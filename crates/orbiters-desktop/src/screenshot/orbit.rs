@@ -547,6 +547,51 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let chip = small_hint::chip_place(held.anchor, held.radius(), space::position(&head), true);
             eye.quad(&Quad { transform: small_hint::chip_quad(&chip), width: small_hint::CHIP_WIDTH_M, height: small_hint::CHIP_WIDTH_M * small_hint::CHIP_PX[1] as f32 / small_hint::CHIP_PX[0] as f32 }, canvas.pixels(), small_hint::CHIP_PX, 1.0);
             eye.save(out, &format!("vr-small-in-a-hand{names}"))?;
+            // G1 (Enzo, 2026-11-12): our backdrop between the capture and VRChat's menu behind the sheet, as each eye sees it, before the sheet and
+            // from both sides, the Worlds page painted in the language now; and, for the comparison, the hole bare as dev.40 had it.
+            {
+                use crate::overlay::worlds::opening::{self, Look, Opening};
+                let page_px = [(page.rect.width() * 2.0).round() as u32, (page.rect.height() * 2.0).round() as u32];
+                let mut page_pixels = crate::overlay::worlds::panel::side_small(page_px)?;
+                panels::cut_page_corners(&mut page_pixels, page_px, [0, 0, page_px[0], page_px[1]]);
+                let back_quad = plane.quad(&back, 0.0, 0.02);
+                let top = ((page.rect.top() - vr::sheet_place(Zone::SheetBack).rect.top()) * 2.0).round() as u32;
+                let sheet_pixels = vr::compose_sheet(&back_pixels, back_px, &page_pixels, page_px, top);
+                let half = [hole.width() / 1024.0 * page_quad.width / 2.0, hole.height() / 576.0 * page_quad.height / 2.0];
+                let accent = panels::look::accent();
+                let o = Opening::in_sheet(at, half, opening::rect_from(&at, &back_quad.transform, back_quad.width, back_quad.height), radius, Look::ours([accent.r(), accent.g(), accent.b()], panels::look::retro()));
+                let placement = small.placement(capture.view.eye());
+                let ceiling = capture.view.ground() + small.reach() * stereo::HOLE_CEILING_PER_REACH;
+                renderer.clip(Some(&(small.middle(capture.view.eye()), small.reach(), ceiling, shared.clone())));
+                let count = capture.within(small.reach() + small.moved_by());
+                for (view_name, offset) in [("left-eye", [-0.032, 0.0, 0.0]), ("right-eye", [0.032, 0.0, 0.0]), ("from-the-left", [-0.34, 0.04, 0.02]), ("from-the-right", [0.30, -0.06, 0.02])] {
+                    let here = space::add(eyes, offset);
+                    let mut view = head;
+                    for (i, row) in view.m.iter_mut().enumerate() {
+                        row[3] = here[i];
+                    }
+                    let camera = stereo::eye_camera(&view, tangents_of(VR_SHOT_HALF_FOV), w, h, &placement);
+                    let capture_pixels = renderer.render_view(&camera, count)?;
+                    for (with, suffix) in [(true, ""), (false, "-bare")] {
+                        let mut eye = Eye::seeing(size, &ground, here, VR_SHOT_HALF_FOV);
+                        eye.quad(&plane.quad(&zones::Placed { zone: Zone::SheetBack, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 }, 0.0, 0.0), &qm, qm_px, 1.0);
+                        let mut shown = capture_pixels.clone();
+                        if with {
+                            for (i, p) in shown.chunks_exact_mut(4).enumerate() {
+                                let (x, y) = (i as u32 % w, i as u32 / w);
+                                let c = [p[0], p[1], p[2], p[3]].map(|v| v as f32 / 255.0);
+                                let seen = opening::texel(c, Some(&o), here, eye.ray(x as f32 + 0.5, y as f32 + 0.5), [x, y]);
+                                for k in 0..4 {
+                                    p[k] = (seen[k] * 255.0).round().clamp(0.0, 255.0) as u8;
+                                }
+                            }
+                        }
+                        eye.over(&shown);
+                        eye.quad(&back_quad, &sheet_pixels, back_px, 1.0);
+                        eye.save(out, &format!("vr-small-window-{view_name}{suffix}{names}"))?;
+                    }
+                }
+            }
         }
     }
     Ok(())

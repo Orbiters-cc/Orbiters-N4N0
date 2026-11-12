@@ -219,6 +219,35 @@ pub fn side_live(px: [u32; 2], live: Option<(&egui::ColorImage, bool)>) -> anyho
     Ok(out)
 }
 
+/// A world's side panel in a headset with its capture standing small in its hole (G1), in the language now: `px` pixels, premultiplied.
+pub fn side_small(px: [u32; 2]) -> anyhow::Result<Vec<u8>> {
+    let mut entries = stand_ins()?;
+    let real = real_worlds();
+    as_the_real_worlds(&mut entries, &real);
+    let facts = stand_in_facts(&entries);
+    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / WIDTH).in_orbit_look();
+    let thumbs: Vec<egui::TextureHandle> = (0..entries.len())
+        .map(|i| match real.get(i) {
+            Some((_, image)) => canvas.ctx().load_texture(format!("real-{i}"), image.clone(), egui::TextureOptions::LINEAR),
+            None => gradient(canvas.ctx(), &format!("stand-in-{i}"), (i.min(6) as f32 * 0.137 + 0.55).fract(), 320, 180),
+        })
+        .collect();
+    let thumb = |e: &Entry| -> Option<TextureId> { entries.iter().position(|x| x.id == e.id).map(|i| thumbs[i].id()) };
+    let picture = |_: u64, _: bool| -> Option<TextureId> { None };
+    let feedback = stand_in_feedback(true);
+    let mut status = Status { current: Some(14), shown: true, small: true, small_docked: true, headset: true, ..Default::default() };
+    status.list.vrchat = true;
+    let panel = Panel { on_sheet: true, section: Section::Captures, page: Page::Detail, selected: Some(14), ..Default::default() };
+    let d = Data { entries: &entries, picked: None, status: &status, feedback: &feedback, facts: &facts, thumb: &thumb, picture: &picture, now: 1_793_310_000 };
+    for _ in 0..2 {
+        canvas.paint(5.0, |p| panel.draw(p, &d, 5.0));
+    }
+    let from = canvas.pixels().to_vec();
+    let mut out = from.clone();
+    crate::overlay::orbit::panels::finish_picture(&mut out, &from, px, px[0] as f32 / WIDTH, [0, 0, px[0], px[1]]);
+    Ok(out)
+}
+
 pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     let mut entries = stand_ins()?;
     // Real worlds' names and pictures, where given: `ORBIT_PANEL_WORLDS`, a folder of "NN Name.jpg".

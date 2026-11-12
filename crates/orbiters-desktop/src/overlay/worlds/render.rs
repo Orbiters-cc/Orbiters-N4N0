@@ -3,6 +3,7 @@
 //! ([`super::stereo::Cube::camera`]), each picture copied into its half of the face's side-by-side texture.
 
 use super::catalog::Capture;
+use super::opening::{self, Opening};
 use super::stereo::{Cube, Placement, PlayCamera, V3};
 use anyhow::{anyhow, Context as _};
 use orbiters_i18n::tr;
@@ -86,6 +87,8 @@ struct Resample {
 /// The uniforms' slots: a dispatch each in one batch (six faces, two eyes).
 const RESAMPLE_SLOTS: u64 = 12;
 const RESAMPLE_SLOT: u64 = 256;
+/// A face's own picture read texel for texel.
+const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
 const RESAMPLE_WGSL: &str = include_str!("resample.wgsl");
 
@@ -210,7 +213,8 @@ impl FaceRenderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                // Read by the resample pass when a backdrop goes under it.
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             let view = texture.create_view(&Default::default());
@@ -278,10 +282,51 @@ impl FaceRenderer {
         &self.masters[face]
     }
 
-    /// Draws face `face` for the eye at `eye` into its pictures (see [`FaceRenderer::render`]).
-    pub fn render_master(&mut self, cube: &Cube, placement: &Placement, eye: V3, eye_index: usize, face: usize, count: usize) -> anyhow::Result<()> {
+    /// Draws face `face` for the eye at `eye` into its pictures (see [`FaceRenderer::render`]), over the backdrop of `opening` where
+    /// its rays go through it.
+    pub fn render_master(&mut self, cube: &Cube, placement: &Placement, eye: V3, eye_index: usize, face: usize, count: usize, opening: Option<&Opening>) -> anyhow::Result<()> {
         let target = self.master(face, cube.width()).clone();
-        self.render(cube, placement, eye, eye_index, face, count, &target)
+        let Some(opening) = opening else {
+            return self.render(cube, placement, eye, eye_index, face, count, &target);
+        };
+        let width = cube.width();
+        let camera = cube.camera(face, eye, placement);
+        self.gpu.count = count.min(self.total).max(1.min(self.total));
+        self.gpu.step(&camera, self.background, Target::None, None)?;
+        self.scratch(width);
+        let (_, _, view) = self.scratch.as_ref().expect("made above");
+        Self::present_on(&self.gpu, self.transparent, view);
+        // Into its half texel for texel, the backdrop under it: a slot of its own, as a batch's twelve are each submitted apart.
+        let bytes = opening::params(&IDENTITY, [width, width, width, eye_index as u32 * width], true, Some((opening, opening::texel_rays(cube, face, eye), eye)));
+        let slot = (face * 2 + eye_index) as u64 % RESAMPLE_SLOTS;
+        let face_view = target.create_view(&Default::default());
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        self.resample_pass(&mut enc, slot, &bytes, view, &face_view, width);
+        self.queue.submit([enc.finish()]);
+        Ok(())
+    }
+
+    /// One dispatch of the resample pass, its `Params` in uniform slot `slot`: `from` into `into`'s texels.
+    fn resample_pass(&self, enc: &mut wgpu::CommandEncoder, slot: u64, bytes: &[u8; 256], from: &wgpu::TextureView, into: &wgpu::TextureView, width: u32) {
+        let offset = slot * RESAMPLE_SLOT;
+        self.queue.write_buffer(&self.resample.uniforms, offset, bytes);
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("3d-worlds resample"), // i18n: not shown (a GPU debug label)
+            layout: &self.resample.pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &self.resample.uniforms, offset, size: wgpu::BufferSize::new(RESAMPLE_SLOT) }),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(from) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.resample.sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(into) },
+            ],
+        });
+        let mut pass = enc.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&self.resample.pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.dispatch_workgroups(width.div_ceil(16), width.div_ceil(16), 1);
     }
 
     /// Draws eye `eye_index`'s wide view `camera` (play space) of the first `count` splats.
@@ -308,47 +353,19 @@ impl FaceRenderer {
     }
 
     /// Resamples the eyes' wide views (drawn by [`FaceRenderer::render_wide`]) into the faces' pictures: `jobs` lists
-    /// (face, eye, its wide camera); then each face listed in `publish` is copied to its target.
-    pub fn resample(&mut self, cube: &Cube, jobs: &[(usize, usize, PlayCamera)], publish: &[(usize, &wgpu::Texture)]) {
+    /// (face, eye, its wide camera), over the backdrop of `opening` where their rays go through it; then each face listed in
+    /// `publish` is copied to its target.
+    pub fn resample(&mut self, cube: &Cube, jobs: &[(usize, usize, PlayCamera)], publish: &[(usize, &wgpu::Texture)], opening: Option<&Opening>) {
         let width = cube.width();
         self.master(0, width);
         let mut enc = self.device.create_command_encoder(&Default::default());
         for (slot, &(face, eye, camera)) in jobs.iter().take(RESAMPLE_SLOTS as usize).enumerate() {
             let Some((_, wide_view)) = self.wide[eye].as_ref() else { continue };
             let h = cube.homography(face, &camera);
-            let mut bytes = [0u8; 64];
-            for (r, row) in h.iter().enumerate() {
-                for (c, v) in row.iter().enumerate() {
-                    bytes[r * 16 + c * 4..r * 16 + c * 4 + 4].copy_from_slice(&v.to_le_bytes());
-                }
-            }
-            for (i, v) in [width, camera.width, camera.height, eye as u32 * width].iter().enumerate() {
-                bytes[48 + i * 4..52 + i * 4].copy_from_slice(&v.to_le_bytes());
-            }
-            let offset = slot as u64 * RESAMPLE_SLOT;
-            self.queue.write_buffer(&self.resample.uniforms, offset, &bytes);
+            let backdrop = opening.map(|o| (o, opening::texel_rays(cube, face, camera.eye), camera.eye));
+            let bytes = opening::params(&h, [width, camera.width, camera.height, eye as u32 * width], false, backdrop);
             let face_view = self.masters[face].create_view(&Default::default());
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("3d-worlds resample"), // i18n: not shown (a GPU debug label)
-                layout: &self.resample.pipeline.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.resample.uniforms,
-                            offset,
-                            size: wgpu::BufferSize::new(64),
-                        }),
-                    },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(wide_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.resample.sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&face_view) },
-                ],
-            });
-            let mut pass = enc.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.resample.pipeline);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(width.div_ceil(16), width.div_ceil(16), 1);
+            self.resample_pass(&mut enc, slot as u64, &bytes, wide_view, &face_view, width);
         }
         for &(face, target) in publish {
             enc.copy_texture_to_texture(
@@ -501,6 +518,125 @@ mod small_tests {
             p[3] = 255;
         }
         super::super::shots::write_png(&out, w, h, &shown).unwrap();
+    }
+
+    /// G1's layer as the GPU really draws it: a face's picture drawn texel for texel, then resampled from a wide view, each over an
+    /// opening seen through part of the face, read back and compared texel by texel with what `opening::texel` reasons (the tests of
+    /// opening.rs prove that covers the whole hole and keeps the capture in front). Runs on this computer's GPU, a moment's work.
+    #[test]
+    fn the_gpu_draws_the_backdrop_under_the_capture_as_reasoned() {
+        use super::super::opening::{self, Look, Opening};
+        let Ok((_adapter, device, queue)) = super::device(None) else {
+            eprintln!("no GPU adapter here: the shader's backdrop is not compared"); // i18n: not shown (a test's note)
+            return;
+        };
+        let mut renderer = FaceRenderer::new(device.clone(), queue.clone());
+        let cube = stereo::Cube { center: [0.0, 1.6, 0.0], half: 1.5, pixels: 56, margin: 4 };
+        let width = cube.width();
+        let eye = [0.03, 1.6, 0.0];
+        // A hole 0.5 m ahead, a little low, facing the eye: seen through the middle of the face ahead (face 0, -Z).
+        let place = orbiters_openvr::Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.55], [0.0, 0.0, 1.0, -0.5]] };
+        let o = Opening::in_sheet(place, [0.15, 0.08], [-0.3, -0.2, 0.3, 0.2], 0.2, Look::ours([0x00, 0xda, 0x6d], false));
+        // The capture's picture: an opaque splat on the left half, a half-covering one across the middle, nothing elsewhere (premultiplied).
+        let picture: Vec<[u8; 4]> = (0..width * width)
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                if x < 32 {
+                    [200, 90, 30, 255]
+                } else if (28..36).contains(&y) {
+                    [60, 20, 70, 128]
+                } else {
+                    [0; 4]
+                }
+            })
+            .collect();
+        let from = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test picture"), // i18n: not shown (a GPU debug label)
+            size: wgpu::Extent3d { width, height: width, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let bytes: Vec<u8> = picture.iter().flatten().copied().collect();
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &from, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(width) },
+            wgpu::Extent3d { width, height: width, depth_or_array_layers: 1 },
+        );
+        let master = renderer.master(0, width).clone();
+        let mut enc = device.create_command_encoder(&Default::default());
+        let params = opening::params(&IDENTITY, [width, width, width, 0], true, Some((&o, opening::texel_rays(&cube, 0, eye), eye)));
+        renderer.resample_pass(&mut enc, 0, &params, &from.create_view(&Default::default()), &master.create_view(&Default::default()), width);
+        queue.submit([enc.finish()]);
+        let got = read_texture(&device, &queue, &master).unwrap();
+        let rays = opening::texel_rays(&cube, 0, eye);
+        let ray = |x: u32, y: u32| stereo::add(stereo::add(stereo::scale(rays[0], x as f32), stereo::scale(rays[1], y as f32)), rays[2]);
+        let to_f = |p: [u8; 4]| p.map(|v| v as f32 / 255.0);
+        let (mut covered, mut capture_kept, mut cut) = (0, 0, 0);
+        for y in 0..width {
+            for x in 0..width {
+                let c = picture[(y * width + x) as usize];
+                let want = opening::texel(to_f(c), Some(&o), eye, ray(x, y), [x, y]).map(|v| (v * 255.0).round().clamp(0.0, 255.0) as i32);
+                let at = ((y * 2 * width + x) * 4) as usize;
+                let have = [0, 1, 2, 3].map(|k| got[at + k] as i32);
+                assert!((0..4).all(|k| (want[k] - have[k]).abs() <= 2), "texel {x},{y}: the GPU drew {have:?}, reasoned {want:?}");
+                let through = o.hit(eye, ray(x, y)).is_some();
+                covered += through as u32;
+                capture_kept += (through && c[3] == 255 && have == [200, 90, 30, 255]) as u32;
+                cut += (!through && c[3] > 0 && have == [0; 4]) as u32;
+            }
+        }
+        assert!(covered > 100 && covered < width * width / 2, "the hole is seen through part of the face: {covered} texels");
+        assert!(capture_kept >= 50, "the opaque splats seen through the hole are untouched: {capture_kept}");
+        assert!(cut >= 20 * width, "the capture is not drawn where its rays miss the hole: {cut}");
+        // Through a wide view: a wide picture with nothing in it, resampled into the face over the backdrop. Texels it covers are the backdrop
+        // where the hole is seen and empty elsewhere; texels it does not cover keep what the whole face had.
+        let view = orbiters_openvr::Matrix34 { m: [[1.0, 0.0, 0.0, eye[0]], [0.0, 1.0, 0.0, eye[1]], [0.0, 0.0, 1.0, eye[2]]] };
+        let wide = stereo::PlayCamera::wide(&view, [-0.4, 0.4, -0.4, 0.4], 0.0, 60.0, 256);
+        let empty = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test wide view"), // i18n: not shown (a GPU debug label)
+            size: wgpu::Extent3d { width: wide.width, height: wide.height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &empty, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &vec![0u8; (wide.width * wide.height * 4) as usize],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(wide.width * 4), rows_per_image: Some(wide.height) },
+            wgpu::Extent3d { width: wide.width, height: wide.height, depth_or_array_layers: 1 },
+        );
+        let empty_view = empty.create_view(&Default::default());
+        renderer.wide[0] = Some((empty, empty_view));
+        renderer.resample(&cube, &[(0, 0, wide)], &[], Some(&o));
+        let after = read_texture(&device, &queue, &master).unwrap();
+        let h = cube.homography(0, &wide);
+        let (mut inside, mut kept) = (0, 0);
+        for y in 0..width {
+            for x in 0..width {
+                let t = [x as f32, y as f32, 1.0];
+                let p = [stereo::dot(h[0], t), stereo::dot(h[1], t), stereo::dot(h[2], t)];
+                let (wx, wy) = (p[0] / p[2], p[1] / p[2]);
+                let at = ((y * 2 * width + x) * 4) as usize;
+                let have = [0, 1, 2, 3].map(|k| after[at + k] as i32);
+                if p[2] > 1e-6 && wx >= 0.6 && wy >= 0.6 && wx <= wide.width as f32 - 1.6 && wy <= wide.height as f32 - 1.6 {
+                    inside += 1;
+                    let want = opening::texel([0.0; 4], Some(&o), eye, ray(x, y), [x, y]).map(|v| (v * 255.0).round() as i32);
+                    assert!((0..4).all(|k| (want[k] - have[k]).abs() <= 2), "wide, texel {x},{y}: the GPU drew {have:?}, reasoned {want:?}");
+                } else if p[2] <= 1e-6 || wx < 0.4 || wy < 0.4 || wx > wide.width as f32 - 1.4 || wy > wide.height as f32 - 1.4 {
+                    kept += 1;
+                    assert_eq!(have, [0, 1, 2, 3].map(|k| got[at + k] as i32), "wide, texel {x},{y} it does not cover kept");
+                }
+            }
+        }
+        assert!(inside > 200 && kept > 200, "{inside} texels resampled, {kept} kept");
     }
 
     /// A camera at `eye` looking at `at` (play space), up kept up.

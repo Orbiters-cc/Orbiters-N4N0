@@ -1053,6 +1053,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             }
             t.menu.worlds.from_elsewhere(turn.worlds);
             t.menu.worlds.small_place(turn.small_place);
+            t.menu.worlds.small_opening(turn.small_opening);
             let menu_up = !turn.menus_up.is_empty();
             let menu_hand = turn.menu_hand;
             t.menu.worlds.menus_up(turn.menus_up);

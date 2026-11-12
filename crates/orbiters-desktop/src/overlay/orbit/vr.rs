@@ -876,7 +876,7 @@ pub fn page_row(back: &super::Panel, page: &super::Panel) -> Option<u32> {
 #[derive(Default)]
 pub struct SheetPicture {
     pub pixels: Vec<u8>,
-    complete_pixels: Option<std::sync::Arc<Vec<u8>>>,
+    complete_pixels: Option<super::page_painter::Pixels>,
     pub px: [u32; 2],
     /// What each part last gave: the back's whole picture, and the page's with where it lies.
     under: Vec<u8>,

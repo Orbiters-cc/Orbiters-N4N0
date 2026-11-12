@@ -4,6 +4,34 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, Condvar};
 use std::time::Instant;
 
+type Shared = (Mutex<Mailbox>, Condvar);
+/// Immutable worker pixels. The last input-side release only transfers ownership;
+/// large allocations are reclaimed by their raster owner, outside the mailbox lock.
+pub(super) struct PixelBuffer { bytes: Vec<u8>, owner: std::thread::ThreadId, shared: std::sync::Weak<Shared> }
+pub(super) type Pixels = Arc<PixelBuffer>;
+impl PixelBuffer {
+    fn new(bytes: Vec<u8>, shared: std::sync::Weak<Shared>) -> Pixels { Arc::new(Self { bytes, owner: std::thread::current().id(), shared }) }
+    pub fn as_slice(&self) -> &[u8] { &self.bytes }
+}
+impl std::ops::Deref for PixelBuffer { type Target = [u8]; fn deref(&self) -> &[u8] { &self.bytes } }
+impl std::fmt::Debug for PixelBuffer { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("Pixels").field("len", &self.bytes.len()).finish() } }
+impl PartialEq for PixelBuffer { fn eq(&self, other: &Self) -> bool { self.bytes == other.bytes } }
+impl Drop for PixelBuffer {
+    fn drop(&mut self) {
+        if self.owner == std::thread::current().id() || self.bytes.is_empty() { return; }
+        if let Some(shared) = self.shared.upgrade() {
+            let mut state = shared.0.lock().unwrap_or_else(|e| e.into_inner());
+            if !state.stop {
+                state.garbage.push(std::mem::take(&mut self.bytes));
+                // At most 64 cached + 64 retiring frames, finite shell zones and
+                // two producer slots can release buffers without another worker turn.
+                debug_assert!(state.garbage.len() <= 1024);
+                drop(state); shared.1.notify_one();
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum Scene {
     Native,
@@ -32,7 +60,7 @@ pub(super) struct PartSpec {
 pub(super) struct PartPicture {
     pub zone: Zone,
     pub token: u64,
-    pub pixels: Vec<u8>,
+    pub pixels: Pixels,
     pub mask: Option<Arc<Vec<u8>>>,
     pub items: Vec<Item>,
     pub hover: Option<usize>,
@@ -41,7 +69,7 @@ pub(super) struct PartPicture {
     #[cfg(test)] pub finish_pixels: usize,
 }
 pub(super) struct PartRequest { pub spec: PartSpec, pub facts: Facts, pub time: f64, pub language: orbiters_i18n::Language }
-pub(super) type CompleteSheet = (Arc<Vec<u8>>, [u32; 2], u32);
+pub(super) type CompleteSheet = (Pixels, [u32; 2], u32);
 #[derive(Clone)]
 pub(super) struct Request {
     pub px: [u32; 2], pub epoch: u64, pub sheet: Sheet, pub facts: Facts,
@@ -51,7 +79,7 @@ pub(super) struct Request {
 }
 #[derive(Clone)]
 pub(super) struct Frame {
-    pub px: [u32; 2], pub epoch: u64, pub sheet: Sheet, pub facts: Facts, pub items: Vec<Item>, pub pixels: Vec<u8>,
+    pub px: [u32; 2], pub epoch: u64, pub sheet: Sheet, pub facts: Facts, pub items: Vec<Item>, pub pixels: Pixels,
     pub phases: crate::overlay::PaintPhases, pub time: f64, pub hover: Option<usize>, pub pressed: Option<usize>,
     pub scene: Scene, pub header: Option<PartPicture>,
     pub header_spec: Option<PartSpec>, pub top: Option<u32>, pub composed: Option<CompleteSheet>, pub pointer: Option<egui::Pos2>, pub language: orbiters_i18n::Language,
@@ -66,6 +94,7 @@ impl Frame {
 }
 #[derive(Default)]
 struct Mailbox {
+    garbage: Vec<Vec<u8>>,
     request: Option<Request>, frame: Option<Frame>, epoch: Option<u64>,
     parts: HashMap<Zone, PartRequest>, part_frames: HashMap<Zone, PartPicture>, order: VecDeque<Zone>,
     audit: Option<(Frame, std::sync::mpsc::Sender<Audit>)>,
@@ -74,16 +103,16 @@ struct Mailbox {
     #[cfg(test)] gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 pub(super) struct Painter { shared: Arc<(Mutex<Mailbox>, Condvar)>, pub ctx: egui::Context }
-struct PartCanvas { id: u64, canvas: Canvas, mask: Option<Arc<Vec<u8>>>, pixels: Vec<u8>, style: Option<orbiters_core::settings::OrbitSettings> }
-struct Engine { page: Canvas, parts: HashMap<Zone, PartCanvas>, parallel: bool }
+struct PartCanvas { id: u64, canvas: Canvas, mask: Option<Arc<Vec<u8>>>, pixels: Vec<u8>, published: Option<Pixels>, style: Option<orbiters_core::settings::OrbitSettings> }
+struct Engine { page: Canvas, parts: HashMap<Zone, PartCanvas>, parallel: bool, shared: std::sync::Weak<Shared> }
 impl Engine {
     fn part(&mut self, spec: &PartSpec, facts: &Facts, time: f64) -> PartPicture {
-        let slot = self.parts.entry(spec.zone).or_insert_with(|| PartCanvas { id: 0, canvas: Canvas::new(1, 1), mask: None, pixels: Vec::new(), style: None });
+        let slot = self.parts.entry(spec.zone).or_insert_with(|| PartCanvas { id: 0, canvas: Canvas::new(1, 1), mask: None, pixels: Vec::new(), published: None, style: None });
         if slot.id != spec.canvas_id {
             let mut canvas = Canvas::zoomed(spec.px[0], spec.px[1], spec.px[0] as f32 / spec.logical.x).in_orbit_look();
             canvas.textures = crate::overlay::PaintTextures::of(&spec.ctx); canvas.ctx = spec.ctx.clone();
             canvas.painter.set_parallel(self.parallel);
-            *slot = PartCanvas { id: spec.canvas_id, canvas, mask: spec.zone.ring().map(|ring| Arc::new(panels::cell_mask(ring, spec.px, spec.px[0] as f32 / spec.logical.x))), pixels: vec![0; spec.px[0] as usize * spec.px[1] as usize * 4], style: None };
+            *slot = PartCanvas { id: spec.canvas_id, canvas, mask: spec.zone.ring().map(|ring| Arc::new(panels::cell_mask(ring, spec.px, spec.px[0] as f32 / spec.logical.x))), pixels: vec![0; spec.px[0] as usize * spec.px[1] as usize * 4], published: None, style: None };
         }
         let items = panels::items(spec.zone, spec.logical, facts);
         let hover = spec.pointer.and_then(|p| panels::hit(&items, p));
@@ -101,7 +130,8 @@ impl Engine {
         panels::finish_picture(&mut slot.pixels, from, spec.px, spec.px[0] as f32 / spec.logical.x, changed);
         if let Some(mask) = &slot.mask { panels::apply_mask(&mut slot.pixels, mask, spec.px, changed); }
         slot.style = Some(facts.orbit);
-        let pixels = slot.pixels.clone();
+        if slot.published.is_none() || changed[0] != changed[2] && changed[1] != changed[3] { slot.published = Some(PixelBuffer::new(slot.pixels.clone(), self.shared.clone())); }
+        let pixels = slot.published.as_ref().unwrap().clone();
         super::super::record_phase(3, began.elapsed());
         PartPicture { zone: spec.zone, token: spec.token, pixels, mask: slot.mask.clone(), items, hover, pressed, facts: facts.clone(), #[cfg(test)] finish_pixels: (changed[2] - changed[0]) as usize * (changed[3] - changed[1]) as usize }
     }
@@ -144,9 +174,9 @@ impl Engine {
         super::super::record_phase(3, at.elapsed());
         let header = request.header.as_ref().map(|spec| self.part(spec, &request.facts, request.time));
         let at = Instant::now();
-        let composed = header.as_ref().zip(request.header.as_ref()).zip(request.top).map(|((header, spec), top)| (Arc::new(super::vr::compose_sheet(&header.pixels, spec.px, &pixels, px, top)), spec.px, top));
+        let composed = header.as_ref().zip(request.header.as_ref()).zip(request.top).map(|((header, spec), top)| (PixelBuffer::new(super::vr::compose_sheet(&header.pixels, spec.px, &pixels, px, top), self.shared.clone()), spec.px, top));
         super::super::record_phase(3, at.elapsed());
-        Frame { px: request.px, epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels, phases: crate::overlay::paint_phases(false), time: request.time, hover, pressed: request.pressed, scene: request.scene, header, header_spec: request.header, top: request.top, composed, pointer: request.pointer, language: request.language }
+        Frame { px: request.px, epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels: PixelBuffer::new(pixels, self.shared.clone()), phases: crate::overlay::paint_phases(false), time: request.time, hover, pressed: request.pressed, scene: request.scene, header, header_spec: request.header, top: request.top, composed, pointer: request.pointer, language: request.language }
     }
 }
 
@@ -158,7 +188,7 @@ impl Audit {
         fn header(f: &Frame) -> &[u8] { f.header.as_ref().map(|h| h.pixels.as_slice()).unwrap_or(&[]) }
         fn sheet(f: &Frame) -> &[u8] { f.composed.as_ref().map(|c| c.0.as_slice()).unwrap_or(&[]) }
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        for b in &serial.pixels { hash = (hash ^ *b as u64).wrapping_mul(0x100000001b3); }
+        for b in serial.pixels.iter() { hash = (hash ^ *b as u64).wrapping_mul(0x100000001b3); }
         Self { sheet_pixels: diff(sheet(expected), sheet(serial)), parallel_sheet_pixels: diff(sheet(serial), sheet(parallel)), pixels: diff(&expected.pixels, &serial.pixels), header_pixels: diff(header(expected), header(serial)), parallel_pixels: diff(&serial.pixels, &parallel.pixels), parallel_header_pixels: diff(header(serial), header(parallel)), items: expected.items == serial.items && serial.items == parallel.items && expected.header.as_ref().map(|h| &h.items) == serial.header.as_ref().map(|h| &h.items), hash }
     }
 }
@@ -173,16 +203,19 @@ impl Painter {
     pub fn with_context(px: [u32; 2], ctx: egui::Context) -> Self {
         let mut page = Canvas::zoomed(px[0], px[1], px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32).in_orbit_look();
         page.textures = crate::overlay::PaintTextures::of(&ctx); page.ctx = ctx.clone(); page.painter.set_parallel(true);
-        let shared = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
+        let shared = Arc::new((Mutex::new(Mailbox { garbage: Vec::with_capacity(1024), ..Default::default() }), Condvar::new()));
         let thread = shared.clone();
         std::thread::Builder::new().name("orbit-page-paint".into()).spawn(move || {
-            let mut engine = Engine { page, parts: HashMap::new(), parallel: true };
+            let mut engine = Engine { page, parts: HashMap::new(), parallel: true, shared: Arc::downgrade(&thread) };
+            let mut cleanup = std::time::Duration::ZERO;
+            let mut garbage = Vec::with_capacity(1024);
             loop {
                 let (page, part, audit) = {
                     let mut state = thread.0.lock().unwrap_or_else(|e| e.into_inner());
-                    while state.request.is_none() && state.parts.is_empty() && state.audit.is_none() && !state.stop { state = thread.1.wait(state).unwrap_or_else(|e| e.into_inner()); }
+                    while state.request.is_none() && state.parts.is_empty() && state.audit.is_none() && state.garbage.is_empty() && !state.stop { state = thread.1.wait(state).unwrap_or_else(|e| e.into_inner()); }
                     if state.stop { return; }
                     state.working = true;
+                    std::mem::swap(&mut garbage, &mut state.garbage);
                     if state.request.is_some() && (!state.was_page || state.parts.is_empty()) {
                         state.was_page = true; (state.request.take(), None, None)
                     } else if !state.parts.is_empty() {
@@ -191,6 +224,7 @@ impl Painter {
                         (None, Some(part), None)
                     } else { (None, None, state.audit.take()) }
                 };
+                let at = Instant::now(); garbage.clear(); cleanup += at.elapsed();
                 #[cfg(test)] {
                     let gate = thread.0.lock().unwrap().gate.take();
                     if let Some((ready, go)) = gate { ready.send(()).unwrap(); go.recv().unwrap(); }
@@ -201,7 +235,8 @@ impl Painter {
                         let epoch = request.epoch;
                         let style = request.facts.orbit;
                         let language = request.language;
-                        let frame = orbiters_i18n::in_language(language, || panels::with_render_style(style, || engine.page(request)));
+                        let mut frame = orbiters_i18n::in_language(language, || panels::with_render_style(style, || engine.page(request)));
+                        frame.phases.finish += std::mem::take(&mut cleanup);
                         #[cfg(test)] {
                             let gate = thread.0.lock().unwrap().publish_gate.take();
                             if let Some((ready, go)) = gate { ready.send(()).unwrap(); go.recv().unwrap(); }
@@ -278,7 +313,7 @@ impl Painter {
     }
     pub fn take(&self) -> Option<Frame> { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).frame.take() }
     pub fn take_parts(&self) -> Vec<PartPicture> { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).part_frames.drain().map(|(_, f)| f).collect() }
-    pub fn busy(&self) -> bool { let s = self.shared.0.lock().unwrap_or_else(|e| e.into_inner()); s.working || s.audit.is_some() || s.request.is_some() || s.frame.is_some() || !s.parts.is_empty() || !s.part_frames.is_empty() }
+    pub fn busy(&self) -> bool { let s = self.shared.0.lock().unwrap_or_else(|e| e.into_inner()); s.working || s.audit.is_some() || s.request.is_some() || s.frame.is_some() || !s.parts.is_empty() || !s.part_frames.is_empty() || !s.garbage.is_empty() }
 }
 impl Drop for Painter {
     fn drop(&mut self) { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).stop = true; self.shared.1.notify_one(); }
@@ -288,6 +323,20 @@ impl Drop for Painter {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn review_last_input_pixel_release_transfers_the_allocation_to_its_owner() {
+        let shared = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
+        let weak = Arc::downgrade(&shared);
+        let pixels = std::thread::spawn(move || PixelBuffer::new(vec![91; 1024 * 1024], weak)).join().unwrap();
+        let pointer = pixels.as_ptr();
+        drop(pixels);
+        let mut state = shared.0.lock().unwrap();
+        assert_eq!(state.garbage.len(), 1, "input must not reclaim the allocation");
+        assert_eq!(state.garbage[0].as_ptr(), pointer, "ownership moves without copying pixels");
+        assert_eq!(state.garbage[0].len(), 1024 * 1024);
+        assert_eq!(state.garbage.pop().unwrap()[0], 91);
+    }
 
     fn request(epoch: u64, sheet: Sheet) -> Request {
         Request { px: [512,288], epoch, sheet, facts: Facts::default(), hover: None, pressed: None, time: 1.0, language: orbiters_i18n::Language::En, scene: Scene::Native, header: None, top: None, pointer: None }
@@ -430,7 +479,7 @@ mod review_header_finish {
     fn review_an_unchanged_retro_header_does_no_pixel_finishing_and_a_new_look_does() {
         let source = super::super::Panel::new(super::super::zones::in_units(Zone::SheetBack), 2.0, 0, false);
         let spec = super::super::Panels::paint_spec(&source);
-        let mut engine = Engine { page: Canvas::new(1, 1), parts: HashMap::new(), parallel: true };
+        let mut engine = Engine { page: Canvas::new(1, 1), parts: HashMap::new(), parallel: true, shared: std::sync::Weak::new() };
         let mut facts = Facts { sheet: Some(Sheet::Pictures), ..Default::default() }; facts.orbit.theme = orbiters_core::settings::MenuLook::Retro;
         let first = panels::with_render_style(facts.orbit, || engine.part(&spec, &facts, 1.0));
         assert!(first.finish_pixels > 0);

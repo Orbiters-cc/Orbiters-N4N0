@@ -108,7 +108,7 @@ impl Software {
         Self {
             width: width as usize,
             height: height as usize,
-            pixels: vec![[0; 4]; width as usize * height as usize],
+            pixels: Vec::new(),
             backdrop: None,
             textures: HashMap::new(),
             picture_look: None,
@@ -233,6 +233,9 @@ impl Software {
     /// Paints the frame over the backdrop (or `clear`) and returns RGBA bytes (premultiplied): only the tiles that
     /// changed since the last frame are painted again ([`Software::damage`] says where).
     pub fn paint(&mut self, primitives: &[ClippedPrimitive], pixels_per_point: f32, clear: Color32) -> &[u8] {
+        // Source canvases for asynchronous overlays never paint. Allocate their large
+        // pixel storage only on the thread that actually performs the first raster.
+        self.pixels.resize(self.width * self.height, [0; 4]);
         let areas = self.changed_areas(primitives, pixels_per_point, clear);
         self.damage = areas.iter().copied().reduce(around).map(|a| a.map(|v| v as u32));
         let width = self.width;
@@ -608,6 +611,15 @@ fn blend_lanes(dst: &mut [u8; 4], src: u64, keep: u64) {
 mod tests {
     use super::*;
     use egui::{pos2, vec2, Rect};
+
+    #[test]
+    fn large_pixels_are_allocated_by_the_first_raster_not_the_source_canvas() {
+        let mut software = Software::new(1408, 792);
+        assert!(software.pixels().is_empty(), "an unpainted source canvas allocates no page pixels");
+        let pixels = software.paint(&[], 1.0, Color32::TRANSPARENT);
+        assert_eq!(pixels.len(), 1408 * 792 * 4);
+        assert!(pixels.iter().all(|b| *b == 0), "the first raster still starts transparent");
+    }
 
     fn run(ctx: &egui::Context, sw: &mut Software, ui: impl FnMut(&mut egui::Ui)) -> Vec<u8> {
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(64.0, 32.0))), ..Default::default() };

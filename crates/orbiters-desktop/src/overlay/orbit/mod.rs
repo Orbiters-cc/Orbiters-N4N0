@@ -123,6 +123,7 @@ pub struct Panel {
     canvas: Canvas,
     /// The picture as the platform takes it: the canvas's, cut to its shape.
     out: Vec<u8>,
+    shown_pixels: Option<page_painter::Pixels>,
     /// Its shape as a cell of the ring, one byte a pixel, multiplied into each picture.
     mask: Option<std::sync::Arc<Vec<u8>>>,
     pub items: Vec<Item>,
@@ -199,7 +200,7 @@ impl Panel {
             px,
             logical,
             canvas: Canvas::zoomed(px[0], px[1], zoom).in_orbit_look(),
-            out: vec![0; px[0] as usize * px[1] as usize * 4],
+            out: Vec::new(), shown_pixels: None,
             mask,
             items: Vec::new(),
             hover: None,
@@ -215,7 +216,7 @@ impl Panel {
 
     /// The picture (RGBA, premultiplied), as painted last.
     pub fn pixels(&self) -> &[u8] {
-        &self.out
+        self.shown_pixels.as_ref().map_or(self.out.as_slice(), |p| p.as_slice())
     }
 
     /// Takes what the canvas painted: the changed part, cut to the panel's shape. Returns it (x0, y0, x1, y1). A part kept from an earlier opening takes all of it the first
@@ -230,6 +231,8 @@ impl Panel {
             return None;
         };
         let pixels = self.canvas.pixels();
+        self.shown_pixels = None;
+        self.out.resize(w as usize * h as usize * 4, 0);
         for y in changed[1]..changed[3].min(h) {
             let (a, b) = ((y * w + changed[0]) as usize * 4, (y * w + changed[2].min(w)) as usize * 4);
             self.out[a..b].copy_from_slice(&pixels[a..b]);
@@ -978,6 +981,7 @@ impl Panels {
     /// Keeps CPU page painting away from the controller loop.
     pub fn with_page_worker(mut self) -> Self { self.stage.async_pages = true; if let Some(w) = self.stage.worlds.as_mut() { w.snapshot_mode(true); } self }
     pub fn new(backend: Ctl, sharp: f32, worlds_here: bool) -> Self {
+        let _ = local_offset(); // Initialize before the controller loop; later reads are atomic.
         let media = crate::media::watcher().clone();
         Self {
             backend,
@@ -3121,14 +3125,14 @@ impl Panels {
     }
     fn publish_page(&mut self, frame: &page_painter::Frame, show: &mut impl FnMut(&Panel, [u32; 4])) -> bool {
         let Some(page) = self.takeover.as_ref() else { return false };
-        if page.out.len() != frame.pixels.len() { return false; }
+        if page.px[0] as usize * page.px[1] as usize * 4 != frame.pixels.len() { return false; }
         let Some(back) = self.list.iter_mut().find(|p| p.zone == Zone::SheetBack) else { return false };
         let Some(header) = &frame.header else { return false };
-        if back.out.len() != header.pixels.len() { return false; }
+        if back.px[0] as usize * back.px[1] as usize * 4 != header.pixels.len() { return false; }
         let at = Instant::now();
         let pressed = back.pressed.and_then(|i| back.items.get(i)).map(|i| i.action);
-        let changed = !back.painted || back.out != header.pixels;
-        if changed { back.out.clone_from(&header.pixels); }
+        let changed = !back.painted || back.shown_pixels.as_ref().is_none_or(|p| !std::sync::Arc::ptr_eq(p, &header.pixels));
+        back.shown_pixels = Some(header.pixels.clone());
         back.items.clone_from(&header.items);
         back.hover = back.pointer.and_then(|p| panels::hit(&back.items, p)); back.pressed = pressed.and_then(|a| back.items.iter().position(|i| i.action == a));
         back.canvas.ran = true;
@@ -3139,7 +3143,7 @@ impl Panels {
         let at = Instant::now();
         let page = self.takeover.as_mut().unwrap();
         let first = !page.painted;
-        page.out.clone_from(&frame.pixels); page.items.clone_from(&frame.items);
+        page.shown_pixels = Some(frame.pixels.clone()); page.items.clone_from(&frame.items);
         page.hover = match &frame.scene {
             page_painter::Scene::Native => self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p)),
             page_painter::Scene::Menu { menu, .. } => self.sheet_pointer.and_then(|p| layout::hit_pointable(layout::cached(ScreenPage::of(menu)), menu, p.x, p.y).map(|(n, _)| n)),
@@ -3163,9 +3167,9 @@ impl Panels {
         self.stage.painter.retain_parts(&live);
         for frame in self.stage.painter.take_parts() {
             if let Some(panel) = self.list.iter_mut().find(|p| p.zone == frame.zone && p.token == frame.token) {
-                if panel.out.len() != frame.pixels.len() { continue; }
+                if panel.px[0] as usize * panel.px[1] as usize * 4 != frame.pixels.len() { continue; }
                 let first = !panel.painted;
-                panel.out = frame.pixels; panel.items = frame.items; panel.mask = frame.mask;
+                panel.shown_pixels = Some(frame.pixels); panel.items = frame.items; panel.mask = frame.mask;
                 panel.hover = panel.pointer.and_then(|p| panels::hit(&panel.items, p));
                 panel.dirty |= first || panel.hover != frame.hover || panel.pressed != frame.pressed;
                 panel.canvas.ran = true;
@@ -3211,7 +3215,7 @@ impl Panels {
                     self.stage.worker_phases = frame.phases;
                     self.stage.cache.retain(|f| f.key() != key);
                     self.stage.cache.push(frame);
-                    while self.stage.cache.iter().map(|f| f.bytes()).sum::<usize>() > 512 * 1024 * 1024 { self.stage.cache.remove(0); }
+                    while self.stage.cache.len() > 64 || self.stage.cache.iter().map(|f| f.bytes()).sum::<usize>() > 512 * 1024 * 1024 { self.stage.cache.remove(0); }
                 } else { self.takeover.as_mut().unwrap().dirty = true; }
             }
         }
@@ -3346,7 +3350,7 @@ impl Panels {
                 stage.presented = Some((stage.epoch, frame.facts.clone(), frame.time));
                 for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack) { back.dirty = true; }
                 let copy_at = Instant::now();
-                panel.out.clone_from(&frame.pixels);
+                panel.shown_pixels = Some(frame.pixels.clone());
                 panel.items.clone_from(&frame.items);
                 panel.hover = self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p));
                 let first = !panel.painted;
@@ -3365,7 +3369,7 @@ impl Panels {
                 stage.presented = Some((stage.epoch, frame.facts.clone(), frame.time));
                 for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack) { back.dirty = true; }
                 let copy_at = Instant::now();
-                panel.out.clone_from(&frame.pixels);
+                panel.shown_pixels = Some(frame.pixels.clone());
                 panel.items.clone_from(&frame.items);
                 panel.hover = self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p));
                 panel.painted = true;
@@ -3624,6 +3628,8 @@ impl Stage {
         }
         if let Some(changed) = changed {
             let pixels = self.canvas.pixels();
+            panel.shown_pixels = None;
+            panel.out.resize(w as usize * h as usize * 4, 0);
             for y in changed[1]..changed[3].min(h) {
                 let (a, b) = ((y * w + changed[0]) as usize * 4, (y * w + changed[2].min(w)) as usize * 4);
                 panel.out[a..b].copy_from_slice(&pixels[a..b]);
@@ -3739,6 +3745,41 @@ fn access_words(kind: &str) -> &str {
 }
 
 /// When a capture was taken, as exactly as tells two of one place apart.
+#[cfg(test)]
+thread_local! { static OFFSET_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+fn query_local_offset() -> Option<time::UtcOffset> {
+    #[cfg(test)] OFFSET_QUERIES.with(|n| n.set(n.get() + 1));
+    time::UtcOffset::current_local_offset().ok()
+}
+fn local_offset() -> time::UtcOffset {
+    use std::sync::{atomic::{AtomicI32, Ordering}, OnceLock};
+    static OFFSET: OnceLock<std::sync::Arc<AtomicI32>> = OnceLock::new();
+    let offset = OFFSET.get_or_init(|| {
+        let value = std::sync::Arc::new(AtomicI32::new(query_local_offset().unwrap_or(time::UtcOffset::UTC).whole_seconds()));
+        let sampled = value.clone();
+        std::thread::Builder::new().name("orbit-local-time".into()).spawn(move || loop {
+            std::thread::park_timeout(Duration::from_secs(1));
+            if let Some(offset) = query_local_offset() { sampled.store(offset.whole_seconds(), Ordering::Relaxed); }
+        }).expect("local-time sampler");
+        value
+    });
+    time::UtcOffset::from_whole_seconds(offset.load(Ordering::Relaxed)).unwrap_or(time::UtcOffset::UTC)
+}
+
+#[cfg(test)]
+mod review_date_clock {
+    use super::*;
+    #[test]
+    fn review_visible_date_formatting_does_not_query_the_operating_system() {
+        let _ = local_offset();
+        let before = OFFSET_QUERIES.with(|n| n.get());
+        for n in 0..6000 { std::hint::black_box(taken_when(1_750_000_000 - n * 86_400, 1_800_000_000)); }
+        assert_eq!(OFFSET_QUERIES.with(|n| n.get()), before, "per-picture formatting queried the OS on input");
+        let _ = query_local_offset();
+        assert_eq!(OFFSET_QUERIES.with(|n| n.get()), before + 1, "the query counter exercises the real OS path");
+    }
+}
+
 fn taken_when(at: u64, now: u64) -> String {
     // One form beside another: within the hour how long ago, else the day and time (round 12's judges read "13 h ago" beside "Fri 23:03").
     if now.saturating_sub(at) < 3_600 {
@@ -3748,7 +3789,7 @@ fn taken_when(at: u64, now: u64) -> String {
     if now.saturating_sub(at) < 6 * 86_400 {
         return day;
     }
-    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    let offset = local_offset();
     let Ok(then) = time::OffsetDateTime::from_unix_timestamp(at as i64) else { return day };
     let then = then.to_offset(offset);
     format!("{day}, {:02}:{:02}", then.hour(), then.minute())
@@ -3756,7 +3797,7 @@ fn taken_when(at: u64, now: u64) -> String {
 
 /// When a visit was, so that two are told apart: the day and time this week, the date before that.
 fn day_and_time(at: u64, now: u64) -> String {
-    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    let offset = local_offset();
     let Ok(then) = time::OffsetDateTime::from_unix_timestamp(at as i64) else { return String::new() };
     let then = then.to_offset(offset);
     if now.saturating_sub(at) >= 6 * 86_400 {

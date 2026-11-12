@@ -1597,7 +1597,7 @@ fn worker_switches_publish_matching_page_header_and_hit_geometry() {
     person.turns(4);
     person.panels.open_sheet(Sheet::Settings, "Settings", &person.snap);
     person.turns_until("settings worker frame", |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted) && !p.panels.stage.painter.busy());
-    let settings = person.panels.takeover.as_ref().unwrap().out.clone();
+    let settings = person.panels.takeover.as_ref().unwrap().pixels().to_vec();
     let epoch = person.panels.stage.epoch;
     person.panels.open_sheet(Sheet::Tracking, "Tracking", &person.snap);
     person.turn();
@@ -1609,7 +1609,7 @@ fn worker_switches_publish_matching_page_header_and_hit_geometry() {
     person.turn();
     assert!(person.panels.stage.epoch > epoch);
     let page = person.panels.takeover.as_ref().unwrap();
-    assert_eq!(page.out, settings, "A-B-A restores A on the next turn");
+    assert_eq!(page.pixels(), settings, "A-B-A restores A on the next turn");
     let (_, shown, _) = person.panels.stage.presented.as_ref().unwrap();
     assert_eq!(shown.sheet, Some(Sheet::Settings));
     assert_eq!(page.items, super::panels::sheet_items(Sheet::Settings, shown));
@@ -1835,6 +1835,9 @@ fn review_the_worker_publishes_the_complete_sheet_and_matching_geometry() {
     sheet.adopt(picture);
     assert_eq!(sheet.pixels().as_ptr(), original.as_ptr(), "input adopts the worker allocation without pixel work");
     assert_eq!(sheet.changed, Some([0,0,size[0],size[1]]), "damage covers the entire composed picture");
+    let rendered = person.panels.stage.cache.iter().find(|f| f.sheet == Sheet::Settings).unwrap();
+    assert_eq!(page.pixels().as_ptr(), rendered.pixels.as_ptr(), "input adopts the raw page allocation without a pixel copy");
+    assert_eq!(back.pixels().as_ptr(), rendered.header.as_ref().unwrap().pixels.as_ptr(), "input adopts the matching raw header allocation");
     assert_eq!(page.items, super::panels::sheet_items(Sheet::Settings, &page.displayed.as_ref().unwrap()));
 }
 #[test]

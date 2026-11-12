@@ -1855,6 +1855,14 @@ mod tests {
     }
 
     #[test]
+    fn landmark_count_cannot_substitute_for_geometric_rank() {
+        let collinear:Vec<_>=(0..5).map(|i|([i as f32*100.,0.],[i as f32*20.,20.])).collect();
+        assert!(fit(&collinear).is_none(),"five collinear detections do not locate a plane");
+        let corners=[[-205.,-115.3125],[205.,-115.3125],[205.,115.3125],[-205.,115.3125]].map(|p|(p,[500.+p[0]*.7,500.+p[1]*.7]));
+        assert!(fit(&corners).is_some(),"four independent corners determine a plane");
+    }
+
+    #[test]
     fn a_metric_size_change_is_not_discarded_as_pose_jitter() {
         let mut follow=Follow::default();
         follow.seen(at(0.),0.001);
@@ -1872,7 +1880,14 @@ mod tests {
         for picture in headset_pictures() {
             let found=find(&picture.pixels,picture.width,picture.height,picture.width*4).expect("camera candidate");
             assert!(found.perspective.is_some(),"camera candidate did not produce a spread fit: {found:?}");
-            assert!(found.landmarks.is_some_and(|(count,_)|count>=5));
+            let (count,points)=found.landmarks.expect("independently observed panel landmarks");
+            let points=&points[..count];
+            let span=|axis:usize| points.iter().map(|(p,_)|p[axis]).fold(f32::NEG_INFINITY,f32::max)-points.iter().map(|(p,_)|p[axis]).fold(f32::INFINITY,f32::min);
+            assert!(span(0)>=300. && span(1)>=180.,"landmarks must cover the face, not only an icon column");
+            let measured=fit(points).expect("observations must determine a non-degenerate homography");
+            for &(p,q) in points {let r=project(measured,p);assert!((r[0]-q[0]).hypot(r[1]-q[1])<=6.);}
+            let rms=(points.iter().map(|&(p,q)|{let r=project(measured,p);(r[0]-q[0]).powi(2)+(r[1]-q[1]).powi(2)}).sum::<f32>()/count as f32).sqrt();
+            assert!(rms<=2.5);
         }
     }
 

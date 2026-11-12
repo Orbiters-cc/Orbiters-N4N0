@@ -22,6 +22,7 @@ import threading
 import time
 import urllib.request
 import psutil
+import queue
 
 ROOT = Path(os.environ['USERPROFILE']) / '.orbiters-build/vr-sandbox'
 LOCK = ROOT / 'steamvr.lock'
@@ -292,6 +293,34 @@ class Session:
             proc=subprocess.Popen([str(launch),url,'-screen-fullscreen','0','-screen-width','1280','-screen-height','720'],creationflags=subprocess.CREATE_NO_WINDOW)
             self.record()
             return {'launch_pid':proc.pid,'url':url,'mode':'SteamVR auto-detection; no --no-vr'}
+        if action=='motion_capture':
+            seconds=float(args.get('duration_s',0));frames=args.get('frames',24)
+            target=args.get('position');rotation=args.get('rotation')
+            if args.get('device') not in ('head','left','right') or not 0<seconds<=30 or type(frames) is not int or not 3<=frames<=80:
+                raise ValueError('motion capture requires device, duration 0..30 and frames 3..80')
+            if target is not None and (len(target)!=3 or not all(math.isfinite(float(x)) for x in target)):raise ValueError('finite position[3] required')
+            if rotation is not None and (len(rotation)!=4 or not all(math.isfinite(float(x)) for x in rotation) or sum(x*x for x in rotation)<1e-8):raise ValueError('finite nonzero quaternion[4] required')
+            prefix=Path(args['output_prefix']).resolve();prefix.parent.mkdir(parents=True,exist_ok=True)
+            if shutil.disk_usage(prefix.parent).free<512*1024*1024:raise RuntimeError('Insufficient capture space')
+            with Path(str(prefix)+'-probe-error.log').open('w') as errors:
+                child=subprocess.Popen([str(ROOT/'motion-probe.exe'),str(prefix),str(frames),str(seconds)],stdout=subprocess.PIPE,stderr=errors,text=True,creationflags=subprocess.CREATE_NO_WINDOW)
+                ready=queue.Queue()
+                def drain():
+                    ready.put(child.stdout.readline())
+                    for _ in child.stdout:pass
+                reader=threading.Thread(target=drain,daemon=True);reader.start()
+                try:
+                    if json.loads(ready.get(timeout=15))!={'ready':True}:raise RuntimeError('Motion capture did not become ready')
+                    command={k:v for k,v in args.items() if k in ('device','position','rotation','duration_s')};command['action']='pose'
+                    began=time.perf_counter();result=self.call(command);ended=time.perf_counter()
+                    atomic_json(Path(str(prefix)+'-command.json'),{'command':command,'began_qpc':began,'ended_qpc':ended})
+                    if child.wait(timeout=seconds+30):raise RuntimeError('Motion probe failed; inspect its error log')
+                    reader.join(timeout=2)
+                finally:
+                    if child.poll() is None:child.terminate();child.wait(timeout=10)
+            manifest=Path(str(prefix)+'-motion.jsonl')
+            samples=[json.loads(line) for line in manifest.read_text().splitlines()]
+            return {'motion':result,'manifest':str(manifest),'samples':len(samples),'command':str(prefix)+'-command.json'}
         if action in ('capture','overlays','devices','view'):
             command=[str(ROOT/'probe.exe'),action]
             if action=='capture':

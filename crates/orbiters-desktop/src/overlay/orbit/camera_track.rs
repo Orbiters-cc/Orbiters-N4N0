@@ -585,7 +585,7 @@ fn landmark_fit(r: &Reading, blobs: &[Blob], x: [f32;2], chevron: [f32;2]) -> Op
 struct PlaneObservation { model:[f32;2],pixel:[f32;2],inverse_eye:Matrix34,mirror:Mirror,size:[f32;2] }
 
 fn observations(found:&Found,size:[f32;2],mirror:Mirror,eye:&Matrix34) -> Vec<PlaneObservation> {
-    let points=if let Some((count,points))=found.landmarks {points.into_iter().take(count).collect()} else {
+    let points:Vec<_>=if let Some((count,points))=found.landmarks {points.into_iter().take(count).collect()} else {
         [[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.]].into_iter().map(|p|(p,found.at(p))).collect()
     };
     points.into_iter().map(|(model,pixel)|PlaneObservation {model,pixel,inverse_eye:undone(eye),mirror,size}).collect()

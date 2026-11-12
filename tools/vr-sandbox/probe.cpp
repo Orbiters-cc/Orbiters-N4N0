@@ -11,10 +11,11 @@
 #include "vendor/openvr.h"
 using Microsoft::WRL::ComPtr;
 static void check(HRESULT h) {if(FAILED(h))throw std::runtime_error("HRESULT "+std::to_string((unsigned long)h));}
-static void save(const wchar_t *path,ID3D11Device *dev,ID3D11DeviceContext *ctx,ID3D11Texture2D *texture) {
+static void save(const wchar_t *path,ID3D11Device *dev,ID3D11DeviceContext *ctx,ID3D11Texture2D *texture,double *copied_at=nullptr) {
     D3D11_TEXTURE2D_DESC desc;texture->GetDesc(&desc);desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.MiscFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> stage;check(dev->CreateTexture2D(&desc,nullptr,&stage));ctx->CopyResource(stage.Get(),texture);
     D3D11_MAPPED_SUBRESOURCE data{};check(ctx->Map(stage.Get(),0,D3D11_MAP_READ,0,&data));
+    if(copied_at){LARGE_INTEGER counter,frequency;QueryPerformanceCounter(&counter);QueryPerformanceFrequency(&frequency);*copied_at=double(counter.QuadPart)/frequency.QuadPart;}
     ComPtr<IWICImagingFactory> factory;check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)));
     ComPtr<IWICStream> stream;check(factory->CreateStream(&stream));check(stream->InitializeFromFilename(path,GENERIC_WRITE));
     ComPtr<IWICBitmapEncoder> encoder;check(factory->CreateEncoder(GUID_ContainerFormatPng,nullptr,&encoder));check(encoder->Initialize(stream.Get(),WICBitmapEncoderNoCache));

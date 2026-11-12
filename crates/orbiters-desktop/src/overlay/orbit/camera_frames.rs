@@ -13,6 +13,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Keep metric refinement and the latest glyph observation independently.
+/// A slow fit must neither erase a newer pickup observation nor be starved by it.
+#[derive(Default)]
+struct Looks { metric: Option<Seen>, glyph: Option<Seen> }
+impl Looks {
+    fn publish(&mut self, look: Seen) {
+        let slot=if look.found.perspective.is_some() { &mut self.metric } else { &mut self.glyph };
+        if slot.as_ref().is_none_or(|old|old.at<=look.at) { *slot=Some(look); }
+    }
+    fn take(&mut self) -> Option<Seen> { self.metric.take().or_else(||self.glyph.take()) }
+}
+
 /// Which picture a look read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -83,7 +95,7 @@ fn trouble(health: &Health, began: Instant, now: Instant) -> Option<&'static str
 pub struct CameraWatch {
     health: Arc<Mutex<Health>>,
     began: Instant,
-    seen: Arc<Mutex<Option<Seen>>>,
+    seen: Arc<Mutex<Looks>>,
     stop: Arc<AtomicBool>,
     hint:Arc<Mutex<Option<(Instant,Found)>>>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -91,7 +103,7 @@ pub struct CameraWatch {
 
 impl CameraWatch {
     pub fn start(from: From) -> Self {
-        let (seen, stop) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
+        let (seen, stop) = (Arc::new(Mutex::new(Looks::default())), Arc::new(AtomicBool::new(false)));
         let health = Arc::new(Mutex::new(Health::default()));
         let (s, st, h) = (seen.clone(), stop.clone(), health.clone());
         let hint=Arc::new(Mutex::new(None));let hints=hint.clone();
@@ -152,7 +164,7 @@ const LOOK_WHOLE_EVERY: Duration = Duration::from_millis(250);
 const EYE_TRIES: u32 = 8;
 
 /// One look on a picture read: `area` is where it is in the whole.
-fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f32; 2], whole: [usize; 2], last: Option<Found>, seen: &Mutex<Option<Seen>>, health: &Mutex<Health>, source: Source, at: Instant, right: Option<RightSeen>) -> Option<Found> {
+fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f32; 2], whole: [usize; 2], last: Option<Found>, seen: &Mutex<Looks>, health: &Mutex<Health>, source: Source, at: Instant, right: Option<RightSeen>) -> Option<Found> {
     let in_part = pixels.len() < whole[0] * whole[1] * 4 && stride == width * 4 && width < whole[0];
     let found = match last {
         // Around the last place in what was read, unless what was read is that already.
@@ -170,7 +182,7 @@ fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f3
         h.found = Some(at);
         h.finds = h.finds.saturating_add(1);
         drop(h);
-        *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(Seen { found, size: [whole[0] as f32, whole[1] as f32], source, at, right });
+        seen.lock().unwrap_or_else(|e| e.into_inner()).publish(Seen { found, size: [whole[0] as f32, whole[1] as f32], source, at, right });
     }
     found
 }
@@ -198,7 +210,42 @@ fn keep(pixels: &[u8], width: usize, height: usize, stride: usize, source: Sourc
     }
 }
 
-fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, hints:&Mutex<Option<(Instant,Found)>>,from: From) {
+fn run(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>, hints:&Mutex<Option<(Instant,Found)>>,from: From) {
+    // Glyph pickup acknowledgement has its own reader. Native border fitting
+    // can take hundreds of milliseconds and must never block this small ROI.
+    let finished=AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let finished_ref=&finished;
+        scope.spawn(move || run_glyphs(seen,stop,finished_ref,health,hints,from));
+        struct Finish<'a>(&'a AtomicBool);
+        impl Drop for Finish<'_> { fn drop(&mut self) { self.0.store(true,Ordering::Relaxed); } }
+        let _finish=Finish(&finished);
+        run_metric(seen,stop,health,hints,from);
+    });
+}
+
+fn run_glyphs(seen:&Mutex<Looks>,stop:&AtomicBool,finished:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Option<(Instant,Found)>>,from:From) {
+    let Some(source)=from.mirror else{return;};
+    let Ok(reader)=EyeReader::new(from.adapter) else{return;};
+    let mut whole=None;
+    while !stop.load(Ordering::Relaxed) && !finished.load(Ordering::Relaxed) {
+        let began=Instant::now();
+        let hint=hints.lock().unwrap_or_else(|e|e.into_inner()).filter(|(at,_)|at.elapsed()<Duration::from_millis(100)).map(|(_,f)|f);
+        if let Some(hint)=hint {
+            let area=whole.map(|size:[u32;2]|camera_track::around(&hint,size[0] as usize,size[1] as usize).map(|v|v as u32));
+            if let Ok(picture)=reader.read_part(source,Eye::Left,area) {
+                whole=Some(picture.whole);
+                if let Some(found)=camera_track::glyphs_near(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4,[picture.from[0] as f32,picture.from[1] as f32],hint) {
+                    seen.lock().unwrap_or_else(|e|e.into_inner()).publish(Seen{found,size:[picture.whole[0] as f32,picture.whole[1] as f32],source:Source::Eye,at:began,right:None});
+                    let mut h=health.lock().unwrap_or_else(|e|e.into_inner());h.framed=Some(began);h.found=Some(began);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(16).saturating_sub(began.elapsed()));
+    }
+}
+
+fn run_metric(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>, hints:&Mutex<Option<(Instant,Found)>>,from: From) {
     let mut kept = None;
     if let Some(mirror) = from.mirror {
         match EyeReader::new(from.adapter) {
@@ -227,7 +274,7 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, hi
                     let guided=left.as_ref().ok().and_then(|picture|hint.and_then(|hint|camera_track::glyphs_near(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4,[picture.from[0] as f32,picture.from[1] as f32],hint)));
                     if let (Some(found),Ok(picture))=(guided,left.as_ref()) {
                         {let mut h=health.lock().unwrap_or_else(|e|e.into_inner());h.framed=Some(began);h.found=Some(began);h.looks=h.looks.saturating_add(1);h.finds=h.finds.saturating_add(1);}
-                        *seen.lock().unwrap_or_else(|e|e.into_inner())=Some(Seen{found,size:[picture.whole[0] as f32,picture.whole[1] as f32],source:Source::Eye,at:began,right:None});
+                        seen.lock().unwrap_or_else(|e|e.into_inner()).publish(Seen{found,size:[picture.whole[0] as f32,picture.whole[1] as f32],source:Source::Eye,at:began,right:None});
                         last=Some((found,picture.whole));
                         // Publish before optional metric refinement. A heavy
                         // border search must not delay pickup acknowledgement.
@@ -280,10 +327,10 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, hi
 }
 
 #[cfg(not(windows))]
-fn run_on_window(_: &Mutex<Option<Seen>>, _: &AtomicBool, _: &Mutex<Health>, _: bool, _: &mut Option<Instant>) {}
+fn run_on_window(_: &Mutex<Looks>, _: &AtomicBool, _: &Mutex<Health>, _: bool, _: &mut Option<Instant>) {}
 
 #[cfg(windows)]
-fn run_on_window(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, keep_frames: bool, kept: &mut Option<Instant>) {
+fn run_on_window(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>, keep_frames: bool, kept: &mut Option<Instant>) {
     let told = |what: &dyn Fn(&mut Health)| what(&mut health.lock().unwrap_or_else(|e| e.into_inner()));
     told(&|h| h.source = Some(Source::Window));
     let mut said = false;
@@ -323,11 +370,25 @@ fn run_on_window(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<H
 #[cfg(test)]
 mod tests {
     #[test]
+    fn slow_refinement_cannot_erase_or_starve_pickup_pixels() {
+        use super::*;
+        let base=Instant::now();
+        let found=camera_track::Found {perspective:None,lines:None,landmarks:None,residual_px:0.,x:[0.;2],chevron:[0.;2],middle:[0.;2],right:[1.,0.],down:[0.,1.],across:1.,tall:1.};
+        let look=|ms,metric| {let mut found=found;if metric {found.perspective=Some([[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]]);} Seen{found,size:[1620.,1800.],source:Source::Eye,at:base+Duration::from_millis(ms),right:None}};
+        let mut looks=Looks::default();
+        // The worker finishes a 600ms border fit after fresh glyph pixels.
+        looks.publish(look(600,false));looks.publish(look(0,true));
+        looks.publish(look(616,false));looks.publish(look(584,false));
+        assert_eq!(looks.take().unwrap().at,base);
+        assert_eq!(looks.take().unwrap().at,base+Duration::from_millis(616));
+        assert!(looks.take().is_none());
+    }
+    #[test]
     fn retired_readers_are_joined_before_the_owner_finishes() {
         use super::*;
         let (release,wait)=std::sync::mpsc::channel();
         let thread=std::thread::spawn(move || { let _=wait.recv_timeout(Duration::from_secs(1)); });
-        let mut watch=CameraWatch { health:Arc::new(Mutex::new(Health::default())),began:Instant::now(),seen:Arc::new(Mutex::new(None)),stop:Arc::new(AtomicBool::new(false)),hint:Arc::new(Mutex::new(None)),thread:Some(thread) };
+        let mut watch=CameraWatch { health:Arc::new(Mutex::new(Health::default())),began:Instant::now(),seen:Arc::new(Mutex::new(Looks::default())),stop:Arc::new(AtomicBool::new(false)),hint:Arc::new(Mutex::new(None)),thread:Some(thread) };
         watch.stop();
         assert!(!watch.finished());
         release.send(()).unwrap();
@@ -339,7 +400,7 @@ mod tests {
         use super::*;
         let (release, wait) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || { let _ = wait.recv_timeout(Duration::from_secs(1)); });
-        let watch = CameraWatch { health: Arc::new(Mutex::new(Health::default())), began: Instant::now(), seen: Arc::new(Mutex::new(None)), stop: Arc::new(AtomicBool::new(false)), hint:Arc::new(Mutex::new(None)),thread: Some(thread) };
+        let watch = CameraWatch { health: Arc::new(Mutex::new(Health::default())), began: Instant::now(), seen: Arc::new(Mutex::new(Looks::default())), stop: Arc::new(AtomicBool::new(false)), hint:Arc::new(Mutex::new(None)),thread: Some(thread) };
         let began = Instant::now();
         drop(watch);
         assert!(began.elapsed() < Duration::from_millis(150));

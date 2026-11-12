@@ -51,6 +51,7 @@ const SUPPORT_SMALL: usize = 4;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Found {
     pub perspective: Option<[[f32; 3]; 3]>,
+    pub lines: Option<LineSet>,
     pub residual_px: f32,
     pub landmarks: Option<(usize, [([f32;2],[f32;2]);10])>,
     pub x: [f32; 2],
@@ -64,6 +65,9 @@ pub struct Found {
     pub tall: f32,
 }
 
+type LineSet = [([[f32;2];2],[f32;3]);4];
+type Outline = ([[f32;3];3],f32,(usize,[([f32;2],[f32;2]);10]),Option<LineSet>);
+
 impl Found {
     fn moved(mut self, by: [f32; 2], scale: f32) -> Self {
         let at = |p: [f32; 2]| [p[0] / scale + by[0], p[1] / scale + by[1]];
@@ -71,6 +75,9 @@ impl Found {
         self.across /= scale;
         self.tall /= scale;
         self.residual_px /= scale;
+        if let Some(lines)=self.lines.as_mut() {for (_,l) in lines {
+            l[2]=l[2]/scale-l[0]*by[0]-l[1]*by[1];
+        }}
         if let Some((count,points)) = self.landmarks.as_mut() {
             for (_,q) in points.iter_mut().take(*count) { *q=at(*q); }
         }
@@ -285,7 +292,7 @@ struct Reading {
 }
 
 impl Reading {
-    fn support(&self, all: &[Blob]) -> usize {
+    fn support(&self, all: &[Blob]) -> (usize,bool) {
         let on = |b: &Blob| {
             let d = [b.middle[0] - self.middle[0], b.middle[1] - self.middle[1]];
             [(d[0] * self.right[0] + d[1] * self.right[1]) / self.across, (d[0] * self.down[0] + d[1] * self.down[1]) / self.tall]
@@ -302,7 +309,7 @@ impl Reading {
         });
         let column = [36.0, 54.0, 74.0, 93.0].iter().filter(|y| near([-190.0, **y], [14.0, 8.0])).count();
         let buttons = [[-148.0, 131.0], [-35.0, 133.0], [82.0, 135.0]].iter().filter(|p| near(**p, [18.0, 14.0])).count();
-        icon as usize + slider as usize + (column >= 2) as usize + (buttons >= 2) as usize
+        (icon as usize + slider as usize + (column >= 2) as usize + (buttons >= 2) as usize,slider && column>=2)
     }
 }
 
@@ -368,22 +375,254 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
                 }
             });
             for reading in [Some(straight), turned].into_iter().flatten() {
-                let support = reading.support(&all);
-                if support < needs {
+                let (support,opposite_sides) = reading.support(&all);
+                if support < needs && !opposite_sides {
                     continue;
                 }
                 let fitted = landmark_fit(&reading, &all, x.middle, c.middle);
-                if lean.abs() > LEANS_AT_MOST.to_radians() && fitted.is_none() { continue; }
                 let (perspective,residual_px,landmarks) = fitted.map_or((None,f32::INFINITY,None), |(h,e,p)| (Some(h),e,Some(p)));
                 let score = looks + support as f32 * 0.2 - (x_share - X_IS).abs() * 3.0 - (c_share - CHEVRON_IS).abs() * 2.0;
                 if best.as_ref().is_none_or(|b| score > b.0) {
-                    let found = Found { perspective, residual_px, landmarks, x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
+                    let mut found = Found { perspective, lines:None, residual_px, landmarks, x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
+                    // Print omits the second top-left icon. Its left status
+                    // column and right sliders still identify opposite sides;
+                    // replace the missing icon vote with a measured border.
+                    if support<needs || (lean.abs()>LEANS_AT_MOST.to_radians() && fitted.is_none()) {
+                        let Some((h,error,points,lines))=outline_fit(light,&found) else {continue;};
+                        found.perspective=Some(h);found.residual_px=error;found.landmarks=Some(points);found.lines=lines;
+                    }
                     best = Some((score, found));
                 }
             }
         }
     }
-    best.map(|b| b.1)
+    best.map(|(_, mut found)| {
+        // Native Photo/Stream rows have different icon centres. Locate the physical
+        // viewfinder border independently; the glyph pair identifies it, not its pose.
+        if let Some((h, error, points,lines)) = outline_fit(light, &found) {
+            found.perspective = Some(h);
+            found.residual_px = error;
+            found.landmarks = Some(points);found.lines=lines;
+        }
+        found
+    })
+}
+
+/// Native viewfinder is 16:9. PANEL_SIZE describes the older interior glyph grid,
+/// not the outer border. Stereo measurements of the sandbox give 1.775:1.
+const OUTLINE_HALF_HEIGHT: f32 = 205.0 * 9.0 / 16.0;
+
+fn outline_fit(light: &Light, f: &Found) -> Option<Outline> {
+    outline_search(light,f,false,false).or_else(||outline_search(light,f,true,false)).or_else(||outline_search(light,f,true,true))
+}
+
+fn outline_search(light: &Light, f: &Found, general:bool,gradient:bool) -> Option<Outline> {
+    let sample = |p:[f32;2]| -> Option<f32> {
+        let (x,y)=(p[0].round() as isize,p[1].round() as isize);
+        if x<0 || y<0 || x>=light.width as isize || y>=light.height as isize { return None; }
+        Some(light.px[y as usize*light.width+x as usize] as f32)
+    };
+    let scale=f.across.max(f.tall);
+    let contrast=|p:[f32;2],n:[f32;2]| -> f32 {
+        // Print has a gray beveled body, not a black stroke. Its material edge
+        // is a first derivative; keep the same complete-plane validation.
+        if gradient {
+            let radius=scale.max(1.);
+            return sample([p[0]+n[0]*radius,p[1]+n[1]*radius]).zip(sample([p[0]-n[0]*radius,p[1]-n[1]*radius])).map_or(0.,|(a,b)|((a-b).abs()-8.).clamp(0.,40.));
+        }
+        let Some(dark)=sample(p).filter(|v|*v<35.) else {return 0.;};
+        let a=sample([p[0]+n[0]*4.*scale,p[1]+n[1]*4.*scale]);
+        let b=sample([p[0]-n[0]*4.*scale,p[1]-n[1]*4.*scale]);
+        a.zip(b).map_or(0.,|(a,b)| ((a+b)*0.5-dark-8.).clamp(0.,40.))
+    };
+    let seed=|x:f32,y:f32| [f.middle[0]+f.right[0]*x*f.across+f.down[0]*y*f.tall,
+        f.middle[1]+f.right[1]*x*f.across+f.down[1]*y*f.tall];
+    let seeds=[seed(-205.,-110.),seed(205.,-110.),seed(205.,110.),seed(-205.,110.)];
+    #[derive(Clone,Copy)]
+    struct Edge { p:[f32;2],u:[f32;2],error:f32 }
+    let mut edges:[Vec<Edge>;4]=std::array::from_fn(|_|Vec::new());
+    for i in 0..4 {
+        let (a,b)=(seeds[i],seeds[(i+1)%4]);
+        let length=(b[0]-a[0]).hypot(b[1]-a[1]);
+        let middle=[(a[0]+b[0])*0.5,(a[1]+b[1])*0.5];
+        let direction=[(b[0]-a[0])/length,(b[1]-a[1])/length];
+        let mut candidates:Vec<(f32,[f32;2],[f32;2])>=Vec::new();
+        let mut clipped=false;
+        // A glyph similarity seed can be very far from the right border under
+        // perspective. Search complete straight edges, rather than nearest blobs.
+        let count=if general {181} else {33};
+        for angle in 0..count {
+            // The fast path is only a proposal. General acquisition searches the
+            // entire half-circle: projective edges need not follow a similarity seed.
+            let theta=if general {-std::f32::consts::FRAC_PI_2+std::f32::consts::PI*angle as f32/180.} else {-0.22+0.44*angle as f32/32.};
+            let (s,c)=theta.sin_cos();
+            let u=[direction[0]*c-direction[1]*s,direction[0]*s+direction[1]*c];
+            let n=[-u[1],u[0]];
+            let reach=100.*scale;
+            for offset in 0..=(reach*2./0.8) as usize {
+                let offset=-reach+offset as f32*0.8;
+                let p=[middle[0]+offset*n[0],middle[1]+offset*n[1]];
+                let score=(0..33).map(|k| {
+                    let t=(-0.35+0.7*k as f32/32.)*length;
+                    contrast([p[0]+t*u[0],p[1]+t*u[1]],n)
+                }).sum::<f32>();
+                if score<33.*10. {continue;}
+                if !general {
+                    if candidates.first().is_none_or(|v|score>v.0) {candidates=vec![(score,p,u)];clipped=angle==0 || angle+1==count;}
+                } else {
+                    // Keep distinct line hypotheses. The strongest individual
+                    // line can belong to the hand behind the viewfinder; only a
+                    // complete, glyph-identified quadrilateral may win.
+                    let duplicate=candidates.iter().position(|&(_,q,v)| (u[0]*v[0]+u[1]*v[1]).abs()>3f32.to_radians().cos() && ((q[0]-p[0])*n[0]+(q[1]-p[1])*n[1]).abs()<6.*scale);
+                    if let Some(k)=duplicate {
+                        if score>candidates[k].0 {candidates[k]=(score,p,u);}
+                    } else if candidates.len()<12 || score>candidates.last().unwrap().0 {
+                        candidates.push((score,p,u));
+                    }
+                    candidates.sort_by(|a,b|b.0.total_cmp(&a.0));candidates.truncate(12);
+                }
+            }
+        }
+        // A maximum on the proposal window's boundary is not convergence.
+        // Retry the unrestricted search instead of fitting a clipped edge.
+        if !general && clipped {return None;}
+        for (_,p,u) in candidates {
+        let n=[-u[1],u[0]];
+        // Refit the selected dark stroke from distributed local samples. This
+        // removes angle-grid quantization without relaxing reprojection bounds.
+        let mut samples=Vec::new();
+        for k in 0..49 {
+            let t=(-0.35+0.7*k as f32/48.)*length;
+            let base=[p[0]+t*u[0],p[1]+t*u[1]];
+            let mut best=(0.,0.);
+            let mut weighted=(0.,0.);
+            for j in -12..=12 {
+                let d=j as f32*0.25;
+                let score=contrast([base[0]+d*n[0],base[1]+d*n[1]],n);
+                if score>best.0 {best=(score,d);}
+                weighted.0+=score*d;weighted.1+=score;
+            }
+            if gradient && weighted.1>0. {best.1=weighted.0/weighted.1;}
+            if best.0>10. {samples.push((t,best.1));}
+        }
+        if samples.len()<25 {continue;}
+        let count=samples.len() as f32;
+        let (mt,md)=(samples.iter().map(|p|p.0).sum::<f32>()/count,samples.iter().map(|p|p.1).sum::<f32>()/count);
+        let slope=samples.iter().map(|&(t,d)|(t-mt)*(d-md)).sum::<f32>()/samples.iter().map(|&(t,_)|(t-mt).powi(2)).sum::<f32>();
+        let offset=md-slope*mt;
+        let error=(samples.iter().map(|&(t,d)|(d-offset-slope*t).powi(2)).sum::<f32>()/count).sqrt();
+        if error>2.5 {continue;}
+        let norm=(1.+slope*slope).sqrt();
+        edges[i].push(Edge {p:[p[0]+offset*n[0],p[1]+offset*n[1]],u:[(u[0]+slope*n[0])/norm,(u[1]+slope*n[1])/norm],error});
+        }
+        if edges[i].is_empty() {return None;}
+    }
+    let model=[[-205.,-OUTLINE_HALF_HEIGHT],[205.,-OUTLINE_HALF_HEIGHT],[205.,OUTLINE_HALF_HEIGHT],[-205.,OUTLINE_HALF_HEIGHT]];
+    let mut rails=Vec::new();
+    if gradient {for level in BRIGHT {blobs(light,level,&mut rails);}}
+    if gradient {
+        let on=|p:[f32;2]| {
+            let d=[p[0]-f.middle[0],p[1]-f.middle[1]];
+            [(d[0]*f.right[0]+d[1]*f.right[1])/f.across,(d[0]*f.down[0]+d[1]*f.down[1])/f.tall]
+        };
+        let rails:Vec<_>=rails.iter().filter(|b| {
+            let p=on(b.middle);
+            (80.0..=210.0).contains(&p[0]) && (-70.0..=100.0).contains(&p[1]) && b.long>b.short*4. && b.long>12.*scale
+        }).collect();
+        let mut best=None;
+        for top in &edges[0] {for left in &edges[3] {
+        for one in &rails {for two in &rails {
+            let separation=on(two.middle)[0]-on(one.middle)[0];
+            if !(10.0..=40.0).contains(&separation){continue;}
+            let solve=|| -> Option<_> {
+                let edges=[*top,*left,Edge{p:one.middle,u:one.along,error:0.5},Edge{p:two.middle,u:two.along,error:0.5}];
+                let models=[[[ -205.,-OUTLINE_HALF_HEIGHT],[205.,-OUTLINE_HALF_HEIGHT]],
+                    [[-205.,-OUTLINE_HALF_HEIGHT],[-205.,OUTLINE_HALF_HEIGHT]],
+                    [[164.,-OUTLINE_HALF_HEIGHT],[164.,OUTLINE_HALF_HEIGHT]],
+                    [[186.,-OUTLINE_HALF_HEIGHT],[186.,OUTLINE_HALF_HEIGHT]]];
+                let lines:LineSet=std::array::from_fn(|i| {
+                    let e=edges[i];let (a,b)=(-e.u[1],e.u[0]);(models[i],[a,b,-a*e.p[0]-b*e.p[1]])
+                });
+                let mut rows=Vec::new();
+                for (model,[a,b,c]) in lines {for [x,y] in model {
+                    rows.push([a*x,a*y,a,b*x,b*y,b,c*x,c*y,-c]);
+                }}
+                for ([x,y],[u,v]) in [(PANEL_X,f.x),(PANEL_CHEVRON,f.chevron)] {
+                    rows.push([x,y,1.,0.,0.,0.,-u*x,-u*y,u]);
+                    rows.push([0.,0.,0.,x,y,1.,-v*x,-v*y,v]);
+                }
+                let h=homography_rows(&rows)?;
+                let mut score=0.;
+                let mut points=[([0.;2],[0.;2]);10];
+                for (i,(p,q)) in [(PANEL_X,f.x),(PANEL_CHEVRON,f.chevron)].into_iter().enumerate() {
+                    let r=project(h,p);let error=(r[0]-q[0]).hypot(r[1]-q[1]);
+                    if error>16.*scale{return None;}score+=error*error;points[i]=(p,q);
+                }
+                for (model,l) in lines {for p in model {let q=project(h,p);score+=(l[0]*q[0]+l[1]*q[1]+l[2]).powi(2);}}
+                Some((score,(h,top.error.max(left.error).max(0.5),(2,points),Some(lines))))
+            };
+            if let Some((score,result))=solve() {if best.as_ref().is_none_or(|(old,_)|score<*old){best=Some((score,result));}}
+        }}}}
+        if let Some((_,result))=best{return Some(result);}
+    }
+    let mut best = None;
+    for a in &edges[0] {for b in &edges[1] {for c in &edges[2] {for d in &edges[3] {
+    let lines=[a,b,c,d];
+    let solve=|| -> Option<_> {
+      let mut points=[([0.;2],[0.;2]);10];
+      for i in 0..4 {
+        let Edge {p,u,..}=*lines[(i+3)%4];let Edge {p:q,u:v,..}=*lines[i];
+        let cross=|a:[f32;2],b:[f32;2]|a[0]*b[1]-a[1]*b[0];
+        let determinant=cross(u,v);
+        if determinant.abs()<0.2 {return None;}
+        let t=cross([q[0]-p[0],q[1]-p[1]],v)/determinant;
+        let corner=[p[0]+t*u[0],p[1]+t*u[1]];
+        if (corner[0]-seeds[i][0]).hypot(corner[1]-seeds[i][1])>200.*scale {return None;}
+        points[i]=(model[i],corner);
+    }
+    for i in 0..4 {
+        let (a,b,c)=(points[i].1,points[(i+1)%4].1,points[(i+2)%4].1);
+        if (b[0]-a[0])*(c[1]-b[1])-(b[1]-a[1])*(c[0]-b[0])<=0. {return None;}
+    }
+    let h=fit(&points[..4])?;
+    // Glyph coordinates are an identity check with icon-sized tolerance, not
+    // exact correspondences pretending that a raster glyph centroid is fixed.
+    for (p,q) in [(PANEL_X,f.x),(PANEL_CHEVRON,f.chevron)] {
+        let r=project(h,p);
+        if (r[0]-q[0]).hypot(r[1]-q[1])>16.*scale {return None;}
+    }
+    if gradient {
+        // Both white adjustment rails are on the front face, independent of
+        // camera mode and slider value. A background edge to their right is
+        // not the viewfinder border. Test them in the proposed panel plane.
+        let inverse=|q:[f32;2]| -> Option<[f32;2]> {
+            let a=h[0][0]-q[0]*h[2][0];let b=h[0][1]-q[0]*h[2][1];
+            let c=h[1][0]-q[1]*h[2][0];let d=h[1][1]-q[1]*h[2][1];
+            let u=q[0]-h[0][2];let v=q[1]-h[1][2];let det=a*d-b*c;
+            (det.abs()>1e-8).then(||[(u*d-b*v)/det,(a*v-u*c)/det])
+        };
+        let rail_x:Vec<_>=rails.iter().filter(|b|b.long>=b.short*2. && b.long>=6.*scale).filter_map(|b| {
+            let p=inverse(b.middle)?;
+            let q=inverse([b.middle[0]+b.along[0]*b.long,b.middle[1]+b.along[1]*b.long])?;
+            ((150.0..=200.0).contains(&p[0]) && (-20.0..=100.0).contains(&p[1]) && (q[0]-p[0]).abs()<(q[1]-p[1]).abs()*0.3).then_some(p[0])
+        }).collect();
+        if !rail_x.iter().any(|a|rail_x.iter().any(|b|(14.0..=30.0).contains(&(a-b).abs()))) {return None;}
+    }
+      let uncertainty=lines.iter().map(|e|e.error).fold(0.5f32,f32::max);
+      Some((h,uncertainty,(4,points),None))
+    };
+    if let Some(result)=solve() {
+        if !gradient {return Some(result);}
+        // Evaluate the complete identity, rather than accepting the first four
+        // strong scene edges. Print's bevel can otherwise pair the true left
+        // edge with an unrelated parallel edge behind the camera.
+        let score=[(PANEL_X,f.x),(PANEL_CHEVRON,f.chevron)].iter().map(|&(p,q)| {
+            let r=project(result.0,p); (r[0]-q[0]).powi(2)+(r[1]-q[1]).powi(2)
+        }).sum::<f32>()+result.1.powi(2);
+        if best.as_ref().is_none_or(|(old,_)|score<*old) {best=Some((score,result));}
+    }
+    }}}}
+    best.map(|(_,result)|result)
 }
 
 /// The panel in a picture of 4-byte pixels, whichever way round its colours are, or `None`.
@@ -394,7 +633,9 @@ fn project(h: [[f32; 3]; 3], p: [f32; 2]) -> [f32; 2] {
 
 /// Least squares homography from independently located, spread landmarks. Reprojection is in pixels.
 pub fn fit(points: &[([f32; 2], [f32; 2])]) -> Option<[[f32; 3]; 3]> {
-    if points.len() < 5 { return None; }
+    // Four independently measured, non-collinear corners determine a plane.
+    // Degenerate sets are still rejected by the pivot and rigid reprojection gates.
+    if points.len() < 4 { return None; }
     let mut a = [[0.0f64; 9]; 8];
     for &(p, q) in points {
         let (x, y, u, v) = (p[0] as f64, p[1] as f64, q[0] as f64, q[1] as f64);
@@ -402,6 +643,17 @@ pub fn fit(points: &[([f32; 2], [f32; 2])]) -> Option<[[f32; 3]; 3]> {
             for i in 0..8 { for j in 0..9 { a[i][j] += row[i] * row[j]; } }
         }
     }
+    let h=solve_homography(a)?;
+    let error = points.iter().map(|&(p,q)| { let r=project(h,p); (r[0]-q[0]).powi(2)+(r[1]-q[1]).powi(2) }).sum::<f32>() / points.len() as f32;
+    (error.is_finite() && error.sqrt() <= 2.5).then_some(h)
+}
+
+fn homography_rows(rows:&[[f32;9]]) -> Option<[[f32;3];3]> {
+    let mut a=[[0.;9];8];
+    for row in rows {for i in 0..8 {for j in 0..9 {a[i][j]+=row[i] as f64*row[j] as f64;}}}
+    solve_homography(a)
+}
+fn solve_homography(mut a:[[f64;9];8]) -> Option<[[f32;3];3]> {
     for k in 0..8 {
         let pivot = (k..8).max_by(|&i,&j| a[i][k].abs().total_cmp(&a[j][k].abs()))?;
         a.swap(k,pivot);
@@ -411,8 +663,7 @@ pub fn fit(points: &[([f32; 2], [f32; 2])]) -> Option<[[f32; 3]; 3]> {
         for i in 0..8 { if i != k { let d = a[i][k]; for j in k..9 { a[i][j] -= d * a[k][j]; } } }
     }
     let h = [[a[0][8] as f32,a[1][8] as f32,a[2][8] as f32], [a[3][8] as f32,a[4][8] as f32,a[5][8] as f32], [a[6][8] as f32,a[7][8] as f32,1.]];
-    let error = points.iter().map(|&(p,q)| { let r=project(h,p); (r[0]-q[0]).powi(2)+(r[1]-q[1]).powi(2) }).sum::<f32>() / points.len() as f32;
-    (error.is_finite() && error.sqrt() <= 2.5).then_some(h)
+    Some(h)
 }
 
 fn landmark_fit(r: &Reading, blobs: &[Blob], x: [f32;2], chevron: [f32;2]) -> Option<([[f32;3];3],f32,(usize,[([f32;2],[f32;2]);10]))> {
@@ -432,6 +683,89 @@ fn landmark_fit(r: &Reading, blobs: &[Blob], x: [f32;2], chevron: [f32;2]) -> Op
     let mut landmarks=[([0.;2],[0.;2]);10];
     for (out,p) in landmarks.iter_mut().zip(&points) { *out=*p; }
     Some((h,residual,(points.len(),landmarks)))
+}
+
+#[derive(Clone,Copy)]
+struct PlaneObservation { model:[f32;2],pixel:[f32;2],line:Option<[f32;3]>,inverse_eye:Matrix34,mirror:Mirror,size:[f32;2] }
+
+fn observations(found:&Found,size:[f32;2],mirror:Mirror,eye:&Matrix34) -> Vec<PlaneObservation> {
+    let points:Vec<_>=if let Some((count,points))=found.landmarks {points.into_iter().take(count).collect()} else {
+        [[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.]].into_iter().map(|p|(p,found.at(p))).collect()
+    };
+    let mut result:Vec<_>=points.into_iter().map(|(model,pixel)|PlaneObservation {model,pixel,line:None,inverse_eye:undone(eye),mirror,size}).collect();
+    if let Some(lines)=found.lines {for (model,line) in lines {for model in model {
+        result.push(PlaneObservation{model,pixel:[0.;2],line:Some(line),inverse_eye:undone(eye),mirror,size});
+    }}}
+    result
+}
+
+/// Optimize the rigid plane in image space. Triangulation is an initializer:
+/// averaging noisy 3D corners does not minimize the observed pixel error (depth
+/// noise grows quadratically with range). Rotation stays on SO(3), never shear.
+fn refine_plane(mut frame:Matrix34,mut unit:f32,observed:&[PlaneObservation],metric:bool) -> Option<(Matrix34,f32)> {
+    let residual=|frame:&Matrix34,unit:f32| -> Option<Vec<f64>> {
+        let mut out=Vec::with_capacity(observed.len()*2);
+        for o in observed {
+            let p:[f64;3]=std::array::from_fn(|i|frame.m[i][3] as f64+frame.m[i][0] as f64*o.model[0] as f64*unit as f64-frame.m[i][1] as f64*o.model[1] as f64*unit as f64);
+            let v:[f64;3]=std::array::from_fn(|i|o.inverse_eye.m[i][3] as f64+(0..3).map(|j|o.inverse_eye.m[i][j] as f64*p[j]).sum::<f64>());
+            if v[2]>=-1e-5 {return None;}
+            let tangent=[v[0]/-v[2],-v[1]/-v[2]];
+            let px: [f64;2]=std::array::from_fn(|k|(tangent[k]-o.mirror.from[k] as f64)/o.mirror.spans[k] as f64*o.size[k] as f64);
+            if let Some(l)=o.line {out.push(l[0] as f64*px[0]+l[1] as f64*px[1]+l[2] as f64);out.push(0.);}
+            else {for k in 0..2 {out.push(px[k]-o.pixel[k] as f64);}}
+        }
+        out.iter().all(|v|v.is_finite()).then_some(out)
+    };
+    let advance=|frame:&Matrix34,unit:f32,delta:[f64;7],amount:f64| {
+        let rotation=[delta[3]*amount,delta[4]*amount,delta[5]*amount];
+        let angle=rotation.iter().map(|v|v*v).sum::<f64>().sqrt();
+        let mut next=*frame;
+        if angle>1e-12 {
+            let axis=rotation.map(|v|v/angle);let (s,c)=angle.sin_cos();
+            for k in 0..3 {
+                let v=frame.m.map(|r|r[k] as f64);let dot=(0..3).map(|i|axis[i]*v[i]).sum::<f64>();
+                let cross=[axis[1]*v[2]-axis[2]*v[1],axis[2]*v[0]-axis[0]*v[2],axis[0]*v[1]-axis[1]*v[0]];
+                for i in 0..3 {next.m[i][k]=(v[i]*c+cross[i]*s+axis[i]*dot*(1.-c)) as f32;}
+            }
+        }
+        for i in 0..3 {next.m[i][3]=(frame.m[i][3] as f64+delta[i]*amount) as f32;}
+        (next,(unit as f64*(delta[6]*amount).exp()) as f32)
+    };
+    let n=if metric {7} else {6};let mut damping=1e-4f64;
+    let mut r=residual(&frame,unit)?;
+    for _ in 0..24 {
+        let cost=r.iter().map(|v|v*v).sum::<f64>();
+        if cost<1e-10 {break;}
+        let mut jacobian:[Vec<f64>;7]=std::array::from_fn(|_|Vec::new());
+        for k in 0..n {
+            let epsilon=if k<3 {1e-4} else {1e-3};let mut d=[0.;7];d[k]=epsilon;
+            let (candidate,scale)=advance(&frame,unit,d,1.);
+            jacobian[k]=residual(&candidate,scale)?.iter().zip(&r).map(|(a,b)|(a-b)/epsilon).collect();
+        }
+        let mut a=[[0.0f64;8];7];
+        for i in 0..n {
+            for j in 0..n {a[i][j]=jacobian[i].iter().zip(&jacobian[j]).map(|(a,b)|a*b).sum();}
+            a[i][n]=-jacobian[i].iter().zip(&r).map(|(a,b)|a*b).sum::<f64>();
+            a[i][i]+=damping*(a[i][i]+1.);
+        }
+        for k in 0..n {
+            let pivot=(k..n).max_by(|&i,&j|a[i][k].abs().total_cmp(&a[j][k].abs()))?;a.swap(k,pivot);
+            if a[k][k].abs()<1e-12 {return None;}
+            let d=a[k][k];for j in k..=n {a[k][j]/=d;}
+            for i in 0..n {if i!=k {let d=a[i][k];for j in k..=n {a[i][j]-=d*a[k][j];}}}
+        }
+        let delta=std::array::from_fn(|i|if i<n {a[i][n]} else {0.});
+        let mut accepted=false;
+        for amount in [1.,0.5,0.25,0.125] {
+            let (candidate,scale)=advance(&frame,unit,delta,amount);
+            if !scale.is_finite() || scale<=0. {continue;}
+            if let Some(next)=residual(&candidate,scale).filter(|v|v.iter().map(|v|v*v).sum::<f64>()<cost) {
+                frame=candidate;unit=scale;r=next;damping=(damping*0.3).max(1e-8);accepted=true;break;
+            }
+        }
+        if !accepted {damping*=10.;if damping>1e8 {break;}}
+    }
+    Some((frame,unit))
 }
 
 /// Perspective pose using the actual eye projection, with rigid-plane consistency rejection.
@@ -457,6 +791,11 @@ pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Mat
     let z=[right[1]*up[2]-right[2]*up[1],right[2]*up[0]-right[0]*up[2],right[0]*up[1]-right[1]*up[0]];
     let position=t.map(|x|x*scale);
     if !(0.15..=4.).contains(&-position[2]) { return None; }
+    let local=Matrix34 {m:std::array::from_fn(|i|[right[i],up[i],z[i],position[i]])};
+    let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
+    let (local,_)=refine_plane(local,unit,&observations(found,size,*mirror,&identity),false)?;
+    let right=local.m.map(|r|r[0]);let up=local.m.map(|r|r[1]);let z=local.m.map(|r|r[2]);let position=local.m.map(|r|r[3]);
+    if !(0.15..=4.).contains(&-position[2]) {return None;}
     // A texture homography can fit a sheared quadrilateral perfectly. Verify the recovered
     // rigid plane itself through the eye projection before accepting it as a physical panel.
     let mut errors=Vec::new();
@@ -472,6 +811,12 @@ pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Mat
     } else {
         for &(p,_) in &points { errors.push(check(p,project(found.perspective?,p))?); }
     }
+    if let Some(lines)=found.lines {for (model,l) in lines {for p in model {
+        let v:[f32;3]=std::array::from_fn(|i|position[i]+right[i]*p[0]*unit-up[i]*p[1]*unit);
+        let tangent=[v[0]/-v[2],-v[1]/-v[2]];
+        let px: [f32;2]=std::array::from_fn(|i|(tangent[i]-mirror.from[i])/mirror.spans[i]*size[i]);
+        errors.push((l[0]*px[0]+l[1]*px[1]+l[2]).powi(2));
+    }}}
     let rms=(errors.iter().sum::<f32>()/errors.len().max(1) as f32).sqrt();
     if !rms.is_finite() || rms>2.5 || errors.iter().any(|e| *e>36.) { return None; }
     let local=Matrix34 { m: std::array::from_fn(|i| [right[i],up[i],z[i],position[i]]) };
@@ -516,6 +861,11 @@ pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2]
     let centre:[f32;3]=std::array::from_fn(|i|points.iter().map(|p|p[i]).sum::<f32>()*0.25);
     if !(0.15..=4.).contains(&-centre[2]) { return None; }
     let unit=(width/410.+height/220.)*0.5;
+    let local=Matrix34 {m:std::array::from_fn(|i|[r[i],u[i],z[i],centre[i]])};
+    let observed:Vec<_>=(0..2).flat_map(|k|observations(found[k],sizes[k],mirrors[k],&eyes[k])).collect();
+    let (local,unit)=refine_plane(local,unit,&observed,true)?;
+    let r=local.m.map(|row|row[0]);let u=local.m.map(|row|row[1]);let z=local.m.map(|row|row[2]);let centre=local.m.map(|row|row[3]);
+    if !(0.15..=4.).contains(&-centre[2]) {return None;}
     let mut errors=Vec::new();
     for k in 0..2 {
         let inverse=undone(&eyes[k]);
@@ -533,10 +883,75 @@ pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2]
             for p in samples { errors.push(check(p,project(found[k].perspective?,p))?); }
         }
     }
+    for k in 0..2 {if let Some(lines)=found[k].lines {for (model,l) in lines {for p in model {
+        let world:[f32;3]=std::array::from_fn(|i|centre[i]+r[i]*p[0]*unit-u[i]*p[1]*unit);
+        let inverse=undone(&eyes[k]);
+        let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*world[j]).sum::<f32>());
+        let t=[v[0]/-v[2],-v[1]/-v[2]];
+        let px: [f32;2]=std::array::from_fn(|i|(t[i]-mirrors[k].from[i])/mirrors[k].spans[i]*sizes[k][i]);
+        errors.push((l[0]*px[0]+l[1]*px[1]+l[2]).powi(2));
+    }}}}
     let rms=(errors.iter().sum::<f32>()/errors.len().max(1) as f32).sqrt();
     if !rms.is_finite() || rms>2.5 || errors.iter().any(|e|*e>36.) { return None; }
     let local=Matrix34 {m:std::array::from_fn(|i|[r[i],u[i],z[i],centre[i]])};
     Some((then(head,&local),unit,rms))
+}
+
+/// Locate only the two measured identity glyphs near a projected search hint.
+/// The hint is never returned as evidence: no border/pose is inferred here.
+pub fn record_near(pixels:&[u8],width:usize,height:usize,stride:usize,offset:[f32;2],center:[f32;2],radius:f32) -> Option<[f32;2]> {
+    let cx=center[0]-offset[0];let cy=center[1]-offset[1];
+    let x0=(cx-radius).max(0.) as usize;let y0=(cy-radius).max(0.) as usize;
+    let x1=((cx+radius).max(0.) as usize).min(width);let y1=((cy+radius).max(0.) as usize).min(height);
+    if x1<=x0 || y1<=y0{return None;}
+    let w=x1-x0;let h=y1-y0;let mut mask=vec![false;w*h];
+    for y in 0..h {for x in 0..w {
+        let Some(p)=pixels.get((y+y0)*stride+(x+x0)*4..(y+y0)*stride+(x+x0)*4+3) else{continue;};
+        let (r,g,b)=(p[0] as u32,p[1] as u32,p[2] as u32);
+        // Record is pink/red in the actual RGBA compositor readback.
+        mask[y*w+x]=r>100 && r*10>b*11 && b*10>g*13 && r*10>g*15;
+    }}
+    let mut best=None;
+    for i in 0..mask.len() {if !mask[i]{continue;}let mut stack=vec![i];mask[i]=false;let mut component=Vec::new();let(mut count,mut sx,mut sy)=(0,0.,0.);let(mut xmin,mut xmax,mut ymin,mut ymax)=(w,0,h,0);
+        while let Some(j)=stack.pop(){component.push(j);let x=j%w;let y=j/w;count+=1;sx+=x as f32;sy+=y as f32;xmin=xmin.min(x);xmax=xmax.max(x);ymin=ymin.min(y);ymax=ymax.max(y);
+            for (nx,ny) in [(x.wrapping_sub(1),y),(x+1,y),(x,y.wrapping_sub(1)),(x,y+1)] {if nx<w && ny<h && mask[ny*w+nx]{mask[ny*w+nx]=false;stack.push(ny*w+nx);}}
+        }
+        if count<5 || xmax-xmin<2 || ymax-ymin<2{continue;}
+        // The Record outline encloses a dark gap. A coloured avatar stripe
+        // or the filled centre dot cannot supply compositor timing evidence.
+        let bw=xmax-xmin+3;let bh=ymax-ymin+3;let mut occupied=vec![false;bw*bh];
+        for j in component {occupied[(j/w-ymin+1)*bw+j%w-xmin+1]=true;}
+        let mut outside=vec![false;bw*bh];let mut pending=vec![0];outside[0]=true;
+        while let Some(j)=pending.pop(){let x=j%bw;let y=j/bw;
+            for (nx,ny) in [(x.wrapping_sub(1),y),(x+1,y),(x,y.wrapping_sub(1)),(x,y+1)] {
+                if nx<bw && ny<bh {let k=ny*bw+nx;if !occupied[k] && !outside[k]{outside[k]=true;pending.push(k);}}
+            }
+        }
+        if !occupied.iter().zip(&outside).any(|(&solid,&exterior)|!solid && !exterior){continue;}
+        let p=[sx/count as f32+x0 as f32+offset[0],sy/count as f32+y0 as f32+offset[1]];let d=(p[0]-center[0]).hypot(p[1]-center[1]);
+        if best.is_none_or(|(distance,_)|d<distance){best=Some((d,p));}
+    }
+    best.map(|(_,p)|p)
+}
+
+pub fn glyphs_near(pixels:&[u8],width:usize,height:usize,stride:usize,offset:[f32;2],hint:Found) -> Option<Found> {
+    let local=hint.shifted([-offset[0],-offset[1]]);
+    let radius=(24.*local.across.max(local.tall)).max(12.);
+    let min=[local.x[0].min(local.chevron[0])-radius,local.x[1].min(local.chevron[1])-radius];
+    let max=[local.x[0].max(local.chevron[0])+radius,local.x[1].max(local.chevron[1])+radius];
+    let origin=[min[0].max(0.) as usize,min[1].max(0.) as usize];
+    if origin[0]>=width || origin[1]>=height{return None;}
+    let light=Light::of(pixels,width,height,stride,[origin[0],origin[1],(max[0]-origin[0] as f32).max(0.) as usize,(max[1]-origin[1] as f32).max(0.) as usize]);
+    if light.width<16 || light.height<16{return None;}
+    let mut all=Vec::new();for level in BRIGHT {blobs(&light,level,&mut all);}
+    let position=|b:&Blob|[b.middle[0]+origin[0] as f32,b.middle[1]+origin[1] as f32];
+    let distance=|b:&Blob,p:[f32;2]|{let q=position(b);(q[0]-p[0]).hypot(q[1]-p[1])};
+    let lean=local.right[1].atan2(local.right[0]);
+    let x=all.iter().filter(|b|b.may_be_x() && distance(b,local.x)<=radius && x_looks(&light,b.middle,b.size() as f32*0.625,lean)>=X_LOOKS).min_by(|a,b|distance(a,local.x).total_cmp(&distance(b,local.x)))?;
+    let c=all.iter().filter(|b|b.may_be_chevron() && distance(b,local.chevron)<=radius && (b.along[0]*local.right[0]+b.along[1]*local.right[1]).abs()>35f32.to_radians().cos()).min_by(|a,b|distance(a,local.chevron).total_cmp(&distance(b,local.chevron)))?;
+    let mut found=local;found.x=position(x);found.chevron=position(c);
+    found.perspective=None;found.landmarks=None;found.lines=None;found.residual_px=f32::INFINITY;
+    Some(found.shifted(offset))
 }
 
 pub fn find(pixels: &[u8], width: usize, height: usize, stride: usize) -> Option<Found> {
@@ -719,7 +1134,23 @@ pub struct Follow {
     /// The hand moves too fast for a picture, which is older than the hand's pose, to say anything of it.
     hand_moving: bool,
     grips: [bool; 2],
+    grab_candidates: [Option<(Matrix34,Matrix34,Matrix34,u32)>;2],
+    image_grabs: [Option<ImageGrab>;2],
+    held_anchors: Option<[[f32;2];2]>,
+    record_anchor: Option<[f32;2]>,
+    scene_ages: [f32;5],
+    scene_age_count: usize,
+    scene_age_next: usize,
+    clock_pixels: Option<([f32;2],[f32;2])>,
+    clock_submissions: [Option<ClockSubmission>;32],
+    clock_submission_next: usize,
 }
+
+#[derive(Clone,Copy,Debug)]
+struct ClockSubmission { at:std::time::Instant, point:[f32;3], delay:f32 }
+
+#[derive(Clone,Copy,Debug)]
+struct ImageGrab { panel:Matrix34,relation:Matrix34,unit:f32,anchors:[[f32;2];2] }
 
 /// Session-only reopening estimate. No guessed pose is ever learned as a fitted pose.
 #[derive(Clone, Debug, Default)]
@@ -846,6 +1277,246 @@ fn takes(frame: &Matrix34, unit: f32, hand: &Matrix34, pointer: Option<([f32; 3]
 }
 
 impl Follow {
+    /// Begin from an already measured camera, never from hand proximity. A
+    /// later image must prove that its two identity glyphs moved with this hand.
+    pub fn begin_image_grab(&mut self,baseline:&Found,size:[f32;2],mirror:Mirror,eye:&Matrix34,hands:[Option<Matrix34>;2],grips:[bool;2]) {
+        if self.is_held(){return;}
+        let Some((at,unit))=self.at else{return;};let panel=self.in_room(&at);
+        // Intersect the actual glyph pixels with the measured plane. Glyph
+        // raster centroids need not equal the ideal UI design coordinates.
+        let local=undone(&panel);
+        let anchor=|q:[f32;2]| -> Option<[f32;2]> {
+            let t=mirror.tangent(q[0]/size[0],q[1]/size[1]);
+            let ray:[f32;3]=std::array::from_fn(|i|eye.m[i][0]*t[0]-eye.m[i][1]*t[1]-eye.m[i][2]);
+            let denominator=(0..3).map(|i|panel.m[i][2]*ray[i]).sum::<f32>();
+            if denominator.abs()<1e-5{return None;}
+            let distance=(0..3).map(|i|panel.m[i][2]*(panel.m[i][3]-eye.m[i][3])).sum::<f32>()/denominator;
+            if distance<=0.{return None;}
+            let world:[f32;3]=std::array::from_fn(|i|eye.m[i][3]+ray[i]*distance);
+            let p:[f32;2]=std::array::from_fn(|i|local.m[i][3]+(0..3).map(|j|local.m[i][j]*world[j]).sum::<f32>());
+            Some([p[0]/unit,-p[1]/unit])
+        };
+        let Some(anchors)=anchor(baseline.x).zip(anchor(baseline.chevron)).map(|(x,c)|[x,c]) else{return;};
+        for hand in 0..2 {
+            if !grips[hand] {self.image_grabs[hand]=None;continue;}
+            if self.image_grabs[hand].is_none() {if let Some(pose)=hands[hand] {
+                self.image_grabs[hand]=Some(ImageGrab{panel,relation:then(&undone(&pose),&panel),unit,anchors});
+            }}
+        }
+    }
+    /// Unknown input is not a release event. It cannot initiate a hold;
+    /// controller tracking loss still ends an existing hold in step().
+    pub fn grip_samples(&self,samples:[Option<bool>;2]) -> [bool;2] {
+        std::array::from_fn(|i|samples[i].unwrap_or(self.held_hand()==Some(i)))
+    }
+
+    /// Hand motion predicts a search region, not a visible attachment. The
+    /// reader must still find the actual glyph pixels before a grab is bound.
+    pub fn search_hint(&self,size:[f32;2],mirror:Mirror,eye:&Matrix34,hands:[Option<Matrix34>;2]) -> Option<Found> {
+        let (frame,unit,anchors)=if let Some((hand,_))=self.held {
+            let (local,unit)=self.at?;(then(&hands[hand]?,&local),unit,self.held_anchors.unwrap_or([PANEL_X,PANEL_CHEVRON]))
+        } else {
+            if let Some((hand,candidate))=self.image_grabs.iter().enumerate().find_map(|(i,c)|c.map(|c|(i,c))) {
+                (then(&hands[hand]?,&candidate.relation),candidate.unit,candidate.anchors)
+            } else {let (frame,unit)=self.at?;(frame,unit,[PANEL_X,PANEL_CHEVRON])}
+        };
+        let inverse=undone(eye);
+        let pixel=|p:[f32;2]| -> Option<[f32;2]> {
+            let world:[f32;3]=std::array::from_fn(|i|frame.m[i][3]+frame.m[i][0]*p[0]*unit-frame.m[i][1]*p[1]*unit);
+            let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*world[j]).sum::<f32>());
+            if v[2]>=-0.0001{return None;}
+            let t=[v[0]/-v[2],-v[1]/-v[2]];
+            Some(std::array::from_fn(|i|(t[i]-mirror.from[i])/mirror.spans[i]*size[i]))
+        };
+        let middle=pixel([0.,0.])?;let r=pixel([1.,0.])?;let d=pixel([0.,1.])?;
+        let across=(r[0]-middle[0]).hypot(r[1]-middle[1]);let tall=(d[0]-middle[0]).hypot(d[1]-middle[1]);
+        if across<=0. || tall<=0.{return None;}
+        Some(Found{perspective:None,lines:None,landmarks:None,residual_px:f32::INFINITY,x:pixel(anchors[0])?,chevron:pixel(anchors[1])?,middle,right:[(r[0]-middle[0])/across,(r[1]-middle[1])/across],down:[(d[0]-middle[0])/tall,(d[1]-middle[1])/tall],across,tall})
+    }
+
+    /// The controller time actually visible in the scene, measured from two
+    /// native camera glyphs. No age is learned from a stationary/ambiguous hand.
+    /// This compensates VRChat's scene latency rather than making overlays lead it.
+    pub fn match_image_hands(&self,found:&Found,size:[f32;2],mirror:Mirror,eye:&Matrix34,samples:&[(f32,[Option<Matrix34>;2])]) -> Option<(f32,[Option<Matrix34>;2])> {
+        let mut candidates=Vec::new();
+        for &(age,hands) in samples {
+            if !(0.0..=0.2).contains(&age) {continue;}
+            let Some(predicted)=self.search_hint(size,mirror,eye,hands) else{continue;};
+            let error=predicted.x.into_iter().zip(found.x).chain(predicted.chevron.into_iter().zip(found.chevron)).map(|(a,b)|(a-b).powi(2)).sum::<f32>();
+            candidates.push((error,age,hands,predicted));
+        }
+        let first=candidates.first()?.3;
+        let identifiable=candidates.iter().any(|(_,_,_,p)|(p.x[0]-first.x[0]).hypot(p.x[1]-first.x[1])>=3. && (p.chevron[0]-first.chevron[0]).hypot(p.chevron[1]-first.chevron[1])>=3.);
+        if !identifiable {return None;}
+        let (error,age,hands,_)=candidates.into_iter().min_by(|a,b|a.0.total_cmp(&b.0))?;
+        // Same six-pixel two-glyph agreement required to prove the rigid grab.
+        if error>2.*6f32.powi(2) {return None;}
+        Some((age,hands))
+    }
+    pub fn panel_in_hands(&self,hands:[Option<Matrix34>;2]) -> Option<(Matrix34,f32)> {
+        let (local,unit)=self.at?;
+        Some((if let Some((hand,_))=self.held {then(&hands[hand]?,&local)} else {local},unit))
+    }
+    /// Calibrate the actual icon raster against the measured plane while still.
+    /// It is an observation of our own compositor output, never a camera detector.
+    pub fn calibrate_record(&mut self,p:[f32;2],size:[f32;2],mirror:Mirror,eye:&Matrix34,hands:[Option<Matrix34>;2],still:bool) {
+        // Clearance and the measured panel can settle after the first ring.
+        // Re-observe its local raster position while still; a stale anchor
+        // otherwise turns a layout correction into false overlay latency.
+        if !still{return;}
+        let Some((panel,unit))=self.panel_in_hands(hands) else{return;};let local=undone(&panel);
+        let t=mirror.tangent(p[0]/size[0],p[1]/size[1]);
+        let ray:[f32;3]=std::array::from_fn(|i|eye.m[i][0]*t[0]-eye.m[i][1]*t[1]-eye.m[i][2]);
+        let denominator=(0..3).map(|i|panel.m[i][2]*ray[i]).sum::<f32>();
+        if denominator.abs()<1e-5{return;}
+        let distance=(0..3).map(|i|panel.m[i][2]*(panel.m[i][3]-eye.m[i][3])).sum::<f32>()/denominator;
+        if distance<=0.{return;}
+        let world:[f32;3]=std::array::from_fn(|i|eye.m[i][3]+ray[i]*distance);
+        let q:[f32;2]=std::array::from_fn(|i|(local.m[i][3]+(0..3).map(|j|local.m[i][j]*world[j]).sum::<f32>())/unit);
+        self.record_anchor=Some([q[0],-q[1]]);
+    }
+    pub fn record_ready(&self) -> bool {self.record_anchor.is_some()}
+    /// Keep the actual displayed raster point and the delay used for that
+    /// submission. A delayed image must not correct a newer control value.
+    pub fn record_submission(&mut self,frame:Matrix34,unit:f32,at:std::time::Instant) {
+        if !self.is_held(){return;}
+        let Some(anchor)=self.record_anchor else{return;};
+        let point=std::array::from_fn(|i|frame.m[i][3]+frame.m[i][0]*anchor[0]*unit-frame.m[i][1]*anchor[1]*unit);
+        self.clock_submissions[self.clock_submission_next]=Some(ClockSubmission{at,point,delay:self.scene_age().unwrap_or(0.)});
+        self.clock_submission_next=(self.clock_submission_next+1)%self.clock_submissions.len();
+    }
+    pub fn record_still(&self,samples:&[(f32,[Option<Matrix34>;2])]) -> bool {
+        let Some(hand)=self.held_hand() else{return true;};
+        let Some((first_age,first))=samples.first() else{return false;};
+        let Some((last_age,_))=samples.last() else{return false;};
+        if (first_age-last_age).abs()<0.15{return false;}
+        let Some(first)=first[hand] else{return false;};
+        samples.iter().all(|(_,poses)|poses[hand].is_some_and(|pose|apart(&first,&pose)<0.001 && turned_apart(&first,&pose)<0.25f32.to_radians()))
+    }
+    /// Compare scene and overlay pixels from the SAME compositor image. Delaying
+    /// by the scene's absolute age would count overlay submission latency twice.
+    pub fn composited_clock(&mut self,native_age:f32,native:[f32;2],record:[f32;2],size:[f32;2],mirror:Mirror,eye:&Matrix34,samples:&[(f32,[Option<Matrix34>;2])],captured:std::time::Instant) {
+        if !self.is_held(){return;}
+        // A stopped camera can still match moving poses left in the history.
+        // Repeated scene/overlay pixels contain no new timing information;
+        // treating them as new samples makes the learned delay drift at stops.
+        let previous=self.clock_pixels.replace((native,record));
+        let Some((was_native,was_record))=previous else{return;};
+        if (native[0]-was_native[0]).hypot(native[1]-was_native[1])<0.5
+            || (record[0]-was_record[0]).hypot(record[1]-was_record[1])<0.5 {return;}
+        let Some(anchor)=self.record_anchor else{return;};let inverse=undone(eye);
+        let mut candidates=Vec::new();
+        for &(age,hands) in samples {
+            let Some((frame,unit))=self.panel_in_hands(hands) else{continue;};
+            let world:[f32;3]=std::array::from_fn(|i|frame.m[i][3]+frame.m[i][0]*anchor[0]*unit-frame.m[i][1]*anchor[1]*unit);
+            let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*world[j]).sum::<f32>());
+            if v[2]>=-0.0001{continue;}
+            let t=[v[0]/-v[2],-v[1]/-v[2]];let pixel:[f32;2]=std::array::from_fn(|i|(t[i]-mirror.from[i])/mirror.spans[i]*size[i]);
+            let error=(pixel[0]-record[0]).hypot(pixel[1]-record[1]);candidates.push((error,age,pixel));
+        }
+        let Some(first)=candidates.first().map(|c|c.2) else{return;};
+        if !candidates.iter().any(|c|(c.2[0]-first[0]).hypot(c.2[1]-first[1])>=3.){return;}
+        let Some((error,overlay_age,_))=candidates.into_iter().min_by(|a,b|a.0.total_cmp(&b.0)) else{return;};
+        if error>6.{return;}
+        let mut submitted=Vec::new();
+        for s in self.clock_submissions.iter().flatten() {
+            if captured.checked_duration_since(s.at).is_none_or(|age|age.as_secs_f32()>0.2){continue;}
+            let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*s.point[j]).sum::<f32>());
+            if v[2]>=-0.0001{continue;}
+            let t=[v[0]/-v[2],-v[1]/-v[2]];let p:[f32;2]=std::array::from_fn(|i|(t[i]-mirror.from[i])/mirror.spans[i]*size[i]);
+            submitted.push(((p[0]-record[0]).hypot(p[1]-record[1]),s.delay,p));
+        }
+        let Some(first)=submitted.first().map(|s|s.2) else{return;};
+        if !submitted.iter().any(|s|(s.2[0]-first[0]).hypot(s.2[1]-first[1])>=3.){return;}
+        let Some((submission_error,applied_delay,_))=submitted.into_iter().min_by(|a,b|a.0.total_cmp(&b.0)) else{return;};
+        if submission_error>6.{return;}
+        // Native age minus overlay age is the remaining error in THAT
+        // submission, not in the newer value current when recognition finishes.
+        let delay=(applied_delay+native_age-overlay_age).clamp(0.,0.2);
+        if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
+            super::super::vr_log::line(&format!("camera relative clock fit: native_age={native_age}, overlay_age={overlay_age}, applied_delay={applied_delay}, target_delay={delay}, residual_px={error}, submission_residual_px={submission_error}")); // i18n: not shown (sandbox diagnostics)
+        }
+        self.scene_ages[self.scene_age_next]=delay;
+        self.scene_age_next=(self.scene_age_next+1)%self.scene_ages.len();
+        self.scene_age_count=(self.scene_age_count+1).min(self.scene_ages.len());
+    }
+    pub fn scene_age(&self) -> Option<f32> {
+        if self.scene_age_count==0 {return None;}
+        let mut ages=self.scene_ages;
+        ages[..self.scene_age_count].sort_by(f32::total_cmp);
+        Some(ages[self.scene_age_count/2])
+    }
+
+    /// Border fitting may miss during a pickup. Verify the measured plane's
+    /// predicted two-glyph motion instead; stationary cameras and unrelated
+    /// grips cannot pass the observed-motion check. Capture-time hands only.
+    pub fn observe_image_grab(&mut self,found:&Found,size:[f32;2],mirror:Mirror,eye:&Matrix34,hands:[Option<Matrix34>;2],grips:[bool;2]) -> Option<usize> {
+        if self.is_held(){return None;}
+        let inverse=undone(eye);
+        let pixel=|frame:&Matrix34,unit:f32,p:[f32;2]| -> Option<[f32;2]> {
+            let world:[f32;3]=std::array::from_fn(|i|frame.m[i][3]+frame.m[i][0]*p[0]*unit-frame.m[i][1]*p[1]*unit);
+            let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*world[j]).sum::<f32>());
+            if v[2]>=-0.0001{return None;}
+            let t=[v[0]/-v[2],-v[1]/-v[2]];
+            Some(std::array::from_fn(|i|(t[i]-mirror.from[i])/mirror.spans[i]*size[i]))
+        };
+        for hand in 0..2 {
+            if !grips[hand]{self.image_grabs[hand]=None;continue;}
+            let Some((candidate,pose))=self.image_grabs[hand].zip(hands[hand]) else{continue;};
+            let carried=then(&pose,&candidate.relation);
+            let consistent=candidate.anchors.into_iter().zip([found.x,found.chevron]).all(|(model,actual)| {
+                let Some((before,predicted))=pixel(&candidate.panel,candidate.unit,model).zip(pixel(&carried,candidate.unit,model)) else{return false;};
+                let seen=[actual[0]-before[0],actual[1]-before[1]];
+                let moved=[predicted[0]-before[0],predicted[1]-before[1]];
+                let a=seen[0].hypot(seen[1]);let b=moved[0].hypot(moved[1]);
+                a>=3. && b>=3. && (0.5..=2.).contains(&(a/b)) && seen[0]*moved[0]+seen[1]*moved[1]>0.
+                    && (actual[0]-predicted[0]).hypot(actual[1]-predicted[1])<=6.
+            });
+            if consistent {
+                self.held=Some((hand,pose));self.at=Some((candidate.relation,candidate.unit));self.wanted=self.at;self.unsure=None;self.grips=grips;
+                self.held_anchors=Some(candidate.anchors);
+                self.image_grabs=[None;2];self.grab_candidates=[None;2];return Some(hand);
+            }
+        }
+        None
+    }
+    /// Express the measured plane in the holding hand at capture time before
+    /// carrying it to the current hand. Otherwise even slow motion acquires
+    /// the image reader's latency through every visual correction.
+    pub fn seen_in_hands(&mut self,frame:Matrix34,unit:f32,captured_hands:[Option<Matrix34>;2]) -> bool {
+        let current=match self.held {
+            Some((hand,current)) => {
+                let Some(captured)=captured_hands[hand] else {return false;};
+                then(&current,&then(&undone(&captured),&frame))
+            }
+            None => frame,
+        };
+        self.seen(current,unit)
+    }
+    /// Verify a grab by observed rigid motion, including handles outside the
+    /// viewfinder rectangle. Proximity alone misses VRChat's offset hand grip.
+    /// `hands` must be sampled at the picture's time, not at recognition completion.
+    pub fn observe_grab(&mut self,frame:Matrix34,unit:f32,hands:[Option<Matrix34>;2],grips:[bool;2]) -> Option<usize> {
+        if self.is_held() {return None;}
+        for hand in 0..2 {
+            let Some(pose)=hands[hand].filter(|_|grips[hand]) else {self.grab_candidates[hand]=None;continue;};
+            let local=then(&undone(&pose),&frame);
+            if let Some((first_hand,first_panel,relation,count))=self.grab_candidates[hand] {
+                if apart(&relation,&local)<0.01 && turned_apart(&relation,&local)<3f32.to_radians() {
+                    self.grab_candidates[hand]=Some((first_hand,first_panel,relation,count+1));
+                    let moved=apart(&first_hand,&pose)>0.025 && apart(&first_panel,&frame)>0.025;
+                    let turned=turned_apart(&first_hand,&pose)>8f32.to_radians() && turned_apart(&first_panel,&frame)>8f32.to_radians();
+                    if count>=2 && (moved || turned) {
+                        self.held=Some((hand,pose));self.at=Some((local,unit));self.wanted=Some((local,unit));self.grips=grips;self.unsure=None;
+                        self.grab_candidates=[None;2];return Some(hand);
+                    }
+                    continue;
+                }
+            }
+            self.grab_candidates[hand]=Some((pose,frame,local,1));
+        }
+        None
+    }
     fn held_by(&self) -> Option<&Matrix34> {
         self.held.as_ref().map(|(_, hand)| hand)
     }
@@ -1142,6 +1813,100 @@ mod tests {
 
     /// How long a look takes on 1280 x 720, whole and around the panel. Printed: a debug build, so far slower than what ships.
     #[test]
+    fn native_glyph_motion_selects_scene_time_not_the_newest_controller_pose() {
+        let mirror=Mirror::whole_eye(QUEST_PRO);let size=[1620.,1800.];let eye=STILL;
+        let mut panel=STILL;panel.m[2][3]=-1.;let unit=0.001;
+        let baseline=straight_found(|p| {let world=[p[0]*unit,-p[1]*unit,-1.];[(world[0]-mirror.from[0])/mirror.spans[0]*size[0],(-world[1]-mirror.from[1])/mirror.spans[1]*size[1]]},1.);
+        let mut follow=Follow::default();follow.attach(panel,unit);
+        follow.begin_image_grab(&baseline,size,mirror,&eye,[None,Some(STILL)],[false,true]);
+        let samples:Vec<_>=(0..=10).map(|i| {let mut hand=STILL;hand.m[0][3]=0.1-i as f32*0.01;(i as f32*0.01,[None,Some(hand)])}).collect();
+        let native=follow.search_hint(size,mirror,&eye,samples[6].1).unwrap();
+        let (age,matched)=follow.match_image_hands(&native,size,mirror,&eye,&samples).unwrap();
+        assert!((matched[1].unwrap().m[0][3]-0.04).abs()<1e-5);
+        assert!((age-0.06).abs()<1e-5);
+        assert_eq!(follow.observe_image_grab(&native,size,mirror,&eye,matched,[false,true]),Some(1));
+        // Static poses cannot identify latency, and unrelated pixels cannot
+        // manufacture a different clock or camera attachment.
+        let static_samples=vec![(0.,matched),(0.1,matched)];
+        assert!(follow.match_image_hands(&native,size,mirror,&eye,&static_samples).is_none());
+        let mut wrong=native;wrong.x[0]+=500.;wrong.chevron[0]+=500.;
+        assert!(follow.match_image_hands(&wrong,size,mirror,&eye,&samples).is_none());
+        assert!(follow.scene_age().is_none());
+        // The scene is 60ms old, but our visible overlay is already 20ms old.
+        // Only the 40ms difference is corrected; absolute scene age double counts.
+        let record_world=[samples[2].1[1].unwrap().m[0][3]-0.28,-0.04];
+        let record=[(record_world[0]-mirror.from[0])/mirror.spans[0]*size[0],(-record_world[1]-mirror.from[1])/mirror.spans[1]*size[1]];
+        follow.calibrate_record(record,size,mirror,&eye,samples[2].1,false);
+        assert!(!follow.record_ready(),"a moving held camera cannot calibrate overlay latency");
+        follow.calibrate_record(record,size,mirror,&eye,samples[2].1,true);
+        assert!(follow.record_ready(),"the first ring can arrive AFTER hand binding");
+        assert!((follow.record_anchor.unwrap()[0]+280.).abs()<0.1);
+        let still_samples=[(0.2,samples[2].1),(0.,samples[2].1)];
+        assert!(follow.record_still(&still_samples));assert!(!follow.record_still(&samples));
+        for hands in [samples[2].1,samples[4].1] {
+            let (frame,unit)=follow.panel_in_hands(hands).unwrap();
+            follow.record_submission(frame,unit,std::time::Instant::now());
+        }
+        follow.clock_pixels=Some(([native.x[0]-2.,native.x[1]],[record[0]-2.,record[1]]));
+        follow.composited_clock(age,native.x,record,size,mirror,&eye,&samples,std::time::Instant::now());
+        assert!((follow.scene_age().unwrap()-0.04).abs()<1e-4,"the observed submission needs 40ms, not absolute scene age or a correction to a newer control value");
+        let delay=follow.scene_age();
+        for stopped_age in [0.08,0.1,0.15,0.19] {
+            follow.composited_clock(stopped_age,native.x,record,size,mirror,&eye,&samples,std::time::Instant::now());
+        }
+        assert_eq!(follow.scene_age(),delay,"stopped pixels must not invent extra delay from old moving history");
+    }
+
+    #[test]
+    fn compositor_backlog_uses_the_delay_of_the_visible_submission() {
+        let identity=Matrix34 { m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]] };
+        let mirror=Mirror::whole_eye(QUEST_PRO);let size=[1620.,1800.];let eye=identity;
+        let mut panel=identity;panel.m[2][3]=-1.;let unit=0.001;
+        let mut follow=Follow::default();follow.attach(panel,unit);follow.held=Some((1,identity));
+        let pixel=|x:f32,y:f32|[(x-mirror.from[0])/mirror.spans[0]*size[0],(-y-mirror.from[1])/mirror.spans[1]*size[1]];
+        follow.calibrate_record(pixel(-0.28,-0.04),size,mirror,&eye,[None,Some(identity)],true);
+        // These outputs were submitted with zero delay. Recognition is delayed
+        // until a newer control value has already risen to 80ms.
+        for k in 0..=5 {
+            let mut frame=panel;frame.m[0][3]=0.08+k as f32*0.01;
+            follow.record_submission(frame,unit,std::time::Instant::now());
+        }
+        follow.scene_ages=[0.08;5];follow.scene_age_count=5;follow.scene_age_next=0;
+        let captured=std::time::Instant::now();
+        for k in 0..=5 {
+            let samples:Vec<_>=(0..=10).map(|i| {let mut hand=identity;hand.m[0][3]=0.1+k as f32*0.01-i as f32*0.01;(i as f32*0.01,[None,Some(hand)])}).collect();
+            let native=follow.search_hint(size,mirror,&eye,samples[6].1).unwrap();
+            let record=pixel(0.08+k as f32*0.01-0.28,-0.04);
+            follow.composited_clock(0.06,native.x,record,size,mirror,&eye,&samples,captured);
+        }
+        assert!((follow.scene_age().unwrap()-0.04).abs()<1e-4,"60ms native minus 20ms overlay corrects the visible zero-delay submission to 40ms; adding to the newer 80ms value double-counts feedback");
+    }
+
+    #[test]
+    fn stationary_record_calibration_follows_measured_layout_changes() {
+        let mirror=Mirror::whole_eye(QUEST_PRO);let size=[1620.,1800.];
+        let mut panel=STILL;panel.m[2][3]=-1.;let mut follow=Follow::default();follow.attach(panel,0.001);
+        let raster=|x:f32|[(x-mirror.from[0])/mirror.spans[0]*size[0],(0.04-mirror.from[1])/mirror.spans[1]*size[1]];
+        follow.calibrate_record(raster(-0.28),size,mirror,&STILL,[None,None],true);
+        follow.calibrate_record(raster(-0.31),size,mirror,&STILL,[None,None],false);
+        assert!((follow.record_anchor.unwrap()[0]+280.).abs()<0.1,"moving pixels cannot recalibrate");
+        follow.calibrate_record(raster(-0.31),size,mirror,&STILL,[None,None],true);
+        assert!((follow.record_anchor.unwrap()[0]+310.).abs()<0.1,"still layout refinement must not leave a stale timing anchor");
+    }
+
+    #[test]
+    fn composited_record_ring_is_observed_and_blue_hands_are_not_a_clock() {
+        let im=image::open(testdata().join("sandbox-record-ring.png")).unwrap().to_rgba8();
+        let p=record_near(im.as_raw(),im.width() as usize,im.height() as usize,im.width() as usize*4,[0.,0.],[48.,48.],40.).unwrap();
+        assert!((p[0]-48.).hypot(p[1]-48.)<2.);
+        let mut stripe=[0,0,0,255].repeat(96*96);
+        for y in 20..76 {for x in 42..49 {stripe[(y*96+x)*4..(y*96+x)*4+4].copy_from_slice(&[240,40,110,255]);}}
+        assert!(record_near(&stripe,96,96,96*4,[0.,0.],[48.,48.],40.).is_none(),"a nearby pink avatar stripe is not the Record outline");
+        let blue=[0,0,255,255].repeat(96*96);
+        assert!(record_near(&blue,96,96,96*4,[0.,0.],[48.,48.],40.).is_none());
+    }
+
+    #[test]
     fn how_long_a_look_takes() {
         let [p, _] = headset_pictures();
         let began = std::time::Instant::now();
@@ -1173,7 +1938,7 @@ mod tests {
     }
 
     fn straight_found(at: impl Fn([f32; 2]) -> [f32; 2], per_pixel: f32) -> Found {
-        Found { perspective: None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right: [1.0, 0.0], down: [0.0, 1.0], across: per_pixel, tall: per_pixel }
+        Found { perspective: None, lines:None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right: [1.0, 0.0], down: [0.0, 1.0], across: per_pixel, tall: per_pixel }
     }
 
     #[test]
@@ -1459,6 +2224,57 @@ mod tests {
     }
 
     #[test]
+    fn observed_glyph_motion_verifies_a_pickup_without_a_new_border_fit() {
+        let eye=STILL;let mirror=mirror();let size=[1000.,1000.];let unit=PANEL_M/410.;
+        let mut panel=STILL;panel.m[2][3]=-0.65;
+        let pixel=|frame:&Matrix34,p:[f32;2]| {
+            let v=then(&undone(&eye),frame);
+            let q:[f32;3]=std::array::from_fn(|i|v.m[i][3]+v.m[i][0]*p[0]*unit-v.m[i][1]*p[1]*unit);
+            [(q[0]/-q[2]+1.)*500.,(-q[1]/-q[2]+1.)*500.]
+        };
+        let baseline=straight_found(|p|pixel(&panel,p),1.);
+        let mut hand=panel;hand.m[1][3]+=0.3;
+        for moving_camera in [false,true] {
+            let mut f=Follow::default();f.attach(panel,unit);
+            f.begin_image_grab(&baseline,size,mirror,&eye,[None,Some(hand)],[false,true]);
+            let mut moved=hand;moved.m[0][3]+=0.012;
+            let mut seen=panel;if moving_camera {seen.m[0][3]+=0.012;}
+            let found=straight_found(|p|pixel(&seen,p),1.);
+            assert!(found.perspective.is_none(),"the border fit is deliberately absent");
+            assert_eq!(f.observe_image_grab(&found,size,mirror,&eye,[None,Some(moved)],[false,true]),moving_camera.then_some(1));
+            assert_eq!(f.is_held(),moving_camera);
+            if moving_camera {
+                moved.m[0][3]+=0.1;
+                let got=f.step(1./72.,[None,Some(moved)],[false,true],[None;2]).unwrap().0;
+                assert!((got.m[0][3]-0.112).abs()<0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn missing_input_does_not_release_a_verified_camera_or_initiate_a_grab() {
+        let mut f=Follow::default();assert_eq!(f.grip_samples([None;2]),[false;2]);
+        let mut relation=STILL;relation.m[1][3]=0.3;
+        for i in 0..4 {let mut hand=STILL;hand.m[0][3]=i as f32*0.02;f.observe_grab(then(&hand,&relation),0.001,[None,Some(hand)],[false,true]);}
+        assert_eq!(f.held_hand(),Some(1));
+        let mut hand=STILL;hand.m[0][3]=0.3;
+        let grips=f.grip_samples([None;2]);assert_eq!(grips,[false,true]);
+        let held=f.step(1./72.,[None,Some(hand)],grips,[None;2]).unwrap().0;
+        assert!(apart(&held,&then(&hand,&relation))<0.001);
+        let released=f.grip_samples([Some(false);2]);
+        let dropped=f.step(1./72.,[None,Some(hand)],released,[None;2]).unwrap().0;
+        assert!(!f.is_held());assert!(apart(&held,&dropped)<0.001);
+    }
+
+    #[test]
+    fn landmark_count_cannot_substitute_for_geometric_rank() {
+        let collinear:Vec<_>=(0..5).map(|i|([i as f32*100.,0.],[i as f32*20.,20.])).collect();
+        assert!(fit(&collinear).is_none(),"five collinear detections do not locate a plane");
+        let corners=[[-205.,-115.3125],[205.,-115.3125],[205.,115.3125],[-205.,115.3125]].map(|p|(p,[500.+p[0]*0.7,500.+p[1]*0.7]));
+        assert!(fit(&corners).is_some(),"four independent corners determine a plane");
+    }
+
+    #[test]
     fn a_metric_size_change_is_not_discarded_as_pose_jitter() {
         let mut follow=Follow::default();
         follow.seen(at(0.),0.001);
@@ -1476,7 +2292,28 @@ mod tests {
         for picture in headset_pictures() {
             let found=find(&picture.pixels,picture.width,picture.height,picture.width*4).expect("camera candidate");
             assert!(found.perspective.is_some(),"camera candidate did not produce a spread fit: {found:?}");
-            assert!(found.landmarks.is_some_and(|(count,_)|count>=5));
+            let (count,points)=found.landmarks.expect("independently observed panel landmarks");
+            let points=&points[..count];
+            let mut model:Vec<_>=points.iter().map(|(p,_)|*p).collect();
+            let measured=if let Some(lines)=found.lines {
+                let mut rows=Vec::new();
+                for (ends,[a,b,c]) in lines {for [x,y] in ends {
+                    model.push([x,y]);rows.push([a*x,a*y,a,b*x,b*y,b,c*x,c*y,-c]);
+                }}
+                for &([x,y],[u,v]) in points {
+                    rows.push([x,y,1.,0.,0.,0.,-u*x,-u*y,u]);
+                    rows.push([0.,0.,0.,x,y,1.,-v*x,-v*y,v]);
+                }
+                homography_rows(&rows).expect("point and line observations must have full rank")
+            } else {fit(points).expect("point observations must have full rank")};
+            let span=|axis:usize| model.iter().map(|p|p[axis]).fold(f32::NEG_INFINITY,f32::max)-model.iter().map(|p|p[axis]).fold(f32::INFINITY,f32::min);
+            assert!(span(0)>=250. && span(1)>=180.,"landmarks must cover both axes of the face: {found:?}");
+            let mut errors=Vec::new();
+            for &(p,q) in points {let r=project(measured,p);errors.push((r[0]-q[0]).hypot(r[1]-q[1]));}
+            if let Some(lines)=found.lines {for (ends,l) in lines {for p in ends {let q=project(measured,p);errors.push((l[0]*q[0]+l[1]*q[1]+l[2]).abs());}}}
+            assert!(errors.iter().all(|e|*e<=6.));
+            let rms=(errors.iter().map(|e|e*e).sum::<f32>()/errors.len() as f32).sqrt();
+            assert!(rms<=2.5);
         }
     }
 
@@ -1515,7 +2352,7 @@ mod tests {
             let (s, c) = lean.to_radians().sin_cos();
             let (right, down) = ([c, s], [-s, c]);
             let at = |p: [f32; 2]| [px + (p[0] * right[0] + p[1] * down[0]) * per_pixel, py + (p[0] * right[1] + p[1] * down[1]) * per_pixel];
-            let found = Found { perspective: None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
+            let found = Found { perspective: None, lines:None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
             for panel_m in [0.2, 0.3, 0.45] {
                 for side in [Side::Left, Side::Right] {
                     let (frame, unit) = panel_in_room(&found, size, &eye, &STILL, panel_m, side);
@@ -1560,7 +2397,7 @@ mod tests {
         let size = [1000.0, 1000.0];
         let per_pixel = PANEL_M / PANEL_SIZE[0] / 0.5 * 500.0;
         let at = |p: [f32; 2]| [500.0 + (p[0] * right[0] + p[1] * down[0]) * per_pixel, 700.0 + (p[0] * right[1] + p[1] * down[1]) * per_pixel];
-        let found = Found { perspective: None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
+        let found = Found { perspective: None, lines:None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
         let (frame, _) = panel_in_room(&found, size, &mirror(), &STILL, PANEL_M, Side::Left);
         assert!(frame.m[1][0] < -0.3, "the panel's right goes down: {:?}", frame.m);
         assert!(frame.m[1][3] < 1.5, "below the eye: {:?}", frame.m);
@@ -1670,5 +2507,129 @@ mod tests {
                 assert!((none.m[i][j] - wanted).abs() < 1e-5, "{:?}", none.m);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sandbox_regression {
+    use super::*;
+    #[test]
+    fn recorded_first_pickup_binds_before_border_reacquisition() {
+        let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/sandbox");
+        let metadata:serde_json::Value=serde_json::from_str(&std::fs::read_to_string(root.join("pickup-motion.json")).unwrap()).unwrap();
+        let matrix=|v:&serde_json::Value|Matrix34{m:std::array::from_fn(|i|std::array::from_fn(|j|v[i*4+j].as_f64().unwrap() as f32))};
+        let identity=Matrix34{m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
+        let mirrors=[Mirror::whole_eye([-1.376,0.839,-1.376,0.9]),Mirror::whole_eye([-0.839,1.376,-1.376,0.9])];
+        let mut eyes=[identity;2];eyes[0].m[0][3]=-0.032;eyes[1].m[0][3]=0.032;
+        let mut pairs=Vec::new();
+        for entry in metadata.as_array().unwrap() {
+            let name=entry["name"].as_str().unwrap();let mut pair=Vec::new();
+            for (i,eye) in ["left","right"].into_iter().enumerate() {
+                let image=image::open(root.join(format!("{name}-{eye}.png"))).unwrap().to_rgba8();
+                let found=find(image.as_raw(),image.width() as usize,image.height() as usize,image.width() as usize*4).expect("visible pickup glyphs");
+                pair.push(found.shifted([entry["origins"][i][0].as_f64().unwrap() as f32,entry["origins"][i][1].as_f64().unwrap() as f32]));
+            }
+            pairs.push(pair);
+        }
+        let head=matrix(&metadata[0]["head"]);
+        let (frame,unit,_)=stereo_pose(&pairs[0][0],&pairs[0][1],[[1620.,1800.];2],mirrors,eyes,&head).expect("initial measured camera");
+        let hands=|entry:usize|[Some(matrix(&metadata[entry]["hands"][0])),Some(matrix(&metadata[entry]["hands"][1]))];
+        let mut follow=Follow::default();follow.attach(frame,unit);
+        follow.begin_image_grab(&pairs[0][0],[1620.,1800.],mirrors[0],&then(&head,&eyes[0]),hands(0),[false,true]);
+        let eye=then(&matrix(&metadata[1]["head"]),&eyes[0]);
+        let hint=follow.search_hint([1620.,1800.],mirrors[0],&eye,hands(1)).expect("calibrated motion search hint");
+        let image=image::open(root.join("pickup-first-motion-left.png")).unwrap().to_rgba8();
+        let glyphs=glyphs_near(image.as_raw(),image.width() as usize,image.height() as usize,image.width() as usize*4,[500.,850.],hint).expect("the reader must deliver actual glyphs without full border recognition");
+        assert!(glyphs.perspective.is_none(),"a search hint must not become a measured homography");
+        assert!((glyphs.x[0]-pairs[1][0].x[0]).hypot(glyphs.x[1]-pairs[1][0].x[1])<1.);
+        assert!((glyphs.chevron[0]-pairs[1][0].chevron[0]).hypot(glyphs.chevron[1]-pairs[1][0].chevron[1])<1.);
+        assert_eq!(follow.observe_image_grab(&glyphs,[1620.,1800.],mirrors[0],&eye,hands(1),[false,true]),Some(1),"the first moving native frame must verify the calibrated hand relation without waiting for a border");
+        let blank=vec![0u8;image.as_raw().len()];
+        assert!(glyphs_near(&blank,image.width() as usize,image.height() as usize,image.width() as usize*4,[500.,850.],hint).is_none(),"the same pose hint with no camera pixels must never be published as evidence");
+    }
+
+    #[test]
+    fn delayed_images_do_not_pull_a_slowly_held_camera_backwards() {
+        let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
+        let mut relation=identity;relation.m[1][3]=-0.3;relation.m[2][3]=0.1;
+        let setup=|| {
+            let mut f=Follow::default();
+            for i in 0..4 {let mut h=identity;h.m[0][3]=i as f32*0.02;f.observe_grab(then(&h,&relation),0.001,[None,Some(h)],[false,true]);}
+            f
+        };
+        let (mut fixed,mut old)=(setup(),setup());
+        let mut last_error=0.;
+        for i in 0..200 {
+            let mut current=identity;current.m[0][3]=0.06+i as f32*0.001;
+            let mut captured=current;captured.m[0][3]-=0.015; // 150ms old at 0.1m/s
+            let picture=then(&captured,&relation);
+            fixed.step(0.01,[None,Some(current)],[false,true],[None;2]);
+            old.step(0.01,[None,Some(current)],[false,true],[None;2]);
+            fixed.seen_in_hands(picture,0.001,[None,Some(captured)]);
+            old.seen(picture,0.001);
+            let wanted=then(&current,&relation);
+            let got=fixed.step(0.01,[None,Some(current)],[false,true],[None;2]).unwrap().0;
+            let bad=old.step(0.01,[None,Some(current)],[false,true],[None;2]).unwrap().0;
+            assert!(apart(&got,&wanted)<0.001);
+            last_error=apart(&bad,&wanted);
+        }
+        assert!(last_error>0.006,"the pre-fix correction path must demonstrate the regression: {last_error}");
+    }
+    #[test]
+    fn offset_camera_handle_is_verified_by_motion_not_a_larger_proximity_radius() {
+        let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
+        let mut relation=identity;relation.m[1][3]=-0.3;relation.m[2][3]=0.1;
+        let mut follow=Follow::default();
+        for i in 0..4 {
+            let mut hand=identity;hand.m[0][3]=i as f32*0.02;
+            follow.observe_grab(then(&hand,&relation),0.001,[None,Some(hand)],[false,true]);
+        }
+        assert_eq!(follow.held_hand(),Some(1));
+        let mut hand=identity;hand.m[0][3]=0.5;
+        let (panel,_)=follow.step(1./72.,[None,Some(hand)],[false,true],[None;2]).unwrap();
+        assert!(apart(&panel,&then(&hand,&relation))<0.001,"propagate directly from the controller");
+        let (dropped,_)=follow.step(1./72.,[None,Some(hand)],[false,false],[None;2]).unwrap();
+        assert!(apart(&panel,&dropped)<0.001);
+    }
+    #[test]
+    fn unrelated_grip_and_camera_motion_never_verify_a_rigid_grab() {
+        let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
+        for moving_panel in [false,true] {
+            let mut follow=Follow::default();
+            for i in 0..10 {
+                let mut hand=identity;hand.m[0][3]=i as f32*0.02;
+                let mut panel=identity;panel.m[1][3]=-0.3;
+                if moving_panel {panel.m[1][3]+=i as f32*0.02;}
+                assert_eq!(follow.observe_grab(panel,0.001,[None,Some(hand)],[false,true]),None);
+            }
+            assert!(!follow.is_held());
+        }
+    }
+    #[test]
+    fn live_photo_grab_and_stream_have_a_measured_plane_in_both_eyes() {
+        let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/sandbox");
+        let mirrors=[Mirror::whole_eye([-1.376,0.839,-1.376,0.9]),Mirror::whole_eye([-0.839,1.376,-1.376,0.9])];
+        let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
+        let mut eyes=[identity;2];eyes[0].m[0][3]=-0.032;eyes[1].m[0][3]=0.032;
+        let mut stereo_failures=Vec::new();
+        for (mode,origins) in [("cold-highlight",[[550.,900.],[0.,900.]]),("camera-open-wheel",[[650.,650.],[180.,650.]]),("camera-grab-move",[[650.,650.],[180.,650.]]),("camera-stream-baseline",[[650.,650.],[180.,650.]]),("close-open",[[500.,900.],[0.,900.]]),("close-held",[[700.,800.],[150.,800.]]),("mode-print",[[830.,570.],[350.,570.]]),("mode-drone",[[830.,570.],[350.,570.]])] {
+            let mut pair=Vec::new();
+            for (index,eye) in ["left","right"].into_iter().enumerate() {
+                let name=format!("{mode}-{eye}.png");
+                let image=image::open(root.join(&name)).unwrap().to_rgba8();
+                let found=find(image.as_raw(),image.width() as usize,image.height() as usize,image.width() as usize*4).expect(&name);
+                assert!(found.perspective.is_some(),"{name}: glyphs found but no usable camera plane: {found:?}");
+                let found=found.shifted(origins[index]);
+                assert!(perspective_pose(&found,[1620.,1800.],&mirrors[index],&eyes[index],0.3).is_some(),"{name}: measured outline must pass unchanged rigid reprojection: {found:?}");
+                pair.push(found);
+            }
+            let Some((_,unit,error))=stereo_pose(&pair[0],&pair[1],[[1620.,1800.];2],mirrors,eyes,&identity) else {
+                eprintln!("stereo failure {mode}: {pair:?}");
+                stereo_failures.push(mode);continue;
+            };
+            assert!((0.27..0.32).contains(&(unit*PANEL_SIZE[0])),"{mode}: wrong metric width {}",unit*PANEL_SIZE[0]);
+            assert!(error<=2.5,"unchanged stereo reprojection gate");
+        }
+        assert!(stereo_failures.is_empty(),"native stereo must recover metric planes: {stereo_failures:?}");
     }
 }

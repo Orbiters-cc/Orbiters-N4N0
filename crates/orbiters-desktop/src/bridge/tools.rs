@@ -206,6 +206,7 @@ pub fn list() -> Value {
     .unwrap_or_default()
     .into_iter()
     .chain(super::projects::list())
+    .chain(super::sandbox::list())
     .collect::<Vec<Value>>()
     .into()
 }
@@ -244,6 +245,12 @@ impl Bridge {
     pub fn call(&self, name: &str, args: &Value, call: &Call) -> Result<Answer, Failure> {
         let acts = !matches!(name, "get_state" | "wait_for" | "find_worlds") && !super::projects::reads(name);
         let result = match name {
+            "vr_sandbox" => {
+                if !matches!(args["action"].as_str(), Some("stop" | "restore" | "status")) {
+                    if let Some(paused) = self.paused() { return Err(paused_failure(&paused)); }
+                }
+                self.exclusively(|| self.sandbox_call(args))
+            }
             unity if super::projects::NAMES.contains(&unity) => self.projects.call(unity, args, call, self.paused()),
             "get_state" => Ok(Answer::Data(self.state())),
             "find_worlds" => self.find_worlds(args),

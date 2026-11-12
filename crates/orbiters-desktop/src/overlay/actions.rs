@@ -562,6 +562,12 @@ impl Actions {
         })
     }
 
+    /// Missing/inactive action data is unknown, distinct from a released grip.
+    pub fn grab_states(&self,steamvr:&vr::Client) -> [Option<bool>;2] {
+        let (Some((_,grabs)),Ok(input))=(self.panel,steamvr.input()) else{return [None;2];};
+        grabs.map(|action|input.digital(action).ok().filter(|d|d.active).map(|d|d.state))
+    }
+
     /// Each hand's grip held (left, right).
     pub fn grabs(&self, steamvr: &vr::Client) -> [bool; 2] {
         let (Some((_, grabs)), Ok(input)) = (self.panel, steamvr.input()) else { return [false; 2] };

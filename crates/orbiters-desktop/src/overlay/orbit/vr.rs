@@ -500,6 +500,21 @@ impl Plane {
     /// may move their hull back over the panel at a grazing angle.
     pub fn camera_quad(&self, placed: &Placed) -> Quad { self.quad(placed,0.0,0.0) }
 
+    /// SteamVR culls the back of an overlay, whereas VRChat's camera remains
+    /// visible from either side. Reverse the tile's face about its own centre;
+    /// its measured position, footprint and camera plane do not change.
+    pub fn camera_quad_facing(&self, placed: &Placed, head: &Matrix34) -> Quad {
+        let mut quad = self.camera_quad(placed);
+        let toward = std::array::from_fn(|i| head.m[i][3] - quad.transform.m[i][3]);
+        if space::dot(space::axis(&quad.transform, 2), toward) < 0.0 {
+            for row in &mut quad.transform.m {
+                row[0] = -row[0];
+                row[2] = -row[2];
+            }
+        }
+        quad
+    }
+
     /// Where a panel's quad is, at `back` units toward the plane's centre (its spring).
     pub fn quad(&self, placed: &Placed, back: f32, near: f32) -> Quad {
         let c = placed.rect.center();
@@ -664,9 +679,6 @@ fn settings_walk_left(snap: &Snapshot) -> bool {
     snap.settings.walk_boost.hand == orbiters_core::settings::Hand::Left
 }
 
-/// How long the tiles stay where they are with no look seeing the panel (a hand over it, a white world behind its X, a head turned away): let go it stays still in the room, so what is known of it
-/// stays true for long. And how many looks it takes to show them at first. They go at once when VRChat says its camera closed.
-const CAMERA_LOST_AFTER: Duration = Duration::from_secs(20);
 /// How far within the eye's view the tiles must lie, of its width: its very edge is not seen through the lens.
 const CAMERA_VIEW_MARGIN: f32 = 0.1;
 const CAMERA_LOOKS_TO_SHOW: u32 = 1;
@@ -694,6 +706,9 @@ impl OrbitVr {
     }
 
     fn camera_scale_measured(&self) -> bool {
+        self.camera_measured_width.is_some()
+    }
+    fn camera_stereo_recent(&self) -> bool {
         self.camera_stereo_at.is_some_and(|at|at.elapsed()<Duration::from_secs(2))
     }
     /// What is up, for a note in the log when a turn took too long.
@@ -719,35 +734,54 @@ impl OrbitVr {
     /// Where VRChat's camera panel is now, while it is being watched and was seen.
     fn camera_turn(&mut self, steamvr: &vr::Client, actions: &Actions, input_read: bool, prediction: f32, now: Instant, dt: f32) -> Option<Plane> {
         let watch = self.camera_watch.as_ref()?;
+        let sampled=Instant::now();
         let mut poses = [Pose::default(); MAX_DEVICES];
         steamvr.predicted_poses(Universe::Standing, prediction, &mut poses);
         let device = |role| steamvr.controller_index(role).filter(|&d| (d as usize) < MAX_DEVICES && poses[d as usize].pose_is_valid).map(|d| (d,poses[d as usize].device_to_absolute));
         let hand_devices=[device(ControllerRole::LeftHand),device(ControllerRole::RightHand)];
         let hands=hand_devices.map(|hand|hand.map(|(_,pose)|pose));
-        if self.camera_seen.is_none() && poses[0].pose_is_valid {
-            {
-                let (frame,unit,side,clearance,reused)=self.camera_reopen.initial(&poses[0].device_to_absolute,hand_devices,self.tune.camera_panel_m);
-                self.camera_follow.clear();
-                self.camera_follow.seen(frame,unit);
-                self.camera_side=side;
-                self.camera_clearance=clearance;
-                self.camera_measured_width=reused.then_some(unit*camera_track::PANEL_SIZE[0]);
-                self.camera_seen=Some(now);
-                self.camera_looks=CAMERA_LOOKS_TO_SHOW;
-            }
-        }
+        // Opening is a state signal, not a panel transform. Never submit a cached
+        // or head-relative guess while waiting for an actual camera observation.
         if poses[0].pose_is_valid {
             // Where the head will be `prediction` from now, which is when this pose is for.
-            self.camera_heads.push_back((now + Duration::from_secs_f32(prediction.max(0.0)), poses[0].device_to_absolute));
-            while self.camera_heads.len() > 60 {
+            self.camera_heads.push_back((sampled + Duration::from_secs_f32(prediction.max(0.0)), poses[0].device_to_absolute,hands));
+            while self.camera_heads.len() > 180 {
                 self.camera_heads.pop_front();
             }
         }
+        let raw_grips=if input_read {actions.grab_states(steamvr)} else {[None;2]};
+        let observed_grips=self.camera_follow.grip_samples(raw_grips);
+        if let Some((baseline,size,mirror,eye))=self.camera_exclusion.first() {
+            self.camera_follow.begin_image_grab(baseline,*size,*mirror,eye,hands,observed_grips);
+        }
+        let scene_hands=self.camera_follow.scene_age().and_then(|age| {
+            let at=(sampled+Duration::from_secs_f32(prediction.max(0.0))).checked_sub(Duration::from_secs_f32(age))?;
+            self.camera_heads.iter().min_by_key(|(t, ..)|if *t>at {*t-at} else {at-*t}).map(|(_,_,h)|*h)
+        }).unwrap_or(hands);
+        let scene_hands=std::array::from_fn(|i|hands[i].and(scene_hands[i]));
+        let hint=self.camera_exclusion.first().and_then(|(_,size,mirror,_)|poses[0].pose_is_valid.then(|| self.camera_follow.search_hint(*size,*mirror,&space::compose(&poses[0].device_to_absolute,&steamvr.eye_to_head(vr::compositor::Eye::Left)),scene_hands)).flatten());
+        let record_hint=self.camera_follow.panel_in_hands(scene_hands).and_then(|(frame,unit)| {
+            let mut placed=zones::in_units(Zone::CameraRecord);
+            if self.camera_side==camera_track::Side::Right {placed=placed.mirrored();}
+            camera_column_out(std::slice::from_mut(&mut placed),self.camera_clearance,self.camera_side==camera_track::Side::Right);
+            let quad=Plane{frame,unit}.camera_quad(&placed);
+            let eye=space::compose(&poses[0].device_to_absolute,&steamvr.eye_to_head(vr::compositor::Eye::Left));
+            let inverse=space::inverse(&eye);
+            let v=space::compose(&inverse,&quad.transform);
+            if v.m[2][3]>=-0.0001{return None;}
+            let mirror=camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Left));
+            let size=self.camera_exclusion.first()?.1;
+            let tangent=[v.m[0][3]/-v.m[2][3],-v.m[1][3]/-v.m[2][3]];
+            let pixel=std::array::from_fn(|i|(tangent[i]-mirror.from[i])/mirror.spans[i]*size[i]);
+            let radius=(quad.width/-v.m[2][3]/mirror.spans[0]*size[0]*1.5).max(32.);
+            Some((pixel,radius))
+        });
+        watch.guide(hint,record_hint);
         if let Some(seen) = watch.take().filter(|seen|seen.at>=self.camera_epoch) {
             let age = if seen.source == Source::Eye { self.tune.camera_eye_age_ms } else { self.tune.camera_window_age_ms };
             let then = seen.at.checked_sub(Duration::from_secs_f32(age.max(0.0) / 1000.0)).unwrap_or(seen.at);
-            let head = self.camera_heads.iter().min_by_key(|(at, _)| if *at > then { *at - then } else { then - *at }).map(|(_, h)| *h);
-            if let Some(head) = head {
+            let sample = self.camera_heads.iter().min_by_key(|(at, ..)| if *at > then { *at - then } else { then - *at }).map(|(_, h,hands)| (*h,*hands));
+            if let Some((head,captured_hands)) = sample {
                 let eye_on_head = steamvr.eye_to_head(vr::compositor::Eye::Left);
                 let raw = steamvr.projection_raw(vr::compositor::Eye::Left);
                 let whole = camera_track::Mirror::whole_eye(raw);
@@ -762,28 +796,46 @@ impl OrbitVr {
                 };
                 let sides = camera_track::eye_sides(raw);
                 let within = (sides[1] - sides[0]) * CAMERA_VIEW_MARGIN;
-                self.camera_side = camera_track::side_with_room(tangent_of, [sides[0] + within, sides[1] - within, sides[2], sides[3]], self.camera_side);
-                if !camera_track::side_projects(&seen.found,self.camera_side) {
-                    self.camera_side = if self.camera_side == camera_track::Side::Left { camera_track::Side::Right } else { camera_track::Side::Left };
+                let mut side=self.camera_side;
+                if self.camera_seen.is_none() {
+                    side = camera_track::side_with_room(tangent_of, [sides[0] + within, sides[1] - within, sides[2], sides[3]], side);
+                }
+                if !camera_track::side_projects(&seen.found,side) {
+                    side = if side == camera_track::Side::Left { camera_track::Side::Right } else { camera_track::Side::Left };
+                }
+                let image_eye=space::compose(&head,&eye_on_head);
+                let samples:Vec<_>=self.camera_heads.iter().filter_map(|(at,_,hands)|seen.at.checked_duration_since(*at).filter(|age|*age<=Duration::from_millis(200)).map(|age|(age.as_secs_f32(),*hands))).collect();
+                if let Some(record)=seen.record {let still=self.camera_follow.record_still(&samples);self.camera_follow.calibrate_record(record,seen.size,mirror,&image_eye,captured_hands,still);}
+                let matching=self.camera_follow.match_image_hands(&seen.found,seen.size,mirror,&image_eye,&samples);
+                let captured_hands=matching.map(|(_,hands)|hands).unwrap_or(captured_hands);
+                if let Some((age,record))=matching.map(|(age,_)|age).zip(seen.record) {
+                    self.camera_follow.composited_clock(age,seen.found.x,record,seen.size,mirror,&image_eye,&samples,seen.at);
+                }
+                if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
+                    super::super::vr_log::line(&format!("camera compositor clock: ns={}, record {:?}, native_age {:?}, calibrated {}, delay {:?}",orbiters_core::clock::now_ns(),seen.record,matching.map(|(age,_)|age),self.camera_follow.record_ready(),self.camera_follow.scene_age())); // i18n: not shown (sandbox diagnostics)
+                }
+                if let Some(hand)=self.camera_follow.observe_image_grab(&seen.found,seen.size,mirror,&space::compose(&head,&eye_on_head),captured_hands,observed_grips) {
+                    super::super::vr_log::line(&format!("camera grab verified by projected glyph motion: hand {hand}")); // i18n: not shown (diagnostics)
                 }
                 let _ = whole;
                 let stereo=seen.right.and_then(|right| camera_track::stereo_pose(&seen.found,&right.found,[seen.size,right.size],
                     [mirror,camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right))],
                     [eye_on_head,steamvr.eye_to_head(vr::compositor::Eye::Right)],&head));
-                let width=stereo.map(|(_,unit,_)|unit*camera_track::PANEL_SIZE[0]).or(self.camera_measured_width).unwrap_or(self.tune.camera_panel_m);
-                let pose=stereo.map(|(frame,unit,_)|(frame,unit)).or_else(||camera_track::perspective_pose(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), width));
+                let width=stereo.map(|(_,unit,_)|unit*camera_track::PANEL_SIZE[0]).or(self.camera_measured_width);
+                let pose=stereo.map(|(frame,unit,_)|(frame,unit)).or_else(||width.and_then(|width|camera_track::perspective_pose(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), width)));
                 let clearance=|unit:f32| ((2.5+seen.found.residual_px)/seen.found.across.min(seen.found.tall).max(0.01)).max(0.012/unit.max(1e-6));
                 let clear=|frame:&Matrix34,unit:f32,side| {
                     camera_track::column_clear(&seen.found,seen.size,&mirror,&space::compose(&head,&eye_on_head),frame,unit,side,clearance(unit))
                     && (seen.right.is_none() || seen.right.is_some_and(|right|camera_track::column_clear(&right.found,right.size,&camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)),&space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)),frame,unit,side,clearance(unit))))
                 };
                 if let Some((frame,unit))=pose {
-                    if !clear(&frame,unit,self.camera_side) {
-                        let other=if self.camera_side==camera_track::Side::Left {camera_track::Side::Right} else {camera_track::Side::Left};
-                        if clear(&frame,unit,other) { self.camera_side=other; }
+                    if !clear(&frame,unit,side) {
+                        let other=if side==camera_track::Side::Left {camera_track::Side::Right} else {camera_track::Side::Left};
+                        if clear(&frame,unit,other) { side=other; }
                     }
                 }
-                if let Some((frame, unit)) = pose.filter(|(frame,unit)|clear(frame,*unit,self.camera_side)) {
+                if let Some((frame, unit)) = pose.filter(|(frame,unit)|clear(frame,*unit,side)) {
+                self.camera_side=side;
                 if let Some((_,unit,_))=stereo {
                     self.camera_measured_width=Some(unit*camera_track::PANEL_SIZE[0]);
                     self.camera_stereo_at=Some(now);
@@ -797,45 +849,51 @@ impl OrbitVr {
                 if let Some(right) = seen.right { self.camera_exclusion.push((right.found, right.size, camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)), space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)))); }
                 let adopted=if self.camera_looks<=CAMERA_LOOKS_TO_SHOW {
                     self.camera_follow.attach(frame,unit); true
-                } else { self.camera_follow.seen(frame,unit) };
+                } else { self.camera_follow.seen_in_hands(frame,unit,captured_hands) };
                 self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
                 self.camera_seen = Some(now);
+
+                if self.camera_stereo_recent() {
+                    if let Some(hand)=self.camera_follow.observe_grab(frame,unit,captured_hands,observed_grips) {
+                        super::super::vr_log::line(&format!("camera grab verified by rigid motion: hand {hand}, grips {observed_grips:?}")); // i18n: not shown (diagnostics)
+                    }
+                }
                 if adopted {
                     self.camera_looks = self.camera_looks.saturating_add(1);
                     self.camera_reopen.remember(frame,unit,self.camera_side,self.camera_clearance,&head,hand_devices,self.camera_follow.held_hand());
                 }
-                } else if !self.camera_follow.is_held() {
-                    self.camera_exclusion=vec![(seen.found,seen.size,mirror,space::compose(&head,&eye_on_head))];
-                    if let Some(right)=seen.right { self.camera_exclusion.push((right.found,right.size,camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)),space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)))); }
-                    self.camera_looks=CAMERA_LOOKS_TO_SHOW;
-                    self.camera_stereo_at=None;
-                    self.camera_panel_seen_ns=None;
-                    super::super::vr_log::line("camera pose rejected: recovered column is not safely outside the observed panel"); // i18n: not shown (diagnostics)
                 }
             }
         }
         // What tracking knows, and what grabs it. Only while it shows: a grip means nothing to it otherwise.
 
-                let may_bind=self.camera_looks>CAMERA_LOOKS_TO_SHOW && self.camera_follow.can_bind_hand() && (self.camera_follow.is_held() || self.camera_scale_measured());
-        let grips = if input_read && may_bind { actions.grabs(steamvr) } else { [false; 2] };
-        let lasers = if input_read && may_bind { actions.lasers(steamvr, prediction) } else { [None; 2] };
-        let pointers = lasers.map(|tip| tip.map(|tip| { let (o, d) = space::ray(&tip); (o, d) }));
-        let mut placed = self.camera_follow.step(dt, hands, grips, pointers);
+        // A grip near a viewfinder is not VRChat's grab acknowledgement. Only
+        // observed rigid motion binds a hand; thereafter raw grips release it.
+        let grips = if self.camera_follow.is_held() { observed_grips } else { [false; 2] };
+        let was_held=self.camera_follow.held_hand();
+        let scene_hands=self.camera_follow.scene_age().and_then(|age| {
+            let at=(sampled+Duration::from_secs_f32(prediction.max(0.0))).checked_sub(Duration::from_secs_f32(age))?;
+            self.camera_heads.iter().min_by_key(|(t, ..)|if *t>at {*t-at} else {at-*t}).map(|(_,_,h)|*h)
+        }).unwrap_or(hands);
+        let scene_hands=std::array::from_fn(|i|hands[i].and(scene_hands[i]));
+        let mut placed = self.camera_follow.step(dt, scene_hands, grips, [None;2]);
+        if was_held!=self.camera_follow.held_hand() {
+            super::super::vr_log::line(&format!("camera hold changed: {:?} to {:?}, input_read {}, raw {:?}, hands valid {:?}",was_held,self.camera_follow.held_hand(),input_read,raw_grips,hands.map(|h|h.is_some()))); // i18n: not shown (diagnostics)
+        }
+        if self.camera_input_logged.due(Duration::from_secs(1)) {
+            super::super::vr_log::line(&format!("camera follow: held {:?}, input_read {}, raw {:?}, grips {:?}, looks {}, measured {}, scene_delay {:?}, update_age_ms {}, placed {:?}",self.camera_follow.held_hand(),input_read,raw_grips,grips,self.camera_looks,self.camera_scale_measured(),self.camera_follow.scene_age(),sampled.saturating_duration_since(now).as_secs_f32()*1000.,placed)); // i18n: not shown (diagnostics)
+        }
         // While a hand has it, it is known, seen or not.
         if self.camera_follow.is_held() {
             self.camera_seen = Some(now);
         }
-        if self.camera_seen.is_some_and(|at| now.duration_since(at) > CAMERA_LOST_AFTER) {
-            self.camera_follow.clear();
-            self.camera_exclusion.clear();
-            self.camera_seen=None;
-            self.camera_looks=0;
-            self.camera_stereo_at=None;
-            self.camera_panel_seen_ns=None;
-        }
-        // Before any observation, the owner-approved initial estimate stays explicitly provisional.
-        // With observations, validate the displayed hull in every available eye. Mono remains provisional.
-        if !self.camera_exclusion.is_empty() {
+        // A dropped camera remains at its measured Standing pose. An image miss
+        // is not a camera-close event. OSC open/closed and tracking/world epoch
+        // changes retire the attachment; images refine it rather than gate it.
+        // Validate unheld display against the observed eyes. A verified holding
+        // hand propagates the measured plane; old eye coordinates cannot guard
+        // that new position against the panel's previous position.
+        if !self.camera_follow.is_held() && !self.camera_exclusion.is_empty() {
             let clear = |frame: &Matrix34, unit| {
                 if self.camera_exclusion.len()==2 { camera_track::binocular_clear(&self.camera_exclusion,frame,unit,self.camera_side,self.camera_clearance) }
                 else { self.camera_exclusion.iter().all(|(found,size,mirror,eye)|camera_track::column_clear(found,*size,mirror,eye,frame,unit,self.camera_side,self.camera_clearance)) }
@@ -848,7 +906,10 @@ impl OrbitVr {
         if self.camera_looks < CAMERA_LOOKS_TO_SHOW {
             return None;
         }
-        placed.map(|(frame, unit)| Plane { frame, unit })
+        placed.map(|(frame, unit)| {
+            self.camera_follow.record_submission(frame,unit,Instant::now());
+            Plane { frame, unit }
+        })
     }
 }
 
@@ -1019,8 +1080,9 @@ pub struct OrbitVr {
     osc_toggle: Option<(usize, Instant)>,
     camera_seen: Option<Instant>,
     camera_looks: u32,
+    camera_input_logged:super::super::vr_log::Every,
     /// The head lately, for where it was when a look's frame was taken.
-    camera_heads: std::collections::VecDeque<(Instant, Matrix34)>,
+    camera_heads: std::collections::VecDeque<(Instant, Matrix34,[Option<Matrix34>;2])>,
     trigger_was: [bool; 2],
     pointing_since: Instant,
     last_turn: Instant,
@@ -1085,6 +1147,7 @@ impl OrbitVr {
             osc_toggle: None,
             camera_seen: None,
             camera_looks: 0,
+            camera_input_logged:Default::default(),
             camera_heads: Default::default(),
             trigger_was: [true; 2],
             pointing_since: now,
@@ -1118,7 +1181,7 @@ impl OrbitVr {
             note: (on != Some(true)).then(|| mark("SteamVR's \"Experimental overlay input overrides\" (Settings, Developer) is off: pointing at a panel still presses in VRChat too.").to_string()),
             steamvr_overrides: on,
             camera_note: self.camera_note(cx.snap),
-            camera_provisional: self.camera_watch.is_some() && (self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured()),
+            camera_provisional: self.camera_watch.is_some() && (self.camera_looks < CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured()),
             camera_panel_seen_ns: self.camera_panel_seen_ns,
             camera_scale_measured: self.camera_scale_measured(),
         };
@@ -1276,7 +1339,7 @@ impl OrbitVr {
         // Camera status changes independently of SteamVR's one-time input override setup.
         let mut status=self.told.clone().unwrap_or_default();
         status.camera_note=self.camera_note(cx.snap);
-        status.camera_provisional=camera_wanted && (self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured());
+        status.camera_provisional=camera_wanted && (self.camera_looks < CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured());
         status.camera_panel_seen_ns=self.camera_panel_seen_ns;
         status.camera_scale_measured=self.camera_scale_measured();
         if self.told.as_ref()!=Some(&status) {
@@ -1344,8 +1407,7 @@ impl OrbitVr {
             places.push(wheel_place(Zone::WheelHide));
         }
         // What the camera's tiles say lines up on their side; they say where the camera is not seen yet; the column stands off by what the fit is unsure of.
-        self.panels.camera_right = self.camera_side == camera_track::Side::Right;
-        self.panels.camera_finding = self.camera_watch.is_some() && self.camera_looks <= CAMERA_LOOKS_TO_SHOW;
+        self.panels.camera_tracking(self.camera_side == camera_track::Side::Right,self.camera_watch.is_some() && !self.camera_scale_measured());
         if menu == Some(Around::Camera) {
             camera_column_out(&mut places, self.camera_clearance, self.camera_side == camera_track::Side::Right);
         }
@@ -1394,13 +1456,13 @@ impl OrbitVr {
                 let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack | Zone::SheetPeek);
                 // The page a code opened, and its bar: stood up on the camera's top edge.
                 if matches!(p.zone, Zone::CameraWeb | Zone::CameraWebBar) {
-                    return (camera_top_plane(&plane).camera_quad(&on_camera_top(p.placed)), p.placed);
+                    return (camera_top_plane(&plane).camera_quad_facing(&on_camera_top(p.placed), &head), p.placed);
                 }
                 let on = if sheet { self.takeover_plane.unwrap_or(plane) } else { plane };
                 let near = near(p.zone, sheet_up);
                 let placed = clear_of_sheet(p.placed, sheet_up);
                 // Camera tools lie in the fitted panel's own plane, with no spring or depth (camera-core).
-                let quad = if menu == Some(Around::Camera) && !sheet { on.camera_quad(&placed) } else { on.quad(&placed, -p.outward(), near) };
+                let quad = if menu == Some(Around::Camera) && !sheet { on.camera_quad_facing(&placed, &head) } else { on.quad(&placed, -p.outward(), near) };
                 (quad, p.placed)
             })
             .collect();
@@ -1659,7 +1721,7 @@ impl OrbitVr {
                 if !cx.overlay.is_visible(*handle) {
                     let _ = cx.overlay.show(*handle);
                     if matches!(panel.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraQr) {
-                        super::super::vr_log::line(&format!("camera first shown: ns={}, zone={:?}, provisional={}", orbiters_core::clock::now_ns(), panel.zone, self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured())); // i18n: not shown (diagnostics)
+                        super::super::vr_log::line(&format!("camera first shown: ns={}, zone={:?}, provisional={}", orbiters_core::clock::now_ns(), panel.zone, self.camera_looks < CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured())); // i18n: not shown (diagnostics)
                     }
                 }
             }
@@ -2227,6 +2289,33 @@ mod tests {
     /// A camera's plane: its middle at `at`, its picture's right along `x`, its up along `y`, facing along `x` cross `y`.
     fn camera_at(x: V3, y: V3, at: V3) -> Plane {
         Plane { frame: space::from_axes(x, y, space::cross(x, y), at), unit: camera_track::PANEL_M / camera_track::PANEL_SIZE[0] }
+    }
+
+    #[test]
+    fn camera_tiles_remain_visible_from_the_back_without_moving_their_hull() {
+        let camera = camera_at([1.,0.,0.], [0.,1.,0.], [0.,1.2,-0.6]);
+        for zone in [Zone::CameraPeople, Zone::CameraWorld, Zone::CameraRecord, Zone::CameraQr] {
+            let placed = zones::in_units(zone);
+            let original = camera.camera_quad(&placed);
+            for z in [-1.2, 0.] {
+                let head = space::from_axes([1.,0.,0.], [0.,1.,0.], [0.,0.,1.], [0.,1.6,z]);
+                let visible = camera.camera_quad_facing(&placed, &head);
+                let toward = std::array::from_fn(|i| head.m[i][3] - visible.transform.m[i][3]);
+                assert!(space::dot(space::axis(&visible.transform,2),toward)>0.);
+                assert_eq!(space::apply(&visible.transform,[0.;3]), space::apply(&original.transform,[0.;3]));
+                assert_eq!((visible.width,visible.height),(original.width,original.height));
+                for (u,v) in [(-0.5,-0.5),(0.5,-0.5),(-0.5,0.5),(0.5,0.5)] {
+                    let corner = space::apply(&visible.transform,[u*visible.width,v*visible.height,0.]);
+                    let inverse = space::apply(&space::inverse(&original.transform),corner);
+                    assert!((inverse[0].abs()-visible.width/2.).abs()<1e-6);
+                    assert!((inverse[1].abs()-visible.height/2.).abs()<1e-6);
+                    assert!(inverse[2].abs()<1e-6);
+                }
+                if z < -0.6 {
+                    assert!(space::dot(space::axis(&original.transform,2),toward)<0.,"the old submitted quad is backface culled");
+                }
+            }
+        }
     }
 
     /// Enzo (F17): the page a code opened lies over the camera's top edge and never in front of the camera: in its plane over a camera held upright, stood up over

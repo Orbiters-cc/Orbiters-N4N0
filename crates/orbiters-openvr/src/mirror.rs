@@ -4,6 +4,7 @@
 
 use crate::compositor::{Compositor, Eye, MirrorSource};
 use std::ffi::c_void;
+use std::cell::RefCell;
 use windows::core::Interface;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_11_0};
@@ -30,6 +31,7 @@ pub struct EyePicture {
 /// Reads eyes' pictures through one small D3D11 device on the headset's GPU (DXGI adapter `adapter`, the default one
 /// when unknown).
 pub struct EyeReader {
+    mirrors: RefCell<MirrorViews>,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
 }
@@ -59,7 +61,7 @@ impl EyeReader {
             )
         }
         .map_err(|e| format!("D3D11CreateDevice: {e}"))?;
-        Ok(Self { device: device.ok_or("no device")?, context: context.ok_or("no context")? }) // i18n: not shown (a graphics call named in an error detail)
+        Ok(Self { mirrors:RefCell::new(MirrorViews::default()),device: device.ok_or("no device")?, context: context.ok_or("no context")? }) // i18n: not shown (a graphics call named in an error detail)
     }
 
     /// `eye`'s picture now, copied whole and read back (a few milliseconds for a 2k × 2k eye).
@@ -70,13 +72,36 @@ impl EyeReader {
     /// The same, of only `area` (x, y, width, height) if given, as a look at something whose place is known needs.
     pub fn read_part(&self, source: MirrorSource, eye: Eye, area: Option<[u32; 4]>) -> Result<EyePicture, String> {
         // SAFETY: this reader's live device; the view is released once copied, and not used after.
-        let raw = unsafe { source.mirror_d3d11(eye, self.device.as_raw()) }.map_err(|e| format!("GetMirrorTextureD3D11: compositor error {e}"))?; // i18n: not shown (a graphics call named in an error detail)
-        let picture = self.copy(&raw, area);
-        unsafe { source.release_mirror_d3d11(raw) };
-        picture
+        let raw=self.mirror(source,eye)?;
+        self.copy(&raw,area)
     }
 
     fn copy(&self, raw: &*mut c_void, area: Option<[u32; 4]>) -> Result<EyePicture, String> {
+        let queued=self.stage(raw,area)?;
+        self.finish(queued)
+    }
+
+    /// Queue both eyes before either CPU Map waits on the GPU. Sequential
+    /// read_part calls can straddle a compositor update on every attempt.
+    /// The index brackets submission of the copies, not their later readback.
+    pub fn read_pair(&self,source:MirrorSource,areas:[Option<[u32;4]>;2]) -> Result<([EyePicture;2],Option<u32>),String> {
+        let before=source.frame_index();
+        let left=self.mirror(source,Eye::Left)?;
+        let right=self.mirror(source,Eye::Right)?;
+        let staged=self.stage(&left,areas[0]).and_then(|left|self.stage(&right,areas[1]).map(|right|[left,right]));
+        let after=source.frame_index();
+        let [left,right]=staged?;
+        Ok(([self.finish(left)?,self.finish(right)?],before.filter(|_|before==after)))
+    }
+
+    // SteamVR fills a newly requested mirror on subsequent compositor frames.
+    // Keep each stream alive; releasing it after every read repeatedly tears down
+    // acquisition. This reader must be dropped before its source Client dies.
+    fn mirror(&self,source:MirrorSource,eye:Eye) -> Result<*mut c_void,String> {
+        self.mirrors.borrow_mut().get(source,eye,||unsafe {source.mirror_d3d11(eye,self.device.as_raw())}.map_err(|e|format!("GetMirrorTextureD3D11: compositor error {e}"))) // i18n: not shown (graphics API diagnostics)
+    }
+
+    fn stage(&self, raw: &*mut c_void, area: Option<[u32; 4]>) -> Result<QueuedEye, String> {
         // SAFETY: SteamVR's view, alive until it is released after this call; borrowed, never released by us.
         let view = unsafe { ID3D11ShaderResourceView::from_raw_borrowed(raw) }.ok_or("no mirror view")?; // i18n: not shown (a graphics call named in an error detail)
         // SAFETY: a valid view.
@@ -110,14 +135,18 @@ impl EyeReader {
         // SAFETY: valid description and out parameter.
         unsafe { self.device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }.map_err(|e| format!("CreateTexture2D: {e}"))?;
         let staging = staging.ok_or("no staging texture")?; // i18n: not shown (a graphics call named in an error detail)
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         let part = D3D11_BOX { left: x0, top: y0, front: 0, right: x0 + part_w, bottom: y0 + part_h, back: 1 };
         // SAFETY: both textures are this device's, of one format, and the box lies within the source and fits the copy; Map waits for the copy.
         unsafe {
             self.context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &texture, 0, Some(&part));
-            self.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
         }
-        .map_err(|e| format!("Map: {e}"))?; // i18n: not shown (a graphics call named in an error detail)
+        Ok(QueuedEye {staging,from:[x0,y0],size:[part_w,part_h],whole:[desc.Width,desc.Height],swap})
+    }
+
+    fn finish(&self,queued:QueuedEye) -> Result<EyePicture,String> {
+        let QueuedEye {staging,from:[x0,y0],size:[part_w,part_h],whole,swap}=queued;
+        let mut mapped=D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {self.context.Map(&staging,0,D3D11_MAP_READ,0,Some(&mut mapped))}.map_err(|e|format!("Map: {e}"))?; // i18n: not shown (a graphics call named in an error detail)
         let (w, h) = (part_w as usize, part_h as usize);
         let mut rgba = vec![0u8; w * h * 4];
         for y in 0..h {
@@ -131,6 +160,46 @@ impl EyeReader {
         }
         // SAFETY: mapped above.
         unsafe { self.context.Unmap(&staging, 0) };
-        Ok(EyePicture { width: part_w, height: part_h, rgba, from: [x0, y0], whole: [desc.Width, desc.Height] })
+        Ok(EyePicture { width: part_w, height: part_h, rgba, from: [x0, y0], whole })
+    }
+}
+
+struct QueuedEye {staging:ID3D11Texture2D,from:[u32;2],size:[u32;2],whole:[u32;2],swap:bool}
+
+struct MirrorView {source:MirrorSource,raw:*mut c_void}
+impl Drop for MirrorView {
+    fn drop(&mut self) {unsafe {self.source.release_mirror_d3d11(self.raw)};}
+}
+
+#[derive(Default)]
+struct MirrorViews([Option<MirrorView>;2]);
+impl MirrorViews {
+    fn get(&mut self,source:MirrorSource,eye:Eye,acquire:impl FnOnce()->Result<*mut c_void,String>) -> Result<*mut c_void,String> {
+        let slot=&mut self.0[eye as usize];
+        if slot.is_none() {*slot=Some(MirrorView {source,raw:acquire()?});}
+        Ok(slot.as_ref().unwrap().raw)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize,Ordering};
+    static RELEASES:AtomicUsize=AtomicUsize::new(0);
+    #[test]
+    fn eye_mirror_streams_survive_reads_and_release_before_client_teardown() {
+        unsafe extern "system" fn release(raw:*mut c_void) {assert!([1,2].contains(&(raw as usize)));RELEASES.fetch_add(1,Ordering::SeqCst);}
+        let mut table=[0usize;37];table[36]=release as *const () as usize;
+        let source=MirrorSource::test_table(table.as_ptr());
+        let acquisitions=AtomicUsize::new(0);RELEASES.store(0,Ordering::SeqCst);
+        {
+            let mut mirrors=MirrorViews::default();
+            for _ in 0..200 {for eye in [Eye::Left,Eye::Right] {
+                let raw=mirrors.get(source,eye,||{acquisitions.fetch_add(1,Ordering::SeqCst);Ok((eye as usize+1) as *mut c_void)}).unwrap();
+                assert_eq!(raw as usize,eye as usize+1);
+            }}
+            assert_eq!(acquisitions.load(Ordering::SeqCst),2,"one continuous SteamVR stream per eye, not a new stream per look");
+            assert_eq!(RELEASES.load(Ordering::SeqCst),0,"do not end either stream between frames");
+        }
+        assert_eq!(RELEASES.load(Ordering::SeqCst),2,"release both while the borrowed compositor table is alive");
     }
 }

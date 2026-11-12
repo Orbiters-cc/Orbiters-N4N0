@@ -26,6 +26,7 @@ pub mod lab;
 pub mod mcp;
 pub mod person;
 pub mod projects;
+pub mod sandbox;
 pub mod tools;
 pub mod win;
 

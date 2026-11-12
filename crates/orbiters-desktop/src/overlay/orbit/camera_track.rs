@@ -912,11 +912,22 @@ pub fn record_near(pixels:&[u8],width:usize,height:usize,stride:usize,offset:[f3
         mask[y*w+x]=r>100 && r*10>b*11 && b*10>g*13 && r*10>g*15;
     }}
     let mut best=None;
-    for i in 0..mask.len() {if !mask[i]{continue;}let mut stack=vec![i];mask[i]=false;let(mut count,mut sx,mut sy)=(0,0.,0.);let(mut xmin,mut xmax,mut ymin,mut ymax)=(w,0,h,0);
-        while let Some(j)=stack.pop(){let x=j%w;let y=j/w;count+=1;sx+=x as f32;sy+=y as f32;xmin=xmin.min(x);xmax=xmax.max(x);ymin=ymin.min(y);ymax=ymax.max(y);
+    for i in 0..mask.len() {if !mask[i]{continue;}let mut stack=vec![i];mask[i]=false;let mut component=Vec::new();let(mut count,mut sx,mut sy)=(0,0.,0.);let(mut xmin,mut xmax,mut ymin,mut ymax)=(w,0,h,0);
+        while let Some(j)=stack.pop(){component.push(j);let x=j%w;let y=j/w;count+=1;sx+=x as f32;sy+=y as f32;xmin=xmin.min(x);xmax=xmax.max(x);ymin=ymin.min(y);ymax=ymax.max(y);
             for (nx,ny) in [(x.wrapping_sub(1),y),(x+1,y),(x,y.wrapping_sub(1)),(x,y+1)] {if nx<w && ny<h && mask[ny*w+nx]{mask[ny*w+nx]=false;stack.push(ny*w+nx);}}
         }
         if count<5 || xmax-xmin<2 || ymax-ymin<2{continue;}
+        // The Record outline encloses a dark gap. A coloured avatar stripe
+        // or the filled centre dot cannot supply compositor timing evidence.
+        let bw=xmax-xmin+3;let bh=ymax-ymin+3;let mut occupied=vec![false;bw*bh];
+        for j in component {occupied[(j/w-ymin+1)*bw+j%w-xmin+1]=true;}
+        let mut outside=vec![false;bw*bh];let mut pending=vec![0];outside[0]=true;
+        while let Some(j)=pending.pop(){let x=j%bw;let y=j/bw;
+            for (nx,ny) in [(x.wrapping_sub(1),y),(x+1,y),(x,y.wrapping_sub(1)),(x,y+1)] {
+                if nx<bw && ny<bh {let k=ny*bw+nx;if !occupied[k] && !outside[k]{outside[k]=true;pending.push(k);}}
+            }
+        }
+        if !occupied.iter().zip(&outside).any(|(&solid,&exterior)|!solid && !exterior){continue;}
         let p=[sx/count as f32+x0 as f32+offset[0],sy/count as f32+y0 as f32+offset[1]];let d=(p[0]-center[0]).hypot(p[1]-center[1]);
         if best.is_none_or(|(distance,_)|d<distance){best=Some((d,p));}
     }
@@ -1344,7 +1355,10 @@ impl Follow {
     /// Calibrate the actual icon raster against the measured plane while still.
     /// It is an observation of our own compositor output, never a camera detector.
     pub fn calibrate_record(&mut self,p:[f32;2],size:[f32;2],mirror:Mirror,eye:&Matrix34,hands:[Option<Matrix34>;2],still:bool) {
-        if !still || self.record_anchor.is_some(){return;}
+        // Clearance and the measured panel can settle after the first ring.
+        // Re-observe its local raster position while still; a stale anchor
+        // otherwise turns a layout correction into false overlay latency.
+        if !still{return;}
         let Some((panel,unit))=self.panel_in_hands(hands) else{return;};let local=undone(&panel);
         let t=mirror.tangent(p[0]/size[0],p[1]/size[1]);
         let ray:[f32;3]=std::array::from_fn(|i|eye.m[i][0]*t[0]-eye.m[i][1]*t[1]-eye.m[i][2]);
@@ -1389,6 +1403,9 @@ impl Follow {
         let Some(first)=candidates.first().map(|c|c.2) else{return;};
         if !candidates.iter().any(|c|(c.2[0]-first[0]).hypot(c.2[1]-first[1])>=3.){return;}
         let Some((error,overlay_age,_))=candidates.into_iter().min_by(|a,b|a.0.total_cmp(&b.0)) else{return;};
+        if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
+            super::super::vr_log::line(&format!("camera relative clock fit: native_age={native_age}, overlay_age={overlay_age}, residual_px={error}")); // i18n: not shown (sandbox diagnostics)
+        }
         if error>6.{return;}
         let delay=(self.scene_age().unwrap_or(0.)+(native_age-overlay_age)*0.25).clamp(0.,0.2);
         self.scene_ages[self.scene_age_next]=delay;
@@ -1809,10 +1826,25 @@ mod tests {
     }
 
     #[test]
+    fn stationary_record_calibration_follows_measured_layout_changes() {
+        let mirror=Mirror::whole_eye(QUEST_PRO);let size=[1620.,1800.];
+        let mut panel=STILL;panel.m[2][3]=-1.;let mut follow=Follow::default();follow.attach(panel,0.001);
+        let raster=|x:f32|[(x-mirror.from[0])/mirror.spans[0]*size[0],(0.04-mirror.from[1])/mirror.spans[1]*size[1]];
+        follow.calibrate_record(raster(-0.28),size,mirror,&STILL,[None,None],true);
+        follow.calibrate_record(raster(-0.31),size,mirror,&STILL,[None,None],false);
+        assert!((follow.record_anchor.unwrap()[0]+280.).abs()<0.1,"moving pixels cannot recalibrate");
+        follow.calibrate_record(raster(-0.31),size,mirror,&STILL,[None,None],true);
+        assert!((follow.record_anchor.unwrap()[0]+310.).abs()<0.1,"still layout refinement must not leave a stale timing anchor");
+    }
+
+    #[test]
     fn composited_record_ring_is_observed_and_blue_hands_are_not_a_clock() {
         let im=image::open(testdata().join("sandbox-record-ring.png")).unwrap().to_rgba8();
         let p=record_near(im.as_raw(),im.width() as usize,im.height() as usize,im.width() as usize*4,[0.,0.],[48.,48.],40.).unwrap();
         assert!((p[0]-48.).hypot(p[1]-48.)<2.);
+        let mut stripe=[0,0,0,255].repeat(96*96);
+        for y in 20..76 {for x in 42..49 {stripe[(y*96+x)*4..(y*96+x)*4+4].copy_from_slice(&[240,40,110,255]);}}
+        assert!(record_near(&stripe,96,96,96*4,[0.,0.],[48.,48.],40.).is_none(),"a nearby pink avatar stripe is not the Record outline");
         let blue=[0,0,255,255].repeat(96*96);
         assert!(record_near(&blue,96,96,96*4,[0.,0.],[48.,48.],40.).is_none());
     }

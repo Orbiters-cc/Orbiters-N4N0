@@ -899,6 +899,29 @@ pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2]
 
 /// Locate only the two measured identity glyphs near a projected search hint.
 /// The hint is never returned as evidence: no border/pose is inferred here.
+pub fn record_near(pixels:&[u8],width:usize,height:usize,stride:usize,offset:[f32;2],center:[f32;2],radius:f32) -> Option<[f32;2]> {
+    let cx=center[0]-offset[0];let cy=center[1]-offset[1];
+    let x0=(cx-radius).max(0.) as usize;let y0=(cy-radius).max(0.) as usize;
+    let x1=((cx+radius).max(0.) as usize).min(width);let y1=((cy+radius).max(0.) as usize).min(height);
+    if x1<=x0 || y1<=y0{return None;}
+    let w=x1-x0;let h=y1-y0;let mut mask=vec![false;w*h];
+    for y in 0..h {for x in 0..w {
+        let Some(p)=pixels.get((y+y0)*stride+(x+x0)*4..(y+y0)*stride+(x+x0)*4+3) else{continue;};
+        let (r,g,b)=(p[0] as u32,p[1] as u32,p[2] as u32);
+        mask[y*w+x]=b>100 && b*10>r*11 && r*10>g*13 && b*10>g*15;
+    }}
+    let mut best=None;
+    for i in 0..mask.len() {if !mask[i]{continue;}let mut stack=vec![i];mask[i]=false;let(mut count,mut sx,mut sy)=(0,0.,0.);let(mut xmin,mut xmax,mut ymin,mut ymax)=(w,0,h,0);
+        while let Some(j)=stack.pop(){let x=j%w;let y=j/w;count+=1;sx+=x as f32;sy+=y as f32;xmin=xmin.min(x);xmax=xmax.max(x);ymin=ymin.min(y);ymax=ymax.max(y);
+            for (nx,ny) in [(x.wrapping_sub(1),y),(x+1,y),(x,y.wrapping_sub(1)),(x,y+1)] {if nx<w && ny<h && mask[ny*w+nx]{mask[ny*w+nx]=false;stack.push(ny*w+nx);}}
+        }
+        if count<5 || xmax-xmin<2 || ymax-ymin<2{continue;}
+        let p=[sx/count as f32+x0 as f32+offset[0],sy/count as f32+y0 as f32+offset[1]];let d=(p[0]-center[0]).hypot(p[1]-center[1]);
+        if best.is_none_or(|(distance,_)|d<distance){best=Some((d,p));}
+    }
+    best.map(|(_,p)|p)
+}
+
 pub fn glyphs_near(pixels:&[u8],width:usize,height:usize,stride:usize,offset:[f32;2],hint:Found) -> Option<Found> {
     let local=hint.shifted([-offset[0],-offset[1]]);
     let radius=(24.*local.across.max(local.tall)).max(12.);
@@ -1102,6 +1125,7 @@ pub struct Follow {
     grab_candidates: [Option<(Matrix34,Matrix34,Matrix34,u32)>;2],
     image_grabs: [Option<ImageGrab>;2],
     held_anchors: Option<[[f32;2];2]>,
+    record_anchor: Option<[f32;2]>,
     scene_ages: [f32;5],
     scene_age_count: usize,
     scene_age_next: usize,
@@ -1274,8 +1298,9 @@ impl Follow {
         let (frame,unit,anchors)=if let Some((hand,_))=self.held {
             let (local,unit)=self.at?;(then(&hands[hand]?,&local),unit,self.held_anchors.unwrap_or([PANEL_X,PANEL_CHEVRON]))
         } else {
-            let (hand,candidate)=self.image_grabs.iter().enumerate().find_map(|(i,c)|c.map(|c|(i,c)))?;
-            (then(&hands[hand]?,&candidate.relation),candidate.unit,candidate.anchors)
+            if let Some((hand,candidate))=self.image_grabs.iter().enumerate().find_map(|(i,c)|c.map(|c|(i,c))) {
+                (then(&hands[hand]?,&candidate.relation),candidate.unit,candidate.anchors)
+            } else {let (frame,unit)=self.at?;(frame,unit,[PANEL_X,PANEL_CHEVRON])}
         };
         let inverse=undone(eye);
         let pixel=|p:[f32;2]| -> Option<[f32;2]> {
@@ -1294,7 +1319,7 @@ impl Follow {
     /// The controller time actually visible in the scene, measured from two
     /// native camera glyphs. No age is learned from a stationary/ambiguous hand.
     /// This compensates VRChat's scene latency rather than making overlays lead it.
-    pub fn match_image_hands(&mut self,found:&Found,size:[f32;2],mirror:Mirror,eye:&Matrix34,samples:&[(f32,[Option<Matrix34>;2])]) -> Option<[Option<Matrix34>;2]> {
+    pub fn match_image_hands(&self,found:&Found,size:[f32;2],mirror:Mirror,eye:&Matrix34,samples:&[(f32,[Option<Matrix34>;2])]) -> Option<(f32,[Option<Matrix34>;2])> {
         let mut candidates=Vec::new();
         for &(age,hands) in samples {
             if !(0.0..=0.2).contains(&age) {continue;}
@@ -1308,10 +1333,49 @@ impl Follow {
         let (error,age,hands,_)=candidates.into_iter().min_by(|a,b|a.0.total_cmp(&b.0))?;
         // Same six-pixel two-glyph agreement required to prove the rigid grab.
         if error>2.*6f32.powi(2) {return None;}
-        self.scene_ages[self.scene_age_next]=age;
+        Some((age,hands))
+    }
+    pub fn panel_in_hands(&self,hands:[Option<Matrix34>;2]) -> Option<(Matrix34,f32)> {
+        let (local,unit)=self.at?;
+        Some((if let Some((hand,_))=self.held {then(&hands[hand]?,&local)} else {local},unit))
+    }
+    /// Calibrate the actual icon raster against the measured plane while still.
+    /// It is an observation of our own compositor output, never a camera detector.
+    pub fn calibrate_record(&mut self,p:[f32;2],size:[f32;2],mirror:Mirror,eye:&Matrix34) {
+        if self.is_held() || self.record_anchor.is_some(){return;}
+        let Some((panel,unit))=self.at else{return;};let local=undone(&panel);
+        let t=mirror.tangent(p[0]/size[0],p[1]/size[1]);
+        let ray:[f32;3]=std::array::from_fn(|i|eye.m[i][0]*t[0]-eye.m[i][1]*t[1]-eye.m[i][2]);
+        let denominator=(0..3).map(|i|panel.m[i][2]*ray[i]).sum::<f32>();
+        if denominator.abs()<1e-5{return;}
+        let distance=(0..3).map(|i|panel.m[i][2]*(panel.m[i][3]-eye.m[i][3])).sum::<f32>()/denominator;
+        if distance<=0.{return;}
+        let world:[f32;3]=std::array::from_fn(|i|eye.m[i][3]+ray[i]*distance);
+        let q:[f32;2]=std::array::from_fn(|i|(local.m[i][3]+(0..3).map(|j|local.m[i][j]*world[j]).sum::<f32>())/unit);
+        self.record_anchor=Some([q[0],-q[1]]);
+    }
+    /// Compare scene and overlay pixels from the SAME compositor image. Delaying
+    /// by the scene's absolute age would count overlay submission latency twice.
+    pub fn composited_clock(&mut self,native_age:f32,record:[f32;2],size:[f32;2],mirror:Mirror,eye:&Matrix34,samples:&[(f32,[Option<Matrix34>;2])]) {
+        if !self.is_held(){return;}
+        let Some(anchor)=self.record_anchor else{return;};let inverse=undone(eye);
+        let mut candidates=Vec::new();
+        for &(age,hands) in samples {
+            let Some((frame,unit))=self.panel_in_hands(hands) else{continue;};
+            let world:[f32;3]=std::array::from_fn(|i|frame.m[i][3]+frame.m[i][0]*anchor[0]*unit-frame.m[i][1]*anchor[1]*unit);
+            let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*world[j]).sum::<f32>());
+            if v[2]>=-0.0001{continue;}
+            let t=[v[0]/-v[2],-v[1]/-v[2]];let pixel:[f32;2]=std::array::from_fn(|i|(t[i]-mirror.from[i])/mirror.spans[i]*size[i]);
+            let error=(pixel[0]-record[0]).hypot(pixel[1]-record[1]);candidates.push((error,age,pixel));
+        }
+        let Some(first)=candidates.first().map(|c|c.2) else{return;};
+        if !candidates.iter().any(|c|(c.2[0]-first[0]).hypot(c.2[1]-first[1])>=3.){return;}
+        let Some((error,overlay_age,_))=candidates.into_iter().min_by(|a,b|a.0.total_cmp(&b.0)) else{return;};
+        if error>6.{return;}
+        let delay=(self.scene_age().unwrap_or(0.)+(native_age-overlay_age)*0.25).clamp(0.,0.2);
+        self.scene_ages[self.scene_age_next]=delay;
         self.scene_age_next=(self.scene_age_next+1)%self.scene_ages.len();
         self.scene_age_count=(self.scene_age_count+1).min(self.scene_ages.len());
-        Some(hands)
     }
     pub fn scene_age(&self) -> Option<f32> {
         if self.scene_age_count==0 {return None;}
@@ -1694,9 +1758,9 @@ mod tests {
         follow.begin_image_grab(&baseline,size,mirror,&eye,[None,Some(STILL)],[false,true]);
         let samples:Vec<_>=(0..=10).map(|i| {let mut hand=STILL;hand.m[0][3]=0.1-i as f32*0.01;(i as f32*0.01,[None,Some(hand)])}).collect();
         let native=follow.search_hint(size,mirror,&eye,samples[6].1).unwrap();
-        let matched=follow.match_image_hands(&native,size,mirror,&eye,&samples).unwrap();
+        let (age,matched)=follow.match_image_hands(&native,size,mirror,&eye,&samples).unwrap();
         assert!((matched[1].unwrap().m[0][3]-0.04).abs()<1e-5);
-        assert!((follow.scene_age().unwrap()-0.06).abs()<1e-5);
+        assert!((age-0.06).abs()<1e-5);
         assert_eq!(follow.observe_image_grab(&native,size,mirror,&eye,matched,[false,true]),Some(1));
         // Static poses cannot identify latency, and unrelated pixels cannot
         // manufacture a different clock or camera attachment.
@@ -1704,7 +1768,23 @@ mod tests {
         assert!(follow.match_image_hands(&native,size,mirror,&eye,&static_samples).is_none());
         let mut wrong=native;wrong.x[0]+=500.;wrong.chevron[0]+=500.;
         assert!(follow.match_image_hands(&wrong,size,mirror,&eye,&samples).is_none());
-        assert!((follow.scene_age().unwrap()-0.06).abs()<1e-5);
+        assert!(follow.scene_age().is_none());
+        // The scene is 60ms old, but our visible overlay is already 20ms old.
+        // Only the 40ms difference is corrected; absolute scene age double counts.
+        follow.record_anchor=Some([-280.,40.]);
+        let record_world=[samples[2].1[1].unwrap().m[0][3]-0.28,-0.04];
+        let record=[(record_world[0]-mirror.from[0])/mirror.spans[0]*size[0],(-record_world[1]-mirror.from[1])/mirror.spans[1]*size[1]];
+        follow.composited_clock(age,record,size,mirror,&eye,&samples);
+        assert!((follow.scene_age().unwrap()-0.01).abs()<1e-4,"one quarter of the observed 40ms relative error, not absolute scene age");
+    }
+
+    #[test]
+    fn composited_record_ring_is_observed_and_blue_hands_are_not_a_clock() {
+        let im=image::open(testdata().join("sandbox-record-ring.png")).unwrap().to_rgba8();
+        let p=record_near(im.as_raw(),im.width() as usize,im.height() as usize,im.width() as usize*4,[0.,0.],[48.,48.],40.).unwrap();
+        assert!((p[0]-48.).hypot(p[1]-48.)<2.);
+        let blue=[0,0,255,255].repeat(96*96);
+        assert!(record_near(&blue,96,96,96*4,[0.,0.],[48.,48.],40.).is_none());
     }
 
     #[test]

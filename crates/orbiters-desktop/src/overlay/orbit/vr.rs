@@ -717,6 +717,7 @@ impl OrbitVr {
     /// Where VRChat's camera panel is now, while it is being watched and was seen.
     fn camera_turn(&mut self, steamvr: &vr::Client, actions: &Actions, input_read: bool, prediction: f32, now: Instant, dt: f32) -> Option<Plane> {
         let watch = self.camera_watch.as_ref()?;
+        let sampled=Instant::now();
         let mut poses = [Pose::default(); MAX_DEVICES];
         steamvr.predicted_poses(Universe::Standing, prediction, &mut poses);
         let device = |role| steamvr.controller_index(role).filter(|&d| (d as usize) < MAX_DEVICES && poses[d as usize].pose_is_valid).map(|d| (d,poses[d as usize].device_to_absolute));
@@ -726,7 +727,7 @@ impl OrbitVr {
         // or head-relative guess while waiting for an actual camera observation.
         if poses[0].pose_is_valid {
             // Where the head will be `prediction` from now, which is when this pose is for.
-            self.camera_heads.push_back((now + Duration::from_secs_f32(prediction.max(0.0)), poses[0].device_to_absolute,hands));
+            self.camera_heads.push_back((sampled + Duration::from_secs_f32(prediction.max(0.0)), poses[0].device_to_absolute,hands));
             while self.camera_heads.len() > 180 {
                 self.camera_heads.pop_front();
             }
@@ -737,12 +738,28 @@ impl OrbitVr {
             self.camera_follow.begin_image_grab(baseline,*size,*mirror,eye,hands,observed_grips);
         }
         let scene_hands=self.camera_follow.scene_age().and_then(|age| {
-            let at=(now+Duration::from_secs_f32(prediction.max(0.0))).checked_sub(Duration::from_secs_f32(age))?;
+            let at=(sampled+Duration::from_secs_f32(prediction.max(0.0))).checked_sub(Duration::from_secs_f32(age))?;
             self.camera_heads.iter().min_by_key(|(t, ..)|if *t>at {*t-at} else {at-*t}).map(|(_,_,h)|*h)
         }).unwrap_or(hands);
         let scene_hands=std::array::from_fn(|i|hands[i].and(scene_hands[i]));
         let hint=self.camera_exclusion.first().and_then(|(_,size,mirror,_)|poses[0].pose_is_valid.then(|| self.camera_follow.search_hint(*size,*mirror,&space::compose(&poses[0].device_to_absolute,&steamvr.eye_to_head(vr::compositor::Eye::Left)),scene_hands)).flatten());
-        watch.guide(hint);
+        let record_hint=self.camera_follow.panel_in_hands(scene_hands).and_then(|(frame,unit)| {
+            let mut placed=zones::in_units(Zone::CameraRecord);
+            if self.camera_side==camera_track::Side::Right {placed=placed.mirrored();}
+            camera_column_out(std::slice::from_mut(&mut placed),self.camera_clearance,self.camera_side==camera_track::Side::Right);
+            let quad=Plane{frame,unit}.camera_quad(&placed);
+            let eye=space::compose(&poses[0].device_to_absolute,&steamvr.eye_to_head(vr::compositor::Eye::Left));
+            let inverse=space::inverse(&eye);
+            let v=space::compose(&inverse,&quad.transform);
+            if v.m[2][3]>=-0.0001{return None;}
+            let mirror=camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Left));
+            let size=self.camera_exclusion.first()?.1;
+            let tangent=[v.m[0][3]/-v.m[2][3],-v.m[1][3]/-v.m[2][3]];
+            let pixel=std::array::from_fn(|i|(tangent[i]-mirror.from[i])/mirror.spans[i]*size[i]);
+            let radius=(quad.width/-v.m[2][3]/mirror.spans[0]*size[0]*1.5).max(32.);
+            Some((pixel,radius))
+        });
+        watch.guide(hint,record_hint);
         if let Some(seen) = watch.take().filter(|seen|seen.at>=self.camera_epoch) {
             let age = if seen.source == Source::Eye { self.tune.camera_eye_age_ms } else { self.tune.camera_window_age_ms };
             let then = seen.at.checked_sub(Duration::from_secs_f32(age.max(0.0) / 1000.0)).unwrap_or(seen.at);
@@ -771,7 +788,12 @@ impl OrbitVr {
                 }
                 let image_eye=space::compose(&head,&eye_on_head);
                 let samples:Vec<_>=self.camera_heads.iter().filter_map(|(at,_,hands)|seen.at.checked_duration_since(*at).filter(|age|*age<=Duration::from_millis(200)).map(|age|(age.as_secs_f32(),*hands))).collect();
-                let captured_hands=self.camera_follow.match_image_hands(&seen.found,seen.size,mirror,&image_eye,&samples).unwrap_or(captured_hands);
+                if let Some(record)=seen.record {self.camera_follow.calibrate_record(record,seen.size,mirror,&image_eye);}
+                let matching=self.camera_follow.match_image_hands(&seen.found,seen.size,mirror,&image_eye,&samples);
+                let captured_hands=matching.map(|(_,hands)|hands).unwrap_or(captured_hands);
+                if let Some((age,record))=matching.map(|(age,_)|age).zip(seen.record) {
+                    self.camera_follow.composited_clock(age,record,seen.size,mirror,&image_eye,&samples);
+                }
                 if let Some(hand)=self.camera_follow.observe_image_grab(&seen.found,seen.size,mirror,&space::compose(&head,&eye_on_head),captured_hands,observed_grips) {
                     super::super::vr_log::line(&format!("camera grab verified by projected glyph motion: hand {hand}")); // i18n: not shown (diagnostics)
                 }
@@ -830,7 +852,7 @@ impl OrbitVr {
         let grips = if self.camera_follow.is_held() { observed_grips } else { [false; 2] };
         let was_held=self.camera_follow.held_hand();
         let scene_hands=self.camera_follow.scene_age().and_then(|age| {
-            let at=(now+Duration::from_secs_f32(prediction.max(0.0))).checked_sub(Duration::from_secs_f32(age))?;
+            let at=(sampled+Duration::from_secs_f32(prediction.max(0.0))).checked_sub(Duration::from_secs_f32(age))?;
             self.camera_heads.iter().min_by_key(|(t, ..)|if *t>at {*t-at} else {at-*t}).map(|(_,_,h)|*h)
         }).unwrap_or(hands);
         let scene_hands=std::array::from_fn(|i|hands[i].and(scene_hands[i]));
@@ -839,7 +861,7 @@ impl OrbitVr {
             super::super::vr_log::line(&format!("camera hold changed: {:?} to {:?}, input_read {}, raw {:?}, hands valid {:?}",was_held,self.camera_follow.held_hand(),input_read,raw_grips,hands.map(|h|h.is_some()))); // i18n: not shown (diagnostics)
         }
         if self.camera_input_logged.due(Duration::from_secs(1)) {
-            super::super::vr_log::line(&format!("camera follow: held {:?}, input_read {}, raw {:?}, grips {:?}, looks {}, measured {}, placed {:?}",self.camera_follow.held_hand(),input_read,raw_grips,grips,self.camera_looks,self.camera_scale_measured(),placed)); // i18n: not shown (diagnostics)
+            super::super::vr_log::line(&format!("camera follow: held {:?}, input_read {}, raw {:?}, grips {:?}, looks {}, measured {}, scene_delay {:?}, update_age_ms {}, placed {:?}",self.camera_follow.held_hand(),input_read,raw_grips,grips,self.camera_looks,self.camera_scale_measured(),self.camera_follow.scene_age(),sampled.saturating_duration_since(now).as_secs_f32()*1000.,placed)); // i18n: not shown (diagnostics)
         }
         // While a hand has it, it is known, seen or not.
         if self.camera_follow.is_held() {

@@ -1,0 +1,1 @@
+Native-resolution 96x96 crop from real SteamVR + VRChat strict-private sandbox, accept-a2/final2-right-acquired-000-left.png, 2026-11-12. Observed purple Record ring centroid at crop (48,48), within rounding. No synthetic rendering. Used only to identify our own composited overlay timing; never to identify a camera.

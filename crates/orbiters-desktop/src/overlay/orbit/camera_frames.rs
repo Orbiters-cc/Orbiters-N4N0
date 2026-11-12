@@ -40,6 +40,7 @@ pub struct Seen {
     pub source: Source,
     pub at: Instant,
     pub right: Option<RightSeen>,
+    pub record: Option<[f32;2]>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -97,7 +98,7 @@ pub struct CameraWatch {
     began: Instant,
     seen: Arc<Mutex<Looks>>,
     stop: Arc<AtomicBool>,
-    hint:Arc<Mutex<Option<(Instant,Found)>>>,
+    hint:Arc<Mutex<Option<(Instant,Found,Option<([f32;2],f32)>)>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -117,7 +118,7 @@ impl CameraWatch {
     }
 
     /// A current pose can guide pixel search; it is never published as a look.
-    pub fn guide(&self,hint:Option<Found>) { *self.hint.lock().unwrap_or_else(|e|e.into_inner())=hint.map(|h|(Instant::now(),h)); }
+    pub fn guide(&self,hint:Option<Found>,record:Option<([f32;2],f32)>) { *self.hint.lock().unwrap_or_else(|e|e.into_inner())=hint.map(|h|(Instant::now(),h,record)); }
 
     pub fn stop(&self) { self.stop.store(true, Ordering::Relaxed); }
     pub fn finished(&self) -> bool { self.thread.as_ref().is_none_or(|t| t.is_finished()) }
@@ -182,7 +183,7 @@ fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f3
         h.found = Some(at);
         h.finds = h.finds.saturating_add(1);
         drop(h);
-        seen.lock().unwrap_or_else(|e| e.into_inner()).publish(Seen { found, size: [whole[0] as f32, whole[1] as f32], source, at, right });
+        seen.lock().unwrap_or_else(|e| e.into_inner()).publish(Seen { found, size: [whole[0] as f32, whole[1] as f32], source, at, right, record:None });
     }
     found
 }
@@ -210,7 +211,7 @@ fn keep(pixels: &[u8], width: usize, height: usize, stride: usize, source: Sourc
     }
 }
 
-fn run(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>, hints:&Mutex<Option<(Instant,Found)>>,from: From) {
+fn run(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>, hints:&Mutex<Option<(Instant,Found,Option<([f32;2],f32)>)>>,from: From) {
     // Glyph pickup acknowledgement has its own reader. Native border fitting
     // can take hundreds of milliseconds and must never block this small ROI.
     let finished=AtomicBool::new(false);
@@ -224,19 +225,20 @@ fn run(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>, hints:&Mu
     });
 }
 
-fn run_glyphs(seen:&Mutex<Looks>,stop:&AtomicBool,finished:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Option<(Instant,Found)>>,from:From) {
+fn run_glyphs(seen:&Mutex<Looks>,stop:&AtomicBool,finished:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Option<(Instant,Found,Option<([f32;2],f32)>)>>,from:From) {
     let Some(source)=from.mirror else{return;};
     let Ok(reader)=EyeReader::new(from.adapter) else{return;};
     let mut whole=None;
     while !stop.load(Ordering::Relaxed) && !finished.load(Ordering::Relaxed) {
         let began=Instant::now();
-        let hint=hints.lock().unwrap_or_else(|e|e.into_inner()).filter(|(at,_)|at.elapsed()<Duration::from_millis(100)).map(|(_,f)|f);
-        if let Some(hint)=hint {
+        let hint=hints.lock().unwrap_or_else(|e|e.into_inner()).filter(|(at,_,_)|at.elapsed()<Duration::from_millis(100)).map(|(_,f,r)|(f,r));
+        if let Some((hint,record_hint))=hint {
             let area=whole.map(|size:[u32;2]|camera_track::around(&hint,size[0] as usize,size[1] as usize).map(|v|v as u32));
             if let Ok(picture)=reader.read_part(source,Eye::Left,area) {
                 whole=Some(picture.whole);
                 if let Some(found)=camera_track::glyphs_near(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4,[picture.from[0] as f32,picture.from[1] as f32],hint) {
-                    seen.lock().unwrap_or_else(|e|e.into_inner()).publish(Seen{found,size:[picture.whole[0] as f32,picture.whole[1] as f32],source:Source::Eye,at:began,right:None});
+                    let record=record_hint.and_then(|(center,radius)|camera_track::record_near(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4,[picture.from[0] as f32,picture.from[1] as f32],center,radius));
+                    seen.lock().unwrap_or_else(|e|e.into_inner()).publish(Seen{found,size:[picture.whole[0] as f32,picture.whole[1] as f32],source:Source::Eye,at:began,right:None,record});
                     let mut h=health.lock().unwrap_or_else(|e|e.into_inner());h.framed=Some(began);h.found=Some(began);
                 }
             }
@@ -245,7 +247,7 @@ fn run_glyphs(seen:&Mutex<Looks>,stop:&AtomicBool,finished:&AtomicBool,health:&M
     }
 }
 
-fn run_metric(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>, hints:&Mutex<Option<(Instant,Found)>>,from: From) {
+fn run_metric(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>, hints:&Mutex<Option<(Instant,Found,Option<([f32;2],f32)>)>>,from: From) {
     let mut kept = None;
     if let Some(mirror) = from.mirror {
         match EyeReader::new(from.adapter) {
@@ -257,7 +259,7 @@ fn run_metric(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>, hi
                 while !stop.load(Ordering::Relaxed) && errors < EYE_TRIES {
                     let began = Instant::now();
                     // Around the last place while it is seen.
-                    let hint=hints.lock().unwrap_or_else(|e|e.into_inner()).filter(|(at,_)|at.elapsed()<Duration::from_millis(100)).map(|(_,f)|f);
+                    let hint=hints.lock().unwrap_or_else(|e|e.into_inner()).filter(|(at,_,_)|at.elapsed()<Duration::from_millis(100)).map(|(_,f,_)|f);
                     let predicted=hint.zip(last.map(|(_,size)|size));
                     let area = predicted.or(last).and_then(|(f, whole): (Found, [u32; 2])| {
                         let a = camera_track::around(&f, whole[0] as usize, whole[1] as usize);
@@ -274,7 +276,7 @@ fn run_metric(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>, hi
                     let guided=left.as_ref().ok().and_then(|picture|hint.and_then(|hint|camera_track::glyphs_near(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4,[picture.from[0] as f32,picture.from[1] as f32],hint)));
                     if let (Some(found),Ok(picture))=(guided,left.as_ref()) {
                         {let mut h=health.lock().unwrap_or_else(|e|e.into_inner());h.framed=Some(began);h.found=Some(began);h.looks=h.looks.saturating_add(1);h.finds=h.finds.saturating_add(1);}
-                        seen.lock().unwrap_or_else(|e|e.into_inner()).publish(Seen{found,size:[picture.whole[0] as f32,picture.whole[1] as f32],source:Source::Eye,at:began,right:None});
+                        seen.lock().unwrap_or_else(|e|e.into_inner()).publish(Seen{found,size:[picture.whole[0] as f32,picture.whole[1] as f32],source:Source::Eye,at:began,right:None,record:None});
                         last=Some((found,picture.whole));
                         // Publish before optional metric refinement. A heavy
                         // border search must not delay pickup acknowledgement.
@@ -374,7 +376,7 @@ mod tests {
         use super::*;
         let base=Instant::now();
         let found=camera_track::Found {perspective:None,lines:None,landmarks:None,residual_px:0.,x:[0.;2],chevron:[0.;2],middle:[0.;2],right:[1.,0.],down:[0.,1.],across:1.,tall:1.};
-        let look=|ms,metric| {let mut found=found;if metric {found.perspective=Some([[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]]);} Seen{found,size:[1620.,1800.],source:Source::Eye,at:base+Duration::from_millis(ms),right:None}};
+        let look=|ms,metric| {let mut found=found;if metric {found.perspective=Some([[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]]);} Seen{found,size:[1620.,1800.],source:Source::Eye,at:base+Duration::from_millis(ms),right:None,record:None}};
         let mut looks=Looks::default();
         // The worker finishes a 600ms border fit after fresh glyph pixels.
         looks.publish(look(600,false));looks.publish(look(0,true));

@@ -35,3 +35,4 @@ crates/orbiters-desktop/src/overlay/worlds/paint_snapshot.rs
 
 # Interaction regression fixtures and developer assertions only.
 crates/orbiters-desktop/src/overlay/orbit/flows.rs
+crates/orbiters-desktop/src/steamvr_start.rs

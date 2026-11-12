@@ -47,12 +47,12 @@ pub struct Service {
     window: Mutex<Option<(Child, Instant)>>,
     /// A page asked for while no window was there: the window starting now gets it once it is linked.
     page_for_window: Mutex<Option<String>>,
-    /// The overlay process we started, when, and for which SteamVR (its `vrserver` process id).
-    overlay: Mutex<Option<(Child, Instant, Option<u32>)>>,
+    /// The overlay process we started, when, and for which SteamVR (PID and creation time), and consecutive failures.
+    overlay: Mutex<Option<(Child, Instant, Option<crate::steamvr_start::Session>, u32)>>,
     /// The process of the panels around VRChat's menus in desktop mode, and when it started.
     orbit: Mutex<Option<(Child, Instant)>>,
-    /// The SteamVR (its `vrserver` process id, 0 unknown) whose start of the app was looked at ([`Service::keep_steamvr_start`]).
-    steamvr_start_seen: Mutex<Option<u32>>,
+    /// The SteamVR (its `vrserver` PID and creation time) whose start of the app was looked at ([`Service::keep_steamvr_start`]).
+    steamvr_start_seen: Mutex<Option<crate::steamvr_start::Session>>,
     /// Tracking smoothing's driver, kept in step with the settings ([`Service::keep_tracking`]).
     smoothing: Mutex<crate::tracking::Smoothing>,
     quitting: AtomicBool,
@@ -158,13 +158,19 @@ impl Service {
             return;
         }
         let snap = self.ctl.view();
-        let session = snap.steamvr.pid.unwrap_or(0);
-        if !snap.steamvr.running || *self.steamvr_start_seen.lock().unwrap() == Some(session) {
+        let Some(session) = crate::steamvr_start::ready_session() else { return };
+        if snap.settings.steamvr_overlay || !snap.steamvr.running || (*self.steamvr_start_seen.lock().unwrap() == Some(session) && !snap.settings.startup.steamvr_pending)
+            || Some(session.0) != snap.steamvr.pid {
             return;
         }
+        // Closing an overlay is asynchronous: do not overlap its connection.
+        if self.links.lock().unwrap().iter().any(|l| l.role == Role::Overlay)
+            || self.overlay.lock().unwrap().as_mut().is_some_and(|(child, _, _, _)| matches!(child.try_wait(), Ok(None))) { return; }
         // Not yet answering (it is starting, or going): asked again next turn.
         let Ok(client) = orbiters_openvr::Client::connect(orbiters_openvr::AppType::Background) else { return };
+        if crate::steamvr_start::current_session() != Some(session) { return; }
         *self.steamvr_start_seen.lock().unwrap() = Some(session);
+        self.smoothing.lock().unwrap().set_kinds((0..64).map(|i| crate::tracking::DeviceKind::of(client.device_class(i))).collect());
         if let Some(startup) = crate::startup::reconcile(&client, &snap.settings.startup) {
             self.ctl.update_settings(|s| s.startup = startup);
         }
@@ -228,20 +234,23 @@ impl Service {
             return;
         }
         if connected.is_some() {
+            if let Some((_, _, _, failures)) = self.overlay.lock().unwrap().as_mut() { *failures = 0; }
             return;
         }
+        let Some(session) = crate::steamvr_start::ready_session().filter(|s| Some(s.0) == snap.steamvr.pid) else { return };
         drop(links);
         let mut overlay = self.overlay.lock().unwrap();
-        if let Some((child, started, steamvr)) = overlay.as_mut() {
+        if let Some((child, started, steamvr, failures)) = overlay.as_mut() {
             let exited = match child.try_wait() {
                 Ok(None) => None,
                 Ok(Some(status)) => Some(status.code()),
                 Err(_) => Some(None),
             };
-            if !overlay_due(exited, started.elapsed(), *steamvr, snap.steamvr.pid) {
+            if !overlay_due(exited, started.elapsed(), *steamvr, Some(session), *failures) {
                 return;
             }
         }
+        let failures = overlay.as_ref().filter(|(_, _, prior, _)| *prior == Some(session)).map_or(1, |(_, _, _, n)| n.saturating_add(1));
         let mut cmd = Command::new(&self.exe);
         cmd.arg("--overlay").args(self.endpoint.args()).stdin(Stdio::null());
         #[cfg(windows)]
@@ -252,7 +261,7 @@ impl Service {
         match cmd.spawn() {
             Ok(child) => {
                 crate::worker::keep_with_service(&child);
-                *overlay = Some((child, Instant::now(), snap.steamvr.pid));
+                *overlay = Some((child, Instant::now(), Some(session), failures));
             }
             Err(e) => eprintln!("could not start the SteamVR overlay: {e}"),
         }
@@ -539,18 +548,15 @@ impl Service {
 }
 
 /// An overlay that failed is started again after this.
-const OVERLAY_RETRY: Duration = Duration::from_secs(20);
+const OVERLAY_RETRY: Duration = Duration::from_secs(2);
 
-/// Whether to start an overlay again, the last one started `since` ago for the SteamVR `started_for` (its process id)
-/// having `exited` (`None` while it runs; its exit code, if any), SteamVR now being `steamvr`. Not while it runs; not
-/// for the SteamVR it left because that one was gone or quitting ([`crate::overlay::EXIT_STEAMVR_GONE`]), which would
-/// start SteamVR again or meet it going: only another SteamVR brings it back; after another failure, in a while.
-fn overlay_due(exited: Option<Option<i32>>, since: Duration, started_for: Option<u32>, steamvr: Option<u32>) -> bool {
-    match exited {
-        None => false,
-        Some(Some(crate::overlay::EXIT_STEAMVR_GONE)) => steamvr != started_for,
-        Some(_) => since >= OVERLAY_RETRY,
-    }
+/// Background connections cannot launch SteamVR. Every ended child is retryable,
+/// including a transient not-running/changed-compositor result and actual QUIT.
+/// Never overlap a live child. A new process identity resets the backoff.
+fn overlay_due(exited: Option<Option<i32>>, since: Duration, started_for: Option<crate::steamvr_start::Session>, steamvr: Option<crate::steamvr_start::Session>, failures: u32) -> bool {
+    if exited.is_none() { return false; }
+    if steamvr != started_for { return true; }
+    since >= OVERLAY_RETRY * if failures <= 1 { 1 } else { 2 }
 }
 
 /// Lets a process we start or signal take the foreground (Windows keeps background processes from stealing it).
@@ -720,18 +726,24 @@ pub(crate) mod tests {
     use super::*;
 
     #[test]
-    fn an_overlay_that_left_with_steamvr_waits_for_another_steamvr() {
-        let gone = Some(Some(crate::overlay::EXIT_STEAMVR_GONE));
-        let (soon, later) = (Duration::from_secs(1), OVERLAY_RETRY);
-        // Running, or still starting.
-        assert!(!overlay_due(None, later, Some(7), Some(7)));
-        // It left because SteamVR quit or was gone: not for that SteamVR, at once for another.
-        assert!(!overlay_due(gone, later * 10, Some(7), Some(7)));
-        assert!(overlay_due(gone, soon, Some(7), Some(8)));
-        // Another failure: tried again after a while.
-        assert!(!overlay_due(Some(Some(1)), soon, Some(7), Some(7)));
-        assert!(overlay_due(Some(Some(1)), later, Some(7), Some(7)));
-        assert!(overlay_due(Some(None), later, Some(7), Some(7)), "ended without a code");
+    fn transient_unready_and_quit_retry_on_the_same_server_forever() {
+        let session = Some((7, 100));
+        for code in [Some(crate::overlay::EXIT_STEAMVR_GONE), Some(0), Some(1), None] {
+            assert!(!overlay_due(None, OVERLAY_RETRY * 10, session, session, 1));
+            assert!(!overlay_due(Some(code), Duration::from_secs(1), session, session, 1));
+            assert!(overlay_due(Some(code), OVERLAY_RETRY, session, session, 1));
+            for failures in [2, 10, u32::MAX] {
+                assert!(!overlay_due(Some(code), OVERLAY_RETRY, session, session, failures));
+                assert!(overlay_due(Some(code), OVERLAY_RETRY * 2, session, session, failures));
+            }
+        }
+    }
+    #[test]
+    fn steamvr_exit_restart_and_pid_reuse_allow_immediate_retry() {
+        for next in [Some((8, 200)), Some((7, 200))] {
+            assert!(overlay_due(Some(Some(crate::overlay::EXIT_STEAMVR_GONE)), Duration::ZERO, Some((7, 100)), next, 100));
+            assert!(!overlay_due(None, Duration::ZERO, Some((7, 100)), next, 100));
+        }
     }
 
     use crate::link_between::{Between, Line};

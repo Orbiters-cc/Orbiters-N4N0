@@ -140,9 +140,10 @@ pub mod mac {
 
 /// Has SteamVR start this program with itself, or no longer: `Ok(true)` once it was told, `Ok(false)` when SteamVR is not
 /// running (the choice then waits for it in the settings).
-pub fn set_start_with_steamvr(on: bool) -> Result<bool, String> {
-    let (exe, path) = this_program()?;
-    applications::set_start_with_steamvr(&manifest(&exe), &path, on)
+pub fn set_start_with_steamvr(_on: bool) -> Result<bool, String> {
+    // The window marks its choice pending. Only the runtime owner reconciles it;
+    // a Settings checkbox must not initialize a competing vrclient.
+    Ok(false)
 }
 
 /// What the settings keep once SteamVR, which runs, was asked: a choice still waiting is told to it; else what it says
@@ -170,6 +171,11 @@ pub fn reconcile(client: &orbiters_openvr::Client, startup: &StartupSettings) ->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_settings_choice_waits_for_the_runtime_owner_without_connecting() {
+        assert_eq!(super::set_start_with_steamvr(true), Ok(false));
+        assert_eq!(super::set_start_with_steamvr(false), Ok(false));
+    }
     #[cfg(windows)]
     #[test]
     fn the_setup_leaves_its_choice_where_the_app_reads_its_settings() {

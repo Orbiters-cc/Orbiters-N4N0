@@ -7,9 +7,9 @@
 //! beside VRChat, opened by a watch on a wrist and used with the controllers' own lasers ([`floating`]): the dashboard
 //! takes the controllers from VRChat, the floating panel does not.
 //!
-//! It never starts SteamVR: it connects as an overlay application (the kind SteamVR starts for) only after a
-//! background connection, which SteamVR refuses when it is not running, found it running; and it ends when SteamVR
-//! quits or its server is gone, with [`EXIT_STEAMVR_GONE`].
+//! It never starts SteamVR: it initializes once as Background, which SteamVR refuses when it is not running,
+//! and obtains the overlay API on that same connection. Admission and Init failures remain retryable. It ends
+//! when SteamVR quits or its server is gone, with [`EXIT_STEAMVR_GONE`].
 
 mod actions;
 mod vr_log;
@@ -46,9 +46,9 @@ const WIDTH: u32 = ui::SIZE.x as u32;
 const HEIGHT: u32 = ui::SIZE.y as u32;
 const KEY: &str = "cc.orbiters.desktop";
 
-/// How an overlay that ended because SteamVR quit or is not running exits. The service should start no other one
-/// for the same SteamVR: a new one would find it gone, or going. ("ST": no runtime exits with it, unlike 3, which is
-/// the C runtime's `abort`.)
+/// Identifies an established overlay ending because SteamVR quit or disappeared.
+/// It does not permanently suppress retries: every connection is non-launching.
+/// ("ST": no runtime exits with it, unlike 3, which is the C runtime's `abort`.)
 pub const EXIT_STEAMVR_GONE: i32 = 0x5354;
 /// SteamVR's server can end without a quit event (a crash): once the service has not seen it this long, the overlay
 /// ends too, and the next SteamVR gets a new one.
@@ -618,35 +618,38 @@ fn while_hidden(events: &mut Vec<Event>) {
 enum Ended {
     /// The service closed it (the setting was turned off, the app quits) or went away.
     Closed,
+    /// Admission/Init was transiently unavailable; the keeper retries.
+    Retry,
     /// SteamVR quit, is quitting, or its server is gone.
     SteamVrGone,
 }
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     match session(args)? {
-        Ended::Closed => Ok(()),
+        Ended::Closed | Ended::Retry => Ok(()),
         // Everything was put back as the session ended: only the exit code is left to say.
         Ended::SteamVrGone => std::process::exit(EXIT_STEAMVR_GONE),
     }
 }
 
-/// SteamVR, never started for it. An overlay application's connection starts SteamVR when it is not running (right
-/// after the person quit it, while the service still sees its server go), a background one is refused instead: so a
-/// background connection looks first, and the overlay connects as what it is only once that found SteamVR running and
-/// not quitting. `None`: SteamVR is not running, or is shutting down.
+/// One non-launching runtime connection, admitted after bounded passive process observation.
+/// Overlay APIs use that same Background client: no probe/drop/Overlay Init window.
 fn connect_steamvr() -> anyhow::Result<Option<vr::Client>> {
-    match vr::Client::connect(vr::AppType::Background) {
-        Ok(probe) => {
-            let quitting = std::iter::from_fn(|| probe.poll_event()).any(|e| e.event_type == vr::event::QUIT);
+    let identity = crate::steamvr_start::ready_session();
+    let Some(identity) = identity else { return Ok(None) };
+    match vr::Client::connect_overlay_without_launch() {
+        Ok(client) => {
+            let quitting = std::iter::from_fn(|| client.poll_event()).any(|e| e.event_type == vr::event::QUIT);
             if quitting {
-                probe.acknowledge_quit();
+                client.acknowledge_quit();
                 return Ok(None);
             }
+            if crate::steamvr_start::current_session() != Some(identity) { return Ok(None); }
+            return Ok(Some(client));
         }
         Err(e) if e.not_running() => return Ok(None),
         Err(e) => return Err(anyhow::anyhow!("{e}")),
     }
-    vr::Client::connect(vr::AppType::Overlay).map(Some).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// SteamVR's server process, watched for its end: it can end without a quit event (a crash), and the service, which
@@ -754,7 +757,7 @@ impl Drop for Teardown<'_> {
 fn session(args: &[String]) -> anyhow::Result<Ended> {
     let endpoint = Endpoint::from_args(args).context("--overlay needs --service <port> <token>")?;
     // SteamVR first: an overlay that finds it gone leaves before the app ever counts it connected.
-    let Some(steamvr) = connect_steamvr()? else { return Ok(Ended::SteamVrGone) };
+    let Some(steamvr) = connect_steamvr()? else { return Ok(Ended::Retry) };
     // Before anything else: what an overlay that died left in SteamVR's settings comes back.
     if orbiters_core::osc::VRCHAT_RUNS_HERE {
         booster::recover_first(&steamvr);
@@ -762,6 +765,10 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let server = Server::find();
     let client = Client::connect(&endpoint, Role::Overlay)?;
     let backend: Ctl = Arc::new(Remote(client.clone()));
+    let mut startup_seen = backend.view().settings.startup.clone();
+    if let Some(startup) = crate::startup::reconcile(&steamvr, &startup_seen) {
+        client.send(&crate::ipc::ToService::PatchSettings { patch: serde_json::json!({"startup": startup}) });
+    }
     let overlay = steamvr.overlay().context("SteamVR has no overlay interface")?; // i18n: not shown (the overlay process's own stderr, a log nobody reads in a window)
     let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}"); // i18n: not shown (the overlay process's own stderr, a log nobody reads in a window)
     let (main, thumb) = overlay.create_dashboard(KEY, "Orbiters").map_err(|c| fail("dashboard tab", c))?; // i18n: not shown (an error text)
@@ -892,6 +899,12 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         }
         was_visible = visible;
         let snap = backend.view();
+        if snap.settings.startup != startup_seen {
+            startup_seen = snap.settings.startup.clone();
+            if let Some(startup) = crate::startup::reconcile(&steamvr, &startup_seen) {
+                client.send(&crate::ipc::ToService::PatchSettings { patch: serde_json::json!({"startup": startup}) });
+            }
+        }
         // The language the settings ask for, for the dashboard tab too, whether or not the menus around VRChat are on.
         crate::language::follow(&snap.settings);
         // Words that stay on the dashboard are put into the language now, as the settings can change it while they show.

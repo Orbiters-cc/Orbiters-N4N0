@@ -42,6 +42,7 @@ mod service;
 mod single;
 mod splat_export;
 mod startup;
+mod steamvr_start;
 mod state;
 mod streams;
 mod tracking;

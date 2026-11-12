@@ -511,6 +511,7 @@ fn outline_search(light: &Light, f: &Found, general:bool,gradient:bool) -> Optio
         if edges[i].is_empty() {return None;}
     }
     let model=[[-205.,-OUTLINE_HALF_HEIGHT],[205.,-OUTLINE_HALF_HEIGHT],[205.,OUTLINE_HALF_HEIGHT],[-205.,OUTLINE_HALF_HEIGHT]];
+    let mut best = None;
     for a in &edges[0] {for b in &edges[1] {for c in &edges[2] {for d in &edges[3] {
     let lines=[a,b,c,d];
     let solve=|| -> Option<_> {
@@ -539,9 +540,17 @@ fn outline_search(light: &Light, f: &Found, general:bool,gradient:bool) -> Optio
       let uncertainty=lines.iter().map(|e|e.error).fold(0.5f32,f32::max);
       Some((h,uncertainty,(4,points)))
     };
-    if let Some(result)=solve() {return Some(result);}
+    if let Some(result)=solve() {
+        // Evaluate the complete identity, rather than accepting the first four
+        // strong scene edges. Print's bevel can otherwise pair the true left
+        // edge with an unrelated parallel edge behind the camera.
+        let score=[(PANEL_X,f.x),(PANEL_CHEVRON,f.chevron)].iter().map(|&(p,q)| {
+            let r=project(result.0,p); (r[0]-q[0]).powi(2)+(r[1]-q[1]).powi(2)
+        }).sum::<f32>()+result.1.powi(2);
+        if best.as_ref().is_none_or(|(old,_)|score<*old) {best=Some((score,result));}
+    }
     }}}}
-    None
+    best.map(|(_,result)|result)
 }
 
 /// The panel in a picture of 4-byte pixels, whichever way round its colours are, or `None`.

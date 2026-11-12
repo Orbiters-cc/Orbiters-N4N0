@@ -511,6 +511,8 @@ fn outline_search(light: &Light, f: &Found, general:bool,gradient:bool) -> Optio
         if edges[i].is_empty() {return None;}
     }
     let model=[[-205.,-OUTLINE_HALF_HEIGHT],[205.,-OUTLINE_HALF_HEIGHT],[205.,OUTLINE_HALF_HEIGHT],[-205.,OUTLINE_HALF_HEIGHT]];
+    let mut rails=Vec::new();
+    if gradient {for level in BRIGHT {blobs(light,level,&mut rails);}}
     let mut best = None;
     for a in &edges[0] {for b in &edges[1] {for c in &edges[2] {for d in &edges[3] {
     let lines=[a,b,c,d];
@@ -536,6 +538,23 @@ fn outline_search(light: &Light, f: &Found, general:bool,gradient:bool) -> Optio
     for (p,q) in [(PANEL_X,f.x),(PANEL_CHEVRON,f.chevron)] {
         let r=project(h,p);
         if (r[0]-q[0]).hypot(r[1]-q[1])>16.*scale {return None;}
+    }
+    if gradient {
+        // Both white adjustment rails are on the front face, independent of
+        // camera mode and slider value. A background edge to their right is
+        // not the viewfinder border. Test them in the proposed panel plane.
+        let inverse=|q:[f32;2]| -> Option<[f32;2]> {
+            let a=h[0][0]-q[0]*h[2][0];let b=h[0][1]-q[0]*h[2][1];
+            let c=h[1][0]-q[1]*h[2][0];let d=h[1][1]-q[1]*h[2][1];
+            let u=q[0]-h[0][2];let v=q[1]-h[1][2];let det=a*d-b*c;
+            (det.abs()>1e-8).then(||[(u*d-b*v)/det,(a*v-u*c)/det])
+        };
+        let rail_x:Vec<_>=rails.iter().filter(|b|b.long>=b.short*2. && b.long>=6.*scale).filter_map(|b| {
+            let p=inverse(b.middle)?;
+            let q=inverse([b.middle[0]+b.along[0]*b.long,b.middle[1]+b.along[1]*b.long])?;
+            ((150.0..=200.0).contains(&p[0]) && (-20.0..=100.0).contains(&p[1]) && (q[0]-p[0]).abs()<(q[1]-p[1]).abs()*0.3).then_some(p[0])
+        }).collect();
+        if !rail_x.iter().any(|a|rail_x.iter().any(|b|(14.0..=30.0).contains(&(a-b).abs()))) {return None;}
     }
       let uncertainty=lines.iter().map(|e|e.error).fold(0.5f32,f32::max);
       Some((h,uncertainty,(4,points)))

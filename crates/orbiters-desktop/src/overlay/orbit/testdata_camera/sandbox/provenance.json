@@ -1,0 +1,74 @@
+[
+  {
+    "file": "camera-open-wheel-left.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\camera-open-wheel-left.png",
+    "origin": [
+      650,
+      650
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  },
+  {
+    "file": "camera-open-wheel-right.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\camera-open-wheel-right.png",
+    "origin": [
+      180,
+      650
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  },
+  {
+    "file": "camera-grab-move-left.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\camera-grab-move-left.png",
+    "origin": [
+      650,
+      650
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  },
+  {
+    "file": "camera-grab-move-right.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\camera-grab-move-right.png",
+    "origin": [
+      180,
+      650
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  },
+  {
+    "file": "camera-stream-baseline-left.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\camera-stream-baseline-left.png",
+    "origin": [
+      650,
+      650
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  },
+  {
+    "file": "camera-stream-baseline-right.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\camera-stream-baseline-right.png",
+    "origin": [
+      180,
+      650
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  }
+]

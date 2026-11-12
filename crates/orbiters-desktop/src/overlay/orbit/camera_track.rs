@@ -1672,3 +1672,20 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod sandbox_regression {
+    use super::*;
+    #[test]
+    fn live_photo_grab_and_stream_have_a_measured_plane_in_both_eyes() {
+        let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/sandbox");
+        for mode in ["camera-open-wheel","camera-grab-move","camera-stream-baseline"] {
+            for eye in ["left","right"] {
+                let name=format!("{mode}-{eye}.png");
+                let image=image::open(root.join(&name)).unwrap().to_rgba8();
+                let found=find(image.as_raw(),image.width() as usize,image.height() as usize,image.width() as usize*4).expect(&name);
+                assert!(found.perspective.is_some(),"{name}: glyphs found but no usable camera plane: {found:?}");
+            }
+        }
+    }
+}

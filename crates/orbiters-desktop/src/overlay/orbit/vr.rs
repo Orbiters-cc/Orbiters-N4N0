@@ -500,6 +500,21 @@ impl Plane {
     /// may move their hull back over the panel at a grazing angle.
     pub fn camera_quad(&self, placed: &Placed) -> Quad { self.quad(placed,0.0,0.0) }
 
+    /// SteamVR culls the back of an overlay, whereas VRChat's camera remains
+    /// visible from either side. Reverse the tile's face about its own centre;
+    /// its measured position, footprint and camera plane do not change.
+    pub fn camera_quad_facing(&self, placed: &Placed, head: &Matrix34) -> Quad {
+        let mut quad = self.camera_quad(placed);
+        let toward = std::array::from_fn(|i| head.m[i][3] - quad.transform.m[i][3]);
+        if space::dot(space::axis(&quad.transform, 2), toward) < 0.0 {
+            for row in &mut quad.transform.m {
+                row[0] = -row[0];
+                row[2] = -row[2];
+            }
+        }
+        quad
+    }
+
     /// Where a panel's quad is, at `back` units toward the plane's centre (its spring).
     pub fn quad(&self, placed: &Placed, back: f32, near: f32) -> Quad {
         let c = placed.rect.center();
@@ -1417,13 +1432,13 @@ impl OrbitVr {
                 let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack | Zone::SheetPeek);
                 // The page a code opened, and its bar: stood up on the camera's top edge.
                 if matches!(p.zone, Zone::CameraWeb | Zone::CameraWebBar) {
-                    return (camera_top_plane(&plane).camera_quad(&on_camera_top(p.placed)), p.placed);
+                    return (camera_top_plane(&plane).camera_quad_facing(&on_camera_top(p.placed), &head), p.placed);
                 }
                 let on = if sheet { self.takeover_plane.unwrap_or(plane) } else { plane };
                 let near = near(p.zone, sheet_up);
                 let placed = clear_of_sheet(p.placed, sheet_up);
                 // Camera tools lie in the fitted panel's own plane, with no spring or depth (camera-core).
-                let quad = if menu == Some(Around::Camera) && !sheet { on.camera_quad(&placed) } else { on.quad(&placed, -p.outward(), near) };
+                let quad = if menu == Some(Around::Camera) && !sheet { on.camera_quad_facing(&placed, &head) } else { on.quad(&placed, -p.outward(), near) };
                 (quad, p.placed)
             })
             .collect();
@@ -2206,6 +2221,33 @@ mod tests {
     /// A camera's plane: its middle at `at`, its picture's right along `x`, its up along `y`, facing along `x` cross `y`.
     fn camera_at(x: V3, y: V3, at: V3) -> Plane {
         Plane { frame: space::from_axes(x, y, space::cross(x, y), at), unit: camera_track::PANEL_M / camera_track::PANEL_SIZE[0] }
+    }
+
+    #[test]
+    fn camera_tiles_remain_visible_from_the_back_without_moving_their_hull() {
+        let camera = camera_at([1.,0.,0.], [0.,1.,0.], [0.,1.2,-0.6]);
+        for zone in [Zone::CameraPeople, Zone::CameraWorld, Zone::CameraRecord, Zone::CameraQr] {
+            let placed = zones::in_units(zone);
+            let original = camera.camera_quad(&placed);
+            for z in [-1.2, 0.] {
+                let head = space::from_axes([1.,0.,0.], [0.,1.,0.], [0.,0.,1.], [0.,1.6,z]);
+                let visible = camera.camera_quad_facing(&placed, &head);
+                let toward = std::array::from_fn(|i| head.m[i][3] - visible.transform.m[i][3]);
+                assert!(space::dot(space::axis(&visible.transform,2),toward)>0.);
+                assert_eq!(space::apply(&visible.transform,[0.;3]), space::apply(&original.transform,[0.;3]));
+                assert_eq!((visible.width,visible.height),(original.width,original.height));
+                for (u,v) in [(-0.5,-0.5),(0.5,-0.5),(-0.5,0.5),(0.5,0.5)] {
+                    let corner = space::apply(&visible.transform,[u*visible.width,v*visible.height,0.]);
+                    let inverse = space::apply(&space::inverse(&original.transform),corner);
+                    assert!((inverse[0].abs()-visible.width/2.).abs()<1e-6);
+                    assert!((inverse[1].abs()-visible.height/2.).abs()<1e-6);
+                    assert!(inverse[2].abs()<1e-6);
+                }
+                if z < -0.6 {
+                    assert!(space::dot(space::axis(&original.transform,2),toward)<0.,"the old submitted quad is backface culled");
+                }
+            }
+        }
     }
 
     /// Enzo (F17): the page a code opened lies over the camera's top edge and never in front of the camera: in its plane over a camera held upright, stood up over

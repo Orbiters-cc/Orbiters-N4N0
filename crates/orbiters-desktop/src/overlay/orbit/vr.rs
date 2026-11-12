@@ -662,8 +662,8 @@ fn settings_walk_left(snap: &Snapshot) -> bool {
     snap.settings.walk_boost.hand == orbiters_core::settings::Hand::Left
 }
 
-/// How long the tiles stay where they are with no look seeing the panel (a hand over it, a white world behind its X, a head turned away): let go it stays still in the room, so what is known of it
-/// stays true for long. And how many looks it takes to show them at first. They go at once when VRChat says its camera closed.
+/// Briefly bridge missed visual observations, or follow a verified holding hand.
+/// Closing the camera hides immediately; opening never supplies a guessed pose.
 const CAMERA_LOST_AFTER: Duration = Duration::from_millis(500);
 /// How far within the eye's view the tiles must lie, of its width: its very edge is not seen through the lens.
 const CAMERA_VIEW_MARGIN: f32 = 0.1;
@@ -726,16 +726,16 @@ impl OrbitVr {
         // or head-relative guess while waiting for an actual camera observation.
         if poses[0].pose_is_valid {
             // Where the head will be `prediction` from now, which is when this pose is for.
-            self.camera_heads.push_back((now + Duration::from_secs_f32(prediction.max(0.0)), poses[0].device_to_absolute));
-            while self.camera_heads.len() > 60 {
+            self.camera_heads.push_back((now + Duration::from_secs_f32(prediction.max(0.0)), poses[0].device_to_absolute,hands));
+            while self.camera_heads.len() > 180 {
                 self.camera_heads.pop_front();
             }
         }
         if let Some(seen) = watch.take().filter(|seen|seen.at>=self.camera_epoch) {
             let age = if seen.source == Source::Eye { self.tune.camera_eye_age_ms } else { self.tune.camera_window_age_ms };
             let then = seen.at.checked_sub(Duration::from_secs_f32(age.max(0.0) / 1000.0)).unwrap_or(seen.at);
-            let head = self.camera_heads.iter().min_by_key(|(at, _)| if *at > then { *at - then } else { then - *at }).map(|(_, h)| *h);
-            if let Some(head) = head {
+            let sample = self.camera_heads.iter().min_by_key(|(at, ..)| if *at > then { *at - then } else { then - *at }).map(|(_, h,hands)| (*h,*hands));
+            if let Some((head,captured_hands)) = sample {
                 let eye_on_head = steamvr.eye_to_head(vr::compositor::Eye::Left);
                 let raw = steamvr.projection_raw(vr::compositor::Eye::Left);
                 let whole = camera_track::Mirror::whole_eye(raw);
@@ -788,6 +788,12 @@ impl OrbitVr {
                 } else { self.camera_follow.seen(frame,unit) };
                 self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
                 self.camera_seen = Some(now);
+                let observed_grips=if input_read {actions.grabs(steamvr)} else {[false;2]};
+                if self.camera_scale_measured() {
+                    if let Some(hand)=self.camera_follow.observe_grab(frame,unit,captured_hands,observed_grips) {
+                        super::super::vr_log::line(&format!("camera grab verified by rigid motion: hand {hand}, grips {observed_grips:?}")); // i18n: not shown (diagnostics)
+                    }
+                }
                 if adopted {
                     self.camera_looks = self.camera_looks.saturating_add(1);
                     self.camera_reopen.remember(frame,unit,self.camera_side,self.camera_clearance,&head,hand_devices,self.camera_follow.held_hand());
@@ -821,8 +827,9 @@ impl OrbitVr {
             self.camera_stereo_at=None;
             self.camera_panel_seen_ns=None;
         }
-        // Before any observation, the owner-approved initial estimate stays explicitly provisional.
-        // With observations, validate the displayed hull in every available eye. Mono remains provisional.
+        // Validate unheld display against the observed eyes. A verified holding
+        // hand propagates the measured plane; old eye coordinates cannot guard
+        // that new position against the panel's previous position.
         if !self.camera_follow.is_held() && !self.camera_exclusion.is_empty() {
             let clear = |frame: &Matrix34, unit| {
                 if self.camera_exclusion.len()==2 { camera_track::binocular_clear(&self.camera_exclusion,frame,unit,self.camera_side,self.camera_clearance) }
@@ -989,7 +996,7 @@ pub struct OrbitVr {
     camera_seen: Option<Instant>,
     camera_looks: u32,
     /// The head lately, for where it was when a look's frame was taken.
-    camera_heads: std::collections::VecDeque<(Instant, Matrix34)>,
+    camera_heads: std::collections::VecDeque<(Instant, Matrix34,[Option<Matrix34>;2])>,
     trigger_was: [bool; 2],
     pointing_since: Instant,
     last_turn: Instant,

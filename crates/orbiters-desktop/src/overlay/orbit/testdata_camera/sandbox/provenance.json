@@ -70,5 +70,101 @@
       1620,
       1800
     ]
+  },
+  {
+    "file": "close-open-left.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\fixed-photo-open-left.png",
+    "origin": [
+      500,
+      900
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  },
+  {
+    "file": "close-open-right.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\fixed-photo-open-right.png",
+    "origin": [
+      0,
+      900
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  },
+  {
+    "file": "close-held-left.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\fixed-photo-held-left.png",
+    "origin": [
+      700,
+      800
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  },
+  {
+    "file": "close-held-right.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\fixed-photo-held-right.png",
+    "origin": [
+      150,
+      800
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  },
+  {
+    "file": "mode-print-left.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\fixed-mode-print-left.png",
+    "origin": [
+      830,
+      570
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  },
+  {
+    "file": "mode-print-right.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\fixed-mode-print-right.png",
+    "origin": [
+      350,
+      570
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  },
+  {
+    "file": "mode-drone-left.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\fixed-mode-drone-left.png",
+    "origin": [
+      830,
+      570
+    ],
+    "size": [
+      1620,
+      1800
+    ]
+  },
+  {
+    "file": "mode-drone-right.png",
+    "source": "C:\\Users\\Enzo\\.orbiters-build\\vr-feedback-1111\\sandbox-camera\\fixed-mode-drone-right.png",
+    "origin": [
+      350,
+      570
+    ],
+    "size": [
+      1620,
+      1800
+    ]
   }
 ]

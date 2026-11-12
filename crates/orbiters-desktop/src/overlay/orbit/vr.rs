@@ -638,6 +638,8 @@ pub struct Turn {
     pub(in crate::overlay) menus_up: Vec<super::super::worlds::stereo::MenuBox>,
     /// Where the sheet has a place for a capture standing small: the middle of its hole, its Z towards who looks, and how far it can reach there.
     pub(in crate::overlay) small_place: Option<(Matrix34, f32)>,
+    /// That hole as the backdrop behind the capture needs it: its size, and the sheet's opaque picture around it (worlds/opening.rs).
+    pub(in crate::overlay) small_opening: Option<super::super::worlds::opening::Opening>,
 }
 
 /// How much of the eye VRChat's window shows, as worked back from Enzo's two pictures: its tiles were 1.4 times the panel's scale, and how far they were off grows with the place on the picture by that.
@@ -1533,6 +1535,20 @@ impl OrbitVr {
             let (x, y) = ((hole.center().x / 1024.0 - 0.5) * quad.width, (0.5 - hole.center().y / 576.0) * quad.height);
             let there = Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
             Some((space::compose(&frame, &there), hole.width() / 1024.0 * quad.width / 2.0 * super::super::worlds::SMALL_FILLS_HOLE))
+        });
+        // Our layer between the capture and VRChat's menu (G1): drawn behind the capture in its own pictures, through the hole and under the sheet round it.
+        turn.small_opening = turn.small_place.zip(self.panels.small_place_on_sheet()).and_then(|((at, radius), hole)| {
+            use super::super::worlds::opening::{self, Look, Opening};
+            let frame_of = |i: usize| match &placing[i] {
+                Placing::At(m) => *m,
+                Placing::Room => quads[i].0.transform,
+            };
+            let page = self.panels.all().position(|p| p.zone == Zone::Takeover)?;
+            let half = [hole.width() / 1024.0 * quads[page].0.width / 2.0, hole.height() / 576.0 * quads[page].0.height / 2.0];
+            let sheet = self.panels.all().position(|p| p.zone == Zone::SheetBack).unwrap_or(page);
+            let sheet = opening::rect_from(&at, &frame_of(sheet), quads[sheet].0.width, quads[sheet].0.height);
+            let accent = super::panels::look::accent();
+            Some(Opening::in_sheet(at, half, sheet, radius, Look::ours([accent.r(), accent.g(), accent.b()], super::panels::look::retro())))
         });
         // The stick's up and down scrolls what is on the sheet, unless a hand holds what shows small: that is zoomed with it. The stick that does not walk, as VRChat's turning one.
         if (self.panels.sheet_open() || self.panels.web_pointed()) && !cx.world_status.small_held && cx.input_read {

@@ -17,7 +17,7 @@ mod pages;
 mod shots;
 
 pub use bar::{bar_hit, bar_press, draw_bar, BAR_PX};
-pub use shots::{shots, side_live};
+pub use shots::{shots, side_live, side_small};
 
 use super::catalog::Entry;
 pub use super::finder::Section;

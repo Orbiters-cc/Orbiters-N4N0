@@ -32,6 +32,7 @@ pub mod finder;
 #[cfg(windows)]
 pub mod interop;
 pub mod panel;
+pub mod opening;
 pub mod pacing;
 pub mod render;
 pub mod shots;
@@ -1067,6 +1068,11 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     /// The hole in the panel it shows through, when it lies there now.
     pub fn small_hole(&self) -> Option<egui::Rect> {
         self.panel.hole(&self.status())
+    }
+
+    /// The hole of that place, for the backdrop behind what shows small in it (opening.rs).
+    pub fn small_opening(&mut self, opening: Option<opening::Opening>) {
+        self.view.small_opening(opening);
     }
 
     /// Where a panel has a place for what shows small, and how large it is.

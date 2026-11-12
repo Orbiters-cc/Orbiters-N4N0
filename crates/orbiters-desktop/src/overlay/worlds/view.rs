@@ -11,6 +11,7 @@
 //! while still and without overload, a stale face out of view is drawn again whole for a later turn.
 
 use super::catalog::Capture;
+use super::opening::Opening;
 use super::pacing::{Kind, Pacer};
 use super::render::FaceRenderer;
 use super::stereo::TurnStick;
@@ -140,6 +141,8 @@ pub struct Job {
     pub work: Work,
     /// Small with its middle moved: only what it reaches from there, with the capture to read that from.
     pub clip: Option<(V3, f32, f32, Arc<Capture>)>,
+    /// Small in a panel's hole: our backdrop under what the splats leave, where the rays go through the hole (opening.rs).
+    pub opening: Option<Opening>,
     /// Splats drawn (the first ones: the reveal).
     pub count: usize,
     /// The shared fence value the GPU waits for first.
@@ -173,10 +176,10 @@ pub fn draw(renderer: &mut FaceRenderer, job: &Job, targets: &[&eframe::wgpu::Te
         Work::Faces(faces) => {
             for &(face, _) in faces {
                 for eye in 0..2 {
-                    renderer.render_master(&job.cube, &job.placement, job.eyes[eye], eye, face, job.count)?;
+                    renderer.render_master(&job.cube, &job.placement, job.eyes[eye], eye, face, job.count, job.opening.as_ref())?;
                 }
             }
-            renderer.resample(&job.cube, &[], &publish);
+            renderer.resample(&job.cube, &[], &publish, job.opening.as_ref());
         }
         Work::Wide { cameras, faces } => {
             for (eye, camera) in cameras.iter().enumerate() {
@@ -184,7 +187,7 @@ pub fn draw(renderer: &mut FaceRenderer, job: &Job, targets: &[&eframe::wgpu::Te
             }
             let jobs: Vec<(usize, usize, PlayCamera)> =
                 faces.iter().flat_map(|&(f, _)| (0..2).filter(move |&e| job.cube.face_in(f, &cameras[e])).map(move |e| (f, e, cameras[e]))).collect();
-            renderer.resample(&job.cube, &jobs, &publish);
+            renderer.resample(&job.cube, &jobs, &publish, job.opening.as_ref());
         }
     }
     renderer.finish()
@@ -336,6 +339,11 @@ pub struct View {
     small_coming: Option<mpsc::Receiver<Arc<Capture>>>,
     /// Where a panel has a place for it, and how large that is: the panel's turn to say, each frame.
     small_place: Option<(vr::Matrix34, f32)>,
+    /// The hole of that place, as the backdrop behind what shows small in it needs it: the panel's turn to say, each frame.
+    small_opening: Option<Opening>,
+    /// The opening the last wide views were drawn with, and whether a face's pictures may still hold a backdrop.
+    wide_opening: Option<Opening>,
+    opening_drawn: bool,
     /// When the hands last moved it; where it stood for the wide views last drawn.
     small_read: Option<Instant>,
     wide_placement: Option<Placement>,
@@ -412,6 +420,9 @@ impl View {
             small: None,
             small_coming: None,
             small_place: None,
+            small_opening: None,
+            wide_opening: None,
+            opening_drawn: false,
             small_read: None,
             wide_placement: None,
             quality: Quality::default(),
@@ -658,6 +669,11 @@ impl View {
         self.small_place = place;
     }
 
+    /// The hole a panel has for what shows small, for the backdrop behind it there, or that it has none.
+    pub fn small_opening(&mut self, opening: Option<Opening>) {
+        self.small_opening = opening;
+    }
+
     /// What shows small, once it shows.
     pub fn small_now(&self) -> Option<&stereo::Small> {
         self.small.as_ref().filter(|_| matches!(self.phase, Phase::Shown { .. }))
@@ -839,6 +855,8 @@ impl View {
                     self.cubes = [None; 2];
                     self.switching = None;
                     self.in_flight = None;
+                    self.wide_opening = None;
+                    self.opening_drawn = false;
                     return;
                 }
                 let from = self.alpha;
@@ -1022,6 +1040,8 @@ impl View {
             let ceiling = if small.docked { capture.view.ground() + small.reach() * stereo::HOLE_CEILING_PER_REACH } else { f32::INFINITY };
             (small.middle(capture.view.eye()), small.reach(), ceiling, capture.clone())
         });
+        // In a panel's hole, our backdrop behind it (opening.rs): the one last drawn while the panel only trembles in the hand.
+        let opening = opening_for(self.small_opening, self.small.as_ref().is_some_and(|s| s.docked), self.wide_opening);
         let pixels = self.width - 2 * MARGIN;
         let id = self.next_id;
         let active_holds = self.cubes[self.active].is_some_and(|c| c.pixels == pixels && eyes.iter().all(|e| c.holds(*e, REACH_M)));
@@ -1043,16 +1063,28 @@ impl View {
                 }
             }
             self.next_id += 1;
+            self.opening_drawn |= opening.is_some();
+            self.wide_opening = opening;
             let faces = (0..6).map(|f| (f, 1 - self.shown_slot[f])).collect();
-            return Some(Job { id, cube, cube_index: next, placement, eyes, work: Work::Faces(faces), count, clip: clip.clone(), wait: self.wait });
+            return Some(Job { id, cube, cube_index: next, placement, eyes, work: Work::Faces(faces), count, clip: clip.clone(), opening, wait: self.wait });
         }
         let cube = self.cubes[self.active]?;
+        if opening.is_none() && std::mem::take(&mut self.opening_drawn) {
+            // Out of its hole (taken in a hand, or the menu closed): every face drawn again whole, so no texel out of view keeps a piece of
+            // the backdrop, which would float where the hole was.
+            self.wide_opening = None;
+            self.last_wide = None;
+            self.next_id += 1;
+            let faces = (0..6).map(|f| (f, 1 - self.shown_slot[f])).collect();
+            return Some(Job { id, cube, cube_index: self.active, placement, eyes, work: Work::Faces(faces), count, clip: clip.clone(), opening: None, wait: self.wait });
+        }
         let looking = stereo::scale(stereo::axis(head, 2), -1.0);
         let due = match self.last_wide {
             None => true,
             Some((from, look, drawn)) => {
                 drawn != count
                     || self.wide_placement != Some(placement)
+                    || self.wide_opening != opening
                     || (0..2).any(|e| super::pacing::translation_due(stereo::length(stereo::sub(eyes[e], from[e])), self.moving, self.still, self.settling))
                     || stereo::dot(look, looking).clamp(-1.0, 1.0).acos() > TURNED
             }
@@ -1066,9 +1098,11 @@ impl View {
             }
             self.last_wide = Some((eyes, looking, count));
             self.wide_placement = Some(placement);
+            self.wide_opening = opening;
+            self.opening_drawn |= opening.is_some();
             self.settling = false;
             self.next_id += 1;
-            return Some(Job { id, cube, cube_index: self.active, placement, eyes, work: Work::Wide { cameras, faces }, count, clip: clip.clone(), wait: self.wait });
+            return Some(Job { id, cube, cube_index: self.active, placement, eyes, work: Work::Wide { cameras, faces }, count, clip: clip.clone(), opening, wait: self.wait });
         }
         // Now and then a face out of view, drawn whole from where the eyes are now.
         if !self.still || self.pacer.level != 0 || self.last_unseen.is_some_and(|t| now.duration_since(t) < UNSEEN_EVERY) {
@@ -1089,8 +1123,10 @@ impl View {
                 self.unseen_turn = f + 1;
                 self.last_unseen = Some(now);
                 self.next_id += 1;
+                self.opening_drawn |= opening.is_some();
                 return Some(Job {
                     clip: clip.clone(),
+                    opening,
                     id,
                     cube,
                     cube_index: self.active,
@@ -1220,6 +1256,16 @@ impl View {
             let _ = (overlay, cube_index, faces, eyes, count);
         }
     }
+}
+
+/// The opening the next batch draws the backdrop of: the panel's (`asked`), while what shows small lies in its hole (`docked`); the one
+/// `drawn` last while the panel only trembles in a hand, which then draws nothing again.
+pub fn opening_for(asked: Option<Opening>, docked: bool, drawn: Option<Opening>) -> Option<Opening> {
+    let asked = asked.filter(|_| docked)?;
+    Some(match drawn {
+        Some(d) if !asked.moved_from(&d) => d,
+        _ => asked,
+    })
 }
 
 /// The headset's pose `seconds` ahead (standing play space), or a standing head at the origin when it is not tracked.

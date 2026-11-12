@@ -1142,7 +1142,12 @@ pub struct Follow {
     scene_age_count: usize,
     scene_age_next: usize,
     clock_pixels: Option<([f32;2],[f32;2])>,
+    clock_submissions: [Option<ClockSubmission>;32],
+    clock_submission_next: usize,
 }
+
+#[derive(Clone,Copy,Debug)]
+struct ClockSubmission { at:std::time::Instant, point:[f32;3], delay:f32 }
 
 #[derive(Clone,Copy,Debug)]
 struct ImageGrab { panel:Matrix34,relation:Matrix34,unit:f32,anchors:[[f32;2];2] }
@@ -1371,6 +1376,15 @@ impl Follow {
         self.record_anchor=Some([q[0],-q[1]]);
     }
     pub fn record_ready(&self) -> bool {self.record_anchor.is_some()}
+    /// Keep the actual displayed raster point and the delay used for that
+    /// submission. A delayed image must not correct a newer control value.
+    pub fn record_submission(&mut self,frame:Matrix34,unit:f32,at:std::time::Instant) {
+        if !self.is_held(){return;}
+        let Some(anchor)=self.record_anchor else{return;};
+        let point=std::array::from_fn(|i|frame.m[i][3]+frame.m[i][0]*anchor[0]*unit-frame.m[i][1]*anchor[1]*unit);
+        self.clock_submissions[self.clock_submission_next]=Some(ClockSubmission{at,point,delay:self.scene_age().unwrap_or(0.)});
+        self.clock_submission_next=(self.clock_submission_next+1)%self.clock_submissions.len();
+    }
     pub fn record_still(&self,samples:&[(f32,[Option<Matrix34>;2])]) -> bool {
         let Some(hand)=self.held_hand() else{return true;};
         let Some((first_age,first))=samples.first() else{return false;};
@@ -1381,7 +1395,7 @@ impl Follow {
     }
     /// Compare scene and overlay pixels from the SAME compositor image. Delaying
     /// by the scene's absolute age would count overlay submission latency twice.
-    pub fn composited_clock(&mut self,native_age:f32,native:[f32;2],record:[f32;2],size:[f32;2],mirror:Mirror,eye:&Matrix34,samples:&[(f32,[Option<Matrix34>;2])]) {
+    pub fn composited_clock(&mut self,native_age:f32,native:[f32;2],record:[f32;2],size:[f32;2],mirror:Mirror,eye:&Matrix34,samples:&[(f32,[Option<Matrix34>;2])],captured:std::time::Instant) {
         if !self.is_held(){return;}
         // A stopped camera can still match moving poses left in the history.
         // Repeated scene/overlay pixels contain no new timing information;
@@ -1403,11 +1417,25 @@ impl Follow {
         let Some(first)=candidates.first().map(|c|c.2) else{return;};
         if !candidates.iter().any(|c|(c.2[0]-first[0]).hypot(c.2[1]-first[1])>=3.){return;}
         let Some((error,overlay_age,_))=candidates.into_iter().min_by(|a,b|a.0.total_cmp(&b.0)) else{return;};
-        if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
-            super::super::vr_log::line(&format!("camera relative clock fit: native_age={native_age}, overlay_age={overlay_age}, residual_px={error}")); // i18n: not shown (sandbox diagnostics)
-        }
         if error>6.{return;}
-        let delay=(self.scene_age().unwrap_or(0.)+(native_age-overlay_age)*0.25).clamp(0.,0.2);
+        let mut submitted=Vec::new();
+        for s in self.clock_submissions.iter().flatten() {
+            if captured.checked_duration_since(s.at).is_none_or(|age|age.as_secs_f32()>0.2){continue;}
+            let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*s.point[j]).sum::<f32>());
+            if v[2]>=-0.0001{continue;}
+            let t=[v[0]/-v[2],-v[1]/-v[2]];let p:[f32;2]=std::array::from_fn(|i|(t[i]-mirror.from[i])/mirror.spans[i]*size[i]);
+            submitted.push(((p[0]-record[0]).hypot(p[1]-record[1]),s.delay,p));
+        }
+        let Some(first)=submitted.first().map(|s|s.2) else{return;};
+        if !submitted.iter().any(|s|(s.2[0]-first[0]).hypot(s.2[1]-first[1])>=3.){return;}
+        let Some((submission_error,applied_delay,_))=submitted.into_iter().min_by(|a,b|a.0.total_cmp(&b.0)) else{return;};
+        if submission_error>6.{return;}
+        // Native age minus overlay age is the remaining error in THAT
+        // submission, not in the newer value current when recognition finishes.
+        let delay=(applied_delay+native_age-overlay_age).clamp(0.,0.2);
+        if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
+            super::super::vr_log::line(&format!("camera relative clock fit: native_age={native_age}, overlay_age={overlay_age}, applied_delay={applied_delay}, target_delay={delay}, residual_px={error}, submission_residual_px={submission_error}")); // i18n: not shown (sandbox diagnostics)
+        }
         self.scene_ages[self.scene_age_next]=delay;
         self.scene_age_next=(self.scene_age_next+1)%self.scene_ages.len();
         self.scene_age_count=(self.scene_age_count+1).min(self.scene_ages.len());
@@ -1815,14 +1843,42 @@ mod tests {
         assert!((follow.record_anchor.unwrap()[0]+280.).abs()<0.1);
         let still_samples=[(0.2,samples[2].1),(0.,samples[2].1)];
         assert!(follow.record_still(&still_samples));assert!(!follow.record_still(&samples));
+        for hands in [samples[2].1,samples[4].1] {
+            let (frame,unit)=follow.panel_in_hands(hands).unwrap();
+            follow.record_submission(frame,unit,std::time::Instant::now());
+        }
         follow.clock_pixels=Some(([native.x[0]-2.,native.x[1]],[record[0]-2.,record[1]]));
-        follow.composited_clock(age,native.x,record,size,mirror,&eye,&samples);
-        assert!((follow.scene_age().unwrap()-0.01).abs()<1e-4,"one quarter of the observed 40ms relative error, not absolute scene age");
+        follow.composited_clock(age,native.x,record,size,mirror,&eye,&samples,std::time::Instant::now());
+        assert!((follow.scene_age().unwrap()-0.04).abs()<1e-4,"the observed submission needs 40ms, not absolute scene age or a correction to a newer control value");
         let delay=follow.scene_age();
         for stopped_age in [0.08,0.1,0.15,0.19] {
-            follow.composited_clock(stopped_age,native.x,record,size,mirror,&eye,&samples);
+            follow.composited_clock(stopped_age,native.x,record,size,mirror,&eye,&samples,std::time::Instant::now());
         }
         assert_eq!(follow.scene_age(),delay,"stopped pixels must not invent extra delay from old moving history");
+    }
+
+    #[test]
+    fn compositor_backlog_uses_the_delay_of_the_visible_submission() {
+        let mirror=Mirror::whole_eye(QUEST_PRO);let size=[1620.,1800.];let eye=STILL;
+        let mut panel=STILL;panel.m[2][3]=-1.;let unit=0.001;
+        let mut follow=Follow::default();follow.attach(panel,unit);follow.held=Some((1,STILL));
+        let pixel=|x:f32,y:f32|[(x-mirror.from[0])/mirror.spans[0]*size[0],(-y-mirror.from[1])/mirror.spans[1]*size[1]];
+        follow.calibrate_record(pixel(-0.28,-0.04),size,mirror,&eye,[None,Some(STILL)],true);
+        // These outputs were submitted with zero delay. Recognition is delayed
+        // until a newer control value has already risen to 80ms.
+        for k in 0..=5 {
+            let mut frame=panel;frame.m[0][3]=0.08+k as f32*0.01;
+            follow.record_submission(frame,unit,std::time::Instant::now());
+        }
+        follow.scene_ages=[0.08;5];follow.scene_age_count=5;follow.scene_age_next=0;
+        let captured=std::time::Instant::now();
+        for k in 0..=5 {
+            let samples:Vec<_>=(0..=10).map(|i| {let mut hand=STILL;hand.m[0][3]=0.1+k as f32*0.01-i as f32*0.01;(i as f32*0.01,[None,Some(hand)])}).collect();
+            let native=follow.search_hint(size,mirror,&eye,samples[6].1).unwrap();
+            let record=pixel(0.08+k as f32*0.01-0.28,-0.04);
+            follow.composited_clock(0.06,native.x,record,size,mirror,&eye,&samples,captured);
+        }
+        assert!((follow.scene_age().unwrap()-0.04).abs()<1e-4,"60ms native minus 20ms overlay corrects the visible zero-delay submission to 40ms; adding to the newer 80ms value double-counts feedback");
     }
 
     #[test]

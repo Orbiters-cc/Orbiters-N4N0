@@ -376,12 +376,16 @@ mod tests {
     }
     #[test]
     fn settled_worker_frames_match_the_serial_canvas() {
+        let _one = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         panels::set_style(&orbiters_core::settings::OrbitSettings::default());
+        for language in orbiters_i18n::Language::ALL {
+        orbiters_i18n::in_language(language, || {
         let painter = Painter::new([512, 288]);
         let mut serial = Canvas::zoomed(512, 288, 512.0 / orbiters_n4n0_core::menu::layout::WIDTH as f32).in_orbit_look();
         for sheet in [Sheet::Settings, Sheet::Tracking, Sheet::Settings] {
             for _ in 0..2 {
-                let request = request(1, sheet);
+                let mut request = request(1, sheet);
+                request.language = language;
                 let facts = request.facts.clone();
                 painter.submit(request);
                 let began = Instant::now();
@@ -390,7 +394,7 @@ mod tests {
                     assert!(began.elapsed() < Duration::from_secs(10));
                     std::thread::sleep(Duration::from_millis(2));
                 };
-                orbiters_i18n::in_language(orbiters_i18n::Language::En, || {
+                orbiters_i18n::in_language(language, || {
                     serial.paint(1.0, |p| panels::paint_sheet(p, sheet, &facts, None, None));
                     let mut pixels = serial.pixels().to_vec();
                     panels::finish_picture(&mut pixels, serial.pixels(), [512, 288], 512.0 / orbiters_n4n0_core::menu::layout::WIDTH as f32, [0, 0, 512, 288]);
@@ -398,6 +402,8 @@ mod tests {
                     assert_eq!(frame.pixels.as_slice(), pixels);
                 });
             }
+        }
+        });
         }
     }
 

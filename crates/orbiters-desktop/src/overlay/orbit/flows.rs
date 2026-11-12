@@ -368,11 +368,16 @@ fn press_on(panels: &mut Panels, snap: &Snapshot, around: Option<Around>, action
 /// pixel of any part is more than a few levels from the new part's, and few are off at all; with it made anew, none is.
 #[test]
 fn a_kept_part_is_a_level_or_two_off_a_new_one_at_most_and_not_at_all_with_its_interface_anew() {
+    // This sample corpus has an English atlas-history bound. Do not let an earlier
+    // controller test or the computer's locale select a different corpus halfway
+    // through its retained/fresh comparison. Pixel assertions remain unchanged.
+    orbiters_i18n::in_language(orbiters_i18n::Language::En, || {
     fn none(_: &std::path::Path, _: &[std::path::PathBuf]) -> Vec<super::LoadedRecent> {
         Vec::new()
     }
     for anew in [false, true] {
         let mut person = Person::with_a_song();
+        Arc::make_mut(&mut person.snap).settings.language = Some("en".into());
         person.panels.recents.lister = Some(none);
         person.panels.fonts_anew = anew;
         person.panels.clock = Some(1.0);
@@ -443,6 +448,7 @@ fn a_kept_part_is_a_level_or_two_off_a_new_one_at_most_and_not_at_all_with_its_i
             assert!(off * 500 <= pixels, "and {off} of {pixels} bytes are off at all");
         }
     }
+    });
 }
 
 /// With a menu up and nothing changing, no part is due a picture. Every part was, every turn: the facts held a new empty gallery each turn, and galleries are compared by

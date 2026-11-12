@@ -59,11 +59,35 @@ def unit_rotation(values):
     if q[0]==0:q[0]=math.cos(math.pi/2)
     return q
 
+class ProcessEntry(C.Structure):
+    _fields_=[('size',C.c_uint32),('usage',C.c_uint32),('pid',C.c_uint32),('heap',C.c_size_t),('module',C.c_uint32),('threads',C.c_uint32),('parent',C.c_uint32),('priority',C.c_int32),('flags',C.c_uint32),('name',C.c_wchar*260)]
+kernel.CreateToolhelp32Snapshot.argtypes=[C.c_uint32,C.c_uint32]
+kernel.CreateToolhelp32Snapshot.restype=C.c_void_p
+kernel.Process32FirstW.argtypes=[C.c_void_p,C.POINTER(ProcessEntry)]
+kernel.Process32NextW.argtypes=[C.c_void_p,C.POINTER(ProcessEntry)]
+
+def process_names():
+    # Enumerate names natively before asking psutil for identities. Querying
+    # every Windows process individually stalls each bridge request for seconds.
+    handle=kernel.CreateToolhelp32Snapshot(2,0)
+    if handle in (None,C.c_void_p(-1).value):raise C.WinError(C.get_last_error())
+    try:
+        entry=ProcessEntry();entry.size=C.sizeof(entry)
+        if not kernel.Process32FirstW(handle,C.byref(entry)):raise C.WinError(C.get_last_error())
+        result=[]
+        while True:
+            result.append((entry.pid,entry.name))
+            if not kernel.Process32NextW(handle,C.byref(entry)):
+                error=C.get_last_error()
+                if error!=18:raise C.WinError(error)
+                return result
+    finally:kernel.CloseHandle(handle)
+
 def processes():
     result=[]
-    for p in psutil.process_iter(['pid','name']):
-        if p.info['name'] and p.info['name'].lower() in NAMES:
-            try:result.append(dict(p.info,create_time=p.create_time()))
+    for pid,name in process_names():
+        if name.lower() in NAMES:
+            try:result.append({'pid':pid,'name':name,'create_time':psutil.Process(pid).create_time()})
             except psutil.NoSuchProcess:pass
     return result
 

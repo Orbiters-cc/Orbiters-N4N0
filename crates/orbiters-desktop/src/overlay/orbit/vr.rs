@@ -761,8 +761,8 @@ impl OrbitVr {
                 let stereo=seen.right.and_then(|right| camera_track::stereo_pose(&seen.found,&right.found,[seen.size,right.size],
                     [mirror,camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right))],
                     [eye_on_head,steamvr.eye_to_head(vr::compositor::Eye::Right)],&head));
-                let width=stereo.map(|(_,unit,_)|unit*camera_track::PANEL_SIZE[0]).or(self.camera_measured_width).unwrap_or(self.tune.camera_panel_m);
-                let pose=stereo.map(|(frame,unit,_)|(frame,unit)).or_else(||camera_track::perspective_pose(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), width));
+                let width=stereo.map(|(_,unit,_)|unit*camera_track::PANEL_SIZE[0]).or(self.camera_measured_width);
+                let pose=stereo.map(|(frame,unit,_)|(frame,unit)).or_else(||width.and_then(|width|camera_track::perspective_pose(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), width)));
                 let clearance=|unit:f32| ((2.5+seen.found.residual_px)/seen.found.across.min(seen.found.tall).max(0.01)).max(0.012/unit.max(1e-6));
                 let clear=|frame:&Matrix34,unit:f32,side| {
                     camera_track::column_clear(&seen.found,seen.size,&mirror,&space::compose(&head,&eye_on_head),frame,unit,side,clearance(unit))
@@ -789,7 +789,7 @@ impl OrbitVr {
                 if let Some(right) = seen.right { self.camera_exclusion.push((right.found, right.size, camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)), space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)))); }
                 let adopted=if self.camera_looks<=CAMERA_LOOKS_TO_SHOW {
                     self.camera_follow.attach(frame,unit); true
-                } else { self.camera_follow.seen(frame,unit) };
+                } else { self.camera_follow.seen_in_hands(frame,unit,captured_hands) };
                 self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
                 self.camera_seen = Some(now);
                 let observed_grips=if input_read {actions.grabs(steamvr)} else {[false;2]};
@@ -807,11 +807,10 @@ impl OrbitVr {
         }
         // What tracking knows, and what grabs it. Only while it shows: a grip means nothing to it otherwise.
 
-        let may_bind=self.camera_looks>CAMERA_LOOKS_TO_SHOW && self.camera_follow.can_bind_hand() && (self.camera_follow.is_held() || self.camera_stereo_recent());
-        let grips = if input_read && may_bind { actions.grabs(steamvr) } else { [false; 2] };
-        let lasers = if input_read && may_bind { actions.lasers(steamvr, prediction) } else { [None; 2] };
-        let pointers = lasers.map(|tip| tip.map(|tip| { let (o, d) = space::ray(&tip); (o, d) }));
-        let mut placed = self.camera_follow.step(dt, hands, grips, pointers);
+        // A grip near a viewfinder is not VRChat's grab acknowledgement. Only
+        // observed rigid motion binds a hand; thereafter raw grips release it.
+        let grips = if input_read && self.camera_follow.is_held() { actions.grabs(steamvr) } else { [false; 2] };
+        let mut placed = self.camera_follow.step(dt, hands, grips, [None;2]);
         // While a hand has it, it is known, seen or not.
         if self.camera_follow.is_held() {
             self.camera_seen = Some(now);

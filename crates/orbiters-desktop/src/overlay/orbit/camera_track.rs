@@ -434,6 +434,7 @@ fn outline_search(light: &Light, f: &Found, general:bool) -> Option<([[f32;3];3]
         let middle=[(a[0]+b[0])*0.5,(a[1]+b[1])*0.5];
         let direction=[(b[0]-a[0])/length,(b[1]-a[1])/length];
         let mut candidates:Vec<(f32,[f32;2],[f32;2])>=Vec::new();
+        let mut clipped=false;
         // A glyph similarity seed can be very far from the right border under
         // perspective. Search complete straight edges, rather than nearest blobs.
         let count=if general {181} else {33};
@@ -454,7 +455,7 @@ fn outline_search(light: &Light, f: &Found, general:bool) -> Option<([[f32;3];3]
                 }).sum::<f32>();
                 if score<33.*10. {continue;}
                 if !general {
-                    if candidates.first().is_none_or(|v|score>v.0) {candidates=vec![(score,p,u)];}
+                    if candidates.first().is_none_or(|v|score>v.0) {candidates=vec![(score,p,u)];clipped=angle==0 || angle+1==count;}
                 } else {
                     // Keep distinct line hypotheses. The strongest individual
                     // line can belong to the hand behind the viewfinder; only a
@@ -469,6 +470,9 @@ fn outline_search(light: &Light, f: &Found, general:bool) -> Option<([[f32;3];3]
                 }
             }
         }
+        // A maximum on the proposal window's boundary is not convergence.
+        // Retry the unrestricted search instead of fitting a clipped edge.
+        if !general && clipped {return None;}
         for (_,p,u) in candidates {
         let n=[-u[1],u[0]];
         // Refit the selected dark stroke from distributed local samples. This
@@ -1081,6 +1085,19 @@ fn takes(frame: &Matrix34, unit: f32, hand: &Matrix34, pointer: Option<([f32; 3]
 }
 
 impl Follow {
+    /// Express the measured plane in the holding hand at capture time before
+    /// carrying it to the current hand. Otherwise even slow motion acquires
+    /// the image reader's latency through every visual correction.
+    pub fn seen_in_hands(&mut self,frame:Matrix34,unit:f32,captured_hands:[Option<Matrix34>;2]) -> bool {
+        let current=match self.held {
+            Some((hand,current)) => {
+                let Some(captured)=captured_hands[hand] else {return false;};
+                then(&current,&then(&undone(&captured),&frame))
+            }
+            None => frame,
+        };
+        self.seen(current,unit)
+    }
     /// Verify a grab by observed rigid motion, including handles outside the
     /// viewfinder rectangle. Proximity alone misses VRChat's offset hand grip.
     /// `hands` must be sampled at the picture's time, not at recognition completion.
@@ -1935,6 +1952,33 @@ mod tests {
 #[cfg(test)]
 mod sandbox_regression {
     use super::*;
+    #[test]
+    fn delayed_images_do_not_pull_a_slowly_held_camera_backwards() {
+        let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
+        let mut relation=identity;relation.m[1][3]=-0.3;relation.m[2][3]=0.1;
+        let setup=|| {
+            let mut f=Follow::default();
+            for i in 0..4 {let mut h=identity;h.m[0][3]=i as f32*0.02;f.observe_grab(then(&h,&relation),0.001,[None,Some(h)],[false,true]);}
+            f
+        };
+        let (mut fixed,mut old)=(setup(),setup());
+        let mut last_error=0.;
+        for i in 0..200 {
+            let mut current=identity;current.m[0][3]=0.06+i as f32*0.001;
+            let mut captured=current;captured.m[0][3]-=0.015; // 150ms old at 0.1m/s
+            let picture=then(&captured,&relation);
+            fixed.step(0.01,[None,Some(current)],[false,true],[None;2]);
+            old.step(0.01,[None,Some(current)],[false,true],[None;2]);
+            fixed.seen_in_hands(picture,0.001,[None,Some(captured)]);
+            old.seen(picture,0.001);
+            let wanted=then(&current,&relation);
+            let got=fixed.step(0.01,[None,Some(current)],[false,true],[None;2]).unwrap().0;
+            let bad=old.step(0.01,[None,Some(current)],[false,true],[None;2]).unwrap().0;
+            assert!(apart(&got,&wanted)<0.001);
+            last_error=apart(&bad,&wanted);
+        }
+        assert!(last_error>0.006,"the pre-fix correction path must demonstrate the regression: {last_error}");
+    }
     #[test]
     fn offset_camera_handle_is_verified_by_motion_not_a_larger_proximity_radius() {
         let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};

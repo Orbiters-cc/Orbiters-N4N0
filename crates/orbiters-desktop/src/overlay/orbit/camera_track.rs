@@ -1858,7 +1858,7 @@ mod tests {
     fn landmark_count_cannot_substitute_for_geometric_rank() {
         let collinear:Vec<_>=(0..5).map(|i|([i as f32*100.,0.],[i as f32*20.,20.])).collect();
         assert!(fit(&collinear).is_none(),"five collinear detections do not locate a plane");
-        let corners=[[-205.,-115.3125],[205.,-115.3125],[205.,115.3125],[-205.,115.3125]].map(|p|(p,[500.+p[0]*.7,500.+p[1]*.7]));
+        let corners=[[-205.,-115.3125],[205.,-115.3125],[205.,115.3125],[-205.,115.3125]].map(|p|(p,[500.+p[0]*0.7,500.+p[1]*0.7]));
         assert!(fit(&corners).is_some(),"four independent corners determine a plane");
     }
 

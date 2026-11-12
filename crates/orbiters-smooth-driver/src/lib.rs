@@ -12,7 +12,8 @@
 //!
 //! Until smoothing is first turned on, or Fast walk first asks, it touches nothing of SteamVR's: no table is patched, every
 //! pose goes from driver to SteamVR as if it were not loaded. The first frame either is on (from the control block) it hooks
-//! the hosts, and stays hooked, passing poses on untouched while off, until SteamVR ends it (`Cleanup`).
+//! the hosts, and stays hooked, passing poses on untouched while off. Cleanup restores exposed entries; if another
+//! add-on chained ours, the pinned DLL remains a passive forwarding link until vrserver exits.
 //!
 //! Across the FFI boundary it never unwinds (every entry catches panics) and never blocks the pose thread (the hook
 //! takes no lock that another pose or a frame could hold, and allocates nothing per pose).
@@ -36,12 +37,12 @@ use orbiters_smooth::win::{
     PAGE_READWRITE,
 };
 use orbiters_smooth::{ControlBlock, DriverReport, Mapping, CONTROL_NAME};
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::ffi::{c_char, c_void, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 /// The two server-driver-host versions whose pose updates we filter (`IVRServerDriverHost_006`, and `_005` for
@@ -90,11 +91,10 @@ struct State {
     /// Set-up and tear-down bookkeeping (never touched by the pose hook).
     setup: Mutex<Setup>,
     /// The monotonic clock the filter times poses with, started in `Init`.
-    clock: UnsafeCell<Option<Instant>>,
+    clock: OnceLock<Instant>,
 }
 
-// SAFETY: `clock` is written once in `Init` and read on pose threads only after that; `Instant` is `Sync`. Every
-// other field is atomic or a `Mutex`.
+// SAFETY: filters guard their cells; every other field is atomic, OnceLock or Mutex.
 unsafe impl Sync for State {}
 
 #[derive(Default)]
@@ -167,14 +167,20 @@ impl State {
             pose_originals: [ORIGINAL; MAX_HOOKS],
             context: AtomicPtr::new(ptr::null_mut()),
             log: AtomicPtr::new(ptr::null_mut()),
-            setup: Mutex::new(Setup { control: None, last_open_attempt_ms: 0, last_hook_attempt_ms: 0, last_walk_check_ms: 0, walk_said: false, patched: Vec::new() }),
-            clock: UnsafeCell::new(None),
+            setup: Mutex::new(Setup {
+                control: None,
+                last_open_attempt_ms: 0,
+                last_hook_attempt_ms: 0,
+                last_walk_check_ms: 0,
+                walk_said: false,
+                patched: Vec::new(),
+            }),
+            clock: OnceLock::new(),
         }
     }
 
     fn now_seconds(&self) -> f64 {
-        // SAFETY: `clock` is set in `Init`, before poses flow, and only read afterward.
-        match unsafe { &*self.clock.get() } {
+        match self.clock.get() {
             Some(start) => start.elapsed().as_secs_f64(),
             None => 0.0,
         }
@@ -182,6 +188,18 @@ impl State {
 }
 
 static STATE: State = State::new();
+
+thread_local! {
+    // A versioned host may forward to another host we hooked. Apply smoothing/walk once.
+    static IN_POSE: Cell<bool> = const { Cell::new(false) };
+}
+
+struct PoseScope(bool);
+impl Drop for PoseScope {
+    fn drop(&mut self) {
+        IN_POSE.with(|v| v.set(self.0));
+    }
+}
 
 /// What Fast walk adds now, for a pose hook: nothing unless the process writing it runs and it is not zero.
 fn walk_now() -> Option<orbiters_smooth::WalkNow> {
@@ -217,9 +235,11 @@ extern "system" fn detour<const INDEX: usize>(this: *mut c_void, device: u32, po
         (bits != 0).then(|| unsafe { std::mem::transmute::<usize, PoseUpdatedFn>(bits) })
     };
     let _ = catch_unwind(AssertUnwindSafe(|| {
+        let nested = IN_POSE.with(|v| v.replace(true));
+        let _scope = PoseScope(nested);
         let mut smoothed = None;
         // Only our own struct layout is touched; any other size passes straight through.
-        let ours = !pose.is_null() && pose_size as usize == std::mem::size_of::<DriverPose>();
+        let ours = !nested && !pose.is_null() && pose_size as usize == std::mem::size_of::<DriverPose>();
         if ours && STATE.active.load(Ordering::Relaxed) {
             STATE.poses.fetch_add(1, Ordering::Relaxed);
             let index = device as usize;
@@ -264,12 +284,22 @@ unsafe fn hook_host(setup: &mut Setup, host: *mut c_void, index: usize, detour_p
         return false;
     }
     let entry = vtable_entry(host, HOST_POSE_UPDATED_SLOT);
-    let current = *entry as usize;
+    // A later add-on may still chain our detour after Cleanup. Its original must stay immutable.
+    if setup.patched.iter().any(|&(address, detour)| address == entry as usize && detour == detour_ptr) {
+        return true;
+    }
+    let current = (&*entry.cast::<AtomicUsize>()).load(Ordering::Acquire);
     if current == 0 || is_our_pose_detour(current) {
         return false; // This table (shared by every host of this version) is already hooked.
     }
     STATE.pose_originals[index].store(current, Ordering::Release);
-    if !patch_entry(entry, detour_ptr) {
+    // A chained callback can outlive Cleanup: pin this small DLL until vrserver exits.
+    use orbiters_smooth::win::{GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN};
+    let mut module = 0;
+    if GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, detour_ptr as *const u16, &mut module) == 0 {
+        return false;
+    }
+    if !patch_entry(entry, current, detour_ptr) {
         return false;
     }
     setup.patched.push((entry as usize, detour_ptr));
@@ -284,12 +314,13 @@ unsafe fn vtable_entry(object: *mut c_void, slot: usize) -> *mut *mut c_void {
     vtable.add(slot)
 }
 
-/// Writes `value` into a function-table slot (one aligned pointer-sized store, so a thread calling through it sees
-/// the old function or the new one), making the page writable around the write and putting its protection back.
+/// Replaces `expected` with `value` atomically in a function-table slot, so a competing add-on is not overwritten.
+/// A thread calling through it sees the old function or the new one. Makes the page writable around the write,
+/// then puts its protection back.
 /// Returns whether it succeeded.
 ///
 /// SAFETY: `entry` must be a writable-after-`VirtualProtect` table slot.
-unsafe fn patch_entry(entry: *mut *mut c_void, value: usize) -> bool {
+unsafe fn patch_entry(entry: *mut *mut c_void, expected: usize, value: usize) -> bool {
     let size = std::mem::size_of::<usize>();
     // A table on a page that also runs code (one another hooking driver made) keeps running while it is written.
     let mut info = MEMORY_BASIC_INFORMATION::zeroed();
@@ -300,20 +331,49 @@ unsafe fn patch_entry(entry: *mut *mut c_void, value: usize) -> bool {
     if VirtualProtect(entry as *const c_void, size, writable, &mut old) == 0 {
         return false;
     }
-    std::ptr::write_volatile(entry, value as *mut c_void);
+    let changed = (&*entry.cast::<AtomicUsize>()).compare_exchange(expected, value, Ordering::AcqRel, Ordering::Acquire).is_ok();
     let mut back = 0u32;
     // Tables sit in executable, read-only pages; restore whatever protection the loader gave them.
     VirtualProtect(entry as *const c_void, size, old, &mut back);
-    true
+    changed
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+
+    unsafe extern "system" fn forward(this: *mut c_void, device: u32, pose: *const DriverPose, size: u32) {
+        detour::<1>(this, device, pose, size);
+    }
+
+    unsafe extern "system" fn terminal(_this: *mut c_void, _device: u32, _pose: *const DriverPose, _size: u32) {}
+
+    #[test]
+    fn versioned_hosts_forward_without_filtering_twice_and_restore_does_not_clobber_an_addon() {
+        STATE.pose_originals[0].store(forward as *const () as usize, Ordering::Release);
+        STATE.pose_originals[1].store(terminal as *const () as usize, Ordering::Release);
+        STATE.clock.get_or_init(Instant::now);
+        STATE.active.store(true, Ordering::Release);
+        let pose = DriverPose::at([1.0, 2.0, 3.0], openvr::Quaternion::IDENTITY);
+        let before = STATE.poses.load(Ordering::Relaxed);
+        detour::<0>(ptr::null_mut(), 2, &pose, std::mem::size_of::<DriverPose>() as u32);
+        assert_eq!(STATE.poses.load(Ordering::Relaxed), before + 1);
+        assert!(!IN_POSE.with(Cell::get), "scope resets after forwarding");
+        STATE.active.store(false, Ordering::Release);
+        let mut slot = 123usize;
+        let entry = (&mut slot as *mut usize).cast();
+        assert!(!unsafe { restore_entry(entry, 456, 789) });
+        assert_eq!(slot, 123, "a later add-on is preserved");
+        assert!(unsafe { restore_entry(entry, 123, 789) });
+        assert_eq!(slot, 789);
+    }
 }
 
 /// Puts `original` back into a patched slot if it still holds our detour.
 ///
 /// SAFETY: `entry` must be a table slot this crate patched.
-unsafe fn restore_entry(entry: *mut *mut c_void, detour_ptr: usize, original: usize) {
-    if *entry as usize == detour_ptr {
-        patch_entry(entry, original);
-    }
+unsafe fn restore_entry(entry: *mut *mut c_void, detour_ptr: usize, original: usize) -> bool {
+    patch_entry(entry, detour_ptr, original)
 }
 
 fn pose_detours() -> [usize; MAX_HOOKS] {
@@ -383,8 +443,7 @@ extern "system" fn provider_init(_this: *mut c_void, context: *mut c_void) -> i3
         if context.is_null() {
             return INIT_INTERFACE_NOT_FOUND;
         }
-        // SAFETY: `clock` is set here, once, before any pose flows.
-        unsafe { *STATE.clock.get() = Some(Instant::now()) };
+        STATE.clock.get_or_init(Instant::now);
         // SAFETY: `context` is a live `IVRDriverContext`; its first word is its table, `GetGenericInterface` slot 0.
         // Only read: nothing of SteamVR's is patched until smoothing is turned on.
         let get_interface_fn = unsafe { *vtable_entry(context, 0) as usize };
@@ -409,14 +468,15 @@ extern "system" fn provider_cleanup(_this: *mut c_void) {
         STATE.walk_alive.store(false, Ordering::Release);
         if let Ok(mut setup) = STATE.setup.lock() {
             let pose = pose_detours();
-            for (entry_addr, detour_ptr) in setup.patched.drain(..) {
+            setup.patched.retain(|&(entry_addr, detour_ptr)| {
                 let entry = entry_addr as *mut *mut c_void;
                 let original = pose.iter().position(|&d| d == detour_ptr).map(|i| STATE.pose_originals[i].load(Ordering::Acquire)).unwrap_or(0);
                 if original != 0 {
                     // SAFETY: an entry this crate patched; restored only if it still holds our detour.
-                    unsafe { restore_entry(entry, detour_ptr, original) };
+                    return !unsafe { restore_entry(entry, detour_ptr, original) };
                 }
-            }
+                true
+            });
             setup.control = None;
             setup.last_hook_attempt_ms = 0;
         }

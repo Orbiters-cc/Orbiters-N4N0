@@ -331,7 +331,7 @@ mod tests {
         use super::*;
         let (release,wait)=std::sync::mpsc::channel();
         let thread=std::thread::spawn(move || { let _=wait.recv_timeout(Duration::from_secs(1)); });
-        let mut watch=CameraWatch { health:Arc::new(Mutex::new(Health::default())),began:Instant::now(),seen:Arc::new(Mutex::new(None)),stop:Arc::new(AtomicBool::new(false)),thread:Some(thread) };
+        let mut watch=CameraWatch { health:Arc::new(Mutex::new(Health::default())),began:Instant::now(),seen:Arc::new(Mutex::new(None)),stop:Arc::new(AtomicBool::new(false)),hint:Arc::new(Mutex::new(None)),thread:Some(thread) };
         watch.stop();
         assert!(!watch.finished());
         release.send(()).unwrap();
@@ -343,7 +343,7 @@ mod tests {
         use super::*;
         let (release, wait) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || { let _ = wait.recv_timeout(Duration::from_secs(1)); });
-        let watch = CameraWatch { health: Arc::new(Mutex::new(Health::default())), began: Instant::now(), seen: Arc::new(Mutex::new(None)), stop: Arc::new(AtomicBool::new(false)), thread: Some(thread) };
+        let watch = CameraWatch { health: Arc::new(Mutex::new(Health::default())), began: Instant::now(), seen: Arc::new(Mutex::new(None)), stop: Arc::new(AtomicBool::new(false)), hint:Arc::new(Mutex::new(None)),thread: Some(thread) };
         let began = Instant::now();
         drop(watch);
         assert!(began.elapsed() < Duration::from_millis(150));

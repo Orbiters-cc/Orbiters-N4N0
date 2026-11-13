@@ -266,6 +266,20 @@ def vrchat_log_for(pid_create_time):
     return after[0] if after else None
 
 
+def menu_open(create_time):
+    """Whether one of VRChat's menus is open, from the last "Immobile status changed to" line of that VRChat's log
+    (it turned True when the main menu opened and False when it closed, 2026-11-13); None before any such line."""
+    path = vrchat_log_for(create_time)
+    if not path:
+        return None
+    try:
+        text = path.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return None
+    found = re.findall(r'Immobile status changed to: (True|False)', text)
+    return None if not found else found[-1] == 'True'
+
+
 def anticheat_began(create_time):
     path = vrchat_log_for(create_time)
     if not path:

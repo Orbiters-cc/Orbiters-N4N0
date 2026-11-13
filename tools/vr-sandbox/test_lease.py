@@ -201,13 +201,23 @@ class SessionTurns(unittest.TestCase):
             self.s.tick()
         self.assertFalse(self.s.stop.is_set())
 
-    def test_moving_marks_the_world_not_fresh_and_a_vrchat_join_marks_it_fresh(self):
+    def test_stick_locomotion_is_reported_to_the_next_turn(self):
         self.s.handle({'action': 'acquire', 'owner': 'a'})
-        self.s.j['world_fresh'] = True
         with patch.object(sandbox.kernel, 'WaitForSingleObject', return_value=0), patch.object(sandbox.kernel, 'ReleaseMutex'):
             self.ask('a', 'pose', device='head', position=[0, 1.6, 0], rotation=[1, 0, 0, 0])
-        self.assertFalse(self.s.j['world_fresh'])
-        self.assertFalse(self.s.handle({'action': 'acquire', 'owner': 'b'})['granted'])
+            self.assertFalse(self.s.j.get('moved', False))      # head poses move the view, not the avatar
+            self.ask('a', 'input', device='left', input='stick_y', value=1)
+        self.assertTrue(self.s.handle({'action': 'release', 'lease_owner': 'a',
+                                       'lease_token': json.loads(sandbox.owner_file('a').read_text())['token']})['avatar_moved_since_launch'])
+        self.assertTrue(self.s.handle({'action': 'acquire', 'owner': 'b'})['avatar_moved_since_launch'])
+
+    def test_a_second_vrchat_launch_is_refused_while_one_runs(self):
+        self.s.handle({'action': 'acquire', 'owner': 'a'})
+        with patch.object(self.s, 'vrchat', return_value={'pid': 1, 'create_time': 1}):
+            with self.assertRaisesRegex(RuntimeError, 'already runs'):
+                self.ask('a', 'vrchat', world_id='wrld_' + '0' * 8 + '-0000-0000-0000-' + '0' * 12,
+                         instance='1~private(usr_' + '0' * 8 + '-0000-0000-0000-' + '0' * 12 + ')~region(eu)',
+                         user_id='usr_' + '0' * 8 + '-0000-0000-0000-' + '0' * 12)
 
     def test_the_tick_ends_a_stale_turn_then_idles_the_session_out(self):
         self.s.handle({'action': 'acquire', 'owner': 'a'})
@@ -323,6 +333,18 @@ class AntiCheatGuards(unittest.TestCase):
                 patch.object(vrchat_life, 'windows_of', return_value=[{'hwnd': 9, 'title': 'VRChat', 'rect': [0, 0, 1, 1]}]):
             found = vrchat_life.error_windows(min_age_s=45, now=330)
         self.assertEqual([p['pid'] for p in found], [1])   # 2 started VRChat, 3 is still a fresh splash
+
+    def test_menu_state_comes_from_the_last_immobile_line(self):
+        with tempfile.TemporaryDirectory() as folder:
+            log = Path(folder) / 'output_log_x.txt'
+            with patch.object(vrchat_life, 'vrchat_log_for', return_value=log):
+                log.write_text('2026.11.13 15:51:13 Debug - nothing about menus\n')
+                self.assertIsNone(vrchat_life.menu_open(0))
+                log.write_text('x Immobile status changed to: True\ny Immobile status changed to: False\n')
+                self.assertFalse(vrchat_life.menu_open(0))
+                with log.open('a') as out:
+                    out.write('z [IK Debug Log] Immobile status changed to: True\n')
+                self.assertTrue(vrchat_life.menu_open(0))
 
     def test_join_is_read_from_the_vrchat_log_after_the_request(self):
         with tempfile.TemporaryDirectory() as folder:

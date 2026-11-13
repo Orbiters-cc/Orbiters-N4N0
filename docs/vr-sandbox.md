@@ -25,17 +25,19 @@ python tools/vr-sandbox/sandbox.py call --owner vr1113b/shell '{"action":"captur
 python tools/vr-sandbox/sandbox.py release --owner vr1113b/shell
 ```
 
-- **VRChat**: if `status` shows `vrchat` running, do NOT launch it again: use the
-  running one. `vr_sandbox` `vrchat` from your exe's bridge launches it when none
-  runs, and otherwise sends your new private instance to the running VRChat
-  through its own launch pipe (no new process, no anti-cheat start). `home`
-  rejoins the session's home instance.
+- **VRChat**: if `status` (or `acquire`'s answer) shows `vrchat` running, use it;
+  `vrchat` is refused while one runs. When none runs, `vr_sandbox` `vrchat` from
+  your exe's bridge launches it (once EAC is idle). VRChat cannot be moved to
+  another instance without a relaunch: a link sent to the running game only
+  opens its world page and waits for a click (tested 2026-11-13). For another
+  world or a fresh spawn point use `acquire --cold`.
 - **Release** stops only your exe (its `--quit`, then a kill), then puts the
   session back to neutral: every input released, head and hands at their start
-  poses, OSC camera mode 0 and flying off, and a rejoin of the home instance
-  (closes every menu, puts the avatar at the spawn point; about 15-30 s). The
-  next agent starts from there. Your installed-app-free state stays: Enzo's
-  installed Orbiters is stopped once per session and comes back at its end.
+  poses, OSC camera mode 0 and flying off, and every VRChat menu closed, checked
+  in VRChat's log (`Immobile status changed to`; a short left Y press toggles the
+  menus). The avatar stays where it is: `avatar_moved_since_launch` in the
+  answers says whether a turn walked it with the stick. Enzo's installed Orbiters
+  is stopped once per session and comes back at its end.
 - **Your turn ends by itself** after 10 minutes without any request from you
   (an agent cut off mid-turn): the controller stops your exe, resets to neutral
   and gives the session to the next in line. Every request renews the turn;

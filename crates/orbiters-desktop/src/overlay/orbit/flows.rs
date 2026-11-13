@@ -1447,27 +1447,87 @@ fn review_slider_releases_round_trip_through_service_with_delayed_state() {
     assert_eq!(client.snapshot().settings.tracking.ms, before);
 }
 
-/// Enzo, 2026-11-11 (F8): a page opened from the Quick Menu's tiles hides the tiles beside it, for the eyes and for the lasers alike, and they come back as it closes. The
-/// way out is always there: its head's Back, its close and its tabs.
+/// OWNER DECISION (Enzo, repeatedly; latest 2026-11-13: "I asked multiple time to make the side tiles on the quick menu stay even when a page is open"): a page opened
+/// from the Quick Menu leaves its side tiles where they are, every one, to see and to point at, whichever page, and pressing one goes on from there. 2026-11-11's F8
+/// had them go; that is overruled. Do not remove this test or weaken it: see AGENTS.md, "Owner decisions".
 #[test]
-fn the_wing_goes_while_a_sheet_is_up_and_comes_back() {
+fn the_side_tiles_stay_while_a_page_is_up() {
     let mut person = Person::new();
     person.around = Some(Around::QuickMenu);
     person.turns(3);
-    let wing = |person: &Person| person.panels.all().filter(|p| Zone::WING.contains(&p.zone) || p.zone == Zone::QmCaption).count();
-    assert!(wing(&person) >= 7, "the wing at first");
-    for tile in [Action::Worlds, Action::Page(Target::YouTube), Action::Page(Target::Instances), Action::Pictures, Action::All] {
+    let wing = |person: &Person| person.panels.all().filter(|p| (Zone::WING.contains(&p.zone) || p.zone == Zone::QmCaption) && p.shown).count();
+    let at_first = wing(&person);
+    assert!(at_first >= 7, "the wing at first: {at_first}");
+    for tile in [Action::Worlds, Action::Page(Target::YouTube), Action::Page(Target::Instances), Action::Pictures, Action::Talk, Action::All] {
         person.press(tile);
         person.turns(2);
         assert!(person.panels.sheet_open(), "{tile:?} opens its sheet");
-        assert_eq!(wing(&person), 0, "{tile:?}: no tile of the wing beside it, to see or to point at");
-        assert!(!person.panels.facts.beside_wing, "{tile:?}");
-        let ways_out: Vec<Action> = person.panels.all().filter(|p| p.zone == Zone::SheetBack).flat_map(|p| p.items.iter().map(|i| i.action)).collect();
-        assert!(ways_out.contains(&Action::Back) && ways_out.contains(&Action::CloseSheet), "{tile:?}: a way out in its head: {ways_out:?}");
+        assert_eq!(wing(&person), at_first, "{tile:?}: every tile of the wing beside it");
+        assert!(person.panels.facts.beside_wing, "{tile:?}");
+        // Each still answers a laser: another tile goes to its page.
+        let other = if tile == Action::Pictures { Action::Worlds } else { Action::Pictures };
+        let on_wing = person.panels.all().enumerate().find_map(|(i, p)| (Zone::WING.contains(&p.zone)).then(|| p.items.iter().find(|it| it.action == other).map(|it| (i, it.rect.center()))).flatten());
+        let (part, at) = on_wing.unwrap_or_else(|| panic!("{tile:?}: {other:?} on the wing"));
+        person.panels.hover(Some((part, at)));
+        person.turn();
+        person.panels.press(&person.snap.clone());
+        person.turn();
+        person.panels.release();
+        person.turns(2);
+        assert!(person.panels.sheet_open() && panels_tool_open(&person, other), "{tile:?}: the wing's {other:?} went there");
+        assert_eq!(wing(&person), at_first, "{tile:?} then {other:?}: the wing still there");
         person.press(Action::CloseSheet);
         person.turns(2);
         assert!(!person.panels.sheet_open());
-        assert!(wing(&person) >= 7, "{tile:?}: the wing is back");
+        assert_eq!(wing(&person), at_first, "{tile:?}: the wing as it was");
+    }
+    // A page reached from All tools (Settings) as well.
+    person.press(Action::All);
+    person.turns(2);
+    person.press(Action::Settings);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Settings));
+    assert_eq!(wing(&person), at_first, "Settings: the wing beside it");
+}
+
+/// Whether `action`'s tool has its page up.
+fn panels_tool_open(person: &Person, action: Action) -> bool {
+    super::panels::tool_is_open(&person.panels.facts, action)
+}
+
+/// The same in a headset's own layouts: the wing on either hand's side and the strip under the menu, as `vr.rs` lays them, stay with a page up (owner decision,
+/// 2026-11-13; see [`the_side_tiles_stay_while_a_page_is_up`]). From the wheel the page alone shows, as before: the ring's cells are not the Quick Menu's side tiles.
+#[test]
+fn the_side_tiles_stay_in_every_headset_layout() {
+    use super::vr;
+    for (layout, places) in [("wing, right hand", vr::quick_menu_places(0)), ("wing, left hand", vr::quick_menu_places(1)), ("strip", vr::strip_places())] {
+        let mut person = Person::new();
+        let snap = person.snap.clone();
+        let turn = |panels: &mut Panels| {
+            let mut places = places.clone();
+            panels.way_back(Some(Around::QuickMenu), &mut places);
+            panels.takeover_place = Some(vr::sheet_place(Zone::Takeover));
+            panels.back_place = Some(vr::sheet_place(Zone::SheetBack));
+            panels.set_open(Some(Around::QuickMenu), places, &snap);
+            panels.follow(&snap, 0);
+            panels.menu_turn(&snap);
+            panels.step_springs(0.011);
+            panels.paint(&snap, |_, _| {});
+        };
+        for _ in 0..3 { turn(&mut person.panels); }
+        let tiles = |panels: &Panels| panels.all().filter(|p| Zone::WING.contains(&p.zone) || matches!(p.zone, Zone::QmStrip | Zone::QmCaption)).map(|p| p.zone).collect::<Vec<_>>();
+        let before = tiles(&person.panels);
+        assert!(!before.is_empty(), "{layout}");
+        person.panels.open_sheet(Sheet::Pictures, "Pictures", &snap);
+        for _ in 0..3 { turn(&mut person.panels); }
+        assert!(person.panels.sheet_open(), "{layout}");
+        assert_eq!(tiles(&person.panels), before, "{layout}: the side tiles stay with a page up");
+        // Laid where vr.rs lays them with a page up, none lies over the page.
+        let page = [Zone::SheetBack, Zone::Takeover].map(|z| vr::clear_of_sheet(vr::sheet_place(z), true).rect);
+        for part in person.panels.all().filter(|p| before.contains(&p.zone)) {
+            let at = vr::clear_of_sheet(part.placed, true).rect;
+            assert!(page.iter().all(|r| !r.intersects(at)), "{layout}: {:?} at {at:?} over the page {page:?}", part.zone);
+        }
     }
 }
 
@@ -1482,9 +1542,15 @@ fn the_open_tool_pressed_again_closes_its_page() {
     person.press(Action::Pictures);
     person.turns(2);
     assert_eq!(person.panels.facts.sheet, Some(Sheet::Pictures));
-    let (part, _) = person.find(Action::Pictures).expect("its tab");
-    assert_eq!(person.panels.all().nth(part).map(|p| p.zone), Some(Zone::SheetBack), "the tab is in the head");
-    let pressed = person.press(Action::Pictures);
+    let head = person.panels.all().position(|p| p.zone == Zone::SheetBack).expect("the head");
+    let tab = person.panels.all().nth(head).and_then(|p| p.items.iter().find(|i| i.action == Action::Pictures)).map(|i| i.rect.center()).expect("its tab in the head");
+    // Its tab in the head, as the wing's tile beside it would.
+    person.panels.hover(Some((head, tab)));
+    person.turn();
+    let pressed = person.panels.press(&person.snap.clone());
+    person.turn();
+    person.panels.release();
+    person.turn();
     person.turns(2);
     assert!(pressed.clicked, "it clicks");
     assert_eq!(person.panels.facts.sheet, None, "Pictures pressed again: closed");
@@ -1510,7 +1576,7 @@ fn the_open_tool_pressed_again_closes_its_page() {
     person.press(Action::All);
     person.turns(2);
     assert_eq!(person.panels.facts.sheet, Some(Sheet::All));
-    assert!(person.find(Action::All).is_none(), "nothing on All tools is All tools");
+    assert!(!person.panels.all().filter(|p| p.zone == Zone::SheetBack).any(|p| p.items.iter().any(|i| i.action == Action::All)), "All tools' head has no tabs");
     person.press(Action::Pictures);
     person.turns(2);
     assert_eq!(person.panels.facts.sheet, Some(Sheet::Pictures), "a card of All tools opens its tool");

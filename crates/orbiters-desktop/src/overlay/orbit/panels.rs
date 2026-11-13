@@ -818,8 +818,8 @@ pub enum Look {
     /// The head's way to VRChat's own menus: a round button beside its close.
     HeadPeek,
     /// One of the tools, in a sheet's head: from any sheet to any other, with or without the wing.
-    /// `words_only`: its name alone, where six names and their icons would not fit (a headset's head with a capture showing).
-    HeadTab { icon: &'static str, label: &'static str, on: bool, words_only: bool },
+    /// One of the six tools along a sheet's head, the same on every page ([`tab_row`]): `named` with its name after its icon at `size`, else its icon alone; `on`, lit.
+    HeadTab { icon: &'static str, label: &'static str, on: bool, named: bool, size: f32 },
     /// One of two ways, on the sheet of settings.
     Choice { icon: &'static str, label: &'static str, on: bool },
     /// The sound device chosen for VR.
@@ -1126,20 +1126,6 @@ fn head_pill_width(facts: &Facts, labels: &[&str]) -> f32 {
     (words + HEAD_PILL_PAD * 2.0).max(HEAD_PILL_LEAST).ceil()
 }
 
-/// A tab of the head: the room its name takes beside its icon, in the weight it has open.
-fn head_tab_font(on: bool) -> FontId {
-    look::font(13.5, if on { weight::BOLD } else { weight::MEDIUM })
-}
-
-fn head_tab_named(label: &str) -> f32 {
-    (29.0 + measure(label, &head_tab_font(true)) + 12.0).ceil().max(COMPACT_TAB_VR)
-}
-
-/// A tab's words where they stand without its icon.
-fn head_words_font(_facts: &Facts, on: bool) -> FontId {
-    look::font(15.5, if on { weight::BOLD } else { weight::SEMIBOLD })
-}
-
 /// What the head's title says, and its font, where no tab is the page's.
 fn head_title_font() -> FontId {
     look::font(18.0, weight::SEMIBOLD)
@@ -1227,78 +1213,83 @@ pub fn head(facts: &Facts, w: f32) -> Head {
     if facts.sheet == Some(Sheet::All) {
         return Head { back, close, peek, hide_view, small_view, stop, transport: None, tabs: Vec::new(), title_x: back.right() + 8.0, end };
     }
-    let unnamed = !HEAD_TOOLS.iter().any(|t| tool_is_open(facts, t.0));
-    // A page that is none of the tools says its name after them: its mark and its words want this.
-    let title_need = if unnamed { 28.0 + measure(sheet_name(&facts.sheet_title), &head_title_font()).min(240.0) + 12.0 } else { 0.0 };
-    let quiet = status_now(facts).is_none();
-    let compact_w = if facts.desktop { 36.0 } else { COMPACT_TAB_VR };
-    let named_all: f32 = HEAD_TOOLS.iter().map(|t| head_tab_named(tr_ctx("tile", t.2)) + 3.0).sum();
-    // What plays has three buttons in the head where everything else still has its room: the tabs keep their names first.
-    let transport_w = HEAD_TRANSPORT * 3.0 + 8.0 + 8.0;
-    let with_music = facts.music.is_some() && !facts.beside_wing && !facts.view_showing && quiet;
-    let transport = (with_music && start + named_all + title_need <= end - transport_w).then(|| end - transport_w + 8.0);
-    if transport.is_some() {
-        end -= transport_w;
-    }
-    // Named wherever all fit beside what the head has at its end; else, in a headset, their words without their icons where those fit (round 11's judges: every tool
-    // one press away and named); else icons, with the open one, and in a headset the one a laser is on, named (round 10's judges could not tell the clock and the four
-    // squares apart). A status in the head takes the room of the names.
-    // On a screen a page of its own makes room for its name: its tools as small icons.
-    let compact = !(quiet && start + named_all + title_need <= end) || (unnamed && facts.desktop);
-    let words_w = |label: &str, on: bool| (measure(label, &head_words_font(facts, on)) + 16.0).ceil().max(compact_w);
-    let words_all: f32 = HEAD_TOOLS.iter().map(|t| words_w(tr_ctx("tile", t.2), tool_is_open(facts, t.0)) + 3.0).sum();
-    let words_only = compact && quiet && !facts.desktop && start + words_all + title_need <= end;
-    let mut x = start;
-    let mut tabs = Vec::new();
-    for (action, icon, label) in HEAD_TOOLS {
-        let on = tool_is_open(facts, action);
-        let label = tr_ctx("tile", label);
-        let named = !compact || on || (!facts.desktop && facts.pointed == Some(action));
-        let width = if words_only { words_w(label, on) } else if named { head_tab_named(label) } else { compact_w };
-        let (top, tall) = if facts.desktop { (7.0, 30.0) } else { (4.0, 36.0) };
-        tabs.push(Item { action, rect: r(x, top, width, tall), look: Look::HeadTab { icon, label, on, words_only } });
-        x += width + 3.0;
-    }
-    // Named ones that do not fit even so become icons, the last first, the open one last: never a name cut short.
-    if x - 3.0 > end {
-        let mut over = x - 3.0 - end;
-        for open_too in [false, true] {
-            for item in tabs.iter_mut().rev() {
-                let Look::HeadTab { on, .. } = item.look else { continue };
-                if over <= 0.0 || on != open_too || item.rect.width() <= compact_w {
-                    continue;
-                }
-                over -= item.rect.width() - compact_w;
-                item.rect.max.x = item.rect.min.x + compact_w;
-                item.look = match item.look {
-                    Look::HeadTab { icon, label, on, .. } => Look::HeadTab { icon, label, on, words_only: false },
-                    other => other,
-                };
-            }
-        }
-        let mut x = start;
-        for item in &mut tabs {
-            let width = item.rect.width();
-            item.rect = r(x, item.rect.top(), width, item.rect.height());
-            x += width + 3.0;
-        }
-    }
+    // ONE row of tabs on every page (Enzo, 2026-11-13: "the page tabs at the top doesn't look the same depending on which page we are on (e.g. youtube vs settings),
+    // unify them"). Until then a page's name, what plays, a status or the pointer each chose between names with icons, names alone and icons alone. Now the row is
+    // laid from the language and the head's width only ([`tab_row`]): the same tabs at the same places on every page, the open one lit. A page that is none of the six
+    // tools (Settings, Smooth tracking, Microphones, FPS booster, a page of N4N0's menu) is one of All tools' and lights All tools.
+    // While the head also holds a running thing's controls or words (a capture showing, a recording, a status), every tab is its icon, the open one lit, and the page's
+    // name follows them: the same on every page. The row's room is the head's without any of those, so that it is the same whatever else the head holds.
+    let row_end = peek.left() - head_gap(facts);
+    let tabs = tab_row(facts, start, row_end, head_condensed(facts));
     let title_x = tabs.last().map_or(start, |t| t.rect.right() + 6.0);
-    Head { back, close, peek, hide_view, small_view, stop, transport, tabs, title_x, end }
+    Head { back, close, peek, hide_view, small_view, stop, transport: None, tabs, title_x, end }
 }
 
-/// The tools along a sheet's head and where they end, as [`head`] lays them.
-#[cfg(test)]
-fn head_tabs(facts: &Facts, head_width: f32) -> (Vec<Item>, f32) {
-    let head = head(facts, head_width);
-    (head.tabs, head.title_x)
+/// Whether the head holds more than its tabs, Back, its close and the way to VRChat's menus: what is running, the same on every page.
+pub fn head_condensed(facts: &Facts) -> bool {
+    facts.view_showing || stop_shown(facts) || status_now(facts).is_some()
+}
+
+/// The tab that is lit: the open tool's, and All tools' for a page reached from it.
+pub fn tab_lit(facts: &Facts, action: Action) -> bool {
+    if tool_is_open(facts, action) {
+        return true;
+    }
+    let a_tools_page = facts.sheet.is_some() && !HEAD_TOOLS.iter().any(|t| tool_is_open(facts, t.0));
+    a_tools_page && action == Action::All
+}
+
+/// A head tab's icon, where its name starts and what is left after its name; and the gap between two tabs.
+const TAB_LEAD: f32 = 25.0;
+const TAB_TRAIL: f32 = 9.0;
+const TAB_GAP: f32 = 3.0;
+/// The size of a tab's name: this, or as much smaller as the language's six names need to lie whole in the head, never under the least.
+const TAB_FONT: f32 = 13.5;
+const TAB_FONT_LEAST: f32 = 11.5;
+/// A head tab as its icon alone, in a headset.
+const ICON_TAB_VR: f32 = 40.0;
+
+/// A tab's name, at `size`, lit or not; its width is always measured lit, so that it does not change as the page does.
+pub fn head_tab_font(size: f32, on: bool) -> FontId {
+    look::font(size, if on { weight::BOLD } else { weight::MEDIUM })
+}
+
+/// The size of the tabs' names in the language now, for a row from `start` to `end`: one size for all six, whatever the page.
+fn tab_font_size(facts: &Facts, start: f32, end: f32) -> f32 {
+    let words: f32 = HEAD_TOOLS.iter().map(|t| measure(tr_ctx("tile", t.2), &head_tab_font(TAB_FONT, true))).sum();
+    let fixed = HEAD_TOOLS.len() as f32 * (TAB_LEAD + TAB_TRAIL + TAB_GAP) - TAB_GAP;
+    let room = end - start - fixed;
+    if words <= room { TAB_FONT } else { (TAB_FONT * room / words).floor().max(TAB_FONT_LEAST) }
+}
+
+/// The six tools along a sheet's head, from `start`: each its icon and its name, as wide as its name lit measures, or (`icons`) each its icon alone at one width.
+pub fn tab_row(facts: &Facts, start: f32, end: f32, icons: bool) -> Vec<Item> {
+    let (top, tall) = if facts.desktop { (7.0, 30.0) } else { (4.0, 36.0) };
+    let compact_w = if facts.desktop { 36.0 } else { COMPACT_TAB_VR };
+    // As icons, a little narrower in a headset, still wider than a laser's dot: beside Hide 3D, Small here and a recording's Stop in the longest languages.
+    let (icon_w, gap) = if facts.desktop { (36.0, TAB_GAP) } else { (ICON_TAB_VR, 2.0) };
+    let size = tab_font_size(facts, start, end);
+    let mut x = start;
+    let mut tabs = Vec::with_capacity(HEAD_TOOLS.len());
+    for (action, icon, label) in HEAD_TOOLS {
+        let label = tr_ctx("tile", label);
+        let width = if icons { icon_w } else { (TAB_LEAD + measure(label, &head_tab_font(size, true)) + TAB_TRAIL).ceil().max(compact_w) };
+        tabs.push(Item { action, rect: r(x, top, width, tall), look: Look::HeadTab { icon, label, on: tab_lit(facts, action), named: !icons, size } });
+        x += width + if icons { gap } else { TAB_GAP };
+    }
+    // Never a name cut short: a language whose names do not fit even at the least size has its icons.
+    if !icons && x - TAB_GAP > end {
+        return tab_row(facts, start, end, true);
+    }
+    tabs
 }
 
 /// The wing's tiles in a row: its mark, then the six.
 fn strip(w: f32, h: f32, facts: &Facts) -> Vec<Item> {
     const PAD: f32 = 5.0;
     const MARK: f32 = 34.0;
-    // What plays at its end, when anything does: the wing has it at its foot. And in a headset a way to put it away, as the wing has at its head.
+    // What plays at its end, when anything does: the wing has it at its foot. And in a headset a way to put it away, as the wing has at its head. With a page up the
+    // strip stays (OWNER DECISION, Enzo repeatedly, latest 2026-11-13; AGENTS.md, "Owner decisions"); only its Hide goes, the page's head having its own close.
     let hide = facts.vr_close && facts.sheet.is_none();
     let hide_wide = if hide { HIDE_TILES + GAP } else { 0.0 };
     let cells: f32 = if facts.music.is_some() { 7.7 } else { 6.0 };
@@ -2577,10 +2568,14 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             }
             p.rect_filled(Rect::from_min_size(pos2(panel.left(), panel.top() + SHEET_HEAD - 2.0), vec2(panel.width(), 2.0)), 0.0, theme::alpha(band, 0.55));
             top_light(p, panel);
-            // The tools along it say which page this is; a page of N4N0's own says so after them.
+            // The lit tab says which page this is. All tools, which has no tabs, says its name; so does every page while its tabs are icons, when no status takes
+            // that room (the same on every page: [`head_condensed`]).
             let head = head(facts, size.x);
             let mut x = head.title_x;
-            if !head.tabs.iter().any(|t| matches!(t.look, Look::HeadTab { on: true, .. })) {
+            // Beside the tabs only whole: the lit tab already names the page.
+            let whole = measure(sheet_name(&facts.sheet_title), &head_title_font()) + 28.0 <= head.end - x;
+            let titled = head.tabs.is_empty() || (head_condensed(facts) && status_now(facts).is_none() && whole);
+            if titled && head.end - x >= 28.0 + 40.0 {
                 widgets::icon(p, pos2(x + 10.0, 22.0), glyph, 21.0, tint);
                 x += 28.0;
                 let font = head_title_font();
@@ -2599,7 +2594,7 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
                 p.text(pos2(from, if second.is_empty() { 22.0 } else { 13.0 }), Align2::LEFT_CENTER, fit(p, &first, &big, room), big, look::accent());
                 p.text(pos2(from, 31.0), Align2::LEFT_CENTER, fit(p, &second, &small, room), small, look::LABEL);
             // What is pointed at is said in one place: where the band under the tabs is up, there.
-            } else if let Some((first, second)) = facts.pointed.filter(|_| !facts.hint_band && matches!(facts.sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|a| caption(a, facts)) {
+            } else if let Some((first, second)) = facts.pointed.filter(|_| !facts.hint_band && head.end - from >= 80.0 && matches!(facts.sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|a| caption(a, facts)) {
                 // What a small tile does, which it does not say itself.
                 let room = head.end - from;
                 let big = look::font(14.5, weight::BOLD);
@@ -3616,7 +3611,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::Heading(name) => {
             text(p, pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, name, 16.0, weight::BOLD, look::LABEL);
         }
-        Look::HeadTab { icon, label, on, words_only } => {
+        Look::HeadTab { icon, label, on, named, size } => {
+            // One look on every page (Enzo, 2026-11-13): lit, the tool's colour under it and round it; pointed at, the hover's; else the head's band alone.
             let radius = look::radius(rect.height() / 2.0);
             let tint = part_ink(item.action);
             if on {
@@ -3624,18 +3620,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 p.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, theme::alpha(tint, 0.8)), egui::StrokeKind::Inside);
             } else if hovered || pressed {
                 p.rect_filled(rect, radius, look::TILE_HOVER);
-            } else if rect.height() > 37.0 {
-                // In a headset each a button of its own, as the sheet's buttons are: words alone read as a line of text, not as targets (round 14's judges).
-                p.rect_filled(rect, radius, look::TILE);
             }
-            // Named where it was made room for its name; a headset's icon-only tab is wider than a screen's, and still only an icon.
-            if words_only {
-                let font = head_words_font(facts, on);
-                p.text(rect.center(), Align2::CENTER_CENTER, fit(p, label, &font, rect.width() - 10.0), font, if on { Color32::WHITE } else { look::LABEL });
-            } else if rect.width() > COMPACT_TAB_VR + 1.0 {
-                widgets::icon(p, pos2(rect.left() + 16.0, rect.center().y), icon, 17.0, tint);
-                let font = head_tab_font(on);
-                p.text(pos2(rect.left() + 29.0, rect.center().y), Align2::LEFT_CENTER, fit(p, label, &font, rect.width() - 33.0), font, if on { Color32::WHITE } else { look::LABEL });
+            if named {
+                widgets::icon(p, pos2(rect.left() + TAB_LEAD / 2.0 + 1.0, rect.center().y), icon, 16.0, tint);
+                let font = head_tab_font(size, on);
+                p.text(pos2(rect.left() + TAB_LEAD, rect.center().y), Align2::LEFT_CENTER, fit(p, label, &font, rect.width() - TAB_LEAD - 4.0), font, if on { Color32::WHITE } else { look::LABEL });
             } else {
                 widgets::icon(p, rect.center(), icon, 18.0, tint);
             }
@@ -4938,21 +4927,75 @@ mod tests {
                 assert_eq!(tabs(&Facts { desktop, beside_wing, sheet: Some(Sheet::All), ..facts() }), 0);
             }
         }
-        // In a headset, with a capture in a world's side panel, every tool is one press away and named (round 11's judges), in the head's own width, clear of Hide 3D.
+    }
+
+    /// Enzo, 2026-11-13: "the page tabs at the top doesn't look the same depending on which page we are on (e.g. youtube vs settings), unify them". In each of the five
+    /// languages, on a screen and in a headset: every page that has tabs has the same six at the same places, each its icon and its whole name, one lit; whatever plays,
+    /// whatever is pointed at, beside the wing or not. While a capture shows or a recording runs they are icons, again the same on every page, clear of what the head
+    /// holds then.
+    #[test]
+    fn one_tab_row_on_every_page() {
+        use orbiters_i18n::{in_language, Language};
+        let pages: Vec<(Sheet, &str)> = vec![
+            (Sheet::Worlds, "Worlds"), (Sheet::Results, "YouTube"), (Sheet::Menu, "YouTube"), (Sheet::Instances, "Instances"), (Sheet::Pictures, "Pictures"),
+            (Sheet::Talk, "Ask N4N0"), (Sheet::Settings, "Settings"), (Sheet::Tracking, "Smooth tracking"), (Sheet::Mics, "Microphones"), (Sheet::Booster, "Boost FPS"),
+            (Sheet::Menu, "Saved looks"), (Sheet::Menu, "QR code"),
+        ];
         let size = Zone::SheetBack.units().size();
-        let busy = Facts { desktop: false, sheet: Some(Sheet::Worlds), view_showing: true, ..facts() };
-        let shown: Vec<Item> = items(Zone::SheetBack, size, &busy).into_iter().filter(|i| matches!(i.look, Look::HeadTab { .. })).collect();
-        assert_eq!(shown.len(), 6);
-        let hide = items(Zone::SheetBack, size, &busy).into_iter().find(|i| i.action == Action::HideView).expect("Hide 3D");
-        assert!(shown.iter().all(|t| matches!(t.look, Look::HeadTab { words_only: true, .. }) && !t.rect.intersects(hide.rect)), "{shown:?}");
-        // With Small here beside Hide 3D, where six names do not fit, icons a laser finds, clear of both.
-        let crowded = Facts { sheet: Some(Sheet::Pictures), ..busy.clone() };
-        let shown: Vec<Item> = items(Zone::SheetBack, size, &crowded).into_iter().filter(|i| matches!(i.look, Look::HeadTab { .. })).collect();
-        let small = items(Zone::SheetBack, size, &crowded).into_iter().find(|i| matches!(i.action, Action::SmallView(_))).expect("Small here");
-        assert!(shown.iter().all(|t| t.rect.width() >= COMPACT_TAB_VR && !t.rect.intersects(small.rect)), "{shown:?}");
-        // A page with no tab of its own keeps room for its name, on a screen.
-        let (_, x) = head_tabs(&Facts { desktop: true, sheet: Some(Sheet::Settings), ..facts() }, 1024.0);
-        assert!(x < 300.0, "{x}");
+        for language in Language::ALL {
+            in_language(language, || {
+                for desktop in [false, true] {
+                    let row = |facts: &Facts| -> Vec<(Action, Rect, bool, bool, u32)> {
+                        items(Zone::SheetBack, size, facts).into_iter().filter_map(|i| match i.look {
+                            Look::HeadTab { on, named, size, .. } => Some((i.action, i.rect, on, named, size.to_bits())),
+                            _ => None,
+                        }).collect()
+                    };
+                    let same = |a: &[(Action, Rect, bool, bool, u32)], b: &[(Action, Rect, bool, bool, u32)]| a.iter().zip(b).all(|(x, y)| (x.0, x.1, x.3, x.4) == (y.0, y.1, y.3, y.4)) && a.len() == b.len();
+                    for condensed in [false, true] {
+                        let mut first: Option<Vec<(Action, Rect, bool, bool, u32)>> = None;
+                        for (sheet, title) in &pages {
+                            for (music, pointed, beside_wing) in [(None, None, false), (Some(("A rather long song name - its artist".to_string(), true)), Some(Action::Pictures), true)] {
+                                let mut facts = Facts { desktop, sheet: Some(*sheet), sheet_title: (*title).into(), music, pointed, beside_wing, ..facts() };
+                                if condensed {
+                                    facts.view_showing = true;
+                                    facts.recording = true;
+                                }
+                                let tabs = row(&facts);
+                                let what = format!("{language:?} desktop {desktop} condensed {condensed} {sheet:?} {title}");
+                                assert_eq!(tabs.len(), 6, "{what}");
+                                assert_eq!(tabs.iter().filter(|t| t.2).count(), 1, "{what}: one tab lit");
+                                assert!(tabs.iter().all(|t| t.3 != condensed), "{what}: named {}", !condensed);
+                                match &first {
+                                    None => first = Some(tabs.clone()),
+                                    Some(first) => assert!(same(first, &tabs), "{what}: the same row as on the first page
+{first:?}
+{tabs:?}"),
+                                }
+                                let head = head(&facts, size.x);
+                                let others: Vec<Rect> = [Some(head.close), Some(head.peek), head.hide_view, head.small_view, head.stop].into_iter().flatten().collect();
+                                for t in &tabs {
+                                    assert!(t.1.left() > head.back.right() && others.iter().all(|o| !o.intersects(t.1)), "{what}: {t:?} clear of the head's buttons {others:?}");
+                                }
+                                if !condensed {
+                                    // Every name whole at its size, the least of which is still a laser's read.
+                                    assert!(f32::from_bits(tabs[0].4) >= TAB_FONT_LEAST, "{what}");
+                                    for (action, rect, on, _, bits) in &tabs {
+                                        let label = HEAD_TOOLS.iter().find(|t| t.0 == *action).map(|t| tr_ctx("tile", t.2)).unwrap();
+                                        assert!(measure(label, &head_tab_font(f32::from_bits(*bits), *on)) <= rect.width() - TAB_LEAD - 4.0 + 0.5, "{what}: {label} whole in {rect:?}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        // A page reached from All tools lights All tools, and its tab there goes to All tools rather than closing the page; the tool's own tab closes its page.
+        let settings = Facts { sheet: Some(Sheet::Settings), sheet_title: "Settings".into(), ..facts() };
+        assert!(tab_lit(&settings, Action::All) && !tool_is_open(&settings, Action::All));
+        let youtube = Facts { sheet: Some(Sheet::Menu), sheet_title: "YouTube".into(), ..facts() };
+        assert!(tab_lit(&youtube, Action::Page(Target::YouTube)) && !tab_lit(&youtube, Action::All));
     }
 
     /// Under the menu, in a headset, as on the wing: a way to put the tiles away. Not where the sheet has its own close, nor on a screen.

@@ -151,33 +151,28 @@ pub fn colours(pair: &Pair, b: &crate::ocr::TextBox) -> Colours {
     let at = |q: [f32; 2]| p.sample(q[0] - from[0] as f32, q[1] - from[1] as f32);
     let [tl, tr, br, bl] = b.corners;
     let lerp2 = |a: [f32; 2], b: [f32; 2], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-    let c = b.centre();
-    let out = |q: [f32; 2], k: f32| [c[0] + (q[0] - c[0]) * k, c[1] + (q[1] - c[1]) * k];
-    // The box is padded already: its own edge is mostly background. Sample on it and a little outside.
-    let mut ring: Vec<[f32; 3]> = Vec::new();
-    for k in [1.0, 1.08] {
-        for i in 0..24 {
-            let t = i as f32 / 24.0;
-            for (a, bb) in [(tl, tr), (tr, br), (br, bl), (bl, tl)] {
-                ring.push(at(out(lerp2(a, bb, t), k)));
-            }
-        }
-    }
-    let median = |ch: usize, v: &[[f32; 3]]| {
-        let mut x: Vec<f32> = v.iter().map(|p| p[ch]).collect();
-        x.sort_by(|a, b| a.total_cmp(b));
-        x[x.len() / 2]
-    };
-    let bg = [median(0, &ring), median(1, &ring), median(2, &ring)];
-    let mut inside: Vec<([f32; 3], f32)> = Vec::new();
+    // Inside the box (padded around the letters) most pixels are the surface the text is written on: its colour is the
+    // commonest there. A ring around the box was tried first and in VRChat (a station's yellow signs, 2026-11-13) it
+    // caught the sign's black frame and painted the cover dark.
+    let mut samples: Vec<[f32; 3]> = Vec::new();
     for j in 1..12 {
         for i in 1..48 {
-            let q = lerp2(lerp2(tl, tr, i as f32 / 48.0), lerp2(bl, br, i as f32 / 48.0), j as f32 / 12.0);
-            let s = at(q);
-            let d = (0..3).map(|k| (s[k] - bg[k]).powi(2)).sum::<f32>();
-            inside.push((s, d));
+            samples.push(at(lerp2(lerp2(tl, tr, i as f32 / 48.0), lerp2(bl, br, i as f32 / 48.0), j as f32 / 12.0)));
         }
     }
+    let bin = |p: &[f32; 3]| ((p[0] as u32 / 24) << 16) | ((p[1] as u32 / 24) << 8) | (p[2] as u32 / 24);
+    let mut counts: std::collections::HashMap<u32, (u32, [f32; 3])> = std::collections::HashMap::new();
+    for p in &samples {
+        let e = counts.entry(bin(p)).or_insert((0, [0.0; 3]));
+        e.0 += 1;
+        for k in 0..3 {
+            e.1[k] += p[k];
+        }
+    }
+    let (n, sum) = counts.values().max_by_key(|(n, _)| *n).copied().unwrap_or((1, [128.0; 3]));
+    let bg = sum.map(|v| v / n as f32);
+    let inside: Vec<([f32; 3], f32)> = samples.iter().map(|s| (*s, (0..3).map(|k| (s[k] - bg[k]).powi(2)).sum::<f32>())).collect();
+    let mut inside = inside;
     inside.sort_by(|a, b| b.1.total_cmp(&a.1));
     let top = &inside[..(inside.len() / 8).max(1)];
     let ink = top.iter().fold([0f32; 3], |a, (s, _)| [a[0] + s[0], a[1] + s[1], a[2] + s[2]]).map(|v| v / top.len() as f32);

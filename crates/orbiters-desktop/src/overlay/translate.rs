@@ -288,6 +288,18 @@ impl TranslateHost {
     }
 }
 
+/// A line in `translate.log` beside the app's other logs: how reading goes (never what was read).
+fn note(line: &str) {
+    use std::io::Write;
+    let path = orbiters_core::paths::logs_dir().join("translate.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::rename(&path, path.with_extension("old.log"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{} {line}", orbiters_core::now_utc_iso());
+    }
+}
+
 fn set_status(shared: &Mutex<Shared>, state: TranslateState) {
     shared.lock().unwrap_or_else(|e| e.into_inner()).status.state = state;
 }
@@ -430,6 +442,9 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
     let mut pace = Duration::from_millis(400);
     let mut last_look: Option<Instant> = None;
     let mut costs: VecDeque<f32> = VecDeque::new();
+    // What the last ten seconds were spent on, for translate.log.
+    let (mut looks, mut paused_turns, mut turning_turns, mut reported) = (0u32, 0u32, 0u32, Instant::now());
+    note(&format!("reading started; translator: {}", if translator_state.is_none() { "ready" } else { "none yet" })); // i18n: not shown (a log's line)
     // The eyes' size, known after a first look (Quest Pro through Virtual Desktop: 3168 x 3456); until then, whole.
     let mut whole_size = [u32::MAX / 2; 2];
     while !stop.load(Ordering::Relaxed) {
@@ -480,6 +495,14 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
             in_use = s;
         }
         let turning = turn_speed(&heads) > FAST_TURN;
+        if reported.elapsed() >= Duration::from_secs(10) {
+            let s = shared.lock().unwrap_or_else(|e| e.into_inner()).status.clone();
+            let mean = if costs.is_empty() { 0.0 } else { costs.iter().sum::<f32>() / costs.len() as f32 };
+            note(&format!("{looks} looks in {:.0} s (mean {mean:.0} ms, pace {} ms), paused {paused_turns}, turning {turning_turns}; {} lines, {} shown; {:?}", reported.elapsed().as_secs_f32(), pace.as_millis(), s.lines, s.shown, s.state)); // i18n: not shown (a log's line)
+            (looks, paused_turns, turning_turns, reported) = (0, 0, 0, Instant::now());
+        }
+        paused_turns += paused as u32;
+        turning_turns += (turning && !paused) as u32;
         if paused || turning || last_look.is_some_and(|t| t.elapsed() < pace) {
             if paused {
                 let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
@@ -495,6 +518,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
             continue;
         };
         last_look = Some(Instant::now());
+        looks += 1;
         // The middle of each eye, where things are looked at: 70 % of it each way, in the left eye that is read; the
         // right eye's part is wider, as what is near shows further to the left there.
         let began = Instant::now();

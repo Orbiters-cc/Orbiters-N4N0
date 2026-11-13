@@ -195,8 +195,9 @@ impl Builtin {
                 ("encoder_hidden_states".into(), Tensor::from_array((hidden.0.clone(), hidden.1.clone())).map_err(e)?.into()),
                 ("use_cache_branch".into(), Tensor::from_array(([1usize], vec![step > 0])).map_err(e)?.into()),
             ];
+            // Borrowed: the encoder's part of the cache stays for every later step.
             for name in &self.past {
-                inputs.push((name.clone(), past.remove(name).expect("every cache input").into()));
+                inputs.push((name.clone(), (&past[name]).into()));
             }
             let mut outputs = self.decoder.run(inputs).map_err(e)?;
             let next = {

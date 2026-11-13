@@ -309,6 +309,13 @@ const VR_SHOT_HALF_FOV: f32 = 50.0;
 /// its hint reads is what a headset shows, not what a wide frame shrinks it to (round 14's judges found its lines too small). A part of what the eye sees.
 const HAND_SHOT_HALF_FOV: f32 = 36.0;
 
+/// Which side tiles a Quick Menu render shows: the wing on the side away from this hand (0 right, 1 left), or the strip under the menu.
+#[derive(Clone, Copy)]
+enum SideTiles {
+    Wing(usize),
+    Strip,
+}
+
 pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
     use crate::overlay::floating::space;
     use crate::overlay::orbit::vr;
@@ -383,17 +390,28 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         let mut held = space::before_eyes(&head, 0.5, 0.08);
         held.m[0][3] -= 0.12;
         let plane = vr::quick_menu_plane(&vr::grip_holding(&held, &tune.quick_menu(1)), 1, &tune, 1.0);
-        let qm_scene = |facts: &Facts, hover: Option<usize>, sheet: Option<Sheet>, name: &str| -> anyhow::Result<()> {
+        // The Quick Menu's side tiles as the app lays them on this hand or in the strip: with a page open they stay, beside it (Enzo, repeatedly; latest 2026-11-13).
+        let side_tiles = |side: SideTiles| -> Vec<zones::Placed> {
+            match side {
+                SideTiles::Wing(hand) => vr::quick_menu_places(hand),
+                SideTiles::Strip => vr::strip_places(),
+            }
+        };
+        let qm_scene_on = |side: SideTiles, facts: &Facts, hover: Option<usize>, sheet: Option<Sheet>, name: &str| -> anyhow::Result<()> {
             let mut eye = Eye::new(size, &ground, eyes);
             let center_units = zones::Placed { zone: Zone::SheetBack, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 };
             eye.quad(&plane.quad(&center_units, 0.0, 0.0), &qm, qm_px, 1.0);
             let mut end = None;
-            for zone in Zone::QUICK_MENU.into_iter().filter(|_| sheet.is_none()) {
-                // Where the headset has it: its gap from My Profile, as the app lays it (the renders had none, and judges saw it touch).
-                let placed = vr::quick_menu_places(0).into_iter().find(|p| p.zone == zone).unwrap_or_else(|| zones::in_units(zone));
+            // Where the headset has them: their gap from My Profile, as the app lays them (the renders had none, and judges saw it touch); with a page up, stood off it
+            // at the page's depth, as `vr::near` has them.
+            let sheet_up = sheet.is_some();
+            let parts = side_tiles(side);
+            let shown: Vec<Zone> = parts.iter().map(|p| p.zone).filter(|z| *z != Zone::QmStop || facts.recording).collect();
+            for zone in shown {
+                let placed = parts.iter().copied().find(|p| p.zone == zone).unwrap_or_else(|| zones::in_units(zone));
                 let hovered = hover.filter(|_| zone == Zone::WingWorlds).map(|_| 0);
                 let (pixels, px) = sharp_picture(&placed, facts, hovered, 2.0);
-                eye.quad(&plane.quad(&vr::clear_of_sheet(placed, false), 0.0, 0.004), &pixels, px, 1.0);
+                eye.quad(&plane.quad(&vr::clear_of_sheet(placed, sheet_up), 0.0, if sheet_up { 0.02 } else { 0.004 }), &pixels, px, 1.0);
                 if let Some(i) = hovered {
                     let item = panels::items(zone, placed.logical(), facts)[i].rect.center().to_vec2() + placed.rect.min.to_vec2();
                     end = Some(space::apply(&plane.frame, [item.x * plane.unit, -item.y * plane.unit, 0.01]));
@@ -419,8 +437,20 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             }
             eye.save(out, name)
         };
+        let qm_scene = |facts: &Facts, hover: Option<usize>, sheet: Option<Sheet>, name: &str| qm_scene_on(SideTiles::Wing(0), facts, hover, sheet, name);
         if !only_small {
         qm_scene(&facts, None, None, &format!("vr-qm-{world}"))?;
+        // The side tiles stay while a page is open (Enzo, repeatedly; latest 2026-11-13): on either hand's side, and in the strip under the menu.
+        let youtube = Facts { sheet: Some(Sheet::Results), sheet_title: "YouTube".into(), ..facts.clone() };
+        qm_scene_on(SideTiles::Wing(1), &youtube, None, Some(Sheet::Results), &format!("vr-sheet-{world}-youtube-wing-left"))?;
+        qm_scene_on(SideTiles::Strip, &youtube, None, Some(Sheet::Results), &format!("vr-sheet-{world}-youtube-strip"))?;
+        qm_scene(&youtube, None, Some(Sheet::Results), &format!("vr-sheet-{world}-youtube"))?;
+        let tracking = Facts { sheet: Some(Sheet::Tracking), sheet_title: "Smooth tracking".into(), tracking: Some((true, [0, 35, 78], "Smoothing your devices now".to_string())), ..facts.clone() };
+        qm_scene(&tracking, None, Some(Sheet::Tracking), &format!("vr-sheet-{world}-tracking"))?;
+        qm_scene(&Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), ..facts.clone() }, None, Some(Sheet::Talk), &format!("vr-sheet-{world}-talk"))?;
+        qm_scene(&Facts { sheet: Some(Sheet::Worlds), sheet_title: "Worlds".into(), ..facts.clone() }, None, Some(Sheet::Worlds), &format!("vr-sheet-{world}-worlds"))?;
+        qm_scene(&Facts { sheet: Some(Sheet::Instances), sheet_title: "Instances".into(), ..facts.clone() }, None, Some(Sheet::Instances), &format!("vr-sheet-{world}-instances"))?;
+        qm_scene(&Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), recording: true, recording_seconds: Some(42), ..facts.clone() }, None, Some(Sheet::Pictures), &format!("vr-sheet-{world}-pictures-recording"))?;
         qm_scene(&pointing(Action::Worlds), Some(0), None, &format!("vr-qm-{world}-point-worlds"))?;
         qm_scene(&Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..facts.clone() }, None, Some(Sheet::All), &format!("vr-sheet-{world}-all"))?;
         qm_scene(&Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..facts.clone() }, None, Some(Sheet::Pictures), &format!("vr-sheet-{world}-pictures"))?;

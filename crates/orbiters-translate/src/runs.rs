@@ -13,7 +13,7 @@ const SURE_LETTER: f32 = 0.5;
 const GAP: f32 = 3.0;
 /// A run's box: its letters' height times this, and this much of a letter height before and after them.
 pub const RUN_HEIGHT: f32 = 1.5;
-const RUN_PAD: f32 = 0.3;
+const RUN_PAD: f32 = 0.45;
 
 /// The letters' own height in a box the detector made larger by its "unclip" distance on every side (DB's
 /// `d = area × 1.5 / perimeter`, found back by halving: the larger the letters, the larger the box).

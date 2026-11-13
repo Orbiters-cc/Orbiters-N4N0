@@ -20,9 +20,9 @@ const BOX_PIXELS: f32 = 72.0;
 /// The original letters' height against their box's: a run's box is [`crate::runs::RUN_HEIGHT`] letters high.
 const LETTERS_IN_BOX: f32 = 1.0 / crate::runs::RUN_HEIGHT;
 /// The smallest letters against the original's, before the box grows.
-const SMALLEST: f32 = 0.62;
+const SMALLEST: f32 = 0.75;
 /// How much longer than the original the box may grow before the translation takes two lines.
-const LONGER: f32 = 1.7;
+const LONGER: f32 = 2.2;
 /// Widest texture.
 const MOST_PIXELS: f32 = 2048.0;
 
@@ -126,7 +126,7 @@ impl Painter {
         let text = painter.paint(&primitives, full.pixels_per_point, egui::Color32::TRANSPARENT).to_vec();
         painter.free_textures(&mut full.textures_delta);
         // The cover: the background colour, its edges fading over a few pixels into the surface, the text over it.
-        let feather = (h as f32 * 0.09).max(2.0);
+        let feather = (h as f32 * 0.06).max(2.0);
         let mut out = vec![0u8; (w * h * 4) as usize];
         for y in 0..h {
             for x in 0..w {
@@ -205,7 +205,7 @@ mod tests {
         let short = p.paint("Exit", c, 0.3, 0.05);
         assert!((short.quad_width - 0.3).abs() < 0.01 && (short.quad_height - 0.05).abs() < 0.001, "{short:?}");
         assert_eq!(short.rgba.len() as u32, short.width * short.height * 4);
-        let long = p.paint("Authorized personnel only beyond this point, thank you", c, 0.3, 0.05);
+        let long = p.paint("Authorized personnel only beyond this point, thank you for your understanding and patience today", c, 0.3, 0.05);
         assert!(long.quad_width > 0.3 && long.quad_width <= 0.3 * LONGER + 0.01, "{}", long.quad_width);
         assert!(long.quad_height > 0.05, "two lines");
         // The middle is opaque background or ink, the edge fades out.

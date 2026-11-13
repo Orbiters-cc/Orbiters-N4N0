@@ -32,6 +32,12 @@
   Duplicate disabled until the check succeeds. Explain insufficient space and recheck immediately before copying.
 - Progressive galleries must preserve the visible item and its scroll position as content arrives. Do not animate
   layout dimensions with springs or let background insertion move the user's viewport unexpectedly.
+- **The SteamVR test sandbox is one shared, long-lived session** (`tools/vr-sandbox`, `docs/vr-sandbox.md`): take a
+  turn with `python tools/vr-sandbox/sandbox.py acquire --owner <your stream> --app <your exe>`, use the VRChat that
+  is already running (never close and relaunch it for an experiment: it costs minutes and preceded Easy Anti-Cheat's
+  "EAC unload timeout"), and `release --owner <your stream>` as soon as you have your evidence. Do not `restore` or
+  stop a session another agent holds. Enzo taking his headset back (`sandbox.py yield`, Virtual Desktop connecting)
+  always wins; him using the mouse and keyboard is not a reason to stop.
 - Unity storage repair must match log errors to the affected project, account for import workspace beyond copy
   size, and hold the Unity project lock before changing cache paths. Preserve Assets, Packages, ProjectSettings
   and exact dependency versions. Copy and verify cache contents before switching locations; retain the original

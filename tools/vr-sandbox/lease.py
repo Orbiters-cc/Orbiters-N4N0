@@ -9,11 +9,13 @@ The controller (sandbox.py) keeps one long-lived session (SteamVR + VRChat). Age
 - A waiter must poll at least every WAITER_STALE_S, or it loses its place.
 - With no holder for IDLE_S the session shuts itself down and restores the owner's SteamVR files.
 """
+import os
 import secrets
 
-STALE_S = 10 * 60          # a turn without any request for this long is ended (cut-off agent)
-WAITER_STALE_S = 45        # a waiter that stopped polling for this long loses its place
-IDLE_S = 10 * 60           # no turn for this long: the session shuts down and restores everything
+# The ORBITERS_SANDBOX_*_S overrides exist only to test these rules live in minutes; agents never set them.
+STALE_S = int(os.environ.get('ORBITERS_SANDBOX_STALE_S', 10 * 60))   # a turn without any request for this long is ended
+WAITER_STALE_S = 180       # a waiter that stopped polling for this long loses its place (a release can take 2 min)
+IDLE_S = int(os.environ.get('ORBITERS_SANDBOX_IDLE_S', 10 * 60))     # no turn this long: the session shuts down
 EXEMPT = {'status', 'lease_status', 'acquire', 'release', 'renew', 'shutdown', 'yield'}
 
 

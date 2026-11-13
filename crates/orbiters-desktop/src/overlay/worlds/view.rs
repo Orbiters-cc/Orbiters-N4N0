@@ -139,8 +139,8 @@ pub struct Job {
     pub placement: Placement,
     pub eyes: [V3; 2],
     pub work: Work,
-    /// Small with its middle moved: only what it reaches from there, with the capture to read that from.
-    pub clip: Option<(V3, f32, f32, Arc<Capture>)>,
+    /// Small: what of it is drawn (a round in the room, all behind a near edge in a panel's hole), with the capture to read that from.
+    pub clip: Option<(stereo::Cut, Arc<Capture>)>,
     /// Small in a panel's hole: our backdrop under what the splats leave, where the rays go through the hole (opening.rs).
     pub opening: Option<Opening>,
     /// Splats drawn (the first ones: the reveal).
@@ -1032,14 +1032,13 @@ impl View {
             Phase::Loading => capture.within(0.0),
             _ => capture.gaussians.len(),
         };
-        // Small, only what it reaches is drawn.
-        let count = self.small.as_ref().map_or(count, |small| count.min(capture.within(small.reach() + small.moved_by())));
-        // Always while it stands small, moved or not: its edge fades, which the marks say.
-        // In a panel's hole, no higher than shows under the hole's top.
-        let clip = self.small.as_ref().map(|small| {
-            let ceiling = if small.docked { capture.view.ground() + small.reach() * stereo::HOLE_CEILING_PER_REACH } else { f32::INFINITY };
-            (small.middle(capture.view.eye()), small.reach(), ceiling, capture.clone())
-        });
+        // Always while it stands small, moved or not: its edge fades, which the marks say. In the room only what its round reaches is drawn; in a
+        // panel's hole all that lies behind its near edge, to the capture's far end (Enzo, 2026-11-13: more of it forward).
+        let clip = self.small.as_ref().map(|small| (stereo::Cut::of(small, &capture.view), capture.clone()));
+        let count = match (&self.small, &clip) {
+            (Some(small), Some((cut, _))) if !cut.reaches_the_far_end() => count.min(capture.within(small.reach() + small.moved_by())),
+            _ => count,
+        };
         // In a panel's hole, our backdrop behind it (opening.rs): the one last drawn while the panel only trembles in the hand.
         let opening = opening_for(self.small_opening, self.small.as_ref().is_some_and(|s| s.docked), self.wide_opening);
         let pixels = self.width - 2 * MARGIN;

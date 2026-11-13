@@ -192,10 +192,88 @@ const SMALL_TILT_IN_THE_ROOM: f32 = 14.0;
 /// How far under a hole's middle a capture's floor lies in it, in its radius: low enough that what stands as high as most captures do (0.7 of the radius) ends under the
 /// hole's top (Enzo's request 60: the upper part is not cut), the floor's near edge going under the hole's foot.
 const SMALL_FLOOR_UNDER_THE_MIDDLE: f32 = 0.2;
-/// How high over its floor a capture in a hole is drawn, in its reach: what is higher would be over the hole's top, behind the panel, and over the sheet's own top
-/// in the room. In a hand nothing is cut by its height (Enzo's request 60).
-// Over the hole's top by about the sheet's head: where it thins out is behind the panel, and no straight edge shows in the hole (the round 20 pre-check).
-pub const HOLE_CEILING_PER_REACH: f32 = 1.02;
+/// From how far out of its reach a capture standing small in the room fades to nothing at its edge.
+const SMALL_FADES_FROM: f32 = 0.8;
+/// How deep the soft near edge of a capture in a panel's hole is, in its reach: as deep as the round's edge in the room fades.
+const HOLE_NEAR_FADE_PER_REACH: f32 = 1.0 - SMALL_FADES_FROM;
+/// How far the near edge of a capture in a panel's hole recedes towards its sides, in its reach: back to about its middle's depth, then level.
+const HOLE_NEAR_RECEDES_PER_REACH: f32 = 1.0;
+
+/// What of a capture standing small is drawn. Each splat's share of it is worked out once (`FaceRenderer::clip`, the renderer's
+/// marks), never per eye or per frame: both eyes see the same edge, and nothing pops as the head moves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Cut {
+    /// In the room (in a hand, or let go there): a round across the ground around its middle, `reach` wide, its last part fading.
+    Round { middle: V3, reach: f32 },
+    /// In a panel's hole: only its near side is cut (Enzo, 2026-11-13, his mockup): a surface that comes nearest who looks at the middle, where the
+    /// round's near edge was, always behind the panel's plane, and recedes smoothly towards the sides; beyond it, away from who looks, all of it,
+    /// to the capture's far end. The hole is a window onto the place going on into the distance, and none of it comes out in front of the menu.
+    ///
+    /// In the capture's coordinates, as [`SmallDock::behind`] lays it in a hole: `ground` the ground under its middle, which lies `reach` behind
+    /// the panel's plane; `toward` the panel's normal towards who looks (level the other way from the start view, tipped up by the hole's tilt);
+    /// `across` the panel's across. A capture in a hole turns with the panel, so these never change as the panel or the head moves.
+    Window { ground: V3, toward: V3, across: V3, reach: f32 },
+}
+
+impl Cut {
+    /// What `small`, a capture whose start view is `view`, draws: in its hole, or out in the room.
+    pub fn of(small: &Small, view: &StartView) -> Self {
+        let middle = small.middle(view.eye());
+        if !small.docked {
+            return Cut::Round { middle, reach: small.reach() };
+        }
+        // SmallDock::behind's rotation is the panel's, times the tilt, times the turn by the start view's yaw: the panel's own axes, in the
+        // capture, are that turn's and tilt's inverse of them.
+        let (s, c) = (-view.yaw()).sin_cos();
+        let (ts, tc) = SMALL_TILT_IN_A_HOLE.to_radians().sin_cos();
+        Cut::Window { ground: [middle[0], view.ground(), middle[2]], toward: [s * tc, ts, -c * tc], across: [c, 0.0, s], reach: small.reach() }
+    }
+
+    /// How much of the splat whose middle is `p` (the capture's coordinates) is left out: 0 drawn whole, 1 not drawn, and in between its soft edge.
+    pub fn gone(&self, p: V3) -> f32 {
+        match *self {
+            Cut::Round { middle, reach } => {
+                // Across the ground only: moved, it shows the same round as before, with nothing cut for its height.
+                let far = (p[0] - middle[0]).hypot(p[2] - middle[2]);
+                ((far - reach * SMALL_FADES_FROM) / (reach * (1.0 - SMALL_FADES_FROM))).clamp(0.0, 1.0)
+            }
+            Cut::Window { ground, toward, across, reach } => {
+                let q = sub(p, ground);
+                // How far behind the panel's plane, and how far aside.
+                let behind = reach - dot(q, toward);
+                let aside = dot(q, across);
+                (((Self::near_edge(reach, aside) + reach * HOLE_NEAR_FADE_PER_REACH) - behind) / (reach * HOLE_NEAR_FADE_PER_REACH)).clamp(0.0, 1.0)
+            }
+        }
+    }
+
+    /// Where a hole's near edge lies, behind the panel's plane, `aside` from its middle (the capture's metres; drawn whole from a fade's depth
+    /// further). In the middle: as near as the round's near edge on the ground was (the ground under the middle is `reach` behind the plane, the
+    /// edge `reach` nearer along the ground, tipped by the hole's tilt), so the floor starts where it did. Aside: a smooth curve back, round
+    /// like the round's edge near the middle, then level about the middle's depth: seen from aside through the hole, what lies beside the window
+    /// is no nearer than what lies ahead.
+    pub fn near_edge(reach: f32, aside: f32) -> f32 {
+        let recedes = reach * HOLE_NEAR_RECEDES_PER_REACH;
+        reach * (1.0 - SMALL_TILT_IN_A_HOLE.to_radians().cos()) + recedes * (1.0 - (-aside * aside / (2.0 * recedes * reach)).exp())
+    }
+
+    /// Whether every splat drawn by `self` is drawn by `other` as much, to see: no need to work the marks out again.
+    pub fn same_as(&self, other: &Cut) -> bool {
+        let near = |a: f32, b: f32, reach: f32| (a - b).abs() < reach * 0.02;
+        match (*self, *other) {
+            (Cut::Round { middle: a, reach: r }, Cut::Round { middle: b, reach: q }) => near(a[0], b[0], r) && near(a[2], b[2], r) && near(r, q, r),
+            (Cut::Window { ground: a, toward: t, reach: r, .. }, Cut::Window { ground: b, toward: u, reach: q, .. }) => {
+                near(a[0], b[0], r) && near(a[1], b[1], r) && near(a[2], b[2], r) && near(r, q, r) && dot(t, u) > 0.9999
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether it may draw splats however far from its middle: the first ones by distance ([`super::catalog::Capture::within`]) are not enough.
+    pub fn reaches_the_far_end(&self) -> bool {
+        matches!(self, Cut::Window { .. })
+    }
+}
 
 /// Where a capture standing small lies in a panel: as that panel turns, this large, this far behind it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1027,6 +1105,116 @@ mod tests {
             free.step([None, None], [false; 2], [0.0; 2], 1.0 / 90.0, None);
         }
         assert!(!free.docked && (free.radius() - SMALL_RADIUS_M).abs() < 1e-2);
+    }
+
+    /// A panel held as a hand holds one: at `x, y, z`, turned `yaw` and tipped back `pitch` radians.
+    fn sheet_at(x: f32, y: f32, z: f32, yaw: f32, pitch: f32) -> Matrix34 {
+        let (ps, pc) = pitch.sin_cos();
+        let tipped = Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, pc, -ps, 0.0], [0.0, ps, pc, 0.0]] };
+        compose(&head_at(x, y, z, yaw), &tipped)
+    }
+
+    /// I-view-forward (Enzo, 2026-11-13, his mockup): in a panel's hole a capture is cut on its near side only. Whatever the panel's pose, the
+    /// start view's way, the zoom or where its middle was moved: nothing that lies in front of the panel's plane (or on it) is drawn, what lies
+    /// ahead is drawn whole to the capture's far end, and the cut is the same for every pose of the panel (never per head or per eye: both eyes see
+    /// one edge, and nothing pops as the head moves).
+    #[test]
+    fn in_a_hole_only_the_near_side_is_cut_and_never_in_front_of_the_panel() {
+        let views = [
+            StartView { position: [0.0, 1.6, 0.0], target: [0.0, 1.6, -1.0], floor: None, eye_height: None },
+            StartView { position: [3.0, 2.1, -4.0], target: [7.0, 1.0, 2.0], floor: Some(0.4), eye_height: None },
+        ];
+        let sheets = [sheet_at(0.3, 1.3, -0.4, 0.2, 0.0), sheet_at(-0.2, 1.1, -0.35, -0.7, 0.5), sheet_at(0.6, 1.5, -0.3, 2.5, -0.3)];
+        for view in &views {
+            for &(moved, reach) in &[([0.0, 0.0], 3.0), ([1.5, -2.0], 1.2), ([0.0, 0.0], 0.5), ([-4.0, 1.0], 12.0)] {
+                let mut cuts = Vec::new();
+                for sheet in &sheets {
+                    let dock = SmallDock::behind(view, sheet, 0.08, reach);
+                    let small = Small::new(view, &head_at(0.0, 1.7, 0.0, 0.0), 6.0).at_dock(&dock).framed((moved, reach));
+                    let cut = Cut::of(&small, view);
+                    assert!(cut.reaches_the_far_end());
+                    let placement = small.placement(view.eye());
+                    let middle = small.middle(view.eye());
+                    let (plane, normal) = (position(sheet), axis(sheet, 2));
+                    let mut ahead_seen = 0;
+                    for i in -24..=24 {
+                        for j in -24..=24 {
+                            for k in -4..=12 {
+                                let p = [middle[0] + i as f32 * reach * 0.4, view.ground() + k as f32 * reach * 0.25, middle[2] + j as f32 * reach * 0.4];
+                                let depth = dot(sub(placement.apply(p), plane), normal);
+                                let gone = cut.gone(p);
+                                assert!((0.0..=1.0).contains(&gone));
+                                if depth > -1e-5 {
+                                    assert_eq!(gone, 1.0, "in front of the panel by {depth} m, drawn: {p:?} reach {reach}");
+                                }
+                                // Far behind the panel (in the room, its radius' worth and more): drawn whole, however far.
+                                if depth < -0.08 * 1.4 {
+                                    assert_eq!(gone, 0.0, "{} m behind the panel and cut: {p:?} reach {reach}", -depth);
+                                    ahead_seen += 1;
+                                }
+                            }
+                        }
+                    }
+                    assert!(ahead_seen > 5000, "{ahead_seen}");
+                    // Far beyond its old round, along the way it looks into the hole: whole.
+                    let forward = sub([view.target[0], view.target[1], -view.target[2]], view.eye());
+                    let level = [forward[0], 0.0, forward[2]];
+                    let level = scale(level, 1.0 / length(level));
+                    for far in [1.5, 5.0, 40.0, 400.0] {
+                        assert_eq!(cut.gone(add([middle[0], view.ground(), middle[2]], scale(level, reach * far))), 0.0, "{far} reaches ahead");
+                    }
+                    cuts.push(cut);
+                }
+                assert!(cuts.windows(2).all(|c| c[0] == c[1]), "the panel's pose changes nothing of the cut: {cuts:?}");
+            }
+        }
+    }
+
+    /// The near edge, seen from above as in Enzo's mockup: nearest at the middle, where the round's near edge was on the ground; smoothly further
+    /// back aside, the same on either side; level about the middle's depth far aside.
+    #[test]
+    fn the_near_edge_bulges_at_the_middle_and_recedes_smoothly_to_the_sides() {
+        let reach = 3.0;
+        let at = |u: f32| Cut::near_edge(reach, u);
+        // The round's near edge on the ground in a hole: `reach` nearer than the ground under the middle, tipped by the hole's tilt.
+        assert!((at(0.0) - reach * (1.0 - SMALL_TILT_IN_A_HOLE.to_radians().cos())).abs() < 1e-5);
+        assert!(at(0.0) > 0.0, "behind the panel even where nearest");
+        let mut last = at(0.0);
+        for i in 1..=200 {
+            let u = i as f32 * reach * 0.03;
+            assert!((at(u) - at(-u)).abs() < 1e-6, "the same on both sides");
+            // Further back while it curves (to three reaches aside), never nearer once level.
+            assert!(if u <= reach * 3.0 { at(u) > last } else { at(u) >= last }, "receding aside at {u}");
+            // Smooth: no step between neighbours.
+            assert!(at(u) - last < reach * 0.03, "no step at {u}");
+            last = at(u);
+        }
+        assert!(at(reach * 6.0) < at(0.0) + reach * 1.0001 && at(reach * 6.0) > at(0.0) + reach * 0.99, "level far aside, about the middle's depth");
+        // The middle's ground is drawn whole.
+        let view = StartView { position: [0.0, 1.6, 0.0], target: [0.0, 1.6, -1.0], floor: None, eye_height: None };
+        let dock = SmallDock::behind(&view, &sheet_at(0.0, 1.2, -0.4, 0.0, 0.0), 0.08, reach);
+        let small = Small::new(&view, &head_at(0.0, 1.7, 0.0, 0.0), reach).at_dock(&dock).framed(([0.0; 2], reach));
+        let cut = Cut::of(&small, &view);
+        for y in [0.0, 0.5, 1.6, 2.5] {
+            assert_eq!(cut.gone([0.0, view.ground() + y, 0.0]), 0.0, "{y} m over the middle's ground");
+        }
+    }
+
+    /// Out of its hole (in a hand, or let go in the room) it is the round it always was: whole to 0.8 of its reach, nothing past it, nothing cut by height.
+    #[test]
+    fn in_the_room_it_is_still_its_round() {
+        let view = StartView { position: [0.0, 1.6, 0.0], target: [0.0, 1.6, -1.0], floor: None, eye_height: None };
+        let small = Small::new(&view, &head_at(0.0, 1.7, 0.0, 0.0), 4.0);
+        let cut = Cut::of(&small, &view);
+        assert!(!cut.reaches_the_far_end());
+        let middle = small.middle(view.eye());
+        for (far, height, gone) in [(0.0, 0.0, 0.0), (3.1, 30.0, 0.0), (3.6, -1.0, 0.5), (4.01, 0.0, 1.0), (40.0, 0.0, 1.0)] {
+            assert!((cut.gone([middle[0] + far, height, middle[2]]) - gone).abs() < 1e-4, "{far} m out, {height} m high");
+        }
+        // Worked out again only for a change one can see.
+        let moved = Cut::Round { middle: add(middle, [0.01, 0.0, 0.0]), reach: 4.0 };
+        assert!(cut.same_as(&moved));
+        assert!(!cut.same_as(&Cut::Round { middle: add(middle, [0.5, 0.0, 0.0]), reach: 4.0 }));
     }
 
     fn head_at(x: f32, y: f32, z: f32, yaw: f32) -> Matrix34 {

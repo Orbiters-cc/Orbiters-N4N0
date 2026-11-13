@@ -489,11 +489,11 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let shared = std::sync::Arc::new(full.around_subject());
             let mut model = |small: &stereo::Small, half: f32| -> anyhow::Result<Vec<u8>> {
                 let camera = stereo::eye_camera(&head, tangents_of(half), w, h, &small.placement(capture.view.eye()));
-                // As the app draws it: only what it reaches, its floor fading at its edge.
-                let ceiling = if small.docked { capture.view.ground() + small.reach() * stereo::HOLE_CEILING_PER_REACH } else { f32::INFINITY };
-                renderer.clip(Some(&(small.middle(capture.view.eye()), small.reach(), ceiling, shared.clone())));
-                // As many as the app draws: what it reaches from where its middle is.
-                renderer.render_view(&camera, capture.within(small.reach() + small.moved_by()))
+                // As the app draws it (view.rs's plan): its round in a hand, all behind its near edge in its hole, the edge fading.
+                let cut = stereo::Cut::of(small, &capture.view);
+                renderer.clip(Some(&(cut, shared.clone())));
+                let count = if cut.reaches_the_far_end() { capture.gaussians.len() } else { capture.within(small.reach() + small.moved_by()) };
+                renderer.render_view(&camera, count)
             };
             let panel = image::open(refs.join("panel-small-docked.png"))?.to_rgba8();
             let panel_px = [panel.width(), panel.height()];
@@ -520,8 +520,27 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let mut eye = Eye::new(size, &ground, eyes);
             eye.quad(&plane.quad(&center_units, 0.0, 0.0), &qm, qm_px, 1.0);
             // Nothing behind it in the hole (Enzo, 2026-11-11): the capture, then the sheet, its back and its page one picture, the wing away.
-            eye.over(&model(&small, half_fov)?);
             let back = vr::clear_of_sheet(vr::sheet_place(Zone::SheetBack), true);
+            // As the app shows it: through its window only, over our backdrop (opening.rs: the cube's faces are resampled so). In its hole it
+            // reaches the capture's far end (I-view-forward), which past the window only the window keeps from showing.
+            let windowed = {
+                use crate::overlay::worlds::opening::{self, Look, Opening};
+                let back_quad = plane.quad(&back, 0.0, 0.02);
+                let half = [hole.width() / 1024.0 * page_quad.width / 2.0, hole.height() / 576.0 * page_quad.height / 2.0];
+                let accent = panels::look::accent();
+                let o = Opening::in_sheet(at, half, opening::rect_from(&at, &back_quad.transform, back_quad.width, back_quad.height), radius, Look::ours([accent.r(), accent.g(), accent.b()], panels::look::retro()));
+                let mut shown = model(&small, half_fov)?;
+                for (i, p) in shown.chunks_exact_mut(4).enumerate() {
+                    let (x, y) = (i as u32 % w, i as u32 / w);
+                    let c = [p[0], p[1], p[2], p[3]].map(|v| v as f32 / 255.0);
+                    let seen = opening::texel(c, Some(&o), eyes, eye.ray(x as f32 + 0.5, y as f32 + 0.5), [x, y]);
+                    for k in 0..4 {
+                        p[k] = (seen[k] * 255.0).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+                shown
+            };
+            eye.over(&windowed);
             let (back_pixels, back_px) = sharp_picture(&back, &worlds, None, 2.0);
             let mut panel_pixels = panel_pixels;
             panels::cut_page_corners(&mut panel_pixels, panel_px, [0, 0, panel_px[0], panel_px[1]]);
@@ -591,9 +610,9 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 let accent = panels::look::accent();
                 let o = Opening::in_sheet(at, half, opening::rect_from(&at, &back_quad.transform, back_quad.width, back_quad.height), radius, Look::ours([accent.r(), accent.g(), accent.b()], panels::look::retro()));
                 let placement = small.placement(capture.view.eye());
-                let ceiling = capture.view.ground() + small.reach() * stereo::HOLE_CEILING_PER_REACH;
-                renderer.clip(Some(&(small.middle(capture.view.eye()), small.reach(), ceiling, shared.clone())));
-                let count = capture.within(small.reach() + small.moved_by());
+                let cut = stereo::Cut::of(&small, &capture.view);
+                renderer.clip(Some(&(cut, shared.clone())));
+                let count = if cut.reaches_the_far_end() { capture.gaussians.len() } else { capture.within(small.reach() + small.moved_by()) };
                 for (view_name, offset) in [("left-eye", [-0.032, 0.0, 0.0]), ("right-eye", [0.032, 0.0, 0.0]), ("from-the-left", [-0.34, 0.04, 0.02]), ("from-the-right", [0.30, -0.06, 0.02])] {
                     let here = space::add(eyes, offset);
                     let mut view = head;

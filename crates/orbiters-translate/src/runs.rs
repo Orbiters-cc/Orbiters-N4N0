@@ -9,8 +9,8 @@ use crate::ocr::{Line, TextBox};
 
 /// A letter counts as text from this sureness.
 const SURE_LETTER: f32 = 0.5;
-/// A gap wider than this many letter heights parts two runs.
-const GAP: f32 = 0.9;
+/// Letters' middles further apart than this many letter heights part two runs (a Latin word space is about one, a Korean one two; a pictogram between two labels several).
+const GAP: f32 = 3.0;
 /// A run's box: its letters' height times this, and this much of a letter height before and after them.
 pub const RUN_HEIGHT: f32 = 1.5;
 const RUN_PAD: f32 = 0.3;
@@ -62,16 +62,20 @@ pub fn split(line: &Line) -> Vec<Line> {
     }
     let (length, thickness) = (line.boxed.length().max(1.0), line.boxed.thickness().max(1.0));
     let h = letter_height(&line.boxed);
+    // CTC places a letter as a narrow peak, not over its width: gaps are measured between letters' middles. Letters of
+    // one word or one CJK label are about a letter height apart or less; a pictogram or a panel's edge is several.
     let gap = GAP * h / length;
+    let middle = |i: usize| (line.glyphs[i].1[0] + line.glyphs[i].1[1]) / 2.0;
     // Runs of glyph indices.
     let mut runs: Vec<Vec<usize>> = Vec::new();
     let mut current: Vec<usize> = Vec::new();
     let mut last_letter: Option<usize> = None;
-    for (i, (text, span, p)) in line.glyphs.iter().enumerate() {
-        let letter = letters_in(text) && *p >= SURE_LETTER;
-        if letter {
+    for (i, (text, _, _)) in line.glyphs.iter().enumerate() {
+        // Any letter, sure or not: a misread letter inside a word ("West Fxit") does not part it. Unsure letters are only
+        // left out at a run's ends (below).
+        if letters_in(text) {
             if let Some(j) = last_letter {
-                if span[0] - line.glyphs[j].1[1] > gap {
+                if middle(i) - middle(j) > gap {
                     runs.push(std::mem::take(&mut current));
                 }
             }
@@ -90,9 +94,10 @@ pub fn split(line: &Line) -> Vec<Line> {
     let pad = RUN_PAD * h / length;
     runs.into_iter()
         .filter_map(|run| {
-            // Marks at its end are not part of it.
-            let first = *run.iter().find(|&&i| letters_in(&line.glyphs[i].0))?;
-            let last = *run.iter().rev().find(|&&i| letters_in(&line.glyphs[i].0))?;
+            // Marks, and letters read without sureness (a pictogram's edge read as one), at its ends are not part of it.
+            let kept = |i: &&usize| letters_in(&line.glyphs[**i].0) && line.glyphs[**i].2 >= SURE_LETTER;
+            let first = *run.iter().find(kept)?;
+            let last = *run.iter().rev().find(kept)?;
             let text: String = line.glyphs[first..=last].iter().map(|g| g.0.as_str()).collect::<String>().trim().to_string();
             let sure: Vec<f32> = line.glyphs[first..=last].iter().filter(|g| letters_in(&g.0)).map(|g| g.2).collect();
             let (a0, a1) = ((line.glyphs[first].1[0] - pad).max(0.0), (line.glyphs[last].1[1] + pad).min(1.0));

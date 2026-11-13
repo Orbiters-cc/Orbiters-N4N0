@@ -542,6 +542,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
         Ok(t) => (Core::new(Some(engine), t, reader_of(&settings, &target)), None),
         Err(state) => (Core::new(Some(engine), Box::new(Nobody), reader_of(&settings, &target)), Some(state)),
     };
+    core.log_text = cfg!(debug_assertions) && std::env::var_os("ORBITERS_TRANSLATE_LOG_TEXT").is_some();
     let mut in_use = settings.clone();
     let mut translator_checked = Instant::now();
     // The built-in translator's download, on a thread of its own while reading goes on: bytes so far, in all, and
@@ -558,6 +559,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
     // The eyes' size, known after a first look (Quest Pro through Virtual Desktop: 3168 x 3456); until then, whole.
     let mut whole_size = [u32::MAX / 2; 2];
     let mut game_busy = false;
+    let mut last_gaze = None;
     while !stop.load(Ordering::Relaxed) {
         let (heads, eyes, paused, shown, now_settings) = {
             let s = shared.lock().unwrap_or_else(|e| e.into_inner());
@@ -628,6 +630,15 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
                     s.status.state = TranslateState::Paused;
                 }
             }
+            // A translation that arrives meanwhile shows now.
+            if let Some(gaze) = last_gaze {
+                if let Some(scene) = core.poll(started.elapsed().as_secs_f64(), gaze) {
+                    shared.lock().unwrap_or_else(|e| e.into_inner()).scene = Some(scene);
+                }
+                for line in core.log.drain(..) {
+                    note(&line);
+                }
+            }
             std::thread::sleep(Duration::from_millis(40));
             continue;
         }
@@ -670,6 +681,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
                 [x, y, side, side]
             });
         let look = Look { pair, area, shown: &shown, zoom };
+        last_gaze = Some(gaze);
         let step = core.step(started.elapsed().as_secs_f64(), &look, gaze);
         for line in core.log.drain(..) {
             note(&line);

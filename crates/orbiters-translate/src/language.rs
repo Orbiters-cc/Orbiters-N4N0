@@ -36,8 +36,9 @@ pub fn primary(tag: &str) -> String {
 /// Whether a line read is worth sending to the translator for `target`, the person reading `reads` too (primary tags).
 pub fn needs_translating(text: &str, target: &str, reads: &[String]) -> bool {
     let c = Counts::of(text);
-    // Nothing to read: numbers, a time, symbols, one letter.
-    if c.letters < 2 {
+    // Nothing to read: numbers, a time, symbols, one Latin or Cyrillic letter. One Chinese character or kana or Hangul
+    // syllable is a word ("男", "出口"'s "口" alone on a door).
+    if c.letters < 2 && c.han + c.kana + c.hangul == 0 {
         return false;
     }
     let target = primary(target);
@@ -163,6 +164,7 @@ mod tests {
         assert!(!needs_translating("非常口", "ja", &none));
         assert!(!needs_translating("12:30 !", "en", &none));
         assert!(!needs_translating("x", "en", &none));
+        assert!(needs_translating("男", "en", &none), "one Chinese character is a word");
         // Unsure: the translator decides (and gives it back unchanged when it is already in the target language).
         assert!(needs_translating("Mixer", "fr", &none));
         assert!(!needs_translating("Respawn", "en", &none));

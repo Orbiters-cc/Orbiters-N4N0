@@ -126,6 +126,10 @@ pub struct Core {
     first_shown: bool,
     /// Lines for translate.log: what batches cost, and how long the first translation took. Taken by the caller.
     pub log: Vec<String>,
+    /// Also what was read and translated (development builds only: the text seen in VR is the person's).
+    pub log_text: bool,
+    /// Answers taken from the translator so far.
+    answered: u64,
 }
 
 impl Core {
@@ -146,6 +150,8 @@ impl Core {
             first_seen: None,
             first_shown: false,
             log: Vec::new(),
+            log_text: false,
+            answered: 0,
         }
     }
 
@@ -173,6 +179,9 @@ impl Core {
         let engine = self.engine.as_mut().ok_or_else(|| anyhow::anyhow!("the text reader is not loaded"))?; // i18n: not shown (log detail)
         let (lines, timings) = engine.read(look)?;
         let t = std::time::Instant::now();
+        if self.log_text {
+            self.log.push(format!("read: {:?}", lines.iter().map(|l| (l.text.as_str(), (l.confidence * 100.0).round())).collect::<Vec<_>>())); // i18n: not shown (a log's line)
+        }
         let lines: Vec<_> = lines.into_iter().filter(|l| language::needs_translating(&l.text, &self.reader.target, &self.reader.reads)).collect();
         let sightings = pipeline::sightings(look, &lines);
         self.tracker.update(now, sightings, &|track: &Track| pipeline::seen(look, track));
@@ -240,6 +249,14 @@ impl Core {
         Scene { quads, activity, timings, lines: self.tracker.tracks.len(), waiting_s: self.asked_at.map(|t| t.elapsed().as_secs_f32()) }
     }
 
+    /// Between looks: when the translator answered since, the quads to show now (a translation shows when it arrives,
+    /// not at the next look, which can be seconds away while the game is short of processor time).
+    pub fn poll(&mut self, now: f64, gaze: (V3, V3)) -> Option<Scene> {
+        let before = self.answered;
+        self.collect(now);
+        (self.answered != before).then(|| self.after_look(now, gaze, Timings::default()))
+    }
+
     fn collect(&mut self, now: f64) {
         while let Ok(message) = self.translator.answers.try_recv() {
             let (request, answer, took) = match message {
@@ -250,6 +267,7 @@ impl Core {
                 }
                 FromTranslator::Answer(r, a, took) => (r, a, took),
             };
+            self.answered += 1;
             self.asked_at = None;
             self.log.push(format!(
                 "batch of {} lines: {} in {:.0} ms ({:.0} ms queued behind the translator)", // i18n: not shown (a log's line)
@@ -264,6 +282,9 @@ impl Core {
             match answer {
                 Ok(translations) => {
                     self.last_failure = None;
+                    if self.log_text {
+                        self.log.push(format!("into {}: {:?}", request.target, request.keys.iter().zip(&translations).collect::<Vec<_>>())); // i18n: not shown (a log's line)
+                    }
                     for (k, t) in request.keys.iter().zip(translations) {
                         self.cache.put(&request.target, k, t);
                     }

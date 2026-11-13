@@ -683,6 +683,46 @@ fn settings_walk_left(snap: &Snapshot) -> bool {
 const CAMERA_VIEW_MARGIN: f32 = 0.1;
 const CAMERA_LOOKS_TO_SHOW: u32 = 1;
 
+/// What became of the camera panel's looks, said in `vr-test.log` once a second while anything happens: every look that places no tiles says why,
+/// so one read of the log explains a camera without tools (Enzo, 2026-11-13: "I don't see the camera overlay appear at all", with nothing in the log saying why).
+#[derive(Default)]
+struct CameraVerdicts {
+    logged: super::super::vr_log::Every,
+    accepted: [u32; 3],
+    rejected: Vec<(&'static str, u32)>,
+    stereo_unused: Vec<(&'static str, u32)>,
+    glyphs_only: u32,
+    before_reset: u32,
+    no_head: u32,
+    hidden: Vec<(String, u32)>,
+}
+
+impl CameraVerdicts {
+    fn bump<K: PartialEq>(list: &mut Vec<(K, u32)>, key: K) {
+        if let Some((_, n)) = list.iter_mut().find(|(k, _)| *k == key) { *n += 1; } else { list.push((key, 1)); }
+    }
+    fn verdict(&mut self, verdict: &camera_track::Verdict, perspective: bool) {
+        match verdict.accepted {
+            Ok(accepted) => self.accepted[accepted.width_from as usize] += 1,
+            Err(_) if !perspective => self.glyphs_only += 1,
+            Err(why) => Self::bump(&mut self.rejected, why),
+        }
+        if perspective {
+            if let Some(why) = verdict.stereo { Self::bump(&mut self.stereo_unused, why); }
+        }
+    }
+    fn hidden(&mut self, why: String) { Self::bump(&mut self.hidden, why); }
+    /// A line once a second, if anything was counted; counting starts again after it.
+    fn line(&mut self) -> Option<String> {
+        let quiet = self.accepted == [0; 3] && self.rejected.is_empty() && self.glyphs_only == 0 && self.before_reset == 0 && self.no_head == 0 && self.hidden.is_empty();
+        if quiet || !self.logged.due(Duration::from_secs(1)) { return None; }
+        let said = format!("camera looks: placed {} (stereo {}, earlier stereo width {}, usual width {}), rejected {:?}, stereo not used {:?}, glyphs only {}, older than a tracking reset {}, no head pose then {}, tools hidden {:?}", // i18n: not shown (diagnostics)
+            self.accepted.iter().sum::<u32>(), self.accepted[0], self.accepted[1], self.accepted[2], self.rejected, self.stereo_unused, self.glyphs_only, self.before_reset, self.no_head, self.hidden);
+        *self = Self { logged: std::mem::take(&mut self.logged), ..Self::default() };
+        Some(said)
+    }
+}
+
 fn camera_takeover_view(turn: &mut Turn, menu_view: &mut bool, held: bool) {
     if *menu_view {
         *menu_view=false;
@@ -777,10 +817,13 @@ impl OrbitVr {
             Some((pixel,radius))
         });
         watch.guide(hint,record_hint);
-        if let Some(seen) = watch.take().filter(|seen|seen.at>=self.camera_epoch) {
+        let taken=watch.take();
+        if taken.is_some_and(|seen|seen.at<self.camera_epoch) { self.camera_verdicts.before_reset+=1; }
+        if let Some(seen) = taken.filter(|seen|seen.at>=self.camera_epoch) {
             let age = if seen.source == Source::Eye { self.tune.camera_eye_age_ms } else { self.tune.camera_window_age_ms };
             let then = seen.at.checked_sub(Duration::from_secs_f32(age.max(0.0) / 1000.0)).unwrap_or(seen.at);
             let sample = self.camera_heads.iter().min_by_key(|(at, ..)| if *at > then { *at - then } else { then - *at }).map(|(_, h,hands)| (*h,*hands));
+            if sample.is_none() { self.camera_verdicts.no_head+=1; }
             if let Some((head,captured_hands)) = sample {
                 let eye_on_head = steamvr.eye_to_head(vr::compositor::Eye::Left);
                 let raw = steamvr.projection_raw(vr::compositor::Eye::Left);
@@ -818,33 +861,25 @@ impl OrbitVr {
                     super::super::vr_log::line(&format!("camera grab verified by projected glyph motion: hand {hand}")); // i18n: not shown (diagnostics)
                 }
                 let _ = whole;
-                let stereo=seen.right.and_then(|right| camera_track::stereo_pose(&seen.found,&right.found,[seen.size,right.size],
-                    [mirror,camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right))],
-                    [eye_on_head,steamvr.eye_to_head(vr::compositor::Eye::Right)],&head));
-                let width=stereo.map(|(_,unit,_)|unit*camera_track::PANEL_SIZE[0]).or(self.camera_measured_width);
-                let pose=stereo.map(|(frame,unit,_)|(frame,unit)).or_else(||width.and_then(|width|camera_track::perspective_pose(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), width)));
-                let clearance=|unit:f32| ((2.5+seen.found.residual_px)/seen.found.across.min(seen.found.tall).max(0.01)).max(0.012/unit.max(1e-6));
-                let clear=|frame:&Matrix34,unit:f32,side| {
-                    camera_track::column_clear(&seen.found,seen.size,&mirror,&space::compose(&head,&eye_on_head),frame,unit,side,clearance(unit))
-                    && (seen.right.is_none() || seen.right.is_some_and(|right|camera_track::column_clear(&right.found,right.size,&camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)),&space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)),frame,unit,side,clearance(unit))))
-                };
-                if let Some((frame,unit))=pose {
-                    if !clear(&frame,unit,side) {
-                        let other=if side==camera_track::Side::Left {camera_track::Side::Right} else {camera_track::Side::Left};
-                        if clear(&frame,unit,other) { side=other; }
-                    }
-                }
-                if let Some((frame, unit)) = pose.filter(|(frame,unit)|clear(frame,*unit,side)) {
-                self.camera_side=side;
-                if let Some((_,unit,_))=stereo {
+                let right_mirror=camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right));
+                let right_on_head=steamvr.eye_to_head(vr::compositor::Eye::Right);
+                let left_view=camera_track::EyeView{found:seen.found,size:seen.size,mirror,on_head:eye_on_head};
+                let right_view=seen.right.map(|right|camera_track::EyeView{found:right.found,size:right.size,mirror:right_mirror,on_head:right_on_head});
+                let verdict=camera_track::accept_sighting(&left_view,right_view.as_ref(),&head,self.camera_measured_width,self.tune.camera_panel_m,side);
+                self.camera_verdicts.verdict(&verdict,seen.found.perspective.is_some());
+                if let Ok(accepted) = verdict.accepted {
+                let (frame,unit,stereo)=(accepted.frame,accepted.unit,accepted.stereo_rms);
+                self.camera_side=accepted.side;
+                if accepted.width_from==camera_track::WidthFrom::Stereo {
                     self.camera_measured_width=Some(unit*camera_track::PANEL_SIZE[0]);
                     self.camera_stereo_at=Some(now);
                 }
-                // 2.5 pixels fit tolerance, converted through the observed scale, plus a minimum safe gap.
-                let gap = clearance(unit)*unit;
-                self.camera_clearance=clearance(unit);
+                let gap = accepted.clearance*unit;
+                self.camera_clearance=accepted.clearance;
                 let depth=-(0..3).map(|i| head.m[i][2]*(frame.m[i][3]-head.m[i][3])).sum::<f32>();
-                super::super::vr_log::line(&format!("camera pose: ns={}, captured {:?}, accepted {:?}, depth {}, side {:?}, unit {}, gap {}, stereo_rms {:?}, measured_width {:?}, pose {:?}, landmarks {:?}", orbiters_core::clock::now_ns(), seen.at, now, depth, self.camera_side, unit, gap, stereo.map(|(_,_,rms)|rms), self.camera_measured_width, frame, seen.found)); // i18n: not shown (diagnostics)
+                if self.camera_looks==0 || self.camera_pose_logged.due(Duration::from_secs(1)) {
+                    super::super::vr_log::line(&format!("camera pose: ns={}, captured {:?}, accepted {:?}, depth {}, side {:?}, unit {}, gap {}, width from {:?}, stereo_rms {:?}, stereo not used because {:?}, measured_width {:?}, pose {:?}, landmarks {:?}", orbiters_core::clock::now_ns(), seen.at, now, depth, self.camera_side, unit, gap, accepted.width_from, stereo, verdict.stereo, self.camera_measured_width, frame, seen.found)); // i18n: not shown (diagnostics)
+                }
                 self.camera_exclusion = vec![(seen.found, seen.size, mirror, space::compose(&head,&eye_on_head))];
                 if let Some(right) = seen.right { self.camera_exclusion.push((right.found, right.size, camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)), space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)))); }
                 let adopted=if self.camera_looks<=CAMERA_LOOKS_TO_SHOW {
@@ -880,6 +915,7 @@ impl OrbitVr {
         if was_held!=self.camera_follow.held_hand() {
             super::super::vr_log::line(&format!("camera hold changed: {:?} to {:?}, input_read {}, raw {:?}, hands valid {:?}",was_held,self.camera_follow.held_hand(),input_read,raw_grips,hands.map(|h|h.is_some()))); // i18n: not shown (diagnostics)
         }
+        if let Some(said)=self.camera_verdicts.line() { super::super::vr_log::line(&said); }
         if self.camera_input_logged.due(Duration::from_secs(1)) {
             super::super::vr_log::line(&format!("camera follow: held {:?}, input_read {}, raw {:?}, grips {:?}, looks {}, measured {}, scene_delay {:?}, update_age_ms {}, placed {:?}",self.camera_follow.held_hand(),input_read,raw_grips,grips,self.camera_looks,self.camera_scale_measured(),self.camera_follow.scene_age(),sampled.saturating_duration_since(now).as_secs_f32()*1000.,placed)); // i18n: not shown (diagnostics)
         }
@@ -1081,6 +1117,9 @@ pub struct OrbitVr {
     camera_seen: Option<Instant>,
     camera_looks: u32,
     camera_input_logged:super::super::vr_log::Every,
+    /// What became of the camera's looks since the last line about them in `vr-test.log`.
+    camera_verdicts: CameraVerdicts,
+    camera_pose_logged: super::super::vr_log::Every,
     /// The head lately, for where it was when a look's frame was taken.
     camera_heads: std::collections::VecDeque<(Instant, Matrix34,[Option<Matrix34>;2])>,
     trigger_was: [bool; 2],
@@ -1148,6 +1187,8 @@ impl OrbitVr {
             camera_seen: None,
             camera_looks: 0,
             camera_input_logged:Default::default(),
+            camera_verdicts:Default::default(),
+            camera_pose_logged:Default::default(),
             camera_heads: Default::default(),
             trigger_was: [true; 2],
             pointing_since: now,
@@ -1352,6 +1393,9 @@ impl OrbitVr {
             Open::Closed if camera_plane.is_some() => Some(Around::Camera),
             _ => None,
         };
+        if camera_plane.is_some() && menu != Some(Around::Camera) {
+            self.camera_verdicts.hidden(format!("{open:?} is up")); // i18n: not shown (diagnostics)
+        }
         if menu.is_none() && self.panels.is_empty() {
             if self.last_shown {
                 self.close(&mut cx);

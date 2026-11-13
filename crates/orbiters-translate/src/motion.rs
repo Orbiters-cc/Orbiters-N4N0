@@ -25,6 +25,10 @@ pub const STICK_REST: f32 = 0.15;
 /// A stick pushed all the way runs.
 pub const DEFAULT_RUN: f32 = 4.0;
 pub const DEFAULT_STRAFE: f32 = 2.0;
+/// VRChat's speeds come over OSC a little late: after the stick is let go they still say how far the player went
+/// (the sandbox, 2026-11-13: a half-second push went 1.97 m; counting VRChat's speed only while the stick was pushed
+/// made 1.3 m of it). They count this long after a stick was let go.
+pub const COAST_S: f64 = 0.6;
 /// OSC speeds older than this no longer count (VRChat sends a value when it changes: a link that went quiet while the
 /// stick is still pushed must not walk the anchors on and on).
 const SPEED_FRESH_S: f64 = 0.5;
@@ -85,6 +89,8 @@ pub struct Osc {
     pub velocity: Option<([f32; 3], f64)>,
     /// The avatar's eye height in the world, metres (`/avatar/eyeheight`).
     pub eye_height: Option<f32>,
+    /// The avatar's turning speed about up (`AngularY`, degrees a second, positive turning right), and when it came.
+    pub angular_y: Option<(f32, f64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -104,11 +110,16 @@ pub struct Locomotion {
     walked_by: V3,
     /// Walked (metres) and turned (radians) in all, for [`crate::track::Tracker::moved`].
     pub total: [f32; 2],
+    /// The walking stick's last push and when; the turning stick's last push time.
+    walk_last: Option<([f32; 2], f64)>,
+    turn_last: Option<f64>,
+    /// The head's heading at the last turn (radians about up), to take the head's own turning out of `AngularY`.
+    heading: Option<f32>,
 }
 
 impl Default for Locomotion {
     fn default() -> Self {
-        Self { to_tracking: IDENTITY, osc: Osc::default(), player_height: None, gain: 1.0, turn: TurnStick::default(), last: None, walked: 0.0, turned: 0.0, walked_by: [0.0; 3], total: [0.0; 2] }
+        Self { to_tracking: IDENTITY, osc: Osc::default(), player_height: None, gain: 1.0, turn: TurnStick::default(), last: None, walked: 0.0, turned: 0.0, walked_by: [0.0; 3], total: [0.0; 2], walk_last: None, turn_last: None, heading: None }
     }
 }
 
@@ -164,19 +175,23 @@ impl Locomotion {
         let (forward, right) = (level(scale(axis(&input.head, 2), -1.0)), level(axis(&input.head, 0)));
         let fresh = self.osc.velocity.filter(|(_, at)| input.now - at < SPEED_FRESH_S).map(|(v, _)| v);
         let mut step = [0.0f32; 3];
-        if push > STICK_REST {
-            if let (Some(f), Some(r)) = (forward, right) {
-                let dir = normalized(add(scale(r, input.walk[0]), scale(f, input.walk[1])));
-                let speed = match fresh {
-                    Some(v) => (v[0] * v[0] + v[2] * v[2]).sqrt() / self.world_scale(),
-                    // No OSC: VRChat's default speeds for this push (forward runs, sideways strafes).
-                    None => {
-                        let along = (input.walk[1].abs() * DEFAULT_RUN).max(input.walk[0].abs() * DEFAULT_STRAFE);
-                        along.min(DEFAULT_RUN) / self.world_scale()
-                    }
-                };
-                step = scale(dir, speed * self.gain * seconds);
-            }
+        let pushed = push > STICK_REST;
+        if pushed {
+            self.walk_last = Some((input.walk, input.now));
+        }
+        // Pushed, or let go a moment ago while VRChat still says the player moves.
+        let stick = if pushed { Some(input.walk) } else { self.walk_last.filter(|(_, at)| input.now - at < COAST_S && fresh.is_some()).map(|(s, _)| s) };
+        if let (Some(stick), Some(f), Some(r)) = (stick, forward, right) {
+            let dir = normalized(add(scale(r, stick[0]), scale(f, stick[1])));
+            let speed = match fresh {
+                Some(v) => (v[0] * v[0] + v[2] * v[2]).sqrt() / self.world_scale(),
+                // No OSC: VRChat's default speeds for this push (forward runs, sideways strafes).
+                None => {
+                    let along = (stick[1].abs() * DEFAULT_RUN).max(stick[0].abs() * DEFAULT_STRAFE);
+                    along.min(DEFAULT_RUN) / self.world_scale()
+                }
+            };
+            step = scale(dir, speed * self.gain * seconds);
         }
         // Up and down: VRChat's own vertical speed (stairs, jumps, falls), whatever the stick does.
         if let Some(v) = fresh {
@@ -189,7 +204,33 @@ impl Locomotion {
             self.total[0] += geometry::norm([step[0], 0.0, step[2]]);
             self.walked_by = add(self.walked_by, step);
         }
-        let turned = self.turn.step(input.turn, seconds, input.turn_in_steps, TURNS_PER_S);
+        // Turning: VRChat's own turning speed while the turning stick is pushed (and a moment after), less the head's own
+        // turning; in steps, or without OSC, the stick's push at VRChat's usual speed.
+        let heading = forward.map(|f| f[0].atan2(-f[2]));
+        let head_turn = match (heading, self.heading) {
+            // Positive turning right, as AngularY.
+            (Some(now), Some(before)) => {
+                let mut d = now - before;
+                if d > std::f32::consts::PI {
+                    d -= std::f32::consts::TAU;
+                } else if d < -std::f32::consts::PI {
+                    d += std::f32::consts::TAU;
+                }
+                d
+            }
+            _ => 0.0,
+        };
+        self.heading = heading.or(self.heading);
+        if input.turn.abs() >= TURN_REST {
+            self.turn_last = Some(input.now);
+        }
+        let angular = self.osc.angular_y.filter(|(_, at)| input.now - at < SPEED_FRESH_S).map(|(a, _)| a);
+        let turning = self.turn_last.is_some_and(|at| input.now - at < COAST_S);
+        let by_stick = self.turn.step(input.turn, seconds, input.turn_in_steps, TURNS_PER_S);
+        let turned = match angular {
+            Some(a) if !input.turn_in_steps && turning && a.abs() < 720.0 => a.to_radians() * seconds - head_turn,
+            _ => by_stick,
+        };
         if turned != 0.0 {
             motion = compose(&turn_about(head, turned), &motion);
             self.turned += turned.abs();
@@ -402,6 +443,39 @@ mod tests {
         }
         let went = apply(&l.to_tracking, [0.0; 3])[2] - before[2];
         assert!((went - 4.0 * l.gain).abs() < 0.1, "{went}");
+    }
+
+    #[test]
+    fn vrchats_speed_counts_a_moment_after_the_stick_is_let_go() {
+        // VRChat's speed comes 0.2 s late: pushed 0.5 s, the speed says 4 m/s from 0.2 s to 0.7 s.
+        let mut l = Locomotion::default();
+        for k in 0..=150 {
+            let now = k as f64 * 0.01;
+            let v = if (0.2..0.7).contains(&now) { 4.0 } else { 0.0 };
+            l.osc.velocity = Some(([0.0, 0.0, v], now));
+            l.step(&input(now, standing(0.0, 0.0, 0.0), [0.0, if now < 0.5 { 1.0 } else { 0.0 }], 0.0));
+        }
+        assert!((l.total[0] - 2.0).abs() < 0.1, "{}", l.total[0]);
+    }
+
+    #[test]
+    fn vrchats_turning_speed_is_taken_while_the_stick_turns() {
+        let mut l = Locomotion::default();
+        // 120 degrees a second for 0.3 s, as VRChat says, the stick pushed a little.
+        for k in 0..=100 {
+            let now = k as f64 * 0.01;
+            l.osc.angular_y = Some((if now < 0.3 { 120.0 } else { 0.0 }, now));
+            l.step(&input(now, standing(0.0, 0.0, 0.0), [0.0; 2], if now < 0.3 { 0.5 } else { 0.0 }));
+        }
+        assert!((l.total[1].to_degrees() - 36.0).abs() < 2.0, "{}", l.total[1].to_degrees());
+        // The head turning by itself, stick at rest: nothing, whatever AngularY says.
+        let before = l.total[1];
+        for k in 101..=200 {
+            let now = k as f64 * 0.01;
+            l.osc.angular_y = Some((90.0, now));
+            l.step(&input(now, standing(0.0, 0.0, -(k - 100) as f32 * 0.01), [0.0; 2], 0.0));
+        }
+        assert_eq!(l.total[1], before);
     }
 
     #[test]

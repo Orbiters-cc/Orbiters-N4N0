@@ -116,6 +116,8 @@ pub struct TranslateHost {
     /// Development builds: `ORBITERS_TRANSLATE_NO_MOTION` leaves translations in tracking space as before 0.3.5-dev.49
     /// (sticks not followed, lines found again elsewhere measured and logged but not moved), to measure the difference.
     no_motion: bool,
+    /// Development builds with `ORBITERS_TRANSLATE_LOG_TEXT`: VRChat's moving values in translate.log, as they come.
+    log_osc: bool,
 }
 
 impl Default for TranslateHost {
@@ -138,6 +140,7 @@ impl Default for TranslateHost {
             osc_count: 0,
             motion_logged: None,
             no_motion: cfg!(debug_assertions) && std::env::var_os("ORBITERS_TRANSLATE_NO_MOTION").is_some(),
+            log_osc: cfg!(debug_assertions) && std::env::var_os("ORBITERS_TRANSLATE_LOG_TEXT").is_some(),
         }
     }
 }
@@ -248,8 +251,12 @@ impl TranslateHost {
                 "VelocityX" => self.motion.osc.velocity = set(0),
                 "VelocityY" => self.motion.osc.velocity = set(1),
                 "VelocityZ" => self.motion.osc.velocity = set(2),
+                "AngularY" => self.motion.osc.angular_y = Some((value, at)),
                 orbiters_n4n0_core::states::EYE_HEIGHT => self.motion.osc.eye_height = Some(value),
                 _ => {}
+            }
+            if self.log_osc && value != 0.0 {
+                note(&format!("osc {name} {value:.3} at {at:.3}")); // i18n: not shown (a log's line)
             }
             self.osc_count += 1;
         }

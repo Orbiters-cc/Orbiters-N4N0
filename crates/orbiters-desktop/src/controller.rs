@@ -237,7 +237,7 @@ struct CameraState {
 const CAMERA_MODE: &str = "/usercamera/Mode";
 /// VRChat's avatar parameters that say how the player moves, forwarded to the overlay for live translation
 /// ([`ToClient::Locomotion`]): the avatar's velocity in its own axes, world metres a second.
-const LOCOMOTION: [&str; 4] = ["VelocityX", "VelocityY", "VelocityZ", "AngularY"];
+const LOCOMOTION: [&str; 3] = ["VelocityX", "VelocityY", "VelocityZ"];
 const CAMERA_STREAMING: &str = "/usercamera/Streaming";
 /// `/usercamera/Mode` for the Stream camera (0 off, 1 photo, 2 stream).
 const STREAM_MODE: i32 = 2;

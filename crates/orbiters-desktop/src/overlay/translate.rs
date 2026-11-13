@@ -247,11 +247,13 @@ impl TranslateHost {
                 v[i] = value;
                 Some((v, at))
             };
+            if name.starts_with("Velocity") {
+                self.motion.osc.speaks = true;
+            }
             match name.as_str() {
                 "VelocityX" => self.motion.osc.velocity = set(0),
                 "VelocityY" => self.motion.osc.velocity = set(1),
                 "VelocityZ" => self.motion.osc.velocity = set(2),
-                "AngularY" => self.motion.osc.angular_y = Some((value, at)),
                 orbiters_n4n0_core::states::EYE_HEIGHT => self.motion.osc.eye_height = Some(value),
                 _ => {}
             }

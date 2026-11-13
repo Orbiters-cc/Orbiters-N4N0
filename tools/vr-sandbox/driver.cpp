@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <string>
 using namespace vr;
@@ -20,6 +21,21 @@ static Shared *shared=nullptr;
 static bool alive=false;
 static const wchar_t *mapName=L"Local\\OrbitersVrSandbox1112";
 static const wchar_t *mutexName=L"Local\\OrbitersVrSandbox1112Mutex";
+// Per-eye render size SteamVR is told: 1080x1200 unless %USERPROFILE%/.orbiters-build/vr-sandbox/render-target.txt
+// says "<width> <height>". The camera stream uses 2112 2304, which VRChat's 1.5 render scale makes the 3168x3456 eyes
+// of Enzo's Quest Pro over Virtual Desktop.
+static std::array<uint32_t,2> renderTarget() {
+    static std::array<uint32_t,2> size=[]{
+        std::array<uint32_t,2> out{1080,1200};
+        wchar_t home[MAX_PATH]; DWORD n=GetEnvironmentVariableW(L"USERPROFILE",home,MAX_PATH);
+        if(n==0||n>=MAX_PATH)return out;
+        std::wstring path=std::wstring(home)+L"\\.orbiters-build\\vr-sandbox\\render-target.txt";
+        FILE *f=nullptr; if(_wfopen_s(&f,path.c_str(),L"r")!=0||!f)return out;
+        unsigned w=0,h=0; if(fscanf_s(f,"%u %u",&w,&h)==2&&w>=256&&h>=256&&w<=4096&&h<=4096)out={w,h};
+        fclose(f); return out;
+    }();
+    return size;
+}
 class Device final : public ITrackedDeviceServerDriver, public IVRDisplayComponent, public IVRVirtualDisplay {
     uint32_t slot; TrackedDeviceIndex_t id=k_unTrackedDeviceIndexInvalid;
     std::array<VRInputComponentHandle_t,20> inputs{};
@@ -97,11 +113,11 @@ public:
             else VRDriverInput()->UpdateBooleanComponent(inputs[i],value>0.5f,0);
         }
     }
-    void GetWindowBounds(int32_t *x,int32_t *y,uint32_t *w,uint32_t *h) override {*x=0;*y=0;*w=2160;*h=1200;}
+    void GetWindowBounds(int32_t *x,int32_t *y,uint32_t *w,uint32_t *h) override {*x=0;*y=0;*w=2*renderTarget()[0];*h=renderTarget()[1];}
     bool IsDisplayOnDesktop() override {return false;}
     bool IsDisplayRealDisplay() override {return false;}
-    void GetRecommendedRenderTargetSize(uint32_t *w,uint32_t *h) override {*w=1080;*h=1200;}
-    void GetEyeOutputViewport(EVREye e,uint32_t *x,uint32_t *y,uint32_t *w,uint32_t *h) override {*x=e==Eye_Left?0:1080;*y=0;*w=1080;*h=1200;}
+    void GetRecommendedRenderTargetSize(uint32_t *w,uint32_t *h) override {*w=renderTarget()[0];*h=renderTarget()[1];}
+    void GetEyeOutputViewport(EVREye e,uint32_t *x,uint32_t *y,uint32_t *w,uint32_t *h) override {*x=e==Eye_Left?0:renderTarget()[0];*y=0;*w=renderTarget()[0];*h=renderTarget()[1];}
     void GetProjectionRaw(EVREye e,float *l,float *r,float *t,float *b) override {*l=e==Eye_Left?-1.376f:-.839f;*r=e==Eye_Left?.839f:1.376f;*t=-1.376f;*b=.900f;}
     DistortionCoordinates_t ComputeDistortion(EVREye,float u,float v) override {DistortionCoordinates_t d{};for(int i=0;i<2;++i)d.rfRed[i]=d.rfGreen[i]=d.rfBlue[i]=i?v:u;return d;}
     bool ComputeInverseDistortion(HmdVector2_t *out,EVREye,uint32_t,float u,float v) override {out->v[0]=u;out->v[1]=v;return true;}

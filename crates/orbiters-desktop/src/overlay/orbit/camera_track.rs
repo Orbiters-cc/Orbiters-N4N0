@@ -90,6 +90,11 @@ impl Found {
         self
     }
 
+    /// The same, for a picture `factor` times as large: what was found on a picture read at half size, in the whole picture's pixels.
+    pub fn enlarged(self, factor: f32) -> Self {
+        self.moved([0.0, 0.0], 1.0 / factor)
+    }
+
     /// The same, for a picture that started `by` further on.
     pub fn shifted(self, by: [f32; 2]) -> Self {
         self.moved(by, 1.0)
@@ -768,19 +773,42 @@ fn refine_plane(mut frame:Matrix34,mut unit:f32,observed:&[PlaneObservation],met
     Some((frame,unit))
 }
 
+/// The fits' pixel gates (2.5 px of reprojection, 6 px for any one landmark) were set on 1620 px eyes with the Quest Pro's projection, the
+/// sandbox's: about 731 pixels per tangent. Enzo's Virtual Desktop eyes are 3168 px across the same view, twice the pixels per degree, and a glyph's
+/// centre is found to as many more pixels: 3 of his 12 looks failed the gate at 2.6 to 4 px. The gates keep the same angle on any eye.
+const GATES_SET_AT_PX_PER_TANGENT: f32 = 1620.0 / 2.215;
+
+/// The reprojection gate in this picture's pixels: 2.5 px at the gates' own sharpness, never less; and for a panel seen large, 0.8% of its
+/// diagonal. How well its outline or glyphs fit a flat rectangle is limited by its frame's thickness and rounded corners as much as by the
+/// pixels: in the sandbox at Enzo's 3168 px eyes, a camera just opened 0.4 m away and tilted fit 6.5 and 5.4 px (both eyes, 1150 px across)
+/// and was refused for minutes, while the same camera at 0.67 m fits to 0.8 px. 0.8% still refuses a sheared match.
+fn gate_px(size: [f32; 2], mirror: &Mirror, h: [[f32; 3]; 3]) -> f32 {
+    let sharp = 2.5 * (size[0] / mirror.spans[0].abs().max(1e-6) / GATES_SET_AT_PX_PER_TANGENT).max(1.0);
+    let (a, b) = (project(h, [-205., -110.]), project(h, [205., 110.]));
+    let (c, d) = (project(h, [205., -110.]), project(h, [-205., 110.]));
+    let diagonal = (a[0] - b[0]).hypot(a[1] - b[1]).max((c[0] - d[0]).hypot(c[1] - d[1]));
+    if diagonal.is_finite() { sharp.max(0.008 * diagonal) } else { sharp }
+}
+
 /// Perspective pose using the actual eye projection, with rigid-plane consistency rejection.
 pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix34, width: f32) -> Option<(Matrix34,f32)> {
-    let h = found.perspective?;
+    perspective_fit(found,size,mirror,eye,width).ok()
+}
+
+/// [`perspective_pose`], saying why a sighting gives no pose: `camera_turn` logs it, so one read of `vr-test.log` explains silence.
+pub fn perspective_fit(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix34, width: f32) -> Result<(Matrix34,f32),&'static str> {
+    let h = found.perspective.ok_or("no perspective fit (glyphs only)")?; // i18n: not shown (diagnostics: why a camera look places no tools)
+    let h0=h;
     let points: Vec<_> = [[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.],[0.,0.]].into_iter().map(|p| {
         let q=project(h,p); let t=mirror.tangent(q[0]/size[0],q[1]/size[1]); (p,t)
     }).collect();
-    let h=fit(&points)?;
+    let h=fit(&points).ok_or("tangent homography is singular")?; // i18n: not shown (diagnostics: why a camera look places no tools)
     let col = |k:usize| [h[0][k],-h[1][k],-h[2][k]];
     let norm = |v:[f32;3]| v.iter().map(|x|x*x).sum::<f32>().sqrt();
     let (a,b,t)=(col(0),col(1),col(2));
     let (na,nb)=(norm(a),norm(b));
     let dot: f32=a.iter().zip(b).map(|(x,y)|x*y).sum();
-    if na.min(nb) <= 0. || (na/nb-1.).abs()>0.25 || dot.abs()/(na*nb)>0.2 { return None; }
+    if na.min(nb) <= 0. || (na/nb-1.).abs()>0.25 || dot.abs()/(na*nb)>0.2 { return Err("homography is not a rigid plane (axes unequal or skewed)"); } // i18n: not shown (diagnostics: why a camera look places no tools)
     let unit=width/PANEL_SIZE[0];
     let scale=2.*unit/(na+nb);
     let right=a.map(|x|x/na);
@@ -790,12 +818,12 @@ pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Mat
     let n=norm(down); let up=down.map(|x|-x/n);
     let z=[right[1]*up[2]-right[2]*up[1],right[2]*up[0]-right[0]*up[2],right[0]*up[1]-right[1]*up[0]];
     let position=t.map(|x|x*scale);
-    if !(0.15..=4.).contains(&-position[2]) { return None; }
+    if !(0.15..=4.).contains(&-position[2]) { return Err("depth outside 0.15 to 4 m"); } // i18n: not shown (diagnostics: why a camera look places no tools)
     let local=Matrix34 {m:std::array::from_fn(|i|[right[i],up[i],z[i],position[i]])};
     let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
-    let (local,_)=refine_plane(local,unit,&observations(found,size,*mirror,&identity),false)?;
+    let (local,_)=refine_plane(local,unit,&observations(found,size,*mirror,&identity),false).ok_or("rigid refinement left the eye's view")?; // i18n: not shown (diagnostics: why a camera look places no tools)
     let right=local.m.map(|r|r[0]);let up=local.m.map(|r|r[1]);let z=local.m.map(|r|r[2]);let position=local.m.map(|r|r[3]);
-    if !(0.15..=4.).contains(&-position[2]) {return None;}
+    if !(0.15..=4.).contains(&-position[2]) {return Err("refined depth outside 0.15 to 4 m");} // i18n: not shown (diagnostics: why a camera look places no tools)
     // A texture homography can fit a sheared quadrilateral perfectly. Verify the recovered
     // rigid plane itself through the eye projection before accepting it as a physical panel.
     let mut errors=Vec::new();
@@ -807,9 +835,9 @@ pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Mat
         Some((px[0]-q[0]).powi(2)+(px[1]-q[1]).powi(2))
     };
     if let Some((count,landmarks))=found.landmarks {
-        for (p,q) in landmarks.into_iter().take(count) { errors.push(check(p,q)?); }
+        for (p,q) in landmarks.into_iter().take(count) { errors.push(check(p,q).ok_or("a landmark falls behind the eye")?); } // i18n: not shown (diagnostics: why a camera look places no tools)
     } else {
-        for &(p,_) in &points { errors.push(check(p,project(found.perspective?,p))?); }
+        for &(p,_) in &points { errors.push(check(p,project(h0,p)).ok_or("a corner falls behind the eye")?); } // i18n: not shown (diagnostics: why a camera look places no tools)
     }
     if let Some(lines)=found.lines {for (model,l) in lines {for p in model {
         let v:[f32;3]=std::array::from_fn(|i|position[i]+right[i]*p[0]*unit-up[i]*p[1]*unit);
@@ -818,13 +846,20 @@ pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Mat
         errors.push((l[0]*px[0]+l[1]*px[1]+l[2]).powi(2));
     }}}
     let rms=(errors.iter().sum::<f32>()/errors.len().max(1) as f32).sqrt();
-    if !rms.is_finite() || rms>2.5 || errors.iter().any(|e| *e>36.) { return None; }
+    let gate=gate_px(size,mirror,h0);
+    if !rms.is_finite() || rms>gate { return Err("rigid reprojection error over the gate (2.5 px at 1620 px eyes, or 0.8% of the panel)"); } // i18n: not shown (diagnostics: why a camera look places no tools)
+    if errors.iter().any(|e| *e>(2.4*gate).powi(2)) { return Err("a landmark reprojects over 6 px (at 1620 px eyes) off"); } // i18n: not shown (diagnostics: why a camera look places no tools)
     let local=Matrix34 { m: std::array::from_fn(|i| [right[i],up[i],z[i],position[i]]) };
-    Some((then(eye,&local),unit))
+    Ok((then(eye,&local),unit))
 }
 
 /// Metric panel pose from a frame-coherent stereo pair. No physical panel width is assumed.
 pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2],eyes:[Matrix34;2],head:&Matrix34) -> Option<(Matrix34,f32,f32)> {
+    stereo_fit(left,right,sizes,mirrors,eyes,head).ok()
+}
+
+/// [`stereo_pose`], saying why a pair gives no metric pose.
+pub fn stereo_fit(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2],eyes:[Matrix34;2],head:&Matrix34) -> Result<(Matrix34,f32,f32),&'static str> {
     let dot=|a:[f32;3],b:[f32;3]| (0..3).map(|i|a[i]*b[i]).sum::<f32>();
     let norm=|v:[f32;3]| dot(v,v).sqrt();
     let normalized=|v:[f32;3]| { let n=norm(v); v.map(|x|x/n.max(1e-9)) };
@@ -834,7 +869,7 @@ pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2]
     for (out,p) in points.iter_mut().zip(samples) {
         let mut origins=[[0.;3];2]; let mut rays=[[0.;3];2];
         for k in 0..2 {
-            let q=project(found[k].perspective?,p);
+            let q=project(found[k].perspective.ok_or(if k==0 {"left eye has no perspective fit"} else {"right eye has no perspective fit"})?,p); // i18n: not shown (diagnostics: why a camera look places no tools)
             let t=mirrors[k].tangent(q[0]/sizes[k][0],q[1]/sizes[k][1]);
             let ray=[t[0],-t[1],-1.];
             origins[k]=std::array::from_fn(|i|eyes[k].m[i][3]);
@@ -843,29 +878,29 @@ pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2]
         let w=std::array::from_fn(|i|origins[0][i]-origins[1][i]);
         let b=dot(rays[0],rays[1]); let d=dot(rays[0],w); let e=dot(rays[1],w);
         let denominator=1.-b*b;
-        if denominator<1e-5 { return None; }
+        if denominator<1e-5 { return Err("the two eyes' rays are parallel"); } // i18n: not shown (diagnostics: why a camera look places no tools)
         let (s,t)=((b*e-d)/denominator,(e-b*d)/denominator);
-        if s<=0. || t<=0. { return None; }
+        if s<=0. || t<=0. { return Err("the two eyes' rays meet behind an eye"); } // i18n: not shown (diagnostics: why a camera look places no tools)
         let a:[f32;3]=std::array::from_fn(|i|origins[0][i]+s*rays[0][i]);
         let b:[f32;3]=std::array::from_fn(|i|origins[1][i]+t*rays[1][i]);
-        if norm(std::array::from_fn(|i|a[i]-b[i]))>0.01 { return None; }
+        if norm(std::array::from_fn(|i|a[i]-b[i]))>0.01 { return Err("the two eyes' rays to a corner miss each other by over 1 cm"); } // i18n: not shown (diagnostics: why a camera look places no tools)
         *out=std::array::from_fn(|i|(a[i]+b[i])*0.5);
     }
     let across:[f32;3]=std::array::from_fn(|i|(points[1][i]-points[0][i]+points[2][i]-points[3][i])*0.5);
     let down:[f32;3]=std::array::from_fn(|i|(points[3][i]-points[0][i]+points[2][i]-points[1][i])*0.5);
     let (width,height)=(norm(across),norm(down));
-    if width<=0. || height<=0. || (width/height/(410./220.)-1.).abs()>0.15 { return None; }
+    if width<=0. || height<=0. || (width/height/(410./220.)-1.).abs()>0.15 { return Err("triangulated panel is not the panel's shape"); } // i18n: not shown (diagnostics: why a camera look places no tools)
     let r=normalized(across); let along=dot(r,down);
     let u=normalized(std::array::from_fn(|i| -down[i]+r[i]*along));
     let z=[r[1]*u[2]-r[2]*u[1],r[2]*u[0]-r[0]*u[2],r[0]*u[1]-r[1]*u[0]];
     let centre:[f32;3]=std::array::from_fn(|i|points.iter().map(|p|p[i]).sum::<f32>()*0.25);
-    if !(0.15..=4.).contains(&-centre[2]) { return None; }
+    if !(0.15..=4.).contains(&-centre[2]) { return Err("triangulated depth outside 0.15 to 4 m"); } // i18n: not shown (diagnostics: why a camera look places no tools)
     let unit=(width/410.+height/220.)*0.5;
     let local=Matrix34 {m:std::array::from_fn(|i|[r[i],u[i],z[i],centre[i]])};
     let observed:Vec<_>=(0..2).flat_map(|k|observations(found[k],sizes[k],mirrors[k],&eyes[k])).collect();
-    let (local,unit)=refine_plane(local,unit,&observed,true)?;
+    let (local,unit)=refine_plane(local,unit,&observed,true).ok_or("stereo refinement left an eye's view")?; // i18n: not shown (diagnostics: why a camera look places no tools)
     let r=local.m.map(|row|row[0]);let u=local.m.map(|row|row[1]);let z=local.m.map(|row|row[2]);let centre=local.m.map(|row|row[3]);
-    if !(0.15..=4.).contains(&-centre[2]) {return None;}
+    if !(0.15..=4.).contains(&-centre[2]) {return Err("refined stereo depth outside 0.15 to 4 m");} // i18n: not shown (diagnostics: why a camera look places no tools)
     let mut errors=Vec::new();
     for k in 0..2 {
         let inverse=undone(&eyes[k]);
@@ -878,9 +913,9 @@ pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2]
             Some((px[0]-q[0]).powi(2)+(px[1]-q[1]).powi(2))
         };
         if let Some((count,landmarks))=found[k].landmarks {
-            for (p,q) in landmarks.into_iter().take(count) { errors.push(check(p,q)?); }
+            for (p,q) in landmarks.into_iter().take(count) { errors.push(check(p,q).ok_or("a landmark falls behind an eye")?); } // i18n: not shown (diagnostics: why a camera look places no tools)
         } else {
-            for p in samples { errors.push(check(p,project(found[k].perspective?,p))?); }
+            for p in samples { errors.push(check(p,project(found[k].perspective.ok_or("no perspective fit")?,p)).ok_or("a corner falls behind an eye")?); } // i18n: not shown (diagnostics: why a camera look places no tools)
         }
     }
     for k in 0..2 {if let Some(lines)=found[k].lines {for (model,l) in lines {for p in model {
@@ -892,9 +927,11 @@ pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2]
         errors.push((l[0]*px[0]+l[1]*px[1]+l[2]).powi(2));
     }}}}
     let rms=(errors.iter().sum::<f32>()/errors.len().max(1) as f32).sqrt();
-    if !rms.is_finite() || rms>2.5 || errors.iter().any(|e|*e>36.) { return None; }
+    let gate=found.iter().zip(sizes.iter().zip(&mirrors)).filter_map(|(f,(size,mirror))|f.perspective.map(|h|gate_px(*size,mirror,h))).fold(0.,f32::max);
+    if !rms.is_finite() || rms>gate { return Err("stereo reprojection error over the gate (2.5 px at 1620 px eyes, or 0.8% of the panel)"); } // i18n: not shown (diagnostics: why a camera look places no tools)
+    if errors.iter().any(|e|*e>(2.4*gate).powi(2)) { return Err("a landmark reprojects over 6 px (at 1620 px eyes) off in one eye"); } // i18n: not shown (diagnostics: why a camera look places no tools)
     let local=Matrix34 {m:std::array::from_fn(|i|[r[i],u[i],z[i],centre[i]])};
-    Some((then(head,&local),unit,rms))
+    Ok((then(head,&local),unit,rms))
 }
 
 /// Locate only the two measured identity glyphs near a projected search hint.
@@ -1093,6 +1130,56 @@ pub fn column_clear(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix3
 /// Independent observed exclusions from both eyes are required for an opaque camera attachment.
 pub fn binocular_clear(observations: &[(Found,[f32;2],Mirror,Matrix34)], frame:&Matrix34, unit:f32, side:Side, clearance:f32) -> bool {
     observations.len()==2 && observations.iter().all(|(found,size,mirror,eye)|column_clear(found,*size,mirror,eye,frame,unit,side,clearance))
+}
+
+/// What one eye saw in a look, with what its picture covers and where that eye sits on the head.
+#[derive(Clone, Copy, Debug)]
+pub struct EyeView { pub found: Found, pub size: [f32;2], pub mirror: Mirror, pub on_head: Matrix34 }
+
+/// Where the panel's width came from: both eyes, an earlier stereo measurement, or VRChat's usual size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WidthFrom { Stereo, Measured, Nominal }
+
+/// A sighting accepted as the panel's place: tiles may stand there.
+#[derive(Clone, Copy, Debug)]
+pub struct Accepted { pub frame: Matrix34, pub unit: f32, pub side: Side, pub clearance: f32, pub stereo_rms: Option<f32>, pub width_from: WidthFrom }
+
+/// What became of one look: accepted, or why not; and why stereo was not used, if it was not.
+#[derive(Clone, Copy, Debug)]
+pub struct Verdict { pub accepted: Result<Accepted,&'static str>, pub stereo: Option<&'static str> }
+
+/// The whole decision `OrbitVr::camera_turn` makes about one look, without SteamVR, so a recorded headset session can be replayed through it.
+/// `head` is the head's pose when the look was read; `side` the side the tiles are on now.
+pub fn accept_sighting(left:&EyeView, right:Option<&EyeView>, head:&Matrix34, measured_width:Option<f32>, nominal_width:f32, side:Side) -> Verdict {
+    let eye_left=then(head,&left.on_head);
+    let stereo=match right {
+        None => Err("no right-eye sighting in this look"), // i18n: not shown (diagnostics: why a camera look places no tools)
+        Some(r) => stereo_fit(&left.found,&r.found,[left.size,r.size],[left.mirror,r.mirror],[left.on_head,r.on_head],head),
+    };
+    let stereo_note=stereo.err();
+    let pose=match stereo {
+        Ok((frame,unit,rms)) => Ok((frame,unit,Some(rms),WidthFrom::Stereo)),
+        // One eye's perspective fit of a panel of known size is a measurement too: its place in the picture is exact, only its distance scales with the
+        // width taken. VRChat's usual width until both eyes measure it (Enzo's Quest Pro over Virtual Desktop gave dev.44 no stereo pose at all, and so no
+        // tools). "No guess" means never placing them without a sighting, never refusing a sighting for want of a second eye.
+        Err(_) => {
+            let (width,from)=measured_width.map_or((nominal_width,WidthFrom::Nominal),|w|(w,WidthFrom::Measured));
+            perspective_fit(&left.found,left.size,&left.mirror,&eye_left,width).map(|(f,u)|(f,u,None,from))
+        }
+    };
+    let (frame,unit,stereo_rms,width_from)=match pose { Ok(p)=>p, Err(why)=>return Verdict{accepted:Err(why),stereo:stereo_note} };
+    let clearance=((2.5+left.found.residual_px)/left.found.across.min(left.found.tall).max(0.01)).max(0.012/unit.max(1e-6));
+    let clear=|side| {
+        column_clear(&left.found,left.size,&left.mirror,&eye_left,&frame,unit,side,clearance)
+        // The right eye checks a stereo pose only: a one-eye pose's distance is only as right as its width, so its column lands beside the panel in the
+        // eye it was measured in, and a little off it in the other (by the disparity of that distance error).
+        && (width_from!=WidthFrom::Stereo || right.is_none_or(|r|column_clear(&r.found,r.size,&r.mirror,&then(head,&r.on_head),&frame,unit,side,clearance)))
+    };
+    let other=if side==Side::Left {Side::Right} else {Side::Left};
+    let side=if clear(side) {side} else if clear(other) {other} else {
+        return Verdict{accepted:Err("the tiles would cover the camera on either side"),stereo:stereo_note}; // i18n: not shown (diagnostics: why a camera look places no tools)
+    };
+    Verdict{accepted:Ok(Accepted{frame,unit,side,clearance,stereo_rms,width_from}),stereo:stereo_note}
 }
 
 /// Where a panel seen by the eye lies in the room, and what one of its units is there. `eye` is that eye's pose then. In the plane facing it, turned as it is seen turned, its middle moved so
@@ -2631,5 +2718,252 @@ mod sandbox_regression {
             assert!(error<=2.5,"unchanged stereo reprojection gate");
         }
         assert!(stereo_failures.is_empty(),"native stereo must recover metric planes: {stereo_failures:?}");
+    }
+}
+
+/// Enzo's own session of 2026-11-13 (0.3.5-dev.44, Quest Pro over Virtual Desktop, 3168 x 3456 per eye): the panel was found with a perspective fit on
+/// most looks, and no tool ever showed. Its looks, as `camera-tiles.log` recorded them, are replayed through the same decision `camera_turn` makes.
+#[cfg(test)]
+mod enzo_headset_replay {
+    use super::*;
+
+    const SIZE: [f32; 2] = [3168., 3456.];
+    /// Quest Pro's eyes as SteamVR gives them (see `the_eye_reaches_further_down_than_up`), the right one mirrored; his vrserver.txt says EyeToHead is
+    /// a translation of 31.5 mm each way.
+    const LEFT: [f32; 4] = [-1.376, 0.839, -1.376, 0.900];
+    const RIGHT: [f32; 4] = [-0.839, 1.376, -1.376, 0.900];
+    const IDENTITY: Matrix34 = Matrix34 { m: [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.]] };
+
+    fn on_head(x: f32, yaw_degrees: f32) -> Matrix34 {
+        let (s, c) = yaw_degrees.to_radians().sin_cos();
+        Matrix34 { m: [[c, 0., s, x], [0., 1., 0., 0.], [-s, 0., c, 0.]] }
+    }
+
+    /// Standing, eyes 1.6 m up, looking ahead and a little down, as one does at a camera held in front.
+    fn head() -> Matrix34 {
+        let (s, c) = (-20f32).to_radians().sin_cos();
+        Matrix34 { m: [[1., 0., 0., 0.1], [0., c, -s, 1.6], [0., s, c, -0.2]] }
+    }
+
+    /// The numbers after `key` in a logged `Found`, up to the next field.
+    fn numbers(text: &str, key: &str) -> Vec<f32> {
+        const FIELDS: [&str; 11] = ["perspective", "lines", "residual_px", "landmarks", "x", "chevron", "middle", "right", "down", "across", "tall"];
+        let from = text.find(&format!(" {key}: ")).unwrap_or_else(|| panic!("{key} in {text}")) + key.len() + 3;
+        let to = FIELDS.iter().filter_map(|k| text[from..].find(&format!(", {k}: ")).map(|i| from + i)).min().unwrap_or(text.len());
+        text[from..to].split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == 'e')).filter_map(|t| t.parse().ok()).collect()
+    }
+
+    /// Every look of that session that found the panel, as the reader handed it over.
+    fn sightings() -> Vec<Found> {
+        let log = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/enzo-2026-11-13/camera-tiles.txt")).unwrap();
+        log.lines().filter_map(|line| line.split_once("fit=Found {").map(|(_, f)| f.to_string())).map(|f| {
+            let field = |key: &str| numbers(&f, key);
+            let two = |key: &str| { let v = field(key); [v[0], v[1]] };
+            let perspective = f.contains("perspective: Some").then(|| { let v = field("perspective"); [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]] });
+            let landmarks = f.contains("landmarks: Some").then(|| {
+                let v = field("landmarks");
+                let count = v[0] as usize;
+                let mut out = [([0.; 2], [0.; 2]); 10];
+                for (i, slot) in out.iter_mut().enumerate().take(count) { let k = 1 + i * 4; *slot = ([v[k], v[k + 1]], [v[k + 2], v[k + 3]]); }
+                (count, out)
+            });
+            let residual = if f.contains("residual_px: inf") { f32::INFINITY } else { field("residual_px")[0] };
+            Found { perspective, lines: None, residual_px: residual, landmarks, x: two("x"), chevron: two("chevron"), middle: two("middle"), right: two("right"), down: two("down"), across: field("across")[0], tall: field("tall")[0] }
+        }).collect()
+    }
+
+    fn left_view(found: Found) -> EyeView { EyeView { found, size: SIZE, mirror: Mirror::whole_eye(LEFT), on_head: on_head(-0.0315, 0.) } }
+
+    #[test]
+    fn the_logged_session_is_read_whole() {
+        let all = sightings();
+        assert_eq!(all.len(), 14, "every landmarks line of 01:46:58 to 01:48:43");
+        let fitted: Vec<_> = all.iter().filter(|f| f.perspective.is_some()).collect();
+        assert!(fitted.len() >= 10, "{}", fitted.len());
+        let first = fitted[0];
+        assert_eq!(first.landmarks.unwrap().0, 5);
+        assert!((first.landmarks.unwrap().1[4].1[0] - 2436.9136).abs() < 1e-3 && (first.residual_px - 1.1394122).abs() < 1e-6 && (first.across - 2.4259875).abs() < 1e-6);
+    }
+
+    /// The bug: every one of these looks was found with a perspective fit, and dev.44 made no pose of any, with no right eye in the look and no width
+    /// measured earlier. A perspective fit of a panel of known size is a measurement: the tools must stand beside it.
+    #[test]
+    fn enzos_logged_looks_place_the_tools_beside_the_camera() {
+        let head = head();
+        let mut placed = 0; let mut fitted = 0;
+        let mut follow = Follow::default();
+        let mut shown = None;
+        for found in sightings().into_iter().filter(|f| f.perspective.is_some()) {
+            fitted += 1;
+            let view = left_view(found);
+            let eye = then(&head, &view.on_head);
+            for width in [0.2f32, PANEL_M, 0.5] {
+                eprintln!("  at width {width}: {:?}", perspective_fit(&found, SIZE, &view.mirror, &eye, width).map(|(_, u)| u));
+            }
+            let verdict = accept_sighting(&view, None, &head, None, PANEL_M, Side::Left);
+            eprintln!("look {fitted}: residual {} -> {:?}", found.residual_px, verdict.accepted.map(|a| (a.side, a.width_from, a.frame.m.map(|r| r[3]))));
+            let Ok(accepted) = verdict.accepted else { continue };
+            assert_eq!(accepted.width_from, WidthFrom::Nominal);
+            assert_eq!(verdict.stereo, Some("no right-eye sighting in this look")); // i18n: not shown (diagnostics: why a camera look places no tools)
+            placed += 1;
+            // Where it is: in front of the eye, within arm's reach, and the column clear of the panel as this eye saw it.
+            let local = then(&undone(&eye), &accepted.frame);
+            assert!((0.15..1.2).contains(&-local.m[2][3]), "{:?}", local.m);
+            assert!(column_clear(&found, SIZE, &view.mirror, &eye, &accepted.frame, accepted.unit, accepted.side, accepted.clearance));
+            if shown.is_none() { follow.attach(accepted.frame, accepted.unit); } else { follow.seen(accepted.frame, accepted.unit); }
+            shown = follow.step(1. / 72., [None; 2], [false; 2], [None; 2]);
+            assert!(shown.is_some(), "an accepted look is shown");
+        }
+        eprintln!("placed {placed} of {fitted} perspective looks");
+        // Measured on this session: 9 of 12. Look 9 is a four-landmark fit whose homography is sheared (no rigid plane at any width); looks 7 and 8
+        // reproject over the gate even at his eyes' sharpness (it is scaled from 2.5 to 4.9 px there). Both are refused, and say so.
+        assert!(placed >= 9, "placed {placed} of {fitted}");
+    }
+
+    /// A panel at `distance` in front of the head, turned by `yaw`, as one eye (`render`, `raw`) would see its five landmarks at 3168 x 3456, with up to
+    /// `noise` pixels of error that differs per landmark and eye.
+    fn seen_by(render: &Matrix34, raw: [f32; 4], head: &Matrix34, panel: &Matrix34, unit: f32, noise: f32, seed: f32) -> Found {
+        let eye = then(head, render);
+        let inverse = undone(&eye);
+        let mirror = Mirror::whole_eye(raw);
+        let model = [PANEL_X, PANEL_CHEVRON, [-154., -84.], [-35., 133.], [82., 135.]];
+        let pixel = |p: [f32; 2]| -> [f32; 2] {
+            let world: [f32; 3] = std::array::from_fn(|i| panel.m[i][3] + panel.m[i][0] * p[0] * unit - panel.m[i][1] * p[1] * unit);
+            let v: [f32; 3] = std::array::from_fn(|i| inverse.m[i][3] + (0..3).map(|j| inverse.m[i][j] * world[j]).sum::<f32>());
+            let t = [v[0] / -v[2], -v[1] / -v[2]];
+            std::array::from_fn(|k| (t[k] - mirror.from[k]) / mirror.spans[k] * SIZE[k])
+        };
+        let mut landmarks = [([0.; 2], [0.; 2]); 10];
+        let mut points = Vec::new();
+        for (i, p) in model.into_iter().enumerate() {
+            let q = pixel(p);
+            let q = [q[0] + noise * (seed + i as f32 * 1.7).sin(), q[1] + noise * (seed * 1.3 + i as f32 * 2.3).cos()];
+            landmarks[i] = (p, q);
+            points.push((p, q));
+        }
+        let h = fit(&points).unwrap();
+        let middle = project(h, [0., 0.]);
+        let r = project(h, [1., 0.]);
+        let d = project(h, [0., 1.]);
+        let across = (r[0] - middle[0]).hypot(r[1] - middle[1]);
+        let tall = (d[0] - middle[0]).hypot(d[1] - middle[1]);
+        let residual = (points.iter().map(|&(p, q)| { let r = project(h, p); (r[0] - q[0]).powi(2) + (r[1] - q[1]).powi(2) }).sum::<f32>() / 5.).sqrt();
+        Found { perspective: Some(h), lines: None, residual_px: residual, landmarks: Some((5, landmarks)), x: points[0].1, chevron: points[1].1, middle,
+            right: [(r[0] - middle[0]) / across, (r[1] - middle[1]) / across], down: [(d[0] - middle[0]) / tall, (d[1] - middle[1]) / tall], across, tall }
+    }
+
+    /// A panel held in front, a little right and below the eyes, facing them, turned by `yaw` degrees about its upright.
+    fn held(head: &Matrix34, distance: f32, yaw: f32) -> Matrix34 {
+        let (s, c) = yaw.to_radians().sin_cos();
+        let local = Matrix34 { m: [[c, 0., s, 0.06], [0., 1., 0., -0.05], [-s, 0., c, -distance]] };
+        then(head, &local)
+    }
+
+    /// Stereo at his resolution and projection: parallel eyes (his EyeToHead is a pure 31.5 mm translation), and canted ones, as long as SteamVR
+    /// reports the eyes as they are rendered. Before, nothing covered 3168 x 3456 or a canted pair.
+    #[test]
+    fn stereo_measures_the_width_at_enzos_resolution_parallel_or_canted() {
+        let head = head();
+        let unit = PANEL_M / PANEL_SIZE[0];
+        let (mut stereo, mut cases) = (0, 0);
+        for cant in [0f32, 5., 10.] {
+            for distance in [0.3f32, 0.45, 0.7, 1.0] {
+                for yaw in [-35f32, 0., 35.] {
+                    for noise in [0f32, 1.2] {
+                        let eyes = [on_head(-0.0315, cant), on_head(0.0315, -cant)];
+                        let panel = held(&head, distance, yaw);
+                        let left = seen_by(&eyes[0], LEFT, &head, &panel, unit, noise, 0.3);
+                        let right = seen_by(&eyes[1], RIGHT, &head, &panel, unit, noise, 1.9);
+                        let views = [EyeView { found: left, size: SIZE, mirror: Mirror::whole_eye(LEFT), on_head: eyes[0] }, EyeView { found: right, size: SIZE, mirror: Mirror::whole_eye(RIGHT), on_head: eyes[1] }];
+                        let verdict = accept_sighting(&views[0], Some(&views[1]), &head, None, PANEL_M, Side::Left);
+                        let case = format!("cant {cant} distance {distance} yaw {yaw} noise {noise}");
+                        let accepted = verdict.accepted.unwrap_or_else(|why| panic!("{case}: {why}"));
+                        // Every look places the tools, from one eye if stereo cannot measure it; and where they are is right either way.
+                        assert!(apart(&accepted.frame, &panel) < 0.05, "{case}: {:?}", accepted.frame.m);
+                        if accepted.width_from == WidthFrom::Stereo {
+                            let width = accepted.unit * PANEL_SIZE[0];
+                            assert!((width - PANEL_M).abs() < 0.03, "{case}: width {width}");
+                            stereo += 1;
+                        } else {
+                            assert!(noise > 0., "{case}: noise-free stereo must measure: {:?}", verdict.stereo);
+                            eprintln!("{case}: one eye, stereo not used because {:?}", verdict.stereo);
+                        }
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("stereo measured {stereo} of {cases} looks at 3168 x 3456");
+    }
+
+    /// When the eyes are not where SteamVR says (a canted render reported as parallel, or another IPD), or the right eye saw something else, stereo
+    /// fails: the left eye's pose places the tools anyway, and the verdict says why stereo was not used.
+    #[test]
+    fn a_stereo_pair_that_disagrees_still_places_the_tools_from_one_eye() {
+        let head = head();
+        let unit = PANEL_M / PANEL_SIZE[0];
+        let reported = [on_head(-0.0315, 0.), on_head(0.0315, 0.)];
+        let panel = held(&head, 0.45, 15.);
+        let left = seen_by(&reported[0], LEFT, &head, &panel, unit, 1.2, 0.3);
+        let views = |right: Found| [EyeView { found: left, size: SIZE, mirror: Mirror::whole_eye(LEFT), on_head: reported[0] }, EyeView { found: right, size: SIZE, mirror: Mirror::whole_eye(RIGHT), on_head: reported[1] }];
+        // Rendered canted by 8 degrees, reported parallel; and a right eye whose sighting is 60 px off vertically.
+        let canted = seen_by(&on_head(0.0315, -8.), RIGHT, &head, &panel, unit, 1.2, 1.9);
+        let mut lifted = seen_by(&reported[1], RIGHT, &head, &panel, unit, 1.2, 1.9);
+        let mut h = lifted.perspective.unwrap();
+        for j in 0..3 { h[1][j] += 60. * h[2][j]; }
+        lifted.perspective = Some(h);
+        if let Some((count, mut points)) = lifted.landmarks { for p in points.iter_mut().take(count) { p.1[1] += 60.; } lifted.landmarks = Some((count, points)); }
+        for (name, right) in [("canted render reported parallel", canted), ("right sighting 60 px off", lifted)] {
+            let [l, r] = views(right);
+            let verdict = accept_sighting(&l, Some(&r), &head, None, PANEL_M, Side::Left);
+            let accepted = verdict.accepted.unwrap_or_else(|why| panic!("{name}: {why}"));
+            // Whatever stereo made of it, the tools stand beside the panel as the left eye sees it. A canted render reported parallel can pass the
+            // stereo gates with a wrong width (measured here; Enzo's Quest Pro reports parallel eyes, as his vrserver.txt shows): only the depth
+            // is then off, not the place in the eye that measured it.
+            let eye = then(&head, &l.on_head);
+            assert!(column_clear(&l.found, SIZE, &l.mirror, &eye, &accepted.frame, accepted.unit, accepted.side, accepted.clearance), "{name}");
+            eprintln!("{name}: {:?}, width {:.3}, stereo not used because {:?}", accepted.width_from, accepted.unit * PANEL_SIZE[0], verdict.stereo);
+            if accepted.width_from != WidthFrom::Stereo {
+                assert!(verdict.stereo.is_some(), "{name}: the reason stereo was not used is said");
+                assert!(apart(&accepted.frame, &panel) < 0.05, "{name}: one eye at the usual width puts it where it is: {:?}", accepted.frame.m);
+            }
+        }
+        // A width measured earlier by both eyes is used, and said to be.
+        let [l, _] = views(canted);
+        assert_eq!(accept_sighting(&l, None, &head, Some(0.28), PANEL_M, Side::Left).accepted.unwrap().width_from, WidthFrom::Measured);
+    }
+
+    /// No sighting, no tools: a look with only glyphs (no perspective fit) is never placed, and says so.
+    #[test]
+    fn glyphs_alone_never_place_the_tools() {
+        let mut found = sightings().into_iter().find(|f| f.perspective.is_none()).expect("a look without a perspective fit in the session");
+        found.landmarks = None;
+        let verdict = accept_sighting(&left_view(found), None, &head(), None, PANEL_M, Side::Left);
+        assert_eq!(verdict.accepted.err(), Some("no perspective fit (glyphs only)")); // i18n: not shown (diagnostics: why a camera look places no tools)
+    }
+
+    /// The sandbox at Enzo's 3168 x 3456 (2026-11-13, camera3/m1): the camera just opened, 0.4 m away, low and tilted, seen by both eyes as these
+    /// outline corners. Refused by the fixed pixel gate for three minutes (rigid fits of 6.5 and 5.4 px); placed now, from both eyes.
+    #[test]
+    fn a_camera_just_opened_close_and_tilted_is_placed() {
+        let corners = |q: [[f32; 2]; 4]| {
+            let model = [[-205., -115.3125], [205., -115.3125], [205., 115.3125], [-205., 115.3125]];
+            let points: Vec<_> = model.into_iter().zip(q).collect();
+            let h = fit(&points).unwrap();
+            let mut landmarks = [([0.; 2], [0.; 2]); 10];
+            for (slot, p) in landmarks.iter_mut().zip(&points) { *slot = *p; }
+            let middle = project(h, [0., 0.]); let r = project(h, [1., 0.]); let d = project(h, [0., 1.]);
+            let (across, tall) = ((r[0] - middle[0]).hypot(r[1] - middle[1]), (d[0] - middle[0]).hypot(d[1] - middle[1]));
+            Found { perspective: Some(h), lines: None, residual_px: 1.04, landmarks: Some((4, landmarks)), x: project(h, PANEL_X), chevron: project(h, PANEL_CHEVRON), middle,
+                right: [(r[0] - middle[0]) / across, (r[1] - middle[1]) / across], down: [(d[0] - middle[0]) / tall, (d[1] - middle[1]) / tall], across, tall }
+        };
+        let left = corners([[1229.1563, 2184.5796], [2082.5117, 1879.5481], [2255.023, 2424.6096], [1273.1213, 2916.1262]]);
+        let right = corners([[248.91309, 2185.6714], [1140.4647, 1879.0818], [1285.1508, 2423.2778], [257.17578, 2915.0972]]);
+        let views = [EyeView { found: left, size: SIZE, mirror: Mirror::whole_eye(LEFT), on_head: on_head(-0.032, 0.) }, EyeView { found: right, size: SIZE, mirror: Mirror::whole_eye(RIGHT), on_head: on_head(0.032, 0.) }];
+        assert!(perspective_fit(&left, SIZE, &views[0].mirror, &then(&IDENTITY, &views[0].on_head), PANEL_M).is_ok(), "one eye alone");
+        let verdict = accept_sighting(&views[0], Some(&views[1]), &IDENTITY, None, PANEL_M, Side::Left);
+        let accepted = verdict.accepted.unwrap_or_else(|why| panic!("{why}"));
+        eprintln!("close tilted camera: {:?}, width {:.3}, depth {:.3}, stereo not used because {:?}", accepted.width_from, accepted.unit * PANEL_SIZE[0], -accepted.frame.m[2][3], verdict.stereo);
+        assert!((0.3..0.55).contains(&-accepted.frame.m[2][3]));
     }
 }

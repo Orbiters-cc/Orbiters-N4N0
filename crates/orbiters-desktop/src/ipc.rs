@@ -1110,6 +1110,8 @@ pub(crate) mod tests {
         s.orbit.note = Some("in the way".into());
         s.worn_kit = Some(true);
         s.camera_open_said = Some(false);
+        s.vrchat_wrists = [Some([0.1, 1.2, -0.3, 10.0, 20.0, 30.0]), None];
+        s.vrchat_wrists_ns = [7, 0];
         s.camera_tools.qr = crate::controller::camera_tools::Qr::Found { url: "https://orbiters.cc".into() };
         s.camera_tools.demo = crate::controller::camera_tools::Demo::Busy;
         s.camera_tools.qr_generation = 3;

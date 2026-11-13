@@ -1122,7 +1122,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         }
         t.menu.worlds.view.publish(&overlay);
         // Live translation: the turn only records the head and shows what the reading thread found.
-        let covered = dashboard || menus_up || t.menu.host.menu.open || t.menu.worlds.small_showing();
+        // Nor while VRChat has no scene to show (a loading screen's texts were read and translated in the sandbox).
+        let covered = dashboard || menus_up || t.menu.host.menu.open || t.menu.worlds.small_showing() || !vrchat_scene;
         let began = Instant::now();
         t.translate.update(translate::Cx { overlay: &overlay, steamvr: &steamvr, presenter: &mut presenter, snap: &snap, backend: &backend, covered, frames: frames.fresh() });
         stall.note(began.elapsed(), || t.translate.doing());

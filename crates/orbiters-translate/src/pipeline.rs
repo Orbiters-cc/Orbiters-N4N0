@@ -123,7 +123,10 @@ impl Engine {
                     let i = unsure[k];
                     // A reader for one script reads any other as look-alike letters of its own ("o6po noxanoBaTb" for
                     // "Добро пожаловать", and sure of it): its read counts only in its own script.
-                    if own_script(reader, &l.text) && l.confidence > lines[i].confidence + 0.02 {
+                    // Nor over a main read in Chinese characters or kana, unless that read was a guess: 西 read a little
+                    // unsure became the Korean reader's "뼈" at 0.94 in the sandbox.
+                    let chinese_or_japanese = lines[i].confidence >= 0.5 && crate::language::guess(&lines[i].text).is_some_and(|g| g == "ja" || g == "zh");
+                    if own_script(reader, &l.text) && !chinese_or_japanese && l.confidence > lines[i].confidence + 0.02 {
                         lines[i] = l;
                     }
                 }

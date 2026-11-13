@@ -769,6 +769,11 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     if let Some(startup) = crate::startup::reconcile(&steamvr, &startup_seen) {
         client.send(&crate::ipc::ToService::PatchSettings { patch: serde_json::json!({"startup": startup}) });
     }
+    // A background connection is known to SteamVR by its program's name, not as the application: the bindings it then
+    // reads are that name's, an old save without the menus' buttons (0.3.5-dev.42 and dev.43: no menu ever opened in VR).
+    crate::startup::keep_known(&steamvr);
+    let identified = steamvr.is_application_installed(orbiters_update::STEAMVR_APP_KEY).then(|| steamvr.identify_application(orbiters_update::STEAMVR_APP_KEY));
+    vr_log::line(&format!("SteamVR knows this overlay as {:?} (told it who it is: {identified:?})", steamvr.own_application_key())); // i18n: not shown (a log's line)
     let overlay = steamvr.overlay().context("SteamVR has no overlay interface")?; // i18n: not shown (the overlay process's own stderr, a log nobody reads in a window)
     let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}"); // i18n: not shown (the overlay process's own stderr, a log nobody reads in a window)
     let (main, thumb) = overlay.create_dashboard(KEY, "Orbiters").map_err(|c| fail("dashboard tab", c))?; // i18n: not shown (an error text)

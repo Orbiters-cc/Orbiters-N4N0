@@ -268,26 +268,40 @@ const APP_KEY_SECTION: &std::ffi::CStr = c"cc.orbiters.n4n0";
 fn keep_saved_bindings_whole(steamvr: &vr::Client, dir: &Path) {
     use std::ffi::CString;
     let runtime = vr::runtime_dir();
+    // Every section SteamVR may read for this process: the application's, and its program's name, by which SteamVR knows a connection it does not take for the application.
+    let program = std::env::current_exe().ok().and_then(|exe| exe.file_name().map(|name| format!("system.generated.{}", name.to_string_lossy().to_lowercase())));
+    let mut sections = vec![APP_KEY_SECTION.to_owned()];
+    for name in steamvr.own_application_key().into_iter().chain(program) {
+        if let Ok(name) = CString::new(name) {
+            if !sections.contains(&name) {
+                sections.push(name);
+            }
+        }
+    }
+    for section in &sections {
+    let section: &std::ffi::CStr = section;
+    let other = if section == APP_KEY_SECTION { String::new() } else { format!("{}_", section.to_string_lossy().replace(|c: char| !c.is_ascii_alphanumeric(), "_")) };
     for (controller, _, _) in CONTROLLERS {
         let key = |what: &str| CString::new(format!("{controller}_250820_{what}_steamvrinput")).expect("no NUL in these");
-        let Some(url) = steamvr.setting_string(APP_KEY_SECTION, &key("CurrentURL")) else { continue };
+        let Some(url) = steamvr.setting_string(section, &key("CurrentURL")) else { continue };
         let saved = saved_binding_file(&url, runtime.as_deref()).and_then(|file| std::fs::read_to_string(file).ok());
         let Ok(ours) = std::fs::read_to_string(dir.join(format!("bindings_{controller}.json"))) else { continue };
         let Some(saved) = saved else {
             eprintln!("SteamVR's saved binding for {controller} cannot be read ({url}): the default one applies");
-            steamvr.remove_setting(APP_KEY_SECTION, &key("CurrentURL"));
-            steamvr.remove_setting(APP_KEY_SECTION, &key("AutosaveURL"));
+            steamvr.remove_setting(section, &key("CurrentURL"));
+            steamvr.remove_setting(section, &key("AutosaveURL"));
             continue;
         };
         let Some(merged) = merged_binding(&saved, &ours) else { continue };
-        let file = dir.join(format!("merged_bindings_{controller}.json"));
+        let file = dir.join(format!("merged_bindings_{other}{controller}.json"));
         let Ok(()) = std::fs::write(&file, merged) else { continue };
         let url = format!("file:///{}", file.to_string_lossy().replace('\\', "/"));
         eprintln!("SteamVR's saved binding for {controller} lacked some of this application's actions: they were added ({url})");
         if let Ok(url) = CString::new(url) {
-            steamvr.set_setting_string(APP_KEY_SECTION, &key("CurrentURL"), &url);
-            steamvr.set_setting_string(APP_KEY_SECTION, &key("AutosaveURL"), &url);
+            steamvr.set_setting_string(section, &key("CurrentURL"), &url);
+            steamvr.set_setting_string(section, &key("AutosaveURL"), &url);
         }
+    }
     }
 }
 

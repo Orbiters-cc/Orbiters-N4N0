@@ -160,7 +160,7 @@ pub fn reconcile(client: &orbiters_openvr::Client, startup: &StartupSettings) ->
         }
     } else {
         next.steamvr = client.starts_with_steamvr(STEAMVR_APP_KEY);
-        if next.steamvr && std::fs::read_to_string(&path).ok().as_deref() != Some(manifest.json().as_str()) {
+        if next.steamvr && may_claim(&exe, applications::manifest_binary(&path).as_deref()) && std::fs::read_to_string(&path).ok().as_deref() != Some(manifest.json().as_str()) {
             if let Err(e) = client.set_start_with_steamvr(&manifest, &path, true) {
                 eprintln!("SteamVR's manifest of the app: {e}");
             }
@@ -169,8 +169,39 @@ pub fn reconcile(client: &orbiters_openvr::Client, startup: &StartupSettings) ->
     (next != *startup).then_some(next)
 }
 
+/// Whether this program may put its own name in SteamVR's manifest, which names `named`: when it names it already, names
+/// none, or names one that is gone (an install that moved). Never while another program is there: on 2026-11-12 a test
+/// build run beside the installed app took the manifest, was deleted, and SteamVR knew no application any more.
+fn may_claim(exe: &Path, named: Option<&Path>) -> bool {
+    named.is_none_or(|named| named == exe || !named.exists())
+}
+
+/// SteamVR is made to know the application, whether or not it starts it: it is by its manifest that SteamVR tells this
+/// program's connection from any other's, and reads the application's own saved bindings for it. A manifest that names
+/// a program that is gone is written again. Before the overlay says who it is.
+pub fn keep_known(client: &orbiters_openvr::Client) {
+    let Ok((exe, path)) = this_program() else { return };
+    let named = applications::manifest_binary(&path);
+    if !may_claim(&exe, named.as_deref()) || (named.as_deref() == Some(exe.as_path()) && client.is_application_installed(STEAMVR_APP_KEY)) {
+        return;
+    }
+    if let Err(code) = client.register_manifest(&manifest(&exe), &path) {
+        eprintln!("SteamVR's manifest of the app: error {code}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_manifest_is_taken_only_from_a_program_that_is_gone() {
+        let here = std::env::current_exe().unwrap();
+        let gone = here.with_file_name("no-such-program-anywhere.exe");
+        let other = std::env::temp_dir();
+        assert!(super::may_claim(&here, None));
+        assert!(super::may_claim(&here, Some(&here)));
+        assert!(super::may_claim(&here, Some(&gone)));
+        assert!(!super::may_claim(&here, Some(&other)), "another program that is still there keeps the manifest");
+    }
     #[test]
     fn a_settings_choice_waits_for_the_runtime_owner_without_connecting() {
         assert_eq!(super::set_start_with_steamvr(true), Ok(false));

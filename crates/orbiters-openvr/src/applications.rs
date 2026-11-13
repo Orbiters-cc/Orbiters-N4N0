@@ -27,6 +27,12 @@ pub struct Manifest<'a> {
     pub description: &'a str,
 }
 
+/// The program the manifest file at `path` names, when it reads as one.
+pub fn manifest_binary(path: &Path) -> Option<std::path::PathBuf> {
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    json["applications"][0]["binary_path_windows"].as_str().map(std::path::PathBuf::from)
+}
+
 impl Manifest<'_> {
     /// The manifest file's content.
     pub fn json(&self) -> String {
@@ -89,6 +95,34 @@ impl Client {
         unsafe { entry::<F>(table, 2)(key.as_ptr()) }
     }
 
+    /// Tells SteamVR this process is the application `key`, one whose manifest it knows. A background connection is
+    /// otherwise known by its program's name (`system.generated.<program>`), with that name's own saved bindings and
+    /// settings and none of the application's. `Err` holds its `EVRApplicationError`.
+    pub fn identify_application(&self, key: &str) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u32, *const c_char) -> i32;
+        let table = self.applications().map_err(|_| -1)?;
+        let key = c_text(key);
+        // SAFETY: IVRApplications_007 entry 11 is IdentifyApplication; the key is NUL-terminated.
+        match unsafe { entry::<F>(table, 11)(std::process::id(), key.as_ptr()) } {
+            0 => Ok(()),
+            code => Err(code),
+        }
+    }
+
+    /// The key SteamVR knows this process by, which is the section its saved bindings are under.
+    pub fn own_application_key(&self) -> Option<String> {
+        type F = unsafe extern "system" fn(u32, *mut c_char, u32) -> i32;
+        let table = self.applications().ok()?;
+        let mut text = [0 as c_char; 512];
+        // SAFETY: IVRApplications_007 entry 5 is GetApplicationKeyByProcessId; the buffer's size is what is passed.
+        if unsafe { entry::<F>(table, 5)(std::process::id(), text.as_mut_ptr(), text.len() as u32) } != 0 {
+            return None;
+        }
+        // SAFETY: the buffer starts zeroed and its last byte is never written past by a call that succeeded.
+        let key = unsafe { std::ffi::CStr::from_ptr(text.as_ptr()) }.to_string_lossy().into_owned();
+        (!key.is_empty()).then_some(key)
+    }
+
     /// Has SteamVR start the application `key` with itself, or not.
     pub fn set_application_auto_launch(&self, key: &str, on: bool) -> Result<(), i32> {
         type F = unsafe extern "system" fn(*const c_char, bool) -> i32;
@@ -136,6 +170,22 @@ impl Client {
             Err(code) => return Err(orbiters_i18n::tr!("SteamVR did not take the application's manifest (error {code})", code = code)),
         }
         self.set_application_auto_launch(manifest.key, true).map_err(|code| orbiters_i18n::tr!("SteamVR did not set its start (error {code})", code = code))
+    }
+
+    /// SteamVR knows the application by the manifest written at `path`, and starts it or not as it did. `Err` holds its
+    /// `EVRApplicationError`, or -2 when the file could not be written.
+    pub fn register_manifest(&self, manifest: &Manifest, path: &Path) -> Result<(), i32> {
+        let json = manifest.json();
+        if std::fs::read_to_string(path).ok().as_deref() != Some(json.as_str()) {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|_| -2)?;
+            }
+            std::fs::write(path, &json).map_err(|_| -2)?;
+        }
+        match self.add_application_manifest(path) {
+            Ok(()) | Err(APP_KEY_ALREADY_EXISTS) => Ok(()),
+            Err(code) => Err(code),
+        }
     }
 
     /// SteamVR forgets the application: not started any more, its manifest unregistered and removed (uninstalling).

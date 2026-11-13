@@ -181,7 +181,7 @@ pub fn plain_room(d: V3) -> [u8; 3] {
     base.map(|c| (c + grain).clamp(0, 255) as u8)
 }
 
-/// A premultiplied RGBA picture laid over an eye's picture as SteamVR composites an overlay: a rectangle of `width` x
+/// An RGBA picture with straight alpha laid over an eye's picture as SteamVR composites an overlay: a rectangle of `width` x
 /// `height` metres at `pose` (+Z facing the viewer), sampled for each pixel it covers.
 #[allow(clippy::too_many_arguments)]
 pub fn composite(eye: &mut Picture, view: &EyeView, pose: &M34, width: f32, height: f32, rgba: &[u8], w: u32, h: u32) {
@@ -219,7 +219,7 @@ pub fn composite(eye: &mut Picture, view: &EyeView, pose: &M34, width: f32, heig
             let a = s[3] / 255.0;
             let i = ((y * eye.width + x) * 4) as usize;
             for k in 0..3 {
-                eye.rgba[i + k] = (s[k] + eye.rgba[i + k] as f32 * (1.0 - a)).round().clamp(0.0, 255.0) as u8;
+                eye.rgba[i + k] = (s[k] * a + eye.rgba[i + k] as f32 * (1.0 - a)).round().clamp(0.0, 255.0) as u8;
             }
         }
     }

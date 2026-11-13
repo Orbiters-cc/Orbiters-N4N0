@@ -310,7 +310,8 @@ impl TranslateHost {
                 (self.slots.len() < MOST_SHOWN).then(|| {
                     let i = self.slots.len();
                     let handle = overlay.create(&format!("{}.translate.{i}", super::KEY), "Orbiters translation").unwrap_or(0); // i18n: not shown (a name for SteamVR)
-                    let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
+                    // Straight alpha (paint.rs says why): the flag stays off.
+                    let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, false);
                     let _ = overlay.set_sort_order(handle, SORT_ORDER);
                     self.slots.push(Slot { handle, track: None, picture: None, pose: q.pose, width: q.width, alpha: 0.0, to: 0.0, visible: false });
                     i

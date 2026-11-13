@@ -4,7 +4,7 @@
 
 use crate::track::Colours;
 
-/// A translation ready for its overlay: premultiplied RGBA, and the size its quad takes in the room (a box made longer
+/// A translation ready for its overlay: RGBA with straight (not premultiplied) alpha, and the size its quad takes in the room (a box made longer
 /// or taller than the original's when the translation needed room), metres.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Painted {
@@ -136,9 +136,11 @@ impl Painter {
                 let i = ((y * w + x) * 4) as usize;
                 let ta = text[i + 3] as f32 / 255.0;
                 for c in 0..3 {
-                    // Premultiplied: text over the background, then the whole at the cover's alpha.
+                    // Text over the background (the painter's text is premultiplied), the whole at the cover's alpha,
+                    // straight: SteamVR takes overlay pictures as sRGB, and a premultiplied fading edge (colour × alpha)
+                    // turns into a dark ring once linearised (sandbox, 2026-11-13: a thin dark outline round each cover).
                     let v = text[i + c] as f32 + background[c] as f32 * (1.0 - ta);
-                    out[i + c] = (v * a).round().clamp(0.0, 255.0) as u8;
+                    out[i + c] = v.round().clamp(0.0, 255.0) as u8;
                 }
                 out[i + 3] = (a * 255.0).round() as u8;
             }
@@ -150,6 +152,44 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No frame: where the cover fades into the surface its colour is the surface's (VR sandbox, 2026-11-13: covers showed
+    /// a thin dark outline).
+    #[test]
+    fn the_covers_edge_is_the_surfaces_colour() {
+        let mut p = Painter::default();
+        let bg = [240u8, 200, 20];
+        let c = Colours { background: bg, text: [10, 10, 10] };
+        let painted = p.paint("West Gate", c, 0.30, 0.04);
+        let (w, h) = (painted.width, painted.height);
+        if let Ok(dir) = std::env::var("ORBITERS_TRANSLATE_STILLS") {
+            let mut over = crate::picture::Picture::new(w + 40, h + 40, [bg[0], bg[1], bg[2], 255]);
+            for y in 0..h {
+                for x in 0..w {
+                    let i = ((y * w + x) * 4) as usize;
+                    let o = (((y + 20) * (w + 40) + x + 20) * 4) as usize;
+                    let a = painted.rgba[i + 3] as f32 / 255.0;
+                    for k in 0..3 {
+                        over.rgba[o + k] = (painted.rgba[i + k] as f32 * a + over.rgba[o + k] as f32 * (1.0 - a)).round() as u8;
+                    }
+                }
+            }
+            over.save_png(&std::path::Path::new(&dir).join("cover-on-yellow.png")).ok();
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let edge = x.min(w - 1 - x).min(y).min(h - 1 - y);
+                let i = ((y * w + x) * 4) as usize;
+                let a = painted.rgba[i + 3] as f32 / 255.0;
+                if edge < 2 && a > 0.01 {
+                    for k in 0..3 {
+                        let straight = painted.rgba[i + k] as f32;
+                        assert!((straight - bg[k] as f32).abs() < 30.0, "pixel ({x}, {y}) of {w} x {h}: {:?} at alpha {a}", &painted.rgba[i..i + 4]);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn unreadable_colours_turn_black_or_white() {

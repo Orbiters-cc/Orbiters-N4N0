@@ -12,9 +12,9 @@ pub fn list() -> Vec<Value> {
     if root().is_none() { return vec![]; }
     vec![json!({
         "name":"vr_sandbox", "title":"Developer SteamVR sandbox",
-        "description":"Exclusive real SteamVR session with an emulated head and two oculus_touch hands. start refuses existing VR sessions and journals configuration; stop restores it. restore works after a crash. pose uses Standing metres and quaternion w,x,y,z, duration_s makes a smooth move. input values remain held until released with zero. menu opens quick/wheel or releases it. flick moves the two stick axes together then returns to centre. camera opens through the right-hand Action Menu Tools route; inspect an eye capture to verify. camera_fly sends the documented OSC Flying control. capture saves left/right compositor PNGs under output_prefix. overlays reads SteamVR transforms and visibility for overlay_keys, or all known Orbiters menu/camera keys when omitted. Read docs/vr-sandbox.md before use.",
+        "description":"Shared real SteamVR + VRChat session with an emulated head and two oculus_touch hands; agents take turns on it (docs/vr-sandbox.md). start takes a turn (starting the session if none runs; it refuses the owner's own VR); stop ends this program's turn and puts the session back to its neutral state, it does not close VRChat; the session closes itself after 10 idle minutes and restores everything. restore works after a crash. vrchat launches VRChat once, or sends the new private instance to the running VRChat through its launch pipe. home rejoins the session's home instance; neutral releases every input and resets poses and the camera. pose uses Standing metres and quaternion w,x,y,z, duration_s makes a smooth move. input values remain held until released with zero. menu opens quick/wheel or releases it. flick moves the two stick axes together then returns to centre. camera opens through the right-hand Action Menu Tools route; inspect an eye capture to verify. camera_fly sends the documented OSC Flying control. capture saves left/right compositor PNGs under output_prefix. overlays reads SteamVR transforms and visibility for overlay_keys, or all known Orbiters menu/camera keys when omitted. Read docs/vr-sandbox.md before use.",
         "inputSchema":{"type":"object","properties":{
-            "action":{"type":"string","enum":["start","stop","restore","status","pose","input","capture","motion_capture","overlays","vrchat","menu","flick","camera","camera_fly","camera_mode","view"]},
+            "action":{"type":"string","enum":["start","stop","restore","status","pose","input","capture","motion_capture","overlays","vrchat","home","neutral","menu","flick","camera","camera_fly","camera_mode","view"]},
             "frames":{"type":"integer","minimum":3,"maximum":80,"description":"motion_capture: per-eye samples while pose moves, with QPC timestamps, controller poses and overlay readback. Default 24."},
             "mode":{"type":"integer","minimum":0,"maximum":6,"description":"Documented OSC camera mode: 0 Off, 1 Photo, 2 Stream, 3 Emoji, 4 Multilayer, 5 Print, 6 Drone. Open through camera first; inspect the actual mode after writing."},
             "menu":{"type":"string","enum":["quick","wheel","close"]},
@@ -41,8 +41,9 @@ impl super::Bridge {
             }
         }
         if args["action"] != "vrchat" { return call(args); }
+        // A running sandbox VRChat gets the new instance through its own launch pipe (sandbox.py): no second
+        // anti-cheat start. sandbox.py refuses a VRChat that its session did not start.
         let seen=self.game.seen();
-        if seen.running { return Err(Failure::new("vrchat_running", "Close the sandbox's current VRChat before launching another.", "Stop and restore the sandbox session first.")); }
         let (user,_) = seen.vrchat_user.ok_or_else(|| Failure::new("vrchat_not_signed_in", "No signed-in VRChat account.", "Use the existing signed-in bridge session."))?;
         let world=args["world_id"].as_str().unwrap_or_default();
         if !orbiters_core::vrchat_log::is_world_id(world) { return Err(Failure::new("bad_world_id", "Expected wrld_ id.", "Use find_worlds.")); }

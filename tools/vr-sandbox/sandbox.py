@@ -1,7 +1,10 @@
 """Developer SteamVR session controller; never installed with Orbiters.
 
-python sandbox.py start | status | stop | restore
-python sandbox.py call '{"action":"pose", "device":"head", "position":[0,1.6,0]}'
+Shared session (default, see docs/vr-sandbox.md):
+python sandbox.py acquire --owner vr1113b/shell [--app EXE] [--render 2112x2304|default] [--cold] [--wait 3600]
+python sandbox.py call --owner vr1113b/shell '{"action":"pose", "device":"head", "position":[0,1.6,0]}'
+python sandbox.py release --owner vr1113b/shell
+python sandbox.py status | yield | restore
 """
 import ctypes as C
 import hashlib
@@ -23,10 +26,21 @@ import time
 import urllib.request
 import psutil
 import queue
+sys.path.insert(0, str(Path(__file__).parent))
+import lease
+import vrchat_life
 
 ROOT = Path(os.environ['USERPROFILE']) / '.orbiters-build/vr-sandbox'
 LOCK = ROOT / 'steamvr.lock'
 JOURNAL = ROOT / 'session.json'
+LEASES = ROOT / 'leases'          # <owner>.json: that agent's turn token (written by the controller on grant)
+STATE = ROOT / 'shared-session.json'  # public view of the shared session: holder, waiters, render, VRChat, history
+YIELD = ROOT / 'YIELD'            # created by `sandbox.py yield` (or by hand): the owner wants SteamVR now
+RENDER = ROOT / 'render-target.txt'
+EAC_LOG = ROOT / 'eac-log.jsonl'
+DEFAULT_RENDER = [1080, 1200]
+HEADSET_HOLD_S = 10               # a Virtual Desktop headset connection must last this long before the session yields
+NEUTRAL_POSES = ([0, 1.65, 0], [-.25, 1.2, -.35], [.25, 1.2, -.35])
 STEAM = Path('C:/Program Files (x86)/Steam')
 RUNTIME = STEAM / 'steamapps/common/SteamVR'
 PATHS = Path(os.environ['LOCALAPPDATA']) / 'openvr/openvrpaths.vrpath'
@@ -166,9 +180,10 @@ def restore(expected_session=None):
     if j.get('restored'):
         return {'restored': True, 'already_restored': True}
     if j.get('pid') != os.getpid() and j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):
-        try:remote({'action':'stop'},journal=j)
+        try:remote({'action':'shutdown','force':True,'reason':'restore'},journal=j)
         except (OSError,urllib.error.URLError):pass # owner may already be closing its HTTP server
-        deadline=time.monotonic()+45
+        # A clean VRChat close waits for its anti-cheat session and for EAC to unload (vrchat_life.close_vrchat).
+        deadline=time.monotonic()+420
         while time.monotonic()<deadline:
             latest=json.loads(JOURNAL.read_text())
             if latest['session']!=j['session']:return {'restored':False,'reason':'session changed'}
@@ -203,8 +218,15 @@ def restore_contents(j):
     foreign = [p for p in processes() if (p['pid'], p['create_time']) not in owned]
     if foreign:
         raise RuntimeError('Restore refused while unowned VR processes run: ' + json.dumps(foreign))
-    if j.get('app_test_exe'):
+    if j.get('turn_app'):stop_app(j['turn_app'])
+    elif j.get('app_test_exe') and not j.get('shared'):
         subprocess.run([j['app_test_exe'],'--quit'],timeout=20,creationflags=subprocess.CREATE_NO_WINDOW,check=True)
+    # VRChat first and cleanly: a game killed during its anti-cheat start-up is what preceded the only
+    # "EAC unload timeout" seen; SteamVR going away first also makes VRChat quit on its own.
+    log=vrchat_life.Log(EAC_LOG)
+    for info in j['processes']:
+        if info['name'].lower()=='vrchat.exe' and same_process(info):
+            vrchat_life.close_vrchat(log,info,'session restore')
     terminating=[]
     for info in sorted(j['processes'], key=lambda p: p['name'].lower() != 'vrmonitor.exe'):
         p = same_process(info)
@@ -249,11 +271,64 @@ def restore_contents(j):
         LOCK.unlink()
     return {'restored': True, 'verified_files': len(j['files']), 'leftover_dead_pids': warnings}
 
+def stop_app(app,timeout=20):
+    """Stops one test program of a turn: its own --quit, then a kill if it stays. Never another program."""
+    if not app:return None
+    p=same_process({'pid':app['pid'],'create_time':app['create_time']})
+    if not p:return 'already gone'
+    try:subprocess.run([app['exe'],'--quit'],timeout=timeout,creationflags=subprocess.CREATE_NO_WINDOW)
+    except (OSError,subprocess.TimeoutExpired):pass
+    try:
+        p.wait(timeout);return 'quit'
+    except psutil.TimeoutExpired:
+        p.kill();p.wait(10);return 'killed after --quit timed out'
+    except psutil.NoSuchProcess:return 'quit'
+
+def private_address(ip):
+    parts=ip.split('.')
+    if len(parts)!=4:return ip.lower().startswith(('fe80','fd'))
+    try:a,b=int(parts[0]),int(parts[1])
+    except ValueError:return False
+    return a==10 or (a==192 and b==168) or (a==172 and 16<=b<=31)
+
+def headset_connected():
+    """The owner's headset is on: Virtual Desktop's streamer holds a TCP connection to a device on the local network
+    (its idle connection goes to VD's internet service, which is ignored). Not yet seen with a real headset
+    connection (none was made while this was written, 2026-11-13); it errs towards yielding."""
+    for p in psutil.process_iter(['name']):
+        if (p.info['name'] or '').lower()=='virtualdesktop.streamer.exe':
+            try:
+                for c in p.connections('tcp'):
+                    if c.status=='ESTABLISHED' and c.raddr and private_address(c.raddr.ip):return True
+            except psutil.Error:pass
+    return False
+
+def owner_wants_vr():
+    if YIELD.exists():return 'yield requested ('+str(YIELD)+')'
+    if headset_connected():return "the owner's headset connected through Virtual Desktop"
+    return None
+
+def current_render():
+    try:
+        w,h=(int(x) for x in RENDER.read_text().split()[:2])
+        if 256<=w<=4096 and 256<=h<=4096:return [w,h]
+    except (OSError,ValueError):pass
+    return list(DEFAULT_RENDER)
+
+def owner_file(owner):
+    return LEASES/(re.sub(r'[^A-Za-z0-9._-]','_',owner)+'.json')
+
 class Session:
     def __init__(self):
         self.stop = threading.Event()
         self.guard = threading.Lock()
         self.j = None
+        self.lease = lease.new_state(time.time())
+        self.eac = vrchat_life.Log(EAC_LOG)
+        self.render = current_render()
+        self.shutdown_reason = None
+        self.headset_since = None
+        self.vrchat_seen = None
 
     def devices(self):
         self.mm = mmap.mmap(-1, C.sizeof(Shared), tagname='Local\\OrbitersVrSandbox1112')
@@ -261,21 +336,24 @@ class Session:
         self.mutex = kernel.CreateMutexW(None, False, 'Local\\OrbitersVrSandbox1112Mutex')
         self.shared.magic, self.shared.version, self.shared.owner = 0x56523132, 1, os.getpid()
         for i, d in enumerate(self.shared.devices):
-            d.p[:] = ([0, 1.65, 0], [-.25, 1.2, -.35], [.25, 1.2, -.35])[i]
+            d.p[:] = NEUTRAL_POSES[i]
             d.q[:] = [1, 0, 0, 0]
 
-    def start(self):
+    def start(self, stream='shared'):
         ROOT.mkdir(parents=True, exist_ok=True)
         running = processes()
         if running:
             raise RuntimeError('Person is using VR; no changes made: ' + json.dumps(running))
         if JOURNAL.exists() and not json.loads(JOURNAL.read_text()).get('restored'):
             raise RuntimeError('Unrestored session exists; run restore first')
+        wants=owner_wants_vr()
+        if wants:raise RuntimeError('Not starting: '+wants)
         identity = secrets.token_hex(16)
-        lock = {'session': identity, 'pid': os.getpid(), 'stream': 'vr1112/sandbox-camera', 'time': time.time()}
+        # Same keys as before the shared session (older scripts read session/pid/stream/time); `shared` is new.
+        lock = {'session': identity, 'pid': os.getpid(), 'stream': stream, 'time': time.time(), 'shared': True}
         with LOCK.open('x') as f:
             json.dump(lock, f)
-        self.j = {'session': identity, 'pid': os.getpid(), 'owner_create_time':psutil.Process().create_time(), 'created': time.time(), 'token': secrets.token_hex(32), 'files': [], 'processes': [], 'restored': False}
+        self.j = {'session': identity, 'pid': os.getpid(), 'owner_create_time':psutil.Process().create_time(), 'created': time.time(), 'token': secrets.token_hex(32), 'files': [], 'processes': [], 'restored': False, 'shared': True, 'render': self.render}
         # Keep old recoveries; every new session gets its own backup directory.
         old = ROOT / 'backup'
         if old.exists():
@@ -304,8 +382,10 @@ class Session:
         paths = json.loads(PATHS.read_text(encoding='utf-8-sig'))
         paths['external_drivers'] = [str(ROOT/'driver')]
         atomic_json(PATHS, paths)
+        self.eac.write('session_start', session=identity, render=self.render)
         proc = subprocess.Popen([str(RUNTIME/'bin/win64/vrstartup.exe')], creationflags=subprocess.CREATE_NO_WINDOW)
         self.record()
+        self.publish()
         return proc
 
     def record(self):
@@ -314,22 +394,164 @@ class Session:
             if (p['pid'],p['create_time']) not in known:
                 if p['name'].lower()=='vrchat.exe':
                     link=self.j.get('launch_link')
-                    if not link or any(x['name'].lower()=='vrchat.exe' for x in self.j['processes']):continue
+                    # One live VRChat per session; a new one after a crash or a cold relaunch is recorded again.
+                    if not link or any(x['name'].lower()=='vrchat.exe' and same_process(x) for x in self.j['processes']):continue
                     try:
                         if link not in psutil.Process(p['pid']).cmdline():continue
                     except psutil.Error:continue
                 self.j['processes'].append(p)
+                known.add((p['pid'],p['create_time']))
         atomic_json(JOURNAL, self.j)
+
+    def vrchat(self):
+        """The session's live VRChat (journal identity), or None."""
+        for info in reversed(self.j['processes']):
+            if info['name'].lower()=='vrchat.exe' and same_process(info):return info
+        return None
+
+    # ---- shared session: turns ------------------------------------------------------------------------------
+    def publish(self):
+        now=time.time();v=self.vrchat() if self.j else None
+        state={'session':self.j and self.j['session'],'controller_pid':os.getpid(),'updated':now,'render':self.render,
+               'vrchat':v and {'pid':v['pid'],'age_s':round(now-v['create_time'])},'home':self.j and self.j.get('home_link'),
+               'lease':lease.public(self.lease,now),'history':self.lease['history'][-20:]}
+        try:atomic_json(STATE,state)
+        except OSError:pass
+        return state
+
+    def grant_file(self,owner,token):
+        LEASES.mkdir(parents=True,exist_ok=True)
+        atomic_json(owner_file(owner),{'owner':owner,'token':token,'session':self.j['session'],'time':time.time()})
+
+    def end_turn(self,reason,owner=None,token=None):
+        holder=lease.end_turn(self.lease,time.time(),reason,owner,token)
+        if not holder:return None
+        report={'owner':holder['owner'],'reason':reason}
+        if holder.get('app'):
+            report['app']=stop_app(holder['app'])
+            self.j.pop('turn_app',None);atomic_json(JOURNAL,self.j)
+        report['neutral']=self.neutral(rejoin=reason!='shutdown')
+        owner_file(holder['owner']).unlink(missing_ok=True)
+        self.eac.write('turn_end',**report)
+        self.publish()
+        return report
+
+    def neutral(self,rejoin=True):
+        """The known starting point of every turn: no input held, head and hands at their start poses, VRChat's
+        camera off and not flying (OSC), and, with VRChat up, back at the session's home instance (a world load closes
+        every menu and puts the avatar at the spawn point). The rejoin goes through VRChat's own launch pipe: no new
+        process and no anti-cheat start."""
+        done={}
+        with self.guard:
+            if kernel.WaitForSingleObject(self.mutex,1000)!=0:raise RuntimeError('IPC mutex timeout')
+            try:
+                for i,d in enumerate(self.shared.devices):
+                    d.inputs[:]=[0]*20;d.p[:]=NEUTRAL_POSES[i];d.q[:]=[1,0,0,0]
+            finally:kernel.ReleaseMutex(self.mutex)
+        done['inputs_released']=True;done['poses']='start poses'
+        v=self.vrchat()
+        if not v:return {**done,'vrchat':'not running'}
+        for address,payload in ((b'/usercamera/Mode\0\0\0\0',b',i\0\0'+struct.pack('>i',0)),(b'/usercamera/Flying\0\0',b',F\0\0')):
+            with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as osc:osc.sendto(address+payload,('127.0.0.1',9000))
+        done['osc']={'camera_mode':0,'camera_flying':False}
+        home=self.j.get('home_link')
+        if rejoin and home:
+            done['home']=self.go(home,v)
+        return done
+
+    def go(self,link,v=None):
+        """Sends a vrchat://launch link to the running VRChat and waits for that instance to finish loading."""
+        v=v or self.vrchat()
+        instance=link.split('id=',1)[1].split('&')[0]
+        since=time.time()-1
+        if not vrchat_life.send_url(link):return {'joined':False,'reason':'VRChat did not answer on its launch pipe'}
+        self.eac.write('vrchat_pipe_link',instance=instance)
+        ok=vrchat_life.wait_joined(v['create_time'],instance,since,timeout=150)
+        return {'joined':ok,'instance':instance,'seconds':round(time.time()-since,1)}
+
+    def end_session(self,reason):
+        self.shutdown_reason=reason
+        if self.lease['holder']:self.end_turn('shutdown')
+        self.eac.write('session_end',reason=reason)
+        self.j['ended_reason']=reason;atomic_json(JOURNAL,self.j)
+        self.stop.set()
+
+    def tick(self):
+        """Once a second from the serve loop: stale turns, idle shutdown, the owner taking SteamVR back."""
+        now=time.time()
+        wants=owner_wants_vr()
+        if wants and wants.startswith('the owner'):
+            self.headset_since=self.headset_since or now
+            if now-self.headset_since<HEADSET_HOLD_S:wants=None
+        elif not wants:self.headset_since=None
+        if wants:
+            YIELD.unlink(missing_ok=True)
+            self.j['yielded']=wants
+            return self.end_session('yield: '+wants)
+        if lease.stale(self.lease['holder'],now):
+            self.end_turn('expired')
+        if lease.idle_expired(self.lease,now):
+            return self.end_session('idle %d min'%(lease.IDLE_S//60))
+        v=self.vrchat()
+        if self.vrchat_seen and not v:
+            self.eac.write('vrchat_exited',pid=self.vrchat_seen['pid'],note='not closed by the sandbox (crash or closed in game)')
+        self.vrchat_seen=v
+
+    def handle(self,args):
+        action=args.get('action')
+        owner,token=args.pop('lease_owner',None),args.pop('lease_token',None)
+        now=time.time()
+        if action=='status':
+            self.record()
+            state=self.publish()
+            return {**state,'running': processes(), 'devices': [{'position':list(d.p),'rotation':list(d.q),'inputs':list(d.inputs)} for d in self.shared.devices]}
+        if action=='acquire':
+            owner=args.get('owner') or owner
+            if self.shutdown_reason:raise lease.LeaseError('Session is shutting down: '+self.shutdown_reason)
+            for _ in range(2):
+                result,detail=lease.acquire(self.lease,owner,now)
+                if result=='wait' and lease.stale(self.lease['holder'],now):
+                    self.end_turn('taken over by '+owner);now=time.time();continue
+                break
+            if result=='wait':
+                self.publish();return {'granted':False,'reason':detail}
+            self.grant_file(owner,detail);self.eac.write('turn_start',owner=owner)
+            state=self.publish()
+            return {'granted':True,'owner':owner,'token':detail,'render':self.render,'vrchat':state['vrchat'],'home':state['home']}
+        if action=='renew':
+            lease.renew(self.lease,owner,token,now);return {'renewed':True}
+        h=self.lease['holder']
+        mine=bool(h) and (owner,token)==(h['owner'],h['token'])
+        if action in ('release','stop') and mine:
+            return {'released':True,**self.end_turn('released',owner,token)}
+        if action=='stop':
+            # Older callers ended the whole session with stop; now only a turn ends. With no turn held it is a shutdown.
+            if h:raise lease.LeaseError(f"Not your turn: {h['owner']} holds the sandbox")
+            self.end_session('stop without a turn');return {'stopping':True}
+        if action=='release':
+            raise lease.LeaseError('You hold no turn (it may have expired or been taken over)')
+        if action=='shutdown':
+            if h and not args.get('force') and not mine:
+                raise lease.LeaseError(f"{h['owner']} holds the sandbox; only the holder (or --force for recovery) shuts it down")
+            self.end_session(args.get('reason') or ('shutdown by '+(owner or 'force')));return {'stopping':True}
+        if action=='yield':
+            self.j['yielded']='yield command';self.end_session('yield command');return {'stopping':True,'yielded':True}
+        lease.check(self.lease,owner,token,action,now)
+        try:return self.call(args)
+        finally:
+            if self.lease['holder']:self.lease['holder']['renewed']=time.time()
 
     def call(self, args):
         action = args['action']
-        if action == 'status':
-            self.record()
-            return {'running': processes(), 'devices': [{'position':list(d.p),'rotation':list(d.q),'inputs':list(d.inputs)} for d in self.shared.devices]}
-        if action == 'stop':
-            self.record()
-            self.stop.set()
-            return {'stopping':True}
+        if action == 'neutral':
+            return self.neutral(rejoin=args.get('rejoin',True))
+        if action == 'home':
+            if not self.j.get('home_link') or not self.vrchat():raise RuntimeError('No VRChat with a home instance in this session')
+            return self.go(self.j['home_link'])
+        if action == 'app_stop':
+            h=self.lease['holder'];result=stop_app(h.get('app'));h['app']=None
+            self.j.pop('turn_app',None);atomic_json(JOURNAL,self.j);self.publish()
+            return {'app':result}
         if action in ('menu','flick','camera'):
             hand=args.get('device','right')
             if hand not in ('left','right'):raise ValueError('controller required')
@@ -373,39 +595,50 @@ class Session:
         if action=='app':
             exe=Path(args['app_exe']).resolve()
             if not exe.is_file() or not exe.is_relative_to(ROOT):raise ValueError('app binary must be inside the sandbox root')
+            holder=self.lease['holder']
+            if holder.get('app') and same_process(holder['app']):raise RuntimeError('Your turn already runs '+holder['app']['exe']+'; app_stop it first')
+            logs=Path(args.get('logs') or ROOT/'logs').resolve()
+            real=(Path(os.environ['LOCALAPPDATA'])/'Orbiters').resolve()
+            if logs==real or logs.is_relative_to(real):raise ValueError("logs must not be the owner's own Orbiters folder")
             install=Path(os.environ['LOCALAPPDATA'])/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
-            if self.j.get('app_test_exe'):raise RuntimeError('App already replaced in this session')
-            appdir=Path(os.environ['APPDATA'])/'Orbiters/Desktop'
-            for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat',Path(os.environ['USERPROFILE'])/'.codex/config.toml',Path(os.environ['USERPROFILE'])/'.claude.json']:
-                backup(self.j,path)
-            visible=any('--window' in p.cmdline() for p in psutil.process_iter(['name']) if p.info['name']=='orbiters-desktop.exe')
-            self.j.update(app_test_exe=str(exe),app_restore_exe=str(install),app_was_visible=visible)
-            atomic_json(JOURNAL,self.j)
-            # --quit only signals the service. Wait for its existing processes to
-            # exit before launching our binary, or single-instance arbitration can
-            # silently discard it while the installed service is still shutting down.
-            previous=[p for p in psutil.process_iter(['name']) if p.info['name']==install.name and Path(p.exe()).resolve()==install.resolve()]
-            subprocess.run([str(install),'--quit'],timeout=20,creationflags=subprocess.CREATE_NO_WINDOW,check=True)
-            _,alive=psutil.wait_procs(previous,timeout=20)
-            if alive:raise RuntimeError('Installed Orbiters did not finish quitting; sandbox app was not launched')
+            if not self.j.get('app_restore_exe'):
+                # First test program of this session: journal the owner's app files and stop his installed app once.
+                # It stays stopped between turns and comes back when the session ends.
+                appdir=Path(os.environ['APPDATA'])/'Orbiters/Desktop'
+                for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat',Path(os.environ['USERPROFILE'])/'.codex/config.toml',Path(os.environ['USERPROFILE'])/'.claude.json']:
+                    backup(self.j,path)
+                visible=any('--window' in p.cmdline() for p in psutil.process_iter(['name']) if p.info['name']=='orbiters-desktop.exe')
+                self.j.update(app_restore_exe=str(install),app_was_visible=visible)
+                atomic_json(JOURNAL,self.j)
+                # --quit only signals the service. Wait for its existing processes to
+                # exit before launching our binary, or single-instance arbitration can
+                # silently discard it while the installed service is still shutting down.
+                previous=[p for p in psutil.process_iter(['name']) if p.info['name']==install.name and Path(p.exe()).resolve()==install.resolve()]
+                if previous:subprocess.run([str(install),'--quit'],timeout=20,creationflags=subprocess.CREATE_NO_WINDOW,check=True)
+                _,alive=psutil.wait_procs(previous,timeout=20)
+                if alive:raise RuntimeError('Installed Orbiters did not finish quitting; sandbox app was not launched')
             env=os.environ.copy();env['ORBITERS_VR_SANDBOX_ROOT']=str(Path(__file__).parent.resolve());env.pop('ORBITERS_NO_NETWORK_LISTENING',None)
+            # The bridge inside the test program calls sandbox.py with these, so its requests count as this turn's.
+            env['ORBITERS_VR_SANDBOX_OWNER']=holder['owner'];env['ORBITERS_VR_SANDBOX_LEASE']=holder['token']
             # The test app's logs stay in the sandbox: the person's own Orbiters logs folder is never written by a test build.
-            env['ORBITERS_SANDBOX_LOGS']=str(ROOT/'logs');(ROOT/'logs').mkdir(exist_ok=True)
+            env['ORBITERS_SANDBOX_LOGS']=str(logs);logs.mkdir(parents=True,exist_ok=True)
             with (ROOT/'app-out.log').open('a') as out,(ROOT/'app-err.log').open('a') as err:
                 proc=subprocess.Popen([str(exe),'--hidden'],env=env,stdout=out,stderr=err,creationflags=subprocess.CREATE_NO_WINDOW,cwd=exe.parent)
-            return {'app_pid':proc.pid,'restore':str(install)}
+            app={'pid':proc.pid,'create_time':psutil.Process(proc.pid).create_time(),'exe':str(exe),'logs':str(logs)}
+            holder['app']=app;self.j['turn_app']=app;self.j['app_test_exe']=str(exe);atomic_json(JOURNAL,self.j);self.publish()
+            return {'app_pid':proc.pid,'restore':str(install),'logs':str(logs)}
         if action=='vrchat':
-            if any(p['name'].lower()=='vrchat.exe' for p in processes()):raise RuntimeError('VRChat already running')
             world,instance,user=args['world_id'],args['instance'],args['user_id']
             if not re.fullmatch(r'wrld_[0-9a-f-]{36}',world) or not re.fullmatch(r'usr_[0-9a-f-]{36}',user):raise ValueError('invalid identity')
             if not re.fullmatch(r'[0-9]+~private\('+re.escape(user)+r'\)~region\((eu|us|use|jp)\)',instance):raise ValueError('only a strict private instance of this account')
             url=f'vrchat://launch?ref=orbiters.cc&id={world}:{instance}'
-            self.j['launch_link']=url
-            atomic_json(JOURNAL,self.j)
-            launch=STEAM/'steamapps/common/VRChat/launch.exe'
-            proc=subprocess.Popen([str(launch),url,'-screen-fullscreen','0','-screen-width','1280','-screen-height','720'],creationflags=subprocess.CREATE_NO_WINDOW)
-            self.record()
-            return {'launch_pid':proc.pid,'url':url,'mode':'SteamVR auto-detection; no --no-vr'}
+            v=self.vrchat()
+            if v:
+                # Already up: hand the link to the running game, never a second anti-cheat start.
+                self.j['home_link']=url;atomic_json(JOURNAL,self.j)
+                return {'url':url,'mode':'running VRChat, through its launch pipe',**self.go(url,v)}
+            if any(p['name'].lower()=='vrchat.exe' for p in processes()):raise RuntimeError('A VRChat this session did not start is running')
+            return self.launch(url)
         if action=='motion_capture':
             seconds=float(args.get('duration_s',0));frames=args.get('frames',24)
             target=args.get('position');rotation=args.get('rotation')
@@ -495,10 +728,46 @@ class Session:
                 return {'device':args['device'],'input':args['input'],'value':value}
         raise ValueError('unknown action')
 
-def serve():
+    def launch(self,url):
+        """Cold VRChat start through its EAC launcher, only once anti-cheat is fully idle; the launch is watched
+        and a "Launch Error" window of the bootstrapper is detected, logged with the EAC state, closed, and retried
+        once after EAC is idle again."""
+        launcher=STEAM/'steamapps/common/VRChat/launch.exe'
+        error=None
+        for attempt in (1,2):
+            waited=vrchat_life.wait_idle(self.eac,'before launch',evidence_dir=ROOT)
+            self.j['launch_link']=url;self.j['home_link']=url;atomic_json(JOURNAL,self.j)
+            sampler=vrchat_life.Sampler(self.eac,'launch',120)
+            began=time.time()
+            self.eac.write('vrchat_launch',attempt=attempt,eac_idle_wait_s=waited,instance=url.split('id=',1)[1],steamvr=any(p['name'].lower()=='vrserver.exe' for p in processes()))
+            proc=subprocess.Popen([str(launcher),url,'-screen-fullscreen','0','-screen-width','1280','-screen-height','720'],creationflags=subprocess.CREATE_NO_WINDOW)
+            error=None
+            try:
+                while time.time()-began<120:
+                    self.record()
+                    v=self.vrchat()
+                    if v:
+                        self.eac.write('vrchat_started',pid=v['pid'],after_s=round(v['create_time']-began,1))
+                        self.vrchat_seen=v
+                        return {'launch_pid':proc.pid,'vrchat_pid':v['pid'],'url':url,'mode':'SteamVR auto-detection; no --no-vr','attempt':attempt}
+                    error=vrchat_life.close_error_windows(self.eac,ROOT)
+                    if error:break
+                    time.sleep(1)
+            finally:sampler.stop()
+            if not error:
+                self.eac.write('vrchat_launch_timeout',**vrchat_life.snapshot())
+                raise RuntimeError('VRChat did not start within 120 s; EAC state in '+str(EAC_LOG))
+            self.eac.write('vrchat_launch_failed',attempt=attempt,windows=error)
+            time.sleep(30)
+        raise RuntimeError('EAC showed "Launch Error" twice (pictures: '+json.dumps(error)+'); state in '+str(EAC_LOG))
+
+def serve(owner=None,stream='shared'):
     s=Session()
     try:
-        s.start()
+        s.start(stream)
+        if owner:
+            result,token=lease.acquire(s.lease,owner,time.time())
+            if result=='granted':s.grant_file(owner,token);s.eac.write('turn_start',owner=owner);s.publish()
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self,*args):pass
             def do_POST(self):
@@ -507,48 +776,187 @@ def serve():
                 try:
                     n=int(self.headers.get('Content-Length','0'))
                     if not 0<n<=65536:raise ValueError('body size')
-                    answer=s.call(json.loads(self.rfile.read(n)))
+                    answer=s.handle(json.loads(self.rfile.read(n)))
                     data=json.dumps(answer).encode();self.send_response(200)
                 except Exception as e:
-                    data=json.dumps({'error':str(e)}).encode();self.send_response(400)
+                    data=json.dumps({'error':str(e),'kind':type(e).__name__}).encode();self.send_response(400)
                 self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
         server=http.server.HTTPServer(('127.0.0.1',PORT),Handler)
         server.timeout=.25
+        last=0
         while not s.stop.is_set():
-            server.handle_request();s.record()
+            server.handle_request()
+            if time.monotonic()-last>=1:
+                last=time.monotonic();s.record();s.tick()
         server.server_close()
     finally:
         if s.j and JOURNAL.exists():
             s.record();print(json.dumps(restore()),flush=True)
+            s.lease['holder']=None;s.publish()
 
-def remote(args,journal=None):
+def lease_args(owner=None):
+    """(owner, token) for a request: the test program's environment, else that owner's saved token."""
+    env_owner=os.environ.get('ORBITERS_VR_SANDBOX_OWNER')
+    owner=owner or env_owner
+    token=os.environ.get('ORBITERS_VR_SANDBOX_LEASE') if owner and owner==env_owner else None
+    if owner and not token:
+        try:token=json.loads(owner_file(owner).read_text())['token']
+        except (OSError,ValueError,KeyError):pass
+    return owner,token
+
+def remote(args,journal=None,owner=None,timeout=None):
     j=json.loads(JOURNAL.read_text()) if journal is None else journal
+    args=dict(args)
+    if args.get('action')!='status':
+        o,t=lease_args(owner)
+        if o:args.setdefault('lease_owner',o)
+        if t:args.setdefault('lease_token',t)
+    slow={'app':90,'release':420,'stop':420,'acquire':420,'vrchat':480,'neutral':240,'home':200,'app_stop':60}
     req=urllib.request.Request(f'http://127.0.0.1:{PORT}/',data=json.dumps(args).encode(),headers={'Authorization':'Bearer '+j['token'],'Content-Type':'application/json'})
-    with urllib.request.urlopen(req,timeout=90 if args.get('action')=='app' else 40) as r:return json.load(r)
+    try:
+        with urllib.request.urlopen(req,timeout=timeout or slow.get(args.get('action'),40)) as r:return json.load(r)
+    except urllib.error.HTTPError as error:
+        body=error.read()
+        try:message=json.loads(body)['error']
+        except Exception:message=body.decode(errors='replace')
+        raise RuntimeError(message) from None
 
-if __name__=='__main__':
-    cmd=sys.argv[1]
-    if cmd=='start':serve()
-    elif cmd=='restore':print(json.dumps(restore()))
-    elif cmd=='watch':
-        identity={'pid':int(sys.argv[2]),'create_time':float(sys.argv[3])}
+def controller_alive():
+    """The live controller's journal, or None."""
+    try:j=json.loads(JOURNAL.read_text())
+    except (OSError,ValueError):return None
+    if j.get('restored') or not j.get('owner_create_time'):return None
+    return j if same_process({'pid':j['pid'],'create_time':j['owner_create_time']}) else None
+
+def start_controller(owner=None):
+    ROOT.mkdir(parents=True,exist_ok=True)
+    command=[sys.executable,__file__,'start']+(['--owner',owner] if owner else [])
+    with (ROOT/'server-out.log').open('a') as out,(ROOT/'server-err.log').open('a') as err:
+        err.write('\n'+time.strftime('%Y-%m-%d %H:%M:%S')+' start '+(owner or '')+'\n')
+        child=subprocess.Popen(command,stdout=out,stderr=err,creationflags=subprocess.CREATE_NO_WINDOW)
+    deadline=time.monotonic()+45
+    while True:
+        if child.poll() is not None:raise RuntimeError('Sandbox did not start: '+(ROOT/'server-err.log').read_text()[-1500:])
+        try:return remote({'action':'status'})
+        except Exception:
+            if time.monotonic()>deadline:raise RuntimeError('Sandbox startup timeout; inspect logs and restore')
+            time.sleep(.25)
+
+def wait_gone(j,timeout=480):
+    deadline=time.monotonic()+timeout
+    while same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):
+        if time.monotonic()>deadline:raise RuntimeError('Session did not finish shutting down; inspect server-err.log')
+        time.sleep(.5)
+
+def parse_render(text):
+    if text in (None,''):return None
+    if text=='default':return list(DEFAULT_RENDER)
+    w,h=(int(x) for x in text.lower().replace(' ','x').split('x'))
+    if not (256<=w<=4096 and 256<=h<=4096):raise ValueError('render must be WxH within 256..4096')
+    return [w,h]
+
+def write_render(size):
+    if size==DEFAULT_RENDER:RENDER.unlink(missing_ok=True)
+    else:RENDER.write_text(f'{size[0]} {size[1]}\n')
+
+def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say=print):
+    """Takes a turn on the shared session, starting the session if none runs. Waits (polling) for its turn and for
+    the owner's own VR use to end. A different render size or cold=True restarts SteamVR and VRChat: the driver
+    reads the render size once, when SteamVR loads it."""
+    deadline=time.monotonic()+wait_s
+    last_reason=None
+    while True:
+        reason=None
+        j=controller_alive()
+        if j is None:
+            foreign=processes()
+            wants=owner_wants_vr()
+            if foreign:reason='VR is in use outside the shared session (the owner, or an older sandbox script): '+', '.join(sorted({p['name'] for p in foreign}))
+            elif wants:reason='Not starting: '+wants
+            elif LOCK.exists():reason='A sandbox lock exists without a live shared controller (an older script, or a restore in progress): '+LOCK.read_text()
+            else:
+                if render:write_render(render)
+                try:
+                    start_controller(owner)
+                    render=cold=None  # a fresh session already has them
+                    continue
+                except RuntimeError as error:reason=str(error)
+        else:
+            try:answer=remote({'action':'acquire','owner':owner},journal=j,owner=owner)
+            except (OSError,urllib.error.URLError) as error:answer={'granted':False,'reason':'controller busy: '+str(error)}
+            except RuntimeError as error:answer={'granted':False,'reason':str(error)}
+            if answer.get('granted'):
+                if cold or (render and answer['render']!=render):
+                    say(json.dumps({'restarting':'cold start requested' if cold else f"render {answer['render']} -> {render}"}),flush=True)
+                    remote({'action':'shutdown','reason':'cold restart for '+owner},journal=j,owner=owner)
+                    wait_gone(j)
+                    cold=False
+                    continue
+                if app:answer['app']=remote({'action':'app','app_exe':app,**({'logs':logs} if logs else {})},journal=j,owner=owner)
+                answer.pop('token',None)
+                return answer
+            reason=answer['reason']
+        if reason!=last_reason:say(json.dumps({'waiting':reason}),flush=True);last_reason=reason
+        if time.monotonic()>deadline:raise RuntimeError('No turn within %d s: %s'%(wait_s,reason))
+        time.sleep(5)
+
+def main(argv):
+    if argv and argv[0]=='watch':
+        identity={'pid':int(argv[1]),'create_time':float(argv[2])}
         while same_process(identity):time.sleep(.5)
-        try:restore(expected_session=sys.argv[4])
+        try:restore(expected_session=argv[3])
         except Exception as e:(ROOT/'restore-error.txt').write_text(str(e))
-    elif cmd=='request':
-        args=json.loads(sys.argv[2]);action=args['action']
+        return
+    import argparse
+    parser=argparse.ArgumentParser(prog='sandbox.py')
+    parser.add_argument('command')
+    parser.add_argument('json',nargs='?')
+    parser.add_argument('--owner')
+    parser.add_argument('--wait',type=float,default=3600)
+    parser.add_argument('--render')
+    parser.add_argument('--cold',action='store_true')
+    parser.add_argument('--app')
+    parser.add_argument('--logs')
+    parser.add_argument('--force',action='store_true')
+    a=parser.parse_args(argv)
+    cmd=a.command
+    if cmd=='start':serve(owner=a.owner,stream=a.owner or 'shared');return
+    if cmd=='acquire':
+        if not a.owner:raise SystemExit('acquire needs --owner <stream>')
+        print(json.dumps(acquire_turn(a.owner,a.wait,parse_render(a.render),a.cold,a.app,a.logs)));return
+    if cmd=='yield':
+        YIELD.parent.mkdir(parents=True,exist_ok=True);YIELD.write_text(time.strftime('%Y-%m-%d %H:%M:%S'))
+        j=controller_alive()
+        if j:
+            try:remote({'action':'yield'},journal=j)
+            except Exception:pass
+            wait_gone(j)
+        YIELD.unlink(missing_ok=True)
+        print(json.dumps({'yielded':True,'vr_processes_left':[p['name'] for p in processes()]}));return
+    if cmd=='restore':
+        j=controller_alive()
+        if j and not a.force:
+            holder=remote({'action':'status'},journal=j)['lease']['holder']
+            if holder and holder['owner']!=a.owner:
+                raise SystemExit(f"{holder['owner']} holds the shared session: end your own turn with `release --owner`, "
+                                 "or wait. restore --force is for recovery only.")
+        print(json.dumps(restore()));return
+    if cmd=='status':
+        j=controller_alive()
+        print(json.dumps(remote({'action':'status'},journal=j) if j else {'session':None,'lock':LOCK.read_text() if LOCK.exists() else None,'vr_processes':processes()}));return
+    if cmd in ('release','renew','shutdown','neutral','home','app_stop'):
+        args={'action':cmd}
+        if a.force:args['force']=True
+        print(json.dumps(remote(args,owner=a.owner)));return
+    if cmd=='call':print(json.dumps(remote(json.loads(a.json),owner=a.owner)));return
+    if cmd=='request':
+        # The bridge's path (crates/orbiters-desktop/src/bridge/sandbox.rs): owner and token come from the test
+        # program's environment, set by the `app` action.
+        args=json.loads(a.json);action=args['action']
         if action=='restore':answer=restore()
-        elif action=='start':
-            ROOT.mkdir(parents=True,exist_ok=True)
-            with (ROOT/'server-out.log').open('a') as out,(ROOT/'server-err.log').open('a') as err:
-                child=subprocess.Popen([sys.executable,__file__,'start'],stdout=out,stderr=err,creationflags=subprocess.CREATE_NO_WINDOW)
-            deadline=time.monotonic()+45
-            while True:
-                if child.poll() is not None:raise RuntimeError((ROOT/'server-err.log').read_text())
-                try:answer=remote({'action':'status'});break
-                except Exception:
-                    if time.monotonic()>deadline:raise RuntimeError('Sandbox startup timeout; inspect logs and restore')
-                    time.sleep(.25)
+        elif action=='start':answer=acquire_turn(lease_args()[0] or a.owner or 'mcp',wait_s=30)
         else:answer=remote(args)
-        print(json.dumps(answer))
-    else:print(json.dumps(remote(json.loads(sys.argv[2]) if cmd=='call' else {'action':cmd})))
+        print(json.dumps(answer));return
+    print(json.dumps(remote({'action':cmd},owner=a.owner)))
+
+if __name__=='__main__':main(sys.argv[1:])

@@ -18,6 +18,7 @@ pub mod desktop;
 #[cfg(windows)]
 pub mod paint_bench;
 pub mod panels;
+pub mod qm_buttons;
 mod page_painter;
 pub mod retro;
 pub mod sheet_view;

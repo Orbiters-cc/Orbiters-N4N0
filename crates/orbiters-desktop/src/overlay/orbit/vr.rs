@@ -1121,6 +1121,10 @@ pub struct OrbitVr {
     /// What the headset shows, kept when asked (`ORBITERS_VR_PICTURES`).
     moments: super::super::eye_picture::Moments,
     osc_toggle: Option<(usize, Instant)>,
+    /// VRChat's own Quick Menu buttons that take it away (its Main Menu's), watched under the other hand's laser: no overlay, no trigger taken (I-qm-leave).
+    qm_watch: super::qm_buttons::QmWatch,
+    /// The VRChat seen running (once looked): one started anew shows its Launch Pad.
+    vrchat_pid: Option<Option<u32>>,
     camera_seen: Option<Instant>,
     camera_looks: u32,
     camera_input_logged:super::super::vr_log::Every,
@@ -1192,6 +1196,8 @@ impl OrbitVr {
             hole_logged: Default::default(),
             moments: Default::default(),
             osc_toggle: None,
+            qm_watch: Default::default(),
+            vrchat_pid: None,
             camera_seen: None,
             camera_looks: 0,
             camera_input_logged:Default::default(),
@@ -1311,6 +1317,12 @@ impl OrbitVr {
         let wanted = settings.any() && cx.snap.vrchat.running;
         // The parts of menus that closed are kept for a while; with no menu up nothing else comes by to let them go.
         self.panels.let_go(now);
+        // A VRChat started anew shows its Quick Menu's Launch Pad; one running before this looked is on a page not known.
+        let pid = cx.snap.vrchat.pid;
+        if self.vrchat_pid.is_some_and(|was| was != pid) && pid.is_some() {
+            self.qm_watch.vrchat_started();
+        }
+        self.vrchat_pid = Some(pid);
         if !wanted || !cx.in_game || cx.dashboard {
             // Free at once, whatever is held.
             if self.last_shown || self.block.blocked() != [false; 2] {
@@ -1599,6 +1611,25 @@ impl OrbitVr {
         });
         let hands: [HandNow; 2] = std::array::from_fn(|i| HandNow { on_panel: hits[i].is_some(), trigger: triggers[i] });
         let blocked_before = self.block.blocked();
+        // VRChat's own buttons that take its Quick Menu away (its Main Menu's): where the other hand's laser meets the Quick Menu's plane, with the trigger VRChat
+        // itself gets. Nothing is shown there and no trigger is taken for it: a press on them is VRChat's alone (I-qm-leave, Enzo 2026-11-13).
+        match (menu, open, self.plane) {
+            (Some(Around::QuickMenu), Open::QuickMenu(menu_hand), Some(qm)) => {
+                let at: [Option<Pos2>; 2] = std::array::from_fn(|i| if i == menu_hand { None } else { lasers[i].and_then(|tip| super::qm_buttons::QmWatch::on_menu(&qm, &tip)) });
+                let away = self.qm_watch.step(at, blocked_before, triggers);
+                if let Some((p, button)) = self.qm_watch.pressed.take() {
+                    super::super::vr_log::line(&format!("quick menu: VRChat's menu pressed at ({:.0}, {:.0}), page {:?}, button {button:?}", p.x, p.y, self.qm_watch.page())); // i18n: not shown (a log's line)
+                }
+                if let Some((button, leads)) = self.qm_watch.clicked.take() {
+                    super::super::vr_log::line(&format!("quick menu: VRChat's {button:?} clicked, leads {leads:?}, page now {:?}", self.qm_watch.page())); // i18n: not shown (a log's line)
+                }
+                if let Some(button) = away {
+                    super::super::vr_log::line(&format!("quick menu: VRChat's {button:?} took its Quick Menu away: Orbiters' parts go with it")); // i18n: not shown (a log's line)
+                    self.buttons.reset();
+                }
+            }
+            _ => self.qm_watch.closed(),
+        }
         let blocked = self.block.step(hands, true);
         cx.actions.set_block(blocked);
         self.stuck.beat(blocked != [false; 2]);

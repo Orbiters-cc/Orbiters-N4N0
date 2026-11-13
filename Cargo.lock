@@ -4395,7 +4395,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-translate"
-version = "0.3.5-dev.44"
+version = "0.3.5-dev.45"
 dependencies = [
  "anyhow",
  "egui",

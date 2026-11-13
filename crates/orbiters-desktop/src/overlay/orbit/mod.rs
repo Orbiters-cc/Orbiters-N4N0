@@ -821,6 +821,9 @@ struct Stage {
     presented: Option<(u64, Facts, f64)>,
     presented_scene: Option<page_painter::Scene>,
     navigation: Option<String>,
+    /// The sheet still shows the page left while the next one's first picture is painted (Enzo, 2026-11-13: "when switching from page to page, there is 1 or a few
+    /// frame where no page is visible"): seen, but nothing on it is pointable, as its targets are the old page's.
+    stale: bool,
     async_pages: bool,
     remote_pictures: crate::worlds::Pictures,
     worker_phases: super::PaintPhases,
@@ -859,7 +862,7 @@ impl Stage {
         let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
         let host = MenuHost::with_media(canvas.ctx().clone(), media.clone());
         let worlds = with_worlds.then(|| Worlds::alone(canvas.ctx().clone()));
-        Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::with_context(px, canvas.ctx().clone()), epoch: 0, cache: Vec::new(), retired: Vec::new(), sheet_picture: None, restore: false, presented: None, presented_scene: None, navigation: None, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
+        Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::with_context(px, canvas.ctx().clone()), epoch: 0, cache: Vec::new(), retired: Vec::new(), sheet_picture: None, restore: false, presented: None, presented_scene: None, navigation: None, stale: false, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
     }
 }
 
@@ -1285,6 +1288,7 @@ impl Panels {
             self.stage.painter.retain_parts(&[]);
             self.stage.sheet_picture = None;
             self.stage.navigation = None;
+            self.stage.stale = false;
             self.rest_all();
             self.open = around;
             self.bloom = Bloom::default();
@@ -1459,6 +1463,7 @@ impl Panels {
         self.stage.painter.cancel_page(self.stage.epoch);
         self.stage.sheet_picture = None;
         self.stage.navigation = None;
+        self.stage.stale = false;
         self.pressed_late = None; self.pressed_facts = None; self.drag = None;
         self.stop_talking();
         self.keep_screen();
@@ -2327,7 +2332,7 @@ impl Panels {
     /// A pointer on a part (`on`: its index in [`Panels::all`], and where in units), or on none.
     pub fn hover(&mut self, on: Option<(usize, Pos2)>) {
         let count = self.list.len();
-        let (sheet, show_keys, desktop) = (self.facts.sheet, self.show_keys, self.facts.desktop);
+        let (sheet, show_keys, desktop, stale) = (self.facts.sheet, self.show_keys, self.facts.desktop, self.stage.stale);
         let mut worlds_hover = None;
         let mut on_zone = None;
         self.header_pointer = on.filter(|(at, _)| self.list.get(*at).is_some_and(|p| p.zone == Zone::SheetBack)).map(|(_, p)| p);
@@ -2378,6 +2383,10 @@ impl Panels {
             panel.pointer = on.filter(|(at, _)| *at == i).map(|(_, p)| p);
             let hover = on.filter(|(at, _)| *at == i).and_then(|(_, p)| {
                 on_zone = Some(panel.zone);
+                // The page left, still seen while the next one is painted: its targets are not the next page's.
+                if stale && matches!(panel.zone, Zone::Takeover | Zone::SheetBack) {
+                    return None;
+                }
                 if i == count {
                     match sheet {
                         Some(Sheet::Menu) => {
@@ -3219,6 +3228,7 @@ impl Panels {
         self.stage.presented = Some((self.stage.epoch, frame.facts.clone(), frame.time));
         self.stage.presented_scene = Some(frame.scene.clone());
         self.stage.sheet_picture = frame.composed.clone();
+        self.stage.stale = false;
         true
     }
     fn paint_async(&mut self, snap: &Snapshot, mut show: impl FnMut(&Panel, [u32; 4])) {
@@ -3286,9 +3296,12 @@ impl Panels {
                 if !self.publish_page(&frame, &mut show) { self.stage.restore = true; }
                 self.stage.cache.push(frame);
             } else if self.stage.presented_scene.as_ref().zip(self.stage.presented.as_ref()).is_none_or(|(scene, (_, facts, _))| scene.key(facts.sheet.unwrap_or(sheet)) != key) {
-                // First visits have no stale targets and no A body under a B header.
-                let page = self.takeover.as_mut().unwrap(); page.items.clear(); page.hover = None; page.pressed = None; page.painted = false; page.dirty = true;
-                if let Some(back) = self.list.iter_mut().find(|p| p.zone == Zone::SheetBack) { back.items.clear(); back.hover = None; back.pressed = None; back.painted = false; back.dirty = true; }
+                // First visits have no stale targets and no A body under a B header. The page left stays SEEN (head and body together, one picture) until the
+                // next one's first picture replaces it: marking them unpainted hid the sheet's overlay for the frames the worker took (I-pageflash). Nothing on it
+                // answers a pointer meanwhile (`stale`).
+                let page = self.takeover.as_mut().unwrap(); page.items.clear(); page.hover = None; page.pressed = None; page.dirty = true;
+                self.stage.stale = page.painted;
+                if let Some(back) = self.list.iter_mut().find(|p| p.zone == Zone::SheetBack) { back.items.clear(); back.hover = None; back.pressed = None; back.dirty = true; }
             }
         }
         let Some(back) = self.list.iter().find(|p| p.zone == Zone::SheetBack) else { return };

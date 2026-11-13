@@ -964,6 +964,11 @@ fn part_handle(handles: &mut HashMap<Zone, vr::OverlayHandle>, overlay: &vr::Ove
     })
 }
 
+/// Whether a part's SteamVR overlay is up: it has a picture and is to be seen. A sheet keeps the page it showed until the next page's first picture comes (I-pageflash).
+pub(super) fn part_shows(panel: &super::Panel) -> bool {
+    panel.painted && panel.shown
+}
+
 /// Where a sheet's page lies on its back's picture, in rows from its top: one picture only where they are of one width and the page lies whole inside it.
 pub fn page_row(back: &super::Panel, page: &super::Panel) -> Option<u32> {
     let rows_a_unit = back.px[1] as f32 / back.placed.rect.height();
@@ -1759,7 +1764,7 @@ impl OrbitVr {
                 if panel.zone == Zone::Takeover {
                     continue;
                 }
-                if !panel.painted || !panel.shown {
+                if !part_shows(panel) {
                     let _ = cx.overlay.hide(*handle);
                     continue;
                 }

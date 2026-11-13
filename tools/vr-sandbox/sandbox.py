@@ -880,6 +880,8 @@ def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say
                     render=cold=None  # a fresh session already has them
                     continue
                 except RuntimeError as error:reason=str(error)
+        elif not j.get('shared'):
+            reason='An older sandbox script holds SteamVR (stream '+json.loads(LOCK.read_text()).get('stream','?')+'); waiting for its restore'
         else:
             try:answer=remote({'action':'acquire','owner':owner},journal=j,owner=owner)
             except (OSError,urllib.error.URLError) as error:answer={'granted':False,'reason':'controller busy: '+str(error)}

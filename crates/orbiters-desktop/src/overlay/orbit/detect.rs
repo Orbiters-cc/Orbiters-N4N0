@@ -161,6 +161,17 @@ fn correlation(a: &[f32; ICON_PATCH * ICON_PATCH], b: &[u8]) -> f32 {
     ab / (aa * bb).sqrt()
 }
 
+/// Icon `icon`'s picture ([`ICONS`]).
+pub fn icon_template(icon: usize) -> &'static [u8] {
+    &ICONS[icon * ICON_PATCH * ICON_PATCH..(icon + 1) * ICON_PATCH * ICON_PATCH]
+}
+
+/// How much a patch sampled where icon `icon` should be looks like it (normalised correlation): in VR the patch is sampled through the eye's projection
+/// (`qm_buttons`).
+pub fn icon_correlation(patch: &[f32; ICON_PATCH * ICON_PATCH], icon: usize) -> f32 {
+    correlation(patch, icon_template(icon))
+}
+
 /// How many of the row's icons are there, at the shift that finds most.
 pub fn icons_found(part: &Part, client: Vec2) -> usize {
     let mut best = 0;

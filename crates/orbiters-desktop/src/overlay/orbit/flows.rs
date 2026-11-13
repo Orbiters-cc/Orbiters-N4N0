@@ -2018,3 +2018,67 @@ fn review_cached_header_pixels_do_not_claim_a_new_context_has_fonts() {
     person.turns_until("new header fonts", |p| p.panels.list.iter().find(|p| p.zone == Zone::SheetBack).is_some_and(|p| p.canvas.ran) && !p.panels.stage.painter.busy());
     assert!(person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap().canvas.atlas_bytes() > 0);
 }
+
+/// Enzo, 2026-11-13, in the headset: "When switching from page to page, there is 1 or a few frame where no page is visible, it breaks the flow". Every way of going from a
+/// page to another (a head tab, a side tile, a card, Back) keeps the page left SEEN on the sheet until the next page's first picture is ready, and nothing on that old
+/// picture answers a pointer meanwhile. The worker is held so that those frames are many, as on a busy computer; `vr::part_shows` is what `OrbitVr::show` hides by.
+#[test]
+fn switching_pages_never_shows_no_page() {
+    let mut person = Person::new();
+    person.panels.stage.async_pages = true;
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    fn sheet_seen(p: &Person) -> bool {
+        p.panels.list.iter().find(|x| x.zone == Zone::SheetBack).is_some_and(|x| super::vr::part_shows(x) && !x.pixels().is_empty())
+    }
+    fn settled(p: &Person) -> bool {
+        sheet_seen(p) && p.panels.takeover.as_ref().is_some_and(|t| t.painted && !t.dirty) && !p.panels.stage.painter.busy()
+    }
+    person.press(Action::Pictures);
+    person.turns_until("Pictures shown", settled);
+    // How each switch is pressed: on the sheet's head (its tabs, Back), on the wing beside it, or on the page (All tools' cards).
+    let head = |z: Zone| z == Zone::SheetBack;
+    let wing = |z: Zone| Zone::WING.contains(&z);
+    let page = |z: Zone| z == Zone::Takeover;
+    let ways: [(&str, &dyn Fn(Zone) -> bool, Action, Option<Sheet>); 5] = [
+        ("a head tab", &head, Action::Page(Target::YouTube), None),
+        ("a side tile", &wing, Action::Page(Target::Instances), Some(Sheet::Instances)),
+        ("All tools' head tab", &head, Action::All, Some(Sheet::All)),
+        ("a card on All tools", &page, Action::Settings, Some(Sheet::Settings)),
+        ("Back", &head, Action::Back, Some(Sheet::All)),
+    ];
+    for (way, on, action, expected) in ways {
+        // Each a first visit: no kept picture of it to show at once.
+        person.panels.stage.cache.clear();
+        let was = person.panels.facts.sheet;
+        let (part, at) = person.panels.all().enumerate().find_map(|(i, p)| on(p.zone).then(|| p.items.iter().find(|it| it.action == action).map(|it| (i, it.rect.center()))).flatten()).unwrap_or_else(|| panic!("{way}: nothing does {action:?} from {was:?}"));
+        let (asked, go) = person.panels.stage.painter.hold_next();
+        person.panels.hover(Some((part, at)));
+        person.turn();
+        person.panels.press(&person.snap.clone());
+        person.panels.release();
+        if let Some(late) = person.panels.pressed_late.take() { person.panels.act(late, &person.snap.clone(), &mut super::Pressed::default()); }
+        person.panels.hover(None);
+        let to = person.panels.facts.sheet;
+        assert!(to.is_some() && to != was && expected.is_none_or(|e| to == Some(e)), "{way}: {action:?} from {was:?} went to {to:?}");
+        // Until the worker has painted the next page, the one left shows, pointed at or not, and nothing of it is pointable.
+        let began = Instant::now();
+        while asked.try_recv().is_err() {
+            assert!(began.elapsed() < Duration::from_secs(10), "{way}: the next page was never asked for");
+            person.turn();
+            assert!(sheet_seen(&person), "{way}: no page shown while the next is asked for");
+        }
+        for _ in 0..6 {
+            person.turn();
+            assert!(sheet_seen(&person), "{way}: no page shown while the next one is painted");
+            let back = person.panels.list.iter().position(|x| x.zone == Zone::SheetBack).unwrap();
+            let middle = (person.panels.list[back].logical / 2.0).to_pos2();
+            person.panels.hover(Some((back, middle)));
+            person.panels.hover(Some((person.panels.list.len(), egui::pos2(512.0, 300.0))));
+            assert!(person.panels.takeover.as_ref().unwrap().hover.is_none() && person.panels.list[back].hover.is_none(), "{way}: the page left answers a pointer");
+            person.panels.hover(None);
+        }
+        go.send(()).unwrap();
+        person.turns_until("the next page shown", |p| { assert!(sheet_seen(p), "no page shown as the next one comes"); settled(p) && p.panels.stage.presented.as_ref().is_some_and(|(_, f, _)| f.sheet == to) });
+    }
+}

@@ -19,6 +19,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory1};
 
 /// An eye's picture: RGBA, gamma-encoded, top row first.
+#[derive(Default)]
 pub struct EyePicture {
     pub width: u32,
     pub height: u32,
@@ -34,6 +35,8 @@ pub struct EyeReader {
     mirrors: RefCell<MirrorViews>,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
+    /// The staging textures of [`EyeReader::read_pair_into`], one an eye, kept while their size and format stay.
+    staging: RefCell<[Option<(ID3D11Texture2D, [u32; 2], i32)>; 2]>,
 }
 
 impl EyeReader {
@@ -61,7 +64,7 @@ impl EyeReader {
             )
         }
         .map_err(|e| format!("D3D11CreateDevice: {e}"))?;
-        Ok(Self { mirrors:RefCell::new(MirrorViews::default()),device: device.ok_or("no device")?, context: context.ok_or("no context")? }) // i18n: not shown (a graphics call named in an error detail)
+        Ok(Self { mirrors:RefCell::new(MirrorViews::default()),device: device.ok_or("no device")?, context: context.ok_or("no context")?, staging: RefCell::new([None, None]) }) // i18n: not shown (a graphics call named in an error detail)
     }
 
     /// `eye`'s picture now, copied whole and read back (a few milliseconds for a 2k × 2k eye).
@@ -92,6 +95,88 @@ impl EyeReader {
         let after=source.frame_index();
         let [left,right]=staged?;
         Ok(([self.finish(left)?,self.finish(right)?],before.filter(|_|before==after)))
+    }
+
+    /// [`EyeReader::read_pair`] into pictures already there: their buffers and this reader's staging textures are used
+    /// again, so a reader looking several times a second at a whole eye (live translation: 44 MB an eye on a Quest Pro)
+    /// allocates nothing after its first look.
+    pub fn read_pair_into(&self,source:MirrorSource,areas:[Option<[u32;4]>;2],out:&mut [EyePicture;2]) -> Result<Option<u32>,String> {
+        let before=source.frame_index();
+        let left=self.mirror(source,Eye::Left)?;
+        let right=self.mirror(source,Eye::Right)?;
+        let staged=self.stage_kept(&left,areas[0],0).and_then(|left|self.stage_kept(&right,areas[1],1).map(|right|[left,right]));
+        let after=source.frame_index();
+        let [left,right]=staged?;
+        let [a,b]=out;
+        self.finish_into(left,a)?;
+        self.finish_into(right,b)?;
+        Ok(before.filter(|_|before==after))
+    }
+
+    fn stage_kept(&self, raw: &*mut c_void, area: Option<[u32; 4]>, slot: usize) -> Result<QueuedEye, String> {
+        // SAFETY: as in `stage`.
+        let view = unsafe { ID3D11ShaderResourceView::from_raw_borrowed(raw) }.ok_or("no mirror view")?; // i18n: not shown (a graphics call named in an error detail)
+        let resource: ID3D11Resource = unsafe { view.GetResource() }.map_err(|e| format!("mirror texture: {e}"))?; // i18n: not shown (a graphics call named in an error detail)
+        let texture: ID3D11Texture2D = resource.cast().map_err(|e| format!("mirror texture: {e}"))?; // i18n: not shown (a graphics call named in an error detail)
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: valid texture and out parameter.
+        unsafe { texture.GetDesc(&mut desc) };
+        let swap = match desc.Format {
+            DXGI_FORMAT_R8G8B8A8_UNORM | DXGI_FORMAT_R8G8B8A8_UNORM_SRGB | DXGI_FORMAT_R8G8B8A8_TYPELESS => false,
+            DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB | DXGI_FORMAT_B8G8R8A8_TYPELESS => true,
+            other => return Err(orbiters_i18n::tr!("the mirror texture's format {format} is not 8-bit RGBA", format = other.0)),
+        };
+        let [x0, y0, part_w, part_h] = area.unwrap_or([0, 0, desc.Width, desc.Height]);
+        let (x0, y0) = (x0.min(desc.Width.saturating_sub(1)), y0.min(desc.Height.saturating_sub(1)));
+        let (part_w, part_h) = (part_w.clamp(1, desc.Width - x0), part_h.clamp(1, desc.Height - y0));
+        let mut kept = self.staging.borrow_mut();
+        let fits = kept[slot].as_ref().is_some_and(|(_, size, format)| *size == [part_w, part_h] && *format == desc.Format.0);
+        if !fits {
+            let staging_desc = D3D11_TEXTURE2D_DESC {
+                Width: part_w,
+                Height: part_h,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: desc.Format,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut staging = None;
+            // SAFETY: valid description and out parameter.
+            unsafe { self.device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }.map_err(|e| format!("CreateTexture2D: {e}"))?;
+            kept[slot] = Some((staging.ok_or("no staging texture")?, [part_w, part_h], desc.Format.0)); // i18n: not shown (a graphics call named in an error detail)
+        }
+        let staging = kept[slot].as_ref().map(|k| k.0.clone()).ok_or("no staging texture")?; // i18n: not shown (a graphics call named in an error detail)
+        let part = D3D11_BOX { left: x0, top: y0, front: 0, right: x0 + part_w, bottom: y0 + part_h, back: 1 };
+        // SAFETY: both textures are this device's, of one format, and the box lies within the source and fits the copy; Map waits for the copy.
+        unsafe {
+            self.context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &texture, 0, Some(&part));
+        }
+        Ok(QueuedEye { staging, from: [x0, y0], size: [part_w, part_h], whole: [desc.Width, desc.Height], swap })
+    }
+
+    fn finish_into(&self, queued: QueuedEye, out: &mut EyePicture) -> Result<(), String> {
+        let QueuedEye { staging, from: [x0, y0], size: [part_w, part_h], whole, swap } = queued;
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe { self.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }.map_err(|e| format!("Map: {e}"))?; // i18n: not shown (a graphics call named in an error detail)
+        let (w, h) = (part_w as usize, part_h as usize);
+        out.rgba.resize(w * h * 4, 0);
+        for y in 0..h {
+            // SAFETY: the mapped rows are RowPitch bytes apart, each at least w × 4 bytes long.
+            let row = unsafe { std::slice::from_raw_parts((mapped.pData as *const u8).add(y * mapped.RowPitch as usize), w * 4) };
+            let dst = &mut out.rgba[y * w * 4..(y + 1) * w * 4];
+            dst.copy_from_slice(row);
+            if swap {
+                dst.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p.swap(0, 2));
+            }
+        }
+        // SAFETY: mapped above.
+        unsafe { self.context.Unmap(&staging, 0) };
+        (out.width, out.height, out.from, out.whole) = (part_w, part_h, [x0, y0], whole);
+        Ok(())
     }
 
     // SteamVR fills a newly requested mirror on subsequent compositor frames.

@@ -673,6 +673,12 @@ pub struct Snapshot {
     /// Whether VRChat's camera is open, as VRChat last said: `None` when it has not said.
     #[serde(default)]
     pub camera_open_said: Option<bool>,
+    /// VRChat's own wrists (left, right) as its OSC last said them (`/tracking/vrsystem/*wrist/pose`: x, y, z, Euler x, y, z in Unity's axes),
+    /// and when (`clock::now_ns`): VRChat's camera panel opens by its avatar's left hand and is grabbed from either (overlay `camera_reckon`).
+    #[serde(default)]
+    pub vrchat_wrists: [Option<[f32; 6]>; 2],
+    #[serde(default)]
+    pub vrchat_wrists_ns: [u64; 2],
     pub camera_tools: crate::controller::camera_tools::Status,
     /// Bumped each time the VRChat bridge's Unity projects tools change something the Unity projects tab shows: the tab
     /// looks again.
@@ -681,7 +687,7 @@ pub struct Snapshot {
 }
 
 orbiters_core::parts!(Snapshot {
-    plain: [smoothing_revision, version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, camera_tools, projects_changed],
+    plain: [smoothing_revision, version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, vrchat_wrists, vrchat_wrists_ns, camera_tools, projects_changed],
     slices: [sources, mics, osc, lan, capture, settings, storage, worker, steamvr, reconstruct_queue, account, uploads, update, vr_audio, orbit, booster, translate],
     identity: [capture_shares],
     nested: [vrchat, n4n0],
@@ -722,6 +728,8 @@ impl Snapshot {
             booster: Default::default(),
             worn_kit: None,
             camera_open_said: None,
+            vrchat_wrists: [None; 2],
+            vrchat_wrists_ns: [0; 2],
             camera_tools: Default::default(),
             projects_changed: 0,
             version: orbiters_core::APP_VERSION.into(),

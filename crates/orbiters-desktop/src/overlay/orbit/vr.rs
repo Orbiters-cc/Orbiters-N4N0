@@ -787,14 +787,16 @@ impl OrbitVr {
         let head = poses[0].pose_is_valid.then_some(poses[0].device_to_absolute);
         if !self.camera_reckon.opened() {
             if let (Some(head), Some(left)) = (head, hands[0]) {
-                self.camera_reckon.open(&head, &left);
-                super::super::vr_log::line(&format!("camera reckon: opened by the left hand, panel {:?}", super::camera_reckon::opening(&head, &left))); // i18n: not shown (diagnostics)
+                let wrist = super::camera_reckon::left_wrist(Duration::from_millis(500));
+                let panel = self.camera_reckon.open(&head, &left, wrist.as_ref());
+                super::super::vr_log::line(&format!("camera reckon: opened by the left hand ({}), panel {panel:?}", if wrist.is_some() { "VRChat's wrist" } else { "controller" })); // i18n: not shown (diagnostics)
             }
         }
         let held = self.camera_reckon.held_hand();
         // Unknown input is not a release: the holding hand keeps it.
         let grips: [bool; 2] = if input_read { let g = actions.grab_states(steamvr); std::array::from_fn(|i| g[i].unwrap_or(held == Some(i))) } else { std::array::from_fn(|i| held == Some(i)) };
-        let triggers = actions.triggers();
+        // As the tiles read them (`orbit_triggers`): `Actions::triggers` is only refreshed by the floating panel's input (sandbox m4: no press seen).
+        let triggers = if input_read { actions.orbit_triggers(steamvr, self.block.blocked()) } else { [false; 2] };
         let (frame, happened) = self.camera_reckon.step(hands, grips, triggers);
         if happened != Default::default() {
             super::super::vr_log::line(&format!("camera reckon: {happened:?}, grips {grips:?}, triggers {triggers:?}")); // i18n: not shown (diagnostics)
@@ -1424,8 +1426,16 @@ impl OrbitVr {
         self.camera_retired.retain_mut(|watch| {
             if watch.finished() { watch.finish(); false } else { true }
         });
+        // VRChat's wrists, from the controller's process, while they are fresh.
+        for hand in 0..2 {
+            if let Some(pose) = cx.snap.vrchat_wrists[hand].filter(|_| orbiters_core::clock::now_ns().saturating_sub(cx.snap.vrchat_wrists_ns[hand]) < 500_000_000) {
+                super::camera_reckon::wrist_said(hand, pose);
+            }
+        }
         if !camera_wanted || camera_just_opened {
             self.camera_reckon.clear();
+            // A sighting from before this opening says nothing of this panel (camera4/m2 compared against one 2 minutes old).
+            self.camera_sighting = None;
         }
         if camera_read != self.camera_watch.is_some() {
             if let Some(watch) = self.camera_watch.take() {

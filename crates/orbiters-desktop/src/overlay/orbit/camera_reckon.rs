@@ -28,10 +28,48 @@ pub const PANEL_WIDTH_M: f32 = 0.288;
 /// Measured with the controller 0.12 m in front (taken), 0.16 m (not), 0.30 m to the side (taken), 0.40 m (not).
 pub const GRAB_BOX: [f32; 4] = [-0.19, 0.19, -0.14, 0.078];
 pub const GRAB_REACH_M: f32 = 0.14;
-/// How far below the controller's −Z VRChat's laser points (the angle at which it lands on the X from 12 cm in front).
-pub const LASER_DOWN_DEG: f32 = 62.0;
-/// How near the X a laser's spot counts as on it, in the panel's units (the button is about 30 across, the next one 40 away).
-pub const CLOSE_RADIUS: f32 = 20.0;
+/// How far below the controller's −Z VRChat's laser points: VRChat closed its camera for aims 62 and 67 degrees up from 12 cm in front, not 57
+/// or 75 (m4), and for 62 not 55 (m1).
+pub const LASER_DOWN_DEG: f32 = 64.5;
+/// How near the X a laser's spot counts as on it, in the panel's units (the button is about 30 across, the next one 40 away; 5 degrees of aim
+/// are 15 units there).
+pub const CLOSE_RADIUS: f32 = 13.0;
+
+/// VRChat's own left wrist, as it says over OSC (`/tracking/vrsystem/leftwrist/pose`, sent to Orbiters' port every frame): where its avatar's
+/// hand really is. With an avatar whose arm cannot reach the controller, the panel opens by that hand, not by the controller (sandbox r2: 24 cm).
+/// Both wrists (left, right), as VRChat said them lately.
+static WRISTS: std::sync::Mutex<[Option<(std::time::Instant, [f32; 6])>; 2]> = std::sync::Mutex::new([None; 2]);
+
+/// The controller heard VRChat say where a wrist is (0 left, 1 right): x, y, z (metres) and Euler x, y, z (degrees), in Unity's axes.
+pub fn wrist_said(hand: usize, values: [f32; 6]) {
+    if let Ok(mut wrists) = WRISTS.lock() {
+        wrists[hand.min(1)] = Some((std::time::Instant::now(), values));
+    }
+}
+
+/// VRChat's wrist (0 left, 1 right) in SteamVR's standing space, if it said so lately.
+pub fn wrist(hand: usize, within: std::time::Duration) -> Option<Matrix34> {
+    let (at, values) = WRISTS.lock().ok()?[hand.min(1)]?;
+    (at.elapsed() <= within).then(|| unity_pose(values))
+}
+
+/// VRChat's left wrist, for where the panel opens.
+pub fn left_wrist(within: std::time::Duration) -> Option<Matrix34> {
+    wrist(0, within)
+}
+
+/// A pose as VRChat's OSC gives it (Unity: Y up, Z forward, left-handed; rotation Y then X then Z, degrees) in SteamVR's axes (Z back).
+pub fn unity_pose(v: [f32; 6]) -> Matrix34 {
+    let (x, y, z) = (v[3].to_radians(), v[4].to_radians(), v[5].to_radians());
+    let rx = [[1.0, 0.0, 0.0], [0.0, x.cos(), -x.sin()], [0.0, x.sin(), x.cos()]];
+    let ry = [[y.cos(), 0.0, y.sin()], [0.0, 1.0, 0.0], [-y.sin(), 0.0, y.cos()]];
+    let rz = [[z.cos(), -z.sin(), 0.0], [z.sin(), z.cos(), 0.0], [0.0, 0.0, 1.0]];
+    let mul = |a: [[f32; 3]; 3], b: [[f32; 3]; 3]| -> [[f32; 3]; 3] { std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum())) };
+    let r = mul(mul(ry, rx), rz);
+    // Z flipped on both sides: S R S.
+    let s = |i: usize| if i == 2 { -1.0 } else { 1.0 };
+    Matrix34 { m: std::array::from_fn(|i| [r[i][0] * s(i) * s(0), r[i][1] * s(i) * s(1), r[i][2] * s(i) * s(2), v[i] * s(i)]) }
+}
 
 fn column(m: &Matrix34, c: usize) -> [f32; 3] {
     [m.m[0][c], m.m[1][c], m.m[2][c]]
@@ -79,6 +117,17 @@ pub fn opening(head: &Matrix34, left: &Matrix34) -> Matrix34 {
     facing(at, column(head, 3))
 }
 
+/// From VRChat's left wrist (its OSC pose) to the panel's middle, in the wrist's frame (metres).
+/// Fitted on 10 opens (camera4/m3): 2.4 to 9.8 mm, 23 mm with the head 30 cm back. VRChat's OSC poses are in SteamVR's standing space (its
+/// head said (-0.05, 1.75, -0.05) where SteamVR had it), so nothing is registered between them.
+pub const FROM_WRIST: [f32; 3] = [0.0424, -0.1735, -0.0884];
+
+/// Where the panel appears, from VRChat's own left wrist: right even when the avatar's arm cannot reach the controller (sandbox: 24 cm off by the
+/// controller rule with the head moved back and the hand tilted, 4.4 mm by the wrist).
+pub fn opening_by_wrist(head: &Matrix34, wrist: &Matrix34) -> Matrix34 {
+    facing(add(column(wrist, 3), turn(wrist, FROM_WRIST)), column(head, 3))
+}
+
 /// A panel at `at` turned to face `eye`, its long side level.
 pub fn facing(at: [f32; 3], eye: [f32; 3]) -> Matrix34 {
     let z = unit(sub(eye, at)).unwrap_or([0.0, 0.0, 1.0]);
@@ -86,13 +135,17 @@ pub fn facing(at: [f32; 3], eye: [f32; 3]) -> Matrix34 {
     frame(x, cross(z, x), z, at)
 }
 
-/// Whether a controller at `hand` is close enough to the panel at `panel` for a grip to take it.
 pub fn within_grab(panel: &Matrix34, hand: &Matrix34) -> bool {
+    within_reach(panel, column(hand, 3), GRAB_REACH_M)
+}
+
+/// Whether a point is within `reach` of the panel's grab box.
+pub fn within_reach(panel: &Matrix34, point: [f32; 3], reach: f32) -> bool {
     let p = undone(panel);
-    let at = add(turn(&p, column(hand, 3)), column(&p, 3));
+    let at = add(turn(&p, point), column(&p, 3));
     let out = |v: f32, lo: f32, hi: f32| (lo - v).max(v - hi).max(0.0);
     let d = [out(at[0], GRAB_BOX[0], GRAB_BOX[1]), out(at[1], GRAB_BOX[2], GRAB_BOX[3]), at[2]];
-    dot(d, d).sqrt() <= GRAB_REACH_M
+    dot(d, d).sqrt() <= reach
 }
 
 /// VRChat's laser from a controller: where it starts and the way it goes.
@@ -126,6 +179,8 @@ pub struct Happened {
     pub let_go: Option<usize>,
     /// A trigger was pressed on its X: VRChat closes its camera panel (in stream mode its camera may stay on, and OSC then says nothing).
     pub closed: bool,
+    /// A trigger pressed (hand), and where the laser this assumes for VRChat landed on the panel then, in its units (the X is at [`PANEL_X`]).
+    pub pressed: Option<(usize, Option<[f32; 2]>)>,
 }
 
 /// VRChat's camera panel as its own rules move it.
@@ -143,8 +198,11 @@ pub struct Reckon {
 
 impl Reckon {
     /// The camera opened: lay the panel where VRChat does. Nothing until the head and the left controller are tracked.
-    pub fn open(&mut self, head: &Matrix34, left: &Matrix34) {
-        *self = Self { at: Some(opening(head, left)), grips: self.grips, triggers: self.triggers, ..Self::default() };
+    /// `wrist`: VRChat's own left wrist when it said it lately ([`left_wrist`]); the controller's pose otherwise.
+    pub fn open(&mut self, head: &Matrix34, left: &Matrix34, wrist: Option<&Matrix34>) -> Matrix34 {
+        let panel = wrist.map_or_else(|| opening(head, left), |wrist| opening_by_wrist(head, wrist));
+        *self = Self { at: Some(panel), grips: self.grips, triggers: self.triggers, ..Self::default() };
+        panel
     }
     pub fn opened(&self) -> bool {
         self.at.is_some() || self.closed
@@ -163,6 +221,10 @@ impl Reckon {
 
     /// One frame: each controller's pose (left, right), its grip and its trigger held. Where the panel is now, in the room.
     pub fn step(&mut self, hands: [Option<Matrix34>; 2], grips: [bool; 2], triggers: [bool; 2]) -> (Option<Matrix34>, Happened) {
+        self.step_inner(hands, grips, triggers)
+    }
+
+    fn step_inner(&mut self, hands: [Option<Matrix34>; 2], grips: [bool; 2], triggers: [bool; 2]) -> (Option<Matrix34>, Happened) {
         let mut happened = Happened::default();
         let (was_grips, was_triggers) = (self.grips, self.triggers);
         self.grips = grips;
@@ -201,8 +263,12 @@ impl Reckon {
         };
         let unit = PANEL_WIDTH_M / PANEL_SIZE[0];
         for hand in 0..2 {
-            if triggers[hand] && !was_triggers[hand] && self.held != Some(hand) && hands[hand].is_some_and(|pose| on_close(&room, unit, &pose)) {
-                happened.closed = true;
+            if triggers[hand] && !was_triggers[hand] && self.held != Some(hand) {
+                if let Some(pose) = hands[hand] {
+                    let (o, d) = laser(&pose);
+                    happened.pressed = Some((hand, laser_spot(&room, unit, o, d)));
+                    happened.closed |= on_close(&room, unit, &pose);
+                }
             }
         }
         if happened.closed {
@@ -325,7 +391,7 @@ mod tests {
     #[test]
     fn a_trigger_with_vrchats_laser_on_the_x_closes_it_and_nothing_else_does() {
         let data = recorded();
-        for aim in data["aims"].as_array().unwrap() {
+        for aim in data["aims"].as_array().unwrap().iter().chain(data["aims_m4"].as_array().unwrap()) {
             let name = aim["name"].as_str().unwrap();
             let (panel, unit, hand) = (m(&aim["panel"]), aim["unit"].as_f64().unwrap() as f32, m(&aim["hand"]));
             assert_eq!(on_close(&panel, unit, &hand), aim["closed_in_vrchat"].as_bool().unwrap(), "{name}");
@@ -342,6 +408,50 @@ mod tests {
         let mut reckon = Reckon::lying_at(panel);
         reckon.step([None, None], [false; 2], [false, true]);
         assert!(!reckon.step([None, Some(hand)], [false; 2], [false, true]).1.closed);
+    }
+
+    /// VRChat's own wrist gives where the panel opens (m3, poses in SteamVR's standing space); the controller rule too, within reach.
+    #[test]
+    fn the_panel_opens_by_vrchats_own_wrist_whatever_the_avatar() {
+        let data = recorded();
+        let opens = data["wrist_opens"].as_array().unwrap();
+        assert!(opens.len() >= 9);
+        for open in opens {
+            let name = open["name"].as_str().unwrap();
+            let wrist: Vec<f32> = open["wrist"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            let wrist = unity_pose(wrist.try_into().unwrap());
+            let (head, truth) = (m(&open["head"]), m(&open["panel"]));
+            let e = apart(&opening_by_wrist(&head, &wrist), &truth);
+            assert!(e <= if name == "spawn4-w3" { 0.025 } else { 0.011 }, "{name}: {:.1} mm", e * 1000.0);
+            let a = turned(&opening_by_wrist(&head, &wrist), &truth);
+            assert!(a < 5.5, "{name}: {a:.1} degrees");
+            let by_controller = apart(&opening(&head, &m(&open["left"])), &truth);
+            assert!(by_controller <= if name == "spawn4-w3" { 0.025 } else { 0.015 }, "{name}: controller rule {:.1} mm", by_controller * 1000.0);
+        }
+    }
+
+    /// m3's grips, with the controller where SteamVR had it (the sandbox commanded it 12 cm off, by the standing offset): the same rule as m1's.
+    #[test]
+    fn m3s_grips_follow_the_same_reach() {
+        let data = recorded();
+        for grab in data["grabs_m3"].as_array().unwrap() {
+            let name = grab["name"].as_str().unwrap();
+            let (before, after) = (m(&grab["before"]), m(&grab["after"]));
+            assert_eq!(within_grab(&before, &at(&grab["at_grip"])), apart(&before, &after) > 0.02, "{name}");
+        }
+    }
+
+    /// VRChat said its head was at (0, 1.65, 0) turned (20, 0, 0) when SteamVR's head was at (0, 1.65, 0) looking 20 degrees down (sandbox).
+    #[test]
+    fn vrchats_poses_turn_into_steamvrs_axes() {
+        let head = unity_pose([0.0, 1.65, 0.0, 20.0, 0.0, 0.0]);
+        let forward = turn(&head, [0.0, 0.0, -1.0]);
+        assert!((forward[1] + 20f32.to_radians().sin()).abs() < 1e-4 && forward[2] < -0.9, "{forward:?}");
+        assert!((column(&head, 3)[1] - 1.65).abs() < 1e-6);
+        let ahead = unity_pose([0.0, 0.0, 0.5, 0.0, 30.0, 0.0]);
+        assert!((column(&ahead, 3)[2] + 0.5).abs() < 1e-6, "Unity's forward is SteamVR's -Z");
+        // Turned 30 degrees about Y in Unity (to its right) looks to SteamVR's right too.
+        assert!(turn(&ahead, [0.0, 0.0, -1.0])[0] > 0.45);
     }
 
     #[test]

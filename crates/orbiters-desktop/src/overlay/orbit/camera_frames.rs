@@ -182,6 +182,37 @@ fn found_in(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [
     found.map(|f| f.shifted(offset))
 }
 
+/// Eyes wider than this are searched at half size: the detector's sizes and thresholds were measured on 1280 to 1620 px eyes, and Enzo's
+/// 3168 px Virtual Desktop eyes made each fit take a quarter of a second or more in a release build (about one look a second on his dev.44).
+const HALVED_FROM: u32 = 2400;
+
+/// Every 2 x 2 pixels as one, averaged.
+fn halved(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let (w, h) = (width / 2, height / 2);
+    let mut out = vec![0u8; w * h * 4];
+    for y in 0..h {
+        let (a, b) = (&rgba[(2 * y) * width * 4..(2 * y + 1) * width * 4], &rgba[(2 * y + 1) * width * 4..(2 * y + 2) * width * 4]);
+        for x in 0..w {
+            for c in 0..4 {
+                let sum = a[8 * x + c] as u16 + a[8 * x + 4 + c] as u16 + b[8 * x + c] as u16 + b[8 * x + 4 + c] as u16;
+                out[(y * w + x) * 4 + c] = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// The panel on one eye's picture as the reader read it, at half size when the eye is large; in the whole eye's pixels.
+fn found_on(picture: &orbiters_openvr::mirror::EyePicture) -> Option<Found> {
+    let offset = [picture.from[0] as f32, picture.from[1] as f32];
+    let (width, height, whole) = (picture.width as usize, picture.height as usize, [picture.whole[0] as usize, picture.whole[1] as usize]);
+    if picture.whole[0] >= HALVED_FROM && width >= 64 && height >= 64 {
+        let half = halved(&picture.rgba, width, height);
+        return found_in(&half, width / 2, height / 2, width / 2 * 4, [0.0, 0.0], [whole[0] / 2, whole[1] / 2], None).map(|f| f.enlarged(2.0).shifted(offset));
+    }
+    found_in(&picture.rgba, width, height, width * 4, offset, whole, None)
+}
+
 /// A look's result, counted and handed to the overlay; its landmarks into `camera-tiles.log` at most twice a second (`logged`), as a replay needs them.
 #[allow(clippy::too_many_arguments)]
 fn told(found: Option<Found>, whole: [usize; 2], seen: &Mutex<Looks>, health: &Mutex<Health>, source: Source, at: Instant, right: Option<RightSeen>, logged: &mut Option<Instant>) {
@@ -304,14 +335,13 @@ fn run(seen:&Mutex<Looks>,stop:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Op
                             }
                             let whole=picture.whole;
                             let began=Instant::now();
-                            let found=found_in(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4,[picture.from[0] as f32,picture.from[1] as f32],[whole[0] as usize,whole[1] as usize],None);
+                            let found=found_on(&picture);
                             let left_ms=began.elapsed().as_secs_f32()*1000.;
                             fitted_ref.lock().unwrap_or_else(|e|e.into_inner())[0]=found.map(|f|(f,whole));
                             // The right eye only where the left has it, and not on every look while it keeps missing.
                             let search_right=found.is_some() && job.right.width>1 && (right_misses<RIGHT_MISSES || jobs%RIGHT_RETRY_EVERY==0);
                             let began=Instant::now();
-                            let right_found=search_right.then(|| camera_track::find(&job.right.rgba,job.right.width as usize,job.right.height as usize,job.right.width as usize*4)
-                                .map(|f|f.shifted([job.right.from[0] as f32,job.right.from[1] as f32]))).flatten();
+                            let right_found=search_right.then(||found_on(&job.right)).flatten();
                             let right_ms=search_right.then(||began.elapsed().as_secs_f32()*1000.);
                             if search_right { right_misses=if right_found.is_some() {0} else {right_misses.saturating_add(1)}; }
                             fitted_ref.lock().unwrap_or_else(|e|e.into_inner())[1]=right_found.map(|f|(f,job.right.whole));
@@ -459,6 +489,19 @@ mod tests {
     }
     use super::*;
     use std::time::Duration;
+
+    /// A large eye is searched at half size, and what is found comes back in the whole eye's pixels.
+    #[test]
+    fn a_large_eye_is_read_at_half_size_in_its_own_pixels() {
+        let picture = orbiters_openvr::mirror::EyePicture { width: 4, height: 2, rgba: vec![10, 20, 30, 255, 30, 40, 50, 255, 0, 0, 0, 0, 0, 0, 0, 0, 50, 60, 70, 255, 70, 80, 90, 255, 0, 0, 0, 0, 0, 0, 0, 0], from: [0, 0], whole: [4, 2] };
+        assert_eq!(halved(&picture.rgba, 4, 2), vec![40, 50, 60, 255, 0, 0, 0, 0]);
+        let found = camera_track::Found { perspective: Some([[2., 0., 100.], [0., 2., 50.], [0., 0., 1.]]), lines: None, landmarks: Some((1, [([1., 1.], [10., 20.]); 10])), residual_px: 1., x: [10., 20.], chevron: [30., 40.], middle: [20., 30.], right: [1., 0.], down: [0., 1.], across: 2., tall: 2. };
+        let big = found.enlarged(2.0).shifted([1000., 500.]);
+        assert_eq!((big.x, big.chevron, big.across, big.residual_px), ([1020., 540.], [1060., 580.], 4., 2.));
+        assert_eq!(big.landmarks.unwrap().1[0].1, [1020., 540.]);
+        let at = big.at([3., 4.]);
+        assert!((at[0] - (1000. + 2. * (2. * 3. + 100.))).abs() < 1e-3 && (at[1] - (500. + 2. * (2. * 4. + 50.))).abs() < 1e-3, "{at:?}");
+    }
 
     /// Settings says why, and a panel out of sight for a moment says nothing.
     #[test]

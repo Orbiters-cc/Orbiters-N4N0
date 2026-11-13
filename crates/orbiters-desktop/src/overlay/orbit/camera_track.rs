@@ -90,6 +90,11 @@ impl Found {
         self
     }
 
+    /// The same, for a picture `factor` times as large: what was found on a picture read at half size, in the whole picture's pixels.
+    pub fn enlarged(self, factor: f32) -> Self {
+        self.moved([0.0, 0.0], 1.0 / factor)
+    }
+
     /// The same, for a picture that started `by` further on.
     pub fn shifted(self, by: [f32; 2]) -> Self {
         self.moved(by, 1.0)
@@ -773,9 +778,16 @@ fn refine_plane(mut frame:Matrix34,mut unit:f32,observed:&[PlaneObservation],met
 /// centre is found to as many more pixels: 3 of his 12 looks failed the gate at 2.6 to 4 px. The gates keep the same angle on any eye.
 const GATES_SET_AT_PX_PER_TANGENT: f32 = 1620.0 / 2.215;
 
-/// The reprojection gate in this picture's pixels: 2.5 px at the gates' own sharpness, never less.
-fn gate_px(size: [f32; 2], mirror: &Mirror) -> f32 {
-    2.5 * (size[0] / mirror.spans[0].abs().max(1e-6) / GATES_SET_AT_PX_PER_TANGENT).max(1.0)
+/// The reprojection gate in this picture's pixels: 2.5 px at the gates' own sharpness, never less; and for a panel seen large, 0.8% of its
+/// diagonal. How well its outline or glyphs fit a flat rectangle is limited by its frame's thickness and rounded corners as much as by the
+/// pixels: in the sandbox at Enzo's 3168 px eyes, a camera just opened 0.4 m away and tilted fit 6.5 and 5.4 px (both eyes, 1150 px across)
+/// and was refused for minutes, while the same camera at 0.67 m fits to 0.8 px. 0.8% still refuses a sheared match.
+fn gate_px(size: [f32; 2], mirror: &Mirror, h: [[f32; 3]; 3]) -> f32 {
+    let sharp = 2.5 * (size[0] / mirror.spans[0].abs().max(1e-6) / GATES_SET_AT_PX_PER_TANGENT).max(1.0);
+    let (a, b) = (project(h, [-205., -110.]), project(h, [205., 110.]));
+    let (c, d) = (project(h, [205., -110.]), project(h, [-205., 110.]));
+    let diagonal = (a[0] - b[0]).hypot(a[1] - b[1]).max((c[0] - d[0]).hypot(c[1] - d[1]));
+    if diagonal.is_finite() { sharp.max(0.008 * diagonal) } else { sharp }
 }
 
 /// Perspective pose using the actual eye projection, with rigid-plane consistency rejection.
@@ -834,8 +846,8 @@ pub fn perspective_fit(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matr
         errors.push((l[0]*px[0]+l[1]*px[1]+l[2]).powi(2));
     }}}
     let rms=(errors.iter().sum::<f32>()/errors.len().max(1) as f32).sqrt();
-    let gate=gate_px(size,mirror);
-    if !rms.is_finite() || rms>gate { return Err("rigid reprojection error over the gate (2.5 px at 1620 px eyes)"); } // i18n: not shown (diagnostics: why a camera look places no tools)
+    let gate=gate_px(size,mirror,h0);
+    if !rms.is_finite() || rms>gate { return Err("rigid reprojection error over the gate (2.5 px at 1620 px eyes, or 0.8% of the panel)"); } // i18n: not shown (diagnostics: why a camera look places no tools)
     if errors.iter().any(|e| *e>(2.4*gate).powi(2)) { return Err("a landmark reprojects over 6 px (at 1620 px eyes) off"); } // i18n: not shown (diagnostics: why a camera look places no tools)
     let local=Matrix34 { m: std::array::from_fn(|i| [right[i],up[i],z[i],position[i]]) };
     Ok((then(eye,&local),unit))
@@ -915,8 +927,8 @@ pub fn stereo_fit(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2],
         errors.push((l[0]*px[0]+l[1]*px[1]+l[2]).powi(2));
     }}}}
     let rms=(errors.iter().sum::<f32>()/errors.len().max(1) as f32).sqrt();
-    let gate=gate_px(sizes[0],&mirrors[0]).max(gate_px(sizes[1],&mirrors[1]));
-    if !rms.is_finite() || rms>gate { return Err("stereo reprojection error over the gate (2.5 px at 1620 px eyes)"); } // i18n: not shown (diagnostics: why a camera look places no tools)
+    let gate=found.iter().zip(sizes.iter().zip(&mirrors)).filter_map(|(f,(size,mirror))|f.perspective.map(|h|gate_px(*size,mirror,h))).fold(0.,f32::max);
+    if !rms.is_finite() || rms>gate { return Err("stereo reprojection error over the gate (2.5 px at 1620 px eyes, or 0.8% of the panel)"); } // i18n: not shown (diagnostics: why a camera look places no tools)
     if errors.iter().any(|e|*e>(2.4*gate).powi(2)) { return Err("a landmark reprojects over 6 px (at 1620 px eyes) off in one eye"); } // i18n: not shown (diagnostics: why a camera look places no tools)
     let local=Matrix34 {m:std::array::from_fn(|i|[r[i],u[i],z[i],centre[i]])};
     Ok((then(head,&local),unit,rms))
@@ -2928,5 +2940,30 @@ mod enzo_headset_replay {
         found.landmarks = None;
         let verdict = accept_sighting(&left_view(found), None, &head(), None, PANEL_M, Side::Left);
         assert_eq!(verdict.accepted.err(), Some("no perspective fit (glyphs only)")); // i18n: not shown (diagnostics: why a camera look places no tools)
+    }
+
+    /// The sandbox at Enzo's 3168 x 3456 (2026-11-13, camera3/m1): the camera just opened, 0.4 m away, low and tilted, seen by both eyes as these
+    /// outline corners. Refused by the fixed pixel gate for three minutes (rigid fits of 6.5 and 5.4 px); placed now, from both eyes.
+    #[test]
+    fn a_camera_just_opened_close_and_tilted_is_placed() {
+        let corners = |q: [[f32; 2]; 4]| {
+            let model = [[-205., -115.3125], [205., -115.3125], [205., 115.3125], [-205., 115.3125]];
+            let points: Vec<_> = model.into_iter().zip(q).collect();
+            let h = fit(&points).unwrap();
+            let mut landmarks = [([0.; 2], [0.; 2]); 10];
+            for (slot, p) in landmarks.iter_mut().zip(&points) { *slot = *p; }
+            let middle = project(h, [0., 0.]); let r = project(h, [1., 0.]); let d = project(h, [0., 1.]);
+            let (across, tall) = ((r[0] - middle[0]).hypot(r[1] - middle[1]), (d[0] - middle[0]).hypot(d[1] - middle[1]));
+            Found { perspective: Some(h), lines: None, residual_px: 1.04, landmarks: Some((4, landmarks)), x: project(h, PANEL_X), chevron: project(h, PANEL_CHEVRON), middle,
+                right: [(r[0] - middle[0]) / across, (r[1] - middle[1]) / across], down: [(d[0] - middle[0]) / tall, (d[1] - middle[1]) / tall], across, tall }
+        };
+        let left = corners([[1229.1563, 2184.5796], [2082.5117, 1879.5481], [2255.023, 2424.6096], [1273.1213, 2916.1262]]);
+        let right = corners([[248.91309, 2185.6714], [1140.4647, 1879.0818], [1285.1508, 2423.2778], [257.17578, 2915.0972]]);
+        let views = [EyeView { found: left, size: SIZE, mirror: Mirror::whole_eye(LEFT), on_head: on_head(-0.032, 0.) }, EyeView { found: right, size: SIZE, mirror: Mirror::whole_eye(RIGHT), on_head: on_head(0.032, 0.) }];
+        assert!(perspective_fit(&left, SIZE, &views[0].mirror, &then(&IDENTITY, &views[0].on_head), PANEL_M).is_ok(), "one eye alone");
+        let verdict = accept_sighting(&views[0], Some(&views[1]), &IDENTITY, None, PANEL_M, Side::Left);
+        let accepted = verdict.accepted.unwrap_or_else(|why| panic!("{why}"));
+        eprintln!("close tilted camera: {:?}, width {:.3}, depth {:.3}, stereo not used because {:?}", accepted.width_from, accepted.unit * PANEL_SIZE[0], -accepted.frame.m[2][3], verdict.stereo);
+        assert!((0.3..0.55).contains(&-accepted.frame.m[2][3]));
     }
 }

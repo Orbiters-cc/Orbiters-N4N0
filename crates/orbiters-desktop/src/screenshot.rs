@@ -1385,6 +1385,56 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
+            name: "settings-translate",
+            page: Page::Settings,
+            // Live translation on, with an AI app found on this computer. Sample figures, not measured.
+            snapshot: {
+                let mut s = idle.clone();
+                s.steamvr.running = true;
+                s.settings.translate.enabled = true;
+                s.translate.set(crate::state::TranslateStatus {
+                    state: crate::state::TranslateState::Looking,
+                    shown: 3,
+                    lines: 5,
+                    look_ms: Some(214),
+                    server: Some("http://127.0.0.1:1234/v1".into()),
+                    models: vec!["qwen3-8b".into(), "translategemma-4b-it".into()],
+                });
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 760.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "settings-translate-orbiters",
+            page: Page::Settings,
+            // Orbiters chosen, its notice not yet accepted.
+            snapshot: {
+                let mut s = idle.clone();
+                s.steamvr.running = true;
+                s.settings.translate.enabled = true;
+                s.settings.translate.provider = orbiters_core::settings::TranslateProvider::Orbiters;
+                s.translate.set(crate::state::TranslateStatus { state: crate::state::TranslateState::NeedsAgreement, ..Default::default() });
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 760.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
             name: "settings",
             page: Page::Settings,
             snapshot: idle.clone(),

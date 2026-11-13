@@ -25,6 +25,7 @@ pub mod menu_pages;
 pub mod menu_retro;
 pub mod menu_ui;
 pub mod orbit;
+pub mod translate;
 pub mod ui;
 pub mod walk;
 pub mod worlds;
@@ -726,6 +727,8 @@ struct Teardown<'a> {
     orbit: Option<orbit::vr::OrbitVr>,
     /// The FPS booster: its frame logger, and what it changed in SteamVR.
     booster: booster::Host,
+    /// Live translation's overlays and reading thread (overlay/translate.rs): nothing runs while it is off.
+    translate: translate::TranslateHost,
     /// SteamVR's server ended without a quit: nothing is restored through it, as nothing can be read from it.
     steamvr_gone: bool,
 }
@@ -739,6 +742,7 @@ impl Drop for Teardown<'_> {
         self.world.destroy(self.overlay);
         self.menu.destroy(self.overlay);
         self.coverage.destroy(self.overlay);
+        self.translate.destroy(self.overlay);
         if let Some(f) = &self.floating {
             f.destroy(self.overlay);
         }
@@ -805,7 +809,12 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let floating = floating::Floating::new(&overlay, KEY).map_err(|e| eprintln!("floating panel unavailable: {e}")).ok();
     let orbit = orbit::vr::OrbitVr::new(&overlay, KEY, backend.clone()).map_err(|e| eprintln!("panels around VRChat's menus unavailable: {e}")).ok();
     let boost = booster::Host::new(&steamvr);
-    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage, floating, orbit, booster: boost, steamvr_gone: false };
+    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage, floating, orbit, booster: boost, translate: translate::TranslateHost::default(), steamvr_gone: false };
+    // Orbiters' translation service is reached through the desktop service, which holds the account's credential.
+    *translate::REMOTE.lock().unwrap_or_else(|e| e.into_inner()) = Some({
+        let backend = backend.clone();
+        Arc::new(move |batch: &orbiters_translate::provider::Batch| backend.translate(batch.clone()).map_err(Into::into))
+    });
     let mut frames = frames::FrameSampler::new(&steamvr);
     // What of the touchpads and sticks goes to the avatar's input parameters.
     let mut pads = orbiters_n4n0::input::Pacer::default();
@@ -1044,6 +1053,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 t.menu.carry(&overlay, turn.menu_moved, turn.menu_released, head.as_ref());
             }
         }
+        // Whether a menu of ours is up (live translation does not read what is under one).
+        let mut menus_up = false;
         // The panels around VRChat's menus, and whose trigger VRChat does not get from the next read on.
         if let Some(orbit) = t.orbit.as_mut() {
             let since = steamvr.time_since_vsync().unwrap_or(0.0);
@@ -1073,6 +1084,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             t.menu.worlds.small_place(turn.small_place);
             t.menu.worlds.small_opening(turn.small_opening);
             let menu_up = !turn.menus_up.is_empty();
+            menus_up = menu_up;
             let menu_hand = turn.menu_hand;
             t.menu.worlds.menus_up(turn.menus_up);
             if t.menu.worlds.small_showing() {
@@ -1109,6 +1121,11 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             sounds.click();
         }
         t.menu.worlds.view.publish(&overlay);
+        // Live translation: the turn only records the head and shows what the reading thread found.
+        let covered = dashboard || menus_up || t.menu.host.menu.open || t.menu.worlds.small_showing();
+        let began = Instant::now();
+        t.translate.update(translate::Cx { overlay: &overlay, steamvr: &steamvr, presenter: &mut presenter, snap: &snap, backend: &backend, covered });
+        stall.note(began.elapsed(), || t.translate.doing());
         if !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &snap)) {
             shown = Some(snap.clone());
             next_frame = Some(next_frame.map_or(Instant::now(), |f| f.min(Instant::now())));

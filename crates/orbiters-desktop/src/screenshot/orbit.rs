@@ -739,6 +739,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     qm_scene("orbit-sheet-talk-arriving", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: arriving, talk: crate::overlay::orbit::panels::TalkNow::Thinking, beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
     // The FPS booster's states. The figures are sample data for the picture, not measured.
     booster_scenes(out, hd, &idle)?;
+    translate_scenes(out, hd, &idle)?;
     qm_scene("orbit-sheet-tracking", out, hd, &Facts { sheet: Some(Sheet::Tracking), sheet_title: orbiters_i18n::tr("Smooth tracking").into(), tracking: Some((true, [0, 35, 78], "Smoothing your devices now".to_string())), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Tracking))?;
     qm_scene("orbit-sheet-talk", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines.clone(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
     qm_scene("orbit-sheet-talk-listening", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines.clone(), talk: crate::overlay::orbit::panels::TalkNow::Listening(0.6), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
@@ -1254,6 +1255,25 @@ fn vr_sheet(facts: &Facts, sheet: panels::Sheet, plane: &crate::overlay::orbit::
     let top = ((page.rect.top() - vr::sheet_place(Zone::SheetBack).rect.top()) * 2.0).round() as u32;
     let whole = vr::compose_sheet(&back_pixels, back_px, &page_pixels, page_px, top);
     (plane.quad(&back, 0.0, 0.02), whole, back_px)
+}
+
+/// Translation's sheet: reading with translations shown, Orbiters waiting for its notice to be accepted, the text
+/// reader downloading, and no AI app on the computer.
+fn translate_scenes(out: &std::path::Path, size: egui::Vec2, idle: &Facts) -> anyhow::Result<()> {
+    use crate::state::{TranslateState, TranslateStatus};
+    use orbiters_core::settings::TranslateProvider;
+    use panels::Sheet;
+    let at = |provider: TranslateProvider, agreed: bool, state: TranslateState, shown: u32| Facts {
+        sheet: Some(Sheet::Translate),
+        sheet_title: "Translation".into(),
+        translate: panels::TranslateFacts { enabled: true, provider, target: orbiters_i18n::language().tag().into(), keep_english: true, agreed, status: TranslateStatus { state, shown, lines: shown + 1, look_ms: Some(214), ..Default::default() } },
+        ..idle.clone()
+    };
+    qm_scene("orbit-sheet-translate", out, size, &at(TranslateProvider::ThisComputer, false, TranslateState::Looking, 3), None, Some(Sheet::Translate))?;
+    qm_scene("orbit-translate-orbiters", out, size, &at(TranslateProvider::Orbiters, false, TranslateState::NeedsAgreement, 0), None, Some(Sheet::Translate))?;
+    qm_scene("orbit-translate-downloading", out, size, &at(TranslateProvider::ThisComputer, false, TranslateState::Downloading { done: 12_000_000, total: 39_000_000 }, 0), None, Some(Sheet::Translate))?;
+    qm_scene("orbit-translate-no-app", out, size, &at(TranslateProvider::ThisComputer, false, TranslateState::NoLocalTranslator, 0), None, Some(Sheet::Translate))?;
+    Ok(())
 }
 
 /// A snapshot the FPS booster's sheet can be drawn from: VR running, the overlay watching, at Background unless changed.

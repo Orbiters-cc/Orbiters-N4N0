@@ -2220,6 +2220,14 @@ impl Panels {
             tracking_note: snap.n4n0.tracking_note.clone(),
             smoothing_held: self.smoothing_held,
             booster: if self.facts.sheet == Some(Sheet::Booster) { panels::BoosterFacts::of(snap, self.booster_details, self.booster_asking, self.booster_held) } else { Default::default() },
+            translate: panels::TranslateFacts {
+                enabled: snap.settings.translate.enabled,
+                provider: snap.settings.translate.provider,
+                target: crate::overlay::translate::target(&snap.settings),
+                keep_english: snap.settings.translate.keep_english,
+                agreed: snap.settings.translate.orbiters_agreed,
+                status: (*snap.translate).clone(),
+            },
             talk_lines: if self.facts.sheet == Some(Sheet::Talk) {
                 snap.n4n0.lines.iter().map(|l| (l.who == orbiters_n4n0::status::N4n0Who::You, l.text.clone())).collect()
             } else {
@@ -2669,6 +2677,16 @@ impl Panels {
                 return;
             }
             panels::Pick::Smoothing(on) => serde_json::json!({ "tracking": { "enabled": on } }),
+            panels::Pick::Translate(pick) => {
+                use panels::TranslatePick;
+                match pick {
+                    TranslatePick::On(on) => serde_json::json!({ "translate": { "enabled": on } }),
+                    TranslatePick::Provider(p) => serde_json::json!({ "translate": { "provider": p } }),
+                    TranslatePick::Into(after) => serde_json::json!({ "translate": { "target": panels::target_after(&crate::overlay::translate::target(&snap.settings), after) } }),
+                    TranslatePick::KeepEnglish(keep) => serde_json::json!({ "translate": { "keep_english": keep } }),
+                    TranslatePick::Agree => serde_json::json!({ "translate": { "orbiters_agreed": true } }),
+                }
+            }
             panels::Pick::Language(after) => crate::language::patch(panels::language_after(crate::language::chosen(&snap.settings), after)),
             panels::Pick::Sound(after) => {
                 let now = snap.settings.vr_audio.output.as_ref();
@@ -2980,6 +2998,7 @@ impl Panels {
                     let _ = tx.send(crate::audio_devices::list(crate::audio_devices::Flow::Output).unwrap_or_default());
                 });
             }
+            Action::Translate => self.open_sheet(Sheet::Translate, mark("Translation"), snap),
             Action::Set(pick) => self.set(pick, snap),
             Action::CloseSheet => self.close_sheet(),
             // Enzo: hidden until shown again, whatever VRChat's menu does meanwhile. It said nothing was open before, which turned what follows the button upside down: closing VRChat's menu opened the tiles.

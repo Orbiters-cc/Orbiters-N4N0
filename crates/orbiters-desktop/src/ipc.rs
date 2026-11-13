@@ -65,6 +65,11 @@ pub enum ToClient {
     },
     /// Close (the app quits, or another window replaced this one).
     Close,
+    /// Orbiters' answer to a [`ToService::Translate`].
+    Translated {
+        id: String,
+        result: crate::controller::translate::Answer,
+    },
 }
 
 /// A long recording can only be started by the camera overlay. Other UI surfaces remain stop-only.
@@ -98,6 +103,16 @@ pub enum ToService {
     /// What the panels around VRChat's menus last said of themselves, for Settings.
     Orbit {
         status: crate::state::OrbitStatus,
+    },
+    /// What live translation in VR is doing (the overlay says).
+    TranslateStatus {
+        status: crate::state::TranslateStatus,
+    },
+    /// Lines for Orbiters' translation service, which the service reaches with the account's credential; answered with
+    /// [`ToClient::Translated`].
+    Translate {
+        id: String,
+        batch: orbiters_translate::provider::Batch,
     },
     Pause {
         paused: bool,
@@ -535,6 +550,7 @@ pub struct Client {
     worker_log: Mutex<Option<Vec<String>>>,
     maps: Mutex<Option<MapsMine>>,
     vrchat_data: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::vrchat_data::Result>>>,
+    translated: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::translate::Answer>>>,
     show: AtomicBool,
     /// A page asked for with the last Show.
     show_page: Mutex<Option<String>>,
@@ -582,6 +598,7 @@ impl Client {
             worker_log: Mutex::new(None),
             maps: Mutex::new(None),
             vrchat_data: Mutex::default(),
+            translated: Mutex::default(),
             show: AtomicBool::new(false),
             show_page: Mutex::new(None),
             close: AtomicBool::new(false),
@@ -621,6 +638,11 @@ impl Client {
                     ToClient::Maps { mine } => *c.maps.lock().unwrap() = Some(mine),
                     ToClient::VrchatData { id, result } => {
                         if let Some(tx) = c.vrchat_data.lock().unwrap().remove(&id) {
+                            let _ = tx.send(result);
+                        }
+                    }
+                    ToClient::Translated { id, result } => {
+                        if let Some(tx) = c.translated.lock().unwrap().remove(&id) {
                             let _ = tx.send(result);
                         }
                     }
@@ -785,6 +807,17 @@ impl Client {
         self.send(&ToService::VrchatData { id: id.clone(), scope, request });
         let result = rx.recv_timeout(Duration::from_secs(120)).unwrap_or_else(|_| Err(orbiters_i18n::tr("VRChat data request timed out. Please try again.").into()));
         self.vrchat_data.lock().unwrap().remove(&id);
+        result
+    }
+
+    /// Lines translated by Orbiters' service, through the desktop service (which holds the account's credential).
+    pub fn translate(&self, batch: orbiters_translate::provider::Batch) -> crate::controller::translate::Answer {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.translated.lock().unwrap().insert(id.clone(), tx);
+        self.send(&ToService::Translate { id: id.clone(), batch });
+        let result = rx.recv_timeout(Duration::from_secs(30)).unwrap_or(Err(crate::controller::translate::Refused::Unreachable("no answer".into()))); // i18n: not shown (log detail)
+        self.translated.lock().unwrap().remove(&id);
         result
     }
 

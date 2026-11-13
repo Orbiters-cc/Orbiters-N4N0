@@ -413,6 +413,17 @@ impl Service {
                 }
             }
             ToService::Orbit { status } => self.ctl.set_orbit_status(status),
+            ToService::TranslateStatus { status } => self.ctl.set_translate_status(status),
+            ToService::Translate { id, batch } => {
+                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
+                if let Some(mailbox) = mailbox {
+                    let ctl = ctl.clone();
+                    std::thread::spawn(move || {
+                        let result = ctl.translate_remote(&batch);
+                        mailbox.post(ToClient::Translated { id, result });
+                    });
+                }
+            }
             ToService::VrchatPicture { scope, id, path } if role == Role::Window => ctl.vrchat_picture(scope, id, path),
             ToService::VrchatPicture { .. } => {}
             ToService::StopReconstruction => {

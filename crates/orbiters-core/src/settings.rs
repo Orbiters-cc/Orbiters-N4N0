@@ -92,6 +92,46 @@ pub struct Settings {
     /// What this person turned on among the experimental features. A feature here only ever narrows what the server
     /// grants (`crate::features`): turning one on in this file does nothing for an account that does not have it.
     pub experimental: ExperimentalSettings,
+    /// Live translation of the text seen in VR (the orbit menu's Translation): off until turned on.
+    pub translate: TranslateSettings,
+}
+
+/// Live translation: the text the headset shows (signs, posters, chat bubbles) read a few times a second and its
+/// translation laid over it in the room. Nothing of it runs while it is off.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateSettings {
+    pub enabled: bool,
+    /// The language to translate into (a website tag: `fr`, `pt-BR`); `None`: the app's language.
+    pub target: Option<String>,
+    pub provider: TranslateProvider,
+    /// The AI server's address for [`TranslateProvider::Address`] (`http://192.168.1.20:1234`).
+    pub server: String,
+    /// The model to ask on an AI server; empty: the one that suits best of those it offers.
+    pub model: String,
+    /// English is left as it is (what VRChat's own menus and most names are in).
+    pub keep_english: bool,
+    /// The person read and accepted that, with Orbiters translating, the text seen in VR is sent to Orbiters.
+    pub orbiters_agreed: bool,
+}
+
+impl Default for TranslateSettings {
+    fn default() -> Self {
+        Self { enabled: false, target: None, provider: TranslateProvider::default(), server: String::new(), model: String::new(), keep_english: true, orbiters_agreed: false }
+    }
+}
+
+/// Who translates. Nothing leaves this computer (or its network) unless Orbiters is chosen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslateProvider {
+    /// An AI app on this computer (LM Studio, Ollama, llama.cpp's server), found by itself; else the model built in.
+    #[default]
+    ThisComputer,
+    /// An AI server at an address of the network ([`TranslateSettings::server`]).
+    Address,
+    /// Orbiters' translation service (an Orbiters account; the text is sent to Orbiters).
+    Orbiters,
 }
 
 /// The experimental features (Settings, Experimental), all off until chosen.
@@ -743,6 +783,7 @@ impl Default for Settings {
             picture_folders: Vec::new(),
             vr_audio: VrAudioSettings::default(),
             experimental: ExperimentalSettings::default(),
+            translate: TranslateSettings::default(),
         }
     }
 }
@@ -962,6 +1003,7 @@ mod tests {
         assert!(FloatingSettings::WIDTHS.contains(&partial.floating.width_m));
         assert_eq!(partial.window_gpu, WindowGpu::GraphicsCard, "the window draws on the graphics card unless chosen otherwise");
         assert_eq!(partial.view_gpu, ViewGpu::WhilePlaying, "its 3D view on the integrated GPU while VRChat runs unless chosen otherwise");
+        assert!(!partial.translate.enabled && partial.translate.provider == TranslateProvider::ThisComputer && !partial.translate.orbiters_agreed, "live translation off, local, nothing agreed");
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -3057,6 +3057,14 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             if hovered || on {
                 p.rect_stroke(rect.shrink(0.75), radius, Stroke::new(2.0, tint), egui::StrokeKind::Middle);
             }
+            // Three rows of them (a headset's thirteen, with Translation): too low for an icon over a name, so its icon
+            // before its name, on one line.
+            if rect.height() < 70.0 {
+                widgets::icon(p, pos2(rect.left() + 22.0, rect.center().y), icon, 24.0, tint);
+                let (label, font) = fitted(p, label, 16.5, weight::BOLD, rect.width() - 48.0, 12.5);
+                p.text(pos2(rect.left() + 40.0, rect.center().y), Align2::LEFT_CENTER, label, font, Color32::WHITE);
+                return;
+            }
             // Many of them, in a headset: its icon over its name.
             if rect.width() < 200.0 {
                 widgets::icon(p, pos2(rect.center().x, rect.top() + 28.0), icon, 30.0, tint);

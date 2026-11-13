@@ -1110,9 +1110,18 @@ impl Panels {
         self.takeover.is_some()
     }
 
-    /// Whether a part shows now, the sheet aside: the Quick Menu's caption lies behind it.
-    fn caption_shown(&self) -> bool {
-        self.takeover.is_none()
+    /// Whether the captions show now: with a page up, only where the page would cover them. The Quick Menu's caption is one of its side tiles, which stay beside a page
+    /// (OWNER DECISION, Enzo repeatedly, latest 2026-11-13; AGENTS.md, "Owner decisions"): it lies beside the page in every layout, and goes only if it would lie under it.
+    fn caption_shown(&self, caption: &Placed) -> bool {
+        if self.takeover.is_none() {
+            return true;
+        }
+        // The wheel's and the camera's captions lie behind a page as before: theirs is another plane.
+        if caption.zone != Zone::QmCaption {
+            return false;
+        }
+        let page = [self.back_place, self.takeover_place].into_iter().flatten().map(|p| p.rect);
+        !page.into_iter().any(|r| r.intersects(caption.rect))
     }
 
     /// The mouse points at the parts rather than at VRChat's wheel: the veil comes over the wheel. Nothing changes for what is not on the wheel.
@@ -1184,7 +1193,8 @@ impl Panels {
         format!("sheet {:?}, page {:?}, parts {}", self.facts.sheet, self.stage.host.menu.page, self.list.len()) // i18n: not shown (a note in the log)
     }
 
-    /// Hidden, all that shows around VRChat's menu `menu`: the one button that brings the rest back.
+    /// Hidden, all that shows around VRChat's menu `menu`: the one button that brings the rest back. Only the person's own Hide does this, never a page opening: the side
+    /// tiles stay while a page is up (OWNER DECISION, Enzo repeatedly, latest 2026-11-13; AGENTS.md, "Owner decisions").
     pub fn way_back(&self, menu: Option<Around>, places: &mut Vec<Placed>) {
         let zone = match menu {
             Some(Around::Wheel) => Zone::WheelHide,
@@ -1291,10 +1301,13 @@ impl Panels {
         // What has nothing to do now is not there: a Stop with no recording, the camera's scanning corners, its page, its button.
         let places: Vec<Placed> = places.into_iter().filter(|p| !p.zone.only_while_needed() || self.needed(p.zone)).collect();
         let live = !snap.settings.reduce_motion;
-        // Opened from the wheel, the sheet is all that shows: its cut-off cells would stick out from under it. Opened from the Quick Menu the wing goes too, for the eyes
-        // and for the lasers (Enzo, 2026-11-11, after 2026-11-09's "the wing stays"): the sheet's head has the same tools as tabs, its Back and its close, and the wing
-        // comes back as the sheet closes. Around VRChat's camera its tiles stay: what it reads is beside them.
-        let places: Vec<Placed> = if self.takeover.is_some() && around != Some(Around::Camera) { Vec::new() } else { places };
+        // OWNER DECISION, DO NOT REMOVE: the Quick Menu's side tiles (the wing, or the strip in that layout, its caption and Stop) STAY while a page is open, on either
+        // hand, to see and to point at. Enzo asked for this repeatedly (2026-11-09; again 2026-11-13: "I asked multiple time to make the side tiles on the quick menu stay
+        // even when a page is open"); 2026-11-11's F8 had them go and is overruled. They stand off the page (`vr::clear_of_sheet`), and pressing the open tool's tile
+        // closes its page. See AGENTS.md, "Owner decisions". Tests: `flows::the_side_tiles_stay_while_a_page_is_up`, `vr::tests::side_tiles_stay_beside_a_page`.
+        // Opened from the wheel, the sheet is all that shows: the ring's cut-off cells would stick out from under it (those are not the Quick Menu's side tiles).
+        // Around VRChat's camera its tiles stay: what it reads is beside them.
+        let places: Vec<Placed> = if self.takeover.is_some() && around == Some(Around::Wheel) { Vec::new() } else { places };
         let back = self.takeover.is_some().then_some(self.back_place).flatten();
         // The way to VRChat's own menus and back is on the sheet's head; while they are reached it is all that shows, where it was.
         let peek = back.map(|back| {
@@ -3613,8 +3626,8 @@ impl Panels {
 
     /// Moves each part's spring on.
     pub fn step_springs(&mut self, dt: f32) {
-        let caption = self.caption_shown();
-        for panel in self.list.iter_mut().filter(|p| matches!(p.zone, Zone::QmCaption | Zone::WheelCaption | Zone::CameraCaption)) {
+        let shown: Vec<bool> = self.list.iter().filter(|p| matches!(p.zone, Zone::QmCaption | Zone::WheelCaption | Zone::CameraCaption)).map(|p| self.caption_shown(&p.placed)).collect();
+        for (panel, caption) in self.list.iter_mut().filter(|p| matches!(p.zone, Zone::QmCaption | Zone::WheelCaption | Zone::CameraCaption)).zip(shown) {
             panel.shown = caption && !self.peek;
         }
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {

@@ -311,7 +311,8 @@ pub fn sheet_place(zone: Zone) -> Placed {
 /// How far a sheet lies over where it does on a screen: nearer the eyes, its foot would seem to reach VRChat's tab row.
 const SHEET_OVER_THE_TABS: f32 = 9.0;
 
-/// Where a part lies in a headset, from where it does on a screen.
+/// Where a part lies in a headset, from where it does on a screen. OWNER DECISION, DO NOT REMOVE: with a page up the Quick Menu's side tiles stay and are moved off it
+/// here, never hidden (Enzo asked repeatedly, latest 2026-11-13; AGENTS.md, "Owner decisions"; test `side_tiles_stay_beside_a_page`).
 pub fn clear_of_sheet(mut placed: Placed, sheet_up: bool) -> Placed {
     if Zone::WING.contains(&placed.zone) || matches!(placed.zone, Zone::QmCaption | Zone::QmStop) {
         let side = if placed.rect.center().x < 0.0 { -1.0 } else { 1.0 };
@@ -1394,6 +1395,8 @@ impl OrbitVr {
         self.plane = plane.or(self.plane);
         let grips = if self.tune.align && cx.input_read { cx.actions.grabs(cx.steamvr) } else { [false; 2] };
         self.align(open, grips, &devices, &poses, settings.vr_size);
+        // The Quick Menu's side tiles (wing or strip) are laid here whether or not a page is up: OWNER DECISION, they stay with a page open (Enzo, repeatedly, latest
+        // 2026-11-13; AGENTS.md, "Owner decisions"). Do not filter them out for a sheet here or in `Panels::set_open`.
         let mut places: Vec<Placed> = match (menu, open) {
             (Some(Around::QuickMenu), Open::QuickMenu(_)) if settings.layout == orbiters_core::settings::OrbitLayout::Strip => strip_places(),
             (Some(Around::QuickMenu), Open::QuickMenu(hand)) => quick_menu_places(hand),
@@ -1787,6 +1790,22 @@ mod tests {
         let sheet = place(Zone::Takeover, 0.0);
         assert_eq!(clear_of_sheet(sheet, true).rect.left(), sheet.rect.left());
         assert!(clear_of_sheet(sheet, true).rect.top() < sheet.rect.top(), "clear of VRChat's tab row");
+    }
+
+    /// OWNER DECISION (Enzo, repeatedly; latest 2026-11-13): the Quick Menu's side tiles stay while a page is open. Where a headset has them then, on either hand's
+    /// side and in the strip, each is clear of the page and its head, and of the other tiles. Do not remove: see AGENTS.md, "Owner decisions".
+    #[test]
+    fn side_tiles_stay_beside_a_page() {
+        let page = [Zone::SheetBack, Zone::Takeover].map(|z| clear_of_sheet(sheet_place(z), true).rect);
+        for (layout, places) in [("right hand", quick_menu_places(0)), ("left hand", quick_menu_places(1)), ("strip", strip_places())] {
+            let laid: Vec<Placed> = places.iter().map(|p| clear_of_sheet(*p, true)).collect();
+            if layout != "strip" {
+                assert!(Zone::WING.iter().all(|z| laid.iter().any(|p| p.zone == *z)), "{layout}: the whole wing");
+            }
+            for a in &laid {
+                assert!(page.iter().all(|r| !r.intersects(a.rect)), "{layout}: {:?} {:?} over the page {page:?}", a.zone, a.rect);
+            }
+        }
     }
 
     fn at(t0: Instant, ms: u64) -> Instant {

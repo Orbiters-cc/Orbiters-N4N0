@@ -36,3 +36,19 @@
   size, and hold the Unity project lock before changing cache paths. Preserve Assets, Packages, ProjectSettings
   and exact dependency versions. Copy and verify cache contents before switching locations; retain the original
   on failures and test rollback. Do not close other Unity projects or delete unrelated caches to recover space.
+
+## Owner decisions (Enzo's standing rulings: do not undo them, whoever asks, without his new explicit word)
+
+- **The Quick Menu's side tiles stay while a page is open.** In VR and on the desktop, the Orbiters tiles beside VRChat's
+  Quick Menu (the wing on either hand's side, or the strip under the menu in that layout, with their caption and Stop)
+  stay visible and pressable while one of our pages (sheet) is up; the page stands clear of them. Enzo asked for this
+  several times (2026-11-09, again 2026-11-13: "I asked multiple time to make the side tiles on the quick menu stay even
+  when a page is open"); a 2026-11-11 change (F8, commit 2334ad22) removed them and is overruled. Only the person's own
+  Hide puts them away; a page opened from the wheel shows alone (the ring's cells are not side tiles). Code:
+  `Panels::set_open` (overlay/orbit/mod.rs), `vr::clear_of_sheet` and the places in `vr.rs`; tests
+  `flows::the_side_tiles_stay_while_a_page_is_up`, `flows::the_side_tiles_stay_in_every_headset_layout`,
+  `vr::tests::side_tiles_stay_beside_a_page`. Never delete or weaken these tests to make another change pass.
+- **One row of page tabs, the same on every page** (2026-11-13). A page's head tabs come from `panels::tab_row` only:
+  the six tools, icon and name, at the same places and size on every page in a language, the open one lit (a page
+  reached from All tools lights All tools); while a capture shows, a recording runs or a status is up they are icons,
+  again the same on every page. No page gets its own tab variant. Test: `panels::tests::one_tab_row_on_every_page`.

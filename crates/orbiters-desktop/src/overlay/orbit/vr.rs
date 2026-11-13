@@ -881,7 +881,7 @@ impl OrbitVr {
                     super::super::vr_log::line(&format!("camera pose: ns={}, captured {:?}, accepted {:?}, depth {}, side {:?}, unit {}, gap {}, width from {:?}, stereo_rms {:?}, stereo not used because {:?}, measured_width {:?}, pose {:?}, landmarks {:?}", orbiters_core::clock::now_ns(), seen.at, now, depth, self.camera_side, unit, gap, accepted.width_from, stereo, verdict.stereo, self.camera_measured_width, frame, seen.found)); // i18n: not shown (diagnostics)
                 }
                 self.camera_exclusion = vec![(seen.found, seen.size, mirror, space::compose(&head,&eye_on_head))];
-                if let Some(right) = seen.right { self.camera_exclusion.push((right.found, right.size, camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)), space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)))); }
+                if let Some(right) = seen.right.filter(|_|accepted.width_from==camera_track::WidthFrom::Stereo) { self.camera_exclusion.push((right.found, right.size, camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)), space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)))); }
                 let adopted=if self.camera_looks<=CAMERA_LOOKS_TO_SHOW {
                     self.camera_follow.attach(frame,unit); true
                 } else { self.camera_follow.seen_in_hands(frame,unit,captured_hands) };
@@ -1451,7 +1451,8 @@ impl OrbitVr {
             places.push(wheel_place(Zone::WheelHide));
         }
         // What the camera's tiles say lines up on their side; they say where the camera is not seen yet; the column stands off by what the fit is unsure of.
-        self.panels.camera_tracking(self.camera_side == camera_track::Side::Right,self.camera_watch.is_some() && !self.camera_scale_measured());
+        // "Finding" only until a look placed them: a width measured by one eye is enough to stand beside it.
+        self.panels.camera_tracking(self.camera_side == camera_track::Side::Right,self.camera_watch.is_some() && self.camera_panel_seen_ns.is_none());
         if menu == Some(Around::Camera) {
             camera_column_out(&mut places, self.camera_clearance, self.camera_side == camera_track::Side::Right);
         }

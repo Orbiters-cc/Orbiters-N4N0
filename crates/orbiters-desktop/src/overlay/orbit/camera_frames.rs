@@ -166,15 +166,33 @@ const EYE_TRIES: u32 = 8;
 
 /// One look on a picture read: `area` is where it is in the whole.
 fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f32; 2], whole: [usize; 2], last: Option<Found>, seen: &Mutex<Looks>, health: &Mutex<Health>, source: Source, at: Instant, right: Option<RightSeen>) -> Option<Found> {
+    let found = found_in(pixels, width, height, stride, offset, whole, last);
+    told(found, whole, seen, health, source, at, right, &mut None);
+    found
+}
+
+/// What a picture read shows of the panel, in the whole picture's pixels, without saying it anywhere yet.
+fn found_in(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f32; 2], whole: [usize; 2], last: Option<Found>) -> Option<Found> {
     let in_part = pixels.len() < whole[0] * whole[1] * 4 && stride == width * 4 && width < whole[0];
     let found = match last {
         // Around the last place in what was read, unless what was read is that already.
         Some(last) if !in_part => camera_track::find_in(pixels, width, height, stride, camera_track::around(&last, width, height), false).or_else(|| camera_track::find(pixels, width, height, stride)),
         _ => camera_track::find_in(pixels, width, height, stride, [0, 0, width, height], width <= 1400),
     };
-    let found = found.map(|f| f.shifted(offset));
+    found.map(|f| f.shifted(offset))
+}
+
+/// A look's result, counted and handed to the overlay; its landmarks into `camera-tiles.log` at most twice a second (`logged`), as a replay needs them.
+#[allow(clippy::too_many_arguments)]
+fn told(found: Option<Found>, whole: [usize; 2], seen: &Mutex<Looks>, health: &Mutex<Health>, source: Source, at: Instant, right: Option<RightSeen>, logged: &mut Option<Instant>) {
     if let Some(found) = found {
-        note(&format!("landmarks: ns={}, captured={:?}, source={:?}, fit={:?}", orbiters_core::clock::now_ns(), at, source, found)); // i18n: not shown (diagnostics)
+        if logged.is_none_or(|t| t.elapsed() >= Duration::from_millis(500)) {
+            *logged = Some(Instant::now());
+            note(&format!("landmarks: ns={}, captured={:?}, source={:?}, fit={:?}", orbiters_core::clock::now_ns(), at, source, found)); // i18n: not shown (diagnostics)
+            if let Some(right) = right {
+                note(&format!("right landmarks: frame {}, fit={:?}", right.frame_index, right.found)); // i18n: not shown (diagnostics)
+            }
+        }
     }
     let mut h = health.lock().unwrap_or_else(|e| e.into_inner());
     h.framed = Some(at);
@@ -185,7 +203,24 @@ fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f3
         drop(h);
         seen.lock().unwrap_or_else(|e| e.into_inner()).publish(Seen { found, size: [whole[0] as f32, whole[1] as f32], source, at, right, record:None });
     }
-    found
+}
+
+/// How the CPU worker's fits went, said every five seconds: how fast looks are, and whether the right eye is ever found (Enzo's dev.44 session made
+/// about one look a second and never a stereo pose, with nothing in the logs saying why).
+#[derive(Default)]
+struct Pace { since: Option<Instant>, jobs: u32, left_ms: f32, right_ms: f32, right_searched: u32, right_found: u32, paired: u32, left_found: u32 }
+impl Pace {
+    fn job(&mut self, left_ms: f32, right_ms: Option<f32>, left: bool, right: bool, paired: bool) {
+        let since = *self.since.get_or_insert_with(Instant::now);
+        self.jobs += 1; self.left_ms += left_ms; self.left_found += u32::from(left);
+        if let Some(ms) = right_ms { self.right_searched += 1; self.right_ms += ms; self.right_found += u32::from(right); self.paired += u32::from(right && paired); }
+        if since.elapsed() >= Duration::from_secs(5) {
+            let n = self.jobs.max(1) as f32;
+            note(&format!("fits: {} in {:.1} s, left {:.0} ms each (found {}), right searched {} at {:.0} ms each, found {}, same compositor frame {}", // i18n: not shown (diagnostics)
+                self.jobs, since.elapsed().as_secs_f32(), self.left_ms / n, self.left_found, self.right_searched, self.right_ms / self.right_searched.max(1) as f32, self.right_found, self.paired));
+            *self = Self::default();
+        }
+    }
 }
 
 /// A frame a second kept for measuring, if asked: only what is in `pixels`, and only on this computer.
@@ -221,6 +256,18 @@ struct Refinement {
     record: Option<[f32;2]>,
 }
 
+/// Where to look for the panel in the right eye when it has not been found there yet: the rows the left eye has it in, all across (both eyes look along
+/// the same rows; only the distance shifts it sideways). One pixel, never searched, while the left has not found it either: the whole right eye
+/// (44 MB on Enzo's headset) is not read for a look that cannot use it.
+fn right_band(left: Option<[u32; 4]>, whole: Option<[u32; 2]>) -> [u32; 4] {
+    left.zip(whole).map_or([0, 0, 1, 1], |([_, y, _, h], [w, _])| [0, y, w, h])
+}
+
+/// After this many looks in a row without the right eye, it is looked for only one look in `RIGHT_RETRY_EVERY`: one eye places the tools, and a
+/// right eye that never shows the panel (as on Enzo's dev.44 session) must not halve how often the left is read.
+const RIGHT_MISSES: u32 = 3;
+const RIGHT_RETRY_EVERY: u32 = 4;
+
 fn run(seen:&Mutex<Looks>,stop:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Option<Guide>>,from:From) {
     let mut kept=None;
     if let Some(source)=from.mirror {
@@ -231,16 +278,15 @@ fn run(seen:&Mutex<Looks>,stop:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Op
                 // cross threads; slow geometry never blocks the frame producer.
                 let (tx,rx)=std::sync::mpsc::sync_channel::<Refinement>(0);
                 let fitted=Mutex::new([None::<(Found,[u32;2])>;2]);
+                let busy=AtomicBool::new(false);
                 std::thread::scope(|scope| {
-                    let fitted_ref=&fitted;
+                    let fitted_ref=&fitted;let busy_ref=&busy;
                     scope.spawn(move || {
-                        let mut kept=None;let mut debug_kept=false;
+                        let mut kept=None;let mut debug_kept=false;let mut logged=None;
+                        let (mut right_misses,mut jobs,mut pace)=(0u32,0u32,Pace::default());
                         while let Ok(job)=rx.recv() {
                             if stop.load(Ordering::Relaxed){break;}
-                            let right_found=camera_track::find(&job.right.rgba,job.right.width as usize,job.right.height as usize,job.right.width as usize*4)
-                                .map(|f|f.shifted([job.right.from[0] as f32,job.right.from[1] as f32]));
-                            fitted_ref.lock().unwrap_or_else(|e|e.into_inner())[1]=right_found.map(|f|(f,job.right.whole));
-                            let right=right_found.zip(job.paired).map(|(found,frame_index)|RightSeen{found,size:[job.right.whole[0] as f32,job.right.whole[1] as f32],at:job.at,frame_index});
+                            jobs=jobs.wrapping_add(1);
                             let picture=job.left;
                             if from.keep_frames {keep(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4,Source::Eye,&mut kept);}
                             // Sandbox-only source evidence, encoded on this CPU
@@ -257,8 +303,22 @@ fn run(seen:&Mutex<Looks>,stop:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Op
                                 }
                             }
                             let whole=picture.whole;
-                            let found=looked(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4,[picture.from[0] as f32,picture.from[1] as f32],[whole[0] as usize,whole[1] as usize],None,seen,health,Source::Eye,job.at,right);
+                            let began=Instant::now();
+                            let found=found_in(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4,[picture.from[0] as f32,picture.from[1] as f32],[whole[0] as usize,whole[1] as usize],None);
+                            let left_ms=began.elapsed().as_secs_f32()*1000.;
                             fitted_ref.lock().unwrap_or_else(|e|e.into_inner())[0]=found.map(|f|(f,whole));
+                            // The right eye only where the left has it, and not on every look while it keeps missing.
+                            let search_right=found.is_some() && job.right.width>1 && (right_misses<RIGHT_MISSES || jobs%RIGHT_RETRY_EVERY==0);
+                            let began=Instant::now();
+                            let right_found=search_right.then(|| camera_track::find(&job.right.rgba,job.right.width as usize,job.right.height as usize,job.right.width as usize*4)
+                                .map(|f|f.shifted([job.right.from[0] as f32,job.right.from[1] as f32]))).flatten();
+                            let right_ms=search_right.then(||began.elapsed().as_secs_f32()*1000.);
+                            if search_right { right_misses=if right_found.is_some() {0} else {right_misses.saturating_add(1)}; }
+                            fitted_ref.lock().unwrap_or_else(|e|e.into_inner())[1]=right_found.map(|f|(f,job.right.whole));
+                            let right=right_found.zip(job.paired).map(|(found,frame_index)|RightSeen{found,size:[job.right.whole[0] as f32,job.right.whole[1] as f32],at:job.at,frame_index});
+                            pace.job(left_ms,right_ms,found.is_some(),right_found.is_some(),job.paired.is_some());
+                            told(found,[whole[0] as usize,whole[1] as usize],seen,health,Source::Eye,job.at,right,&mut logged);
+                            busy_ref.store(false,Ordering::Relaxed);
                         }
                     });
                     let(mut errors,mut last,mut said)=(0,None,false);
@@ -270,9 +330,19 @@ fn run(seen:&Mutex<Looks>,stop:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Op
                         let hint=guide.map(|(_,f,_)|f);let record_hint=guide.and_then(|(_,_,r)|r);
                         let predicted=hint.zip(last.or(fitted[0]).map(|(_,size)|size));
                         let area=predicted.or(last).or(fitted[0]).map(|(f,size)|camera_track::around(&f,size[0] as usize,size[1] as usize).map(|v|v as u32));
-                        let right_area=fitted[1].map(|(f,size)|camera_track::around(&f,size[0] as usize,size[1] as usize).map(|v|v as u32));
-                        match reader.read_pair(source,[area,right_area]) {
-                            Ok(([left,right],paired)) => {
+                        let right_area=fitted[1].map(|(f,size)|camera_track::around(&f,size[0] as usize,size[1] as usize).map(|v|v as u32))
+                            .or_else(||Some(right_band(area,last.or(fitted[0]).map(|(_,size)|size))));
+                        // A fit as soon as the worker is free, ten a second at most while the panel is in view: it is what places the tools.
+                        let job_every=if fitted[0].is_some() || last.is_some() {LOOK_EVERY} else {LOOK_WHOLE_EVERY};
+                        let job_due=requested.elapsed()>=job_every && !busy.load(Ordering::Relaxed);
+                        // Between fits only the left eye is read, and only to follow glyphs near where the overlay expects them.
+                        let read=if job_due {
+                            reader.read_pair(source,[area,right_area]).map(|([left,right],paired)|(left,Some((right,paired))))
+                        } else if hint.is_some() {
+                            reader.read_part(source,orbiters_openvr::compositor::Eye::Left,area).map(|left|(left,None))
+                        } else { Err(String::new()) };
+                        match read {
+                            Ok((left,pair)) => {
                                 errors=0;
                                 if !std::mem::replace(&mut said,true){note(&format!("reading persistent eye pair, {} x {}",left.whole[0],left.whole[1]));} // i18n: not shown (diagnostics)
                                 let offset=[left.from[0] as f32,left.from[1] as f32];
@@ -283,17 +353,19 @@ fn run(seen:&Mutex<Looks>,stop:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Op
                                     let mut h=health.lock().unwrap_or_else(|e|e.into_inner());h.framed=Some(began);h.found=Some(began);h.looks=h.looks.saturating_add(1);h.finds=h.finds.saturating_add(1);
                                     last=Some((found,left.whole));
                                 }
-                                if requested.elapsed()>=LOOK_WHOLE_EVERY {
+                                if let Some((right,paired))=pair {
+                                    busy.store(true,Ordering::Relaxed);
                                     match tx.try_send(Refinement{left,right,paired,at:began,record_hint,record}) {
                                         Ok(())=>requested=Instant::now(),
-                                        Err(std::sync::mpsc::TrySendError::Full(_))=>{},
+                                        Err(std::sync::mpsc::TrySendError::Full(_))=>busy.store(false,Ordering::Relaxed),
                                         Err(std::sync::mpsc::TrySendError::Disconnected(_))=>break,
                                     }
                                 }
                             }
+                            Err(error) if error.is_empty() => {}
                             Err(error) => {errors+=1;last=None;if errors==EYE_TRIES{note(&format!("the eye cannot be read: {error}"));}} // i18n: not shown (diagnostics)
                         }
-                        let every=if guide.is_some() || last.is_some() || fitted[0].is_some() {Duration::from_millis(16)} else {LOOK_WHOLE_EVERY};
+                        let every=if guide.is_some() {Duration::from_millis(16)} else if last.is_some() || fitted[0].is_some() {Duration::from_millis(10)} else {LOOK_WHOLE_EVERY};
                         std::thread::sleep(every.saturating_sub(began.elapsed()));
                     }
                     drop(tx); // CPU worker exits after its current bounded job.

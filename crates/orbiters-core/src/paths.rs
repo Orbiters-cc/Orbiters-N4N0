@@ -162,6 +162,12 @@ pub fn settings_file() -> PathBuf {
 
 /// `%LOCALAPPDATA%/Orbiters/logs`: what the processes of the app note when they panic ([`crate::panic_log`]).
 pub fn logs_dir() -> PathBuf {
+    // A debug build started by the VR sandbox (`tools/vr-sandbox`) logs into the sandbox: a test build never writes the person's own logs.
+    if cfg!(debug_assertions) {
+        if let Some(dir) = std::env::var_os("ORBITERS_SANDBOX_LOGS").filter(|d| !d.is_empty()) {
+            return PathBuf::from(dir);
+        }
+    }
     local_data_root().join("logs")
 }
 

@@ -389,6 +389,8 @@ class Session:
             _,alive=psutil.wait_procs(previous,timeout=20)
             if alive:raise RuntimeError('Installed Orbiters did not finish quitting; sandbox app was not launched')
             env=os.environ.copy();env['ORBITERS_VR_SANDBOX_ROOT']=str(Path(__file__).parent.resolve());env.pop('ORBITERS_NO_NETWORK_LISTENING',None)
+            # The test app's logs stay in the sandbox: the person's own Orbiters logs folder is never written by a test build.
+            env['ORBITERS_SANDBOX_LOGS']=str(ROOT/'logs');(ROOT/'logs').mkdir(exist_ok=True)
             with (ROOT/'app-out.log').open('a') as out,(ROOT/'app-err.log').open('a') as err:
                 proc=subprocess.Popen([str(exe),'--hidden'],env=env,stdout=out,stderr=err,creationflags=subprocess.CREATE_NO_WINDOW,cwd=exe.parent)
             return {'app_pid':proc.pid,'restore':str(install)}

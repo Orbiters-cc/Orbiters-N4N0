@@ -17,7 +17,7 @@
 //!   followed line again ([`Locomotion::correct`]): the whole anchor space moves by what that re-reading showed, and the
 //!   walking speed learns from it ([`Locomotion::gain`]).
 
-use crate::geometry::{self, add, axis, compose, normalized, origin, scale, sub, V3, IDENTITY, M34};
+use crate::geometry::{self, add, axis, compose, normalized, origin, scale, V3, IDENTITY, M34};
 
 /// Under this a stick is at rest (VRChat's own dead zone is about this).
 pub const STICK_REST: f32 = 0.15;
@@ -252,7 +252,7 @@ pub fn median(by: &[V3]) -> Option<V3> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{apply, norm};
+    use crate::geometry::{apply, norm, sub};
 
     fn input(now: f64, head: M34, walk: [f32; 2], turn: f32) -> Input {
         Input { now, head, walk, turn, turn_in_steps: false, menu_up: false }
@@ -392,6 +392,7 @@ mod tests {
         // Seen 2 m nearer than estimated.
         l.learn([0.0, 0.0, 2.0]);
         assert!(l.gain > 1.05 && l.gain < 1.25, "{}", l.gain);
+        assert_eq!(l.walked, 0.0);
         // Walking again the same: the world now goes 10 % further each second.
         let before = apply(&l.to_tracking, [0.0; 3]);
         for k in 201..=301 {
@@ -401,7 +402,6 @@ mod tests {
         }
         let went = apply(&l.to_tracking, [0.0; 3])[2] - before[2];
         assert!((went - 4.0 * l.gain).abs() < 0.1, "{went}");
-        assert_eq!(l.walked, 0.0);
     }
 
     #[test]

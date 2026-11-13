@@ -113,6 +113,9 @@ pub struct TranslateHost {
     /// OSC speeds taken since the last line in translate.log.
     osc_count: u32,
     motion_logged: Option<Instant>,
+    /// Development builds: `ORBITERS_TRANSLATE_NO_MOTION` leaves translations in tracking space as before 0.3.5-dev.49
+    /// (sticks not followed, lines found again elsewhere measured and logged but not moved), to measure the difference.
+    no_motion: bool,
 }
 
 impl Default for TranslateHost {
@@ -134,6 +137,7 @@ impl Default for TranslateHost {
             placed_with: orbiters_translate::geometry::IDENTITY,
             osc_count: 0,
             motion_logged: None,
+            no_motion: cfg!(debug_assertions) && std::env::var_os("ORBITERS_TRANSLATE_NO_MOTION").is_some(),
         }
     }
 }
@@ -249,7 +253,7 @@ impl TranslateHost {
             }
             self.osc_count += 1;
         }
-        if poses[0].pose_is_valid {
+        if poses[0].pose_is_valid && !self.no_motion {
             let sticks = cx.sticks.unwrap_or_default();
             self.motion.step(&motion::Input {
                 now: now.saturating_duration_since(self.clock).as_secs_f64(),
@@ -659,6 +663,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
         Err(state) => (Core::new(Some(engine), Box::new(Nobody), reader_of(&settings, &target)), Some(state)),
     };
     core.log_text = cfg!(debug_assertions) && std::env::var_os("ORBITERS_TRANSLATE_LOG_TEXT").is_some();
+    core.tracker.hold_anchors = cfg!(debug_assertions) && std::env::var_os("ORBITERS_TRANSLATE_NO_MOTION").is_some();
     let mut in_use = settings.clone();
     let mut translator_checked = Instant::now();
     // The built-in translator's download, on a thread of its own while reading goes on: bytes so far, in all, and

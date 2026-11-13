@@ -191,10 +191,17 @@ impl Core {
         let lines: Vec<_> = lines.into_iter().filter(|l| language::needs_translating(&l.text, &self.reader.target, &self.reader.reads)).collect();
         let sightings = pipeline::sightings(look, &lines);
         let followed = self.tracker.update(now, sightings, &|track: &Track| pipeline::seen(look, track));
+        if self.log_text {
+            let at = |t: &Track| t.placed.centre().map(|v| (v * 100.0).round() / 100.0);
+            self.log.push(format!("followed: {:?}", self.tracker.tracks.iter().map(|t| (t.text.as_str(), at(t), t.placed.measured, t.sightings)).collect::<Vec<_>>())); // i18n: not shown (a log's line)
+        }
+        if let (true, Some(by)) = (followed.held, followed.moved) {
+            self.log.push(format!("found lines again {:.0} cm from their anchors, {} agreeing (not moved: anchors held)", geometry::norm(by) * 100.0, followed.agreeing)); // i18n: not shown (a log's line)
+        }
         let mut timings = timings;
         timings.place = t.elapsed().as_secs_f32() * 1000.0;
         let mut scene = self.after_look(now, gaze, timings);
-        scene.moved = followed.moved;
+        scene.moved = followed.moved.filter(|_| !followed.held);
         Ok(scene)
     }
 
@@ -408,9 +415,9 @@ mod tests {
 
     #[test]
     fn a_little_head_movement_does_not_swap_the_translations_shown() {
-        // More lines than are shown, one every 3 degrees.
-        let texts: Vec<String> = (0..30).map(|i| format!("線{i}")).collect();
-        let lines = || texts.iter().enumerate().map(|(i, t)| line(t, i as f32 * 3.0 - 45.0)).collect::<Vec<_>>();
+        // More lines than are shown (in one batch, so that all come at once), one every 3 degrees.
+        let texts: Vec<String> = (0..22).map(|i| format!("線{i}")).collect();
+        let lines = || texts.iter().enumerate().map(|(i, t)| line(t, i as f32 * 3.0 - 31.5)).collect::<Vec<_>>();
         let mut core = Core::new(None, Box::new(Echo), Reader { target: "en".into(), reads: vec![] });
         let first = settle(&mut core, &lines, 0.0);
         assert_eq!(first.quads.len(), MOST_SHOWN);

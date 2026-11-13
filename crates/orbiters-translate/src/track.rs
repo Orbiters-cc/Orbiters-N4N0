@@ -73,6 +73,8 @@ pub struct Followed {
     pub moved: Option<V3>,
     /// Lines found again that agreed on it.
     pub agreeing: usize,
+    /// It was only measured ([`Tracker::hold_anchors`]): the lines did not move.
+    pub held: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -155,13 +157,16 @@ pub struct Tracker {
     /// the caller before each look. A line found again elsewhere moves all lines only as far as that motion since it was
     /// confirmed can have been misjudged: standing still, the same text a metre away is another sign.
     pub moved: [f32; 2],
+    /// Re-anchoring is measured but not done (a development switch, to measure how far lines slide without it).
+    pub hold_anchors: bool,
 }
 
 impl Tracker {
     /// One look's lines. `seen` says, for each line already followed, what this look could tell about it.
     pub fn update(&mut self, now: f64, sightings: Vec<Sighting>, seen: &dyn Fn(&Track) -> Seen) -> Followed {
-        let followed = self.reanchor(&sightings);
-        if let Some(by) = followed.moved {
+        let mut followed = self.reanchor(&sightings);
+        followed.held = self.hold_anchors && followed.moved.is_some();
+        if let (Some(by), false) = (followed.moved, followed.held) {
             for t in &mut self.tracks {
                 for (i, d) in by.iter().enumerate() {
                     t.placed.pose[i][3] += d;
@@ -287,7 +292,7 @@ impl Tracker {
         let distance = sightings.iter().filter(|s| s.placed.measured).map(|s| s.placed.distance).fold(0.0f32, f32::max);
         let noise = 0.08f32.max(0.04 * distance);
         let enough = if by.len() == 1 { geometry::norm(m) > 2.0 * noise } else { agreeing * 2 > by.len() && geometry::norm(m) > noise };
-        Followed { moved: enough.then_some(m), agreeing }
+        Followed { moved: enough.then_some(m), agreeing, held: false }
     }
 
     pub fn get(&self, id: u64) -> Option<&Track> {

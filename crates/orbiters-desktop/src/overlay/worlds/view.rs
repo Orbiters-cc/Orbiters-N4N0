@@ -154,7 +154,7 @@ const IDLE_KEEPS_GPU: Duration = Duration::from_secs(300);
 
 /// VRChat's setting for how it turns: `VRC_INPUT_COMFORT_TURNING`, on for steps. It is read when a capture shows; if it cannot be read, smoothly, VRChat's default.
 #[cfg(windows)]
-fn vrchat_turns_in_steps() -> Option<bool> {
+pub(crate) fn vrchat_turns_in_steps() -> Option<bool> {
     use windows::core::HSTRING;
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
     let (mut value, mut size) = (0u32, 4u32);
@@ -164,7 +164,7 @@ fn vrchat_turns_in_steps() -> Option<bool> {
 }
 
 #[cfg(not(windows))]
-fn vrchat_turns_in_steps() -> Option<bool> {
+pub(crate) fn vrchat_turns_in_steps() -> Option<bool> {
     None
 }
 

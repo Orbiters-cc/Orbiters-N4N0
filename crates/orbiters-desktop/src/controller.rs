@@ -235,6 +235,9 @@ struct CameraState {
 }
 
 const CAMERA_MODE: &str = "/usercamera/Mode";
+/// VRChat's avatar parameters that say how the player moves, forwarded to the overlay for live translation
+/// ([`ToClient::Locomotion`]): the avatar's velocity in its own axes, world metres a second.
+const LOCOMOTION: [&str; 3] = ["VelocityX", "VelocityY", "VelocityZ"];
 const CAMERA_STREAMING: &str = "/usercamera/Streaming";
 /// `/usercamera/Mode` for the Stream camera (0 off, 1 photo, 2 stream).
 const STREAM_MODE: i32 = 2;
@@ -1430,7 +1433,27 @@ impl Controller {
     fn on_osc_events(self: &Shared, events: &mut Vec<OscEvent>, at_ns: u64, record_parameter: &str) {
         let mut messages = Vec::with_capacity(events.len());
         let mut went_off = false;
+        // How the player moves, for live translation in VR (the overlay keeps translations on the world as the person
+        // walks with the stick): forwarded only while it is on.
+        let mut locomotion: Vec<(String, f32)> = Vec::new();
+        let translating = self.view().settings.translate.enabled
+            || (cfg!(debug_assertions) && (std::env::var_os("ORBITERS_TRANSLATE_ON").is_some() || std::env::var_os("ORBITERS_TRANSLATE_ON_FILE").is_some()));
         for event in events.drain(..) {
+            if translating {
+                match &event {
+                    OscEvent::Parameter { name, value } if LOCOMOTION.contains(&name.as_str()) => {
+                        if let OscValue::Float(v) = value {
+                            locomotion.push((name.clone(), *v));
+                        }
+                    }
+                    OscEvent::Values { address, values } if address == orbiters_n4n0_core::states::EYE_HEIGHT => {
+                        if let Some(OscValue::Float(v)) = values.first() {
+                            locomotion.push((address.clone(), *v));
+                        }
+                    }
+                    _ => {}
+                }
+            }
             match event {
                 OscEvent::Parameter { name, value } => {
                     // Face tracking's flood skips N4N0's buttons (none is one of its parameters).
@@ -1466,6 +1489,11 @@ impl Controller {
                     }
                 }
             }
+        }
+        if !locomotion.is_empty() {
+            let mut subs = self.subscribers.lock().unwrap();
+            // Only the readers that show things (the overlay, a window): the tray's mailbox would only keep them.
+            subs.retain(|m| !m.shows_notices() || m.post(ToClient::Locomotion { values: locomotion.clone() }));
         }
         self.on_osc(messages, at_ns);
         if went_off {

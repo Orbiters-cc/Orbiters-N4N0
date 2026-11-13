@@ -183,12 +183,14 @@ fn our_own_translations_are_masked_and_known_as_covered() {
         context: pipeline::context(&look.pair, &placed).unwrap(),
         first: 0.0,
         last_seen: 0.0,
+        in_view: 0.0,
+        moved_at: [0.0; 2],
         sightings: 2,
         misses: 0,
     };
     assert_eq!(pipeline::seen(&look, &track), Seen::Covered { changed: false });
     track.id = 2;
-    assert_eq!(pipeline::seen(&look, &track), Seen::Away, "under another overlay of ours: nothing can be told");
+    assert_eq!(pipeline::seen(&look, &track), Seen::Edge, "under another overlay of ours: on screen, nothing can be told");
     // The sign gone (the same look without it): its surroundings changed.
     let empty = [render_eye(&views[0], SIZE, &plain_room, &[]), render_eye(&views[1], SIZE, &plain_room, &[])];
     track.id = 1;

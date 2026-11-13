@@ -1,19 +1,38 @@
 //! Lines followed from look to look, so that a translation stays put: a line seen again (same text, about the same
-//! place in the room) refines its place a little at a time; a line not seen again where the eye could see it goes; a line
-//! out of view stays where it was for a while (it is anchored in the room: looking back finds it there).
+//! place in the world) refines its place a little at a time; a line not found again where the eye could see it goes; a
+//! line out of view stays where it was for a while (it is anchored to the world: looking back finds it there).
+//!
+//! Places are in the anchor space of [`crate::motion`], which moves with VRChat's world as the person walks and turns with
+//! the sticks. What that estimate gets wrong shows when a look finds followed lines again somewhere else: all lines then
+//! move by what those re-readings agree on ([`Tracker::update`]'s re-anchoring), which keeps a translation on its sign
+//! after walking with a stick.
 //!
 //! A line whose translation is shown is hidden from the text reader by that translation (our overlays are in the eye's
 //! picture, and are masked out of it). It is then kept while what surrounds it looks the same ([`Track::context`]); when
-//! that changes (the sign moved, someone walked in front, a chat bubble changed), it goes, and the next look reads what
-//! is there now.
+//! that changes (the sign moved, someone walked in front, a chat bubble changed) in two looks over a second apart, it
+//! goes, and the next look reads what is there now.
+//!
+//! When a line goes (Enzo, 2026-11-13: "the translated words should time out after it's not visible on the screen for
+//! long enough"), all by time, so that the reading's pace (three times slower while VRChat is short of processor time)
+//! does not change it:
+//! - off the screen ([`Seen::Away`]) for [`OUT_OF_VIEW_S`];
+//! - on screen but its text not found where it should be ([`Seen::Open`] in [`MISSES`] looks in a row, or its
+//!   surroundings changed while covered), and unconfirmed for [`MISS_S`];
+//! - on screen at the edge of the view, outside the part read, unconfirmed for [`UNCONFIRMED_S`].
+//!
+//! A line looked at is confirmed by each look (read again, or covered with its surroundings unchanged): it never goes.
 
 use crate::geometry::{self, add, normalized, scale, sub, V3};
 use crate::place::Placed;
 
-/// Looks in a row a line may be missed where it should be seen before it goes.
+/// Looks in a row a line may be missed where it should be seen before it can go.
 pub const MISSES: u32 = 2;
-/// Seconds a line out of view stays.
-pub const OUT_OF_VIEW_S: f64 = 20.0;
+/// And how long it must have gone unconfirmed then, seconds (two looks at the fastest pace are 0.7 s).
+pub const MISS_S: f64 = 1.2;
+/// Seconds a line off the screen stays (looking away and back within this finds it where it was).
+pub const OUT_OF_VIEW_S: f64 = 6.0;
+/// Seconds a line on screen but outside the part read stays unconfirmed.
+pub const UNCONFIRMED_S: f64 = 20.0;
 /// How much of a new measurement a known line takes.
 const FOLLOW: f32 = 0.35;
 
@@ -41,8 +60,19 @@ pub enum Seen {
     Open,
     /// Under its own translation: only its surroundings could be compared.
     Covered { changed: bool },
-    /// Outside the part read, or behind the eye.
+    /// On screen, but outside the part read (or under another of our overlays): nothing to tell.
+    Edge,
+    /// Off the screen: behind or beside the eye.
     Away,
+}
+
+/// What a look's following did beyond the lines themselves.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Followed {
+    /// All lines moved by this (anchor space): the world was not where the motion estimate had it.
+    pub moved: Option<V3>,
+    /// Lines found again that agreed on it.
+    pub agreeing: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -56,7 +86,12 @@ pub struct Track {
     pub colours: Colours,
     pub context: Vec<f32>,
     pub first: f64,
+    /// Last confirmed: read again, or covered with its surroundings unchanged.
     pub last_seen: f64,
+    /// Last on screen.
+    pub in_view: f64,
+    /// [`Tracker::moved`] when it was last confirmed.
+    pub moved_at: [f32; 2],
     pub sightings: u32,
     pub misses: u32,
 }
@@ -116,11 +151,23 @@ pub fn blend(a: &Placed, b: &Placed, t: f32) -> Placed {
 pub struct Tracker {
     pub tracks: Vec<Track>,
     next: u64,
+    /// How far the sticks moved the player so far, all told (metres walked, radians turned: [`crate::motion`]), set by
+    /// the caller before each look. A line found again elsewhere moves all lines only as far as that motion since it was
+    /// confirmed can have been misjudged: standing still, the same text a metre away is another sign.
+    pub moved: [f32; 2],
 }
 
 impl Tracker {
     /// One look's lines. `seen` says, for each line already followed, what this look could tell about it.
-    pub fn update(&mut self, now: f64, sightings: Vec<Sighting>, seen: &dyn Fn(&Track) -> Seen) {
+    pub fn update(&mut self, now: f64, sightings: Vec<Sighting>, seen: &dyn Fn(&Track) -> Seen) -> Followed {
+        let followed = self.reanchor(&sightings);
+        if let Some(by) = followed.moved {
+            for t in &mut self.tracks {
+                for (i, d) in by.iter().enumerate() {
+                    t.placed.pose[i][3] += d;
+                }
+            }
+        }
         let mut matched = vec![false; self.tracks.len()];
         let mut fresh = Vec::new();
         for s in sightings {
@@ -152,6 +199,8 @@ impl Tracker {
                     t.colours = s.colours;
                     t.context = s.context;
                     t.last_seen = now;
+                    t.in_view = now;
+                    t.moved_at = self.moved;
                     t.sightings += 1;
                     t.misses = 0;
                 }
@@ -168,30 +217,40 @@ impl Tracker {
                     context: s.context,
                     first: now,
                     last_seen: now,
+                    in_view: now,
+                    moved_at: self.moved,
                     sightings: 1,
                     misses: 0,
                 }),
             }
         }
         let mut keep = Vec::with_capacity(self.tracks.len() + fresh.len());
+        let moved = self.moved;
         for (t, was_matched) in std::mem::take(&mut self.tracks).into_iter().zip(matched) {
             if was_matched {
                 keep.push(t);
                 continue;
             }
             let mut t = t;
+            let missed = |t: &mut Track| {
+                t.misses += 1;
+                t.in_view = now;
+                t.misses < MISSES || now - t.last_seen < MISS_S
+            };
             let stays = match seen(&t) {
-                Seen::Open => {
-                    t.misses += 1;
-                    t.misses < MISSES
+                Seen::Open | Seen::Covered { changed: true } => missed(&mut t),
+                Seen::Covered { changed: false } => {
+                    t.last_seen = now;
+                    t.in_view = now;
+                    t.moved_at = moved;
+                    t.misses = 0;
+                    true
                 }
-                Seen::Covered { changed } => {
-                    if !changed {
-                        t.last_seen = now;
-                    }
-                    !changed
+                Seen::Edge => {
+                    t.in_view = now;
+                    now - t.last_seen < UNCONFIRMED_S
                 }
-                Seen::Away => now - t.last_seen < OUT_OF_VIEW_S,
+                Seen::Away => now - t.in_view < OUT_OF_VIEW_S,
             };
             if stays {
                 keep.push(t);
@@ -201,6 +260,34 @@ impl Tracker {
         keep.retain(|t| !fresh.iter().any(|f| geometry::norm(sub(f.placed.centre(), t.placed.centre())) < 0.5 * f.placed.height.max(t.placed.height) && t.sightings == 1 && t.last_seen < now));
         keep.extend(fresh);
         self.tracks = keep;
+        followed
+    }
+
+    /// Lines measured from both eyes found again, each alone of its text in the look and near where it was followed, but
+    /// further than a measurement's own noise: where they agree the world is, against where the anchors have it.
+    fn reanchor(&self, sightings: &[Sighting]) -> Followed {
+        let mut by = Vec::new();
+        for s in sightings.iter().filter(|s| s.placed.measured) {
+            let k = key(&s.text);
+            let same = |text: &str| text == k || alike(text, &k) >= 0.75;
+            if sightings.iter().filter(|o| same(&key(&o.text))).count() != 1 {
+                continue;
+            }
+            // As far as the sticks' motion since a line was confirmed can have been misjudged: half of what was walked,
+            // and half of what was turned at that distance.
+            let reach = |t: &Track| 0.25 + 0.5 * ((self.moved[0] - t.moved_at[0]).max(0.0) + (self.moved[1] - t.moved_at[1]).max(0.0) * s.placed.distance);
+            let near: Vec<&Track> = self.tracks.iter().filter(|t| t.placed.measured && same(&t.key) && geometry::norm(sub(t.placed.centre(), s.placed.centre())) < reach(t)).collect();
+            if let [t] = near[..] {
+                by.push(sub(s.placed.centre(), t.placed.centre()));
+            }
+        }
+        let Some(m) = crate::motion::median(&by) else { return Followed::default() };
+        let agreeing = by.iter().filter(|b| geometry::norm(sub(**b, m)) < 0.15).count();
+        // One line alone may be a misplacement: it must be well off to count. Several must mostly agree.
+        let distance = sightings.iter().filter(|s| s.placed.measured).map(|s| s.placed.distance).fold(0.0f32, f32::max);
+        let noise = 0.08f32.max(0.04 * distance);
+        let enough = if by.len() == 1 { geometry::norm(m) > 2.0 * noise } else { agreeing * 2 > by.len() && geometry::norm(m) > noise };
+        Followed { moved: enough.then_some(m), agreeing }
     }
 
     pub fn get(&self, id: u64) -> Option<&Track> {
@@ -249,7 +336,7 @@ mod tests {
         t.update(0.0, vec![seen("出口", 0.0)], &|_| Seen::Open);
         t.update(0.5, vec![], &|_| Seen::Open);
         assert_eq!(t.tracks.len(), 1, "one miss is forgiven");
-        t.update(1.0, vec![], &|_| Seen::Open);
+        t.update(1.5, vec![], &|_| Seen::Open);
         assert!(t.tracks.is_empty());
     }
 
@@ -257,10 +344,117 @@ mod tests {
     fn a_line_out_of_view_stays_for_a_while() {
         let mut t = Tracker::default();
         t.update(0.0, vec![seen("出口", 0.0)], &|_| Seen::Open);
+        t.update(4.0, vec![], &|_| Seen::Away);
+        assert_eq!(t.tracks.len(), 1, "looking away a moment and back finds it");
+        t.update(5.5, vec![], &|_| Seen::Away);
+        assert_eq!(t.tracks.len(), 1);
+        t.update(OUT_OF_VIEW_S + 0.5, vec![], &|_| Seen::Away);
+        assert!(t.tracks.is_empty(), "off the screen long enough: gone");
+    }
+
+    #[test]
+    fn looking_back_at_it_restarts_its_time() {
+        let mut t = Tracker::default();
+        t.update(0.0, vec![seen("出口", 0.0)], &|_| Seen::Open);
+        t.update(5.0, vec![], &|_| Seen::Away);
+        // On screen at the edge for a moment, then away again: counted from then.
+        t.update(5.5, vec![], &|_| Seen::Edge);
         t.update(10.0, vec![], &|_| Seen::Away);
         assert_eq!(t.tracks.len(), 1);
-        t.update(25.0, vec![], &|_| Seen::Away);
+        t.update(12.0, vec![], &|_| Seen::Away);
         assert!(t.tracks.is_empty());
+    }
+
+    #[test]
+    fn at_the_edge_of_the_view_unconfirmed_it_goes_in_time() {
+        let mut t = Tracker::default();
+        t.update(0.0, vec![seen("出口", 0.0)], &|_| Seen::Open);
+        t.update(UNCONFIRMED_S - 1.0, vec![], &|_| Seen::Edge);
+        assert_eq!(t.tracks.len(), 1);
+        t.update(UNCONFIRMED_S + 0.5, vec![], &|_| Seen::Edge);
+        assert!(t.tracks.is_empty());
+    }
+
+    #[test]
+    fn a_sign_looked_at_never_goes() {
+        // Hundreds of looks at both paces with its translation over it; a noisy compare now and then (someone walking by)
+        // never twice in a row: it stays all along.
+        let mut t = Tracker::default();
+        t.update(0.0, vec![seen("出口", 0.0)], &|_| Seen::Open);
+        let mut now = 0.0;
+        for k in 0..300 {
+            now += if k % 3 == 0 { 0.35 } else { 1.5 };
+            let changed = k % 17 == 5;
+            t.update(now, vec![], &|_| Seen::Covered { changed });
+            assert_eq!(t.tracks.len(), 1, "look {k} at {now:.1} s");
+        }
+    }
+
+    #[test]
+    fn a_line_missed_in_quick_looks_waits_a_little() {
+        let mut t = Tracker::default();
+        t.update(0.0, vec![seen("出口", 0.0)], &|_| Seen::Open);
+        t.update(0.35, vec![], &|_| Seen::Open);
+        t.update(0.7, vec![], &|_| Seen::Open);
+        assert_eq!(t.tracks.len(), 1, "two quick misses are not yet {MISS_S} s");
+        t.update(1.3, vec![], &|_| Seen::Open);
+        assert!(t.tracks.is_empty());
+    }
+
+    #[test]
+    fn found_again_elsewhere_all_lines_move_with_it() {
+        let mut t = Tracker::default();
+        t.update(0.0, vec![seen("出口", 0.0), seen("入口", 1.0)], &|_| Seen::Open);
+        // Walked 3 m with the stick and the estimate fell 60 cm short: the next look finds 出口 0.6 m further along X.
+        t.moved = [3.0, 0.0];
+        let f = t.update(1.5, vec![seen("出口", 0.6)], &|_| Seen::Away);
+        let by = f.moved.expect("re-anchored");
+        assert!((by[0] - 0.6).abs() < 1e-4, "{by:?}");
+        assert_eq!(t.tracks.len(), 2, "one line, not a new one beside the old");
+        let other = t.tracks.iter().find(|x| x.text == "入口").unwrap();
+        assert!((other.placed.centre()[0] - 1.6).abs() < 1e-4, "the line not looked at moved too");
+        let exit = t.tracks.iter().find(|x| x.text == "出口").unwrap();
+        assert!((exit.placed.centre()[0] - 0.6).abs() < 1e-4);
+    }
+
+    #[test]
+    fn standing_still_the_same_text_elsewhere_is_another_sign() {
+        let mut t = Tracker::default();
+        t.update(0.0, vec![seen("出口", 0.0)], &|_| Seen::Open);
+        let f = t.update(0.5, vec![seen("出口", 1.0)], &|_| Seen::Open);
+        assert_eq!(f.moved, None);
+        // Turned a quarter turn with the stick: at 2 m a sign may be up to 0.25 + 0.5 x 1.57 x 2 m off.
+        t.moved = [0.0, std::f32::consts::FRAC_PI_2];
+        let f = t.update(1.0, vec![seen("出口", 2.0)], &|_| Seen::Away);
+        assert!(f.moved.is_some());
+    }
+
+    #[test]
+    fn a_small_difference_is_noise_not_a_move() {
+        let mut t = Tracker::default();
+        t.update(0.0, vec![seen("出口", 0.0), seen("入口", 1.0)], &|_| Seen::Open);
+        t.moved = [3.0, 0.0];
+        let f = t.update(0.5, vec![seen("出口", 0.03), seen("入口", 1.02)], &|_| Seen::Open);
+        assert_eq!(f.moved, None);
+    }
+
+    #[test]
+    fn two_signs_alike_do_not_re_anchor() {
+        // Two 出口 in one look: which is which cannot be told.
+        let mut t = Tracker::default();
+        t.update(0.0, vec![seen("出口", 0.0)], &|_| Seen::Open);
+        t.moved = [3.0, 0.0];
+        let f = t.update(0.5, vec![seen("出口", 0.7), seen("出口", -0.7)], &|_| Seen::Open);
+        assert_eq!(f.moved, None);
+    }
+
+    #[test]
+    fn lines_that_disagree_do_not_re_anchor() {
+        let mut t = Tracker::default();
+        t.update(0.0, vec![seen("出口", 0.0), seen("入口", 2.0), seen("非常口", 4.0)], &|_| Seen::Open);
+        t.moved = [3.0, 0.0];
+        let f = t.update(0.5, vec![seen("出口", 0.5), seen("入口", 1.5), seen("非常口", 4.0)], &|_| Seen::Open);
+        assert_eq!(f.moved, None, "{f:?}");
     }
 
     #[test]
@@ -272,6 +466,8 @@ mod tests {
         }
         assert_eq!(t.tracks.len(), 1);
         t.update(11.0, vec![], &|_| Seen::Covered { changed: true });
+        assert_eq!(t.tracks.len(), 1, "one changed compare may be someone passing");
+        t.update(12.5, vec![], &|_| Seen::Covered { changed: true });
         assert!(t.tracks.is_empty());
     }
 

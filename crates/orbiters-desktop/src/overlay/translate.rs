@@ -12,6 +12,11 @@
 //!
 //! Our own overlays are in the eyes' pictures: the translations are masked out of what is read (a translation must not be
 //! read again), and reading pauses while a menu is up.
+//!
+//! Places live in the anchor space of [`orbiters_translate::motion`], which follows VRChat's world as the person walks
+//! and turns with the sticks (VRChat's speed from OSC, forwarded by the service: [`crate::ipc::ToClient::Locomotion`]):
+//! the heads recorded for the reading thread are in it, the translations are kept in it, and each turn shows them where
+//! the world is in tracking space now.
 
 use super::Presenter;
 use crate::backend::Ctl;
@@ -20,6 +25,7 @@ use orbiters_core::settings::{TranslateProvider, TranslateSettings};
 use orbiters_openvr::{self as vr, overlay_flag, Matrix34};
 use orbiters_translate::core::{Activity, Core, Reader, Scene, MOST_SHOWN};
 use orbiters_translate::geometry::M34;
+use orbiters_translate::motion::{self, Locomotion};
 use orbiters_translate::paint::Painted;
 use orbiters_translate::pipeline::Shown;
 use orbiters_translate::provider::{self, Failure, Translator};
@@ -43,8 +49,12 @@ const FAST_TURN: f32 = 70.0;
 /// What the overlay's turn and the reading thread share.
 #[derive(Default)]
 struct Shared {
-    /// Head poses (standing space) by time, the last two seconds.
+    /// Head poses (anchor space: [`Locomotion::anchor`]) by time, the last two seconds.
     heads: VecDeque<(Instant, M34)>,
+    /// What the sticks moved the player so far (metres walked, radians turned), for re-anchoring's reach.
+    moved: [f32; 2],
+    /// Lines found again elsewhere than the anchors had them: by how much (anchor space), for the walking speed to learn.
+    corrections: Vec<orbiters_translate::geometry::V3>,
     /// SteamVR's eye-to-head transforms and projection tangents (left, right).
     eyes: Option<([M34; 2], [[f32; 4]; 2])>,
     /// A menu or the dashboard covers the view.
@@ -70,6 +80,7 @@ struct Slot {
     handle: vr::OverlayHandle,
     track: Option<u64>,
     picture: Option<Arc<Painted>>,
+    /// Anchor space; shown at `Locomotion::tracking` of it.
     pose: M34,
     width: f32,
     alpha: f32,
@@ -91,6 +102,17 @@ pub struct TranslateHost {
     frames_since: Option<Instant>,
     frames_logged: Vec<orbiters_booster::frames::Frame>,
     frames_logged_since: Option<Instant>,
+    /// Where VRChat's world is in tracking space now, as the sticks move the player.
+    motion: Locomotion,
+    /// Since when [`Locomotion`] counts time.
+    clock: Instant,
+    /// VRChat turns in steps (its comfort turning), read when translation starts.
+    turn_in_steps: bool,
+    /// The anchor-to-tracking transform the overlays were last placed with.
+    placed_with: M34,
+    /// OSC speeds taken since the last line in translate.log.
+    osc_count: u32,
+    motion_logged: Option<Instant>,
 }
 
 impl Default for TranslateHost {
@@ -106,6 +128,12 @@ impl Default for TranslateHost {
             frames_since: None,
             frames_logged: Vec::new(),
             frames_logged_since: None,
+            motion: Locomotion::default(),
+            clock: Instant::now(),
+            turn_in_steps: false,
+            placed_with: orbiters_translate::geometry::IDENTITY,
+            osc_count: 0,
+            motion_logged: None,
         }
     }
 }
@@ -121,6 +149,11 @@ pub struct Cx<'a, 'b> {
     pub covered: bool,
     /// VRChat's frames since the last turn, as SteamVR's compositor timed them.
     pub frames: &'a [orbiters_booster::frames::Frame],
+    /// The two hands' sticks (x right, y forward) when read this turn, and which hand walks in VRChat.
+    pub sticks: Option<[[f32; 2]; 2]>,
+    pub walk_hand: usize,
+    /// SteamVR's dashboard is up: VRChat gets no input then.
+    pub dashboard: bool,
 }
 
 /// How VRChat's frames went lately: what slows the reading down when the game is short of processor time.
@@ -187,6 +220,10 @@ impl TranslateHost {
         }
         if self.thread.is_none() {
             self.start(cx.steamvr);
+            self.motion = Locomotion::default();
+            self.motion.read_player_height(vrchat_player_height());
+            self.turn_in_steps = super::worlds::view::vrchat_turns_in_steps().unwrap_or(false);
+            self.placed_with = self.motion.to_tracking;
         }
         let now = Instant::now();
         let dt = self.last_turn.map_or(0.0, |t| (now - t).as_secs_f32());
@@ -194,13 +231,56 @@ impl TranslateHost {
         // The head now, for the thread to find it at the moment of a look.
         let mut poses = [vr::Pose::default(); vr::MAX_DEVICES];
         cx.steamvr.poses(vr::Universe::Standing, &mut poses);
+        // What VRChat said of the player's speed, then how far the sticks moved the world this turn.
+        for (at, name, value) in cx.backend.take_locomotion() {
+            let at = at.saturating_duration_since(self.clock).as_secs_f64();
+            let v = self.motion.osc.velocity.map_or([0.0; 3], |(v, _)| v);
+            let set = |i: usize| {
+                let mut v = v;
+                v[i] = value;
+                Some((v, at))
+            };
+            match name.as_str() {
+                "VelocityX" => self.motion.osc.velocity = set(0),
+                "VelocityY" => self.motion.osc.velocity = set(1),
+                "VelocityZ" => self.motion.osc.velocity = set(2),
+                orbiters_n4n0_core::states::EYE_HEIGHT => self.motion.osc.eye_height = Some(value),
+                _ => {}
+            }
+            self.osc_count += 1;
+        }
+        if poses[0].pose_is_valid {
+            let sticks = cx.sticks.unwrap_or_default();
+            self.motion.step(&motion::Input {
+                now: now.saturating_duration_since(self.clock).as_secs_f64(),
+                head: m34(&poses[0].device_to_absolute),
+                walk: sticks[cx.walk_hand.min(1)],
+                turn: sticks[1 - cx.walk_hand.min(1)][0],
+                turn_in_steps: self.turn_in_steps,
+                menu_up: cx.dashboard,
+            });
+        }
+        self.log_motion();
         let (scene, status) = {
             let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             if poses[0].pose_is_valid {
-                s.heads.push_back((now, m34(&poses[0].device_to_absolute)));
+                s.heads.push_back((now, self.motion.anchor(&m34(&poses[0].device_to_absolute))));
                 while s.heads.front().is_some_and(|(t, _)| now.duration_since(*t) > Duration::from_secs(2)) {
                     s.heads.pop_front();
                 }
+            }
+            s.moved = self.motion.total;
+            // Lines found again elsewhere: how far the walk was misjudged, in tracking space, to learn the speed from.
+            for by in std::mem::take(&mut s.corrections) {
+                let by = orbiters_translate::geometry::rotate(&self.motion.to_tracking, by);
+                note(&format!(
+                    "found lines again {:.0} cm from their anchors after walking {:.2} m and turning {:.0} degrees with the sticks; walking speed x{:.2}", // i18n: not shown (a log's line)
+                    orbiters_translate::geometry::norm(by) * 100.0,
+                    self.motion.walked,
+                    self.motion.turned.to_degrees(),
+                    self.motion.gain
+                ));
+                self.motion.learn(by);
             }
             if s.eyes.is_none() {
                 let eyes = [vr::compositor::Eye::Left, vr::compositor::Eye::Right];
@@ -212,6 +292,13 @@ impl TranslateHost {
         };
         if let Some(scene) = scene {
             self.place(cx.overlay, cx.presenter, &scene);
+        }
+        // The world moved through tracking space: every translation with it.
+        if self.motion.to_tracking != self.placed_with {
+            self.placed_with = self.motion.to_tracking;
+            for slot in self.slots.iter().filter(|s| s.visible || s.to > 0.0) {
+                let _ = cx.overlay.set_transform_absolute(slot.handle, &matrix(&self.motion.tracking(&slot.pose)));
+            }
         }
         self.animate(cx.overlay, dt);
         let shown: Vec<Shown> =
@@ -337,9 +424,32 @@ impl TranslateHost {
                 slot.pose = q.pose;
                 slot.width = q.width;
                 let _ = overlay.set_width_in_meters(slot.handle, q.width);
-                let _ = overlay.set_transform_absolute(slot.handle, &matrix(&q.pose));
+                let _ = overlay.set_transform_absolute(slot.handle, &matrix(&self.motion.tracking(&q.pose)));
             }
         }
+    }
+
+    /// Every ten seconds while the sticks moved the player: how, for translate.log.
+    fn log_motion(&mut self) {
+        let due = self.motion_logged.is_none_or(|t| t.elapsed() >= Duration::from_secs(10));
+        if !due {
+            return;
+        }
+        let moved = self.motion.total;
+        if self.motion_logged.is_some() && (moved[0] > 0.0 || moved[1] > 0.0 || self.osc_count > 0) {
+            note(&format!(
+                "sticks moved the player {:.1} m and {:.0} degrees in all; {} OSC speeds in 10 s, last {:?}; world scale {:.2}, walking speed x{:.2}, turning in steps {}", // i18n: not shown (a log's line)
+                moved[0],
+                moved[1].to_degrees(),
+                self.osc_count,
+                self.motion.osc.velocity.map(|(v, _)| v),
+                self.motion.world_scale(),
+                self.motion.gain,
+                self.turn_in_steps
+            ));
+        }
+        self.osc_count = 0;
+        self.motion_logged = Some(Instant::now());
     }
 
     fn animate(&mut self, overlay: &vr::Overlay, dt: f32) {
@@ -386,6 +496,11 @@ impl TranslateHost {
         for slot in self.slots.drain(..) {
             let _ = overlay.destroy(slot.handle);
         }
+    }
+
+    /// The reading thread runs (translation is on).
+    pub fn running(&self) -> bool {
+        self.thread.is_some()
     }
 
     /// What the stall log says it was doing.
@@ -562,10 +677,11 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
     let mut game_busy = false;
     let mut last_gaze = None;
     while !stop.load(Ordering::Relaxed) {
-        let (heads, eyes, paused, shown, now_settings) = {
+        let (heads, eyes, paused, shown, now_settings, moved) = {
             let s = shared.lock().unwrap_or_else(|e| e.into_inner());
-            (s.heads.clone(), s.eyes, s.paused, s.shown.clone(), s.settings.clone())
+            (s.heads.clone(), s.eyes, s.paused, s.shown.clone(), s.settings.clone(), s.moved)
         };
+        core.tracker.moved = moved;
         // Settings changed: another translator, another language.
         if let Some((s, target)) = now_settings {
             let translator_changed = s.provider != in_use.provider || s.server != in_use.server || s.model != in_use.model || s.orbiters_agreed != in_use.orbiters_agreed;
@@ -697,6 +813,9 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
         let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
         match step {
             Ok(scene) => {
+                if let Some(by) = scene.moved {
+                    s.corrections.push(by);
+                }
                 let fetch = fetching.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 s.status.state = match (&translator_state, &scene.activity) {
                     (Some(TranslateState::NoLocalTranslator), _) if matches!(fetch, Some((_, _, None))) => {
@@ -766,6 +885,26 @@ fn pct(size: [u32; 2], p: [u32; 4]) -> [u32; 4] {
         return [0, 0, size[0], size[1]];
     }
     [size[0] * p[0] / 100, size[1] * p[1] / 100, size[0] * p[2] / 100, size[1] * p[3] / 100]
+}
+
+/// The person's real height as VRChat has it (Settings, Tracking & IK, Player Height, metres): with the avatar's eye
+/// height, how much larger than the room the world is.
+#[cfg(windows)]
+fn vrchat_player_height() -> Option<f32> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_QWORD};
+    let (mut value, mut size) = (0u64, 8u32);
+    // SAFETY: the buffer and its size are valid for the call, and the type asked for is that size.
+    let status = unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, &HSTRING::from("Software\\VRChat\\VRChat"), &HSTRING::from("PlayerHeight_h2758831273"), RRF_RT_REG_QWORD, None, Some(&mut value as *mut u64 as *mut _), Some(&mut size))
+    };
+    // Unity keeps a float preference as a double's bits.
+    status.is_ok().then(|| f64::from_bits(value) as f32)
+}
+
+#[cfg(not(windows))]
+fn vrchat_player_height() -> Option<f32> {
+    None
 }
 
 /// The head at `at`: the recorded pose nearest in time.

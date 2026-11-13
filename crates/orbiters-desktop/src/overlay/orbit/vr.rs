@@ -854,7 +854,8 @@ impl OrbitVr {
                 if let Some((age,record))=matching.map(|(age,_)|age).zip(seen.record) {
                     self.camera_follow.composited_clock(age,seen.found.x,record,seen.size,mirror,&image_eye,&samples,seen.at);
                 }
-                if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
+                // Once a second: thirty lines a second rotated vr-test.log within a minute and lost the sandbox's evidence (camera3/m3).
+                if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() && self.camera_clock_logged.due(Duration::from_secs(1)) {
                     super::super::vr_log::line(&format!("camera compositor clock: ns={}, record {:?}, native_age {:?}, calibrated {}, delay {:?}",orbiters_core::clock::now_ns(),seen.record,matching.map(|(age,_)|age),self.camera_follow.record_ready(),self.camera_follow.scene_age())); // i18n: not shown (sandbox diagnostics)
                 }
                 if let Some(hand)=self.camera_follow.observe_image_grab(&seen.found,seen.size,mirror,&space::compose(&head,&eye_on_head),captured_hands,observed_grips) {
@@ -1120,6 +1121,7 @@ pub struct OrbitVr {
     /// What became of the camera's looks since the last line about them in `vr-test.log`.
     camera_verdicts: CameraVerdicts,
     camera_pose_logged: super::super::vr_log::Every,
+    camera_clock_logged: super::super::vr_log::Every,
     /// The head lately, for where it was when a look's frame was taken.
     camera_heads: std::collections::VecDeque<(Instant, Matrix34,[Option<Matrix34>;2])>,
     trigger_was: [bool; 2],
@@ -1189,6 +1191,7 @@ impl OrbitVr {
             camera_input_logged:Default::default(),
             camera_verdicts:Default::default(),
             camera_pose_logged:Default::default(),
+            camera_clock_logged:Default::default(),
             camera_heads: Default::default(),
             trigger_was: [true; 2],
             pointing_since: now,

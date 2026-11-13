@@ -128,6 +128,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             if orbiters_core::osc::VRCHAT_RUNS_HERE {
                 m.add(15, |ui| apply |= super::booster_card::card(ui, cx, 15, &mut state.booster, &mut draft));
             }
+            if orbiters_core::osc::VRCHAT_RUNS_HERE {
+                m.add(16, |ui| apply |= super::translate_card::card(ui, cx, 16, &mut draft));
+            }
             // Setting Windows' default is Windows' alone.
             if cfg!(windows) {
                 m.add(14, |ui| super::mic_grid::card(ui, cx, 14, &mut state.mic_grid));

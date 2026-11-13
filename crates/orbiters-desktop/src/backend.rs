@@ -35,6 +35,12 @@ pub trait Backend: Send + Sync {
     }
     /// What the panels around VRChat's menus say of themselves, for Settings.
     fn orbit_status(&self, _status: crate::state::OrbitStatus) {}
+    /// What live translation in VR is doing, for the menus and Settings.
+    fn translate_status(&self, _status: crate::state::TranslateStatus) {}
+    /// Lines translated by Orbiters' service (blocking: call it from a thread of its own).
+    fn translate(&self, _batch: orbiters_translate::provider::Batch) -> controller::translate::Answer {
+        Err(controller::translate::Refused::SignedOut)
+    }
     fn pause_capture(&self, paused: bool);
     fn start_test_capture(&self);
     /// VRChat's camera flies around where it stands, at three heights, then the recording is reconstructed.
@@ -143,6 +149,12 @@ impl Backend for Remote {
     }
     fn orbit_status(&self, status: crate::state::OrbitStatus) {
         self.0.send(&ToService::Orbit { status });
+    }
+    fn translate_status(&self, status: crate::state::TranslateStatus) {
+        self.0.send(&ToService::TranslateStatus { status });
+    }
+    fn translate(&self, batch: orbiters_translate::provider::Batch) -> controller::translate::Answer {
+        self.0.translate(batch)
     }
     fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         self.0.vrchat_data(scope, request)
@@ -376,6 +388,8 @@ impl Local {
 
 impl Backend for Local {
     fn camera_qr(&self, active: bool) { self.ctl.camera_qr(active); }
+    fn translate_status(&self, status: crate::state::TranslateStatus) { self.ctl.set_translate_status(status); }
+    fn translate(&self, batch: orbiters_translate::provider::Batch) -> controller::translate::Answer { self.ctl.translate_remote(&batch) }
     fn switch_demo_avatar(&self) { self.ctl.switch_demo_avatar(); }
     fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         self.ctl.vrchat_data(scope, request)

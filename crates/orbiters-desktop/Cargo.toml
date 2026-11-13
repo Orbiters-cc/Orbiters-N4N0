@@ -21,6 +21,7 @@ orbiters-n4n0-core = { workspace = true }
 orbiters-n4n0 = { workspace = true }
 orbiters-update = { workspace = true, features = ["net"] }
 orbiters-reconstruct = { workspace = true }
+orbiters-translate = { workspace = true }
 bytemuck = { workspace = true }
 orbiters-openvr = { workspace = true }
 orbiters-smooth = { workspace = true }

@@ -37,3 +37,6 @@ crates/orbiters-desktop/src/overlay/worlds/paint_snapshot.rs
 # Interaction regression fixtures and developer assertions only.
 crates/orbiters-desktop/src/overlay/orbit/flows.rs
 crates/orbiters-desktop/src/steamvr_start.rs
+# Live translation's engine (reading, placing, translating text seen in VR): its errors are log details; what people read
+# of it is worded in the desktop's overlay/translate.rs and its sheet (catalog/translate), never here.
+crates/orbiters-translate

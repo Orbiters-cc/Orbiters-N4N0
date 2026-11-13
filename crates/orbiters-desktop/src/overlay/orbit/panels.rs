@@ -29,6 +29,9 @@ pub use mic_sheet::MicTile;
 use mic_sheet::{draw_mics, mic_items};
 mod tracking_sheet;
 pub use tracking_sheet::{smoothing_at, Smoothed};
+mod translate_sheet;
+pub use translate_sheet::{orbiters_notice, status_words, target_after, target_name, TranslateFacts, TranslatePick, TARGETS};
+use translate_sheet::{draw_target, draw_translate, translate_caption, translate_items};
 use tracking_sheet::{draw_smoothing_bar, draw_tracking, tracking_caption, tracking_items};
 use settings_sheet::{draw_settings, draw_stepper_name, hue_color, language_name, settings_items, settings_caption, sound_name};
 pub use settings_sheet::{hue_at, language_after};
@@ -148,6 +151,8 @@ pub enum Action {
     Peek,
     /// The FPS booster's sheet.
     Booster,
+    /// Live translation's sheet.
+    Translate,
     /// The sheet of settings for these menus, and something chosen on it.
     Settings,
     Set(Pick),
@@ -258,6 +263,8 @@ pub enum Sheet {
     Mics,
     /// The FPS booster's slider, and what it measured.
     Booster,
+    /// Live translation: on or off, who translates, into what.
+    Translate,
 }
 
 /// What can be chosen on the sheet of settings.
@@ -287,6 +294,8 @@ pub enum Pick {
     SmoothingBar(Smoothed),
     /// Something on the FPS booster's sheet.
     Booster(BoosterPick),
+    /// Something on Translation's sheet.
+    Translate(TranslatePick),
 }
 
 /// The colours to choose from at a press.
@@ -612,6 +621,8 @@ pub struct Facts {
     pub smoothing_held: Option<(Smoothed, u16)>,
     /// The FPS booster's sheet, made only while it shows.
     pub booster: BoosterFacts,
+    /// Live translation, for its sheet.
+    pub translate: TranslateFacts,
     pub n4n0_says: Option<String>,
     pub wake_word: Option<String>,
     /// The ring's cells can be picked by the number keys: on the desktop's wheel.
@@ -825,6 +836,8 @@ pub enum Look {
     /// The sound device chosen for VR.
     SoundName,
     LanguageName,
+    /// The language Translation writes in.
+    TranslateTarget,
     /// A colour to choose, one of [`SWATCHES`], and the bar of all of them.
     Swatch(usize),
     HueBar,
@@ -1005,6 +1018,10 @@ fn accessories(facts: &Facts) -> Vec<(Action, &'static str, &'static str)> {
     small.push((Action::Page(Target::WorldFeedback), icons::HEART, tr("World feedback")));
     small.push((Action::Page(Target::Qr), icons::QR_CODE, tr("QR code")));
     small.push((Action::Page(Target::Suggest), icons::CHAT_TEARDROP_TEXT, tr("Suggest")));
+    // What the headset shows is read on this computer: SteamVR here, in VR.
+    if orbiters_core::osc::VRCHAT_RUNS_HERE && !facts.desktop {
+        small.push((Action::Translate, icons::GLOBE, tr("Translation")));
+    }
     if orbiters_core::osc::VRCHAT_RUNS_HERE {
         small.push((Action::Booster, icons::GAUGE, tr("FPS booster")));
     }
@@ -1352,7 +1369,8 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             // One grid for both their rows: four columns on a screen, a short last row ending where its tiles do, so every edge stays on the grid (round 18's judges:
             // three tiles under four, no column lining up). None takes two columns: an accessory would then be larger than a main feature. A headset's many: two
             // even rows.
-            let per_row = if small.len() <= 8 { 4 } else { small.len().div_ceil(2) };
+            // More than twelve (Translation made a headset's thirteen): three rows, so each keeps the width its words need.
+            let per_row = if small.len() <= 8 { 4 } else if small.len() <= 12 { small.len().div_ceil(2) } else { small.len().div_ceil(3) };
             let small_rows = small.len().div_ceil(per_row) as f32;
             let small_gap = 8.0;
             let small_h = (576.0 - y0 * 2.0 - gap * 2.0 - first_h - second_h - gap - (small_rows - 1.0) * small_gap) / small_rows;
@@ -1505,6 +1523,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
         Sheet::Tracking => tracking_items(facts),
         Sheet::Mics => mic_items(facts),
         Sheet::Booster => booster_items(facts),
+        Sheet::Translate => translate_items(facts),
         Sheet::Menu | Sheet::Worlds => Vec::new(),
     }
 }
@@ -1883,6 +1902,7 @@ fn tile_line(action: Action, facts: &Facts) -> Option<String> {
         Action::Page(Target::Qr) => tr("Open a link shown in the world"),
         Action::Page(Target::Suggest) => tr("Tell the Orbiters team"),
         Action::Booster => tr("More frames, only what helps"),
+        Action::Translate => tr("Signs and chat in your language"),
         Action::Settings => tr("These menus' look and sound"),
         Action::OpenApp => tr("The full app, on your computer."),
         _ => return None,
@@ -2170,6 +2190,7 @@ fn sheet_says(facts: &Facts) -> &'static str {
         Some(Sheet::Tracking) => tr("Less jitter, a little more lag, in milliseconds."),
         Some(Sheet::Mics) => tr("Speak: the one that moves is the one hearing you."),
         Some(Sheet::Booster) => tr("Spend what helps your frames. Shows what it really gains."),
+        Some(Sheet::Translate) => tr("Signs and chat in your language, where they are."),
         Some(Sheet::All) => tr("Everything Orbiters can do from here."),
         _ => tr("Orbiters, beside VRChat's menu."),
     }
@@ -2187,6 +2208,7 @@ fn sheet_mark(facts: &Facts) -> (&'static str, Color32) {
         Some(Sheet::Mics) => (icons::MICROPHONE, look::LABEL),
         Some(Sheet::Tracking) => (icons::VIRTUAL_REALITY, tool_tint(Action::Page(Target::Tracking))),
         Some(Sheet::Booster) => (icons::GAUGE, look::LABEL),
+        Some(Sheet::Translate) => (icons::GLOBE, look::LABEL),
         // A colour of its own too, as every sheet's head has (round 11's judges found it the only grey one): indigo, which no large tile of it has.
         Some(Sheet::All) => (icons::SQUARES_FOUR, theme::INDIGO),
         Some(Sheet::Menu) if facts.sheet_title == "YouTube" => (icons::YOUTUBE_LOGO, tool_tint(Action::Page(Target::YouTube))),
@@ -2201,7 +2223,7 @@ pub fn hit(items: &[Item], p: Pos2) -> Option<usize> {
 
 /// What the caption says of what is pointed at, in words for someone who has never seen any of this: a title and what it does.
 pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
-    if let Some(said) = settings_caption(action).or_else(|| tracking_caption(action)).or_else(|| booster_caption(action)) {
+    if let Some(said) = settings_caption(action).or_else(|| tracking_caption(action)).or_else(|| booster_caption(action)).or_else(|| translate_caption(action)) {
         return Some(said);
     }
     let (a, b): (String, String) = match action {
@@ -2259,7 +2281,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Page(Target::Qr) => (tr("QR code").into(), tr("Open a link shown in the world, through VRChat's camera.").into()),
         Action::Page(Target::Suggest) => (tr("Suggest").into(), tr("Tell the Orbiters team what you would like.").into()),
         Action::Page(_) => return None,
-        Action::Set(_) | Action::Booster => return None,
+        Action::Set(_) | Action::Booster | Action::Translate => return None,
         Action::FastWalk => (tr("Fast walk").into(), if let Some(words) = facts.fast_walk_lesser.filter(|_| facts.fast_walk) { tr(words).to_string() } else if facts.fast_walk { tr("On: you walk faster. Press to turn it off.").into() } else { tr("Walk faster than VRChat lets you.").to_string() }),
         Action::PlayPause => match &facts.music {
             Some((title, playing)) => (title.clone(), if *playing { tr("Playing on your computer. Press to pause.").into() } else { tr("Paused on your computer. Press to play.").to_string() }),
@@ -2662,6 +2684,9 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     }
     if sheet == Sheet::Booster {
         draw_booster(p, facts);
+    }
+    if sheet == Sheet::Translate {
+        draw_translate(p, facts);
     }
     if sheet == Sheet::Instances && facts.worlds_visited.is_empty() {
         widgets::icon(p, page.center() - vec2(0.0, 30.0), icons::CLOCK, 54.0, look::MUTED);
@@ -3654,6 +3679,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::BoosterCell(level) => draw_booster_cell(p, rect, level, facts, hovered, pressed),
         Look::SoundName => draw_stepper_name(p, rect, icons::SPEAKER_HIGH, sound_name(facts)),
         Look::LanguageName => draw_stepper_name(p, rect, icons::GLOBE, &language_name(facts)),
+        Look::TranslateTarget => draw_target(p, rect, facts),
         Look::Swatch(i) => {
             COLOURS.with(|l| l.borrow_mut().push(rect));
             let [red, green, blue] = SWATCHES[i];
@@ -5340,7 +5366,7 @@ mod tests {
         let idle = facts();
         let recording = Facts { recording: true, recording_seconds: Some(42), capture_busy: true, ..facts() };
         let stopping = Facts { rec_stopping: true, capture_busy: true, ..facts() };
-        let sheets = [Sheet::All, Sheet::Pictures, Sheet::Menu, Sheet::Worlds, Sheet::Instances, Sheet::Results, Sheet::Talk, Sheet::Settings, Sheet::Tracking, Sheet::Mics, Sheet::Booster];
+        let sheets = [Sheet::All, Sheet::Pictures, Sheet::Menu, Sheet::Worlds, Sheet::Instances, Sheet::Results, Sheet::Talk, Sheet::Settings, Sheet::Tracking, Sheet::Mics, Sheet::Booster, Sheet::Translate];
         let every = |facts: &Facts| -> Vec<(String, Action)> {
             let mut out = Vec::new();
             let zones = Zone::WHEEL.iter().chain(&Zone::QUICK_MENU).chain(&Zone::CAMERA).chain(&[Zone::QmStrip, Zone::WheelHide]);

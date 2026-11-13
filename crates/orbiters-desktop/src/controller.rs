@@ -393,6 +393,7 @@ mod scan;
 pub mod shares;
 pub mod update;
 mod videos;
+pub mod translate;
 pub mod vrchat_data;
 pub mod vrchat_login;
 pub mod camera_tools;

@@ -77,6 +77,13 @@ every crate built into the programs, and of the native libraries next to them, a
 | Silero VAD v5 (Silero Team), from k2-fsa's sherpa-onnx releases | MIT |
 | NVIDIA Parakeet TDT 0.6B v3, int8 export by k2-fsa for sherpa-onnx | CC-BY-4.0: “parakeet-tdt-0.6b-v3” by NVIDIA, https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3, converted to ONNX and quantized by k2-fsa |
 
+## Models downloaded when Translation is turned on (live translation in VR), not distributed with the app
+
+| Model | License |
+|---|---|
+| PaddleOCR PP-OCRv6 small text detector and recogniser (PaddlePaddle, ONNX exports `PaddlePaddle/PP-OCRv6_small_det_onnx`, `PaddlePaddle/PP-OCRv6_small_rec_onnx` on Hugging Face) | Apache-2.0 |
+| PaddleOCR PP-OCRv5 Korean and East Slavic recognisers (`PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx`, `PaddlePaddle/eslav_PP-OCRv5_mobile_rec_onnx`) | Apache-2.0 |
+
 ## Fonts
 
 | Component | License |

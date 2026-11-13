@@ -37,6 +37,47 @@ pub struct OrbitStatus {
     pub camera_scale_measured: bool,
 }
 
+/// What live translation in VR is doing (the orbit menu's Translation and Settings show it).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TranslateStatus {
+    pub state: TranslateState,
+    /// Translations shown now, and lines of text followed.
+    pub shown: u32,
+    pub lines: u32,
+    /// What a look costs on average (reading, placing, painting), milliseconds of the reading thread.
+    pub look_ms: Option<u32>,
+    /// The AI server in use or found, and the models it offers (for Settings' choice of model).
+    pub server: Option<String>,
+    pub models: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum TranslateState {
+    /// Turned off, or the overlay not running.
+    #[default]
+    Off,
+    /// Downloading the text reader (bytes so far, in all).
+    Downloading { done: u64, total: u64 },
+    /// Downloading the translator built into the app, no AI app answering on this computer (bytes so far, in all).
+    DownloadingTranslator { done: u64, total: u64 },
+    Starting,
+    /// Reading what the headset shows; nothing waits for a translation.
+    Looking,
+    /// Lines waiting for the translator.
+    Translating(u32),
+    /// A menu or SteamVR's dashboard covers the view.
+    Paused,
+    /// Orbiters is chosen, but its notice was not accepted yet.
+    NeedsAgreement,
+    /// An address is chosen, but none was typed.
+    NeedsAddress,
+    /// No AI app answers on this computer.
+    NoLocalTranslator,
+    /// Something in the way: `key` is an English text (`mark`ed) the surfaces translate, `detail` a technical detail.
+    Problem { key: String, detail: Option<String> },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VrchatStatus {
     pub running: bool,
@@ -612,6 +653,9 @@ pub struct Snapshot {
     /// What the panels around VRChat's menus last said of themselves.
     #[serde(default)]
     pub orbit: Slice<OrbitStatus>,
+    /// Live translation in VR, as the overlay last said.
+    #[serde(default)]
+    pub translate: Slice<TranslateStatus>,
     /// The FPS booster, as both surfaces show it.
     #[serde(default)]
     pub booster: Slice<crate::booster::Status>,
@@ -630,7 +674,7 @@ pub struct Snapshot {
 
 orbiters_core::parts!(Snapshot {
     plain: [smoothing_revision, version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, camera_tools, projects_changed],
-    slices: [sources, mics, osc, lan, capture, settings, storage, worker, steamvr, reconstruct_queue, account, uploads, update, vr_audio, orbit, booster],
+    slices: [sources, mics, osc, lan, capture, settings, storage, worker, steamvr, reconstruct_queue, account, uploads, update, vr_audio, orbit, booster, translate],
     identity: [capture_shares],
     nested: [vrchat, n4n0],
 });
@@ -666,6 +710,7 @@ impl Snapshot {
         Self {
             smoothing_revision: 0,
             orbit: Default::default(),
+            translate: Default::default(),
             booster: Default::default(),
             worn_kit: None,
             camera_open_said: None,

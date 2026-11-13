@@ -30,7 +30,7 @@ use mic_sheet::{draw_mics, mic_items};
 mod tracking_sheet;
 pub use tracking_sheet::{smoothing_at, Smoothed};
 mod translate_sheet;
-pub use translate_sheet::{orbiters_notice, status_words, target_after, target_name, TranslateFacts, TranslatePick, TARGETS};
+pub use translate_sheet::{orbiters_notice, small_model_advice, status_words, target_after, target_name, TranslateFacts, TranslatePick, TARGETS};
 use translate_sheet::{draw_target, draw_translate, translate_caption, translate_items};
 use tracking_sheet::{draw_smoothing_bar, draw_tracking, tracking_caption, tracking_items};
 use settings_sheet::{draw_settings, draw_stepper_name, hue_color, language_name, settings_items, settings_caption, sound_name};

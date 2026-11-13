@@ -34,6 +34,9 @@ const SORT_ORDER: u32 = 6;
 const FADE: Duration = Duration::from_millis(180);
 /// How old the compositor's mirror picture is when read, against the head poses recorded (the camera tiles' measure).
 const EYE_AGE: Duration = Duration::from_millis(15);
+/// A look's area wider than this (pixels) is read again, in part, at its own scale.
+const ZOOM_FROM: u32 = 1500;
+const ZOOM_SIDE: u32 = 960;
 /// The head turning faster than this (degrees a second) smears text and the head's pose at capture: no look then.
 const FAST_TURN: f32 = 70.0;
 
@@ -49,6 +52,8 @@ struct Shared {
     /// The translations shown now, to mask them out of what is read.
     shown: Vec<Shown>,
     settings: Option<(TranslateSettings, String)>,
+    /// VRChat's frames over the last two seconds.
+    load: FrameLoad,
     /// What the thread found: the latest scene, and what it is doing.
     scene: Option<Scene>,
     status: TranslateStatus,
@@ -81,11 +86,27 @@ pub struct TranslateHost {
     slots: Vec<Slot>,
     last_turn: Option<Instant>,
     status_sent: Option<(Instant, TranslateStatus)>,
+    /// VRChat's frames gathered for [`FrameLoad`], since when, and since the last line in translate.log.
+    frames: Vec<orbiters_booster::frames::Frame>,
+    frames_since: Option<Instant>,
+    frames_logged: Vec<orbiters_booster::frames::Frame>,
+    frames_logged_since: Option<Instant>,
 }
 
 impl Default for TranslateHost {
     fn default() -> Self {
-        Self { shared: Arc::default(), stop: Arc::new(AtomicBool::new(false)), thread: None, slots: Vec::new(), last_turn: None, status_sent: None }
+        Self {
+            shared: Arc::default(),
+            stop: Arc::new(AtomicBool::new(false)),
+            thread: None,
+            slots: Vec::new(),
+            last_turn: None,
+            status_sent: None,
+            frames: Vec::new(),
+            frames_since: None,
+            frames_logged: Vec::new(),
+            frames_logged_since: None,
+        }
     }
 }
 
@@ -98,6 +119,44 @@ pub struct Cx<'a, 'b> {
     pub backend: &'a Ctl,
     /// A menu of ours or SteamVR's dashboard is up.
     pub covered: bool,
+    /// VRChat's frames since the last turn, as SteamVR's compositor timed them.
+    pub frames: &'a [orbiters_booster::frames::Frame],
+}
+
+/// How VRChat's frames went lately: what slows the reading down when the game is short of processor time.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameLoad {
+    pub frames: usize,
+    pub interval_ms: f32,
+    pub app_cpu_ms: f32,
+    /// Frames whose processor time took most of the frame's budget, and frames shown late or dropped.
+    pub cpu_bound: f32,
+    pub late: f32,
+}
+
+impl FrameLoad {
+    pub fn of(frames: &[orbiters_booster::frames::Frame]) -> Self {
+        let n = frames.len();
+        if n == 0 {
+            return Self::default();
+        }
+        let mut intervals: Vec<f32> = frames.iter().map(|f| f.interval_ms).filter(|i| *i > 0.0).collect();
+        intervals.sort_by(|a, b| a.total_cmp(b));
+        // The frame's budget: the most common interval (the headset's refresh, or the rate SteamVR holds the game to).
+        let budget = intervals.get(intervals.len() / 4).copied().unwrap_or(11.1).max(1.0);
+        Self {
+            frames: n,
+            interval_ms: frames.iter().map(|f| f.interval_ms).sum::<f32>() / n as f32,
+            app_cpu_ms: frames.iter().map(|f| f.app_cpu_ms()).sum::<f32>() / n as f32,
+            cpu_bound: frames.iter().filter(|f| f.app_cpu_ms() > 0.9 * budget).count() as f32 / n as f32,
+            late: frames.iter().filter(|f| f.mis_presented > 0 || f.dropped > 0).count() as f32 / n as f32,
+        }
+    }
+
+    /// The game is short of processor time: reading slows down.
+    pub fn busy(&self) -> bool {
+        self.frames >= 30 && (self.cpu_bound > 0.1 || self.late > 0.05)
+    }
 }
 
 /// The language translations are made into: the one chosen, else the app's.
@@ -110,8 +169,14 @@ impl TranslateHost {
         let settings = &cx.snap.settings.translate;
         // A development build in the VR sandbox may be told to translate by the environment (`ORBITERS_TRANSLATE_ON=1`),
         // its settings untouched (the sandbox restores the person's own settings afterwards).
-        let forced = cfg!(debug_assertions) && std::env::var_os("ORBITERS_TRANSLATE_ON").is_some();
+        // A development build in the VR sandbox may be told to translate by the environment, its settings untouched (the
+        // sandbox restores the person's own afterwards): `ORBITERS_TRANSLATE_ON=1`, or `ORBITERS_TRANSLATE_ON_FILE` naming
+        // a file whose presence turns it on (to measure the same scene with it on and off).
+        let measuring = cfg!(debug_assertions) && std::env::var_os("ORBITERS_TRANSLATE_ON_FILE").is_some();
+        let forced = cfg!(debug_assertions)
+            && (std::env::var_os("ORBITERS_TRANSLATE_ON").is_some() || std::env::var_os("ORBITERS_TRANSLATE_ON_FILE").is_some_and(|f| std::path::Path::new(&f).exists()));
         let on = (settings.enabled || forced) && orbiters_core::osc::VRCHAT_RUNS_HERE;
+        self.watch_frames(cx.frames, on, on || measuring);
         if !on {
             if self.thread.is_some() {
                 self.stop_thread();
@@ -152,8 +217,48 @@ impl TranslateHost {
         let shown: Vec<Shown> =
             self.slots.iter().filter(|s| s.visible && s.track.is_some()).map(|s| Shown { pose: s.pose, width: s.width, height: s.picture.as_ref().map_or(0.0, |p| p.quad_height), track: s.track }).collect();
         self.shared.lock().unwrap_or_else(|e| e.into_inner()).shown = shown;
-        let status = TranslateStatus { shown: self.slots.iter().filter(|s| s.visible && s.to > 0.5).count() as u32, ..status };
+        let shown_now = self.slots.iter().filter(|s| s.visible && s.to > 0.5).count() as u32;
+        // What the turn shows, for the reading thread's log line too.
+        self.shared.lock().unwrap_or_else(|e| e.into_inner()).status.shown = shown_now;
+        let status = TranslateStatus { shown: shown_now, ..status };
         self.report(cx.backend, status);
+    }
+
+    /// VRChat's frames: their load over two seconds for the reading thread, and a line every ten in translate.log while
+    /// translating (or measuring, with translation off).
+    fn watch_frames(&mut self, fresh: &[orbiters_booster::frames::Frame], on: bool, log: bool) {
+        let now = Instant::now();
+        self.frames.extend_from_slice(fresh);
+        if self.frames_since.is_none_or(|t| now - t >= Duration::from_secs(2)) {
+            let load = FrameLoad::of(&self.frames);
+            self.shared.lock().unwrap_or_else(|e| e.into_inner()).load = load;
+            self.frames.clear();
+            self.frames_since = Some(now);
+        }
+        if !log {
+            self.frames_logged.clear();
+            return;
+        }
+        self.frames_logged.extend_from_slice(fresh);
+        if self.frames_logged_since.is_none_or(|t| now - t >= Duration::from_secs(10)) {
+            if !self.frames_logged.is_empty() {
+                let l = FrameLoad::of(&self.frames_logged);
+                let mut ms: Vec<f32> = self.frames_logged.iter().map(|f| f.interval_ms).collect();
+                ms.sort_by(|a, b| a.total_cmp(b));
+                let p95 = ms[(ms.len() * 95 / 100).min(ms.len() - 1)];
+                note(&format!(
+                    "VRChat frames (translation {}): {} frames, interval mean {:.2} ms, p95 {p95:.2} ms, app processor {:.2} ms, processor-bound {:.0} %, late or dropped {:.1} %", // i18n: not shown (a log's line)
+                    if on { "on" } else { "off" }, // i18n: not shown (a log's line)
+                    l.frames,
+                    l.interval_ms,
+                    l.app_cpu_ms,
+                    l.cpu_bound * 100.0,
+                    l.late * 100.0
+                ));
+            }
+            self.frames_logged.clear();
+            self.frames_logged_since = Some(now);
+        }
     }
 
     fn start(&mut self, steamvr: &vr::Client) {
@@ -333,16 +438,19 @@ fn translator(settings: &TranslateSettings, backend_lan: &mut LanFound) -> Resul
             backend_lan.found = Some((base.clone(), models.clone()));
             let model = if settings.model.is_empty() || !models.contains(&settings.model) { provider::pick_model(&models) } else { Some(settings.model.clone()) };
             let model = model.ok_or(TranslateState::Problem { key: orbiters_i18n::mark("The AI server has no model loaded.").into(), detail: None })?;
+            backend_lan.model = Some(model.clone());
             Ok(Box::new(provider::LanModel::new(&base, &model)))
         }
         TranslateProvider::ThisComputer => match provider::find_server() {
             Some((base, models)) => {
                 backend_lan.found = Some((base.clone(), models.clone()));
                 let model = if settings.model.is_empty() || !models.contains(&settings.model) { provider::pick_model(&models) } else { Some(settings.model.clone()) };
+                backend_lan.model = model.clone();
                 Ok(Box::new(provider::LanModel::new(&base, &model.unwrap_or_default())))
             }
             None => {
                 backend_lan.found = None;
+                backend_lan.model = None;
                 // No AI app here: the translator built in, once downloaded (`run` downloads it meanwhile).
                 if !orbiters_translate::builtin::Builtin::installed() {
                     return Err(TranslateState::NoLocalTranslator);
@@ -359,6 +467,8 @@ fn translator(settings: &TranslateSettings, backend_lan: &mut LanFound) -> Resul
 #[derive(Default)]
 struct LanFound {
     found: Option<(String, Vec<String>)>,
+    /// The model asked.
+    model: Option<String>,
 }
 
 /// How the overlay reaches Orbiters' translation service (through the desktop service, which holds the account's
@@ -447,6 +557,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
     note(&format!("reading started; translator: {}", if translator_state.is_none() { "ready" } else { "none yet" })); // i18n: not shown (a log's line)
     // The eyes' size, known after a first look (Quest Pro through Virtual Desktop: 3168 x 3456); until then, whole.
     let mut whole_size = [u32::MAX / 2; 2];
+    let mut game_busy = false;
     while !stop.load(Ordering::Relaxed) {
         let (heads, eyes, paused, shown, now_settings) = {
             let s = shared.lock().unwrap_or_else(|e| e.into_inner());
@@ -503,7 +614,14 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
         }
         paused_turns += paused as u32;
         turning_turns += (turning && !paused) as u32;
-        if paused || turning || last_look.is_some_and(|t| t.elapsed() < pace) {
+        // VRChat short of processor time: looks three times rarer, at most every four seconds.
+        let load = shared.lock().unwrap_or_else(|e| e.into_inner()).load;
+        let pace_now = if load.busy() { (pace * 3).clamp(Duration::from_millis(1500), Duration::from_secs(4)) } else { pace };
+        if load.busy() != game_busy {
+            game_busy = load.busy();
+            note(&format!("VRChat {}: looks every {} ms", if game_busy { "short of processor time" } else { "at ease again" }, pace_now.as_millis())); // i18n: not shown (a log's line)
+        }
+        if paused || turning || last_look.is_some_and(|t| t.elapsed() < pace_now) {
             if paused {
                 let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
                 if !matches!(s.status.state, TranslateState::Problem { .. }) {
@@ -538,9 +656,24 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
             from: [pictures[0].from, pictures[1].from],
             views,
         };
-        let look = Look { pair, area, shown: &shown };
         let gaze = (orbiters_translate::geometry::origin(&head), orbiters_translate::geometry::scale(orbiters_translate::geometry::axis(&head, 2), -1.0));
+        // A large eye's area is scaled down for the detector (a Quest Pro's middle 2218 px to 960): every other look also
+        // reads 960 px about where the head looks at their own scale, for small text there (tests/bench.rs,
+        // smallest_readable_letters).
+        let zoom = (area[2] > ZOOM_FROM && looks % 2 == 0)
+            .then(|| views[0].project(orbiters_translate::geometry::add(gaze.0, orbiters_translate::geometry::scale(gaze.1, 2.0))))
+            .flatten()
+            .map(|c| {
+                let side = ZOOM_SIDE.min(area[2]).min(area[3]);
+                let x = (c[0] as i64 - side as i64 / 2).clamp(area[0] as i64, (area[0] + area[2] - side) as i64) as u32;
+                let y = (c[1] as i64 - side as i64 / 2).clamp(area[1] as i64, (area[1] + area[3] - side) as i64) as u32;
+                [x, y, side, side]
+            });
+        let look = Look { pair, area, shown: &shown, zoom };
         let step = core.step(started.elapsed().as_secs_f64(), &look, gaze);
+        for line in core.log.drain(..) {
+            note(&line);
+        }
         let cost = began.elapsed();
         costs.push_back(cost.as_secs_f32() * 1000.0);
         if costs.len() > 20 {
@@ -564,12 +697,15 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
                     (Some(state), _) => state.clone(),
                     (None, Activity::Failed(f)) => failure_state(f),
                     (None, Activity::Translating(n)) => TranslateState::Translating(*n as u32),
+                    (None, Activity::Waking) => TranslateState::Waking,
                     (None, Activity::Looking) => TranslateState::Looking,
                 };
                 s.status.lines = scene.lines as u32;
                 s.status.look_ms = Some((costs.iter().sum::<f32>() / costs.len() as f32).round() as u32);
                 s.status.server = lan.found.as_ref().map(|f| f.0.clone());
                 s.status.models = lan.found.as_ref().map(|f| f.1.clone()).unwrap_or_default();
+                s.status.waited_s = scene.waiting_s.map(|w| w as u32);
+                s.status.small_model = lan.model.clone().filter(|m| provider::too_small(m));
                 s.scene = Some(scene);
             }
             Err(e) => s.status.state = TranslateState::Problem { key: orbiters_i18n::mark("The text reader could not start.").into(), detail: Some(e.to_string()) },

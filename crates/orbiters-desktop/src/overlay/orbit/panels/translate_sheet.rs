@@ -104,13 +104,26 @@ pub fn status_words(f: &TranslateFacts) -> String {
         }
         TranslateState::Looking if s.shown > 0 => orbiters_i18n::tr_n("{count} translation shown", "{count} translations shown", s.shown as u64),
         TranslateState::Looking => tr("Looking for text to translate.").to_string(),
-        TranslateState::Translating(n) => orbiters_i18n::tr_n("Translating {count} line…", "Translating {count} lines…", *n as u64),
+        TranslateState::Translating(n) => {
+            let words = orbiters_i18n::tr_n("Translating {count} line…", "Translating {count} lines…", *n as u64);
+            match s.waited_s.filter(|w| *w >= 2) {
+                Some(w) => orbiters_i18n::tr!("{what} ({seconds} s)", what = words, seconds = w),
+                None => words,
+            }
+        }
+        TranslateState::Waking => tr("Waking the translator: the AI app is loading its model.").to_string(),
         TranslateState::Paused => tr("Paused while a menu is open.").to_string(),
         TranslateState::NeedsAgreement => tr("Orbiters translates once you agree below.").to_string(),
         TranslateState::NeedsAddress => tr("Type the AI server's address in Orbiters' Settings, Translation.").to_string(),
         TranslateState::NoLocalTranslator => tr("No AI app answers on this computer. Start LM Studio or Ollama with a model, or choose Orbiters.").to_string(),
         TranslateState::Problem { key, .. } => tr(key).to_string(),
     }
+}
+
+/// Advice when the AI server's model is too small to translate signs well.
+pub fn small_model_advice(f: &TranslateFacts) -> Option<String> {
+    let model = f.status.small_model.as_ref().filter(|_| f.enabled && f.provider != TranslateProvider::Orbiters)?;
+    Some(orbiters_i18n::tr!("{model} is a small model and translates signs poorly. TranslateGemma 4B or Qwen3 8B translate better.", model = model))
 }
 
 /// The notice shown before Orbiters translates.
@@ -138,6 +151,11 @@ pub(super) fn draw_translate(p: &Painter, facts: &Facts) {
     let mut job = egui::text::LayoutJob::simple(status_words(f), look::font(19.0, weight::SEMIBOLD), look::LABEL, 1000.0 - X);
     job.wrap.max_rows = 2;
     p.galley(pos2(X, y + 6.0), p.layout_job(job), look::LABEL);
+    if let Some(advice) = small_model_advice(f) {
+        let mut job = egui::text::LayoutJob::simple(advice, look::font(16.0, weight::MEDIUM), look::MUTED, 1000.0 - X);
+        job.wrap.max_rows = 2;
+        p.galley(pos2(X, y + 66.0), p.layout_job(job), look::MUTED);
+    }
     if f.provider == TranslateProvider::Orbiters && !f.agreed {
         let mut job = egui::text::LayoutJob::simple(orbiters_notice().to_string(), look::font(16.0, weight::MEDIUM), look::MUTED, 1000.0 - X - 240.0);
         job.wrap.max_rows = 3;

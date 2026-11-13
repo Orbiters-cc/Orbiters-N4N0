@@ -49,6 +49,12 @@ pub struct TranslateStatus {
     /// The AI server in use or found, and the models it offers (for Settings' choice of model).
     pub server: Option<String>,
     pub models: Vec<String>,
+    /// How long the batch on its way has been waited for, seconds.
+    #[serde(default)]
+    pub waited_s: Option<u32>,
+    /// The AI server's model in use, when it is too small to translate well.
+    #[serde(default)]
+    pub small_model: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -66,6 +72,8 @@ pub enum TranslateState {
     Looking,
     /// Lines waiting for the translator.
     Translating(u32),
+    /// The translator getting ready (an AI server loading its model) before its first batch.
+    Waking,
     /// A menu or SteamVR's dashboard covers the view.
     Paused,
     /// Orbiters is chosen, but its notice was not accepted yet.

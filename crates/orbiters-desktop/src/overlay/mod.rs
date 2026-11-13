@@ -1124,7 +1124,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         // Live translation: the turn only records the head and shows what the reading thread found.
         let covered = dashboard || menus_up || t.menu.host.menu.open || t.menu.worlds.small_showing();
         let began = Instant::now();
-        t.translate.update(translate::Cx { overlay: &overlay, steamvr: &steamvr, presenter: &mut presenter, snap: &snap, backend: &backend, covered });
+        t.translate.update(translate::Cx { overlay: &overlay, steamvr: &steamvr, presenter: &mut presenter, snap: &snap, backend: &backend, covered, frames: frames.fresh() });
         stall.note(began.elapsed(), || t.translate.doing());
         if !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &snap)) {
             shown = Some(snap.clone());

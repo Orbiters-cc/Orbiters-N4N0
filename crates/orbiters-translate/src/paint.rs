@@ -17,9 +17,8 @@ pub struct Painted {
 
 /// Pixels across the original box's height: enough for crisp letters at the sizes signs are read at.
 const BOX_PIXELS: f32 = 72.0;
-/// The original letters' height against their box's: the text detector's boxes are padded by about three quarters of
-/// the letters' height each side ("unclip").
-const LETTERS_IN_BOX: f32 = 0.5;
+/// The original letters' height against their box's: a run's box is [`crate::runs::RUN_HEIGHT`] letters high.
+const LETTERS_IN_BOX: f32 = 1.0 / crate::runs::RUN_HEIGHT;
 /// The smallest letters against the original's, before the box grows.
 const SMALLEST: f32 = 0.62;
 /// How much longer than the original the box may grow before the translation takes two lines.
@@ -72,7 +71,9 @@ impl Painter {
         let (box_w, box_h) = ((width * px_per_m).max(8.0), BOX_PIXELS);
         let ink = text_colour(colours);
         let ink32 = egui::Color32::from_rgb(ink[0], ink[1], ink[2]);
-        let start = box_h * LETTERS_IN_BOX / 0.72;
+        // Letters as tall as the original's, never taller: a font's size is about its CJK letters' height, Latin
+        // capitals are seven tenths of it.
+        let start = box_h * LETTERS_IN_BOX;
         let family = orbiters_ui::fonts::family(500.0);
         let layout = |ctx: &egui::Context, size: f32, wrap: f32| ctx.fonts_mut(|f| f.layout(text.to_string(), egui::FontId::new(size, family.clone()), ink32, wrap));
         // Twice: letters of a script not drawn before open their font on the first layout.
@@ -125,7 +126,7 @@ impl Painter {
         let text = painter.paint(&primitives, full.pixels_per_point, egui::Color32::TRANSPARENT).to_vec();
         painter.free_textures(&mut full.textures_delta);
         // The cover: the background colour, its edges fading over a few pixels into the surface, the text over it.
-        let feather = (h as f32 * 0.12).max(2.0);
+        let feather = (h as f32 * 0.09).max(2.0);
         let mut out = vec![0u8; (w * h * 4) as usize];
         for y in 0..h {
             for x in 0..w {

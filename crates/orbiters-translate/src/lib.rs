@@ -4,6 +4,7 @@
 //!
 //! - [`ocr`]: lines of text found and read (PaddleOCR's PP-OCR models through ONNX Runtime), [`models`] downloads them,
 //! - [`geometry`] and [`place`]: rays from an eye's pixels into the room, a line's distance from both eyes, its plane,
+//! - [`runs`]: a detected line cut to the runs of letters it holds (arrows and pictograms left visible),
 //! - [`track`]: lines followed from look to look, so that a translation stays put,
 //! - [`language`]: which lines need translating at all,
 //! - [`provider`]: who translates (an AI server on this computer or the network, Orbiters), [`builtin`] the model
@@ -23,4 +24,5 @@ pub mod picture;
 pub mod pipeline;
 pub mod place;
 pub mod provider;
+pub mod runs;
 pub mod track;

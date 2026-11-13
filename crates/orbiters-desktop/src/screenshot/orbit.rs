@@ -1273,6 +1273,12 @@ fn translate_scenes(out: &std::path::Path, size: egui::Vec2, idle: &Facts) -> an
     qm_scene("orbit-translate-orbiters", out, size, &at(TranslateProvider::Orbiters, false, TranslateState::NeedsAgreement, 0), None, Some(Sheet::Translate))?;
     qm_scene("orbit-translate-downloading", out, size, &at(TranslateProvider::ThisComputer, false, TranslateState::Downloading { done: 12_000_000, total: 39_000_000 }, 0), None, Some(Sheet::Translate))?;
     qm_scene("orbit-translate-no-app", out, size, &at(TranslateProvider::ThisComputer, false, TranslateState::NoLocalTranslator, 0), None, Some(Sheet::Translate))?;
+    // A batch waited for, with a model too small to translate well.
+    let mut small = at(TranslateProvider::ThisComputer, false, TranslateState::Translating(3), 2);
+    small.translate.status.small_model = Some("qwen3.5-2b".into());
+    small.translate.status.waited_s = Some(4);
+    qm_scene("orbit-translate-small-model", out, size, &small, None, Some(Sheet::Translate))?;
+    qm_scene("orbit-translate-waking", out, size, &at(TranslateProvider::ThisComputer, false, TranslateState::Waking, 0), None, Some(Sheet::Translate))?;
     Ok(())
 }
 

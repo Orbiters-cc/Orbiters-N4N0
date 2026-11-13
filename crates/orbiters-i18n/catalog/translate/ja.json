@@ -55,6 +55,7 @@
   "Type the AI server's address in Orbiters' Settings, Translation.": "Orbiters の設定の「翻訳」で AI サーバーのアドレスを入力してください。",
   "VRChat's menus and most names": "VRChat のメニューやほとんどの名前",
   "VRChat's menus and most names are in English.": "VRChat のメニューやほとんどの名前は英語です。",
+  "Waking the translator: the AI app is loading its model.": "翻訳機能を起動中：AI アプリがモデルを読み込んでいます。",
   "What it is doing": "今していること",
   "Who translates what is read": "読み取った文字を翻訳するもの",
   "Who translates what is read.": "読み取った文字を翻訳するものです。",
@@ -63,5 +64,7 @@
   "switch\u0004On": "オン",
   "the app's language": "アプリの言語",
   "{count} translation shown": "{count} 件の翻訳を表示中",
-  "{count} translations shown": "{count} 件の翻訳を表示中"
+  "{count} translations shown": "{count} 件の翻訳を表示中",
+  "{model} is a small model and translates signs poorly. TranslateGemma 4B or Qwen3 8B translate better.": "{model} は小さなモデルのため、看板の翻訳が不正確です。TranslateGemma 4B や Qwen3 8B のほうがよく翻訳します。",
+  "{what} ({seconds} s)": "{what}（{seconds} 秒）"
 }

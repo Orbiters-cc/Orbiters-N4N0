@@ -55,6 +55,7 @@
   "Type the AI server's address in Orbiters' Settings, Translation.": "Escribe la dirección del servidor de IA en la Configuración de Orbiters, Traducción.",
   "VRChat's menus and most names": "Los menús de VRChat y la mayoría de los nombres",
   "VRChat's menus and most names are in English.": "Los menús de VRChat y la mayoría de los nombres están en inglés.",
+  "Waking the translator: the AI app is loading its model.": "Despertando el traductor: la app de IA está cargando su modelo.",
   "What it is doing": "Lo que está haciendo",
   "Who translates what is read": "Quién traduce lo que se lee",
   "Who translates what is read.": "Quién traduce lo que se lee.",
@@ -63,5 +64,7 @@
   "switch\u0004On": "Activada",
   "the app's language": "el idioma de la app",
   "{count} translation shown": "{count} traducción mostrada",
-  "{count} translations shown": "{count} traducciones mostradas"
+  "{count} translations shown": "{count} traducciones mostradas",
+  "{model} is a small model and translates signs poorly. TranslateGemma 4B or Qwen3 8B translate better.": "{model} es un modelo pequeño y traduce mal los carteles. TranslateGemma 4B o Qwen3 8B traducen mejor.",
+  "{what} ({seconds} s)": "{what} ({seconds} s)"
 }

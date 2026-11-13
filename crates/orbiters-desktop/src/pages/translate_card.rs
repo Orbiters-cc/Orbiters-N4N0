@@ -2,7 +2,7 @@
 //! Translation sheet, plus what needs a keyboard there (an AI server's address, the model to ask).
 
 use super::{section, Cx};
-use crate::overlay::orbit::panels::{orbiters_notice, status_words, target_name, TranslateFacts, TARGETS};
+use crate::overlay::orbit::panels::{orbiters_notice, small_model_advice, status_words, target_name, TranslateFacts, TARGETS};
 use egui::{vec2, Sense, Ui};
 use orbiters_core::settings::{Settings, TranslateProvider};
 use orbiters_i18n::tr;
@@ -99,6 +99,9 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
         widgets::separator(ui);
         let facts = TranslateFacts { enabled: t.enabled, provider: t.provider, target: t.target.clone().unwrap_or_else(|| orbiters_i18n::language().tag().to_string()), keep_english: t.keep_english, agreed: t.orbiters_agreed, status: (**status).clone() };
         wrapped(ui, &status_words(&facts), 14.0, theme::FG, true);
+        if let Some(advice) = small_model_advice(&facts) {
+            wrapped(ui, &advice, 13.0, theme::FG_2, false);
+        }
         if let crate::state::TranslateState::Problem { detail: Some(detail), .. } = &status.state {
             wrapped(ui, detail, 12.0, theme::FG_3, false);
         }

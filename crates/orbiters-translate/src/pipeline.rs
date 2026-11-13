@@ -35,6 +35,9 @@ pub struct Look<'a> {
     pub pair: Pair<'a>,
     pub area: [u32; 4],
     pub shown: &'a [Shown],
+    /// A part about where the eye looks (whole-eye pixels) also read at its own scale, for text too small for the
+    /// detector at the area's scale (on a large eye the area is scaled down two to three times).
+    pub zoom: Option<[u32; 4]>,
 }
 
 /// What a look cost, milliseconds.
@@ -44,6 +47,8 @@ pub struct Timings {
     pub read: f32,
     pub place: f32,
     pub lines: usize,
+    /// The look read its zoomed part too.
+    pub zoomed: bool,
 }
 
 /// The text reader's models, loaded.
@@ -91,6 +96,20 @@ impl Engine {
         let t = Instant::now();
         let boxes = self.detector.detect(&DetInput { picture: left, area, size: det_size(area, self.detail), hidden: &hidden })?;
         // A line partly under one of our overlays is not read: it would read our own letters.
+        let mut boxes = boxes;
+        if let Some(z) = look.zoom {
+            let z = [z[0].saturating_sub(from[0]), z[1].saturating_sub(from[1]), z[2], z[3]];
+            if z[0] + z[2] <= left.width && z[1] + z[3] <= left.height {
+                let near = self.detector.detect(&DetInput { picture: left, area: z, size: det_size(z, self.detail), hidden: &hidden })?;
+                // Lines the main pass found already are kept from it; what only the closer look found is added.
+                let known: Vec<[f32; 4]> = boxes.iter().map(|b| b.bounds()).collect();
+                boxes.extend(near.into_iter().filter(|b| {
+                    let c = b.centre();
+                    !known.iter().any(|k| c[0] >= k[0] && c[0] <= k[2] && c[1] >= k[1] && c[1] <= k[3])
+                }));
+                timings.zoomed = true;
+            }
+        }
         let boxes: Vec<_> = boxes.into_iter().filter(|b| !b.corners.iter().chain([&b.centre()]).any(|c| hidden.iter().any(|h| h.contains(*c)))).collect();
         timings.detect = t.elapsed().as_secs_f32() * 1000.0;
         let t = Instant::now();
@@ -110,6 +129,8 @@ impl Engine {
                 }
             }
         }
+        // Only what is text: a line over an arrow, a word and a pictogram becomes the word.
+        let mut lines: Vec<Line> = lines.iter().flat_map(crate::runs::split).collect();
         lines.retain(|l| l.confidence >= LEAST && !l.text.trim().is_empty());
         timings.read = t.elapsed().as_secs_f32() * 1000.0;
         timings.lines = lines.len();

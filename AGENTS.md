@@ -34,8 +34,8 @@
   layout dimensions with springs or let background insertion move the user's viewport unexpectedly.
 - **The SteamVR test sandbox is one shared, long-lived session** (`tools/vr-sandbox`, `docs/vr-sandbox.md`): take a
   turn with `python tools/vr-sandbox/sandbox.py acquire --owner <your stream> --app <your exe>`, use the VRChat that
-  is already running (never close and relaunch it for an experiment: it costs minutes and preceded Easy Anti-Cheat's
-  "EAC unload timeout"), and `release --owner <your stream>` as soon as you have your evidence. Do not `restore` or
+  is already running (never close and relaunch it for an experiment: it costs minutes, and a launch within ~80 s of an
+  early quit is what makes Easy Anti-Cheat fail with "EAC unload timeout"), and `release --owner <your stream>` as soon as you have your evidence. Do not `restore` or
   stop a session another agent holds. Enzo taking his headset back (`sandbox.py yield`, Virtual Desktop connecting)
   always wins; him using the mouse and keyboard is not a reason to stop.
 - Unity storage repair must match log errors to the affected project, account for import workspace beyond copy

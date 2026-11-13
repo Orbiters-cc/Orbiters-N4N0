@@ -11,9 +11,10 @@ is the readiness handoff; this guide alone is not a completion claim.
 ## Shared session: take a turn, never restart VRChat yourself
 
 SteamVR and VRChat start once and stay up; agents take turns on them. Starting and
-closing VRChat for every experiment costs minutes of loading and is what preceded
-Easy Anti-Cheat's "Launch Error / EAC unload timeout" (see below). Use these
-commands, from your worktree, with your stream name as owner:
+closing VRChat for every experiment costs one to two minutes of loading each time
+and is what causes Easy Anti-Cheat's "Launch Error (30005) EAC unload timeout"
+(reproduced, see below). Use these commands, from your worktree, with your stream
+name as owner:
 
 ```powershell
 # 1. Take a turn (waits in line; starts SteamVR if no session runs). Your test exe must be inside
@@ -32,12 +33,17 @@ python tools/vr-sandbox/sandbox.py release --owner vr1113b/shell
   opens its world page and waits for a click (tested 2026-11-13). For another
   world or a fresh spawn point use `acquire --cold`.
 - **Release** stops only your exe (its `--quit`, then a kill), then puts the
-  session back to neutral: every input released, head and hands at their start
-  poses, OSC camera mode 0 and flying off, and every VRChat menu closed, checked
-  in VRChat's log (`Immobile status changed to`; a short left Y press toggles the
-  menus). The avatar stays where it is: `avatar_moved_since_launch` in the
-  answers says whether a turn walked it with the stick. Enzo's installed Orbiters
-  is stopped once per session and comes back at its end.
+  session back to neutral (6-13 s): every input released, head and hands at their
+  start poses, OSC camera mode 0 and flying off, VRChat's main menu closed
+  (checked in its log, `Immobile status changed to`) and its Quick Menu closed
+  (not in the log: with the start poses one left Y press is made and two eye
+  captures compared; the one showing the menu panel is "open"; a press that
+  opened it is undone). The answer says what was verified. The avatar stays
+  where it is: `avatar_moved_since_launch` says whether a turn walked it.
+- Enzo's installed Orbiters and every SteamVR overlay app set to start with
+  SteamVR (OVR Toolkit, XSOverlay, SlimeVR, SpaceCalibrator...) are kept out of
+  the session: his app is stopped before SteamVR starts, autolaunch is off in the
+  journalled app configuration, and both come back when the session ends.
 - **Your turn ends by itself** after 10 minutes without any request from you
   (an agent cut off mid-turn): the controller stops your exe, resets to neutral
   and gives the session to the next in line. Every request renews the turn;
@@ -67,32 +73,41 @@ python tools/vr-sandbox/sandbox.py release --owner vr1113b/shell
   (`session`, `pid`, `stream`, `time`) plus `shared: true`. MCP `start` takes a turn
   for the program's owner, MCP `stop` ends that turn only.
 
-## Easy Anti-Cheat ("Launch Error / EAC unload timeout")
+## Easy Anti-Cheat ("Launch Error (30005) EAC unload timeout")
 
-The dialog is a window of `start_protected_game.exe` (EAC's bootstrapper); no
-VRChat.exe starts. The one occurrence (2026-11-13 12:37:54) came 82 s after a
-VRChat that quit 10 s after it started, during "Attempting to login to EOS",
-before "AntiCheat Session Begin"; the EAC driver had unloaded at once and the next
-launch six minutes later worked. The controller therefore:
+Cause, reproduced twice on 2026-11-13 (16:13 and 16:16, picture
+`vr-feedback-1111/sandbox4/repro-early-quit-relaunch-launch-error.png`):
 
-- never closes a VRChat before its anti-cheat session began (or 90 s), closes it
-  with its window's close (as its own button does) and kills it only after 30 s;
+1. VRChat quits early (closed 60 s after its start; on 12:36 it quit after 10 s).
+   The `EasyAntiCheat_EOS` service stops at once, but the `EasyAntiCheat_EOSSys`
+   driver service stays RUNNING for about 77 s (the System log's FilterManager
+   "unloaded" event comes at once and hides this; `sc queryex` shows it).
+2. A launch inside that window: EAC's bootstrapper (`start_protected_game.exe`)
+   asks the old driver to stop (STOP_PENDING), waits about 20 s, then shows
+   "Couldn't start the game ... Error Code: 30005 (EAC unload timeout)". No
+   VRChat.exe starts. At 12:37:54 the launch came 83 s after the early quit.
+3. After a normal session (VRChat up several minutes) the driver service is
+   deleted 2-18 s after VRChat exits (sampled on every cycle today). A driver
+   service left STOPPED but not deleted does not block (launch at 16:11: VRChat
+   started in 2.5 s).
+
+So the controller:
+
+- keeps VRChat up across turns (the shared session), and never closes one
+  before its anti-cheat session began (or 90 s); it closes VRChat with its
+  window's close and kills it only after 30 s;
 - before every launch waits until no `VRChat.exe`, `start_protected_game.exe`,
-  `launch.exe` or `EasyAntiCheat_EOS.exe` is left, the `EasyAntiCheat_EOS`
-  service is STOPPED and the `EasyAntiCheat_EOSSys` driver service is deleted, for
-  5 s (up to 180 s, then a clear error, never a blind launch). Each launch
-  re-creates that driver service and it is deleted about 2 s after VRChat exits
-  (sampled); EAC's error 30005 behind this dialog is "CreateService failed", so a
-  driver service still present, even stopped, is the state to wait out;
-- closes a leftover Launch Error dialog (a bootstrapper window older than 45 s
-  without its VRChat child), with a picture of it, and retries a failed launch once;
+  `launch.exe` or `EasyAntiCheat_EOS.exe` is left and both EAC services are
+  STOPPED or deleted, for 5 s (up to 180 s, then a clear error, never a blind
+  launch);
+- treats a bootstrapper window titled "Launch Error" (or any bootstrapper window
+  older than 45 s without its VRChat child) as a failed launch: logs the EAC
+  state and a picture, closes it, waits for EAC to be idle and retries once;
 - logs every launch, close, turn and EAC service/process change with timestamps
-  in `C:/Users/Enzo/.orbiters-build/vr-sandbox/eac-log.jsonl`. After an
-  occurrence, read the lines around `launch_error_window`: they hold the service
-  states, processes and the driver's load/unload events at that moment.
+  in `C:/Users/Enzo/.orbiters-build/vr-sandbox/eac-log.jsonl`.
 
-A `STOP_PENDING` EasyAntiCheat_EOSSys that never stops is reported by VRChat
-players to need a reboot; the controller then refuses to launch and says so.
+A driver service that stays STOP_PENDING is reported by VRChat players to need a
+reboot; the controller then refuses to launch and says so.
 
 ## Build
 

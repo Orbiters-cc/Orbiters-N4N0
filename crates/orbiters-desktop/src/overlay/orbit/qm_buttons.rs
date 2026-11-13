@@ -1,193 +1,311 @@
-//! VRChat's own Quick Menu buttons that take its Quick Menu away (Enzo, 2026-11-13: "When I click on a menu button from the quick menu (opening the Avatar page for
-//! instance on the big menu and making the quick menu go away), the overlay stays [...] could be with invisible buttons hitbox at the same place as the vrchat quick
-//! menu buttons").
+//! VRChat's Quick Menu going away under a press of its own buttons (Enzo, 2026-11-13: "When I click on a menu button from the quick menu (opening the Avatar page
+//! for instance on the big menu and making the quick menu go away), the overlay stays [...] could be with invisible buttons hitbox at the same place as the vrchat
+//! quick menu buttons").
 //!
-//! VRChat says nothing of its menus; what is known here is the button that opened its Quick Menu ([`super::vr::MenuButtons`]). So the press of a laser on one of
-//! its buttons is watched: where the pointing hand's laser meets the Quick Menu's own plane (the plane the wing and the sheet are laid on), and its trigger going down
-//! and up there, as a click is in VRChat's menus. **Nothing here is an overlay and nothing takes a trigger**: these "hitboxes" are rectangles in the menu's units,
-//! looked at with the trigger VRChat itself receives ([`super::super::actions::Actions::orbit_triggers`] with no hand blocked), so they cannot swallow a click VRChat
-//! needs. A press that began on one of Orbiters' parts was Orbiters' (blocked from VRChat) and is not looked at.
+//! VRChat says nothing of its menus; [`super::vr::MenuButtons`] follows the button that opens its Quick Menu, and nothing saw a button *inside* it take it away.
 //!
-//! What is under the laser depends on the page VRChat's Quick Menu shows: its row of tabs (rocket, bell, pin, camera, sound, chat, gear) is on every page at the same
-//! place, and My Profile beside it is the same on every page; the buttons of the Launch Pad (the rocket's page) only there. A button that opens another page of the
-//! Quick Menu (not the Main Menu) leaves what lies where unknown until a tab is pressed: nothing on the main panel counts then. Units: a 1280 x 720 window's pixels
-//! from the menu's middle, x right and y down ([`super::zones`]), measured on VRChat's own menu (`sota/reports/orbit-overlays/qm-live-1280.png`) and checked in the
-//! SteamVR sandbox with real VRChat (`done4-shell.md`).
+//! **Why not hitboxes placed on VRChat's buttons** (measured in the SteamVR sandbox with real VRChat, `done4-shell.md`): VRChat draws its laser from the
+//! controller's raw pose with an offset of its own, not from the controller's tip that Orbiters' laser uses: pointed at one of Orbiters' tiles, VRChat's beam went
+//! a long way past it. And the plane Orbiters lays its parts on was matched to VRChat's menu by eye, which leaves its depth free: VRChat's laser, coming from below,
+//! landed one to two buttons away from where the same plane put it (aimed at Avatars, VRChat pressed Shop; aimed at the tabs, Groups). A button-by-button
+//! map would close the parts on the wrong buttons and miss the right ones.
+//!
+//! **What is done instead, as cheaply:** a click VRChat itself received (the pointing hand's trigger down and up off Orbiters' parts, read with no trigger taken:
+//! nothing here is an overlay and no click is swallowed, [`ClickWatch`]) is the cue to look whether VRChat's Quick Menu is still there, in the headset's own
+//! picture: its row of tabs (rocket, bell, pin, camera, sound, chat, gear, on every page of it and on nothing else) where the plane puts it **as seen from the eye**,
+//! which is what was matched by eye. [`Sight`] reads only that small part of one eye, on its own thread, a few times after a click; the tabs' shapes are the
+//! desktop detector's ([`super::detect`]), sampled through the eye's projection. [`QmCheck`] decides: seen there in this opening, then not seen twice after a click:
+//! it went (its Main Menu, Home, a portal...), and Orbiters' parts go. The same looks after a press of the menu button put right any other way the two got out of
+//! step (VRChat's Main Menu closes on that press without opening the Quick Menu). Out of view, unreadable, or never seen in this opening: nothing is decided, and
+//! the parts behave as before.
 
+use super::super::floating::space::{self, V3};
+use super::detect::{ICONS_NEEDED, ICON_HALF, ICON_MATCH, ICON_PATCH};
+use super::vr::Plane;
 use super::zones::{QM_ICONS_X, QM_ICONS_Y};
-use egui::{pos2, Pos2, Rect};
+use orbiters_openvr::Matrix34;
+use std::time::{Duration, Instant};
 
-/// What pressing a button of VRChat's Quick Menu does to it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Leads {
-    /// VRChat's Quick Menu goes (its Main Menu opens in its place): Orbiters' parts go with it.
-    Away,
-    /// Another page of the Quick Menu: what is where is not known until a tab is pressed.
-    Elsewhere,
-    /// The page the rocket's tab shows, or another tab's.
-    Tab(usize),
-}
-
-/// A button of VRChat's Quick Menu, by what it says.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Button {
-    LiveNow,
-    Worlds,
-    Avatars,
-    Social,
-    Groups,
-    Shop,
-    ProfileCard,
-    ProfileAvatar,
-    ProfileWorld,
-    ProfileFriends,
-    Home,
-    Respawn,
-    Select,
-    Safety,
-    Tab(usize),
-}
-
-/// Where each is, and what it leads to. A margin is left inside each edge: a laser on a button's very edge may be on its neighbour for VRChat, whose own laser
-/// starts where this one does (the controller's tip) but is read a frame apart.
-const INSIDE: f32 = 5.0;
-
-fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
-    Rect::from_min_max(pos2(x0 + INSIDE, y0 + INSIDE), pos2(x1 - INSIDE, y1 - INSIDE))
-}
-
-/// The Launch Pad's buttons: its grid of six (to the Main Menu's pages) and the row under it.
-fn launch_pad() -> [(Button, Rect, Leads); 10] {
-    [
-        (Button::LiveNow, rect(-143.0, 1.0, -57.0, 60.0), Leads::Away),
-        (Button::Worlds, rect(-43.0, 1.0, 43.0, 60.0), Leads::Away),
-        (Button::Avatars, rect(57.0, 1.0, 143.0, 60.0), Leads::Away),
-        (Button::Social, rect(-143.0, 73.0, -57.0, 132.0), Leads::Away),
-        (Button::Groups, rect(-43.0, 73.0, 43.0, 132.0), Leads::Away),
-        (Button::Shop, rect(57.0, 73.0, 143.0, 132.0), Leads::Away),
-        (Button::Home, rect(-164.0, 169.0, -80.0, 196.0), Leads::Elsewhere),
-        (Button::Respawn, rect(-78.0, 169.0, 0.0, 196.0), Leads::Elsewhere),
-        (Button::Select, rect(5.0, 169.0, 85.0, 196.0), Leads::Elsewhere),
-        (Button::Safety, rect(90.0, 169.0, 165.0, 196.0), Leads::Elsewhere),
-    ]
-}
-
-/// My Profile, the side panel at the menu's right on every page: its card and its rows to the Main Menu.
-fn my_profile() -> [(Button, Rect, Leads); 4] {
-    [
-        (Button::ProfileCard, rect(196.0, -111.0, 318.0, -26.0), Leads::Away),
-        (Button::ProfileAvatar, rect(196.0, 36.0, 318.0, 72.0), Leads::Away),
-        (Button::ProfileWorld, rect(196.0, 84.0, 318.0, 120.0), Leads::Away),
-        (Button::ProfileFriends, rect(196.0, 132.0, 318.0, 168.0), Leads::Away),
-    ]
-}
-
-/// The row of tabs under the main panel, on every page.
-fn tabs() -> impl Iterator<Item = (Button, Rect, Leads)> {
-    QM_ICONS_X.iter().enumerate().map(|(i, x)| (Button::Tab(i), Rect::from_center_size(pos2(*x, QM_ICONS_Y), egui::vec2(40.0, 36.0)), Leads::Tab(i)))
-}
-
-/// The Quick Menu's page as far as is known: the Launch Pad (its rocket tab, where VRChat starts), another tab's, or not known.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Page {
-    LaunchPad,
-    Tab(usize),
-    Unknown,
-}
-
-/// The button at `at` on `page`, and what it leads to.
-pub fn button_at(at: Pos2, page: Page) -> Option<(Button, Leads)> {
-    let all = launch_pad();
-    let pad: &[(Button, Rect, Leads)] = if page == Page::LaunchPad { &all } else { &[] };
-    tabs().chain(my_profile()).chain(pad.iter().copied()).find(|(_, r, _)| r.contains(at)).map(|(b, _, l)| (b, l))
-}
-
-/// Watches the presses of the laser of the hand that does not hold the Quick Menu on its buttons.
+/// Watches the trigger VRChat gets, per hand: a click is down and up, begun off Orbiters' parts (a press begun on them was blocked from VRChat).
 #[derive(Clone, Copy, Debug)]
-pub struct QmWatch {
-    page: Page,
-    /// The button a trigger went down on, per hand: a click is down and up on the same.
-    down: [Option<Button>; 2],
-    /// Each trigger as last seen, and whether its press began on Orbiters' parts (blocked from VRChat).
+pub struct ClickWatch {
     was: [bool; 2],
     ours: [bool; 2],
-    /// For the log: where the last press on VRChat's menu went down (its units, the button there), and the last click with what it led to.
-    pub pressed: Option<(Pos2, Option<Button>)>,
-    pub clicked: Option<(Button, Leads)>,
+    /// A press seen beginning, per hand: one held from before clicks nothing when let go.
+    began: [bool; 2],
 }
 
-impl Default for QmWatch {
+impl Default for ClickWatch {
     fn default() -> Self {
-        // VRChat starts on its Launch Pad; this may start with it elsewhere: not known until a tab is pressed, or VRChat starts again.
-        Self { page: Page::Unknown, down: [None; 2], was: [true; 2], ours: [false; 2], pressed: None, clicked: None }
+        // A trigger already held when this starts clicks nothing.
+        Self { was: [true; 2], ours: [false; 2], began: [false; 2] }
     }
 }
 
-impl QmWatch {
-    pub fn page(&self) -> Page {
-        self.page
-    }
-
-    /// VRChat (re)started: its Quick Menu shows its Launch Pad.
-    pub fn vrchat_started(&mut self) {
-        self.page = Page::LaunchPad;
-    }
-
-    /// Where a laser from `tip` meets VRChat's Quick Menu laid on `plane` (its frame on the menu's middle, +Z towards who holds it), in the menu's units: x right, y
-    /// down. `None` when it points away from it or along it.
-    pub fn on_menu(plane: &super::vr::Plane, tip: &orbiters_openvr::Matrix34) -> Option<Pos2> {
-        use super::super::floating::space;
-        let (origin, direction) = space::ray(tip);
-        let local = space::inverse(&plane.frame);
-        let (o, d) = (space::apply(&local, origin), space::rotate(&local, direction));
-        if d[2].abs() < 1e-6 {
-            return None;
-        }
-        let t = -o[2] / d[2];
-        if !(t > 0.0) || plane.unit <= 0.0 {
-            return None;
-        }
-        Some(pos2((o[0] + d[0] * t) / plane.unit, -(o[1] + d[1] * t) / plane.unit))
-    }
-
-    /// One turn with VRChat's Quick Menu open: for each hand, where its laser meets the menu's plane (in its units; `None` off it or for the hand that holds it),
-    /// whether it is on one of Orbiters' parts, and its trigger as VRChat gets it. Returns the button clicked that takes the Quick Menu away, if one was.
-    pub fn step(&mut self, at: [Option<Pos2>; 2], on_ours: [bool; 2], trigger: [bool; 2]) -> Option<Button> {
-        let mut away = None;
+impl ClickWatch {
+    /// One turn: whether each hand's press began on Orbiters' parts (blocked), each trigger, and which hand may point (not the one holding the menu). True when
+    /// VRChat got a click.
+    pub fn step(&mut self, on_ours: [bool; 2], trigger: [bool; 2], pointing: [bool; 2]) -> bool {
+        let mut clicked = false;
         for hand in 0..2 {
             let (down, was) = (trigger[hand], self.was[hand]);
             if down && !was {
                 self.ours[hand] = on_ours[hand];
-                self.down[hand] = if on_ours[hand] { None } else { at[hand].and_then(|p| button_at(p, self.page)).map(|(b, _)| b) };
-                if let Some(p) = at[hand].filter(|_| !on_ours[hand]) {
-                    self.pressed = Some((p, self.down[hand]));
-                }
+                self.began[hand] = true;
             } else if !down && was {
-                let pressed = self.down[hand].take();
-                let released = if self.ours[hand] { None } else { at[hand].and_then(|p| button_at(p, self.page)) };
-                if let (Some(pressed), Some((button, leads))) = (pressed, released) {
-                    if pressed == button {
-                        self.clicked = Some((button, leads));
-                        match leads {
-                            Leads::Away => away = Some(button),
-                            Leads::Elsewhere => self.page = Page::Unknown,
-                            Leads::Tab(0) => self.page = Page::LaunchPad,
-                            Leads::Tab(i) => self.page = Page::Tab(i),
-                        }
-                    }
-                }
+                clicked |= pointing[hand] && !self.ours[hand] && self.began[hand];
                 self.ours[hand] = false;
+                self.began[hand] = false;
             }
             self.was[hand] = down;
         }
-        away
+        clicked
     }
 
-    /// The Quick Menu closed or another opened: no press under way is VRChat's Quick Menu's.
-    pub fn closed(&mut self) {
-        self.down = [None; 2];
-        // A trigger held through the change presses nothing on the next menu.
+    /// A menu closed or another opened: a trigger held through it clicks nothing.
+    pub fn reset(&mut self) {
         self.was = [true; 2];
+        self.began = [false; 2];
+    }
+}
+
+/// Where a point lies in an eye's picture: `eye` the eye's pose in the play space, `raw` its sides' tangents ([`orbiters_openvr::Client::projection_raw`]), `size`
+/// the picture's pixels. `None` behind the eye.
+pub fn in_eye(eye: &Matrix34, raw: [f32; 4], size: [u32; 2], p: V3) -> Option<[f32; 2]> {
+    let c = space::apply(&space::inverse(eye), p);
+    if c[2] > -0.01 {
+        return None;
+    }
+    let [left, right, top, bottom] = super::camera_track::eye_sides(raw);
+    let (x, y) = (c[0] / -c[2], -c[1] / -c[2]);
+    Some([(x - left) / (right - left) * size[0] as f32, (y - top) / (bottom - top) * size[1] as f32])
+}
+
+/// A point of the Quick Menu, in its units (x right, y down from its middle), in the play space.
+pub fn on_plane(plane: &Plane, x: f32, y: f32) -> V3 {
+    space::apply(&plane.frame, [x * plane.unit, -y * plane.unit, 0.0])
+}
+
+/// Shifts of the whole row tried, in the menu's units: the plane was matched by eye within a few, and the hand moves between the pose and the picture.
+const SHIFTS: [f32; 5] = [-8.0, -4.0, 0.0, 4.0, 8.0];
+/// At most this many found: no Quick Menu.
+pub const GONE_AT_MOST: usize = 1;
+
+/// Where each sample of each tab's patch lies in the eye's picture, at each shift: `None` when any of the row is behind the eye or off the picture.
+fn samples(eye: &Matrix34, raw: [f32; 4], size: [u32; 2], plane: &Plane) -> Option<Vec<[f32; 2]>> {
+    let mut out = Vec::with_capacity(SHIFTS.len() * SHIFTS.len() * QM_ICONS_X.len() * ICON_PATCH * ICON_PATCH);
+    for dy in SHIFTS {
+        for dx in SHIFTS {
+            for x in QM_ICONS_X {
+                for i in 0..ICON_PATCH * ICON_PATCH {
+                    let g = |v: usize| ((v as f32 + 0.5) / ICON_PATCH as f32 * 2.0 - 1.0) * ICON_HALF;
+                    let p = in_eye(eye, raw, size, on_plane(plane, x + dx + g(i % ICON_PATCH), QM_ICONS_Y + dy + g(i / ICON_PATCH)))?;
+                    if !(0.0..size[0] as f32 - 1.0).contains(&p[0]) || !(0.0..size[1] as f32 - 1.0).contains(&p[1]) {
+                        return None;
+                    }
+                    out.push(p);
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// How many of the tabs' icons a picture shows at the shift that finds most: `grey` reads the picture at a pixel of the whole eye.
+fn found_in(points: &[[f32; 2]], grey: impl Fn(f32, f32) -> f32) -> usize {
+    let patch = ICON_PATCH * ICON_PATCH;
+    let mut best = 0;
+    for shift in points.chunks_exact(QM_ICONS_X.len() * patch) {
+        let found = shift
+            .chunks_exact(patch)
+            .enumerate()
+            .filter(|(i, pts)| {
+                let a: [f32; ICON_PATCH * ICON_PATCH] = std::array::from_fn(|k| grey(pts[k][0], pts[k][1]));
+                super::detect::icon_correlation(&a, *i) >= ICON_MATCH
+            })
+            .count();
+        best = best.max(found);
+    }
+    best
+}
+
+/// What [`Sight`] is asked to look at.
+#[derive(Clone, Copy)]
+pub struct Ask {
+    /// The left eye's pose in the play space, now, and its sides' tangents.
+    pub eye: Matrix34,
+    pub raw: [f32; 4],
+    pub plane: Plane,
+}
+
+/// Looks at VRChat's Quick Menu's tabs in the left eye's picture, one look at a time, on its own thread with its own small reader of the headset's picture.
+pub struct Sight {
+    asks: std::sync::mpsc::Sender<Ask>,
+    told: std::sync::mpsc::Receiver<Option<usize>>,
+    pub busy: bool,
+}
+
+impl Sight {
+    #[cfg(windows)]
+    pub fn start(source: orbiters_openvr::compositor::MirrorSource, adapter: Option<u32>) -> Self {
+        let (asks, asked) = std::sync::mpsc::channel::<Ask>();
+        let (tell, told) = std::sync::mpsc::channel();
+        let _ = std::thread::Builder::new().name("orbit-qm-sight".into()).spawn(move || {
+            let reader = orbiters_openvr::mirror::EyeReader::new(adapter).ok();
+            let mut whole: Option<[u32; 2]> = None;
+            while let Ok(ask) = asked.recv() {
+                let found = reader.as_ref().and_then(|reader| {
+                    let size = match whole {
+                        Some(s) => s,
+                        None => {
+                            let all = reader.read_part(source, orbiters_openvr::compositor::Eye::Left, None).ok()?;
+                            *whole.insert(all.whole)
+                        }
+                    };
+                    let points = samples(&ask.eye, ask.raw, size, &ask.plane)?;
+                    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, 0.0f32, 0.0f32);
+                    for p in &points {
+                        (x0, y0, x1, y1) = (x0.min(p[0]), y0.min(p[1]), x1.max(p[0]), y1.max(p[1]));
+                    }
+                    let area = [x0 as u32, y0 as u32, (x1 as u32 + 2 - x0 as u32).min(size[0] - x0 as u32), (y1 as u32 + 2 - y0 as u32).min(size[1] - y0 as u32)];
+                    let part = reader.read_part(source, orbiters_openvr::compositor::Eye::Left, Some(area)).ok()?;
+                    if part.whole != size {
+                        whole = Some(part.whole);
+                        return None;
+                    }
+                    let grey = |x: f32, y: f32| {
+                        let (fx, fy) = ((x - part.from[0] as f32).clamp(0.0, part.width as f32 - 1.001), (y - part.from[1] as f32).clamp(0.0, part.height as f32 - 1.001));
+                        let (ix, iy) = (fx as usize, fy as usize);
+                        let (ax, ay) = (fx - ix as f32, fy - iy as f32);
+                        let g = |x: usize, y: usize| {
+                            let i = (y * part.width as usize + x) * 4;
+                            part.rgba.get(i..i + 3).map_or(0.0, |p| (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0)
+                        };
+                        (g(ix, iy) * (1.0 - ax) + g(ix + 1, iy) * ax) * (1.0 - ay) + (g(ix, iy + 1) * (1.0 - ax) + g(ix + 1, iy + 1) * ax) * ay
+                    };
+                    Some(found_in(&points, grey))
+                });
+                if tell.send(found).is_err() {
+                    return;
+                }
+            }
+        });
+        Self { asks, told, busy: false }
+    }
+
+    /// Looks once, unless a look is under way.
+    pub fn ask(&mut self, ask: Ask) {
+        if !self.busy && self.asks.send(ask).is_ok() {
+            self.busy = true;
+        }
+    }
+
+    /// What the last look found, once: `Some(None)` when it could not see the row (out of view, unreadable).
+    pub fn take(&mut self) -> Option<Option<usize>> {
+        let found = self.told.try_recv().ok()?;
+        self.busy = false;
+        Some(found)
+    }
+}
+
+/// Why looks are due.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Why {
+    /// The Quick Menu is taken as open: is it seen there, to trust a later "not seen".
+    Opened,
+    /// VRChat got a click while its Quick Menu was taken as open.
+    Clicked,
+    /// The menu button was pressed: is what the buttons say what shows.
+    Pressed,
+}
+
+/// What the looks say to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// VRChat's Quick Menu is not there: Orbiters' parts go.
+    Gone,
+    /// It is there though taken as closed: Orbiters' parts come.
+    There,
+}
+
+/// After a click or a press, looks at these moments: VRChat's menus take about 0.2 to 0.3 s to come or go.
+const LOOKS_AFTER: [u64; 4] = [300, 550, 850, 1300];
+const LOOKS_AFTER_OPENING: [u64; 2] = [500, 900];
+
+/// Decides from looks whether VRChat's Quick Menu is there, against what the buttons say.
+#[derive(Debug, Default)]
+pub struct QmCheck {
+    due: Vec<Instant>,
+    why: Option<Why>,
+    /// Seen there since it was taken as open: only then is "not seen" believed.
+    seen: bool,
+    /// Looks in a row that found it gone, or there.
+    gone: u8,
+    there: u8,
+}
+
+impl QmCheck {
+    fn plan(&mut self, why: Why, now: Instant, after: &[u64]) {
+        self.why = Some(why);
+        self.due = after.iter().map(|ms| now + Duration::from_millis(*ms)).collect();
+        (self.gone, self.there) = (0, 0);
+    }
+
+    /// Why the looks under way were asked for (for the log).
+    pub fn why(&self) -> Option<Why> {
+        self.why
+    }
+
+    /// The buttons now take the Quick Menu as open (`true`) or not.
+    pub fn taken(&mut self, open: bool, now: Instant) {
+        self.seen = false;
+        self.plan(if open { Why::Opened } else { Why::Pressed }, now, if open { &LOOKS_AFTER_OPENING } else { &LOOKS_AFTER });
+    }
+
+    /// The menu button was pressed and the buttons' answer is the same as before (a long press...): look as well.
+    pub fn pressed(&mut self, now: Instant) {
+        self.plan(Why::Pressed, now, &LOOKS_AFTER);
+    }
+
+    pub fn clicked(&mut self, now: Instant) {
+        self.plan(Why::Clicked, now, &LOOKS_AFTER);
+    }
+
+    /// Whether a look is due now.
+    pub fn look_now(&mut self, now: Instant) -> bool {
+        let due = self.due.first().is_some_and(|at| *at <= now);
+        if due {
+            self.due.remove(0);
+        }
+        due
+    }
+
+    /// A look found `found` icons of its tabs (`None`: could not see the row). `open`: what the buttons take it as.
+    pub fn found(&mut self, found: Option<usize>, open: bool) -> Option<Verdict> {
+        let found = found?;
+        if found >= ICONS_NEEDED {
+            self.seen = true;
+            self.gone = 0;
+            self.there = self.there.saturating_add(1);
+            if !open && self.there >= 2 {
+                self.due.clear();
+                return Some(Verdict::There);
+            }
+        } else if found <= GONE_AT_MOST {
+            self.there = 0;
+            self.gone = self.gone.saturating_add(1);
+            if open && self.seen && self.gone >= 2 {
+                self.due.clear();
+                self.seen = false;
+                return Some(Verdict::Gone);
+            }
+            // Never seen in this opening: nothing is believed. Were the row never found in some light or headset, the parts would otherwise go each time
+            // they open. (VRChat's Main Menu closing on the menu button is [`super::vr::MenuButtons::main_menu_opened`]'s.)
+        } else {
+            // Half there (mid-animation, partly hidden): neither, and the looks in a row start again.
+            (self.gone, self.there) = (0, 0);
+        }
+        None
     }
 }
 
@@ -195,110 +313,123 @@ impl QmWatch {
 mod tests {
     use super::*;
 
-    fn click(watch: &mut QmWatch, at: Pos2) -> Option<Button> {
-        let mut away = watch.step([None, Some(at)], [false; 2], [false; 2]);
-        away = away.or(watch.step([None, Some(at)], [false; 2], [false, true]));
-        away.or(watch.step([None, Some(at)], [false; 2], [false; 2]))
-    }
-
-    fn centre(b: Button, page: Page) -> Pos2 {
-        let all: Vec<(Button, Rect, Leads)> = tabs().chain(my_profile()).chain(launch_pad()).collect();
-        let r = all.iter().find(|(x, _, _)| *x == b).unwrap().1;
-        assert_eq!(button_at(r.center(), page).map(|(x, _)| x), Some(b));
-        r.center()
-    }
-
-    /// Enzo: the Avatars button of VRChat's Quick Menu opens its Main Menu and the Quick Menu goes: Orbiters' parts must go with it. Its tabs, and its buttons
-    /// that keep it up, must not.
+    /// Enzo: VRChat's Avatars button takes its Quick Menu away and Orbiters' parts stayed. Seen there, clicked, then not seen twice: gone.
     #[test]
-    fn the_main_menu_s_buttons_take_the_parts_away_and_the_others_do_not() {
-        let mut watch = QmWatch::default();
-        watch.vrchat_started();
-        for b in [Button::LiveNow, Button::Worlds, Button::Avatars, Button::Social, Button::Groups, Button::Shop] {
-            assert_eq!(click(&mut watch, centre(b, Page::LaunchPad)), Some(b), "{b:?} on the Launch Pad");
-        }
-        // The tabs keep it up, and another tab's page has none of the Launch Pad's buttons.
-        let avatars = centre(Button::Avatars, Page::LaunchPad);
-        assert_eq!(click(&mut watch, centre(Button::Tab(3), Page::LaunchPad)), None, "the camera's tab");
-        assert_eq!(watch.page(), Page::Tab(3));
-        assert_eq!(click(&mut watch, avatars), None, "where Avatars is on the Launch Pad, on the camera's page");
-        // My Profile is beside every page.
-        for b in [Button::ProfileCard, Button::ProfileAvatar, Button::ProfileWorld, Button::ProfileFriends] {
-            assert_eq!(click(&mut watch, centre(b, Page::Tab(3))), Some(b), "{b:?} on another tab's page");
-        }
-        assert_eq!(click(&mut watch, centre(Button::Tab(0), Page::Tab(3))), None);
-        assert_eq!(click(&mut watch, avatars), Some(Button::Avatars), "back on the Launch Pad");
-        // A page of its own (Safety, Select...) leaves the main panel unknown until a tab.
-        assert_eq!(click(&mut watch, centre(Button::Safety, Page::LaunchPad)), None);
-        assert_eq!(watch.page(), Page::Unknown);
-        assert_eq!(click(&mut watch, avatars), None, "on an unknown page");
+    fn a_click_that_takes_the_quick_menu_away_takes_the_parts() {
+        let t0 = Instant::now();
+        let mut check = QmCheck::default();
+        check.taken(true, t0);
+        assert!(!check.look_now(t0));
+        assert!(check.look_now(t0 + Duration::from_millis(500)));
+        assert_eq!(check.found(Some(6), true), None, "seen there");
+        check.clicked(t0 + Duration::from_secs(3));
+        assert_eq!(check.found(Some(0), true), None, "one look is not enough");
+        assert_eq!(check.found(Some(1), true), Some(Verdict::Gone));
     }
 
-    /// A press is a click only down and up on the same button, as in VRChat's menus; one begun on Orbiters' parts was Orbiters' and VRChat never had it.
+    /// A click on a tab, or anything that keeps it up, finds it still there: nothing goes. Neither does what could not be seen, nor a menu never seen there
+    /// (another world's light, the row out of view): the parts then behave as before.
     #[test]
-    fn only_a_click_of_vrchat_s_counts() {
-        let mut watch = QmWatch::default();
-        watch.vrchat_started();
-        let (avatars, worlds) = (centre(Button::Avatars, Page::LaunchPad), centre(Button::Worlds, Page::LaunchPad));
-        watch.step([None, Some(avatars)], [false; 2], [false; 2]);
-        watch.step([None, Some(avatars)], [false; 2], [false, true]);
-        assert_eq!(watch.step([None, Some(worlds)], [false; 2], [false; 2]), None, "down on one, up on another");
-        watch.step([None, Some(avatars)], [false, true], [false, true]);
-        assert_eq!(watch.step([None, Some(avatars)], [false; 2], [false; 2]), None, "begun on Orbiters' parts");
-        // Between buttons, and off the menu.
-        assert_eq!(click(&mut watch, pos2(50.0, 66.0)), None);
-        watch.step([None, None], [false; 2], [false, true]);
-        assert_eq!(watch.step([None, None], [false; 2], [false; 2]), None);
-        // A trigger held when the menu opens presses nothing.
-        let mut watch = QmWatch::default();
-        watch.vrchat_started();
-        assert_eq!(watch.step([None, Some(avatars)], [false; 2], [false, true]), None);
-        assert_eq!(watch.step([None, Some(avatars)], [false; 2], [false; 2]), None, "held from before");
-    }
-
-    /// A laser from the other hand pointed at a button of VRChat's Quick Menu, held on either hand, is found on that button, as VRChat's own laser from the same tip.
-    #[test]
-    fn a_laser_on_the_menu_is_found_on_its_button() {
-        use super::super::super::floating::space;
-        let tune = super::super::vr::Tune::default();
-        for hand in 0..2 {
-            let grip = space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [if hand == 0 { -0.2 } else { 0.2 }, 1.1, -0.3]);
-            let plane = super::super::vr::quick_menu_plane(&grip, hand, &tune, 1.0);
-            for b in [Button::Avatars, Button::ProfileWorld, Button::Tab(0)] {
-                let at = centre(b, Page::LaunchPad);
-                let target = space::apply(&plane.frame, [at.x * plane.unit, -at.y * plane.unit, 0.0]);
-                // From in front of the menu, a little aside, pointing at it: the tip's -Z along the way.
-                let from = space::add(target, space::add(space::scale(space::axis(&plane.frame, 2), 0.35), [0.1, 0.05, 0.0]));
-                let back = space::unit(space::sub(from, target)).unwrap();
-                let side = space::unit(space::cross([0.0, 1.0, 0.0], back)).unwrap();
-                let tip = space::from_axes(side, space::cross(back, side), back, from);
-                let found = QmWatch::on_menu(&plane, &tip).expect("on the plane");
-                assert!((found - at).length() < 0.5, "{b:?} on hand {hand}: {found:?} for {at:?}");
-                assert_eq!(button_at(found, Page::LaunchPad).map(|(x, _)| x), Some(b));
-            }
-            // Pointing away from it.
-            let z = space::scale(space::axis(&plane.frame, 2), -1.0);
-            let x = space::unit(space::cross([0.0, 1.0, 0.0], z)).unwrap();
-            let away = space::from_axes(x, space::cross(z, x), z, space::add(space::position(&plane.frame), space::scale(space::axis(&plane.frame, 2), 0.3)));
-            assert!(QmWatch::on_menu(&plane, &away).is_none(), "pointing away from it, on hand {hand}");
+    fn what_keeps_it_up_or_cannot_be_seen_changes_nothing() {
+        let t0 = Instant::now();
+        let mut check = QmCheck::default();
+        check.taken(true, t0);
+        assert_eq!(check.found(Some(7), true), None);
+        check.clicked(t0);
+        for found in [Some(5), Some(4), None, None, Some(6)] {
+            assert_eq!(check.found(found, true), None, "{found:?}");
+        }
+        // Half there (2 or 3 icons, mid-animation) is neither.
+        assert_eq!(check.found(Some(2), true), None);
+        assert_eq!(check.found(Some(0), true), None);
+        assert_eq!(check.found(Some(3), true), None);
+        assert_eq!(check.found(Some(0), true), None, "not two in a row");
+        let mut never = QmCheck::default();
+        never.taken(true, t0);
+        never.clicked(t0);
+        for _ in 0..4 {
+            assert_eq!(never.found(Some(0), true), None, "never seen in this opening");
         }
     }
 
-    /// No two buttons overlap, and none lies on Orbiters' wing beside the menu (on either hand) or the strip under its tabs.
+    /// A Quick Menu seen while taken as closed (the buttons out of step some other way) brings the parts back; one not seen while taken as open is believed
+    /// gone only once it was seen in that opening.
     #[test]
-    fn the_buttons_are_apart_and_clear_of_orbiters_parts() {
-        let all: Vec<(Button, Rect, Leads)> = tabs().chain(my_profile()).chain(launch_pad()).collect();
-        for (i, (a, ra, _)) in all.iter().enumerate() {
-            for (b, rb, _) in &all[i + 1..] {
-                assert!(!ra.intersects(*rb), "{a:?} and {b:?}");
-            }
+    fn looks_after_the_menu_button_put_the_buttons_right() {
+        let t0 = Instant::now();
+        let mut check = QmCheck::default();
+        check.taken(true, t0);
+        for _ in 0..4 {
+            assert_eq!(check.found(Some(0), true), None, "never seen in this opening: not believed");
         }
-        for places in [super::super::vr::quick_menu_places(0), super::super::vr::quick_menu_places(1), super::super::vr::strip_places()] {
-            for part in places {
-                for (b, r, _) in &all {
-                    assert!(!part.rect.intersects(*r), "{b:?} under {:?}", part.zone);
-                }
-            }
-        }
+        let mut check = QmCheck::default();
+        check.taken(false, t0);
+        assert_eq!(check.found(Some(5), false), None);
+        assert_eq!(check.found(Some(6), false), Some(Verdict::There));
+    }
+
+    /// Seen in the sandbox: once a Quick Menu button opened VRChat's Main Menu, the next short press of the menu button closes that Main Menu and opens nothing;
+    /// the press after opens the Quick Menu, and its parts with it.
+    #[test]
+    fn the_press_after_the_main_menu_opens_nothing() {
+        use super::super::vr::{MenuButtons, Open};
+        let t0 = Instant::now();
+        let mut buttons = MenuButtons::default();
+        let mut at = t0;
+        let mut press = |b: &mut MenuButtons| {
+            b.step([false; 2], at);
+            at += Duration::from_millis(50);
+            b.step([true, false], at);
+            at += Duration::from_millis(100);
+            let open = b.step([false; 2], at);
+            at += Duration::from_millis(50);
+            open
+        };
+        assert_eq!(press(&mut buttons), Open::QuickMenu(0));
+        buttons.main_menu_opened();
+        assert_eq!(buttons.open(), Open::Closed);
+        assert_eq!(press(&mut buttons), Open::Closed, "closes VRChat's Main Menu only");
+        assert_eq!(press(&mut buttons), Open::QuickMenu(0));
+        assert_eq!(buttons.last_hand(), Some(0));
+        buttons.reset();
+        buttons.seen_open(1);
+        assert_eq!(buttons.open(), Open::QuickMenu(1));
+    }
+
+    /// Only VRChat's clicks: a press begun on Orbiters' parts was blocked from VRChat; the hand holding the menu points at nothing; a trigger held from before
+    /// clicks nothing.
+    #[test]
+    fn only_a_click_vrchat_got_counts() {
+        let mut watch = ClickWatch::default();
+        assert!(!watch.step([false; 2], [false, true], [true; 2]), "held from before");
+        assert!(!watch.step([false; 2], [false, false], [true; 2]), "held from before, let go");
+        assert!(!watch.step([false; 2], [false, true], [true; 2]));
+        assert!(watch.step([false; 2], [false, false], [true; 2]), "a click");
+        assert!(!watch.step([false, true], [false, true], [true; 2]));
+        assert!(!watch.step([false; 2], [false, false], [true; 2]), "begun on Orbiters' parts");
+        assert!(!watch.step([false; 2], [true, false], [false, true]));
+        assert!(!watch.step([false; 2], [false, false], [false, true]), "the menu's own hand");
+    }
+
+    /// The row sampled through the eye's projection lands where the eye sees the plane: a point straight ahead is the picture's middle sideways, and the tabs
+    /// of a menu held before the eyes are all in view, those behind it are not.
+    #[test]
+    fn the_tabs_are_found_where_the_eye_sees_them() {
+        let raw = [-1.376, 0.839, -1.376, 0.9];
+        let eye = space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.65, 0.0]);
+        let p = in_eye(&eye, raw, [1620, 1800], [0.0, 1.65, -1.0]).unwrap();
+        assert!((p[0] - 1620.0 * 1.376 / (1.376 + 0.839)).abs() < 0.5 && (p[1] - 1800.0 * 0.9 / (0.9 + 1.376)).abs() < 0.5, "{p:?}");
+        assert!(in_eye(&eye, raw, [1620, 1800], [0.0, 1.65, 1.0]).is_none());
+        let plane = Plane { frame: space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.55, -0.4]), unit: 0.0009 };
+        let points = samples(&eye, raw, [1620, 1800], &plane).expect("in view");
+        assert_eq!(points.len(), SHIFTS.len() * SHIFTS.len() * 7 * ICON_PATCH * ICON_PATCH);
+        let behind = Plane { frame: space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.55, 0.4]), unit: 0.0009 };
+        assert!(samples(&eye, raw, [1620, 1800], &behind).is_none());
+        // A picture of the icons themselves, drawn where the plane puts them, is found; a blank one is not.
+        let exact: Vec<[f32; 2]> = points.chunks_exact(7 * ICON_PATCH * ICON_PATCH).nth(SHIFTS.len() * SHIFTS.len() / 2).unwrap().to_vec();
+        let painted: Vec<([f32; 2], f32)> = exact.iter().enumerate().map(|(n, p)| (*p, super::super::detect::icon_template(n / (ICON_PATCH * ICON_PATCH))[n % (ICON_PATCH * ICON_PATCH)] as f32)).collect();
+        let icons = |x: f32, y: f32| painted.iter().find(|(p, _)| (p[0] - x).abs() < 0.01 && (p[1] - y).abs() < 0.01).map_or(0.0, |(_, v)| *v);
+        assert_eq!(found_in(&exact, icons), 7);
+        assert_eq!(found_in(&points, |_, _| 128.0), 0);
     }
 }

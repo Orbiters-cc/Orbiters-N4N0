@@ -59,12 +59,16 @@ pub struct MenuButtons {
     closed_ahead: Option<usize>,
     /// What VRChat must be told now: its Quick Menu toggled, on that hand.
     toggle: Option<usize>,
+    /// VRChat's Main Menu is up (a button of its Quick Menu opened it): a short press of the menu button closes it and opens nothing (seen in the SteamVR sandbox).
+    main_menu: bool,
+    /// The hand of the last press.
+    last: Option<usize>,
 }
 
 impl Default for MenuButtons {
     fn default() -> Self {
         // Buttons taken as held: one already down when this starts presses nothing.
-        Self { open: Open::Closed, down: [true; 2], press: None, closed_ahead: None, toggle: None }
+        Self { open: Open::Closed, down: [true; 2], press: None, closed_ahead: None, toggle: None, main_menu: false, last: None }
     }
 }
 
@@ -77,6 +81,24 @@ impl MenuButtons {
     pub fn reset(&mut self) {
         self.open = Open::Closed;
         self.press = None;
+        self.main_menu = false;
+    }
+
+    /// VRChat's Quick Menu was seen to go under a click of one of its buttons: its Main Menu took its place, most likely (`qm_buttons`).
+    pub fn main_menu_opened(&mut self) {
+        self.reset();
+        self.main_menu = true;
+    }
+
+    /// VRChat's Quick Menu was seen up on `hand` while these took it as closed.
+    pub fn seen_open(&mut self, hand: usize) {
+        self.open = Open::QuickMenu(hand);
+        self.main_menu = false;
+    }
+
+    /// The hand that last pressed the menu button.
+    pub fn last_hand(&self) -> Option<usize> {
+        self.last
     }
 
     /// The avatar walks: VRChat closes its Quick Menu then, and not its wheel, whose hand's stick picks its slices.
@@ -104,6 +126,7 @@ impl MenuButtons {
             if down[hand] && !self.down[hand] && self.press.is_none() {
                 self.press = Some((hand, now, self.open == Open::Wheel(hand)));
                 self.closed_ahead = None;
+                self.last = Some(hand);
             }
         }
         if let Some((hand, since, on_wheel)) = self.press {
@@ -120,6 +143,7 @@ impl MenuButtons {
                 // The wheel takes the place of what was open.
                 if held >= HOLD && !on_wheel {
                     self.open = Open::Wheel(hand);
+                    self.main_menu = false;
                 }
             } else {
                 // A slow short press after all: VRChat toggles its Quick Menu at the release, back open. It was to close.
@@ -127,6 +151,9 @@ impl MenuButtons {
                     self.toggle = Some(on);
                 }
                 if on_wheel {
+                    self.open = Open::Closed;
+                } else if held < HOLD && std::mem::take(&mut self.main_menu) {
+                    // VRChat's Main Menu was up: this press closed it, and nothing opened.
                     self.open = Open::Closed;
                 } else if held < HOLD {
                     // As VRChat must, this waits for the release: only then is it known not to be the wheel's. With a wheel open on either hand it only closes the wheel, and it
@@ -1121,10 +1148,12 @@ pub struct OrbitVr {
     /// What the headset shows, kept when asked (`ORBITERS_VR_PICTURES`).
     moments: super::super::eye_picture::Moments,
     osc_toggle: Option<(usize, Instant)>,
-    /// VRChat's own Quick Menu buttons that take it away (its Main Menu's), watched under the other hand's laser: no overlay, no trigger taken (I-qm-leave).
-    qm_watch: super::qm_buttons::QmWatch,
-    /// The VRChat seen running (once looked): one started anew shows its Launch Pad.
-    vrchat_pid: Option<Option<u32>>,
+    /// VRChat's Quick Menu taken away by one of its own buttons (I-qm-leave): the clicks VRChat gets (no overlay, no trigger taken), and looks at its tabs in the eye's
+    /// picture after one ([`super::qm_buttons`]).
+    qm_clicks: super::qm_buttons::ClickWatch,
+    qm_check: super::qm_buttons::QmCheck,
+    qm_sight: Option<super::qm_buttons::Sight>,
+    qm_taken: Open,
     camera_seen: Option<Instant>,
     camera_looks: u32,
     camera_input_logged:super::super::vr_log::Every,
@@ -1196,8 +1225,10 @@ impl OrbitVr {
             hole_logged: Default::default(),
             moments: Default::default(),
             osc_toggle: None,
-            qm_watch: Default::default(),
-            vrchat_pid: None,
+            qm_clicks: Default::default(),
+            qm_check: Default::default(),
+            qm_sight: None,
+            qm_taken: Open::Closed,
             camera_seen: None,
             camera_looks: 0,
             camera_input_logged:Default::default(),
@@ -1317,12 +1348,6 @@ impl OrbitVr {
         let wanted = settings.any() && cx.snap.vrchat.running;
         // The parts of menus that closed are kept for a while; with no menu up nothing else comes by to let them go.
         self.panels.let_go(now);
-        // A VRChat started anew shows its Quick Menu's Launch Pad; one running before this looked is on a page not known.
-        let pid = cx.snap.vrchat.pid;
-        if self.vrchat_pid.is_some_and(|was| was != pid) && pid.is_some() {
-            self.qm_watch.vrchat_started();
-        }
-        self.vrchat_pid = Some(pid);
         if !wanted || !cx.in_game || cx.dashboard {
             // Free at once, whatever is held.
             if self.last_shown || self.block.blocked() != [false; 2] {
@@ -1371,6 +1396,9 @@ impl OrbitVr {
             self.panels.close_sheet();
         }
         self.camera_was = camera;
+        if settings.around_quick_menu() {
+            self.quick_menu_looks(&cx, now);
+        }
         let open = self.buttons.open();
         // VRChat's camera panel, seen on its window while it says its camera is open, with neither of its menus up.
         // Looked for even with a menu up: VRChat's camera is opened from one, and what follows the buttons may still say it is open.
@@ -1611,25 +1639,6 @@ impl OrbitVr {
         });
         let hands: [HandNow; 2] = std::array::from_fn(|i| HandNow { on_panel: hits[i].is_some(), trigger: triggers[i] });
         let blocked_before = self.block.blocked();
-        // VRChat's own buttons that take its Quick Menu away (its Main Menu's): where the other hand's laser meets the Quick Menu's plane, with the trigger VRChat
-        // itself gets. Nothing is shown there and no trigger is taken for it: a press on them is VRChat's alone (I-qm-leave, Enzo 2026-11-13).
-        match (menu, open, self.plane) {
-            (Some(Around::QuickMenu), Open::QuickMenu(menu_hand), Some(qm)) => {
-                let at: [Option<Pos2>; 2] = std::array::from_fn(|i| if i == menu_hand { None } else { lasers[i].and_then(|tip| super::qm_buttons::QmWatch::on_menu(&qm, &tip)) });
-                let away = self.qm_watch.step(at, blocked_before, triggers);
-                if let Some((p, button)) = self.qm_watch.pressed.take() {
-                    super::super::vr_log::line(&format!("quick menu: VRChat's menu pressed at ({:.0}, {:.0}), page {:?}, button {button:?}", p.x, p.y, self.qm_watch.page())); // i18n: not shown (a log's line)
-                }
-                if let Some((button, leads)) = self.qm_watch.clicked.take() {
-                    super::super::vr_log::line(&format!("quick menu: VRChat's {button:?} clicked, leads {leads:?}, page now {:?}", self.qm_watch.page())); // i18n: not shown (a log's line)
-                }
-                if let Some(button) = away {
-                    super::super::vr_log::line(&format!("quick menu: VRChat's {button:?} took its Quick Menu away: Orbiters' parts go with it")); // i18n: not shown (a log's line)
-                    self.buttons.reset();
-                }
-            }
-            _ => self.qm_watch.closed(),
-        }
         let blocked = self.block.step(hands, true);
         cx.actions.set_block(blocked);
         self.stuck.beat(blocked != [false; 2]);
@@ -1745,6 +1754,70 @@ impl OrbitVr {
         let small = if cx.world_status.small_taken { "small-taken" } else if cx.world_status.small_docked { "small-in-its-hole" } else if cx.world_status.small { "small" } else { "" };
         self.moments.see(cx.steamvr, format!("{menu:?} {:?} {:?} {small}", facts.sheet, facts.pointed)); // i18n: not shown (a file's name)
         turn
+    }
+
+    /// Whether VRChat's Quick Menu is where the buttons say (I-qm-leave, Enzo 2026-11-13): after a click VRChat got while it is taken as open (one of its own buttons
+    /// may have opened its Main Menu in its place), and after the menu button, its row of tabs is looked for in the eye's picture where Orbiters' plane is seen.
+    fn quick_menu_looks(&mut self, cx: &Cx<'_, '_>, now: Instant) {
+        use super::qm_buttons::{Ask, Sight, Verdict};
+        let open = self.buttons.open();
+        if open != self.qm_taken {
+            self.qm_clicks.reset();
+            match open {
+                Open::Wheel(_) => self.qm_check = Default::default(),
+                _ => self.qm_check.taken(matches!(open, Open::QuickMenu(_)), now),
+            }
+            self.qm_taken = open;
+        }
+        if cx.input_read {
+            if let Open::QuickMenu(hand) = open {
+                let triggers = cx.actions.orbit_triggers(cx.steamvr, self.block.blocked());
+                let pointing = std::array::from_fn(|i| i != hand);
+                if self.qm_clicks.step(self.block.blocked(), triggers, pointing) {
+                    super::super::vr_log::line("quick menu: VRChat got a click: looking whether its Quick Menu is still there"); // i18n: not shown (a log's line)
+                    self.qm_check.clicked(now);
+                }
+            }
+        }
+        if let Some(found) = self.qm_sight.as_mut().and_then(|s| s.take()) {
+            let verdict = self.qm_check.found(found, matches!(open, Open::QuickMenu(_)));
+            super::super::vr_log::line(&format!("quick menu: tabs found {found:?} in the eye's picture, taken as {open:?}, looked after {:?}, verdict {verdict:?}", self.qm_check.why())); // i18n: not shown (a log's line)
+            match (verdict, open) {
+                (Some(Verdict::Gone), Open::QuickMenu(_)) => self.buttons.main_menu_opened(),
+                (Some(Verdict::There), Open::Closed) => {
+                    if let Some(hand) = self.buttons.last_hand() {
+                        self.buttons.seen_open(hand);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let hand = match open {
+            Open::QuickMenu(hand) => Some(hand),
+            Open::Closed => self.buttons.last_hand(),
+            Open::Wheel(_) => None,
+        };
+        if !self.qm_check.look_now(now) {
+            return;
+        }
+        let Some(hand) = hand else { return };
+        let mut poses = [Pose::default(); MAX_DEVICES];
+        cx.steamvr.predicted_poses(Universe::Standing, 0.0, &mut poses);
+        let role = if hand == 0 { ControllerRole::LeftHand } else { ControllerRole::RightHand };
+        let Some(device) = cx.steamvr.controller_index(role).filter(|&d| (d as usize) < MAX_DEVICES && poses[d as usize].pose_is_valid) else { return };
+        if !poses[0].pose_is_valid {
+            return;
+        }
+        let plane = quick_menu_plane(&poses[device as usize].device_to_absolute, hand, &self.tune, cx.snap.settings.orbit.vr_size);
+        let eye = space::compose(&poses[0].device_to_absolute, &cx.steamvr.eye_to_head(vr::compositor::Eye::Left));
+        let raw = cx.steamvr.projection_raw(vr::compositor::Eye::Left);
+        if self.qm_sight.is_none() {
+            let Ok(compositor) = cx.steamvr.compositor() else { return };
+            self.qm_sight = Some(Sight::start(compositor.mirror_source(), cx.steamvr.dxgi_adapter_index()));
+        }
+        if let Some(sight) = self.qm_sight.as_mut() {
+            sight.ask(Ask { eye, raw, plane });
+        }
     }
 
     fn show(&mut self, cx: &mut Cx<'_, '_>, quads: &[(Quad, Placed)], placing: &[Placing]) {

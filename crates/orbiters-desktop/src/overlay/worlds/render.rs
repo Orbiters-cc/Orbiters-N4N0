@@ -4,7 +4,7 @@
 
 use super::catalog::Capture;
 use super::opening::{self, Opening};
-use super::stereo::{Cube, Placement, PlayCamera, V3};
+use super::stereo::{Cube, Cut, Placement, PlayCamera, V3};
 use anyhow::{anyhow, Context as _};
 use orbiters_i18n::tr;
 use eframe::wgpu;
@@ -57,8 +57,8 @@ pub fn adapter_luid(adapter: &wgpu::Adapter) -> Option<u64> {
 
 /// Draws a capture's faces into textures.
 pub struct FaceRenderer {
-    /// The middle and reach of what is drawn, where marks leave the rest out.
-    clipped: Option<(V3, f32, f32)>,
+    /// What is drawn, where marks leave the rest out.
+    clipped: Option<Cut>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     gpu: Gpu,
@@ -120,8 +120,22 @@ impl Resample {
     }
 }
 
-/// From how far out of its reach a capture standing small fades to nothing at its edge.
-const SMALL_FADES_FROM: f32 = 0.8;
+/// Each splat's mark for `cut` (the shader's: 0 drawn whole, 2 not drawn, 128 whole to 255 nothing on its soft edge).
+fn marks_of(cut: &Cut, means: &[V3]) -> Vec<u8> {
+    means
+        .iter()
+        .map(|m| {
+            let t = cut.gone(*m);
+            if t >= 1.0 {
+                2
+            } else if t <= 0.0 {
+                0
+            } else {
+                128 + (t * 127.0) as u8
+            }
+        })
+        .collect()
+}
 
 impl FaceRenderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
@@ -130,49 +144,22 @@ impl FaceRenderer {
         Self { clipped: None, transparent: false, device, queue, gpu, scratch: None, masters: Vec::new(), wide: [None, None], resample, background: BACKGROUND, total: 0, overflows_seen: 0 }
     }
 
-    /// Only what lies within `reach` of `middle` is drawn, with the middle moved away from where the splats are sorted from. `None`, all of them again. Asked with each batch, read
-    /// again when it moved enough to see. On this thread, as a capture has millions: the marks themselves cost a frame nothing (`Gpu::set_marks`).
-    /// `ceiling`: nothing over that height either (its last part fading too), for a capture in a panel's hole.
-    pub fn clip(&mut self, clip: Option<&(V3, f32, f32, std::sync::Arc<Capture>)>) {
-        let Some((middle, reach, ceiling, capture)) = clip else {
+    /// Only what `cut` draws is drawn ([`Cut`]: a round in the room, all behind a near edge in a panel's hole), its edge fading. `None`, all of them
+    /// again. Asked with each batch, read again when it changed enough to see. On this thread, as a capture has millions: the marks themselves cost a
+    /// frame nothing (`Gpu::set_marks`).
+    pub fn clip(&mut self, clip: Option<&(Cut, std::sync::Arc<Capture>)>) {
+        let Some((cut, capture)) = clip else {
             if self.clipped.take().is_some() {
                 self.gpu.count = self.total;
                 self.gpu.set_marks(&[]);
             }
             return;
         };
-        let near = |a: f32, b: f32| (a - b).abs() < *reach * 0.02;
-        if self.clipped.is_some_and(|(c, r, top)| near(c[0], middle[0]) && near(c[2], middle[2]) && near(r, *reach) && (top == *ceiling || near(top, *ceiling))) {
+        if self.clipped.is_some_and(|c| c.same_as(cut)) {
             return;
         }
-        self.clipped = Some((*middle, *reach, *ceiling));
-        // The last tenth of its reach under its ceiling fades as its edge does.
-        let fades = reach * 0.14;
-        let within = reach * reach;
-        // Its last part fades out (round 18's judges: a ragged cut through a shack and across the floor): whole to here, then thinner to nothing at its reach.
-        let whole = (reach * SMALL_FADES_FROM) * (reach * SMALL_FADES_FROM);
-        let marks: Vec<u8> = capture
-            .gaussians
-            .means
-            .iter()
-            .map(|m| {
-                // Across the ground only: moved, it shows the same round as before, with nothing cut for its height.
-                let (x, z) = (m[0] - middle[0], m[2] - middle[2]);
-                let far = x * x + z * z;
-                if far > within || m[1] > *ceiling {
-                    return 2;
-                }
-                // How much of it is left, by its edge and by its ceiling: 128 whole to 255 nothing (the shader's faded marks).
-                let by_edge = if far <= whole { 0.0 } else { (far.sqrt() - reach * SMALL_FADES_FROM) / (reach * (1.0 - SMALL_FADES_FROM)) };
-                let by_top = if m[1] <= *ceiling - fades { 0.0 } else { (m[1] - (*ceiling - fades)) / fades };
-                let t = by_edge.max(by_top).clamp(0.0, 1.0);
-                if t <= 0.0 {
-                    0
-                } else {
-                    128 + (t * 127.0) as u8
-                }
-            })
-            .collect();
+        self.clipped = Some(*cut);
+        let marks = marks_of(cut, &capture.gaussians.means);
         self.gpu.count = self.total;
         self.gpu.set_marks(&marks);
     }
@@ -518,6 +505,77 @@ mod small_tests {
             p[3] = 255;
         }
         super::super::shots::write_png(&out, w, h, &shown).unwrap();
+    }
+
+    /// I-view-forward's cost (Enzo, 2026-11-13): a real capture in a panel's hole, both eyes' wide views as a batch draws them at Balanced, timed
+    /// with the cut it had (its round under a ceiling, the first splats by distance) and with the one it has (all behind its near edge, to the far
+    /// end). `ORBIT_SESSION=<its folder>`; `ORBIT_ROUNDS` batches each (default 60). Prints each one's median and 95th percentile.
+    #[test]
+    #[ignore = "needs a GPU and a real session"]
+    fn a_capture_in_a_hole_costs() {
+        use super::super::view::{Quality, WIDE_MARGIN};
+        let dir = std::path::PathBuf::from(std::env::var("ORBIT_SESSION").unwrap());
+        let rounds: usize = std::env::var("ORBIT_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+        let full = super::super::catalog::read_local(&dir, &Default::default()).unwrap();
+        let capture = std::sync::Arc::new(full.around_subject());
+        let head = orbiters_openvr::Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.6], [0.0, 0.0, 1.0, 0.0]] };
+        // The side panel's hole about where a hand holds it: 0.45 m ahead, a little low, facing the eyes.
+        let at = orbiters_openvr::Matrix34 { m: [[1.0, 0.0, 0.0, 0.08], [0.0, 1.0, 0.0, 1.32], [0.0, 0.0, 1.0, -0.45]] };
+        let frame = capture.hole_frame();
+        let dock = stereo::SmallDock::behind(&capture.view, &at, 0.07, frame.1);
+        let small = Small::new(&capture.view, &head, capture.small_reach()).at_dock(&dock).framed(frame);
+        let placement = small.placement(capture.view.eye());
+        let (_adapter, device, queue) = super::device(None).unwrap();
+        let mut renderer = FaceRenderer::new(device, queue);
+        renderer.load(&capture).unwrap();
+        renderer.make_transparent().unwrap();
+        // The cut it had: across the ground within its reach, its last fifth fading, nothing over its ceiling (its last part fading).
+        let (middle, reach) = (small.middle(capture.view.eye()), small.reach());
+        let ceiling = capture.view.ground() + reach * 1.02;
+        let before: Vec<u8> = capture
+            .gaussians
+            .means
+            .iter()
+            .map(|m| {
+                let far = (m[0] - middle[0]).hypot(m[2] - middle[2]);
+                if far > reach || m[1] > ceiling {
+                    return 2;
+                }
+                let by_edge = ((far - reach * 0.8) / (reach * 0.2)).max(0.0);
+                let by_top = ((m[1] - (ceiling - reach * 0.14)) / (reach * 0.14)).max(0.0);
+                let t = by_edge.max(by_top).clamp(0.0, 1.0);
+                if t <= 0.0 { 0 } else { 128 + (t * 127.0) as u8 }
+            })
+            .collect();
+        let cut = stereo::Cut::of(&small, &capture.view);
+        let after = marks_of(&cut, &capture.gaussians.means);
+        let eyes = [[-0.032, 1.6, 0.0], [0.032, 1.6, 0.0]];
+        let tangents = [[-1.33, 1.0, -1.15, 1.08], [-1.0, 1.33, -1.15, 1.08]];
+        let quality = Quality::Balanced;
+        let cameras = [0, 1].map(|e| {
+            let mut view = head;
+            view.m[0][3] = eyes[e][0];
+            PlayCamera::wide(&view, tangents[e], WIDE_MARGIN, quality.wide_per_tan(), 3072)
+        });
+        println!("{} splats; reach {reach}; wide views {}x{}", capture.gaussians.len(), cameras[0].width, cameras[0].height);
+        for (name, marks, count) in [("before", &before, capture.within(reach + small.moved_by())), ("after", &after, capture.gaussians.len())] {
+            renderer.gpu.count = renderer.total;
+            renderer.gpu.set_marks(marks);
+            let drawn = marks[..count].iter().filter(|m| **m != 2).count();
+            let mut times = Vec::new();
+            for round in 0..rounds + 5 {
+                let t = std::time::Instant::now();
+                for e in 0..2 {
+                    renderer.render_wide(e, &cameras[e], &placement, count).unwrap();
+                }
+                renderer.finish().unwrap();
+                if round >= 5 {
+                    times.push(t.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+            times.sort_by(f64::total_cmp);
+            println!("{name}: {drawn} of {count} splats drawn; a batch (two eyes) median {:.2} ms, p95 {:.2} ms", times[times.len() / 2], times[times.len() * 95 / 100]);
+        }
     }
 
     /// G1's layer as the GPU really draws it: a face's picture drawn texel for texel, then resampled from a wide view, each over an

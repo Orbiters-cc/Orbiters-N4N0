@@ -654,7 +654,15 @@ const VR_SIDE: Rect = Rect { min: Pos2 { x: 452.0, y: 12.0 }, max: Pos2 { x: 101
 /// Its picture; where a capture standing small is seen through it.
 // About 40% of the panel's height (round 19's judges): what is left under it holds its cue, then the name and who made it as a block of their own, well clear of the
 // buttons (a laser on Around me was on the byline).
-pub const VR_HERO: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 250.0 } };
+/// The shade along the top edge of the hole a capture shows through, in the modern look: the panel's own thickness, so the capture reads as behind it
+/// (round 19's judges). Bands this tall, this many, each this dark (0 to 1) from the edge in. Everything of the hole below it is clear.
+pub const HOLE_SHADE_BAND: f32 = 3.0;
+pub const HOLE_SHADE_BANDS: usize = 7;
+pub fn hole_shade(band: usize) -> f32 {
+    if band >= HOLE_SHADE_BANDS { 0.0 } else { 0.5 * (1.0 - band as f32 / HOLE_SHADE_BANDS as f32).powi(2) }
+}
+
+pub const VR_HERO: Rect =Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 250.0 } };
 const VR_SMALL_BACK: Rect = Rect { min: Pos2 { x: 836.0, y: 198.0 }, max: Pos2 { x: 990.0, y: 242.0 } };
 /// Centred right under the hole, the hand's cue for what is in it (round 15's judges found it far off at the right).
 // A clear line of its own between the hole and the name (the round 19 pre-check saw it on the name).
@@ -2207,9 +2215,9 @@ impl Panel {
             }
             // A shade along the hole's top edge, under its frame: the panel's own thickness, so the capture reads as behind it in a still (round 19's judges).
             // Not in the retro look, whose flat grounds have no shades.
-            for i in (0..7).filter(|_| !orbit_look::retro()) {
-                let band = Rect::from_min_size(pos2(h.left(), h.top() + i as f32 * 3.0), vec2(h.width(), 3.0));
-                p.rect_filled(band, CornerRadius::ZERO, theme::black(0.5 * (1.0 - i as f32 / 7.0).powi(2)));
+            for i in (0..HOLE_SHADE_BANDS).filter(|_| !orbit_look::retro()) {
+                let band = Rect::from_min_size(pos2(h.left(), h.top() + i as f32 * HOLE_SHADE_BAND), vec2(h.width(), HOLE_SHADE_BAND));
+                p.rect_filled(band, CornerRadius::ZERO, theme::black(hole_shade(i)));
             }
             let words = if near { tr("Close your grip") } else { tr("Grip to take it") };
             // Right under the hole, off the capture, and with nothing around it: this is done with a hand, and is no button for a laser.

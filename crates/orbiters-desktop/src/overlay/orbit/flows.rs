@@ -754,11 +754,53 @@ fn the_stick_scrolls_what_is_on_the_sheet() {
 
 /// Enzo: "the hole is glitchy and I don't see the 3D view behind it". What is submitted for the sheet's page and its back, by the same painting as in a headset, read back at the hole. This says
 /// the pictures are clear there: what becomes of them in the compositor only `vr-test.log` can say.
+///
+/// The page's hole holds one thing by design: in the modern look, a shade along its top edge ([`crate::overlay::worlds::panel::hole_shade`], the panel's thickness).
+/// It is drawn with the world's details, so a hole whose world is not listed has none. This test once picked a world by an id only (7) and so met the shade
+/// only when this computer's own world lists, loading in the background, happened to hold a world of that id by the time the hole opened: under load they
+/// did, and its top row read 42 (the shade's fourth band), failing release runs from dev.45 on (done4-hole-test.md). The world is now given, so the page is
+/// the one a person sees whatever loads meanwhile, and every pixel of the hole is checked against exactly what is meant there.
 #[test]
 fn the_hole_is_clear_in_what_is_submitted() {
-    use crate::overlay::worlds::panel::Status;
+    use crate::overlay::worlds::panel::{hole_shade, Status, HOLE_SHADE_BAND, HOLE_SHADE_BANDS};
+    // A page's alpha at a point of it, in its units.
+    fn alpha(panel: &super::Panel, x: f32, y: f32) -> u8 {
+        let zoom = panel.px[0] as f32 / panel.logical.x;
+        panel.pixels()[((y * zoom) as usize * panel.px[0] as usize + (x * zoom) as usize) * 4 + 3]
+    }
+    // What is wrong with the page's hole: below its shade (and clear of the frame's corner marks, which lie on its corners) nothing at all; in the shade, each
+    // band exactly as dark as it is meant to be, and nothing of the page; in the retro look, no shade.
+    fn page_hole(person: &Person, retro: bool) -> Vec<String> {
+        let page = person.panels.takeover.as_ref().unwrap();
+        let h = person.panels.stage.worlds.as_ref().and_then(|w| w.small_hole()).expect("the hole open");
+        let shade = if retro { 0.0 } else { HOLE_SHADE_BAND * HOLE_SHADE_BANDS as f32 };
+        let xs: Vec<f32> = (0..9).map(|i| h.left() + 40.0 + (h.width() - 80.0) * i as f32 / 8.0).collect();
+        let mut wrong = Vec::new();
+        // From 2 units in: the frame's edge is soft by a pixel (the retro look's restyle leaves 6 of 255 on the first unit in).
+        let mut y = h.top() + shade + 2.0;
+        while y < h.bottom() - 2.0 {
+            for &x in &xs {
+                let a = alpha(page, x, y);
+                if a != 0 {
+                    wrong.push(format!("({x}, {y}) {a} below the shade"));
+                }
+            }
+            y += 4.0;
+        }
+        for band in 0..HOLE_SHADE_BANDS {
+            let y = h.top() + (band as f32 + 0.5) * HOLE_SHADE_BAND;
+            let meant = if retro { 0.0 } else { hole_shade(band) * 255.0 };
+            for &x in &xs {
+                let a = alpha(page, x, y);
+                if (a as f32 - meant).abs() > 1.5 {
+                    wrong.push(format!("({x}, {y}) {a} in shade band {band}, meant {meant:.0}"));
+                }
+            }
+        }
+        wrong
+    }
     // At rest, and with its side panel still on its way in (a capture shows docked at once, as a world is pressed): in the same turn the hole opens, all of it
-    // is clear on the page and on its back. dev.21's run once found the page still solid there: the page waited for its own 22 ms while the back did not.
+    // is as it should be on the page and clear on its back. dev.21's run once found the page still solid there: the page waited for its own 22 ms while the back did not.
     for (retro, sliding) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut person = Person::new();
         let mut snap = (*person.snap).clone();
@@ -770,21 +812,24 @@ fn the_hole_is_clear_in_what_is_submitted() {
         person.turns(3);
         person.press(Action::Worlds);
         person.turns(2);
+        let found = orbiters_core::maps::FoundWorld { world: orbiters_core::maps::World { world_id: "wrld_hole".into(), name: "Hole".into(), ..Default::default() }, ..Default::default() };
+        let entry = crate::overlay::worlds::catalog::Entry::world(&found, None, Default::default());
+        let id = entry.id;
         let worlds = person.panels.stage.worlds.as_mut().unwrap();
+        worlds.pick_for_test(entry);
         if sliding {
-            worlds.slide_world_in_for_test(7);
-        } else {
-            worlds.show_world_for_test(7);
+            worlds.slide_world_in_for_test(id);
         }
         // Painted just now, without its hole: the next paint is within the page's own 22 ms, whatever the machine's speed.
         person.turn();
-        let docked = Status { headset: true, small: true, small_docked: true, shown: true, current: Some(7), ..Default::default() };
+        let docked = Status { headset: true, small: true, small_docked: true, shown: true, current: Some(id), ..Default::default() };
         let _ = person.panels.world_relay(docked.clone());
         person.turn();
         let [page_middle, page_outside, back_middle, back_outside] = person.panels.hole_alphas();
-        let (page, back) = person.panels.hole_alphas_across();
-        println!("hole, retro {retro} sliding {sliding}: page {page_middle:?} outside {page_outside:?}, back {back_middle:?} outside {back_outside:?}; across {page:?} {back:?}");
-        assert!(!page.is_empty() && page.iter().all(|a| *a == Some(0)), "the page, retro {retro} sliding {sliding}: {page:?}");
+        let (_, back) = person.panels.hole_alphas_across();
+        println!("hole, retro {retro} sliding {sliding}: page {page_middle:?} outside {page_outside:?}, back {back_middle:?} outside {back_outside:?}; back across {back:?}");
+        let wrong = page_hole(&person, retro);
+        assert!(wrong.is_empty(), "the page, retro {retro} sliding {sliding}: {wrong:?}");
         assert!(!back.is_empty() && back.iter().all(|a| *a == Some(0)), "its back, retro {retro} sliding {sliding}: {back:?}");
         assert!(page_outside.is_some_and(|a| a > 200), "and solid around it: {page_outside:?}");
         assert!(back_outside.is_some_and(|a| a > 200), "{back_outside:?}");
@@ -793,8 +838,9 @@ fn the_hole_is_clear_in_what_is_submitted() {
             let _ = person.panels.world_relay(docked.clone());
             person.turn();
         }
-        let (page, back) = person.panels.hole_alphas_across();
-        assert!(page.iter().chain(&back).all(|a| *a == Some(0)), "later, retro {retro} sliding {sliding}: {page:?} {back:?}");
+        let wrong = page_hole(&person, retro);
+        let (_, back) = person.panels.hole_alphas_across();
+        assert!(wrong.is_empty() && back.iter().all(|a| *a == Some(0)), "later, retro {retro} sliding {sliding}: {wrong:?} {back:?}");
     }
 }
 

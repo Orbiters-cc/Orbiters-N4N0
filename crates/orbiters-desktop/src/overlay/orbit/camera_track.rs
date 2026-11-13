@@ -2743,7 +2743,7 @@ mod enzo_headset_replay {
 
     /// Every look of that session that found the panel, as the reader handed it over.
     fn sightings() -> Vec<Found> {
-        let log = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/enzo-2026-11-13/camera-tiles.log")).unwrap();
+        let log = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/enzo-2026-11-13/camera-tiles.txt")).unwrap();
         log.lines().filter_map(|line| line.split_once("fit=Found {").map(|(_, f)| f.to_string())).map(|f| {
             let field = |key: &str| numbers(&f, key);
             let two = |key: &str| { let v = field(key); [v[0], v[1]] };

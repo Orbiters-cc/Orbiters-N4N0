@@ -167,6 +167,10 @@ pub struct Tracker {
     pub hold_anchors: bool,
     /// Texts found to move with the head, and until when they are left alone.
     pub head_locked: Vec<(String, f64)>,
+    /// The sticks moved the player during this look's picture or just before: VRChat shows its motion a little after
+    /// the sticks are read, so where lines are found then says nothing reliable of where the world is (in the sandbox a
+    /// look during a turn moved every line 24 cm one way, and the next look 57 cm back). No re-anchoring then.
+    pub moving: bool,
 }
 
 impl Tracker {
@@ -192,7 +196,7 @@ impl Tracker {
         let locked: Vec<String> = self.head_locked.iter().map(|(k, _)| k.clone()).collect();
         sightings.retain(|s| !locked.contains(&key(&s.text)));
         self.tracks.retain(|t| !locked.contains(&t.key));
-        let mut followed = self.reanchor(&sightings);
+        let mut followed = if self.moving { Followed::default() } else { self.reanchor(&sightings) };
         followed.held = self.hold_anchors && followed.moved.is_some();
         if let (Some(by), false) = (followed.moved, followed.held) {
             for t in &mut self.tracks {
@@ -481,6 +485,21 @@ mod tests {
         // Turned a quarter turn with the stick: at 2 m a sign may be up to 0.25 + 0.5 x 1.57 x 2 m off.
         t.moved = [0.0, std::f32::consts::FRAC_PI_2];
         let f = t.update(1.0, vec![seen("出口", 2.0)], &|_| Seen::Away);
+        assert!(f.moved.is_some());
+    }
+
+    #[test]
+    fn no_re_anchoring_from_a_look_taken_while_moving() {
+        let mut t = Tracker::default();
+        t.update(0.0, vec![seen("出口", 0.0), seen("入口", 1.0)], &|_| Seen::Open);
+        t.moved = [3.0, 0.0];
+        t.moving = true;
+        let f = t.update(1.5, vec![seen("出口", 0.6)], &|_| Seen::Away);
+        assert_eq!(f.moved, None);
+        assert!((t.tracks.iter().find(|x| x.text == "入口").unwrap().placed.centre()[0] - 1.0).abs() < 1e-6);
+        // The next look, the sticks at rest again: now it does.
+        t.moving = false;
+        let f = t.update(3.0, vec![seen("出口", 0.6), seen("入口", 1.6)], &|_| Seen::Open);
         assert!(f.moved.is_some());
     }
 

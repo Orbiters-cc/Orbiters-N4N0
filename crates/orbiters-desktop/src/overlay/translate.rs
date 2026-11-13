@@ -51,8 +51,10 @@ const FAST_TURN: f32 = 70.0;
 struct Shared {
     /// Head poses (anchor space: [`Locomotion::anchor`]) by time, the last two seconds.
     heads: VecDeque<(Instant, M34)>,
-    /// What the sticks moved the player so far (metres walked, radians turned), for re-anchoring's reach.
+    /// What the sticks moved the player so far (metres walked, radians turned), for re-anchoring's reach, and when
+    /// they last moved it.
     moved: [f32; 2],
+    moved_at: Option<Instant>,
     /// Lines found again elsewhere than the anchors had them: by how much (anchor space), for the walking speed to learn.
     corrections: Vec<orbiters_translate::geometry::V3>,
     /// SteamVR's eye-to-head transforms and projection tangents (left, right).
@@ -281,6 +283,9 @@ impl TranslateHost {
                 while s.heads.front().is_some_and(|(t, _)| now.duration_since(*t) > Duration::from_secs(2)) {
                     s.heads.pop_front();
                 }
+            }
+            if s.moved != self.motion.total {
+                s.moved_at = Some(now);
             }
             s.moved = self.motion.total;
             // Lines found again elsewhere: how far the walk was misjudged, in tracking space, to learn the speed from.
@@ -691,11 +696,14 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
     let mut game_busy = false;
     let mut last_gaze = None;
     while !stop.load(Ordering::Relaxed) {
-        let (heads, eyes, paused, shown, now_settings, moved) = {
+        let (heads, eyes, paused, shown, now_settings, moved, moved_at) = {
             let s = shared.lock().unwrap_or_else(|e| e.into_inner());
-            (s.heads.clone(), s.eyes, s.paused, s.shown.clone(), s.settings.clone(), s.moved)
+            (s.heads.clone(), s.eyes, s.paused, s.shown.clone(), s.settings.clone(), s.moved, s.moved_at)
         };
         core.tracker.moved = moved;
+        // VRChat shows the sticks' motion a little later than they are read: a look up to 0.4 s after they moved the
+        // player does not re-anchor.
+        core.tracker.moving = moved_at.is_some_and(|t| t.elapsed() < Duration::from_millis(400));
         // Settings changed: another translator, another language.
         if let Some((s, target)) = now_settings {
             let translator_changed = s.provider != in_use.provider || s.server != in_use.server || s.model != in_use.model || s.orbiters_agreed != in_use.orbiters_agreed;

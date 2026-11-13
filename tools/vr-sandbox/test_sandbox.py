@@ -141,7 +141,7 @@ class InputTests(unittest.TestCase):
 
     def session(self):
         s=object.__new__(sandbox.Session)
-        s.shared=sandbox.Shared();s.guard=threading.Lock();s.stop=threading.Event();s.mutex=123
+        s.shared=sandbox.Shared();s.guard=threading.Lock();s.stop=threading.Event();s.mutex=123;s.j={}
         return s
 
     def test_trigger_press_releases_analog_click_and_touch(self):

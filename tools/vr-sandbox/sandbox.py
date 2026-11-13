@@ -8,6 +8,7 @@ python sandbox.py status | yield | restore
 """
 import ctypes as C
 import hashlib
+import importlib.util
 import http.server
 import json
 import math
@@ -429,17 +430,22 @@ class Session:
         if holder.get('app'):
             report['app']=stop_app(holder['app'])
             self.j.pop('turn_app',None);atomic_json(JOURNAL,self.j)
-        report['neutral']=self.neutral(rejoin=reason!='shutdown')
+        report['neutral']=self.neutral()
+        report['world_fresh']=self.j.get('world_fresh',False)
         owner_file(holder['owner']).unlink(missing_ok=True)
         self.eac.write('turn_end',**report)
+        # The idle countdown starts once the turn's clean-up is over, not when it began.
+        if self.lease['holder'] is None:self.lease['idle_since']=time.time()
         self.publish()
         return report
 
-    def neutral(self,rejoin=True):
-        """The known starting point of every turn: no input held, head and hands at their start poses, VRChat's
-        camera off and not flying (OSC), and, with VRChat up, back at the session's home instance (a world load closes
-        every menu and puts the avatar at the spawn point). The rejoin goes through VRChat's own launch pipe: no new
-        process and no anti-cheat start."""
+    def neutral(self):
+        """What the controller itself resets at every turn's end: no input held, head and hands at their start poses,
+        VRChat's camera off and not flying (OSC). The world part of the neutral state (a fresh private instance of the
+        home world: a world load closes every menu and puts the avatar at the spawn point) needs the signed-in account
+        of the turn's test program, so the CLI does it through that program's bridge (world_reset), at release or at
+        the next acquire with an app when a turn was cut off. Rejoining the SAME instance through the pipe fails in
+        VRChat ("Attempted to change instance ID for an existing instance", 2026-11-13 15:39)."""
         done={}
         with self.guard:
             if kernel.WaitForSingleObject(self.mutex,1000)!=0:raise RuntimeError('IPC mutex timeout')
@@ -453,9 +459,6 @@ class Session:
         for address,payload in ((b'/usercamera/Mode\0\0\0\0',b',i\0\0'+struct.pack('>i',0)),(b'/usercamera/Flying\0\0',b',F\0\0')):
             with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as osc:osc.sendto(address+payload,('127.0.0.1',9000))
         done['osc']={'camera_mode':0,'camera_flying':False}
-        home=self.j.get('home_link')
-        if rejoin and home:
-            done['home']=self.go(home,v)
         return done
 
     def go(self,link,v=None):
@@ -465,7 +468,8 @@ class Session:
         since=time.time()-1
         if not vrchat_life.send_url(link):return {'joined':False,'reason':'VRChat did not answer on its launch pipe'}
         self.eac.write('vrchat_pipe_link',instance=instance)
-        ok=vrchat_life.wait_joined(v['create_time'],instance,since,timeout=150)
+        # Within the bridge client's 70 s; a cached world loads in 15-30 s.
+        ok=vrchat_life.wait_joined(v['create_time'],instance,since,timeout=60)
         return {'joined':ok,'instance':instance,'seconds':round(time.time()-since,1)}
 
     def end_session(self,reason):
@@ -516,7 +520,7 @@ class Session:
                 self.publish();return {'granted':False,'reason':detail}
             self.grant_file(owner,detail);self.eac.write('turn_start',owner=owner)
             state=self.publish()
-            return {'granted':True,'owner':owner,'token':detail,'render':self.render,'vrchat':state['vrchat'],'home':state['home']}
+            return {'granted':True,'owner':owner,'token':detail,'render':self.render,'vrchat':state['vrchat'],'home':state['home'],'world_fresh':self.j.get('world_fresh',False)}
         if action=='renew':
             lease.renew(self.lease,owner,token,now);return {'renewed':True}
         h=self.lease['holder']
@@ -542,11 +546,11 @@ class Session:
 
     def call(self, args):
         action = args['action']
+        if action not in ('capture','overlays','devices','view','vrchat','app','app_stop'):
+            # Anything that moves or presses may leave a menu open or the avatar elsewhere.
+            self.j['world_fresh']=False
         if action == 'neutral':
-            return self.neutral(rejoin=args.get('rejoin',True))
-        if action == 'home':
-            if not self.j.get('home_link') or not self.vrchat():raise RuntimeError('No VRChat with a home instance in this session')
-            return self.go(self.j['home_link'])
+            return self.neutral()
         if action == 'app_stop':
             h=self.lease['holder'];result=stop_app(h.get('app'));h['app']=None
             self.j.pop('turn_app',None);atomic_json(JOURNAL,self.j);self.publish()
@@ -635,7 +639,9 @@ class Session:
             if v:
                 # Already up: hand the link to the running game, never a second anti-cheat start.
                 self.j['home_link']=url;atomic_json(JOURNAL,self.j)
-                return {'url':url,'mode':'running VRChat, through its launch pipe',**self.go(url,v)}
+                result=self.go(url,v)
+                self.j['world_fresh']=bool(result.get('joined'));atomic_json(JOURNAL,self.j)
+                return {'url':url,'mode':'running VRChat, through its launch pipe',**result}
             if any(p['name'].lower()=='vrchat.exe' for p in processes()):raise RuntimeError('A VRChat this session did not start is running')
             return self.launch(url)
         if action=='motion_capture':
@@ -748,6 +754,7 @@ class Session:
                     if v:
                         self.eac.write('vrchat_started',pid=v['pid'],after_s=round(v['create_time']-began,1))
                         self.vrchat_seen=v
+                        self.j['world_fresh']=True;atomic_json(JOURNAL,self.j)
                         return {'launch_pid':proc.pid,'vrchat_pid':v['pid'],'url':url,'mode':'SteamVR auto-detection; no --no-vr','attempt':attempt}
                     error=vrchat_life.close_error_windows(self.eac,ROOT)
                     if error:break
@@ -810,7 +817,7 @@ def remote(args,journal=None,owner=None,timeout=None):
         o,t=lease_args(owner)
         if o:args.setdefault('lease_owner',o)
         if t:args.setdefault('lease_token',t)
-    slow={'app':90,'release':420,'stop':420,'acquire':420,'vrchat':480,'neutral':240,'home':200,'app_stop':60}
+    slow={'app':90,'release':120,'stop':120,'acquire':180,'vrchat':480,'neutral':60,'app_stop':60}
     req=urllib.request.Request(f'http://127.0.0.1:{PORT}/',data=json.dumps(args).encode(),headers={'Authorization':'Bearer '+j['token'],'Content-Type':'application/json'})
     try:
         with urllib.request.urlopen(req,timeout=timeout or slow.get(args.get('action'),40)) as r:return json.load(r)
@@ -846,6 +853,43 @@ def wait_gone(j,timeout=480):
     while same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):
         if time.monotonic()>deadline:raise RuntimeError('Session did not finish shutting down; inspect server-err.log')
         time.sleep(.5)
+
+def bridge_client():
+    spec=importlib.util.spec_from_file_location('bridge_live',Path(__file__).parents[2]/'scripts/bridge-live.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module
+
+def world_reset(owner,wait_bridge_s=120):
+    """The world part of the neutral state: the turn's test program creates a fresh strict private instance of the
+    session's home world with its signed-in account, and the controller sends it to the running VRChat through its
+    launch pipe (no relaunch). Needs a test program built with the bridge change of 2026-11-13 (older ones refuse
+    while VRChat runs); the answer says so instead of failing the release."""
+    st=remote({'action':'status'})
+    if not st.get('vrchat') or not st.get('home'):return {'world_reset':'skipped: no running VRChat with a home world'}
+    holder=st['lease']['holder']
+    if not holder or holder['owner']!=owner or not holder.get('app'):return {'world_reset':'skipped: your turn runs no test program (its bridge creates the instance)'}
+    world=st['home'].split('id=',1)[1].split(':',1)[0]
+    bl=bridge_client();deadline=time.monotonic()+wait_bridge_s;bridge=None
+    while bridge is None:
+        try:
+            b=bl.Bridge();data=b.call('get_state',{})['result']
+            state=data.get('structuredContent') or json.loads(data['content'][0]['text'])
+            if state['vrchat'].get('signed_in_as'):bridge=b;break
+        except (SystemExit,Exception):pass
+        if time.monotonic()>deadline:return {'world_reset':False,'error':"the test program's bridge did not get ready"}
+        remote({'action':'renew'},owner=owner);time.sleep(3)
+    try:result=bridge.post('tools/call',{'name':'vr_sandbox','arguments':{'action':'vrchat','world_id':world}},limit=150)['result']
+    except SystemExit as error:return {'world_reset':False,'error':str(error)}
+    data=result.get('structuredContent') or json.loads(result['content'][0]['text'])
+    if result.get('isError'):return {'world_reset':False,'error':data}
+    return {'world_reset':bool(data.get('joined')),'instance':data.get('instance'),'seconds':data.get('seconds')}
+
+def release_turn(owner):
+    """Ends a turn: fresh home instance through the turn's program (when VRChat runs), then the controller stops the
+    program and resets inputs, poses and camera."""
+    reset=world_reset(owner)
+    answer=remote({'action':'release'},owner=owner)
+    return {**answer,**reset}
 
 def parse_render(text):
     if text in (None,''):return None
@@ -893,7 +937,10 @@ def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say
                     wait_gone(j)
                     cold=False
                     continue
-                if app:answer['app']=remote({'action':'app','app_exe':app,**({'logs':logs} if logs else {})},journal=j,owner=owner)
+                if app:
+                    answer['app']=remote({'action':'app','app_exe':app,**({'logs':logs} if logs else {})},journal=j,owner=owner)
+                    # A turn that was cut off could not reset the world; this program's bridge does it now.
+                    if answer.get('vrchat') and not answer.get('world_fresh'):answer.update(world_reset(owner))
                 answer.pop('token',None)
                 return answer
             reason=answer['reason']
@@ -945,7 +992,9 @@ def main(argv):
     if cmd=='status':
         j=controller_alive()
         print(json.dumps(remote({'action':'status'},journal=j) if j else {'session':None,'lock':LOCK.read_text() if LOCK.exists() else None,'vr_processes':processes()}));return
-    if cmd in ('release','renew','shutdown','neutral','home','app_stop'):
+    if cmd=='release':print(json.dumps(release_turn(a.owner)));return
+    if cmd=='home':print(json.dumps(world_reset(a.owner)));return
+    if cmd in ('renew','shutdown','neutral','app_stop'):
         args={'action':cmd}
         if a.force:args['force']=True
         print(json.dumps(remote(args,owner=a.owner)));return

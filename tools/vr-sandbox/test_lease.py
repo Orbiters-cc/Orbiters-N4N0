@@ -119,9 +119,9 @@ class FakeSession(sandbox.Session):
         self.ended = []
         self.stopped_apps = []
 
-    def neutral(self, rejoin=True):
-        self.ended.append(rejoin)
-        return {'rejoined': rejoin}
+    def neutral(self):
+        self.ended.append('neutral')
+        return {'inputs_released': True}
 
     def vrchat(self):
         return None
@@ -160,7 +160,7 @@ class SessionTurns(unittest.TestCase):
         self.s.lease['holder']['app'] = {'pid': 1, 'create_time': 1, 'exe': 'a.exe'}
         report = self.ask('a', 'release')
         self.assertEqual(report['app'], 'quit')
-        self.assertEqual(self.s.ended, [True])
+        self.assertEqual(self.s.ended, ['neutral'])
         self.assertFalse(sandbox.owner_file('a').exists())
         self.assertTrue(self.s.handle({'action': 'acquire', 'owner': 'b'})['granted'])
         self.assertFalse(self.s.stop.is_set())   # the session itself stays up
@@ -179,16 +179,35 @@ class SessionTurns(unittest.TestCase):
         self.assertFalse(self.s.stop.is_set())
         self.ask('a', 'shutdown')
         self.assertTrue(self.s.stop.is_set())
-        self.assertEqual(self.s.ended, [False])   # no rejoin when the whole session ends
+        self.assertEqual(self.s.ended, ['neutral'])
 
     def test_a_stale_turn_is_taken_over_at_the_next_acquire(self):
         self.s.handle({'action': 'acquire', 'owner': 'cut-off'})
         self.s.lease['holder']['renewed'] -= lease.STALE_S + 5
         answer = self.s.handle({'action': 'acquire', 'owner': 'next'})
         self.assertTrue(answer['granted'])
-        self.assertEqual(self.s.ended, [True])
+        self.assertEqual(self.s.ended, ['neutral'])
         events = [e['event'] for e in self.s.lease['history']]
         self.assertIn('taken over by next', events)
+
+    def test_the_idle_countdown_starts_after_a_long_release_not_before(self):
+        self.s.handle({'action': 'acquire', 'owner': 'a'})
+        clock = [1000.0]
+        def slow_neutral():
+            clock[0] += lease.IDLE_S + 30          # a release that took longer than the idle limit
+            return {}
+        with patch.object(sandbox.time, 'time', side_effect=lambda: clock[0]), patch.object(self.s, 'neutral', side_effect=slow_neutral),                 patch.object(sandbox, 'owner_wants_vr', return_value=None):
+            self.ask('a', 'release')
+            self.s.tick()
+        self.assertFalse(self.s.stop.is_set())
+
+    def test_moving_marks_the_world_not_fresh_and_a_vrchat_join_marks_it_fresh(self):
+        self.s.handle({'action': 'acquire', 'owner': 'a'})
+        self.s.j['world_fresh'] = True
+        with patch.object(sandbox.kernel, 'WaitForSingleObject', return_value=0), patch.object(sandbox.kernel, 'ReleaseMutex'):
+            self.ask('a', 'pose', device='head', position=[0, 1.6, 0], rotation=[1, 0, 0, 0])
+        self.assertFalse(self.s.j['world_fresh'])
+        self.assertFalse(self.s.handle({'action': 'acquire', 'owner': 'b'})['granted'])
 
     def test_the_tick_ends_a_stale_turn_then_idles_the_session_out(self):
         self.s.handle({'action': 'acquire', 'owner': 'a'})

@@ -1451,7 +1451,8 @@ impl Controller {
                 }
                 OscEvent::Values { address, values } => {
                     if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some()
-                        && (address=="/usercamera/Pose" || address.starts_with("/tracking/vrsystem/") || address=="/usercamera/Flying") {
+                        // Not /tracking/vrsystem/*: VRChat sends those every frame, and they grew the sandbox's app-err.log by 2.7 MB a minute (227 MB in one session).
+                        && (address=="/usercamera/Pose" || address=="/usercamera/Flying") {
                         eprintln!("sandbox camera OSC {at_ns} {address} {values:?}"); // i18n: not shown (developer diagnostics)
                     }
                     if address == orbiters_n4n0_core::states::EYE_HEIGHT {

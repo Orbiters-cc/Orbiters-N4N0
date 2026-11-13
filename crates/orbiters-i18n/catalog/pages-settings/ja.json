@@ -592,12 +592,14 @@
   "call\u0004Mute": "ミュート",
   "call\u0004Unmute": "ミュート解除",
   "Around the camera": "カメラのまわり",
-  "In a headset: 3D pictures and the QR code beside VRChat's camera. It looks for the camera's panel on VRChat's window while the camera is open, and keeps nothing it sees.": "ヘッドセットで、VRChatのカメラの横に3D写真とQRコードを表示します。カメラが開いている間はVRChatのウィンドウからカメラのパネルを探しますが、見たものは何も保存しません。",
+  "In a headset: 3D pictures and the QR code beside VRChat's camera. They appear where VRChat opens it and move with the hand that holds it.": "ヘッドセットで：VRChatのカメラの横に3D写真とQRコード。VRChatがカメラを開いた場所に現れ、カメラを持つ手と一緒に動きます。",
   "Windows did not take that microphone: {error}": "Windowsがそのマイクを受け付けませんでした：{error}",
   "Microphones": "マイク",
   "Speak: the one that moves is the one hearing you. Press one to make it Windows' default.": "話してみてください。動いているマイクが声を拾っています。押すとWindowsの既定になります。",
   "No microphone is plugged in or turned on.": "接続またはオンになっているマイクがありません。",
   "Looking for microphones…": "マイクを探しています…",
   "microphone\u0004Default": "既定",
-  "Its level cannot be read now": "現在は音量を読み取れません"
+  "Its level cannot be read now": "現在は音量を読み取れません",
+  "Find the camera on screen": "画面上でカメラを探す",
+  "Also looks for the camera's panel in what VRChat shows and moves the tiles onto it. Off by default: it can put them in the wrong place. It keeps nothing it sees.": "VRChatの表示からカメラのパネルも探し、その上にタイルを置きます。初期設定はオフ：間違った場所に置くことがあります。見たものは何も保存しません。"
 }

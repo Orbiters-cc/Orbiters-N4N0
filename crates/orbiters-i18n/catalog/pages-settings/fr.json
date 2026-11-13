@@ -592,12 +592,14 @@
   "call\u0004Mute": "Couper le micro",
   "call\u0004Unmute": "Rétablir le micro",
   "Around the camera": "Autour de la caméra",
-  "In a headset: 3D pictures and the QR code beside VRChat's camera. It looks for the camera's panel on VRChat's window while the camera is open, and keeps nothing it sees.": "Dans un casque : photos 3D et code QR à côté de la caméra de VRChat. Pendant que la caméra est ouverte, Orbiters cherche son panneau dans la fenêtre de VRChat, sans rien garder de ce qu’il voit.",
+  "In a headset: 3D pictures and the QR code beside VRChat's camera. They appear where VRChat opens it and move with the hand that holds it.": "Dans un casque : photos 3D et code QR à côté de la caméra de VRChat. Ils apparaissent là où VRChat l’ouvre et suivent la main qui la tient.",
   "Windows did not take that microphone: {error}": "Windows n’a pas accepté ce micro : {error}",
   "Microphones": "Micros",
   "Speak: the one that moves is the one hearing you. Press one to make it Windows' default.": "Parle : celui qui bouge est celui qui t’entend. Appuie sur l’un d’eux pour en faire le micro par défaut de Windows.",
   "No microphone is plugged in or turned on.": "Aucun micro n’est branché ou allumé.",
   "Looking for microphones…": "Recherche de micros…",
   "microphone\u0004Default": "Par défaut",
-  "Its level cannot be read now": "Son niveau est illisible pour l’instant"
+  "Its level cannot be read now": "Son niveau est illisible pour l’instant",
+  "Find the camera on screen": "Trouver la caméra à l’écran",
+  "Also looks for the camera's panel in what VRChat shows and moves the tiles onto it. Off by default: it can put them in the wrong place. It keeps nothing it sees.": "Cherche aussi le panneau de la caméra dans ce qu’affiche VRChat et y place les tuiles. Désactivé par défaut : il peut les mettre au mauvais endroit. Rien de ce qu’il voit n’est gardé."
 }

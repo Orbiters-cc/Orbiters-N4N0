@@ -592,12 +592,14 @@
   "call\u0004Mute": "Silenciar",
   "call\u0004Unmute": "Ativar microfone",
   "Around the camera": "Ao redor da câmera",
-  "In a headset: 3D pictures and the QR code beside VRChat's camera. It looks for the camera's panel on VRChat's window while the camera is open, and keeps nothing it sees.": "No headset: fotos 3D e o código QR ao lado da câmera do VRChat. Enquanto a câmera está aberta, ele procura o painel dela na janela do VRChat e não guarda nada do que vê.",
+  "In a headset: 3D pictures and the QR code beside VRChat's camera. They appear where VRChat opens it and move with the hand that holds it.": "Em um headset: fotos 3D e o código QR ao lado da câmera do VRChat. Eles aparecem onde o VRChat a abre e acompanham a mão que a segura.",
   "Windows did not take that microphone: {error}": "O Windows não aceitou esse microfone: {error}",
   "Microphones": "Microfones",
   "Speak: the one that moves is the one hearing you. Press one to make it Windows' default.": "Fale: o que se mexer é o que está ouvindo você. Pressione um para torná-lo o padrão do Windows.",
   "No microphone is plugged in or turned on.": "Nenhum microfone está conectado ou ligado.",
   "Looking for microphones…": "Procurando microfones…",
   "microphone\u0004Default": "Padrão",
-  "Its level cannot be read now": "O nível não pode ser lido agora"
+  "Its level cannot be read now": "O nível não pode ser lido agora",
+  "Find the camera on screen": "Encontrar a câmera na tela",
+  "Also looks for the camera's panel in what VRChat shows and moves the tiles onto it. Off by default: it can put them in the wrong place. It keeps nothing it sees.": "Também procura o painel da câmera no que o VRChat mostra e coloca os blocos nele. Desligado por padrão: pode colocá-los no lugar errado. Não guarda nada do que vê."
 }

@@ -20,7 +20,7 @@
 //! the parts behave as before.
 
 use super::super::floating::space::{self, V3};
-use super::detect::{ICONS_NEEDED, ICON_HALF, ICON_MATCH, ICON_PATCH};
+use super::detect::{ICON_HALF, ICON_PATCH};
 use super::vr::Plane;
 use super::zones::{QM_ICONS_X, QM_ICONS_Y};
 use orbiters_openvr::Matrix34;
@@ -86,47 +86,114 @@ pub fn on_plane(plane: &Plane, x: f32, y: f32) -> V3 {
     space::apply(&plane.frame, [x * plane.unit, -y * plane.unit, 0.0])
 }
 
-/// Shifts of the whole row tried, in the menu's units: the plane was matched by eye within a few, and the hand moves between the pose and the picture.
-const SHIFTS: [f32; 5] = [-8.0, -4.0, 0.0, 4.0, 8.0];
+/// How far each icon is looked for from where the plane puts it, in the menu's units, and in what steps. The plane was matched to VRChat's menu by eye, from
+/// Enzo's eyes and hands: seen from elsewhere it is off by up to an icon's width and turned a little (measured in the SteamVR sandbox: 48 units at the row's
+/// left end, 28 at its right, 8 to 16 up), so each icon is looked for on its own.
+const SHIFT_X: f32 = 56.0;
+const SHIFT_Y: f32 = 32.0;
+const STEP: f32 = 4.0;
+/// An icon is there at this likeness or better (sandbox, real VRChat: its tabs 0.62 to 0.77, pictures without its Quick Menu 0.56 at most).
+pub const VR_ICON_MATCH: f32 = 0.6;
+/// Icons found must agree on how far off the plane is, within this (units): elsewhere in a picture likenesses come at shifts all over.
+const AGREE: f32 = 16.0;
+/// At least this many found: its Quick Menu is there. Live in the sandbox, real VRChat: 4 on its Launch Pad, 3 on its other pages (the open tab is lit and
+/// looks like no icon); pictures without it: 1.
+pub const SEEN_AT_LEAST: usize = 3;
 /// At most this many found: no Quick Menu.
 pub const GONE_AT_MOST: usize = 1;
 
-/// Where each sample of each tab's patch lies in the eye's picture, at each shift: `None` when any of the row is behind the eye or off the picture.
-fn samples(eye: &Matrix34, raw: [f32; 4], size: [u32; 2], plane: &Plane) -> Option<Vec<[f32; 2]>> {
-    let mut out = Vec::with_capacity(SHIFTS.len() * SHIFTS.len() * QM_ICONS_X.len() * ICON_PATCH * ICON_PATCH);
-    for dy in SHIFTS {
-        for dx in SHIFTS {
-            for x in QM_ICONS_X {
-                for i in 0..ICON_PATCH * ICON_PATCH {
-                    let g = |v: usize| ((v as f32 + 0.5) / ICON_PATCH as f32 * 2.0 - 1.0) * ICON_HALF;
-                    let p = in_eye(eye, raw, size, on_plane(plane, x + dx + g(i % ICON_PATCH), QM_ICONS_Y + dy + g(i / ICON_PATCH)))?;
-                    if !(0.0..size[0] as f32 - 1.0).contains(&p[0]) || !(0.0..size[1] as f32 - 1.0).contains(&p[1]) {
-                        return None;
-                    }
-                    out.push(p);
+/// The Quick Menu's plane as the eye sees it: a point of it (units) to the eye's picture (pixels).
+struct Seen {
+    c0: V3,
+    a: V3,
+    b: V3,
+    sides: [f32; 4],
+    size: [f32; 2],
+}
+
+impl Seen {
+    fn new(eye: &Matrix34, raw: [f32; 4], size: [u32; 2], plane: &Plane) -> Self {
+        let inv = space::inverse(eye);
+        let c0 = space::apply(&inv, space::position(&plane.frame));
+        let a = space::rotate(&inv, space::scale(space::axis(&plane.frame, 0), plane.unit));
+        let b = space::rotate(&inv, space::scale(space::axis(&plane.frame, 1), -plane.unit));
+        Self { c0, a, b, sides: super::camera_track::eye_sides(raw), size: [size[0] as f32, size[1] as f32] }
+    }
+
+    fn at(&self, x: f32, y: f32) -> Option<[f32; 2]> {
+        let c: V3 = std::array::from_fn(|i| self.c0[i] + self.a[i] * x + self.b[i] * y);
+        if c[2] > -0.01 {
+            return None;
+        }
+        let [left, right, top, bottom] = self.sides;
+        Some([(c[0] / -c[2] - left) / (right - left) * self.size[0], (-c[1] / -c[2] - top) / (bottom - top) * self.size[1]])
+    }
+
+    /// The part of the picture the row and every shift tried lie in (x0, y0, x1, y1): `None` when any of it is behind the eye or off the picture.
+    fn row_area(&self) -> Option<[f32; 4]> {
+        let (x0, x1) = (QM_ICONS_X[0] - ICON_HALF - SHIFT_X, QM_ICONS_X[QM_ICONS_X.len() - 1] + ICON_HALF + SHIFT_X);
+        let (y0, y1) = (QM_ICONS_Y - ICON_HALF - SHIFT_Y, QM_ICONS_Y + ICON_HALF + SHIFT_Y);
+        let mut area = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
+            let p = self.at(x, y)?;
+            if !(0.0..self.size[0] - 1.0).contains(&p[0]) || !(0.0..self.size[1] - 1.0).contains(&p[1]) {
+                return None;
+            }
+            area = [area[0].min(p[0]), area[1].min(p[1]), area[2].max(p[0]), area[3].max(p[1])];
+        }
+        Some(area)
+    }
+}
+
+/// How many of the tabs' icons the picture shows (`grey` reads it at a pixel of the whole eye), each looked for on its own about where the plane puts it, those
+/// found agreeing on how far off it is. `None` when the row is not in view.
+fn count(seen: &Seen, grey: impl Fn(f32, f32) -> f32) -> Option<usize> {
+    seen.row_area()?;
+    let g = |v: usize| ((v as f32 + 0.5) / ICON_PATCH as f32 * 2.0 - 1.0) * ICON_HALF;
+    let steps = |from: f32, to: f32, step: f32| (0..=(((to - from) / step) as usize)).map(move |k| from + k as f32 * step);
+    let mut found: Vec<[f32; 2]> = Vec::new();
+    for (icon, x) in QM_ICONS_X.iter().enumerate() {
+        let likeness = |dx: f32, dy: f32| -> Option<f32> {
+            let mut patch = [0.0f32; ICON_PATCH * ICON_PATCH];
+            for (k, v) in patch.iter_mut().enumerate() {
+                let p = seen.at(x + dx + g(k % ICON_PATCH), QM_ICONS_Y + dy + g(k / ICON_PATCH))?;
+                *v = grey(p[0], p[1]);
+            }
+            Some(super::detect::icon_correlation(&patch, icon))
+        };
+        // Every second step first, then about the best of those.
+        let mut best = (f32::MIN, [0.0f32; 2]);
+        for dy in steps(-SHIFT_Y, SHIFT_Y, 2.0 * STEP) {
+            for dx in steps(-SHIFT_X, SHIFT_X, 2.0 * STEP) {
+                let score = likeness(dx, dy)?;
+                if score > best.0 {
+                    best = (score, [dx, dy]);
                 }
             }
         }
+        let [cx, cy] = best.1;
+        for dy in steps(cy - STEP, cy + STEP, STEP / 2.0) {
+            for dx in steps(cx - STEP, cx + STEP, STEP / 2.0) {
+                let score = likeness(dx, dy)?;
+                if score > best.0 {
+                    best = (score, [dx, dy]);
+                }
+            }
+        }
+        if best.0 >= VR_ICON_MATCH {
+            found.push(best.1);
+        }
     }
-    Some(out)
-}
-
-/// How many of the tabs' icons a picture shows at the shift that finds most: `grey` reads the picture at a pixel of the whole eye.
-fn found_in(points: &[[f32; 2]], grey: impl Fn(f32, f32) -> f32) -> usize {
-    let patch = ICON_PATCH * ICON_PATCH;
-    let mut best = 0;
-    for shift in points.chunks_exact(QM_ICONS_X.len() * patch) {
-        let found = shift
-            .chunks_exact(patch)
-            .enumerate()
-            .filter(|(i, pts)| {
-                let a: [f32; ICON_PATCH * ICON_PATCH] = std::array::from_fn(|k| grey(pts[k][0], pts[k][1]));
-                super::detect::icon_correlation(&a, *i) >= ICON_MATCH
-            })
-            .count();
-        best = best.max(found);
+    if found.is_empty() {
+        return Some(0);
     }
-    best
+    let median = |i: usize| {
+        let mut v: Vec<f32> = found.iter().map(|f| f[i]).collect();
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    let (mx, my) = (median(0), median(1));
+    Some(found.iter().filter(|f| (f[0] - mx).abs() <= AGREE && (f[1] - my).abs() <= AGREE).count())
 }
 
 /// What [`Sight`] is asked to look at.
@@ -162,11 +229,8 @@ impl Sight {
                             *whole.insert(all.whole)
                         }
                     };
-                    let points = samples(&ask.eye, ask.raw, size, &ask.plane)?;
-                    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, 0.0f32, 0.0f32);
-                    for p in &points {
-                        (x0, y0, x1, y1) = (x0.min(p[0]), y0.min(p[1]), x1.max(p[0]), y1.max(p[1]));
-                    }
+                    let seen = Seen::new(&ask.eye, ask.raw, size, &ask.plane);
+                    let [x0, y0, x1, y1] = seen.row_area()?;
                     let area = [x0 as u32, y0 as u32, (x1 as u32 + 2 - x0 as u32).min(size[0] - x0 as u32), (y1 as u32 + 2 - y0 as u32).min(size[1] - y0 as u32)];
                     let part = reader.read_part(source, orbiters_openvr::compositor::Eye::Left, Some(area)).ok()?;
                     if part.whole != size {
@@ -183,7 +247,7 @@ impl Sight {
                         };
                         (g(ix, iy) * (1.0 - ax) + g(ix + 1, iy) * ax) * (1.0 - ay) + (g(ix, iy + 1) * (1.0 - ax) + g(ix + 1, iy + 1) * ax) * ay
                     };
-                    Some(found_in(&points, grey))
+                    count(&seen, grey)
                 });
                 if tell.send(found).is_err() {
                     return;
@@ -283,7 +347,7 @@ impl QmCheck {
     /// A look found `found` icons of its tabs (`None`: could not see the row). `open`: what the buttons take it as.
     pub fn found(&mut self, found: Option<usize>, open: bool) -> Option<Verdict> {
         let found = found?;
-        if found >= ICONS_NEEDED {
+        if found >= SEEN_AT_LEAST {
             self.seen = true;
             self.gone = 0;
             self.there = self.there.saturating_add(1);
@@ -339,7 +403,7 @@ mod tests {
         for found in [Some(5), Some(4), None, None, Some(6)] {
             assert_eq!(check.found(found, true), None, "{found:?}");
         }
-        // Half there (2 or 3 icons, mid-animation) is neither.
+        // Half there (2 icons, mid-animation) is neither.
         assert_eq!(check.found(Some(2), true), None);
         assert_eq!(check.found(Some(0), true), None);
         assert_eq!(check.found(Some(3), true), None);
@@ -421,15 +485,39 @@ mod tests {
         assert!((p[0] - 1620.0 * 1.376 / (1.376 + 0.839)).abs() < 0.5 && (p[1] - 1800.0 * 0.9 / (0.9 + 1.376)).abs() < 0.5, "{p:?}");
         assert!(in_eye(&eye, raw, [1620, 1800], [0.0, 1.65, 1.0]).is_none());
         let plane = Plane { frame: space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.55, -0.4]), unit: 0.0009 };
-        let points = samples(&eye, raw, [1620, 1800], &plane).expect("in view");
-        assert_eq!(points.len(), SHIFTS.len() * SHIFTS.len() * 7 * ICON_PATCH * ICON_PATCH);
+        let seen = Seen::new(&eye, raw, [1620, 1800], &plane);
+        let q = seen.at(30.0, -20.0).unwrap();
+        let r = in_eye(&eye, raw, [1620, 1800], on_plane(&plane, 30.0, -20.0)).unwrap();
+        assert!((q[0] - r[0]).abs() < 0.01 && (q[1] - r[1]).abs() < 0.01, "{q:?} {r:?}");
+        assert!(seen.row_area().is_some());
         let behind = Plane { frame: space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.55, 0.4]), unit: 0.0009 };
-        assert!(samples(&eye, raw, [1620, 1800], &behind).is_none());
-        // A picture of the icons themselves, drawn where the plane puts them, is found; a blank one is not.
-        let exact: Vec<[f32; 2]> = points.chunks_exact(7 * ICON_PATCH * ICON_PATCH).nth(SHIFTS.len() * SHIFTS.len() / 2).unwrap().to_vec();
-        let painted: Vec<([f32; 2], f32)> = exact.iter().enumerate().map(|(n, p)| (*p, super::super::detect::icon_template(n / (ICON_PATCH * ICON_PATCH))[n % (ICON_PATCH * ICON_PATCH)] as f32)).collect();
-        let icons = |x: f32, y: f32| painted.iter().find(|(p, _)| (p[0] - x).abs() < 0.01 && (p[1] - y).abs() < 0.01).map_or(0.0, |(_, v)| *v);
-        assert_eq!(found_in(&exact, icons), 7);
-        assert_eq!(found_in(&points, |_, _| 128.0), 0);
+        assert!(Seen::new(&eye, raw, [1620, 1800], &behind).row_area().is_none());
+        // The tabs drawn where VRChat would show them, off the plane as much as measured in the sandbox (40 units right, 12 up): back from a pixel to the plane
+        // along the eye's ray, an icon's picture there.
+        let [left, right, top, bottom] = super::super::camera_track::eye_sides(raw);
+        let units = |x: f32, y: f32| -> [f32; 2] {
+            let d = [left + x / 1620.0 * (right - left), -(top + y / 1800.0 * (bottom - top)), -1.0];
+            let o = space::position(&eye);
+            let n = space::axis(&plane.frame, 2);
+            let t = space::dot(space::sub(space::position(&plane.frame), o), n) / space::dot(d, n);
+            let h = space::sub(space::add(o, space::scale(d, t)), space::position(&plane.frame));
+            [space::dot(h, space::axis(&plane.frame, 0)) / plane.unit, -space::dot(h, space::axis(&plane.frame, 1)) / plane.unit]
+        };
+        let tabs = |x: f32, y: f32| -> f32 {
+            let [ux, uy] = units(x, y);
+            for (i, ix) in QM_ICONS_X.iter().enumerate() {
+                let (fx, fy) = ((ux - (ix + 40.0)) / ICON_HALF, (uy - (QM_ICONS_Y - 12.0)) / ICON_HALF);
+                if fx.abs() < 1.0 && fy.abs() < 1.0 {
+                    let (cx, cy) = (((fx + 1.0) / 2.0 * ICON_PATCH as f32) as usize, ((fy + 1.0) / 2.0 * ICON_PATCH as f32) as usize);
+                    return super::super::detect::icon_template(i)[cy.min(ICON_PATCH - 1) * ICON_PATCH + cx.min(ICON_PATCH - 1)] as f32;
+                }
+            }
+            40.0
+        };
+        // Drawn with the nearest pixel of each 24 x 24 picture, one icon loses its shape: 6 or 7 of them, where 4 say the Quick Menu is there.
+        assert!(count(&seen, tabs).is_some_and(|n| n >= 6), "the tabs, off the plane: {:?}", count(&seen, tabs));
+        assert_eq!(count(&seen, |_, _| 128.0), Some(0), "a blank picture");
+        let noise = |x: f32, y: f32| ((x * 12.9898 + y * 78.233).sin() * 43758.547).fract().abs() * 255.0;
+        assert!(count(&seen, noise).unwrap() <= GONE_AT_MOST, "noise");
     }
 }

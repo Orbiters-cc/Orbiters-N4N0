@@ -65,6 +65,33 @@ python tools/vr-sandbox/sandbox.py release --owner vr1113b/shell
   (`session`, `pid`, `stream`, `time`) plus `shared: true`. MCP `start` takes a turn
   for the program's owner, MCP `stop` ends that turn only.
 
+## Easy Anti-Cheat ("Launch Error / EAC unload timeout")
+
+The dialog is a window of `start_protected_game.exe` (EAC's bootstrapper); no
+VRChat.exe starts. The one occurrence (2026-11-13 12:37:54) came 82 s after a
+VRChat that quit 10 s after it started, during "Attempting to login to EOS",
+before "AntiCheat Session Begin"; the EAC driver had unloaded at once and the next
+launch six minutes later worked. The controller therefore:
+
+- never closes a VRChat before its anti-cheat session began (or 90 s), closes it
+  with its window's close (as its own button does) and kills it only after 30 s;
+- before every launch waits until no `VRChat.exe`, `start_protected_game.exe`,
+  `launch.exe` or `EasyAntiCheat_EOS.exe` is left, the `EasyAntiCheat_EOS`
+  service is STOPPED and the `EasyAntiCheat_EOSSys` driver service is deleted, for
+  5 s (up to 180 s, then a clear error, never a blind launch). Each launch
+  re-creates that driver service and it is deleted about 2 s after VRChat exits
+  (sampled); EAC's error 30005 behind this dialog is "CreateService failed", so a
+  driver service still present, even stopped, is the state to wait out;
+- closes a leftover Launch Error dialog (a bootstrapper window older than 45 s
+  without its VRChat child), with a picture of it, and retries a failed launch once;
+- logs every launch, close, turn and EAC service/process change with timestamps
+  in `C:/Users/Enzo/.orbiters-build/vr-sandbox/eac-log.jsonl`. After an
+  occurrence, read the lines around `launch_error_window`: they hold the service
+  states, processes and the driver's load/unload events at that moment.
+
+A `STOP_PENDING` EasyAntiCheat_EOSSys that never stops is reported by VRChat
+players to need a reboot; the controller then refuses to launch and says so.
+
 ## Build
 
 From this worktree, use Windows Python with `psutil` and Visual Studio C++ tools:

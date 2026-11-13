@@ -130,8 +130,14 @@ def snapshot():
 
 
 def idle(snap):
-    """EAC fully unloaded and no game, bootstrapper or launcher process left."""
-    return not snap['processes'] and all(s['state'] in ('STOPPED', 'ABSENT') for s in snap['services'].values())
+    """EAC fully unloaded and no game, bootstrapper or launcher process left. On this machine (sampled 2026-11-13
+    14:18) the bootstrapper installs the EasyAntiCheat_EOSSys driver service at each launch and it is DELETED about 2 s
+    after the game ends; a launch must re-create it (EAC error 30005 is "CreateService failed", shown with "EAC unload
+    timeout"). So a driver service that still exists, even STOPPED (deletion pending while a handle is open), is
+    not idle."""
+    s = snap['services']
+    return (not snap['processes'] and s['EasyAntiCheat_EOS']['state'] in ('STOPPED', 'ABSENT')
+            and s['EasyAntiCheat_EOSSys']['state'] == 'ABSENT')
 
 
 def driver_events(since_s=900):
@@ -248,8 +254,8 @@ def wait_idle(log, label, timeout=IDLE_TIMEOUT_S, margin=IDLE_MARGIN_S, evidence
         if clock() - began > timeout:
             log.write('eac_busy_timeout', label=label, first=first, **snap, driver_events=driver_events())
             raise RuntimeError(f'Easy Anti-Cheat did not unload within {timeout} s; not launching VRChat. State: '
-                               + json.dumps(snap) + '. If EasyAntiCheat_EOSSys stays STOP_PENDING only a reboot clears it '
-                               '(reported by VRChat players); details in eac-log.jsonl.')
+                               + json.dumps(snap) + '. The EasyAntiCheat_EOSSys driver service must be deleted before a launch can re-create it; '
+                               'if it stays (STOP_PENDING or STOPPED) only a reboot is reported to clear it. Details in eac-log.jsonl.')
         sleep(.5)
 
 

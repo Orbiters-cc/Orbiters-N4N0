@@ -264,7 +264,7 @@ class TurnTokens(unittest.TestCase):
 
 
 class AntiCheatGuards(unittest.TestCase):
-    def snap(self, services=('STOPPED', 'STOPPED'), procs=()):
+    def snap(self, services=('STOPPED', 'ABSENT'), procs=()):
         return {'services': dict(zip(vrchat_life.EAC_SERVICES, ({'state': s} for s in services))), 'processes': list(procs)}
 
     def test_launch_waits_until_eac_stays_unloaded(self):
@@ -289,8 +289,10 @@ class AntiCheatGuards(unittest.TestCase):
                 vrchat_life.wait_idle(log, 'test', timeout=10, margin=2, sleep=sleep, clock=lambda: clock[0])
             self.assertIn('eac_busy_timeout', log.path.read_text())
 
-    def test_absent_services_count_as_idle(self):
-        self.assertTrue(vrchat_life.idle(self.snap(('ABSENT', 'STOPPED'))))
+    def test_idle_needs_the_driver_service_deleted_not_only_stopped(self):
+        self.assertTrue(vrchat_life.idle(self.snap(('ABSENT', 'ABSENT'))))
+        self.assertTrue(vrchat_life.idle(self.snap(('STOPPED', 'ABSENT'))))
+        self.assertFalse(vrchat_life.idle(self.snap(('STOPPED', 'STOPPED'))))   # deletion still pending
         self.assertFalse(vrchat_life.idle(self.snap(procs=[{'name': 'launch.exe', 'pid': 1}])))
 
     def test_only_an_old_bootstrapper_window_without_vrchat_is_a_launch_error(self):

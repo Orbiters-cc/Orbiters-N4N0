@@ -314,6 +314,20 @@ def current_render():
     except (OSError,ValueError):pass
     return list(DEFAULT_RENDER)
 
+def menu_panel_share(path):
+    """Share of dark-navy VRChat menu pixels in the lower middle of a left-eye capture (where the Quick Menu sits
+    with the start poses)."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        import cv2
+    image=cv2.imread(path)
+    if image is None:raise RuntimeError('unreadable capture '+path)
+    h,w=image.shape[:2]
+    r=image[int(h*.62):,int(w*.3):int(w*.85)].astype(int)
+    B,G,R=r[...,0],r[...,1],r[...,2]
+    return float(((B>R+12)&(B<120)&(R<70)).mean())
+
 def owner_file(owner):
     return LEASES/(re.sub(r'[^A-Za-z0-9._-]','_',owner)+'.json')
 
@@ -381,11 +395,35 @@ class Session:
         paths = json.loads(PATHS.read_text(encoding='utf-8-sig'))
         paths['external_drivers'] = [str(ROOT/'driver')]
         atomic_json(PATHS, paths)
+        # Enzo's installed Orbiters must not attach to the emulated SteamVR (its overlays would be in every turn's
+        # pictures and it would write his real logs about sandbox runs): stopped before SteamVR starts, back at the end.
+        self.stop_installed_app()
         self.eac.write('session_start', session=identity, render=self.render)
         proc = subprocess.Popen([str(RUNTIME/'bin/win64/vrstartup.exe')], creationflags=subprocess.CREATE_NO_WINDOW)
         self.record()
         self.publish()
         return proc
+
+    def stop_installed_app(self):
+        install=Path(os.environ['LOCALAPPDATA'])/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
+        appdir=Path(os.environ['APPDATA'])/'Orbiters/Desktop'
+        # Test programs share these files with the installed app; the journal restores their bytes at the end.
+        for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat',Path(os.environ['USERPROFILE'])/'.codex/config.toml',Path(os.environ['USERPROFILE'])/'.claude.json']:
+            backup(self.j,path)
+        previous=[]
+        for p in psutil.process_iter(['name']):
+            try:
+                if p.info['name']==install.name and Path(p.exe()).resolve()==install.resolve():previous.append(p)
+            except psutil.Error:pass
+        visible=any('--window' in p.cmdline() for p in previous if p.is_running())
+        # Restarted at the end only if it was running now.
+        self.j.update(installed_app_stopped=True,app_restore_exe=str(install) if previous else None,app_was_visible=visible)
+        atomic_json(JOURNAL,self.j)
+        # --quit only signals the service. Wait for its existing processes to exit before anything else, or
+        # single-instance arbitration can silently discard a test program while the installed one shuts down.
+        if previous:subprocess.run([str(install),'--quit'],timeout=20,creationflags=subprocess.CREATE_NO_WINDOW,check=True)
+        _,alive=psutil.wait_procs(previous,timeout=20)
+        if alive:raise RuntimeError('Installed Orbiters did not finish quitting')
 
     def record(self):
         known = {(p['pid'],p['create_time']) for p in self.j['processes']}
@@ -462,22 +500,46 @@ class Session:
         done['avatar_moved_since_launch']=self.j.get('moved',False)
         return done
 
+    def press_left_y(self):
+        with self.guard:
+            if kernel.WaitForSingleObject(self.mutex,1000)!=0:raise RuntimeError('IPC mutex timeout')
+            try:self.shared.devices[1].inputs[14]=1
+            finally:kernel.ReleaseMutex(self.mutex)
+            self.stop.wait(.15)
+            if kernel.WaitForSingleObject(self.mutex,1000)!=0:raise RuntimeError('IPC mutex timeout')
+            try:self.shared.devices[1].inputs[14]=0
+            finally:kernel.ReleaseMutex(self.mutex)
+        time.sleep(2)
+
+    def panel(self,name):
+        """Share of VRChat-menu panel pixels (its dark navy) where the Quick Menu shows with the start poses."""
+        prefix=ROOT/'neutral'/name;prefix.parent.mkdir(exist_ok=True)
+        result=subprocess.run([str(ROOT/'probe.exe'),'capture',str(prefix)],capture_output=True,text=True,timeout=30,creationflags=subprocess.CREATE_NO_WINDOW)
+        if result.returncode:raise RuntimeError(result.stderr)
+        return menu_panel_share(str(prefix)+'-left.png')
+
     def close_menus(self,v,tries=3):
-        state=vrchat_life.menu_open(v['create_time'])
-        if state is None:return "unknown: no menu line in VRChat's log yet (none opened since launch)"
-        presses=0
+        """Main menu: VRChat's log says ("Immobile status changed to"); a short left Y press toggles it. Quick Menu: not
+        in the log, so with the start poses one Y press is made and two eye captures compared: the one showing VRChat's
+        panel is the open state (measured 2026-11-13: panel share 0.28 open, 0.00 closed); a press that opened it is
+        undone. Returns what was verified."""
+        report={}
+        state=vrchat_life.menu_open(v['create_time']);presses=0
         while state and presses<tries:
-            with self.guard:
-                if kernel.WaitForSingleObject(self.mutex,1000)!=0:raise RuntimeError('IPC mutex timeout')
-                try:self.shared.devices[1].inputs[14]=1
-                finally:kernel.ReleaseMutex(self.mutex)
-                self.stop.wait(.12)
-                if kernel.WaitForSingleObject(self.mutex,1000)!=0:raise RuntimeError('IPC mutex timeout')
-                try:self.shared.devices[1].inputs[14]=0
-                finally:kernel.ReleaseMutex(self.mutex)
-            presses+=1;time.sleep(1.5)
+            self.press_left_y();presses+=1
             state=vrchat_life.menu_open(v['create_time'])
-        return ('closed' if not state else 'STILL OPEN')+f' (VRChat log; {presses} press(es) of left Y)'
+        report['main_menu']='no main menu opened since launch' if state is None else ('closed' if not state else 'STILL OPEN')+' (VRChat log)'
+        try:
+            time.sleep(.5)
+            before=self.panel('before');self.press_left_y();after=self.panel('after')
+            if before-after>.1:report['quick_menu']=f'was open, closed (panel {before:.2f} -> {after:.2f})'
+            elif after-before>.1:
+                self.press_left_y();again=self.panel('again')
+                report['quick_menu']=(f'was closed (panel {before:.2f}, {after:.2f} after a test press, {again:.2f} after undoing it)'
+                                      if after-again>.1 else f'STILL OPEN? panel {before:.2f} -> {after:.2f} -> {again:.2f}')
+            else:report['quick_menu']=f'unknown: a Y press changed nothing visible (panel {before:.2f} -> {after:.2f})'
+        except Exception as error:report['quick_menu']='unknown: '+str(error)[:200]
+        return report
 
     def end_session(self,reason):
         self.shutdown_reason=reason
@@ -610,22 +672,7 @@ class Session:
             real=(Path(os.environ['LOCALAPPDATA'])/'Orbiters').resolve()
             if logs==real or logs.is_relative_to(real):raise ValueError("logs must not be the owner's own Orbiters folder")
             install=Path(os.environ['LOCALAPPDATA'])/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
-            if not self.j.get('app_restore_exe'):
-                # First test program of this session: journal the owner's app files and stop his installed app once.
-                # It stays stopped between turns and comes back when the session ends.
-                appdir=Path(os.environ['APPDATA'])/'Orbiters/Desktop'
-                for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat',Path(os.environ['USERPROFILE'])/'.codex/config.toml',Path(os.environ['USERPROFILE'])/'.claude.json']:
-                    backup(self.j,path)
-                visible=any('--window' in p.cmdline() for p in psutil.process_iter(['name']) if p.info['name']=='orbiters-desktop.exe')
-                self.j.update(app_restore_exe=str(install),app_was_visible=visible)
-                atomic_json(JOURNAL,self.j)
-                # --quit only signals the service. Wait for its existing processes to
-                # exit before launching our binary, or single-instance arbitration can
-                # silently discard it while the installed service is still shutting down.
-                previous=[p for p in psutil.process_iter(['name']) if p.info['name']==install.name and Path(p.exe()).resolve()==install.resolve()]
-                if previous:subprocess.run([str(install),'--quit'],timeout=20,creationflags=subprocess.CREATE_NO_WINDOW,check=True)
-                _,alive=psutil.wait_procs(previous,timeout=20)
-                if alive:raise RuntimeError('Installed Orbiters did not finish quitting; sandbox app was not launched')
+            if not self.j.get('installed_app_stopped'):self.stop_installed_app()
             env=os.environ.copy();env['ORBITERS_VR_SANDBOX_ROOT']=str(Path(__file__).parent.resolve());env.pop('ORBITERS_NO_NETWORK_LISTENING',None)
             # The bridge inside the test program calls sandbox.py with these, so its requests count as this turn's.
             env['ORBITERS_VR_SANDBOX_OWNER']=holder['owner'];env['ORBITERS_VR_SANDBOX_LEASE']=holder['token']

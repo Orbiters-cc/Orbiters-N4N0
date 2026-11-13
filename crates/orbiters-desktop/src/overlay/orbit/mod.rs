@@ -10,6 +10,7 @@
 
 pub mod block;
 pub mod camera_frames;
+pub mod camera_reckon;
 pub mod camera_track;
 pub mod camera_web;
 pub mod detect;

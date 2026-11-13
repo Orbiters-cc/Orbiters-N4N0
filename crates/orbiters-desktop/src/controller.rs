@@ -1451,8 +1451,24 @@ impl Controller {
                 }
                 OscEvent::Values { address, values } => {
                     if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some()
-                        && (address=="/usercamera/Pose" || address.starts_with("/tracking/vrsystem/") || address=="/usercamera/Flying") {
+                        // Not /tracking/vrsystem/*: VRChat sends those every frame, and they grew the sandbox's app-err.log by 2.7 MB a minute (227 MB in one session).
+                        && (address=="/usercamera/Pose" || address=="/usercamera/Flying") {
                         eprintln!("sandbox camera OSC {at_ns} {address} {values:?}"); // i18n: not shown (developer diagnostics)
+                    }
+                    // Where VRChat's avatar's hands are: its camera panel opens by the left, and is grabbed from either (`camera_reckon`).
+                    let wrist = match address.as_str() { "/tracking/vrsystem/leftwrist/pose" => Some(0), "/tracking/vrsystem/rightwrist/pose" => Some(1), _ => None };
+                    if let Some(hand) = wrist.filter(|_| values.len() == 6) {
+                        let floats: Vec<f32> = values.iter().filter_map(|v| if let OscValue::Float(f) = v { Some(*f) } else { None }).collect();
+                        if let Ok(pose) = <[f32; 6]>::try_from(floats.as_slice()) {
+                            // VRChat says it every frame: the overlay (another process) gets it at most 20 times a second.
+                            let now = orbiters_core::clock::now_ns();
+                            self.update_if(|s| {
+                                if now.saturating_sub(s.vrchat_wrists_ns[hand]) < 50_000_000 { return false; }
+                                s.vrchat_wrists[hand] = Some(pose);
+                                s.vrchat_wrists_ns[hand] = now;
+                                true
+                            });
+                        }
                     }
                     if address == orbiters_n4n0_core::states::EYE_HEIGHT {
                         if let Some(OscValue::Float(height)) = values.first() {

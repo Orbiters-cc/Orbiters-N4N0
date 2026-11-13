@@ -242,6 +242,10 @@ pub struct OrbitSettings {
     pub quick_menu: bool,
     /// Tiles around VRChat's camera panel, in a headset: found on VRChat's window while its camera is open.
     pub camera_tiles: bool,
+    /// Those tiles also find the camera's panel by looking for it on VRChat's picture. Off (the default), they follow VRChat's own rules
+    /// with no picture read: where the panel opens by the left hand, the hand that grabs it, its X pressed (Enzo, 2026-11-13: the looking
+    /// "seems to work pretty shit", make it an option, off by default).
+    pub camera_pattern: bool,
     /// VRChat's turning stick turns what shows around the person, in a headset.
     pub immersive_turn: bool,
     /// How large the panels are in VR against where they are measured to be, one of [`OrbitSettings::VR_SIZES`]: VRChat
@@ -284,7 +288,7 @@ impl OrbitSettings {
 
 impl Default for OrbitSettings {
     fn default() -> Self {
-        Self { camera_tiles: true, immersive_turn: true, layout: OrbitLayout::Wing, theme: MenuLook::Modern, accent: [0x00, 0xda, 0x6d], retro_color: [0x2b, 0xe3, 0x6a], retro_pictures: false, display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
+        Self { camera_tiles: true, camera_pattern: false, immersive_turn: true, layout: OrbitLayout::Wing, theme: MenuLook::Modern, accent: [0x00, 0xda, 0x6d], retro_color: [0x2b, 0xe3, 0x6a], retro_pictures: false, display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
     }
 }
 
@@ -939,6 +943,16 @@ fn migrated(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finding VRChat's camera by its picture is an option, off by default, and off for settings saved before it existed (Enzo, 2026-11-13).
+    #[test]
+    fn camera_pattern_tracking_is_off_unless_turned_on() {
+        assert!(!OrbitSettings::default().camera_pattern);
+        let saved: Settings = serde_json::from_value(serde_json::json!({ "orbit": { "camera_tiles": true } })).unwrap();
+        assert!(saved.orbit.camera_tiles && !saved.orbit.camera_pattern);
+        let on: Settings = serde_json::from_value(serde_json::json!({ "orbit": { "camera_pattern": true } })).unwrap();
+        assert!(on.orbit.camera_pattern);
+    }
 
     /// Enzo's saved settings: `levels` became milliseconds, and each smooths exactly as it did (strength × 120 ms).
     #[test]

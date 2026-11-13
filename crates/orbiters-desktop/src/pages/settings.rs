@@ -1149,9 +1149,15 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
         apply |= widgets::toggle(ui, "orbit-wheel", &mut orbit.wheel);
     });
     widgets::separator(ui);
-    widgets::field(ui, tr("Around the camera"), Some(tr("In a headset: 3D pictures and the QR code beside VRChat's camera. It looks for the camera's panel on VRChat's window while the camera is open, and keeps nothing it sees.")), 48.0, |ui| {
+    widgets::field(ui, tr("Around the camera"), Some(tr("In a headset: 3D pictures and the QR code beside VRChat's camera. They appear where VRChat opens it and move with the hand that holds it.")), 48.0, |ui| {
         apply |= widgets::toggle(ui, "orbit-camera", &mut orbit.camera_tiles);
     });
+    if orbit.camera_tiles {
+        widgets::separator(ui);
+        widgets::field(ui, tr("Find the camera on screen"), Some(tr("Also looks for the camera's panel in what VRChat shows and moves the tiles onto it. Off by default: it can put them in the wrong place. It keeps nothing it sees.")), 48.0, |ui| {
+            apply |= widgets::toggle(ui, "orbit-camera-pattern", &mut orbit.camera_pattern);
+        });
+    }
     if let Some(why) = snap.orbit.camera_note.as_ref().filter(|_| orbit.camera_tiles) {
         widgets::separator(ui);
         widgets::field(ui, tr("The camera's tiles, right now"), Some(tr(why)), 48.0, |_| {});

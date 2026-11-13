@@ -799,6 +799,57 @@ impl OrbitVr {
         self.camera_watch.as_ref().and_then(|watch| watch.problem()).map(str::to_string)
     }
 
+    /// Where VRChat's camera panel is now by VRChat's own rules (`camera_reckon`), with no picture read: laid by the left hand when it opens,
+    /// carried by the hand that grips it, gone when a trigger presses its X. `sandbox`: each new sighting of the picture reader is written
+    /// beside it to `camera-truth.jsonl`, the error of this prototype measured.
+    fn camera_reckon_turn(&mut self, steamvr: &vr::Client, actions: &Actions, input_read: bool, prediction: f32, wanted: bool, sandbox: bool) -> Option<Plane> {
+        use super::camera_reckon::PANEL_WIDTH_M;
+        if !wanted {
+            return None;
+        }
+        let mut poses = [Pose::default(); MAX_DEVICES];
+        steamvr.predicted_poses(Universe::Standing, prediction, &mut poses);
+        let device = |role| steamvr.controller_index(role).filter(|&d| (d as usize) < MAX_DEVICES && poses[d as usize].pose_is_valid).map(|d| poses[d as usize].device_to_absolute);
+        let hands = [device(ControllerRole::LeftHand), device(ControllerRole::RightHand)];
+        let head = poses[0].pose_is_valid.then_some(poses[0].device_to_absolute);
+        if !self.camera_reckon.opened() {
+            if let (Some(head), Some(left)) = (head, hands[0]) {
+                let wrist = super::camera_reckon::left_wrist(Duration::from_millis(500));
+                let panel = self.camera_reckon.open(&head, &left, wrist.as_ref());
+                super::super::vr_log::line(&format!("camera reckon: opened by the left hand ({}), panel {panel:?}", if wrist.is_some() { "VRChat's wrist" } else { "controller" })); // i18n: not shown (diagnostics)
+            }
+        }
+        let held = self.camera_reckon.held_hand();
+        // Unknown input is not a release: the holding hand keeps it.
+        let grips: [bool; 2] = if input_read { let g = actions.grab_states(steamvr); std::array::from_fn(|i| g[i].unwrap_or(held == Some(i))) } else { std::array::from_fn(|i| held == Some(i)) };
+        // As the tiles read them (`orbit_triggers`): `Actions::triggers` is only refreshed by the floating panel's input (sandbox m4: no press seen).
+        let triggers = if input_read { actions.orbit_triggers(steamvr, self.block.blocked()) } else { [false; 2] };
+        let (frame, happened) = self.camera_reckon.step(hands, grips, triggers);
+        if happened != Default::default() {
+            super::super::vr_log::line(&format!("camera reckon: {happened:?}, grips {grips:?}, triggers {triggers:?}")); // i18n: not shown (diagnostics)
+        }
+        if sandbox {
+            if let (Some((at, seen)), Some(now)) = (self.camera_sighting, frame) {
+                if self.camera_reckon_logged.due(Duration::from_millis(200)) {
+                    let apart = (0..3).map(|i| (seen.m[i][3] - now.m[i][3]).powi(2)).sum::<f32>().sqrt();
+                    let trace: f32 = (0..3).map(|c| (0..3).map(|i| seen.m[i][c] * now.m[i][c]).sum::<f32>()).sum();
+                    let turned = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees();
+                    let line = serde_json::json!({ "ns": orbiters_core::clock::now_ns(), "sighting_age_ms": at.elapsed().as_secs_f32() * 1000.0, "error_mm": apart * 1000.0, "error_deg": turned, "held": self.camera_reckon.held_hand(), "reckon": now.m, "sighting": seen.m, "hands": hands.map(|h| h.map(|h| h.m)), "head": head.map(|h| h.m) });
+                    let path = orbiters_core::paths::logs_dir().join("camera-truth.jsonl");
+                    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                        use std::io::Write;
+                        let _ = writeln!(file, "{line}");
+                    }
+                }
+            }
+        }
+        let frame = frame?;
+        self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
+        self.camera_looks = self.camera_looks.max(CAMERA_LOOKS_TO_SHOW);
+        self.camera_measured_width = Some(PANEL_WIDTH_M);
+        Some(Plane { frame, unit: PANEL_WIDTH_M / camera_track::PANEL_SIZE[0] })
+    }
+
     /// Where VRChat's camera panel is now, while it is being watched and was seen.
     fn camera_turn(&mut self, steamvr: &vr::Client, actions: &Actions, input_read: bool, prediction: f32, now: Instant, dt: f32) -> Option<Plane> {
         let watch = self.camera_watch.as_ref()?;
@@ -916,6 +967,7 @@ impl OrbitVr {
                 } else { self.camera_follow.seen_in_hands(frame,unit,captured_hands) };
                 self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
                 self.camera_seen = Some(now);
+                self.camera_sighting = Some((seen.at, frame));
 
                 if self.camera_stereo_recent() {
                     if let Some(hand)=self.camera_follow.observe_grab(frame,unit,captured_hands,observed_grips) {
@@ -1142,6 +1194,11 @@ pub struct OrbitVr {
     camera_stereo_at: Option<Instant>,
     camera_follow: super::camera_track::Follow,
     camera_reopen: camera_track::Reopen,
+    /// VRChat's camera panel by VRChat's own rules, with no picture read (the default; `OrbitSettings::camera_pattern` off).
+    camera_reckon: super::camera_reckon::Reckon,
+    camera_reckon_logged: super::super::vr_log::Every,
+    /// The last panel the picture reader placed, and when: in the sandbox, what the reckoning is checked against.
+    camera_sighting: Option<(Instant, Matrix34)>,
     camera_epoch: Instant,
     camera_side: camera_track::Side,
     hole_logged: super::super::vr_log::Every,
@@ -1220,6 +1277,9 @@ impl OrbitVr {
             pointers: [None; 2],
             camera_follow: Default::default(),
             camera_reopen: Default::default(),
+            camera_reckon: Default::default(),
+            camera_reckon_logged: Default::default(),
+            camera_sighting: None,
             camera_epoch: now,
             camera_side: Default::default(),
             hole_logged: Default::default(),
@@ -1391,7 +1451,8 @@ impl OrbitVr {
         }
         // VRChat's wheel goes when its camera opens.
         let camera = cx.snap.camera_open_said;
-        if camera == Some(true) && self.camera_was != Some(true) {
+        let camera_just_opened = camera == Some(true) && self.camera_was != Some(true);
+        if camera_just_opened {
             self.buttons.camera_opened();
             self.panels.close_sheet();
         }
@@ -1403,15 +1464,30 @@ impl OrbitVr {
         // VRChat's camera panel, seen on its window while it says its camera is open, with neither of its menus up.
         // Looked for even with a menu up: VRChat's camera is opened from one, and what follows the buttons may still say it is open.
         let camera_wanted = settings.camera_tiles && camera == Some(true);
+        // The picture is read only when the person turned that on; in the sandbox it is read anyway, as the ground truth the reckoning is
+        // measured against (camera-truth.jsonl), and the reckoning still places the tools.
+        let camera_sandbox = cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some();
+        let camera_read = camera_wanted && (settings.camera_pattern || camera_sandbox);
         self.camera_retired.retain_mut(|watch| {
             if watch.finished() { watch.finish(); false } else { true }
         });
-        if camera_wanted != self.camera_watch.is_some() {
+        // VRChat's wrists, from the controller's process, while they are fresh.
+        for hand in 0..2 {
+            if let Some(pose) = cx.snap.vrchat_wrists[hand].filter(|_| orbiters_core::clock::now_ns().saturating_sub(cx.snap.vrchat_wrists_ns[hand]) < 500_000_000) {
+                super::camera_reckon::wrist_said(hand, pose);
+            }
+        }
+        if !camera_wanted || camera_just_opened {
+            self.camera_reckon.clear();
+            // A sighting from before this opening says nothing of this panel (camera4/m2 compared against one 2 minutes old).
+            self.camera_sighting = None;
+        }
+        if camera_read != self.camera_watch.is_some() {
             if let Some(watch) = self.camera_watch.take() {
                 watch.stop();
                 self.camera_retired.push(watch);
             }
-            self.camera_watch = camera_wanted.then(|| {
+            self.camera_watch = camera_read.then(|| {
                 let mirror = if self.tune.camera_use_window { None } else { cx.steamvr.compositor().ok().map(|c| c.mirror_source()) };
                 CameraWatch::start(super::camera_frames::From { mirror, adapter: cx.steamvr.dxgi_adapter_index(), keep_frames: self.tune.camera_keep_frames })
             });
@@ -1425,7 +1501,14 @@ impl OrbitVr {
             self.camera_panel_seen_ns = None;
             self.camera_stereo_at = None;
         }
-        let camera_plane = self.camera_turn(cx.steamvr, &*cx.actions, cx.input_read, cx.prediction, now, dt);
+        let camera_plane = if settings.camera_pattern {
+            self.camera_turn(cx.steamvr, &*cx.actions, cx.input_read, cx.prediction, now, dt)
+        } else {
+            if camera_sandbox {
+                let _ = self.camera_turn(cx.steamvr, &*cx.actions, cx.input_read, cx.prediction, now, dt);
+            }
+            self.camera_reckon_turn(cx.steamvr, &*cx.actions, cx.input_read, cx.prediction, camera_wanted, camera_sandbox)
+        };
         // Camera status changes independently of SteamVR's one-time input override setup.
         let mut status=self.told.clone().unwrap_or_default();
         status.camera_note=self.camera_note(cx.snap);

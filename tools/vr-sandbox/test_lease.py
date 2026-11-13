@@ -293,6 +293,12 @@ class TurnTokens(unittest.TestCase):
                 sandbox.os.environ.pop('ORBITERS_VR_SANDBOX_OWNER', None)
                 self.assertEqual(sandbox.lease_args('vr1113b/shell'), ('vr1113b/shell', 'saved'))
 
+    def test_the_documented_call_order_parses_and_says_when_no_session_runs(self):
+        with patch.object(sandbox, 'controller_alive', return_value=None):
+            for argv in (['call', '--owner', 'x', '{"action":"menu"}'], ['call', '{"action":"menu"}', '--owner', 'x']):
+                with self.assertRaisesRegex(SystemExit, 'No shared sandbox session'):
+                    sandbox.main(argv)
+
     def test_render_sizes(self):
         self.assertEqual(sandbox.parse_render('2112x2304'), [2112, 2304])
         self.assertEqual(sandbox.parse_render('default'), sandbox.DEFAULT_RENDER)

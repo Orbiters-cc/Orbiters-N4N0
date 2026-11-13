@@ -1014,8 +1014,10 @@ def main(argv):
     parser.add_argument('--app')
     parser.add_argument('--logs')
     parser.add_argument('--force',action='store_true')
-    a=parser.parse_args(argv)
+    a=parser.parse_intermixed_args(argv)
     cmd=a.command
+    if cmd in ('call','release','renew','shutdown','neutral','app_stop') and not controller_alive():
+        raise SystemExit('No shared sandbox session runs; take a turn first: python tools/vr-sandbox/sandbox.py acquire --owner <stream>')
     if cmd=='start':serve(owner=a.owner,stream=a.owner or 'shared');return
     if cmd=='acquire':
         if not a.owner:raise SystemExit('acquire needs --owner <stream>')

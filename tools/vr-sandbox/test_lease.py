@@ -318,11 +318,18 @@ class AntiCheatGuards(unittest.TestCase):
                 vrchat_life.wait_idle(log, 'test', timeout=10, margin=2, sleep=sleep, clock=lambda: clock[0])
             self.assertIn('eac_busy_timeout', log.path.read_text())
 
-    def test_idle_needs_the_driver_service_deleted_not_only_stopped(self):
+    def test_idle_waits_out_a_running_driver_service_but_not_a_stopped_one(self):
         self.assertTrue(vrchat_life.idle(self.snap(('ABSENT', 'ABSENT'))))
-        self.assertTrue(vrchat_life.idle(self.snap(('STOPPED', 'ABSENT'))))
-        self.assertFalse(vrchat_life.idle(self.snap(('STOPPED', 'STOPPED'))))   # deletion still pending
-        self.assertFalse(vrchat_life.idle(self.snap(procs=[{'name': 'launch.exe', 'pid': 1}])))
+        self.assertTrue(vrchat_life.idle(self.snap(('STOPPED', 'STOPPED'))))       # launch worked like this (16:11)
+        for driver in ('RUNNING', 'STOP_PENDING', 'START_PENDING'):                # 30005 reproduced with RUNNING
+            self.assertFalse(vrchat_life.idle(self.snap(('STOPPED', driver))))
+        self.assertFalse(vrchat_life.idle(self.snap(('RUNNING', 'ABSENT'))))
+
+    def test_a_launch_error_title_is_an_error_at_once(self):
+        procs = [{'name': 'start_protected_game.exe', 'pid': 7, 'ppid': 0, 'create_time': 100}]
+        with patch.object(vrchat_life, 'game_processes', return_value=procs), \
+                patch.object(vrchat_life, 'windows_of', return_value=[{'hwnd': 9, 'title': 'Launch Error (30005)', 'rect': [0, 0, 1, 1]}]):
+            self.assertEqual([p['pid'] for p in vrchat_life.error_windows(min_age_s=45, now=101)], [7])
 
     def test_only_an_old_bootstrapper_window_without_vrchat_is_a_launch_error(self):
         procs = [{'name': 'start_protected_game.exe', 'pid': 1, 'ppid': 0, 'create_time': 100},

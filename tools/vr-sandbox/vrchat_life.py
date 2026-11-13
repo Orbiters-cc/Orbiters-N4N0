@@ -15,6 +15,7 @@ import ctypes.wintypes as W
 import json
 import os
 import re
+import struct
 import subprocess
 import threading
 import time
@@ -130,14 +131,14 @@ def snapshot():
 
 
 def idle(snap):
-    """EAC fully unloaded and no game, bootstrapper or launcher process left. On this machine (sampled 2026-11-13
-    14:18) the bootstrapper installs the EasyAntiCheat_EOSSys driver service at each launch and it is DELETED about 2 s
-    after the game ends; a launch must re-create it (EAC error 30005 is "CreateService failed", shown with "EAC unload
-    timeout"). So a driver service that still exists, even STOPPED (deletion pending while a handle is open), is
-    not idle."""
+    """Safe to launch: no game, bootstrapper or launcher process left, the EasyAntiCheat_EOS service stopped and the
+    EasyAntiCheat_EOSSys driver service not running. Reproduced twice on 2026-11-13 (16:13, 16:16): VRChat closed
+    60 s after its start leaves that driver service RUNNING for about 77 s; a launch then makes the bootstrapper stop
+    it (STOP_PENDING), wait about 20 s and show "Launch Error (30005) ... EAC unload timeout". A driver service that is
+    STOPPED but not yet deleted does not block (a launch at 16:11 started VRChat in 2.5 s)."""
     s = snap['services']
     return (not snap['processes'] and s['EasyAntiCheat_EOS']['state'] in ('STOPPED', 'ABSENT')
-            and s['EasyAntiCheat_EOSSys']['state'] == 'ABSENT')
+            and s['EasyAntiCheat_EOSSys']['state'] in ('STOPPED', 'ABSENT'))
 
 
 def driver_events(since_s=900):
@@ -183,12 +184,38 @@ class Sampler:
         self.thread.join(5)
 
 
+gdi32 = C.WinDLL('gdi32', use_last_error=True)
+user32.GetDC.argtypes = [W.HWND]; user32.GetDC.restype = W.HDC
+user32.ReleaseDC.argtypes = [W.HWND, W.HDC]
+user32.PrintWindow.argtypes = [W.HWND, W.HDC, W.UINT]
+gdi32.CreateCompatibleDC.argtypes = [W.HDC]; gdi32.CreateCompatibleDC.restype = W.HDC
+gdi32.CreateCompatibleBitmap.argtypes = [W.HDC, C.c_int, C.c_int]; gdi32.CreateCompatibleBitmap.restype = W.HBITMAP
+gdi32.SelectObject.argtypes = [W.HDC, W.HGDIOBJ]; gdi32.SelectObject.restype = W.HGDIOBJ
+gdi32.GetDIBits.argtypes = [W.HDC, W.HBITMAP, W.UINT, W.UINT, C.c_void_p, C.c_void_p, W.UINT]
+gdi32.DeleteObject.argtypes = [W.HGDIOBJ]
+gdi32.DeleteDC.argtypes = [W.HDC]
+
+
 def capture_window(window, path):
+    """The window's own picture (PrintWindow, even when covered) saved as a .bmp next to `path`. Evidence only:
+    never blocks recovery. Python's imaging library is not usable in every interpreter here, so plain GDI."""
     try:
-        from PIL import ImageGrab
-        ImageGrab.grab(bbox=tuple(window['rect']), all_screens=True).save(path)
-        return str(path)
-    except Exception as error:  # evidence only; never blocks recovery
+        x0, y0, x1, y1 = window['rect']
+        w, h = x1 - x0, y1 - y0
+        screen = user32.GetDC(None)
+        dc = gdi32.CreateCompatibleDC(screen)
+        bitmap = gdi32.CreateCompatibleBitmap(screen, w, h)
+        old = gdi32.SelectObject(dc, bitmap)
+        user32.PrintWindow(window['hwnd'], dc, 2)            # PW_RENDERFULLCONTENT
+        header = struct.pack('<IiiHHIIiiII', 40, w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+        pixels = C.create_string_buffer(w * h * 4)
+        gdi32.GetDIBits(dc, bitmap, 0, h, pixels, C.c_char_p(header), 0)
+        gdi32.SelectObject(dc, old); gdi32.DeleteObject(bitmap); gdi32.DeleteDC(dc); user32.ReleaseDC(None, screen)
+        out = Path(path).with_suffix('.bmp')
+        size = 14 + 40 + w * h * 4
+        out.write_bytes(b'BM' + struct.pack('<IHHI', size, 0, 0, 54) + header + pixels.raw)
+        return str(out)
+    except Exception as error:
         return f'capture failed: {error}'
 
 
@@ -199,12 +226,18 @@ def error_windows(min_age_s=ERROR_WINDOW_AGE_S, now=None):
     procs = game_processes()
     found = []
     for p in procs:
-        if p['name'].lower() != 'start_protected_game.exe' or now - p['create_time'] < min_age_s:
+        if p['name'].lower() != 'start_protected_game.exe':
+            continue
+        wins = windows_of(p['pid'])
+        # The dialog's title is "Launch Error (30005)" (seen 2026-11-13); an older splash without VRChat counts too.
+        if any(w['title'].startswith('Launch Error') for w in wins):
+            found.append({**p, 'windows': wins})
+            continue
+        if now - p['create_time'] < min_age_s:
             continue
         # VRChat.exe is the bootstrapper's child (seen 2026-11-13); a VRChat of another launch does not count.
         if any(q['name'].lower() == 'vrchat.exe' and q['ppid'] == p['pid'] and q['create_time'] >= p['create_time'] for q in procs):
             continue
-        wins = windows_of(p['pid'])
         if wins:
             found.append({**p, 'windows': wins})
     return found
@@ -254,8 +287,8 @@ def wait_idle(log, label, timeout=IDLE_TIMEOUT_S, margin=IDLE_MARGIN_S, evidence
         if clock() - began > timeout:
             log.write('eac_busy_timeout', label=label, first=first, **snap, driver_events=driver_events())
             raise RuntimeError(f'Easy Anti-Cheat did not unload within {timeout} s; not launching VRChat. State: '
-                               + json.dumps(snap) + '. The EasyAntiCheat_EOSSys driver service must be deleted before a launch can re-create it; '
-                               'if it stays (STOP_PENDING or STOPPED) only a reboot is reported to clear it. Details in eac-log.jsonl.')
+                               + json.dumps(snap) + '. A launch while the EasyAntiCheat_EOSSys driver service still runs fails with "EAC unload timeout" (30005); '
+                               'if it stays STOP_PENDING only a reboot is reported to clear it. Details in eac-log.jsonl.')
         sleep(.5)
 
 

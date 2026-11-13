@@ -29,6 +29,10 @@ use crate::place::Placed;
 pub const MISSES: u32 = 2;
 /// And how long it must have gone unconfirmed then, seconds (two looks at the fastest pace are 0.7 s).
 pub const MISS_S: f64 = 1.2;
+/// After the sticks moved the player since a line was confirmed, its cover may be off its text until a look finds the
+/// text again and re-anchors: it may not be found where it should be for this long before it goes (the sandbox: a
+/// cover moved off its sign by a short stick turn went after 1.2 s, before the sign was read again).
+pub const MOVED_MISS_S: f64 = 3.0;
 /// Seconds a line off the screen stays (looking away and back within this finds it where it was).
 pub const OUT_OF_VIEW_S: f64 = 6.0;
 /// Seconds a line on screen but outside the part read stays unconfirmed.
@@ -274,7 +278,8 @@ impl Tracker {
             let missed = |t: &mut Track| {
                 t.misses += 1;
                 t.in_view = now;
-                t.misses < MISSES || now - t.last_seen < MISS_S
+                let moved_since = (moved[0] - t.moved_at[0]) + (moved[1] - t.moved_at[1]) > 0.05;
+                t.misses < MISSES || now - t.last_seen < if moved_since { MOVED_MISS_S } else { MISS_S }
             };
             let stays = match seen(&t) {
                 Seen::Open | Seen::Covered { changed: true } => missed(&mut t),
@@ -457,6 +462,19 @@ mod tests {
         t.update(0.7, vec![], &|_| Seen::Open);
         assert_eq!(t.tracks.len(), 1, "two quick misses are not yet {MISS_S} s");
         t.update(1.3, vec![], &|_| Seen::Open);
+        assert!(t.tracks.is_empty());
+    }
+
+    #[test]
+    fn after_the_sticks_moved_a_missed_line_waits_to_be_found_again() {
+        let mut t = Tracker::default();
+        t.update(0.0, vec![seen("出口", 0.0)], &|_| Seen::Open);
+        t.moved = [0.0, 0.3];
+        for now in [0.5, 1.0, 1.5, 2.0, 2.5] {
+            t.update(now, vec![], &|_| Seen::Covered { changed: true });
+            assert_eq!(t.tracks.len(), 1, "{now}");
+        }
+        t.update(3.2, vec![], &|_| Seen::Covered { changed: true });
         assert!(t.tracks.is_empty());
     }
 

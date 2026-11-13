@@ -163,7 +163,14 @@ pub fn sightings(look: &Look, lines: &[Line]) -> Vec<Sighting> {
     lines
         .iter()
         .zip(placed)
-        .map(|(l, p)| Sighting { text: l.text.clone(), confidence: l.confidence, colours: colours(&look.pair, &l.boxed), context: context(&look.pair, &p).unwrap_or_default(), placed: p })
+        .map(|(l, p)| Sighting {
+            text: l.text.clone(),
+            confidence: l.confidence,
+            colours: colours(&look.pair, &l.boxed),
+            context: context(&look.pair, &p).unwrap_or_default(),
+            in_eye: geometry::apply(&geometry::inverse(&look.pair.views[0].eye), p.centre()),
+            placed: p,
+        })
         .collect()
 }
 

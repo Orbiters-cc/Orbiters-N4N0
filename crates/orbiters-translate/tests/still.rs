@@ -146,7 +146,7 @@ fn translations_stay_put_while_the_head_moves() {
         let sightings = placed
             .into_iter()
             .enumerate()
-            .map(|(i, p)| orbiters_translate::track::Sighting { text: LINES[i].into(), confidence: 0.99, placed: p, colours: orbiters_translate::track::Colours { background: [235, 228, 210], text: [20; 3] }, context: vec![] })
+            .map(|(i, p)| orbiters_translate::track::Sighting { text: LINES[i].into(), confidence: 0.99, placed: p, colours: orbiters_translate::track::Colours { background: [235, 228, 210], text: [20; 3] }, context: vec![], in_eye: [0.0; 3] })
             .collect();
         tracker.update(k as f64 * 0.5, sightings, &|_| Seen::Open);
         assert_eq!(tracker.tracks.len(), LINES.len(), "look {k}: one track a line, no duplicates");
@@ -185,6 +185,7 @@ fn our_own_translations_are_masked_and_known_as_covered() {
         last_seen: 0.0,
         in_view: 0.0,
         moved_at: [0.0; 2],
+        in_eye: [0.0; 3],
         sightings: 2,
         misses: 0,
     };
@@ -329,7 +330,7 @@ fn lines_are_asked_once_in_a_batch_and_painted_once_translated() {
         let sightings = placed
             .iter()
             .enumerate()
-            .map(|(i, p)| orbiters_translate::track::Sighting { text: LINES[i].into(), confidence: 0.99, placed: *p, colours: orbiters_translate::track::Colours { background: [235, 228, 210], text: [20; 3] }, context: vec![] })
+            .map(|(i, p)| orbiters_translate::track::Sighting { text: LINES[i].into(), confidence: 0.99, placed: *p, colours: orbiters_translate::track::Colours { background: [235, 228, 210], text: [20; 3] }, context: vec![], in_eye: [0.0; 3] })
             .collect();
         core.tracker.update(k as f64 * 0.1, sightings, &|_| Seen::Open);
         let s = core.after_look(k as f64 * 0.1, gaze, Default::default());

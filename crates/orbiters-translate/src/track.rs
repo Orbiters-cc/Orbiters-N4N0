@@ -35,6 +35,8 @@ pub const OUT_OF_VIEW_S: f64 = 6.0;
 pub const UNCONFIRMED_S: f64 = 20.0;
 /// How much of a new measurement a known line takes.
 const FOLLOW: f32 = 0.35;
+/// Seconds a text found to move with the head (VRChat's notices, another app's overlay) is left alone.
+pub const HEAD_LOCKED_S: f64 = 60.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Colours {
@@ -51,6 +53,8 @@ pub struct Sighting {
     pub colours: Colours,
     /// Grey samples of a ring around the line, to tell later whether its surroundings changed.
     pub context: Vec<f32>,
+    /// Its middle in the eye's own space (where it is before the eye, whichever way the head looks).
+    pub in_eye: V3,
 }
 
 /// What a look could tell about a line already followed.
@@ -94,6 +98,8 @@ pub struct Track {
     pub in_view: f64,
     /// [`Tracker::moved`] when it was last confirmed.
     pub moved_at: [f32; 2],
+    /// Its middle in the eye's space when last read ([`Sighting::in_eye`]).
+    pub in_eye: V3,
     pub sightings: u32,
     pub misses: u32,
 }
@@ -159,11 +165,33 @@ pub struct Tracker {
     pub moved: [f32; 2],
     /// Re-anchoring is measured but not done (a development switch, to measure how far lines slide without it).
     pub hold_anchors: bool,
+    /// Texts found to move with the head, and until when they are left alone.
+    pub head_locked: Vec<(String, f64)>,
 }
 
 impl Tracker {
     /// One look's lines. `seen` says, for each line already followed, what this look could tell about it.
     pub fn update(&mut self, now: f64, sightings: Vec<Sighting>, seen: &dyn Fn(&Track) -> Seen) -> Followed {
+        // Text that moves with the head is not on the world (VRChat's notices and loading screen, other apps' overlays):
+        // its translation, anchored to the world, stayed after the notice went, covering it so that nothing ever told it
+        // was gone (the sandbox, 2026-11-13: "You have joined an Invite instance" shown in French for minutes). Read again
+        // at the same place before the eye after the head moved, while its anchor is elsewhere, it is left alone.
+        self.head_locked.retain(|(_, until)| *until > now);
+        let mut sightings = sightings;
+        for s in &sightings {
+            let k = key(&s.text);
+            let locked = self.tracks.iter().any(|t| {
+                t.key == k
+                    && geometry::norm(sub(t.in_eye, s.in_eye)) < 0.03 + 0.02 * s.placed.distance
+                    && geometry::norm(sub(t.placed.centre(), s.placed.centre())) > 0.04 + 0.03 * s.placed.distance
+            });
+            if locked && !self.head_locked.iter().any(|(h, _)| *h == k) {
+                self.head_locked.push((k, now + HEAD_LOCKED_S));
+            }
+        }
+        let locked: Vec<String> = self.head_locked.iter().map(|(k, _)| k.clone()).collect();
+        sightings.retain(|s| !locked.contains(&key(&s.text)));
+        self.tracks.retain(|t| !locked.contains(&t.key));
         let mut followed = self.reanchor(&sightings);
         followed.held = self.hold_anchors && followed.moved.is_some();
         if let (Some(by), false) = (followed.moved, followed.held) {
@@ -203,6 +231,7 @@ impl Tracker {
                     t.confidence = t.confidence.max(s.confidence);
                     t.colours = s.colours;
                     t.context = s.context;
+                    t.in_eye = s.in_eye;
                     t.last_seen = now;
                     t.in_view = now;
                     t.moved_at = self.moved;
@@ -224,6 +253,7 @@ impl Tracker {
                     last_seen: now,
                     in_view: now,
                     moved_at: self.moved,
+                    in_eye: s.in_eye,
                     sightings: 1,
                     misses: 0,
                 }),
@@ -321,7 +351,27 @@ mod tests {
         Placed { pose, width: 0.5, height: 0.08, measured: true, distance: 2.0 }
     }
     fn seen(text: &str, x: f32) -> Sighting {
-        Sighting { text: text.into(), confidence: 0.9, placed: placed(x), colours: Colours { background: [255; 3], text: [0; 3] }, context: vec![] }
+        Sighting { text: text.into(), confidence: 0.9, placed: placed(x), colours: Colours { background: [255; 3], text: [0; 3] }, context: vec![], in_eye: [x, 0.0, -2.0] }
+    }
+
+    #[test]
+    fn text_that_moves_with_the_head_is_left_alone() {
+        let mut t = Tracker::default();
+        t.update(0.0, vec![seen("Vous avez rejoint", 0.0), seen("出口", 1.0)], &|_| Seen::Open);
+        // The head turned: the notice is read at the same place before the eye, half a metre away in the world.
+        let mut notice = seen("Vous avez rejoint", 0.5);
+        notice.in_eye = [0.0, 0.0, -2.0];
+        t.update(1.0, vec![notice.clone()], &|_| Seen::Covered { changed: false });
+        assert!(!t.tracks.iter().any(|x| x.text == "Vous avez rejoint"), "its translation goes");
+        assert!(t.tracks.iter().any(|x| x.text == "出口"), "the sign stays");
+        // And is not followed again while it shows.
+        t.update(2.0, vec![notice], &|_| Seen::Open);
+        assert!(!t.tracks.iter().any(|x| x.text == "Vous avez rejoint"));
+        // A sign read again where it is, after the head moved: not mistaken for one (its place before the eye changed).
+        let mut sign = seen("出口", 1.0);
+        sign.in_eye = [1.0, 0.0, -2.3];
+        t.update(3.0, vec![sign], &|_| Seen::Open);
+        assert!(t.tracks.iter().any(|x| x.text == "出口"));
     }
 
     #[test]

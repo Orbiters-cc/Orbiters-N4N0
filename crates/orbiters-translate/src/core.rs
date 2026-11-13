@@ -392,7 +392,7 @@ mod tests {
         pose[0][3] = 3.0 * a.sin();
         pose[1][3] = 1.6;
         pose[2][3] = -3.0 * a.cos();
-        Sighting { text: text.into(), confidence: 0.95, placed: Placed { pose, width: 0.3, height: 0.06, measured: true, distance: 3.0 }, colours: Colours { background: [250; 3], text: [0; 3] }, context: vec![] }
+        Sighting { text: text.into(), confidence: 0.95, placed: Placed { pose, width: 0.3, height: 0.06, measured: true, distance: 3.0 }, colours: Colours { background: [250; 3], text: [0; 3] }, context: vec![], in_eye: [0.0; 3] }
     }
 
     fn gaze(degrees: f32) -> (V3, V3) {

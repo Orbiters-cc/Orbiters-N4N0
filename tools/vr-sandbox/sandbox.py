@@ -328,6 +328,17 @@ def menu_panel_share(path):
     B,G,R=r[...,0],r[...,1],r[...,2]
     return float(((B>R+12)&(B<120)&(R<70)).mean())
 
+def disable_autolaunch(folder):
+    changed=[]
+    for path in sorted(Path(folder).glob('*.vrappconfig')):
+        try:config=json.loads(path.read_text(encoding='utf-8-sig'))
+        except (OSError,ValueError):continue
+        if config.get('autolaunch'):
+            config['autolaunch']=False
+            atomic_json(path,config)
+            changed.append(path.stem)
+    return changed
+
 def owner_file(owner):
     return LEASES/(re.sub(r'[^A-Za-z0-9._-]','_',owner)+'.json')
 
@@ -395,6 +406,11 @@ class Session:
         paths = json.loads(PATHS.read_text(encoding='utf-8-sig'))
         paths['external_drivers'] = [str(ROOT/'driver')]
         atomic_json(PATHS, paths)
+        # SteamVR starts every overlay app marked autolaunch (Enzo's Orbiters, OVR Toolkit, XSOverlay, SlimeVR, Standable,
+        # SpaceCalibrator... seen in the sandbox's vrserver log on 2026-11-13, two of them crashing each time). Off in
+        # this session only: the vrappconfig folder is journalled and restored byte for byte.
+        report=disable_autolaunch(STEAM/'config/vrappconfig')
+        self.j['autolaunch_disabled']=report;atomic_json(JOURNAL,self.j)
         # Enzo's installed Orbiters must not attach to the emulated SteamVR (its overlays would be in every turn's
         # pictures and it would write his real logs about sandbox runs): stopped before SteamVR starts, back at the end.
         self.stop_installed_app()

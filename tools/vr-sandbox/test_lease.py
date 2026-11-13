@@ -269,6 +269,21 @@ class SessionTurns(unittest.TestCase):
 
 
 class TurnTokens(unittest.TestCase):
+    def test_autolaunch_is_switched_off_and_restored_byte_for_byte(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); apps = root / 'vrappconfig'; apps.mkdir()
+            original = b'{\r\n   "autolaunch" : true,\r\n   "last_launch_time" : "0"\r\n}\r\n'
+            (apps / 'cc.orbiters.n4n0.vrappconfig').write_bytes(original)
+            (apps / 'other.vrappconfig').write_text('{"autolaunch": false}')
+            j = {'session': 't', 'files': [], 'processes': [], 'restored': False}
+            with patch.multiple(sandbox, ROOT=root, LOCK=root / 'lock', JOURNAL=root / 'journal'), patch.object(sandbox, 'processes', return_value=[]):
+                sandbox.backup(j, apps, tree=True); sandbox.atomic_json(sandbox.JOURNAL, j)
+                self.assertEqual(sandbox.disable_autolaunch(apps), ['cc.orbiters.n4n0'])
+                self.assertFalse(json.loads((apps / 'cc.orbiters.n4n0.vrappconfig').read_text())['autolaunch'])
+                sandbox.restore()
+            self.assertEqual((apps / 'cc.orbiters.n4n0.vrappconfig').read_bytes(), original)
+
+
     def test_the_test_programs_environment_identifies_its_turn(self):
         with patch.dict(sandbox.os.environ, {'ORBITERS_VR_SANDBOX_OWNER': 'x', 'ORBITERS_VR_SANDBOX_LEASE': 't'}):
             self.assertEqual(sandbox.lease_args(), ('x', 't'))

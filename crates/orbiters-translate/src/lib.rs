@@ -6,6 +6,7 @@
 //! - [`geometry`] and [`place`]: rays from an eye's pixels into the room, a line's distance from both eyes, its plane,
 //! - [`runs`]: a detected line cut to the runs of letters it holds (arrows and pictograms left visible),
 //! - [`track`]: lines followed from look to look, so that a translation stays put,
+//! - [`motion`]: where VRChat's world is in tracking space as the person walks and turns with the sticks,
 //! - [`language`]: which lines need translating at all,
 //! - [`provider`]: who translates (an AI server on this computer or the network, Orbiters), [`builtin`] the model
 //!   built in for a computer without one,
@@ -18,6 +19,7 @@ pub mod core;
 pub mod geometry;
 pub mod language;
 pub mod models;
+pub mod motion;
 pub mod ocr;
 pub mod paint;
 pub mod picture;

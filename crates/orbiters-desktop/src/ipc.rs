@@ -70,6 +70,11 @@ pub enum ToClient {
         id: String,
         result: crate::controller::translate::Answer,
     },
+    /// What VRChat said over OSC of how the player moves (`VelocityX`/`Y`/`Z`, `/avatar/eyeheight`), while live
+    /// translation is on: the overlay keeps translations on the world as the person walks with the stick.
+    Locomotion {
+        values: Vec<(String, f32)>,
+    },
 }
 
 /// A long recording can only be started by the camera overlay. Other UI surfaces remain stop-only.
@@ -551,6 +556,8 @@ pub struct Client {
     maps: Mutex<Option<MapsMine>>,
     vrchat_data: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::vrchat_data::Result>>>,
     translated: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::translate::Answer>>>,
+    /// [`ToClient::Locomotion`]'s values, with when they came, until the overlay takes them.
+    locomotion: Mutex<Vec<(Instant, String, f32)>>,
     show: AtomicBool,
     /// A page asked for with the last Show.
     show_page: Mutex<Option<String>>,
@@ -599,6 +606,7 @@ impl Client {
             maps: Mutex::new(None),
             vrchat_data: Mutex::default(),
             translated: Mutex::default(),
+            locomotion: Mutex::default(),
             show: AtomicBool::new(false),
             show_page: Mutex::new(None),
             close: AtomicBool::new(false),
@@ -645,6 +653,16 @@ impl Client {
                         if let Some(tx) = c.translated.lock().unwrap().remove(&id) {
                             let _ = tx.send(result);
                         }
+                    }
+                    ToClient::Locomotion { values } => {
+                        let now = Instant::now();
+                        let mut held = c.locomotion.lock().unwrap();
+                        held.extend(values.into_iter().map(|(name, value)| (now, name, value)));
+                        // Nobody took them (translation went off in between): the latest are enough.
+                        let excess = held.len().saturating_sub(256);
+                        held.drain(..excess);
+                        // Nothing to draw for it.
+                        continue;
                     }
                     ToClient::Show => c.show.store(true, Ordering::Relaxed),
                     ToClient::ShowPage { page } => {
@@ -819,6 +837,11 @@ impl Client {
         let result = rx.recv_timeout(Duration::from_secs(30)).unwrap_or(Err(crate::controller::translate::Refused::Unreachable("no answer".into()))); // i18n: not shown (log detail)
         self.translated.lock().unwrap().remove(&id);
         result
+    }
+
+    /// VRChat's locomotion values since the last call ([`ToClient::Locomotion`]).
+    pub fn take_locomotion(&self) -> Vec<(Instant, String, f32)> {
+        std::mem::take(&mut *self.locomotion.lock().unwrap())
     }
 
     pub fn take_show(&self) -> bool {
@@ -1091,6 +1114,7 @@ pub(crate) mod tests {
         s.camera_tools.demo = crate::controller::camera_tools::Demo::Busy;
         s.camera_tools.qr_generation = 3;
         s.projects_changed = 5;
+        s.translate.set(crate::state::TranslateStatus { lines: 3, ..Default::default() });
         let o = &mut s.n4n0;
         o.face = N4n0Face::Happy;
         o.listening = true;

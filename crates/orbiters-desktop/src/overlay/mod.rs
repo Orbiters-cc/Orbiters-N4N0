@@ -1125,7 +1125,15 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         // Nor while VRChat has no scene to show (a loading screen's texts were read and translated in the sandbox).
         let covered = dashboard || menus_up || t.menu.host.menu.open || t.menu.worlds.small_showing() || !vrchat_scene;
         let began = Instant::now();
-        t.translate.update(translate::Cx { overlay: &overlay, steamvr: &steamvr, presenter: &mut presenter, snap: &snap, backend: &backend, covered, frames: frames.fresh() });
+        // The sticks, while translating: walking and turning with them move VRChat's world, and the translations with it.
+        let sticks = if t.translate.running() {
+            let read = *pads_now.get_or_insert_with(|| actions.pads(&steamvr));
+            read.map(|p| [[p.sticks[0].x, p.sticks[0].y], [p.sticks[1].x, p.sticks[1].y]])
+        } else {
+            None
+        };
+        let walk_hand = if snap.settings.walk_boost.hand == orbiters_core::settings::Hand::Left { 0 } else { 1 };
+        t.translate.update(translate::Cx { overlay: &overlay, steamvr: &steamvr, presenter: &mut presenter, snap: &snap, backend: &backend, covered, frames: frames.fresh(), sticks, walk_hand, dashboard });
         stall.note(began.elapsed(), || t.translate.doing());
         if !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &snap)) {
             shown = Some(snap.clone());

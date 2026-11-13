@@ -37,6 +37,11 @@ pub trait Backend: Send + Sync {
     fn orbit_status(&self, _status: crate::state::OrbitStatus) {}
     /// What live translation in VR is doing, for the menus and Settings.
     fn translate_status(&self, _status: crate::state::TranslateStatus) {}
+    /// What VRChat said over OSC of how the player moves since the last call (the service forwards it while live
+    /// translation is on): when it came, the name (`VelocityX`, `VelocityY`, `VelocityZ`, `/avatar/eyeheight`), the value.
+    fn take_locomotion(&self) -> Vec<(std::time::Instant, String, f32)> {
+        Vec::new()
+    }
     /// Lines translated by Orbiters' service (blocking: call it from a thread of its own).
     fn translate(&self, _batch: orbiters_translate::provider::Batch) -> controller::translate::Answer {
         Err(controller::translate::Refused::SignedOut)
@@ -155,6 +160,9 @@ impl Backend for Remote {
     }
     fn translate(&self, batch: orbiters_translate::provider::Batch) -> controller::translate::Answer {
         self.0.translate(batch)
+    }
+    fn take_locomotion(&self) -> Vec<(std::time::Instant, String, f32)> {
+        self.0.take_locomotion()
     }
     fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         self.0.vrchat_data(scope, request)

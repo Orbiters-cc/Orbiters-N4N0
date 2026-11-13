@@ -163,7 +163,14 @@ pub fn sightings(look: &Look, lines: &[Line]) -> Vec<Sighting> {
     lines
         .iter()
         .zip(placed)
-        .map(|(l, p)| Sighting { text: l.text.clone(), confidence: l.confidence, colours: colours(&look.pair, &l.boxed), context: context(&look.pair, &p).unwrap_or_default(), placed: p })
+        .map(|(l, p)| Sighting {
+            text: l.text.clone(),
+            confidence: l.confidence,
+            colours: colours(&look.pair, &l.boxed),
+            context: context(&look.pair, &p).unwrap_or_default(),
+            in_eye: geometry::apply(&geometry::inverse(&look.pair.views[0].eye), p.centre()),
+            placed: p,
+        })
         .collect()
 }
 
@@ -237,13 +244,18 @@ pub fn context_changed(before: &[f32], now: &[f32]) -> bool {
 }
 
 /// What a look could tell of a followed line: open when its middle is in the part read and nothing of ours covers it,
-/// covered when its own translation does (its surroundings then compared), away otherwise.
+/// covered when its own translation does (its surroundings then compared), at the edge when on screen but not read,
+/// away when off the screen.
 pub fn seen(look: &Look, track: &Track) -> Seen {
     let view = &look.pair.views[0];
     let Some(c) = view.project(track.placed.centre()) else { return Seen::Away };
+    if c[0] < 0.0 || c[1] < 0.0 || c[0] > view.size[0] || c[1] > view.size[1] {
+        return Seen::Away;
+    }
     let a = look.area;
     if c[0] < a[0] as f32 || c[1] < a[1] as f32 || c[0] > (a[0] + a[2]) as f32 || c[1] > (a[1] + a[3]) as f32 {
-        return Seen::Away;
+        // On screen, outside the part read.
+        return Seen::Edge;
     }
     for s in look.shown {
         if let Some(outline) = s.outline(view) {
@@ -252,8 +264,8 @@ pub fn seen(look: &Look, track: &Track) -> Seen {
                     let changed = context(&look.pair, &track.placed).is_some_and(|now| context_changed(&track.context, &now));
                     Seen::Covered { changed }
                 } else {
-                    // Under a menu or another translation: nothing to tell.
-                    Seen::Away
+                    // Under another translation: on screen, nothing to tell.
+                    Seen::Edge
                 };
             }
         }

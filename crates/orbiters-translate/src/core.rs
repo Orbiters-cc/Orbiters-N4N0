@@ -59,6 +59,8 @@ pub struct Scene {
     pub lines: usize,
     /// How long the batch on its way has been waited for, seconds.
     pub waiting_s: Option<f32>,
+    /// This look found lines again elsewhere than the anchors had them: all lines moved by this (anchor space).
+    pub moved: Option<V3>,
 }
 
 struct Request {
@@ -130,6 +132,9 @@ pub struct Core {
     pub log_text: bool,
     /// Answers taken from the translator so far.
     answered: u64,
+    /// The lines shown by the last scene: they keep their place among the [`MOST_SHOWN`] while they are about as central
+    /// as the others (a head moving a little must not swap translations in and out).
+    shown: HashSet<u64>,
 }
 
 impl Core {
@@ -152,6 +157,7 @@ impl Core {
             log: Vec::new(),
             log_text: false,
             answered: 0,
+            shown: HashSet::new(),
         }
     }
 
@@ -184,10 +190,19 @@ impl Core {
         }
         let lines: Vec<_> = lines.into_iter().filter(|l| language::needs_translating(&l.text, &self.reader.target, &self.reader.reads)).collect();
         let sightings = pipeline::sightings(look, &lines);
-        self.tracker.update(now, sightings, &|track: &Track| pipeline::seen(look, track));
+        let followed = self.tracker.update(now, sightings, &|track: &Track| pipeline::seen(look, track));
+        if self.log_text {
+            let at = |t: &Track| t.placed.centre().map(|v| (v * 100.0).round() / 100.0);
+            self.log.push(format!("followed: {:?}", self.tracker.tracks.iter().map(|t| (t.text.as_str(), at(t), t.placed.measured, t.sightings)).collect::<Vec<_>>())); // i18n: not shown (a log's line)
+        }
+        if let (true, Some(by)) = (followed.held, followed.moved) {
+            self.log.push(format!("found lines again {:.0} cm from their anchors, {} agreeing (not moved: anchors held)", geometry::norm(by) * 100.0, followed.agreeing)); // i18n: not shown (a log's line)
+        }
         let mut timings = timings;
         timings.place = t.elapsed().as_secs_f32() * 1000.0;
-        Ok(self.after_look(now, gaze, timings))
+        let mut scene = self.after_look(now, gaze, timings);
+        scene.moved = followed.moved.filter(|_| !followed.held);
+        Ok(scene)
     }
 
     /// The part of a step after the lines are followed: ask, collect, paint, choose. Tests call it after feeding the
@@ -200,11 +215,17 @@ impl Core {
         let target = self.reader.target.clone();
         let mut quads = Vec::new();
         let mut order: Vec<&Track> = self.tracker.tracks.iter().filter(|t| t.settled()).collect();
+        let shown = &self.shown;
         let priority = |t: &Track| {
             let to = geometry::sub(t.placed.centre(), gaze.0);
             let d = geometry::norm(to).max(0.01);
             let off = 1.0 - geometry::dot(geometry::scale(to, 1.0 / d), gaze.1);
-            off * 4.0 + d * 0.05
+            let p = off * 4.0 + d * 0.05;
+            if shown.contains(&t.id) {
+                0.6 * p
+            } else {
+                p
+            }
         };
         order.sort_by(|a, b| priority(a).total_cmp(&priority(b)));
         let mut wanted = Vec::new();
@@ -212,7 +233,8 @@ impl Core {
             if wanted.len() >= MOST_SHOWN {
                 break;
             }
-            let Some(translation) = self.cache.get(&target, &t.key) else { continue };
+            // A clearer read of a line shown asks for its translation anew: meanwhile the one shown stays.
+            let Some(translation) = self.cache.get(&target, &t.key).or_else(|| self.painted.get(&t.id).map(|p| &p.0)) else { continue };
             if same_text(translation, &t.text) {
                 continue;
             }
@@ -230,6 +252,7 @@ impl Core {
             let picture = self.painted[&id].2.clone();
             quads.push(Quad { track: id, pose: placed.pose, width: picture.quad_width, height: picture.quad_height, picture });
         }
+        self.shown = quads.iter().map(|q| q.track).collect();
         let waiting = self.in_flight.len() + self.tracker.tracks.iter().filter(|t| self.cache.get(&target, &t.key).is_none()).count().min(1);
         if self.first_seen.is_none() && self.tracker.tracks.iter().any(|t| self.cache.get(&target, &t.key).is_none()) {
             self.first_seen = Some(std::time::Instant::now());
@@ -246,7 +269,7 @@ impl Core {
             (None, 0) => Activity::Looking,
             (None, n) => Activity::Translating(n),
         };
-        Scene { quads, activity, timings, lines: self.tracker.tracks.len(), waiting_s: self.asked_at.map(|t| t.elapsed().as_secs_f32()) }
+        Scene { quads, activity, timings, lines: self.tracker.tracks.len(), waiting_s: self.asked_at.map(|t| t.elapsed().as_secs_f32()), moved: None }
     }
 
     /// Between looks: when the translator answered since, the quads to show now (a translation shows when it arrives,
@@ -347,4 +370,80 @@ pub fn same_text(a: &str, b: &str) -> bool {
 fn colours_far(a: Colours, b: Colours) -> bool {
     let d = |x: [u8; 3], y: [u8; 3]| (0..3).map(|i| (x[i] as i32 - y[i] as i32).abs()).max().unwrap_or(0);
     d(a.background, b.background) > 24 || d(a.text, b.text) > 40
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::place::Placed;
+    use crate::track::{Seen, Sighting};
+
+    struct Echo;
+    impl Translator for Echo {
+        fn translate(&mut self, batch: &Batch) -> Result<Vec<String>, Failure> {
+            Ok(batch.lines.iter().map(|l| format!("T {}", l.text)).collect())
+        }
+    }
+
+    /// A line `degrees` to the right of straight ahead, 3 m away.
+    fn line(text: &str, degrees: f32) -> Sighting {
+        let a = degrees.to_radians();
+        let mut pose = geometry::rotation([0.0, 1.0, 0.0], -a, [0.0; 3]);
+        pose[0][3] = 3.0 * a.sin();
+        pose[1][3] = 1.6;
+        pose[2][3] = -3.0 * a.cos();
+        Sighting { text: text.into(), confidence: 0.95, placed: Placed { pose, width: 0.3, height: 0.06, measured: true, distance: 3.0 }, colours: Colours { background: [250; 3], text: [0; 3] }, context: vec![], in_eye: [0.0; 3] }
+    }
+
+    fn gaze(degrees: f32) -> (V3, V3) {
+        let a = degrees.to_radians();
+        ([0.0, 1.6, 0.0], [a.sin(), 0.0, -a.cos()])
+    }
+
+    /// Until every line followed is translated (the translator answers on its own thread).
+    fn settle(core: &mut Core, lines: &dyn Fn() -> Vec<Sighting>, at: f32) -> Scene {
+        for k in 0..200 {
+            core.tracker.update(k as f64 * 0.01, lines(), &|_| Seen::Open);
+            let scene = core.after_look(k as f64 * 0.01, gaze(at), Default::default());
+            if core.tracker.tracks.iter().all(|t| core.cached(&t.text).is_some()) && k > 2 {
+                return scene;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("never translated");
+    }
+
+    #[test]
+    fn a_little_head_movement_does_not_swap_the_translations_shown() {
+        // More lines than are shown (in one batch, so that all come at once), one every 3 degrees.
+        let texts: Vec<String> = (0..22).map(|i| format!("線{i}")).collect();
+        let lines = || texts.iter().enumerate().map(|(i, t)| line(t, i as f32 * 3.0 - 31.5)).collect::<Vec<_>>();
+        let mut core = Core::new(None, Box::new(Echo), Reader { target: "en".into(), reads: vec![] });
+        let first = settle(&mut core, &lines, 0.0);
+        assert_eq!(first.quads.len(), MOST_SHOWN);
+        let shown: HashSet<u64> = first.quads.iter().map(|q| q.track).collect();
+        // The head turns 4 degrees: the lines at the edge are hardly more or less central than before.
+        let after = core.after_look(10.0, gaze(4.0), Default::default());
+        let now: HashSet<u64> = after.quads.iter().map(|q| q.track).collect();
+        assert_eq!(now, shown, "the same translations stay");
+        // Turned well away, the ones now central take over.
+        let far = core.after_look(10.5, gaze(40.0), Default::default());
+        let now: HashSet<u64> = far.quads.iter().map(|q| q.track).collect();
+        assert_ne!(now, shown);
+    }
+
+    #[test]
+    fn a_clearer_read_keeps_the_translation_shown_until_its_own_comes() {
+        let mut core = Core::new(None, Box::new(Echo), Reader { target: "en".into(), reads: vec![] });
+        let first = settle(&mut core, &|| vec![line("出口はこちら", 0.0)], 0.0);
+        assert_eq!(first.quads.len(), 1);
+        let id = first.quads[0].track;
+        // A clearer read of the same line (one letter more): asked anew; meanwhile the old translation stays.
+        let mut better = line("出口はこちらです", 0.0);
+        better.confidence = 0.99;
+        core.tracker.update(5.0, vec![better], &|_| Seen::Open);
+        assert_eq!(core.tracker.tracks[0].text, "出口はこちらです");
+        let scene = core.after_look(5.0, gaze(0.0), Default::default());
+        assert!(scene.quads.iter().any(|q| q.track == id), "no gap while the new translation is on its way");
+    }
 }

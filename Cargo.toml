@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/orbiters-web", "crates/orbiters-projects", "crates/orbiters-booster", "crates/orbiters-core", "crates/orbiters-i18n", "crates/orbiters-spout", "crates/orbiters-capture", "crates/orbiters-ui", "crates/orbiters-desktop", "crates/orbiters-openvr", "crates/orbiters-reconstruct", "crates/orbiters-sound", "crates/orbiters-n4n0-core", "crates/orbiters-n4n0", "crates/orbiters-n4n0-mobile", "crates/orbiters-audio", "crates/orbiters-voice", "crates/orbiters-call", "crates/orbiters-update", "crates/orbiters-setup", "crates/orbiters-smooth", "crates/orbiters-smooth-driver", "xtask"]
+members = ["crates/orbiters-web", "crates/orbiters-projects", "crates/orbiters-booster", "crates/orbiters-core", "crates/orbiters-i18n", "crates/orbiters-spout", "crates/orbiters-capture", "crates/orbiters-ui", "crates/orbiters-desktop", "crates/orbiters-openvr", "crates/orbiters-reconstruct", "crates/orbiters-sound", "crates/orbiters-n4n0-core", "crates/orbiters-n4n0", "crates/orbiters-n4n0-mobile", "crates/orbiters-audio", "crates/orbiters-voice", "crates/orbiters-call", "crates/orbiters-update", "crates/orbiters-setup", "crates/orbiters-smooth", "crates/orbiters-smooth-driver", "crates/orbiters-translate", "xtask"]
 
 [workspace.package]
 version = "0.3.5-dev.44"
@@ -26,6 +26,7 @@ orbiters-reconstruct = { path = "crates/orbiters-reconstruct" }
 # The SteamVR driver takes this one by its path, without its default features: a member cannot switch off the
 # defaults of an entry here.
 orbiters-smooth = { path = "crates/orbiters-smooth" }
+orbiters-translate = { path = "crates/orbiters-translate" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -85,3 +86,8 @@ opt-level = 3
 # The CPU painter of the VR overlay too.
 [profile.dev.package.orbiters-ui]
 opt-level = 3
+
+# Live translation's picture work (scaling eye pictures, reading the text detector's map) runs in the overlay of a
+# debug build too.
+[profile.dev.package.orbiters-translate]
+opt-level = 2

@@ -1,0 +1,21 @@
+[package]
+name = "orbiters-translate"
+description = "Live translation of the text seen in VR: reads text in the headset's eye pictures (PP-OCR through ONNX Runtime), places it in the room from both eyes, asks a translator, and paints the translation over the original."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+orbiters-i18n = { workspace = true }
+orbiters-core = { workspace = true }
+orbiters-ui = { workspace = true }
+egui = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+png = { workspace = true }
+sha2 = "0.10"
+ureq = { version = "3", default-features = false, features = ["json", "gzip"] }
+# Text detection and recognition (PP-OCR) through the ONNX Runtime the voice worker ships beside the programs, as the
+# face detector of orbiters-reconstruct does: one pinned version for the whole workspace.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "std"] }

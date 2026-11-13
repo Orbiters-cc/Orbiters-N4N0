@@ -4183,6 +4183,7 @@ dependencies = [
  "orbiters-smooth",
  "orbiters-sound",
  "orbiters-spout",
+ "orbiters-translate",
  "orbiters-ui",
  "orbiters-update",
  "orbiters-web",
@@ -4390,6 +4391,23 @@ dependencies = [
  "orbiters-contracts",
  "orbiters-i18n",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "orbiters-translate"
+version = "0.3.5-dev.44"
+dependencies = [
+ "anyhow",
+ "egui",
+ "orbiters-core",
+ "orbiters-i18n",
+ "orbiters-ui",
+ "ort",
+ "png",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ureq 3.4.2",
 ]
 
 [[package]]

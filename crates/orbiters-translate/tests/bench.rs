@@ -116,3 +116,62 @@ fn benchmark() {
     }
     std::fs::write(models().join("../bench.txt"), log).unwrap();
 }
+
+/// The smallest letters read at Enzo's eyes (3168 x 3456 a eye): a sign straight ahead at 3 m with lines whose letters
+/// are 6 to 30 px high in the eye, read by the main pass (the middle 70 % of the eye scaled to 960 px) and by the zoomed
+/// pass (960 x 960 px about the gaze, at its own scale).
+#[test]
+#[ignore]
+fn smallest_readable_letters() {
+    use orbiters_translate::pipeline::{Engine, Look};
+    use orbiters_translate::place::Pair;
+    std::env::set_var("ORBITERS_TRANSLATE_MODELS", models().join("../models-app"));
+    let mut engine = Engine::load(2).unwrap();
+    let size = [3168u32, 3456u32];
+    let view = eye(size);
+    // Eye pixels a texture pixel at 3 m for a 1.4 m sign 1000 px wide: (1.4 / 1000) / 3 rad x (3168 / 2.215) px/rad.
+    let eye_per_tex = (1.4 / 1000.0) / 3.0 * (3168.0 / 2.215);
+    let heights = [6.0f32, 8.0, 10.0, 12.0, 14.0, 17.0, 20.0, 24.0, 30.0];
+    let mut texts = Vec::new();
+    let mut y = 10.0;
+    for h in heights {
+        // A font's size is about its CJK letters' height.
+        let font = h / eye_per_tex;
+        texts.push(Text { text: format!("出口はこちら{h}"), at: [20.0, y], size: font, colour: [20, 20, 20] });
+        y += font * 1.5;
+        texts.push(Text { text: format!("Exit here {h}"), at: [20.0, y], size: font, colour: [20, 20, 20] });
+        y += font * 1.8;
+    }
+    let picture = draw_text(1000, y as u32 + 10, [235, 228, 210], &texts);
+    let sign_h = 1.4 * picture.height as f32 / 1000.0;
+    // Straight ahead of the left eye at 3 m, its top a little above the eye.
+    let pose = [[1.0, 0.0, 0.0, -0.032], [0.0, 1.0, 0.0, 1.6 - sign_h / 2.0 + 0.2], [0.0, 0.0, 1.0, -3.0]];
+    let sign = Sign { picture, pose, width: 1.4 };
+    let left = render_eye(&view, size, &plain_room, std::slice::from_ref(&sign));
+    left.save_png(&models().join("../smallest-letters-3168.png")).ok();
+    let views = [view, view];
+    let pair = Pair { pictures: [left.view(), left.view()], from: [[0, 0]; 2], views };
+    let area = [size[0] * 15 / 100, size[1] * 15 / 100, size[0] * 70 / 100, size[1] * 70 / 100];
+    let centre = view.project(sign.at([500.0, sign.picture.height as f32 / 2.0])).unwrap();
+    let zoom = [(centre[0] as u32).saturating_sub(480), (centre[1] as u32).saturating_sub(480), 960, 960];
+    let main = engine.read(&Look { pair: Pair { ..pair }, area, shown: &[], zoom: None }).unwrap().0;
+    let pair = Pair { pictures: [left.view(), left.view()], from: [[0, 0]; 2], views };
+    let zoomed = engine.read(&Look { pair, area: zoom, shown: &[], zoom: None }).unwrap().0;
+    let mut log = String::new();
+    for h in heights {
+        let found = |lines: &[orbiters_translate::ocr::Line], want: &str| lines.iter().any(|l| l.text.replace(' ', "").contains(&want.replace(' ', "")));
+        let line = format!(
+            "{h:>4} px letters: main pass ja {} en {}; zoomed pass ja {} en {}",
+            found(&main, &format!("出口はこちら{h}")),
+            found(&main, &format!("Exit here {h}")),
+            found(&zoomed, &format!("出口はこちら{h}")),
+            found(&zoomed, &format!("Exit here {h}"))
+        );
+        println!("{line}");
+        log.push_str(&line);
+        log.push('\n');
+    }
+    println!("main read: {:?}", main.iter().map(|l| &l.text).collect::<Vec<_>>());
+    println!("zoomed read: {:?}", zoomed.iter().map(|l| &l.text).collect::<Vec<_>>());
+    std::fs::write(models().join("../smallest-letters.txt"), log).unwrap();
+}

@@ -81,6 +81,8 @@ pub struct Line {
     pub confidence: f32,
     /// Which recogniser read it.
     pub reader: Reader,
+    /// Each letter, where it lies along the box (0 at its start, 1 at its end) and how sure it is.
+    pub glyphs: Vec<(String, [f32; 2], f32)>,
 }
 
 /// The recognisers: one reads Chinese, Japanese, English and most Latin-script languages; Korean and Cyrillic have
@@ -137,6 +139,9 @@ pub(crate) fn session(model: &Path, threads: usize) -> anyhow::Result<ort::sessi
         .map_err(e)?
         .with_inter_op_spinning(false)
         .map_err(e)?
+        // Input shapes change from run to run (each batch of lines has its own width): a memory plan per shape only holds memory.
+        .with_memory_pattern(false)
+        .map_err(e)?
         .commit_from_file(model)
         .map_err(e)
 }
@@ -162,6 +167,15 @@ impl Default for DetSettings {
 pub struct Detector {
     session: ort::session::Session,
     pub settings: DetSettings,
+    run: ort::session::run_options::RunOptions,
+}
+
+/// Runs that give the memory they took back to the system when done (ONNX Runtime keeps an arena otherwise, as large as
+/// the largest run so far): the reader lives in the overlay's process, beside the game.
+pub(crate) fn lean_run() -> anyhow::Result<ort::session::run_options::RunOptions> {
+    let mut run = ort::session::run_options::RunOptions::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+    run.add_config_entry("memory.enable_memory_arena_shrinkage", "cpu:0").map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(run)
 }
 
 /// What the detector reads: a part of a picture (x, y, width, height) scaled to `size` (both multiples of 32), with
@@ -220,7 +234,7 @@ const DET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 impl Detector {
     pub fn load(model: &Path, threads: usize) -> anyhow::Result<Self> {
-        Ok(Self { session: session(model, threads)?, settings: DetSettings::default() })
+        Ok(Self { session: session(model, threads)?, settings: DetSettings::default(), run: lean_run()? })
     }
 
     /// The lines of text in `input`, in the picture's pixels.
@@ -228,7 +242,7 @@ impl Detector {
         let [w, h] = input.size;
         let tensor_data = det_tensor(input);
         let tensor = ort::value::Tensor::from_array(([1usize, 3, h as usize, w as usize], tensor_data)).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let outputs = self.session.run(ort::inputs!["x" => tensor]).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let outputs = self.session.run_with_options(ort::inputs!["x" => tensor], &self.run).map_err(|e| anyhow::anyhow!("{e}"))?;
         let (shape, map) = outputs[0].try_extract_tensor::<f32>().map_err(|e| anyhow::anyhow!("{e}"))?;
         let (mh, mw) = (shape[shape.len() - 2] as usize, shape[shape.len() - 1] as usize);
         let boxes = boxes_from_map(map, mw, mh, &self.settings);
@@ -472,13 +486,14 @@ pub struct Recogniser {
     /// Letter `i` of the model's output is `letters[i - 1]` (0 is CTC's blank); one past the list is a space.
     letters: Vec<String>,
     pub reader: Reader,
+    run: ort::session::run_options::RunOptions,
 }
 
 impl Recogniser {
     pub fn load(model: &Path, dictionary: &Path, reader: Reader, threads: usize) -> anyhow::Result<Self> {
         let letters = read_dictionary(&std::fs::read_to_string(dictionary)?);
         anyhow::ensure!(!letters.is_empty(), "no letters in {}", dictionary.display()); // i18n: not shown (log detail)
-        Ok(Self { session: session(model, threads)?, letters, reader })
+        Ok(Self { session: session(model, threads)?, letters, reader, run: lean_run()? })
     }
 
     /// Reads each box of `picture`.
@@ -494,12 +509,15 @@ impl Recogniser {
                 crop_into(picture, &boxes[i], width(&boxes[i]), w, &mut data[k * 3 * REC_HEIGHT * w..(k + 1) * 3 * REC_HEIGHT * w]);
             }
             let tensor = ort::value::Tensor::from_array(([chunk.len(), 3, REC_HEIGHT, w], data)).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let outputs = self.session.run(ort::inputs!["x" => tensor]).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let outputs = self.session.run_with_options(ort::inputs!["x" => tensor], &self.run).map_err(|e| anyhow::anyhow!("{e}"))?;
             let (shape, probs) = outputs[0].try_extract_tensor::<f32>().map_err(|e| anyhow::anyhow!("{e}"))?;
             let (t, c) = (shape[1] as usize, shape[2] as usize);
             for (k, &i) in chunk.iter().enumerate() {
-                let (text, confidence) = ctc_decode(&probs[k * t * c..(k + 1) * t * c], t, c, &self.letters);
-                out[i] = Some(Line { boxed: boxes[i].clone(), text, confidence, reader: self.reader });
+                let (text, confidence, glyphs) = ctc_glyphs(&probs[k * t * c..(k + 1) * t * c], t, c, &self.letters);
+                // A step is `w / t` pixels of the batch's crops; this crop is `width(box)` of them.
+                let along = |step: f32| (step * w as f32 / t as f32 / width(&boxes[i]) as f32).clamp(0.0, 1.0);
+                let glyphs = glyphs.into_iter().map(|g| (g.text, [along(g.steps[0] as f32), along(g.steps[1] as f32 + 1.0)], g.p)).collect();
+                out[i] = Some(Line { boxed: boxes[i].clone(), text, confidence, reader: self.reader, glyphs });
             }
         }
         Ok(out.into_iter().flatten().collect())
@@ -546,30 +564,49 @@ fn crop_into(picture: Rgba, b: &TextBox, width: usize, stride: usize, out: &mut 
 /// Greedy CTC: the most likely letter at each step, repeats and blanks dropped. Also the mean probability of the letters
 /// kept.
 pub fn ctc_decode(probs: &[f32], steps: usize, classes: usize, letters: &[String]) -> (String, f32) {
+    let (text, confidence, _) = ctc_glyphs(probs, steps, classes, letters);
+    (text, confidence)
+}
+
+/// A letter read and where: the recogniser's steps it was read over (first, last) and how sure it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Glyph {
+    pub text: String,
+    pub steps: [usize; 2],
+    pub p: f32,
+}
+
+/// [`ctc_decode`] with each letter's place along the line, in the recogniser's steps.
+pub fn ctc_glyphs(probs: &[f32], steps: usize, classes: usize, letters: &[String]) -> (String, f32, Vec<Glyph>) {
     let mut text = String::new();
     let (mut sum, mut n) = (0f32, 0usize);
     let mut last = 0usize;
+    let mut glyphs: Vec<Glyph> = Vec::new();
     for t in 0..steps {
         let row = &probs[t * classes..(t + 1) * classes];
         let (best, p) = row.iter().enumerate().fold((0usize, f32::MIN), |acc, (i, &p)| if p > acc.1 { (i, p) } else { acc });
-        if best != 0 && best != last {
-            match letters.get(best - 1) {
-                Some(l) => {
-                    text.push_str(l);
-                    // Spaces say nothing of how sure the read is: a line of spaces is no read.
-                    if !l.trim().is_empty() {
-                        sum += p;
-                        n += 1;
-                    }
-                }
-                None => text.push(' '),
+        if best != 0 && best == last {
+            // The same letter held over more steps: it is that wide.
+            if let Some(g) = glyphs.last_mut() {
+                g.steps[1] = t;
+                g.p = g.p.max(p);
             }
+        }
+        if best != 0 && best != last {
+            let l = letters.get(best - 1).cloned().unwrap_or_else(|| " ".to_string());
+            text.push_str(&l);
+            // Spaces say nothing of how sure the read is: a line of spaces is no read.
+            if !l.trim().is_empty() {
+                sum += p;
+                n += 1;
+            }
+            glyphs.push(Glyph { text: l, steps: [t, t], p });
         }
         last = best;
     }
     let text = text.trim().to_string();
     let confidence = if n == 0 || text.is_empty() { 0.0 } else { sum / n as f32 };
-    (text, confidence)
+    (text, confidence, glyphs)
 }
 
 /// The letters of a model's dictionary: one a line, or the `character_dict` list of PaddleOCR's `inference.yml`.

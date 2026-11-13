@@ -42,6 +42,8 @@ pub enum Activity {
     /// Looking; nothing to translate in view.
     #[default]
     Looking,
+    /// The translator is getting ready (a server loading its model).
+    Waking,
     /// Lines are waiting for the translator.
     Translating(usize),
     /// The translator failed: the last reason.
@@ -55,18 +57,27 @@ pub struct Scene {
     pub timings: Timings,
     /// Lines followed now (shown or not).
     pub lines: usize,
+    /// How long the batch on its way has been waited for, seconds.
+    pub waiting_s: Option<f32>,
 }
 
 struct Request {
     target: String,
     keys: Vec<String>,
     batch: Batch,
+    asked: std::time::Instant,
+}
+
+enum FromTranslator {
+    /// Ready, after warming up this long.
+    Warm(std::time::Duration),
+    Answer(Request, Result<Vec<String>, Failure>, std::time::Duration),
 }
 
 /// The translator on its own thread: requests in, answers out.
 struct TranslatorThread {
     send: mpsc::Sender<Request>,
-    answers: mpsc::Receiver<(Request, Result<Vec<String>, Failure>)>,
+    answers: mpsc::Receiver<FromTranslator>,
 }
 
 impl TranslatorThread {
@@ -76,9 +87,15 @@ impl TranslatorThread {
         std::thread::Builder::new()
             .name("translate requests".into())
             .spawn(move || {
+                let t = std::time::Instant::now();
+                translator.warm_up();
+                if give.send(FromTranslator::Warm(t.elapsed())).is_err() {
+                    return;
+                }
                 for r in requests {
+                    let t = std::time::Instant::now();
                     let answer = translator.translate(&r.batch);
-                    if give.send((r, answer)).is_err() {
+                    if give.send(FromTranslator::Answer(r, answer, t.elapsed())).is_err() {
                         break;
                     }
                 }
@@ -100,6 +117,19 @@ pub struct Core {
     last_failure: Option<Failure>,
     painted: HashMap<u64, (String, Colours, Arc<Painted>)>,
     pub reader: Reader,
+    /// The translator has warmed up.
+    warm: bool,
+    /// When the batch on its way was sent.
+    asked_at: Option<std::time::Instant>,
+    /// When a line to translate was first followed, and whether a translation was shown since (for the log).
+    first_seen: Option<std::time::Instant>,
+    first_shown: bool,
+    /// Lines for translate.log: what batches cost, and how long the first translation took. Taken by the caller.
+    pub log: Vec<String>,
+    /// Also what was read and translated (development builds only: the text seen in VR is the person's).
+    pub log_text: bool,
+    /// Answers taken from the translator so far.
+    answered: u64,
 }
 
 impl Core {
@@ -115,6 +145,13 @@ impl Core {
             last_failure: None,
             painted: HashMap::new(),
             reader,
+            warm: false,
+            asked_at: None,
+            first_seen: None,
+            first_shown: false,
+            log: Vec::new(),
+            log_text: false,
+            answered: 0,
         }
     }
 
@@ -124,6 +161,8 @@ impl Core {
         self.in_flight.clear();
         self.failed.clear();
         self.last_failure = None;
+        self.warm = false;
+        self.asked_at = None;
     }
 
     pub fn set_reader(&mut self, reader: Reader) {
@@ -140,6 +179,9 @@ impl Core {
         let engine = self.engine.as_mut().ok_or_else(|| anyhow::anyhow!("the text reader is not loaded"))?; // i18n: not shown (log detail)
         let (lines, timings) = engine.read(look)?;
         let t = std::time::Instant::now();
+        if self.log_text {
+            self.log.push(format!("read: {:?}", lines.iter().map(|l| (l.text.as_str(), (l.confidence * 100.0).round())).collect::<Vec<_>>())); // i18n: not shown (a log's line)
+        }
         let lines: Vec<_> = lines.into_iter().filter(|l| language::needs_translating(&l.text, &self.reader.target, &self.reader.reads)).collect();
         let sightings = pipeline::sightings(look, &lines);
         self.tracker.update(now, sightings, &|track: &Track| pipeline::seen(look, track));
@@ -189,22 +231,60 @@ impl Core {
             quads.push(Quad { track: id, pose: placed.pose, width: picture.quad_width, height: picture.quad_height, picture });
         }
         let waiting = self.in_flight.len() + self.tracker.tracks.iter().filter(|t| self.cache.get(&target, &t.key).is_none()).count().min(1);
+        if self.first_seen.is_none() && self.tracker.tracks.iter().any(|t| self.cache.get(&target, &t.key).is_none()) {
+            self.first_seen = Some(std::time::Instant::now());
+        }
+        if !self.first_shown && !quads.is_empty() {
+            self.first_shown = true;
+            if let Some(seen) = self.first_seen {
+                self.log.push(format!("first translation shown {:.1} s after its line was first followed", seen.elapsed().as_secs_f32())); // i18n: not shown (a log's line)
+            }
+        }
         let activity = match (&self.last_failure, waiting) {
+            (None, n) if n > 0 && !self.warm => Activity::Waking,
             (Some(f), _) => Activity::Failed(f.clone()),
             (None, 0) => Activity::Looking,
             (None, n) => Activity::Translating(n),
         };
-        Scene { quads, activity, timings, lines: self.tracker.tracks.len() }
+        Scene { quads, activity, timings, lines: self.tracker.tracks.len(), waiting_s: self.asked_at.map(|t| t.elapsed().as_secs_f32()) }
+    }
+
+    /// Between looks: when the translator answered since, the quads to show now (a translation shows when it arrives,
+    /// not at the next look, which can be seconds away while the game is short of processor time).
+    pub fn poll(&mut self, now: f64, gaze: (V3, V3)) -> Option<Scene> {
+        let before = self.answered;
+        self.collect(now);
+        (self.answered != before).then(|| self.after_look(now, gaze, Timings::default()))
     }
 
     fn collect(&mut self, now: f64) {
-        while let Ok((request, answer)) = self.translator.answers.try_recv() {
+        while let Ok(message) = self.translator.answers.try_recv() {
+            let (request, answer, took) = match message {
+                FromTranslator::Warm(took) => {
+                    self.warm = true;
+                    self.log.push(format!("translator ready after {:.0} ms of warming up", took.as_secs_f64() * 1000.0)); // i18n: not shown (a log's line)
+                    continue;
+                }
+                FromTranslator::Answer(r, a, took) => (r, a, took),
+            };
+            self.answered += 1;
+            self.asked_at = None;
+            self.log.push(format!(
+                "batch of {} lines: {} in {:.0} ms ({:.0} ms queued behind the translator)", // i18n: not shown (a log's line)
+                request.keys.len(),
+                if answer.is_ok() { "translated" } else { "failed" }, // i18n: not shown (a log's line)
+                took.as_secs_f64() * 1000.0,
+                request.asked.elapsed().saturating_sub(took).as_secs_f64() * 1000.0
+            ));
             for k in &request.keys {
                 self.in_flight.remove(&(request.target.clone(), k.clone()));
             }
             match answer {
                 Ok(translations) => {
                     self.last_failure = None;
+                    if self.log_text {
+                        self.log.push(format!("into {}: {:?}", request.target, request.keys.iter().zip(&translations).collect::<Vec<_>>())); // i18n: not shown (a log's line)
+                    }
                     for (k, t) in request.keys.iter().zip(translations) {
                         self.cache.put(&request.target, k, t);
                     }
@@ -246,7 +326,8 @@ impl Core {
         for k in &keys {
             self.in_flight.insert((target.clone(), k.clone()));
         }
-        if self.translator.send.send(Request { target, keys, batch }).is_err() {
+        self.asked_at = Some(std::time::Instant::now());
+        if self.translator.send.send(Request { target, keys, batch, asked: std::time::Instant::now() }).is_err() {
             self.in_flight.clear();
         }
     }

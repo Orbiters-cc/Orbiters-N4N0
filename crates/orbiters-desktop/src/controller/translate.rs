@@ -83,6 +83,13 @@ impl super::Controller {
             return Err(Refused::NotAgreed);
         }
         let Some((api, token)) = self.account_api() else { return Err(Refused::SignedOut) };
+        call(&api, &token, batch)
+    }
+}
+
+/// One batch to Orbiters' route with `token` (the account's credential).
+pub fn call(api: &orbiters_core::account::Api, token: &str, batch: &Batch) -> Answer {
+    {
         let body = serde_json::json!({ "target": batch.target, "lines": batch.lines });
         let response = api
             .agent()
@@ -103,6 +110,24 @@ impl super::Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// End to end against the development server on this computer (127.0.0.1:4100), with the development account the
+    /// Unity tools and the app share (`MCB/account_dev.dat`, read, never written). Run by hand:
+    /// `cargo test -p orbiters-desktop --bin orbiters-desktop -- controller::translate --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn orbiters_translates_a_batch_on_the_development_server() {
+        use orbiters_core::account::{read, Api, Server};
+        use orbiters_translate::provider::Item;
+        let account = read(Server::Development).expect("a development account signed in on this computer");
+        let batch = Batch { target: "en".into(), lines: vec![Item { text: "西口".into(), source: Some("ja".into()) }, Item { text: "北口".into(), source: Some("ja".into()) }, Item { text: "関係者以外立入禁止".into(), source: Some("ja".into()) }] };
+        let t = std::time::Instant::now();
+        let answer = call(&Api::new(Server::Development), &account.token, &batch);
+        println!("{:.0} ms: {answer:?}", t.elapsed().as_secs_f64() * 1000.0);
+        let translations = answer.expect("translated");
+        assert_eq!(translations.len(), 3);
+        assert!(translations[0].to_lowercase().contains("west"), "{translations:?}");
+    }
 
     #[test]
     fn the_servers_answers_are_told_apart() {

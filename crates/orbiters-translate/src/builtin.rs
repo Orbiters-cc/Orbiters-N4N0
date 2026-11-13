@@ -226,6 +226,10 @@ impl Builtin {
 }
 
 impl Translator for Builtin {
+    fn warm_up(&mut self) {
+        let _ = self.line("OK", "en", "fr");
+    }
+
     fn translate(&mut self, batch: &Batch) -> Result<Vec<String>, Failure> {
         batch
             .lines

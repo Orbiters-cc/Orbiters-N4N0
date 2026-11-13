@@ -1398,7 +1398,10 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
                     lines: 5,
                     look_ms: Some(214),
                     server: Some("http://127.0.0.1:1234/v1".into()),
-                    models: vec!["qwen3-8b".into(), "translategemma-4b-it".into()],
+                    models: vec!["qwen3.5-2b".into(), "qwen3-8b".into(), "translategemma-4b-it".into()],
+                    waited_s: None,
+                    // The advice a too small model gets.
+                    small_model: Some("qwen3.5-2b".into()),
                 });
                 s
             },

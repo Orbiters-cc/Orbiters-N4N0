@@ -172,7 +172,7 @@ fn our_own_translations_are_masked_and_known_as_covered() {
     let shown = [Shown { pose: placed.pose, width: placed.width, height: placed.height, track: Some(1) }];
     let outline = shown[0].outline(&views[0]).unwrap();
     assert!(outline.contains(b.centre()) && b.corners.iter().all(|c| outline.contains(*c)), "the whole line is under its translation's outline");
-    let look = Look { pair, area: [0, 0, SIZE[0], SIZE[1]], shown: &shown };
+    let look = Look { pair, area: [0, 0, SIZE[0], SIZE[1]], shown: &shown, zoom: None };
     let mut track = orbiters_translate::track::Track {
         id: 1,
         text: LINES[0].into(),
@@ -192,7 +192,7 @@ fn our_own_translations_are_masked_and_known_as_covered() {
     // The sign gone (the same look without it): its surroundings changed.
     let empty = [render_eye(&views[0], SIZE, &plain_room, &[]), render_eye(&views[1], SIZE, &plain_room, &[])];
     track.id = 1;
-    let look = Look { pair: Pair { pictures: [empty[0].view(), empty[1].view()], from: [[0, 0]; 2], views }, area: [0, 0, SIZE[0], SIZE[1]], shown: &shown };
+    let look = Look { pair: Pair { pictures: [empty[0].view(), empty[1].view()], from: [[0, 0]; 2], views }, area: [0, 0, SIZE[0], SIZE[1]], shown: &shown, zoom: None };
     assert_eq!(pipeline::seen(&look, &track), Seen::Covered { changed: true });
 }
 
@@ -364,7 +364,7 @@ fn five_scripts_are_read_at_an_angle_and_placed() {
         let sign = sign(distance, yaw, roll);
         let views = views(&head_at(0.0, 0.0));
         let pictures = render(&views, std::slice::from_ref(&sign));
-        let look = Look { pair: pair(&pictures, views), area: [243, 270, 1134, 1260], shown: &[] };
+        let look = Look { pair: pair(&pictures, views), area: [243, 270, 1134, 1260], shown: &[], zoom: None };
         let (lines, timings) = engine.read(&look).unwrap();
         println!("{distance} m, yaw {yaw}: {lines:?} {timings:?}", lines = lines.iter().map(|l| (&l.text, l.confidence)).collect::<Vec<_>>());
         for want in LINES {
@@ -391,7 +391,7 @@ fn our_own_translation_is_not_read_again() {
     let p = pair(&pictures, views);
     let placed = place::place_all(&views[0], &[place::measure(&p, &line_box(&sign, &views[0], 0))])[0];
     let shown = [Shown { pose: placed.pose, width: placed.width, height: placed.height, track: Some(1) }];
-    let look = Look { pair: p, area: [0, 0, SIZE[0], SIZE[1]], shown: &shown };
+    let look = Look { pair: p, area: [0, 0, SIZE[0], SIZE[1]], shown: &shown, zoom: None };
     let (lines, _) = engine.read(&look).unwrap();
     assert!(!lines.iter().any(|l| l.text.contains("出口")), "{:?}", lines.iter().map(|l| &l.text).collect::<Vec<_>>());
     assert!(lines.iter().any(|l| l.text.contains("欢迎")), "the rest is read");
@@ -407,7 +407,7 @@ fn a_whole_look_gives_translations_over_the_sign() {
     for k in 0..6 {
         let views = views(&head_at(0.01 * k as f32, 0.5 * k as f32));
         let pictures = render(&views, std::slice::from_ref(&sign));
-        let look = Look { pair: pair(&pictures, views), area: [243, 270, 1134, 1260], shown: &[] };
+        let look = Look { pair: pair(&pictures, views), area: [243, 270, 1134, 1260], shown: &[], zoom: None };
         let gaze = (geometry::origin(&views[0].eye), scale(geometry::axis(&views[0].eye, 2), -1.0));
         let scene = core.step(k as f64 * 0.5, &look, gaze).unwrap();
         println!("look {k}: {} quads, {:?}", scene.quads.len(), scene.timings);
@@ -449,3 +449,74 @@ fn the_built_in_translator_translates_on_the_processor() {
     let batch = Batch { target: "en".into(), lines: vec![Item { text: "出口".into(), source: None }, Item { text: "Добро пожаловать".into(), source: None }] };
     assert_eq!(b.translate(&batch).unwrap().len(), 2, "a batch, the source guessed from the letters");
 }
+
+/// A fixture of `testdata`: a part of a real eye picture from the VR sandbox (1620 x 1800 eyes, world "Japan Street").
+fn fixture(name: &str) -> orbiters_translate::picture::Picture {
+    orbiters_translate::picture::Picture::load_png(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata").join(name)).unwrap()
+}
+
+/// Reads a whole fixture, at its size and scaled up `zoom` times, as one eye of a look.
+fn read_fixture(engine: &mut pipeline::Engine, picture: &orbiters_translate::picture::Picture, zoom: u32) -> Vec<orbiters_translate::ocr::Line> {
+    let p = if zoom > 1 { picture.resized(picture.width * zoom, picture.height * zoom) } else { picture.clone() };
+    let view = views(&head_at(0.0, 0.0))[0];
+    let view = EyeView { size: [p.width as f32, p.height as f32], ..view };
+    let look = Look { pair: Pair { pictures: [p.view(), p.view()], from: [[0, 0]; 2], views: [view, view] }, area: [0, 0, p.width, p.height], shown: &[], zoom: None };
+    engine.read(&look).unwrap().0
+}
+
+/// The two posters of the station the first sandbox run did not translate: what is read of them at the sandbox's eye
+/// resolution, and twice as large (what a closer look of the same detail would give the detector; it cannot add detail
+/// the picture does not have).
+#[test]
+#[ignore]
+fn the_stations_posters() {
+    let mut engine = engine();
+    for name in ["station-poster.png", "station-leaflet.png"] {
+        let p = fixture(name);
+        for zoom in [1, 2] {
+            let lines = read_fixture(&mut engine, &p, zoom);
+            println!("{name} x{zoom}: {:?}", lines.iter().map(|l| (l.text.as_str(), (l.confidence * 100.0).round(), runs_letter_height(&l.boxed) / zoom as f32)).collect::<Vec<_>>());
+        }
+    }
+}
+
+fn runs_letter_height(b: &TextBox) -> f32 {
+    b.thickness() / orbiters_translate::runs::RUN_HEIGHT
+}
+
+/// The station's sign, captured with translation off: "← 西口 West Exit | ← [toilets] | 北口 North Exit ↑". Its runs are
+/// the words, the arrows and the pictogram are covered by none of them, and no run is taller than its letters.
+#[test]
+#[ignore]
+fn the_station_sign_is_cut_to_its_words() {
+    let mut engine = engine();
+    let p = fixture("station-sign.png");
+    let lines = read_fixture(&mut engine, &p, 1);
+    println!("{:?}", lines.iter().map(|l| (l.text.as_str(), l.boxed.bounds())).collect::<Vec<_>>());
+    let texts: Vec<String> = lines.iter().map(|l| l.text.replace(' ', "")).collect();
+    assert!(texts.iter().any(|t| t == "西口"), "西口 alone: {texts:?}");
+    assert!(texts.iter().any(|t| t == "北口"), "北口 alone: {texts:?}");
+    assert!(!texts.iter().any(|t| t.contains('←') || t.contains('↑')), "no arrow is in a run: {texts:?}");
+    // The pictogram's columns in the fixture (measured on the picture): nothing covers them.
+    let (p0, p1) = PICTOGRAM_COLUMNS;
+    for l in &lines {
+        let b = l.boxed.bounds();
+        assert!(b[2] <= p0 || b[0] >= p1, "{} covers the pictogram: {b:?}", l.text);
+    }
+}
+
+#[test]
+#[ignore]
+fn the_built_in_translators_first_translation() {
+    use orbiters_translate::builtin::Builtin;
+    let t = std::time::Instant::now();
+    let mut b = Builtin::load(2).unwrap();
+    let loaded = t.elapsed();
+    b.warm_up();
+    let warmed = t.elapsed();
+    let first = b.line("西口", "ja", "en").unwrap();
+    println!("built-in: loaded in {:.0} ms, warmed up by {:.0} ms, first sign translated by {:.0} ms: {first}", loaded.as_secs_f64() * 1000.0, warmed.as_secs_f64() * 1000.0, t.elapsed().as_secs_f64() * 1000.0);
+}
+
+/// Where the toilets' pictogram lies across `testdata/station-sign.png`, pixels (measured on the picture).
+const PICTOGRAM_COLUMNS: (f32, f32) = (198.0, 236.0);

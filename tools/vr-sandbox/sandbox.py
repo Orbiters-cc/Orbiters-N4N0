@@ -363,7 +363,7 @@ class Session:
             backup(self.j, path, tree=True)
         atomic_json(JOURNAL, self.j)
         # Recovery outlives the control server, including an abrupt crash.
-        subprocess.Popen([sys.executable, __file__, 'watch', str(os.getpid()), str(psutil.Process().create_time()), self.j['session']], creationflags=subprocess.CREATE_NO_WINDOW)
+        detached([sys.executable, __file__, 'watch', str(os.getpid()), str(psutil.Process().create_time()), self.j['session']])
         self.devices()
         config = json.loads(SETTINGS.read_text(encoding='utf-8-sig')) if SETTINGS.exists() else {}
         config.setdefault('steamvr', {}).update({'forcedDriver': 'orbiters_sandbox', 'forcedHmd': 'orbiters-sandbox-head', 'activateMultipleDrivers': True, 'enableHomeApp': False, 'supersampleScale': 1.0, 'showMirrorView': False})
@@ -837,15 +837,32 @@ def controller_alive():
     if j.get('restored') or not j.get('owner_create_time'):return None
     return j if same_process({'pid':j['pid'],'create_time':j['owner_create_time']}) else None
 
+def detached(command,out=None,err=None):
+    """Starts `command` outside the caller's process tree and job: the shared controller and its watcher must outlive
+    the agent that happened to start them (on 2026-11-13 a stopped agent task took a live session down with it, its
+    controller being that task's child). A short-lived python in between exits at once, so a tree kill of the caller
+    cannot reach them. Returns that program's pid."""
+    helper=[sys.executable,__file__,'spawn',json.dumps({'command':command,'out':out,'err':err})]
+    result=subprocess.run(helper,capture_output=True,text=True,timeout=30,creationflags=subprocess.CREATE_NO_WINDOW)
+    if result.returncode:raise RuntimeError('Could not start detached: '+result.stderr[-800:])
+    return int(result.stdout.strip())
+
+def spawn(spec):
+    flags=0x00000008|0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    out=open(spec['out'],'a') if spec.get('out') else subprocess.DEVNULL
+    err=open(spec['err'],'a') if spec.get('err') else subprocess.DEVNULL
+    try:child=subprocess.Popen(spec['command'],stdout=out,stderr=err,stdin=subprocess.DEVNULL,creationflags=flags|0x01000000)  # + BREAKAWAY_FROM_JOB
+    except OSError:child=subprocess.Popen(spec['command'],stdout=out,stderr=err,stdin=subprocess.DEVNULL,creationflags=flags)  # the job forbids breakaway
+    print(child.pid,flush=True)
+
 def start_controller(owner=None):
     ROOT.mkdir(parents=True,exist_ok=True)
     command=[sys.executable,__file__,'start']+(['--owner',owner] if owner else [])
-    with (ROOT/'server-out.log').open('a') as out,(ROOT/'server-err.log').open('a') as err:
-        err.write('\n'+time.strftime('%Y-%m-%d %H:%M:%S')+' start '+(owner or '')+'\n')
-        child=subprocess.Popen(command,stdout=out,stderr=err,creationflags=subprocess.CREATE_NO_WINDOW)
+    with (ROOT/'server-err.log').open('a') as err:err.write('\n'+time.strftime('%Y-%m-%d %H:%M:%S')+' start '+(owner or '')+'\n')
+    child=psutil.Process(detached(command,str(ROOT/'server-out.log'),str(ROOT/'server-err.log')))
     deadline=time.monotonic()+45
     while True:
-        if child.poll() is not None:raise RuntimeError('Sandbox did not start: '+(ROOT/'server-err.log').read_text()[-1500:])
+        if not child.is_running() or child.status()==psutil.STATUS_ZOMBIE:raise RuntimeError('Sandbox did not start: '+(ROOT/'server-err.log').read_text()[-1500:])
         try:return remote({'action':'status'})
         except Exception:
             if time.monotonic()>deadline:raise RuntimeError('Sandbox startup timeout; inspect logs and restore')
@@ -916,6 +933,7 @@ def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say
         time.sleep(5)
 
 def main(argv):
+    if argv and argv[0]=='spawn':spawn(json.loads(argv[1]));return
     if argv and argv[0]=='watch':
         identity={'pid':int(argv[1]),'create_time':float(argv[2])}
         while same_process(identity):time.sleep(.5)

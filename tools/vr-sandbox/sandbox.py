@@ -295,12 +295,11 @@ def headset_connected():
     """The owner's headset is on: Virtual Desktop's streamer holds a TCP connection to a device on the local network
     (its idle connection goes to VD's internet service, which is ignored). Not yet seen with a real headset
     connection (none was made while this was written, 2026-11-13); it errs towards yielding."""
-    for p in psutil.process_iter(['name']):
-        if (p.info['name'] or '').lower()=='virtualdesktop.streamer.exe':
-            try:
-                for c in p.connections('tcp'):
-                    if c.status=='ESTABLISHED' and c.raddr and private_address(c.raddr.ip):return True
-            except psutil.Error:pass
+    for info in vrchat_life.game_processes({'virtualdesktop.streamer.exe'}):
+        try:
+            for c in psutil.Process(info['pid']).connections('tcp'):
+                if c.status=='ESTABLISHED' and c.raddr and private_address(c.raddr.ip):return True
+        except psutil.Error:pass
     return False
 
 def owner_wants_vr():
@@ -477,7 +476,7 @@ class Session:
         self.stop.set()
 
     def tick(self):
-        """Once a second from the serve loop: stale turns, idle shutdown, the owner taking SteamVR back."""
+        """Every two seconds from the serve loop: stale turns, idle shutdown, the owner taking SteamVR back."""
         now=time.time()
         wants=owner_wants_vr()
         if wants and wants.startswith('the owner'):
@@ -786,7 +785,7 @@ def serve(owner=None,stream='shared'):
         last=0
         while not s.stop.is_set():
             server.handle_request()
-            if time.monotonic()-last>=1:
+            if time.monotonic()-last>=2:
                 last=time.monotonic();s.record();s.tick()
         server.server_close()
     finally:

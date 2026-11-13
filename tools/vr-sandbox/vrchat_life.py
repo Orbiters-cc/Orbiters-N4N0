@@ -71,12 +71,39 @@ def service_state(name):
     return {'state': state.group(1), 'pid': int(pid.group(1)) if pid else 0}
 
 
-def game_processes():
+class _Entry(C.Structure):
+    _fields_ = [('size', C.c_uint32), ('usage', C.c_uint32), ('pid', C.c_uint32), ('heap', C.c_size_t), ('module', C.c_uint32),
+                ('threads', C.c_uint32), ('parent', C.c_uint32), ('priority', C.c_int32), ('flags', C.c_uint32), ('name', C.c_wchar * 260)]
+_kernel = C.WinDLL('kernel32', use_last_error=True)
+_kernel.CreateToolhelp32Snapshot.argtypes = [C.c_uint32, C.c_uint32]
+_kernel.CreateToolhelp32Snapshot.restype = C.c_void_p
+_kernel.Process32FirstW.argtypes = [C.c_void_p, C.POINTER(_Entry)]
+_kernel.Process32NextW.argtypes = [C.c_void_p, C.POINTER(_Entry)]
+_kernel.CloseHandle.argtypes = [C.c_void_p]
+
+
+def game_processes(names=GAME_NAMES):
+    """Names and parents from one native snapshot; creation times only for the few matches (psutil.process_iter
+    asking every process took 19 s on this machine)."""
+    handle = _kernel.CreateToolhelp32Snapshot(2, 0)
+    if handle in (None, C.c_void_p(-1).value):
+        raise C.WinError(C.get_last_error())
+    matches = []
+    try:
+        entry = _Entry(); entry.size = C.sizeof(entry)
+        ok = _kernel.Process32FirstW(handle, C.byref(entry))
+        while ok:
+            if entry.name.lower() in names:
+                matches.append((entry.pid, entry.name, entry.parent))
+            ok = _kernel.Process32NextW(handle, C.byref(entry))
+    finally:
+        _kernel.CloseHandle(handle)
     found = []
-    for p in psutil.process_iter(['name', 'ppid', 'create_time']):
-        name = (p.info['name'] or '').lower()
-        if name in GAME_NAMES:
-            found.append({'name': p.info['name'], 'pid': p.pid, 'ppid': p.info['ppid'], 'create_time': p.info['create_time']})
+    for pid, name, parent in matches:
+        try:
+            found.append({'name': name, 'pid': pid, 'ppid': parent, 'create_time': psutil.Process(pid).create_time()})
+        except psutil.Error:
+            pass
     return sorted(found, key=lambda x: x['create_time'] or 0)
 
 

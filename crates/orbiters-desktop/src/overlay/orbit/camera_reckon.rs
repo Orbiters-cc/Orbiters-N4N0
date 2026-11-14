@@ -8,7 +8,7 @@
 //!   in the head's turn about the vertical. Fitted on 13 opens with real VRChat (camera4/m1): 1 to 4 mm and under 2 degrees for hands and head
 //!   in reach of each other; 24 mm with the head 30 cm away from where the arms reach.
 //! - **Grab.** A grip pressed (as VRChat's own binding clicks it: `vrchat_grip`) with VRChat's grab point ([`GRAB_POINT`], beside the
-//!   controller, towards the palm) within [`GRAB_REACH_M`] of the panel's box ([`GRAB_BOX`], wider than the picture: its side buttons) takes it; it then moves rigidly with that controller (measured 2 mm, 2.5 degrees) until that grip is let go, and stays where it
+//!   controller, towards the palm) within [`GRAB_REACH_M`] of the panel's box ([`GRAB_BOX`], VRChat's own pickup box) takes it; it then moves rigidly with that controller (measured 2 mm, 2.5 degrees) until that grip is let go, and stays where it
 //!   was let go. A grip pressed by the other hand while one holds it does nothing, and it does not pass to that hand when the first lets go
 //!   (a new press is needed). Its camera modes do not move it.
 //! - **Close.** Its X closes it; VRChat's laser from the controller points [`LASER_DOWN_DEG`] below the controller's −Z. A trigger pressed while
@@ -25,15 +25,16 @@ pub const BESIDE_HAND: [f32; 3] = [0.1554, 0.0012, 0.0033];
 /// The panel's width in the room, as both eyes measured it in the sandbox (0.2845 to 0.2885 m).
 pub const PANEL_WIDTH_M: f32 = 0.288;
 /// Where a grip takes it: a box in the panel's plane (left, right, bottom, top, metres from its middle, up positive), and how far from it,
-/// measured from [`GRAB_POINT`].
-pub const GRAB_BOX: [f32; 4] = [-0.19, 0.19, -0.14, 0.078];
-pub const GRAB_REACH_M: f32 = 0.134;
+/// measured from [`GRAB_POINT`]. The box is VRChat's own: the camera panel's pickup trigger in its scene data is 0.291 x 0.167 m about the
+/// picture's middle (read from VRChat's installed files, camera5/re-report.md; its pickup "proximity" says 0.2, which no grab point fits).
+pub const GRAB_BOX: [f32; 4] = [-0.1455, 0.1455, -0.0835, 0.0835];
+pub const GRAB_REACH_M: f32 = 0.14;
 /// Where VRChat measures a grab from, in the right controller's frame (metres; the left hand's has its x turned over): not the controller's
 /// origin. With the controller 11 cm in front, VRChat took the panel with the hand level, not with it tilted 45 degrees down; it took it
 /// from 15 cm tilted 45 degrees up and from 17 cm tilted 70 degrees up; turned 45 degrees about the vertical, one way took and the other
 /// did not, mirrored between the hands (sandbox 2026-11-14, 24 grips, `testdata_camera/sandbox-2026-11-14/reach.json`). Fitted on those and
-/// the 13 grips of 2026-11-13: all 37 agree, 12 mm from the nearest; the controller's origin got 8 of the 24 wrong.
-pub const GRAB_POINT: [f32; 3] = [-0.07, -0.035, 0.03];
+/// the 13 grips of 2026-11-13 with VRChat's box: all 37 agree, 14 mm from the nearest; the controller's origin got 8 of the 24 wrong.
+pub const GRAB_POINT: [f32; 3] = [-0.07, -0.03, 0.035];
 /// How far below the controller's −Z VRChat's laser points: VRChat closed its camera for aims 62 and 67 degrees up from 12 cm in front, not 57
 /// or 75 (m4), and for 62 not 55 (m1).
 pub const LASER_DOWN_DEG: f32 = 64.5;

@@ -615,3 +615,57 @@ fn the_whole_chain_with_the_built_in_translator() {
     all.sort_by(f32::total_cmp);
     println!("shown after the first picture: median {:.2} s, p90 {:.2} s, longest {:.2} s over {} lines", all[all.len() / 2], all[all.len() * 9 / 10], all[all.len() - 1], all.len());
 }
+
+/// This process's working set, megabytes (Windows' tasklist).
+fn working_set_mb() -> f64 {
+    let out = std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {}", std::process::id()), "/FO", "CSV", "/NH"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let field = text.trim().rsplit("\",\"").next().unwrap_or("0").trim_matches('"').replace([',', '.', ' ', 'K', '\u{a0}'], "");
+    field.parse::<f64>().unwrap_or(0.0) / 1024.0
+}
+
+/// The reader and the built-in translator's memory: loaded, then after a minute of looks at signs of every width and
+/// batches of every size. `ORBITERS_TEST_NO_ARENA=1` turns ONNX Runtime's arena off, to compare (run each alone: memory
+/// given back is not always returned to Windows), `ORBITERS_TEST_EYE=1620x1800` another eye size.
+#[test]
+#[ignore]
+fn memory_of_the_reader_and_the_built_in_translator() {
+    use orbiters_translate::builtin::Builtin;
+    let arena = std::env::var_os("ORBITERS_TEST_NO_ARENA").is_none();
+    // Enzo's eyes (Quest Pro through Virtual Desktop) unless told otherwise.
+    let size: [u32; 2] = std::env::var("ORBITERS_TEST_EYE").ok().and_then(|s| s.split_once('x').map(|(w, h)| [w.parse().unwrap(), h.parse().unwrap()])).unwrap_or([3168, 3456]);
+    let at = |v: [EyeView; 2]| v.map(|e| EyeView { size: [size[0] as f32, size[1] as f32], ..e });
+    let area = [size[0] * 15 / 100, size[1] * 15 / 100, size[0] * 70 / 100, size[1] * 70 / 100];
+    orbiters_translate::ocr::CPU_ARENA.store(arena, std::sync::atomic::Ordering::Relaxed);
+    let before = working_set_mb();
+    let mut core = Core::new(Some(engine()), Box::new(Builtin::load(4).unwrap()), Reader { target: "fr".into(), reads: vec![] });
+    core.no_cache = true;
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let loaded = working_set_mb();
+    let start = std::time::Instant::now();
+    let mut most = loaded;
+    let mut k = 0;
+    while start.elapsed().as_secs_f64() < 60.0 {
+        // Signs at other distances and angles each look: other boxes, other widths.
+        let s = sign(1.5 + (k % 7) as f32 * 0.4, -30.0 + (k % 9) as f32 * 7.0, (k % 5) as f32 * 3.0 - 6.0);
+        let views = at(views(&head_at(0.0, 0.0)));
+        let gaze = (geometry::origin(&views[0].eye), scale(geometry::axis(&views[0].eye, 2), -1.0));
+        let pictures = [render_eye(&views[0], size, &plain_room, std::slice::from_ref(&s)), render_eye(&views[1], size, &plain_room, std::slice::from_ref(&s))];
+        let zoom = [size[0] / 2 - 480, size[1] / 2 - 480, 960, 960];
+        let look = Look { pair: pair(&pictures, views), area, shown: &[], zoom: if k % 2 == 0 && size[0] > 1500 { Some(zoom) } else { None } };
+        let now = start.elapsed().as_secs_f64();
+        let _ = core.step(now, &look, gaze).unwrap();
+        // Every few looks the lines go (out of view), so that they are read and translated again.
+        if k % 3 == 2 {
+            core.tracker.update(now + 10.0, vec![], &|_| Seen::Away);
+            core.tracker.update(now + 20.0, vec![], &|_| Seen::Away);
+        }
+        for _ in 0..10 {
+            core.poll(start.elapsed().as_secs_f64(), gaze);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        most = most.max(working_set_mb());
+        k += 1;
+    }
+    println!("eyes {size:?}, arena {arena}: {before:.0} MB before, {loaded:.0} MB loaded, {most:.0} MB at most over {k} looks, {:.0} MB at the end", working_set_mb());
+}

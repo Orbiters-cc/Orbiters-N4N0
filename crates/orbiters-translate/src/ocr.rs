@@ -129,11 +129,19 @@ pub(crate) fn session(model: &Path, threads: usize) -> anyhow::Result<ort::sessi
     session_with(model, threads, false)
 }
 
+/// Whether ONNX Runtime keeps an arena of memory for its runs (the text reader's runs give it back after each,
+/// [`lean_run`]). Off, the built-in translator took twice as long (sandbox 2026-11-14: a line 0.52-0.63 s against
+/// 0.26-0.31 s): on, except in the tests that compare.
+pub static CPU_ARENA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 /// A session on `threads` threads, spinning while waiting or not.
 pub(crate) fn session_with(model: &Path, threads: usize, spinning: bool) -> anyhow::Result<ort::session::Session> {
     start_runtime()?;
     let e = |e: ort::Error| anyhow::anyhow!("{e}");
+    let arena = CPU_ARENA.load(std::sync::atomic::Ordering::Relaxed);
     ort::session::Session::builder()
+        .map_err(e)?
+        .with_execution_providers([ort::execution_providers::CPUExecutionProvider::default().with_arena_allocator(arena).build()])
         .map_err(e)?
         .with_intra_threads(threads.max(1))
         .map_err(e)?

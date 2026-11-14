@@ -305,13 +305,17 @@ impl TranslateHost {
             for (by, turned) in std::mem::take(&mut s.corrections) {
                 let by = orbiters_translate::geometry::rotate(&self.motion.to_tracking, by);
                 note(&format!(
-                    "found lines again {:.0} cm from their anchors (turned back {:.1} degrees about the head first) after walking {:.2} m and turning {:.0} degrees with the sticks; walking speed x{:.2}", // i18n: not shown (a log's line)
+                    "found lines again {:.0} cm from their anchors (turned back {:.1} degrees about the head first) after walking {:.2} m and turning {:.0} degrees with the sticks; walking speed x{:.2}, turning speed x{:.2}", // i18n: not shown (a log's line)
                     orbiters_translate::geometry::norm(by) * 100.0,
                     turned.unwrap_or(0.0).to_degrees(),
                     self.motion.walked,
                     self.motion.turned.to_degrees(),
-                    self.motion.gain
+                    self.motion.gain,
+                    self.motion.turn_gain
                 ));
+                if let Some(a) = turned {
+                    self.motion.learn_turn(a);
+                }
                 self.motion.learn(by);
             }
             if s.eyes.is_none() {
@@ -471,13 +475,14 @@ impl TranslateHost {
         let moved = self.motion.total;
         if self.motion_logged.is_some() && (moved[0] > 0.0 || moved[1] > 0.0 || self.osc_count > 0) {
             note(&format!(
-                "sticks moved the player {:.1} m and {:.0} degrees in all; {} OSC speeds in 10 s, last {:?}; world scale {:.2}, walking speed x{:.2}, turning in steps {}", // i18n: not shown (a log's line)
+                "sticks moved the player {:.1} m and {:.0} degrees in all; {} OSC speeds in 10 s, last {:?}; world scale {:.2}, walking speed x{:.2}, turning speed x{:.2}, turning in steps {}", // i18n: not shown (a log's line)
                 moved[0],
                 moved[1].to_degrees(),
                 self.osc_count,
                 self.motion.osc.velocity.map(|(v, _)| v),
                 self.motion.world_scale(),
                 self.motion.gain,
+                self.motion.turn_gain,
                 self.turn_in_steps
             ));
         }

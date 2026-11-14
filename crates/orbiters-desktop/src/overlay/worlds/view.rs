@@ -1304,7 +1304,7 @@ pub(crate) fn face_handles(slots: &dyn slots::Slots, key: &str) -> Result<[[vr::
 /// What the panel says when the faces could not be made.
 fn create_error(code: i32) -> String {
     if code == slots::LIMIT_EXCEEDED {
-        tr("SteamVR has no room for more overlays. Close an overlay app you are not using, then try again.").into()
+        tr("SteamVR is full: close an overlay app, then try again.").into()
     } else {
         tr!("a 3D world overlay: SteamVR overlay error {code}", code = code)
     }
@@ -1387,7 +1387,7 @@ mod tests {
 
     #[test]
     fn no_room_says_so_in_plain_words() {
-        assert!(create_error(slots::LIMIT_EXCEEDED).contains("no room"));
+        assert!(create_error(slots::LIMIT_EXCEEDED).contains("full"));
         assert!(create_error(slots::KEY_IN_USE).contains("17"));
     }
 }

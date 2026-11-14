@@ -255,5 +255,5 @@
   "That instance has closed.": "Cette instance est fermée.",
   "You cannot join that instance.": "Tu ne peux pas rejoindre cette instance.",
   "Looking for more instances…": "Recherche d’autres instances…",
-  "SteamVR has no room for more overlays. Close an overlay app you are not using, then try again.": "SteamVR n’a plus de place pour d’autres overlays. Ferme une appli d’overlay dont tu ne te sers pas, puis réessaie."
+  "SteamVR is full: close an overlay app, then try again.": "SteamVR est plein : ferme une appli d’overlay, puis réessaie."
 }

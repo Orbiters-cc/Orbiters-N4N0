@@ -607,7 +607,7 @@ fn the_whole_chain_with_the_built_in_translator() {
                 std::thread::sleep(std::time::Duration::from_millis(30));
             }
         }
-        let chains: Vec<_> = core.chains.drain(..).collect();
+        let chains = std::mem::take(&mut core.chains);
         println!("run {run}: {}", chains.iter().map(|c| format!("read {:.2} translated {:.2} shown {:.2}", c.read, c.translated, c.shown)).collect::<Vec<_>>().join(" | "));
         all.extend(chains.iter().map(|c| c.shown));
         assert_eq!(chains.len(), 5, "every line shown");

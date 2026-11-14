@@ -310,8 +310,8 @@ impl Core {
         self.gaze = Some(gaze);
         let read_at = self.read_at.take().unwrap_or(now);
         for t in &self.tracker.tracks {
-            if !self.born.contains_key(&t.id) {
-                self.born.insert(t.id, (now, read_at));
+            if let std::collections::hash_map::Entry::Vacant(e) = self.born.entry(t.id) {
+                e.insert((now, read_at));
                 if self.no_cache {
                     self.cache.remove(&self.reader.target, &t.key);
                 }

@@ -88,6 +88,7 @@
   "Muted": "ミュート中",
   "N4N0 asks": "N4N0からの確認",
   "N4N0 can hear now.": "N4N0が聞こえるようになりました。",
+  "N4N0 can't reach Orbiters right now. Try again in a moment.": "N4N0は今Orbitersにつながりません。少し待ってからもう一度お試しください。",
   "N4N0 cannot hear yet: install its speech models in Orbiters - N4N0 › N4N0.": "N4N0はまだ音声を聞き取れません。Orbiters - N4N0 › N4N0で音声モデルをインストールしてください。",
   "N4N0 copied: {text}": "N4N0がコピーしました：{text}",
   "N4N0 could not answer: {error}": "N4N0は答えられませんでした：{error}",

@@ -154,6 +154,21 @@ fn error_from(status: u16, body: &str) -> AssistantError {
     AssistantError { code, message }
 }
 
+/// What a person reads when Orbiters cannot be reached at all (no connection, refused, no name, timed out): one plain
+/// sentence, never the operating system's words; those go to the log.
+pub const UNREACHABLE: &str = "N4N0 can't reach Orbiters right now. Try again in a moment.";
+
+/// Whether `e` says Orbiters could not be reached at all, rather than that it answered with a refusal or something
+/// unreadable.
+pub fn unreachable(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<ureq::Error>(),
+            Some(ureq::Error::Io(_) | ureq::Error::ConnectionFailed | ureq::Error::HostNotFound | ureq::Error::Timeout(_) | ureq::Error::ConnectProxyFailed(_))
+        ) || c.downcast_ref::<std::io::Error>().is_some()
+    })
+}
+
 /// Sends one request of a turn and reads its answer: `on_event` gets the text and progress as they come; the result
 /// is the `done` payload. `cancel` stops reading at the next event.
 pub fn send(api: &Api, token: &str, request: &Request, cancel: &AtomicBool, mut on_event: impl FnMut(Event)) -> anyhow::Result<Done> {
@@ -320,6 +335,19 @@ mod tests {
         assert_eq!(utf16_prefix("a😀b", 2), "a");
         assert_eq!(utf16_prefix("a😀b", 3), "a😀");
         assert_eq!(utf16_prefix("éé", 10), "éé");
+    }
+
+    #[test]
+    fn a_refused_connection_is_unreachable() {
+        // Port 9 (discard) is closed here: the connection is refused, as with the dev server stopped (logs6/shot4.png).
+        let api = Api::at("http://127.0.0.1:9/");
+        let context = Context { summary: String::new(), locale: "en".into(), time: String::new(), display: None };
+        let request = Request { client: "test", messages: &[], input: None, tool_results: Vec::new(), tools: &[], context };
+        let err = send(&api, "token", &request, &AtomicBool::new(false), |_| {}).unwrap_err();
+        assert!(unreachable(&err), "{err:#}");
+        assert!(!unreachable(&anyhow::Error::new(error_from(503, "{}"))));
+        assert!(!unreachable(&anyhow::anyhow!("unexpected answer from Orbiters")));
+        assert!(!UNREACHABLE.contains("os error") && !UNREACHABLE.contains("io:"));
     }
 
     #[test]

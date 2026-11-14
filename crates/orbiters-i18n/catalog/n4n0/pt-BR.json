@@ -88,6 +88,7 @@
   "Muted": "Silenciado",
   "N4N0 asks": "N4N0 pergunta",
   "N4N0 can hear now.": "O N4N0 já consegue ouvir você.",
+  "N4N0 can't reach Orbiters right now. Try again in a moment.": "O N4N0 não consegue se conectar ao Orbiters agora. Tente de novo daqui a pouco.",
   "N4N0 cannot hear yet: install its speech models in Orbiters - N4N0 › N4N0.": "O N4N0 ainda não consegue ouvir você: instale os modelos de voz dele em Orbiters - N4N0 › N4N0.",
   "N4N0 copied: {text}": "O N4N0 copiou: {text}",
   "N4N0 could not answer: {error}": "O N4N0 não conseguiu responder: {error}",

@@ -254,5 +254,6 @@
   "That instance is full now.": "Essa instância está cheia agora.",
   "That instance has closed.": "Essa instância foi fechada.",
   "You cannot join that instance.": "Você não pode entrar nessa instância.",
-  "Looking for more instances…": "Procurando mais instâncias…"
+  "Looking for more instances…": "Procurando mais instâncias…",
+  "SteamVR has no room for more overlays. Close an overlay app you are not using, then try again.": "O SteamVR não tem espaço para mais overlays. Feche um app de overlay que você não está usando e tente de novo."
 }

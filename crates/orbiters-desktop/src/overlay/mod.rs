@@ -13,6 +13,7 @@
 
 mod actions;
 mod vr_log;
+pub mod slots;
 mod booster;
 pub mod calibration;
 pub mod coverage;
@@ -187,6 +188,16 @@ impl Presenter {
             }
         }
         self.gpu.as_mut()
+    }
+
+    /// `handle` was let go: its textures go too.
+    fn forget(&mut self, handle: vr::OverlayHandle) {
+        #[cfg(windows)]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.forget(handle);
+        }
+        #[cfg(not(windows))]
+        let _ = handle;
     }
 
     /// Shows a whole picture on `handle`.
@@ -489,11 +500,11 @@ struct World {
 impl World {
     fn new(overlay: &vr::Overlay) -> anyhow::Result<Self> {
         let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}"); // i18n: not shown (the overlay process's own stderr, a log nobody reads in a window)
-        let mirror = overlay.create(&format!("{KEY}.mirror"), "Orbiters calibration mirror").map_err(|c| fail("mirror", c))?; // i18n: not shown (a name for SteamVR)
+        let mirror = slots::create(overlay, &format!("{KEY}.mirror"), "Orbiters calibration mirror").map_err(|c| fail("mirror", c))?; // i18n: not shown (a name for SteamVR)
         let _ = overlay.set_width_in_meters(mirror, MIRROR_WIDTH_M);
         let mut targets = [0; 2];
         for (i, side) in ["left", "right"].into_iter().enumerate() {
-            targets[i] = overlay.create(&format!("{KEY}.target.{side}"), &format!("Orbiters {side} hand target")).map_err(|c| fail("hand target", c))?; // i18n: not shown (a name for SteamVR)
+            targets[i] = slots::create(overlay, &format!("{KEY}.target.{side}"), &format!("Orbiters {side} hand target")).map_err(|c| fail("hand target", c))?; // i18n: not shown (a name for SteamVR)
             let _ = overlay.set_width_in_meters(targets[i], TARGET_WIDTH_M);
         }
         // Painted premultiplied, as the menu: without the flag the glow shows dim and edges get dark fringes.
@@ -1052,6 +1063,13 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 let head = head[0].pose_is_valid.then_some(head[0].device_to_absolute);
                 t.menu.carry(&overlay, turn.menu_moved, turn.menu_released, head.as_ref());
             }
+        }
+        // The 3D view found SteamVR's overlay slots all taken (Enzo's overlay apps hold many of its 128): the parts around VRChat's menus that
+        // are not up give theirs back (they are made again when they next show), and the view tries once more.
+        if t.menu.worlds.view.wants_room() {
+            let freed = t.orbit.as_mut().map_or(0, |orbit| orbit.give_back_hidden(&overlay, &mut presenter));
+            vr_log::line(&format!("3D view: SteamVR had no overlay slot left; {freed} hidden parts gave theirs back, trying again")); // i18n: not shown (a log's line)
+            t.menu.worlds.view.room_made(&overlay, &steamvr);
         }
         // Whether a menu of ours is up (live translation does not read what is under one).
         let mut menus_up = false;

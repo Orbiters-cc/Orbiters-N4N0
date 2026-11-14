@@ -412,14 +412,15 @@ impl TranslateHost {
         }
         for q in wanted {
             let at = self.slots.iter().position(|s| s.track == Some(q.track)).or_else(|| self.slots.iter().position(|s| s.to == 0.0 && s.alpha <= 0.0)).or_else(|| {
-                (self.slots.len() < MOST_SHOWN).then(|| {
+                (self.slots.len() < MOST_SHOWN).then_some(()).and_then(|()| {
                     let i = self.slots.len();
-                    let handle = overlay.create(&format!("{}.translate.{i}", super::KEY), "Orbiters translation").unwrap_or(0); // i18n: not shown (a name for SteamVR)
+                    // SteamVR's slots all taken (`overlay::slots`): no line for now, asked again on the next one (a 0 kept here was a line lost for good).
+                    let handle = super::slots::create(overlay, &format!("{}.translate.{i}", super::KEY), "Orbiters translation").ok()?; // i18n: not shown (a name for SteamVR)
                     // Straight alpha (paint.rs says why): the flag stays off.
                     let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, false);
                     let _ = overlay.set_sort_order(handle, SORT_ORDER);
                     self.slots.push(Slot { handle, track: None, picture: None, pose: q.pose, width: q.width, alpha: 0.0, to: 0.0, visible: false });
-                    i
+                    Some(i)
                 })
             });
             let Some(i) = at else { continue };

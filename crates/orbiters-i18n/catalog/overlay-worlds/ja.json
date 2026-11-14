@@ -254,5 +254,6 @@
   "That instance is full now.": "そのインスタンスは満員になりました。",
   "That instance has closed.": "そのインスタンスは終了しました。",
   "You cannot join that instance.": "そのインスタンスには参加できません。",
-  "Looking for more instances…": "ほかのインスタンスを探しています…"
+  "Looking for more instances…": "ほかのインスタンスを探しています…",
+  "SteamVR has no room for more overlays. Close an overlay app you are not using, then try again.": "SteamVRにこれ以上オーバーレイを置く余裕がありません。使っていないオーバーレイアプリを閉じてから、もう一度お試しください。"
 }

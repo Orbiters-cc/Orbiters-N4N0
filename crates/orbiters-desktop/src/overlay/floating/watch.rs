@@ -35,7 +35,7 @@ pub struct Watch {
 
 impl Watch {
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
-        let handle = overlay.create(&format!("{key}.watch"), "Orbiters watch").map_err(|c| anyhow::anyhow!("watch: SteamVR overlay error {c}"))?; // i18n: not shown (a name for SteamVR)
+        let handle = crate::overlay::slots::create(overlay, &format!("{key}.watch"), "Orbiters watch").map_err(|c| anyhow::anyhow!("watch: SteamVR overlay error {c}"))?; // i18n: not shown (a name for SteamVR)
         let _ = overlay.set_width_in_meters(handle, WIDTH_M);
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, SORT_ORDER);

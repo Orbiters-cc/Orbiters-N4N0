@@ -112,7 +112,7 @@ pub struct CoverageOverlayPanel {
 impl CoverageOverlayPanel {
     pub fn new(overlay: &vr::Overlay) -> anyhow::Result<Self> {
         let handle =
-            overlay.create(&format!("{KEY}.coverage"), "Orbiters coverage").map_err(|c| anyhow::anyhow!("coverage overlay: SteamVR overlay error {c}"))?; // i18n: not shown (a name for SteamVR)
+            super::slots::create(overlay, &format!("{KEY}.coverage"), "Orbiters coverage").map_err(|c| anyhow::anyhow!("coverage overlay: SteamVR overlay error {c}"))?; // i18n: not shown (a name for SteamVR)
         let _ = overlay.set_width_in_meters(handle, WIDTH_M);
         // Painted premultiplied, as the menu.
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);

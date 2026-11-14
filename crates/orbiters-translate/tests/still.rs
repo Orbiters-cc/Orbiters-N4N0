@@ -345,8 +345,10 @@ fn lines_are_asked_once_in_a_batch_and_painted_once_translated() {
     let batches = batches.lock().unwrap();
     assert_eq!(batches.len(), 1, "one request for the four lines, none again once cached");
     assert_eq!(batches[0].lines.len(), 4);
-    assert_eq!(batches[0].lines[0].source.as_deref(), Some("ja"));
-    assert_eq!(batches[0].lines[2].source.as_deref(), Some("ko"));
+    // In the order of how near they are to the gaze (no longer reading order): each with the language of its letters.
+    let source = |text: &str| batches[0].lines.iter().find(|l| l.text == text).and_then(|l| l.source.as_deref());
+    assert_eq!(source(LINES[0]), Some("ja"));
+    assert_eq!(source(LINES[2]), Some("ko"));
     for q in &scene.quads {
         assert_eq!(q.picture.rgba.len() as u32, q.picture.width * q.picture.height * 4);
         assert!(q.width > 0.05 && q.height > 0.01);

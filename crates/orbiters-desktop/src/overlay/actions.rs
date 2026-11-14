@@ -60,10 +60,13 @@ const ACTIONS: &str = r#"{
     { "name": "/actions/orbit_block/in/trigger_left", "type": "boolean" },
     { "name": "/actions/orbit_block/in/trigger_right", "type": "boolean" },
     { "name": "/actions/orbit_block/in/pull_left", "type": "vector1" },
-    { "name": "/actions/orbit_block/in/pull_right", "type": "vector1" }
+    { "name": "/actions/orbit_block/in/pull_right", "type": "vector1" },
+    { "name": "/actions/grip/in/value_left", "type": "vector1" },
+    { "name": "/actions/grip/in/value_right", "type": "vector1" }
   ],
   "action_sets": [ { "name": "/actions/walk", "usage": "leftright" }, { "name": "/actions/menu", "usage": "leftright" }, { "name": "/actions/avatar", "usage": "leftright" },
-    { "name": "/actions/panel", "usage": "leftright" }, { "name": "/actions/orbit", "usage": "leftright" }, { "name": "/actions/orbit_block", "usage": "leftright" } ],
+    { "name": "/actions/panel", "usage": "leftright" }, { "name": "/actions/orbit", "usage": "leftright" }, { "name": "/actions/orbit_block", "usage": "leftright" },
+    { "name": "/actions/grip", "usage": "leftright" } ],
   "localization": [ { "language_tag": "en_US", "/actions/walk": "Walk boost",
     "/actions/walk/in/move_left": "Walking stick (left hand)", "/actions/walk/in/move_right": "Walking stick (right hand)",
     "/actions/menu": "N4N0's menu", "/actions/menu/in/open": "Open N4N0's menu (a press)",
@@ -85,7 +88,9 @@ const ACTIONS: &str = r#"{
     "/actions/orbit/in/menu_left": "VRChat's menu button (left hand)", "/actions/orbit/in/menu_right": "VRChat's menu button (right hand)",
     "/actions/orbit_block": "Trigger on the panels (taken from VRChat while pointing at them)",
     "/actions/orbit_block/in/trigger_left": "Press on a panel (left hand)", "/actions/orbit_block/in/trigger_right": "Press on a panel (right hand)",
-    "/actions/orbit_block/in/pull_left": "Trigger's pull (left hand)", "/actions/orbit_block/in/pull_right": "Trigger's pull (right hand)" } ]
+    "/actions/orbit_block/in/pull_left": "Trigger's pull (left hand)", "/actions/orbit_block/in/pull_right": "Trigger's pull (right hand)",
+    "/actions/grip": "How far each grip is pulled (to grip VRChat's camera as VRChat does)",
+    "/actions/grip/in/value_left": "Grip's pull (left hand)", "/actions/grip/in/value_right": "Grip's pull (right hand)" } ]
 }"#;
 
 /// How each controller opens N4N0's menu by default (its left hand), never with a stick's click: clicking a stick
@@ -148,9 +153,10 @@ fn bindings(controller: &str, input: &str, mode: &str) -> String {
     let panel = panel_bindings(controller);
     let orbit = orbit_bindings(controller);
     let orbit_block = orbit_block_bindings();
+    let grip = grip_bindings();
     format!(
         r#"{{ "controller_type": "{controller}", "name": "Orbiters", "description": "Walk boost's sticks; {opens} N4N0's menu; the triggers press on N4N0's screen and the Orbiters panel; the touchpads and sticks reach the avatar; the grips move the Orbiters panel",
-  "bindings": {{ "/actions/walk": {{ "sources": [ {}, {} ] }}, "/actions/menu": {{ "sources": [ {menu}, {}, {} ] }}, "/actions/avatar": {{ "sources": [ {avatar} ] }}, "/actions/panel": {panel}, "/actions/orbit": {orbit}, "/actions/orbit_block": {orbit_block} }} }}"#,
+  "bindings": {{ "/actions/walk": {{ "sources": [ {}, {} ] }}, "/actions/menu": {{ "sources": [ {menu}, {}, {} ] }}, "/actions/avatar": {{ "sources": [ {avatar} ] }}, "/actions/panel": {panel}, "/actions/orbit": {orbit}, "/actions/orbit_block": {orbit_block}, "/actions/grip": {grip} }} }}"#,
         source("left"),
         source("right"),
         press("left"),
@@ -203,6 +209,13 @@ fn orbit_block_bindings() -> String {
     let source = |hand: &str| {
         format!(r#"{{ "path": "/user/hand/{hand}/input/trigger", "mode": "trigger", "inputs": {{ "click": {{ "output": "/actions/orbit_block/in/trigger_{hand}" }}, "pull": {{ "output": "/actions/orbit_block/in/pull_{hand}" }} }} }}"#)
     };
+    format!(r#"{{ "sources": [ {}, {} ] }}"#, source("left"), source("right"))
+}
+
+/// Each hand's grip, how far it is pulled (0 to 1): VRChat takes and lets go of its camera panel at its own thresholds of that pull
+/// (`overlay::orbit::vrchat_grip`), which a click at SteamVR's thresholds does not follow. A grip with no pull (a wand's button) leaves it inactive.
+fn grip_bindings() -> String {
+    let source = |hand: &str| format!(r#"{{ "path": "/user/hand/{hand}/input/grip", "mode": "trigger", "inputs": {{ "pull": {{ "output": "/actions/grip/in/value_{hand}" }} }} }}"#);
     format!(r#"{{ "sources": [ {}, {} ] }}"#, source("left"), source("right"))
 }
 
@@ -306,7 +319,7 @@ fn keep_saved_bindings_whole(steamvr: &vr::Client, dir: &Path) {
 }
 
 /// The file a saved binding's address stands for: a Workshop item's (the one file in its folder, under SteamVR's own Steam library) or a file's.
-fn saved_binding_file(url: &str, runtime: Option<&Path>) -> Option<PathBuf> {
+pub(super) fn saved_binding_file(url: &str, runtime: Option<&Path>) -> Option<PathBuf> {
     if let Some(item) = url.strip_prefix("vr-input-workshop://") {
         let library = runtime?.parent()?.parent()?;
         let folder = library.join("workshop").join("content").join("250820").join(item);
@@ -371,6 +384,8 @@ pub struct Actions {
     panel: Option<([ActionHandle; 2], [ActionHandle; 2])>,
     /// VRChat's menu button of each hand, the set that takes the trigger from VRChat, each hand's device and trigger in it.
     orbit: Option<Orbit>,
+    /// Each hand's grip pull (left, right).
+    grip: Option<[ActionHandle; 2]>,
     /// Hands whose trigger is taken from VRChat from the next read on.
     blocked: [bool; 2],
     sets: Vec<ActionSetHandle>,
@@ -454,10 +469,12 @@ impl Actions {
                 hands: [input.input_source("/user/hand/left").map_err(fail)?, input.input_source("/user/hand/right").map_err(fail)?],
                 triggers: [input.action("/actions/orbit_block/in/trigger_left").map_err(fail)?, input.action("/actions/orbit_block/in/trigger_right").map_err(fail)?],
             };
-            Ok((walk, menu, presses, (avatar, pads), panel, (orbit_set, orbit)))
+            let grip_set = input.action_set("/actions/grip").map_err(fail)?;
+            let grip = [input.action("/actions/grip/in/value_left").map_err(fail)?, input.action("/actions/grip/in/value_right").map_err(fail)?];
+            Ok((walk, menu, presses, (avatar, pads), panel, (orbit_set, orbit), (grip_set, grip)))
         })();
         match loaded {
-            Ok((walk, menu, presses, (avatar, pads), (panel, lasers, grabs), (orbit_set, orbit))) => Self {
+            Ok((walk, menu, presses, (avatar, pads), (panel, lasers, grabs), (orbit_set, orbit), (grip_set, grip))) => Self {
                 walk: Some(walk),
                 menu: Some(menu),
                 taps: Taps::default(),
@@ -466,14 +483,15 @@ impl Actions {
                 pads: Some(pads),
                 panel: Some((lasers, grabs)),
                 orbit: Some(orbit),
+                grip: Some(grip),
                 blocked: [false; 2],
-                sets: vec![walk.set, menu.0, avatar, panel, orbit_set],
+                sets: vec![walk.set, menu.0, avatar, panel, orbit_set, grip_set],
                 failed: None,
                 menu_down: false,
             },
             Err(e) => {
                 eprintln!("SteamVR actions unavailable: {e}");
-                Self { walk: None, menu: None, taps: Taps::default(), presses: None, press_down: [false; 2], pads: None, panel: None, orbit: None, blocked: [false; 2], sets: Vec::new(), failed: Some(e), menu_down: false }
+                Self { walk: None, menu: None, taps: Taps::default(), presses: None, press_down: [false; 2], pads: None, panel: None, orbit: None, grip: None, blocked: [false; 2], sets: Vec::new(), failed: Some(e), menu_down: false }
             }
         }
     }
@@ -582,6 +600,12 @@ impl Actions {
         grabs.map(|action|input.digital(action).ok().filter(|d|d.active).map(|d|d.state))
     }
 
+    /// How far each hand's grip is pulled, 0 to 1 (left, right): `None` where SteamVR gives no pull (unbound, a grip with only a click).
+    pub fn grip_pulls(&self, steamvr: &vr::Client) -> [Option<f32>; 2] {
+        let (Some(grip), Ok(input)) = (self.grip, steamvr.input()) else { return [None; 2] };
+        grip.map(|action| input.analog(action).ok().filter(|d| d.active).map(|d| d.x))
+    }
+
     /// Each hand's grip held (left, right).
     pub fn grabs(&self, steamvr: &vr::Client) -> [bool; 2] {
         let (Some((_, grabs)), Ok(input)) = (self.panel, steamvr.input()) else { return [false; 2] };
@@ -594,9 +618,9 @@ fn blocked_sets(set: ActionSetHandle, hands: [orbiters_openvr::input::InputSourc
     (0..2).filter(move |&hand| blocked[hand]).map(move |hand| ActiveSet { set, device: hands[hand], priority: OVERLAY_GLOBAL_PRIORITY_MIN + 1 })
 }
 
-/// The sets made active in a turn at most: the five of [`Actions`], and the one that takes a trigger from VRChat for
+/// The sets made active in a turn at most: the six of [`Actions`], and the one that takes a trigger from VRChat for
 /// each hand.
-const MOST_SETS: usize = 7;
+const MOST_SETS: usize = 8;
 
 /// Two quick taps on a touch sensor (a thumbrest, a trackpad touched without pressing it): what opens N4N0's menu
 /// by default. A tap is a touch from [`TAP_SHORTEST`] to [`TAP_LONGEST`] long; the second must start within
@@ -739,7 +763,14 @@ mod tests {
             }
         }
         let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(manifest["actions"].as_array().unwrap().len(), 30);
+        assert_eq!(manifest["actions"].as_array().unwrap().len(), 32);
+        // Every controller gives each grip's pull, for VRChat's own grab thresholds (`orbit::vrchat_grip`).
+        for (controller, _, _) in CONTROLLERS {
+            let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(format!("bindings_{controller}.json"))).unwrap()).unwrap();
+            let sources = value["bindings"]["/actions/grip"]["sources"].as_array().unwrap();
+            assert_eq!(sources[1]["path"], "/user/hand/right/input/grip");
+            assert_eq!(sources[1]["inputs"]["pull"]["output"], "/actions/grip/in/value_right");
+        }
         // Every controller has the floating panel's lasers (each hand's tip) and grips.
         for (controller, _, _) in CONTROLLERS {
             let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(format!("bindings_{controller}.json"))).unwrap()).unwrap();

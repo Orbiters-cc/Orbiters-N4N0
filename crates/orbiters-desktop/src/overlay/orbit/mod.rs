@@ -13,6 +13,7 @@ pub mod camera_frames;
 pub mod camera_reckon;
 pub mod camera_track;
 pub mod camera_web;
+pub mod vrchat_grip;
 pub mod detect;
 #[cfg(windows)]
 pub mod desktop;

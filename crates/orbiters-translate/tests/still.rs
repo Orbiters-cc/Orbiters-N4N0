@@ -345,8 +345,10 @@ fn lines_are_asked_once_in_a_batch_and_painted_once_translated() {
     let batches = batches.lock().unwrap();
     assert_eq!(batches.len(), 1, "one request for the four lines, none again once cached");
     assert_eq!(batches[0].lines.len(), 4);
-    assert_eq!(batches[0].lines[0].source.as_deref(), Some("ja"));
-    assert_eq!(batches[0].lines[2].source.as_deref(), Some("ko"));
+    // In the order of how near they are to the gaze (no longer reading order): each with the language of its letters.
+    let source = |text: &str| batches[0].lines.iter().find(|l| l.text == text).and_then(|l| l.source.as_deref());
+    assert_eq!(source(LINES[0]), Some("ja"));
+    assert_eq!(source(LINES[2]), Some("ko"));
     for q in &scene.quads {
         assert_eq!(q.picture.rgba.len() as u32, q.picture.width * q.picture.height * 4);
         assert!(q.width > 0.05 && q.height > 0.01);
@@ -523,3 +525,149 @@ fn the_built_in_translators_first_translation() {
 
 /// Where the toilets' pictogram lies across `testdata/station-sign.png`, pixels (measured on the picture).
 const PICTOGRAM_COLUMNS: (f32, f32) = (198.0, 236.0);
+
+/// Lines read together in one pass of the built-in translator give what each gives alone, in not much more time than
+/// the longest alone (on the processor a step's time is the reading of the weights). Prints the times at 2 and 4
+/// threads, for one line and for 1, 3, 6 and 8 together.
+#[test]
+#[ignore]
+fn the_built_in_translator_translates_lines_together() {
+    use orbiters_translate::builtin::Builtin;
+    let signs = [
+        ("西口", "ja"),
+        ("北口", "ja"),
+        ("出口はこちらです", "ja"),
+        ("関係者以外立入禁止", "ja"),
+        ("欢迎来到我们的世界", "zh"),
+        ("안녕하세요 친구들", "ko"),
+        ("今日はみんなでカラオケしよう！", "ja"),
+        ("CITY SCENERY WORLD in VRCHAT", "en"),
+    ];
+    for (threads, spinning) in [(2usize, false), (4, false), (2, true), (4, true)] {
+        println!("threads {threads}, spinning {spinning}:");
+        let mut b = Builtin::load_with(threads, spinning).unwrap();
+        b.warm_up();
+        let mut alone = Vec::new();
+        let t = std::time::Instant::now();
+        for (text, source) in signs {
+            let t = std::time::Instant::now();
+            alone.push(b.line(text, source, "fr").unwrap());
+            println!("threads {threads} alone {:.0} ms: {text} -> {}", t.elapsed().as_secs_f64() * 1000.0, alone.last().unwrap());
+        }
+        println!("threads {threads}: 8 lines one after the other {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+        for n in [1usize, 3, 6, 8] {
+            let mut together = vec![String::new(); n];
+            let mut when = vec![0.0; n];
+            let t = std::time::Instant::now();
+            b.lines(&signs[..n], "fr", &mut |i, s| {
+                together[i] = s;
+                when[i] = t.elapsed().as_secs_f64() * 1000.0;
+            })
+            .unwrap();
+            println!("threads {threads}: {n} together {:.0} ms in {} steps, each done at {:?}", t.elapsed().as_secs_f64() * 1000.0, b.steps, when.iter().map(|w| w.round()).collect::<Vec<_>>());
+            // The int8 model's activations are scaled over the whole pass, so a line read with others may come out a
+            // little differently (sandbox 2026-11-14: "La sortie est ici." together, "L'entrée est ici." alone).
+            let same = together.iter().zip(&alone).filter(|(a, b)| a == b).count();
+            println!("    {same} of {n} as alone: {together:?}");
+            assert!(together.iter().all(|t| !t.is_empty()), "every line translated: {together:?}");
+            assert!(same * 2 >= n, "mostly as alone: {together:?} against {alone:?}");
+        }
+    }
+}
+
+/// The whole chain on rendered eyes with the real text reader and the built-in translator, as the overlay runs it:
+/// looks 0.6 s apart, translations shown as they come (polled every 30 ms). Prints, for five fresh starts, how long
+/// after the first look's picture each translation showed.
+#[test]
+#[ignore]
+fn the_whole_chain_with_the_built_in_translator() {
+    use orbiters_translate::builtin::Builtin;
+    let sign = sign(2.2, 25.0, 6.0);
+    let mut all = Vec::new();
+    for run in 0..5 {
+        let mut core = Core::new(Some(engine()), Box::new(Builtin::load(4).unwrap()), Reader { target: "fr".into(), reads: vec![] });
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let start = std::time::Instant::now();
+        core.clock = start;
+        let mut next_look = 0.0f64;
+        let mut k = 0;
+        while start.elapsed().as_secs_f64() < 8.0 {
+            let now = start.elapsed().as_secs_f64();
+            let views = views(&head_at(0.002 * k as f32, 0.1 * k as f32));
+            let gaze = (geometry::origin(&views[0].eye), scale(geometry::axis(&views[0].eye, 2), -1.0));
+            if now >= next_look {
+                let pictures = render(&views, std::slice::from_ref(&sign));
+                let taken = start.elapsed().as_secs_f64();
+                let look = Look { pair: pair(&pictures, views), area: [243, 270, 1134, 1260], shown: &[], zoom: None };
+                let (lines, timings) = core.engine.as_mut().unwrap().read(&look).unwrap();
+                core.follow(taken, &look, lines, timings, gaze);
+                let cost = start.elapsed().as_secs_f64() - taken;
+                next_look = start.elapsed().as_secs_f64() + (cost * 1.5).clamp(0.3, 1.5);
+                k += 1;
+            } else {
+                core.poll(now, gaze);
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+        }
+        let chains = std::mem::take(&mut core.chains);
+        println!("run {run}: {}", chains.iter().map(|c| format!("read {:.2} translated {:.2} shown {:.2}", c.read, c.translated, c.shown)).collect::<Vec<_>>().join(" | "));
+        all.extend(chains.iter().map(|c| c.shown));
+        assert_eq!(chains.len(), 5, "every line shown");
+    }
+    all.sort_by(f32::total_cmp);
+    println!("shown after the first picture: median {:.2} s, p90 {:.2} s, longest {:.2} s over {} lines", all[all.len() / 2], all[all.len() * 9 / 10], all[all.len() - 1], all.len());
+}
+
+/// This process's working set, megabytes (Windows' tasklist).
+fn working_set_mb() -> f64 {
+    let out = std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {}", std::process::id()), "/FO", "CSV", "/NH"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let field = text.trim().rsplit("\",\"").next().unwrap_or("0").trim_matches('"').replace([',', '.', ' ', 'K', '\u{a0}'], "");
+    field.parse::<f64>().unwrap_or(0.0) / 1024.0
+}
+
+/// The reader and the built-in translator's memory: loaded, then after a minute of looks at signs of every width and
+/// batches of every size. `ORBITERS_TEST_NO_ARENA=1` turns ONNX Runtime's arena off, to compare (run each alone: memory
+/// given back is not always returned to Windows), `ORBITERS_TEST_EYE=1620x1800` another eye size.
+#[test]
+#[ignore]
+fn memory_of_the_reader_and_the_built_in_translator() {
+    use orbiters_translate::builtin::Builtin;
+    let arena = std::env::var_os("ORBITERS_TEST_NO_ARENA").is_none();
+    // Enzo's eyes (Quest Pro through Virtual Desktop) unless told otherwise.
+    let size: [u32; 2] = std::env::var("ORBITERS_TEST_EYE").ok().and_then(|s| s.split_once('x').map(|(w, h)| [w.parse().unwrap(), h.parse().unwrap()])).unwrap_or([3168, 3456]);
+    let at = |v: [EyeView; 2]| v.map(|e| EyeView { size: [size[0] as f32, size[1] as f32], ..e });
+    let area = [size[0] * 15 / 100, size[1] * 15 / 100, size[0] * 70 / 100, size[1] * 70 / 100];
+    orbiters_translate::ocr::CPU_ARENA.store(arena, std::sync::atomic::Ordering::Relaxed);
+    let before = working_set_mb();
+    let mut core = Core::new(Some(engine()), Box::new(Builtin::load(4).unwrap()), Reader { target: "fr".into(), reads: vec![] });
+    core.no_cache = true;
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let loaded = working_set_mb();
+    let start = std::time::Instant::now();
+    let mut most = loaded;
+    let mut k = 0;
+    while start.elapsed().as_secs_f64() < 60.0 {
+        // Signs at other distances and angles each look: other boxes, other widths.
+        let s = sign(1.5 + (k % 7) as f32 * 0.4, -30.0 + (k % 9) as f32 * 7.0, (k % 5) as f32 * 3.0 - 6.0);
+        let views = at(views(&head_at(0.0, 0.0)));
+        let gaze = (geometry::origin(&views[0].eye), scale(geometry::axis(&views[0].eye, 2), -1.0));
+        let pictures = [render_eye(&views[0], size, &plain_room, std::slice::from_ref(&s)), render_eye(&views[1], size, &plain_room, std::slice::from_ref(&s))];
+        let zoom = [size[0] / 2 - 480, size[1] / 2 - 480, 960, 960];
+        let look = Look { pair: pair(&pictures, views), area, shown: &[], zoom: if k % 2 == 0 && size[0] > 1500 { Some(zoom) } else { None } };
+        let now = start.elapsed().as_secs_f64();
+        let _ = core.step(now, &look, gaze).unwrap();
+        // Every few looks the lines go (out of view), so that they are read and translated again.
+        if k % 3 == 2 {
+            core.tracker.update(now + 10.0, vec![], &|_| Seen::Away);
+            core.tracker.update(now + 20.0, vec![], &|_| Seen::Away);
+        }
+        for _ in 0..10 {
+            core.poll(start.elapsed().as_secs_f64(), gaze);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        most = most.max(working_set_mb());
+        k += 1;
+    }
+    println!("eyes {size:?}, arena {arena}: {before:.0} MB before, {loaded:.0} MB loaded, {most:.0} MB at most over {k} looks, {:.0} MB at the end", working_set_mb());
+}

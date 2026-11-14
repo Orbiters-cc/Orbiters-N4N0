@@ -39,6 +39,14 @@ pub enum Failure {
 pub trait Translator: Send {
     /// One translation a line of `batch`, in its order.
     fn translate(&mut self, batch: &Batch) -> Result<Vec<String>, Failure>;
+    /// The same, each line handed to `each` (its index in `batch`, its translation) as soon as it is ready: a translator
+    /// that finishes lines one by one (the built-in one) shows the first before the last is done.
+    fn translate_each(&mut self, batch: &Batch, each: &mut dyn FnMut(usize, String)) -> Result<(), Failure> {
+        for (i, t) in self.translate(batch)?.into_iter().enumerate() {
+            each(i, t);
+        }
+        Ok(())
+    }
     /// Gets ready for a first batch (a server loads its model on its first request): called once, as the translator's
     /// thread starts, so that the first sign seen does not wait for it.
     fn warm_up(&mut self) {}
@@ -268,8 +276,45 @@ impl Cache {
             }
         }
     }
+    pub fn remove(&mut self, target: &str, text: &str) {
+        let k = (target.to_string(), text.to_string());
+        if self.map.remove(&k).is_some() {
+            self.order.retain(|o| *o != k);
+        }
+    }
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    /// The translations kept from earlier sessions (a sign seen yesterday shows at once): one JSON array a line,
+    /// `[target, text, translation]`, oldest first. A missing or damaged file gives what could be read.
+    pub fn load(path: &std::path::Path) -> Self {
+        let mut cache = Self::default();
+        if let Ok(text) = std::fs::read_to_string(path) {
+            for line in text.lines() {
+                if let Ok((target, source, translation)) = serde_json::from_str::<(String, String, String)>(line) {
+                    cache.put(&target, &source, translation);
+                }
+            }
+        }
+        cache
+    }
+
+    /// Written whole, through a file beside it, so that a cut never leaves half a file.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let mut out = String::new();
+        for k in &self.order {
+            if let Some(t) = self.map.get(k) {
+                out.push_str(&serde_json::to_string(&(&k.0, &k.1, t)).unwrap_or_default());
+                out.push('\n');
+            }
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let part = path.with_extension("part");
+        std::fs::write(&part, out)?;
+        std::fs::rename(&part, path)
     }
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()

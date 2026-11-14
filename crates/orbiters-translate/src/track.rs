@@ -77,8 +77,14 @@ pub enum Seen {
 /// What a look's following did beyond the lines themselves.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Followed {
-    /// All lines moved by this (anchor space): the world was not where the motion estimate had it.
+    /// All lines moved by this (anchor space): the world was not where the motion estimate had it. After a turn about
+    /// the head (`turned`), what was left once that turn was undone.
     pub moved: Option<V3>,
+    /// All lines first turned by this, radians about the vertical through `about` (the head at the look): a stick turn
+    /// misjudged. A turn error moves each line by its own amount (more the further it is, and the other way behind):
+    /// one shift for all, as before 0.3.5-dev.54, set the lines looked at right and left the others off.
+    pub turned: Option<f32>,
+    pub about: V3,
     /// Lines found again that agreed on it.
     pub agreeing: usize,
     /// It was only measured ([`Tracker::hold_anchors`]): the lines did not move.
@@ -175,6 +181,15 @@ pub struct Tracker {
     /// the sticks are read, so where lines are found then says nothing reliable of where the world is (in the sandbox a
     /// look during a turn moved every line 24 cm one way, and the next look 57 cm back). No re-anchoring then.
     pub moving: bool,
+    /// The head at this look (anchor space), set by the caller: a turn misjudged is undone about it.
+    pub head: Option<V3>,
+}
+
+/// The signed angle about up (+Y) from `a` to `b`, seen from `about`, in the horizontal plane; `None` too near it.
+fn yaw_between(about: V3, a: V3, b: V3) -> Option<f32> {
+    let (a, b) = (sub(a, about), sub(b, about));
+    let (la, lb) = ((a[0] * a[0] + a[2] * a[2]).sqrt(), (b[0] * b[0] + b[2] * b[2]).sqrt());
+    (la > 0.3 && lb > 0.3).then(|| (a[2] * b[0] - a[0] * b[2]).atan2(a[0] * b[0] + a[2] * b[2]))
 }
 
 impl Tracker {
@@ -185,13 +200,26 @@ impl Tracker {
         // was gone (the sandbox, 2026-11-13: "You have joined an Invite instance" shown in French for minutes). Read again
         // at the same place before the eye after the head moved, while its anchor is elsewhere, it is left alone.
         self.head_locked.retain(|(_, until)| *until > now);
+        //
+        // Only a move across the view counts: a far sign's distance from both eyes varies by centimetres a pixel, so
+        // standing still it is read again deeper or nearer at the same place before the eye. Before 0.3.5-dev.54 that
+        // made a sign 4 m away "move with the head" when read 18 cm deeper, and it was not followed for a minute.
+        let head = self.head;
+        let across = |a: V3, b: V3| {
+            let d = sub(b, a);
+            match head {
+                Some(h) => {
+                    let ray = normalized(sub(b, h));
+                    geometry::norm(sub(d, scale(ray, geometry::dot(d, ray))))
+                }
+                None => geometry::norm(d),
+            }
+        };
         let mut sightings = sightings;
         for s in &sightings {
             let k = key(&s.text);
             let locked = self.tracks.iter().any(|t| {
-                t.key == k
-                    && geometry::norm(sub(t.in_eye, s.in_eye)) < 0.03 + 0.02 * s.placed.distance
-                    && geometry::norm(sub(t.placed.centre(), s.placed.centre())) > 0.04 + 0.03 * s.placed.distance
+                t.key == k && geometry::norm(sub(t.in_eye, s.in_eye)) < 0.03 + 0.02 * s.placed.distance && across(t.placed.centre(), s.placed.centre()) > 0.04 + 0.03 * s.placed.distance
             });
             if locked && !self.head_locked.iter().any(|(h, _)| *h == k) {
                 self.head_locked.push((k, now + HEAD_LOCKED_S));
@@ -201,11 +229,13 @@ impl Tracker {
         sightings.retain(|s| !locked.contains(&key(&s.text)));
         self.tracks.retain(|t| !locked.contains(&t.key));
         let mut followed = if self.moving { Followed::default() } else { self.reanchor(&sightings) };
-        followed.held = self.hold_anchors && followed.moved.is_some();
-        if let (Some(by), false) = (followed.moved, followed.held) {
-            for t in &mut self.tracks {
-                for (i, d) in by.iter().enumerate() {
-                    t.placed.pose[i][3] += d;
+        followed.held = self.hold_anchors && (followed.moved.is_some() || followed.turned.is_some());
+        if !followed.held {
+            let turn = followed.turned.map_or(geometry::IDENTITY, |a| crate::motion::turn_about(followed.about, a));
+            let by = followed.moved.unwrap_or([0.0; 3]);
+            if followed.moved.is_some() || followed.turned.is_some() {
+                for t in &mut self.tracks {
+                    t.placed.pose = geometry::compose(&crate::motion::moved_by(by), &geometry::compose(&turn, &t.placed.pose));
                 }
             }
         }
@@ -309,29 +339,62 @@ impl Tracker {
 
     /// Lines measured from both eyes found again, each alone of its text in the look and near where it was followed, but
     /// further than a measurement's own noise: where they agree the world is, against where the anchors have it.
+    ///
+    /// When the sticks turned the player more than they walked since those lines were confirmed (a turn's error at
+    /// their distance against what was walked), the error is taken as a turn about the head first, and what is left as
+    /// a shift. Standing still since, one line alone never moves the others (a far line's distance from both eyes is
+    /// a few centimetres per pixel: Enzo's 2026-11-14 log has lines moved 18 cm "after walking 0.00 m and turning 0
+    /// degrees").
     fn reanchor(&self, sightings: &[Sighting]) -> Followed {
-        let mut by = Vec::new();
+        // Each: where the anchors had it, where it was read, how far the sticks moved the player since it was confirmed.
+        let mut pairs: Vec<(V3, V3, [f32; 2])> = Vec::new();
         for s in sightings.iter().filter(|s| s.placed.measured) {
             let k = key(&s.text);
             let same = |text: &str| text == k || alike(text, &k) >= 0.75;
             if sightings.iter().filter(|o| same(&key(&o.text))).count() != 1 {
                 continue;
             }
+            let since = |t: &Track| [(self.moved[0] - t.moved_at[0]).max(0.0), (self.moved[1] - t.moved_at[1]).max(0.0)];
             // As far as the sticks' motion since a line was confirmed can have been misjudged: half of what was walked,
             // and half of what was turned at that distance.
-            let reach = |t: &Track| 0.25 + 0.5 * ((self.moved[0] - t.moved_at[0]).max(0.0) + (self.moved[1] - t.moved_at[1]).max(0.0) * s.placed.distance);
+            let reach = |t: &Track| 0.25 + 0.5 * (since(t)[0] + since(t)[1] * s.placed.distance);
             let near: Vec<&Track> = self.tracks.iter().filter(|t| t.placed.measured && same(&t.key) && geometry::norm(sub(t.placed.centre(), s.placed.centre())) < reach(t)).collect();
             if let [t] = near[..] {
-                by.push(sub(s.placed.centre(), t.placed.centre()));
+                pairs.push((t.placed.centre(), s.placed.centre(), since(t)));
             }
         }
+        let by: Vec<V3> = pairs.iter().map(|(p, q, _)| sub(*q, *p)).collect();
         let Some(m) = crate::motion::median(&by) else { return Followed::default() };
-        let agreeing = by.iter().filter(|b| geometry::norm(sub(**b, m)) < 0.15).count();
+        // A turn about the head, when turning is what the sticks did most since.
+        let turned = self.head.and_then(|h| {
+            let walked = crate::motion::median(&pairs.iter().map(|(_, _, d)| [d[0], 0.0, 0.0]).collect::<Vec<_>>())?[0];
+            let turn_reach = crate::motion::median(&pairs.iter().map(|(p, _, d)| [d[1] * geometry::norm(sub(*p, h)), 0.0, 0.0]).collect::<Vec<_>>())?[0];
+            if turn_reach <= walked.max(0.05) {
+                return None;
+            }
+            let angles: Vec<V3> = pairs.iter().filter_map(|(p, q, _)| yaw_between(h, *p, *q)).map(|a| [a, 0.0, 0.0]).collect();
+            let a = crate::motion::median(&angles)?[0];
+            let turn = crate::motion::turn_about(h, a);
+            let rest = crate::motion::median(&pairs.iter().map(|(p, q, _)| sub(*q, geometry::apply(&turn, *p))).collect::<Vec<_>>())?;
+            Some((a, rest, turn))
+        });
+        // Where each line would be after the correction.
+        let corrected = |p: V3| match &turned {
+            Some((_, rest, turn)) => add(geometry::apply(turn, p), *rest),
+            None => add(p, m),
+        };
+        let agreeing = pairs.iter().filter(|(p, q, _)| geometry::norm(sub(*q, corrected(*p))) < 0.15).count();
+        let size = crate::motion::median(&pairs.iter().map(|(p, _, _)| [geometry::norm(sub(corrected(*p), *p)), 0.0, 0.0]).collect::<Vec<_>>()).map_or(0.0, |v| v[0]);
         // One line alone may be a misplacement: it must be well off to count. Several must mostly agree.
         let distance = sightings.iter().filter(|s| s.placed.measured).map(|s| s.placed.distance).fold(0.0f32, f32::max);
         let noise = 0.08f32.max(0.04 * distance);
-        let enough = if by.len() == 1 { geometry::norm(m) > 2.0 * noise } else { agreeing * 2 > by.len() && geometry::norm(m) > noise };
-        Followed { moved: enough.then_some(m), agreeing, held: false }
+        let still = pairs.iter().all(|(_, _, d)| d[0] < 0.05 && d[1] < 0.02);
+        let enough = if by.len() == 1 { !still && size > 2.0 * noise } else { agreeing * 2 > by.len() && agreeing >= 2 - (!still) as usize && size > noise };
+        match (enough, turned) {
+            (false, _) => Followed { agreeing, ..Followed::default() },
+            (true, Some((a, rest, _))) => Followed { moved: Some(rest), turned: Some(a), about: self.head.unwrap_or_default(), agreeing, held: false },
+            (true, None) => Followed { moved: Some(m), turned: None, about: [0.0; 3], agreeing, held: false },
+        }
     }
 
     pub fn get(&self, id: u64) -> Option<&Track> {
@@ -585,5 +648,63 @@ mod tests {
         t.update(0.5, vec![better], &|_| Seen::Open);
         assert_eq!(t.tracks.len(), 1);
         assert_eq!(t.tracks[0].text, "Добро пожаловать");
+    }
+
+    /// A line read at `p` (anchor space), measured from both eyes; its place before the eye as if the head were at the
+    /// origin looking down -Z.
+    fn seen_at(text: &str, p: V3) -> Sighting {
+        let mut pose = IDENTITY;
+        for i in 0..3 {
+            pose[i][3] = p[i];
+        }
+        let distance = geometry::norm(p);
+        Sighting { text: text.into(), confidence: 0.9, placed: Placed { pose, width: 0.5, height: 0.08, measured: true, distance }, colours: Colours { background: [255; 3], text: [0; 3] }, context: vec![], in_eye: p }
+    }
+
+    /// Enzo's 2026-11-14 log: "found lines again 65 cm from their anchors after walking 4.49 m and turning 131 degrees".
+    /// Short stick turns came out 3.5 to 11 degrees off in the sandbox. A turn misjudged by 10 degrees, found again on
+    /// two signs ahead: every line turns back about the head, the one behind too (one shift for all, as before, would
+    /// have moved the line behind the wrong way).
+    #[test]
+    fn a_misjudged_turn_is_undone_about_the_head() {
+        let mut t = Tracker { head: Some([0.0; 3]), ..Tracker::default() };
+        let (exit, entrance, behind) = ([0.0, 0.0, -3.0], [2.0, 0.0, -3.0], [0.5, 0.0, 4.0]);
+        t.update(0.0, vec![seen_at("出口", exit), seen_at("入口", entrance), seen_at("非常口", behind)], &|_| Seen::Open);
+        // Turned two radians with the stick since, and the estimate was 10 degrees short.
+        t.moved = [0.0, 2.0];
+        let error = crate::motion::turn_about([0.0; 3], 10f32.to_radians());
+        let f = t.update(1.0, vec![seen_at("出口", geometry::apply(&error, exit)), seen_at("入口", geometry::apply(&error, entrance))], &|t: &Track| if t.text == "非常口" { Seen::Away } else { Seen::Open });
+        let turned = f.turned.expect("a turn");
+        assert!((turned.to_degrees() - 10.0).abs() < 0.5, "{}", turned.to_degrees());
+        assert!(geometry::norm(f.moved.unwrap_or_default()) < 0.02, "no shift left over: {f:?}");
+        for (text, was) in [("出口", exit), ("入口", entrance), ("非常口", behind)] {
+            let now = t.tracks.iter().find(|x| x.text == text).unwrap().placed.centre();
+            let want = geometry::apply(&error, was);
+            assert!(geometry::norm(sub(now, want)) < 0.02, "{text}: {now:?}, the world has it at {want:?}");
+        }
+    }
+
+    /// Walking more than turning since: a shift, as before (the walking speed learns from it).
+    #[test]
+    fn a_misjudged_walk_is_still_a_shift() {
+        let mut t = Tracker { head: Some([0.0; 3]), ..Tracker::default() };
+        t.update(0.0, vec![seen_at("出口", [0.0, 0.0, -3.0]), seen_at("入口", [2.0, 0.0, -3.0])], &|_| Seen::Open);
+        t.moved = [3.0, 0.05];
+        let f = t.update(1.0, vec![seen_at("出口", [0.0, 0.0, -2.5]), seen_at("入口", [2.0, 0.0, -2.5])], &|_| Seen::Open);
+        assert_eq!(f.turned, None);
+        assert!((f.moved.unwrap()[2] - 0.5).abs() < 1e-4, "{f:?}");
+    }
+
+    /// Standing still, a far line read 18 cm from where it was is its distance's noise: nothing moves. Two lines that
+    /// agree are not noise.
+    #[test]
+    fn standing_still_one_line_alone_moves_nothing() {
+        let mut t = Tracker { head: Some([0.0; 3]), ..Tracker::default() };
+        t.update(0.0, vec![seen_at("出口", [0.0, 0.0, -3.0]), seen_at("入口", [1.5, 0.0, -3.0])], &|_| Seen::Open);
+        let f = t.update(1.0, vec![seen_at("出口", [0.0, 0.0, -2.82])], &|_| Seen::Open);
+        assert_eq!((f.moved, f.turned), (None, None));
+        assert_eq!(t.tracks.len(), 2, "read deeper at the same place before the eye: still the sign, not a notice");
+        let f = t.update(2.0, vec![seen_at("出口", [0.0, 0.0, -2.78]), seen_at("入口", [1.5, 0.0, -2.78])], &|_| Seen::Open);
+        assert!(f.moved.is_some(), "{f:?}");
     }
 }

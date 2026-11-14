@@ -54,7 +54,26 @@ mod window;
 mod words;
 mod worker;
 
+/// A development build reads switches from `<its name>.env` beside it, `ORBITERS_…=value` a line: the VR sandbox's
+/// shared session starts every agent's program with the session controller's own environment, so a test build cannot
+/// be given its switches (`ORBITERS_TRANSLATE_ON`, …) any other way. Release builds never read it.
+fn sandbox_switches() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let Some(file) = std::env::current_exe().ok().map(|e| e.with_extension("env")) else { return };
+    let Ok(text) = std::fs::read_to_string(file) else { return };
+    for line in text.lines() {
+        if let Some((key, value)) = line.trim().split_once('=') {
+            if key.starts_with("ORBITERS_") && std::env::var_os(key).is_none() {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    sandbox_switches();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let private_roots = harness::prepare(&args)?;
     if args.iter().any(|a| a == "--say-state") {

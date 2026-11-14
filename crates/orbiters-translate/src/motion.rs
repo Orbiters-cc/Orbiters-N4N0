@@ -103,6 +103,11 @@ pub struct Locomotion {
     pub player_height: Option<f32>,
     /// What re-reading taught: how much further than estimated the world moves for the speed VRChat said.
     pub gain: f32,
+    /// And how much further than [`TURNS_PER_S`] VRChat's smooth turn goes: in the sandbox (2026-11-14, pushes of 50
+    /// to 300 ms) VRChat turned 6 to 17 % more than that rate, and a person's comfort settings may differ again.
+    pub turn_gain: f32,
+    /// Turned with the smooth turning stick since the last correction, radians, signed (as `turn_about` takes them).
+    turned_by: f32,
     turn: TurnStick,
     last: Option<f64>,
     /// Walked and turned since the last correction (metres in tracking space, radians), for its log and to learn `gain`.
@@ -118,7 +123,7 @@ pub struct Locomotion {
 
 impl Default for Locomotion {
     fn default() -> Self {
-        Self { to_tracking: IDENTITY, osc: Osc::default(), player_height: None, gain: 1.0, turn: TurnStick::default(), last: None, walked: 0.0, turned: 0.0, walked_by: [0.0; 3], total: [0.0; 2], walk_last: None, walk_since: None }
+        Self { to_tracking: IDENTITY, osc: Osc::default(), player_height: None, gain: 1.0, turn_gain: 1.0, turned_by: 0.0, turn: TurnStick::default(), last: None, walked: 0.0, turned: 0.0, walked_by: [0.0; 3], total: [0.0; 2], walk_last: None, walk_since: None }
     }
 }
 
@@ -215,7 +220,10 @@ impl Locomotion {
         }
         // Turning: the stick's push at VRChat's usual speed. VRChat's `AngularY` was tried and is no turning speed: for a
         // 31 degree turn in 0.3 s it said 600 to 1000 in steps of 200 (the sandbox, 2026-11-13).
-        let turned = self.turn.step(input.turn, seconds, input.turn_in_steps, TURNS_PER_S);
+        let turned = self.turn.step(input.turn, seconds, input.turn_in_steps, TURNS_PER_S * if input.turn_in_steps { 1.0 } else { self.turn_gain });
+        if !input.turn_in_steps {
+            self.turned_by += turned;
+        }
         if turned != 0.0 {
             motion = compose(&turn_about(head, turned), &motion);
             self.turned += turned.abs();
@@ -239,7 +247,18 @@ impl Locomotion {
         }
         self.walked = 0.0;
         self.turned = 0.0;
+        self.turned_by = 0.0;
         self.walked_by = [0.0; 3];
+    }
+
+    /// A look found followed lines turned `radians` about the head from where the anchors had them (the lines were
+    /// turned by it in anchor space, [`crate::track::Tracker::update`]): the smooth turn's speed learns how far off it
+    /// was. Called before [`Locomotion::learn`], which starts the next stretch.
+    pub fn learn_turn(&mut self, radians: f32) {
+        if self.turned_by.abs() > 0.35 {
+            let ratio = ((self.turned_by + radians) / self.turned_by).clamp(0.6, 1.6);
+            self.turn_gain = (self.turn_gain * (0.6 + 0.4 * ratio)).clamp(0.5, 2.0);
+        }
     }
 
     /// A pose in tracking space now, in anchor space.
@@ -473,5 +492,39 @@ mod tests {
     fn the_median_ignores_one_odd_line() {
         let m = median(&[[0.1, 0.0, 0.0], [0.12, 0.0, 0.01], [3.0, 1.0, 1.0]]).unwrap();
         assert!((m[0] - 0.12).abs() < 1e-6 && m[1] == 0.0 && (m[2] - 0.01).abs() < 1e-6);
+    }
+
+    /// VRChat turned 12 % more than the stick model says (the sandbox, 2026-11-14): the error found again on the signs
+    /// teaches the turning speed, and the next turn of the same push comes out nearer.
+    #[test]
+    fn the_turning_speed_learns_from_lines_found_again() {
+        let head = standing(0.0, 0.0, 0.0);
+        let turn_for = |l: &mut Locomotion, from: f64| {
+            let start = l.to_tracking;
+            for k in 0..=30 {
+                l.step(&input(from + k as f64 * 0.01, head, [0.0, 0.0], 1.0));
+            }
+            l.step(&input(from + 0.31, head, [0.0, 0.0], 0.0));
+            // How far the world turned this time, radians.
+            let a = geometry::axis(&geometry::compose(&l.to_tracking, &geometry::inverse(&start)), 0);
+            a[2].atan2(a[0]).abs()
+        };
+        let mut l = Locomotion::default();
+        let first = turn_for(&mut l, 0.0);
+        // The lines were found 12 % further round.
+        let error = 0.12 * first;
+        let mut later = 0.0;
+        for round in 0..6 {
+            l.learn_turn(if round == 0 { error } else { 1.12 * first - later });
+            l.learn([0.0; 3]);
+            later = turn_for(&mut l, 10.0 * (round + 1) as f64);
+        }
+        assert!((later / first - 1.12).abs() < 0.03, "{first} then {later}: x{}", l.turn_gain);
+        // A turn in steps is a step, whatever was learnt.
+        let mut steps = Locomotion { turn_gain: 1.3, ..Locomotion::default() };
+        steps.step(&Input { turn_in_steps: true, ..input(0.0, head, [0.0, 0.0], 0.0) });
+        steps.step(&Input { turn_in_steps: true, ..input(0.01, head, [0.0, 0.0], 1.0) });
+        let a = geometry::axis(&steps.to_tracking, 0);
+        assert!((a[2].atan2(a[0]).abs() - TURN_STEP).abs() < 1e-4);
     }
 }

@@ -12,6 +12,7 @@
 
 use super::catalog::Capture;
 use super::opening::Opening;
+use crate::overlay::slots;
 use super::pacing::{Kind, Pacer};
 use super::render::FaceRenderer;
 use super::stereo::TurnStick;
@@ -326,6 +327,10 @@ struct Drawn {
 pub struct View {
     key: String,
     handles: Option<[[vr::OverlayHandle; 6]; 2]>,
+    /// A capture asked to show while SteamVR had no overlay slot for its faces: room is made ([`View::room_made`]) and it is shown then.
+    room: Option<Arc<Capture>>,
+    /// The next showing comes after room was made: no slot then is said.
+    room_tried: bool,
     thread: Option<Thread>,
     #[cfg(windows)]
     d3d11: Option<super::interop::OverlaySide>,
@@ -410,6 +415,8 @@ impl View {
         Self {
             key: format!("{key}.world"),
             handles: None,
+            room: None,
+            room_tried: false,
             thread: None,
             #[cfg(windows)]
             d3d11: None,
@@ -473,7 +480,21 @@ impl View {
 
     /// Whether a capture shows (or appears, or is on its way).
     pub fn active(&self) -> bool {
-        !matches!(self.phase, Phase::Off | Phase::Leaving { .. })
+        !matches!(self.phase, Phase::Off | Phase::Leaving { .. }) || self.room.is_some()
+    }
+
+    /// A capture waits for SteamVR to have overlay slots for its faces.
+    pub fn wants_room(&self) -> bool {
+        self.room.is_some()
+    }
+
+    /// Room was made for what waits: it shows now, or says why it cannot.
+    pub fn room_made(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client) {
+        if let Some(capture) = self.room.take() {
+            self.room_tried = true;
+            self.show(overlay, steamvr, capture);
+            self.room_tried = false;
+        }
     }
 
     /// Whether the capture is still on its way to the GPU.
@@ -549,11 +570,17 @@ impl View {
         if self.thread.is_none() {
             return;
         }
+        self.room = None;
         if self.handles.is_none() {
             match self.create(overlay) {
                 Ok(h) => self.handles = Some(h),
-                Err(e) => {
-                    self.error = Some(e);
+                // SteamVR's slots are all taken: the parts not up give theirs back, then this is tried again (`overlay::run`'s loop).
+                Err(slots::LIMIT_EXCEEDED) if !self.room_tried => {
+                    self.room = Some(capture);
+                    return;
+                }
+                Err(code) => {
+                    self.error = Some(create_error(code));
                     return;
                 }
             }
@@ -769,21 +796,26 @@ impl View {
         }
     }
 
-    fn create(&self, overlay: &vr::Overlay) -> Result<[[vr::OverlayHandle; 6]; 2], String> {
-        let mut out = [[0; 6]; 2];
-        for (c, cube) in out.iter_mut().enumerate() {
-            for (f, h) in cube.iter_mut().enumerate() {
-                *h =
-                    overlay.create(&format!("{}.{c}.{f}", self.key), "3D world") // i18n: not shown (the overlay's name in SteamVR)
-                    .map_err(|code| tr!("a 3D world overlay: SteamVR overlay error {code}", code = code))?;
-                let _ = overlay.set_flag(*h, overlay_flag::SIDE_BY_SIDE_PARALLEL, true);
-                // A capture all around is opaque and this changes nothing; small, what is around it shows the room.
-                let _ = overlay.set_flag(*h, overlay_flag::IS_PREMULTIPLIED, true);
-                // Under N4N0's menu (10) and the pill, and over what lies under it: a panel's pane, its plate.
-                let _ = overlay.set_sort_order(*h, 2);
-            }
+    /// The twelve faces' overlays (two cubes of six), all or none ([`face_handles`]).
+    fn create(&self, overlay: &vr::Overlay) -> Result<[[vr::OverlayHandle; 6]; 2], i32> {
+        let out = face_handles(overlay, &self.key)?;
+        for h in out.iter().flatten().copied() {
+            let _ = overlay.set_flag(h, overlay_flag::SIDE_BY_SIDE_PARALLEL, true);
+            // A capture all around is opaque and this changes nothing; small, what is around it shows the room.
+            let _ = overlay.set_flag(h, overlay_flag::IS_PREMULTIPLIED, true);
+            // Under N4N0's menu (10) and the pill, and over what lies under it: a panel's pane, its plate.
+            let _ = overlay.set_sort_order(h, 2);
         }
         Ok(out)
+    }
+
+    /// Its faces' overlays go back to SteamVR while nothing shows: they hold 12 of the 128 slots every overlay app shares.
+    fn let_go_of_faces(&mut self, overlay: &vr::Overlay) {
+        if let Some(handles) = self.handles.take() {
+            for h in handles.iter().flatten() {
+                let _ = overlay.destroy(*h);
+            }
+        }
     }
 
     fn hide_all(&self, overlay: &vr::Overlay) {
@@ -842,7 +874,7 @@ impl View {
             Phase::Leaving { since } => {
                 let t = since.elapsed().as_secs_f32() / FADE_OUT.as_secs_f32();
                 if t >= 1.0 {
-                    self.hide_all(overlay);
+                    self.let_go_of_faces(overlay);
                     self.phase = Phase::Off;
                     self.capture = None;
                     self.full = None;
@@ -1257,6 +1289,27 @@ impl View {
     }
 }
 
+/// The overlays of the faces of a view keyed `key`: two cubes of six, made whole or not at all (a set left half made held SteamVR's slots and
+/// keys, and every showing after it failed with "SteamVR overlay error 17": `overlay::slots`).
+pub(crate) fn face_handles(slots: &dyn slots::Slots, key: &str) -> Result<[[vr::OverlayHandle; 6]; 2], i32> {
+    let keys: Vec<String> = (0..2).flat_map(|c| (0..6).map(move |f| format!("{key}.{c}.{f}"))).collect();
+    let made = slots::create_all(slots, &keys, "3D world")?; // i18n: not shown (the overlay's name in SteamVR)
+    let mut out = [[0; 6]; 2];
+    for (i, h) in made.into_iter().enumerate() {
+        out[i / 6][i % 6] = h;
+    }
+    Ok(out)
+}
+
+/// What the panel says when the faces could not be made.
+fn create_error(code: i32) -> String {
+    if code == slots::LIMIT_EXCEEDED {
+        tr("SteamVR is full: close an overlay app, then try again.").into()
+    } else {
+        tr!("a 3D world overlay: SteamVR overlay error {code}", code = code)
+    }
+}
+
 /// The opening the next batch draws the backdrop of: the panel's (`asked`), while what shows small lies in its hole (`docked`); the one
 /// `drawn` last while the panel only trembles in a hand, which then draws nothing again.
 pub fn opening_for(asked: Option<Opening>, docked: bool, drawn: Option<Opening>) -> Option<Opening> {
@@ -1281,4 +1334,60 @@ fn tracked_head(steamvr: &vr::Client, seconds: f32) -> Pose {
     let mut poses = [Pose::default(); MAX_DEVICES];
     steamvr.predicted_poses(Universe::Standing, seconds, &mut poses);
     poses[0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::overlay::slots::fake::{Process, World, ALL};
+    use crate::overlay::slots::Slots as _;
+    use std::cell::RefCell;
+
+    /// Enzo, 2026-11-14 (0.3.5-dev.52): his overlay apps left 8 of SteamVR's 128 slots, the view's twelve faces got eight, those eight stayed in
+    /// SteamVR, and every showing after that said "a 3D world overlay: SteamVR overlay error 17" (vrcompositor.txt). Now: nothing is kept of
+    /// a set with no room, a second try says the same and not 17, and with room it comes whole, even from what he was left with.
+    #[test]
+    fn the_view_s_faces_are_made_whole_or_not_at_all_and_a_second_try_works() {
+        let world = RefCell::new(World::default());
+        let (others, us) = (Process { world: &world, id: 1 }, Process { world: &world, id: 2 });
+        let key = "cc.orbiters.desktop.world";
+        others.take(ALL - 8);
+        for _ in 0..3 {
+            assert_eq!(face_handles(&us, key), Err(slots::LIMIT_EXCEEDED));
+            assert!(us.keys().is_empty(), "faces left behind: {:?}", us.keys());
+        }
+        // The parts not up give back their slots (`OrbitVr::give_back_hidden`); the view is made.
+        for i in 0..19 {
+            others.destroy(others.find(&format!("other.1.{i}")).unwrap()).unwrap();
+        }
+        let faces = face_handles(&us, key).expect("room was made");
+        assert_eq!(us.keys().len(), 12);
+        let mut all: Vec<_> = faces.iter().flatten().copied().collect();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 12);
+        // Let go while nothing shows, made again for the next capture.
+        for h in faces.iter().flatten() {
+            us.destroy(*h).unwrap();
+        }
+        assert!(face_handles(&us, key).is_ok());
+        // Enzo's state on dev.52: world.0.0 to world.1.1 held by this process with nobody keeping them. Taken back, made whole.
+        let world2 = RefCell::new(World::default());
+        let him = Process { world: &world2, id: 3 };
+        for c in 0..2 {
+            for f in 0..6 {
+                if c * 6 + f < 8 {
+                    let _ = him.create(&format!("{key}.{c}.{f}"), "3D world");
+                }
+            }
+        }
+        assert!(face_handles(&him, key).is_ok());
+        assert_eq!(him.keys().len(), 12);
+    }
+
+    #[test]
+    fn no_room_says_so_in_plain_words() {
+        assert!(create_error(slots::LIMIT_EXCEEDED).contains("full"));
+        assert!(create_error(slots::KEY_IN_USE).contains("17"));
+    }
 }

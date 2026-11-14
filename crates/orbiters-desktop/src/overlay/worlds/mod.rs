@@ -281,9 +281,12 @@ fn under_menu(at: &Matrix34, height_m: f32) -> Matrix34 {
 impl Worlds {
     /// The pill's and the bar's overlays; the panel draws on the menu's canvas, whose context `ctx` is.
     pub fn new(overlay: &vr::Overlay, key: &str, ctx: egui::Context) -> anyhow::Result<Self> {
-        let chip = overlay.create(&format!("{key}.worlds-chip"), "N4N0's 3D worlds").map_err(|c| anyhow::anyhow!("3D worlds pill: SteamVR overlay error {c}"))?; // i18n: not shown (the overlay's name in SteamVR)
+        let chip = crate::overlay::slots::create(overlay, &format!("{key}.worlds-chip"), "N4N0's 3D worlds").map_err(|c| anyhow::anyhow!("3D worlds pill: SteamVR overlay error {c}"))?; // i18n: not shown (the overlay's name in SteamVR)
         interactive(overlay, chip, CHIP_WIDTH_M);
-        let bar = overlay.create(&format!("{key}.worlds-bar"), "N4N0's 3D world controls").map_err(|c| anyhow::anyhow!("3D worlds bar: SteamVR overlay error {c}"))?; // i18n: not shown (the overlay's name in SteamVR)
+        let bar = crate::overlay::slots::create(overlay, &format!("{key}.worlds-bar"), "N4N0's 3D world controls").map_err(|c| { // i18n: not shown (a name for SteamVR, or the overlay process's own stderr)
+            let _ = overlay.destroy(chip);
+            anyhow::anyhow!("3D worlds bar: SteamVR overlay error {c}") // i18n: not shown (a name for SteamVR, or the overlay process's own stderr)
+        })?; // i18n: not shown (the overlay's name in SteamVR)
         interactive(overlay, bar, BAR_WIDTH_M);
         Ok(Self {
             paint_fixture: None, snapshot_mode: false, presented_paint: None, pressed_paint: None,

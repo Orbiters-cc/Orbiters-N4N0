@@ -1032,15 +1032,56 @@ impl OrbitVr {
 
 /// A part's overlay, made the first time it shows. Its order is said to SteamVR and read back into the VR test log: Enzo's IMG2 had a pane of order 0 drawn over the
 /// sheet's head (15) and page (16), which only an order by distance does, and the log says what SteamVR took.
-fn part_handle(handles: &mut HashMap<Zone, vr::OverlayHandle>, overlay: &vr::Overlay, key: &str, zone: Zone) -> vr::OverlayHandle {
-    *handles.entry(zone).or_insert_with(|| {
-        let made = overlay.create(&format!("{key}.{zone:?}"), &format!("Orbiters {zone:?}")).unwrap_or(0);
-        let _ = overlay.set_flag(made, vr::overlay_flag::IS_PREMULTIPLIED, true);
-        let order = SORT_ORDER + u32::from(zone == Zone::Takeover);
-        let said = overlay.set_sort_order(made, order);
-        super::super::vr_log::line(&format!("overlay {zone:?}: handle {made} sort order {order} set {said:?} read back {:?}", overlay.sort_order(made))); // i18n: not shown (a log's line)
-        made
-    })
+/// One SteamVR refused (its slots all taken: `overlay::slots`) is not kept as 0 for good, as it was: it is asked for again a moment later.
+fn part_handle(handles: &mut HashMap<Zone, vr::OverlayHandle>, refused: &mut HashMap<Zone, Instant>, overlay: &vr::Overlay, key: &str, zone: Zone) -> vr::OverlayHandle {
+    match part_made(handles, refused, overlay, key, zone, Instant::now()) {
+        Ok((made, true)) => {
+            let _ = overlay.set_flag(made, vr::overlay_flag::IS_PREMULTIPLIED, true);
+            let order = SORT_ORDER + u32::from(zone == Zone::Takeover);
+            let said = overlay.set_sort_order(made, order);
+            super::super::vr_log::line(&format!("overlay {zone:?}: handle {made} sort order {order} set {said:?} read back {:?}", overlay.sort_order(made))); // i18n: not shown (a log's line)
+            made
+        }
+        Ok((made, false)) => made,
+        Err(Some(code)) => {
+            super::super::vr_log::line(&format!("overlay {zone:?}: SteamVR refused it (overlay error {code}); asked again in a moment")); // i18n: not shown (a log's line)
+            0
+        }
+        Err(None) => 0,
+    }
+}
+
+/// How long a part SteamVR refused waits before it is asked for again.
+const REFUSED_WAITS: Duration = Duration::from_secs(1);
+
+/// `zone`'s overlay, and whether it was made now; or SteamVR's refusal (`None`: refused a moment ago, not asked again yet).
+fn part_made(
+    handles: &mut HashMap<Zone, vr::OverlayHandle>, refused: &mut HashMap<Zone, Instant>, slots: &dyn super::super::slots::Slots, key: &str, zone: Zone, now: Instant,
+) -> Result<(vr::OverlayHandle, bool), Option<i32>> {
+    if let Some(h) = handles.get(&zone) {
+        return Ok((*h, false));
+    }
+    if refused.get(&zone).is_some_and(|t| now.saturating_duration_since(*t) < REFUSED_WAITS) {
+        return Err(None);
+    }
+    match super::super::slots::create(slots, &format!("{key}.{zone:?}"), &format!("Orbiters {zone:?}")) { // i18n: not shown (an overlay's name in SteamVR)
+        Ok(made) => {
+            refused.remove(&zone);
+            handles.insert(zone, made);
+            Ok((made, true))
+        }
+        Err(code) => {
+            refused.insert(zone, now);
+            Err(Some(code))
+        }
+    }
+}
+
+/// The parts whose overlays are neither up (`up`) nor seen: taken out of `handles`, to be let go. Each is made again when it next shows, and
+/// a part that comes back is painted whole (`Panel::wake`, a new part), so nothing shows blank.
+fn hidden_parts(handles: &mut HashMap<Zone, vr::OverlayHandle>, up: &[Zone], visible: impl Fn(vr::OverlayHandle) -> bool) -> Vec<vr::OverlayHandle> {
+    let zones: Vec<Zone> = handles.iter().filter(|(zone, h)| !up.contains(zone) && !visible(**h)).map(|(zone, _)| *zone).collect();
+    zones.iter().filter_map(|zone| handles.remove(zone)).collect()
 }
 
 /// Whether a part's SteamVR overlay is up: it has a picture and is to be seen. A sheet keeps the page it showed until the next page's first picture comes (I-pageflash).
@@ -1181,6 +1222,8 @@ pub struct OrbitVr {
     stuck: Stuck,
     lasers: Lasers,
     handles: HashMap<Zone, vr::OverlayHandle>,
+    /// Parts SteamVR refused an overlay, and when.
+    refused: HashMap<Zone, Instant>,
     /// Where the Quick Menu opened; where a page opened from the wheel goes.
     plane: Option<Plane>,
     takeover_plane: Option<Plane>,
@@ -1265,6 +1308,7 @@ impl OrbitVr {
             stuck: Stuck::start(),
             lasers: Lasers::new(overlay, &format!("{key}.orbit"))?,
             handles: HashMap::new(),
+            refused: HashMap::new(),
             plane: None,
             takeover_plane: None,
             camera_watch: None,
@@ -1313,6 +1357,18 @@ impl OrbitVr {
             let _ = overlay.destroy(*handle);
         }
         self.lasers.destroy(overlay);
+    }
+
+    /// SteamVR's overlay slots are all taken and the 3D view needs some: the overlays of the parts not up now go back (the wheel's, the
+    /// camera's, a page's, while they are away). Says how many.
+    pub fn give_back_hidden(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter) -> usize {
+        let up: Vec<Zone> = self.panels.all().map(|p| p.zone).collect();
+        let gone = hidden_parts(&mut self.handles, &up, |h| overlay.is_visible(h));
+        for h in &gone {
+            let _ = overlay.destroy(*h);
+            presenter.forget(*h);
+        }
+        gone.len()
     }
 
     /// Says to Settings whether the block can work. SteamVR's own setting is turned on here once, as the panels are wanted; that it can be turned off again in SteamVR is the person's.
@@ -1905,7 +1961,7 @@ impl OrbitVr {
 
     fn show(&mut self, cx: &mut Cx<'_, '_>, quads: &[(Quad, Placed)], placing: &[Placing]) {
         let (overlay, presenter) = (cx.overlay, &mut *cx.presenter);
-        let (handles, key) = (&mut self.handles, &self.key);
+        let (handles, refused, key) = (&mut self.handles, &mut self.refused, &self.key);
         // The sheet's back and its page are one picture, shown by the back's overlay.
         let page_at = self.panels.all().find(|p| p.zone == Zone::SheetBack).zip(self.panels.takeover.as_ref()).and_then(|(back, page)| page_row(back, page));
         let worker_sheet = self.panels.stage.async_pages && page_at.is_some();
@@ -1925,7 +1981,7 @@ impl OrbitVr {
             // A newly opened sheet gets its back on the next layout turn; wait for that
             // rather than submitting its page as a second, overlapping overlay.
             if panel.zone == Zone::Takeover { return; }
-            let handle = part_handle(&mut *handles, overlay, key, panel.zone);
+            let handle = part_handle(&mut *handles, &mut *refused, overlay, key, panel.zone);
             if handle != 0 {
                 presenter.show_part(overlay, handle, panel.pixels(), panel.px[0], panel.px[1], changed);
             }
@@ -1939,7 +1995,7 @@ impl OrbitVr {
             }
         }
         if let Some(changed) = self.sheet.changed.take() {
-            let handle = part_handle(&mut self.handles, overlay, &self.key, Zone::SheetBack);
+            let handle = part_handle(&mut self.handles, &mut self.refused, overlay, &self.key, Zone::SheetBack);
             if handle != 0 {
                 presenter.show_part(overlay, handle, self.sheet.pixels(), self.sheet.px[0], self.sheet.px[1], changed);
             }
@@ -2018,6 +2074,44 @@ mod tests {
     }
     use super::*;
     use orbiters_core::settings::OrbitSettings;
+
+    /// Enzo, 2026-11-14: the 3D view found SteamVR's 128 overlay slots taken. A part refused is asked for again (it was kept as 0 for good,
+    /// never to show), and the parts not up give their slots back for the view, to be made again, whole, when they next show.
+    #[test]
+    fn parts_give_their_slots_back_and_a_refused_part_is_made_once_there_is_room() {
+        use crate::overlay::slots::fake::{Process, World, ALL};
+        use crate::overlay::slots::Slots as _;
+        let world = std::cell::RefCell::new(World::default());
+        let (others, us) = (Process { world: &world, id: 1 }, Process { world: &world, id: 2 });
+        let (mut handles, mut refused) = (HashMap::new(), HashMap::new());
+        let t0 = Instant::now();
+        let key = "cc.orbiters.desktop.orbit";
+        // The wheel and the camera's tiles were up once; Enzo is on a page now.
+        let wheel = [Zone::WheelWorlds, Zone::WheelAll, Zone::WheelCaption, Zone::CameraQr, Zone::CameraRecord];
+        for zone in wheel.into_iter().chain([Zone::WingWorlds, Zone::SheetBack]) {
+            assert!(matches!(part_made(&mut handles, &mut refused, &us, key, zone, t0), Ok((_, true))));
+        }
+        let taken = world.borrow().overlays.len();
+        others.take(ALL - taken);
+        // No room: refused, not kept, not asked again at once, asked again a moment later.
+        assert_eq!(part_made(&mut handles, &mut refused, &us, key, Zone::WheelPictures, t0), Err(Some(crate::overlay::slots::LIMIT_EXCEEDED)));
+        assert!(!handles.contains_key(&Zone::WheelPictures));
+        assert_eq!(part_made(&mut handles, &mut refused, &us, key, Zone::WheelPictures, t0 + Duration::from_millis(100)), Err(None));
+        // The view needs room: what is not up goes back, what is up stays.
+        let gone = hidden_parts(&mut handles, &[Zone::WingWorlds, Zone::SheetBack], |_| false);
+        for h in &gone {
+            us.destroy(*h).unwrap();
+        }
+        assert_eq!(gone.len(), wheel.len());
+        assert_eq!(world.borrow().free(), wheel.len());
+        assert!(handles.contains_key(&Zone::WingWorlds) && handles.contains_key(&Zone::SheetBack));
+        // A part seen is never taken away, up or not.
+        let seen = *handles.get(&Zone::WingWorlds).unwrap();
+        assert!(hidden_parts(&mut handles, &[], |h| h == seen).iter().all(|h| *h != seen));
+        // The refused one comes once room is there and its moment passed; one given back is made again (no key left in use).
+        assert!(matches!(part_made(&mut handles, &mut refused, &us, key, Zone::WheelPictures, t0 + REFUSED_WAITS), Ok((_, true))));
+        assert!(matches!(part_made(&mut handles, &mut refused, &us, key, Zone::WheelWorlds, t0 + REFUSED_WAITS), Ok((_, true))));
+    }
 
     /// Round 5's judges: the wing's tiles ran into a sheet's right edge. It moves away, and only with a sheet up.
     #[test]

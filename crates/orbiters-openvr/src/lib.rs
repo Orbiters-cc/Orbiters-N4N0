@@ -901,6 +901,16 @@ impl Overlay<'_> {
         Ok((main, thumb))
     }
 
+    /// The overlay this or another process made with `key`.
+    pub fn find(&self, key: &str) -> Result<OverlayHandle, i32> {
+        type F = unsafe extern "system" fn(*const c_char, *mut u64) -> i32;
+        let key = CString::new(key).expect("no NUL");
+        let mut handle = 0;
+        // SAFETY: entry 0 is FindOverlay.
+        overlay_result(unsafe { entry::<F>(self.table, 0)(key.as_ptr(), &mut handle) })?;
+        Ok(handle)
+    }
+
     pub fn create(&self, key: &str, name: &str) -> Result<OverlayHandle, i32> {
         type F = unsafe extern "system" fn(*const c_char, *const c_char, *mut u64) -> i32;
         let (key, name) = (CString::new(key).expect("no NUL"), CString::new(name).expect("no NUL"));

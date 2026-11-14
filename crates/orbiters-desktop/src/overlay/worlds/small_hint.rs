@@ -178,7 +178,7 @@ impl HideChip {
     }
 
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
-        let handle = overlay.create(&format!("{key}.small-hide"), "Hide a small 3D view").map_err(|c| anyhow::anyhow!("the small view's Hide: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR)
+        let handle = crate::overlay::slots::create(overlay, &format!("{key}.small-hide"), "Hide a small 3D view").map_err(|c| anyhow::anyhow!("the small view's Hide: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR)
         let _ = overlay.set_width_in_meters(handle, CHIP_WIDTH_M);
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, 3);
@@ -277,12 +277,16 @@ pub struct SmallHint {
 
 impl SmallHint {
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
-        let handle = overlay.create(&format!("{key}.small-hint"), "How to handle a small 3D view").map_err(|c| anyhow::anyhow!("the small view's hint: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR)
+        let handle = crate::overlay::slots::create(overlay, &format!("{key}.small-hint"), "How to handle a small 3D view").map_err(|c| anyhow::anyhow!("the small view's hint: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR)
         let _ = overlay.set_width_in_meters(handle, WIDTH_M);
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
         // Over the capture, and under N4N0's menu and these panels.
         let _ = overlay.set_sort_order(handle, 3);
-        let stick = overlay.create(&format!("{key}.small-hint-stick"), "A thumbstick").map_err(|c| anyhow::anyhow!("the small view's stick: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR's own lists)
+        let stick = crate::overlay::slots::create(overlay, &format!("{key}.small-hint-stick"), "A thumbstick").map_err(|c| { // i18n: not shown (a name for SteamVR, or the overlay process's own stderr)
+            // Not left behind holding a slot and its key.
+            let _ = overlay.destroy(handle);
+            anyhow::anyhow!("the small view's stick: {c:?}") // i18n: not shown (a name for SteamVR, or the overlay process's own stderr)
+        })?; // i18n: not shown (the overlay's name in SteamVR's own lists)
         let _ = overlay.set_width_in_meters(stick, stick3d::WIDTH_M);
         let _ = overlay.set_flag(stick, vr::overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_flag(stick, vr::overlay_flag::SIDE_BY_SIDE_PARALLEL, true);

@@ -572,3 +572,46 @@ fn the_built_in_translator_translates_lines_together() {
         }
     }
 }
+
+/// The whole chain on rendered eyes with the real text reader and the built-in translator, as the overlay runs it:
+/// looks 0.6 s apart, translations shown as they come (polled every 30 ms). Prints, for five fresh starts, how long
+/// after the first look's picture each translation showed.
+#[test]
+#[ignore]
+fn the_whole_chain_with_the_built_in_translator() {
+    use orbiters_translate::builtin::Builtin;
+    let sign = sign(2.2, 25.0, 6.0);
+    let mut all = Vec::new();
+    for run in 0..5 {
+        let mut core = Core::new(Some(engine()), Box::new(Builtin::load(4).unwrap()), Reader { target: "fr".into(), reads: vec![] });
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let start = std::time::Instant::now();
+        core.clock = start;
+        let mut next_look = 0.0f64;
+        let mut k = 0;
+        while start.elapsed().as_secs_f64() < 8.0 {
+            let now = start.elapsed().as_secs_f64();
+            let views = views(&head_at(0.002 * k as f32, 0.1 * k as f32));
+            let gaze = (geometry::origin(&views[0].eye), scale(geometry::axis(&views[0].eye, 2), -1.0));
+            if now >= next_look {
+                let pictures = render(&views, std::slice::from_ref(&sign));
+                let taken = start.elapsed().as_secs_f64();
+                let look = Look { pair: pair(&pictures, views), area: [243, 270, 1134, 1260], shown: &[], zoom: None };
+                let (lines, timings) = core.engine.as_mut().unwrap().read(&look).unwrap();
+                core.follow(taken, &look, lines, timings, gaze);
+                let cost = start.elapsed().as_secs_f64() - taken;
+                next_look = start.elapsed().as_secs_f64() + (cost * 1.5).clamp(0.3, 1.5);
+                k += 1;
+            } else {
+                core.poll(now, gaze);
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+        }
+        let chains: Vec<_> = core.chains.drain(..).collect();
+        println!("run {run}: {}", chains.iter().map(|c| format!("read {:.2} translated {:.2} shown {:.2}", c.read, c.translated, c.shown)).collect::<Vec<_>>().join(" | "));
+        all.extend(chains.iter().map(|c| c.shown));
+        assert_eq!(chains.len(), 5, "every line shown");
+    }
+    all.sort_by(f32::total_cmp);
+    println!("shown after the first picture: median {:.2} s, p90 {:.2} s, longest {:.2} s over {} lines", all[all.len() / 2], all[all.len() * 9 / 10], all[all.len() - 1], all.len());
+}

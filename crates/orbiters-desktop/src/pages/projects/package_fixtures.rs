@@ -135,6 +135,26 @@ impl State {
                     range: ">=3.1.0 <3.8.0-a".into(),
                     wanted: "3.9.0".into(),
                     removable: true,
+                    embedded: None,
+                }];
+            } else if name == "projects-conflict-embedded" {
+                // A package in development in the project's own Packages folder holds the change back.
+                plan.requested = vec![("orbiters.mixer".into(), "0.3.0".into())];
+                plan.conflicts = vec![coherent::Conflict {
+                    name: "orbiters.mixer".into(),
+                    display_name: "Mixer".into(), // i18n: not shown (sample package and repository names of a screenshot scene)
+                    version: "0.3.0".into(),
+                    needed_by: vec![need("orbiters.myworld", "My World", "0.1.0", ">=0.2.3 <0.3.0")], // i18n: not shown (sample package and repository names of a screenshot scene)
+                }];
+                plan.blockers = vec![coherent::Blocker {
+                    name: "orbiters.myworld".into(),
+                    display_name: "My World".into(), // i18n: not shown (sample package and repository names of a screenshot scene)
+                    version: "0.1.0".into(),
+                    dependency: "Mixer".into(), // i18n: not shown (sample package and repository names of a screenshot scene)
+                    range: ">=0.2.3 <0.3.0".into(),
+                    wanted: "0.3.0".into(),
+                    removable: false,
+                    embedded: Some("orbiters.myworld".into()),
                 }];
             } else {
                 plan.steps = vec![

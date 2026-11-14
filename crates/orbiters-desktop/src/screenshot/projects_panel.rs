@@ -38,6 +38,7 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
         "projects-missing-done",
         "projects-conflict",
         "projects-conflict-blocked",
+        "projects-conflict-embedded",
         "projects-unity-open",
         "projects-unity-kill",
         "projects-unity-closing",

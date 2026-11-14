@@ -1,8 +1,10 @@
 //! A package change that conflicts (an installed package's dependency range does not accept a version it installs)
 //! made coherent instead of cancelled: the requested versions, then for each installed package whose range the
 //! change breaks, its newest version that accepts what the plan installs, until nothing conflicts. A package with no
-//! such version blocks the plan, named with the range it holds, unless the person chooses to remove it too. Nothing
-//! is written here; `vpm::Change::Plan` applies a solved plan through the usual install path.
+//! such version blocks the plan, named with the range it holds, unless the person chooses to remove it too. A folder
+//! of the project's Packages that no repository installed (a package in development) counts with its own
+//! package.json: it is named, with its version and range, and it is never removed, as nothing here could bring it
+//! back. Nothing is written here; `vpm::Change::Plan` applies a solved plan through the usual install path.
 use orbiters_i18n::tr;
 use crate::updates::Step;
 use std::collections::HashMap;
@@ -43,6 +45,9 @@ pub struct Blocker {
     pub wanted: String,
     /// Nothing else that stays needs it and it was not asked for: removing it solves this.
     pub removable: bool,
+    /// Its folder under the project's Packages when no repository installed it (a package in development, a copy put
+    /// there by hand): no other version can take its place and it is never removed; its package.json holds the range.
+    pub embedded: Option<String>,
 }
 /// A change that conflicted, made coherent: everything that has to change with it, why, and what still blocks it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
@@ -94,6 +99,12 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
     let mut install: Vec<(String, String)> = requested.to_vec();
     let mut why: HashMap<String, String> = requested.iter().map(|(n, _)| (n.clone(), tr("asked for").to_string())).collect();
     let unity = project.unity_version();
+    // The version in the project: a repository's package from the lock, a folder of Packages from its package.json.
+    let current = |c: &str| project.all_packages().find(|p| p.name() == c).map(|p| p.version().to_string()).unwrap_or_default();
+    if let Some(r) = remove.iter().find(|r| project.unlocked_packages().iter().any(|(_, m)| m.as_ref().is_some_and(|m| m.name() == r.as_str()))) {
+        out.error = Some(tr!("{package} is a folder in this project's Packages, which is never removed here", package = display(r)));
+        return out;
+    }
     for round in 0..12 {
         let mut infos = vec![];
         for (n, v) in &install {
@@ -117,9 +128,9 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
             }
         };
         // The versions the plan ends with, and their dependency ranges: what it installs over what is locked.
-        let mut planned: HashMap<String, Version> = project.locked_packages().map(|l| (l.name().to_string(), l.version().clone())).collect();
+        let mut planned: HashMap<String, Version> = project.all_packages().map(|l| (l.name().to_string(), l.version().clone())).collect();
         let mut deps: HashMap<String, Vec<(String, VersionRange)>> = project
-            .locked_packages()
+            .all_packages()
             .map(|l| (l.name().to_string(), l.dependencies().iter().map(|(k, v)| (k.to_string(), v.clone())).collect()))
             .collect();
         for (name, change) in changes.package_changes() {
@@ -158,7 +169,7 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
                         .map(|c| Need {
                             name: c.clone(),
                             display_name: display(c),
-                            version: project.get_locked(c).map(|l| l.version().to_string()).unwrap_or_default(),
+                            version: current(c),
                             range: project.get_locked(c).and_then(|l| l.dependencies().get(d.as_str()).map(ToString::to_string)).unwrap_or_else(|| range_of(c, d)),
                         })
                         .collect(),
@@ -210,7 +221,7 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
                 return out;
             }
             for c in requirers {
-                let current = project.get_locked(c).map(|l| l.version().to_string()).unwrap_or_default();
+                let current = current(c);
                 let fixed = install.iter().any(|(n, _)| n == c);
                 let selector = VersionSelector::latest_for(Some(unity), prerelease);
                 let mut candidates: Vec<PackageInfo<'_>> = packages.find_packages(c).filter(|p| selector.satisfies(p.package_json())).collect();
@@ -228,6 +239,7 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
                     None => {
                         // Removable when no other package that stays needs it.
                         let needed = deps.iter().any(|(p, ds)| p != c && ds.iter().any(|(dep, _)| dep == c));
+                        let embedded = project.unlocked_packages().iter().find(|(_, m)| m.as_ref().is_some_and(|m| m.name() == c.as_str())).map(|(folder, _)| folder.to_string());
                         out.blockers.push(Blocker {
                             name: c.clone(),
                             display_name: display(c),
@@ -235,7 +247,8 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
                             dependency: display(d),
                             range: range_of(c, d),
                             wanted: wanted.clone(),
-                            removable: !needed && !requested.iter().any(|(n, _)| n == c),
+                            removable: !needed && !requested.iter().any(|(n, _)| n == c) && embedded.is_none(),
+                            embedded,
                         });
                     }
                 }

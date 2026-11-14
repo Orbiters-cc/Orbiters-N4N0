@@ -1,8 +1,9 @@
 //! The dialog of a package change that conflicted (a version list, an Update button, Update all): what conflicts
 //! (who needs which versions), the plan that makes the whole coherent (each package from → to, added or removed,
 //! and why) and one button applying it through `vpm::Change::Plan`, the usual install path. A package no version of
-//! which fits blocks the plan, named with the range it holds; Remove it too solves again without it. Cancel changes
-//! nothing.
+//! which fits blocks the plan, named with the range it holds; Remove it too solves again without it. A blocker that is
+//! a folder of the project's Packages (a package in development) is never removed: its package.json, which holds the
+//! range, is shown in the file manager instead. Cancel changes nothing.
 use orbiters_i18n::tr;
 use super::art::{self, glyph};
 use super::state::{Outcome, State};
@@ -101,14 +102,25 @@ pub(super) fn body(ui: &mut Ui, state: &mut State) {
         art::caps(ui, tr("What blocks it"));
         let mut removing: Option<String> = None;
         for b in &plan.blockers {
-            let text = tr!(
-                "{package} {version} accepts {dependency} {range} only, and none of its versions in your repositories works with {wanted}.",
-                package = b.display_name,
-                version = b.version,
-                dependency = b.dependency,
-                range = b.range,
-                wanted = b.wanted
-            );
+            let text = if b.embedded.is_some() {
+                tr!(
+                    "{package} {version} is a folder in this project's Packages, so no other version can take its place. It accepts {dependency} {range} only: change that range in its package.json to go on with {wanted}.",
+                    package = b.display_name,
+                    version = b.version,
+                    dependency = b.dependency,
+                    range = b.range,
+                    wanted = b.wanted
+                )
+            } else {
+                tr!(
+                    "{package} {version} accepts {dependency} {range} only, and none of its versions in your repositories works with {wanted}.",
+                    package = b.display_name,
+                    version = b.version,
+                    dependency = b.dependency,
+                    range = b.range,
+                    wanted = b.wanted
+                )
+            };
             let galley = ui.painter().layout_job(Txt::new(&text, 12.0).color(theme::FG_2).line_height(18.0).job(w - 44.0 - 150.0));
             let (r, _) = ui.allocate_exact_size(vec2(w, (galley.size().y + 24.0).max(56.0)), Sense::hover());
             let p = ui.painter();
@@ -116,7 +128,16 @@ pub(super) fn body(ui: &mut Ui, state: &mut State) {
             widgets::icon(p, pos2(r.left() + 20.0, r.top() + 20.0), icons::X_CIRCLE, 14.0, theme::DANGER);
             p.galley(pos2(r.left() + 36.0, r.top() + 12.0), galley, theme::FG_2);
             let br = Rect::from_min_size(pos2(r.right() - 12.0 - 132.0, r.center().y - 16.0), vec2(132.0, 32.0));
-            if b.removable {
+            if let Some(folder) = &b.embedded {
+                let resp = Button::new(tr("Show its file")).icon(icons::FOLDER_OPEN).variant(Variant::Secondary).size(Size::Sm).width(132.0).id_salt(("conflict-show", &b.name)).show_at(ui, br);
+                state.anchors.insert(format!("conflict-show-{}", b.name), br);
+                if widgets::activated(&resp.on_hover_text(tr("Shows its package.json in the file manager"))) {
+                    let manifest = state.conflict.as_ref().map(|v| v.path.join("Packages").join(folder).join("package.json"));
+                    if let Some(Err(e)) = manifest.map(|m| orbiters_projects::reveal(&m)) {
+                        state.error = Some(format!("{e:#}"));
+                    }
+                }
+            } else if b.removable {
                 let resp = Button::new(tr("Remove it too")).icon(glyph::TRASH_SIMPLE).variant(Variant::Danger).size(Size::Sm).width(132.0).enabled(!state.running()).id_salt(("conflict-remove", &b.name)).show_at(ui, br);
                 state.anchors.insert(format!("conflict-remove-{}", b.name), br);
                 if widgets::activated(&resp.on_hover_text(tr("Solves the plan again without it; nothing changes before you apply"))) {

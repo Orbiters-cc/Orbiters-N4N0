@@ -706,7 +706,7 @@ impl Projects {
                     "next": if conflicted.plan.solved() {
                         "Nothing was changed. The plan makes it coherent: if it removes packages or changes others, tell the person, then call unity_change_packages with action apply_plan and the plan's install and remove."
                     } else {
-                        "Nothing was changed, and no plan solves it as it is: its blockers say which installed packages stand in the way. unity_change_packages with action solve and remove can try without them."
+                        "Nothing was changed, and no plan solves it as it is: its blockers say which installed packages stand in the way. unity_change_packages with action solve and remove can try without them, except a blocker with embedded set: that one is a folder of the project's Packages, never removed here, and its own package.json holds the range."
                     },
                 })),
                 Err(e) => {

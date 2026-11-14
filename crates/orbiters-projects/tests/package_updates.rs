@@ -392,6 +392,49 @@ fn a_conflicting_sdk_update_becomes_a_coherent_plan_applied_at_once() {
     });
 }
 
+/// A package in development (a folder of the project's Packages no repository installed) that holds a change back is
+/// named from its own package.json, with its version and range, and is never offered for removal nor removed.
+#[test]
+fn a_package_in_the_projects_own_folder_blocks_with_its_name_version_and_range_and_is_never_removed() {
+    let server = sample_avatar(true);
+    let root = tempfile::tempdir().unwrap();
+    let projects = tempfile::tempdir().unwrap();
+    let source = projects.path().join("N4N0 sample avatar");
+    let rt = orbiters_projects::runtime().unwrap();
+    rt.block_on(async {
+        sample_project(root.path(), &server, &source).await;
+        let folder = source.join("Packages/My tool in progress");
+        std::fs::create_dir_all(&folder).unwrap();
+        orbiters_projects::write_json(
+            &folder.join("package.json"),
+            &json!({"name":"my.tool","displayName":"My Tool","version":"0.1.0","vpmDependencies":{"com.vrchat.avatars":">=3.7.0 <3.8.0"}}),
+        )
+        .unwrap();
+        let plan = conflicted(install(root.path(), &source, &[("com.vrchat.avatars", "3.9.0")]).await.unwrap_err());
+        assert!(!plan.solved(), "{plan:#?}");
+        let need = plan.conflicts.iter().flat_map(|c| &c.needed_by).find(|n| n.name == "my.tool").expect("named among who needs another version");
+        assert_eq!((need.display_name.as_str(), need.version.as_str(), need.range.as_str()), ("My Tool", "0.1.0", ">=3.7.0 <3.8.0"));
+        assert_eq!(plan.blockers.len(), 1, "{plan:#?}");
+        let b = &plan.blockers[0];
+        assert_eq!((b.name.as_str(), b.display_name.as_str(), b.version.as_str(), b.range.as_str(), b.wanted.as_str()), ("my.tool", "My Tool", "0.1.0", ">=3.7.0 <3.8.0", "3.9.0"));
+        assert_eq!(b.embedded.as_deref(), Some("My tool in progress"));
+        assert!(!b.removable);
+        // Asked anyway (the bridge can): refused, and the folder is still there.
+        let plan = coherent::solve(root.path(), &source, &plan.requested, &["my.tool".into()], false).await.unwrap();
+        assert!(!plan.solved() && plan.error.as_deref().is_some_and(|e| e.contains("My Tool")), "{plan:#?}");
+        assert!(folder.join("package.json").is_file());
+        // Its range widened, as the dialog says: the same change now goes through with the others.
+        orbiters_projects::write_json(
+            &folder.join("package.json"),
+            &json!({"name":"my.tool","displayName":"My Tool","version":"0.1.0","vpmDependencies":{"com.vrchat.avatars":">=3.7.0 <3.10.0"}}),
+        )
+        .unwrap();
+        let plan = conflicted(install(root.path(), &source, &[("com.vrchat.avatars", "3.9.0")]).await.unwrap_err());
+        assert!(plan.solved() && plan.blockers.is_empty(), "{plan:#?}");
+        assert!(plan.steps.iter().all(|s| s.name != "my.tool"), "{plan:#?}");
+    });
+}
+
 #[test]
 fn a_tool_without_a_coherent_version_blocks_until_removed_and_failures_roll_back() {
     let server = sample_avatar(false);

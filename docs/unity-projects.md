@@ -282,7 +282,10 @@ The **Update to coherent versions** dialog (`conflict.rs`) shows what conflicts 
 change (from → to, added, removed) with why, and **Update n packages together**, which applies `vpm::Change::Plan`:
 removals, then the exact versions, the manifest and its packages put back on any failure. A package with no fitting
 version blocks the plan, named with the range it holds; **Remove it too** solves again without it when nothing else
-needs it. Cancel changes nothing.
+needs it. A folder of the project's `Packages` that no repository installed (a package in development, a copy put
+there by hand) counts with its own `package.json`: it is named, with its version and range, it is never removed
+(`Blocker::embedded`, refused by `solve` too), and **Show its file** shows that `package.json`, where the range is
+changed. Cancel changes nothing.
 
 ## A project open in Unity
 

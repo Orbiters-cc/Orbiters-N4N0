@@ -264,5 +264,12 @@ pub(crate) fn display_names(project: &UnityProject, packages: &impl PackageColle
             out.insert(name.to_string(), d.to_string());
         }
     }
+    // A folder of the project's Packages that no repository installed (a package in development, a copy put there by
+    // hand) is named by its own package.json.
+    for manifest in project.unlocked_packages().iter().filter_map(|(_, m)| m.as_ref()) {
+        if let Some(d) = manifest.display_name() {
+            out.insert(manifest.name().to_string(), d.to_string());
+        }
+    }
     out
 }

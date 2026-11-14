@@ -30,6 +30,7 @@ const LANGUAGES: &[&str] = &[
 ];
 const EOS: i64 = 2;
 const UNK: i64 = 3;
+const PAD: i64 = 1;
 /// Tokens a translation may take at most: a line on a sign.
 const MOST_TOKENS: usize = 64;
 
@@ -138,6 +139,8 @@ pub struct Builtin {
     past: Vec<String>,
     heads: usize,
     head_size: usize,
+    /// The decoder's steps of the last [`Builtin::lines`].
+    pub steps: usize,
 }
 
 impl Builtin {
@@ -146,15 +149,20 @@ impl Builtin {
     }
 
     pub fn load(threads: usize) -> anyhow::Result<Self> {
+        Self::load_with(threads, false)
+    }
+
+    /// With the decoder's threads spinning between its many small steps, or not (`tests/still.rs` measures both).
+    pub fn load_with(threads: usize, spinning: bool) -> anyhow::Result<Self> {
         let path = |f: &ModelFile| crate::models::path(f);
         anyhow::ensure!(Self::installed(), "the built-in translator is not downloaded"); // i18n: not shown (log detail)
         let encoder = crate::ocr::session(&path(&FILES[0]), threads)?;
-        let decoder = crate::ocr::session(&path(&FILES[1]), threads)?;
+        let decoder = crate::ocr::session_with(&path(&FILES[1]), threads, spinning)?;
         let pieces = Pieces::parse(&std::fs::read(path(&FILES[2]))?).ok_or_else(|| anyhow::anyhow!("unreadable SentencePiece model"))?; // i18n: not shown (log detail)
         let ids: HashMap<String, i64> = serde_json::from_str(&std::fs::read_to_string(path(&FILES[3]))?)?;
         let words = ids.iter().map(|(k, v)| (*v, k.clone())).collect();
         let past: Vec<String> = decoder.inputs.iter().map(|i| i.name.clone()).filter(|n| n.starts_with("past_key_values")).collect();
-        Ok(Self { encoder, decoder, pieces, ids, words, past, heads: 16, head_size: 64 })
+        Ok(Self { encoder, decoder, pieces, ids, words, past, heads: 16, head_size: 64, steps: 0 })
     }
 
     fn language(&self, tag: &str) -> Option<i64> {
@@ -164,35 +172,68 @@ impl Builtin {
 
     /// One line, greedy.
     pub fn line(&mut self, text: &str, source: &str, target: &str) -> anyhow::Result<String> {
+        let mut out = None;
+        self.lines(&[(text, source)], target, &mut |_, t| out = Some(t))?;
+        out.ok_or_else(|| anyhow::anyhow!("no translation")) // i18n: not shown (log detail)
+    }
+
+    /// Several lines at once into `target`, greedy, each handed to `done` (its index, its translation) as soon as it is
+    /// finished. One pass of the decoder serves every line: on the processor a step's time is mostly the reading of the
+    /// model's weights (330 MB a step), about the same for one line or eight, so eight lines take not much longer than the
+    /// longest of them alone (`tests/still.rs`, `the_built_in_translator_translates_lines_together`). A source language
+    /// the model does not know is read as English.
+    pub fn lines(&mut self, items: &[(&str, &str)], target: &str, done: &mut dyn FnMut(usize, String)) -> anyhow::Result<()> {
         use ort::value::Tensor;
         let e = |e: ort::Error| anyhow::anyhow!("{e}");
-        let (Some(src), Some(tgt)) = (self.language(source), self.language(target)) else { anyhow::bail!("language not known to the model") }; // i18n: not shown (log detail)
-        let mut input: Vec<i64> = vec![src];
-        input.extend(self.pieces.encode(text).iter().map(|p| *self.ids.get(p).unwrap_or(&UNK)));
-        input.push(EOS);
-        let n = input.len();
-        let mask = vec![1i64; n];
+        let Some(tgt) = self.language(target) else { anyhow::bail!("language not known to the model") }; // i18n: not shown (log detail)
+        if items.is_empty() {
+            return Ok(());
+        }
+        let english = self.language("en").unwrap_or(tgt);
+        let inputs: Vec<Vec<i64>> = items
+            .iter()
+            .map(|(text, source)| {
+                let mut v = vec![self.language(source).unwrap_or(english)];
+                v.extend(self.pieces.encode(text).iter().map(|p| *self.ids.get(p).unwrap_or(&UNK)));
+                v.truncate(MOST_TOKENS);
+                v.push(EOS);
+                v
+            })
+            .collect();
+        let b = inputs.len();
+        let n = inputs.iter().map(Vec::len).max().unwrap_or(1);
+        let (mut ids, mut mask) = (Vec::with_capacity(b * n), Vec::with_capacity(b * n));
+        for v in &inputs {
+            ids.extend(v.iter().copied().chain(std::iter::repeat_n(PAD, n - v.len())));
+            mask.extend(std::iter::repeat_n(1i64, v.len()).chain(std::iter::repeat_n(0, n - v.len())));
+        }
+        let mask = Tensor::from_array(([b, n], mask)).map_err(e)?.into_dyn();
         let hidden = {
-            let outputs = self
-                .encoder
-                .run(ort::inputs!["input_ids" => Tensor::from_array(([1usize, n], input)).map_err(e)?, "attention_mask" => Tensor::from_array(([1usize, n], mask.clone())).map_err(e)?])
-                .map_err(e)?;
+            let ids = Tensor::from_array(([b, n], ids)).map_err(e)?.into_dyn();
+            let outputs = self.encoder.run(ort::inputs!["input_ids" => &ids, "attention_mask" => &mask]).map_err(e)?;
             let (shape, values) = outputs[0].try_extract_tensor::<f32>().map_err(e)?;
-            (shape.iter().map(|d| *d as usize).collect::<Vec<_>>(), values.to_vec())
+            let shape: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
+            Tensor::from_array((shape, values.to_vec())).map_err(e)?.into_dyn()
         };
         let mut past: HashMap<String, ort::value::DynValue> = HashMap::new();
         // The first step reads no cache (use_cache_branch false), but its inputs need a shape: ONNX Runtime takes no
         // zero-length tensor from data, so one step of zeros stands in.
         for name in &self.past {
-            past.insert(name.clone(), Tensor::<f32>::from_array(([1usize, self.heads, 1, self.head_size], vec![0f32; self.heads * self.head_size])).map_err(e)?.into_dyn());
+            past.insert(name.clone(), Tensor::<f32>::from_array(([b, self.heads, 1, self.head_size], vec![0f32; b * self.heads * self.head_size])).map_err(e)?.into_dyn());
         }
-        let mut out: Vec<i64> = Vec::new();
-        let mut feed: Vec<i64> = vec![EOS, tgt];
+        // A sign's translation is at most about three times its tokens: past that the model repeats itself, and every step
+        // costs all the lines of the pass.
+        let limit: Vec<usize> = inputs.iter().map(|v| (3 * v.len() + 8).min(MOST_TOKENS)).collect();
+        let mut out: Vec<Vec<i64>> = vec![Vec::new(); b];
+        let mut finished = vec![false; b];
+        let mut feed: Vec<i64> = (0..b).flat_map(|_| [EOS, tgt]).collect();
+        let mut width = 2;
+        let text_of = |out: &[i64], words: &HashMap<i64, String>| out.iter().filter_map(|i| words.get(i)).cloned().collect::<String>().replace('▁', " ").trim().to_string();
         for step in 0..MOST_TOKENS {
             let mut inputs: Vec<(String, ort::session::SessionInputValue)> = vec![
-                ("input_ids".into(), Tensor::from_array(([1usize, feed.len()], feed.clone())).map_err(e)?.into()),
-                ("encoder_attention_mask".into(), Tensor::from_array(([1usize, n], mask.clone())).map_err(e)?.into()),
-                ("encoder_hidden_states".into(), Tensor::from_array((hidden.0.clone(), hidden.1.clone())).map_err(e)?.into()),
+                ("input_ids".into(), Tensor::from_array(([b, width], std::mem::take(&mut feed))).map_err(e)?.into()),
+                ("encoder_attention_mask".into(), (&mask).into()),
+                ("encoder_hidden_states".into(), (&hidden).into()),
                 ("use_cache_branch".into(), Tensor::from_array(([1usize], vec![step > 0])).map_err(e)?.into()),
             ];
             // Borrowed: the encoder's part of the cache stays for every later step.
@@ -200,11 +241,16 @@ impl Builtin {
                 inputs.push((name.clone(), (&past[name]).into()));
             }
             let mut outputs = self.decoder.run(inputs).map_err(e)?;
-            let next = {
+            self.steps = step + 1;
+            let next: Vec<i64> = {
                 let (shape, logits) = outputs[0].try_extract_tensor::<f32>().map_err(e)?;
                 let vocab = shape[shape.len() - 1] as usize;
-                let last = &logits[logits.len() - vocab..];
-                last.iter().enumerate().fold((0usize, f32::MIN), |b, (i, &v)| if v > b.1 { (i, v) } else { b }).0 as i64
+                (0..b)
+                    .map(|r| {
+                        let at = (r * width + width - 1) * vocab;
+                        logits[at..at + vocab].iter().enumerate().fold((0usize, f32::MIN), |m, (i, &v)| if v > m.1 { (i, v) } else { m }).0 as i64
+                    })
+                    .collect()
             };
             for name in &self.past {
                 let present = name.replace("past_key_values", "present");
@@ -214,14 +260,27 @@ impl Builtin {
                 }
             }
             drop(outputs);
-            if next == EOS {
-                break;
+            for r in 0..b {
+                if finished[r] {
+                    feed.push(PAD);
+                } else if next[r] == EOS || out[r].len() >= limit[r] {
+                    finished[r] = true;
+                    done(r, text_of(&out[r], &self.words));
+                    feed.push(PAD);
+                } else {
+                    out[r].push(next[r]);
+                    feed.push(next[r]);
+                }
             }
-            out.push(next);
-            feed = vec![next];
+            if finished.iter().all(|f| *f) {
+                return Ok(());
+            }
+            width = 1;
         }
-        let text: String = out.iter().filter_map(|i| self.words.get(i)).cloned().collect();
-        Ok(text.replace('▁', " ").trim().to_string())
+        for r in (0..b).filter(|r| !finished[*r]) {
+            done(r, text_of(&out[r], &self.words));
+        }
+        Ok(())
     }
 }
 
@@ -231,14 +290,15 @@ impl Translator for Builtin {
     }
 
     fn translate(&mut self, batch: &Batch) -> Result<Vec<String>, Failure> {
-        batch
-            .lines
-            .iter()
-            .map(|l| {
-                let source = l.source.clone().or_else(|| crate::language::guess(&l.text).map(str::to_string)).unwrap_or_else(|| "en".into());
-                self.line(&l.text, &source, &batch.target).map_err(|e| Failure::BadAnswer(e.to_string()))
-            })
-            .collect()
+        let mut out = vec![String::new(); batch.lines.len()];
+        self.translate_each(batch, &mut |i, t| out[i] = t)?;
+        Ok(out)
+    }
+
+    fn translate_each(&mut self, batch: &Batch, each: &mut dyn FnMut(usize, String)) -> Result<(), Failure> {
+        let sources: Vec<String> = batch.lines.iter().map(|l| l.source.clone().or_else(|| crate::language::guess(&l.text).map(str::to_string)).unwrap_or_else(|| "en".into())).collect();
+        let items: Vec<(&str, &str)> = batch.lines.iter().zip(&sources).map(|(l, s)| (l.text.as_str(), s.as_str())).collect();
+        self.lines(&items, &batch.target, each).map_err(|e| Failure::BadAnswer(e.to_string()))
     }
 }
 

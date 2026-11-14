@@ -43,6 +43,10 @@ const EYE_AGE: Duration = Duration::from_millis(15);
 /// A look's area wider than this (pixels) is read again, in part, at its own scale.
 const ZOOM_FROM: u32 = 1500;
 const ZOOM_SIDE: u32 = 960;
+/// The built-in translator's threads (below normal priority, busy only while lines wait): 4 translate about 15 %
+/// faster than 2 (`tests/still.rs`, `the_built_in_translator_translates_lines_together`, sandbox 2026-11-14: 8 lines
+/// together 1.6 s against 2.0 s), and spinning between steps gains nothing.
+const TRANSLATOR_THREADS: usize = 4;
 /// The head turning faster than this (degrees a second) smears text and the head's pose at capture: no look then.
 const FAST_TURN: f32 = 70.0;
 
@@ -56,7 +60,7 @@ struct Shared {
     moved: [f32; 2],
     moved_at: Option<Instant>,
     /// Lines found again elsewhere than the anchors had them: by how much (anchor space), for the walking speed to learn.
-    corrections: Vec<orbiters_translate::geometry::V3>,
+    corrections: Vec<(orbiters_translate::geometry::V3, Option<f32>)>,
     /// SteamVR's eye-to-head transforms and projection tangents (left, right).
     eyes: Option<([M34; 2], [[f32; 4]; 2])>,
     /// A menu or the dashboard covers the view.
@@ -166,14 +170,24 @@ pub struct Cx<'a, 'b> {
 }
 
 /// How VRChat's frames went lately: what slows the reading down when the game is short of processor time.
+///
+/// Only SteamVR's own reasons count ([`orbiters_booster::frames`]): the frame late for the processor or the graphics
+/// card (`0x01`, `0x02`), or dropped. Before 0.3.5-dev.54 a frame presented more than once counted as late, and the
+/// time from poses to frame ready as the processor's: with Enzo's Virtual Desktop SteamVR throttles every frame (flags
+/// `0x300`, two presents, one "mis-presented": all 1899 of 1901 frames of his 2026-11-11 log), and that time includes
+/// the wait for the next refresh, so every frame was "late" and "processor-bound" (his 2026-11-14 log: 100 % late,
+/// 75-94 % processor-bound at 15 ms a frame), the reading always went three times slower, and it looked as if
+/// translating cost him frames.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameLoad {
     pub frames: usize,
     pub interval_ms: f32,
     pub app_cpu_ms: f32,
-    /// Frames whose processor time took most of the frame's budget, and frames shown late or dropped.
+    /// Frames SteamVR says were late for the processor, and frames late for either or dropped.
     pub cpu_bound: f32,
     pub late: f32,
+    /// Frames SteamVR throttled (presented more than once on purpose: a state, not lateness).
+    pub throttled: f32,
 }
 
 impl FrameLoad {
@@ -182,16 +196,15 @@ impl FrameLoad {
         if n == 0 {
             return Self::default();
         }
-        let mut intervals: Vec<f32> = frames.iter().map(|f| f.interval_ms).filter(|i| *i > 0.0).collect();
-        intervals.sort_by(|a, b| a.total_cmp(b));
-        // The frame's budget: the most common interval (the headset's refresh, or the rate SteamVR holds the game to).
-        let budget = intervals.get(intervals.len() / 4).copied().unwrap_or(11.1).max(1.0);
+        use orbiters_booster::frames::{LATE_CPU, LATE_GPU, THROTTLE_MASK};
+        let share = |keep: &dyn Fn(&orbiters_booster::frames::Frame) -> bool| frames.iter().filter(|f| keep(f)).count() as f32 / n as f32;
         Self {
             frames: n,
             interval_ms: frames.iter().map(|f| f.interval_ms).sum::<f32>() / n as f32,
             app_cpu_ms: frames.iter().map(|f| f.app_cpu_ms()).sum::<f32>() / n as f32,
-            cpu_bound: frames.iter().filter(|f| f.app_cpu_ms() > 0.9 * budget).count() as f32 / n as f32,
-            late: frames.iter().filter(|f| f.mis_presented > 0 || f.dropped > 0).count() as f32 / n as f32,
+            cpu_bound: share(&|f| f.flags & LATE_CPU != 0),
+            late: share(&|f| f.flags & (LATE_CPU | LATE_GPU) != 0 || f.dropped > 0),
+            throttled: share(&|f| f.flags & THROTTLE_MASK != 0),
         }
     }
 
@@ -289,11 +302,12 @@ impl TranslateHost {
             }
             s.moved = self.motion.total;
             // Lines found again elsewhere: how far the walk was misjudged, in tracking space, to learn the speed from.
-            for by in std::mem::take(&mut s.corrections) {
+            for (by, turned) in std::mem::take(&mut s.corrections) {
                 let by = orbiters_translate::geometry::rotate(&self.motion.to_tracking, by);
                 note(&format!(
-                    "found lines again {:.0} cm from their anchors after walking {:.2} m and turning {:.0} degrees with the sticks; walking speed x{:.2}", // i18n: not shown (a log's line)
+                    "found lines again {:.0} cm from their anchors (turned back {:.1} degrees about the head first) after walking {:.2} m and turning {:.0} degrees with the sticks; walking speed x{:.2}", // i18n: not shown (a log's line)
                     orbiters_translate::geometry::norm(by) * 100.0,
+                    turned.unwrap_or(0.0).to_degrees(),
                     self.motion.walked,
                     self.motion.turned.to_degrees(),
                     self.motion.gain
@@ -352,13 +366,14 @@ impl TranslateHost {
                 ms.sort_by(|a, b| a.total_cmp(b));
                 let p95 = ms[(ms.len() * 95 / 100).min(ms.len() - 1)];
                 note(&format!(
-                    "VRChat frames (translation {}): {} frames, interval mean {:.2} ms, p95 {p95:.2} ms, app processor {:.2} ms, processor-bound {:.0} %, late or dropped {:.1} %", // i18n: not shown (a log's line)
+                    "VRChat frames (translation {}): {} frames, interval mean {:.2} ms, p95 {p95:.2} ms, poses to ready {:.2} ms, late for the processor {:.1} %, late or dropped {:.1} %, throttled {:.0} %", // i18n: not shown (a log's line)
                     if on { "on" } else { "off" }, // i18n: not shown (a log's line)
                     l.frames,
                     l.interval_ms,
                     l.app_cpu_ms,
                     l.cpu_bound * 100.0,
-                    l.late * 100.0
+                    l.late * 100.0,
+                    l.throttled * 100.0
                 ));
             }
             self.frames_logged.clear();
@@ -589,7 +604,7 @@ fn translator(settings: &TranslateSettings, backend_lan: &mut LanFound) -> Resul
                 if !orbiters_translate::builtin::Builtin::installed() {
                     return Err(TranslateState::NoLocalTranslator);
                 }
-                orbiters_translate::builtin::Builtin::load(2).map(|b| Box::new(b) as Box<dyn Translator>).map_err(|e| TranslateState::Problem {
+                orbiters_translate::builtin::Builtin::load(TRANSLATOR_THREADS).map(|b| Box::new(b) as Box<dyn Translator>).map_err(|e| TranslateState::Problem {
                     key: orbiters_i18n::mark("The built-in translator could not start.").into(),
                     detail: Some(e.to_string()),
                 })
@@ -626,10 +641,7 @@ fn failure_state(f: &Failure) -> TranslateState {
 /// The reading thread.
 #[cfg(windows)]
 fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::MirrorSource>, Option<u32>)) {
-    use orbiters_openvr::mirror::{EyePicture, EyeReader};
-    use orbiters_translate::geometry::{compose, EyeView, Mirror};
-    use orbiters_translate::pipeline::Look;
-    use orbiters_translate::place::Pair;
+    use orbiters_openvr::mirror::EyeReader;
     lower_priority();
     // The models first (a download the first time).
     if !orbiters_translate::models::missing().is_empty() {
@@ -676,34 +688,167 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
         Ok(t) => (Core::new(Some(engine), t, reader_of(&settings, &target)), None),
         Err(state) => (Core::new(Some(engine), Box::new(Nobody), reader_of(&settings, &target)), Some(state)),
     };
+    let started = Instant::now();
+    core.clock = started;
     core.log_text = cfg!(debug_assertions) && std::env::var_os("ORBITERS_TRANSLATE_LOG_TEXT").is_some();
     core.tracker.hold_anchors = cfg!(debug_assertions) && std::env::var_os("ORBITERS_TRANSLATE_NO_MOTION").is_some();
+    // Development builds measuring the translator itself on texts seen before: `ORBITERS_TRANSLATE_NO_CACHE`.
+    core.no_cache = cfg!(debug_assertions) && std::env::var_os("ORBITERS_TRANSLATE_NO_CACHE").is_some();
+    if !core.no_cache {
+        core.keep_cache(kept_translations());
+    }
+    // The translations arriving while a look is read show at once: the reading thread takes the text reader out of the
+    // core for the read, and this thread shows what the translator gave meanwhile, every 30 ms.
+    let core = Mutex::new(core);
+    let done = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let _ = std::thread::Builder::new().name("translate show".into()).spawn_scoped(scope, || { // i18n: not shown (a thread's name)
+            lower_priority();
+            while !done.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(30));
+                let head = shared.lock().unwrap_or_else(|e| e.into_inner()).heads.back().map(|(_, h)| *h);
+                let Some(head) = head else { continue };
+                let gaze = (orbiters_translate::geometry::origin(&head), orbiters_translate::geometry::scale(orbiters_translate::geometry::axis(&head, 2), -1.0));
+                let mut c = core.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(scene) = c.poll(started.elapsed().as_secs_f64(), gaze) {
+                    shared.lock().unwrap_or_else(|e| e.into_inner()).scene = Some(scene);
+                }
+                take_logs(&mut c);
+            }
+        });
+        reading(shared, stop, &core, source, &reader, &settings, translator_state.take(), &mut lan, started);
+        done.store(true, Ordering::Relaxed);
+    });
+    core.lock().unwrap_or_else(|e| e.into_inner()).save_cache(true);
+}
+
+/// Where translations are kept between sessions (a development build in the VR sandbox keeps them in its logs folder:
+/// a test build never writes the person's own files).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn kept_translations() -> std::path::PathBuf {
+    if cfg!(debug_assertions) {
+        if let Some(dir) = std::env::var_os("ORBITERS_SANDBOX_LOGS").filter(|d| !d.is_empty()) {
+            return std::path::PathBuf::from(dir).join("translations.jsonl");
+        }
+    }
+    orbiters_core::paths::cache_dir().join("translations.jsonl")
+}
+
+/// The core's lines for translate.log, and the times of the lines shown for the first time.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn take_logs(core: &mut Core) {
+    for line in core.log.drain(..) {
+        note(&line);
+    }
+    let chains: Vec<_> = core.chains.drain(..).collect();
+    if chains.is_empty() {
+        return;
+    }
+    if core.log_text {
+        // Development builds: each line, with the time it showed, for the sandbox's measures.
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+        for c in &chains {
+            note(&format!("first shown at {unix:.3}: picture at {:.3}, read +{:.0} ms, translated +{:.0} ms, shown +{:.0} ms, {:.0} degrees off the gaze{}", unix - c.shown as f64, c.read * 1000.0, c.translated * 1000.0, c.shown * 1000.0, c.off_deg, if c.known { " (known)" } else { "" })); // i18n: not shown (a log's line)
+        }
+    }
+    CHAINS.lock().unwrap_or_else(|e| e.into_inner()).extend(chains);
+}
+
+/// The lines shown for the first time since translate.log last said how long they took.
+#[cfg_attr(not(windows), allow(dead_code))]
+static CHAINS: Mutex<Vec<orbiters_translate::core::Chain>> = Mutex::new(Vec::new());
+
+/// What the lines shown for the first time took, for translate.log: from the picture they were first read in.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn chains_line(chains: &[orbiters_translate::core::Chain]) -> Option<String> {
+    if chains.is_empty() {
+        return None;
+    }
+    let spread = |f: &dyn Fn(&orbiters_translate::core::Chain) -> f32| {
+        let mut v: Vec<f32> = chains.iter().map(f).collect();
+        v.sort_by(f32::total_cmp);
+        (v[v.len() / 2], v[(v.len() * 9 / 10).min(v.len() - 1)], v[v.len() - 1])
+    };
+    let (shown, shown90, longest) = spread(&|c| c.shown);
+    let (read, _, _) = spread(&|c| c.read);
+    let (translated, _, _) = spread(&|c| c.translated.max(0.0));
+    Some(format!(
+        "{} lines shown for the first time ({} known before): picture to shown median {shown:.1} s, p90 {shown90:.1} s, longest {longest:.1} s; read {read:.1} s, translated {translated:.1} s (medians)", // i18n: not shown (a log's line)
+        chains.len(),
+        chains.iter().filter(|c| c.known).count()
+    ))
+}
+
+/// How often to look: about as often as a look takes and a half (two threads of the text reader at below normal
+/// priority, idle half the time at most), from 0.3 s to 1.5 s. Twice rarer while VRChat is really short of time (its
+/// frames late for the processor or dropped, [`FrameLoad::busy`]) and while nothing changes (the last look found no
+/// new line and the head kept still).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pace_for(cost: Duration, busy: bool, idle: bool) -> Duration {
+    let pace = (cost * 3 / 2).clamp(Duration::from_millis(300), Duration::from_millis(1500));
+    let pace = if busy { (pace * 2).clamp(Duration::from_secs(1), Duration::from_secs(3)) } else { pace };
+    if idle {
+        (pace * 2).min(Duration::from_millis(1500))
+    } else {
+        pace
+    }
+}
+
+/// The reading loop of [`run`].
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn reading(
+    shared: &Mutex<Shared>,
+    stop: &AtomicBool,
+    core: &Mutex<Core>,
+    source: vr::compositor::MirrorSource,
+    reader: &orbiters_openvr::mirror::EyeReader,
+    settings: &TranslateSettings,
+    translator_state: Option<TranslateState>,
+    lan: &mut LanFound,
+    started: Instant,
+) {
+    use orbiters_openvr::mirror::EyePicture;
+    use orbiters_translate::geometry::{compose, EyeView, Mirror};
+    use orbiters_translate::pipeline::Look;
+    use orbiters_translate::place::Pair;
+    let lock = || core.lock().unwrap_or_else(|e| e.into_inner());
+    let reader_of = |s: &TranslateSettings, target: &str| Reader { target: target.to_string(), reads: if s.keep_english { vec!["en".to_string()] } else { vec![] } };
+    let mut translator_state = translator_state;
     let mut in_use = settings.clone();
     let mut translator_checked = Instant::now();
     // The built-in translator's download, on a thread of its own while reading goes on: bytes so far, in all, and
     // whether it ended (and how).
     let fetching: Arc<Mutex<Option<(u64, u64, Option<Result<(), String>>)>>> = Arc::default();
     let mut pictures: [EyePicture; 2] = Default::default();
-    let started = Instant::now();
-    let mut pace = Duration::from_millis(400);
+    let mut cost = Duration::from_millis(250);
     let mut last_look: Option<Instant> = None;
     let mut costs: VecDeque<f32> = VecDeque::new();
-    // What the last ten seconds were spent on, for translate.log.
+    // What the last ten seconds were spent on, for translate.log: looks, and their parts (eye pictures, finding lines,
+    // reading them, placing them; milliseconds).
     let (mut looks, mut paused_turns, mut turning_turns, mut reported) = (0u32, 0u32, 0u32, Instant::now());
+    let mut parts = [0f32; 4];
     note(&format!("reading started; translator: {}", if translator_state.is_none() { "ready" } else { "none yet" })); // i18n: not shown (a log's line)
     // The eyes' size, known after a first look (Quest Pro through Virtual Desktop: 3168 x 3456); until then, whole.
     let mut whole_size = [u32::MAX / 2; 2];
     let mut game_busy = false;
-    let mut last_gaze = None;
+    // The head stopped turning (or a menu went): text just came into view, and is looked at at once.
+    let mut held_back = false;
+    // The last look found no new line, and the head then (anchor space).
+    let mut quiet: Option<M34> = None;
     while !stop.load(Ordering::Relaxed) {
         let (heads, eyes, paused, shown, now_settings, moved, moved_at) = {
             let s = shared.lock().unwrap_or_else(|e| e.into_inner());
             (s.heads.clone(), s.eyes, s.paused, s.shown.clone(), s.settings.clone(), s.moved, s.moved_at)
         };
-        core.tracker.moved = moved;
-        // VRChat shows the sticks' motion a little later than they are read: a look up to 0.4 s after they moved the
-        // player does not re-anchor.
-        core.tracker.moving = moved_at.is_some_and(|t| t.elapsed() < Duration::from_millis(400));
+        {
+            let mut c = lock();
+            c.tracker.moved = moved;
+            // VRChat shows the sticks' motion a little later than they are read: a look up to 0.4 s after they moved
+            // the player does not re-anchor.
+            c.tracker.moving = moved_at.is_some_and(|t| t.elapsed() < Duration::from_millis(400));
+            c.save_cache(false);
+        }
         // Settings changed: another translator, another language.
         if let Some((s, target)) = now_settings {
             let translator_changed = s.provider != in_use.provider || s.server != in_use.server || s.model != in_use.model || s.orbiters_agreed != in_use.orbiters_agreed;
@@ -732,55 +877,74 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
             let retry = translator_state.is_some() && (translator_checked.elapsed() > Duration::from_secs(15) || (downloaded && translator_state == Some(TranslateState::NoLocalTranslator)));
             if translator_changed || retry {
                 translator_checked = Instant::now();
-                match translator(&s, &mut lan) {
+                match translator(&s, lan) {
                     Ok(t) => {
-                        core.set_translator(t);
+                        lock().set_translator(t);
                         translator_state = None;
                     }
                     Err(state) => {
-                        core.set_translator(Box::new(Nobody));
+                        lock().set_translator(Box::new(Nobody));
                         translator_state = Some(state);
                     }
                 }
             }
-            core.set_reader(reader_of(&s, &target));
+            lock().set_reader(reader_of(&s, &target));
             in_use = s;
         }
         let turning = turn_speed(&heads) > FAST_TURN;
         if reported.elapsed() >= Duration::from_secs(10) {
             let s = shared.lock().unwrap_or_else(|e| e.into_inner()).status.clone();
             let mean = if costs.is_empty() { 0.0 } else { costs.iter().sum::<f32>() / costs.len() as f32 };
-            note(&format!("{looks} looks in {:.0} s (mean {mean:.0} ms, pace {} ms), paused {paused_turns}, turning {turning_turns}; {} lines, {} shown; {:?}", reported.elapsed().as_secs_f32(), pace.as_millis(), s.lines, s.shown, s.state)); // i18n: not shown (a log's line)
-            (looks, paused_turns, turning_turns, reported) = (0, 0, 0, Instant::now());
+            let each = parts.map(|p| p / looks.max(1) as f32);
+            note(&format!(
+                "{looks} looks in {:.0} s (mean {mean:.0} ms: pictures {:.0}, finding {:.0}, reading {:.0}, placing {:.0}; pace {} ms), paused {paused_turns}, turning {turning_turns}; {} lines, {} shown; {:?}", // i18n: not shown (a log's line)
+                reported.elapsed().as_secs_f32(),
+                each[0],
+                each[1],
+                each[2],
+                each[3],
+                pace_for(cost, game_busy, false).as_millis(),
+                s.lines,
+                s.shown,
+                s.state
+            ));
+            if let Some(line) = chains_line(&std::mem::take(&mut *CHAINS.lock().unwrap_or_else(|e| e.into_inner()))) {
+                note(&line);
+            }
+            (looks, paused_turns, turning_turns, reported, parts) = (0, 0, 0, Instant::now(), [0.0; 4]);
         }
         paused_turns += paused as u32;
         turning_turns += (turning && !paused) as u32;
-        // VRChat short of processor time: looks three times rarer, at most every four seconds.
         let load = shared.lock().unwrap_or_else(|e| e.into_inner()).load;
-        let pace_now = if load.busy() { (pace * 3).clamp(Duration::from_millis(1500), Duration::from_secs(4)) } else { pace };
         if load.busy() != game_busy {
             game_busy = load.busy();
-            note(&format!("VRChat {}: looks every {} ms", if game_busy { "short of processor time" } else { "at ease again" }, pace_now.as_millis())); // i18n: not shown (a log's line)
+            note(&format!("VRChat {}: looks every {} ms", if game_busy { "short of processor time" } else { "at ease again" }, pace_for(cost, game_busy, false).as_millis())); // i18n: not shown (a log's line)
         }
-        if paused || turning || last_look.is_some_and(|t| t.elapsed() < pace_now) {
+        // Nothing new last time and the head still since: a slower pace until something changes.
+        let idle = match (quiet, heads.back()) {
+            (Some(then), Some((_, now))) => {
+                let turned = orbiters_translate::geometry::dot(orbiters_translate::geometry::axis(&then, 2), orbiters_translate::geometry::axis(now, 2)).clamp(-1.0, 1.0).acos().to_degrees();
+                let walked = orbiters_translate::geometry::norm(orbiters_translate::geometry::sub(orbiters_translate::geometry::origin(&then), orbiters_translate::geometry::origin(now)));
+                turned < 4.0 && walked < 0.1
+            }
+            _ => false,
+        };
+        let pace_now = pace_for(cost, game_busy, idle);
+        if paused || turning {
+            held_back = true;
+        }
+        let due = held_back || last_look.is_none_or(|t| t.elapsed() >= pace_now);
+        if paused || turning || !due {
             if paused {
                 let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
                 if !matches!(s.status.state, TranslateState::Problem { .. }) {
                     s.status.state = TranslateState::Paused;
                 }
             }
-            // A translation that arrives meanwhile shows now.
-            if let Some(gaze) = last_gaze {
-                if let Some(scene) = core.poll(started.elapsed().as_secs_f64(), gaze) {
-                    shared.lock().unwrap_or_else(|e| e.into_inner()).scene = Some(scene);
-                }
-                for line in core.log.drain(..) {
-                    note(&line);
-                }
-            }
-            std::thread::sleep(Duration::from_millis(40));
+            std::thread::sleep(Duration::from_millis(30));
             continue;
         }
+        held_back = false;
         let Some((eye_to_head, raw)) = eyes else {
             std::thread::sleep(Duration::from_millis(50));
             continue;
@@ -796,7 +960,9 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
             std::thread::sleep(Duration::from_secs(1));
             continue;
         }
-        let Some(head) = head_at(&heads, began.checked_sub(EYE_AGE).unwrap_or(began)) else { continue };
+        let pictures_ms = began.elapsed().as_secs_f32() * 1000.0;
+        let taken = began.checked_sub(EYE_AGE).unwrap_or(began);
+        let Some(head) = head_at(&heads, taken) else { continue };
         let whole = [pictures[0].whole[0] as f32, pictures[0].whole[1] as f32];
         let views = [0, 1].map(|k| EyeView { eye: compose(&head, &eye_to_head[k]), mirror: Mirror::whole_eye(raw[k]), size: whole });
         whole_size = pictures[0].whole;
@@ -820,23 +986,40 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
                 [x, y, side, side]
             });
         let look = Look { pair, area, shown: &shown, zoom };
-        last_gaze = Some(gaze);
-        let step = core.step(started.elapsed().as_secs_f64(), &look, gaze);
-        for line in core.log.drain(..) {
-            note(&line);
-        }
-        let cost = began.elapsed();
+        // Read with the text reader out of the core: what the translator gives meanwhile shows.
+        let engine = lock().engine.take();
+        let step = match engine {
+            Some(mut engine) => {
+                let read = engine.read(&look);
+                lock().engine = Some(engine);
+                read
+            }
+            None => Err(anyhow::anyhow!("the text reader is not loaded")), // i18n: not shown (log detail)
+        };
+        let now = started.elapsed().as_secs_f64() - began.elapsed().as_secs_f64() - EYE_AGE.as_secs_f64();
+        let step = step.map(|(lines, timings)| {
+            let mut c = lock();
+            let before = c.tracker.tracks.iter().map(|t| t.id).max().unwrap_or(0);
+            let scene = c.follow(now, &look, lines, timings, gaze);
+            let new_lines = c.tracker.tracks.iter().any(|t| t.id > before);
+            take_logs(&mut c);
+            (scene, new_lines)
+        });
+        cost = began.elapsed();
         costs.push_back(cost.as_secs_f32() * 1000.0);
         if costs.len() > 20 {
             costs.pop_front();
         }
-        // At most a third of one core's time on average, and not more often than three times a second.
-        pace = (cost * 2).clamp(Duration::from_millis(330), Duration::from_secs(3));
         let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
         match step {
-            Ok(scene) => {
+            Ok((scene, new_lines)) => {
+                quiet = (!new_lines).then_some(head);
+                let t = &scene.timings;
+                for (p, v) in parts.iter_mut().zip([pictures_ms, t.detect, t.read, t.place]) {
+                    *p += v;
+                }
                 if let Some(by) = scene.moved {
-                    s.corrections.push(by);
+                    s.corrections.push((by, scene.turned));
                 }
                 let fetch = fetching.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 s.status.state = match (&translator_state, &scene.activity) {
@@ -973,6 +1156,45 @@ mod tests {
         assert!((speed - 90.0).abs() < 5.0, "{speed}");
         let still: VecDeque<_> = (0..20u64).map(|k| (t0 + Duration::from_millis(10 * k), IDENTITY)).collect();
         assert!(turn_speed(&still) < 1.0);
+    }
+
+    /// Enzo's frames through Virtual Desktop (his 2026-11-11 log, 1899 of 1901 frames): throttled, two presents, one
+    /// "mis-presented", at 72 Hz. That is SteamVR's state, not VRChat short of time: the reading keeps its pace.
+    #[test]
+    fn throttled_frames_are_not_a_busy_game() {
+        use orbiters_booster::frames::{Frame, LATE_CPU};
+        let throttled = |i: u32| Frame { index: i, presents: 2, mis_presented: 1, flags: 0x300, interval_ms: 13.9, poses_ready_ms: 0.4, frame_ready_ms: 14.3, ..Frame::default() };
+        let frames: Vec<Frame> = (0..144).map(throttled).collect();
+        let load = FrameLoad::of(&frames);
+        assert!(!load.busy(), "{load:?}");
+        assert_eq!((load.late, load.cpu_bound, load.throttled), (0.0, 0.0, 1.0));
+        // A game really late for the processor on one frame in five slows the reading down.
+        let late: Vec<Frame> = (0..144).map(|i| Frame { flags: if i % 5 == 0 { 0x300 | LATE_CPU } else { 0x300 }, ..throttled(i) }).collect();
+        assert!(FrameLoad::of(&late).busy());
+        let dropped: Vec<Frame> = (0..144).map(|i| Frame { dropped: (i % 8 == 0) as u32, ..throttled(i) }).collect();
+        assert!(FrameLoad::of(&dropped).busy());
+    }
+
+    /// Enzo's 2026-11-14 log: looks of 1.2 s at a pace of 1.3 to 3 s, three times slower again as VRChat seemed busy:
+    /// a sign came into view and waited up to 4 s for a look. Now a look follows the last by half its own time.
+    #[test]
+    fn looks_follow_each_other_closely() {
+        let ms = Duration::from_millis;
+        assert_eq!(pace_for(ms(100), false, false), ms(300), "never more than about three a second");
+        assert_eq!(pace_for(ms(400), false, false), ms(600));
+        assert_eq!(pace_for(ms(1200), false, false), ms(1500), "a slow look: 1.5 s at most");
+        assert_eq!(pace_for(ms(400), true, false), ms(1200), "VRChat really short of time: twice rarer");
+        assert_eq!(pace_for(ms(400), false, true), ms(1200), "nothing changing: twice rarer");
+        assert!(pace_for(ms(1200), true, true) <= ms(3000));
+    }
+
+    #[test]
+    fn the_chains_are_summed_up_for_the_log() {
+        use orbiters_translate::core::Chain;
+        assert_eq!(chains_line(&[]), None);
+        let c = |shown: f32, known: bool| Chain { read: 0.4, translated: if known { -3.0 } else { shown - 0.1 }, shown, known, off_deg: 3.0 };
+        let line = chains_line(&[c(1.0, false), c(2.0, false), c(0.5, true), c(1.5, false)]).unwrap();
+        assert!(line.starts_with("4 lines shown for the first time (1 known before): picture to shown median 1.5 s, p90 2.0 s, longest 2.0 s"), "{line}");
     }
 
     #[test]

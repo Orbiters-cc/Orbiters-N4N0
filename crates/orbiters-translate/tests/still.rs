@@ -523,3 +523,52 @@ fn the_built_in_translators_first_translation() {
 
 /// Where the toilets' pictogram lies across `testdata/station-sign.png`, pixels (measured on the picture).
 const PICTOGRAM_COLUMNS: (f32, f32) = (198.0, 236.0);
+
+/// Lines read together in one pass of the built-in translator give what each gives alone, in not much more time than
+/// the longest alone (on the processor a step's time is the reading of the weights). Prints the times at 2 and 4
+/// threads, for one line and for 1, 3, 6 and 8 together.
+#[test]
+#[ignore]
+fn the_built_in_translator_translates_lines_together() {
+    use orbiters_translate::builtin::Builtin;
+    let signs = [
+        ("西口", "ja"),
+        ("北口", "ja"),
+        ("出口はこちらです", "ja"),
+        ("関係者以外立入禁止", "ja"),
+        ("欢迎来到我们的世界", "zh"),
+        ("안녕하세요 친구들", "ko"),
+        ("今日はみんなでカラオケしよう！", "ja"),
+        ("CITY SCENERY WORLD in VRCHAT", "en"),
+    ];
+    for (threads, spinning) in [(2usize, false), (4, false), (2, true), (4, true)] {
+        println!("threads {threads}, spinning {spinning}:");
+        let mut b = Builtin::load_with(threads, spinning).unwrap();
+        b.warm_up();
+        let mut alone = Vec::new();
+        let t = std::time::Instant::now();
+        for (text, source) in signs {
+            let t = std::time::Instant::now();
+            alone.push(b.line(text, source, "fr").unwrap());
+            println!("threads {threads} alone {:.0} ms: {text} -> {}", t.elapsed().as_secs_f64() * 1000.0, alone.last().unwrap());
+        }
+        println!("threads {threads}: 8 lines one after the other {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+        for n in [1usize, 3, 6, 8] {
+            let mut together = vec![String::new(); n];
+            let mut when = vec![0.0; n];
+            let t = std::time::Instant::now();
+            b.lines(&signs[..n], "fr", &mut |i, s| {
+                together[i] = s;
+                when[i] = t.elapsed().as_secs_f64() * 1000.0;
+            })
+            .unwrap();
+            println!("threads {threads}: {n} together {:.0} ms in {} steps, each done at {:?}", t.elapsed().as_secs_f64() * 1000.0, b.steps, when.iter().map(|w| w.round()).collect::<Vec<_>>());
+            // The int8 model's activations are scaled over the whole pass, so a line read with others may come out a
+            // little differently (sandbox 2026-11-14: "La sortie est ici." together, "L'entrée est ici." alone).
+            let same = together.iter().zip(&alone).filter(|(a, b)| a == b).count();
+            println!("    {same} of {n} as alone: {together:?}");
+            assert!(together.iter().all(|t| !t.is_empty()), "every line translated: {together:?}");
+            assert!(same * 2 >= n, "mostly as alone: {together:?} against {alone:?}");
+        }
+    }
+}

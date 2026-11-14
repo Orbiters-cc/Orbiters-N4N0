@@ -126,6 +126,11 @@ pub fn start_runtime() -> anyhow::Result<()> {
 
 /// A session on `threads` threads that never spin while waiting.
 pub(crate) fn session(model: &Path, threads: usize) -> anyhow::Result<ort::session::Session> {
+    session_with(model, threads, false)
+}
+
+/// A session on `threads` threads, spinning while waiting or not.
+pub(crate) fn session_with(model: &Path, threads: usize, spinning: bool) -> anyhow::Result<ort::session::Session> {
     start_runtime()?;
     let e = |e: ort::Error| anyhow::anyhow!("{e}");
     ort::session::Session::builder()
@@ -135,7 +140,7 @@ pub(crate) fn session(model: &Path, threads: usize) -> anyhow::Result<ort::sessi
         .with_inter_threads(1)
         .map_err(e)?
         // Threads that spin while waiting take CPU time from VRChat for nothing.
-        .with_intra_op_spinning(false)
+        .with_intra_op_spinning(spinning)
         .map_err(e)?
         .with_inter_op_spinning(false)
         .map_err(e)?

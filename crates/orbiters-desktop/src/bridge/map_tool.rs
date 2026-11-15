@@ -31,6 +31,11 @@ enum Move {
     Turn { degrees: f32 },
 }
 
+/// A map built: its world, the pictures it was built of, and it.
+type Built = (String, Vec<String>, Arc<Map>);
+/// A session's world and its moves there: (unix seconds, move).
+type Moves = (String, Vec<(u64, Move)>);
+
 /// The maps and what they need, kept by the bridge.
 #[derive(Default)]
 pub struct Maps {
@@ -38,9 +43,9 @@ pub struct Maps {
     dir: Mutex<Option<PathBuf>>,
     captures: Mutex<HashMap<String, Arc<Capture>>>,
     /// The last map built: its world, the pictures it was built of, and it.
-    built: Mutex<Option<(String, Vec<String>, Arc<Map>)>>,
+    built: Mutex<Option<Built>>,
     /// Each session's world and its moves there: (unix seconds, move).
-    moves: Mutex<HashMap<String, (String, Vec<(u64, Move)>)>>,
+    moves: Mutex<HashMap<String, Moves>>,
     /// The last walking speed VRChat reported per session, metres a second.
     speeds: Mutex<HashMap<String, f32>>,
 }
@@ -208,7 +213,7 @@ impl Bridge {
         let mut pictures: Vec<super::journal::Picture> =
             self.journal.lock().unwrap().pictures.iter().filter(|p| p.world_id.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(world))).cloned().collect();
         if let Some(only) = only {
-            pictures.retain(|p| only.iter().any(|o| *o == p.session));
+            pictures.retain(|p| only.contains(&p.session));
         }
         pictures.sort_by_key(|p| p.at);
         let mut used = Vec::new();
@@ -357,7 +362,7 @@ impl Bridge {
         if !left_out.is_empty() {
             answer["left_out"] = json!(left_out);
         }
-        answer["next"] = json!(if verdict.simple && map.captures.len() >= 1 {
+        answer["next"] = json!(if verdict.simple && !map.captures.is_empty() {
             "The rule: a very simple world needs one picture, and it has one. Go on to the next world.".to_string()
         } else if map.captures.len() >= verdict.pictures as usize {
             "This world has its pictures; take more only for an area or an opening not yet pictured (suggestions).".to_string()

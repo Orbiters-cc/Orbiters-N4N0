@@ -382,7 +382,7 @@ fn a_session_folder_gives_its_centre_path_avatar_and_voxels() {
 }
 
 /// Runs the map on real captures (`ORBITERS_MAP_SESSIONS`: session folders separated by `|`, one world per `;`), writing
-/// each world's plan picture and answer to `ORBITERS_MAP_OUT`, and the pictures' shares (decimated) as fixtures when
+/// each world's plan picture and answer to `ORBITERS_MAP_OUT`, and the pictures' shares (their path thinned) as fixtures when
 /// `ORBITERS_MAP_FIXTURES` names a folder. For tuning and the report; not part of the suite.
 #[test]
 #[ignore]
@@ -397,7 +397,6 @@ fn real_captures() {
         if let Ok(dir) = std::env::var("ORBITERS_MAP_FIXTURES") {
             for c in &captures {
                 let mut small = (**c).clone();
-                small.voxels.retain(|v| v[3] >= 2);
                 small.path = thin(&small.path, 60);
                 std::fs::write(std::path::Path::new(&dir).join(format!("{}.json", c.session)), serde_json::to_vec(&small).unwrap()).unwrap();
             }
@@ -432,7 +431,7 @@ fn real_captures() {
     }
 }
 
-/// A picture's share as the tour left it on 2026-11-15, decimated (voxels with two points or more, 60 positions of its path).
+/// A picture's share as the tour left it on 2026-11-15 (its voxels; 60 positions of its path, not 240).
 fn fixture(json: &str) -> Arc<Capture> {
     Arc::new(serde_json::from_str(json).unwrap())
 }

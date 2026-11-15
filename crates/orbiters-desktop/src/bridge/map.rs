@@ -88,7 +88,9 @@ mod voxels_text {
         let text = String::deserialize(d)?;
         let bytes = base64::engine::general_purpose::STANDARD.decode(text).map_err(serde::de::Error::custom)?;
         Ok(bytes
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|c| {
                 let i = |k: usize| i16::from_le_bytes([c[k], c[k + 1]]) as i32;
                 [i(0), i(2), i(4), u16::from_le_bytes([c[6], c[7]]) as i32]
@@ -194,7 +196,7 @@ fn read_eye_height(dir: &Path) -> Option<f32> {
     let names: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("parameters.json")).ok()?).ok()?;
     let id = names["parameters"].as_array()?.iter().find(|p| p["address"] == "/avatar/eyeheight")?["id"].as_u64()? as u16;
     let bytes = std::fs::read(dir.join("parameters.bin")).ok()?;
-    bytes.get(16..)?.chunks_exact(16).find(|r| u16::from_le_bytes([r[8], r[9]]) == id && r[10] == 0).map(|r| f32::from_le_bytes(r[12..16].try_into().unwrap())).filter(|h| (0.2..20.0).contains(h))
+    bytes.get(16..)?.as_chunks::<16>().0.iter().find(|r| u16::from_le_bytes([r[8], r[9]]) == id && r[10] == 0).map(|r| f32::from_le_bytes(r[12..16].try_into().unwrap())).filter(|h| (0.2..20.0).contains(h))
 }
 
 /// The splats worth a map from a reconstruction's PLY, in Unity's world: opaque enough, small (not the background shell or a
@@ -1261,7 +1263,7 @@ impl Map {
                 best = (along, h);
             }
         }
-        openings.sort_by(|a, b| b.1.cmp(&a.1));
+        openings.sort_by_key(|a| std::cmp::Reverse(a.1));
         (seen, openings.into_iter().map(|o| o.0).collect(), best.1)
     }
 
@@ -1285,9 +1287,9 @@ impl Map {
         let [pw, pd] = self.plan_dims;
         let mut d = vec![u8::MAX; pw * pd];
         let mut queue = VecDeque::new();
-        for c in 0..pw * pd {
+        for (c, v) in d.iter_mut().enumerate() {
             if self.cells[c] == Cell::Blocked || self.outer[c] {
-                d[c] = 0;
+                *v = 0;
                 queue.push_back(c);
             }
         }
@@ -1302,11 +1304,11 @@ impl Map {
                 }
             }
         }
-        for c in 0..pw * pd {
+        for (c, v) in d.iter_mut().enumerate() {
             let (x, z) = (c / pd, c % pd);
             // The plan's edge is not known to be open.
             let edge = x.min(z).min(pw - 1 - x).min(pd - 1 - z).min(8) as u8;
-            d[c] = d[c].min(edge + 1).min(8);
+            *v = (*v).min(edge + 1).min(8);
         }
         d
     }

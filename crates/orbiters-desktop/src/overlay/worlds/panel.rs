@@ -678,55 +678,57 @@ pub fn hole_shade(band: usize) -> f32 {
     if band >= HOLE_SHADE_BANDS { 0.0 } else { 0.5 * (1.0 - band as f32 / HOLE_SHADE_BANDS as f32).powi(2) }
 }
 
-/// Between the carousel's gutters (K-carousel): the captures before and after it peek out on either side, each under its arrow. Still 1.75 times a screen's.
-pub const VR_HERO: Rect = Rect { min: Pos2 { x: 504.0, y: 24.0 }, max: Pos2 { x: 960.0, y: 250.0 } };
-const VR_SMALL_BACK: Rect = Rect { min: Pos2 { x: 800.0, y: 198.0 }, max: Pos2 { x: 952.0, y: 242.0 } };
-/// The carousel's gutters: the whole height of the picture, each a laser's easy target; and the neighbour that peeks out in each, a little smaller, as further back.
-const VR_FLIP_PREVIOUS: Rect = Rect { min: Pos2 { x: 452.0, y: 24.0 }, max: Pos2 { x: 503.0, y: 250.0 } };
-const VR_FLIP_NEXT: Rect = Rect { min: Pos2 { x: 961.0, y: 24.0 }, max: Pos2 { x: 1012.0, y: 250.0 } };
-const VR_PEEK_PREVIOUS: Rect = Rect { min: Pos2 { x: 460.0, y: 40.0 }, max: Pos2 { x: 498.0, y: 234.0 } };
-const VR_PEEK_NEXT: Rect = Rect { min: Pos2 { x: 966.0, y: 40.0 }, max: Pos2 { x: 1004.0, y: 234.0 } };
-/// Where on the side panel a stick flips the captures: the picture, its gutters and the line under it.
+/// A capture's picture in a headset's side panel: its whole width (K-carousel kept it: the neighbours peek out over its edges, [`VR_PEEK_NEXT`]).
+pub const VR_HERO: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 250.0 } };
+const VR_SMALL_BACK: Rect = Rect { min: Pos2 { x: 804.0, y: 198.0 }, max: Pos2 { x: 958.0, y: 242.0 } };
+/// The carousel's arrows, the whole height of the picture, each a laser's easy target over its edge; and the neighbour that peeks out under each, as if the row of
+/// captures went on behind the panel.
+const VR_FLIP_PREVIOUS: Rect = Rect { min: Pos2 { x: 452.0, y: 24.0 }, max: Pos2 { x: 506.0, y: 250.0 } };
+const VR_FLIP_NEXT: Rect = Rect { min: Pos2 { x: 958.0, y: 24.0 }, max: Pos2 { x: 1012.0, y: 250.0 } };
+const VR_PEEK_PREVIOUS: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: 496.0, y: 250.0 } };
+const VR_PEEK_NEXT: Rect = Rect { min: Pos2 { x: 968.0, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 250.0 } };
+/// The other layout tried (the owner's choice, K-carousel): the neighbours in gutters beside a narrower picture, which then covers nothing of the capture but
+/// shows it 15% smaller. A developer's switch: `ORBIT_CAROUSEL_GUTTERS`, or [`set_carousel_gutters`] in the screenshots.
+const VR_HERO_NARROW: Rect = Rect { min: Pos2 { x: 504.0, y: 24.0 }, max: Pos2 { x: 960.0, y: 250.0 } };
+const VR_SMALL_BACK_NARROW: Rect = Rect { min: Pos2 { x: 800.0, y: 198.0 }, max: Pos2 { x: 952.0, y: 242.0 } };
+const VR_FLIP_PREVIOUS_GUTTER: Rect = Rect { min: Pos2 { x: 452.0, y: 24.0 }, max: Pos2 { x: 503.0, y: 250.0 } };
+const VR_FLIP_NEXT_GUTTER: Rect = Rect { min: Pos2 { x: 961.0, y: 24.0 }, max: Pos2 { x: 1012.0, y: 250.0 } };
+const VR_PEEK_PREVIOUS_GUTTER: Rect = Rect { min: Pos2 { x: 460.0, y: 40.0 }, max: Pos2 { x: 498.0, y: 234.0 } };
+const VR_PEEK_NEXT_GUTTER: Rect = Rect { min: Pos2 { x: 966.0, y: 40.0 }, max: Pos2 { x: 1004.0, y: 234.0 } };
+/// Where on the side panel a stick flips the captures: the picture, its arrows and the line under it.
 const VR_FLIP_BAND: Rect = Rect { min: Pos2 { x: 452.0, y: 12.0 }, max: Pos2 { x: 1012.0, y: 288.0 } };
-/// The other layout tried for the carousel (the owner's choice between them, K-carousel): the picture keeps its whole width, and its neighbours peek out over
-/// its edges, each under its arrow. Off unless the screenshots ask for it ([`set_carousel_over_edges`]).
-static OVER_EDGES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-const VR_HERO_WIDE: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 250.0 } };
-const VR_SMALL_BACK_WIDE: Rect = Rect { min: Pos2 { x: 836.0, y: 198.0 }, max: Pos2 { x: 990.0, y: 242.0 } };
-const VR_FLIP_PREVIOUS_OVER: Rect = Rect { min: Pos2 { x: 452.0, y: 24.0 }, max: Pos2 { x: 506.0, y: 250.0 } };
-const VR_FLIP_NEXT_OVER: Rect = Rect { min: Pos2 { x: 958.0, y: 24.0 }, max: Pos2 { x: 1012.0, y: 250.0 } };
-const VR_PEEK_PREVIOUS_OVER: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: 496.0, y: 250.0 } };
-const VR_PEEK_NEXT_OVER: Rect = Rect { min: Pos2 { x: 968.0, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 250.0 } };
+static GUTTERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The carousel's neighbours over the picture's edges (true) or in gutters beside it (false, the default).
-pub fn set_carousel_over_edges(on: bool) {
-    OVER_EDGES.store(on, std::sync::atomic::Ordering::Relaxed);
+/// The carousel's neighbours in gutters beside a narrower picture (true) or over its edges (false, the default).
+pub fn set_carousel_gutters(on: bool) {
+    GUTTERS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn over_edges() -> bool {
     static FROM_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // A developer's switch, for comparing both layouts in the VR sandbox.
-    OVER_EDGES.load(std::sync::atomic::Ordering::Relaxed) || *FROM_ENV.get_or_init(|| std::env::var_os("ORBIT_CAROUSEL_OVER_EDGES").is_some()) // i18n: not shown (an environment variable's name)
+    !(GUTTERS.load(std::sync::atomic::Ordering::Relaxed) || *FROM_ENV.get_or_init(|| std::env::var_os("ORBIT_CAROUSEL_GUTTERS").is_some())) // i18n: not shown (an environment variable's name)
 }
 
 /// The picture of a capture's side panel in a headset, as the carousel's layout has it.
 pub fn vr_hero() -> Rect {
-    if over_edges() { VR_HERO_WIDE } else { VR_HERO }
+    if over_edges() { VR_HERO } else { VR_HERO_NARROW }
 }
 
 fn vr_small_back() -> Rect {
-    if over_edges() { VR_SMALL_BACK_WIDE } else { VR_SMALL_BACK }
+    if over_edges() { VR_SMALL_BACK } else { VR_SMALL_BACK_NARROW }
 }
 
 /// The carousel's arrow towards the next (`forward`) or the one before, and where that neighbour peeks out.
 fn vr_flip(forward: bool) -> (Rect, Rect) {
     match (over_edges(), forward) {
-        (false, false) => (VR_FLIP_PREVIOUS, VR_PEEK_PREVIOUS),
-        (false, true) => (VR_FLIP_NEXT, VR_PEEK_NEXT),
-        (true, false) => (VR_FLIP_PREVIOUS_OVER, VR_PEEK_PREVIOUS_OVER),
-        (true, true) => (VR_FLIP_NEXT_OVER, VR_PEEK_NEXT_OVER),
+        (true, false) => (VR_FLIP_PREVIOUS, VR_PEEK_PREVIOUS),
+        (true, true) => (VR_FLIP_NEXT, VR_PEEK_NEXT),
+        (false, false) => (VR_FLIP_PREVIOUS_GUTTER, VR_PEEK_PREVIOUS_GUTTER),
+        (false, true) => (VR_FLIP_NEXT_GUTTER, VR_PEEK_NEXT_GUTTER),
     }
 }
+
 
 /// How long a flip's picture takes to come in.
 const FLIP_SLIDE: f64 = 0.2;
@@ -2353,25 +2355,6 @@ impl Panel {
         // The carousel (K-carousel): the captures before and after this one peek out on either side, each under its arrow, and the line under the picture says how
         // far along the list this one is and what the stick does where the laser is.
         let place = self.carousel_place(d);
-        if let Some((_, _, before, after)) = place {
-            for (neighbour, peek, target, glyph, forward) in [(before, vr_flip(false).1, Target::FlipPrevious, icons::CARET_LEFT, false), (after, vr_flip(true).1, Target::FlipNext, icons::CARET_RIGHT, true)] {
-                let Some(n) = neighbour else { continue };
-                let (h, pr) = state(target);
-                let shown = opening * if h { 1.0 } else { 0.8 };
-                // Over the picture's edge it follows the hole's rounded corners on its outer side.
-                let corner = match (over_edges(), forward) {
-                    (false, _) => CornerRadius::same(10),
-                    (true, false) => CornerRadius { nw: 14, sw: 14, ne: 0, se: 0 },
-                    (true, true) => CornerRadius { nw: 0, sw: 0, ne: 14, se: 14 },
-                };
-                peek_picture(p, peek, (d.thumb)(n), &n.world_id, !forward, shown, corner);
-                p.rect_filled(peek, corner, theme::black(if h { 0.2 } else { 0.45 } * opening));
-                let r = if pr { 17.0 } else { 19.0 };
-                p.circle_filled(peek.center(), r + 1.5, theme::black(0.35 * opening));
-                p.circle_filled(peek.center(), r, fade(if h { orbit_look::accent() } else { RAISED2 }, opening));
-                widgets::icon(p, peek.center(), glyph, 22.0, fade(if h { orbit_look::on_accent() } else { theme::FG }, opening));
-            }
-        }
         if vr {
             self.carousel_line(p, d, hole, place, opening);
         }
@@ -2425,9 +2408,11 @@ impl Panel {
                     (theme::WARN, status.stage.clone().unwrap_or_else(|| tr("Getting ready").into()))
                 };
                 let pulse = if status.shown && status.stage.is_none() { 1.0 } else { 0.55 + 0.45 * ((time * 4.0).sin() as f32 * 0.5 + 0.5) };
-                p.circle_filled(pos2(hero.min.x + 20.0, foot.center().y), 5.0, fade(dot, rest * pulse));
-                let room = if taken { small_back.min.x - hero.min.x - 44.0 } else { hero.width() - 44.0 };
-                text_cut(p, pos2(hero.min.x + 34.0, foot.center().y), room, orbit_look::txt(label, 15.0).weight(weight::MEDIUM).color(fade(theme::FG, rest)));
+                // Clear of the carousel's neighbours over the picture's edges.
+                let inset = if vr && over_edges() { 36.0 } else { 0.0 };
+                p.circle_filled(pos2(hero.min.x + inset + 20.0, foot.center().y), 5.0, fade(dot, rest * pulse));
+                let room = if taken { small_back.min.x - hero.min.x - inset - 44.0 } else { hero.width() - 2.0 * inset - 44.0 };
+                text_cut(p, pos2(hero.min.x + inset + 34.0, foot.center().y), room, orbit_look::txt(label, 15.0).weight(weight::MEDIUM).color(fade(theme::FG, rest)));
                 if let Some(f) = status.download {
                     let track = Rect::from_min_size(pos2(hero.min.x, hero.max.y - 4.0), vec2(hero.width(), 4.0));
                     p.rect_filled(track, CornerRadius::same(2), fade(theme::white(0.12), rest));
@@ -2440,7 +2425,28 @@ impl Panel {
                     (None, true) => tr("Its 3D preview is on orbiters.cc").to_string(),
                     (None, false) => tr("No 3D capture of it yet").to_string(),
                 };
-                text_cut(p, pos2(hero.min.x + 16.0, foot.center().y), hero.width() - 32.0, orbit_look::txt(line, 15.0).color(fade(theme::FG_2, rest)));
+                let inset = if vr && over_edges() { 36.0 } else { 0.0 };
+                text_cut(p, pos2(hero.min.x + inset + 16.0, foot.center().y), hero.width() - 2.0 * inset - 32.0, orbit_look::txt(line, 15.0).color(fade(theme::FG_2, rest)));
+            }
+        }
+        // Over the picture's edges, over what lies on it (its frame's corners), as if the next ones lay on the panel.
+        if let Some((_, _, before, after)) = place {
+            for (neighbour, peek, target, glyph, forward) in [(before, vr_flip(false).1, Target::FlipPrevious, icons::CARET_LEFT, false), (after, vr_flip(true).1, Target::FlipNext, icons::CARET_RIGHT, true)] {
+                let Some(n) = neighbour else { continue };
+                let (h, pr) = state(target);
+                let shown = opening * if h { 1.0 } else { 0.8 };
+                // Over the picture's edge it follows the hole's rounded corners on its outer side.
+                let corner = match (over_edges(), forward) {
+                    (false, _) => CornerRadius::same(10),
+                    (true, false) => CornerRadius { nw: 14, sw: 14, ne: 0, se: 0 },
+                    (true, true) => CornerRadius { nw: 0, sw: 0, ne: 14, se: 14 },
+                };
+                peek_picture(p, peek, (d.thumb)(n), &n.world_id, !forward, shown, corner);
+                p.rect_filled(peek, corner, theme::black(if h { 0.2 } else { 0.45 } * opening));
+                let r = if pr { 17.0 } else { 19.0 };
+                p.circle_filled(peek.center(), r + 1.5, theme::black(0.35 * opening));
+                p.circle_filled(peek.center(), r, fade(if h { orbit_look::accent() } else { RAISED2 }, opening));
+                widgets::icon(p, peek.center(), glyph, 22.0, fade(if h { orbit_look::on_accent() } else { theme::FG }, opening));
             }
         }
         // Its way out, on its edge: it slides away to the right, so it says so. An X here, just under the sheet's own, was one close too many (a judge's).
@@ -3320,8 +3326,12 @@ mod tests {
         assert_eq!(panel.hole(&opening), None);
         assert_eq!(panel.hole(&Status { current: Some(3), ..shown.clone() }), Some(VR_HERO), "open again once it shows");
         for t in [VR_FLIP_PREVIOUS, VR_FLIP_NEXT] {
-            assert!(!t.intersects(VR_HERO) && VR_SIDE.contains_rect(t), "{t:?}");
+            assert!(VR_SIDE.contains_rect(t), "{t:?}");
+            assert!(t.intersect(VR_HERO).width() <= 42.0, "over the picture's edge only: {t:?}");
             assert!(t.height() >= VR_HERO.height() && t.width() >= 50.0, "the whole height of the picture: {t:?}");
+        }
+        for peek in [VR_PEEK_PREVIOUS, VR_PEEK_NEXT] {
+            assert!(peek.width() <= 32.0 && VR_HERO.contains_rect(peek), "a neighbour hides no more than its edge: {peek:?}");
         }
     }
 
@@ -3336,7 +3346,8 @@ mod tests {
         let panel = Panel { page: Page::Detail, selected: Some(2), ..Default::default() };
         let at = |p: Pos2| panel.stick_spot(&d, p.x, p.y);
         assert_eq!(at(VR_HERO.center()), Some(StickSpot::InCapture));
-        assert_eq!(at(VR_FLIP_NEXT.center()), Some(StickSpot::Flip));
+        assert_eq!(at(VR_FLIP_NEXT.center()), Some(StickSpot::Flip), "the arrow over the picture's edge flips");
+        assert_eq!(at(pos2(VR_HERO.max.x - 60.0, VR_HERO.center().y)), Some(StickSpot::InCapture), "just inside it, it moves");
         assert_eq!(at(VR_GRIP.center()), Some(StickSpot::Flip));
         assert_eq!(at(VR_SHOW.center()), None, "the buttons: VRChat's");
         assert_eq!(at(pos2(200.0, 300.0)), None, "the list: VRChat's");
@@ -3486,6 +3497,11 @@ mod tests {
         let targets = panel.targets(&d);
         for (t, r) in &targets {
             assert!(!matches!(t, Target::Back | Target::Field | Target::Section(_) | Target::Sort(_) | Target::Filter), "{t:?}");
+            // The carousel's arrows lie over its edges (K-carousel), and only there.
+            if matches!(t, Target::FlipPrevious | Target::FlipNext) {
+                assert!(r.intersect(VR_HERO).width() <= 42.0, "{t:?} {r:?}");
+                continue;
+            }
             assert!(!r.intersects(VR_HERO), "{t:?} over the hole");
             if matches!(t, Target::Card(_)) {
                 assert!(r.max.x <= VR_SIDE.min.x && r.max.y <= 576.0, "{r:?}");
@@ -3493,8 +3509,7 @@ mod tests {
         }
         assert!(!VR_GRIP.intersects(VR_HERO));
         assert_eq!(panel.hole(&status), Some(VR_HERO));
-        // K-carousel gave its gutters some of its width: still far larger than a screen's.
-        assert!(VR_HERO.width() * VR_HERO.height() > 1.75 * SIDE_HERO.width() * SIDE_HERO.height());
+        assert!(VR_HERO.width() * VR_HERO.height() > 2.0 * SIDE_HERO.width() * SIDE_HERO.height());
         // The list's head goes back to all of it.
         assert!(targets.iter().any(|(t, _)| *t == Target::CloseSide));
     }

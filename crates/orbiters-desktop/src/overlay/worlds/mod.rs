@@ -2160,9 +2160,6 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
 
     /// Paints the panel on the menu's canvas.
     pub fn paint(&mut self, canvas: &mut Canvas) {
-        if let Some((id, at)) = self.flipped_at.take_if(|(id, _)| self.panel.selected == Some(*id)) {
-            super::vr_log::line(&format!("carousel: {id}'s picture painted {} ms after the flip", at.elapsed().as_millis())); // i18n: not shown (a log's line)
-        }
         let snapshot = self.prepare_paint(canvas.ctx());
         canvas.paint(snapshot.time, |p| snapshot.draw(p));
         self.panel.adopt_metrics(&snapshot.panel);

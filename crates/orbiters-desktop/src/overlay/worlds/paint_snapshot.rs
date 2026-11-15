@@ -89,6 +89,10 @@ impl Worlds {
     }
     pub(crate) fn prepare_paint(&mut self, _ctx: &egui::Context) -> PaintSnapshot {
         self.panel.vr_coast(self.time());
+        // How soon a flip of the carousel shows the next one's picture (`vr-test.log`).
+        if let Some((id, at)) = self.flipped_at.take_if(|(id, _)| self.panel.selected == Some(*id)) {
+            super::super::vr_log::line(&format!("carousel: {id}'s picture painted {} ms after the flip", at.elapsed().as_millis())); // i18n: not shown (a log's line)
+        }
         self.panel.dirty = false;
         self.hole_changed = false;
         if let Some(frame) = self.live_frame.take() {

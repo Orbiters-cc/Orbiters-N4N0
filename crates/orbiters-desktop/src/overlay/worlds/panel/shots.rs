@@ -356,12 +356,12 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     paint("carousel-flip-1", &entries, &flipping, &opening, &feedback, 20.06)?;
     paint("carousel-flip-2", &entries, &flipping, &opening, &feedback, 20.5)?;
     paint("carousel-flip-3d", &entries, &flipping, &Status { current: Some(13), ..middle.clone() }, &feedback, 21.0)?;
-    // The other layout, for the owner to compare: the picture's whole width, its neighbours over its edges.
-    super::set_carousel_over_edges(true);
-    paint("carousel-over-edges", &entries, &vr_detail, &middle, &feedback, 5.0)?;
-    paint("carousel-over-edges-pointing-band", &entries, &Panel { pointer: Some(egui::pos2(985.0, 140.0)), hover: Some(Target::FlipNext), ..vr_detail.clone() }, &middle, &feedback, 5.0)?;
-    paint("carousel-over-edges-first", &entries, &first, &Status { current: Some(10), ..middle.clone() }, &feedback, 5.0)?;
-    super::set_carousel_over_edges(false);
+    // The other layout, for the owner to compare: neighbours in gutters beside a narrower picture.
+    super::set_carousel_gutters(true);
+    paint("carousel-gutters", &entries, &vr_detail, &middle, &feedback, 5.0)?;
+    paint("carousel-gutters-pointing-band", &entries, &Panel { pointer: Some(egui::pos2(985.0, 140.0)), hover: Some(Target::FlipNext), ..vr_detail.clone() }, &middle, &feedback, 5.0)?;
+    paint("carousel-gutters-first", &entries, &first, &Status { current: Some(10), ..middle.clone() }, &feedback, 5.0)?;
+    super::set_carousel_gutters(false);
     paint("review-signed-in", &entries, &detail, &docked, &feedback, 5.0)?;
     let mut signed_out_review = docked.clone(); signed_out_review.list.vrchat = false;
     paint("review-signed-out", &entries, &detail, &signed_out_review, &feedback, 5.0)?;

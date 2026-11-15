@@ -1896,6 +1896,13 @@ mod tests {
                         .collect::<Vec<_>>()
                         .join(",");
                     let entries = crate::overlay::worlds::catalog::parse(&format!(r#"{{"previews":[{listing}]}}"#)).expect("a listing");
+                    // The page's own read of the listing first: what it brings would replace this one, and take the list back to its top, at any moment.
+                    let began = Instant::now();
+                    while rig.panels.stage.worlds.as_ref().is_some_and(|w| w.listing_read_for_test()) {
+                        assert!(began.elapsed() < Duration::from_secs(30), "the listing's read never ended");
+                        rig.turn();
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
                     let worlds = rig.panels.stage.worlds.as_mut().expect("the worlds' page");
                     worlds.listing_for_test(entries.clone());
                     rig.settle("its list");
@@ -1911,6 +1918,7 @@ mod tests {
             rig.settle("everything at rest");
             if up == Up::WorldsList {
                 assert!(rig.held().list.is_some_and(|s| s > 100.0), "the list is scrolled down: {:?}", rig.held());
+                assert!(!rig.panels.stage.worlds.as_ref().is_some_and(|w| w.listing_read_for_test()), "no read of the listing under way");
             }
             rig
         }

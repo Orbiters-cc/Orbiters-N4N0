@@ -938,6 +938,12 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     #[cfg(test)]
     pub fn draft_for_test(&self) -> &str { &self.panel.draft }
 
+    /// Whether a read of the listing is under way, for the tests: what it brings replaces a listing put in meanwhile.
+    #[cfg(test)]
+    pub fn listing_read_for_test(&self) -> bool {
+        self.catalog.snapshot().1
+    }
+
     #[cfg(test)]
     pub fn list_scroll_for_test(&self) -> f32 {
         self.panel.list_scroll_for_test()

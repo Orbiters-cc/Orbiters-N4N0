@@ -44,26 +44,51 @@ pub mod look {
     use orbiters_ui::theme;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    static ACCENT_NOW: AtomicU32 = AtomicU32::new(0x00da6d);
-    static RETRO_NOW: AtomicBool = AtomicBool::new(false);
-    static DOTS_NOW: AtomicBool = AtomicBool::new(false);
+    /// The look the app has chosen, for whatever is painted outside [`super::with_render_style`].
+    pub(super) struct Chosen {
+        accent: AtomicU32,
+        retro: AtomicBool,
+        dots: AtomicBool,
+    }
+    const FIRST: Chosen = Chosen { accent: AtomicU32::new(0x00da6d), retro: AtomicBool::new(false), dots: AtomicBool::new(false) };
+
+    /// One for the whole process: the app has one look.
+    #[cfg(not(test))]
+    static CHOSEN: Chosen = FIRST;
+    #[cfg(not(test))]
+    pub(super) fn chosen<T>(f: impl FnOnce(&Chosen) -> T) -> T {
+        f(&CHOSEN)
+    }
+    // The tests run side by side in one process, each a person with a look of its own: a retro test's look reached the plain tests painting
+    // beside it on other threads, and their pills and tab rows were measured in its monospace halfway through (VR1115 flaky). As
+    // `orbiters_i18n::in_language` is for the language, a test's look is its thread's.
+    #[cfg(test)]
+    thread_local! {
+        static CHOSEN: Chosen = const { FIRST };
+    }
+    #[cfg(test)]
+    pub(super) fn chosen<T>(f: impl FnOnce(&Chosen) -> T) -> T {
+        CHOSEN.with(f)
+    }
 
     /// What is chosen in the sheet of Settings. With the retro look what is lit is a grey, as all of it goes through one colour afterwards: a dark colour must not dim it.
     pub(super) fn choose(accent: [u8; 3], retro: bool, dots: bool) {
         let accent = if retro { [185; 3] } else { accent };
-        ACCENT_NOW.store(u32::from_be_bytes([0, accent[0], accent[1], accent[2]]), Ordering::Relaxed);
-        RETRO_NOW.store(retro, Ordering::Relaxed);
-        DOTS_NOW.store(retro && dots, Ordering::Relaxed);
+        chosen(|c| {
+            c.accent.store(u32::from_be_bytes([0, accent[0], accent[1], accent[2]]), Ordering::Relaxed);
+            c.retro.store(retro, Ordering::Relaxed);
+            c.dots.store(retro && dots, Ordering::Relaxed);
+        });
     }
 
     /// Whether the retro look is chosen.
     pub fn retro() -> bool {
-        super::render_settings().map_or_else(|| RETRO_NOW.load(Ordering::Relaxed), |s| s.theme == orbiters_core::settings::MenuLook::Retro)
+        super::render_settings().map_or_else(|| chosen(|c| c.retro.load(Ordering::Relaxed)), |s| s.theme == orbiters_core::settings::MenuLook::Retro)
     }
 
     /// How pictures are drawn: in the retro menu's dots if they are not to keep their colours, as they are otherwise.
     pub fn picture_look() -> Option<orbiters_ui::software::PictureLook> {
-        super::render_settings().map_or_else(|| DOTS_NOW.load(Ordering::Relaxed), |s| s.theme == orbiters_core::settings::MenuLook::Retro && !s.retro_pictures).then_some(super::super::retro::phosphor as orbiters_ui::software::PictureLook)
+        super::render_settings().map_or_else(|| chosen(|c| c.dots.load(Ordering::Relaxed)), |s| s.theme == orbiters_core::settings::MenuLook::Retro && !s.retro_pictures).then_some(super::super::retro::phosphor as orbiters_ui::software::PictureLook)
     }
 
     /// Text of the look chosen, for what lays out its own: the retro menu's monospace, a little smaller as it is wider.
@@ -87,7 +112,7 @@ pub mod look {
 
     /// The accent chosen.
     pub fn accent() -> Color32 {
-        let [r, g, b] = super::render_settings().map(|s| if s.theme == orbiters_core::settings::MenuLook::Retro { [185; 3] } else { s.accent }).unwrap_or_else(|| { let [_, r, g, b] = ACCENT_NOW.load(Ordering::Relaxed).to_be_bytes(); [r, g, b] });
+        let [r, g, b] = super::render_settings().map(|s| if s.theme == orbiters_core::settings::MenuLook::Retro { [185; 3] } else { s.accent }).unwrap_or_else(|| { let [_, r, g, b] = chosen(|c| c.accent.load(Ordering::Relaxed)).to_be_bytes(); [r, g, b] });
         Color32::from_rgb(r, g, b)
     }
 
@@ -1623,7 +1648,7 @@ pub fn finish_picture(out: &mut [u8], from: &[u8], px: [u32; 2], zoom: f32, chan
     let Some((ramp, keep)) = style else { return };
     let changed = [changed[0], changed[1], changed[2].min(px[0]), changed[3].min(px[1])];
     #[cfg(test)]
-    if let Some((ready, go)) = FINISH_GATE.lock().unwrap().take() { ready.send(()).unwrap(); go.recv().unwrap(); }
+    if FINISH_GATE.get().is_some() { FINISH_GATE.set(Some(Some(style_now(|s| s.try_lock().is_ok())))); }
     in_ramp(out, px[0], changed, &ramp);
     let keeping = if keep { pictures } else { Vec::new() };
     for rect in keeping.into_iter().chain(colours) {
@@ -1638,7 +1663,22 @@ pub fn finish_picture(out: &mut [u8], from: &[u8], px: [u32; 2], zoom: f32, chan
 }
 
 /// The retro look's ramp and whether pictures keep their colours: none with the modern look.
-static STYLE: std::sync::Mutex<Option<(std::sync::Arc<Vec<[u8; 3]>>, bool)>> = std::sync::Mutex::new(None);
+type Finish = std::sync::Mutex<Option<(std::sync::Arc<Vec<[u8; 3]>>, bool)>>;
+/// The app's, one for the process as [`look::chosen`] is; in tests each test's thread has its own, for the same reason.
+#[cfg(not(test))]
+static STYLE: Finish = std::sync::Mutex::new(None);
+#[cfg(not(test))]
+fn style_now<T>(f: impl FnOnce(&Finish) -> T) -> T {
+    f(&STYLE)
+}
+#[cfg(test)]
+thread_local! {
+    static STYLE: Finish = const { std::sync::Mutex::new(None) };
+}
+#[cfg(test)]
+fn style_now<T>(f: impl FnOnce(&Finish) -> T) -> T {
+    STYLE.with(f)
+}
 
 #[derive(Clone)]
 struct RenderStyle { settings: OrbitSettings, finish: Option<(std::sync::Arc<Vec<[u8; 3]>>, bool)> }
@@ -1646,7 +1686,7 @@ thread_local! { static RENDER_STYLE: std::cell::RefCell<Option<RenderStyle>> = c
 fn render_settings() -> Option<OrbitSettings> { RENDER_STYLE.with(|s| s.borrow().as_ref().map(|s| s.settings)) }
 fn captured_finish_style() -> Option<(std::sync::Arc<Vec<[u8; 3]>>, bool)> {
     if let Some(style) = RENDER_STYLE.with(|s| s.borrow().clone()) { return style.finish; }
-    STYLE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    style_now(|s| s.lock().unwrap_or_else(|e| e.into_inner()).clone())
 }
 /// A job's complete immutable look, scoped to its rendering thread. No shared guard spans pixel work.
 pub(crate) fn with_render_style<T>(settings: OrbitSettings, draw: impl FnOnce() -> T) -> T {
@@ -1662,7 +1702,8 @@ pub(crate) fn with_render_style<T>(settings: OrbitSettings, draw: impl FnOnce() 
 pub fn set_style(o: &OrbitSettings) {
     let retro = o.theme == MenuLook::Retro;
     look::choose(o.accent, retro, !o.retro_pictures);
-    *STYLE.lock().unwrap_or_else(|e| e.into_inner()) = retro.then(|| (std::sync::Arc::new(retro_ramp(o.retro_color)), o.retro_pictures));
+    let finish = retro.then(|| (std::sync::Arc::new(retro_ramp(o.retro_color)), o.retro_pictures));
+    style_now(|s| *s.lock().unwrap_or_else(|e| e.into_inner()) = finish);
 }
 
 /// How high a sheet's head is, above its page.
@@ -4888,6 +4929,26 @@ mod tests {
         }
     }
 
+    /// VR1115 flaky: this test and the tab row's failed in one release run in three, as a retro test on another thread had made the whole process
+    /// retro while they measured (its monospace ran the caption's pill past its window, the tabs into the head's buttons). A test's look is its own.
+    #[test]
+    fn a_look_chosen_on_another_thread_leaves_this_ones() {
+        let (said, heard) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let retro = std::thread::spawn(move || {
+            set_style(&OrbitSettings { theme: MenuLook::Retro, accent: [200, 10, 10], ..Default::default() });
+            said.send(look::retro()).unwrap();
+            let _ = held.recv();
+        });
+        assert!(heard.recv().unwrap(), "retro over there");
+        assert!(!look::retro() && look::accent() == egui::Color32::from_rgb(0x00, 0xda, 0x6d) && look::picture_look().is_none(), "the modern look here");
+        assert!(captured_finish_style().is_none());
+        the_wheels_caption_is_clear_outside_its_pill();
+        one_tab_row_on_every_page();
+        release.send(()).unwrap();
+        retro.join().unwrap();
+    }
+
     /// Round 17's judges: "雨の摩天 / 楼". A long name breaks between words only.
     #[test]
     fn a_long_name_breaks_between_words() {
@@ -5798,28 +5859,24 @@ mod click_identity_regression {
 }
 
 #[cfg(test)]
-static FINISH_GATE: std::sync::Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> = std::sync::Mutex::new(None);
+thread_local! {
+    /// Armed by a test: whether the style's lock was free where the pixel work of [`finish_picture`] begins, noted there.
+    static FINISH_GATE: std::cell::Cell<Option<Option<bool>>> = const { std::cell::Cell::new(None) };
+}
 #[cfg(test)]
 mod review_regressions {
     use super::*;
     #[test]
     fn review_retro_pixel_work_does_not_hold_the_style_lock() {
-        let _one = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         set_style(&OrbitSettings { theme: MenuLook::Retro, ..Default::default() });
-        let (ready, waiting) = std::sync::mpsc::channel();
-        let (go, proceed) = std::sync::mpsc::channel();
-        *FINISH_GATE.lock().unwrap() = Some((ready, proceed));
-        let paint = std::thread::spawn(|| {
-            let mut out = vec![127; 64 * 64 * 4];
-            let from = out.clone();
-            finish_picture(&mut out, &from, [64, 64], 1.0, [0, 0, 64, 64]);
-        });
-        waiting.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
-        let free = STYLE.try_lock().is_ok();
-        go.send(()).unwrap();
-        paint.join().unwrap();
+        FINISH_GATE.set(Some(None));
+        let mut out = vec![127; 64 * 64 * 4];
+        let from = out.clone();
+        finish_picture(&mut out, &from, [64, 64], 1.0, [0, 0, 64, 64]);
+        let free = FINISH_GATE.take();
         set_style(&OrbitSettings::default());
-        assert!(free, "input/header style access waits for the blocked pixel finish");
+        assert_ne!(out, from, "the retro look was applied");
+        assert_eq!(free, Some(Some(true)), "input/header style access waits for the blocked pixel finish");
     }
     #[test]
     fn review_removed_gallery_anchor_uses_the_nearest_surviving_source() {

@@ -1,4 +1,4 @@
 {
-  "This world gives no depth for most of what you see here, so the 3D picture will look poor: it can only be rebuilt from colour.": "このワールドはここで見えているものの大半に深度を出していないため、3D写真の仕上がりは悪くなります。色の情報だけから作り直すしかありません。",
-  "This world gave no depth for most of what the camera saw, so this 3D view was rebuilt from colour alone and looks softer away from the camera's path.": "このワールドはカメラが映したものの大半に深度を出していなかったため、この3Dビューは色の情報だけから作り直されており、カメラの軌跡から離れるとぼやけて見えます。"
+  "This world gives no depth for most of what you see here, so the 3D picture will look flat and poor away from where the camera went.": "このワールドはここで見えているものの大半に深度を出していないため、カメラが通った場所から離れると3D写真は平たく粗く見えます。",
+  "This world gave no depth for most of what the camera saw, so this 3D view shows it as a flat backdrop that only looks right from near the camera's path.": "このワールドはカメラが映したものの大半に深度を出していなかったため、この3Dビューではそれが平らな背景として表示され、カメラの軌跡の近くからしか正しく見えません。"
 }

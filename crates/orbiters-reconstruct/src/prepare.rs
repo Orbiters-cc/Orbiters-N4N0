@@ -113,7 +113,7 @@ impl Prepared {
                 f.blind_below,
                 f.blind_votes,
                 f.blind_share() * 100.0,
-                if f.blind_world { format!(": the world draws its surfaces without depth, all {} \"nothing there\" samples taken as unknown", f.blind_samples) } else { String::new() }
+                if f.blind_world { ": the world draws its surfaces without depth (its zeros stay sky: a backdrop from the camera's path)" } else { "" }
             ));
         }
         if let Some(f) = &self.depth {

@@ -50,7 +50,7 @@ pub enum Warning {
 /// What to tell the person when the world turns out to give no depth (crate::coverage::Coverage::depth_blind): the 3D
 /// picture can only be rebuilt from colour, and looks poor.
 fn depth_blind_message() -> &'static str {
-    tr("This world gives no depth for most of what you see here, so the 3D picture will look poor: it can only be rebuilt from colour.")
+    tr("This world gives no depth for most of what you see here, so the 3D picture will look flat and poor away from where the camera went.")
 }
 
 /// A session's rig faces so far, when not one of them could be read: what to tell the person. A face camera that does not project as

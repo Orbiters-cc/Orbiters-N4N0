@@ -135,7 +135,7 @@ pub fn wearer_line(report: &crate::reconstruction::Report) -> Option<&'static st
 
 /// A line for whoever looks at a result whose world gave no depth for most of what the camera saw ([`Report::depth_blind`]).
 pub fn depth_line(report: &crate::reconstruction::Report) -> Option<&'static str> {
-    report.depth_blind.then(|| tr("This world gave no depth for most of what the camera saw, so this 3D view was rebuilt from colour alone and looks softer away from the camera's path."))
+    report.depth_blind.then(|| tr("This world gave no depth for most of what the camera saw, so this 3D view shows it as a flat backdrop that only looks right from near the camera's path."))
 }
 
 /// Whether the recording began with Local User off in VRChat's camera, and no avatar answered the message that hides it.
@@ -221,7 +221,7 @@ mod tests {
         assert!(wearer_line(&out).is_some_and(|l| l.contains("taken out") && l.contains("shadow")));
         assert!(wearer_line(&Report { wearer_not_found: true, ..Default::default() }).is_some_and(|l| l.contains("nothing of it was found")));
         assert_eq!(depth_line(&Report::default()), None);
-        assert!(depth_line(&Report { depth_blind: true, ..Default::default() }).is_some_and(|l| l.contains("no depth")));
+        assert!(depth_line(&Report { depth_blind: true, ..Default::default() }).is_some_and(|l| l.contains("no depth") && l.contains("backdrop")));
         // A report from before any of this still reads.
         std::fs::write(rec::dir(&dir).join(rec::REPORT_FILE), r#"{"gaussians":4}"#).unwrap();
         assert_eq!(rec::read_report(&dir).map(|r| r.wearer), Some(None));

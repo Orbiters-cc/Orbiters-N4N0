@@ -4,15 +4,17 @@
 //! decode to wrong depths. Treated as measurements, the first become sky discs 400 m out painted with whatever the
 //! keyframes show there (smears from other viewpoints), and the second seed discs in front of the camera (specks).
 //! Marked unknown instead (DepthView::unknown), they are neither seeds nor depth targets. Four rules:
-//! - (first) a world that draws its surfaces without depth: the capture kit reads Unity's camera depth texture, which
-//!   only holds what the world's shaders draw into it (their shadow-caster pass, opaque queues), so a world whose own
-//!   shaders leave it out shows its walls and floors in colour while every depth sample there reads "nothing there",
-//!   the code of the sky. Taken as sky, the whole room went onto the sky shell 400 m out and into the sky map
-//!   (冥滩酒吧｜DeathStranding, 2026-11-15: 95 % and 97 % of its samples were zeros, 38 % and 45 % of all of them looking
-//!   more than 10° below the horizon, against at most 0.5 % in twelve captures of seven other worlds the same day).
-//!   Nothing below the horizon is sky: when a share of the samples that reaches `blind_share` reads nothing there, no
-//!   zero of the session is evidence of sky, and every one becomes unknown. The session is then seeded as one whose
-//!   depth says too little (crate::init::add_from_rays) and trained from its colour;
+//! - (first, a verdict only) a world that draws its surfaces without depth: the capture kit reads Unity's camera depth
+//!   texture, which only holds what the world's shaders draw into it (their shadow-caster pass, opaque queues), so a
+//!   world whose own shaders leave it out shows its walls and floors in colour while every depth sample there reads
+//!   "nothing there", the code of the sky (冥滩酒吧｜DeathStranding, 2026-11-15: 95 % and 97 % of its samples were zeros,
+//!   38 % and 45 % of all of them looking more than 10° below the horizon, against at most 0.5 % in twelve captures of
+//!   seven other worlds the same day). Nothing below the horizon is sky: when such samples reach `blind_share` of the
+//!   known ones, the session is told blind (`FixStats::blind_world`, the report's `depth_blind`). Its zeros stay as they
+//!   are: taken as unknown, the session trained from colour alone (rays seeded at a tenth and at a third of the seeding
+//!   budget) lost 3.9–4.2 dB on held-out keyframes of the first capture and nothing gained on the second, and filled
+//!   every turned view with floaters; on the sky shell and in the sky map the room at least reads as a backdrop from
+//!   the camera's path (reports: done7-depthworld.md). Only depth can fix such a capture;
 //! - tile positions left or right of the frame's centre (farther than `min_offset` of the half-width) that read
 //!   nothing in any depth frame of the session (a tile looking at the sky now and then still reads now and then: a
 //!   camera that turns sees something there), unless the world directions they look along read as nothing in the
@@ -50,7 +52,7 @@ pub struct FixParams {
     /// Rule "blind world": samples that read nothing looking more than this many degrees below the horizon...
     pub blind_below_deg: f32,
     /// ...as this share of the session's known samples (of version 2 files, in at least `blind_min_frames` frames) make
-    /// every "nothing there" of the session unknown.
+    /// the session blind.
     pub blind_share: f32,
     pub blind_min_frames: usize,
 }
@@ -90,12 +92,11 @@ pub struct FixStats {
     pub decoder_unknown: usize,
     /// Whether the "never reads" rule ran (sessions whose decoder marks nothing unknown).
     pub never_read_rule: bool,
-    /// The "blind world" rule: known samples of the version 2 frames that voted, those of them that read nothing
-    /// looking down, and whether that made every "nothing there" unknown (`blind_samples` of them).
+    /// The "blind world" verdict: known samples of the version 2 frames that voted, those of them that read nothing
+    /// looking down, and whether they reached `blind_share`.
     pub blind_votes: usize,
     pub blind_below: usize,
     pub blind_world: bool,
-    pub blind_samples: usize,
 }
 
 impl FixStats {
@@ -232,10 +233,9 @@ pub fn mark_untrusted(data: &mut Dataset, p: &FixParams) -> FixStats {
     stats
 }
 
-/// Rule "blind world" (the module's first): counts the known samples of the frames whose zeros are "nothing there"
-/// (version 2 files) and those of them that read nothing looking more than `blind_below_deg` down; when they reach
-/// `blind_share`, every zero of every frame becomes unknown.
-fn blind_world(data: &mut Dataset, p: &FixParams, stats: &mut FixStats) {
+/// The "blind world" verdict (the module's first rule): counts the known samples of the frames whose zeros are "nothing
+/// there" (version 2 files) and those of them that read nothing looking more than `blind_below_deg` down. Marks nothing.
+fn blind_world(data: &Dataset, p: &FixParams, stats: &mut FixStats) {
     let voting = |d: &DepthView| well_formed(d) && !d.zero_may_be_unread;
     let frames = data.depth_views.iter().filter(|d| voting(d)).count();
     let sin_below = -p.blind_below_deg.to_radians().sin();
@@ -260,20 +260,6 @@ fn blind_world(data: &mut Dataset, p: &FixParams, stats: &mut FixStats) {
         .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
     (stats.blind_below, stats.blind_votes) = (below, votes);
     stats.blind_world = frames >= p.blind_min_frames && votes > 0 && below as f32 >= p.blind_share * votes as f32;
-    if !stats.blind_world {
-        return;
-    }
-    stats.blind_samples = data
-        .depth_views
-        .par_iter_mut()
-        .map(|d| {
-            let zeros: Vec<usize> = (0..d.depth.len()).filter(|&i| d.depth[i] <= 0.0 && !d.is_unknown(i)).collect();
-            for &i in &zeros {
-                d.unknown.insert(i);
-            }
-            zeros.len()
-        })
-        .sum();
 }
 
 /// Sine of the elevation of the world direction a depth sample at `pixel` looks along (`origin`: the camera's position).
@@ -554,7 +540,7 @@ mod tests {
     }
 
     /// A world that draws its surfaces without depth (冥滩酒吧｜DeathStranding): its floor reads "nothing there" like the
-    /// sky. No zero of such a session is evidence of sky: every one becomes unknown, and what was read stays.
+    /// sky. The session is told blind, and its samples stay as they came (unknown, it trained worse from colour alone).
     #[test]
     fn a_world_whose_floor_reads_nothing_has_no_sky() {
         let g = grid(|_, _| false);
@@ -573,7 +559,7 @@ mod tests {
         }
         let mut data = dataset(views);
         let stats = mark_untrusted(&mut data, &FixParams::default());
-        assert!(!stats.blind_world && stats.blind_below > 0 && stats.blind_samples == 0, "{stats:?}");
+        assert!(!stats.blind_world && stats.blind_below > 0, "{stats:?}");
         assert!(!data.depth_views[3].is_unknown((GH - 1) * GW + 45));
         // Blind: the floor reads nothing but for a prop.
         let prop = (GH - 5) * GW + 48;
@@ -589,9 +575,7 @@ mod tests {
         let stats = mark_untrusted(&mut data, &FixParams::default());
         assert!(stats.blind_world && stats.blind_share() > 0.3, "{stats:?}");
         let d = &data.depth_views[7];
-        assert!((0..d.depth.len()).all(|i| i == prop || d.is_unknown(i)), "no zero is sky");
-        assert!(!d.is_unknown(prop) && d.depth[prop] > 0.0, "what was read stays");
-        assert_eq!(stats.blind_samples, 30 * (GW * GH - 1));
+        assert!(!d.is_unknown(prop) && d.depth[prop] > 0.0 && (0..d.depth.len()).all(|i| !d.is_unknown(i)), "nothing marked");
         // Fewer frames than `blind_min_frames`, or frames whose zeros may be unread (version 1): no verdict.
         let mut few = dataset((0..30).map(v2).take(FixParams::default().blind_min_frames - 1).map(|mut d| {
             d.depth.iter_mut().for_each(|z| *z = 0.0);

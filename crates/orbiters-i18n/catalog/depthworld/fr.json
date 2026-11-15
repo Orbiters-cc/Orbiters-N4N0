@@ -1,4 +1,4 @@
 {
-  "This world gives no depth for most of what you see here, so the 3D picture will look poor: it can only be rebuilt from colour.": "Ce monde ne donne pas de profondeur pour la plupart de ce que tu vois ici, donc la photo 3D sera de mauvaise qualité : elle ne peut être reconstruite qu’à partir des couleurs.",
-  "This world gave no depth for most of what the camera saw, so this 3D view was rebuilt from colour alone and looks softer away from the camera's path.": "Ce monde n’a pas donné de profondeur pour la plupart de ce que la caméra a vu, donc cette vue 3D a été reconstruite à partir des couleurs seules et paraît plus floue loin de la trajectoire de la caméra."
+  "This world gives no depth for most of what you see here, so the 3D picture will look flat and poor away from where the camera went.": "Ce monde ne donne pas de profondeur pour la plupart de ce que tu vois ici, donc la photo 3D paraîtra plate et de mauvaise qualité loin de l’endroit où la caméra est passée.",
+  "This world gave no depth for most of what the camera saw, so this 3D view shows it as a flat backdrop that only looks right from near the camera's path.": "Ce monde n’a pas donné de profondeur pour la plupart de ce que la caméra a vu, donc cette vue 3D le montre comme un décor plat qui ne paraît juste que près de la trajectoire de la caméra."
 }

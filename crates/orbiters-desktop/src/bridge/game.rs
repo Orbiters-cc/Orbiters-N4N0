@@ -111,6 +111,11 @@ pub enum Find {
     SpotlightPc,
     /// VRChat's "Spotlight - Cross Platform" row.
     SpotlightCrossPlatform,
+    /// Another of VRChat's world rows (its Worlds menu: Community Labs, Random, Avatar Worlds, Games, Updated Recently, New,
+    /// Classics).
+    Row(orbiters_core::maps::Row),
+    /// A world playlist (favourite group) of the app's VRChat account, by its tag.
+    FavoriteGroup(String),
 }
 
 /// A page of worlds, and whether another follows.
@@ -359,6 +364,18 @@ pub trait Game: Send + Sync {
     /// VRChat's for a few seconds, and nothing of the main session's may go there.
     fn lent_away(&self) -> bool {
         false
+    }
+    /// The world playlists (favourite groups) of the VRChat account signed in in Orbiters - N4N0: tag and name.
+    fn favorite_groups(&self) -> Result<Vec<(String, String)>, Failure> {
+        Ok(Vec::new())
+    }
+    /// Where VRChat's camera is, as it last said (`/usercamera/Pose`: x, y, z in metres, pitch, yaw, roll in degrees).
+    fn camera_pose(&self) -> Option<[f32; 6]> {
+        None
+    }
+    /// Puts VRChat's camera there (`/usercamera/Pose`), and takes it as the camera's pose a 3D picture starts from.
+    fn set_camera_pose(&self, _pose: [f32; 6]) -> Result<(), Failure> {
+        Err(Failure::new("camera_unavailable", "This VRChat's camera cannot be placed from here.", "Walk and turn instead.")) // i18n: not shown (an AI client reads it in the tool's answer)
     }
 }
 

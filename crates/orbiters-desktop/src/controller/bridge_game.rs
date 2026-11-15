@@ -97,8 +97,12 @@ pub(super) fn api_failure(error: anyhow::Error, doing: &str) -> Failure {
 
 impl RealGame {
     fn send_osc(&self, address: &str, arg: rosc::OscType) -> Result<(), Failure> {
+        self.send_osc_all(address, vec![arg])
+    }
+
+    fn send_osc_all(&self, address: &str, args: Vec<rosc::OscType>) -> Result<(), Failure> {
         let ctl = self.ctl()?;
-        match ctl.with_osc(|o| o.send(address, vec![arg])) {
+        match ctl.with_osc(|o| o.send(address, args)) {
             Some(Ok(())) => Ok(()),
             Some(Err(e)) => Err(Failure::new(
                 "osc_failed",
@@ -189,6 +193,8 @@ impl Game for RealGame {
             Find::Trending => WorldList::Trending,
             Find::SpotlightPc => WorldList::Spotlight(Spotlight::Pc),
             Find::SpotlightCrossPlatform => WorldList::Spotlight(Spotlight::CrossPlatform),
+            Find::Row(row) => WorldList::Row(*row),
+            Find::FavoriteGroup(group) => WorldList::FavoriteGroup(group.clone()),
         };
         let found = ctl.vrchat_source().worlds(&list, page).map_err(|e| api_failure(e, "finding worlds"))?; // i18n: not shown
         let worlds = found
@@ -304,6 +310,21 @@ impl Game for RealGame {
 
     fn lent_away(&self) -> bool {
         self.ctl().is_ok_and(|ctl| ctl.sides.lent().is_some())
+    }
+
+    fn favorite_groups(&self) -> Result<Vec<(String, String)>, Failure> {
+        self.ctl()?.vrchat_source().favorite_world_groups().map_err(|e| api_failure(e, "reading the playlists")) // i18n: not shown
+    }
+
+    fn camera_pose(&self) -> Option<[f32; 6]> {
+        self.ctl().ok()?.camera_pose()
+    }
+
+    fn set_camera_pose(&self, pose: [f32; 6]) -> Result<(), Failure> {
+        let ctl = self.ctl()?;
+        self.send_osc_all(super::burst::POSE, pose.iter().map(|v| rosc::OscType::Float(*v)).collect())?;
+        ctl.camera_placed(pose);
+        Ok(())
     }
 }
 
@@ -443,6 +464,13 @@ impl Controller {
     }
 
     /// Whether VRChat told where its camera is: a 3D picture starts from there.
+    /// The bridge put VRChat's camera at `pose` (`aim_camera`): a 3D picture starts from there, whether or not VRChat says
+    /// it back (it says where its camera is when it moves; what it does for a pose sent to it is not measured).
+    pub(super) fn camera_placed(&self, pose: [f32; 6]) {
+        let values = pose.iter().map(|v| orbiters_core::osc::OscValue::Float(*v)).collect();
+        self.osc_values.lock().unwrap().latest.record(super::burst::POSE.to_string(), values, orbiters_core::clock::now_ns());
+    }
+
     pub(super) fn camera_pose_known(&self) -> bool {
         let osc = self.osc_values.lock().unwrap();
         osc.latest.get(super::burst::POSE).is_some_and(|(values, _)| {

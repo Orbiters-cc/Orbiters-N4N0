@@ -45,6 +45,10 @@ pub struct Journal {
     pub visits: Vec<Visit>,
     #[serde(default)]
     pub pictures: Vec<Picture>,
+    /// The VRChat accounts side sessions were signed in with (`usr_…`): a session folder in a strict private instance of one
+    /// of them was recorded by a bridge session ([`Journal::adopt`]).
+    #[serde(default)]
+    pub accounts: Vec<String>,
     /// Where it is kept; `None`: in memory only (tests that do not ask for a file).
     #[serde(skip)]
     path: Option<PathBuf>,
@@ -103,6 +107,63 @@ impl Journal {
         self.pictures.iter().find(|p| p.session == session)
     }
 
+    /// A side session is signed in with `account`.
+    pub fn account(&mut self, account: &str) {
+        if account.starts_with("usr_") && !self.accounts.iter().any(|a| a == account) {
+            self.accounts.push(account.to_string());
+            self.save();
+        }
+    }
+
+    /// Takes in the 3D pictures under `sessions_dir` that a bridge session took before this journal knew them (before the
+    /// build that keeps it): a folder with a picture's settings (`picture.json`) whose manifest puts it in a strict private
+    /// instance of an account a side session used, never of `persons` (the VRChat account of Orbiters - N4N0's Settings, the
+    /// person's own). Nothing else is ever taken: the person's own captures stay theirs. How many were taken in.
+    pub fn adopt(&mut self, sessions_dir: &Path, persons: Option<&str>) -> usize {
+        let accounts: Vec<&String> = self.accounts.iter().filter(|a| Some(a.as_str()) != persons).collect();
+        if accounts.is_empty() {
+            return 0;
+        }
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(sessions_dir).into_iter().flatten().flatten() {
+            let dir = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if self.picture(&name).is_some() {
+                continue;
+            }
+            let Some(picture) = orbiters_core::picture::Picture::read(&dir) else { continue };
+            let Ok(manifest) = orbiters_core::bundle::read_manifest(&dir) else { continue };
+            let Some(world) = manifest.world else { continue };
+            let Some(instance) = world.instance.as_deref() else { continue };
+            if !accounts.iter().any(|a| orbiters_core::vrchat_api::private_instance_of(instance, a)) {
+                continue;
+            }
+            let length_s = match picture.length {
+                orbiters_core::settings::Photo3dLength::Quick => 1,
+                orbiters_core::settings::Photo3dLength::Standard => 4,
+                orbiters_core::settings::Photo3dLength::Full => 8,
+            };
+            let at = entry.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+            found.push((Picture { session: name, world_id: world.id.clone(), world_name: world.name.clone(), length_s, profile: 0, at, freed: None }, world.id, world.name));
+        }
+        found.sort_by_key(|(p, ..)| p.at);
+        let taken = found.len();
+        for (picture, world, name) in found {
+            if let Some(world) = world.filter(|w| orbiters_core::vrchat_log::is_world_id(w)) {
+                let world = world.to_ascii_lowercase();
+                if !self.visits.iter().any(|v| v.world == world) {
+                    self.visits.push(Visit { world, name, profile: 0, at: picture.at });
+                }
+            }
+            self.pictures.push(picture);
+        }
+        if taken > 0 {
+            self.pictures.sort_by_key(|p| p.at);
+            self.save();
+        }
+        taken
+    }
+
     pub fn freed(&mut self, session: &str, what: &str) {
         if let Some(p) = self.pictures.iter_mut().find(|p| p.session == session) {
             p.freed = Some(what.to_string());
@@ -131,5 +192,45 @@ mod tests {
         assert!(!j.was_in("wrld_c"));
         assert_eq!(j.picture("A 2026-11-15 10-00-00").map(|p| p.length_s), Some(8));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Pictures a bridge session took before the journal existed are taken in from the sessions folder by their instance's
+    /// owner, a side session's account; the person's own captures (their own account's private instances, recordings without
+    /// a picture's settings, other people's instances) never are.
+    #[test]
+    fn only_pictures_from_a_bridge_sessions_own_instances_are_taken_in() {
+        let root = std::env::temp_dir().join(format!("orbiters-journal-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let side = "usr_dfc96b2c-1aec-4775-9557-eef94a7f02c3";
+        let person = "usr_1339e525-0000-4000-8000-000000000000";
+        let session = |name: &str, owner: &str, picture: bool| {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut m = orbiters_core::contracts::manifest::SessionManifest::new("id".into(), "2026-11-15T05:00:00Z".into(), "0.3.5");
+            m.world = Some(orbiters_core::contracts::manifest::WorldInfo {
+                id: Some("wrld_b2d24c29-1ded-4990-a90d-dd6dcc440300".into()),
+                name: Some("Japan Shrine".into()),
+                author_name: None,
+                instance: Some(format!("54758~private({owner})~region(eu)~nonce(46fc04e3-a8f0-4b31-99f6-732418f4632c)")),
+            });
+            std::fs::write(dir.join(orbiters_core::contracts::manifest::MANIFEST_FILE), serde_json::to_vec(&m).unwrap()).unwrap();
+            if picture {
+                let p = orbiters_core::picture::Picture { length: orbiters_core::settings::Photo3dLength::Full, ..Default::default() };
+                p.save(&dir).unwrap();
+            }
+        };
+        session("Japan Shrine 2026-11-15 05-53-21", side, true);
+        session("Mine 2026-11-01 10-00-00", person, true);
+        session("A recording 2026-11-02 10-00-00", side, false);
+        session("Someone's 2026-11-03 10-00-00", "usr_99999999-0000-4000-8000-000000000000", true);
+        let mut j = Journal::default();
+        assert_eq!(j.adopt(&root, Some(person)), 0, "no side session's account known yet: nothing");
+        j.account(side);
+        j.account(person);
+        assert_eq!(j.adopt(&root, Some(person)), 1, "the person's account is never a bridge session's, even if one used it");
+        assert_eq!(j.picture("Japan Shrine 2026-11-15 05-53-21").map(|p| p.length_s), Some(8));
+        assert!(j.was_in("wrld_b2d24c29-1ded-4990-a90d-dd6dcc440300"));
+        assert_eq!(j.adopt(&root, Some(person)), 0, "once");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

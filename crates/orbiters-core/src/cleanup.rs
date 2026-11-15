@@ -196,6 +196,32 @@ pub fn keep_only_view(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<
     result.map(|()| total)
 }
 
+/// Deletes for good only a reconstructed session's recording that training read and nothing else does: its keyframes, its
+/// depth frames and leftover reconstructions ([`Part::Keyframes`], [`Part::Depth`], [`Part::Leftovers`]), nearly all of a 3D
+/// picture's size (187 of 230 MB in an 8 s one). Unlike [`keep_only_view`] it keeps the avatar's streams: the skeleton band
+/// gives a share its start view's ground and eye height (`views::eye_level`), so a capture shared after this is the capture
+/// shared before it. It can no longer be reconstructed again. Refused without a finished reconstruction.
+pub fn drop_recording(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<u64> {
+    anyhow::ensure!(dir.join(MANIFEST_FILE).is_file(), "{}", tr!("{path} is not a session folder.", path = dir.display()));
+    anyhow::ensure!(has_view(dir), "{}", tr("This session has no 3D view to keep: reconstruct it first."));
+    let mut total = 0;
+    let result = (|| {
+        let (keyframes, going) = (dir.join(KEYFRAMES_DIR), dir.join(KEYFRAMES_GOING));
+        if keyframes.is_dir() {
+            if std::fs::symlink_metadata(&going).is_ok() {
+                total += remove(&going, freed)?;
+            }
+            crate::rename_retrying(&keyframes, &going)?;
+        }
+        for e in capture_files(dir).into_iter().filter(|e| matches!(e.part, Part::Keyframes | Part::Depth | Part::Leftovers)) {
+            total += remove(&e.path, freed)?;
+        }
+        Ok(())
+    })();
+    crate::bundle::forget_sizes(dir);
+    result.map(|()| total)
+}
+
 /// Deletes a whole session folder for good, the biggest parts first; `freed` as for [`keep_only_view`]. Refused for a
 /// folder without a session manifest.
 pub fn delete_session(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<u64> {
@@ -315,6 +341,28 @@ mod tests {
 
     /// What the capture wrote: 5 × 1000 keyframes, 5 × 300 + 200 depth, a 5000 video, 4356 of performance streams.
     const CAPTURE: u64 = 5000 + 1700 + 5000 + 4356;
+
+    /// A tour's picture drops only what training read: its keyframes, depth and leftover runs; the streams a share reads
+    /// (the skeleton band's ground and eye height), the 3D view and the person's own files stay; not without a 3D view.
+    #[test]
+    fn dropping_the_recording_keeps_what_a_share_and_the_view_read() {
+        let (root, dir) = session("drop", false);
+        assert!(drop_recording(&dir, &mut |_| {}).is_err(), "nothing to keep without a reconstruction");
+        assert!(dir.join("keyframes").is_dir());
+        let _ = fs::remove_dir_all(&root);
+        let (root, dir) = session("drop-done", true);
+        let mut told = 0;
+        let freed = drop_recording(&dir, &mut |n| told += n).unwrap();
+        assert_eq!((freed, told), (5000 + 1700 + 900 + 1500, 5000 + 1700 + 900 + 1500));
+        for gone in ["keyframes", "depth", "depth-raw", "reconstruction.partial", "reconstruction.old", "keyframes.deleting"] {
+            assert!(!dir.join(gone).exists(), "{gone}");
+        }
+        for kept in ["skeleton.bin", "parameters.bin", "audio/mic.wav", "colour.mkv", "notes.txt", "reconstruction/splats.ply", "reconstruction/report.json", "manifest.json"] {
+            assert!(dir.join(kept).exists(), "{kept}");
+        }
+        assert!(trimmed(&dir) && has_view(&dir), "a session reduced to its 3D view, as the library knows them");
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn keeping_only_the_3d_view_deletes_the_capture_files_and_keeps_what_the_view_reads() {

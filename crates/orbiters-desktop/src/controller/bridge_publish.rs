@@ -164,7 +164,7 @@ impl crate::bridge::game::Publish for RealPublish {
         let result = if everything {
             orbiters_core::cleanup::delete_session(session, &mut |_| {})
         } else {
-            orbiters_core::cleanup::keep_only_view(session, &mut |_| {})
+            orbiters_core::cleanup::drop_recording(session, &mut |_| {})
         };
         ctl.bump_library();
         result.map_err(|e| Failure::new("not_freed", format!("{e:#}"), "Leave it and tell the person if it stays."))

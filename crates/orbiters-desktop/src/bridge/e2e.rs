@@ -1701,3 +1701,28 @@ fn a_tour_publishes_its_pictures_where_it_was_told_and_frees_them_once_safe() {
     client2.fails("label_world", json!({ "world_id": LAB_WORLD_B, "add": ["bright"] }), "not_seen_here");
     assert_eq!(client2.tool("pictures", json!({})).unwrap()["taken_in_all"], 3);
 }
+
+/// Vantage without walking: the open camera is put higher and further, from where it is and the way it looks, and a picture
+/// starts there; VRChat's other rows and the person's playlists are sources.
+#[test]
+fn the_camera_is_placed_for_a_view_and_more_rows_are_sources() {
+    let (game, _bridge, _server, client) = lab("aim");
+    arrive(&client);
+    client.fails("aim_camera", json!({ "up_m": 3 }), "camera_closed");
+    open_camera(&game, &client);
+    // The lab's camera opens at (1, 1.5, 2) looking along +X (yaw 90).
+    let aimed = client.tool("aim_camera", json!({ "forward_m": 4, "right_m": 1, "up_m": 3, "turn_deg": -30, "pitch_deg": 20 })).unwrap();
+    let to: Vec<f64> = aimed["to"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    assert_eq!(to, [5.0, 4.5, 1.0, 20.0, 60.0, 0.0], "{aimed}");
+    assert_eq!(aimed["moved_m"], 5.1);
+    client.fails("aim_camera", json!({ "up_m": 40 }), "bad_arguments");
+    let picture = client.tool("take_3d_picture", json!({ "length_s": 8 })).unwrap();
+    assert_eq!(picture["saved"], true);
+
+    let rows = client.tool("find_worlds", json!({ "source": "games" })).unwrap();
+    assert!(!rows["worlds"].as_array().unwrap().is_empty(), "{rows}");
+    let playlists = client.tool("find_worlds", json!({ "source": "playlists" })).unwrap();
+    assert_eq!(playlists["playlists"][0]["group"], "worlds1", "{playlists}");
+    client.tool("find_worlds", json!({ "source": "playlists", "group": "worlds1" })).unwrap();
+    client.fails("find_worlds", json!({ "source": "playlists", "group": "worlds9" }), "unknown_playlist");
+}

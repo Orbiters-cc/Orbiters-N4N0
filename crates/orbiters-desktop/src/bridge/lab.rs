@@ -102,6 +102,8 @@ struct State {
     menu_open: bool,
     camera_open: bool,
     pose_known: bool,
+    /// Where its camera was put (`set_camera_pose`), else where it opened.
+    camera_pose: Option<[f32; 6]>,
     capture_state: String,
     session: Option<PathBuf>,
     recording_until: Option<Instant>,
@@ -578,6 +580,20 @@ impl Game for LabGame {
 
     fn hold_reconstructions(&self, hold: bool) {
         self.state.lock().unwrap().hold = hold;
+    }
+
+    fn favorite_groups(&self) -> Result<Vec<(String, String)>, Failure> {
+        Ok(vec![("worlds1".into(), "Lab playlist".into())]) // i18n: not shown
+    }
+
+    fn camera_pose(&self) -> Option<[f32; 6]> {
+        let state = self.state.lock().unwrap();
+        state.pose_known.then(|| state.camera_pose.unwrap_or([1.0, 1.5, 2.0, 0.0, 90.0, 0.0]))
+    }
+
+    fn set_camera_pose(&self, pose: [f32; 6]) -> Result<(), Failure> {
+        self.state.lock().unwrap().camera_pose = Some(pose);
+        Ok(())
     }
 }
 

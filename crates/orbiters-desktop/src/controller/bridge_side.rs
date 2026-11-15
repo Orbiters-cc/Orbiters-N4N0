@@ -549,6 +549,25 @@ impl Game for SideGame {
         Some(self.to_vrchat())
     }
 
+    fn favorite_groups(&self) -> Result<Vec<(String, String)>, Failure> {
+        self.inner.favorite_groups()
+    }
+
+    fn camera_pose(&self) -> Option<[f32; 6]> {
+        let values = self.values.lock().unwrap();
+        values.get(super::burst::POSE).and_then(|(v, _)| <[f32; 6]>::try_from(super::burst::floats(v).as_slice()).ok()).filter(|p| p.iter().any(|f| *f != 0.0))
+    }
+
+    fn set_camera_pose(&self, pose: [f32; 6]) -> Result<(), Failure> {
+        let packet = rosc::OscPacket::Message(rosc::OscMessage { addr: super::burst::POSE.to_string(), args: pose.iter().map(|v| rosc::OscType::Float(*v)).collect() });
+        let bytes = rosc::encoder::encode(&packet).map_err(|e| Failure::new("osc_failed", format!("OSC: {e}"), "Tell the person."))?; // i18n: not shown
+        self.sender.send_to(&bytes, self.to_vrchat()).map_err(|e| Failure::new("osc_failed", format!("OSC to VRChat failed: {e}"), "Call get_state."))?; // i18n: not shown
+        // What a picture starts from, and what a lend carries to the app.
+        let values = pose.iter().map(|v| OscValue::Float(*v)).collect();
+        self.values.lock().unwrap().record(super::burst::POSE.to_string(), values, orbiters_core::clock::now_ns());
+        Ok(())
+    }
+
     fn inject(&self, window: &GameWindow, input: &[Input]) -> Result<(), Failure> {
         win::inject(window, input)
     }

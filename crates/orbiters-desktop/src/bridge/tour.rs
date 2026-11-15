@@ -56,7 +56,7 @@ pub fn list() -> Vec<Value> {
         json!({
             "name": "pictures",
             "title": "List the pictures taken",
-            "description": "The 3D pictures this bridge's sessions took, newest first, kept across restarts of the app: each one's world, length, size on this computer, reconstruction (waiting, running, done, failed) and publishing (none, running, done with id and link, failed) in the active environment. With picture: that one. unpublished: only those not published yet.",
+            "description": "The 3D pictures this bridge's sessions took, newest first, kept across restarts of the app (and those taken before the app kept them, found in the sessions folder by their instance: a strict private instance of a side session's own VRChat account, never the person's): each one's world, length, size on this computer, reconstruction (waiting, running, done, failed) and publishing (none, running, done with id and link, failed) in the active environment. With picture: that one. unpublished: only those not published yet.",
             "inputSchema": { "type": "object", "properties": {
                 "picture": { "type": "string" },
                 "unpublished": { "type": "boolean" },
@@ -67,7 +67,7 @@ pub fn list() -> Vec<Value> {
         json!({
             "name": "free_picture_files",
             "title": "Free a picture's files",
-            "description": "Deletes a picture's files on this computer for good, to keep room for the next ones (get_state's `disks`). what capture_files: the recording only (keyframes, depth, the avatar's streams: most of its size), once its reconstruction is done; its 3D view stays, so it can still be published and seen here. what everything: the whole picture, only once it is published (publish_3d_picture done in the active environment), or when its reconstruction failed or it has no keyframes (nothing to publish). Refused while it records, waits for or runs its reconstruction, or is being published.",
+            "description": "Deletes a picture's files on this computer for good, to keep room for the next ones (get_state's `disks`). what capture_files: what only its reconstruction read (keyframes, depth frames, leftover runs: about 190 of an 8 s picture's 230 MB), once its reconstruction is done; its 3D view and everything publishing reads stay, so it can still be published and seen here, but not reconstructed again. what everything: the whole picture, only once it is published (publish_3d_picture done in the active environment), or when its reconstruction failed or it has no keyframes (nothing to publish). Refused while it records, waits for or runs its reconstruction, or is being published.",
             "inputSchema": { "type": "object", "properties": {
                 "picture": { "type": "string" },
                 "what": { "type": "string", "enum": ["capture_files", "everything"] },
@@ -187,9 +187,22 @@ impl Bridge {
         })))
     }
 
+    /// Takes in the pictures bridge sessions took before the journal knew them (journal.rs `adopt`).
+    fn adopt(&self, publish: &dyn Publish) -> usize {
+        let persons = self.game.seen().vrchat_user.map(|u| u.0);
+        let dir = publish.sessions_dir();
+        if dir.as_os_str().is_empty() {
+            return 0;
+        }
+        self.journal.lock().unwrap().adopt(&dir, persons.as_deref())
+    }
+
     /// The picture a call names: one this bridge took, its folder, and its journal entry.
     fn picture_named(&self, publish: &dyn Publish, args: &Value) -> Result<(PathBuf, journal::Picture), Failure> {
         let name = args["picture"].as_str().unwrap_or_default();
+        if self.journal.lock().unwrap().picture(name).is_none() {
+            self.adopt(publish);
+        }
         let Some(picture) = self.journal.lock().unwrap().picture(name).cloned() else {
             return Err(Failure::new(
                 "unknown_picture",
@@ -223,6 +236,7 @@ impl Bridge {
             let (_, picture) = self.picture_named(&*publish, args)?;
             return Ok(Answer::Data(self.picture_entry(&*publish, &picture)));
         }
+        let adopted = self.adopt(&*publish);
         let limit = args["limit"].as_u64().unwrap_or(30).clamp(1, 200) as usize;
         let unpublished = args["unpublished"].as_bool().unwrap_or(false);
         let all: Vec<journal::Picture> = self.journal.lock().unwrap().pictures.iter().rev().cloned().collect();
@@ -236,6 +250,7 @@ impl Bridge {
         Ok(Answer::Data(json!({
             "pictures": listed,
             "taken_in_all": all.len(),
+            "found_on_disk_now": adopted,
             "orbiters": environment_json(&publish.environment()),
             "disks": publish.disks(),
         })))

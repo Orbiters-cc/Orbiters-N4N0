@@ -263,6 +263,40 @@ pub enum WorldList {
     Favorites,
     /// What VRChat highlights: the worlds of one of its Spotlight rows, latest updated first (VRChat only).
     Spotlight(Spotlight),
+    /// Another of VRChat's own world rows ([`Row`]).
+    Row(Row),
+    /// One world favourite group of the signed-in VRChat account (a playlist of worlds in VRChat's menu), by its tag
+    /// (`worlds1`…: [`crate::vrchat_api::Client::favorite_world_groups`]).
+    FavoriteGroup(String),
+}
+
+/// VRChat's other world rows, as its client's Worlds menu has them (`GET /config`, `dynamicWorldRows`, read 2026-11-15),
+/// with the sort and tag each asks `/worlds` for. Its other rows have lists of their own (Hot: trending, the Spotlight rows,
+/// Active: active), or are the account's own (Recent: what this computer visited; Mine).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Row {
+    CommunityLabs,
+    Random,
+    AvatarWorlds,
+    Games,
+    UpdatedRecently,
+    New,
+    Classics,
+}
+
+impl Row {
+    /// The row's `sort`, and its `tag` when it has one.
+    pub fn query(self) -> (&'static str, Option<&'static str>) {
+        match self {
+            Row::CommunityLabs => ("labs", None),
+            Row::Random => ("shuffle", None),
+            Row::AvatarWorlds => ("heat", Some("author_tag_avatar")),
+            Row::Games => ("heat", Some("author_tag_game")),
+            Row::UpdatedRecently => ("updated", None),
+            Row::New => ("publication", None),
+            Row::Classics => ("trending", None),
+        }
+    }
 }
 
 /// VRChat's Spotlight rows, as its client's world rows name them (`GET /config`, `dynamicWorldRows`, read 2026-11-15:
@@ -333,7 +367,7 @@ pub fn found_path(list: &WorldList, page: usize) -> Option<String> {
             Some(format!("maps/search?q={}&page={page}", crate::vrchat_api::encode(&q)))
         }
         WorldList::Popular => Some(format!("maps/featured?page={page}")),
-        WorldList::Active | WorldList::Trending | WorldList::Favorites | WorldList::Spotlight(_) => None,
+        WorldList::Active | WorldList::Trending | WorldList::Favorites | WorldList::Spotlight(_) | WorldList::Row(_) | WorldList::FavoriteGroup(_) => None,
     }
 }
 

@@ -595,6 +595,39 @@ fn entries_of(worlds: Vec<crate::worlds::VisitedWorld>, history: &visited::Histo
     entries.sort_by_key(|e| std::cmp::Reverse(e.taken));
     entries
 }
+/// The entry of one session folder of this computer, as Photos & captures lists it ([`entries_of`]), for the bridge's
+/// publishing of the 3D pictures it took (controller/bridge_publish.rs); `None` for a folder without a readable manifest.
+pub fn session_entry(dir: &Path, server: Server) -> Option<Entry> {
+    let manifest = orbiters_core::bundle::read_manifest(dir).ok()?;
+    let world = manifest.world.clone().unwrap_or_default();
+    let records = records_path(server).ok().map(|p| read_records(&p)).unwrap_or_default();
+    let record = records.iter().find(|r| r.path == dir);
+    let reconstructed = orbiters_core::reconstruction::read_report(dir).is_some();
+    let taken = unix(&manifest.created_utc);
+    Some(Entry {
+        key: dir.to_string_lossy().into(),
+        world_id: world.id.clone().unwrap_or_default(),
+        world_name: world.name.clone().unwrap_or_default(),
+        taken,
+        instance: world.instance.clone(),
+        source_key: dir.file_name().map(|s| s.to_string_lossy().into_owned()),
+        people: Vec::new(),
+        local: Some(Local::Session(dir.to_path_buf())),
+        remote: record.and_then(|r| r.item.clone()),
+        content: Content::read(dir),
+        ready: reconstructed,
+        no_keyframes: manifest.stats.frames > 0 && manifest.stats.keyframes == 0,
+        picture_mode: orbiters_core::picture::Picture::read(dir).map(|p| p.mode),
+        no_depth: manifest.stats.depth_frames == 0,
+        trimmed: orbiters_core::cleanup::trimmed(dir),
+        result: None,
+        picture: Some(crate::worlds::Picture::Session(dir.to_path_buf())),
+        size: session_picture_size(manifest.capture.width, manifest.capture.height),
+        layers: Vec::new(),
+        edits: reconstructed.then(|| orbiters_reconstruct::edit::generation(&orbiters_core::reconstruction::result_dir(dir)).map_err(|e| e.to_string())),
+        uploaded_edits: record.map(|r| r.edits.clone().unwrap_or_else(|| orbiters_reconstruct::edit::UNEDITED.into())),
+    })
+}
 pub fn remote_entry(item: Item) -> Entry {
     let picture = item.picture.as_ref().and_then(|p| {
         p.thumbnail_url.starts_with("https://").then(|| crate::worlds::Picture::Remote {

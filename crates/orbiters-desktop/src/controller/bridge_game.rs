@@ -402,6 +402,8 @@ impl Controller {
         let bridge = Bridge::new(game, Some(exe.clone()));
         bridge.set_opener(Arc::new(super::bridge_side::RealOpener::new(Arc::downgrade(self), exe)));
         bridge.set_feedback(Arc::new(super::world_feedback::RealFeedback { ctl: Arc::downgrade(self) }));
+        bridge.set_publish(Arc::new(super::bridge_publish::RealPublish::new(Arc::downgrade(self))));
+        bridge.keep_journal(&crate::bridge::journal::Journal::file());
         bridge.projects.set_host(Arc::new(RealProjectsHost { ctl: Arc::downgrade(self) }));
         let flag = Arc::new(RealFlag { ctl: Arc::downgrade(self) });
         let ctl = Arc::downgrade(self);

@@ -378,6 +378,7 @@ mod around;
 mod booster;
 pub(crate) use booster::{dev_build as booster_dev_build, restore_at_sign_in as booster_restore_at_sign_in, store as booster_store};
 mod bridge_game;
+mod bridge_publish;
 mod bridge_side;
 mod burst;
 #[cfg(all(test, windows))]
@@ -1784,6 +1785,8 @@ impl Controller {
         if previous.development != settings.development {
             // The account thread reads the other server's account within half a second; the updates look there now.
             use_environment(settings.development);
+            // What was read of worlds' feedback is the other environment's.
+            self.world_feedback_environment_changed();
             self.update(|s| s.update.state = crate::state::UpdateState::Idle);
             self.update_action(crate::ipc::UpdateAction::Check);
         }

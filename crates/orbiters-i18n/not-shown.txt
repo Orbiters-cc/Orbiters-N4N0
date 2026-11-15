@@ -13,6 +13,9 @@ crates/orbiters-desktop/src/bridge/projects.rs
 crates/orbiters-desktop/src/bridge/sandbox.rs
 crates/orbiters-desktop/src/bridge/sessions.rs
 crates/orbiters-desktop/src/controller/bridge_side.rs
+crates/orbiters-desktop/src/bridge/tour.rs
+crates/orbiters-desktop/src/bridge/journal.rs
+crates/orbiters-desktop/src/controller/bridge_publish.rs
 # This crate, and the keyed menu texts it holds beside (crates/orbiters-n4n0-core/menu-strings are their translations).
 crates/orbiters-i18n
 crates/orbiters-n4n0-core/src/menu/strings.rs

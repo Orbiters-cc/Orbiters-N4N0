@@ -27,6 +27,7 @@ pub mod mcp;
 pub mod person;
 pub mod projects;
 pub mod sandbox;
+pub mod sessions;
 pub mod tools;
 pub mod win;
 
@@ -154,6 +155,113 @@ pub(crate) struct Run {
     pub event: Option<String>,
 }
 
+/// One VRChat the bridge drives (bridge/sessions.rs): `main`, the app's own, or a side session beside anything else.
+pub struct Session {
+    /// `main`, or `p<profile>-<random>`: what an agent passes as `session`.
+    pub id: String,
+    /// VRChat's `--profile` (`None`: main without one, the default).
+    pub profile: Option<u32>,
+    /// A side session's OSC ports, in and out (`None`: main, on VRChat's defaults).
+    pub osc: Option<(u16, u16)>,
+    pub game: Arc<dyn Game>,
+    pub(crate) run: Mutex<Run>,
+    /// One action at a time in this session: a second one is told so rather than waiting behind it.
+    pub(crate) action: Mutex<()>,
+    pub(crate) held: Held,
+    /// The person's own input in this session's window (side sessions): it pauses this session only.
+    pub(crate) presence: Mutex<Presence>,
+    /// Who drives it, for side sessions.
+    pub(crate) lease: Mutex<Option<sessions::Lease>>,
+    pub(crate) opened: Instant,
+}
+
+impl Session {
+    pub(crate) fn new(id: &str, profile: Option<u32>, osc: Option<(u16, u16)>, game: Arc<dyn Game>) -> Arc<Self> {
+        Arc::new(Self {
+            id: id.to_string(),
+            profile,
+            osc,
+            game,
+            run: Mutex::default(),
+            action: Mutex::new(()),
+            held: Held::default(),
+            presence: Mutex::default(),
+            lease: Mutex::new(None),
+            opened: Instant::now(),
+        })
+    }
+
+    pub fn is_main(&self) -> bool {
+        self.osc.is_none()
+    }
+
+    /// The VRChat this session started, while it runs.
+    pub fn pid(&self) -> Option<u32> {
+        self.run.lock().unwrap().pid
+    }
+}
+
+/// Whose turn it is to have the keyboard and the mouse: only one VRChat window can be the foreground, so the steps that
+/// need it (keys, clicks, bringing a window forward) take turns between sessions, the one that asked first next.
+#[derive(Default)]
+pub(crate) struct FocusTurn {
+    /// The session holding the turn, and when it last used it.
+    holder: Option<(String, Instant)>,
+    /// Sessions waiting: when they first asked, and last asked.
+    waiting: Vec<(String, Instant, Instant)>,
+}
+
+/// A turn not used for this long is free for the next session.
+pub(crate) const FOCUS_HOLD: Duration = Duration::from_secs(8);
+/// A waiter that stopped asking for this long loses its place.
+const FOCUS_WAITER: Duration = Duration::from_secs(30);
+
+impl FocusTurn {
+    /// Asks for the turn for `session`: `Ok` with it, or the seconds to wait.
+    pub(crate) fn ask(&mut self, session: &str, now: Instant) -> Result<(), u64> {
+        self.waiting.retain(|w| now.duration_since(w.2) < FOCUS_WAITER);
+        if let Some((holder, used)) = self.holder.clone() {
+            if holder == session {
+                self.holder = Some((session.to_string(), now));
+                return Ok(());
+            }
+            if now.duration_since(used) < FOCUS_HOLD {
+                self.wait(session, now);
+                return Err((FOCUS_HOLD - now.duration_since(used)).as_secs() + 1);
+            }
+        }
+        self.wait(session, now);
+        // Free: the one that asked first gets it.
+        let first = self.waiting.iter().min_by_key(|w| w.1).map(|w| w.0.clone());
+        if first.as_deref() == Some(session) {
+            self.waiting.retain(|w| w.0 != session);
+            self.holder = Some((session.to_string(), now));
+            Ok(())
+        } else {
+            Err(2)
+        }
+    }
+
+    fn wait(&mut self, session: &str, now: Instant) {
+        match self.waiting.iter_mut().find(|w| w.0 == session) {
+            Some(w) => w.2 = now,
+            None => self.waiting.push((session.to_string(), now, now)),
+        }
+    }
+
+    /// `session` is done with it (closed, or gone).
+    pub(crate) fn leave(&mut self, session: &str) {
+        if self.holder.as_ref().is_some_and(|h| h.0 == session) {
+            self.holder = None;
+        }
+        self.waiting.retain(|w| w.0 != session);
+    }
+
+    pub(crate) fn holder(&self) -> Option<&str> {
+        self.holder.as_ref().map(|h| h.0.as_str())
+    }
+}
+
 /// A tool call's way of knowing it should end: its client went away, or the service stopped it.
 #[derive(Clone)]
 pub struct Call {
@@ -169,16 +277,23 @@ impl Call {
 
 /// The running bridge's state and rules. Lives for as long as the service; [`mcp::Server`] comes and goes around it.
 pub struct Bridge {
+    /// The main session's game: the app's own VRChat.
     pub game: Arc<dyn Game>,
     pub(crate) timing: Timing,
+    /// The person: their input anywhere on this computer, the hotkey and Settings' Pause.
     pub(crate) presence: Mutex<Presence>,
     pub(crate) own_input: Arc<OwnInput>,
-    pub(crate) held: Held,
     guard: Mutex<Option<Guard>>,
     guard_exe: Option<PathBuf>,
-    /// One action at a time: a second one is told so rather than waiting behind it.
-    pub(crate) action: Mutex<()>,
-    pub(crate) run: Mutex<Run>,
+    /// The session of before, which tools without `session` act on.
+    pub(crate) main: Arc<Session>,
+    /// Side sessions, in the order they were opened.
+    pub(crate) sides: Mutex<Vec<Arc<Session>>>,
+    /// What starts side sessions and knows the computer (`None`: none can be opened).
+    pub(crate) opener: Mutex<Option<Arc<dyn game::Opener>>>,
+    /// One launch of VRChat at a time on this computer: a new VRChat is told apart from the others by appearing after it.
+    pub(crate) launching: Mutex<()>,
+    pub(crate) focus: Mutex<FocusTurn>,
     log: Mutex<VecDeque<LogLine>>,
     client: Mutex<Option<(String, Instant)>>,
     in_flight: AtomicUsize,
@@ -197,15 +312,17 @@ impl Bridge {
 
     pub fn with_timing(game: Arc<dyn Game>, guard_exe: Option<PathBuf>, timing: Timing) -> Arc<Self> {
         Arc::new(Self {
+            main: Session::new(sessions::MAIN, None, None, game.clone()),
             game,
             timing,
             presence: Mutex::default(),
             own_input: Arc::default(),
-            held: Held::default(),
             guard: Mutex::new(None),
             guard_exe,
-            action: Mutex::new(()),
-            run: Mutex::default(),
+            sides: Mutex::new(Vec::new()),
+            opener: Mutex::new(None),
+            launching: Mutex::new(()),
+            focus: Mutex::default(),
             log: Mutex::new(VecDeque::new()),
             client: Mutex::new(None),
             in_flight: AtomicUsize::new(0),
@@ -256,15 +373,49 @@ impl Bridge {
         }
     }
 
+    /// Paused on the whole computer: the hotkey, Settings, or the person's input anywhere in the last 30 s. The main session,
+    /// and every step that needs the keyboard and the mouse, stop for it.
     pub fn paused(&self) -> Option<Paused> {
         self.presence.lock().unwrap().paused(Instant::now())
+    }
+
+    /// Paused for this session: the main session as [`Bridge::paused`] (as ever); a side session by the hotkey, Settings,
+    /// or the person's own input in its window, not by their input elsewhere (OSC and screenshots need nothing of theirs).
+    pub fn paused_in(&self, session: &Session) -> Option<Paused> {
+        if session.is_main() {
+            return self.paused();
+        }
+        let now = Instant::now();
+        match self.presence.lock().unwrap().paused(now) {
+            Some(Paused::Held) => return Some(Paused::Held),
+            _ => session.presence.lock().unwrap().paused(now),
+        }
+    }
+
+    /// Every session, main first.
+    pub fn sessions(&self) -> Vec<Arc<Session>> {
+        std::iter::once(self.main.clone()).chain(self.sides.lock().unwrap().iter().cloned()).collect()
+    }
+
+    /// What starts side sessions and knows the computer.
+    pub fn set_opener(&self, opener: Arc<dyn game::Opener>) {
+        *self.opener.lock().unwrap() = Some(opener);
     }
 
     /// What the person's listener heard.
     pub fn heard(&self, heard: Heard) {
         match heard {
             Heard::PersonInput => {
-                self.presence.lock().unwrap().person_input(Instant::now());
+                let now = Instant::now();
+                self.presence.lock().unwrap().person_input(now);
+                // Their input in a side session's window is theirs to that session: it waits for them.
+                for side in self.sides.lock().unwrap().iter() {
+                    if let Some(window) = side.pid().and_then(|pid| side.game.window(pid)) {
+                        if side.game.is_foreground(&window) {
+                            side.presence.lock().unwrap().person_input(now);
+                        }
+                    }
+                }
                 self.release_all();
             }
             Heard::Hotkey => {
@@ -305,15 +456,19 @@ impl Bridge {
         self.release_all();
         // A copy, a Library move, a scan or a size ends where it safely can; a package change finishes.
         self.projects.stop_all();
-        let (was_running, was_going) = {
-            let mut run = self.run.lock().unwrap();
-            (run.pid.take().is_some(), run.going.take().is_some())
-        };
-        if was_going {
-            self.game.hold_reconstructions(false);
-        }
-        if was_running && matches!(self.game.seen().capture.state.as_str(), "starting" | "recording" | "paused") {
-            self.game.stop_picture();
+        for session in self.sessions() {
+            let (was_running, was_going) = {
+                let mut run = session.run.lock().unwrap();
+                // A side session's VRChat stays the bridge's, to be closed by close_session: only what runs ends.
+                let pid = if session.is_main() { run.pid.take() } else { run.pid };
+                (pid.is_some(), run.going.take().is_some())
+            };
+            if was_going {
+                session.game.hold_reconstructions(false);
+            }
+            if was_running && matches!(session.game.seen().capture.state.as_str(), "starting" | "recording" | "paused") {
+                session.game.stop_picture();
+            }
         }
         self.log(true, why.to_string());
     }
@@ -337,33 +492,55 @@ impl Bridge {
         }
     }
 
-    /// Brings up everything that is down.
+    /// Brings up everything that is down, in every session.
     pub fn release_all(&self) {
-        for hold in self.held.take_all() {
-            self.lift_now(&hold);
+        for session in self.sessions() {
+            self.release_session(&session);
         }
     }
 
-    fn lift_now(&self, hold: &Hold) {
+    /// Brings up what is down in one session.
+    pub(crate) fn release_session(&self, session: &Session) {
+        for hold in session.held.take_all() {
+            self.lift_now(session, &hold);
+        }
+    }
+
+    fn lift_now(&self, session: &Session, hold: &Hold) {
         if let Some((address, rest)) = hold.osc_rest() {
-            let _ = self.game.osc(address, rest);
+            let _ = session.game.osc(address, rest);
         }
         if let Some(up) = hold.up() {
             self.own_input_sent();
-            self.game.release(&[up]);
+            session.game.release(&[up]);
             self.own_input_sent();
         }
-        self.tell_guard(format!("up {}", hold.guard_line()));
+        self.tell_guard(format!("up {}", Self::guard_line(session, hold)));
     }
 
-    /// What the listener does a few times a second: nothing stays down past its time, and the game's comings and goings
+    /// The guard's line for a hold: an OSC one names where it goes (each session has its own input port).
+    fn guard_line(session: &Session, hold: &Hold) -> String {
+        match (hold.osc_rest(), session.game.osc_target()) {
+            (Some(_), Some(target)) => format!("{} @{target}", hold.guard_line()), // i18n: not shown (what the guard reads)
+            _ => hold.guard_line(),
+        }
+    }
+
+    /// What the listener does a few times a second: nothing stays down past its time, and the games' comings and goings
     /// are followed.
     pub fn tick(&self) {
-        if self.held.overdue(Instant::now()) {
-            self.release_all();
-            self.log(false, tr("Input was still down past its time: released."));
+        let now = Instant::now();
+        if let Some(opener) = self.opener.lock().unwrap().clone() {
+            opener.set_main(self.main.pid());
         }
-        self.follow_game();
+        for session in self.sessions() {
+            if session.held.overdue(now) {
+                self.release_session(&session);
+                self.log(false, tr("Input was still down past its time: released."));
+            }
+            session.game.tick();
+            self.follow_game(&session);
+        }
     }
 
     pub(crate) fn begin_call(&self, client_gone: Arc<AtomicBool>) -> Call {
@@ -384,6 +561,7 @@ impl Bridge {
     /// from it, however it ends.
     pub(crate) fn press_for(
         &self,
+        session: &Session,
         call: &Call,
         holds: &[(Hold, Option<OscArg>, Option<Input>)],
         seconds: Duration,
@@ -393,13 +571,14 @@ impl Bridge {
         /// Everything comes up when this goes, a panic included.
         struct Lifted<'a> {
             bridge: &'a Bridge,
+            session: &'a Session,
             holds: Vec<Hold>,
         }
         impl Drop for Lifted<'_> {
             fn drop(&mut self) {
                 for hold in &self.holds {
-                    if self.bridge.held.lift(hold) {
-                        self.bridge.lift_now(hold);
+                    if self.session.held.lift(hold) {
+                        self.bridge.lift_now(self.session, hold);
                     }
                 }
             }
@@ -407,19 +586,19 @@ impl Bridge {
         self.tell_guard_target();
         let begin = Instant::now();
         let until = begin + seconds;
-        let mut lifted = Lifted { bridge: self, holds: Vec::new() };
+        let mut lifted = Lifted { bridge: self, session, holds: Vec::new() };
         for (hold, osc, key) in holds {
-            self.held.press(hold.clone(), until);
+            session.held.press(hold.clone(), until);
             lifted.holds.push(hold.clone());
-            self.tell_guard(format!("down {}", hold.guard_line())); // i18n: not shown (what the AI reads)
+            self.tell_guard(format!("down {}", Self::guard_line(session, hold))); // i18n: not shown (what the AI reads)
             if let Some(address) = match hold {
                 Hold::OscButton(a) | Hold::OscAxis(a) => Some(*a),
                 _ => None,
             } {
-                self.game.osc(address, osc.unwrap_or(OscArg::Int(1)))?;
+                session.game.osc(address, osc.unwrap_or(OscArg::Int(1)))?;
             }
             if let (Some(key), Some(window)) = (key, window) {
-                self.send_own(window, &[*key])?;
+                self.send_own(session, window, &[*key])?;
             }
         }
         let mut looked = begin;
@@ -434,7 +613,8 @@ impl Bridge {
                     "Stop here: the person has to turn the bridge on again.", // i18n: not shown (an AI client reads it in the tool's answer)
                 ));
             }
-            if let Some(paused) = self.paused() {
+            // Keys need the person away from the whole computer; OSC only from this session's window.
+            if let Some(paused) = if window.is_some() { self.paused() } else { self.paused_in(session) } {
                 return Err(tools::paused_failure(&paused));
             }
             if looked.elapsed() > Duration::from_millis(200) {
@@ -450,9 +630,9 @@ impl Bridge {
     /// Sends input into the game as our own. Said before as well as after: the raw input of `SendInput` wakes the thread that
     /// hears the person at once, and told only afterwards, that thread took the bridge's own click for the person's, and paused it
     /// for 30 s after each click and key in the first run on the real game (2026-11-06).
-    pub(crate) fn send_own(&self, window: &game::GameWindow, input: &[Input]) -> Result<(), Failure> {
+    pub(crate) fn send_own(&self, session: &Session, window: &game::GameWindow, input: &[Input]) -> Result<(), Failure> {
         self.own_input_sent();
-        let sent = self.game.inject(window, input);
+        let sent = session.game.inject(window, input);
         self.own_input_sent();
         sent
     }
@@ -464,9 +644,9 @@ impl Bridge {
         self.own_input.sent(unsafe { windows::Win32::System::SystemInformation::GetTickCount() });
     }
 
-    /// Tells the guard where OSC goes.
+    /// Tells the guard where the main session's OSC goes (a side session's lines name their own).
     pub(crate) fn tell_guard_target(&self) {
-        if let Some(target) = self.game.osc_target() {
+        if let Some(target) = self.main.game.osc_target() {
             self.tell_guard(format!("target {target}")); // i18n: not shown (what the AI reads)
         }
     }

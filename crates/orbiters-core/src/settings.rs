@@ -140,6 +140,8 @@ pub enum TranslateProvider {
 pub struct ExperimentalSettings {
     /// The MCP bridge to VRChat, for an agent to start and control the game (`docs/vrchat-bridge.md`).
     pub vrchat_bridge: bool,
+    /// How many VRChats the bridge may run at once (its sessions, `docs/vrchat-bridge.md`); 0: the default, 2.
+    pub vrchat_bridge_sessions: u8,
 }
 
 /// The sound devices Windows uses by default while SteamVR runs: set for all three of Windows' roles (console,

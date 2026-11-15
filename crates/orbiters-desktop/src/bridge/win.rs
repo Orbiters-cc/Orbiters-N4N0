@@ -62,6 +62,15 @@ mod imp {
     pub fn start_vrchat(_args: &[String]) -> Result<(), Failure> {
         Err(Failure::new("not_windows", "The bridge is for Windows.", "Run it on Windows.")) // i18n: not shown (an AI client reads it in the tool's answer)
     }
+    pub fn start_vrchat_beside(_args: &[String]) -> Result<(), Failure> {
+        Err(Failure::new("not_windows", "The bridge is for Windows.", "Run it on Windows.")) // i18n: not shown (an AI client reads it in the tool's answer)
+    }
+    pub fn udp_owners() -> std::collections::HashMap<u16, u32> {
+        std::collections::HashMap::new()
+    }
+    pub fn foreground_pid() -> Option<u32> {
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -251,6 +260,77 @@ mod imp {
     pub(super) fn vrchat_launcher() -> Option<std::path::PathBuf> {
         let command = registry(HKEY_CLASSES_ROOT, r"VRChat\shell\open\command", None)?;
         launcher_of(&command).filter(|p| p.is_file())
+    }
+
+    /// Starts another VRChat beside those running: through VRChat's own `launch.exe` with `--profile` (measured 2026-11-15:
+    /// it then starts a process of its own every time, in 1.3 to 3.2 s, and never hands the link to a running VRChat).
+    /// Not Steam's `-applaunch`, which starts a game once. Never `VRChat.exe` itself: Easy Anti-Cheat starts from the
+    /// launcher.
+    pub fn start_vrchat_beside(args: &[String]) -> Result<(), Failure> {
+        let Some(launcher) = vrchat_launcher() else {
+            return Err(Failure::new(
+                "vrchat_not_installed",
+                "VRChat's launcher was not found on this computer.", // i18n: not shown (an AI client reads it in the tool's answer)
+                "Ask the person to start VRChat once, so that it registers itself.", // i18n: not shown (an AI client reads it in the tool's answer)
+            ));
+        };
+        let mut command = std::process::Command::new(launcher);
+        // As the registered link: the link first (as measured), then the options.
+        let (links, options): (Vec<&String>, Vec<&String>) = args.iter().partition(|a| a.starts_with("vrchat://"));
+        command.args(links).args(options).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        command.spawn().map(drop).map_err(|e| Failure::new("start_failed", format!("VRChat did not start: {e}"), "Ask the person to look at the computer.")) // i18n: not shown
+    }
+
+    /// Which process owns each IPv4 UDP port on this computer (`GetExtendedUdpTable`, what `netstat -ano` reads): a plain
+    /// query of the system's table, nothing opened in any process.
+    pub fn udp_owners() -> std::collections::HashMap<u16, u32> {
+        #[link(name = "iphlpapi")]
+        extern "system" {
+            fn GetExtendedUdpTable(table: *mut core::ffi::c_void, size: *mut u32, order: i32, family: u32, class: i32, reserved: u32) -> u32;
+        }
+        const AF_INET: u32 = 2;
+        const UDP_TABLE_OWNER_PID: i32 = 1;
+        let mut owners = std::collections::HashMap::new();
+        let mut size = 0u32;
+        // SAFETY: a size query with no buffer, then a call into a buffer of the size asked for, read within its length.
+        unsafe {
+            GetExtendedUdpTable(std::ptr::null_mut(), &mut size, 0, AF_INET, UDP_TABLE_OWNER_PID, 0);
+            for _ in 0..3 {
+                let mut buffer = vec![0u32; (size as usize).div_ceil(4) + 64];
+                let mut have = (buffer.len() * 4) as u32;
+                let status = GetExtendedUdpTable(buffer.as_mut_ptr().cast(), &mut have, 0, AF_INET, UDP_TABLE_OWNER_PID, 0);
+                if status == 122 {
+                    // ERROR_INSUFFICIENT_BUFFER: sockets came meanwhile.
+                    size = have;
+                    continue;
+                }
+                if status != 0 {
+                    break;
+                }
+                // MIB_UDPTABLE_OWNER_PID: a count, then rows of (address, port in network order, process id).
+                let count = (buffer[0] as usize).min((buffer.len() - 1) / 3);
+                for row in buffer[1..1 + count * 3].chunks_exact(3) {
+                    let port = u16::from_be((row[1] & 0xFFFF) as u16);
+                    owners.insert(port, row[2]);
+                }
+                break;
+            }
+        }
+        owners
+    }
+
+    /// The process whose window is the foreground now.
+    pub fn foreground_pid() -> Option<u32> {
+        let mut pid = 0;
+        // SAFETY: plain queries.
+        unsafe {
+            let window = GetForegroundWindow();
+            if window.0.is_null() {
+                return None;
+            }
+            GetWindowThreadProcessId(window, Some(&mut pid));
+        }
+        (pid != 0).then_some(pid)
     }
 
     /// Starts VRChat the way a person does, so that its anti-cheat starts as ever: through Steam (`-applaunch`, which unlike

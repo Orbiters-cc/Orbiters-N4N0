@@ -53,6 +53,12 @@ pub struct Behaviour {
     pub reconstruct_fails: Option<String>,
     /// Asking Windows for the foreground works. Off, the real check on the fake window says no, as it is never activated.
     pub focus_works: bool,
+    /// The profile has no account signed in: the game waits at its sign-in page.
+    pub needs_sign_in: bool,
+    /// The app is lent to a side session's picture (the main session's game).
+    pub lent_away: bool,
+    /// The account the game itself signed in with (a side session's profile), as its log says.
+    pub account: Option<(String, String)>,
 }
 
 impl Default for Behaviour {
@@ -69,6 +75,9 @@ impl Default for Behaviour {
             reconstruct: Duration::from_millis(200),
             reconstruct_fails: None,
             focus_works: false,
+            needs_sign_in: false,
+            lent_away: false,
+            account: None,
         }
     }
 }
@@ -340,6 +349,8 @@ impl Game for LabGame {
             queue: state.queue.clone(),
             queue_waits_for: "once VRChat closes or the headset has been off a minute".into(), // i18n: not shown
             steamvr: false,
+            session_account: state.behaviour.account.clone().filter(|_| running),
+            needs_sign_in: running && state.behaviour.needs_sign_in,
         }
     }
 
@@ -439,6 +450,10 @@ impl Game for LabGame {
 
     fn osc_target(&self) -> Option<SocketAddr> {
         Some(self.osc_also.unwrap_or(self.osc_in))
+    }
+
+    fn lent_away(&self) -> bool {
+        self.state.lock().unwrap().behaviour.lent_away
     }
 
     fn capture_kit(&self) -> Option<bool> {
@@ -767,6 +782,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let game = LabGame::with_osc_also(&dir, Some(exe.clone()), osc_also);
     let timing = super::Timing { instance_every: Duration::from_secs(1), start_limit: Duration::from_secs(20) };
     let bridge = super::Bridge::with_timing(game.clone(), Some(exe), timing);
+    bridge.set_opener(LabOpener::new(&dir.join("sessions")));
     let stand_in = StandIn::start();
     let flag = Arc::new(LabFlag { api: orbiters_core::account::Api::at(&stand_in.address), signed_in: AtomicBool::new(true), enabled: AtomicBool::new(true) });
     let keeper = super::keeper::Keeper::new(
@@ -838,4 +854,93 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     keeper.shutdown();
     Ok(())
+}
+
+/// The lab's side sessions: each a [`LabGame`] of its own (its window, log, OSC port), and a computer whose Easy Anti-Cheat,
+/// limits, memory and other VRChats a test sets.
+pub struct LabOpener {
+    root: PathBuf,
+    pub games: Mutex<Vec<(String, u32, Arc<LabGame>)>>,
+    pub eac: Mutex<super::sessions::Eac>,
+    /// Profiles VRChats of the person's run with.
+    pub others: Mutex<Vec<u32>>,
+    /// VRChats of the person's, by process id.
+    pub persons: Mutex<Vec<u32>>,
+    pub limit: Mutex<usize>,
+    pub memory: Mutex<Option<u64>>,
+    pub foreground: Mutex<Option<u32>>,
+    /// Profiles whose account is not signed in.
+    pub signed_out: Mutex<Vec<u32>>,
+    pub forgotten: Mutex<Vec<String>>,
+}
+
+impl LabOpener {
+    pub fn new(root: &Path) -> Arc<Self> {
+        Arc::new(Self {
+            root: root.to_path_buf(),
+            games: Mutex::default(),
+            eac: Mutex::new(super::sessions::Eac { service: "ABSENT".into(), driver: "ABSENT".into(), vrchat_runs: false, launcher_runs: false }),
+            others: Mutex::default(),
+            persons: Mutex::default(),
+            limit: Mutex::new(super::sessions::DEFAULT_LIMIT),
+            memory: Mutex::new(Some(16 << 30)),
+            foreground: Mutex::new(None),
+            signed_out: Mutex::default(),
+            forgotten: Mutex::default(),
+        })
+    }
+
+    /// The game of the session of `profile`.
+    pub fn game_of(&self, profile: u32) -> Option<Arc<LabGame>> {
+        self.games.lock().unwrap().iter().rev().find(|g| g.1 == profile).map(|g| g.2.clone())
+    }
+}
+
+impl super::game::Opener for LabOpener {
+    fn side(&self, session: &str, profile: u32, _osc: (u16, u16)) -> Result<Arc<dyn Game>, Failure> {
+        let game = LabGame::with_osc_also(&self.root.join(session), None, None);
+        let signed_out = self.signed_out.lock().unwrap().contains(&profile);
+        game.set_behaviour(|b| {
+            b.needs_sign_in = signed_out;
+            b.account = (!signed_out).then(|| (format!("usr_{profile:08}-0000-4000-8000-000000000000"), format!("Lab Profile {profile}"))); // i18n: not shown
+        });
+        self.games.lock().unwrap().push((session.to_string(), profile, game.clone()));
+        Ok(game)
+    }
+
+    fn forget(&self, session: &str) {
+        self.forgotten.lock().unwrap().push(session.to_string());
+    }
+
+    fn rename(&self, from: &str, to: &str) {
+        for game in self.games.lock().unwrap().iter_mut().filter(|g| g.0 == from) {
+            game.0 = to.to_string();
+        }
+    }
+
+    fn vrchat_pids(&self) -> Vec<u32> {
+        let mut pids: Vec<u32> = self.games.lock().unwrap().iter().filter_map(|g| g.2.state.lock().unwrap().pid).collect();
+        pids.extend(self.persons.lock().unwrap().iter().copied());
+        pids
+    }
+
+    fn others_profiles(&self) -> Vec<u32> {
+        self.others.lock().unwrap().clone()
+    }
+
+    fn eac(&self) -> super::sessions::Eac {
+        self.eac.lock().unwrap().clone()
+    }
+
+    fn memory_free(&self) -> Option<u64> {
+        *self.memory.lock().unwrap()
+    }
+
+    fn limit(&self) -> usize {
+        *self.limit.lock().unwrap()
+    }
+
+    fn foreground_pid(&self) -> Option<u32> {
+        *self.foreground.lock().unwrap()
+    }
 }

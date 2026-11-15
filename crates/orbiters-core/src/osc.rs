@@ -46,7 +46,7 @@ impl OscValue {
         }
     }
 
-    fn from_osc(arg: &OscType) -> Option<Self> {
+    pub fn from_osc(arg: &OscType) -> Option<Self> {
         Some(match arg {
             OscType::Bool(b) => OscValue::Bool(*b),
             OscType::Int(i) => OscValue::Int(*i),
@@ -549,24 +549,69 @@ struct Route {
     target: Mutex<Option<SocketAddr>>,
     /// The VRChat chosen on the network, the only one heard (LAN).
     peer: Mutex<Option<Ipv4Addr>>,
+    /// The input port of this machine's VRChat (loopback): a VRChat whose OSCQuery says another port is one the VRChat
+    /// bridge started beside the person's with ports of its own (`--osc`), never the one this app talks with.
+    local_port: Option<u16>,
+    /// A VRChat of the bridge's the app is lent to for a 3D picture: its input port and its OSCQuery service.
+    lent: Mutex<Option<(SocketAddr, SocketAddr)>>,
+    /// Whose datagrams are taken, by their source (`false`: dropped, a VRChat of the bridge's beside the person's).
+    filter: Mutex<Option<FilterSlot>>,
 }
+
+/// A [`DatagramFilter`] in a [`Route`], which is printed for debugging.
+#[derive(Clone)]
+struct FilterSlot(DatagramFilter);
+
+impl std::fmt::Debug for FilterSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DatagramFilter")
+    }
+}
+
+/// Says whether a datagram from this source is taken ([`OscService::set_datagram_filter`]).
+pub type DatagramFilter = Arc<dyn Fn(SocketAddr) -> bool + Send + Sync>;
 
 impl Route {
     fn of(network: &Network) -> Self {
         match network {
             Network::Loopback { vrchat_port } => {
-                Self { lan: false, target: Mutex::new(Some(SocketAddr::from((Ipv4Addr::LOCALHOST, *vrchat_port)))), peer: Mutex::new(None) }
+                Self {
+                    lan: false,
+                    target: Mutex::new(Some(SocketAddr::from((Ipv4Addr::LOCALHOST, *vrchat_port)))),
+                    peer: Mutex::new(None),
+                    local_port: Some(*vrchat_port),
+                    lent: Mutex::new(None),
+                    filter: Mutex::new(None),
+                }
             }
             Network::Lan { vrchat, .. } => Self {
                 lan: true,
                 target: Mutex::new(vrchat.ip.map(|ip| SocketAddr::from((ip, vrchat.osc_port)))),
                 peer: Mutex::new(vrchat.ip),
+                local_port: None,
+                lent: Mutex::new(None),
+                filter: Mutex::new(None),
             },
         }
     }
 
     fn target(&self) -> Option<SocketAddr> {
+        if let Some((lent, _)) = *self.lent.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+            return Some(lent);
+        }
         *self.target.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether a datagram from `from` is taken by the filter (no filter: all).
+    fn takes(&self, from: SocketAddr) -> bool {
+        let filter = self.filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        filter.is_none_or(|f| (f.0)(from))
+    }
+
+    /// Whether the VRChat OSCQuery service at `addr` is one this app talks with: it answers as VRChat and, on this
+    /// machine, takes input on the app's VRChat port (a side session of the bridge's says its own `--osc` port).
+    fn answers(&self, addr: SocketAddr) -> bool {
+        vrchat_client_port(addr).is_some_and(|port| self.local_port.is_none_or(|local| port == local))
     }
 
     fn peer(&self) -> Option<Ipv4Addr> {
@@ -757,6 +802,7 @@ impl OscService {
             let last_received = last_received.clone();
             let turned_away = turned_away.clone();
             let mut heard = Heard::of(&route);
+            let filter_route = route.clone();
             threads.push(std::thread::Builder::new().name("osc-receive".into()).spawn(move || {
                 let mut buf = vec![0u8; 65536];
                 let mut events = Vec::new();
@@ -772,7 +818,7 @@ impl OscService {
                             continue;
                         }
                     };
-                    if n == 0 || !heard.datagram(from.ip()) || !nesting_within_limit(&buf[..n]) {
+                    if n == 0 || !heard.datagram(from.ip()) || !filter_route.takes(from) || !nesting_within_limit(&buf[..n]) {
                         turned_away.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
@@ -960,7 +1006,27 @@ impl OscService {
 
     /// VRChat's OSCQuery service when it was found.
     pub fn vrchat_query(&self) -> Option<SocketAddr> {
+        if let Some((_, query)) = *self.route.lent.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+            return Some(query);
+        }
         *self.vrchat_query.lock().unwrap()
+    }
+
+    /// Lends the app to another VRChat on this machine for a while (the VRChat bridge's 3D picture in a session of its
+    /// own): messages go to `osc` and VRChat's tree is read from `query` until `None` gives it back.
+    pub fn lend(&self, to: Option<(SocketAddr, SocketAddr)>) {
+        *self.route.lent.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = to;
+    }
+
+    /// Where the app is lent to now ([`OscService::lend`]).
+    pub fn lent(&self) -> Option<(SocketAddr, SocketAddr)> {
+        *self.route.lent.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Which datagrams are taken, by their source: the VRChat bridge drops those of its own VRChats beside the person's,
+    /// which find these services over mDNS like any VRChat and would mix their avatar's values with the person's.
+    pub fn set_datagram_filter(&self, filter: Option<DatagramFilter>) {
+        *self.route.filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = filter.map(FilterSlot);
     }
 
     /// Uses this OSCQuery address for VRChat (tests, or a known port).
@@ -1226,13 +1292,6 @@ fn nearest_first(mut addresses: Vec<Ipv4Addr>, own: Ipv4Addr) -> Vec<Ipv4Addr> {
     addresses
 }
 
-/// Whether VRChat's OSCQuery service answers at `addr`: its HOST_INFO, within a second, has an OSC port and VRChat's
-/// name (`VRChat-Client-…`, as it announces itself). An announcement pointing at another program's service on this
-/// machine (an OSC app's), or back at this one, is not VRChat.
-fn is_vrchat_client(addr: SocketAddr) -> bool {
-    vrchat_client_port(addr).is_some()
-}
-
 /// The input port VRChat's OSCQuery service at `addr` says (its HOST_INFO's `OSC_PORT`), when it answers as VRChat.
 fn vrchat_client_port(addr: SocketAddr) -> Option<u16> {
     vrchat_client_port_within(addr, Duration::from_secs(1))
@@ -1358,19 +1417,19 @@ fn watch_vrchat(
                     Some(_) => None,
                 };
                 let Some(addr) = addr else { continue };
-                if services.announced(&name, addr, is_vrchat_client) {
+                if services.announced(&name, addr, |a| route.answers(a)) {
                     checked = Instant::now();
                     // After VRChat's discovery is up (it announced itself), twice, and once more later.
                     announce_later(announcement.clone(), &[2000, 3500, 10000]);
                 }
             }
-            Some(Some(Sighting::Gone { name })) => services.removed(&name, is_vrchat_client),
+            Some(Some(Sighting::Gone { name })) => services.removed(&name, |a| route.answers(a)),
             Some(_) => {}
             None => return,
         }
         if checked.elapsed() >= RECHECK {
             checked = Instant::now();
-            services.recheck(is_vrchat_client);
+            services.recheck(|a| route.answers(a));
         }
         if services.current() != before {
             let current = services.current();
@@ -1477,7 +1536,7 @@ mod platform_tests {
     /// The answers reach the chosen VRChat directly, in the shape VRChat takes, with this service's ports.
     #[test]
     fn answers_go_directly_to_the_chosen_vrchat() {
-        let route = Arc::new(Route { lan: true, target: Mutex::new(None), peer: Mutex::new(None) });
+        let route = Arc::new(Route { lan: true, target: Mutex::new(None), peer: Mutex::new(None), local_port: None, lent: Mutex::new(None), filter: Mutex::new(None) });
         let a = Announcement {
             interface: None,
             instance: "Test-4242".into(),
@@ -1901,6 +1960,27 @@ mod tests {
         assert!(!is_vrchat_client(host(r#"{"NAME":"VRCFT","OSC_IP":"127.0.0.1","OSC_PORT":9010}"#)), "another OSC app");
         assert!(!is_vrchat_client(host(r#"{"NAME":"Orbiters desktop","OSC_PORT":50000}"#)), "this one");
         assert!(!is_vrchat_client(host(r#"{"NAME":"VRChat-Client-A1B2C3"}"#)), "no OSC port");
+        // On this machine, only the VRChat on the app's port is the app's: one the bridge started with `--osc=9010:…`
+        // is a side session, and the app never talks with it or reads its tree (measured 2026-11-15: each VRChat
+        // advertises its own `VRChat-Client-*` service with its own OSC port).
+        let route = Route::of(&Network::Loopback { vrchat_port: 9000 });
+        assert!(route.answers(host(r#"{"NAME":"VRChat-Client-A1B2C3","OSC_IP":"127.0.0.1","OSC_PORT":9000}"#)));
+        assert!(!route.answers(host(r#"{"NAME":"VRChat-Client-0D0E0D","OSC_IP":"127.0.0.1","OSC_PORT":9010}"#)), "a side session");
+    }
+
+    #[test]
+    fn a_lent_app_talks_with_the_lent_vrchat_and_a_filter_drops_side_sessions() {
+        let route = Route::of(&Network::Loopback { vrchat_port: 9000 });
+        assert_eq!(route.target(), Some(SocketAddr::from(([127, 0, 0, 1], 9000))));
+        let (side, query) = (SocketAddr::from(([127, 0, 0, 1], 9010)), SocketAddr::from(([127, 0, 0, 1], 60102)));
+        *route.lent.lock().unwrap() = Some((side, query));
+        assert_eq!(route.target(), Some(side));
+        *route.lent.lock().unwrap() = None;
+        assert_eq!(route.target(), Some(SocketAddr::from(([127, 0, 0, 1], 9000))), "given back");
+        assert!(route.takes(side), "no filter: everything");
+        *route.filter.lock().unwrap() = Some(FilterSlot(Arc::new(|from: SocketAddr| from.port() != 57303)));
+        assert!(!route.takes(SocketAddr::from(([127, 0, 0, 1], 57303))));
+        assert!(route.takes(SocketAddr::from(([127, 0, 0, 1], 50000))));
     }
 
     #[test]

@@ -19,15 +19,19 @@ const WORLDS_A_PAGE: usize = 20;
 /// How far into VRChat's log its command line is, at most.
 const LOG_HEAD: usize = 256 * 1024;
 
-struct RealGame {
-    ctl: Weak<Controller>,
-    exe: PathBuf,
+pub(super) struct RealGame {
+    pub(super) ctl: Weak<Controller>,
+    pub(super) exe: PathBuf,
     /// The log last looked at for its command line, and what it said.
     desktop_mode: Mutex<(Option<PathBuf>, Option<bool>)>,
 }
 
 impl RealGame {
-    fn ctl(&self) -> Result<Shared, Failure> {
+    pub(super) fn new(ctl: Weak<Controller>, exe: PathBuf) -> Self {
+        Self { ctl, exe, desktop_mode: Mutex::new((None, None)) }
+    }
+
+    pub(super) fn ctl(&self) -> Result<Shared, Failure> {
         self.ctl.upgrade().ok_or_else(|| Failure::new("app_closing", "Orbiters - N4N0 is closing.", "Stop here.")) // i18n: not shown
     }
 
@@ -66,7 +70,7 @@ fn desktop_mode_in(head: &str) -> Option<bool> {
 }
 
 /// An error of VRChat's API as the agent reads it.
-fn api_failure(error: anyhow::Error, doing: &str) -> Failure {
+pub(super) fn api_failure(error: anyhow::Error, doing: &str) -> Failure {
     match error.downcast_ref::<VrchatError>() {
         Some(VrchatError::RateLimited(wait)) => {
             let seconds = wait.as_secs().max(1);
@@ -145,6 +149,8 @@ impl Game for RealGame {
             queue: (*snap.reconstruct_queue).clone(),
             queue_waits_for: ctl.reconstruction_waits_for().to_string(),
             steamvr: snap.steamvr.running,
+            session_account: None,
+            needs_sign_in: false,
         }
     }
 
@@ -195,6 +201,13 @@ impl Game for RealGame {
     }
 
     fn launch(&self, plan: &LaunchPlan) -> Result<(), Failure> {
+        // Beside the bridge's side sessions, Steam would start nothing (a game runs once there): VRChat's own launcher, with
+        // the default profile named so that a running VRChat is never handed the link instead.
+        let sides_run = self.ctl().is_ok_and(|ctl| !ctl.sides.side_pids().is_empty());
+        if sides_run {
+            let plan = LaunchPlan { profile: Some(plan.profile.unwrap_or(0)), ..plan.clone() };
+            return win::start_vrchat_beside(&plan.args());
+        }
         win::start_vrchat(&plan.args())
     }
 
@@ -278,6 +291,10 @@ impl Game for RealGame {
                 ctl.next_reconstruction();
             }
         }
+    }
+
+    fn lent_away(&self) -> bool {
+        self.ctl().is_ok_and(|ctl| ctl.sides.lent().is_some())
     }
 }
 
@@ -372,8 +389,9 @@ impl Controller {
                 return;
             }
         };
-        let game = Arc::new(RealGame { ctl: Arc::downgrade(self), exe: exe.clone(), desktop_mode: Mutex::new((None, None)) });
-        let bridge = Bridge::new(game, Some(exe));
+        let game = Arc::new(RealGame::new(Arc::downgrade(self), exe.clone()));
+        let bridge = Bridge::new(game, Some(exe.clone()));
+        bridge.set_opener(Arc::new(super::bridge_side::RealOpener::new(Arc::downgrade(self), exe)));
         bridge.projects.set_host(Arc::new(RealProjectsHost { ctl: Arc::downgrade(self) }));
         let flag = Arc::new(RealFlag { ctl: Arc::downgrade(self) });
         let ctl = Arc::downgrade(self);

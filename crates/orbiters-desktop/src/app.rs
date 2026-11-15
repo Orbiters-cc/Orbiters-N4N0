@@ -7,7 +7,7 @@ use crate::ipc::UpdateAction;
 use crate::pages::{self, Page};
 use crate::state::{AccountState, CaptureState, Snapshot, UpdateState};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, ResizeDirection, Sense, Ui, Vec2, ViewportCommand};
-use orbiters_i18n::{mark, tr};
+use orbiters_i18n::{mark, tr, tr_n};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::glow::{self, Mood};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -467,7 +467,31 @@ impl App {
             pages::network::sidebar_status(&snap.lan)
         };
         side_status(ui, pos2(inner.left(), bottom - 34.0 - 44.0), tr("Action Menu"), &osc_text, osc_tone, inner.width());
-        side_status(ui, pos2(inner.left(), bottom - 34.0 - 88.0), "VRChat", &vrchat_text, vrchat_tone, inner.width());
+        // Several VRChats on this computer: how many, and the one pictures are taken in (its account, its world); a press
+        // opens the Capture page, where another is chosen.
+        let several = snap.vrchat.several_target().filter(|_| orbiters_core::osc::VRCHAT_RUNS_HERE);
+        let (vrchat_label, vrchat_text) = match several {
+            Some(target) => {
+                let who = crate::controller::vrchats::who(target);
+                let text = match &target.world {
+                    Some(world) => format!("{who} · {world}"),
+                    None => who,
+                };
+                (tr_n("{count} VRChat", "{count} VRChats", snap.vrchat.runs.len() as u64), text)
+            }
+            None => ("VRChat".to_string(), vrchat_text),
+        };
+        let vrchat_row = Rect::from_min_size(pos2(inner.left(), bottom - 34.0 - 88.0), vec2(inner.width(), 40.0));
+        if several.is_some() {
+            let resp = ui.interact(vrchat_row, Id::unique("side-vrchats"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            if resp.hovered() {
+                ui.painter().rect_filled(vrchat_row.shrink2(vec2(4.0, 0.0)), theme::radius(10.0), theme::white(0.04));
+            }
+            if widgets::pressed(&resp) {
+                self.set_page(Page::Capture, now);
+            }
+        }
+        side_status(ui, vrchat_row.min, &vrchat_label, &vrchat_text, vrchat_tone, inner.width());
         let (account_text, account_tone) = match &snap.account.state {
             AccountState::SignedIn { username } => (username.clone(), widgets::Tone::Ok),
             AccountState::Checking { username } | AccountState::Offline { username } => (username.clone().unwrap_or_default(), widgets::Tone::Warn),

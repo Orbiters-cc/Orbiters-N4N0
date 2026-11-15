@@ -82,7 +82,58 @@ pub struct SideMark {
     pub query: Option<SocketAddr>,
 }
 
-/// The side sessions, for the app's watchers and OSC: shared by the controller and the bridge.
+/// Who drives a VRChat running on this computer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Driver {
+    /// The person's own: started by them (Steam, VRChat's launcher, a link), never with the bridge's marks.
+    Person,
+    /// The bridge's main session (profile 0, VRChat's default ports): only while the person runs no VRChat of their own.
+    Main,
+    /// A side session of the bridge's, by its id.
+    Session(String),
+    /// Started by the bridge for a side session (its `--profile` of 1 or more and that profile's `--osc`, marks only the
+    /// bridge passes) but held by no session now: an earlier run of the app's, or one whose agent left it running. Never
+    /// the person's (2026-11-15 13:48: such a VRChat of the world tour's, PID 8244, was counted as the person's).
+    Bridge,
+}
+
+/// One VRChat running on this computer, as the app knows it ([`Sides::set_roster`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct VrchatRun {
+    pub pid: u32,
+    /// When its process started (Unix seconds; 0 when Windows would not say).
+    pub started_s: u64,
+    /// VRChat's `--profile` (0 without one).
+    pub profile: u32,
+    pub log: Option<PathBuf>,
+    /// Where it takes OSC input: its `--osc` in port, or VRChat's default.
+    pub osc_in: u16,
+    /// Its OSCQuery service (`Advertising Service VRChat-Client-… of type OSCQuery on <port>`).
+    pub query: Option<SocketAddr>,
+    /// The account signed in (id, display name).
+    pub account: Option<(String, String)>,
+    pub world: Option<String>,
+    /// Desktop (`--no-vr`) or in VR; unknown until its log said.
+    pub desktop: Option<bool>,
+    /// Whether its camera is open, as its own OSCQuery tree says (a mark for the picker, never proof for a recording).
+    pub camera: Option<bool>,
+    pub driver: Driver,
+}
+
+/// VRChat's own OSC input port, which a VRChat started without `--osc` takes.
+pub const VRCHAT_OSC_IN: u16 = 9000;
+
+/// The VRChat the app follows by default among `runs`: the person's own (the one on VRChat's default ports first, then
+/// the one started last), else the bridge's main session's. Never a side session's or one the bridge left running.
+pub fn default_target(runs: &[VrchatRun]) -> Option<&VrchatRun> {
+    runs.iter()
+        .filter(|r| r.driver == Driver::Person)
+        .min_by_key(|r| (r.osc_in != VRCHAT_OSC_IN, std::cmp::Reverse(r.started_s), r.pid))
+        .or_else(|| runs.iter().find(|r| r.driver == Driver::Main))
+}
+
+/// The side sessions, for the app's watchers and OSC: shared by the controller and the bridge. Also every VRChat running
+/// (the roster) and the one the app follows: its capture target, which the person may choose.
 #[derive(Default)]
 pub struct Sides {
     inner: Mutex<SidesInner>,
@@ -99,6 +150,12 @@ struct SidesInner {
     main: Option<u32>,
     /// Logs read for their arguments (only once they are all written).
     heads: HashMap<PathBuf, Vec<String>>,
+    /// Every VRChat running, once the watcher looked (`None` before: the rules of before apply).
+    roster: Option<Vec<VrchatRun>>,
+    /// The VRChat the person chose to take pictures in, while it runs.
+    chosen: Option<u32>,
+    /// What a VRChat the app did not follow said of its camera over OSC (open, when), by process.
+    camera_heard: HashMap<u32, (bool, u64)>,
 }
 
 /// How long a launching side VRChat's new log may stay without its arguments before it counts as somebody else's.
@@ -157,21 +214,124 @@ impl Sides {
         inner.marks.iter().find(|m| m.session == lent).cloned()
     }
 
-    /// The VRChat the app follows among `running`: the side session it is lent to, else one that is no side session's
-    /// (the person's, or the main session's), else none.
+    /// The VRChat the app follows among `running`: the side session it is lent to, else its target in the roster, else
+    /// (before the roster is known) one that is no side session's (the person's, or the main session's), else none.
     pub fn app_pid(&self, running: &[u32]) -> Option<u32> {
         let sides = self.side_pids();
         if let Some(pid) = self.lent().and_then(|m| m.pid).filter(|p| running.contains(p)) {
             return Some(pid);
         }
+        if self.inner.lock().unwrap().roster.is_some() {
+            return self.target().map(|t| t.pid).filter(|p| running.contains(p));
+        }
         running.iter().copied().find(|p| !sides.contains(p))
+    }
+
+    /// Every VRChat running, as the watcher last saw them, with each one's driver brought up to date with the sessions.
+    pub fn set_roster(&self, mut runs: Vec<VrchatRun>) {
+        let mut inner = self.inner.lock().unwrap();
+        for run in &mut runs {
+            if let Some(mark) = inner.marks.iter().find(|m| m.pid == Some(run.pid)) {
+                run.driver = Driver::Session(mark.session.clone());
+            } else if inner.main == Some(run.pid) {
+                run.driver = Driver::Main;
+            }
+        }
+        if inner.chosen.is_some_and(|c| !runs.iter().any(|r| r.pid == c)) {
+            inner.chosen = None;
+        }
+        inner.camera_heard.retain(|pid, _| runs.iter().any(|r| r.pid == *pid));
+        inner.roster = Some(runs);
+    }
+
+    /// Whether the watcher looked at the VRChats running yet.
+    pub fn roster_known(&self) -> bool {
+        self.inner.lock().unwrap().roster.is_some()
+    }
+
+    pub fn roster(&self) -> Vec<VrchatRun> {
+        self.inner.lock().unwrap().roster.clone().unwrap_or_default()
+    }
+
+    /// The person chooses which VRChat their pictures are taken in (`None`: the default, their own).
+    pub fn choose(&self, pid: Option<u32>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.chosen = pid.filter(|p| inner.roster.as_ref().is_none_or(|r| r.iter().any(|x| x.pid == *p)));
+    }
+
+    pub fn chosen(&self) -> Option<u32> {
+        self.inner.lock().unwrap().chosen
+    }
+
+    /// The VRChat the person's capture follows: the one they chose, else [`default_target`]. A bridge picture's lend does not
+    /// change it.
+    pub fn person_target(&self) -> Option<VrchatRun> {
+        let inner = self.inner.lock().unwrap();
+        let runs = inner.roster.as_ref()?;
+        inner.chosen.and_then(|c| runs.iter().find(|r| r.pid == c)).or_else(|| default_target(runs)).cloned()
+    }
+
+    /// The VRChat the app follows now: the side session it is lent to for a picture, else [`Sides::person_target`].
+    pub fn target(&self) -> Option<VrchatRun> {
+        let lent = self.lent();
+        let inner = self.inner.lock().unwrap();
+        let runs = inner.roster.as_ref()?;
+        if let Some(mark) = lent {
+            let run = mark.pid.and_then(|p| runs.iter().find(|r| r.pid == p)).cloned();
+            return run.or_else(|| {
+                mark.pid.map(|pid| VrchatRun {
+                    pid,
+                    started_s: 0,
+                    profile: mark.profile,
+                    log: mark.log.clone(),
+                    osc_in: mark.osc_in,
+                    query: mark.query,
+                    account: None,
+                    world: None,
+                    desktop: Some(true),
+                    camera: None,
+                    driver: Driver::Session(mark.session.clone()),
+                })
+            });
+        }
+        inner.chosen.and_then(|c| runs.iter().find(|r| r.pid == c)).or_else(|| default_target(runs)).cloned()
+    }
+
+    /// What a VRChat the app does not follow said of its camera over OSC, while it was not followed.
+    pub fn camera_heard(&self, pid: u32) -> Option<(bool, u64)> {
+        self.inner.lock().unwrap().camera_heard.get(&pid).copied()
+    }
+
+    pub fn hear_camera(&self, pid: u32, open: bool, at_ns: u64) {
+        self.inner.lock().unwrap().camera_heard.insert(pid, (open, at_ns));
+    }
+
+    /// The processes of every VRChat known to run (the roster's and the sessions').
+    pub fn known_pids(&self) -> Vec<u32> {
+        let inner = self.inner.lock().unwrap();
+        let mut pids: Vec<u32> = inner.roster.iter().flatten().map(|r| r.pid).collect();
+        pids.extend(inner.marks.iter().filter_map(|m| m.pid));
+        pids.extend(inner.main);
+        pids.sort_unstable();
+        pids.dedup();
+        pids
     }
 
     /// Whether the app leaves this log alone: a side session's that the app is not lent to. A log is a side session's when
     /// the session knows it, or when its arguments name a side session's `--osc` ports; a log without its arguments yet,
     /// new while a side VRChat starts, waits too (a person's VRChat starting in those seconds is followed a moment later).
     pub fn skips_log(&self, path: &Path) -> bool {
+        // The roster names the target's log: that one, and no other (the VRChat followed and its log are one).
+        if let Some(target) = self.target() {
+            if let Some(log) = &target.log {
+                return log != path;
+            }
+        }
         let mut inner = self.inner.lock().unwrap();
+        if inner.roster.iter().flatten().any(|r| r.log.as_deref() == Some(path)) {
+            // A log of a VRChat the app does not follow.
+            return true;
+        }
         let lent_log = inner.lent.as_ref().and_then(|l| inner.marks.iter().find(|m| &m.session == l)).and_then(|m| m.log.clone());
         if lent_log.as_deref() == Some(path) {
             return false;
@@ -208,11 +368,15 @@ impl Sides {
 /// lent to it). Measured 2026-11-15: a side VRChat finds the app's OSC service over mDNS like any VRChat and sends its
 /// avatar's values there too, from a UDP socket of its own process (profile 1 sent ~330 a second from port 57303, which
 /// Windows' UDP table lists under its process id).
+///
+/// With several VRChats (the roster), only the one the app follows is heard: a datagram of any other VRChat is dropped,
+/// and what it says of its camera kept for it ([`Sides::camera_heard`]), so that choosing it later knows whether its camera
+/// is open without waiting for it to say so again.
 pub fn datagram_filter(sides: std::sync::Arc<Sides>) -> orbiters_core::osc::DatagramFilter {
     let owners: Mutex<(HashMap<u16, u32>, Option<Instant>)> = Mutex::new((HashMap::new(), None));
-    std::sync::Arc::new(move |from: SocketAddr| {
-        let side_pids = sides.side_pids();
-        if side_pids.is_empty() {
+    std::sync::Arc::new(move |from: SocketAddr, datagram: &[u8]| {
+        let known = sides.known_pids();
+        if known.len() < 2 && sides.side_pids().is_empty() {
             return true;
         }
         let owner = {
@@ -222,9 +386,45 @@ pub fn datagram_filter(sides: std::sync::Arc<Sides>) -> orbiters_core::osc::Data
             }
             owners.0.get(&from.port()).copied()
         };
-        let lent = sides.lent().and_then(|m| m.pid);
-        !owner.is_some_and(|pid| side_pids.contains(&pid) && Some(pid) != lent)
+        let followed = sides.target().map(|t| t.pid).or_else(|| sides.lent().and_then(|m| m.pid));
+        takes_datagram(&sides, owner, followed, datagram)
     })
+}
+
+/// [`datagram_filter`]'s rule, given the datagram's owning process and the VRChat followed.
+pub fn takes_datagram(sides: &Sides, owner: Option<u32>, followed: Option<u32>, datagram: &[u8]) -> bool {
+    let Some(pid) = owner else { return true };
+    if Some(pid) == followed {
+        return true;
+    }
+    let side = sides.side_pids().contains(&pid);
+    if !side && !sides.known_pids().contains(&pid) {
+        // Not a VRChat (another OSC program), or one not seen yet: as before.
+        return true;
+    }
+    if let Some(open) = camera_mode_in(datagram) {
+        sides.hear_camera(pid, open, orbiters_core::clock::now_ns());
+    }
+    false
+}
+
+/// Whether a datagram says VRChat's camera is open (`/usercamera/Mode` not 0), when it says.
+pub fn camera_mode_in(datagram: &[u8]) -> Option<bool> {
+    const MODE: &[u8] = b"/usercamera/Mode";
+    if !datagram.windows(MODE.len()).any(|w| w == MODE) {
+        return None;
+    }
+    fn find(packet: rosc::OscPacket) -> Option<bool> {
+        match packet {
+            rosc::OscPacket::Message(m) if m.addr == "/usercamera/Mode" => match m.args.first() {
+                Some(rosc::OscType::Int(mode)) => Some(*mode != 0),
+                _ => None,
+            },
+            rosc::OscPacket::Message(_) => None,
+            rosc::OscPacket::Bundle(b) => b.content.into_iter().filter_map(find).last(),
+        }
+    }
+    rosc::decoder::decode_udp(datagram).ok().and_then(|(_, p)| find(p))
 }
 
 /// A new strict private instance of `account`, as VRChat's own client names one: what a side session joins.

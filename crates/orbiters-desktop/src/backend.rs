@@ -49,6 +49,8 @@ pub trait Backend: Send + Sync {
         Err(controller::translate::Refused::SignedOut)
     }
     fn pause_capture(&self, paused: bool);
+    /// Takes pictures in this VRChat among several on this computer (`None`: the person's own).
+    fn choose_vrchat(&self, _pid: Option<u32>) {}
     fn start_test_capture(&self);
     /// VRChat's camera flies around where it stands, at three heights, then the recording is reconstructed.
     fn scan(&self) {}
@@ -205,6 +207,10 @@ impl Backend for Remote {
 
     fn pause_capture(&self, paused: bool) {
         self.0.send(&ToService::Pause { paused });
+    }
+
+    fn choose_vrchat(&self, pid: Option<u32>) {
+        self.0.send(&ToService::ChooseVrchat { pid });
     }
 
     fn start_test_capture(&self) {
@@ -440,6 +446,10 @@ impl Backend for Local {
 
     fn pause_capture(&self, paused: bool) {
         self.report(self.ctl.pause_capture(paused));
+    }
+
+    fn choose_vrchat(&self, pid: Option<u32>) {
+        self.report(self.ctl.choose_vrchat(pid));
     }
 
     fn start_test_capture(&self) {

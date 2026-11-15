@@ -126,6 +126,10 @@ pub enum ToService {
     Pause {
         paused: bool,
     },
+    /// The VRChat pictures are taken in, among several on this computer (`None`: the person's own).
+    ChooseVrchat {
+        pid: Option<u32>,
+    },
     TestPattern,
     /// VRChat's camera flies a scan around where it stands (controller/scan.rs).
     Scan,

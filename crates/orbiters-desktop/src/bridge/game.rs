@@ -3,6 +3,7 @@
 //! controller and Windows (`controller/bridge_game.rs`), the other a fake VRChat for tests and the lab (`lab.rs`), so
 //! that the whole loop runs without touching the real game or the desktop of the person playing on this computer.
 
+use serde_json::Value;
 use super::input::Input;
 use orbiters_core::settings::{Photo3dLength, PictureMode};
 use serde::Serialize;
@@ -233,6 +234,15 @@ pub trait Opener: Send + Sync {
     fn foreground_pid(&self) -> Option<u32>;
     /// The main session's VRChat, the bridge's own: a side session's picture may borrow the app from it.
     fn set_main(&self, _pid: Option<u32>) {}
+    /// Every VRChat on this computer as the app's Capture page shows them (profile, account, world, desktop or VR, camera,
+    /// who drives it, which one the person's pictures are taken in): `list_sessions` and `get_state` say the same.
+    fn vrchats(&self) -> Value {
+        Value::Array(Vec::new())
+    }
+    /// VRChats the bridge started for a side session that no session holds now: never the person's.
+    fn left_by_bridge(&self) -> Vec<u32> {
+        Vec::new()
+    }
     /// What Easy Anti-Cheat's launcher said when it finished a launch at `since` or later: its code and its words.
     fn launcher_outcome(&self, _since: std::time::SystemTime) -> Option<(i64, String)> {
         None
@@ -334,6 +344,15 @@ pub trait Game: Send + Sync {
     fn seen(&self) -> Seen;
     /// Whether VRChat's camera is open, `None` when VRChat does not say. Apart from [`Game::seen`] as it asks VRChat.
     fn camera_open(&self) -> Option<bool>;
+    /// The person chose this VRChat for their own pictures in the app and records in it now: the agent's input waits
+    /// (`paused_by_person`), as their input in its window makes it wait.
+    fn persons_capture_here(&self) -> bool {
+        false
+    }
+    /// The person chose this VRChat for their own pictures in the app (its Capture page): its pictures are theirs.
+    fn chosen_by_person(&self) -> bool {
+        false
+    }
     /// Whether the avatar worn has N4N0's capture kit: `None` when VRChat does not say. Reads VRChat's tree: not for every tick.
     fn capture_kit(&self) -> Option<bool>;
     /// A new private instance of `world`, owned by the signed-in VRChat account. Only ever that kind: nothing here can

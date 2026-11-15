@@ -1651,6 +1651,12 @@ impl Panels {
     pub fn follow_note(&mut self, snap: &Snapshot) {
         let now = Instant::now();
         let mut said = self.note.follow(&snap.n4n0.photo_note, now);
+        // Several VRChats on this computer: the camera to open is the one pictures are taken in, named.
+        if let (Some(Some((title, _))), Some(target)) = (said.as_mut(), snap.vrchat.several_target()) {
+            if title.as_str() == tr("Open VRChat's camera first") {
+                *title = tr!("Open the camera in {who}'s VRChat first", who = crate::controller::vrchats::who(target));
+            }
+        }
         // The flight's end, which nothing else says: the camera just stops.
         let flying = snap.capture.photo_3d && !matches!(snap.capture.state, CaptureState::Idle);
         if self.was_flying && !flying {

@@ -418,6 +418,8 @@ impl Bridge {
         let now = Instant::now();
         match self.presence.lock().unwrap().paused(now) {
             Some(Paused::Held) => Some(Paused::Held),
+            // The person records in this session's VRChat (they chose it on the Capture page): its input waits for them.
+            _ if session.game.persons_capture_here() => Some(Paused::Person { resumes_in_s: 30 }),
             _ => session.presence.lock().unwrap().paused(now),
         }
     }

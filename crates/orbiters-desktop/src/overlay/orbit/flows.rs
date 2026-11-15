@@ -2128,3 +2128,69 @@ fn switching_pages_never_shows_no_page() {
         person.turns_until("the next page shown", |p| { assert!(sheet_seen(p), "no page shown as the next one comes"); settled(p) && p.panels.stage.presented.as_ref().is_some_and(|(_, f, _)| f.sheet == to) });
     }
 }
+
+/// The beta's usage statistics follow the person through the menus: which menu, sheet and N4N0 page they are on, and what they press there, by names that
+/// are the same in every language and hold nothing typed.
+#[test]
+fn usage_follows_the_menus_and_their_presses() {
+    crate::usage::reset();
+    crate::usage::set_enabled(true);
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::Worlds);
+    person.turns(2);
+    person.press(Action::All);
+    person.turns(2);
+    person.press(Action::Settings);
+    person.turns(3);
+    person.press(Action::CloseSheet);
+    person.turns(2);
+    person.around = None;
+    person.turns(2);
+    let steps = crate::usage::take();
+    crate::usage::set_enabled(false);
+    let entered: Vec<(&str, Option<&str>)> = steps.iter().filter(|s| s.kind == crate::usage::Kind::Enter).map(|s| (s.screen.as_str(), s.from.as_deref())).collect();
+    assert_eq!(
+        entered,
+        vec![("qm", None), ("qm/Worlds", Some("qm")), ("qm/All", Some("qm/Worlds")), ("qm/Settings", Some("qm/All")), ("qm", Some("qm/Settings")), ("closed", Some("qm"))],
+        "{steps:?}"
+    );
+    let pressed: Vec<(&str, &str)> = steps.iter().filter(|s| s.kind == crate::usage::Kind::Press).map(|s| (s.screen.as_str(), s.control.as_deref().unwrap())).collect();
+    assert_eq!(pressed, vec![("qm", "Worlds"), ("qm/Worlds", "All"), ("qm/All", "Settings"), ("qm/Settings", "CloseSheet")], "{steps:?}");
+}
+
+/// Opt-in, against a server under test (`ORBITERS_USAGE_API=http://127.0.0.1:4200 cargo test -- --ignored usage_reaches`): a walk through the
+/// menus as a person takes it, noted by the real recorder, kept by the real spool and sent over HTTP as the app sends it.
+#[test]
+#[ignore]
+fn usage_reaches_a_server_under_test() {
+    let Ok(base) = std::env::var("ORBITERS_USAGE_API") else { return };
+    let spool = crate::usage::spool::Spool::default();
+    for (link, around, walk) in [
+        (1, Around::QuickMenu, vec![Action::Worlds, Action::Pictures, Action::All, Action::Settings, Action::CloseSheet]),
+        (2, Around::Wheel, vec![Action::Pictures, Action::All, Action::Translate, Action::CloseSheet]),
+        (3, Around::QuickMenu, vec![Action::Page(Target::Instances), Action::Worlds, Action::CloseSheet]),
+    ] {
+        crate::usage::reset();
+        crate::usage::set_enabled(true);
+        spool.linked(link, crate::ipc::Role::Overlay);
+        let mut person = Person::new();
+        person.around = Some(around);
+        person.turns(3);
+        for action in walk {
+            if person.find(action).is_some() {
+                person.press(action);
+                person.turns(2);
+            }
+        }
+        person.around = None;
+        person.turns(2);
+        spool.steps(link, crate::usage::take(), true);
+        spool.unlinked(link, true);
+    }
+    crate::usage::set_enabled(false);
+    let waiting = spool.waiting().len();
+    assert!(waiting > 10, "{waiting}");
+    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base)), crate::usage::spool::Sent::Taken(waiting));
+}

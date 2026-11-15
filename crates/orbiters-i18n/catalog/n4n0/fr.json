@@ -348,5 +348,6 @@
   "{reason}: a QR code here opens only http or https pages": "{reason} : un QR code ici n’ouvre que des pages http ou https",
   "{time} · muted": "{time} · micro coupé",
   "✓ Link copied": "✓ Lien copié",
-  "panel\u0004Search videos": "Rechercher"
+  "panel\u0004Search videos": "Rechercher",
+  "N4N0 can't reach Orbiters right now. Try again in a moment.": "N4N0 n’arrive pas à joindre Orbiters pour le moment. Réessaie dans un instant."
 }

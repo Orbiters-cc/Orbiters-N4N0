@@ -1304,7 +1304,8 @@ pub fn tab_row(facts: &Facts, start: f32, end: f32, icons: bool) -> Vec<Item> {
 /// The wing's tiles in a row: its mark, then the six.
 fn strip(w: f32, h: f32, facts: &Facts) -> Vec<Item> {
     const PAD: f32 = 5.0;
-    const MARK: f32 = 34.0;
+    // The mark, and the beta's chip under it.
+    const MARK: f32 = 44.0;
     // What plays at its end, when anything does: the wing has it at its foot. And in a headset a way to put it away, as the wing has at its head. With a page up the
     // strip stays (OWNER DECISION, Enzo repeatedly, latest 2026-11-13; AGENTS.md, "Owner decisions"); only its Hide goes, the page's head having its own close.
     let hide = facts.vr_close && facts.sheet.is_none();
@@ -2550,7 +2551,10 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
         Zone::QmStrip => {
             p.rect_filled(panel, look::radius(look::RADIUS), look::PANEL);
             top_light(p, panel);
-            widgets::icon(p, pos2(20.0, size.y / 2.0), icons::N4N0_MARK, 20.0, look::LABEL);
+            // The mark over the beta's chip, in the strip's first column.
+            widgets::icon(p, pos2(24.0, size.y / 2.0 - 9.0), icons::N4N0_MARK, 18.0, look::LABEL);
+            let chip = beta_chip_width(p, BETA_SIZE - 2.0);
+            beta_chip(p, pos2(24.0 - chip / 2.0, size.y / 2.0 + 12.0), BETA_SIZE - 2.0);
         }
         Zone::SheetHint => {
             // Over VRChat's tooltip for what the sheet hides, where one appears.
@@ -4481,7 +4485,39 @@ fn draw_turning(p: &Painter, page: Rect, n: usize, facts: &Facts, view: &OpenedV
 }
 
 /// The words about what is pointed at, or what to do first, in a pill as wide as they are. Nothing to say: nothing shows.
+/// The chip's text size on the menus, in their units: about the "3D" badge on Worlds in 3D, which reads in a headset.
+pub const BETA_SIZE: f32 = 10.5;
+/// The row the chip takes over the wing's name pill, in a headset.
+pub const BETA_ROW: f32 = 22.0;
+
+/// The word on the chip: Beta in the language now, in capitals where the language has them.
+fn beta_word() -> String {
+    tr_ctx("chip", "Beta").to_uppercase()
+}
+
+/// How wide the beta's chip is at text size `size`.
+pub fn beta_chip_width(p: &Painter, size: f32) -> f32 {
+    p.layout_no_wrap(beta_word(), look::font(size, weight::BOLD), Color32::WHITE).size().x + size * 1.3
+}
+
+/// The chip that says this is a beta (Enzo, 2026-11-15): the accent's colour on a tint of it, its left end at `left_center`. Its width.
+pub fn beta_chip(p: &Painter, left_center: Pos2, size: f32) -> f32 {
+    let galley = p.layout_no_wrap(beta_word(), look::font(size, weight::BOLD), look::accent());
+    let w = galley.size().x + size * 1.3;
+    let h = size + 9.0;
+    let chip = Rect::from_min_size(pos2(left_center.x, left_center.y - h / 2.0), vec2(w, h));
+    p.rect_filled(chip, look::radius(h / 2.0), theme::mix(look::OPAQUE, look::accent(), 0.2));
+    p.galley(chip.center() - galley.size() / 2.0, galley, look::accent());
+    w
+}
+
 fn draw_caption(p: &Painter, zone: Zone, rect: Rect, facts: &Facts) {
+    // Over the wing in a headset, a row of its own for the beta's chip, over the left end of the name pill (its Hide): the words go above it.
+    let mut rect = rect;
+    if zone == Zone::QmCaption && !facts.hidden && !facts.strip_caption && !(facts.desktop && !facts.vr_close) {
+        beta_chip(p, pos2(rect.left() + 2.0, rect.bottom() - BETA_ROW / 2.0), BETA_SIZE);
+        rect.max.y -= BETA_ROW;
+    }
     // Under the camera's tiles: its own words ([`camera_words`]), on the tiles' side.
     if zone == Zone::CameraCaption {
         if let Some((first, second)) = camera_words(facts) {
@@ -4502,6 +4538,11 @@ fn draw_caption(p: &Painter, zone: Zone, rect: Rect, facts: &Facts) {
     }
     // On the wheel, whose it is, whatever it has to say.
     let words = if on_the_wheel { Some(words.unwrap_or_else(|| ("Orbiters".to_string(), String::new()))) } else { words };
+    // On a screen nothing else says whose the wing is while nothing is pointed at: its name and the chip alone.
+    if words.is_none() && zone == Zone::QmCaption && facts.desktop && !facts.vr_close && !facts.strip_caption && !facts.hidden {
+        draw_wing_name(p, rect);
+        return;
+    }
     let Some((first, second)) = words else { return };
     // What plays's own picture beside its words, where it is what is pointed at.
     let on_the_wing = zone == Zone::QmCaption && !facts.strip_caption;
@@ -4571,8 +4612,10 @@ fn draw_wheel_head(p: &Painter, rect: Rect, first: &str, second: &str) {
     let r = (rect.height() / 2.0) as u8;
     p.rect_filled(rect, egui::CornerRadius { nw: r, sw: r, ne: 0, se: 0 }, look::PANEL);
     widgets::icon(p, pos2(rect.left() + 26.0, rect.center().y), icons::N4N0_MARK, 20.0, look::LABEL);
+    // The beta's chip right after the mark: whose the ring is and what it is, whatever the head says.
+    let chip = beta_chip(p, pos2(rect.left() + 44.0, rect.center().y), BETA_SIZE + 0.5);
     let (big, small) = (look::font(15.0, weight::BOLD), look::font(13.0, weight::MEDIUM));
-    let x = rect.left() + 48.0;
+    let x = rect.left() + 44.0 + chip + 10.0;
     let room = rect.right() - x - 10.0;
     if second.is_empty() {
         // At rest its name alone, in the middle of its part.
@@ -4613,7 +4656,9 @@ fn draw_words_left(p: &Painter, rect: Rect, first: &str, second: &str, named: bo
     p.rect_filled(pill, look::radius(12.0), look::PANEL);
     if named {
         widgets::icon(p, pill.min + vec2(18.0, 16.0), icons::N4N0_MARK, 16.0, look::LABEL);
-        p.text(pill.min + vec2(32.0, 16.0), Align2::LEFT_CENTER, "Orbiters N4N0", look::font(13.5, weight::SEMIBOLD), look::LABEL);
+        // "Orbiters" beside N4N0's mark, as the wheel's head has it: with the beta's chip, "Orbiters N4N0" is wider than the wing.
+        let name = p.text(pill.min + vec2(32.0, 16.0), Align2::LEFT_CENTER, "Orbiters", look::font(13.5, weight::SEMIBOLD), look::LABEL);
+        beta_chip(p, pos2(name.right() + 8.0, pill.top() + 16.0), BETA_SIZE);
         p.line_segment([pill.min + vec2(10.0, 29.0), pos2(pill.right() - 10.0, pill.top() + 29.0)], Stroke::new(1.0, Color32::from_white_alpha(28)));
     }
     let below = big.size().y;
@@ -4621,6 +4666,17 @@ fn draw_words_left(p: &Painter, rect: Rect, first: &str, second: &str, named: bo
     if !second.is_empty() {
         p.galley(pill.min + vec2(10.0, 9.0 + head + below), small, look::MUTED);
     }
+}
+
+/// The wing's name and the beta's chip on a pill of their own at the foot of `rect`, where the caption's head would be.
+fn draw_wing_name(p: &Painter, rect: Rect) {
+    let font = look::font(13.5, weight::SEMIBOLD);
+    let name = p.layout_no_wrap("Orbiters".to_string(), font.clone(), look::LABEL).size().x;
+    let pill = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 32.0), pos2((rect.left() + 32.0 + name + 8.0 + beta_chip_width(p, BETA_SIZE) + 10.0).min(rect.right()), rect.bottom()));
+    p.rect_filled(pill, look::radius(12.0), look::PANEL);
+    widgets::icon(p, pos2(pill.left() + 18.0, pill.center().y), icons::N4N0_MARK, 16.0, look::LABEL);
+    let name = p.text(pos2(pill.left() + 32.0, pill.center().y), Align2::LEFT_CENTER, "Orbiters", font, look::LABEL);
+    beta_chip(p, pos2(name.right() + 8.0, pill.center().y), BETA_SIZE);
 }
 
 /// The same, with what plays's picture at its start.
@@ -4655,19 +4711,20 @@ fn draw_words_marked_to(p: &Painter, rect: Rect, first: &str, second: &str, mark
     let second = fit(p, second, &small, room);
     let width = p.layout_no_wrap(first.clone(), big.clone(), Color32::WHITE).size().x.max(p.layout_no_wrap(second.clone(), small.clone(), Color32::WHITE).size().x) + 24.0;
     let height = if second.is_empty() { 30.0 } else { rect.height() - 8.0 };
-    let size = vec2(width + if mark { 22.0 } else { 0.0 }, height);
+    // The mark, and the beta's chip after it (Enzo, 2026-11-15).
+    let chip = if mark { beta_chip_width(p, BETA_SIZE) + 6.0 } else { 0.0 };
+    let lead = if mark { 22.0 + chip } else { 0.0 };
+    let size = vec2(width + lead, height);
     let pill = if right { Rect::from_center_size(pos2(rect.right() - size.x / 2.0, rect.center().y), size) } else { Rect::from_center_size(rect.center(), size) };
     p.rect_filled(pill, look::radius(look::RADIUS + 2.0), look::PANEL);
-    if second.is_empty() {
-        p.text(pill.center() + vec2(if mark { 11.0 } else { 0.0 }, 0.0), Align2::CENTER_CENTER, first, big, look::LABEL);
-        if mark {
-            widgets::icon(p, pill.left_center() + vec2(15.0, 0.0), icons::N4N0_MARK, 15.0, look::LABEL);
-        }
-        return;
-    }
-    let shift = vec2(if mark { 11.0 } else { 0.0 }, 0.0);
+    let shift = vec2(lead / 2.0, 0.0);
     if mark {
-        widgets::icon(p, pill.left_center() + vec2(16.0, 0.0), icons::N4N0_MARK, 16.0, look::LABEL);
+        widgets::icon(p, pill.left_center() + vec2(16.0, 0.0), icons::N4N0_MARK, if second.is_empty() { 15.0 } else { 16.0 }, look::LABEL);
+        beta_chip(p, pill.left_center() + vec2(30.0, 0.0), BETA_SIZE);
+    }
+    if second.is_empty() {
+        p.text(pill.center() + shift, Align2::CENTER_CENTER, first, big, look::LABEL);
+        return;
     }
     p.text(pill.center() + shift - vec2(0.0, 9.0), Align2::CENTER_CENTER, first, big, look::LABEL);
     p.text(pill.center() + shift + vec2(0.0, 9.0), Align2::CENTER_CENTER, second, small, look::MUTED);

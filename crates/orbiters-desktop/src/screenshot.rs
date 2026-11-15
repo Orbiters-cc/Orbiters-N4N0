@@ -157,6 +157,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         PathBuf::from(args.first().context("usage: --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]")?);
     let (sessions, raw) = crate::harness::screenshot_library().context("screenshots require library inputs from the harness bootstrap")?;
     let mut settings = Settings { picture_folders, sessions_dir: sessions.clone(), raw_captures_dir: raw.clone(), ..Settings::default() };
+    // The usage statistics' notice was closed: it shows in its own scene ("usage-notice") alone.
+    settings.usage.told = true;
     let mut scale = 1.0f32;
     let mut height = 820.0f32;
     let mut width = 1280.0f32;
@@ -1433,6 +1435,21 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 760.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        // The beta's one notice about its usage statistics, over Home, until it is closed.
+        Scenario {
+            name: "usage-notice",
+            page: Page::Home,
+            snapshot: { let mut s = idle.clone(); s.settings.usage.told = false; s },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
             world: None,
             home: None,
             library: None,

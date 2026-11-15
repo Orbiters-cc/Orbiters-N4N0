@@ -213,6 +213,18 @@ pub fn english_names_of(shown: &str) -> &'static [&'static str] {
     english_of_table(language()).and_then(|back| back.get(shown)).map_or(&[], |keys| keys.as_slice())
 }
 
+/// The English key of a text shown in the language now, only when it is a text of the catalogs: the name a control is counted by in the beta's
+/// usage statistics, the same in every language. Anything else (a world's or a person's name, a number, a text with values in it) is `None`,
+/// so that nothing but the app's own words can be counted.
+pub fn control_name(shown: &str) -> Option<&'static str> {
+    if language() == Language::En {
+        // English is the text itself: a key is one French has (every text shown is translated).
+        let (key, _) = table(Language::Fr)?.get_key_value(shown)?;
+        return Some(key);
+    }
+    english_names_of(shown).first().copied()
+}
+
 /// A catalog's texts with values in them, ready to be matched: the words around each `{name}`, the names in order, the translation.
 struct Written {
     words: Vec<&'static str>,
@@ -369,6 +381,19 @@ mod tests {
             assert!(said.contains(tr("reading the meshes")) && said != "it took too long (reading the meshes)", "{said}");
         });
         in_language(Language::Ja, || assert!(!tr_written("it took too long (reading the meshes)").contains("too long")));
+    }
+
+    #[test]
+    fn controls_are_named_by_their_english_in_every_language() {
+        in_language(Language::En, || {
+            assert_eq!(control_name("Beta usage statistics"), Some("Beta usage statistics"));
+            assert_eq!(control_name("Café de Nuit (a world)"), None, "not a text of the app: never counted");
+        });
+        for language in Language::TRANSLATED {
+            in_language(language, || assert_eq!(control_name(tr("Beta usage statistics")), Some("Beta usage statistics"), "{language:?}"));
+        }
+        // Two English texts with one translation (Settings and Preferences are both 設定) are counted under the first of them in that language.
+        in_language(Language::Ja, || assert!(matches!(control_name(tr("Settings")), Some("Preferences" | "Settings"))));
     }
 
     #[test]

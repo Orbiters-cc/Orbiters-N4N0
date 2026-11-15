@@ -959,6 +959,25 @@ fn turn_ended(n: &Shared, bodies: &Arc<Mutex<Vec<Value>>>, requests: usize) {
 }
 
 #[test]
+fn orbiters_out_of_reach_is_one_plain_sentence() {
+    // logs6/shot4.png: the dev server was stopped and the person read the operating system's "(os error 10061)".
+    let (t, n, _vrchat) = n4n0_with_vrchat();
+    t.sign_in("http://127.0.0.1:9/".into(), "orbit-test");
+    n.ask("salut".into(), "typed");
+    let started = Instant::now();
+    while (n.n4n0.lock().unwrap().thinking() || t.view().lines.last().is_none_or(|l| l.who != N4n0Who::Error)) && started.elapsed() < Duration::from_secs(8) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let last = t.view().lines.last().map(|l| (l.who, l.text.clone()));
+    assert_eq!(last, Some((N4n0Who::Error, orbiters_n4n0_core::assistant::UNREACHABLE.to_string())));
+    // In every language: one sentence of its own, none of the system's words.
+    for language in orbiters_i18n::Language::TRANSLATED {
+        let words = orbiters_i18n::in_language(language, || crate::runtime::turn_failure(&anyhow::anyhow!(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))));
+        assert!(words != orbiters_n4n0_core::assistant::UNREACHABLE && !words.contains("os error") && !words.contains("io:"), "{language:?}: {words}");
+    }
+}
+
+#[test]
 fn a_failed_round_leaves_the_conversation_as_it_was() {
     let (t, n, _vrchat) = n4n0_with_vrchat();
     let before = vec![json!({ "role": "user", "content": "salut" }), json!({ "role": "assistant", "content": "yo" })];

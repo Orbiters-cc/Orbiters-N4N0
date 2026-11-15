@@ -476,6 +476,8 @@ pub fn quick_menu_places(hand: usize) -> Vec<Placed> {
             // Its caption over the name pill, which holds Hide tiles here.
             if *zone == Zone::QmCaption {
                 placed.rect = placed.rect.translate(egui::vec2(0.0, -zones::QM_CAPTION_OVER_THE_NAME));
+                // And a row for the beta's chip at its foot, over the pill: the words keep the room they had.
+                placed.rect.min.y -= super::panels::BETA_ROW;
             }
             if hand == 1 {
                 let rect = placed.rect;

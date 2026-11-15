@@ -74,6 +74,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     let client = Client::connect(&endpoint, Role::Orbit)?;
     let backend: Ctl = Arc::new(crate::backend::Remote(client.clone()));
+    crate::usage::forward(backend.clone());
     let mut game = Game::default();
     let mut windows = Windows::default();
     let mut panels = Panels::new(backend.clone(), 1.0, true);

@@ -780,6 +780,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let server = Server::find();
     let client = Client::connect(&endpoint, Role::Overlay)?;
     let backend: Ctl = Arc::new(Remote(client.clone()));
+    crate::usage::forward(backend.clone());
     let mut startup_seen = backend.view().settings.startup.clone();
     if let Some(startup) = crate::startup::reconcile(&steamvr, &startup_seen) {
         client.send(&crate::ipc::ToService::PatchSettings { patch: serde_json::json!({"startup": startup}) });

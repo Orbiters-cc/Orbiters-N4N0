@@ -109,6 +109,10 @@ pub enum ToService {
     Orbit {
         status: crate::state::OrbitStatus,
     },
+    /// The beta's usage statistics this client noted since it last sent them (`usage`).
+    Usage {
+        steps: Vec<crate::usage::Step>,
+    },
     /// What live translation in VR is doing (the overlay says).
     TranslateStatus {
         status: crate::state::TranslateStatus,

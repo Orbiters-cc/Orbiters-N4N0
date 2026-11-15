@@ -31,6 +31,7 @@ pub mod splat_worker;
 pub mod splats;
 pub mod states;
 pub mod storage;
+pub mod usage_notice;
 pub mod videos;
 pub mod vr_audio;
 pub mod watch;

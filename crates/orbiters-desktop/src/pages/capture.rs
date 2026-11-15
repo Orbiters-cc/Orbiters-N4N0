@@ -242,6 +242,9 @@ impl BigAction<'_> {
         let hover = anim::toggle(&ctx, id.with("hover"), self.enabled && resp.hovered(), Spring::SOFT);
         let press = anim::toggle(&ctx, id.with("press"), self.enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
         let clicked = self.enabled && widgets::pressed(&resp);
+        if clicked {
+            widgets::note_press(label);
+        }
         if self.enabled {
             resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         } else if !self.why_not.is_empty() {

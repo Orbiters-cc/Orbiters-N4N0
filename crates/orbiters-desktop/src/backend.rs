@@ -37,6 +37,8 @@ pub trait Backend: Send + Sync {
     fn orbit_status(&self, _status: crate::state::OrbitStatus) {}
     /// What live translation in VR is doing, for the menus and Settings.
     fn translate_status(&self, _status: crate::state::TranslateStatus) {}
+    /// The beta's usage statistics noted in this process since the last call (`usage`): only a process linked to the service sends them.
+    fn usage(&self, _steps: Vec<crate::usage::Step>) {}
     /// What VRChat said over OSC of how the player moves since the last call (the service forwards it while live
     /// translation is on): when it came, the name (`VelocityX`, `VelocityY`, `VelocityZ`, `/avatar/eyeheight`), the value.
     fn take_locomotion(&self) -> Vec<(std::time::Instant, String, f32)> {
@@ -157,6 +159,9 @@ impl Backend for Remote {
     }
     fn translate_status(&self, status: crate::state::TranslateStatus) {
         self.0.send(&ToService::TranslateStatus { status });
+    }
+    fn usage(&self, steps: Vec<crate::usage::Step>) {
+        self.0.send(&ToService::Usage { steps });
     }
     fn translate(&self, batch: orbiters_translate::provider::Batch) -> controller::translate::Answer {
         self.0.translate(batch)

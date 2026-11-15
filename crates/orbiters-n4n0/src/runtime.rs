@@ -2022,10 +2022,16 @@ impl N4n0 {
                     rt.notes.push(format!("Your last answer did not arrive; before that, Orbiters - N4N0 did: {}.", tools_run.done.join(", "))); // i18n: not shown
                 }
                 let from_server = e.downcast_ref::<AssistantError>().map(|a| a.message.clone());
-                let message = from_server.clone().unwrap_or_else(|| tr!("N4N0 could not answer: {error}", error = format!("{e:#}")));
+                if from_server.is_none() {
+                    eprintln!("N4N0: the turn failed: {e:#}");
+                }
+                let (message, panel) = match from_server {
+                    Some(words) => (words.clone(), words),
+                    // The panel on the avatar has no Japanese.
+                    None => (turn_failure(&e), latin(|| turn_failure(&e))),
+                };
                 rt.line(N4n0Who::Error, message);
-                // The panel on the avatar has no Japanese.
-                rt.show(&from_server.unwrap_or_else(|| latin(|| tr!("N4N0 could not answer: {error}", error = format!("{e:#}")))));
+                rt.show(&panel);
             }
         }
         drop(rt);
@@ -2462,5 +2468,15 @@ fn read_manifest(dir: &Path, avatar_id: &str) -> Option<AvatarManifest> {
             eprintln!("avatar manifest {avatar_id}: {e}");
             None
         }
+    }
+}
+
+/// What a person reads when a turn failed without the server's own words: Orbiters out of reach is one plain sentence
+/// (the operating system's text goes to the log), anything else names what went wrong.
+pub(crate) fn turn_failure(e: &anyhow::Error) -> String {
+    if assistant::unreachable(e) {
+        tr(assistant::UNREACHABLE).to_string()
+    } else {
+        tr!("N4N0 could not answer: {error}", error = format!("{e:#}"))
     }
 }

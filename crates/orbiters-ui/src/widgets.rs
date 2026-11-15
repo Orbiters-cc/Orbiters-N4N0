@@ -12,6 +12,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Set by an automated run (the end-to-end test) that clicks controls like a person, by their labels.
 static WATCH: AtomicBool = AtomicBool::new(false);
 
+/// Told the English name of every control pressed (the beta's usage statistics, `orbiters-desktop`'s `usage`). Set once by the app.
+static PRESS_HOOK: std::sync::OnceLock<fn(&'static str)> = std::sync::OnceLock::new();
+
+thread_local! {
+    /// The label of the settings row ([`field`]) whose control is being drawn: what a toggle or slider there is named by.
+    static FIELD: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// From now on, `hook` hears the English name of every control pressed: buttons, icon buttons, segments, the switches and sliders of a settings
+/// row (by the row's label). Only the app's own words are told ([`orbiters_i18n::control_name`]): a label that is a name, a number or a text
+/// with values in it is not. Nothing is told while no hook is set.
+pub fn on_press(hook: fn(&'static str)) {
+    let _ = PRESS_HOOK.set(hook);
+}
+
+/// A control labelled `label` (in the language now) was pressed, for [`on_press`]'s hook.
+pub fn note_press(label: &str) {
+    if let Some(hook) = PRESS_HOOK.get() {
+        if let Some(name) = orbiters_i18n::control_name(label) {
+            hook(name);
+        }
+    }
+}
+
+fn note_field_press() {
+    if let (Some(hook), Some(name)) = (PRESS_HOOK.get(), FIELD.with(|f| f.get())) {
+        hook(name);
+    }
+}
+
 /// Where each control was drawn: rect, whether it took clicks, the pass it was drawn in.
 #[derive(Clone, Default)]
 struct Drawn(HashMap<String, (Rect, bool, u64)>);
@@ -282,6 +312,9 @@ impl<'a> Button<'a> {
         let w = self.desired_width(ui);
         let (rect, resp) = ui.allocate_exact_size(vec2(w, h), if self.enabled { Sense::click() } else { Sense::hover() });
         note_control(ui.ctx(), self.label, rect, self.enabled);
+        if resp.clicked() {
+            note_press(self.label);
+        }
         self.paint(ui, rect, &resp, size, gap, icon_size);
         let resp = if self.enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
         match self.hint {
@@ -302,6 +335,9 @@ impl<'a> Button<'a> {
             pressed(&resp);
         }
         note_control(ui.ctx(), self.label, rect, self.enabled);
+        if resp.clicked() {
+            note_press(self.label);
+        }
         self.paint(ui, rect, &resp, size, gap, icon_size);
         let resp = if self.enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
         match self.hint {
@@ -411,6 +447,9 @@ impl<'a> IconButton<'a> {
     pub fn show(self, ui: &mut Ui) -> Response {
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(self.size), Sense::click());
         note_control(ui.ctx(), self.label, rect, true);
+        if resp.clicked() {
+            note_press(self.label);
+        }
         self.paint(ui, rect, &resp);
         resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(orbiters_i18n::tr(self.label))
     }
@@ -422,6 +461,9 @@ impl<'a> IconButton<'a> {
         let resp = ui.interact(rect, ui.scope_id().with("icon-button").with_salt(key), Sense::click());
         pressed(&resp);
         note_control(ui.ctx(), self.label, rect, true);
+        if resp.clicked() {
+            note_press(self.label);
+        }
         self.paint(ui, rect, &resp);
         resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(orbiters_i18n::tr(self.label))
     }
@@ -503,6 +545,7 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt,
         if !o.disabled && pressed(&resp) && *value != o.value {
             *value = o.value;
             changed = true;
+            note_press(o.label);
         }
         note_control(ui.ctx(), o.label, rects[i], !o.disabled);
         responses.push(resp);
@@ -565,6 +608,7 @@ pub fn toggle(ui: &mut Ui, id_salt: impl egui::AsIdSalt, on: &mut bool) -> bool 
     if pressed(&resp) {
         *on = !*on;
         changed = true;
+        note_field_press();
     }
     let ctx = ui.ctx();
     let k = anim::toggle(ctx, id.with("k"), *on, Spring::BOUNCY);
@@ -595,6 +639,9 @@ pub fn slider(
     let (rect, _) = ui.allocate_exact_size(vec2(192.0 + 12.0 + 80.0, 28.0), Sense::hover());
     let track_rect = Rect::from_min_size(rect.min, vec2(192.0, 28.0));
     let resp = ui.interact(track_rect, id, Sense::click_and_drag());
+    if resp.drag_stopped() || (resp.clicked() && !resp.dragged()) {
+        note_field_press();
+    }
     let mut changed = false;
     if let (true, Some(p)) = (resp.is_pointer_button_down_on() || resp.dragged(), resp.interact_pointer_pos()) {
         let t = ((p.x - track_rect.left()) / track_rect.width()).clamp(0.0, 1.0);
@@ -869,7 +916,11 @@ pub fn field(ui: &mut Ui, label: &str, description: Option<&str>, control_width:
     }
     let control_rect = Rect::from_min_max(pos2(rect.right() - control_width, rect.top()), rect.max);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(control_rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    // The row's label names its control's presses; the label lives only for this call, so it is the English of it that is kept (a catalog text is 'static).
+    let named = PRESS_HOOK.get().and(orbiters_i18n::control_name(label));
+    let was = FIELD.with(|f| f.replace(named));
     control(&mut child);
+    FIELD.with(|f| f.set(was));
 }
 
 /// Hairline between rows.

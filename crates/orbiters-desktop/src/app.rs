@@ -43,6 +43,10 @@ pub struct App {
     n4n0: pages::n4n0::State,
     logo_glitch: Option<(f64, f32)>,
     logo_hovered: bool,
+    /// The page (and Home's feature) last told to the usage statistics.
+    usage_here: Option<(Page, Option<orbiters_n4n0_core::menu::Page>)>,
+    /// The usage statistics' notice was closed here (the service's settings say so a moment later).
+    usage_told: bool,
 }
 
 impl App {
@@ -89,6 +93,8 @@ impl App {
             n4n0: Default::default(),
             logo_glitch: None,
             logo_hovered: false,
+            usage_here: None,
+            usage_told: false,
         }
     }
 
@@ -237,6 +243,14 @@ impl App {
             // From the top of the window: the content scrolls on under the title bar (see `pages::under_top`).
             let page_rect = Rect::from_min_max(pos2(body.left() + SIDEBAR_W, full.top()), body.max);
             self.page(ui, &snap, page_rect);
+            let told = self.usage_told || snap.settings.usage.told;
+            if let Some(answer) = pages::usage_notice::show(ui, page_rect, told) {
+                self.usage_told = true;
+                self.ctl.patch_settings(serde_json::json!({ "usage": { "told": true } }));
+                if answer == pages::usage_notice::Answer::Settings {
+                    self.set_page(Page::Settings, now);
+                }
+            }
         }
         self.title_bar(ui, &snap, title);
         self.toasts.show(&ctx);
@@ -265,6 +279,8 @@ impl App {
         let p = ui.painter();
         let name = Txt::new("Orbiters - N4N0", 12.0).weight(weight::SEMIBOLD).tracking(0.025).color(theme::FG_2);
         let r = widgets::text(p, pos2(rect.left() + 16.0, rect.center().y), Align2::LEFT_CENTER, &name);
+        // The beta's chip after the app's name, over every page (Enzo, 2026-11-15).
+        let r = r.union(beta_chip(ui, pos2(r.right() + 8.0, rect.center().y)));
         let subtitle = match snap.capture.state {
             CaptureState::Recording => Some(tr("Recording").to_string()),
             CaptureState::Importing => Some(tr("Importing").to_string()),
@@ -525,8 +541,20 @@ impl App {
         (now - since < 1.2).then_some((since + 0.15, 1.0))
     }
 
+    /// Where the person is, for the usage statistics: told when it changed (a comparison a frame, a name only then).
+    fn note_screen(&mut self) {
+        let here = (self.page, (self.page == Page::Home).then(|| self.home.shown()).flatten());
+        if self.usage_here != Some(here) {
+            self.usage_here = Some(here);
+            let page = format!("{:?}", here.0);
+            let feature = here.1.map(|p| crate::usage::stable_name(&format!("{p:?}"))).unwrap_or_default();
+            crate::usage::enter(&crate::usage::screen_name([page.into(), feature.into()]));
+        }
+    }
+
     fn page(&mut self, ui: &mut Ui, snap: &Arc<Snapshot>, rect: Rect) {
         let ctx = ui.ctx().clone();
+        self.note_screen();
         // Enter: slide in from the right and fade up with a soft spring.
         let v = anim::spring_from(&ctx, Id::unique(("orbiters-page", self.visit)), [0.0], [1.0], Spring::SOFT)[0];
         let shifted = rect.translate(vec2(24.0 * (1.0 - v), 0.0));
@@ -565,6 +593,18 @@ impl App {
             }
         }
     }
+}
+
+/// The chip that says this is a beta, its left end at `left_center`: the accent on a tint of it, as the website's badges are.
+pub(crate) fn beta_chip(ui: &Ui, left_center: egui::Pos2) -> Rect {
+    let word = orbiters_i18n::tr_ctx("chip", "Beta").to_uppercase();
+    let txt = Txt::new(word, 10.0).weight(weight::BOLD).tracking(0.06).color(theme::ACCENT);
+    let size = widgets::text_size(ui, &txt);
+    let chip = Rect::from_min_size(pos2(left_center.x, left_center.y - 9.0), vec2(size.x + 14.0, 18.0));
+    let p = ui.painter();
+    p.rect_filled(chip, theme::radius(9.0), theme::alpha(theme::ACCENT, 0.16));
+    widgets::text(p, chip.center(), Align2::CENTER_CENTER, &txt);
+    chip
 }
 
 fn nav_entrance(ui: &Ui, id: Id, since: f64, i: usize) -> (f32, f32) {
@@ -726,6 +766,7 @@ impl eframe::App for App {
     /// The window closes with Talk held: let go of it, or VRChat would stay muted and N4N0 go on listening.
     fn on_exit(&mut self) {
         self.n4n0.leave(&self.ctl);
+        crate::usage::flush(&self.ctl);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

@@ -150,6 +150,7 @@ pub fn menu_button(ui: &mut Ui, id_salt: impl egui::AsIdSalt, rect: Rect, glyph:
     note_control(ui.ctx(), label, rect, true);
     let open = is_open(ui.ctx(), id);
     if widgets::activated(&resp) {
+        widgets::note_press(label);
         set_open(ui.ctx(), id, !open);
     }
     let ctx = ui.ctx().clone();
@@ -261,6 +262,7 @@ fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected:
                 widgets::note_control(ctx, item.label, r, live);
                 let resp = ui.interact(r, id.with(("row", i)), if live { Sense::click() } else { Sense::hover() });
                 if live && widgets::pressed(&resp) {
+                    widgets::note_press(item.label);
                     picked = Some(i);
                 }
                 let hover = anim::toggle(ctx, id.with(("row-hover", i)), live && resp.hovered(), Spring::SNAPPY);

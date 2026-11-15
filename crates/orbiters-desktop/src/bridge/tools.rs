@@ -60,9 +60,9 @@ pub enum Answer {
 }
 
 /// The tools that act on one VRChat, and take `session`.
-const VRCHAT_TOOLS: [&str; 16] = [
+const VRCHAT_TOOLS: [&str; 17] = [
     "get_state", "find_worlds", "go_to_world", "close_vrchat", "wait_for", "screenshot", "walk", "turn", "press", "mouse", "focus_game", "wear_avatar", "take_3d_picture",
-    "aim_camera", "world_labels", "label_world",
+    "aim_camera", "world_labels", "label_world", "open_camera",
 ];
 /// How long the label tools wait for Orbiters to answer, by default.
 const LABELS_WAIT_S: f64 = 20.0;
@@ -116,6 +116,12 @@ Move on to the next world, and say so at the end, when:\n\
 Stop the whole run and tell the person when: `no_capture_kit` (`avatar.capture_kit` false in `get_state` says it as soon as you arrive: nothing can be reconstructed with that avatar, and you may not change it); `stopped` (they took control back); `not_private_instance` twice; `not_started_by_bridge` (or open a session of your own); `vrchat_not_signed_in`; `needs_sign_in`; `vr_mode`; `session_taken_over`.\n\n\
 ## While the person is at the computer\n\n\
 `paused_by_person`: they are using the computer. Wait for as long as `retry_after_s` says with `wait_for` (`until: not_paused`), and go on when it clears; do not fight it. `paused_held`: they pressed the hotkey or Pause, and it lasts until they resume.\n\n\
+## VR sessions: going on while the person works\n\n\
+A desktop VRChat takes keys and clicks only as the foreground window, and its camera opens only through its menu (OSC cannot open it, and it closes at every world change): so in a desktop session every world waits for the person to leave the computer. A **VR session** does not: `open_session {\"profile\": 1, \"vr\": true}` starts that profile's VRChat in VR mode inside the developer VR sandbox (SteamVR with an emulated headset and controllers; only on a computer where the person set it up, else `vr_unavailable`). Nothing of it uses the keyboard, the mouse or the focus, so `paused_by_person` does not stop it; the hotkey and Settings' Pause still do. In it:\n\
+- `screenshot` is the headset's left eye. `mouse` `move` or `click` at a pixel of that picture aims the right controller's laser there (VRChat's laser dot shows on the next screenshot) and `click` pulls the trigger: use it for the world page's Join after `go_to_world`, and for any VRChat button.\n\
+- `open_camera` opens the camera and sets it to Stream, in every world (it closes at each world change); then `aim_camera` and `take_3d_picture` as always.\n\
+- `walk`, `turn` and the OSC inputs are the same. `press` of a key and `focus_game` answer `vr_session`.\n\
+- Close a desktop session of the same profile first (one account, one VRChat). The person's VR wins: while they use their headset, their SteamVR or their own VRChat, `open_session` with vr answers `vr_busy`; if they put their headset on during the session, the sandbox gives SteamVR back and this VRChat stops: open a desktop session then, or wait. With the person's own VRChat running, 3D pictures answer `app_in_use` in every session (the capture is theirs).\n\n\
 ## What you must not do\n\n\
 Do not open the chatbox, send chat, invites or friend requests, change avatars unless the person named one (then wear_avatar, never the menus), buy anything, or touch the safety settings, even though a click can reach them: VRChat's menus show a shop with Purchase buttons, a banner on the first page leads there, and a click has no way back. Never click what you have not just seen. Do not press anything in another person's menu. The keys and inputs you can press are limited on purpose. Only private instances you own are possible: there is no way to join others, and none to try.\n";
 
@@ -242,6 +248,13 @@ pub fn list() -> Value {
             "annotations": acts,
         },
         {
+            "name": "open_camera",
+            "title": "Open VRChat's Stream Camera",
+            "description": "Opens VRChat's camera in a VR session (open_session with vr): the emulated right controller takes the Action Menu's camera route, then OSC switches it to Stream, and the answer comes once VRChat says the camera is open. Needs nothing of the person's: no focus, no keyboard, no mouse. VRChat closes its camera at every world change: open it again in each world, then aim_camera and take_3d_picture. In a desktop session it answers desktop_session with the menu clicks to make instead.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "annotations": acts,
+        },
+        {
             "name": "focus_game",
             "title": "Bring VRChat forward",
             "description": "Asks Windows to make VRChat the foreground window, for press's keys and mouse, when something else took the focus. Windows may refuse: `foreground` says what happened, and if it stays false only the person can click VRChat. Do not call it in a loop: if the focus went away, the person may be using the computer.",
@@ -302,6 +315,7 @@ pub fn list() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "profile": { "type": "integer", "minimum": 1, "maximum": 99, "description": "VRChat's profile number. 0 is the default profile, the person's and the main session's." },
                 "take_over": { "type": "boolean", "description": "Take over this profile's session when its agent has left it alone for 10 minutes or more. Default false." },
+                "vr": { "type": "boolean", "description": "A VR session: VRChat in VR mode in the developer VR sandbox (an emulated headset and controllers, only where the person set it up), driven without the keyboard, the mouse or the focus, so it goes on while the person uses the computer. Refused with vr_busy while the person uses VR. Default false (desktop mode). See the guide's VR sessions." },
             }, "required": ["profile"], "additionalProperties": false },
             "annotations": acts,
         },
@@ -419,6 +433,9 @@ impl Bridge {
                     )
                     .retry_after(15));
                 }
+                if let Some(rig) = s.vr() {
+                    rig.keep();
+                }
                 match vrchat {
                     "get_state" => Ok(Answer::Data(self.state(s))),
                     "find_worlds" => self.find_worlds(s, args),
@@ -435,6 +452,7 @@ impl Bridge {
                     "aim_camera" => self.exclusively(s, || self.aim_camera(s, args, call)),
                     "world_labels" => self.world_labels(s, args),
                     "label_world" => self.exclusively(s, || self.label_world(s, args)),
+                    "open_camera" => self.exclusively(s, || self.open_camera(s, call)),
                     _ => self.exclusively(s, || self.take_3d_picture(s, args, call)),
                 }
             }
@@ -1059,7 +1077,7 @@ impl Bridge {
             // Join button could not be looked at or clicked, as nothing is done outside one's own private instance.
             if !s.is_main() && pid.is_some() && !relaunch && own_private(&seen) {
                 self.release_session(s);
-                let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: s.profile, osc: s.osc };
+                let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: s.profile, osc: s.osc, vr: s.vr().is_some() };
                 match s.game.send_link(&plan) {
                     Ok(()) => {
                         travelled = true;
@@ -1080,11 +1098,11 @@ impl Bridge {
                 ));
             }
             if !s.is_main() {
-                let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: s.profile, osc: s.osc };
+                let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: s.profile, osc: s.osc, vr: s.vr().is_some() };
                 return self.launch_side(s, plan, call);
             }
             let profile = args["profile"].as_u64().map(|p| p as u32);
-            let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile, osc: None };
+            let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile, osc: None, vr: false };
             // Beside side sessions, one launch at a time: a new VRChat is told apart by appearing after its launch.
             let _one = self.launching.lock().unwrap();
             if self.opener.lock().unwrap().clone().is_some_and(|o| o.eac().delete_pending) {
@@ -1296,10 +1314,24 @@ impl Bridge {
         if seen.in_world {
             Self::in_private_instance(&seen)?;
         }
+        let max_width = args["max_width"].as_u64().unwrap_or(WINDOW_WIDTH as u64).clamp(320, 2560) as u32;
+        if let Some(rig) = s.vr() {
+            // The headset's left eye, as SteamVR composited it: mouse takes this picture's pixels for the laser.
+            let shot = super::vr::eye_shot(&rig.eye()?, max_width)?;
+            *s.vr_shot.lock().unwrap() = Some((shot.width, shot.height));
+            let info = json!({
+                "timestamp": orbiters_core::visited::now(),
+                "vr": true,
+                "image_width": shot.width,
+                "image_height": shot.height,
+                "all_black": shot.all_black,
+                "next": "The headset's left eye. mouse click at a pixel of this picture points the right controller's laser there and pulls the trigger.",
+            });
+            return Ok(Answer::Picture(info, shot));
+        }
         let window = self.window(s, pid)?;
         // Only with the person away from the computer: they may be looking at this window at the size they gave it.
         let (window, restored) = if self.paused().is_none() { self.fit_window(s, pid, window) } else { (window, false) };
-        let max_width = args["max_width"].as_u64().unwrap_or(WINDOW_WIDTH as u64).clamp(320, 2560) as u32;
         let shot = s.game.capture(&window, max_width)?;
         let scale = if window.width == 0 { 1.0 } else { shot.width as f64 / window.width as f64 };
         let info = json!({
@@ -1393,6 +1425,9 @@ impl Bridge {
                 "Pick one of those.",
             ));
         };
+        if s.vr().is_some() {
+            return Err(Self::vr_session());
+        }
         let (_, pid) = self.may_act(s)?;
         let window = self.window(s, pid)?;
         self.focus_for(s, &window)?;
@@ -1417,8 +1452,70 @@ impl Bridge {
         )
     }
 
+    /// What a VR session has instead of keys and the focus.
+    fn vr_session() -> Failure {
+        Failure::new(
+            "vr_session",
+            "This is a VR session: VRChat takes no keyboard and no focus here, only the emulated controllers.",
+            "open_camera opens the camera; screenshot, then mouse click (or move) at a pixel of it, aims the laser and presses; walk, turn and the OSC inputs work as always.",
+        )
+    }
+
+    /// `mouse` in a VR session: the laser through a pixel of the last screenshot (the left eye), with the trigger for click.
+    fn vr_mouse(&self, s: &Session, rig: &dyn super::vr::VrRig, action: &str, args: &Value) -> Result<Answer, Failure> {
+        self.may_act(s)?;
+        if !matches!(action, "move" | "click") {
+            return Err(Self::vr_session());
+        }
+        let Some((width, height)) = *s.vr_shot.lock().unwrap() else {
+            return Err(Failure::new("no_screenshot", "Nothing was looked at yet in this VR session.", "Take a screenshot first: x and y are pixels of it."));
+        };
+        let (Some(x), Some(y)) = (args["x"].as_f64(), args["y"].as_f64()) else {
+            return Err(Failure::new("bad_arguments", format!("{action} needs x and y."), "Pass pixels of your last screenshot."));
+        };
+        if x < 0.0 || y < 0.0 || x > f64::from(width) || y > f64::from(height) {
+            return Err(Failure::new("outside", format!("({x}, {y}) is outside the screenshot ({width} x {height})."), "Pick a point on it."));
+        }
+        let click = action == "click";
+        rig.point((x, y), (width, height), click)?;
+        Ok(Answer::Data(json!({
+            "pointed": [x, y],
+            "clicked": click,
+            "over": "vr_controller",
+            "next": if click { "Take a screenshot to see what it did." } else { "Take a screenshot: VRChat's laser dot shows where a click would land." },
+        })))
+    }
+
+    fn open_camera(&self, s: &Session, call: &Call) -> Result<Answer, Failure> {
+        let Some(rig) = s.vr() else {
+            return Err(Failure::new(
+                "desktop_session",
+                "A desktop session's camera opens only through VRChat's menu, with the keyboard and the mouse (OSC cannot open it).",
+                "press esc, screenshot, mouse click on the camera icon, screenshot, mouse click on Stream Camera. Or open a VR session (open_session with vr).",
+            ));
+        };
+        self.may_act(s)?;
+        if s.game.camera_open() != Some(true) {
+            rig.camera()?;
+        }
+        // Open, it takes OSC: Stream, for the 3D picture's Spout.
+        let _ = s.game.osc("/usercamera/Mode", OscArg::Int(2));
+        let open = self.wait_until(Duration::from_secs(6), call, || s.game.camera_open() == Some(true))?;
+        if !open {
+            return Err(Failure::new(
+                "camera_closed",
+                "VRChat did not say its camera opened.",
+                "Take a screenshot: if a menu is in the way, mouse click its close; then open_camera again.",
+            ));
+        }
+        Ok(Answer::Data(json!({ "camera": "open", "mode": "stream", "next": "aim_camera, then take_3d_picture." })))
+    }
+
     fn mouse(&self, s: &Session, args: &Value) -> Result<Answer, Failure> {
         let action = args["action"].as_str().unwrap_or_default();
+        if let Some(rig) = s.vr() {
+            return self.vr_mouse(s, &*rig, action, args);
+        }
         let (_, pid) = self.may_act(s)?;
         let window = self.window(s, pid)?;
         self.focus_for(s, &window)?;
@@ -1503,6 +1600,9 @@ impl Bridge {
     }
 
     fn focus_game(&self, s: &Session) -> Result<Answer, Failure> {
+        if s.vr().is_some() {
+            return Err(Self::vr_session());
+        }
         let (_, pid) = self.may_act(s)?;
         let window = self.window(s, pid)?;
         if !s.is_main() {
@@ -1821,6 +1921,7 @@ impl Bridge {
             self.release_session(&existing);
             let renamed = Session::new(&sessions::new_id(profile), existing.profile, existing.osc, existing.game.clone());
             *renamed.run.lock().unwrap() = std::mem::take(&mut *existing.run.lock().unwrap());
+            *renamed.vr.lock().unwrap() = existing.vr.lock().unwrap().take();
             *renamed.lease.lock().unwrap() = Some(Lease { owner: owner.clone(), last_call: Instant::now() });
             {
                 let mut sides = self.sides.lock().unwrap();
@@ -1874,13 +1975,40 @@ impl Bridge {
             ));
         }
         let id = sessions::new_id(profile);
-        let game = opener.side(&id, profile, osc)?;
+        // A VR session takes its turn on the sandbox first: SteamVR with the emulated headset must run before VRChat starts,
+        // or VRChat comes up on the desktop.
+        let rig = if args["vr"].as_bool().unwrap_or(false) {
+            let Some(rig) = opener.vr_rig(&id) else {
+                return Err(Failure::new(
+                    "vr_unavailable",
+                    "VR sessions need the developer VR sandbox, which is not set up on this computer (`experimental.vrchat_bridge_vr_sandbox` in Orbiters - N4N0's settings).",
+                    "Open a desktop session (without vr), or ask the person.",
+                ));
+            };
+            rig.take()?;
+            Some(rig)
+        } else {
+            None
+        };
+        let game = match opener.side(&id, profile, osc) {
+            Ok(game) => game,
+            Err(failure) => {
+                if let Some(rig) = &rig {
+                    rig.release();
+                }
+                return Err(failure);
+            }
+        };
         let s = Session::new(&id, Some(profile), Some(osc), game);
+        *s.vr.lock().unwrap() = rig.clone();
         *s.lease.lock().unwrap() = Some(Lease { owner: owner.clone(), last_call: Instant::now() });
         // A start that fails releases all it took: its OSC listener and its mark (2026-11-15 07:13: a failed start kept port
         // 9011 bound until the app restarted, and every open_session after it answered port_taken).
-        if let Err(failure) = self.launch_side(&s, LaunchPlan { world_id: String::new(), instance: String::new(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: Some(profile), osc: Some(osc) }, call) {
+        if let Err(failure) = self.launch_side(&s, LaunchPlan { world_id: String::new(), instance: String::new(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: Some(profile), osc: Some(osc), vr: rig.is_some() }, call) {
             opener.forget(&id);
+            if let Some(rig) = &rig {
+                rig.release();
+            }
             return Err(failure);
         }
         self.sides.lock().unwrap().push(s.clone());
@@ -2106,6 +2234,9 @@ impl Bridge {
         }
         self.sides.lock().unwrap().retain(|x| x.id != s.id);
         self.focus.lock().unwrap().leave(&s.id);
+        if let Some(rig) = s.vr.lock().unwrap().take() {
+            rig.release();
+        }
         if let Some(opener) = self.opener.lock().unwrap().clone() {
             opener.forget(&s.id);
         }
@@ -2376,8 +2507,8 @@ mod tests {
         let tools = tools.as_array().unwrap();
         let vrchat = tools.iter().filter(|t| !t["name"].as_str().unwrap().starts_with("unity_")).count();
         // The thirteen of a game, two for its labels, three for the sessions, four for a tour's environment, publishing and
-        // pictures (and the sandbox's, in its builds).
-        assert!(vrchat <= 23, "few: {vrchat}");
+        // pictures, one to open the camera without the keyboard (VR sessions) (and the sandbox's, in its builds).
+        assert!(vrchat <= 24, "few: {vrchat}");
         assert_eq!(tools.len(), vrchat + super::super::projects::NAMES.len(), "the Unity projects tools after them");
         for tool in tools {
             assert!(tool["description"].as_str().unwrap().len() > 60, "{tool}");
@@ -2421,7 +2552,7 @@ mod tests {
 
     #[test]
     fn the_guide_explains_the_loop_and_when_to_give_up() {
-        for words in ["go_to_world", "take_3d_picture", "close_vrchat", "give up", "world_labels", "label_world", "spotlight_pc", "next_page", "paused_by_person", "no_keyframes", "open_session", "needs_sign_in", "Join", "eac_stuck", "relaunch", "focus_busy", "close_session", "take_over", "landed_elsewhere", "window_resized", "`tab`"] {
+        for words in ["go_to_world", "take_3d_picture", "close_vrchat", "give up", "world_labels", "label_world", "spotlight_pc", "next_page", "paused_by_person", "no_keyframes", "open_session", "needs_sign_in", "Join", "eac_stuck", "relaunch", "focus_busy", "close_session", "take_over", "landed_elsewhere", "window_resized", "`tab`", "open_camera", "vr_busy", "vr_session", "\"vr\": true"] {
             assert!(GUIDE.contains(words), "{words}");
         }
     }

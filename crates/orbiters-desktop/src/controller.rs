@@ -2762,7 +2762,9 @@ fn spawn_watchers(ctl: Shared) {
                         .map(|p| p.pid().as_u32())
                         .collect();
                     let pid = ctl.sides.app_pid(&vrchats);
-                    let steamvr_pid = named(&["vrserver.exe", "vrserver"]);
+                    // The developer VR sandbox's SteamVR (a bridge VR session's emulated headset) is not the person's VR: no
+                    // overlay, sound devices or start choice for it (steamvr_start::sandbox_runs).
+                    let steamvr_pid = named(&["vrserver.exe", "vrserver"]).filter(|_| !crate::steamvr_start::sandbox_runs());
                     let steamvr = steamvr_pid.is_some();
                     let was = running;
                     // A VRChat on the network counts as running, for N4N0 and the interface; `remote` says it costs

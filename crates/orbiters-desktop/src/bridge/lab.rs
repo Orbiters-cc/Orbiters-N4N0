@@ -248,6 +248,25 @@ impl LabGame {
         self.state.lock().unwrap().released.clone()
     }
 
+    /// The VR sandbox's camera route reached this VRChat (vr.rs): its camera opens, and says where it is.
+    pub fn vr_camera(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.pid.is_some() && !state.menu_open {
+            state.camera_open = true;
+            state.pose_known = true;
+        }
+    }
+
+    /// The VR laser's trigger: on a world's page (a link sent to the running game), its Join.
+    pub fn vr_click(&self) {
+        let mut state = self.state.lock().unwrap();
+        if let Some((world, instance)) = state.world_page.take() {
+            let load = state.behaviour.load;
+            state.joining = Some((Instant::now() + load, world, instance));
+            state.player_from = Some(Instant::now() + load + state.behaviour.player_after);
+        }
+    }
+
     pub fn launches(&self) -> Vec<LaunchPlan> {
         self.state.lock().unwrap().launches.clone()
     }
@@ -1271,6 +1290,10 @@ pub struct LabOpener {
     pub launches_come_up_after: Mutex<Option<Duration>>,
     /// New sessions' VRChats show the world's page for a link (as VRChat does) instead of travelling at once.
     pub links_open_page: Mutex<bool>,
+    /// The VR sandbox, when this lab has one: `None` none set up; `Some(None)` free; `Some(Some(why))` the person's VR in use.
+    pub vr: Mutex<Option<Option<String>>>,
+    /// The rigs handed out, by session.
+    pub rigs: Mutex<Vec<Arc<LabRig>>>,
 }
 
 impl LabOpener {
@@ -1291,6 +1314,8 @@ impl LabOpener {
             launches_hang: Mutex::default(),
             launches_come_up_after: Mutex::default(),
             links_open_page: Mutex::default(),
+            vr: Mutex::default(),
+            rigs: Mutex::default(),
         })
     }
 
@@ -1324,6 +1349,9 @@ impl super::game::Opener for LabOpener {
             b.account = (!signed_out).then(|| (format!("usr_{profile:08}-0000-4000-8000-000000000000"), format!("Lab Profile {profile}"))); // i18n: not shown
         });
         self.games.lock().unwrap().push((session.to_string(), profile, game.clone()));
+        if let Some(rig) = self.rigs.lock().unwrap().iter().find(|r| r.session == session) {
+            *rig.game.lock().unwrap() = Some(game.clone());
+        }
         Ok(game)
     }
 
@@ -1379,5 +1407,75 @@ impl super::game::Opener for LabOpener {
     fn end_launcher(&self, osc: (u16, u16)) -> usize {
         self.launchers_ended.lock().unwrap().push(osc);
         1
+    }
+
+    fn vr_rig(&self, session: &str) -> Option<Arc<dyn super::vr::VrRig>> {
+        let busy = self.vr.lock().unwrap().clone()?;
+        let rig = Arc::new(LabRig { session: session.to_string(), busy, game: Mutex::default(), calls: Mutex::default() });
+        self.rigs.lock().unwrap().push(rig.clone());
+        Some(rig)
+    }
+}
+
+/// The lab's VR sandbox: records what the bridge asked of it and plays it on the session's lab VRChat.
+pub struct LabRig {
+    pub session: String,
+    busy: Option<String>,
+    game: Mutex<Option<Arc<LabGame>>>,
+    /// `take`, `keep`, `camera`, `point x y w h click`, `eye`, `release`, in order (`keep` once per call at most).
+    pub calls: Mutex<Vec<String>>,
+}
+
+impl LabRig {
+    fn note(&self, call: String) {
+        let mut calls = self.calls.lock().unwrap();
+        if call != "keep" || calls.last().map(String::as_str) != Some("keep") {
+            calls.push(call);
+        }
+    }
+}
+
+impl super::vr::VrRig for LabRig {
+    fn take(&self) -> Result<(), Failure> {
+        self.note("take".into());
+        match &self.busy {
+            Some(why) => Err(Failure::new("vr_busy", format!("No VR session now: {why}"), "Use a desktop session.")), // i18n: not shown (the lab)
+            None => Ok(()),
+        }
+    }
+
+    fn keep(&self) {
+        self.note("keep".into());
+    }
+
+    fn camera(&self) -> Result<(), Failure> {
+        self.note("camera".into());
+        if let Some(game) = self.game.lock().unwrap().as_ref() {
+            game.vr_camera();
+        }
+        Ok(())
+    }
+
+    fn point(&self, pixel: (f64, f64), size: (u32, u32), click: bool) -> Result<(), Failure> {
+        self.note(format!("point {} {} {} {} {click}", pixel.0, pixel.1, size.0, size.1)); // i18n: not shown (the lab's record of calls)
+        if click {
+            if let Some(game) = self.game.lock().unwrap().as_ref() {
+                game.vr_click();
+            }
+        }
+        Ok(())
+    }
+
+    fn eye(&self) -> Result<Vec<u8>, Failure> {
+        self.note("eye".into());
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1620, 1800, image::Rgba([90, 120, 160, 255])))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| Failure::new("vr_sandbox", e.to_string(), "The lab."))?; // i18n: not shown
+        Ok(png)
+    }
+
+    fn release(&self) {
+        self.note("release".into());
     }
 }

@@ -149,8 +149,9 @@ fn homography(from: [(f32, f32); 4], to: [(f32, f32); 4]) -> [f64; 9] {
         for r in 0..8 {
             if r != c {
                 let f = a[r][c] / a[c][c];
-                for k in c..9 {
-                    a[r][k] -= f * a[c][k];
+                let pivot = a[c];
+                for (k, v) in a[r].iter_mut().enumerate().skip(c) {
+                    *v -= f * pivot[k];
                 }
             }
         }
@@ -428,7 +429,7 @@ fn run_set() -> Vec<(Kind, Tally)> {
     for (k, kind) in KINDS.into_iter().enumerate() {
         let mut tally = Tally::default();
         for i in 0..PER_KIND {
-            let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ ((k as u64) << 32 | i as u64).wrapping_mul(0x1000_0001_B3));
+            let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ ((k as u64) << 32 | i as u64).wrapping_mul(0x10_0000_01B3));
             for _ in 0..4 {
                 rng.next();
             }
@@ -445,7 +446,7 @@ fn run_set() -> Vec<(Kind, Tally)> {
                 }
             }
             let (before, after, glimpse) = look(&bgra);
-            let failed = !after.iter().any(|c| *c == s.text) && kind != Kind::Cut && kind != Kind::Nothing || (kind == Kind::Nothing && glimpse.is_some()) || (kind == Kind::Cut && glimpse != Some(Glimpse::Cut));
+            let failed = !after.contains(&s.text) && kind != Kind::Cut && kind != Kind::Nothing || (kind == Kind::Nothing && glimpse.is_some()) || (kind == Kind::Cut && glimpse != Some(Glimpse::Cut));
             if failed && std::env::var_os("QR_DEBUG").is_some() {
                 let frame = Pixels { width: W, height: H, stride: W * 4, data: &bgra, bgra: true };
                 let (ww, wh, whole) = grey(&frame, View::Whole);
@@ -462,7 +463,7 @@ fn run_set() -> Vec<(Kind, Tally)> {
                 }
             }
             tally.cases += 1;
-            let wanted = |codes: &[String]| codes.iter().any(|c| *c == s.text);
+            let wanted = |codes: &[String]| codes.contains(&s.text);
             tally.before += wanted(&before) as u32;
             tally.after += wanted(&after) as u32;
             tally.wrong += after.iter().any(|c| *c != s.text) as u32;

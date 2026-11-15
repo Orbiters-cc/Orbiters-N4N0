@@ -61,6 +61,8 @@ pub enum Input {
 impl CameraWeb {
     /// Opens `url` in a page of its own.
     pub fn open(url: &str) -> Self {
+        // Changed only where an engine opens (Windows, outside tests).
+        #[allow(unused_mut)]
         let mut web = Self::idle(url);
         // Tests drive what shows around it, with no browser of their own (camera-web proves the engine).
         #[cfg(all(windows, not(test)))]

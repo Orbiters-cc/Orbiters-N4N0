@@ -21,7 +21,8 @@ use egui::{pos2, vec2, Pos2, Rect, Vec2};
 pub enum Around {
     Wheel,
     QuickMenu,
-    /// VRChat's camera panel, where it is seen (`camera_track`). In a headset alone.
+    /// VRChat's camera panel, where it is seen: in a headset (`camera_track`), and on the desktop in the middle of VRChat's window
+    /// (`detect::camera_panel`, [`camera_on_screen`]).
     Camera,
 }
 
@@ -399,6 +400,55 @@ const CAMERA_SCAN_OUT: f32 = 8.0;
 /// The page's bar over the camera's top edge (from, to), and how tall the page over it is: a phone's page, about 30 cm wide.
 pub const CAMERA_WEB_BAR: [f32; 2] = [-CAMERA_HALF[1] - 16.0 - 40.0, -CAMERA_HALF[1] - 16.0];
 const CAMERA_WEB_TALL: f32 = 470.0;
+
+/// On the desktop, VRChat's camera panel's own row of buttons (Take Photo to Anchor or Focus), against the outside of its rim, in its heights (350 at 720 tall): from
+/// the rim's foot down, from its left edge in, from its right edge in. Its arrow to the next buttons hangs past the right edge. Measured on `p1-stream-camera` and
+/// `07-after-walk` (1280 x 720): the row is 383 to 895 across, 535 to 620 down, under a rim 332 to 948, 185 to 535.
+pub const DESK_CAMERA_BUTTONS: [f32; 3] = [86.0, 51.0, 53.0];
+/// How large Orbiters' tiles are beside it, in pixels a unit at 720 tall: a tile of 92 x 60 is 124 x 81, as tall as VRChat's own buttons (80), the column of four
+/// about the panel's height, as Enzo drew it (2026-11-15).
+pub const DESK_CAMERA_UNIT: f32 = 1.35;
+
+/// Where the camera's parts go on the desktop, around VRChat's camera panel whose rim's outside is `panel` (window pixels, [`super::detect::camera_panel`]): the
+/// column at its left with the gap of the headset's, its top level with the panel's; their words under VRChat's row of buttons from the column's outer edge, with
+/// the demo avatar's button after them; the corners just off the rim while a code is looked for. No page over it: on the desktop a code's page opens in the browser
+/// (`Panels::follow`). Nothing lies on the panel's picture or on its buttons. Each part shows whole or not at all.
+pub fn camera_on_screen(panel: Rect, client: Vec2) -> Vec<Placed> {
+    let window = Rect::from_min_size(pos2(0.0, 0.0), client).shrink(EDGE);
+    let k = panel.height() / CAMERA_PANEL_TALL;
+    // Smaller where the window has no room at the panel's left for the column at its size.
+    let unit = (DESK_CAMERA_UNIT * k).min((panel.left() - window.left()) / (CAMERA_TILE[0] + CAMERA_GAP));
+    if unit <= 0.0 {
+        return Vec::new();
+    }
+    let center = panel.center();
+    let column_right = panel.left() - CAMERA_GAP * unit;
+    let column_left = column_right - CAMERA_TILE[0] * unit;
+    let tile = |row: usize| {
+        let top = panel.top() + (camera_tile(row).top() + CAMERA_HALF[1]) * unit;
+        Rect::from_min_size(pos2(column_left, top), vec2(CAMERA_TILE[0], CAMERA_TILE[1]) * unit)
+    };
+    let under = panel.bottom() + (DESK_CAMERA_BUTTONS[0] + 8.0) * k;
+    let caption = Rect::from_min_size(pos2(column_left, under), vec2(CAMERA_COLUMN_OUT.abs() + 64.0, CAMERA_UNDER[1] - CAMERA_UNDER[0]) * unit);
+    let act = Rect::from_min_size(pos2(caption.right() + 8.0 * unit, under), vec2(224.0, 34.0) * unit);
+    let scan = panel.expand(CAMERA_SCAN_OUT * k);
+    [
+        (Zone::CameraPeople, tile(0)),
+        (Zone::CameraWorld, tile(1)),
+        (Zone::CameraRecord, tile(2)),
+        (Zone::CameraQr, tile(3)),
+        (Zone::CameraCaption, caption),
+        (Zone::CameraAct, act),
+        (Zone::CameraScan, scan),
+    ]
+    .into_iter()
+    .map(|(zone, rect)| Placed { zone, rect: Rect::from_min_max(rect.min.round(), rect.max.round()), center, unit })
+    .filter(|p| window.contains_rect(p.rect))
+    .collect()
+}
+
+/// The panel's height at 720 tall ([`super::detect::CAMERA_PANEL`]).
+const CAMERA_PANEL_TALL: f32 = 350.0;
 
 /// One of the camera's tiles, from the top: the 3D pictures and Record together, the QR code a little apart.
 fn camera_tile(row: usize) -> Rect {
@@ -799,6 +849,62 @@ mod tests {
             assert!(at(Zone::CameraWebBar).top() > at(Zone::CameraWeb).bottom(), "the bar nearest the camera");
             assert!(!at(Zone::CameraCaption).intersects(at(Zone::CameraAct)));
         }
+    }
+
+    /// Enzo, 2026-11-15 (L-desk-camera): on the desktop the camera's tools are a column at the left of VRChat's camera panel, about its height, where he drew it. Nothing
+    /// of it lies on the panel's picture or on VRChat's buttons under it, nor where the bridge clicks (the Quick Menu's camera icon and its Stream Camera tile), at
+    /// the sizes the panel was measured at and at a window just wide enough.
+    #[test]
+    fn on_the_desktop_the_camera_s_column_is_left_of_its_panel_and_clear_of_vrchat_s_parts() {
+        for (client, panel) in [
+            (vec2(1280.0, 720.0), Rect::from_min_max(pos2(332.0, 185.0), pos2(948.0, 535.0))),
+            (vec2(1920.0, 1080.0), Rect::from_min_max(pos2(498.0, 277.5), pos2(1422.0, 802.5))),
+            (vec2(960.0, 540.0), Rect::from_min_max(pos2(249.0, 138.0), pos2(711.0, 403.0))),
+            (vec2(800.0, 600.0), Rect::from_min_max(pos2(207.0, 159.0), pos2(593.0, 378.0))),
+        ] {
+            let k = panel.height() / 350.0;
+            let placed = camera_on_screen(panel, client);
+            let at = |zone: Zone| placed.iter().find(|p| p.zone == zone).map(|p| p.rect);
+            let buttons = Rect::from_min_max(pos2(panel.left() + 51.0 * k, panel.bottom()), pos2(panel.right() + 25.0 * k, panel.bottom() + 86.0 * k));
+            let column = [Zone::CameraPeople, Zone::CameraWorld, Zone::CameraRecord, Zone::CameraQr];
+            for zone in column.into_iter().chain([Zone::CameraCaption]) {
+                assert!(at(zone).is_some(), "{client:?}: {zone:?} has no room");
+            }
+            for p in &placed {
+                assert!(Rect::from_min_size(pos2(0.0, 0.0), client).contains_rect(p.rect), "{client:?}: {:?} leaves the window", p.zone);
+                if p.zone == Zone::CameraScan {
+                    assert!(p.rect.contains_rect(panel) && p.rect.width() - panel.width() <= 20.0 * k, "{client:?}: corners just off the rim");
+                    continue;
+                }
+                assert!(!p.rect.intersects(panel), "{client:?}: {:?} on the camera's panel", p.zone);
+                assert!(!p.rect.intersects(buttons), "{client:?}: {:?} on VRChat's buttons", p.zone);
+                assert!((p.logical() - p.zone.units().size()).length() < 2.5, "{client:?}: {:?} is drawn at the headset's own size in units", p.zone);
+            }
+            // The bridge's clicks, on the Quick Menu (the camera column is not up then, but nothing of it may ever be there).
+            let (sx, sy) = (client.x / 1280.0, client.y / 720.0);
+            for click in [pos2(640.0 * sx, 620.0 * sy), pos2(597.0 * sx, 345.0 * sy)] {
+                assert!(!placed.iter().any(|p| !p.zone.passes_clicks() && p.rect.contains(click)), "{client:?}: something of ours where the bridge clicks {click:?}");
+            }
+            // One column at its left with a real gap, from its top, in order, about its height, its tiles about as tall as VRChat's buttons.
+            for zone in column {
+                let r = at(zone).unwrap();
+                let gap = panel.left() - r.right();
+                assert!(gap >= 15.0 * k && gap <= 40.0 * k, "{client:?}: {zone:?} {gap} px from the panel");
+            }
+            for pair in column.windows(2) {
+                assert!(at(pair[0]).unwrap().bottom() < at(pair[1]).unwrap().top(), "{pair:?}");
+            }
+            let (top, foot) = (at(Zone::CameraPeople).unwrap().top(), at(Zone::CameraQr).unwrap().bottom());
+            assert!((top - panel.top()).abs() <= 1.0, "{client:?}: the column starts level with the panel");
+            assert!((foot - top) / panel.height() > 0.85 && (foot - top) / panel.height() < 1.15, "{client:?}: the column is about the panel's height");
+            let tall = at(Zone::CameraPeople).unwrap().height() / k;
+            assert!((70.0..=95.0).contains(&tall), "{client:?}: a tile {tall} px tall at 720");
+            // The words under VRChat's buttons, starting under the column.
+            let caption = at(Zone::CameraCaption).unwrap();
+            assert!(caption.top() >= buttons.bottom() && (caption.left() - at(Zone::CameraPeople).unwrap().left()).abs() <= 1.0);
+        }
+        // No room at all at its left: nothing, rather than parts cut off.
+        assert!(camera_on_screen(Rect::from_min_max(pos2(2.0, 100.0), pos2(1278.0, 600.0)), vec2(1280.0, 720.0)).iter().all(|p| p.zone == Zone::CameraCaption || p.zone == Zone::CameraAct || p.zone == Zone::CameraScan) );
     }
 
     /// Enzo (F13): the wheel's Stop lies under the ring, clear of its cells, its second rings and VRChat's wheel.

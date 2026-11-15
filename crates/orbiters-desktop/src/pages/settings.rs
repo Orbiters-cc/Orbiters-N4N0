@@ -1159,7 +1159,7 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
         apply |= widgets::toggle(ui, "orbit-wheel", &mut orbit.wheel);
     });
     widgets::separator(ui);
-    widgets::field(ui, tr("Around the camera"), Some(tr("In a headset: 3D pictures and the QR code beside VRChat's camera. They appear where VRChat opens it and move with the hand that holds it.")), 48.0, |ui| {
+    widgets::field(ui, tr("Around the camera"), Some(tr("3D pictures, Record and the QR code beside VRChat's camera. In a headset they appear where VRChat opens it and move with the hand that holds it; in desktop mode, at the left of its panel.")), 48.0, |ui| {
         apply |= widgets::toggle(ui, "orbit-camera", &mut orbit.camera_tiles);
     });
     if orbit.camera_tiles {

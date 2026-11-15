@@ -78,7 +78,7 @@ fn usage_name(action: &Action) -> String {
 
 /// Whether the desktop's panels are wanted: VRChat runs without SteamVR, on this computer, and the setting says so.
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
-    orbiters_core::osc::VRCHAT_RUNS_HERE && snap.vrchat.running && !snap.vrchat.remote && !snap.steamvr.running && snap.settings.orbit.any()
+    orbiters_core::osc::VRCHAT_RUNS_HERE && snap.vrchat.running && !snap.vrchat.remote && !snap.steamvr.running && (snap.settings.orbit.any() || snap.settings.orbit.camera_tiles)
 }
 
 /// A part's appearing: a spring from nothing to its place, a little past it. Each turn moves the window or overlay and its alpha, no new picture.
@@ -1006,6 +1006,9 @@ pub struct Panels {
     web_for: Option<u64>,
     /// When the demo avatar was put on: said for a moment.
     demo_done: Option<Instant>,
+    /// The links the desktop sent to the browser, in tests.
+    #[cfg(test)]
+    pub opened_in_browser: Vec<String>,
 }
 
 /// How long Stop says Stopping after a press while the service has not said so yet; how long the camera says the demo avatar was put on.
@@ -1102,6 +1105,8 @@ impl Panels {
             web: None,
             web_for: None,
             demo_done: None,
+            #[cfg(test)]
+            opened_in_browser: Vec::new(),
         }
     }
 
@@ -1886,6 +1891,23 @@ impl Panels {
         panels::CameraNow { finding: self.camera_finding, kit: snap.worn_kit, demo, qr, web, on_the_right: self.camera_right }
     }
 
+    /// A code's page in the computer's own browser, off this thread (the shell may take a moment). Tests count it rather than open anything.
+    fn open_in_browser(&mut self, url: &str) {
+        #[cfg(test)]
+        {
+            self.opened_in_browser.push(url.to_string());
+        }
+        #[cfg(not(test))]
+        {
+            let url = url.to_string();
+            let _ = std::thread::Builder::new().name("orbit-open-link".into()).spawn(move || {
+                if let Err(e) = crate::controller::open_url(&url) {
+                    eprintln!("orbit: the code's page did not open: {e}"); // i18n: not shown (a log's line)
+                }
+            });
+        }
+    }
+
     /// Tracking state is part of the painted caption, independently of Facts.
     fn camera_tracking(&mut self,right:bool,finding:bool) {
         if (self.camera_right,self.camera_finding)!=(right,finding) {
@@ -1913,7 +1935,13 @@ impl Panels {
         if let crate::controller::camera_tools::Qr::Found { url } = &snap.camera_tools.qr {
             if self.web_for != Some(snap.camera_tools.qr_generation) {
                 self.web_for = Some(snap.camera_tools.qr_generation);
-                self.web = Some(camera_web::CameraWeb::open(url));
+                if self.facts.desktop {
+                    // On the desktop there is no room over the camera, whose picture nothing may cover (L-desk-camera): the page opens in the person's browser,
+                    // as any link does on a computer.
+                    self.open_in_browser(url);
+                } else {
+                    self.web = Some(camera_web::CameraWeb::open(url));
+                }
                 self.backend.camera_qr(false);
                 self.camera_dirty();
             }

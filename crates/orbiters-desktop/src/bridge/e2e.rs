@@ -1922,6 +1922,81 @@ fn open_session_takes_the_vrchat_a_failed_start_of_its_profile_left_running() {
     assert_eq!(opener.game_of(2).unwrap().launches().len(), 0);
 }
 
+/// The map (L-tour-map): no plan before a finished picture; then the world's plan with its picture, where the earlier picture
+/// stood, the avatar from the recording, suggestions apart from it with aim_camera calls and a walk through the door; a camera
+/// sent into a wall is warned of (not refused), a walk towards one too; and the plan outlives the picture's files once it is
+/// published and freed, across a restart.
+#[test]
+fn a_worlds_pictures_plan_the_next_one_and_warn_before_moves() {
+    let (game, bridge, _server, client) = lab("map");
+    let publish = super::lab::LabPublish::new(game.dir());
+    bridge.set_publish(publish.clone());
+    let journal = game.dir().join("journal.json");
+    bridge.keep_journal(&journal);
+    let maps = game.dir().join("maps");
+    bridge.keep_maps(maps.clone());
+    arrive(&client);
+    client.fails("map_plan", json!({}), "no_map");
+    open_camera(&game, &client);
+    let picture = client.tool("take_3d_picture", json!({ "length_s": 8 })).unwrap();
+    let name = picture["session"].as_str().unwrap().to_string();
+    // Two rooms joined by a door; the picture was taken in the first, the avatar standing at (3, 5) facing +x.
+    super::map::tests::write_session(&game.dir().join(&name), &super::map::tests::two_rooms(), ([0.0, 0.0], [24.0, 10.0]), [4.0, 5.0], [3.0, 1.02, 5.0], 90.0);
+    let waiting = client.fails("map_plan", json!({}), "no_map");
+    assert!(waiting["message"].as_str().unwrap().contains("finished"), "not before its reconstruction is done: {waiting}");
+    client.tool("close_vrchat", json!({})).unwrap();
+    assert!(until(PATIENCE, || client.tool("wait_for", json!({ "until": "reconstructions_done", "timeout_s": 2 })).unwrap()["done"] == true));
+    arrive(&client);
+    open_camera(&game, &client);
+
+    let (status, body) = client.rpc("tools/call", json!({ "name": "map_plan", "arguments": {} }));
+    assert_eq!(status, 200);
+    let result = &body["result"];
+    assert_eq!(result["isError"], false, "{body}");
+    assert_eq!(result["content"][0]["mimeType"], "image/png", "the plan's picture");
+    let plan = &result["structuredContent"];
+    assert_eq!(plan["pictures_used"], 1, "{plan}");
+    assert_eq!(plan["verdict"]["pictures"], 3, "two rooms: more than one picture: {plan}");
+    assert_eq!(plan["centres"][0]["at"], json!([4.0, 1.6, 5.0]));
+    assert_eq!(plan["avatar"]["as_of_picture"], name.as_str(), "{plan}");
+    assert_ne!(plan["camera"]["at"], "solid", "{plan}");
+    let first = &plan["suggestions"][0];
+    assert!(first["why"].as_str().unwrap().contains("another area"), "{plan}");
+    assert!(first["from_centres_m"].as_f64().unwrap() >= 10.0, "{first}");
+    assert!(first["aim_camera"].as_array().is_some_and(|a| !a.is_empty()), "{first}");
+    assert!(first["walk"].as_array().is_some_and(|a| !a.is_empty()), "a walk through the door: {first}");
+    assert!(plan.to_string().len() < 4000, "short: {} bytes", plan.to_string().len());
+
+    // The camera sent into the wall between the rooms: it goes (the map has holes), and the answer warns.
+    let aimed = client.tool("aim_camera", json!({ "forward_m": 11 })).unwrap();
+    assert_eq!(aimed["to"][0], 12.0, "{aimed}");
+    assert_eq!(aimed["map"]["at"], "solid", "{aimed}");
+    assert!(aimed["map"]["warning"].is_string(), "{aimed}");
+    let checked = client.tool("map_check", json!({ "point": [6.0, 1.6, 5.0], "walk_to": [18.0, 5.0] })).unwrap();
+    assert_eq!(checked["point"]["at"], "free", "{checked}");
+    assert!(checked["walk_to"]["steps"].as_array().is_some_and(|s| !s.is_empty()), "{checked}");
+    client.fails("map_check", json!({ "point": [1.0, 2.0] }), "bad_arguments");
+    // Backwards from (3, 5) facing +x is west: the outer wall 3 m away.
+    let walked = client.tool("walk", json!({ "direction": "backward", "seconds": 2 })).unwrap();
+    assert!(walked["map"]["then"].as_str().unwrap().contains("wall"), "{walked}");
+    assert!(walked["map"]["clear_m"].as_f64().unwrap() < 4.0, "{walked}");
+
+    // Published and freed whole, the picture still maps its world, after a restart too.
+    client.tool("close_vrchat", json!({})).unwrap();
+    let published = client.tool("publish_3d_picture", json!({ "picture": name, "visibility": "private" })).unwrap();
+    assert_eq!(published["publish"]["state"], "done", "{published}");
+    client.tool("free_picture_files", json!({ "picture": name, "what": "everything" })).unwrap();
+    assert!(!game.dir().join(&name).exists());
+    let (_game2, bridge2, _server2, client2) = lab("map-restart");
+    bridge2.keep_journal(&journal);
+    bridge2.keep_maps(maps);
+    bridge2.set_publish(publish.clone());
+    arrive(&client2);
+    let again = client2.tool("map_plan", json!({ "image": false })).unwrap();
+    assert_eq!(again["pictures_used"], 1, "{again}");
+    assert!(again["left_out"].is_null(), "{again}");
+}
+
 #[test]
 fn a_vr_session_tours_while_the_person_uses_the_computer() {
     // nofocus, 2026-11-15: with the person at the computer every key and click of a desktop session answers paused_by_person, and

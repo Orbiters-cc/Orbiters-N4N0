@@ -51,12 +51,14 @@ const ROWS: [(&str, orbiters_core::maps::Row); 7] = [
 ];
 /// How far `aim_camera` moves VRChat's camera in one call, metres each way: the 3D picture's flight goes 10 m from where it
 /// starts, and a camera much further from the avatar than that is not measured.
-const AIM_REACH_M: f64 = 25.0;
+pub(super) const AIM_REACH_M: f64 = 25.0;
 
 /// A tool's answer.
 pub enum Answer {
     Data(Value),
     Picture(Value, Shot),
+    /// Data with an image made here (a map's plan), and its media type.
+    Image(Value, Vec<u8>, &'static str),
 }
 
 /// The tools that act on one VRChat, and take `session`.
@@ -85,7 +87,7 @@ You drive VRChat on this computer, in desktop mode, through this bridge. A perso
 5. Open VRChat's camera, which only the menus can do: `press` `esc`, `screenshot`, `mouse` `click` on the camera icon in the menu's bottom row (about 640, 620 at 1280 by 720), `screenshot`, and `click` on the Stream Camera tile (about 597, 345). The menu closes and the camera's panel stays on the screen. `get_state` says `camera.open`. Those coordinates hold because the bridge keeps VRChat's window at the size it started with (1280 by 720): if someone resized it, the next `screenshot` puts it back first, without bringing it forward (`window_restored: true`), and a `click` or `move` on a resized window is refused with `window_resized` and clicks nothing (take a screenshot, then click). Still check each spot in your last screenshot: they are where the icon and the tile usually are. Leave the camera's settings alone: the app sets Stream and Spout itself when it records. **Look at a screenshot after every click, and before the next one:** a click can miss, its page may not have changed, and the same spot on the page you are really on may be a shop banner. If the page is not what you expected, `press` `esc` closes everything: start again.\n\
 6. If `camera.pose_known` is false, `turn` by a few degrees: VRChat says where its camera is when it moves.\n\
 7. Before opening the camera, walk somewhere worth a picture with `walk` and `turn`, looking with `screenshot` between moves: with the camera or a menu open the avatar does not move (`speed_seen` 0), and the picture starts where the camera opens. `press` `esc` closes the camera again. `turn` is approximate: judge by the pictures. `walk` tells you if the avatar did not seem to move.\n\
-8. `take_3d_picture` with `length_s` 1, 4 or 8. It waits for the recording to be saved and gives the `session`. Take a few from different places: 4 or 8 seconds in the open, 1 second for a close look. The camera stays open after a picture, so the next one needs no menu; but the avatar does not walk while it is open (see Viewpoints for moving between pictures).\n\
+8. `take_3d_picture` with `length_s` 1, 4 or 8. It waits for the recording to be saved and gives the `session`. 8 seconds in the open, 1 second for a close look. A world's pictures start in different places (see Viewpoints); once the first is reconstructed, map_plan says where the next should be, or that one is enough. The camera stays open after a picture, so the next one needs no menu; but the avatar does not walk while it is open (see Viewpoints for moving between pictures).\n\
 9. Label the world, if you were asked to: `world_labels` lists the labels N4N0 offers (a fixed list) and those the world already has; `label_world` with `add` gives the ones that fit **what you saw** in your screenshots there, and only those (see Labels below).\n\
 10. `go_to_world` with the next world, and so on.\n\
 11. `close_vrchat` at the end. Reconstructions follow the app's own setting: they run beside VRChat, or wait for it to close (`get_state`'s `reconstructions` and each picture's `reconstruction` say which). Then `wait_for` with `until: reconstructions_done`, as many times as it takes, and report each session's `reconstruction` from `get_state`, which says `failed` and why when one did not finish.\n\n\
@@ -98,12 +100,21 @@ Several agents (and the person) can each have a VRChat on this computer at the s
 What is shared, and how: `walk`, `turn`, the OSC inputs and `screenshot` need nothing of anyone else's and run side by side in every session. **Keys and clicks** (`press` of a key, `mouse`, `focus_game`) need your window in the foreground, which only one window can have: they take turns. A refusal `focus_busy` says how long to wait (`retry_after_s`, a few seconds: a turn is yours while you keep using it, and passes to the next session 8 s after your last key or click). They also wait while the person uses the computer at all (`paused_by_person`), and are refused with `person_vrchat_has_focus` while the person's own VRChat has the foreground: the bridge never takes it from them. **3D pictures** borrow Orbiters - N4N0's capture: one at a time on this computer (`picture_busy`: wait), and none while the person's own VRChat runs (`app_in_use`: the capture is theirs then). The person's input in your session's window pauses your session only. One account cannot be in two VRChats: each profile has its own. `list_sessions` shows them all.\n\n\
 ## Labels\n\n\
 A tour of worlds for labels goes, for each world: `go_to_world` (and `wait_for` in_world), `screenshot`, `turn` and `walk` to look around with more screenshots (the spawn alone rarely shows what a world is), the camera and `take_3d_picture`, then `world_labels`, then `label_world` with the labels that match what you saw. Labels are N4N0's world label feedback: the same list, rules and account as a person's Label it on N4N0's worlds page. They are published on Orbiters under the Orbiters account signed in in Orbiters - N4N0 (`world_labels`' `account` says which, and on which server), and other people see and count them. So give a label only for what your screenshots show (a mirror, pens, a video player, a game, nature, a city, bright or dark, a quiet place for sleeping or chilling), never from the world's name or description, and give fewer rather than doubtful ones. ai-world (made with AI) needs a `reason` of at least 10 words saying what you saw; ai-thumbnail says the world's own picture (its thumbnail in VRChat's menus) looks made with AI. `remove` takes back a label you gave. Only worlds a session of this bridge arrived in can be labelled (the bridge keeps them across restarts of the app, so a world seen before an update can still be labelled after it). A world with none that fits gets none: say so in your report. Orbiters takes one label change a world (several labels together count once) and about 120 an hour from an account: past that, `sent` is false and Orbiters - N4N0 sends them later by itself, within a day.\n\n\
-## Viewpoints\n\n\
-A 3D picture is made of what the camera sees as it flies around the spot it opens at: what is behind a wall, or out of its sight, is not in it. So three pictures of a world are three different places, never three from one spot: (1) a high point that overlooks much of the world (stairs, a balcony, a roof, a hill: walk there with screenshots between moves, `press` `jump` to get onto things), facing the open; (2) the middle of its main space, facing what it is about (a stage, a fountain, a skyline, a bar); (3) somewhere else of its own: another room, the outside, a view back over the whole. Before each picture, look at a screenshot with the camera open: turn until the interesting part is in the middle, with open space in front rather than a wall a metre away.\n\n\
-Two ways to get there. **aim_camera** moves the open camera itself, without the avatar and without the menus: `up_m` 3 to 8 lifts it over tables, railings and crowds of objects so much more of the world is in sight, `forward_m`/`right_m` take it out over a plaza or into the next room, `turn_deg` and `pitch_deg` (positive looks down; 15 to 30 from high up) aim it. A picture flies around the camera's spot and comes back to it, so: picture, aim_camera to the next spot, picture, and so on, with a screenshot after every move (nothing stops the camera in a wall, under a floor or outside the world: if the panel shows that, move it back). Or walk: `press` `esc` closes the camera, walk and `press` `jump` to get onto things, then open the camera again through the menu as in step 5 (the camera opens in front of the avatar). Good spots are up a stair or on a balcony looking over the main space, in the middle of the main space at eye height facing what it is about, and at an edge looking back over all of it.\n\n\
+## Viewpoints: the owner's rules\n\n\
+A 3D picture is made of what the camera sees as it flies around the spot it starts at: what is behind a wall, or out of its sight, is not in it. The person who owns this tour asked for:\n\
+- **Different centres.** Each picture of a world starts at least 10 m from every earlier one, or in another room, or on a high point. A diagonal view from nearly the same spot adds nothing: never turn and take again.\n\
+- **One picture for a very simple world** (one closed room with little in it, an empty box, a test grid): then go on to the next world.\n\
+- **Otherwise three, and visit the map:** other rooms, the far side, up a stair or a balcony. There is often interesting stuff in the other room.\n\
+Before each picture, look at a screenshot with the camera open: turn until the interesting part is in the middle, with open space in front rather than a wall a metre away.\n\n\
+## The map: where to go next\n\n\
+Once a picture's reconstruction is done (`pictures` says; often a minute or two), `map_plan` turns this world's finished pictures into a plan seen from above, merged as the world gets more (a picture of the plan comes with it). It answers: `verdict` (`pictures` 1 for a very simple world: stop there; 3 otherwise, with why), `size`, `centres` (where earlier pictures started), `camera` and `avatar` on the plan, and `suggestions` A to C: each at least 10 m from every centre when the world is that large, in open space clear of walls, with `why` (another area, an opening into unseen space, a high point), its camera `pose`, the `aim_camera` calls that take the open camera there from where it is, and a `walk` (turn by turn_deg, then walk walk_s seconds forward) through floor the pictures saw, when the avatar should go (another room: walk, then open the camera there). On the picture black is unknown: no picture saw it, so it may be open or solid; an opening (black beside floor) is a door or a corridor worth a look.\n\n\
+- The loop for a world: picture 1 from the best spot near the spawn; while it reconstructs, look around and label; `map_plan`; if `verdict.pictures` is 1, go to the next world; else go to suggestion A, screenshot, picture 2; `map_plan` again once it is reconstructed (the plan grows); picture 3. If reconstructions wait for VRChat to close, there is no map during the visit: follow the rules by eye.\n\
+- Before a move: `map_check` with `point` [x, y, z], `aim` (aim_camera's forward_m, right_m, up_m), `walk` {direction, seconds} or `walk_to` [x, z]. `aim_camera` and `walk` add a `map` note by themselves: `at` solid (inside a wall or an object), near_solid, unknown or outside (the void, the sky, unpictured parts), and for a walk how far the way is clear and what stops it. They warn and never refuse: the map has holes. Still look with a screenshot.\n\
+- Frame: aim_camera's, metres; heading 0 is +z (up on the picture), 90 is +x (right). The avatar's place comes from the last picture's recording (where it stood while the camera flew); the bridge adds the walks and turns since (`added_since` says how many: turns are approximate, so it drifts). A new picture puts it right again.\n\n\
+Two ways to get somewhere. **aim_camera** moves the open camera itself, without the avatar and without the menus (map_plan gives the calls); `up_m` 3 to 8 lifts it over tables, railings and crowds of objects, `pitch_deg` 15 to 30 looks down from high up. A picture flies around the camera's spot and comes back to it, so: picture, aim_camera to the next spot, screenshot, picture. Or walk: `press` `esc` closes the camera, walk (map_plan's steps) and `press` `jump` to get onto things, then open the camera again through the menu as in step 5. In the same world the camera reopens where it was last left, not at the avatar: aim_camera from the pose it reports. In a VR session the map works the same (the same world frame and poses): open_camera instead of the menu; walk's speed_seen says whether the avatar moved.\n\n\
 ## Publishing on Orbiters, and the disk\n\n\
 `get_state`'s `orbiters` says which Orbiters environment Orbiters - N4N0 talks to (production is orbiters.cc, what everyone sees; development is the server on this computer) and under which account, and its `disks` how much room is left. Labels (label_world) and pictures (publish_3d_picture) go to that environment. If the person asked for another one, `orbiters_environment` with `action: switch` switches the whole app, as its Settings switch does (its answer says what changes for the person: the account, the update feed, where labels and pictures go): do it once, say so in your report, and never switch back unless the person asked. It is refused while labels still wait to be sent.\n\n\
-For each world: take at least three pictures from different places (see Viewpoints). Once a picture's `reconstruction` is done (`pictures` lists every picture the bridge took, even before a restart, with its reconstruction and publishing), `publish_3d_picture` a world's other pictures with `visibility: private` and its best one `public`, last: Orbiters lists one public 3D picture per account and world, so a later public one takes an earlier one's place. The answer gives the item's `id` and `link`. When reconstructions wait for VRChat to close (`waiting_starts`), publish a world's pictures later, from another world: `pictures` with `unpublished: true` lists what is left. Publish only pictures that show the world (not a black, blurred or empty one).\n\n\
+For each world: take the pictures it deserves from different places (see Viewpoints: three, one for a very simple world). Once a picture's `reconstruction` is done (`pictures` lists every picture the bridge took, even before a restart, with its reconstruction and publishing), `publish_3d_picture` a world's other pictures with `visibility: private` and its best one `public`, last: Orbiters lists one public 3D picture per account and world, so a later public one takes an earlier one's place. The answer gives the item's `id` and `link`. When reconstructions wait for VRChat to close (`waiting_starts`), publish a world's pictures later, from another world: `pictures` with `unpublished: true` lists what is left. Publish only pictures that show the world (not a black, blurred or empty one).\n\n\
 Room on this computer: an 8 s picture takes about 230 MB (a world of three 0.7 to 1.1 GB) until it is reconstructed; its keyframes and depth frames are 190 MB of it, and only its reconstruction reads them. Once a picture is reconstructed, `free_picture_files` with `capture_files` deletes those and keeps its 3D view and all that publishing reads (about 45 MB left); once it is published, `everything` deletes it whole (it stays on Orbiters, in the account's gallery). Pictures taken before this build are found by `pictures` too. Do it for each published picture as you go: a tour of hundreds of pictures fills the disk within hours otherwise. When `get_state` says `disk_warning`, free files before the next picture.\n\n\
 ## When to give up on a world\n\n\
 Move on to the next world, and say so at the end, when:\n\
@@ -351,6 +362,7 @@ pub fn list() -> Value {
         tool
     })
     .chain(super::tour::list())
+    .chain(super::map_tool::list())
     .chain(super::projects::list())
     .chain(super::sandbox::list())
     .collect::<Vec<Value>>()
@@ -408,7 +420,7 @@ fn file_name(path: &std::path::Path) -> String {
 impl Bridge {
     /// One tool call, whose outcome goes to the log (all but what only reads: those fill it with nothing).
     pub fn call(&self, name: &str, args: &Value, call: &Call) -> Result<Answer, Failure> {
-        let acts = !matches!(name, "get_state" | "wait_for" | "find_worlds" | "list_sessions" | "world_labels") && !super::projects::reads(name) && !super::tour::reads(name);
+        let acts = !matches!(name, "get_state" | "wait_for" | "find_worlds" | "list_sessions" | "world_labels" | "map_plan" | "map_check") && !super::projects::reads(name) && !super::tour::reads(name);
         let result = match name {
             "vr_sandbox" => {
                 if !matches!(args["action"].as_str(), Some("stop" | "restore" | "status")) {
@@ -419,6 +431,13 @@ impl Bridge {
             }
             unity if super::projects::NAMES.contains(&unity) => self.projects.call(unity, args, call, self.paused()),
             tour if super::tour::NAMES.contains(&tour) => self.tour_call(tour, args, call),
+            map if super::map_tool::NAMES.contains(&map) => self.session_of(args, true).and_then(|s| {
+                // A VR session's sandbox turn is kept by every call, as by the other tools.
+                if let Some(rig) = s.vr() {
+                    rig.keep();
+                }
+                self.map_call(map, &s, args)
+            }),
             "open_session" => self.open_session(args, call),
             "list_sessions" => Ok(Answer::Data(self.list_sessions())),
             "close_session" => self.session_of(args, true).and_then(|s| self.exclusively(&s, || self.close_session(&s, call))),
@@ -1376,13 +1395,22 @@ impl Bridge {
             }
             Self::in_private_instance(&seen)
         };
+        let direction = args["direction"].as_str().unwrap_or("forward");
+        let run = args["run"].as_bool().unwrap_or(false);
+        // What the map shows ahead, before the avatar goes (none without a map of this world or a known avatar).
+        let map = self.map_note_for_walk(s, direction, seconds.as_secs_f32(), run);
         let held = self.press_for(s, call, &holds, seconds, None, &still_ok)?;
         let speed_seen = speed.lock().unwrap().or(s.game.seen().speed);
+        self.map_walked(s, direction, held.as_secs_f64(), speed_seen, run);
         let note = match speed_seen {
             Some(s) if s < 0.1 => Some("VRChat reported no movement: blocked, seated, or a menu open. Look with screenshot."),
             _ => None,
         };
-        Ok(Answer::Data(json!({ "walked_s": held.as_secs_f64(), "speed_seen": speed_seen, "note": note })))
+        let mut answer = json!({ "walked_s": held.as_secs_f64(), "speed_seen": speed_seen, "note": note });
+        if let Some(map) = map {
+            answer["map"] = map;
+        }
+        Ok(Answer::Data(answer))
     }
 
     fn turn(&self, s: &Session, args: &Value, call: &Call) -> Result<Answer, Failure> {
@@ -1396,6 +1424,7 @@ impl Bridge {
         let address = if degrees > 0.0 { "/input/LookRight" } else { "/input/LookLeft" };
         let holds = [(Hold::OscButton(address), Some(OscArg::Int(1)), None)];
         let held = self.press_for(s, call, &holds, seconds, None, &self.still_private(s))?;
+        self.map_turned(s, degrees);
         Ok(Answer::Data(json!({
             "turned_about_degrees": degrees,
             "held_s": held.as_secs_f64(),
@@ -1787,12 +1816,17 @@ impl Bridge {
         self.wait_until(Duration::from_millis(600), call, || false)?;
         let moved = ((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2) + (to[2] - from[2]).powi(2)).sqrt();
         let round = |p: [f32; 6]| p.map(|v| (v * 100.0).round() / 100.0);
-        Ok(Answer::Data(json!({
+        let mut answer = json!({
             "from": round(from),
             "to": round(to),
             "moved_m": (f64::from(moved) * 10.0).round() / 10.0,
             "next": "Look with screenshot: the camera's panel shows what it sees from there. If it is in a wall, under the floor or facing nothing, aim_camera again. Then take_3d_picture: it flies around this spot.",
-        })))
+        });
+        // What this world's map says of the spot: a warning, never a refusal (the map has holes).
+        if let Some(map) = self.map_note_for_camera(s, [to[0], to[1], to[2]]) {
+            answer["map"] = map;
+        }
+        Ok(Answer::Data(answer))
     }
 }
 
@@ -2507,8 +2541,9 @@ mod tests {
         let tools = tools.as_array().unwrap();
         let vrchat = tools.iter().filter(|t| !t["name"].as_str().unwrap().starts_with("unity_")).count();
         // The thirteen of a game, two for its labels, three for the sessions, four for a tour's environment, publishing and
-        // pictures, one to open the camera without the keyboard (VR sessions) (and the sandbox's, in its builds).
-        assert!(vrchat <= 24, "few: {vrchat}");
+        // pictures, two for the map that guides its next picture, one to open the camera without the keyboard (VR sessions) (and the
+        // sandbox's, in its builds).
+        assert!(vrchat <= 26, "few: {vrchat}");
         assert_eq!(tools.len(), vrchat + super::super::projects::NAMES.len(), "the Unity projects tools after them");
         for tool in tools {
             assert!(tool["description"].as_str().unwrap().len() > 60, "{tool}");

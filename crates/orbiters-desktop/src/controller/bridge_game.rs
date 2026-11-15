@@ -425,6 +425,7 @@ impl Controller {
         bridge.set_feedback(Arc::new(super::world_feedback::RealFeedback { ctl: Arc::downgrade(self) }));
         bridge.set_publish(Arc::new(super::bridge_publish::RealPublish::new(Arc::downgrade(self))));
         bridge.keep_journal(&crate::bridge::journal::Journal::file());
+        bridge.keep_maps(orbiters_core::paths::config_dir().join("bridge-maps"));
         bridge.projects.set_host(Arc::new(RealProjectsHost { ctl: Arc::downgrade(self) }));
         let flag = Arc::new(RealFlag { ctl: Arc::downgrade(self) });
         let ctl = Arc::downgrade(self);

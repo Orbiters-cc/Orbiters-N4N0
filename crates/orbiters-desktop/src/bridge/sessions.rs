@@ -421,7 +421,7 @@ pub fn camera_mode_in(datagram: &[u8]) -> Option<bool> {
                 _ => None,
             },
             rosc::OscPacket::Message(_) => None,
-            rosc::OscPacket::Bundle(b) => b.content.into_iter().filter_map(find).last(),
+            rosc::OscPacket::Bundle(b) => b.content.into_iter().filter_map(find).next_back(),
         }
     }
     rosc::decoder::decode_udp(datagram).ok().and_then(|(_, p)| find(p))

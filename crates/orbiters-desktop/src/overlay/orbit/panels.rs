@@ -50,11 +50,14 @@ pub mod look {
         retro: AtomicBool,
         dots: AtomicBool,
     }
-    const FIRST: Chosen = Chosen { accent: AtomicU32::new(0x00da6d), retro: AtomicBool::new(false), dots: AtomicBool::new(false) };
+    /// What the app starts with: the default accent, the modern look.
+    const fn first() -> Chosen {
+        Chosen { accent: AtomicU32::new(0x00da6d), retro: AtomicBool::new(false), dots: AtomicBool::new(false) }
+    }
 
     /// One for the whole process: the app has one look.
     #[cfg(not(test))]
-    static CHOSEN: Chosen = FIRST;
+    static CHOSEN: Chosen = first();
     #[cfg(not(test))]
     pub(super) fn chosen<T>(f: impl FnOnce(&Chosen) -> T) -> T {
         f(&CHOSEN)
@@ -64,7 +67,7 @@ pub mod look {
     // `orbiters_i18n::in_language` is for the language, a test's look is its thread's.
     #[cfg(test)]
     thread_local! {
-        static CHOSEN: Chosen = const { FIRST };
+        static CHOSEN: Chosen = const { first() };
     }
     #[cfg(test)]
     pub(super) fn chosen<T>(f: impl FnOnce(&Chosen) -> T) -> T {

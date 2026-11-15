@@ -2,7 +2,7 @@
 //! the sources are doing, the recording's settings, live statistics and the camera path.
 
 use super::{block, entering, Cx};
-use crate::state::CaptureState;
+use crate::state::{CaptureState, VrchatDriverShown, VrchatRunShown};
 use egui::{pos2, vec2, Align, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder, Vec2};
 use orbiters_contracts::manifest::{CaptureMode, StorageQuality};
 use orbiters_core::picture::Left;
@@ -45,6 +45,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::p
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 32 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             header(ui, cx);
+            vrchat_picker(ui, cx);
             actions(ui, cx, state, projects);
             chips(ui, cx, projects);
             // A recording's numbers and what it records: chosen and read where recording happens, the test pattern's
@@ -84,12 +85,14 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
     let world = &snap.vrchat.world;
     let recording = matches!(c.state, CaptureState::Recording | CaptureState::Paused);
     block(ui, cx, 0, 72.0, |ui, rect| {
-        let caption = if recording {
-            tr("Live capture")
+        let caption: String = if recording {
+            tr("Live capture").into()
+        } else if let (true, Some(target)) = (world.in_world, snap.vrchat.several_target()) {
+            tr!("VRChat world · {who}", who = crate::controller::vrchats::who(target))
         } else if world.in_world {
-            tr("VRChat world")
+            tr("VRChat world").into()
         } else {
-            tr("Capture")
+            tr("Capture").into()
         };
         let headline = match c.state {
             CaptureState::Importing => tr("Importing a raw capture").to_string(),
@@ -98,7 +101,7 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
             _ => world.world_name.clone().filter(|_| world.in_world).unwrap_or_else(|| tr("Ready to capture").into()),
         };
         let p = ui.painter();
-        widgets::text(p, pos2(rect.left(), rect.top() + 7.0), Align2::LEFT_CENTER, &Txt::caps(caption));
+        widgets::text(p, pos2(rect.left(), rect.top() + 7.0), Align2::LEFT_CENTER, &Txt::caps(&caption));
         widgets::sliding_value(
             ui,
             Id::unique("capture-headline"),
@@ -494,6 +497,133 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
     }
 }
 
+/// Several VRChats on this computer: which is which (account, world, who drives it, desktop or VR, its camera), and which
+/// one pictures are taken in. One click on another chooses it. Nothing shows with one VRChat.
+fn vrchat_picker(ui: &mut Ui, cx: &mut Cx) {
+    let snap = cx.snap;
+    let runs = &snap.vrchat.runs;
+    if runs.len() < 2 || !orbiters_core::osc::VRCHAT_RUNS_HERE {
+        return;
+    }
+    let target = runs.iter().find(|r| r.target);
+    let note = target.and_then(|t| match &t.driver {
+        VrchatDriverShown::Agent { .. } => Some(tr("An agent drives this VRChat through the bridge. While you take a picture here, it waits, and its own pictures wait for you.")),
+        VrchatDriverShown::Left => Some(tr("An agent started this VRChat and is gone: nobody drives it.")),
+        VrchatDriverShown::Person => None,
+    });
+    let busy = snap.is_capturing();
+    const CARD_H: f32 = 96.0;
+    let height = 30.0 + CARD_H + if note.is_some() { 30.0 } else { 0.0 };
+    let mut chosen = None;
+    block(ui, cx, 20, height, |ui, rect| {
+        let p = ui.painter().clone();
+        let caption = tr_n("{count} VRChat on this computer", "{count} VRChats on this computer", runs.len() as u64);
+        widgets::text(&p, pos2(rect.left(), rect.top() + 8.0), Align2::LEFT_CENTER, &Txt::caps(&caption));
+        let row = Rect::from_min_size(pos2(rect.left(), rect.top() + 26.0), vec2(rect.width(), CARD_H));
+        let gap = 12.0;
+        // The row filled (two or three side by side), never one card too wide to read across.
+        let width = ((row.width() - gap * (runs.len() as f32 - 1.0)) / runs.len() as f32).min(560.0);
+        for (i, run) in runs.iter().enumerate() {
+            let card = Rect::from_min_size(pos2(row.left() + i as f32 * (width + gap), row.top()), vec2(width, CARD_H));
+            let id = Id::unique(("vrchat-pick", run.pid));
+            let resp = ui.interact(card, id, Sense::click());
+            let can = !run.target && !busy;
+            let resp = if can { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+            if can && widgets::pressed(&resp) {
+                chosen = Some(run.pid);
+            }
+            vrchat_card(ui, card, id, run, can && resp.hovered());
+        }
+        let hint = if busy { tr("Finish the current capture first.") } else { tr("Pictures are taken in the one you pick") };
+        let right = row.left() + runs.len() as f32 * (width + gap) - gap;
+        widgets::text(&p, pos2(right, rect.top() + 8.0), Align2::RIGHT_CENTER, &Txt::new(hint, 12.5).color(theme::FG_3));
+        if let Some(note) = note {
+            let y = row.bottom() + 18.0;
+            widgets::icon(&p, pos2(rect.left() + 8.0, y), icons::INFO, 14.0, theme::FG_3);
+            widgets::text_truncated(&p, pos2(rect.left() + 24.0, y), Align2::LEFT_CENTER, &Txt::new(note, 12.5).color(theme::FG_2), rect.width() - 24.0);
+        }
+    });
+    if let Some(pid) = chosen {
+        cx.ctl.choose_vrchat(Some(pid));
+    }
+}
+
+/// One VRChat of the picker: the one pictures are taken in lit, with its mark.
+fn vrchat_card(ui: &Ui, card: Rect, id: Id, run: &VrchatRunShown, hovered: bool) {
+    let p = ui.painter();
+    let lit = anim::toggle(ui.ctx(), id.with("lit"), run.target, Spring::SOFT);
+    let hover = anim::toggle(ui.ctx(), id.with("hover"), hovered, Spring::SNAPPY);
+    let fill = theme::alpha(theme::ACCENT, 0.08 * lit);
+    widgets::frame(p, card, 16.0, theme::surface());
+    p.rect_filled(card, theme::radius(16.0), fill);
+    p.rect_filled(card, theme::radius(16.0), theme::white(0.03 * hover));
+    if lit > 0.01 {
+        p.rect_stroke(card, theme::radius(16.0), egui::Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.85 * lit)), egui::StrokeKind::Inside);
+    }
+    let (glyph, tint) = match run.driver {
+        VrchatDriverShown::Person => (icons::USER, theme::ACCENT),
+        VrchatDriverShown::Agent { .. } => (icons::SPARKLE, theme::CYAN),
+        VrchatDriverShown::Left => (icons::SPARKLE, theme::FG_4),
+    };
+    let tile = Rect::from_min_size(pos2(card.left() + 14.0, card.top() + 14.0), vec2(36.0, 36.0));
+    p.rect_filled(tile, theme::radius(12.0), theme::alpha(tint, 0.12));
+    widgets::icon(p, tile.center(), glyph, 16.0, tint);
+    let x = tile.right() + 12.0;
+    // Its mark on the right: where pictures are taken, or the way to choose it.
+    let mark_w = if run.target {
+        let label = Txt::new(tr("Pictures here"), 12.0).weight(weight::MEDIUM).color(theme::ACCENT);
+        let w = widgets::text_size(ui, &label).x + 30.0;
+        let pill = Rect::from_min_size(pos2(card.right() - 12.0 - w, card.top() + 12.0), vec2(w, 24.0));
+        p.rect_filled(pill, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.14));
+        widgets::icon(p, pos2(pill.left() + 13.0, pill.center().y), icons::CHECK, 12.0, theme::ACCENT);
+        widgets::text(p, pos2(pill.left() + 23.0, pill.center().y), Align2::LEFT_CENTER, &label);
+        w + 12.0
+    } else if hovered {
+        let label = Txt::new(tr("Take pictures here"), 12.0).weight(weight::MEDIUM).color(theme::FG_2);
+        let w = widgets::text_size(ui, &label).x;
+        widgets::text(p, pos2(card.right() - 14.0, card.top() + 24.0), Align2::RIGHT_CENTER, &label);
+        w + 14.0
+    } else {
+        0.0
+    };
+    let room = card.right() - x - 12.0 - mark_w;
+    let name = crate::controller::vrchats::who(run);
+    widgets::text_truncated(p, pos2(x, card.top() + 24.0), Align2::LEFT_CENTER, &Txt::new(name, 15.0).weight(weight::SEMIBOLD), room);
+    let world = run.world.clone().unwrap_or_else(|| tr("Not in a world yet").into());
+    widgets::text_truncated(p, pos2(x, card.top() + 43.0), Align2::LEFT_CENTER, &Txt::new(world, 12.5).color(theme::FG_2), card.right() - x - 14.0);
+    // Who drives it, how it runs, and its camera.
+    let driver = match &run.driver {
+        VrchatDriverShown::Person => tr("Your own").to_string(),
+        VrchatDriverShown::Agent { session } => tr!("Agent · {session}", session = session),
+        VrchatDriverShown::Left => tr("Left by an agent").into(),
+    };
+    let mode = match run.desktop {
+        Some(true) => Some(tr("Desktop")),
+        Some(false) => Some(tr("VR")),
+        None => None,
+    };
+    let line = match mode {
+        Some(mode) => format!("{driver}  ·  {mode}"),
+        None => driver,
+    };
+    let y = card.bottom() - 22.0;
+    let left = card.left() + 16.0;
+    let used = widgets::text_size(ui, &Txt::new(&line, 12.0)).x;
+    widgets::text_truncated(p, pos2(left, y), Align2::LEFT_CENTER, &Txt::new(&line, 12.0).color(theme::FG_3), card.width() * 0.6);
+    if let Some(open) = run.camera {
+        let cx_ = left + used.min(card.width() * 0.6) + 18.0;
+        // Closed on the one pictures are taken in: what to do before a picture, in amber.
+        let (tone, ink) = match (open, run.target) {
+            (true, _) => (Tone::Ok, theme::FG_2),
+            (false, true) => (Tone::Warn, theme::WARN),
+            (false, false) => (Tone::Off, theme::FG_3),
+        };
+        widgets::status_dot(p, pos2(cx_, y), tone, false);
+        let words = if open { tr("Camera open") } else { tr("Camera closed") };
+        widgets::text_truncated(p, pos2(cx_ + 10.0, y), Align2::LEFT_CENTER, &Txt::new(words, 12.0).color(ink), card.right() - cx_ - 24.0);
+    }
+}
+
 /// What capturing needs, as status cards: VRChat, N4N0 on the avatar (the one card to act on: it opens the avatar
 /// picker), the Spout source, the Action Menu and the storage. Five on a row, or three then two on narrow windows.
 fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
@@ -506,11 +636,16 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
     };
     let osc = &snap.osc;
     let storage = &snap.storage;
+    // Several VRChats: each line is about the one pictures are taken in, and says which.
+    let vrchat_label = match snap.vrchat.several_target() {
+        Some(target) => tr!("VRChat · {who}", who = crate::controller::vrchats::who(target)),
+        None => "VRChat".to_string(),
+    };
     let chips = [
         if orbiters_core::osc::VRCHAT_RUNS_HERE {
             (
                 icons::MONITOR_PLAY,
-                "VRChat",
+                vrchat_label.as_str(),
                 if snap.vrchat.running {
                     if world.in_world {
                         tr("In a world").to_string()
@@ -530,7 +665,8 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
             (
                 icons::BROADCAST,
                 tr("Spout source"),
-                source.map(|s| format!("{} · {}×{}", s.name, s.width, s.height)).unwrap_or_else(|| tr("VRChat's camera: Stream mode, Spout Stream on").into()),
+                // Without a sender, what to do, not a state: "VRChat's camera: Stream mode, Spout Stream on" read as one (2026-11-15).
+                source.map(|s| format!("{} · {}×{}", s.name, s.width, s.height)).unwrap_or_else(|| tr("Nothing yet: VRChat's camera, Stream mode").into()),
                 if source.is_some() { Tone::Ok } else { Tone::Warn },
             )
         } else {

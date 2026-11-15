@@ -343,5 +343,10 @@
   "Record beside VRChat's camera": "VRChatのカメラの横で録画",
   "Stopping…": "停止中…",
   "VRChat did not confirm the capture avatar. Try again.": "VRChatで撮影用アバターへの変更を確認できませんでした。もう一度お試しください。",
-  "Orbiters did not answer for this world's feedback. It tries again by itself.": "このワールドの評価をOrbitersから取得できませんでした。自動で再試行します。"
+  "Orbiters did not answer for this world's feedback. It tries again by itself.": "このワールドの評価をOrbitersから取得できませんでした。自動で再試行します。",
+  "That VRChat is not running any more.": "そのVRChatはもう起動していません。",
+  "Open the camera in {who}'s VRChat first": "先に{who}のVRChatでカメラを開いてください",
+  "profile {number}": "プロファイル{number}",
+  "{count} VRChat": "VRChat {count}個",
+  "{count} VRChats": "VRChat {count}個"
 }

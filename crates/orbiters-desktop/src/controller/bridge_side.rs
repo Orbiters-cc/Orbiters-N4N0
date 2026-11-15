@@ -250,6 +250,40 @@ impl Opener for RealOpener {
             sides.set_main(pid);
         }
     }
+
+    fn vrchats(&self) -> serde_json::Value {
+        let Some(ctl) = self.ctl.upgrade() else { return serde_json::Value::Array(Vec::new()) };
+        vrchats_json(&ctl.view().vrchat.runs)
+    }
+
+    fn left_by_bridge(&self) -> Vec<u32> {
+        self.sides().map(|s| s.roster().into_iter().filter(|r| r.driver == sessions::Driver::Bridge).map(|r| r.pid).collect()).unwrap_or_default()
+    }
+}
+
+/// The VRChats on this computer as the Capture page shows them, for an agent (`list_sessions`, `get_state`).
+pub(crate) fn vrchats_json(runs: &[crate::state::VrchatRunShown]) -> serde_json::Value {
+    use crate::state::VrchatDriverShown;
+    serde_json::Value::Array(
+        runs.iter()
+            .map(|r| {
+                serde_json::json!({
+                    "profile": r.profile,
+                    "account": r.account,
+                    "world_name": r.world,
+                    "mode": r.desktop.map(|d| if d { "desktop" } else { "vr" }),
+                    "camera_open": r.camera,
+                    "driven_by": match &r.driver {
+                        VrchatDriverShown::Person => "the person".to_string(),
+                        VrchatDriverShown::Agent { session } => format!("session {session}"),
+                        VrchatDriverShown::Left => "nobody: the bridge started it for a session that is gone".to_string(),
+                    },
+                    "pictures_taken_here": r.target,
+                    "chosen_by_person": r.chosen,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// What a side session knows of its VRChat.
@@ -555,6 +589,16 @@ impl Game for SideGame {
         })
     }
 
+    fn persons_capture_here(&self) -> bool {
+        let pid = self.state.lock().unwrap().pid;
+        pid.is_some() && self.sides.chosen() == pid && !self.lent_to_me() && self.ctl().is_ok_and(|c| c.is_capturing())
+    }
+
+    fn chosen_by_person(&self) -> bool {
+        let pid = self.state.lock().unwrap().pid;
+        pid.is_some() && self.sides.chosen() == pid
+    }
+
     fn capture_kit(&self) -> Option<bool> {
         let query = self.state.lock().unwrap().query?;
         let values = orbiters_core::osc::vrchat_values(query, Duration::from_secs(1)).ok()?;
@@ -745,9 +789,23 @@ impl Game for SideGame {
         let (Some(pid), Some(query)) = (pid, query) else {
             return Err(Failure::new("osc_off", "This session's VRChat has not said where its OSC is yet.", "Wait a moment and call get_state.")); // i18n: not shown
         };
-        // The main session's VRChat is the bridge's own: borrowed from it while it records nothing.
+        // The person chose this very VRChat for their own pictures: theirs while they keep it chosen.
+        if self.sides.chosen() == Some(pid) {
+            return Err(Failure::new(
+                "app_in_use",
+                "The person chose this session's VRChat for their own 3D pictures in Orbiters - N4N0 (its Capture page): the capture is theirs here until they choose another.", // i18n: not shown
+                "Walk, look and screenshot meanwhile (your input waits while they record), and try again later; tell the person if you need pictures now.", // i18n: not shown
+            )
+            .retry_after(120));
+        }
+        // The main session's VRChat is the bridge's own: borrowed from it while it records nothing. With the roster known, a
+        // VRChat the bridge left running (its marks) is never counted as the person's.
         let (sides, main) = (self.sides.side_pids(), self.sides.main_pid());
-        if vrchat_pids().iter().any(|p| !sides.contains(p) && Some(*p) != main) {
+        let persons = match self.sides.person_target() {
+            Some(t) => t.driver != sessions::Driver::Main,
+            None => !self.sides.roster_known() && vrchat_pids().iter().any(|p| !sides.contains(p) && Some(*p) != main),
+        };
+        if persons {
             return Err(Failure::new(
                 "app_in_use",
                 "The person's own VRChat runs, which Orbiters - N4N0 follows: its capture is theirs, so no 3D picture can be taken in a side session meanwhile.", // i18n: not shown
@@ -868,6 +926,15 @@ impl Controller {
         }
         drop(osc);
         self.update(|s| s.camera_open_said = camera_open);
+        match to.and_then(|m| m.pid) {
+            // What was just put in is this VRChat's: followed as it stands.
+            Some(pid) => *self.followed.lock().unwrap() = Some(pid),
+            // Back to the VRChat the person's capture follows (theirs, or the one they chose), with its own camera state.
+            None => {
+                *self.followed.lock().unwrap() = None;
+                self.follow_target();
+            }
+        }
     }
 }
 

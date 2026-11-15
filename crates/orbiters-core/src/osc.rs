@@ -568,8 +568,9 @@ impl std::fmt::Debug for FilterSlot {
     }
 }
 
-/// Says whether a datagram from this source is taken ([`OscService::set_datagram_filter`]).
-pub type DatagramFilter = Arc<dyn Fn(SocketAddr) -> bool + Send + Sync>;
+/// Says whether a datagram from this source is taken ([`OscService::set_datagram_filter`]); it sees the datagram's bytes too,
+/// so that what a VRChat the app does not follow says of its camera is still known (the app's choice among several VRChats).
+pub type DatagramFilter = Arc<dyn Fn(SocketAddr, &[u8]) -> bool + Send + Sync>;
 
 impl Route {
     fn of(network: &Network) -> Self {
@@ -603,9 +604,9 @@ impl Route {
     }
 
     /// Whether a datagram from `from` is taken by the filter (no filter: all).
-    fn takes(&self, from: SocketAddr) -> bool {
+    fn takes(&self, from: SocketAddr, datagram: &[u8]) -> bool {
         let filter = self.filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        filter.is_none_or(|f| (f.0)(from))
+        filter.is_none_or(|f| (f.0)(from, datagram))
     }
 
     /// Whether the VRChat OSCQuery service at `addr` is one this app talks with: it answers as VRChat and, on this
@@ -818,7 +819,7 @@ impl OscService {
                             continue;
                         }
                     };
-                    if n == 0 || !heard.datagram(from.ip()) || !filter_route.takes(from) || !nesting_within_limit(&buf[..n]) {
+                    if n == 0 || !heard.datagram(from.ip()) || !filter_route.takes(from, &buf[..n]) || !nesting_within_limit(&buf[..n]) {
                         turned_away.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
@@ -1977,10 +1978,10 @@ mod tests {
         assert_eq!(route.target(), Some(side));
         *route.lent.lock().unwrap() = None;
         assert_eq!(route.target(), Some(SocketAddr::from(([127, 0, 0, 1], 9000))), "given back");
-        assert!(route.takes(side), "no filter: everything");
-        *route.filter.lock().unwrap() = Some(FilterSlot(Arc::new(|from: SocketAddr| from.port() != 57303)));
-        assert!(!route.takes(SocketAddr::from(([127, 0, 0, 1], 57303))));
-        assert!(route.takes(SocketAddr::from(([127, 0, 0, 1], 50000))));
+        assert!(route.takes(side, &[]), "no filter: everything");
+        *route.filter.lock().unwrap() = Some(FilterSlot(Arc::new(|from: SocketAddr, _: &[u8]| from.port() != 57303)));
+        assert!(!route.takes(SocketAddr::from(([127, 0, 0, 1], 57303)), &[]));
+        assert!(route.takes(SocketAddr::from(([127, 0, 0, 1], 50000)), &[]));
     }
 
     #[test]

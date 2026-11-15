@@ -870,6 +870,7 @@ impl Bridge {
             "pictures": picture_list,
             "orbiters": orbiters,
             "disks": disks,
+            "vrchats": self.opener.lock().unwrap().clone().map(|o| o.vrchats()).unwrap_or(Value::Array(Vec::new())),
             "next": match &disk_warning { Some(w) => format!("{w} Then: {next}"), None => next },
             "disk_warning": disk_warning,
         })
@@ -1911,7 +1912,9 @@ impl Bridge {
 
     /// The VRChats running that no session of the bridge's started: the person's.
     fn persons_vrchats(&self, opener: &dyn super::game::Opener) -> Vec<u32> {
-        let ours: Vec<u32> = self.sessions().iter().filter_map(|s| s.pid()).collect();
+        let mut ours: Vec<u32> = self.sessions().iter().filter_map(|s| s.pid()).collect();
+        // One the bridge started for a session and no session holds (its `--profile` and `--osc` say so) is not theirs either.
+        ours.extend(opener.left_by_bridge());
         opener.vrchat_pids().into_iter().filter(|p| !ours.contains(p)).collect()
     }
 
@@ -2232,6 +2235,7 @@ impl Bridge {
         json!({
             "sessions": sessions,
             "persons_vrchats_running": persons,
+            "vrchats": opener.as_ref().map(|o| o.vrchats()).unwrap_or(Value::Array(Vec::new())),
             "limit": opener.as_ref().map(|o| o.limit()),
             "keyboard_and_mouse_turn": self.focus.lock().unwrap().holder().map(short_id),
             "next": "Your own session's full id is the one open_session gave you: pass it as session. Ids are not shown here, so that nobody drives another agent's session by accident.",
@@ -2288,6 +2292,7 @@ impl Bridge {
             "osc_ports": s.osc.map(|(i, o)| json!({ "in": i, "out": o })),
             "driven_by": lease.map(|l| l.owner),
             "paused_here": self.paused_in(s),
+            "chosen_by_person": s.game.chosen_by_person(),
             "keyboard_and_mouse_turn": self.focus.lock().unwrap().holder().map(|h| h == s.id),
         })
     }

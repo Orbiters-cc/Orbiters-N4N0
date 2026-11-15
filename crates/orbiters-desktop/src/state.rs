@@ -102,9 +102,57 @@ pub struct VrchatStatus {
     /// It runs on another device of the network ([`LanStatus`]): it takes nothing of this computer's GPU or processor.
     #[serde(default)]
     pub remote: bool,
+    /// Every VRChat running on this computer, in the order they started; one of them is the target (the one followed, which
+    /// pictures are taken in). Empty while none runs; one entry when only one does.
+    #[serde(default)]
+    pub runs: Vec<VrchatRunShown>,
 }
 
-orbiters_core::parts!(VrchatStatus { plain: [running, pid, log_found, motion, remote], slices: [world], identity: [], nested: [] });
+orbiters_core::parts!(VrchatStatus { plain: [running, pid, log_found, motion, remote, runs], slices: [world], identity: [], nested: [] });
+
+/// One VRChat running on this computer, as the interface shows it (controller/vrchats.rs).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VrchatRunShown {
+    pub pid: u32,
+    /// VRChat's profile (`--profile`): each holds its own account.
+    pub profile: u32,
+    /// The account signed in, once its log said.
+    pub account: Option<String>,
+    pub world: Option<String>,
+    /// Desktop or VR, once known.
+    pub desktop: Option<bool>,
+    /// Whether its camera is open (its own OSCQuery tree), when it could be asked.
+    pub camera: Option<bool>,
+    pub driver: VrchatDriverShown,
+    /// The one the app follows and takes pictures in.
+    pub target: bool,
+    /// The person chose it (rather than it being the default, their own).
+    pub chosen: bool,
+}
+
+/// Who drives a VRChat.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum VrchatDriverShown {
+    /// The person's own.
+    #[default]
+    Person,
+    /// An agent through the VRChat bridge, in this session (shortened id, `main` for the bridge's main session).
+    Agent { session: String },
+    /// Started by the bridge for an agent, held by no session now.
+    Left,
+}
+
+impl VrchatStatus {
+    /// The VRChat followed (pictures are taken in it), when several run: `None` with one VRChat or none, where nothing
+    /// needs saying.
+    pub fn several_target(&self) -> Option<&VrchatRunShown> {
+        if self.runs.len() < 2 {
+            return None;
+        }
+        self.runs.iter().find(|r| r.target)
+    }
+}
 
 impl VrchatStatus {
     /// Whether a VRChat runs on this very computer: what shares its GPU, and what its log, Spout and sound come from.
@@ -740,6 +788,7 @@ impl Snapshot {
                 log_found: orbiters_core::paths::vrchat_log_dir().is_some(),
                 motion: None,
                 remote: false,
+                runs: Vec::new(),
             },
             sources: Default::default(),
             mics: Default::default(),

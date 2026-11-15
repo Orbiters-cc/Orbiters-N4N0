@@ -343,5 +343,10 @@
   "Record beside VRChat's camera": "Gravar ao lado da câmera do VRChat",
   "Stopping…": "Parando…",
   "VRChat did not confirm the capture avatar. Try again.": "O VRChat não confirmou o avatar de captura. Tente novamente.",
-  "Orbiters did not answer for this world's feedback. It tries again by itself.": "O Orbiters não respondeu sobre o feedback deste mundo. Ele tenta de novo sozinho."
+  "Orbiters did not answer for this world's feedback. It tries again by itself.": "O Orbiters não respondeu sobre o feedback deste mundo. Ele tenta de novo sozinho.",
+  "That VRChat is not running any more.": "Esse VRChat não está mais aberto.",
+  "Open the camera in {who}'s VRChat first": "Abra primeiro a câmera no VRChat de {who}",
+  "profile {number}": "perfil {number}",
+  "{count} VRChat": "{count} VRChat",
+  "{count} VRChats": "{count} VRChats"
 }

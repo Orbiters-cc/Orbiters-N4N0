@@ -126,6 +126,10 @@ pub enum ToService {
     Pause {
         paused: bool,
     },
+    /// The VRChat pictures are taken in, among several on this computer (`None`: the person's own).
+    ChooseVrchat {
+        pid: Option<u32>,
+    },
     TestPattern,
     /// VRChat's camera flies a scan around where it stands (controller/scan.rs).
     Scan,
@@ -1125,6 +1129,7 @@ pub(crate) mod tests {
         s.version = "another version".into();
         s.vrchat.log_found = !plain.vrchat.log_found;
         s.vrchat.remote = true;
+        s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 8244, profile: 1, account: Some("Orbiters".into()), target: true, ..Default::default() }];
         s.lan.link = LanLink::Looking;
         s.capture.state = CaptureState::Recording;
         s.capture.trail = vec![[1.0, 2.0, 3.0]];

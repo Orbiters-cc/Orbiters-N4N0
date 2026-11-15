@@ -316,6 +316,25 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     toolkit_project.n4n0.avatar_id = Some("avtr_00000000-0000-4000-8000-000000000001".into());
     let mut toolkit_elsewhere = idle_after.clone();
     toolkit_elsewhere.n4n0.avatar_id = Some("avtr_4f3b5bc4-0000-4000-8000-000000000000".into());
+    // Several VRChats on this computer (controller/vrchats.rs): one; his own beside the world tour's; the tour's chosen; his
+    // chosen with its camera closed.
+    let vrchats = |target: u32, chosen: bool, own_camera: bool, tour: crate::state::VrchatDriverShown| {
+        use crate::state::{VrchatDriverShown, VrchatRunShown};
+        let mut s = idle.clone();
+        let own = VrchatRunShown { pid: 37076, profile: 0, account: Some("blackorbit".into()), world: Some("FRONTLINE KIZUNA".into()), desktop: Some(true), camera: Some(own_camera), driver: VrchatDriverShown::Person, target: target == 37076, chosen: false };
+        let tour = VrchatRunShown { pid: 8244, profile: 1, account: Some("Orbiters".into()), world: Some("Audience Anarchy".into()), desktop: Some(true), camera: Some(!own_camera || target == 8244), driver: tour, target: target == 8244, chosen };
+        s.vrchat.runs = vec![tour, own];
+        let world = if target == 8244 { ("wrld_81800175-2fdb-4e77-b602-c7fa35f33c0c", "Audience Anarchy") } else { ("wrld_a51861e9-85a8-43da-85a3-854a184b2fc1", "FRONTLINE KIZUNA") };
+        s.vrchat.world.world_id = Some(world.0.into());
+        s.vrchat.world.world_name = Some(world.1.into());
+        s
+    };
+    let mut vrchats_one = idle.clone();
+    vrchats_one.vrchat.runs = vrchats(37076, false, true, crate::state::VrchatDriverShown::Left).vrchat.runs.into_iter().filter(|r| r.pid == 37076).collect();
+    let vrchats_own = vrchats(37076, false, true, crate::state::VrchatDriverShown::Left);
+    let vrchats_agent = vrchats(8244, true, false, crate::state::VrchatDriverShown::Agent { session: "p1-3f2a…".into() });
+    let mut vrchats_closed = vrchats(37076, false, false, crate::state::VrchatDriverShown::Agent { session: "p1-3f2a…".into() });
+    *vrchats_closed.sources = Vec::new();
     let mut no_strip = recording.clone();
     no_strip.capture.trail.clear();
     no_strip.capture.coverage = None;
@@ -1237,6 +1256,62 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             splash: false,
             open_detail: false,
             toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-vrchats-one",
+            page: Page::Capture,
+            snapshot: vrchats_one,
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-vrchats-own",
+            page: Page::Capture,
+            snapshot: vrchats_own,
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-vrchats-agent",
+            page: Page::Capture,
+            snapshot: vrchats_agent,
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-vrchats-closed",
+            page: Page::Capture,
+            snapshot: vrchats_closed,
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![(toast::Kind::Error, Box::leak(orbiters_i18n::tr!("Open the camera in {who}'s VRChat first", who = "blackorbit").into_boxed_str()))],
             pointer: None,
             scroll: 0.0,
             world: None,

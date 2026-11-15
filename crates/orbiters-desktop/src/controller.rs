@@ -55,13 +55,19 @@ struct OscValues {
     camera_received: Option<bool>,
     camera_closed_at: Option<u64>,
     camera_command: Option<(i32,u64)>,
-    camera_commanded: std::collections::HashSet<i32>,
+    /// The camera modes the app wrote on this connection, with when it last wrote each: a Mode received within
+    /// [`CAMERA_ECHO_WINDOW_NS`] of the app writing it may be VRChat's echo, never proof of a camera opened.
+    camera_commanded: std::collections::HashMap<i32,u64>,
     /// The avatar worn's parameters (those of avatars worn before go when it changes), the poses, the camera.
     latest: Latest,
     forwarding: bool,
     pending: Vec<OscSample>,
     last_flush: Option<Instant>,
 }
+
+/// How long after the app wrote a camera Mode the same Mode received may still be VRChat's echo of it. VRChat answers an
+/// OSC write within milliseconds; a person closes and opens the camera in seconds.
+const CAMERA_ECHO_WINDOW_NS: u64 = 2_000_000_000;
 
 /// Addresses kept in [`OscValues::latest`] at most: an avatar's parameters, the poses and the camera are a few
 /// hundred; past this, a new address is not kept.
@@ -152,6 +158,10 @@ pub struct Controller {
     bridge: Mutex<Option<Arc<crate::bridge::keeper::Keeper>>>,
     /// The VRChats the bridge runs beside the person's (bridge/sessions.rs): the app follows none of them, unless lent.
     pub(crate) sides: Arc<crate::bridge::sessions::Sides>,
+    /// The VRChat the app's OSC, camera evidence and capture were last pointed at ([`Controller::follow_target`]).
+    followed: Mutex<Option<u32>>,
+    /// The other VRChats whose Spout Stream a recording switched off (their OSC input), to switch on again after it.
+    quieted: Mutex<Vec<std::net::SocketAddr>>,
     /// How Go there reaches the person's VRChat (controller/travel.rs): this computer, or a test's.
     pub(crate) travel: Mutex<Option<Arc<dyn travel::Travel>>>,
     /// The bridge restarts VRChat between two worlds: the moments it is closed start no reconstruction.
@@ -402,6 +412,7 @@ mod scan;
 pub mod shares;
 pub mod update;
 mod videos;
+pub(crate) mod vrchats;
 pub mod translate;
 pub mod travel;
 pub mod vrchat_data;
@@ -456,6 +467,8 @@ impl Controller {
             vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
             bridge: Mutex::new(None),
             sides: Arc::default(),
+            followed: Mutex::new(None),
+            quieted: Mutex::new(Vec::new()),
             travel: Mutex::new(None),
             bridge_holds_reconstructions: AtomicBool::new(false),
             booster: Default::default(),
@@ -664,7 +677,12 @@ impl Controller {
     }
 
     pub fn notify(&self, kind: NoticeKind, message: impl Into<String>) {
-        self.push_notice(Notice::Toast { kind, message: message.into() });
+        let mut message = message.into();
+        // Several VRChats on this computer: the camera to open is the target's, named (in any language the key came in).
+        if message == tr("Open VRChat's camera first") || message == "Open VRChat's camera first" { // i18n: not shown (the English key, as the bridge and N4N0 pass it)
+            message = self.camera_first();
+        }
+        self.push_notice(Notice::Toast { kind, message });
     }
 
     /// Looks at the settings without copying them (the OSC receiving thread does, for every value VRChat sends).
@@ -1122,9 +1140,11 @@ impl Controller {
     }
 
     fn acquire_camera_stream(self: &Shared, owner: usize, vrchat: &[(String, OscValue)]) -> bool {
+        // Several VRChats: only the target's camera may stream (they all name their sender VRCSender1).
+        let shared_name = self.view().camera_open_said != Some(false) && self.quiet_other_streams();
         let mut owners = self.camera_stream_owners.lock().unwrap();
         let mut evidence=self.osc_values.lock().unwrap();
-        if self.received_camera_closed(&evidence) || self.view().camera_open_said==Some(false) { owners[owner]=false; return false; }
+        if self.received_camera_closed(&evidence) || self.view().camera_open_said==Some(false) { owners[owner]=false; drop(evidence); drop(owners); self.unquiet_unless_streaming(); return false; }
         owners[owner] = true;
         let value = |path: &str| vrchat.iter().find(|(p, _)| p == path).map(|(_, v)| v.clone());
         let mode = match value(CAMERA_MODE) {
@@ -1132,13 +1152,18 @@ impl Controller {
             _ => 0,
         };
         let streaming = value(CAMERA_STREAMING).is_some_and(|v| v.truthy());
-        if mode == STREAM_MODE && streaming {
+        if mode == STREAM_MODE && streaming && !shared_name {
             return true;
         }
         self.camera_before.lock().unwrap().get_or_insert(CameraState { mode, streaming });
+        if streaming && shared_name {
+            // The target streamed already, under the name the others just left: it announces its own picture again.
+            let _ = self.with_osc(|o| o.send(CAMERA_STREAMING, vec![rosc::OscType::Bool(false)]));
+        }
         if mode != STREAM_MODE {
-            evidence.camera_command=Some((STREAM_MODE,clock::now_ns()));
-            evidence.camera_commanded.insert(STREAM_MODE);
+            let now=clock::now_ns();
+            evidence.camera_command=Some((STREAM_MODE,now));
+            evidence.camera_commanded.insert(STREAM_MODE,now);
             let _ = self.with_osc(|o| o.send(CAMERA_MODE, vec![rosc::OscType::Int(STREAM_MODE)]));
         }
         drop(evidence);
@@ -1231,10 +1256,18 @@ impl Controller {
         self.release_camera_stream(0);
     }
 
+    /// The other VRChats' Spout Stream back on, unless a recording or a code scan still streams here.
+    fn unquiet_unless_streaming(&self) {
+        if !self.camera_stream_owners.lock().unwrap().iter().any(|on| *on) {
+            self.unquiet_other_streams();
+        }
+    }
+
     fn release_camera_stream(&self, owner: usize) {
         let mut owners = self.camera_stream_owners.lock().unwrap();
         owners[owner] = false;
         if owners.iter().any(|on| *on) { return; }
+        self.unquiet_other_streams();
         let Some(before) = self.camera_before.lock().unwrap().take() else { return };
         let _ = self.with_osc(|o| {
             o.send(CAMERA_STREAMING, vec![rosc::OscType::Bool(before.streaming)])?;
@@ -1549,7 +1582,10 @@ impl Controller {
         if let Some(open) = camera {
             // Same-mode reopening is a visibility hint, but a previously commanded value
             // needs fresh visual evidence before authorizing a live start.
-            let independent=open && mode.is_none_or(|m| !osc.camera_commanded.contains(&m));
+            // A Mode the app wrote is proof only once it cannot be VRChat's echo of that write any more: the person
+            // closing the camera and opening it again in the mode a picture put back (2026-11-15 13:48, desktop: the
+            // second picture said "Open VRChat's camera first" with the camera open) is a real opening.
+            let independent=open && mode.is_none_or(|m| osc.camera_commanded.get(&m).is_none_or(|written| at_ns.saturating_sub(*written) > CAMERA_ECHO_WINDOW_NS));
             osc.camera_received=Some(independent);
             if independent { osc.camera_closed_at=None; }
         }
@@ -1677,8 +1713,9 @@ impl Controller {
 
     fn camera_mode_command(&self, mode: i32) {
         let mut osc=self.osc_values.lock().unwrap();
-        osc.camera_command=Some((mode,clock::now_ns()));
-        osc.camera_commanded.insert(mode);
+        let now=clock::now_ns();
+        osc.camera_command=Some((mode,now));
+        osc.camera_commanded.insert(mode,now);
     }
 
     pub fn start_test_capture(self: &Shared) -> anyhow::Result<()> {
@@ -2721,10 +2758,17 @@ fn spawn_watchers(ctl: Shared) {
     std::thread::Builder::new()
         .name("watchers".into())
         .spawn(move || {
-            let mut log = LogWatcher::new(None);
-            // The bridge's side sessions' logs are theirs: the app follows the person's VRChat (bridge/sessions.rs).
-            let sides = ctl.sides.clone();
-            log.set_skip(Arc::new(move |path: &std::path::Path| sides.skips_log(path)));
+            // The bridge's side sessions' logs are theirs: the app follows its target's log only (bridge/sessions.rs).
+            let new_log = || {
+                let mut log = LogWatcher::new(None);
+                let sides = ctl.sides.clone();
+                log.set_skip(Arc::new(move |path: &std::path::Path| sides.skips_log(path)));
+                log
+            };
+            let mut log = new_log();
+            // Every VRChat running, and which the app follows (controller/vrchats.rs).
+            let mut roster = vrchats::Roster::default();
+            let mut log_target: Option<(u32, Option<PathBuf>)> = None;
             let mut split = WorldSplit::default();
             // The worlds visited, kept from VRChat's logs before VRChat deletes them (the Visited worlds page).
             let history_file = visited::history_file();
@@ -2755,13 +2799,36 @@ fn spawn_watchers(ctl: Shared) {
                             .map(|p| p.pid().as_u32())
                     };
                     // The person's VRChat (or the main session's), never one the bridge runs beside it, unless lent to it.
-                    let vrchats: Vec<u32> = system
+                    let started: Vec<(u32, u64)> = system
                         .processes()
                         .values()
                         .filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat"))
-                        .map(|p| p.pid().as_u32())
+                        .map(|p| (p.pid().as_u32(), p.start_time()))
                         .collect();
+                    let vrchats: Vec<u32> = started.iter().map(|(p, _)| *p).collect();
+                    if orbiters_core::osc::VRCHAT_RUNS_HERE {
+                        let dir = orbiters_core::paths::vrchat_log_dir();
+                        let runs = roster.scan(&started, dir.as_deref(), |query| {
+                            orbiters_core::osc::vrchat_camera_values(query, Duration::from_millis(300)).into_iter().find_map(|(p, v)| match v {
+                                OscValue::Int(mode) if p == CAMERA_MODE => Some(mode != 0),
+                                _ => None,
+                            })
+                        });
+                        ctl.sides.set_roster(runs);
+                        ctl.follow_target();
+                        ctl.publish_runs();
+                    }
                     let pid = ctl.sides.app_pid(&vrchats);
+                    // Another VRChat followed: its log from its last world, as at a start (never its whole past as news).
+                    let target = ctl.sides.target();
+                    let now_target = target.as_ref().map(|t| (t.pid, t.log.clone()));
+                    if now_target != log_target {
+                        let followed_log = log.state.log_file.clone();
+                        if target.as_ref().is_some_and(|t| t.log.is_some() && followed_log.is_some() && t.log != followed_log) {
+                            log = new_log();
+                        }
+                        log_target = now_target;
+                    }
                     // The developer VR sandbox's SteamVR (a bridge VR session's emulated headset) is not the person's VR: no
                     // overlay, sound devices or start choice for it (steamvr_start::sandbox_runs).
                     let steamvr_pid = named(&["vrserver.exe", "vrserver"]).filter(|_| !crate::steamvr_start::sandbox_runs());
@@ -3207,6 +3274,131 @@ mod tests {
         assert_eq!(ctl.osc_values.lock().unwrap().camera_received,Some(true));
         ctl.shutdown();
     }
+    /// A VRChat of the roster, as the watcher reads it from its log.
+    fn vrchat_run(pid: u32, profile: u32, osc_in: u16, driver: crate::bridge::sessions::Driver, account: &str, world: &str) -> crate::bridge::sessions::VrchatRun {
+        crate::bridge::sessions::VrchatRun {
+            pid,
+            started_s: u64::from(pid),
+            profile,
+            log: None,
+            osc_in,
+            query: None,
+            account: Some((format!("usr_{account}"), account.to_string())),
+            world: Some(world.to_string()),
+            desktop: Some(true),
+            camera: None,
+            driver,
+        }
+    }
+
+    /// A datagram VRChat sends when its camera opens or closes.
+    fn mode_datagram(mode: i32) -> Vec<u8> {
+        rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage { addr: CAMERA_MODE.into(), args: vec![rosc::OscType::Int(mode)] })).unwrap()
+    }
+
+    /// Enzo's case, 2026-11-15 13:48 (logs7/two-vrchats.png): his own VRChat (desktop, FRONTLINE KIZUNA) beside the world
+    /// tour's (profile 1, held by no session after the update, its camera closed). A picture in his worked at 13:48:10 and
+    /// put his camera back in Stream mode (the app wrote Mode 2); at 13:48:56 VRChat's menu closed the camera and he opened
+    /// it again in Stream mode; the next picture said "Open VRChat's camera first". Now: his VRChat is the target, the tour's
+    /// datagrams never reach the app, and his camera opened again is the proof a picture needs.
+    #[test]
+    fn his_camera_opened_again_after_a_picture_is_proof_beside_a_closed_bridge_vrchat() {
+        use crate::bridge::sessions::{takes_datagram, Driver};
+        let (ctl, _socket) = review_controller();
+        ctl.sides.set_roster(vec![vrchat_run(8244, 1, 9010, Driver::Bridge, "Orbiters", "Audience Anarchy"), vrchat_run(37076, 0, 9000, Driver::Person, "blackorbit", "FRONTLINE KIZUNA")]);
+        ctl.follow_target();
+        ctl.publish_runs();
+        assert_eq!(ctl.sides.target().map(|t| t.pid), Some(37076), "his own, never the one the bridge left");
+        assert_eq!(ctl.sides.app_pid(&[8244, 37076]), Some(37076));
+        let shown = ctl.view().vrchat.runs.clone();
+        assert_eq!(shown.len(), 2);
+        assert!(shown.iter().any(|r| r.pid == 37076 && r.target && r.driver == crate::state::VrchatDriverShown::Person));
+        assert!(shown.iter().any(|r| r.pid == 8244 && !r.target && r.driver == crate::state::VrchatDriverShown::Left));
+        let t0 = clock::now_ns();
+        // He opens the camera in Stream mode: proof.
+        ctl.on_osc(vec![(CAMERA_MODE.into(), vec![OscValue::Int(2)])], t0);
+        assert!(ctl.require_live_camera().is_ok());
+        // The picture puts it back: the app writes Mode 2, VRChat echoes it.
+        ctl.camera_mode_command(2);
+        let written = clock::now_ns();
+        ctl.on_osc(vec![(CAMERA_MODE.into(), vec![OscValue::Int(2)])], written + 1_000_000);
+        // The tour's VRChat says its camera is closed: dropped, kept as its own.
+        assert!(!takes_datagram(&ctl.sides, Some(8244), Some(37076), &mode_datagram(0)));
+        assert_eq!(ctl.sides.camera_heard(8244).map(|h| h.0), Some(false));
+        assert!(takes_datagram(&ctl.sides, Some(37076), Some(37076), &mode_datagram(0)), "his own is heard");
+        // VRChat's menu closes his camera, then he opens it again in Stream mode.
+        ctl.on_osc(vec![(CAMERA_MODE.into(), vec![OscValue::Int(0)])], written + 46_000_000_000);
+        assert!(ctl.require_live_camera().is_err());
+        ctl.on_osc(vec![(CAMERA_MODE.into(), vec![OscValue::Int(2)])], written + 60_000_000_000);
+        assert_eq!(ctl.view().camera_open_said, Some(true));
+        assert!(ctl.require_live_camera().is_ok(), "his camera opened again is his proof");
+        // An echo of the app's own write, a moment after it, is still never proof.
+        ctl.camera_mode_command(2);
+        ctl.on_osc(vec![(CAMERA_MODE.into(), vec![OscValue::Int(0)])], clock::now_ns());
+        ctl.on_osc(vec![(CAMERA_MODE.into(), vec![OscValue::Int(2)])], clock::now_ns());
+        assert!(ctl.require_live_camera().is_err());
+        ctl.shutdown();
+    }
+
+    /// The reverse: the person chose a bridge session's VRChat (its camera open) while their own has its camera closed. The
+    /// target's camera is what counts, their own VRChat's datagrams are dropped, and the notice names the VRChat.
+    #[test]
+    fn a_chosen_bridge_vrchat_is_followed_and_the_persons_closed_camera_does_not_count() {
+        use crate::bridge::sessions::{takes_datagram, Driver};
+        let (ctl, _socket) = review_controller();
+        let session = "p1-3f2a9c0d1e2f".to_string();
+        ctl.sides.set_roster(vec![vrchat_run(8244, 1, 9010, Driver::Session(session.clone()), "Orbiters", "Audience Anarchy"), vrchat_run(37076, 0, 9000, Driver::Person, "blackorbit", "FRONTLINE KIZUNA")]);
+        ctl.follow_target();
+        // The session's camera opens while it is not followed: heard and kept.
+        assert!(!takes_datagram(&ctl.sides, Some(8244), Some(37076), &mode_datagram(2)));
+        ctl.choose_vrchat(Some(8244)).unwrap();
+        assert_eq!(ctl.sides.target().map(|t| t.pid), Some(8244));
+        assert_eq!(ctl.sides.chosen(), Some(8244));
+        assert_eq!(ctl.view().camera_open_said, Some(true));
+        assert!(ctl.require_live_camera().is_ok(), "its camera, heard while it was not followed");
+        // His own closes its camera: not the target's.
+        assert!(!takes_datagram(&ctl.sides, Some(37076), Some(8244), &mode_datagram(0)));
+        assert!(ctl.require_live_camera().is_ok());
+        let shown = ctl.view().vrchat.runs.clone();
+        assert!(shown.iter().any(|r| r.pid == 8244 && r.target && r.chosen && r.driver == crate::state::VrchatDriverShown::Agent { session: "p1-3f2a…".into() }));
+        // Back to his own: its camera closed, said as his, by name.
+        ctl.choose_vrchat(None).unwrap();
+        assert_eq!(ctl.sides.target().map(|t| t.pid), Some(37076));
+        assert_eq!(ctl.sides.chosen(), None);
+        assert_eq!(ctl.view().camera_open_said, Some(false));
+        assert!(ctl.require_live_camera().is_err());
+        orbiters_i18n::in_language(orbiters_i18n::Language::En, || assert_eq!(ctl.camera_first(), "Open the camera in blackorbit's VRChat first"));
+        // No switch during a recording.
+        ctl.update(|s| s.capture.state = CaptureState::Recording);
+        assert!(ctl.choose_vrchat(Some(8244)).is_err());
+        assert_eq!(ctl.sides.target().map(|t| t.pid), Some(37076));
+        ctl.update(|s| s.capture.state = CaptureState::Idle);
+        // The chosen one going away gives the default back.
+        ctl.choose_vrchat(Some(8244)).unwrap();
+        ctl.sides.set_roster(vec![vrchat_run(37076, 0, 9000, Driver::Person, "blackorbit", "FRONTLINE KIZUNA")]);
+        assert_eq!(ctl.sides.target().map(|t| t.pid), Some(37076));
+        ctl.shutdown();
+    }
+
+    /// One VRChat: nothing new is shown, every datagram is taken as before, and the notice is the one of before.
+    #[test]
+    fn with_one_vrchat_nothing_changes() {
+        use crate::bridge::sessions::Driver;
+        let (ctl, _socket) = review_controller();
+        ctl.sides.set_roster(vec![vrchat_run(37076, 0, 9000, Driver::Person, "blackorbit", "FRONTLINE KIZUNA")]);
+        ctl.follow_target();
+        ctl.publish_runs();
+        assert_eq!(ctl.view().vrchat.runs.len(), 1);
+        assert!(ctl.view().vrchat.several_target().is_none(), "nothing to choose, nothing said");
+        orbiters_i18n::in_language(orbiters_i18n::Language::En, || assert_eq!(ctl.camera_first(), "Open VRChat's camera first"));
+        let filter = crate::bridge::sessions::datagram_filter(ctl.sides.clone());
+        assert!(filter(std::net::SocketAddr::from(([127, 0, 0, 1], 50000)), &mode_datagram(0)), "every datagram, as before");
+        assert_eq!(ctl.sides.app_pid(&[37076]), Some(37076));
+        ctl.on_osc(vec![(CAMERA_MODE.into(), vec![OscValue::Int(2)])], clock::now_ns());
+        assert!(ctl.require_live_camera().is_ok());
+        ctl.shutdown();
+    }
+
     #[test]
     fn camera_mode_is_published_on_receive_and_unknown_cannot_record() {
         let ctl = Controller::new(Settings::default());

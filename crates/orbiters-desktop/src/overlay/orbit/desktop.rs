@@ -228,7 +228,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             panels.release();
         }
         // What came into view lies over everything of ours, the pointer included: it goes back on top.
-        if windows.show(&mut panels, &snap, origin) {
+        if windows.show(&mut panels, &snap, origin, open) {
             pointer.raise();
         }
         let wait = TURN.saturating_sub(turn.elapsed());
@@ -748,9 +748,26 @@ struct PanelWindow {
     stale: bool,
     /// The bitmap the device context held before ours, put back before ours is deleted.
     first_bitmap: windows::Win32::Graphics::Gdi::HGDIOBJ,
+    /// Its painted pixels take the mouse from what is under them (no `WS_EX_TRANSPARENT`).
+    catches: bool,
 }
 
 impl PanelWindow {
+    /// Whether its painted pixels take the mouse from what is under them, from now on: with `false` every pixel of it lets the mouse through, as if it were not there.
+    fn catch_mouse(&mut self, on: bool) {
+        if self.catches == on {
+            return;
+        }
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE};
+        // SAFETY: a live window of this thread; only its extended style's one bit changes, which Windows' hit testing reads as it goes.
+        unsafe {
+            let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
+            let transparent = WS_EX_TRANSPARENT.0 as isize;
+            let _ = SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, if on { style & !transparent } else { style | transparent });
+        }
+        self.catches = on;
+    }
+
     fn new(width: u32, height: u32, clicks: bool) -> anyhow::Result<Self> {
         let extra = if clicks { Default::default() } else { WS_EX_TRANSPARENT };
         // SAFETY: plain Win32 calls; every handle made here is released on drop.
@@ -779,7 +796,7 @@ impl PanelWindow {
                 }
             };
             let first_bitmap = SelectObject(dc, bitmap.into());
-            Ok(Self { hwnd, dc, bitmap, bits: bits.cast(), size: SIZE { cx: width as i32, cy: height as i32 }, shown: false, at: POINT::default(), alpha: 0, stale: true, first_bitmap })
+            Ok(Self { hwnd, dc, bitmap, bits: bits.cast(), size: SIZE { cx: width as i32, cy: height as i32 }, shown: false, at: POINT::default(), alpha: 0, stale: true, first_bitmap, catches: clicks })
         }
     }
 
@@ -884,12 +901,13 @@ impl Windows {
         }
     }
 
-    /// New pictures, then every panel where its spring has it. Says whether one came into view, which then lies over all others.
-    fn show(&mut self, panels: &mut Panels, snap: &Snapshot, origin: Pos2) -> bool {
+    /// New pictures, then every panel where its spring has it, taking the mouse or not as [`catches_mouse`] says for the menu `open`. Says whether one came into view,
+    /// which then lies over all others.
+    fn show(&mut self, panels: &mut Panels, snap: &Snapshot, origin: Pos2, open: Option<Around>) -> bool {
         let list = &mut self.list;
         panels.paint(snap, |panel, changed| {
             let [w, h] = panel.px;
-            let clicks = !panel.zone.passes_clicks();
+            let clicks = catches_mouse(panel.zone, open);
             let window = list.entry(panel.zone).and_modify(|window| {
                 if window.size.cx != w as i32 || window.size.cy != h as i32 {
                     *window = PanelWindow::new(w, h, clicks).expect("a window was made before");
@@ -907,6 +925,9 @@ impl Windows {
             };
             window.picture(panel.pixels(), changed);
         });
+        for (zone, window) in &mut self.list {
+            window.catch_mouse(catches_mouse(*zone, open));
+        }
         let showing: Vec<(Zone, POINT, u8)> = panels.all().filter(|p| p.painted && p.shown).map(|p| placed_at(p, origin)).collect();
         let came_up = place_in_order(&mut self.list, &showing);
         for (zone, window) in &mut self.list {
@@ -916,6 +937,18 @@ impl Windows {
         }
         came_up
     }
+}
+
+/// Whether the window of a part in `zone` takes the mouse from VRChat where it has pixels, with the menu `open` up; where it does not, the mouse reaches VRChat exactly
+/// as if Orbiters were not running.
+///
+/// With VRChat's wheel open, none does. VRChat then holds Windows' pointer at its window's centre (its slice follows the mouse's movement and its click goes where the
+/// pointer is held), and the ring's 3D pictures cell lies over that point at every window size (160 hundredths of the wheel's radius up and left of its centre): Windows
+/// gave that cell every press, which it did nothing with, and VRChat's wheel never had a click (Enzo, 2026-11-15, dev.56; every build since the ring, 2026-11-06). The
+/// ring takes nothing from Windows' pointer anyway: its cells are pressed through Left Alt's pointer, whose hook keeps the mouse from everything while it lasts, and
+/// through the number keys; a page opened from the wheel has that hook too.
+fn catches_mouse(zone: Zone, open: Option<Around>) -> bool {
+    !zone.passes_clicks() && open != Some(Around::Wheel)
 }
 
 /// Places the windows in the order they lie: what comes into view goes above what shows, so the sheet's page stays over its back. Says whether one came into view.
@@ -1407,6 +1440,195 @@ mod tests {
         let after = count();
         // Process-wide: tests on other threads make and free their own. A leak is one bitmap a window at least, 200 here.
         assert!(after < before + 60, "GDI objects {before} then {after}: a window leaks");
+    }
+
+    /// A stand-in for VRChat's window: a plain window that takes the mouse everywhere, under ours as VRChat's is.
+    struct StandIn(HWND);
+
+    impl StandIn {
+        fn new(at: POINT, size: Vec2) -> Self {
+            unsafe extern "system" fn plain(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+                // SAFETY: what the system passed on.
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+            let name = w!("OrbitersTestStandIn");
+            // SAFETY: plain Win32 calls; the window is destroyed on drop.
+            unsafe {
+                let module = GetModuleHandleW(None).unwrap_or_default();
+                let class = WNDCLASSW { lpfnWndProc: Some(plain), hInstance: module.into(), lpszClassName: name, ..Default::default() };
+                RegisterClassW(&class);
+                let hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, name, w!(""), WS_POPUP, at.x, at.y, size.x as i32, size.y as i32, None, None, None, None)
+                    .expect("a stand-in window");
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                Self(hwnd)
+            }
+        }
+    }
+
+    impl Drop for StandIn {
+        fn drop(&mut self) {
+            // SAFETY: made in `new`, destroyed once.
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    /// Where the stand-in's client area goes: left of every screen, so that nobody sees these windows and no real window lies there.
+    fn off_screen(client: Vec2) -> POINT {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN};
+        // SAFETY: plain queries.
+        let (left, top) = unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN)) };
+        POINT { x: left - client.x as i32 - 3000, y: top }
+    }
+
+    /// The window that gets the mouse at `p` (screen pixels), by Windows' own hit testing: what a press there goes to.
+    fn under(p: POINT) -> HWND {
+        // SAFETY: a plain query.
+        unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(p) }
+    }
+
+    /// The desktop's parts as [`run`] lays them, paints them and puts up their windows, over a stand-in for VRChat's window of `client` pixels with `open` up, turned
+    /// until each part rests where it goes. `sheet` presses All tools on the wing first, and waits for its page.
+    fn put_up(open: Around, client: Vec2, sheet: bool) -> (Panels, Windows, StandIn, Pos2) {
+        let snap = crate::screenshot::idle_snapshot(&orbiters_core::settings::Settings::default(), &[]);
+        let mut panels = Panels::new(Arc::new(crate::screenshot::Still), 1.0, true);
+        let mut windows = Windows::default();
+        let corner = off_screen(client);
+        let stand_in = StandIn::new(corner, client);
+        let origin = pos2(corner.x as f32, corner.y as f32);
+        let strip = snap.settings.orbit.layout == orbiters_core::settings::OrbitLayout::Strip;
+        panels.takeover_place = zones::place(Zone::Takeover, client);
+        panels.back_place = zones::place(Zone::SheetBack, client);
+        panels.hint_place = zones::place(Zone::SheetHint, client);
+        let turn = |panels: &mut Panels, windows: &mut Windows| {
+            pump();
+            panels.set_open(Some(open), zones::layout_as(open, client, strip), &snap);
+            panels.follow(&snap, 0);
+            panels.menu_turn(&snap);
+            panels.step_springs(0.05);
+            windows.show(panels, &snap, origin, Some(open));
+        };
+        let rests = |panels: &Panels| panels.all().filter(|p| p.shown).all(|p| p.painted && p.appear.settled()) && (!sheet || panels.takeover.as_ref().is_some_and(|p| p.painted));
+        let until = |panels: &mut Panels, windows: &mut Windows, what: &str, done: &dyn Fn(&Panels) -> bool| {
+            let began = Instant::now();
+            loop {
+                turn(panels, windows);
+                if done(panels) {
+                    break;
+                }
+                assert!(began.elapsed() < Duration::from_secs(20), "{what}: it never came");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        until(&mut panels, &mut windows, "the menu's parts at rest", &|p: &Panels| p.all().filter(|p| p.shown).all(|p| p.painted && p.appear.settled()));
+        if sheet {
+            let (i, at) = panels
+                .all()
+                .enumerate()
+                .find(|(_, p)| matches!(p.zone, Zone::WingAll | Zone::QmStrip))
+                .map(|(i, p)| (i, p.to_logical([0.5, 0.5])))
+                .expect("All tools beside the Quick Menu");
+            panels.hover(Some((i, at)));
+            turn(&mut panels, &mut windows);
+            panels.press(&snap);
+            turn(&mut panels, &mut windows);
+            panels.release();
+            panels.hover(None);
+            until(&mut panels, &mut windows, "All tools' page", &rests);
+            assert!(panels.sheet_open(), "All tools opened its page");
+        }
+        until(&mut panels, &mut windows, "everything at rest", &rests);
+        (panels, windows, stand_in, origin)
+    }
+
+    /// What gets the mouse at each point of a grid over the game's window, every 6 pixels, and at its centre, where VRChat holds the pointer while its wheel is open:
+    /// `None` VRChat (the stand-in), or the zone of ours. Any other window there fails.
+    fn grid(windows: &Windows, stand_in: &StandIn, origin: Pos2, client: Vec2) -> Vec<(Pos2, Option<Zone>)> {
+        let mut points: Vec<Pos2> = (0..(client.y as i32 / 6)).flat_map(|y| (0..(client.x as i32 / 6)).map(move |x| pos2(x as f32 * 6.0 + 3.0, y as f32 * 6.0 + 3.0))).collect();
+        points.push(pos2((client.x / 2.0).floor(), (client.y / 2.0).floor()));
+        points
+            .into_iter()
+            .map(|p| {
+                let got = under(POINT { x: origin.x as i32 + p.x as i32, y: origin.y as i32 + p.y as i32 });
+                if got == stand_in.0 {
+                    return (p, None);
+                }
+                let zone = windows.list.iter().find(|(_, w)| w.hwnd == got).map(|(z, _)| *z);
+                (p, Some(zone.unwrap_or_else(|| panic!("at {p:?} the mouse goes to a window that is neither ours nor the stand-in"))))
+            })
+            .collect()
+    }
+
+    /// Windows' hit testing as these tests ask it: a painted pixel of a window of ours that takes the mouse is ours, a clear one is the stand-in's.
+    fn hit_testing_reads_the_pixels(origin: Pos2, stand_in: &StandIn) {
+        let at = POINT { x: origin.x as i32 + 40, y: origin.y as i32 + 40 };
+        let mut opaque = PanelWindow::new(8, 8, true).expect("a window");
+        opaque.picture(&[255u8; 8 * 8 * 4], [0, 0, 8, 8]);
+        opaque.place(at, 255);
+        let mut clear = PanelWindow::new(8, 8, true).expect("a window");
+        clear.picture(&[0u8; 8 * 8 * 4], [0, 0, 8, 8]);
+        clear.place(POINT { x: at.x + 20, y: at.y }, 255);
+        assert_eq!(under(POINT { x: at.x + 4, y: at.y + 4 }), opaque.hwnd, "a painted pixel of a window that takes the mouse takes it");
+        assert_eq!(under(POINT { x: at.x + 24, y: at.y + 4 }), stand_in.0, "a clear pixel lets the mouse through");
+        opaque.catch_mouse(false);
+        assert_eq!(under(POINT { x: at.x + 4, y: at.y + 4 }), stand_in.0, "a painted pixel of a window that lets the mouse through lets it through");
+        opaque.catch_mouse(true);
+        assert_eq!(under(POINT { x: at.x + 4, y: at.y + 4 }), opaque.hwnd, "and takes it again");
+    }
+
+    /// Enzo, 2026-11-15, desktop mode: with VRChat's wheel open, a click on its buttons did nothing. VRChat holds Windows' pointer at its window's centre while the wheel
+    /// is open (its slice follows the mouse's movement, the click goes where the pointer is held), and the ring's 3D pictures cell lies there at any window size: Windows
+    /// gave that cell's window every press, and the cell, which only Left Alt's pointer presses, did nothing with it. With the wheel open no window of ours may take the
+    /// mouse anywhere; the ring's cells are pressed through Left Alt's pointer and the number keys, as ever.
+    #[test]
+    fn with_vrchat_s_wheel_open_every_click_reaches_vrchat() {
+        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        for client in [vec2(1280.0, 720.0), vec2(1920.0, 1080.0), vec2(1000.0, 1000.0)] {
+            let (panels, windows, stand_in, origin) = put_up(Around::Wheel, client, false);
+            hit_testing_reads_the_pixels(origin, &stand_in);
+            // The ring is up, painted, in its windows: what this test is about is there to take the mouse.
+            let cells: Vec<&Panel> = panels.all().filter(|p| p.shown && p.zone.ring().is_some() && p.zone.group().is_none()).collect();
+            assert_eq!(cells.len(), 6, "{client:?}: the ring's six cells show");
+            assert!(cells.iter().all(|p| p.pixels().chunks_exact(4).any(|px| px[3] > 0) && windows.list.get(&p.zone).is_some_and(|w| w.shown)), "{client:?}: each cell has its picture on screen");
+            let seen = grid(&windows, &stand_in, origin, client);
+            let ours: Vec<&(Pos2, Option<Zone>)> = seen.iter().filter(|(_, z)| z.is_some()).collect();
+            let centre = seen.last().expect("the centre");
+            eprintln!("wheel {client:?}: {} points, {} reach VRChat, {} ours (centre: {:?})", seen.len(), seen.len() - ours.len(), ours.len(), centre.1); // i18n: not shown (a test's measurement)
+            assert_eq!(centre.1, None, "{client:?}: the centre of VRChat's window, where it holds the pointer with its wheel open, is VRChat's");
+            assert!(ours.is_empty(), "{client:?}: with the wheel open {} points of the window go to ours, first {:?}", ours.len(), ours.first());
+            // The ring's cells are still pressed where Left Alt's pointer is: the middle of each is on it.
+            for cell in &cells {
+                let ring = cell.zone.ring().expect("a cell");
+                let middle = cell.placed.center + zones::polar((ring.inner + ring.outer) / 2.0, (ring.from + ring.to) / 2.0) * cell.placed.unit;
+                let found = hit(&panels, middle).map(|(i, _)| panels.all().nth(i).expect("a part").zone);
+                assert_eq!(found, Some(cell.zone), "{client:?}: Left Alt's pointer at the middle of {:?} is on it", cell.zone);
+            }
+        }
+    }
+
+    /// The same rule with VRChat's Quick Menu up and the mouse free, with the side tiles alone and with a page open beside them: a point goes to ours only on a part
+    /// of ours that is pressed there, and every part's middle is ours (its buttons still work).
+    #[test]
+    fn with_the_quick_menu_open_only_our_parts_take_the_mouse() {
+        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let client = vec2(1280.0, 720.0);
+        for sheet in [false, true] {
+            let (panels, windows, stand_in, origin) = put_up(Around::QuickMenu, client, sheet);
+            hit_testing_reads_the_pixels(origin, &stand_in);
+            let seen = grid(&windows, &stand_in, origin, client);
+            let ours = seen.iter().filter(|(_, z)| z.is_some()).count();
+            eprintln!("quick menu, page {sheet}: {} points, {} reach VRChat, {ours} ours", seen.len(), seen.len() - ours); // i18n: not shown (a test's measurement)
+            for (p, zone) in &seen {
+                if zone.is_some() {
+                    assert!(hit(&panels, *p).is_some(), "page {sheet}: {p:?} goes to {zone:?}, where nothing of ours is pressed");
+                }
+            }
+            assert!(ours > 0, "page {sheet}: our parts take the mouse");
+            for panel in panels.all().filter(|p| p.shown && !p.zone.passes_clicks()) {
+                let middle = panel.placed.rect.center();
+                let got = under(POINT { x: origin.x as i32 + middle.x as i32, y: origin.y as i32 + middle.y as i32 });
+                assert!(got != stand_in.0, "page {sheet}: the middle of {:?} is ours", panel.zone);
+            }
+        }
     }
 
     #[test]

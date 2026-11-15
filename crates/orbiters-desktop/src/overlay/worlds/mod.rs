@@ -246,8 +246,8 @@ enum GoSaid {
     Listed { world: String, scope: Scope, read: Result<orbiters_core::vrchat_api::WorldInstances, String> },
     /// The next batch of the list.
     More { world: String, scope: Scope, read: Result<orbiters_core::vrchat_api::WorldInstances, String> },
-    /// The invite went out to this instance, or why not (and whether the list changed under it).
-    Invited { world: String, scope: Scope, sent: Result<orbiters_core::vrchat_api::WorldInstance, (String, bool)> },
+    /// On the way to this instance, and how; or why not (and whether the list changed under it).
+    Went { world: String, scope: Scope, sent: Result<(orbiters_core::vrchat_api::WorldInstance, crate::controller::travel::Went), (String, bool)> },
 }
 
 /// Where Go there sends the person.
@@ -255,6 +255,8 @@ enum GoTarget {
     /// An instance of the list, by its exact id.
     Listed(String),
     New(orbiters_core::vrchat_api::CreateAccess, orbiters_core::vrchat_api::InstanceRegion),
+    /// An invite to the instance just gone to, asked for instead (VRChat only showed its page).
+    Invite(orbiters_core::vrchat_api::WorldInstance),
 }
 
 /// Why Go there could not, in words.
@@ -268,9 +270,17 @@ fn go_words(e: &crate::controller::vrchat_data::WorldError) -> String {
         WorldError::Full => tr("That instance is full now."),
         WorldError::Closed => tr("That instance has closed."),
         WorldError::NotJoinable => tr("You cannot join that instance."),
+        WorldError::BridgeBusy => tr("Orbiters' AI bridge is using VRChat with your account on this computer: go there once it is done."),
+        WorldError::NotStarted(e) => return tr!("VRChat could not be started there: {error}", error = e),
         WorldError::Api(e) => return e.to_string(),
     }
     .to_string()
+}
+
+/// Whether VRChat's log's instance (`46657~hidden(usr_…)~region(eu)~nonce(…)`) is the one the API named (it may leave
+/// out the `~nonce(…)` VRChat's client adds).
+fn same_instance(logged: &str, named: &str) -> bool {
+    logged == named || logged.strip_prefix(named).is_some_and(|rest| rest.starts_with("~nonce("))
 }
 
 /// Whether the list Go there shows is out of date after this answer.
@@ -538,6 +548,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             self.panel.dirty = true;
         }
         self.region = finder::region(snap.vrchat.world.instance.as_deref());
+        self.go_arrived(&snap.vrchat.world);
         self.live_turns = !snap.settings.reduce_motion;
         // What turns on the side panel: its newest picture, or that it cannot.
         if self.panel.page != panel::Page::Detail || !self.open {
@@ -695,8 +706,14 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 }
                 Action::Search => self.search_now = true,
                 Action::Join(world) => self.go_load(world),
-                Action::GoTo { world, instance } => self.go_invite(world, GoTarget::Listed(instance)),
-                Action::NewInstance { world, access, region } => self.go_invite(world, GoTarget::New(access, region)),
+                Action::GoTo { world, instance } => self.go_there(world, GoTarget::Listed(instance)),
+                Action::NewInstance { world, access, region } => self.go_there(world, GoTarget::New(access, region)),
+                Action::InviteInstead { world, instance } => {
+                    if let Some(gone) = self.go.went.as_ref().filter(|g| g.instance.id == instance) {
+                        let target = GoTarget::Invite(gone.instance.clone());
+                        self.go_there(world, target);
+                    }
+                }
                 Action::OpenWeb(world) => {
                     let Some(link) = finder::web_link(&world) else { continue };
                     let tx = self.said.0.clone();
@@ -1496,6 +1513,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             self.panel.dirty = true;
         }
         self.region = finder::region(snap.vrchat.world.instance.as_deref());
+        self.go_arrived(&snap.vrchat.world);
         while let Ok(said) = self.said.1.try_recv() {
             let time = self.time();
             self.panel.say(said, time);
@@ -1938,8 +1956,14 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 }
                 Action::Search => self.search_now = true,
                 Action::Join(world) => self.go_load(world),
-                Action::GoTo { world, instance } => self.go_invite(world, GoTarget::Listed(instance)),
-                Action::NewInstance { world, access, region } => self.go_invite(world, GoTarget::New(access, region)),
+                Action::GoTo { world, instance } => self.go_there(world, GoTarget::Listed(instance)),
+                Action::NewInstance { world, access, region } => self.go_there(world, GoTarget::New(access, region)),
+                Action::InviteInstead { world, instance } => {
+                    if let Some(gone) = self.go.went.as_ref().filter(|g| g.instance.id == instance) {
+                        let target = GoTarget::Invite(gone.instance.clone());
+                        self.go_there(world, target);
+                    }
+                }
                 Action::OpenWeb(world) => {
                     let Some(link) = finder::web_link(&world) else { continue };
                     let tx = self.said.0.clone();
@@ -2019,20 +2043,22 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         });
     }
 
-    /// The invite to an instance of `world` listed, or a new instance of it and then the invite to that, on a thread (F5).
-    fn go_invite(&mut self, world: String, target: GoTarget) {
+    /// To an instance of `world` listed, or to a new one made for the press, directly where it can (L-go-direct), on a
+    /// thread; or the invite to the one just gone to, asked for instead.
+    fn go_there(&mut self, world: String, target: GoTarget) {
         let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else { return };
         if self.go.world != world || self.go.busy.is_some() {
             return;
         }
         self.go.error = None;
         self.go.busy = Some(match target {
-            GoTarget::Listed(_) => panel::go::GoBusy::Inviting,
+            GoTarget::Listed(_) => panel::go::GoBusy::Going,
             GoTarget::New(..) => panel::go::GoBusy::Creating,
+            GoTarget::Invite(_) => panel::go::GoBusy::Inviting,
         });
         let listed = match &target {
             GoTarget::Listed(id) => self.go.list.as_ref().and_then(|l| l.items.iter().find(|i| &i.id == id)).cloned(),
-            GoTarget::New(..) => None,
+            GoTarget::New(..) | GoTarget::Invite(_) => None,
         };
         let tx = self.go_said.0.clone();
         let _ = std::thread::Builder::new().name("3d-worlds-invite".into()).spawn(move || {
@@ -2041,31 +2067,52 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 Ok(answer) => Ok(answer),
                 Err(e) => Err((e, false)),
             };
-            let instance = match (target, listed) {
-                (GoTarget::Listed(_), Some(instance)) => Ok(instance),
-                (GoTarget::Listed(_), None) => Err((go_words(&crate::controller::vrchat_data::WorldError::NotListed), true)),
-                // Made for this one press, then invited to: the person asked to go to a new one.
-                (GoTarget::New(access, region), _) => match ask(DataRequest::CreateInstance { world: world.clone(), access, region }) {
-                    Ok(DataResponse::CreatedInstance(made)) => Ok(made),
-                    Ok(_) => Err((tr("VRChat answered something unexpected.").to_string(), false)),
-                    Err(e) => Err(e),
+            let unexpected = || (tr("VRChat answered something unexpected.").to_string(), false);
+            let sent = match (target, listed) {
+                (GoTarget::Invite(instance), _) => match ask(DataRequest::InviteSelf { world: world.clone(), instance: instance.id.clone() }) {
+                    // Only an explicit Invited is an invite sent.
+                    Ok(DataResponse::Invited) => Ok((instance, crate::controller::travel::Went::Invited(crate::controller::travel::Detour::Asked))),
+                    Ok(_) => Err(unexpected()),
+                    Err((e, changed)) => Err((tr!("The invite could not be sent: {e}", e = e), changed)),
                 },
+                (GoTarget::Listed(_), None) => Err((go_words(&crate::controller::vrchat_data::WorldError::NotListed), true)),
+                (target, listed) => {
+                    let instance = match (target, listed) {
+                        (GoTarget::Listed(_), Some(instance)) => Ok(instance),
+                        // Made for this one press, then gone to: the person asked to go to a new one.
+                        (GoTarget::New(access, region), _) => match ask(DataRequest::CreateInstance { world: world.clone(), access, region }) {
+                            Ok(DataResponse::CreatedInstance(made)) => Ok(made),
+                            Ok(_) => Err(unexpected()),
+                            // Said as what failed: the making, not a list.
+                            Err((e, _)) => Err((tr!("The instance could not be made: {e}", e = e), false)),
+                        },
+                        _ => unreachable!(),
+                    };
+                    instance.and_then(|instance| match ask(DataRequest::GoThere { world: world.clone(), instance: instance.id.clone() }) {
+                        Ok(DataResponse::Went(how)) => Ok((instance, how)),
+                        Ok(_) => Err(unexpected()),
+                        Err(e) => Err(e),
+                    })
+                }
             };
-            let sent = instance.and_then(|instance| match ask(DataRequest::InviteSelf { world: world.clone(), instance: instance.id.clone() }) {
-                // Only an explicit Invited is an invite sent.
-                Ok(DataResponse::Invited) => Ok(instance),
-                Ok(_) => Err((tr("VRChat answered something unexpected.").to_string(), false)),
-                Err(e) => Err(e),
-            });
-            let _ = tx.send(GoSaid::Invited { world, scope, sent });
+            let _ = tx.send(GoSaid::Went { world, scope, sent });
         });
+    }
+
+    /// VRChat's log says the person is in the instance Go there took them to: its card says so.
+    fn go_arrived(&mut self, now: &orbiters_core::vrchat_log::WorldState) {
+        let Some(gone) = self.go.went.as_mut().filter(|g| !g.arrived) else { return };
+        if now.world_id.as_deref() == Some(gone.instance.world.as_str()) && now.instance.as_deref().is_some_and(|i| same_instance(i, &gone.instance.id)) {
+            gone.arrived = true;
+            self.panel.dirty = true;
+        }
     }
 
     /// What Go there's threads answered: kept only for the world and the account it was asked for.
     fn follow_go(&mut self) {
         while let Ok(said) = self.go_said.1.try_recv() {
             let (world, scope) = match &said {
-                GoSaid::Listed { world, scope, .. } | GoSaid::More { world, scope, .. } | GoSaid::Invited { world, scope, .. } => (world.clone(), scope.clone()),
+                GoSaid::Listed { world, scope, .. } | GoSaid::More { world, scope, .. } | GoSaid::Went { world, scope, .. } => (world.clone(), scope.clone()),
             };
             if world != self.go.world || self.scope.as_ref() != Some(&scope) {
                 continue;
@@ -2100,11 +2147,11 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                         }
                     }
                 }
-                GoSaid::Invited { sent, .. } => {
+                GoSaid::Went { sent, .. } => {
                     self.go.busy = None;
                     match sent {
-                        Ok(instance) => {
-                            self.go.invited = Some(instance);
+                        Ok((instance, how)) => {
+                            self.go.went = Some(panel::go::GoneTo { instance, how, arrived: false });
                             self.go.error = None;
                         }
                         // The list changed under it (full, closed, gone): read again, and said why.
@@ -2351,15 +2398,23 @@ mod go_tests {
         assert!(worlds.status().go.list.is_some(), "and the panel sees it");
         // The invite refused, the list having changed: said, and the list read again.
         worlds.go.busy = Some(panel::go::GoBusy::Inviting);
-        tx.send(GoSaid::Invited { world: WORLD.into(), scope: ours.clone(), sent: Err(("That instance is full now.".into(), true)) }).unwrap();
+        tx.send(GoSaid::Went { world: WORLD.into(), scope: ours.clone(), sent: Err(("That instance is full now.".into(), true)) }).unwrap();
         worlds.follow_go();
         assert_eq!(worlds.go.busy, None);
         assert_eq!(worlds.go.error.as_deref(), Some("That instance is full now."));
         worlds.go.loading = false;
         worlds.go.busy = Some(panel::go::GoBusy::Inviting);
-        tx.send(GoSaid::Invited { world: WORLD.into(), scope: ours.clone(), sent: Ok(instance("1~region(eu)")) }).unwrap();
+        worlds.go.busy = Some(panel::go::GoBusy::Going);
+        tx.send(GoSaid::Went { world: WORLD.into(), scope: ours.clone(), sent: Ok((instance("1~region(eu)"), crate::controller::travel::Went::Direct)) }).unwrap();
         worlds.follow_go();
-        assert_eq!(worlds.go.invited.as_ref().map(|i| i.id.as_str()), Some("1~region(eu)"));
+        assert_eq!(worlds.go.went.as_ref().map(|g| (g.instance.id.as_str(), g.how, g.arrived)), Some(("1~region(eu)", crate::controller::travel::Went::Direct, false)));
+        // VRChat's log: still elsewhere, then in it (its id with the client's nonce): the card says the person is there.
+        let mut now = orbiters_core::vrchat_log::WorldState { world_id: Some(WORLD.into()), instance: Some("2~region(eu)".into()), ..Default::default() };
+        worlds.go_arrived(&now);
+        assert!(!worlds.go.went.as_ref().unwrap().arrived);
+        now.instance = Some("1~region(eu)~nonce(abc)".into());
+        worlds.go_arrived(&now);
+        assert!(worlds.go.went.as_ref().unwrap().arrived);
         // VRChat's list comes a batch at a time: the next batch is added to what was read; one that cannot be read leaves what was, and says so.
         worlds.go.list.as_mut().unwrap().remaining = vec!["2~region(eu)".into(), "3~region(eu)".into()];
         assert_eq!(panel::go::go_pages(&worlds.go), 1, "five a page: one, the batch still to come with it");
@@ -2376,7 +2431,7 @@ mod go_tests {
         // Signed out of VRChat: the page says so, whatever it read.
         worlds.vrchat = false;
         let status = worlds.status();
-        assert!(status.go.list.is_none() && status.go.invited.is_none() && status.go.error.is_some());
+        assert!(status.go.list.is_none() && status.go.went.is_none() && status.go.error.is_some());
     }
 }
 

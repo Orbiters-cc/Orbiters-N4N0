@@ -11,3 +11,4 @@ crates/orbiters-desktop/src/overlay/worlds/finder.rs
 crates/orbiters-desktop/src/overlay/worlds/interop.rs
 crates/orbiters-desktop/src/overlay/worlds/catalog.rs
 crates/orbiters-desktop/src/overlay/worlds/shots.rs
+crates/orbiters-desktop/src/overlay/worlds/panel/go.rs

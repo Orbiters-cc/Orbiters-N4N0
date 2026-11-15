@@ -259,5 +259,22 @@
   "Stick: move around": "Stick : te déplacer",
   "Grip: take it": "Grip : le prendre",
   "Stick left or right: another capture": "Stick à gauche ou à droite : une autre capture",
-  "{at} of {count}": "{at} sur {count}"
+  "{at} of {count}": "{at} sur {count}",
+  "You are there": "Tu y es",
+  "VRChat took you to this instance.": "VRChat t’a emmené dans cette instance.",
+  "Taking you there": "En route",
+  "Your VRChat has the instance and takes you there now. If it shows the world's page instead, press Join on it.": "Ton VRChat a reçu l’instance et t’y emmène. S’il affiche plutôt la page du monde, appuie sur Rejoindre.",
+  "Starting VRChat": "VRChat démarre",
+  "VRChat is starting, right in this instance.": "VRChat démarre directement dans cette instance.",
+  "Another VRChat on this computer, one of Orbiters' AI bridge, receives VRChat's links: going there directly would move it, not yours.": "Un autre VRChat de cet ordinateur, celui du pont IA d’Orbiters, reçoit les liens de VRChat : y aller directement le déplacerait lui, pas le tien.",
+  "Your VRChat did not take the link to go there directly.": "Ton VRChat n’a pas accepté le lien pour y aller directement.",
+  "Your VRChat runs on another device: Orbiters cannot take it there directly.": "Ton VRChat tourne sur un autre appareil : Orbiters ne peut pas l’y emmener directement.",
+  "Send me an invite instead": "M’envoyer plutôt une invitation",
+  "Join": "Rejoindre",
+  "Pick an instance, or make one: Orbiters takes you there in VRChat.": "Choisis une instance, ou crée-en une : Orbiters t’y emmène dans VRChat.",
+  "Making the instance, then taking you there…": "Création de l’instance, puis en route…",
+  "Taking you there…": "En route…",
+  "Orbiters' AI bridge is using VRChat with your account on this computer: go there once it is done.": "Le pont IA d’Orbiters utilise VRChat avec ton compte sur cet ordinateur : vas-y une fois qu’il a fini.",
+  "VRChat could not be started there: {error}": "VRChat n’a pas pu y démarrer : {error}",
+  "The instance could not be made: {e}": "L’instance n’a pas pu être créée : {e}"
 }

@@ -259,5 +259,22 @@
   "Stick: move around": "スティック：移動",
   "Grip: take it": "グリップ：持つ",
   "Stick left or right: another capture": "スティック左右：ほかのキャプチャ",
-  "{at} of {count}": "{at} / {count}"
+  "{at} of {count}": "{at} / {count}",
+  "You are there": "到着しました",
+  "VRChat took you to this instance.": "VRChatがこのインスタンスへ連れて行きました。",
+  "Taking you there": "移動しています",
+  "Your VRChat has the instance and takes you there now. If it shows the world's page instead, press Join on it.": "VRChatがインスタンスを受け取り、今そこへ移動します。代わりにワールドのページが開いたら、そこで参加を押してください。",
+  "Starting VRChat": "VRChatを起動しています",
+  "VRChat is starting, right in this instance.": "VRChatがこのインスタンスの中で起動しています。",
+  "Another VRChat on this computer, one of Orbiters' AI bridge, receives VRChat's links: going there directly would move it, not yours.": "このPCの別のVRChat（OrbitersのAIブリッジのもの）がVRChatのリンクを受け取っています。直接移動すると、あなたではなくそちらが動いてしまいます。",
+  "Your VRChat did not take the link to go there directly.": "VRChatが直接移動するためのリンクを受け付けませんでした。",
+  "Your VRChat runs on another device: Orbiters cannot take it there directly.": "VRChatは別の機器で動いているため、Orbitersから直接移動させられません。",
+  "Send me an invite instead": "代わりに招待を送る",
+  "Join": "参加",
+  "Pick an instance, or make one: Orbiters takes you there in VRChat.": "インスタンスを選ぶか作成してください。OrbitersがVRChatでそこへ連れて行きます。",
+  "Making the instance, then taking you there…": "インスタンスを作成して移動しています…",
+  "Taking you there…": "移動しています…",
+  "Orbiters' AI bridge is using VRChat with your account on this computer: go there once it is done.": "このPCではOrbitersのAIブリッジがあなたのアカウントでVRChatを使用中です。終わってから移動してください。",
+  "VRChat could not be started there: {error}": "そこでVRChatを起動できませんでした：{error}",
+  "The instance could not be made: {e}": "インスタンスを作成できませんでした：{e}"
 }

@@ -103,7 +103,7 @@ The world's page stays open while the lists change under it.
 Offline review: `--screenshot <out> --only worlds-overlay` adds `panel-search.png`, `panel-search-3d-only.png`,
 `panel-search-orbiters.png`, `panel-search-failed.png`, `panel-typing-search.png`, `panel-typing-searching.png`,
 `panel-browse-popular.png`, `panel-browse-active.png`, `panel-browse-visited.png`,
-`panel-browse-favorites-signed-out.png`, `panel-world.png` (Launch VRChat) and `panel-world-invite.png`; the earlier
+`panel-browse-favorites-signed-out.png`, `panel-world.png` (Launch VRChat) and `panel-world-go.png`; the earlier
 captures' shots show the 3D captures section.
 
 **Giving feedback.** The panel sends what the member gives as N4N0's menus do: `N4n0Command::Feedback` with the

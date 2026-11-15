@@ -259,5 +259,22 @@
   "Stick: move around": "Direcional: se mover",
   "Grip: take it": "Grip: pegar",
   "Stick left or right: another capture": "Direcional para os lados: outra captura",
-  "{at} of {count}": "{at} de {count}"
+  "{at} of {count}": "{at} de {count}",
+  "You are there": "Você chegou",
+  "VRChat took you to this instance.": "O VRChat levou você a esta instância.",
+  "Taking you there": "Levando você até lá",
+  "Your VRChat has the instance and takes you there now. If it shows the world's page instead, press Join on it.": "Seu VRChat recebeu a instância e leva você até lá agora. Se ele mostrar a página do mundo, aperte Participar nela.",
+  "Starting VRChat": "Abrindo o VRChat",
+  "VRChat is starting, right in this instance.": "O VRChat está abrindo direto nesta instância.",
+  "Another VRChat on this computer, one of Orbiters' AI bridge, receives VRChat's links: going there directly would move it, not yours.": "Outro VRChat deste computador, um da ponte de IA do Orbiters, recebe os links do VRChat: ir direto moveria ele, não o seu.",
+  "Your VRChat did not take the link to go there directly.": "Seu VRChat não aceitou o link para ir direto até lá.",
+  "Your VRChat runs on another device: Orbiters cannot take it there directly.": "Seu VRChat roda em outro aparelho: o Orbiters não consegue levá-lo direto até lá.",
+  "Send me an invite instead": "Me mande um convite em vez disso",
+  "Join": "Participar",
+  "Pick an instance, or make one: Orbiters takes you there in VRChat.": "Escolha uma instância ou crie uma: o Orbiters leva você até lá no VRChat.",
+  "Making the instance, then taking you there…": "Criando a instância e levando você até lá…",
+  "Taking you there…": "Levando você até lá…",
+  "Orbiters' AI bridge is using VRChat with your account on this computer: go there once it is done.": "A ponte de IA do Orbiters está usando o VRChat com a sua conta neste computador: vá quando ela terminar.",
+  "VRChat could not be started there: {error}": "Não foi possível abrir o VRChat lá: {error}",
+  "The instance could not be made: {e}": "Não foi possível criar a instância: {e}"
 }

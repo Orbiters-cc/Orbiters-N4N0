@@ -458,8 +458,8 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     let rooftop_list = [rooftop.clone()];
     let page = Panel { page: Page::Detail, selected: Some(rooftop.id), ..Default::default() };
     paint("world", &rooftop_list, &page, &signed_out, &stand_in_feedback(true), 5.0)?;
-    let invited = Panel { note: Some((tr("Invite sent: accept it in VRChat's notifications").into(), 4.5)), hover: Some(Target::Join), ..page.clone() };
-    paint("world-invite", &rooftop_list, &invited, &listed, &stand_in_feedback(true), 5.0)?;
+    let pointed_go = Panel { hover: Some(Target::Join), ..page.clone() };
+    paint("world-go", &rooftop_list, &pointed_go, &listed, &stand_in_feedback(true), 5.0)?;
     // VR feedback F5: Go there, signed in to VRChat in Orbiters: reading the list, the list (a full one greyed, some hidden), none, not read, a new one on
     // its way, the invite sent; and more than a page of them.
     {
@@ -496,7 +496,21 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
         paint("go-creating", &rooftop_list, &chooser, &go(GoView { list: list(items.clone(), 0), busy: Some(GoBusy::Creating), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
         let full = tr("That instance is full now.");
         paint("go-refused", &rooftop_list, &chooser, &go(GoView { list: list(items.clone(), 0), error: Some(full.into()), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
-        paint("go-invited", &rooftop_list, &chooser, &go(GoView { list: list(items.clone(), 0), invited: Some(items[1].clone()), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
+        // L-go-direct: on the way directly, there, VRChat starting, an invite for a reason, and the invite asked for.
+        {
+            use super::go::GoneTo;
+            use crate::controller::travel::{Detour, Went};
+            let gone = |how, arrived| go(GoView { list: list(items.clone(), 0), went: Some(GoneTo { instance: items[1].clone(), how, arrived }), ..Default::default() });
+            paint("go-direct", &rooftop_list, &Panel { hover: Some(Target::GoInvite), ..chooser.clone() }, &gone(Went::Direct, false), &stand_in_feedback(true), 5.0)?;
+            paint("go-arrived", &rooftop_list, &chooser, &gone(Went::Direct, true), &stand_in_feedback(true), 5.0)?;
+            paint("go-started", &rooftop_list, &chooser, &gone(Went::Started, false), &stand_in_feedback(true), 5.0)?;
+            paint("go-invited-bridge", &rooftop_list, &chooser, &gone(Went::Invited(Detour::OtherVrchat), false), &stand_in_feedback(true), 5.0)?;
+            paint("go-invited-remote", &rooftop_list, &chooser, &gone(Went::Invited(Detour::Remote), false), &stand_in_feedback(true), 5.0)?;
+            paint("go-invited", &rooftop_list, &chooser, &gone(Went::Invited(Detour::Asked), false), &stand_in_feedback(true), 5.0)?;
+            paint("go-going", &rooftop_list, &chooser, &go(GoView { list: list(items.clone(), 0), busy: Some(GoBusy::Going), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
+            let made_fail = tr!("The instance could not be made: {e}", e = tr("VRChat could not be reached. Try again shortly."));
+            paint("go-make-failed", &rooftop_list, &chooser, &go(GoView { list: list(items.clone(), 0), error: Some(made_fail), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
+        }
         let many: Vec<WorldInstance> = (0..12).map(|i| one(&format!("m{i}"), InstanceAccess::Public, "eu", i, Some(32), None, false)).collect();
         let first_batch: Vec<WorldInstance> = (0..5).map(|i| one(&format!("b{i}"), InstanceAccess::Public, "eu", i + 3, Some(32), None, false)).collect();
         let partial = Some(WorldInstances { items: first_batch, unavailable: 0, remaining: vec!["rest".into()] });

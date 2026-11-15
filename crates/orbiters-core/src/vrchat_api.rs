@@ -276,7 +276,11 @@ fn instance_details(v: &serde_json::Value, world: &str, id: Option<&str>) -> Res
     let capacity = v["capacity"].as_u64().or_else(|| v["world"]["capacity"].as_u64()).and_then(|n| u32::try_from(n).ok());
     let full = v["full"].as_bool().unwrap_or(false) || v["hasCapacityForYou"].as_bool() == Some(false)
         || capacity.is_some_and(|c| occupants >= c);
-    let closed = v["active"].as_bool() == Some(false) || v["closedAt"].as_str().is_some_and(|s|
+    // Closed only when VRChat says it closed (`closedAt` past, `hardClose`). `active: false` is not that: an instance
+    // nobody has entered yet says it, every new one included (measured 2026-11-15: POST /instances and the GET after it
+    // answer `"active": false, "closedAt": null, "hardClose": null` for a Friends+ instance of Popcorn Palace), and
+    // VRChat opens it when someone arrives. Read as closed, it made every new instance unjoinable (L-invite-error).
+    let closed = v["hardClose"].as_bool() == Some(true) || v["closedAt"].as_str().is_some_and(|s|
         time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
             .map_or(true, |t| t <= time::OffsetDateTime::now_utc()));
     let friends = v["users"].as_array().filter(|users| users.iter().all(|u| u["isFriend"].is_boolean()))
@@ -1672,12 +1676,32 @@ pub(crate) mod tests {
             assert!(calls[1].url.ends_with(&format!("/invite/myself/to/wrld_test:{}",path_segment(&id))));
         }
     }
+    /// VRChat's real answer to POST /instances (a Friends+ instance of Popcorn Palace in Europe, 2026-11-15, the fields
+    /// the client reads): a new instance says `active: false` and carries no `closedAt`. It must come out joinable, or the
+    /// invite or trip to it is refused as "no longer on the list" (Enzo's L-invite-error).
+    #[test]
+    fn a_new_instance_as_vrchat_answers_its_making_is_joinable() {
+        let world = "wrld_266523e8-9161-40da-acd0-6bd82e075833";
+        let id = "46657~hidden(usr_test)~region(eu)";
+        let answer = serde_json::json!({"accessType":"friendsPlus","active":false,"canRequestInvite":false,"capacity":80,
+            "full":false,"hidden":"usr_test","instanceId":id,"location":format!("{world}:{id}"),"n_users":0,"name":"46657",
+            "nonce":"d5ec8417-3b1d-4af7-a840-c59518f97e6c","ownerId":"usr_test","permanent":true,"queueEnabled":false,
+            "recommendedCapacity":40,"region":"eu","type":"hidden","userCount":0,"users":[],"worldId":world});
+        let (mut c, _) = mock(vec![json(answer)]);
+        let made = c.create_instance(world, CreateAccess::FriendsPlus, InstanceRegion::Eu).unwrap();
+        assert_eq!(made.id, id);
+        assert!(made.can_join && !made.closed && !made.full, "{made:?}");
+    }
     #[test]
     fn chooser_full_closed_and_unknown_are_not_joinable() {
-        for (field,value) in [("full",serde_json::json!(true)),("active",serde_json::json!(false)),("hasCapacityForYou",serde_json::json!(false)),("accessType",serde_json::json!("new-kind"))] {
+        for (field,value) in [("full",serde_json::json!(true)),("hardClose",serde_json::json!(true)),("closedAt",serde_json::json!("2026-01-01T00:00:00Z")),("hasCapacityForYou",serde_json::json!(false)),("accessType",serde_json::json!("new-kind"))] {
             let mut v=chooser_instance("1","friendsPlus"); v[field]=value;
-            assert!(!instance_details(&v,"wrld_test",Some("1")).unwrap().can_join);
+            assert!(!instance_details(&v,"wrld_test",Some("1")).unwrap().can_join, "{field}");
         }
+        // Nobody in it yet: VRChat says `active: false` and opens it when someone arrives.
+        let mut v=chooser_instance("1","friendsPlus"); v["active"]=false.into(); v["n_users"]=0.into();
+        let i=instance_details(&v,"wrld_test",Some("1")).unwrap();
+        assert!(i.can_join && !i.closed, "an instance nobody entered yet is not closed");
         assert!(instance_details(&chooser_instance("2","public"),"wrld_test",Some("1")).is_err());
         assert!(instance_details(&chooser_instance("1","public"),"wrld_other",Some("1")).is_err());
     }

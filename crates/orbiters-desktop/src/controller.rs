@@ -152,6 +152,8 @@ pub struct Controller {
     bridge: Mutex<Option<Arc<crate::bridge::keeper::Keeper>>>,
     /// The VRChats the bridge runs beside the person's (bridge/sessions.rs): the app follows none of them, unless lent.
     pub(crate) sides: Arc<crate::bridge::sessions::Sides>,
+    /// How Go there reaches the person's VRChat (controller/travel.rs): this computer, or a test's.
+    pub(crate) travel: Mutex<Option<Arc<dyn travel::Travel>>>,
     /// The bridge restarts VRChat between two worlds: the moments it is closed start no reconstruction.
     bridge_holds_reconstructions: AtomicBool,
     /// What the FPS booster holds back, and all it keeps here (controller/booster.rs).
@@ -400,6 +402,7 @@ pub mod shares;
 pub mod update;
 mod videos;
 pub mod translate;
+pub mod travel;
 pub mod vrchat_data;
 pub mod vrchat_login;
 pub mod camera_tools;
@@ -452,6 +455,7 @@ impl Controller {
             vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
             bridge: Mutex::new(None),
             sides: Arc::default(),
+            travel: Mutex::new(None),
             bridge_holds_reconstructions: AtomicBool::new(false),
             booster: Default::default(),
             reconstruction_failures: Mutex::default(),

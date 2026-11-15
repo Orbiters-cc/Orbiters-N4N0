@@ -13,17 +13,17 @@ Requests and successful responses:
 - `Request::CreateInstance { world, access: CreateAccess, region: InstanceRegion }` -> `Response::CreatedInstance(WorldInstance)`. Only creates, never sends an invite. `CreateAccess::{Public, FriendsPlus, Friends, InvitePlus, Invite}`; `InstanceRegion::{Us, Use, Eu, Jp}`. Creation validates returned world, access, region and personal owner (except public). Groups are deliberately absent: correct group creation needs membership/permissions/roles, outside this personal creation interface.
 - `Request::InviteSelf { world, instance }` -> `Response::Invited`. Pass the EXACT id from a listed or created WorldInstance. This sends an invite, not a teleport: tell the user to accept it in VRChat. Creation and invitation are separate deliberate user operations. Do not generate a random public id or reconstruct an instance from its display number.
 
-`WorldInstance` fields: world: String, id: String (opaque, includes access/region/nonce), access: InstanceAccess, region: String, occupants: u32, capacity: Option<u32>, friends: Option<u32>, full: bool, closed: bool, can_join: bool. `InstanceAccess::{Public, FriendsPlus, Friends, InvitePlus, Invite, GroupPublic, GroupPlus, Group, Unknown}`. Preserve an unrecognized region string for display. friends=None means unknown; Some(0) means a returned complete user list reports no friends. Friends derive only from API users[].isFriend; do not infer them from access type. Disable selection when !can_join (full, closed, unknown kind). Capacity can come from the embedded world when no instance override is supplied. A future closedAt is not already closed.
+`WorldInstance` fields: world: String, id: String (opaque, includes access/region/nonce), access: InstanceAccess, region: String, occupants: u32, capacity: Option<u32>, friends: Option<u32>, full: bool, closed: bool, can_join: bool. `InstanceAccess::{Public, FriendsPlus, Friends, InvitePlus, Invite, GroupPublic, GroupPlus, Group, Unknown}`. Preserve an unrecognized region string for display. friends=None means unknown; Some(0) means a returned complete user list reports no friends. Friends derive only from API users[].isFriend; do not infer them from access type. Disable selection when !can_join (full, closed, unknown kind). Capacity can come from the embedded world when no instance override is supplied. A future closedAt is not already closed. Closed means `closedAt` past or `hardClose: true` only: `active: false` is what VRChat answers for an instance nobody has entered yet, every new one included (measured 2026-11-15, L-invite-error), and is joinable.
 
 ## States and errors
 
 Pages own idle/loading/ready/empty/error/sending/sent state. Opening/loading a chooser does not create or invite. Keep world and scope with pending work, discard responses after account/environment/revision change. WorldError is a structured Response variant (the outer existing Result remains unchanged):
 
-`WorldError::{AccountChanged, SignInRequired, InvalidWorld, NotListed, Full, Closed, NotJoinable, Api(orbiters_core::vrchat_api::Error)}`.
+`WorldError::{AccountChanged, SignInRequired, InvalidWorld, NotListed, Full, Closed, NotJoinable, BridgeBusy, NotStarted(String), Api(orbiters_core::vrchat_api::Error)}`.
 
 Api preserves Unauthorized (401/session expiry), Disabled (revoked grant), RateLimited(Duration), NotFound (hidden or absent, not closed), Unavailable, InvalidResponse and existing transport errors. Error implements Display with existing translations. For RateLimited, show retry duration; do not automatically retry mutations. No new user-facing wording is introduced here; the pages stream supplies translated labels and structured failure explanations.
 
-On NotListed, reopen/refresh the chooser: destination permits expire after five minutes, are tied to Scope (environment, Orbiters member, VRChat user, allowed flag, revision) and exact world/id, and are retained only in the service process. Refresh clears prior permits for that world even if the refresh fails. Creating replaces that world's prior permits with the new destination. Service re-fetches selected instance before invitation and refuses full/closed/unavailable choices. VRChat may still refuse or fill the instance after that lookup; the API is final authority. Revocation checks guard actual transport and discard stale responses. A mutation already accepted remotely cannot be undone by a later scope change; do not retry it automatically.
+On NotListed, reopen/refresh the chooser: destination permits expire after five minutes, are tied to Scope (environment, Orbiters member, VRChat user, allowed flag, revision) and exact world/id, and are retained only in the service process. Refresh clears prior permits for that world even if the refresh fails. Creating adds the new destination beside that world's listed permits (it no longer replaces them). Service re-fetches selected instance before invitation and refuses full/closed/unavailable choices. VRChat may still refuse or fill the instance after that lookup; the API is final authority. Revocation checks guard actual transport and discard stale responses. A mutation already accepted remotely cannot be undone by a later scope change; do not retry it automatically.
 
 ## Implementation and evidence
 
@@ -97,3 +97,14 @@ All four findings in review-instances-api.md were checked against dfdde538f66a80
 
 
 Final review head is recorded in the canonical external done-instances-api.md after this commit.
+
+## Going there directly (L-go-direct, 2026-11-15)
+
+`Request::GoThere { world, instance }` (same permit and fresh lookup as InviteSelf) answers `Response::Went(travel::Went)`:
+`Direct` (the instance's `vrchat://launch` link written to VRChat's link pipe `\.\pipe\VRChatURLLaunchPipe`, served by the
+person's own VRChat), `Started` (no VRChat ran: VRChat's launcher with the link and `--profile=0`), or `Invited(Detour)` where a
+direct trip cannot be: `OtherVrchat` (the pipe's server, asked with `GetNamedPipeServerProcessId`, is a VRChat of Orbiters' bridge:
+its main session, a side session, or any VRChat whose `--osc` port is not 9000; nothing is written to it), `LinkRefused` (the pipe
+could not be opened or written), `Remote` (VRChat runs on another device). Only the bridge's main VRChat running: `BridgeBusy`,
+nothing sent. `InviteSelf` stays for "Send me an invite instead" (`Detour::Asked`). Code: `controller/travel.rs`. The page's card
+says how and, from VRChat's log, when the person is in the instance.

@@ -1,9 +1,11 @@
-//! Go there (Enzo's VR feedback F5): the instances of a world one can go to, with who may join, where, how full, and new
-//! ones to make; then the invite, and what to do with it in VRChat. Only with the member's own VRChat session in Orbiters
-//! (the button is hidden otherwise). Opening it reads the list and nothing else: an invite is sent only for the instance
-//! pressed, a new instance made only for the kind pressed (and the invite to it follows that one press).
+//! Go there (Enzo's VR feedback F5, L-go-direct): the instances of a world one can go to, with who may join, where, how
+//! full, and new ones to make; a press takes the person there directly (the link to their own VRChat, or VRChat started
+//! in it: controller/travel.rs), with an invite to accept in VRChat only where that cannot be, and the page says why.
+//! Only with the member's own VRChat session in Orbiters (the button is hidden otherwise). Opening it reads the list and
+//! nothing else: only the instance pressed is gone to, a new instance made only for the kind pressed.
 
 use super::*;
+use crate::controller::travel::{Detour, Went};
 use orbiters_core::vrchat_api::{CreateAccess, InstanceAccess, InstanceRegion, WorldInstance, WorldInstances};
 use orbiters_i18n::{tr, tr_n};
 
@@ -20,8 +22,8 @@ pub struct GoView {
     pub error: Option<String>,
     /// A new instance or an invite on its way.
     pub busy: Option<GoBusy>,
-    /// The invite went out, to this instance.
-    pub invited: Option<WorldInstance>,
+    /// The person is on the way to this instance, and how.
+    pub went: Option<GoneTo>,
     /// The region of the instance the player is in: new instances are made there unless another is picked.
     pub region: Option<InstanceRegion>,
     /// The next batch of the list is being read (VRChat's list comes a batch at a time).
@@ -35,8 +37,43 @@ pub fn go_pages(go: &GoView) -> usize {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GoBusy {
+    /// A new instance is made, then gone to.
     Creating,
+    /// On the way to one of the list.
+    Going,
+    /// The invite the person asked for instead.
     Inviting,
+}
+
+/// Where Go there took the person, and how.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GoneTo {
+    pub instance: WorldInstance,
+    pub how: Went,
+    /// VRChat's log says they are in it now.
+    pub arrived: bool,
+}
+
+/// What the card says happened: its title and what to do now.
+pub fn went_words(gone: &GoneTo) -> (&'static str, String) {
+    if gone.arrived {
+        return (tr("You are there"), tr("VRChat took you to this instance.").to_string());
+    }
+    let invite = tr("In VRChat, open the Quick Menu's notifications and accept the invite. It takes you there.");
+    match gone.how {
+        Went::Direct => (tr("Taking you there"), tr("Your VRChat has the instance and takes you there now. If it shows the world's page instead, press Join on it.").to_string()),
+        Went::Started => (tr("Starting VRChat"), tr("VRChat is starting, right in this instance.").to_string()),
+        Went::Invited(Detour::Asked) => (tr("Invite sent"), invite.to_string()),
+        Went::Invited(why) => {
+            let because = match why {
+                Detour::OtherVrchat => tr("Another VRChat on this computer, one of Orbiters' AI bridge, receives VRChat's links: going there directly would move it, not yours."),
+                Detour::LinkRefused => tr("Your VRChat did not take the link to go there directly."),
+                Detour::Remote => tr("Your VRChat runs on another device: Orbiters cannot take it there directly."),
+                Detour::Asked => "",
+            };
+            (tr("Invite sent"), format!("{because} {invite}"))
+        }
+    }
 }
 
 /// The kinds of instance one can make, in the order offered.
@@ -54,7 +91,10 @@ const NEW_LEFT: f32 = 664.0;
 const REGION: Rect = Rect { min: Pos2 { x: NEW_LEFT, y: 146.0 }, max: Pos2 { x: 992.0, y: 192.0 } };
 /// Reads the list again; on the invite's card, back to the list.
 const GO_RETRY: Rect = Rect { min: Pos2 { x: 816.0, y: 506.0 }, max: Pos2 { x: 992.0, y: 554.0 } };
-const AGAIN: Rect = Rect { min: Pos2 { x: 200.0, y: 398.0 }, max: Pos2 { x: 472.0, y: 446.0 } };
+const AGAIN: Rect = Rect { min: Pos2 { x: 200.0, y: 410.0 }, max: Pos2 { x: 472.0, y: 456.0 } };
+/// On the card of a direct trip: the way back on the left, an invite instead on the right.
+const AGAIN_LEFT: Rect = Rect { min: Pos2 { x: 52.0, y: 410.0 }, max: Pos2 { x: 316.0, y: 456.0 } };
+const INVITE_INSTEAD: Rect = Rect { min: Pos2 { x: 328.0, y: 410.0 }, max: Pos2 { x: 620.0, y: 456.0 } };
 const LIST: Rect = Rect { min: Pos2 { x: 32.0, y: ROWS_TOP }, max: Pos2 { x: LIST_RIGHT, y: 478.0 } };
 
 fn row_rect(slot: usize) -> Rect {
@@ -147,8 +187,13 @@ impl Panel {
 
     pub(super) fn go_targets(&self, d: &Data, out: &mut Vec<(Target, Rect)>) {
         let go = &d.status.go;
-        if go.invited.is_some() {
-            out.push((Target::GoRetry, AGAIN));
+        if let Some(gone) = &go.went {
+            // VRChat may only show the world's page: the invite is the other way, on request.
+            let invite = gone.how == Went::Direct && !gone.arrived && go.busy.is_none();
+            out.push((Target::GoRetry, if invite { AGAIN_LEFT } else { AGAIN }));
+            if invite {
+                out.push((Target::GoInvite, INVITE_INSTEAD));
+            }
             return;
         }
         if let Some(list) = &go.list {
@@ -178,18 +223,25 @@ impl Panel {
         let go = &d.status.go;
         let state = |t: Target| (self.hover == Some(t), self.pressed == Some(t));
         self.title(p, tr("Go there"), self.entry(d).map(|e| e.name.as_str()), 990.0, shown);
-        text_cut(p, pos2(32.0, 86.0), 960.0, orbit_look::txt(tr("Pick an instance, or make one: Orbiters sends you an invite to accept in VRChat."), 17.0).color(fade(theme::FG_3, shown)));
+        text_cut(p, pos2(32.0, 86.0), 960.0, orbit_look::txt(tr("Pick an instance, or make one: Orbiters takes you there in VRChat."), 17.0).color(fade(theme::FG_3, shown)));
         let head = |p: &Painter, x: f32, words: &str| text(p, pos2(x, 128.0), Align2::LEFT_CENTER, orbit_look::txt(words, 15.0).weight(weight::SEMIBOLD).color(fade(theme::FG_2, shown)));
-        // The invite went out: what to do now, large, where the list was (the end of this story is in VRChat).
-        if let Some(sent) = &go.invited {
-            let card = Rect::from_min_max(pos2(32.0, 124.0), pos2(LIST_RIGHT, 470.0));
+        // On the way: how, and what to do now if anything, large, where the list was (the end of this story is in VRChat).
+        if let Some(gone) = &go.went {
+            let sent = &gone.instance;
+            let (title, says) = went_words(gone);
+            let card = Rect::from_min_max(pos2(32.0, 124.0), pos2(LIST_RIGHT, 474.0));
             p.rect_filled(card, CornerRadius::same(24), fade(theme::alpha(orbit_look::accent(), 0.12), shown));
             p.rect_stroke(card, CornerRadius::same(24), Stroke::new(1.5, fade(orbit_look::accent(), shown)), StrokeKind::Inside);
-            widgets::icon(p, pos2(card.center().x, 176.0), icons::CHECK_CIRCLE, 48.0, fade(orbit_look::accent(), shown));
-            text(p, pos2(card.center().x, 228.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Invite sent"), 28.0).weight(weight::BOLD).color(fade(theme::FG, shown)));
+            let glyph = match gone.how {
+                _ if gone.arrived => icons::CHECK_CIRCLE,
+                Went::Invited(_) => icons::ENVELOPE_SIMPLE,
+                Went::Direct | Went::Started => icons::SIGN_IN,
+            };
+            widgets::icon(p, pos2(card.center().x, 176.0), glyph, 48.0, fade(orbit_look::accent(), shown));
+            text(p, pos2(card.center().x, 228.0), Align2::CENTER_CENTER, orbit_look::txt(title, 28.0).weight(weight::BOLD).color(fade(theme::FG, shown)));
             text(p, pos2(card.center().x, 272.0), Align2::CENTER_CENTER, orbit_look::txt(instance_line(sent), 18.0).color(fade(theme::FG_2, shown)));
-            let mut job = orbit_look::txt(tr("In VRChat, open the Quick Menu's notifications and accept the invite. It takes you there."), 19.0).color(fade(theme::FG, shown)).line_height(26.0).job(card.width() - 56.0);
-            job.wrap.max_rows = 3;
+            let mut job = orbit_look::txt(says, 19.0).color(fade(theme::FG, shown)).line_height(26.0).job(card.width() - 56.0);
+            job.wrap.max_rows = 4;
             job.halign = egui::Align::Center;
             let galley = p.layout_job(job);
             p.galley(pos2(card.center().x, 300.0), galley, theme::FG);
@@ -197,6 +249,10 @@ impl Panel {
                 if *t == Target::GoRetry {
                     let (h, pr) = state(*t);
                     pill_button(p, *rect, Some(icons::ARROW_U_UP_LEFT), tr("See the instances again"), RAISED2, theme::FG, h, pr, shown);
+                }
+                if *t == Target::GoInvite {
+                    let (h, pr) = state(*t);
+                    pill_button(p, *rect, Some(icons::ENVELOPE_SIMPLE), tr("Send me an invite instead"), RAISED, theme::FG, h, pr, shown);
                 }
             }
         } else {
@@ -242,7 +298,7 @@ impl Panel {
                         }
                         text_cut(p, pos2(rect.min.x + 20.0, rect.min.y + 34.0), 400.0, orbit_look::txt(under, 15.5).color(fade(theme::FG_3, alpha)));
                         let (word, tint) = if item.can_join {
-                            (tr("Invite me"), orbit_look::accent())
+                            (tr("Join"), orbit_look::accent())
                         } else if item.full {
                             (tr("Full"), theme::FG_3)
                         } else if item.closed {
@@ -263,8 +319,8 @@ impl Panel {
                 }
             }
         }
-        // Making one: where, then which kind. A press makes it and sends the invite to it. Not beside the invite sent.
-        if go.invited.is_none() {
+        // Making one: where, then which kind. A press makes it and goes there. Not beside the card of a trip.
+        if go.went.is_none() {
             head(p, NEW_LEFT, tr("Make a new one"));
         }
         let busy = go.busy.is_some();
@@ -293,7 +349,7 @@ impl Panel {
                 }
                 Target::Previous => round_button(p, rect.center(), icons::CARET_LEFT, h, pr, shown),
                 Target::Next => round_button(p, rect.center(), icons::CARET_RIGHT, h, pr, shown),
-                Target::GoRetry if go.invited.is_none() => {
+                Target::GoRetry if go.went.is_none() => {
                     pill_button(p, *rect, Some(icons::ARROW_CLOCKWISE), if go.list.is_some() { tr("Read again") } else { tr("Try again") }, RAISED2, theme::FG, h, pr, shown)
                 }
                 _ => {}
@@ -301,9 +357,10 @@ impl Panel {
         }
         // What is going on now, or what did not happen, at the foot.
         let (line, tint) = match (go.busy, &go.error) {
-            (Some(GoBusy::Creating), _) => (tr("Making the instance, then sending you an invite…").to_string(), theme::FG_2),
+            (Some(GoBusy::Creating), _) => (tr("Making the instance, then taking you there…").to_string(), theme::FG_2),
+            (Some(GoBusy::Going), _) => (tr("Taking you there…").to_string(), theme::FG_2),
             (Some(GoBusy::Inviting), _) => (tr("Sending you an invite…").to_string(), theme::FG_2),
-            (None, Some(error)) if go.list.is_some() || go.invited.is_some() => (error.clone(), theme::WARN),
+            (None, Some(error)) if go.list.is_some() || go.went.is_some() => (error.clone(), theme::WARN),
             (None, _) if go.loading && go.list.is_some() => (tr("Reading the instances again…").to_string(), theme::FG_3),
             _ => (String::new(), theme::FG_3),
         };

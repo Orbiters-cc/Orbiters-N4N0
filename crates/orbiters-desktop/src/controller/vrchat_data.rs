@@ -69,6 +69,13 @@ pub enum Request {
         world: String,
         instance: String,
     },
+    /// Takes the person to an exact destination listed or created in this scope within five minutes, directly
+    /// (controller/travel.rs): the link to their own VRChat, or VRChat started there; an invite only where neither can be.
+    /// A fresh lookup checks capacity/closure first. Answer: Went or WorldError.
+    GoThere {
+        world: String,
+        instance: String,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -83,11 +90,19 @@ pub enum Response {
     Owned(Vec<String>),
     Worlds(orbiters_core::maps::FoundWorlds),
     Invited,
+    Went(super::travel::Went),
 }
 
 /// Structured failures for WorldDetails, WorldInstances, CreateInstance and InviteSelf. No UI wording here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WorldError { AccountChanged, SignInRequired, InvalidWorld, NotListed, Full, Closed, NotJoinable, Api(orbiters_core::vrchat_api::Error) }
+pub enum WorldError {
+    AccountChanged, SignInRequired, InvalidWorld, NotListed, Full, Closed, NotJoinable,
+    /// Only Orbiters' AI bridge's own VRChat runs, with the person's account: none of the person's to take there.
+    BridgeBusy,
+    /// VRChat could not be started in the instance, in its launcher's words.
+    NotStarted(String),
+    Api(orbiters_core::vrchat_api::Error),
+}
 
 #[derive(Default)]
 struct InstancePermits {
@@ -99,10 +114,18 @@ impl InstancePermits {
         self.entries.retain(|(s, w, _, at)| s == scope && w != world && at.elapsed().as_secs() < 300);
         self.entries.extend(items.iter().filter(|i| i.can_join).map(|i| (scope.clone(), world.into(), i.id.clone(), std::time::Instant::now())));
     }
+    /// An instance made for the person's press: it may be gone to, beside those listed.
+    fn made(&mut self, scope: &Scope, world: &str, id: &str) {
+        self.entries.retain(|(s, _, _, at)| s == scope && at.elapsed().as_secs() < 300);
+        self.entries.push((scope.clone(), world.into(), id.into(), std::time::Instant::now()));
+    }
     fn contains(&self, scope: &Scope, world: &str, id: &str) -> bool {
         self.entries.iter().any(|(s, w, i, at)| s == scope && w == world && i == id && at.elapsed().as_secs() < 300)
     }
 }
+/// Whether a world request goes there directly or only invites.
+#[derive(Clone, Copy)]
+enum Way { Direct, Invite }
 static INSTANCE_PERMITS: std::sync::Mutex<InstancePermits> = std::sync::Mutex::new(InstancePermits { entries: Vec::new(), pending: Vec::new() });
 
 fn scoped_world_work(
@@ -127,7 +150,7 @@ impl Controller {
         self.vrchat_data_until(scope, request, std::time::Instant::now() + std::time::Duration::from_secs(60))
     }
     pub(crate) fn vrchat_data_until(&self, scope: Scope, request: Request, deadline: std::time::Instant) -> Result {
-        if matches!(&request, Request::WorldDetails { .. } | Request::WorldInstances { .. } | Request::WorldInstancesNext { .. } | Request::CreateInstance { .. } | Request::InviteSelf { .. }) {
+        if matches!(&request, Request::WorldDetails { .. } | Request::WorldInstances { .. } | Request::WorldInstancesNext { .. } | Request::CreateInstance { .. } | Request::InviteSelf { .. } | Request::GoThere { .. }) {
             return Ok(self.vrchat_world_data(scope, request, deadline));
         }
         if scope != Scope::of(&self.view()) {
@@ -222,7 +245,7 @@ impl Controller {
                     }
                     Response::Worlds(source.worlds(&list, page)?)
                 }
-                Request::WorldDetails { .. } | Request::WorldInstances { .. } | Request::WorldInstancesNext { .. } | Request::CreateInstance { .. } | Request::InviteSelf { .. } => unreachable!(),
+                Request::WorldDetails { .. } | Request::WorldInstances { .. } | Request::WorldInstancesNext { .. } | Request::CreateInstance { .. } | Request::InviteSelf { .. } | Request::GoThere { .. } => unreachable!(),
             })
         })()
         .map_err(|e| e.to_string());
@@ -237,12 +260,13 @@ impl Controller {
             if !scope.allowed { return Err(WorldError::SignInRequired); }
             let user = scope.user.as_deref().ok_or(WorldError::SignInRequired)?;
             let world = match &request {
-                Request::WorldDetails { world } | Request::WorldInstances { world } | Request::WorldInstancesNext { world, .. } | Request::CreateInstance { world, .. } | Request::InviteSelf { world, .. } => world,
+                Request::WorldDetails { world } | Request::WorldInstances { world } | Request::WorldInstancesNext { world, .. } | Request::CreateInstance { world, .. } | Request::InviteSelf { world, .. } | Request::GoThere { world, .. } => world,
                 _ => unreachable!(),
             };
             if !orbiters_core::vrchat_log::is_world_id(world) { return Err(WorldError::InvalidWorld); }
             let source = self.vrchat_source();
             let continuation = match &request { Request::WorldInstancesNext { instances, .. } => Some(instances.clone()), _ => None };
+            let way = if matches!(request, Request::GoThere { .. }) { Way::Direct } else { Way::Invite };
             match request {
                 Request::WorldDetails { world } => source.personal_until(user, || scope == Scope::of(&self.view()), deadline, |c| c.world(&world)).map(Response::WorldDetails).map_err(WorldError::Api),
                 Request::WorldInstances { world } | Request::WorldInstancesNext { world, .. } => {
@@ -272,10 +296,13 @@ impl Controller {
                 Request::CreateInstance { world, access, region } => {
                     let instance = source.personal_until(user, || scope == Scope::of(&self.view()), deadline, |c| c.create_instance(&world, access, region)).map_err(WorldError::Api)?;
                     if scope != Scope::of(&self.view()) { return Err(WorldError::AccountChanged); }
-                    INSTANCE_PERMITS.lock().unwrap().allow(&scope, &world, std::slice::from_ref(&instance));
+                    // Made for this press: it may be gone to, whatever VRChat says of a room nobody entered yet, and the
+                    // instances listed before stay as they were (allow() would forget them).
+                    INSTANCE_PERMITS.lock().unwrap().made(&scope, &world, &instance.id);
                     Ok(Response::CreatedInstance(instance))
                 }
-                Request::InviteSelf { world, instance } => {
+                Request::InviteSelf { world, instance } | Request::GoThere { world, instance } => {
+                    let direct = matches!(way, Way::Direct);
                     if !INSTANCE_PERMITS.lock().unwrap().contains(&scope, &world, &instance) { return Err(WorldError::NotListed); }
                     let fresh = source.personal_until(user, || scope == Scope::of(&self.view()), deadline, |c| c.world_instance(&world, &instance)).map_err(WorldError::Api)?
                         .ok_or(WorldError::NotJoinable)?;
@@ -283,8 +310,20 @@ impl Controller {
                     if fresh.closed { return Err(WorldError::Closed); }
                     if !fresh.can_join { return Err(WorldError::NotJoinable); }
                     if scope != Scope::of(&self.view()) { return Err(WorldError::AccountChanged); }
+                    let detour = if direct {
+                        let travel: std::sync::Arc<dyn super::travel::Travel> = self.travel.lock().unwrap().clone().unwrap_or_else(|| std::sync::Arc::new(super::travel::Real));
+                        let bridge = super::travel::Bridge { main: self.sides.main_pid(), sides: self.sides.side_pids() };
+                        match super::travel::go(travel.as_ref(), self.view().vrchat.remote, &bridge, &world, &instance) {
+                            Ok(went) => return Ok(Response::Went(went)),
+                            Err(super::travel::GoFailure::BridgeBusy) => return Err(WorldError::BridgeBusy),
+                            Err(super::travel::GoFailure::Start(words)) => return Err(WorldError::NotStarted(words)),
+                            Err(super::travel::GoFailure::Invite(why)) => why,
+                        }
+                    } else {
+                        super::travel::Detour::Asked
+                    };
                     source.personal_until(user, || scope == Scope::of(&self.view()), deadline, |c| c.invite_self(&world, &instance)).map_err(WorldError::Api)?;
-                    Ok(Response::Invited)
+                    Ok(if direct { Response::Went(super::travel::Went::Invited(detour)) } else { Response::Invited })
                 }
                 _ => unreachable!(),
             }
@@ -803,7 +842,7 @@ mod tests {
             let ctl = Controller::new(orbiters_core::settings::Settings::default());
             let mut fresh = review_instance();
             if mode=="full" { fresh["full"]=true.into(); }
-            if mode=="closed" { fresh["active"]=false.into(); }
+            if mode=="closed" { fresh["hardClose"]=true.into(); }
             if mode=="null" { fresh=serde_json::Value::Null; }
             let status = mode.parse().unwrap_or(200);
             let (_, calls) = ctl.test_vrchat(vec![(200,review_instance()),(status,fresh)]);
@@ -889,6 +928,88 @@ mod tests {
             assert!(matches!(ctl.vrchat_data(stale,Request::CreateInstance {world:REVIEW_WORLD.into(),access:orbiters_core::vrchat_api::CreateAccess::Public,region:orbiters_core::vrchat_api::InstanceRegion::Eu}).unwrap(),Response::WorldError(WorldError::AccountChanged)));
         }
         assert!(calls.lock().unwrap().is_empty());
+    }
+
+    /// VRChat's answer to making a Friends+ instance (2026-11-15, the fields read): nobody in it yet, `active: false`.
+    fn made_answer(world: &str) -> serde_json::Value {
+        serde_json::json!({"worldId":world,"instanceId":MADE_ID,"accessType":"friendsPlus","ownerId":"usr_test","region":"eu",
+            "n_users":0,"capacity":80,"full":false,"active":false,"users":[]})
+    }
+    const MADE_ID: &str = "46657~hidden(usr_test)~region(eu)";
+    // Worlds of their own: permits are one store for the process, and tests run at once (a list read clears its world's).
+    const MADE_WORLD: &str = "wrld_266523e8-9161-40da-acd0-6bd82e075833";
+    const KEEP_WORLD: &str = "wrld_266523e8-9161-40da-acd0-6bd82e075834";
+    const DIRECT_WORLDS: [&str; 3] = ["wrld_266523e8-9161-40da-acd0-6bd82e075835", "wrld_266523e8-9161-40da-acd0-6bd82e075836", "wrld_266523e8-9161-40da-acd0-6bd82e075837"];
+    fn fake_pc(ctl: &Controller, fake: crate::controller::travel::tests::Fake) -> std::sync::Arc<crate::controller::travel::tests::Fake> {
+        let fake = std::sync::Arc::new(fake);
+        *ctl.travel.lock().unwrap() = Some(fake.clone() as std::sync::Arc<dyn crate::controller::travel::Travel>);
+        fake
+    }
+
+    /// Enzo's press (L-invite-error): Make a new one, Friends+, then the invite. A new instance said `active: false`, read
+    /// as closed, never got its permit, and the invite was refused as "no longer on the list".
+    #[test]
+    fn a_new_instance_can_be_invited_to_at_once() {
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        let (_, calls) = ctl.test_vrchat(vec![(200, made_answer(MADE_WORLD)), (200, made_answer(MADE_WORLD)), (200, serde_json::json!({}))]);
+        let scope = Scope::of(&ctl.view());
+        let Response::CreatedInstance(made) = ctl.vrchat_data(scope.clone(), Request::CreateInstance { world: MADE_WORLD.into(), access: orbiters_core::vrchat_api::CreateAccess::FriendsPlus, region: orbiters_core::vrchat_api::InstanceRegion::Eu }).unwrap() else { panic!("not made") };
+        assert!(made.can_join);
+        let reply = ctl.vrchat_data(scope, Request::InviteSelf { world: MADE_WORLD.into(), instance: made.id }).unwrap();
+        assert!(matches!(reply, Response::Invited), "{reply:?}");
+        assert!(calls.lock().unwrap().last().unwrap().1.ends_with(&format!("/invite/myself/to/{MADE_WORLD}:{MADE_ID}")));
+    }
+
+    #[test]
+    fn making_one_keeps_the_listed_ones_open_to_go_to() {
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        let kept = || { let mut v = review_instance(); v["worldId"] = KEEP_WORLD.into(); v };
+        ctl.test_vrchat(vec![(200, serde_json::json!({"instances":[[REVIEW_ID,1,{}]]})), (200, kept()), (200, made_answer(KEEP_WORLD)), (200, kept())]);
+        let pc = fake_pc(&ctl, crate::controller::travel::tests::Fake { running: vec![10], server: Some(10), ..Default::default() });
+        let scope = Scope::of(&ctl.view());
+        ctl.vrchat_data(scope.clone(), Request::WorldInstances { world: KEEP_WORLD.into() }).unwrap();
+        ctl.vrchat_data(scope.clone(), Request::CreateInstance { world: KEEP_WORLD.into(), access: orbiters_core::vrchat_api::CreateAccess::FriendsPlus, region: orbiters_core::vrchat_api::InstanceRegion::Eu }).unwrap();
+        let reply = ctl.vrchat_data(scope, Request::GoThere { world: KEEP_WORLD.into(), instance: REVIEW_ID.into() }).unwrap();
+        assert!(matches!(reply, Response::Went(crate::controller::travel::Went::Direct)), "{reply:?}");
+        assert_eq!(pc.written.lock().unwrap().len(), 1);
+    }
+
+    /// L-go-direct: a new instance, then straight there through the person's own VRChat; no invite is sent.
+    #[test]
+    fn go_there_takes_the_person_directly_and_invites_only_where_it_cannot() {
+        use crate::controller::travel::{tests::Fake, Detour, Went};
+        let make = |world: &str| Request::CreateInstance { world: world.into(), access: orbiters_core::vrchat_api::CreateAccess::FriendsPlus, region: orbiters_core::vrchat_api::InstanceRegion::Eu };
+        let go = |world: &str| Request::GoThere { world: world.into(), instance: MADE_ID.into() };
+        // The person's VRChat owns the link pipe.
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        let world = DIRECT_WORLDS[0];
+        let (_, calls) = ctl.test_vrchat(vec![(200, made_answer(DIRECT_WORLDS[0])), (200, made_answer(DIRECT_WORLDS[0]))]);
+        let pc = fake_pc(&ctl, Fake { running: vec![10], server: Some(10), ..Default::default() });
+        let scope = Scope::of(&ctl.view());
+        ctl.vrchat_data(scope.clone(), make(world)).unwrap();
+        assert!(matches!(ctl.vrchat_data(scope, go(world)).unwrap(), Response::Went(Went::Direct)));
+        assert_eq!(*pc.written.lock().unwrap(), [format!("vrchat://launch?ref=orbiters.cc&id={world}:{MADE_ID}")]);
+        assert!(!calls.lock().unwrap().iter().any(|(_, u)| u.contains("/invite/")), "no invite to accept");
+        // A bridge side session owns the pipe: nothing written there, the invite goes, and says why.
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        let world = DIRECT_WORLDS[1];
+        let (_, calls) = ctl.test_vrchat(vec![(200, made_answer(DIRECT_WORLDS[1])), (200, made_answer(DIRECT_WORLDS[1])), (200, serde_json::json!({}))]);
+        let pc = fake_pc(&ctl, Fake { running: vec![20, 10], server: Some(20), side_args: vec![20], ..Default::default() });
+        let scope = Scope::of(&ctl.view());
+        ctl.vrchat_data(scope.clone(), make(world)).unwrap();
+        assert!(matches!(ctl.vrchat_data(scope, go(world)).unwrap(), Response::Went(Went::Invited(Detour::OtherVrchat))));
+        assert!(pc.written.lock().unwrap().is_empty());
+        assert!(calls.lock().unwrap().last().unwrap().1.contains("/invite/myself/to/"));
+        // The bridge's main VRChat alone: nothing moved, nothing sent.
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        let world = DIRECT_WORLDS[2];
+        let (_, calls) = ctl.test_vrchat(vec![(200, made_answer(DIRECT_WORLDS[2])), (200, made_answer(DIRECT_WORLDS[2]))]);
+        ctl.sides.set_main(Some(30));
+        fake_pc(&ctl, Fake { running: vec![30], server: Some(30), ..Default::default() });
+        let scope = Scope::of(&ctl.view());
+        ctl.vrchat_data(scope.clone(), make(world)).unwrap();
+        assert!(matches!(ctl.vrchat_data(scope, go(world)).unwrap(), Response::WorldError(WorldError::BridgeBusy)));
+        assert!(!calls.lock().unwrap().iter().any(|(_, u)| u.contains("/invite/")));
     }
 
 }

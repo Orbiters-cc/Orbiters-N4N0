@@ -52,7 +52,7 @@ commands/status, not data-request IPC for the other pages.
 | Profile lookup | `source.user(user_id)` | `Result<Option<User>>`; direct lookup when available; no substitute profile otherwise. |
 | Current VRChat user | `source.current_user()` | `Result<Option<User>>`; refreshes the direct session. |
 | Overlay world search | `source.worlds(list, page)` | `Result<FoundWorlds>`; a page of a search, popular, active or favorite worlds through the personal session (kept five minutes), else Orbiters' public `GET /maps/search` / `/maps/featured` (Active and Favorites need the session). `Request::WorldList` (docs/world-view-overlay.md). |
-| Join a world from the overlay | `source.invite_self(world, instance)` | `Result<()>`; an invite to oneself to a public instance, personal session only (`Request::InviteSelf`, checked to be a public instance first). |
+| Go to a world from the overlay | `Request::GoThere` / `Request::InviteSelf` | Directly through the person's own VRChat (its launch link on VRChat's link pipe, `controller/travel.rs`), an invite to oneself only where that cannot be or when asked; listed or newly made instances only (docs/vr1111-instances-api.md). |
 
 Callers should use a fresh source for each operation. Direct 401 or feature revocation falls back;
 rate limits and service errors are surfaced rather than adding load to the shared account. Signing

@@ -152,6 +152,9 @@ pub enum Target {
     Card(usize),
     Previous,
     Next,
+    /// In a headset, the side panel's carousel: the capture before or after this one, as the list has them (K-carousel).
+    FlipPrevious,
+    FlipNext,
     Show,
     Hide,
     Recenter,
@@ -234,6 +237,15 @@ pub enum Action {
     GoTo { world: String, instance: String },
     /// A new instance of `world`, then the invite to it.
     NewInstance { world: String, access: orbiters_core::vrchat_api::CreateAccess, region: orbiters_core::vrchat_api::InstanceRegion },
+}
+
+/// What a stick does where a laser is on a capture's side panel in a headset (K-small-stick, K-carousel): elsewhere it is VRChat's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StickSpot {
+    /// On the capture lying in the panel's hole: the stick moves in it, as walking would.
+    InCapture,
+    /// On the carousel round it, with other captures to go to: the stick flips them, side to side.
+    Flip,
 }
 
 /// How the capture view goes, as the panel shows it.
@@ -541,6 +553,10 @@ pub struct Panel {
     page_at: f64,
     /// When another world was pressed with the side panel open.
     selected_at: f64,
+    /// The carousel flipped (forward or back), and when: the picture comes in from that side.
+    flipped: Option<(bool, f64)>,
+    /// Where the pointer is on the panel (a headset's laser), for what the stick does there.
+    pub pointer: Option<Pos2>,
     /// Something changed: paint again.
     pub dirty: bool,
 }
@@ -662,8 +678,60 @@ pub fn hole_shade(band: usize) -> f32 {
     if band >= HOLE_SHADE_BANDS { 0.0 } else { 0.5 * (1.0 - band as f32 / HOLE_SHADE_BANDS as f32).powi(2) }
 }
 
-pub const VR_HERO: Rect =Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 250.0 } };
-const VR_SMALL_BACK: Rect = Rect { min: Pos2 { x: 836.0, y: 198.0 }, max: Pos2 { x: 990.0, y: 242.0 } };
+/// A capture's picture in a headset's side panel: its whole width (K-carousel kept it: the neighbours peek out over its edges, [`VR_PEEK_NEXT`]).
+pub const VR_HERO: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 250.0 } };
+const VR_SMALL_BACK: Rect = Rect { min: Pos2 { x: 804.0, y: 198.0 }, max: Pos2 { x: 958.0, y: 242.0 } };
+/// The carousel's arrows, the whole height of the picture, each a laser's easy target over its edge; and the neighbour that peeks out under each, as if the row of
+/// captures went on behind the panel.
+const VR_FLIP_PREVIOUS: Rect = Rect { min: Pos2 { x: 452.0, y: 24.0 }, max: Pos2 { x: 506.0, y: 250.0 } };
+const VR_FLIP_NEXT: Rect = Rect { min: Pos2 { x: 958.0, y: 24.0 }, max: Pos2 { x: 1012.0, y: 250.0 } };
+const VR_PEEK_PREVIOUS: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: 496.0, y: 250.0 } };
+const VR_PEEK_NEXT: Rect = Rect { min: Pos2 { x: 968.0, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 250.0 } };
+/// The other layout tried (the owner's choice, K-carousel): the neighbours in gutters beside a narrower picture, which then covers nothing of the capture but
+/// shows it 15% smaller. A developer's switch: `ORBIT_CAROUSEL_GUTTERS`, or [`set_carousel_gutters`] in the screenshots.
+const VR_HERO_NARROW: Rect = Rect { min: Pos2 { x: 504.0, y: 24.0 }, max: Pos2 { x: 960.0, y: 250.0 } };
+const VR_SMALL_BACK_NARROW: Rect = Rect { min: Pos2 { x: 800.0, y: 198.0 }, max: Pos2 { x: 952.0, y: 242.0 } };
+const VR_FLIP_PREVIOUS_GUTTER: Rect = Rect { min: Pos2 { x: 452.0, y: 24.0 }, max: Pos2 { x: 503.0, y: 250.0 } };
+const VR_FLIP_NEXT_GUTTER: Rect = Rect { min: Pos2 { x: 961.0, y: 24.0 }, max: Pos2 { x: 1012.0, y: 250.0 } };
+const VR_PEEK_PREVIOUS_GUTTER: Rect = Rect { min: Pos2 { x: 460.0, y: 40.0 }, max: Pos2 { x: 498.0, y: 234.0 } };
+const VR_PEEK_NEXT_GUTTER: Rect = Rect { min: Pos2 { x: 966.0, y: 40.0 }, max: Pos2 { x: 1004.0, y: 234.0 } };
+/// Where on the side panel a stick flips the captures: the picture, its arrows and the line under it.
+const VR_FLIP_BAND: Rect = Rect { min: Pos2 { x: 452.0, y: 12.0 }, max: Pos2 { x: 1012.0, y: 288.0 } };
+static GUTTERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The carousel's neighbours in gutters beside a narrower picture (true) or over its edges (false, the default).
+pub fn set_carousel_gutters(on: bool) {
+    GUTTERS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn over_edges() -> bool {
+    static FROM_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // A developer's switch, for comparing both layouts in the VR sandbox.
+    !(GUTTERS.load(std::sync::atomic::Ordering::Relaxed) || *FROM_ENV.get_or_init(|| std::env::var_os("ORBIT_CAROUSEL_GUTTERS").is_some())) // i18n: not shown (an environment variable's name)
+}
+
+/// The picture of a capture's side panel in a headset, as the carousel's layout has it.
+pub fn vr_hero() -> Rect {
+    if over_edges() { VR_HERO } else { VR_HERO_NARROW }
+}
+
+fn vr_small_back() -> Rect {
+    if over_edges() { VR_SMALL_BACK } else { VR_SMALL_BACK_NARROW }
+}
+
+/// The carousel's arrow towards the next (`forward`) or the one before, and where that neighbour peeks out.
+fn vr_flip(forward: bool) -> (Rect, Rect) {
+    match (over_edges(), forward) {
+        (true, false) => (VR_FLIP_PREVIOUS, VR_PEEK_PREVIOUS),
+        (true, true) => (VR_FLIP_NEXT, VR_PEEK_NEXT),
+        (false, false) => (VR_FLIP_PREVIOUS_GUTTER, VR_PEEK_PREVIOUS_GUTTER),
+        (false, true) => (VR_FLIP_NEXT_GUTTER, VR_PEEK_NEXT_GUTTER),
+    }
+}
+
+
+/// How long a flip's picture takes to come in.
+const FLIP_SLIDE: f64 = 0.2;
 /// Centred right under the hole, the hand's cue for what is in it (round 15's judges found it far off at the right).
 // A clear line of its own between the hole and the name (the round 19 pre-check saw it on the name).
 const VR_GRIP: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 254.0 }, max: Pos2 { x: SIDE_RIGHT, y: 286.0 } };
@@ -1275,9 +1343,82 @@ impl Panel {
         }
     }
 
+    /// What the carousel flips through, in the list's order (its search, section, labels and sort): the worlds with a 3D capture while the one shown has one, else
+    /// every world of the list.
+    pub fn carousel<'a>(&self, d: &Data<'a>) -> Vec<&'a Entry> {
+        let results = self.results(d);
+        if self.entry(d).is_none_or(|e| e.capture) { results.into_iter().filter(|e| e.capture).collect() } else { results }
+    }
+
+    /// Where the world shown is in the carousel (from 0), how many it has, and the worlds before and after it.
+    pub fn carousel_place<'a>(&self, d: &Data<'a>) -> Option<(usize, usize, Option<&'a Entry>, Option<&'a Entry>)> {
+        if self.page != Page::Detail || !d.status.headset {
+            return None;
+        }
+        let set = self.carousel(d);
+        let at = set.iter().position(|e| Some(e.id) == self.selected)?;
+        Some((at, set.len(), at.checked_sub(1).map(|i| set[i]), set.get(at + 1).copied()))
+    }
+
+    /// The world before or after the one shown, on its side panel: it is shown there at once, around or small as this one was, and the list beside it keeps it in view
+    /// and lit (K-carousel: Enzo, "more frictionless and more straight forward to go through all the 3D capture pictures").
+    fn flip(&mut self, d: &Data, forward: bool, time: f64) -> Vec<Action> {
+        let Some((_, _, before, after)) = self.carousel_place(d) else { return Vec::new() };
+        let Some(entry) = (if forward { after } else { before }) else { return Vec::new() };
+        self.selected_at = time;
+        self.flipped = Some((forward, time));
+        self.select(entry.id);
+        if let Some(i) = self.results(d).iter().position(|e| e.id == entry.id) {
+            self.reveal(i, d.status.headset);
+        }
+        let status = d.status;
+        if !entry.capture || status.current == Some(entry.id) && (status.shown || status.stage.is_some()) {
+            Vec::new()
+        } else {
+            vec![Action::Show(entry.id)]
+        }
+    }
+
+    /// The list beside the side panel scrolled just enough for result `i` to be in view, as the carousel goes past its end.
+    fn reveal(&mut self, i: usize, headset: bool) {
+        let shape = self.list_shape(headset);
+        let rect = if headset { vr_card_rect(i) } else { side_card_rect_flowing(i) };
+        let (top, bottom) = (rect.min.y - self.vr_scroll, rect.max.y - self.vr_scroll);
+        if top < shape.top {
+            self.vr_throw = 0.0;
+            self.vr_scroll_to(self.vr_scroll - (shape.top - top) - 8.0);
+        } else if bottom > shape.bottom {
+            self.vr_throw = 0.0;
+            self.vr_scroll_to(self.vr_scroll + (bottom - shape.bottom) + 8.0);
+        }
+    }
+
+    /// What a stick does with a laser at (x, y) on this page ([`StickSpot`]).
+    pub fn stick_spot(&self, d: &Data, x: f32, y: f32) -> Option<StickSpot> {
+        let at = pos2(x, y);
+        // Over the picture's edges, its arrows are the carousel's.
+        let on_arrow = over_edges() && self.carousel_place(d).is_some_and(|(_, _, b, a)| (b.is_some() && vr_flip(false).0.contains(at)) || (a.is_some() && vr_flip(true).0.contains(at)));
+        if !on_arrow && self.hole(d.status).is_some_and(|h| h.contains(at)) {
+            return Some(StickSpot::InCapture);
+        }
+        let flips = self.carousel_place(d).is_some_and(|(_, n, _, _)| n > 1);
+        (flips && VR_FLIP_BAND.contains(at)).then_some(StickSpot::Flip)
+    }
+
+    /// The carousel was last flipped back.
+    pub fn flipped_back(&self) -> bool {
+        self.flipped.is_some_and(|(forward, _)| !forward)
+    }
+
+    /// The stick pushed to one side on the carousel: the next or the one before.
+    pub fn flip_by_stick(&mut self, d: &Data, forward: bool, time: f64) -> Vec<Action> {
+        self.dirty = true;
+        self.flip(d, forward, time)
+    }
+
     /// Where a capture standing small may lie on this page: the picture of its world's side panel.
     pub fn small_place(&self, status: &Status) -> Option<Rect> {
-        (self.page == Page::Detail && status.small && status.current.is_some() && status.current == self.selected).then_some(if status.headset { VR_HERO } else { SIDE_HERO })
+        (self.page == Page::Detail && status.small && status.current.is_some() && status.current == self.selected).then_some(if status.headset { vr_hero() } else { SIDE_HERO })
     }
 
     /// The hole it is seen through, when it lies there now.
@@ -1341,7 +1482,7 @@ impl Panel {
                     out.push((Target::Show, if go_ok { VR_SHOW } else { VR_SHOW_WIDE }));
                     out.push((Target::ShowSmall, if go_ok { VR_SHOW_SMALL } else { VR_SHOW_SMALL_WIDE }));
                     if status.small && status.small_taken {
-                        out.push((Target::SmallBack, VR_SMALL_BACK));
+                        out.push((Target::SmallBack, vr_small_back()));
                     }
                 } else {
                     out.push((Target::Show, if go_ok { VR_SHOW } else { VR_SHOW_WIDE }));
@@ -1379,6 +1520,15 @@ impl Panel {
                 }
                 if !d.others(e).is_empty() {
                     out.push((Target::Other, if vr { VR_OTHER } else { OTHER }));
+                }
+                // The carousel's way to the capture before and after this one, where there is one.
+                if let Some((_, _, before, after)) = self.carousel_place(d) {
+                    if before.is_some() {
+                        out.push((Target::FlipPrevious, vr_flip(false).0));
+                    }
+                    if after.is_some() {
+                        out.push((Target::FlipNext, vr_flip(true).0));
+                    }
                 }
             }
             Page::Filter | Page::Labels | Page::Comments | Page::Compose(_) | Page::Pictures => self.page_targets(d, &mut out),
@@ -1520,6 +1670,7 @@ impl Panel {
                 self.page_at = time;
                 Vec::new()
             }
+            Target::FlipPrevious | Target::FlipNext => self.flip(d, target == Target::FlipNext, time),
             Target::Card(i) => {
                 let results = self.results(d);
                 let Some(entry) = results.get(i) else { return Vec::new() };
@@ -2201,6 +2352,12 @@ impl Panel {
         // Another world's, coming in at once.
         let rest = opening.min(ease_out((time - self.selected_at) / 0.16).max(0.25));
         let current = status.current == Some(entry.id);
+        // The carousel (K-carousel): the captures before and after this one peek out on either side, each under its arrow, and the line under the picture says how
+        // far along the list this one is and what the stick does where the laser is.
+        let place = self.carousel_place(d);
+        if vr {
+            self.carousel_line(p, d, hole, place, opening);
+        }
         if let Some(h) = hole {
             // Through the hole: the capture. What says it can be taken lies on it, and brightens as a hand comes near.
             let near = status.small_near;
@@ -2219,24 +2376,18 @@ impl Panel {
                 let band = Rect::from_min_size(pos2(h.left(), h.top() + i as f32 * HOLE_SHADE_BAND), vec2(h.width(), HOLE_SHADE_BAND));
                 p.rect_filled(band, CornerRadius::ZERO, theme::black(hole_shade(i)));
             }
-            let words = if near { tr("Close your grip") } else { tr("Grip to take it") };
-            // Right under the hole, off the capture, and with nothing around it: this is done with a hand, and is no button for a laser.
-            let ink = if near { orbit_look::accent() } else { theme::FG };
-            let galley = p.layout_job(orbit_look::txt(words, 21.0).weight(weight::BOLD).color(ink).job(f32::INFINITY));
-            // And, quieter, what comes after: the panel promises the view in a hand (round 19's judges).
-            let then = (!near).then(|| p.layout_job(orbit_look::txt(format!("\u{b7}  {}", tr("then your stick zooms it")), 18.5).weight(weight::MEDIUM).color(theme::FG_3).job(f32::INFINITY)));
-            let then_wide = then.as_ref().map_or(0.0, |g| g.size().x + 10.0);
-            let left = VR_GRIP.center().x - (galley.size().x + 34.0 + then_wide) / 2.0;
-            widgets::icon(p, pos2(left + 13.0, VR_GRIP.center().y), icons::HAND_GRABBING, 27.0, orbit_look::accent());
-            let words_wide = galley.size().x;
-            p.galley(pos2(left + 34.0, VR_GRIP.center().y - galley.size().y / 2.0), galley, ink);
-            if let Some(then) = then {
-                p.galley(pos2(left + 34.0 + words_wide + 10.0, VR_GRIP.center().y - then.size().y / 2.0), then, theme::FG_3);
-            }
         } else {
-            let hero = if vr { VR_HERO } else { SIDE_HERO };
-            let small_back = if vr { VR_SMALL_BACK } else { SMALL_BACK };
-            picture(p, hero, (d.thumb)(entry), &entry.world_id, CornerRadius::same(14), rest);
+            let hero = if vr { vr_hero() } else { SIDE_HERO };
+            let small_back = if vr { vr_small_back() } else { SMALL_BACK };
+            // Flipped to: it comes in from the side it was on, inside its frame, over the one it replaces.
+            match self.flipped.filter(|(_, at)| self.moves && time - at < FLIP_SLIDE) {
+                Some((forward, at)) => {
+                    let along = 1.0 - ease_out((time - at) / FLIP_SLIDE);
+                    let by = along * hero.width() * 0.35 * if forward { 1.0 } else { -1.0 };
+                    picture(&p.with_clip_rect(hero), hero.translate(vec2(by, 0.0)), (d.thumb)(entry), &entry.world_id, CornerRadius::same(14), rest.max(1.0 - along));
+                }
+                None => picture(p, hero, (d.thumb)(entry), &entry.world_id, CornerRadius::same(14), rest),
+            }
             if let Some(live) = self.live.as_ref().filter(|l| l.id == entry.id && !vr) {
                 draw_live(p, hero, live, None);
                 if live.picture.is_some() {
@@ -2257,9 +2408,11 @@ impl Panel {
                     (theme::WARN, status.stage.clone().unwrap_or_else(|| tr("Getting ready").into()))
                 };
                 let pulse = if status.shown && status.stage.is_none() { 1.0 } else { 0.55 + 0.45 * ((time * 4.0).sin() as f32 * 0.5 + 0.5) };
-                p.circle_filled(pos2(hero.min.x + 20.0, foot.center().y), 5.0, fade(dot, rest * pulse));
-                let room = if taken { small_back.min.x - hero.min.x - 44.0 } else { hero.width() - 44.0 };
-                text_cut(p, pos2(hero.min.x + 34.0, foot.center().y), room, orbit_look::txt(label, 15.0).weight(weight::MEDIUM).color(fade(theme::FG, rest)));
+                // Clear of the carousel's neighbours over the picture's edges.
+                let inset = if vr && over_edges() { 36.0 } else { 0.0 };
+                p.circle_filled(pos2(hero.min.x + inset + 20.0, foot.center().y), 5.0, fade(dot, rest * pulse));
+                let room = if taken { small_back.min.x - hero.min.x - inset - 44.0 } else { hero.width() - 2.0 * inset - 44.0 };
+                text_cut(p, pos2(hero.min.x + inset + 34.0, foot.center().y), room, orbit_look::txt(label, 15.0).weight(weight::MEDIUM).color(fade(theme::FG, rest)));
                 if let Some(f) = status.download {
                     let track = Rect::from_min_size(pos2(hero.min.x, hero.max.y - 4.0), vec2(hero.width(), 4.0));
                     p.rect_filled(track, CornerRadius::same(2), fade(theme::white(0.12), rest));
@@ -2272,7 +2425,28 @@ impl Panel {
                     (None, true) => tr("Its 3D preview is on orbiters.cc").to_string(),
                     (None, false) => tr("No 3D capture of it yet").to_string(),
                 };
-                text_cut(p, pos2(hero.min.x + 16.0, foot.center().y), hero.width() - 32.0, orbit_look::txt(line, 15.0).color(fade(theme::FG_2, rest)));
+                let inset = if vr && over_edges() { 36.0 } else { 0.0 };
+                text_cut(p, pos2(hero.min.x + inset + 16.0, foot.center().y), hero.width() - 2.0 * inset - 32.0, orbit_look::txt(line, 15.0).color(fade(theme::FG_2, rest)));
+            }
+        }
+        // Over the picture's edges, over what lies on it (its frame's corners), as if the next ones lay on the panel.
+        if let Some((_, _, before, after)) = place {
+            for (neighbour, peek, target, glyph, forward) in [(before, vr_flip(false).1, Target::FlipPrevious, icons::CARET_LEFT, false), (after, vr_flip(true).1, Target::FlipNext, icons::CARET_RIGHT, true)] {
+                let Some(n) = neighbour else { continue };
+                let (h, pr) = state(target);
+                let shown = opening * if h { 1.0 } else { 0.8 };
+                // Over the picture's edge it follows the hole's rounded corners on its outer side.
+                let corner = match (over_edges(), forward) {
+                    (false, _) => CornerRadius::same(10),
+                    (true, false) => CornerRadius { nw: 14, sw: 14, ne: 0, se: 0 },
+                    (true, true) => CornerRadius { nw: 0, sw: 0, ne: 14, se: 14 },
+                };
+                peek_picture(p, peek, (d.thumb)(n), &n.world_id, !forward, shown, corner);
+                p.rect_filled(peek, corner, theme::black(if h { 0.2 } else { 0.45 } * opening));
+                let r = if pr { 17.0 } else { 19.0 };
+                p.circle_filled(peek.center(), r + 1.5, theme::black(0.35 * opening));
+                p.circle_filled(peek.center(), r, fade(if h { orbit_look::accent() } else { RAISED2 }, opening));
+                widgets::icon(p, peek.center(), glyph, 22.0, fade(if h { orbit_look::on_accent() } else { theme::FG }, opening));
             }
         }
         // Its way out, on its edge: it slides away to the right, so it says so. An X here, just under the sheet's own, was one close too many (a judge's).
@@ -2424,6 +2598,73 @@ impl Panel {
             p.galley(pos2(x, SIDE_SAYS), p.layout_job(job), theme::WARN);
         }
     }
+}
+
+impl Panel {
+    /// The line under a capture's picture in a headset, beside its carousel: what each control does here, lit where the laser is, and how far along the list
+    /// this one is. Words with nothing round them: this is done with a hand, and is no button for a laser (as before).
+    fn carousel_line(&self, p: &Painter, d: &Data, hole: Option<Rect>, place: Option<(usize, usize, Option<&Entry>, Option<&Entry>)>, alpha: f32) {
+        let y = VR_GRIP.center().y;
+        let mut right = VR_GRIP.max.x;
+        if let Some((at, n, _, _)) = place.filter(|(_, n, _, _)| *n > 1) {
+            let more = if d.status.list.more { "+" } else { "" };
+            let galley = p.layout_job(orbit_look::txt(tr!("{at} of {count}", at = at + 1, count = format!("{n}{more}")), 17.0).weight(weight::MEDIUM).color(fade(theme::FG_3, alpha)).job(f32::INFINITY));
+            right -= galley.size().x;
+            p.galley(pos2(right, y - galley.size().y / 2.0), galley, theme::FG_3);
+            right -= 18.0;
+        }
+        // What the stick does where the laser is, by the same rule as the stick itself.
+        let spot = self.pointer.and_then(|at| self.stick_spot(d, at.x, at.y));
+        let on_capture = spot == Some(StickSpot::InCapture);
+        let on_band = spot == Some(StickSpot::Flip);
+        let near = d.status.small_near;
+        // Each part: its icon, its words, lit or not.
+        let mut parts: Vec<(&str, &str, bool)> = Vec::new();
+        if on_band {
+            parts.push((icons::CARET_RIGHT, tr("Stick left or right: another capture"), true));
+        } else if hole.is_some() {
+            parts.push((icons::ARROWS_OUT, tr("Stick: move around"), on_capture && !near));
+            parts.push((icons::HAND_GRABBING, if near { tr("Close your grip") } else { tr("Grip: take it") }, near));
+        }
+        let mut x = VR_LEFT;
+        for (i, (glyph, words, lit)) in parts.into_iter().enumerate() {
+            if i > 0 {
+                text(p, pos2(x + 2.0, y), Align2::LEFT_CENTER, orbit_look::txt("\u{b7}", 18.0).color(fade(theme::FG_3, alpha)));
+                x += 16.0;
+            }
+            let ink = fade(if lit { orbit_look::accent() } else { theme::FG_2 }, alpha);
+            if x + 30.0 >= right {
+                break;
+            }
+            // Side to side: both ways.
+            let icon_w = if glyph == icons::CARET_RIGHT {
+                widgets::icon(p, pos2(x + 8.0, y), icons::CARET_LEFT, 20.0, ink);
+                widgets::icon(p, pos2(x + 22.0, y), icons::CARET_RIGHT, 20.0, ink);
+                34.0
+            } else {
+                widgets::icon(p, pos2(x + 12.0, y), glyph, 24.0, ink);
+                30.0
+            };
+            let galley = p.layout_job(orbit_look::txt(words, 19.0).weight(if lit { weight::BOLD } else { weight::SEMIBOLD }).color(ink).job_truncated(right - x - icon_w));
+            let wide = galley.size().x;
+            p.galley(pos2(x + icon_w, y - galley.size().y / 2.0), galley, ink);
+            x += icon_w + wide + 8.0;
+        }
+    }
+}
+
+/// A neighbour peeking out of the carousel's gutter: the edge of its picture nearest the one shown (`right_edge`: its right one), as if the row of them went on
+/// behind the panel.
+fn peek_picture(p: &Painter, rect: Rect, texture: Option<TextureId>, world_id: &str, right_edge: bool, alpha: f32, corner: CornerRadius) {
+    let Some(id) = texture else {
+        let hue = world_id.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;
+        p.rect_filled(rect, corner, fade(hsv(hue as f32 / 360.0, 0.45, 0.42), alpha));
+        return;
+    };
+    let u = (rect.width() / (rect.height() * 16.0 / 9.0)).min(1.0);
+    let uv = if right_edge { Rect::from_min_max(pos2(1.0 - u, 0.0), pos2(1.0, 1.0)) } else { Rect::from_min_max(pos2(0.0, 0.0), pos2(u, 1.0)) };
+    super::super::orbit::panels::keep_colour(p, rect);
+    p.add(RectShape::filled(rect, corner, fade(Color32::WHITE, alpha)).with_texture(id, uv));
 }
 
 /// The search beside the side panel: from the list's left edge to its right one on a sheet (round 18's judges: it shared neither), after the Back button where there is one.
@@ -3025,6 +3266,129 @@ mod tests {
     }}"#;
     const HOME: &str = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
 
+    /// `n` captures, ids 1 to n, newest first as the listing has them.
+    fn many(n: u64) -> Vec<Entry> {
+        let previews: Vec<String> = (1..=n)
+            .map(|i| format!(r#"{{"slot":{i},"key":{i},"id":{i},"worldId":"wrld_00000000-0000-4000-8000-{i:012}","name":"World {i}","author":"a","uploader":"b","view":{{"position":[0,1,0],"target":[0,1,1]}}}}"#))
+            .collect();
+        super::super::catalog::parse(&format!(r#"{{"previews":[{}],"feedback":{{}}}}"#, previews.join(","))).unwrap()
+    }
+
+    /// K-carousel (Enzo, 2026-11-15: "more frictionless and more straight forward to go through all the 3D capture pictures. Maybe if it could be a caroussel"):
+    /// from a capture's side panel, the one after and the one before are a press away, in the list's order, skipping worlds without a capture, and each is
+    /// shown as it comes, small as the one before was. Nothing past either end.
+    #[test]
+    fn the_carousel_goes_through_the_captures_in_the_lists_order() {
+        let mut entries = super::super::catalog::parse(LISTING).unwrap();
+        let found = orbiters_core::maps::FoundWorld { world: orbiters_core::maps::World { world_id: "wrld_no_capture".into(), name: "Plain".into(), ..Default::default() }, ..Default::default() };
+        entries.insert(1, Entry::world(&found, None, Default::default()));
+        let (facts, feedback) = (HashMap::new(), FeedbackView::default());
+        let status = Status { headset: true, current: Some(1), shown: true, small: true, small_docked: true, ..Default::default() };
+        let d = data(&entries, &status, &feedback, &facts);
+        let mut panel = Panel { page: Page::Detail, selected: Some(1), ..Default::default() };
+        let order: Vec<u64> = panel.carousel(&d).iter().map(|e| e.id).collect();
+        assert_eq!(order, vec![1, 2, 3, 4], "the captures only, as listed");
+        let has = |panel: &Panel, t: Target| panel.targets(&d).iter().any(|(x, _)| *x == t);
+        assert!(!has(&panel, Target::FlipPrevious) && has(&panel, Target::FlipNext), "the first: nothing before it");
+        assert_eq!(panel.press(Target::FlipNext, &d, 1.0), vec![Action::Show(2)]);
+        assert_eq!(panel.selected, Some(2));
+        assert_eq!(panel.page, Page::Detail, "still its side panel");
+        assert!(has(&panel, Target::FlipPrevious) && has(&panel, Target::FlipNext));
+        assert_eq!(panel.press(Target::FlipNext, &d, 2.0), vec![Action::Show(3)]);
+        assert_eq!(panel.press(Target::FlipNext, &d, 3.0), vec![Action::Show(4)]);
+        assert!(!has(&panel, Target::FlipNext), "the last: nothing after it");
+        assert_eq!(panel.flip_by_stick(&d, true, 4.0), Vec::new(), "the stick past the end does nothing");
+        assert_eq!(panel.selected, Some(4));
+        assert_eq!(panel.flip_by_stick(&d, false, 5.0), vec![Action::Show(3)]);
+        assert_eq!(panel.press(Target::FlipPrevious, &d, 6.0), vec![Action::Show(2)]);
+        // Back to the one showing: nothing to ask, it is there.
+        assert_eq!(panel.press(Target::FlipPrevious, &d, 7.0), Vec::new());
+        assert_eq!(panel.selected, Some(1));
+        // Where it is: first of four, its neighbours.
+        let (at, n, before, after) = panel.carousel_place(&d).unwrap();
+        assert_eq!((at, n, before.map(|e| e.id), after.map(|e| e.id)), (0, 4, None, Some(2)));
+        // On a screen there is no carousel.
+        let screen = Status { headset: false, ..status.clone() };
+        assert!(panel.carousel_place(&data(&entries, &screen, &feedback, &facts)).is_none());
+    }
+
+    /// K-carousel: a flip shows the next one's picture at once and never the capture leaving through an open hole: the hole closes the moment another is chosen
+    /// (its still covers it) and opens again only once that one shows. The arrows are tall, easy targets beside the hole and never over it.
+    #[test]
+    fn a_flip_shows_its_picture_at_once_and_never_an_empty_hole() {
+        let entries = super::super::catalog::parse(LISTING).unwrap();
+        let (facts, feedback) = (HashMap::new(), FeedbackView::default());
+        let shown = Status { headset: true, current: Some(2), shown: true, small: true, small_docked: true, ..Default::default() };
+        let mut panel = Panel { page: Page::Detail, selected: Some(2), ..Default::default() };
+        assert_eq!(panel.hole(&shown), Some(VR_HERO));
+        panel.press(Target::FlipNext, &data(&entries, &shown, &feedback, &facts), 1.0);
+        assert_eq!(panel.hole(&shown), None, "the old capture is not seen under the new name: its still covers it");
+        let opening = Status { current: Some(3), shown: false, stage: Some("Opening it".into()), ..shown.clone() };
+        assert_eq!(panel.hole(&opening), None);
+        assert_eq!(panel.hole(&Status { current: Some(3), ..shown.clone() }), Some(VR_HERO), "open again once it shows");
+        for t in [VR_FLIP_PREVIOUS, VR_FLIP_NEXT] {
+            assert!(VR_SIDE.contains_rect(t), "{t:?}");
+            assert!(t.intersect(VR_HERO).width() <= 42.0, "over the picture's edge only: {t:?}");
+            assert!(t.height() >= VR_HERO.height() && t.width() >= 50.0, "the whole height of the picture: {t:?}");
+        }
+        for peek in [VR_PEEK_PREVIOUS, VR_PEEK_NEXT] {
+            assert!(peek.width() <= 32.0 && VR_HERO.contains_rect(peek), "a neighbour hides no more than its edge: {peek:?}");
+        }
+    }
+
+    /// K-small-stick and K-carousel: where the laser is says what the stick does. On the capture in the hole it moves in it; on the picture's band round it, with
+    /// other captures, it flips them; on the buttons, the list or a world alone it is VRChat's.
+    #[test]
+    fn where_the_laser_is_says_what_the_stick_does() {
+        let entries = super::super::catalog::parse(LISTING).unwrap();
+        let (facts, feedback) = (HashMap::new(), FeedbackView::default());
+        let status = Status { headset: true, current: Some(2), shown: true, small: true, small_docked: true, ..Default::default() };
+        let d = data(&entries, &status, &feedback, &facts);
+        let panel = Panel { page: Page::Detail, selected: Some(2), ..Default::default() };
+        let at = |p: Pos2| panel.stick_spot(&d, p.x, p.y);
+        assert_eq!(at(VR_HERO.center()), Some(StickSpot::InCapture));
+        assert_eq!(at(VR_FLIP_NEXT.center()), Some(StickSpot::Flip), "the arrow over the picture's edge flips");
+        assert_eq!(at(pos2(VR_HERO.max.x - 60.0, VR_HERO.center().y)), Some(StickSpot::InCapture), "just inside it, it moves");
+        assert_eq!(at(VR_GRIP.center()), Some(StickSpot::Flip));
+        assert_eq!(at(VR_SHOW.center()), None, "the buttons: VRChat's");
+        assert_eq!(at(pos2(200.0, 300.0)), None, "the list: VRChat's");
+        // Still opening: the picture flips too, nothing moves in it yet.
+        let opening = Status { shown: false, stage: Some("Opening it".into()), ..status.clone() };
+        assert_eq!(panel.stick_spot(&data(&entries, &opening, &feedback, &facts), VR_HERO.center().x, VR_HERO.center().y), Some(StickSpot::Flip));
+        // One capture alone: nothing to flip to.
+        let one = &entries[1..2];
+        assert_eq!(panel.stick_spot(&data(one, &opening, &feedback, &facts), VR_HERO.center().x, VR_HERO.center().y), None);
+        // Another page: nothing.
+        let list = Panel { page: Page::Browse, ..panel.clone() };
+        assert_eq!(list.stick_spot(&d, VR_HERO.center().x, VR_HERO.center().y), None);
+    }
+
+    /// K-carousel: the list beside the side panel keeps in step: flipped past what shows of it, it scrolls just enough for the one shown, lit, to be in view.
+    #[test]
+    fn the_list_keeps_in_step_with_the_carousel() {
+        let entries = many(30);
+        let (facts, feedback) = (HashMap::new(), FeedbackView::default());
+        let status = Status { headset: true, ..Default::default() };
+        let d = data(&entries, &status, &feedback, &facts);
+        let mut panel = Panel { page: Page::Detail, selected: Some(1), ..Default::default() };
+        panel.targets(&d);
+        assert_eq!(panel.vr_scroll, 0.0);
+        let shape = panel.list_shape(true);
+        for n in 1..20u64 {
+            panel.press(Target::FlipNext, &d, n as f64);
+            assert_eq!(panel.selected, Some(n + 1));
+            let card = vr_card_rect(n as usize).translate(vec2(0.0, -panel.vr_scroll));
+            assert!(card.min.y >= shape.top - 0.5 && card.max.y <= shape.bottom + 0.5, "flip {n}: {card:?} out of {}..{}", shape.top, shape.bottom);
+        }
+        assert!(panel.vr_scroll > 0.0);
+        // And back up.
+        for _ in 0..19 {
+            panel.press(Target::FlipPrevious, &d, 30.0);
+        }
+        assert_eq!(panel.selected, Some(1));
+        assert!(vr_card_rect(0).translate(vec2(0.0, -panel.vr_scroll)).min.y >= shape.top - 0.5);
+    }
+
     fn data<'a>(entries: &'a [Entry], status: &'a Status, feedback: &'a FeedbackView, facts: &'a HashMap<String, Facts>) -> Data<'a> {
         Data { entries, picked: None, status, feedback, facts, thumb: &|_| None, picture: &|_, _| None, now: 0 }
     }
@@ -3134,6 +3498,11 @@ mod tests {
         let targets = panel.targets(&d);
         for (t, r) in &targets {
             assert!(!matches!(t, Target::Back | Target::Field | Target::Section(_) | Target::Sort(_) | Target::Filter), "{t:?}");
+            // The carousel's arrows lie over its edges (K-carousel), and only there.
+            if matches!(t, Target::FlipPrevious | Target::FlipNext) {
+                assert!(r.intersect(VR_HERO).width() <= 42.0, "{t:?} {r:?}");
+                continue;
+            }
             assert!(!r.intersects(VR_HERO), "{t:?} over the hole");
             if matches!(t, Target::Card(_)) {
                 assert!(r.max.x <= VR_SIDE.min.x && r.max.y <= 576.0, "{r:?}");

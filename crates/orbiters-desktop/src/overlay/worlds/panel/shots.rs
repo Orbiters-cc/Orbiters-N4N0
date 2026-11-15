@@ -335,6 +335,33 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     paint("small-docked", &entries, &detail, &docked, &feedback, 5.0)?;
     paint("small-near", &entries, &detail, &Status { small_near: true, ..docked.clone() }, &feedback, 5.0)?;
     paint("small-taken", &entries, &detail, &Status { small_docked: false, small_taken: true, ..docked.clone() }, &feedback, 5.0)?;
+    // K-carousel and K-small-stick, in a headset: a capture of the middle of the list, its neighbours peeking out; the laser on the capture (the stick moves in
+    // it), on the carousel (the stick flips), on the arrow; the first of the list; a flip on its way (the next one's picture coming in, then waiting for its 3D).
+    let vr_detail = Panel { on_sheet: true, page: Page::Detail, selected: Some(12), ..base.clone() };
+    let mut middle = Status { current: Some(12), shown: true, small: true, small_docked: true, headset: true, ..Default::default() };
+    middle.list.vrchat = true;
+    paint("carousel", &entries, &vr_detail, &middle, &feedback, 5.0)?;
+    paint("carousel-pointing-capture", &entries, &Panel { pointer: Some(super::VR_HERO.center()), ..vr_detail.clone() }, &middle, &feedback, 5.0)?;
+    paint("carousel-pointing-band", &entries, &Panel { pointer: Some(egui::pos2(985.0, 140.0)), hover: Some(Target::FlipNext), ..vr_detail.clone() }, &middle, &feedback, 5.0)?;
+    paint("carousel-near", &entries, &vr_detail, &Status { small_near: true, ..middle.clone() }, &feedback, 5.0)?;
+    let first = Panel { selected: Some(10), ..vr_detail.clone() };
+    paint("carousel-first", &entries, &first, &Status { current: Some(10), ..middle.clone() }, &feedback, 5.0)?;
+    let mut flipping = Panel { moves: true, ..vr_detail.clone() };
+    {
+        let d = Data { entries: &entries, picked: None, status: &middle, feedback: &feedback, facts: &facts, thumb: &thumb, picture: &picture, now };
+        flipping.press(Target::FlipNext, &d, 20.0);
+        flipping.pressed = None;
+    }
+    let opening = Status { current: Some(13), stage: Some(tr("Opening it").into()), shown: false, ..middle.clone() };
+    paint("carousel-flip-1", &entries, &flipping, &opening, &feedback, 20.06)?;
+    paint("carousel-flip-2", &entries, &flipping, &opening, &feedback, 20.5)?;
+    paint("carousel-flip-3d", &entries, &flipping, &Status { current: Some(13), ..middle.clone() }, &feedback, 21.0)?;
+    // The other layout, for the owner to compare: neighbours in gutters beside a narrower picture.
+    super::set_carousel_gutters(true);
+    paint("carousel-gutters", &entries, &vr_detail, &middle, &feedback, 5.0)?;
+    paint("carousel-gutters-pointing-band", &entries, &Panel { pointer: Some(egui::pos2(985.0, 140.0)), hover: Some(Target::FlipNext), ..vr_detail.clone() }, &middle, &feedback, 5.0)?;
+    paint("carousel-gutters-first", &entries, &first, &Status { current: Some(10), ..middle.clone() }, &feedback, 5.0)?;
+    super::set_carousel_gutters(false);
     paint("review-signed-in", &entries, &detail, &docked, &feedback, 5.0)?;
     let mut signed_out_review = docked.clone(); signed_out_review.list.vrchat = false;
     paint("review-signed-out", &entries, &detail, &signed_out_review, &feedback, 5.0)?;

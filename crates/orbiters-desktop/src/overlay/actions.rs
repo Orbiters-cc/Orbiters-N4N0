@@ -62,11 +62,13 @@ const ACTIONS: &str = r#"{
     { "name": "/actions/orbit_block/in/pull_left", "type": "vector1" },
     { "name": "/actions/orbit_block/in/pull_right", "type": "vector1" },
     { "name": "/actions/grip/in/value_left", "type": "vector1" },
-    { "name": "/actions/grip/in/value_right", "type": "vector1" }
+    { "name": "/actions/grip/in/value_right", "type": "vector1" },
+    { "name": "/actions/small_view/in/stick_left", "type": "vector2" },
+    { "name": "/actions/small_view/in/stick_right", "type": "vector2" }
   ],
   "action_sets": [ { "name": "/actions/walk", "usage": "leftright" }, { "name": "/actions/menu", "usage": "leftright" }, { "name": "/actions/avatar", "usage": "leftright" },
     { "name": "/actions/panel", "usage": "leftright" }, { "name": "/actions/orbit", "usage": "leftright" }, { "name": "/actions/orbit_block", "usage": "leftright" },
-    { "name": "/actions/grip", "usage": "leftright" } ],
+    { "name": "/actions/grip", "usage": "leftright" }, { "name": "/actions/small_view", "usage": "leftright" } ],
   "localization": [ { "language_tag": "en_US", "/actions/walk": "Walk boost",
     "/actions/walk/in/move_left": "Walking stick (left hand)", "/actions/walk/in/move_right": "Walking stick (right hand)",
     "/actions/menu": "N4N0's menu", "/actions/menu/in/open": "Open N4N0's menu (a press)",
@@ -90,7 +92,9 @@ const ACTIONS: &str = r#"{
     "/actions/orbit_block/in/trigger_left": "Press on a panel (left hand)", "/actions/orbit_block/in/trigger_right": "Press on a panel (right hand)",
     "/actions/orbit_block/in/pull_left": "Trigger's pull (left hand)", "/actions/orbit_block/in/pull_right": "Trigger's pull (right hand)",
     "/actions/grip": "How far each grip is pulled (to grip VRChat's camera as VRChat does)",
-    "/actions/grip/in/value_left": "Grip's pull (left hand)", "/actions/grip/in/value_right": "Grip's pull (right hand)" } ]
+    "/actions/grip/in/value_left": "Grip's pull (left hand)", "/actions/grip/in/value_right": "Grip's pull (right hand)",
+    "/actions/small_view": "Stick on a 3D capture or its panel (taken from VRChat while pointing at them)",
+    "/actions/small_view/in/stick_left": "Move in a 3D capture, flip captures (left hand)", "/actions/small_view/in/stick_right": "Move in a 3D capture, flip captures (right hand)" } ]
 }"#;
 
 /// How each controller opens N4N0's menu by default (its left hand), never with a stick's click: clicking a stick
@@ -154,9 +158,10 @@ fn bindings(controller: &str, input: &str, mode: &str) -> String {
     let orbit = orbit_bindings(controller);
     let orbit_block = orbit_block_bindings();
     let grip = grip_bindings();
+    let small_view = small_view_bindings(input, mode);
     format!(
         r#"{{ "controller_type": "{controller}", "name": "Orbiters", "description": "Walk boost's sticks; {opens} N4N0's menu; the triggers press on N4N0's screen and the Orbiters panel; the touchpads and sticks reach the avatar; the grips move the Orbiters panel",
-  "bindings": {{ "/actions/walk": {{ "sources": [ {}, {} ] }}, "/actions/menu": {{ "sources": [ {menu}, {}, {} ] }}, "/actions/avatar": {{ "sources": [ {avatar} ] }}, "/actions/panel": {panel}, "/actions/orbit": {orbit}, "/actions/orbit_block": {orbit_block}, "/actions/grip": {grip} }} }}"#,
+  "bindings": {{ "/actions/walk": {{ "sources": [ {}, {} ] }}, "/actions/menu": {{ "sources": [ {menu}, {}, {} ] }}, "/actions/avatar": {{ "sources": [ {avatar} ] }}, "/actions/panel": {panel}, "/actions/orbit": {orbit}, "/actions/orbit_block": {orbit_block}, "/actions/grip": {grip}, "/actions/small_view": {small_view} }} }}"#,
         source("left"),
         source("right"),
         press("left"),
@@ -208,6 +213,16 @@ fn orbit_bindings(controller: &str) -> String {
 fn orbit_block_bindings() -> String {
     let source = |hand: &str| {
         format!(r#"{{ "path": "/user/hand/{hand}/input/trigger", "mode": "trigger", "inputs": {{ "click": {{ "output": "/actions/orbit_block/in/trigger_{hand}" }}, "pull": {{ "output": "/actions/orbit_block/in/pull_{hand}" }} }} }}"#)
+    };
+    format!(r#"{{ "sources": [ {}, {} ] }}"#, source("left"), source("right"))
+}
+
+/// Each hand's stick (a wand's trackpad), whole: this set made active at SteamVR's overlay priority takes that stick from VRChat while it moves in a 3D
+/// capture or flips captures ([`StickTake`]), so the person neither walks nor turns in VRChat meanwhile. A set of its own: a saved binding that predates it
+/// gets it whole ([`keep_saved_bindings_whole`] adds sets, never actions to a set).
+fn small_view_bindings(input: &str, mode: &str) -> String {
+    let source = |hand: &str| {
+        format!(r#"{{ "path": "/user/hand/{hand}/input/{input}", "mode": "{mode}", "inputs": {{ "position": {{ "output": "/actions/small_view/in/stick_{hand}" }} }} }}"#)
     };
     format!(r#"{{ "sources": [ {}, {} ] }}"#, source("left"), source("right"))
 }
@@ -388,6 +403,10 @@ pub struct Actions {
     grip: Option<[ActionHandle; 2]>,
     /// Hands whose trigger is taken from VRChat from the next read on.
     blocked: [bool; 2],
+    /// The set that takes a stick from VRChat, and each hand's stick in it.
+    small_view: Option<(ActionSetHandle, [ActionHandle; 2])>,
+    /// Hands whose stick is taken from VRChat from the next read on.
+    sticks_taken: [bool; 2],
     sets: Vec<ActionSetHandle>,
     /// The manifest could not be loaded: why (said once).
     pub failed: Option<Unavailable>,
@@ -471,10 +490,14 @@ impl Actions {
             };
             let grip_set = input.action_set("/actions/grip").map_err(fail)?;
             let grip = [input.action("/actions/grip/in/value_left").map_err(fail)?, input.action("/actions/grip/in/value_right").map_err(fail)?];
-            Ok((walk, menu, presses, (avatar, pads), panel, (orbit_set, orbit), (grip_set, grip)))
+            let small_view = (
+                input.action_set("/actions/small_view").map_err(fail)?,
+                [input.action("/actions/small_view/in/stick_left").map_err(fail)?, input.action("/actions/small_view/in/stick_right").map_err(fail)?],
+            );
+            Ok((walk, menu, presses, (avatar, pads), panel, (orbit_set, orbit), (grip_set, grip), small_view))
         })();
         match loaded {
-            Ok((walk, menu, presses, (avatar, pads), (panel, lasers, grabs), (orbit_set, orbit), (grip_set, grip))) => Self {
+            Ok((walk, menu, presses, (avatar, pads), (panel, lasers, grabs), (orbit_set, orbit), (grip_set, grip), small_view)) => Self {
                 walk: Some(walk),
                 menu: Some(menu),
                 taps: Taps::default(),
@@ -485,13 +508,15 @@ impl Actions {
                 orbit: Some(orbit),
                 grip: Some(grip),
                 blocked: [false; 2],
+                small_view: Some(small_view),
+                sticks_taken: [false; 2],
                 sets: vec![walk.set, menu.0, avatar, panel, orbit_set, grip_set],
                 failed: None,
                 menu_down: false,
             },
             Err(e) => {
                 eprintln!("SteamVR actions unavailable: {e}");
-                Self { walk: None, menu: None, taps: Taps::default(), presses: None, press_down: [false; 2], pads: None, panel: None, orbit: None, grip: None, blocked: [false; 2], sets: Vec::new(), failed: Some(e), menu_down: false }
+                Self { walk: None, menu: None, taps: Taps::default(), presses: None, press_down: [false; 2], pads: None, panel: None, orbit: None, grip: None, blocked: [false; 2], small_view: None, sticks_taken: [false; 2], sets: Vec::new(), failed: Some(e), menu_down: false }
             }
         }
     }
@@ -507,7 +532,8 @@ impl Actions {
         let mut count = 0;
         let own = self.sets.iter().map(|&set| ActiveSet { set, ..Default::default() });
         let blocking = self.orbit.into_iter().flat_map(|orbit| blocked_sets(orbit.block, orbit.hands, self.blocked));
-        for (slot, set) in active.iter_mut().zip(own.chain(blocking)) {
+        let sticks = self.orbit.zip(self.small_view).into_iter().flat_map(|(orbit, (set, _))| blocked_sets(set, orbit.hands, self.sticks_taken));
+        for (slot, set) in active.iter_mut().zip(own.chain(blocking).chain(sticks)) {
             *slot = set;
             count += 1;
         }
@@ -517,6 +543,16 @@ impl Actions {
     /// Which hands' triggers VRChat does not get from the next read on (`overlay::orbit::block`). Said anew at each read: it ends by not being said.
     pub fn set_block(&mut self, blocked: [bool; 2]) {
         self.blocked = blocked;
+    }
+
+    /// Which hands' sticks VRChat does not get from the next read on ([`StickTake`]). Said anew at each read, as [`Actions::set_block`].
+    pub fn set_sticks_taken(&mut self, taken: [bool; 2]) {
+        self.sticks_taken = if self.small_view.is_some() { taken } else { [false; 2] };
+    }
+
+    /// The hands whose stick is taken from VRChat now.
+    pub fn sticks_taken(&self) -> [bool; 2] {
+        self.sticks_taken
     }
 
     /// VRChat's menu button of each hand, held.
@@ -557,7 +593,9 @@ impl Actions {
             let (touch, click) = (digital(a.touchpad[1])?, digital(a.touchpad[2])?);
             let force = input.analog(a.touchpad[3]).ok()?;
             pads.touchpads[hand] = pad(position.map(|d| (d.x, d.y)), touch, click, force.active.then_some(force.x), false);
-            let position = analog(a.stick[0]);
+            // A stick taken from VRChat is taken from this application's lower sets too: it is read from the set that took it.
+            let taken = self.sticks_taken[hand].then_some(self.small_view).flatten().and_then(|(_, sticks)| analog(sticks[hand]));
+            let position = taken.or_else(|| analog(a.stick[0]));
             let (touch, click) = (digital(a.stick[1])?, digital(a.stick[2])?);
             pads.sticks[hand] = pad(position.map(|d| (d.x, d.y)), touch, click, None, true);
         }
@@ -618,9 +656,38 @@ fn blocked_sets(set: ActionSetHandle, hands: [orbiters_openvr::input::InputSourc
     (0..2).filter(move |&hand| blocked[hand]).map(move |hand| ActiveSet { set, device: hands[hand], priority: OVERLAY_GLOBAL_PRIORITY_MIN + 1 })
 }
 
-/// The sets made active in a turn at most: the six of [`Actions`], and the one that takes a trigger from VRChat for
-/// each hand.
-const MOST_SETS: usize = 8;
+/// The sets made active in a turn at most: the six of [`Actions`], the one that takes a trigger from VRChat for
+/// each hand, and the one that takes a stick from it for each hand.
+const MOST_SETS: usize = 10;
+
+/// Which hands' sticks are taken from VRChat, while a stick moves in a 3D capture or flips captures (Enzo, 2026-11-15: moving in the small capture "doesn't work
+/// at all" on his Touch controllers, whose sticks also walk and turn in VRChat). The same means and rules as a trigger's ([`super::orbit::block`]):
+/// - taken only while the hand wants it (its laser on the capture or its panel, or the capture held) and its stick at rest when that begins: a push already under way
+///   stays VRChat's until the thumb lets go, so VRChat never sees half of one;
+/// - kept while the stick is pushed, wherever the laser went: VRChat must not get the end of a push;
+/// - free at once with the stick at rest and nothing wanting it, and when nothing shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StickTake {
+    taken: [bool; 2],
+}
+
+/// How far from its middle a stick is pushed before it counts as pushed (a thumb resting on it reads a little).
+pub const STICK_PUSHED: f32 = 0.2;
+
+impl StickTake {
+    /// A turn: each hand wants its stick, and how far it is pushed (0 to 1). Returns which hands' sticks VRChat must not get from now on.
+    pub fn step(&mut self, wants: [bool; 2], pushed: [f32; 2], shown: bool) -> [bool; 2] {
+        for hand in 0..2 {
+            let off = pushed[hand] >= STICK_PUSHED;
+            self.taken[hand] = shown && if self.taken[hand] { wants[hand] || off } else { wants[hand] && !off };
+        }
+        self.taken
+    }
+
+    pub fn taken(&self) -> [bool; 2] {
+        self.taken
+    }
+}
 
 /// Two quick taps on a touch sensor (a thumbrest, a trackpad touched without pressing it): what opens N4N0's menu
 /// by default. A tap is a touch from [`TAP_SHORTEST`] to [`TAP_LONGEST`] long; the second must start within
@@ -751,6 +818,60 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// K-small-stick (2026-11-15): the binding SteamVR keeps for Enzo's Touch controllers (dev.56's merged copy, every set of then and no `/actions/small_view`)
+    /// gets the new set whole, each hand's joystick position to its stick, and what he had stays.
+    #[test]
+    fn enzos_saved_binding_from_before_gets_the_stick_that_moves_in_a_capture() {
+        let dir = std::env::temp_dir().join(format!("orbit-small-view-bindings-{}", std::process::id()));
+        write_manifest(&dir).unwrap();
+        let ours = std::fs::read_to_string(dir.join("bindings_oculus_touch.json")).unwrap();
+        let saved = r#"{ "app_key": "cc.orbiters.n4n0", "controller_type": "oculus_touch", "bindings": {
+            "/actions/avatar": { "sources": [ { "path": "/user/hand/left/input/joystick", "mode": "joystick", "inputs": { "position": { "output": "/actions/avatar/in/stick_left" } } } ] },
+            "/actions/menu": { "sources": [] }, "/actions/panel": { "sources": [] }, "/actions/walk": { "sources": [] }, "/actions/orbit": { "sources": [] },
+            "/actions/orbit_block": { "sources": [] }, "/actions/grip": { "sources": [] } } }"#;
+        let merged: serde_json::Value = serde_json::from_str(&merged_binding(saved, &ours).expect("the new set lacks")).unwrap();
+        let sources = merged["bindings"]["/actions/small_view"]["sources"].as_array().unwrap();
+        for hand in ["left", "right"] {
+            let source = sources.iter().find(|s| s["path"] == format!("/user/hand/{hand}/input/joystick")).expect("each hand's joystick");
+            assert_eq!(source["mode"], "joystick");
+            assert_eq!(source["inputs"]["position"]["output"], format!("/actions/small_view/in/stick_{hand}"));
+        }
+        assert_eq!(merged["bindings"]["/actions/avatar"]["sources"].as_array().map(Vec::len), Some(1), "what was saved stays as it was");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Every controller's stick (a wand's trackpad) can be taken from VRChat, by the set the manifest names.
+    #[test]
+    fn every_controller_s_stick_can_be_taken_for_a_capture() {
+        let dir = std::env::temp_dir().join(format!("orbit-small-view-every-{}", std::process::id()));
+        let path = write_manifest(&dir).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(manifest["action_sets"].as_array().unwrap().iter().any(|s| s["name"] == "/actions/small_view"));
+        for (controller, input, mode) in CONTROLLERS {
+            let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(format!("bindings_{controller}.json"))).unwrap()).unwrap();
+            let sources = value["bindings"]["/actions/small_view"]["sources"].as_array().unwrap_or_else(|| panic!("{controller}"));
+            assert_eq!(sources.len(), 2, "{controller}");
+            assert_eq!(sources[1]["path"], format!("/user/hand/right/input/{input}"));
+            assert_eq!(sources[1]["mode"], mode);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The stick's rules, as the trigger's: taken at rest only, kept while pushed, free once let go with nothing wanting it, and free when nothing shows.
+    #[test]
+    fn a_stick_is_taken_at_rest_kept_while_pushed_and_given_back() {
+        let mut take = StickTake::default();
+        assert_eq!(take.step([false, true], [0.0, 0.9], true), [false, false], "a walk or a turn already under way stays VRChat's");
+        assert_eq!(take.step([false, true], [0.0, 0.05], true), [false, true], "the thumb let go: taken");
+        assert_eq!(take.step([false, false], [0.0, 0.8], true), [false, true], "pushed when the laser left: kept, VRChat gets no half push");
+        assert_eq!(take.step([false, false], [0.0, 0.0], true), [false, false], "let go: free");
+        take.step([true, true], [0.0, 0.0], true);
+        assert_eq!(take.step([true, true], [0.6, 0.6], false), [false, false], "nothing shows: free at once");
+        let sets: Vec<ActiveSet> = blocked_sets(9, [11, 22], [true, false]).collect();
+        assert_eq!(sets, vec![ActiveSet { set: 9, device: 11, priority: OVERLAY_GLOBAL_PRIORITY_MIN + 1 }], "only that hand's stick, at the overlay's priority");
+        assert!(MOST_SETS >= 6 + 2 + 2, "room for both blocks");
+    }
+
     #[test]
     fn bindings_are_json() {
         let dir = std::env::temp_dir().join(format!("orbiters-actions-{}", std::process::id()));
@@ -763,7 +884,7 @@ mod tests {
             }
         }
         let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(manifest["actions"].as_array().unwrap().len(), 32);
+        assert_eq!(manifest["actions"].as_array().unwrap().len(), 34);
         // Every controller gives each grip's pull, for VRChat's own grab thresholds (`orbit::vrchat_grip`).
         for (controller, _, _) in CONTROLLERS {
             let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(format!("bindings_{controller}.json"))).unwrap()).unwrap();

@@ -1145,6 +1145,29 @@ impl Panels {
         self.takeover.is_some()
     }
 
+    /// What a stick does where a laser is on part `panel` (its index in [`Panels::all`]) at `uv`: on the 3D worlds' page, moves in the capture in its hole or flips its
+    /// captures on the side panel (K-small-stick, K-carousel). Nothing anywhere else: the stick is VRChat's there.
+    pub fn stick_spot(&self, panel: usize, uv: [f32; 2]) -> Option<super::worlds::panel::StickSpot> {
+        let part = self.all().nth(panel)?;
+        if part.zone != Zone::Takeover || self.facts.sheet != Some(Sheet::Worlds) {
+            return None;
+        }
+        let at = part.to_logical(uv);
+        self.stage.worlds.as_ref()?.stick_spot(at.x, at.y)
+    }
+
+    /// A stick taken on the carousel, side to side (-1 to 1; 0 when none is): flips the captures, once a push and on while held. Whether it flipped.
+    pub fn flip_stick(&mut self, x: f32) -> bool {
+        let Some(worlds) = self.stage.worlds.as_mut() else { return false };
+        let flipped = worlds.flip_stick(x);
+        if flipped {
+            if let Some(panel) = self.takeover.as_mut() {
+                panel.dirty = true;
+            }
+        }
+        flipped
+    }
+
     /// Whether the captions show now: with a page up, only where the page would cover them. The Quick Menu's caption is one of its side tiles, which stay beside a page
     /// (OWNER DECISION, Enzo repeatedly, latest 2026-11-13; AGENTS.md, "Owner decisions"): it lies beside the page in every layout, and goes only if it would lie under it.
     fn caption_shown(&self, caption: &Placed) -> bool {

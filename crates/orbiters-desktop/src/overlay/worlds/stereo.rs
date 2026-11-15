@@ -488,7 +488,19 @@ impl Small {
     pub fn move_middle(&mut self, hands: [Option<Matrix34>; 2], pads: [[f32; 2]; 2], seconds: f32, limit: f32) {
         let Some(hold) = self.held else { return };
         let Some(pose) = hands[hold.hand].as_ref() else { return };
-        let pad = pads[hold.hand];
+        self.move_along(pose, pads[hold.hand], seconds, limit);
+    }
+
+    /// One frame of the stick of a hand whose laser is on it where it lies (in a panel's hole, or left in the room): its middle goes the way the thumb pushes, as that
+    /// hand points, as when held (Enzo, K-small-stick: on his Touch controllers moving in it "doesn't work at all", it moved only held, with the other hand's stick,
+    /// which walks in VRChat). Not while a hand holds it: the held routes have it then.
+    pub fn move_pointed(&mut self, pose: &Matrix34, pad: [f32; 2], seconds: f32, limit: f32) {
+        if self.held.is_none() {
+            self.move_along(pose, pad, seconds, limit);
+        }
+    }
+
+    fn move_along(&mut self, pose: &Matrix34, pad: [f32; 2], seconds: f32, limit: f32) {
         if pad[0].hypot(pad[1]) <= SMALL_STICK_REST {
             return;
         }
@@ -982,6 +994,38 @@ mod tests {
         assert_ne!(small.placement(eye).offset, start.offset);
         small.move_middle(hands, pads, 100.0, 1.5);
         assert!((small.moved_by() - 1.5).abs() < 1e-3, "stops where the capture ends");
+    }
+
+    /// K-small-stick: lying in its place, pointed at, the pointing hand's stick moves its middle (no grip, no other hand): pushed up, what was ahead comes nearer, as
+    /// walking does; pushed right, sideways. Not while held (the held routes then), and never by a resting thumb.
+    #[test]
+    fn the_stick_of_the_hand_pointing_at_it_moves_its_middle_where_it_lies() {
+        let mut small = small_for_hands();
+        let eye = [0.0, 1.6, 0.0];
+        // A hand before it, pointing at it (its -Z the way it points, as SteamVR's tip).
+        let pointing = head_at(small.anchor[0], small.anchor[1] + 0.1, small.anchor[2] + 0.4, 0.0);
+        small.move_pointed(&pointing, [0.0, 0.1], 0.5, 100.0);
+        assert_eq!(small.moved_by(), 0.0, "a thumb resting");
+        let before = small.placement(eye);
+        small.move_pointed(&pointing, [0.0, 1.0], 0.5, 100.0);
+        assert!(small.moved_by() > 0.5, "{}", small.moved_by());
+        let middle = small.middle(eye);
+        // What now stands at its middle stood ahead of it, away from who points: pushed up goes on into it, as walking does.
+        let was = before.apply(middle);
+        assert!(was[2] < small.anchor[2] - 0.05 && (was[0] - small.anchor[0]).abs() < 0.02, "pushed up: on into it ({was:?} from {:?})", small.anchor);
+        assert_eq!(middle[1], eye[1], "no up and down");
+        let forward = small.moved_by();
+        let before = small.placement(eye);
+        small.move_pointed(&pointing, [1.0, 0.0], 0.5, 100.0);
+        let was = before.apply(small.middle(eye));
+        assert!(was[0] > small.anchor[0] + 0.05, "pushed right: to the right ({was:?} from {:?})", small.anchor);
+        assert!(small.moved_by() > forward);
+        // Held: the pointing route does nothing, the held ones do.
+        let hand = head_at(small.anchor[0] + 0.05, small.anchor[1], small.anchor[2], 0.0);
+        small.step([None, Some(hand)], [false, true], [0.0; 2], 0.016, None);
+        let held_at = small.moved_by();
+        small.move_pointed(&pointing, [0.0, 1.0], 0.5, 100.0);
+        assert_eq!(small.moved_by(), held_at);
     }
 
     /// Enzo: "the vrchat rotation joystick command to be reproduced". Pushed right, one turns right: what was ahead goes left, and where one stands stays.

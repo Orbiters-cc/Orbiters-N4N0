@@ -649,8 +649,8 @@ impl View {
         }
     }
 
-    /// The hands, for what shows small: their poses, grips and sticks' up and down.
-    pub fn small_input(&mut self, hands: [Option<vr::Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2], pads: [[f32; 2]; 2]) {
+    /// The hands, for what shows small: their poses, grips and sticks' up and down; and the laser of a hand pointing at it, with that hand's stick.
+    pub fn small_input(&mut self, hands: [Option<vr::Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2], pads: [[f32; 2]; 2], pointed: Option<(vr::Matrix34, [f32; 2])>) {
         let now = Instant::now();
         let seconds = self.small_read.map_or(0.0, |t| now.duration_since(t).as_secs_f32()).min(0.1);
         self.small_read = Some(now);
@@ -659,6 +659,9 @@ impl View {
         let dock = self.small_place.map(|(at, radius)| stereo::SmallDock::behind(&capture.view, &at, radius, reach));
         small.step(hands, grips, sticks, seconds, dock);
         small.move_middle(hands, pads, seconds, capture.farthest());
+        if let Some((laser, stick)) = pointed {
+            small.move_pointed(&laser, stick, seconds, capture.farthest());
+        }
         self.placement = Some(small.placement(capture.view.eye()));
     }
 

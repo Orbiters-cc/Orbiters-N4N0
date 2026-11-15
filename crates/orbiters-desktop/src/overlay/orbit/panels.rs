@@ -4656,7 +4656,8 @@ fn draw_words_left(p: &Painter, rect: Rect, first: &str, second: &str, named: bo
     p.rect_filled(pill, look::radius(12.0), look::PANEL);
     if named {
         widgets::icon(p, pill.min + vec2(18.0, 16.0), icons::N4N0_MARK, 16.0, look::LABEL);
-        let name = p.text(pill.min + vec2(32.0, 16.0), Align2::LEFT_CENTER, "Orbiters N4N0", look::font(13.5, weight::SEMIBOLD), look::LABEL);
+        // "Orbiters" beside N4N0's mark, as the wheel's head has it: with the beta's chip, "Orbiters N4N0" is wider than the wing.
+        let name = p.text(pill.min + vec2(32.0, 16.0), Align2::LEFT_CENTER, "Orbiters", look::font(13.5, weight::SEMIBOLD), look::LABEL);
         beta_chip(p, pos2(name.right() + 8.0, pill.top() + 16.0), BETA_SIZE);
         p.line_segment([pill.min + vec2(10.0, 29.0), pos2(pill.right() - 10.0, pill.top() + 29.0)], Stroke::new(1.0, Color32::from_white_alpha(28)));
     }
@@ -4670,11 +4671,11 @@ fn draw_words_left(p: &Painter, rect: Rect, first: &str, second: &str, named: bo
 /// The wing's name and the beta's chip on a pill of their own at the foot of `rect`, where the caption's head would be.
 fn draw_wing_name(p: &Painter, rect: Rect) {
     let font = look::font(13.5, weight::SEMIBOLD);
-    let name = p.layout_no_wrap("Orbiters N4N0".to_string(), font.clone(), look::LABEL).size().x;
+    let name = p.layout_no_wrap("Orbiters".to_string(), font.clone(), look::LABEL).size().x;
     let pill = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 32.0), pos2((rect.left() + 32.0 + name + 8.0 + beta_chip_width(p, BETA_SIZE) + 10.0).min(rect.right()), rect.bottom()));
     p.rect_filled(pill, look::radius(12.0), look::PANEL);
     widgets::icon(p, pos2(pill.left() + 18.0, pill.center().y), icons::N4N0_MARK, 16.0, look::LABEL);
-    let name = p.text(pos2(pill.left() + 32.0, pill.center().y), Align2::LEFT_CENTER, "Orbiters N4N0", font, look::LABEL);
+    let name = p.text(pos2(pill.left() + 32.0, pill.center().y), Align2::LEFT_CENTER, "Orbiters", font, look::LABEL);
     beta_chip(p, pos2(name.right() + 8.0, pill.center().y), BETA_SIZE);
 }
 

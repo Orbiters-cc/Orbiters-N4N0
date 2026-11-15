@@ -253,7 +253,7 @@ impl Spool {
             std::thread::sleep(Duration::from_secs(20));
             loop {
                 if enabled() {
-                    let api = orbiters_core::account::Api::new(orbiters_core::account::Server::current());
+                    let api = api();
                     // A backlog goes a batch after another; a failure waits for the next minute.
                     while let Sent::Taken(_) | Sent::Dropped(_) = self.send(&api) {}
                 } else {
@@ -263,6 +263,27 @@ impl Spool {
             }
         });
     }
+}
+
+/// Where the steps wait: `usage` in the local data folder. A debug build started by the VR sandbox keeps them in the sandbox's folder, as its
+/// logs (`orbiters_core::paths::logs_dir`): a test build never writes the person's own.
+pub fn folder() -> PathBuf {
+    if cfg!(debug_assertions) {
+        if let Some(dir) = std::env::var_os("ORBITERS_SANDBOX_LOGS").filter(|d| !d.is_empty()) {
+            return PathBuf::from(dir).join("usage");
+        }
+    }
+    orbiters_core::paths::local_data_root().join("usage")
+}
+
+/// The Orbiters the steps go to: the app's server; a debug build may be pointed at a server under test (`ORBITERS_USAGE_API`).
+fn api() -> orbiters_core::account::Api {
+    if cfg!(debug_assertions) {
+        if let Some(base) = std::env::var("ORBITERS_USAGE_API").ok().filter(|b| !b.is_empty()) {
+            return orbiters_core::account::Api::at(&base);
+        }
+    }
+    orbiters_core::account::Api::new(orbiters_core::account::Server::current())
 }
 
 fn load(inner: &mut Inner) {

@@ -654,7 +654,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         }
     }));
 
-    service.usage.open(orbiters_core::paths::local_data_root().join("usage"));
+    service.usage.open(crate::usage::spool::folder());
     let ctl = service.ctl.clone();
     service.usage.clone().run(move || ctl.view().settings.usage.enabled);
     service.accept(listener)?;
@@ -1131,5 +1131,31 @@ pub(crate) mod tests {
             ToService::PatchSettings { patch } => assert_eq!(patch["n4n0"]["wake_word"], true),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// The beta's usage statistics from a linked window: its steps become a session (started at the first one) in the service's spool; turned
+    /// off in the settings, everything waiting is forgotten at once and nothing more is kept; a link that goes ends its session where it was.
+    #[test]
+    fn a_links_usage_becomes_a_session_and_the_switch_forgets_it() {
+        use crate::usage::{Kind, Step};
+        let service = service();
+        let (window, between) = linked_through(&service, Role::Window);
+        let step = |kind, screen: &str, control: Option<&str>| Step { at: crate::usage::now_ms(), kind, screen: screen.into(), from: None, control: control.map(Into::into) };
+        window.send(&ToService::Usage { steps: vec![step(Kind::Enter, "Home", None), step(Kind::Press, "Home", Some("Open Settings")), step(Kind::Enter, "Settings", None)] });
+        assert!(until(|| service.usage.waiting().len() == 4), "{:?}", service.usage.waiting());
+        let kinds: Vec<String> = service.usage.waiting().iter().map(|e| format!("{} {}", e.kind, e.screen.as_deref().unwrap_or(""))).collect();
+        assert_eq!(kinds, ["start Home", "enter Home", "press Home", "enter Settings"]);
+        assert!(service.usage.waiting().iter().all(|e| e.surface == "app"));
+        // The window goes: its session ends on Settings.
+        drop(between);
+        assert!(until(|| service.usage.waiting().last().is_some_and(|e| e.kind == "end")));
+        assert_eq!(service.usage.waiting().last().and_then(|e| e.screen.clone()).as_deref(), Some("Settings"));
+        // Turned off from another window: all forgotten, and what comes next is not kept.
+        let other = linked(&service, Role::Window);
+        other.send(&ToService::PatchSettings { patch: serde_json::json!({ "usage": { "enabled": false } }) });
+        assert!(until(|| service.usage.waiting().is_empty()));
+        other.send(&ToService::Usage { steps: vec![step(Kind::Enter, "Home", None)] });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(service.usage.waiting().is_empty(), "nothing kept while off");
     }
 }

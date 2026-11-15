@@ -8,7 +8,8 @@ use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{icons, widgets};
 
-pub const WIDTH: f32 = 420.0;
+/// At most this wide: wide and low, so that it lies under a page's first rows rather than over them.
+pub const WIDTH: f32 = 760.0;
 
 /// What the person did with the card.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,7 +33,8 @@ pub fn show(ui: &mut Ui, page: Rect, told: bool) -> Option<Answer> {
     let id = Id::unique("orbiters-usage-notice");
     let enter = anim::spring_from(&ctx, id.with("enter"), [0.0], [1.0], Spring::SOFT)[0];
     let pad = 20.0;
-    let text_w = WIDTH - pad * 2.0 - 40.0;
+    let width = (page.width() - 48.0).clamp(320.0, WIDTH);
+    let text_w = width - pad * 2.0 - 40.0;
     let title = Txt::new(tr(TITLE), 14.0).weight(weight::SEMIBOLD).color(theme::FG).line_height(20.0);
     let body = Txt::new(tr(BODY), 12.5).color(theme::FG_2).line_height(18.0);
     let off = Txt::new(tr(OFF), 12.5).color(theme::FG_3).line_height(18.0);
@@ -41,8 +43,8 @@ pub fn show(ui: &mut Ui, page: Rect, told: bool) -> Option<Answer> {
     let og = ui.painter().layout_job(off.job(text_w));
     let buttons_h = 32.0;
     let h = pad + tg.size().y + 6.0 + bg.size().y + 6.0 + og.size().y + 14.0 + buttons_h + pad;
-    // Bottom left of the page, where toasts (bottom right) never land on it.
-    let base = Rect::from_min_size(pos2(page.left() + 24.0, page.bottom() - 24.0 - h), vec2(WIDTH, h));
+    // At the page's foot from its left, under its first rows in a window of the usual size.
+    let base = Rect::from_min_size(pos2(page.left() + 24.0, page.bottom() - 24.0 - h), vec2(width, h));
     let rect = base.translate(vec2(0.0, 30.0 * (1.0 - enter)));
     let mut answer = None;
     egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).interactable(true).show(&ctx, |ui| {

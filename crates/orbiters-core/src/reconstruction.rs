@@ -78,6 +78,10 @@ pub struct Report {
     /// They should have gone and nothing of them was found to take out.
     #[serde(default)]
     pub wearer_not_found: bool,
+    /// The world drew what the camera saw without depth (orbiters-reconstruct's depthfix, rule "blind world"): every
+    /// "nothing there" was taken as unknown, and the result comes from colour alone.
+    #[serde(default)]
+    pub depth_blind: bool,
 }
 
 /// What taking the wearer out did: numbers for the gallery's line and for whoever checks it.

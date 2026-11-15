@@ -3,7 +3,18 @@
 //! post-processing smears the symbols (chromatic aberration, worst towards the frame's edges) misread symbols still
 //! decode to wrong depths. Treated as measurements, the first become sky discs 400 m out painted with whatever the
 //! keyframes show there (smears from other viewpoints), and the second seed discs in front of the camera (specks).
-//! Marked unknown instead (DepthView::unknown), they are neither seeds nor depth targets. Three rules:
+//! Marked unknown instead (DepthView::unknown), they are neither seeds nor depth targets. Four rules:
+//! - (first, a verdict only) a world that draws its surfaces without depth: the capture kit reads Unity's camera depth
+//!   texture, which only holds what the world's shaders draw into it (their shadow-caster pass, opaque queues), so a
+//!   world whose own shaders leave it out shows its walls and floors in colour while every depth sample there reads
+//!   "nothing there", the code of the sky (冥滩酒吧｜DeathStranding, 2026-11-15: 95 % and 97 % of its samples were zeros,
+//!   38 % and 45 % of all of them looking more than 10° below the horizon, against at most 0.5 % in twelve captures of
+//!   seven other worlds the same day). Nothing below the horizon is sky: when such samples reach `blind_share` of the
+//!   known ones, the session is told blind (`FixStats::blind_world`, the report's `depth_blind`). Its zeros stay as they
+//!   are: taken as unknown, the session trained from colour alone (rays seeded at a tenth and at a third of the seeding
+//!   budget) lost 3.9–4.2 dB on held-out keyframes of the first capture and nothing gained on the second, and filled
+//!   every turned view with floaters; on the sky shell and in the sky map the room at least reads as a backdrop from
+//!   the camera's path (reports: done7-depthworld.md). Only depth can fix such a capture;
 //! - tile positions left or right of the frame's centre (farther than `min_offset` of the half-width) that read
 //!   nothing in any depth frame of the session (a tile looking at the sky now and then still reads now and then: a
 //!   camera that turns sees something there), unless the world directions they look along read as nothing in the
@@ -38,11 +49,30 @@ pub struct FixParams {
     /// `min_direction_votes` times and hit something in at most `max_direction_hits` of them.
     pub min_direction_votes: u32,
     pub max_direction_hits: f32,
+    /// Rule "blind world": samples that read nothing looking more than this many degrees below the horizon...
+    pub blind_below_deg: f32,
+    /// ...as this share of the session's known samples (of version 2 files, in at least `blind_min_frames` frames) make
+    /// the session blind.
+    pub blind_share: f32,
+    pub blind_min_frames: usize,
 }
 
 impl Default for FixParams {
     fn default() -> Self {
-        Self { min_offset: 0.4, min_frames: 20, neighbour_tolerance: 0.25, max_disagreeing: 0.3, min_depth: 0.3, min_direction_votes: 20, max_direction_hits: 0.2 }
+        Self {
+            min_offset: 0.4,
+            min_frames: 20,
+            neighbour_tolerance: 0.25,
+            max_disagreeing: 0.3,
+            min_depth: 0.3,
+            min_direction_votes: 20,
+            max_direction_hits: 0.2,
+            // 10° down meets a floor 1.6 m under the eye 9 m out; 5 % is ten times the most any healthy capture showed
+            // (0.5 %, Nel Blu) and an eighth of the least the blind world did (38 %).
+            blind_below_deg: 10.0,
+            blind_share: 0.05,
+            blind_min_frames: 8,
+        }
     }
 }
 
@@ -62,6 +92,18 @@ pub struct FixStats {
     pub decoder_unknown: usize,
     /// Whether the "never reads" rule ran (sessions whose decoder marks nothing unknown).
     pub never_read_rule: bool,
+    /// The "blind world" verdict: known samples of the version 2 frames that voted, those of them that read nothing
+    /// looking down, and whether they reached `blind_share`.
+    pub blind_votes: usize,
+    pub blind_below: usize,
+    pub blind_world: bool,
+}
+
+impl FixStats {
+    /// The share of the voting samples that read nothing looking down (0 without votes).
+    pub fn blind_share(&self) -> f32 {
+        self.blind_below as f32 / self.blind_votes.max(1) as f32
+    }
 }
 
 const SX: usize = SAMPLES_X as usize;
@@ -132,6 +174,7 @@ struct FrameCounts {
 /// Marks untrusted samples of every depth frame as unknown (`unknown`), keeping marks already there.
 pub fn mark_untrusted(data: &mut Dataset, p: &FixParams) -> FixStats {
     let mut stats = FixStats { decoder_unknown: data.depth_views.iter().map(|d| d.decoder_unknown).sum(), ..Default::default() };
+    blind_world(data, p, &mut stats);
     // Old files only, and only when their decoder marked no tile unknown (65535 in a version 1 file is the decoder's
     // unknown, or a depth of exactly 0.1 m from before contracts 0.4.0: hardly ever a whole tile of them).
     let old: Vec<&DepthView> = data.depth_views.iter().filter(|d| d.zero_may_be_unread).collect();
@@ -188,6 +231,42 @@ pub fn mark_untrusted(data: &mut Dataset, p: &FixParams) -> FixStats {
         stats.samples += c.samples;
     }
     stats
+}
+
+/// The "blind world" verdict (the module's first rule): counts the known samples of the frames whose zeros are "nothing
+/// there" (version 2 files) and those of them that read nothing looking more than `blind_below_deg` down. Marks nothing.
+fn blind_world(data: &Dataset, p: &FixParams, stats: &mut FixStats) {
+    let voting = |d: &DepthView| well_formed(d) && !d.zero_may_be_unread;
+    let frames = data.depth_views.iter().filter(|d| voting(d)).count();
+    let sin_below = -p.blind_below_deg.to_radians().sin();
+    let (below, votes) = data
+        .depth_views
+        .par_iter()
+        .filter(|d| voting(d))
+        .map(|d| {
+            let origin = d.camera.position();
+            let (mut below, mut votes) = (0usize, 0usize);
+            for i in 0..d.depth.len() {
+                if d.is_unknown(i) {
+                    continue;
+                }
+                votes += 1;
+                if d.depth[i] <= 0.0 && elevation_sin(&d.camera, origin, d.grid.pixels[i]) < sin_below {
+                    below += 1;
+                }
+            }
+            (below, votes)
+        })
+        .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+    (stats.blind_below, stats.blind_votes) = (below, votes);
+    stats.blind_world = frames >= p.blind_min_frames && votes > 0 && below as f32 >= p.blind_share * votes as f32;
+}
+
+/// Sine of the elevation of the world direction a depth sample at `pixel` looks along (`origin`: the camera's position).
+fn elevation_sin(camera: &Camera, origin: [f32; 3], pixel: [f32; 2]) -> f32 {
+    let q = camera.unproject(pixel[0], pixel[1], 1.0);
+    let v = [q[0] - origin[0], q[1] - origin[1], q[2] - origin[2]];
+    v[1] / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-12)
 }
 
 fn dead_of_size<'a>(dead: &'a [((u32, u32), Vec<bool>)], d: &DepthView) -> &'a [bool] {
@@ -458,6 +537,58 @@ mod tests {
         let mut data = dataset(views);
         mark_untrusted(&mut data, &FixParams::default());
         assert!((5..13).any(|gy| !data.depth_views[90].is_unknown(gy * GW + GW - 3)), "the mechanism this guards against");
+    }
+
+    /// A world that draws its surfaces without depth (冥滩酒吧｜DeathStranding): its floor reads "nothing there" like the
+    /// sky. The session is told blind, and its samples stay as they came (unknown, it trained worse from colour alone).
+    #[test]
+    fn a_world_whose_floor_reads_nothing_has_no_sky() {
+        let g = grid(|_, _| false);
+        let v2 = |k: usize| DepthView { zero_may_be_unread: false, ..frame(k, &g, false) };
+        // Healthy: the floor reads, the sky above the horizon does not.
+        let mut data = dataset((0..30).map(v2).collect());
+        let stats = mark_untrusted(&mut data, &FixParams::default());
+        assert!(!stats.blind_world && stats.blind_below == 0 && stats.blind_votes > 0, "{stats:?}");
+        assert!(data.depth_views[5].depth.iter().enumerate().any(|(i, z)| *z == 0.0 && !data.depth_views[5].is_unknown(i)), "the sky stays sky");
+        // A hole in the floor (a pit, water that draws no depth) is not a blind world: 1 % of the samples.
+        let mut views: Vec<DepthView> = (0..30).map(v2).collect();
+        for d in views.iter_mut() {
+            for gx in 40..50 {
+                d.depth[(GH - 1) * GW + gx] = 0.0;
+            }
+        }
+        let mut data = dataset(views);
+        let stats = mark_untrusted(&mut data, &FixParams::default());
+        assert!(!stats.blind_world && stats.blind_below > 0, "{stats:?}");
+        assert!(!data.depth_views[3].is_unknown((GH - 1) * GW + 45));
+        // Blind: the floor reads nothing but for a prop.
+        let prop = (GH - 5) * GW + 48;
+        let mut views: Vec<DepthView> = (0..30).map(v2).collect();
+        for d in views.iter_mut() {
+            for i in 0..d.depth.len() {
+                if i != prop {
+                    d.depth[i] = 0.0;
+                }
+            }
+        }
+        let mut data = dataset(views);
+        let stats = mark_untrusted(&mut data, &FixParams::default());
+        assert!(stats.blind_world && stats.blind_share() > 0.3, "{stats:?}");
+        let d = &data.depth_views[7];
+        assert!(!d.is_unknown(prop) && d.depth[prop] > 0.0 && (0..d.depth.len()).all(|i| !d.is_unknown(i)), "nothing marked");
+        // Fewer frames than `blind_min_frames`, or frames whose zeros may be unread (version 1): no verdict.
+        let mut few = dataset((0..30).map(v2).take(FixParams::default().blind_min_frames - 1).map(|mut d| {
+            d.depth.iter_mut().for_each(|z| *z = 0.0);
+            d
+        }).collect());
+        assert!(!mark_untrusted(&mut few, &FixParams::default()).blind_world);
+        let mut old = dataset((0..30).map(|k| {
+            let mut d = frame(k, &g, false);
+            d.depth.iter_mut().for_each(|z| *z = 0.0);
+            d
+        }).collect());
+        let stats = mark_untrusted(&mut old, &FixParams::default());
+        assert!(!stats.blind_world && stats.blind_votes == 0, "{stats:?}");
     }
 
     /// Fewer depth frames than `min_frames`: "never reads" means nothing yet.

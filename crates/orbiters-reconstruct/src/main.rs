@@ -496,6 +496,7 @@ fn run(args: Args) -> anyhow::Result<Ended> {
         depth_unknown: prepared.depth.as_ref().map(|f| f.unknown_samples),
         wearer: prepared.wearer.as_ref().map(|(_, s)| rec::WearerOut { pixel_share: s.pixel_share, views: s.views, views_total: s.views_total, depth_samples: s.depth_samples, depth_hits: s.depth_hits, gaussians_left: outcome.wearer_left, floor_patched: outcome.floor_patched }),
         wearer_not_found: prepared.wearer_not_found,
+        depth_blind: prepared.depth.as_ref().is_some_and(|f| f.blind_world),
     };
     std::fs::write(partial.join(rec::REPORT_FILE), serde_json::to_string_pretty(&report)?)?;
     timing::section("7 replace", None, || replace(dir, &partial))?;

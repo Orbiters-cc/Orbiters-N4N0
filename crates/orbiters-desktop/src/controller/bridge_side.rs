@@ -648,6 +648,12 @@ impl Controller {
         let route = to.as_ref().and_then(|m| m.query.map(|q| (SocketAddr::from(([127, 0, 0, 1], m.osc_in)), q)));
         let _ = self.with_osc(|o| o.lend(route));
         let mut osc = self.osc_values.lock().unwrap();
+        // The camera's opening was heard, on the session's own out port, by the session: the proof the app asks of a live
+        // camera before it records (`require_live_camera`) is that VRChat's, not a value the app wrote.
+        let camera_open = values.as_ref().and_then(|v| v.first(super::CAMERA_MODE)).map(|m| matches!(m, OscValue::Int(mode) if mode != 0));
+        osc.camera_received = camera_open;
+        osc.camera_command = None;
+        osc.camera_commanded.clear();
         match values {
             Some(values) => {
                 for (address, (args, at)) in values.iter() {
@@ -663,5 +669,7 @@ impl Controller {
                 osc.latest = kept;
             }
         }
+        drop(osc);
+        self.update(|s| s.camera_open_said = camera_open);
     }
 }

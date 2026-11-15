@@ -511,7 +511,7 @@ impl Bridge {
     }
 
     /// Notes a turn the bridge sent. On the desktop none while the camera or a menu is open (then it turns nothing); a VR
-    /// session's avatar turns with its camera open too. VR sessions are otherwise the same to the map: `/usercamera/Pose`,
+    /// session's turns are counted always (whether VRChat in VR turns the avatar with the camera open is not measured). VR sessions are otherwise the same to the map: `/usercamera/Pose`,
     /// the recording's poses and its skeleton band are the same world frame there.
     pub(super) fn map_turned(&self, s: &Session, degrees: f64) {
         if s.vr().is_none() && s.game.camera_open() == Some(true) {

@@ -124,10 +124,24 @@ def windows_of(pid):
     return result
 
 
+def bridge_session(pid, process=None):
+    """Whether a VRChat.exe is a session of Orbiters' VRChat bridge beside this one (crates/orbiters-desktop/src/bridge/
+    sessions.rs): desktop mode, a profile of its own (1 or more, its own account) and OSC ports of its own. Such a VRChat
+    is not the owner's VR session and not the sandbox's: it neither blocks the sandbox nor is ever stopped by it."""
+    try:
+        args = (process or psutil.Process(pid)).cmdline()
+    except psutil.Error:
+        return False
+    profile = next((a.split('=', 1)[1] for a in args if a.startswith('--profile=')), '0')
+    return '--no-vr' in args and any(a.startswith('--osc=') for a in args) and profile.isdigit() and int(profile) >= 1
+
+
 def snapshot():
     procs = game_processes()
+    beside = [p for p in procs if p['name'].lower() == 'vrchat.exe' and bridge_session(p['pid'])]
     return {'services': {name: service_state(name) for name in EAC_SERVICES},
-            'processes': [{k: v for k, v in p.items()} for p in procs]}
+            'processes': [{k: v for k, v in p.items()} for p in procs if p not in beside],
+            'beside': beside}
 
 
 def idle(snap):
@@ -137,6 +151,11 @@ def idle(snap):
     it (STOP_PENDING), wait about 20 s and show "Launch Error (30005) ... EAC unload timeout". A driver service that is
     STOPPED but not yet deleted does not block (a launch at 16:11 started VRChat in 2.5 s)."""
     s = snap['services']
+    if snap.get('beside'):
+        # Beside a running VRChat (a bridge session) the service and its driver serve it, and a launch works at once:
+        # measured 2026-11-15, five launches beside one or two VRChats, none failed (done6-bridge.md).
+        return (all(p['name'].lower() == 'easyanticheat_eos.exe' for p in snap['processes'])
+                and s['EasyAntiCheat_EOS']['state'] == 'RUNNING' and s['EasyAntiCheat_EOSSys']['state'] == 'RUNNING')
     return (not snap['processes'] and s['EasyAntiCheat_EOS']['state'] in ('STOPPED', 'ABSENT')
             and s['EasyAntiCheat_EOSSys']['state'] in ('STOPPED', 'ABSENT'))
 

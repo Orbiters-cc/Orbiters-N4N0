@@ -150,6 +150,8 @@ pub struct Controller {
     vrchat_login: Mutex<vrchat_login::Runtime>,
     /// The VRChat bridge's keeper (`crate::bridge`), in the tray service once it started.
     bridge: Mutex<Option<Arc<crate::bridge::keeper::Keeper>>>,
+    /// The VRChats the bridge runs beside the person's (bridge/sessions.rs): the app follows none of them, unless lent.
+    pub(crate) sides: Arc<crate::bridge::sessions::Sides>,
     /// The bridge restarts VRChat between two worlds: the moments it is closed start no reconstruction.
     bridge_holds_reconstructions: AtomicBool,
     /// What the FPS booster holds back, and all it keeps here (controller/booster.rs).
@@ -376,6 +378,7 @@ mod around;
 mod booster;
 pub(crate) use booster::{dev_build as booster_dev_build, restore_at_sign_in as booster_restore_at_sign_in, store as booster_store};
 mod bridge_game;
+mod bridge_side;
 mod burst;
 #[cfg(all(test, windows))]
 mod pause_tests;
@@ -448,6 +451,7 @@ impl Controller {
             account_runtime: Mutex::new(account::AccountRuntime::default()),
             vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
             bridge: Mutex::new(None),
+            sides: Arc::default(),
             bridge_holds_reconstructions: AtomicBool::new(false),
             booster: Default::default(),
             reconstruction_failures: Mutex::default(),
@@ -1936,6 +1940,10 @@ impl Controller {
         });
         match result {
             Ok(service) => {
+                service.set_datagram_filter(Some(crate::bridge::sessions::datagram_filter(self.sides.clone())));
+                if let Some(lent) = self.sides.lent() {
+                    service.lend(lent.query.map(|q| (std::net::SocketAddr::from(([127, 0, 0, 1], lent.osc_in)), q)));
+                }
                 let (port, adv) = (service.osc_port, service.advertising());
                 let replaced = self.osc.lock().unwrap().replace(service);
                 drop(replaced);
@@ -2707,6 +2715,9 @@ fn spawn_watchers(ctl: Shared) {
         .name("watchers".into())
         .spawn(move || {
             let mut log = LogWatcher::new(None);
+            // The bridge's side sessions' logs are theirs: the app follows the person's VRChat (bridge/sessions.rs).
+            let sides = ctl.sides.clone();
+            log.set_skip(Arc::new(move |path: &std::path::Path| sides.skips_log(path)));
             let mut split = WorldSplit::default();
             // The worlds visited, kept from VRChat's logs before VRChat deletes them (the Visited worlds page).
             let history_file = visited::history_file();
@@ -2736,7 +2747,14 @@ fn spawn_watchers(ctl: Shared) {
                             })
                             .map(|p| p.pid().as_u32())
                     };
-                    let pid = named(&["vrchat.exe", "vrchat"]);
+                    // The person's VRChat (or the main session's), never one the bridge runs beside it, unless lent to it.
+                    let vrchats: Vec<u32> = system
+                        .processes()
+                        .values()
+                        .filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat"))
+                        .map(|p| p.pid().as_u32())
+                        .collect();
+                    let pid = ctl.sides.app_pid(&vrchats);
                     let steamvr_pid = named(&["vrserver.exe", "vrserver"]);
                     let steamvr = steamvr_pid.is_some();
                     let was = running;

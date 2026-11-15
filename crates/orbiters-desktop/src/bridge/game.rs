@@ -92,6 +92,10 @@ pub struct Seen {
     /// When the ones waiting start, as the app says it ("once VRChat closes …").
     pub queue_waits_for: String,
     pub steamvr: bool,
+    /// The account this VRChat itself is signed in with, as its log says (a side session's profile has its own): id, name.
+    pub session_account: Option<(String, String)>,
+    /// This VRChat waits at its sign-in page: only the person can sign in, on its window.
+    pub needs_sign_in: bool,
 }
 
 /// A place to find worlds from.
@@ -157,13 +161,16 @@ pub struct LaunchPlan {
     pub height: u32,
     /// VRChat's `--profile`, whose account this start uses; `None`: the default.
     pub profile: Option<u32>,
+    /// A side session's OSC ports, in and out (`--osc=<in>:127.0.0.1:<out>`); `None`: VRChat's defaults, for the app.
+    pub osc: Option<(u16, u16)>,
 }
 
 impl LaunchPlan {
     /// The arguments VRChat gets, each one checked against docs.vrchat.com/docs/launch-options and Unity's player command
     /// line: `--no-vr` for desktop mode, Unity's `-screen-*` for a window of a known size (so a screenshot's pixels are
-    /// mouse coordinates), and the launch link of the instance. No `--osc`: VRChat's defaults are what the app's OSC finds
-    /// through OSCQuery, and the option turns nothing on anyway.
+    /// mouse coordinates), and the launch link of the instance (none: the account's home). The main session has no `--osc`:
+    /// VRChat's defaults are what the app's OSC finds through OSCQuery. A side session's ports are its own, so that two
+    /// VRChats never share 9000 and 9001 (sessions.rs).
     pub fn args(&self) -> Vec<String> {
         let mut args = vec![
             "--no-vr".to_string(),
@@ -177,9 +184,39 @@ impl LaunchPlan {
         if let Some(profile) = self.profile {
             args.push(format!("--profile={profile}"));
         }
-        args.push(format!("vrchat://launch?ref=orbiters.cc&id={}:{}", self.world_id, self.instance));
+        if let Some((osc_in, osc_out)) = self.osc {
+            args.push(super::sessions::osc_arg(osc_in, osc_out));
+        }
+        if !self.world_id.is_empty() {
+            args.push(format!("vrchat://launch?ref=orbiters.cc&id={}:{}", self.world_id, self.instance));
+        }
         args
     }
+}
+
+/// What starts side sessions and knows this computer: the controller's for real (controller/bridge_side.rs), the lab's in
+/// tests.
+pub trait Opener: Send + Sync {
+    /// A side session's game for `profile` on its own OSC ports: nothing started yet ([`Game::launch`] starts it).
+    fn side(&self, session: &str, profile: u32, osc: (u16, u16)) -> Result<std::sync::Arc<dyn Game>, Failure>;
+    /// The side session went: the app forgets it.
+    fn forget(&self, session: &str);
+    /// A session taken over by another agent gets a new id.
+    fn rename(&self, from: &str, to: &str);
+    /// The VRChats running now, by process id.
+    fn vrchat_pids(&self) -> Vec<u32>;
+    /// The profiles the VRChats the bridge did not start run with, from their logs (0 for one without `--profile`).
+    fn others_profiles(&self) -> Vec<u32>;
+    /// Easy Anti-Cheat now.
+    fn eac(&self) -> super::sessions::Eac;
+    /// Memory free now, bytes.
+    fn memory_free(&self) -> Option<u64>;
+    /// How many VRChats the bridge may run at once (Settings).
+    fn limit(&self) -> usize;
+    /// The process whose window is the foreground now.
+    fn foreground_pid(&self) -> Option<u32>;
+    /// The main session's VRChat, the bridge's own: a side session's picture may borrow the app from it.
+    fn set_main(&self, _pid: Option<u32>) {}
 }
 
 /// VRChat as far as the tools care.
@@ -221,6 +258,13 @@ pub trait Game: Send + Sync {
     /// Holds reconstructions back while the game restarts between two worlds (they wait for VRChat as ever: without this,
     /// the moments it is closed would start one, which would then fight the next world for the graphics card).
     fn hold_reconstructions(&self, hold: bool);
+    /// A few times a second, from the bridge's listener: a side session follows its own VRChat here.
+    fn tick(&self) {}
+    /// The app is lent to a side session's VRChat for its 3D picture: what the main session reads of the app is that
+    /// VRChat's for a few seconds, and nothing of the main session's may go there.
+    fn lent_away(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -229,7 +273,7 @@ mod tests {
 
     #[test]
     fn the_start_goes_to_desktop_mode_in_a_window_into_the_instance() {
-        let plan = LaunchPlan { world_id: "wrld_1".into(), instance: "123~private(usr_1)~region(eu)".into(), width: 1280, height: 720, profile: None };
+        let plan = LaunchPlan { world_id: "wrld_1".into(), instance: "123~private(usr_1)~region(eu)".into(), width: 1280, height: 720, profile: None, osc: None };
         assert_eq!(
             plan.args(),
             [
@@ -243,7 +287,11 @@ mod tests {
                 "vrchat://launch?ref=orbiters.cc&id=wrld_1:123~private(usr_1)~region(eu)"
             ]
         );
-        let args = LaunchPlan { profile: Some(3), ..plan }.args();
+        let args = LaunchPlan { profile: Some(3), ..plan.clone() }.args();
         assert!(args.contains(&"--profile=3".to_string()));
+        // A side session: its own OSC ports, and the account's home when it only opens.
+        let side = LaunchPlan { world_id: String::new(), instance: String::new(), profile: Some(1), osc: Some((9010, 9011)), ..plan }.args();
+        assert_eq!(&side[side.len() - 2..], ["--profile=1", "--osc=9010:127.0.0.1:9011"]);
+        assert!(!side.iter().any(|a| a.starts_with("vrchat://")));
     }
 }

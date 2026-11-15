@@ -590,20 +590,20 @@ fn a_client_going_away_releases_what_it_held() {
     let mut stream = TcpStream::connect(("127.0.0.1", client.port)).unwrap();
     stream.write_all(request.as_bytes()).unwrap();
     assert!(until(Duration::from_secs(3), || game.last_value("/input/MoveForward") == Some(1.0)), "walking");
-    assert!(!bridge.held.is_empty());
+    assert!(!bridge.main.held.is_empty());
     let gone = Instant::now();
     drop(stream);
     assert!(until(Duration::from_secs(2), || game.last_value("/input/MoveForward") == Some(0.0)), "released when the client went away");
     assert!(gone.elapsed() < Duration::from_secs(2), "not at the end of the 9 s: {:?}", gone.elapsed());
-    assert!(until(Duration::from_secs(1), || bridge.held.is_empty()));
+    assert!(until(Duration::from_secs(1), || bridge.main.held.is_empty()));
     client.fails("walk", json!({ "direction": "forward", "seconds": 11 }), "bad_duration");
 }
 
 #[test]
 fn the_sweep_brings_up_what_stayed_down_past_its_time() {
     let (game, bridge, _server, _client) = lab("sweep");
-    bridge.held.press(Hold::OscButton("/input/MoveForward"), Instant::now() - Duration::from_secs(5));
-    assert!(until(Duration::from_secs(2), || bridge.held.is_empty()), "the listener's tick took care of it");
+    bridge.main.held.press(Hold::OscButton("/input/MoveForward"), Instant::now() - Duration::from_secs(5));
+    assert!(until(Duration::from_secs(2), || bridge.main.held.is_empty()), "the listener's tick took care of it");
     assert!(until(Duration::from_secs(1), || game.last_value("/input/MoveForward") == Some(0.0)));
 }
 
@@ -942,7 +942,7 @@ fn the_whole_loop_runs_unattended() {
         *b = Behaviour { reconstruct: Duration::from_millis(100), ..Behaviour::default() };
     });
     tour(&client, &game);
-    assert!(bridge.held.is_empty(), "nothing left down at the end");
+    assert!(bridge.main.held.is_empty(), "nothing left down at the end");
     let mut status = Status::default();
     bridge.status_into(&mut status);
     assert!(status.log.iter().any(|l| l.text.contains("3D picture") && l.ok), "the log tells what it did");
@@ -1175,4 +1175,243 @@ fn the_unity_projects_tools_are_reached_like_the_others() {
     // Without the token, nothing.
     let (status, _, _) = exchange(client.port, "POST", "/mcp", &[("Host", format!("127.0.0.1:{}", client.port)), ("Content-Type", "application/json".into())], &modern_message("tools/list", json!({}))).unwrap();
     assert_eq!(status, 401);
+}
+
+// ---- Sessions: several VRChats at once
+
+use super::lab::LabOpener;
+
+/// The bridge with the lab's main game and side sessions, and a client.
+fn lab_with_sessions(name: &str) -> (Arc<LabGame>, Arc<LabOpener>, Arc<Bridge>, Server, Client) {
+    let (game, bridge, server, client) = lab(name);
+    let opener = LabOpener::new(&std::env::temp_dir().join(format!("orbiters-bridge-sessions-{name}-{}", uuid::Uuid::new_v4().simple())));
+    bridge.set_opener(opener.clone());
+    (game, opener, bridge, server, client)
+}
+
+/// Opens a session of `profile` and takes it to world A: its id.
+fn open_and_arrive(client: &Client, profile: u32, world: &str) -> String {
+    let opened = client.tool("open_session", json!({ "profile": profile })).expect("open_session");
+    let id = opened["session"].as_str().unwrap().to_string();
+    assert!(id.starts_with(&format!("p{profile}-")), "{opened}");
+    assert_eq!(opened["needs_sign_in"], false, "{opened}");
+    assert_eq!(opened["signed_in_as"], format!("Lab Profile {profile}"));
+    let arrived = client.tool("go_to_world", json!({ "session": id, "world_id": world })).expect("go_to_world");
+    assert_eq!(arrived["arrived"], true, "{arrived}");
+    id
+}
+
+#[test]
+fn two_sessions_are_driven_at_once_without_cross_talk() {
+    let (main, opener, _bridge, _server, client) = lab_with_sessions("two");
+    let one = open_and_arrive(&client, 1, LAB_WORLD_A);
+    let two = open_and_arrive(&client, 2, LAB_WORLD_B);
+    let (g1, g2) = (opener.game_of(1).unwrap(), opener.game_of(2).unwrap());
+    // Each started with its own profile and OSC ports, the main session's game never.
+    assert!(main.launches().is_empty(), "the main session was not touched");
+    let args1 = g1.launches().last().unwrap().args();
+    let args2 = g2.launches().last().unwrap().args();
+    assert!(args1.contains(&"--profile=1".into()) && args1.contains(&"--osc=9010:127.0.0.1:9011".into()), "{args1:?}");
+    assert!(args2.contains(&"--profile=2".into()) && args2.contains(&"--osc=9020:127.0.0.1:9021".into()), "{args2:?}");
+    // Both walk at the same time, each in its own VRChat only.
+    let port = client.port;
+    let (a, b) = (one.clone(), two.clone());
+    let walking1 = std::thread::spawn(move || Client { port }.tool("walk", json!({ "session": a, "direction": "forward", "seconds": 0.6 })));
+    let walking2 = std::thread::spawn(move || Client { port }.tool("walk", json!({ "session": b, "direction": "left", "seconds": 0.6 })));
+    walking1.join().unwrap().expect("session 1 walks");
+    walking2.join().unwrap().expect("session 2 walks beside it");
+    assert_eq!(g1.last_value("/input/MoveForward"), Some(0.0));
+    assert_eq!(g1.last_value("/input/MoveLeft"), None, "nothing of session 2's reached session 1");
+    assert_eq!(g2.last_value("/input/MoveLeft"), Some(0.0));
+    assert_eq!(g2.last_value("/input/MoveForward"), None, "nothing of session 1's reached session 2");
+    assert!(main.heard().is_empty(), "nor the main session's");
+    // Each looks at its own window.
+    for id in [&one, &two] {
+        let (_, picture) = client.rpc("tools/call", json!({ "name": "screenshot", "arguments": { "session": id } }));
+        assert_eq!(picture["result"]["content"][0]["type"], "image", "{picture}");
+    }
+    // Each state is its own: its world, its account, its pictures.
+    let (s1, s2) = (client.tool("get_state", json!({ "session": one })).unwrap(), client.tool("get_state", json!({ "session": two })).unwrap());
+    assert_eq!((s1["place"]["world_id"].as_str(), s2["place"]["world_id"].as_str()), (Some(LAB_WORLD_A), Some(LAB_WORLD_B)));
+    assert_eq!(s1["session"]["account"]["name"], "Lab Profile 1");
+    // Each in a strict private instance of its own account, not of the app's (VRChat refuses another account there).
+    assert!(s1["place"]["instance"].as_str().unwrap().contains("~private(usr_00000001-"), "{s1}");
+    assert!(s2["place"]["instance"].as_str().unwrap().contains("~private(usr_00000002-"), "{s2}");
+    assert_eq!((s1["place"]["private"].as_bool(), s2["place"]["private"].as_bool()), (Some(true), Some(true)));
+    assert!(main.instances().is_empty() && opener.game_of(1).unwrap().instances().is_empty(), "no API instance for a side session");
+    assert_eq!(s2["session"]["profile"], 2);
+    assert_eq!(client.state()["vrchat"]["running"], false, "the main session still has no VRChat");
+    // A picture in each, the camera opened through each session's own window (one keyboard turn after the other).
+    for (id, game) in [(&one, &g1), (&two, &g2)] {
+        game.set_foreground(true);
+        let mut opened = false;
+        for _ in 0..20 {
+            match client.tool("press", json!({ "session": id, "input": "esc" })) {
+                Ok(_) => {
+                    opened = true;
+                    break;
+                }
+                Err(f) if f["code"] == "focus_busy" => std::thread::sleep(Duration::from_millis(500)),
+                Err(f) => panic!("{f}"),
+            }
+        }
+        assert!(opened, "the keyboard turn came");
+        client.tool("mouse", json!({ "session": id, "action": "click", "x": CAMERA_ICON.0, "y": CAMERA_ICON.1 })).unwrap();
+        client.tool("press", json!({ "session": id, "input": "esc" })).unwrap();
+        client.tool("turn", json!({ "session": id, "degrees": 20 })).unwrap();
+        let picture = client.tool("take_3d_picture", json!({ "session": id, "length_s": 1 })).unwrap();
+        assert_eq!(picture["saved"], true, "{picture}");
+        game.set_foreground(false);
+        // Another session's turn comes once this one leaves the keyboard alone.
+        std::thread::sleep(super::FOCUS_HOLD);
+    }
+    let (s1, s2) = (client.tool("get_state", json!({ "session": one })).unwrap(), client.tool("get_state", json!({ "session": two })).unwrap());
+    let (p1, p2) = (s1["pictures"].as_array().unwrap(), s2["pictures"].as_array().unwrap());
+    assert_eq!((p1.len(), p2.len()), (1, 1), "each picture in its own session");
+    assert_eq!((p1[0]["world_id"].as_str(), p2[0]["world_id"].as_str()), (Some(LAB_WORLD_A), Some(LAB_WORLD_B)));
+    assert!(g1.injected().iter().any(|i| matches!(i, Input::Key { scan: 0x01, .. })) && g2.injected().iter().any(|i| matches!(i, Input::Key { scan: 0x01, .. })));
+    // Listed, ids not shown.
+    let list = client.tool("list_sessions", json!({})).unwrap();
+    let listed = list["sessions"].as_array().unwrap();
+    assert_eq!(listed.len(), 3, "{list}");
+    assert!(listed.iter().all(|s| !s["session"].as_str().unwrap().contains(&one[3..])), "{list}");
+    // Closed, and gone.
+    client.tool("close_session", json!({ "session": one })).unwrap();
+    client.fails("walk", json!({ "session": one, "direction": "forward", "seconds": 0.1 }), "unknown_session");
+    assert!(opener.forgotten.lock().unwrap().contains(&one));
+    assert_eq!(g1.closes(), 2, "once to go to the world, once at the end");
+    assert_eq!(client.tool("get_state", json!({ "session": two })).unwrap()["vrchat"]["running"], true, "the other session goes on");
+}
+
+#[test]
+fn a_session_is_driven_with_its_id_only_and_taken_over_once_left_alone() {
+    let (_main, _opener, bridge, _server, client) = lab_with_sessions("lease");
+    let id = open_and_arrive(&client, 1, LAB_WORLD_A);
+    client.fails("get_state", json!({ "session": "p1-000000000000" }), "session_taken_over");
+    client.fails("get_state", json!({ "session": "p5-000000000000" }), "unknown_session");
+    // The profile has its session: another agent is told, and may not take it while it is in use.
+    let busy = client.fails("open_session", json!({ "profile": 1, "take_over": true }), "session_in_use");
+    assert!(busy["message"].as_str().unwrap().contains("e2e"), "who drives it: {busy}");
+    // Left alone for longer than the lease: taken over, the same VRChat, a new id; the old one is refused.
+    let side = bridge.sides.lock().unwrap()[0].clone();
+    side.lease.lock().unwrap().as_mut().unwrap().last_call = Instant::now() - super::sessions::LEASE_STALE - Duration::from_secs(1);
+    client.fails("open_session", json!({ "profile": 1 }), "session_in_use");
+    let taken = client.tool("open_session", json!({ "profile": 1, "take_over": true })).unwrap();
+    assert_eq!(taken["taken_over"], true);
+    let new = taken["session"].as_str().unwrap();
+    assert_ne!(new, id);
+    client.fails("walk", json!({ "session": id, "direction": "forward", "seconds": 0.1 }), "session_taken_over");
+    assert_eq!(client.tool("get_state", json!({ "session": new })).unwrap()["vrchat"]["started_by_bridge"], true, "the VRChat came with it");
+}
+
+#[test]
+fn a_profile_without_an_account_says_it_needs_the_persons_sign_in() {
+    let (_main, opener, _bridge, _server, client) = lab_with_sessions("sign-in");
+    opener.signed_out.lock().unwrap().push(3);
+    let opened = client.tool("open_session", json!({ "profile": 3 })).unwrap();
+    assert_eq!(opened["needs_sign_in"], true, "{opened}");
+    assert!(opened["next"].as_str().unwrap().contains("sign in"), "{opened}");
+    let id = opened["session"].as_str().unwrap();
+    let state = client.tool("get_state", json!({ "session": id })).unwrap();
+    assert_eq!(state["session"]["needs_sign_in"], true);
+    assert!(state["next"].as_str().unwrap().contains("never types"), "{state}");
+    client.fails("go_to_world", json!({ "session": id, "world_id": LAB_WORLD_A }), "needs_sign_in");
+    assert_eq!(opener.game_of(3).unwrap().launches().len(), 1, "nothing restarted for it");
+    let waited = client.tool("wait_for", json!({ "session": id, "until": "signed_in", "timeout_s": 1 })).unwrap();
+    assert_eq!(waited["done"], false);
+    opener.game_of(3).unwrap().set_behaviour(|b| {
+        b.needs_sign_in = false;
+        b.account = Some(("usr_x".into(), "Signed In".into()));
+    });
+    assert_eq!(client.tool("wait_for", json!({ "session": id, "until": "signed_in", "timeout_s": 2 })).unwrap()["done"], true);
+}
+
+#[test]
+fn a_session_beyond_what_is_allowed_is_refused_with_its_reason() {
+    let (_main, opener, _bridge, _server, client) = lab_with_sessions("limits");
+    client.fails("open_session", json!({ "profile": 0 }), "bad_profile");
+    opener.others.lock().unwrap().push(4);
+    client.fails("open_session", json!({ "profile": 4 }), "profile_in_use");
+    *opener.memory.lock().unwrap() = Some(1 << 30);
+    client.fails("open_session", json!({ "profile": 1 }), "low_memory");
+    *opener.memory.lock().unwrap() = Some(16 << 30);
+    // Easy Anti-Cheat of a VRChat that just closed: no launch until it unloaded.
+    *opener.eac.lock().unwrap() = super::sessions::Eac { service: "STOPPED".into(), driver: "RUNNING".into(), vrchat_runs: false, launcher_runs: false };
+    let busy = client.fails("open_session", json!({ "profile": 1 }), "eac_busy");
+    assert!(busy["retry_after_s"].as_u64().is_some());
+    assert!(opener.games.lock().unwrap().iter().all(|g| g.2.launches().is_empty()), "nothing was launched");
+    *opener.eac.lock().unwrap() = super::sessions::Eac { service: "ABSENT".into(), driver: "ABSENT".into(), vrchat_runs: false, launcher_runs: false };
+    *opener.limit.lock().unwrap() = 1;
+    open_and_arrive(&client, 1, LAB_WORLD_A);
+    let full = client.fails("open_session", json!({ "profile": 2 }), "too_many_sessions");
+    assert!(full["message"].as_str().unwrap().contains("graphics memory"), "{full}");
+}
+
+#[test]
+fn the_persons_input_in_a_sessions_window_pauses_that_session_only() {
+    let (_main, opener, bridge, _server, client) = lab_with_sessions("person");
+    let (one, two) = (open_and_arrive(&client, 1, LAB_WORLD_A), open_and_arrive(&client, 2, LAB_WORLD_B));
+    let (g1, g2) = (opener.game_of(1).unwrap(), opener.game_of(2).unwrap());
+    g1.set_foreground(true);
+    bridge.heard(Heard::PersonInput);
+    client.fails("walk", json!({ "session": one, "direction": "forward", "seconds": 0.2 }), "paused_by_person");
+    client.tool("walk", json!({ "session": two, "direction": "forward", "seconds": 0.2 })).expect("the other session walks on");
+    client.tool("turn", json!({ "session": two, "degrees": 10 })).expect("and turns");
+    // Keys need the person away from the whole computer.
+    g2.set_foreground(true);
+    g1.set_foreground(false);
+    client.fails("press", json!({ "session": two, "input": "esc" }), "paused_by_person");
+    assert!(g2.injected().is_empty(), "no key reached the window while the person is at the computer");
+}
+
+#[test]
+fn the_persons_own_vrchat_never_loses_the_foreground_to_a_session() {
+    let (_main, opener, _bridge, _server, client) = lab_with_sessions("person-focus");
+    let one = open_and_arrive(&client, 1, LAB_WORLD_A);
+    // The person's VRChat runs and has the foreground.
+    opener.persons.lock().unwrap().push(4242);
+    *opener.foreground.lock().unwrap() = Some(4242);
+    let game = opener.game_of(1).unwrap();
+    game.set_behaviour(|b| b.focus_works = true);
+    client.fails("press", json!({ "session": one, "input": "esc" }), "person_vrchat_has_focus");
+    client.fails("focus_game", json!({ "session": one }), "person_vrchat_has_focus");
+    assert!(game.injected().is_empty());
+    client.tool("walk", json!({ "session": one, "direction": "forward", "seconds": 0.2 })).expect("OSC needs no focus");
+    // Another window of theirs (not a VRChat) has it: the session's window is brought forward on its turn.
+    *opener.foreground.lock().unwrap() = Some(1);
+    client.tool("press", json!({ "session": one, "input": "esc" })).expect("brought forward and pressed");
+    let list = client.tool("list_sessions", json!({})).unwrap();
+    assert_eq!(list["persons_vrchats_running"], 1, "{list}");
+}
+
+#[test]
+fn keys_and_clicks_take_turns_between_sessions() {
+    let mut turn = super::FocusTurn::default();
+    let t0 = Instant::now();
+    assert!(turn.ask("a", t0).is_ok());
+    assert!(turn.ask("a", t0 + Duration::from_secs(5)).is_ok(), "kept while used");
+    let wait = turn.ask("b", t0 + Duration::from_secs(6)).unwrap_err();
+    assert!((1..=8).contains(&wait), "{wait}");
+    let _ = turn.ask("c", t0 + Duration::from_secs(7));
+    // a stops using it: b asked first, b is next, c after.
+    let later = t0 + Duration::from_secs(5) + super::FOCUS_HOLD + Duration::from_millis(1);
+    assert!(turn.ask("c", later).is_err(), "c asked after b");
+    assert!(turn.ask("b", later).is_ok());
+    assert_eq!(turn.holder(), Some("b"));
+    turn.leave("b");
+    assert!(turn.ask("c", later).is_ok(), "b closed: c's turn at once");
+}
+
+#[test]
+fn the_main_session_waits_while_a_side_sessions_picture_borrows_the_app() {
+    let (main, _opener, _bridge, _server, client) = lab_with_sessions("lent");
+    arrive(&client);
+    main.set_behaviour(|b| b.lent_away = true);
+    let failure = client.fails("walk", json!({ "direction": "forward", "seconds": 0.2 }), "app_lent");
+    assert!(failure["retry_after_s"].as_u64().is_some());
+    assert!(main.last_value("/input/MoveForward").is_none(), "nothing of main's went out while lent");
+    assert_eq!(client.state()["app_lent_to_another_session"], true);
+    main.set_behaviour(|b| b.lent_away = false);
+    assert_eq!(client.state()["vrchat"]["started_by_bridge"], true, "still the bridge's after the lend: not taken for gone");
+    client.tool("walk", json!({ "direction": "forward", "seconds": 0.2 })).unwrap();
 }

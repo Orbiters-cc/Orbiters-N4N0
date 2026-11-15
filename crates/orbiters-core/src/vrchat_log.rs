@@ -390,6 +390,12 @@ fn last_join(file: &mut File, len: u64) -> Option<u64> {
 /// The log of the VRChat run that began last: `output_log_<date>_<time>.txt` names sort by when the run began. Not the
 /// log written to last: a second VRChat, or an old log something touched, would be followed then.
 pub fn newest_log(dir: &Path) -> Option<PathBuf> {
+    newest_log_where(dir, |_| true)
+}
+
+/// [`newest_log`] among the logs `keep` says yes to: the logs of the VRChats the bridge runs beside the person's are not
+/// the person's VRChat, and the app must not follow them (bridge/sessions.rs).
+pub fn newest_log_where(dir: &Path, keep: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let dated = |name: &str| {
         let b = name.as_bytes();
         name.len() == "output_log_2026-10-20_00-00-00.txt".len()
@@ -402,9 +408,13 @@ pub fn newest_log(dir: &Path) -> Option<PathBuf> {
             let name = e.file_name().into_string().ok()?;
             (name.starts_with("output_log_") && name.ends_with(".txt")).then(|| ((dated(&name), name), e.path()))
         })
+        .filter(|(_, path)| keep(path))
         .max_by(|a, b| a.0.cmp(&b.0))
         .map(|(_, path)| path)
 }
+
+/// Which logs a [`LogWatcher`] leaves out when it picks the newest.
+pub type SkipLog = std::sync::Arc<dyn Fn(&Path) -> bool + Send + Sync>;
 
 /// What one poll reads at most: the rest waits for the next (the watcher thread has other things to do).
 const PER_POLL: u64 = 32 << 20;
@@ -421,12 +431,27 @@ pub struct LogWatcher {
     live: bool,
     /// What the last poll read: the log's file name and the bytes from, to.
     last_read: Option<(String, u64, u64)>,
+    /// Follows this one log only (a VRChat the bridge started beside the person's: its own log, whatever is newer).
+    only: Option<PathBuf>,
+    /// Logs never followed (the bridge's side sessions'), when it picks the newest.
+    skip: Option<SkipLog>,
     pub state: WorldState,
 }
 
 impl LogWatcher {
     pub fn new(dir: Option<PathBuf>) -> Self {
-        Self { dir, file: None, position: 0, caught_up: false, live: false, last_read: None, state: WorldState::default() }
+        Self { dir, file: None, position: 0, caught_up: false, live: false, last_read: None, only: None, skip: None, state: WorldState::default() }
+    }
+
+    /// A follower of one log file only, from its start.
+    pub fn of_file(path: PathBuf) -> Self {
+        let dir = path.parent().map(Path::to_path_buf);
+        Self { only: Some(path), file: Some(PathBuf::new()), ..Self::new(dir) }
+    }
+
+    /// Leaves out the logs `skip` says yes to when it picks the newest one.
+    pub fn set_skip(&mut self, skip: SkipLog) {
+        self.skip = Some(skip);
     }
 
     /// Whether everything the log holds was read: until then the state may be an hour old (a world left long ago).
@@ -453,7 +478,12 @@ impl LogWatcher {
         self.last_read = None;
         self.live = false;
         let Some(dir) = self.dir.clone().or_else(crate::paths::vrchat_log_dir) else { return events };
-        let Some(newest) = newest_log(&dir) else { return events };
+        let newest = match (&self.only, &self.skip) {
+            (Some(only), _) => Some(only.clone()),
+            (None, Some(skip)) => newest_log_where(&dir, |p| !skip(p)),
+            (None, None) => newest_log(&dir),
+        };
+        let Some(newest) = newest else { return events };
         let Ok(mut f) = File::open(&newest) else { return events };
         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
         let mut live = was_caught_up;
@@ -732,6 +762,29 @@ mod tests {
         std::fs::write(dir.join("output_log_2026-10-19_23-00-00.txt"), "touched").unwrap();
         std::fs::write(dir.join("output_log_notes.txt"), "").unwrap();
         assert_eq!(newest_log(&dir).unwrap().file_name().unwrap(), "output_log_2026-10-20_10-00-00.txt");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_side_sessions_log_is_followed_by_its_session_and_skipped_by_the_app() {
+        let dir = temp_dir("sides");
+        let person = dir.join("output_log_2026-11-15_01-00-00.txt");
+        let side = dir.join("output_log_2026-11-15_01-08-16.txt");
+        std::fs::write(&person, format!("{}\n", line(&format!("[Behaviour] Joining {WORLD_A}:1~private(usr_a)~region(eu)")))).unwrap();
+        std::fs::write(&side, format!("{}\n", line(&format!("[Behaviour] Joining {WORLD_B}:2~private(usr_b)~region(eu)")))).unwrap();
+        // The app: newer is the side session's, which it must not follow.
+        let mut app = LogWatcher::new(Some(dir.clone()));
+        let side_path = side.clone();
+        app.set_skip(std::sync::Arc::new(move |p: &Path| p == side_path));
+        app.poll();
+        assert_eq!(app.state.log_file.as_deref(), Some(person.as_path()));
+        assert_eq!(app.state.world_id.as_deref(), Some(WORLD_A));
+        // The session: its own log only, from its start, whatever is newer.
+        std::fs::write(dir.join("output_log_2026-11-15_02-00-00.txt"), "").unwrap();
+        let mut own = LogWatcher::of_file(side.clone());
+        own.poll();
+        assert_eq!(own.state.log_file.as_deref(), Some(side.as_path()));
+        assert_eq!(own.state.world_id.as_deref(), Some(WORLD_B));
         std::fs::remove_dir_all(dir).ok();
     }
 }

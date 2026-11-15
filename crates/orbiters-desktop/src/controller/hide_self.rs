@@ -214,6 +214,12 @@ fn avatar_support(vrchat: &[(String, OscValue)]) -> (Option<bool>, bool) {
     (kit, value_of(vrchat, &parameter(HIDE_SELF_PARAMETER)).is_some())
 }
 
+/// Whether the avatar in this VRChat tree has the capture kit (`None`: the tree says nothing of the avatar): a side session
+/// of the bridge's reads its own VRChat's tree.
+pub(crate) fn kit_in(vrchat: &[(String, OscValue)]) -> Option<bool> {
+    avatar_support(vrchat).0
+}
+
 impl super::Controller {
     /// Whether the avatar worn has N4N0's capture kit, as VRChat's tree says: `None` when it does not say.
     pub(crate) fn worn_avatar_has_kit(&self) -> Option<bool> {

@@ -165,3 +165,47 @@ class InputTests(unittest.TestCase):
         self.assertEqual(observed[1],[0,0])
 
 if __name__=='__main__':unittest.main()
+
+
+class BridgeSessionsBeside(unittest.TestCase):
+    """A desktop VRChat of Orbiters' bridge in a profile of its own (2026-11-15) coexists with the shared session."""
+
+    def cmdline(self, args):
+        from unittest.mock import Mock
+        process = Mock()
+        process.cmdline.return_value = args
+        return patch.object(sandbox.vrchat_life.psutil, 'Process', return_value=process)
+
+    def test_a_bridge_session_is_told_apart_by_its_own_profile_and_osc(self):
+        bridge = ['C:/VRChat/VRChat.exe', '--no-vr', '--profile=1', '--osc=9010:127.0.0.1:9011', '-screen-fullscreen', '0']
+        with self.cmdline(bridge):
+            self.assertTrue(sandbox.vrchat_life.bridge_session(1))
+        for other in (['C:/VRChat/VRChat.exe', 'vrchat://launch?id=x', '-screen-fullscreen', '0'],          # the sandbox's or the owner's VR
+                      ['C:/VRChat/VRChat.exe', '--no-vr', '--profile=0', '--osc=9010:127.0.0.1:9011'],    # the owner's own profile
+                      ['C:/VRChat/VRChat.exe', '--no-vr', '--profile=2'],                                 # no ports of its own
+                      ['C:/VRChat/VRChat.exe', '--profile=1', '--osc=9010:127.0.0.1:9011']):              # in VR
+            with self.cmdline(other):
+                self.assertFalse(sandbox.vrchat_life.bridge_session(1), other)
+
+    def test_a_bridge_session_neither_refuses_the_sandbox_nor_is_recorded_as_its_own(self):
+        with patch.object(sandbox, 'process_exited', return_value=False), \
+                patch.object(sandbox, 'process_names', return_value=[(2, 'VRChat.exe'), (3, 'vrserver.exe')]), \
+                patch.object(sandbox.vrchat_life, 'bridge_session', side_effect=lambda pid, *_: pid == 2), \
+                patch.object(sandbox.psutil, 'Process') as process:
+            process.return_value.create_time.return_value = 1.0
+            self.assertEqual([p['pid'] for p in sandbox.processes()], [3])
+
+    def test_a_launch_beside_a_bridge_session_waits_for_nothing_but_a_launcher(self):
+        running = {'state': 'RUNNING'}
+        beside = [{'name': 'VRChat.exe', 'pid': 2}]
+        eac = {'name': 'EasyAntiCheat_EOS.exe', 'pid': 9}
+        snap = lambda procs: {'services': {'EasyAntiCheat_EOS': running, 'EasyAntiCheat_EOSSys': running}, 'processes': procs, 'beside': beside}
+        self.assertTrue(sandbox.vrchat_life.idle(snap([eac])))
+        self.assertFalse(sandbox.vrchat_life.idle(snap([eac, {'name': 'start_protected_game.exe', 'pid': 7}])), 'a launch under way')
+        self.assertFalse(sandbox.vrchat_life.idle(snap([eac, {'name': 'VRChat.exe', 'pid': 8}])), 'the sandbox\'s own VRChat still runs')
+        stopped = {'services': {'EasyAntiCheat_EOS': {'state': 'STOPPED'}, 'EasyAntiCheat_EOSSys': {'state': 'RUNNING'}}, 'processes': [], 'beside': []}
+        self.assertFalse(sandbox.vrchat_life.idle(stopped), 'alone, the 2026-11-13 rule stands')
+
+    def test_the_vr_launch_names_the_default_profile(self):
+        source = Path(sandbox.__file__).read_text(encoding='utf-8')
+        self.assertIn("[str(launcher),url,'--profile=0',", source)

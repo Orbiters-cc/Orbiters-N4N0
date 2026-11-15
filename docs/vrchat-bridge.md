@@ -67,6 +67,44 @@ Needed as well: signed in to VRChat in Settings (private instances are made with
 | `focus_game` | Asks Windows to bring the game forward: Windows may say no. |
 | `wear_avatar` | Changes to an avatar by its `avtr_` id, over OSC, and waits for the change. Only when the person asked. Says `changed` false when VRChat did not take it, and `avatar.capture_kit`. |
 | `take_3d_picture` | 1, 4 or 8 seconds, then the session and its reconstruction's state. |
+| `open_session` | A VRChat of its own in a profile (`--profile=N`, N ≥ 1), beside any other VRChat: its `session` id, its account or `needs_sign_in`. |
+| `list_sessions` | The sessions, their profiles, accounts, worlds, who drives each and how long it has been idle (ids shortened). |
+| `close_session` | Closes a session's VRChat and ends the session. |
+
+Every VRChat tool takes `session`; without it, it acts on the main session as before.
+
+### Sessions: several VRChats at once (2026-11-15)
+
+A **session** is one VRChat the bridge started, bound to a VRChat profile, driven by one agent. `bridge/sessions.rs` holds the rules,
+`controller/bridge_side.rs` the real side sessions, `lab.rs`'s `LabOpener` the fake ones the tests drive.
+
+- **main**: what the bridge always had, and what tools without `session` act on. The VRChat the app itself follows (default OSC ports
+  9000/9001, the newest log, the capture), so only while the person runs no VRChat.
+- **side sessions** (`open_session`): started by VRChat's own `launch.exe` with `--no-vr --profile=N --osc=<9000+10N>:127.0.0.1:<9001+10N>`
+  (Steam's `-applaunch` starts a game once). Each has its own OSC ports, its own log (the one whose arguments name its `--osc`), its own
+  process (the one VRChat that appeared after its launch: launches are one at a time) and window, its account (from its log:
+  `post login checks for <name> (usr_…)`, or `needs_sign_in` from `No cached credentials found`), its own pause and held inputs, and a lease.
+
+What is one per computer, and what became of it:
+
+| Shared thing | Now |
+| --- | --- |
+| The app's VRChat (process, log, OSC, OSCQuery) | Follows the person's VRChat (or main), never a side session: the process watcher skips side sessions' pids, the log watcher their logs, OSCQuery discovery takes only a `VRChat-Client` whose OSC port is 9000, and their datagrams to the app's OSC port (they find it over mDNS like any VRChat) are dropped by the owning process of their source port (`GetExtendedUdpTable`). |
+| OSC ports | Per session (`--osc`); main and the person keep 9000/9001. |
+| Keyboard and mouse focus | One window at a time: keys, clicks and `focus_game` take **turns** (`FocusTurn`, first asked first served, a turn kept while used and passed on 8 s after its last use: `focus_busy` with `retry_after_s`). A session brings its own window forward on its turn, only with the person away from the computer, and never when the foreground is a VRChat the bridge did not start (`person_vrchat_has_focus`). OSC (walk, turn, OSC inputs) and screenshots (Windows Graphics Capture of the window) need no focus and run in parallel. |
+| Window capture | Per window. |
+| VRChat's log | Per session (its own `output_log`, found by its `--osc` argument). |
+| The person wins | Their input in a side session's window pauses that session only; their input anywhere pauses every key and click (and main, as before); the hotkey and Settings' Pause hold everything. |
+| 3D pictures (camera, Spout `VRCSender1`, capture worker, OSC camera flight) | The app's, **lent** to one side session for its recording (`Controller::lend_vrchat`: process and log watchers, OSC target, OSCQuery, datagrams and the session's last camera pose all point at it), then given back. One picture at a time on the computer (`picture_busy`), and none while a VRChat the bridge does not run as a side session is the app's (`app_in_use`: the person's own, or main). |
+| Pictures and account | In Orbiters - N4N0's sessions folder like every capture, published under the Orbiters account signed in in the app; each session's `get_state` lists its own. |
+| Instances | Main: made through VRChat's API by the VRChat account signed in in the app, as before. A side session: VRChat refuses another account in that one (`Failed to join instance … due to 'You are not allowed to travel to that location'`, measured 2026-11-15), so the session names a new strict private instance of its own account, as VRChat's client does (`<n>~private(<its usr>)~region(<r>)~nonce(<uuid>)`, `sessions::own_private_instance`), joined at once in the same test. |
+| Easy Anti-Cheat | Shared by all VRChats (one service process, one driver). A launch waits until it may (`Eac::may_launch`): beside a running VRChat at once; with none, until service and driver are stopped (else `eac_busy`). A side VRChat that never signed in is not closed before 90 s (`too_young_to_close`). |
+| VRChat's link pipe (`VRChatURLLaunchPipe`) | Only the first VRChat started gets it (`All pipe instances are busy` in the others). A `vrchat://` link the person clicks goes to whichever VRChat has it: if a side session started first, its world page opens there, not in theirs. |
+| Limit | `experimental.vrchat_bridge_sessions` in the settings (default 2, at most 4: main and side sessions together), and 4 GB of free memory for a new one: `too_many_sessions`, `low_memory`. |
+
+Ownership: `open_session` returns an id with an unguessable part; every call with it renews its lease; `list_sessions` never shows whole ids;
+a session without a call for 10 minutes may be taken over (`open_session` with `take_over`: same VRChat, new id, the old id refused with
+`session_taken_over`). The person's own VRChat, and any VRChat the bridge did not start, is never driven, focused away from, or closed.
 
 The resource `bridge://guide` and the prompt `world_tour` explain the loop to an agent, including when to give up on a world. Every refusal has a
 `code`, a `message` and a `next` (and `retry_after_s` when that is the answer).

@@ -126,6 +126,8 @@ def processes():
         if name.lower() in NAMES:
             try:
                 p=psutil.Process(pid)
+                # A desktop VRChat of Orbiters' bridge in another profile is neither the owner's VR nor ours (vrchat_life).
+                if name.lower()=='vrchat.exe' and vrchat_life.bridge_session(pid,p):continue
                 info={'pid':pid,'name':name,'create_time':p.create_time()}
                 if not process_dead(p) and not any(d['pid']==pid and d['create_time']==info['create_time'] for d in dead):result.append(info)
             except psutil.NoSuchProcess:pass
@@ -811,7 +813,9 @@ class Session:
             sampler=vrchat_life.Sampler(self.eac,'launch',120)
             began=time.time()
             self.eac.write('vrchat_launch',attempt=attempt,eac_idle_wait_s=waited,instance=url.split('id=',1)[1],steamvr=any(p['name'].lower()=='vrserver.exe' for p in processes()))
-            proc=subprocess.Popen([str(launcher),url,'-screen-fullscreen','0','-screen-width','1280','-screen-height','720'],creationflags=subprocess.CREATE_NO_WINDOW)
+            # --profile=0 (the default, the owner's account) named: launch.exe hands a bare link to a VRChat already running
+            # (a bridge session started first owns VRChat's link pipe) instead of starting one; with --profile it always starts.
+            proc=subprocess.Popen([str(launcher),url,'--profile=0','-screen-fullscreen','0','-screen-width','1280','-screen-height','720'],creationflags=subprocess.CREATE_NO_WINDOW)
             error=None
             try:
                 while time.time()-began<120:

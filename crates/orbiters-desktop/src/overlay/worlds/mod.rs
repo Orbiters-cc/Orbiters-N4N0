@@ -83,6 +83,8 @@ pub enum Relayed {
     /// A capture of this computer's gallery: its session, what it is called, and what tells its results apart.
     ShowLocal { dir: std::path::PathBuf, name: String, changed: u64 },
     View(Action),
+    /// The captures a flip of the carousel may show next, nearest first: downloaded ahead, so a flip shows the 3D view as soon as the GPU has it (K-carousel).
+    Prepare(Vec<Entry>),
 }
 
 /// The world list the panel shows: the 3D captures, the worlds visited, or a list VRChat (or Orbiters) answers.
@@ -213,7 +215,31 @@ pub struct Worlds {
     /// Go there (F5): the instances of the world whose page shows, and what its threads answered.
     go: panel::go::GoView,
     go_said: (mpsc::Sender<GoSaid>, mpsc::Receiver<GoSaid>),
+    /// The carousel (K-carousel): the stick's flip held (which way, when it last flipped, how many times), the neighbours last asked to be prepared (for which world
+    /// and list), when the last flip was and to what (for `vr-test.log`'s times).
+    flip_latch: Option<(bool, Instant, u32)>,
+    prepared_for: Option<(u64, usize, Vec<u64>)>,
+    flipped_at: Option<(u64, Instant)>,
+    /// What the carousel's next flips may show, downloaded one at a time while nothing else is, and the one downloading.
+    prepare: Vec<Entry>,
+    preparing: Option<Download>,
+    /// A capture kept in memory, asked for while another lay in the panel's hole: shown once the panel has closed its hole over the old one ([`SWITCH_AFTER`]).
+    switch: Option<(Arc<Capture>, Instant)>,
+    /// When the capture now current was asked for, and whether it was ready in memory then (`vr-test.log`).
+    asked_at: Option<(u64, Instant, bool)>,
 }
+
+/// How long a capture switched to while another lay in the panel's hole waits before the old one's faces go: long enough for the panel, painted at once without a
+/// hole, to reach the headset first (never a frame with neither, the rule of dev.50's page switch).
+const SWITCH_AFTER: Duration = Duration::from_millis(45);
+
+/// The stick on the carousel: how far to one side flips, how far back lets it flip again, and how soon it flips again while held there.
+const FLIP_AT: f32 = 0.6;
+const FLIP_REARM: f32 = 0.3;
+const FLIP_REPEAT_FIRST: Duration = Duration::from_millis(550);
+const FLIP_REPEAT: Duration = Duration::from_millis(350);
+/// How many of the carousel's next captures are downloaded ahead: the next two and the one before.
+const PREPARED_AHEAD: usize = 3;
 
 /// What Go there's threads answer, with the world and the account they were asked for.
 enum GoSaid {
@@ -365,6 +391,13 @@ impl Worlds {
             opened_from: None,
             go: Default::default(),
             go_said: mpsc::channel(),
+            flip_latch: None,
+            prepared_for: None,
+            flipped_at: None,
+            prepare: Vec::new(),
+            preparing: None,
+            switch: None,
+            asked_at: None,
         })
     }
 
@@ -470,6 +503,13 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             opened_from: None,
             go: Default::default(),
             go_said: mpsc::channel(),
+            flip_latch: None,
+            prepared_for: None,
+            flipped_at: None,
+            prepare: Vec::new(),
+            preparing: None,
+            switch: None,
+            asked_at: None,
         }
     }
 
@@ -525,6 +565,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             let entries = self.entries();
             self.act_alone(deferred, &entries);
         }
+        self.prepare_neighbours();
         self.find();
         let seen = (self.finder.version(), self.visited.state().1);
         if seen != self.found_seen {
@@ -535,6 +576,34 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.follow_go();
         for ask in self.outbox.drain(..) {
             backend.n4n0(N4n0Command::Feedback { ask });
+        }
+    }
+
+    /// On a sheet in VR, with a capture's side panel open: the overlay's own 3D worlds are asked to download the carousel's next captures ahead (K-carousel), the
+    /// nearest first, each time the world shown or the list changes.
+    fn prepare_neighbours(&mut self) {
+        if self.relay.is_none() || self.panel.page != panel::Page::Detail {
+            return;
+        }
+        let entries = self.entries();
+        let status = self.status();
+        let picked = self.picked().cloned();
+        let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
+        let d = Data { entries: &entries, picked: picked.as_ref(), status: &status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: 0 };
+        let set = self.panel.carousel(&d);
+        let Some(at) = self.panel.selected.and_then(|id| set.iter().position(|e| e.id == id)) else { return };
+        // The way it was last flipped first: who flips forward goes on forward.
+        let back = self.panel.flipped_back();
+        let mut order: Vec<Option<&Entry>> = vec![set.get(at + 1).copied(), at.checked_sub(1).map(|i| set[i]), set.get(at + 2).copied(), at.checked_sub(2).map(|i| set[i])];
+        if back {
+            order.swap(0, 1);
+            order.swap(2, 3);
+        }
+        let near: Vec<Entry> = order.into_iter().flatten().filter(|e| e.capture).take(PREPARED_AHEAD).cloned().collect();
+        let key = (set[at].id, set.len(), near.iter().map(|e| e.id).collect::<Vec<_>>());
+        if self.prepared_for.as_ref() != Some(&key) {
+            self.prepared_for = Some(key);
+            self.relayed.push(Relayed::Prepare(near));
         }
     }
 
@@ -670,6 +739,13 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             view.turn(now.0 - from.0, now.1 - from.1);
         }
         self.live_pointer = at;
+        // Where the laser is says what the stick does there, in words under the picture: painted again when that changes.
+        let spot = |w: &Self| w.panel.pointer.and_then(|p| w.stick_spot(p.x, p.y));
+        let before = spot(self);
+        self.panel.pointer = at.map(|(x, y)| egui::pos2(x, y));
+        if spot(self) != before {
+            self.panel.dirty = true;
+        }
         if let Some((_, y)) = at {
             self.panel.vr_drag(y, self.time());
         }
@@ -713,10 +789,15 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         }
         let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
         self.panel.pressed = Some(target);
+        let hole = self.small_hole();
+        let selected = self.panel.selected;
         let actions = {
             let d = Data { entries, picked, status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
             self.panel.press(target, &d, time)
         };
+        if self.panel.selected != selected {
+            self.flipped(hole);
+        }
         self.keep_picked(entries);
         if let (panel::Target::Hero, Some((_, view))) = (target, &self.live) {
             view.hold(true);
@@ -727,6 +808,72 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         }
         self.act_alone(actions, entries);
         self.follow_live(entries);
+    }
+
+    /// What a stick does with a laser at (x, y) on this panel: moves in the capture in its hole, flips the carousel, or nothing of ours ([`panel::StickSpot`]).
+    pub fn stick_spot(&self, x: f32, y: f32) -> Option<panel::StickSpot> {
+        if !self.open && self.relay.is_none() {
+            return None;
+        }
+        let entries = self.entries();
+        let status = self.status();
+        let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
+        let picked = self.picked().cloned();
+        let d = Data { entries: &entries, picked: picked.as_ref(), status: &status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: 0 };
+        self.panel.stick_spot(&d, x, y)
+    }
+
+    /// A stick taken on the carousel, side to side (-1 to 1): past [`FLIP_AT`] it flips once; held there, again after [`FLIP_REPEAT_FIRST`] and then every
+    /// [`FLIP_REPEAT`], to go through many quickly; it flips again only once let back under [`FLIP_REARM`]. Whether it flipped.
+    pub fn flip_stick(&mut self, x: f32) -> bool {
+        let now = Instant::now();
+        let way = if x >= FLIP_AT { Some(true) } else if x <= -FLIP_AT { Some(false) } else { None };
+        match (way, self.flip_latch) {
+            (None, _) => {
+                if x.abs() < FLIP_REARM {
+                    self.flip_latch = None;
+                }
+                return false;
+            }
+            (Some(forward), Some((held, at, times))) if forward == held => {
+                let wait = if times == 1 { FLIP_REPEAT_FIRST } else { FLIP_REPEAT };
+                if now.duration_since(at) < wait {
+                    return false;
+                }
+                self.flip_latch = Some((forward, now, times + 1));
+            }
+            // A latch the other way holds until the stick comes back to its middle.
+            (Some(_), Some(_)) => return false,
+            (Some(forward), None) => self.flip_latch = Some((forward, now, 1)),
+        }
+        let forward = way == Some(true);
+        let entries = self.entries();
+        let status = self.status();
+        let time = self.time();
+        let picked = self.picked().cloned();
+        let hole = self.small_hole();
+        let actions = {
+            let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
+            let d = Data { entries: &entries, picked: picked.as_ref(), status: &status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
+            let before = self.panel.selected;
+            let actions = self.panel.flip_by_stick(&d, forward, time);
+            if self.panel.selected == before {
+                return false;
+            }
+            actions
+        };
+        self.flipped(hole);
+        self.keep_picked(&entries);
+        self.act_alone(actions, &entries);
+        true
+    }
+
+    /// The carousel flipped: its time noted, and the page painted at once if its hole closed over the capture leaving.
+    fn flipped(&mut self, hole: Option<egui::Rect>) {
+        if let Some(id) = self.panel.selected {
+            self.flipped_at = Some((id, Instant::now()));
+        }
+        self.hole_changed |= self.small_hole() != hole;
     }
 
     #[cfg(test)]
@@ -1135,8 +1282,8 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     }
 
     /// The hands, for what shows small.
-    pub fn small_input(&mut self, hands: [Option<vr::Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2], pads: [[f32; 2]; 2]) {
-        self.view.small_input(hands, grips, sticks, pads);
+    pub fn small_input(&mut self, hands: [Option<vr::Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2], pads: [[f32; 2]; 2], pointed: Option<(vr::Matrix34, [f32; 2])>) {
+        self.view.small_input(hands, grips, sticks, pads, pointed);
     }
 
     pub fn hide_view(&mut self) {
@@ -1161,6 +1308,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                     self.deferred.push(Action::Show(id));
                 }
                 Relayed::View(action) => self.deferred.push(action),
+                Relayed::Prepare(entries) => self.prepare = entries,
             }
         }
     }
@@ -1205,6 +1353,8 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                     tr("Downloading").into()
                 });
             }
+        } else if self.switch.is_some() {
+            s.stage = Some(tr("Opening it").into());
         } else if self.current.is_some() && self.view.active() {
             if self.view.preparing() {
                 // Its device and shaders stay for the next: after the first, a capture only has to get there.
@@ -1363,7 +1513,12 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             self.panel.dirty = true;
         }
         self.finish_download(overlay, steamvr);
+        if let Some((capture, _)) = self.switch.take_if(|(_, at)| Instant::now() >= *at) {
+            self.view.show(overlay, steamvr, capture);
+        }
+        self.prepare_ahead();
         self.view.update(overlay, steamvr);
+        self.log_flip_times();
         self.update_hint(overlay, steamvr, presenter, snap);
         self.update_hide_chip(overlay, steamvr, presenter);
         if self.current.is_some() && self.download.is_none() && !self.view.active() {
@@ -1542,6 +1697,56 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     }
 
     /// The download's answer: the capture goes to the view, and is kept for showing again.
+    /// The carousel's next captures, downloaded one at a time while nothing else downloads, into the captures kept in memory: a flip to one shows it at once.
+    fn prepare_ahead(&mut self) {
+        if let Some(p) = &self.preparing {
+            match p.answer.try_recv() {
+                Ok(Ok(capture)) => {
+                    let on_screen = self.current.as_ref().map(cache::Key::of);
+                    self.captures.put(p.key.clone(), Arc::new(capture), on_screen.as_ref());
+                    super::vr_log::line(&format!("carousel: {} downloaded ahead", p.id)); // i18n: not shown (a log's line)
+                    self.preparing = None;
+                }
+                Ok(Err(e)) => {
+                    super::vr_log::line(&format!("carousel: {} could not be downloaded ahead: {e:#}", p.id)); // i18n: not shown (a log's line)
+                    self.preparing = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.preparing = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        // Nothing ahead of what the person waits for: only once the capture shown is downloaded.
+        if self.preparing.is_some() || self.download.is_some() || self.current.is_none() {
+            return;
+        }
+        let current = self.current.as_ref().map(|e| e.id);
+        let Some(i) = self.prepare.iter().position(|e| Some(e.id) != current && !self.captures.holds(&cache::Key::of(e))) else { return };
+        let entry = self.prepare.remove(i);
+        let progress = Arc::new(Progress::default());
+        let (tx, rx) = mpsc::channel();
+        let (source, p, e) = (self.source.clone(), progress.clone(), entry.clone());
+        let _ = std::thread::Builder::new().name("3d-worlds-ahead".into()).spawn(move || {
+            let _ = tx.send(match &e.local {
+                Some(dir) => catalog::read_local(dir, &p),
+                None => source.download(&e, &p),
+            });
+        });
+        self.preparing = Some(Download { id: entry.id, key: cache::Key::of(&entry), progress, answer: rx });
+    }
+
+    /// For `vr-test.log`: how long after a flip the 3D view showed.
+    fn log_flip_times(&mut self) {
+        let Some((id, at, ready)) = self.asked_at else { return };
+        if self.current.as_ref().map(|e| e.id) != Some(id) {
+            self.asked_at = None;
+            return;
+        }
+        if self.switch.is_none() && self.download.is_none() && self.view.active() && !self.view.preparing() {
+            super::vr_log::line(&format!("carousel: {id} in 3D {} ms after it was asked for ({})", at.elapsed().as_millis(), if ready { "downloaded before" } else { "downloaded then" })); // i18n: not shown (a log's line)
+            self.asked_at = None;
+        }
+    }
+
     fn finish_download(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client) {
         let Some(d) = &self.download else { return };
         let answer = match d.answer.try_recv() {
@@ -1672,12 +1877,28 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                     }
                     self.error = None;
                     self.view.error = None;
+                    self.switch = None;
                     let key = cache::Key::of(&entry);
                     if let Some(capture) = self.captures.get(&key) {
-                        // Shown lately: at once, no download.
+                        // Shown lately, or downloaded ahead by the carousel: at once, no download.
                         self.download = None;
+                        self.asked_at = Some((id, Instant::now(), true));
+                        // One lying in the panel's hole goes only once the panel has closed its hole over it: never a frame with neither.
+                        if self.view.small_now().is_some_and(|s| s.docked) && self.current.as_ref().is_some_and(|c| c.id != id) {
+                            self.current = Some(entry);
+                            self.switch = Some((capture, Instant::now() + SWITCH_AFTER));
+                            continue;
+                        }
                         self.current = Some(entry);
                         self.view.show(overlay, steamvr, capture);
+                        continue;
+                    }
+                    self.asked_at = Some((id, Instant::now(), false));
+                    // Being downloaded ahead already: that download goes on as this one.
+                    if let Some(ahead) = self.preparing.take_if(|p| p.id == id) {
+                        self.view.warm_up(steamvr);
+                        self.download = Some(ahead);
+                        self.current = Some(entry);
                         continue;
                     }
                     // The render device and its shaders get ready while the capture downloads.
@@ -1696,6 +1917,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 }
                 Action::Hide => {
                     self.download = None;
+                    self.switch = None;
                     self.error = None;
                     self.view.hide();
                     if !self.view.active() {
@@ -1938,6 +2160,9 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
 
     /// Paints the panel on the menu's canvas.
     pub fn paint(&mut self, canvas: &mut Canvas) {
+        if let Some((id, at)) = self.flipped_at.take_if(|(id, _)| self.panel.selected == Some(*id)) {
+            super::vr_log::line(&format!("carousel: {id}'s picture painted {} ms after the flip", at.elapsed().as_millis())); // i18n: not shown (a log's line)
+        }
         let snapshot = self.prepare_paint(canvas.ctx());
         canvas.paint(snapshot.time, |p| snapshot.draw(p));
         self.panel.adopt_metrics(&snapshot.panel);
@@ -1982,6 +2207,15 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 let mut list: Vec<&Entry> = results[window].to_vec();
                 if let Some(e) = self.panel.entry(&d).filter(|e| !list.iter().any(|l| l.id == e.id)) {
                     list.push(e);
+                }
+                // The carousel's neighbours, two each way: their pictures are here before a flip shows one (K-carousel).
+                let set = self.panel.carousel(&d);
+                if let Some(at) = self.panel.selected.and_then(|id| set.iter().position(|e| e.id == id)) {
+                    for e in set[at.saturating_sub(2)..(at + 3).min(set.len())].iter().copied() {
+                        if !list.iter().any(|l| l.id == e.id) {
+                            list.push(e);
+                        }
+                    }
                 }
                 (list, true)
             }
@@ -2144,5 +2378,87 @@ mod go_tests {
         worlds.vrchat = false;
         let status = worlds.status();
         assert!(status.go.list.is_none() && status.go.invited.is_none() && status.go.error.is_some());
+    }
+}
+
+#[cfg(test)]
+mod carousel_tests {
+    use super::*;
+
+    fn many(n: u64) -> Vec<Entry> {
+        let previews: Vec<String> = (1..=n)
+            .map(|i| format!(r#"{{"slot":{i},"key":{i},"id":{i},"worldId":"wrld_00000000-0000-4000-8000-{i:012}","name":"World {i}","author":"a","uploader":"b","view":{{"position":[0,1,0],"target":[0,1,1]}}}}"#))
+            .collect();
+        catalog::parse(&format!(r#"{{"previews":[{}],"feedback":{{}}}}"#, previews.join(","))).unwrap()
+    }
+
+    /// A sheet's panel in a headset, a capture's side panel open on `id`, its view small in the hole.
+    fn on_a_sheet(id: u64) -> Worlds {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let mut worlds = Worlds::alone(ctx);
+        worlds.listing_for_test(many(8));
+        worlds.relay_to(Status { headset: true, current: Some(id), shown: true, small: true, small_docked: true, ..Default::default() });
+        worlds.panel.page = panel::Page::Detail;
+        worlds.panel.selected = Some(id);
+        worlds
+    }
+
+    fn shows(relayed: &[Relayed]) -> Vec<u64> {
+        relayed.iter().filter_map(|r| if let Relayed::Show(e) = r { Some(e.id) } else { None }).collect()
+    }
+
+    /// K-carousel: the stick on the carousel flips once a push, again only once let back, and on by itself while held to one side, to go through many quickly.
+    #[test]
+    fn the_stick_flips_once_a_push_and_on_while_held() {
+        let mut worlds = on_a_sheet(3);
+        let view = worlds.relay.clone().unwrap();
+        assert!(!worlds.flip_stick(0.4), "a thumb's nudge");
+        assert!(worlds.flip_stick(0.9));
+        assert_eq!(worlds.panel.selected, Some(4));
+        assert_eq!(shows(&worlds.relay_to(view.clone())), vec![4], "shown as it comes, by the overlay's own view");
+        assert!(!worlds.flip_stick(0.95), "held: not again at once");
+        assert!(!worlds.flip_stick(0.4), "half back is not let go");
+        assert!(!worlds.flip_stick(-0.9), "the other way waits for the middle");
+        assert!(!worlds.flip_stick(0.1));
+        assert!(worlds.flip_stick(-0.9));
+        assert_eq!(worlds.panel.selected, Some(3));
+        std::thread::sleep(FLIP_REPEAT_FIRST + Duration::from_millis(30));
+        assert!(worlds.flip_stick(-0.9), "held: on by itself");
+        assert_eq!(worlds.panel.selected, Some(2));
+        assert!(!worlds.flip_stick(-0.9));
+        worlds.flip_stick(0.0);
+        assert!(worlds.flip_stick(-0.9));
+        assert_eq!(worlds.panel.selected, Some(1));
+        worlds.flip_stick(0.0);
+        assert!(!worlds.flip_stick(-0.9), "nothing before the first");
+    }
+
+    /// K-carousel: the overlay's own view is asked to download the next captures ahead, nearest first and the way the person goes, once for each world shown.
+    #[test]
+    fn the_next_captures_are_asked_ahead_the_way_the_person_goes() {
+        let mut worlds = on_a_sheet(3);
+        let view = worlds.relay.clone().unwrap();
+        worlds.prepare_neighbours();
+        let prepared = |relayed: Vec<Relayed>| relayed.into_iter().find_map(|r| if let Relayed::Prepare(e) = r { Some(e.iter().map(|e| e.id).collect::<Vec<_>>()) } else { None });
+        assert_eq!(prepared(worlds.relay_to(view.clone())), Some(vec![4, 2, 5]));
+        worlds.prepare_neighbours();
+        assert_eq!(prepared(worlds.relay_to(view.clone())), None, "asked once");
+        worlds.flip_stick(-0.9);
+        worlds.prepare_neighbours();
+        assert_eq!(prepared(worlds.relay_to(view.clone())), Some(vec![1, 3, 4]), "going back: the one before first");
+        // The overlay's own 3D worlds keep what was asked.
+        let mut own = Worlds::alone(egui::Context::default());
+        own.from_elsewhere(vec![Relayed::Prepare(many(3))]);
+        assert_eq!(own.prepare.iter().map(|e| e.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    /// K-small-stick: a laser on the capture lying in the hole is where the stick moves in it; the sheet's panel says so for the loop to take the stick.
+    #[test]
+    fn the_sheet_says_where_the_stick_moves_in_the_capture() {
+        let worlds = on_a_sheet(3);
+        let hole = worlds.small_hole().expect("its hole");
+        assert_eq!(worlds.stick_spot(hole.center().x, hole.center().y), Some(panel::StickSpot::InCapture));
+        assert_eq!(worlds.stick_spot(200.0, 300.0), None);
     }
 }

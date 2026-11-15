@@ -683,6 +683,8 @@ pub struct Turn {
     pub(in crate::overlay) small_place: Option<(Matrix34, f32)>,
     /// That hole as the backdrop behind the capture needs it: its size, and the sheet's opaque picture around it (worlds/opening.rs).
     pub(in crate::overlay) small_opening: Option<super::super::worlds::opening::Opening>,
+    /// What each hand's stick does where its laser is (left, right): moves in the capture lying in the page's hole, flips captures on its side panel, or nothing of ours.
+    pub(in crate::overlay) stick_spots: [Option<super::super::worlds::panel::StickSpot>; 2],
 }
 
 /// How much of the eye VRChat's window shows, as worked back from Enzo's two pictures: its tiles were 1.4 times the panel's scale, and how far they were off grows with the place on the picture by that.
@@ -1531,7 +1533,9 @@ impl OrbitVr {
                 send_quick_menu_toggle(hand, 1, cx.snap.settings.osc.vrchat_port);
             }
             // Walking closes VRChat's Quick Menu. A moment's touch of the stick does not; laying the parts on it is not walking.
-            let stick = cx.pads.get_or_insert_with(|| cx.actions.pads(cx.steamvr)).map_or(0.0, |pads| pads.sticks[0].x.hypot(pads.sticks[0].y));
+            // A left stick taken from VRChat (moving in a 3D capture) walks nowhere.
+            let taken = cx.actions.sticks_taken()[0];
+            let stick = cx.pads.get_or_insert_with(|| cx.actions.pads(cx.steamvr)).filter(|_| !taken).map_or(0.0, |pads| pads.sticks[0].x.hypot(pads.sticks[0].y));
             self.walking_since = (stick >= WALKS_AT && self.aligning.is_none()).then(|| self.walking_since.unwrap_or(now));
             if self.walking_since.is_some_and(|since| now.duration_since(since) >= WALKS_AFTER) {
                 self.buttons.walking();
@@ -1808,6 +1812,8 @@ impl OrbitVr {
                 laser_on(&where_seen, o, d)
             })
         });
+        // What each hand's stick does where its laser is: moves in the 3D capture lying in the page's hole, or flips the captures on its side panel (K-small-stick, K-carousel).
+        let stick_spots: [Option<super::super::worlds::panel::StickSpot>; 2] = std::array::from_fn(|i| hits[i].and_then(|(panel, uv, _)| self.panels.stick_spot(panel, uv)));
         let hands: [HandNow; 2] = std::array::from_fn(|i| HandNow { on_panel: hits[i].is_some(), trigger: triggers[i] });
         let blocked_before = self.block.blocked();
         let blocked = self.block.step(hands, true);
@@ -1829,6 +1835,14 @@ impl OrbitVr {
         });
         self.panels.hover(pointer);
         let mut turn = Turn::default();
+        turn.stick_spots = stick_spots;
+        // A stick taken on the carousel flips its captures, side to side (its up and down does nothing there).
+        if cx.input_read {
+            let taken = cx.actions.sticks_taken();
+            let flipping = (0..2).find(|&h| taken[h] && stick_spots[h] == Some(super::super::worlds::panel::StickSpot::Flip));
+            let x = flipping.and_then(|h| cx.pads.get_or_insert_with(|| cx.actions.pads(cx.steamvr)).map(|pads| pads.sticks[h].x)).unwrap_or(0.0);
+            turn.clicked |= self.panels.flip_stick(x);
+        }
         if let Some(h) = self.active {
             let (down, was) = (triggers[h], self.trigger_was[h]);
             // Only a press that began blocked is the panels'.
@@ -1861,6 +1875,7 @@ impl OrbitVr {
                 super::super::worlds::Relayed::Show(_) | super::super::worlds::Relayed::ShowLocal { .. } => self.showed_view = true,
                 super::super::worlds::Relayed::View(super::super::worlds::panel::Action::Hide) => self.showed_view = false,
                 super::super::worlds::Relayed::View(_) => {}
+                super::super::worlds::Relayed::Prepare(_) => {}
             }
         }
         // VRChat's own menu, as far as it reaches round its plane, and each part of ours that shows. What is in a sheet's hole is told apart where it is used.
@@ -1899,8 +1914,10 @@ impl OrbitVr {
             Some(Opening::in_sheet(at, half, sheet, radius, Look::ours([accent.r(), accent.g(), accent.b()], super::panels::look::retro())))
         });
         // The stick's up and down scrolls what is on the sheet, unless a hand holds what shows small: that is zoomed with it. The stick that does not walk, as VRChat's turning one.
-        if (self.panels.sheet_open() || self.panels.web_pointed()) && !cx.world_status.small_held && cx.input_read {
-            let hand = if settings_walk_left(cx.snap) { 1 } else { 0 };
+        // Nor a stick taken to move in the capture or to flip captures: that is what it does then.
+        let scrolling = if settings_walk_left(cx.snap) { 1 } else { 0 };
+        if (self.panels.sheet_open() || self.panels.web_pointed()) && !cx.world_status.small_held && cx.input_read && !(cx.actions.sticks_taken()[scrolling] && turn.stick_spots[scrolling].is_some()) {
+            let hand = scrolling;
             if let Some(pads) = *cx.pads.get_or_insert_with(|| cx.actions.pads(cx.steamvr)) {
                 self.panels.stick(pads.sticks[hand].y, dt, cx.snap);
             }

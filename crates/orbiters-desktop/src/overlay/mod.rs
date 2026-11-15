@@ -802,6 +802,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let sounds = Sounds::start();
     let mut stall = Stalls::default();
     let mut input_log = vr_log::Every::default();
+    // Whose stick VRChat does not get, while it moves in a 3D capture or flips captures (K-small-stick).
+    let mut stick_take = actions::StickTake::default();
     let mut painter = painter();
     let mut presenter = Presenter::new(&steamvr);
     if let Some(icon) = thumbnail() {
@@ -1105,6 +1107,21 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             menus_up = menu_up;
             let menu_hand = turn.menu_hand;
             t.menu.worlds.menus_up(turn.menus_up);
+            // Whose stick is taken from VRChat from the next read on: a hand pointing at the capture or its panel's carousel, and both while a hand holds the
+            // capture (one zooms, the other moves in it). The rules are the trigger's: `actions::StickTake`.
+            {
+                let read = *pads_now.get_or_insert_with(|| actions.pads(&steamvr));
+                let held = t.menu.worlds.view.small_now().is_some_and(|s| s.held());
+                let wants: [bool; 2] = std::array::from_fn(|h| turn.stick_spots[h].is_some() || held);
+                let pushed = read.as_ref().map_or([0.0; 2], |pads| pads.sticks.map(|s| s.x.hypot(s.y)));
+                let before = stick_take.taken();
+                // A read that failed lets every stick go: nothing could say when to give one back.
+                let taken = stick_take.step(wants, pushed, input_read);
+                actions.set_sticks_taken(taken);
+                if taken != before {
+                    vr_log::line(&format!("sticks taken from VRChat {taken:?} (were {before:?}): spots {:?} held {held} pushed {pushed:?}", turn.stick_spots)); // i18n: not shown (a log's line)
+                }
+            }
             if t.menu.worlds.small_showing() {
                 let read = *pads_now.get_or_insert_with(|| actions.pads(&steamvr));
                 let sticks = read.as_ref().map_or([0.0; 2], |pads| [pads.sticks[0].y, pads.sticks[1].y]);
@@ -1117,10 +1134,13 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 if let Some(hand) = menu_hand {
                     grabs[hand] = false;
                 }
+                // A laser on it where it lies: that hand's stick moves in it (its stick is taken from VRChat meanwhile, above).
+                let pointing = (0..2).find(|&h| turn.stick_spots[h] == Some(worlds::panel::StickSpot::InCapture));
+                let pointed = pointing.and_then(|h| Some((lasers[h]?, read.as_ref().map(|pads| [pads.sticks[h].x, pads.sticks[h].y])?)));
                 if input_log.due(Duration::from_secs(1)) {
-                    vr_log::line(&format!("small input: read {} sticks {:?} moves {:?} grips {grabs:?} menu hand {menu_hand:?}", read.is_some(), sticks, moves)); // i18n: not shown (a log's line)
+                    vr_log::line(&format!("small input: read {} sticks {:?} moves {:?} grips {grabs:?} menu hand {menu_hand:?} pointing {pointing:?} pointed stick {:?} taken {:?}", read.is_some(), sticks, moves, pointed.map(|p| p.1), actions.sticks_taken())); // i18n: not shown (a log's line)
                 }
-                t.menu.worlds.small_input(lasers, grabs, sticks, moves);
+                t.menu.worlds.small_input(lasers, grabs, sticks, moves, pointed);
                 t.menu.worlds.small_tools(lasers, actions.orbit_triggers(&steamvr, [false; 2]));
             } else if snap.settings.orbit.immersive_turn && t.menu.worlds.view.active() {
                 // Around the person: VRChat's turning stick is the hand that does not walk, side to side. It turns with a menu up too: a capture shown from these menus goes when they close, so
@@ -1146,7 +1166,9 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         // The sticks, while translating: walking and turning with them move VRChat's world, and the translations with it.
         let sticks = if t.translate.running() {
             let read = *pads_now.get_or_insert_with(|| actions.pads(&steamvr));
-            read.map(|p| [[p.sticks[0].x, p.sticks[0].y], [p.sticks[1].x, p.sticks[1].y]])
+            // A stick taken from VRChat moves nothing of its world.
+            let taken = actions.sticks_taken();
+            read.map(|p| std::array::from_fn(|h| if taken[h] { [0.0, 0.0] } else { [p.sticks[h].x, p.sticks[h].y] }))
         } else {
             None
         };

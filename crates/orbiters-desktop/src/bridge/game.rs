@@ -348,6 +348,14 @@ pub trait Game: Send + Sync {
     fn send_link(&self, _plan: &LaunchPlan) -> Result<(), Failure> {
         Err(Failure::new("link_unavailable", "This VRChat cannot be handed a link from here.", "It is started again in the instance instead.")) // i18n: not shown (an AI client reads it in the tool's answer)
     }
+    /// A side session's own VRChat that runs though no start of the bridge was seen to bring it up: a start the bridge gave
+    /// up on (2026-11-15 12:25), or one left from a failed `open_session` or an earlier run of the app. Only a VRChat whose
+    /// command line has this session's profile and its OSC ports ([`super::sessions::started_for`]), started at `since` or
+    /// later when given, and told apart from every other VRChat: its process id, now followed as this session's. Never the
+    /// default profile's or one without these ports.
+    fn adopt(&self, _since: Option<std::time::SystemTime>) -> Option<u32> {
+        None
+    }
     /// The window of the process `pid`, while it has one.
     fn window(&self, pid: u32) -> Option<GameWindow>;
     /// Whether `window` is the foreground window at this moment.

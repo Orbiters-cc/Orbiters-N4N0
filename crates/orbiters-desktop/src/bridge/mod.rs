@@ -171,6 +171,9 @@ pub(crate) struct Run {
     /// The window's client size when its VRChat arrived (what `-screen-width` and `-screen-height` asked): the size clicks'
     /// coordinates are for, put back when someone changed it.
     pub size: Option<(u32, u32)>,
+    /// A side session's start the bridge gave up on: when, the launch's moment, and where it was going. A VRChat of it that
+    /// comes up afterwards is this session's ([`Game::adopt`]), never the person's (2026-11-15 12:25).
+    pub given_up: Option<(Instant, std::time::SystemTime, Option<Going>)>,
 }
 
 /// One VRChat the bridge drives (bridge/sessions.rs): `main`, the app's own, or a side session beside anything else.

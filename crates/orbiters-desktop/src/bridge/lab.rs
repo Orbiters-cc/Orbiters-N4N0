@@ -67,6 +67,9 @@ pub struct Behaviour {
     pub link_refused: bool,
     /// `launch` starts a launcher that never brings a VRChat up (Easy Anti-Cheat's error window).
     pub launch_hangs: bool,
+    /// VRChat comes up this long after `launch` (Easy Anti-Cheat loading first: 2026-11-15 12:25, its "301" line came before
+    /// VRChat.exe).
+    pub comes_up_after: Option<Duration>,
 }
 
 impl Default for Behaviour {
@@ -89,6 +92,7 @@ impl Default for Behaviour {
             link_opens_page: true,
             link_refused: false,
             launch_hangs: false,
+            comes_up_after: None,
         }
     }
 }
@@ -133,6 +137,8 @@ struct State {
     links: Vec<LaunchPlan>,
     /// The world's page a link opened, waiting for Join: world and instance.
     world_page: Option<(String, String)>,
+    /// A launch whose VRChat comes up later: when, and its plan.
+    coming: Option<(Instant, LaunchPlan)>,
 }
 
 /// One OSC message the stand-in received.
@@ -321,8 +327,34 @@ impl LabGame {
         self.write_line(&format!("[Behaviour] Joining or Creating Room: {name}"));
     }
 
+    /// The VRChat of a launch comes up: its window, its process, its new log.
+    fn come_up(&self, plan: &LaunchPlan) -> Result<(), Failure> {
+        let window = LabWindow::open(&self.title).ok_or_else(|| Failure::new("start_failed", "The fake window did not open.", "This is the lab."))?; // i18n: not shown
+        let mut state = self.state.lock().unwrap();
+        state.window = Some(window);
+        state.pid = Some(std::process::id());
+        state.player_from = Some(Instant::now() + state.behaviour.load + state.behaviour.player_after);
+        state.joining = (!state.behaviour.never_arrives).then(|| (Instant::now() + state.behaviour.load, plan.world_id.clone(), plan.instance.clone()));
+        drop(state);
+        self.new_log();
+        // Like VRChat, its log names the start's own arguments first.
+        self.write_line("Launching with args"); // i18n: not shown
+        Ok(())
+    }
+
     /// Lets time pass: what was due happens.
     fn advance(&self) {
+        let due = {
+            let mut state = self.state.lock().unwrap();
+            if state.coming.as_ref().is_some_and(|(at, _)| Instant::now() >= *at) {
+                state.coming.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, plan)) = due {
+            let _ = self.come_up(&plan);
+        }
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
         // The window closed: the game is gone.
@@ -452,16 +484,19 @@ impl Game for LabGame {
         if state.behaviour.launch_hangs {
             return Ok(());
         }
-        let window = LabWindow::open(&self.title).ok_or_else(|| Failure::new("start_failed", "The fake window did not open.", "This is the lab."))?; // i18n: not shown
-        state.window = Some(window);
-        state.pid = Some(std::process::id());
-        state.player_from = Some(Instant::now() + state.behaviour.load + state.behaviour.player_after);
-        state.joining = (!state.behaviour.never_arrives).then(|| (Instant::now() + state.behaviour.load, plan.world_id.clone(), plan.instance.clone()));
+        if let Some(after) = state.behaviour.comes_up_after {
+            state.coming = Some((Instant::now() + after, plan.clone()));
+            return Ok(());
+        }
         drop(state);
-        self.new_log();
-        // Like VRChat, its log names the start's own arguments first.
-        self.write_line("Launching with args"); // i18n: not shown
-        Ok(())
+        self.come_up(plan)
+    }
+
+    fn adopt(&self, _since: Option<std::time::SystemTime>) -> Option<u32> {
+        // The lab's game is one VRChat: a side session's own while it runs from a start with a profile and OSC ports.
+        let state = self.state.lock().unwrap();
+        let plan = state.launches.last()?;
+        (plan.profile.is_some_and(|p| p != 0) && plan.osc.is_some()).then_some(state.pid).flatten()
     }
 
     fn send_link(&self, plan: &LaunchPlan) -> Result<(), Failure> {
@@ -1232,6 +1267,8 @@ pub struct LabOpener {
     pub launchers_ended: Mutex<Vec<(u16, u16)>>,
     /// New sessions' launches never bring a VRChat up.
     pub launches_hang: Mutex<bool>,
+    /// New sessions' VRChats come up this long after their launch.
+    pub launches_come_up_after: Mutex<Option<Duration>>,
     /// New sessions' VRChats show the world's page for a link (as VRChat does) instead of travelling at once.
     pub links_open_page: Mutex<bool>,
 }
@@ -1252,6 +1289,7 @@ impl LabOpener {
             launcher_said: Mutex::default(),
             launchers_ended: Mutex::default(),
             launches_hang: Mutex::default(),
+            launches_come_up_after: Mutex::default(),
             links_open_page: Mutex::default(),
         })
     }
@@ -1264,11 +1302,23 @@ impl LabOpener {
 
 impl super::game::Opener for LabOpener {
     fn side(&self, session: &str, profile: u32, _osc: (u16, u16)) -> Result<Arc<dyn Game>, Failure> {
+        // A VRChat of this profile whose session was forgotten (a start answered failed) still runs: it is the same game, as
+        // the real VRChat is the same process.
+        {
+            let forgotten = self.forgotten.lock().unwrap().clone();
+            let mut games = self.games.lock().unwrap();
+            if let Some(left) = games.iter_mut().find(|g| g.1 == profile && forgotten.contains(&g.0) && g.2.state.lock().unwrap().pid.is_some()) {
+                left.0 = session.to_string();
+                return Ok(left.2.clone());
+            }
+        }
         let game = LabGame::with_osc_also(&self.root.join(session), None, None);
         let signed_out = self.signed_out.lock().unwrap().contains(&profile);
         let (hang, page) = (*self.launches_hang.lock().unwrap(), *self.links_open_page.lock().unwrap());
+        let after = *self.launches_come_up_after.lock().unwrap();
         game.set_behaviour(|b| {
             b.launch_hangs = hang;
+            b.comes_up_after = after;
             b.link_opens_page = page;
             b.needs_sign_in = signed_out;
             b.account = (!signed_out).then(|| (format!("usr_{profile:08}-0000-4000-8000-000000000000"), format!("Lab Profile {profile}"))); // i18n: not shown
@@ -1294,7 +1344,16 @@ impl super::game::Opener for LabOpener {
     }
 
     fn others_profiles(&self) -> Vec<u32> {
-        self.others.lock().unwrap().clone()
+        // The person's, and a forgotten session's VRChat still running: no session's mark any more.
+        let forgotten = self.forgotten.lock().unwrap().clone();
+        let mut profiles = self.others.lock().unwrap().clone();
+        let games = self.games.lock().unwrap().clone();
+        for game in games.iter().filter(|g| forgotten.contains(&g.0)) {
+            // Time passes for it too: a VRChat of a start answered failed comes up late.
+            game.2.advance();
+        }
+        profiles.extend(games.iter().filter(|g| forgotten.contains(&g.0) && g.2.state.lock().unwrap().pid.is_some()).map(|g| g.1));
+        profiles
     }
 
     fn eac(&self) -> super::sessions::Eac {

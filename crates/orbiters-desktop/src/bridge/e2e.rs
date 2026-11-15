@@ -1802,21 +1802,122 @@ fn a_start_that_cannot_come_up_releases_everything_and_says_why() {
     *opener.eac.lock().unwrap() = super::sessions::Eac { service: "ABSENT".into(), driver: "ABSENT".into(), vrchat_runs: false, launcher_runs: false, delete_pending: false };
     // The launcher hangs on its error window (07:04: "Launch Error (30005)"), then says so in its log: ended, and plain words.
     *opener.launches_hang.lock().unwrap() = true;
-    *opener.launcher_said.lock().unwrap() = Some((30005, "EAC unload timeout".into()));
+    // Its outcome line as Easy Anti-Cheat wrote it on 2026-11-13 15:16 (anticheatlauncher-backup-2026.11.13-15.16.54.log).
+    *opener.launcher_said.lock().unwrap() = super::sessions::launcher_outcome("[15:16:39:736] [Windows] [EAC Bootstrapper] [Info] Launcher finished with: 206, 'EAC unload timeout'.\n");
     let begin = Instant::now();
     let failed = client.fails("open_session", json!({ "profile": 1 }), "start_failed");
     assert!(begin.elapsed() < Duration::from_secs(10), "known from the launcher's log, not after 30 s");
     assert_eq!(failed["retry_after_s"], 90, "{failed}");
-    assert!(failed["message"].as_str().unwrap().contains("30005"), "{failed}");
+    let message = failed["message"].as_str().unwrap();
+    assert!(message.contains("206: EAC unload timeout") && message.contains("looked again"), "{failed}");
     assert_eq!(opener.launchers_ended.lock().unwrap().as_slice(), [(9010, 9011)], "its own launcher ended");
     let second = opener.games.lock().unwrap()[1].0.clone();
     assert!(opener.forgotten.lock().unwrap().contains(&second), "its OSC listener and mark released");
     assert!(bridge.sides.lock().unwrap().is_empty(), "no session left behind");
     // The launcher said 1072 (marked for deletion) after a start: eac_stuck too.
-    *opener.launcher_said.lock().unwrap() = Some((206, "CreateService failed with 1072".into()));
+    *opener.launcher_said.lock().unwrap() = super::sessions::launcher_outcome("[06:04:55:187] [Windows] [EAC Bootstrapper] [Info] Launcher finished with: 206, 'CreateService failed with 1072.'.\n");
     client.fails("open_session", json!({ "profile": 1 }), "eac_stuck");
     // Once it can, the same profile opens at once: nothing of the failed starts is in the way.
     *opener.launches_hang.lock().unwrap() = false;
     *opener.launcher_said.lock().unwrap() = None;
     open_and_arrive(&client, 1, LAB_WORLD_A);
+}
+
+/// Easy Anti-Cheat's success line, verbatim from the start of 2026-11-15 12:25 (`anticheatlauncher.log`, times UTC).
+const LOADED_301: &str = "[11:25:13:653] [Windows] [EAC Bootstrapper] [Info] Launcher finished with: 301, 'Easy Anti-Cheat successfully loaded in-game'.
+[11:25:13:653] [Windows] [EAC Bootstrapper] [Info] Successfully initialized the Easy Anti-Cheat module, waiting for game window to become visible.
+[11:25:13:653] [Windows] [EAC Bootstrapper] [Info] Unlocking the launch lock, allowing next game to launch to take place.
+";
+
+/// [`lab_with_sessions`] whose starts are given up on sooner: each wait for a VRChat to come up lasts `start_limit`.
+fn lab_with_sessions_timed(name: &str, start_limit: Duration) -> (Arc<LabGame>, Arc<LabOpener>, Arc<Bridge>, Server, Client) {
+    let (game, bridge, server, client) = lab_timed(name, start_limit);
+    let opener = LabOpener::new(&std::env::temp_dir().join(format!("orbiters-bridge-sessions-{name}-{}", uuid::Uuid::new_v4().simple())));
+    bridge.set_opener(opener.clone());
+    (game, opener, bridge, server, client)
+}
+
+#[test]
+fn a_start_whose_anti_cheat_says_loaded_is_its_sessions_vrchat() {
+    // 2026-11-15 12:25: the launcher's 301 came before VRChat.exe, and go_to_world answered start_failed for a VRChat that
+    // came up and arrived; the bridge then called it the person's.
+    let (_main, opener, _bridge, _server, client) = lab_with_sessions("loaded-301");
+    *opener.launcher_said.lock().unwrap() = super::sessions::launcher_outcome(LOADED_301);
+    assert_eq!(opener.launcher_said.lock().unwrap().as_ref().map(|s| s.0), Some(301));
+    *opener.launches_come_up_after.lock().unwrap() = Some(Duration::from_millis(1500));
+    let opened = client.tool("open_session", json!({ "profile": 1 })).expect("a 301 start is a start");
+    assert_eq!(opened["adopted"], false, "{opened}");
+    let id = opened["session"].as_str().unwrap().to_string();
+    let arrived = client.tool("go_to_world", json!({ "session": id, "world_id": LAB_WORLD_A })).expect("the first world from home starts it again: 301 again");
+    assert_eq!(arrived["arrived"], true, "{arrived}");
+    let state = client.tool("get_state", json!({ "session": id })).unwrap();
+    assert_eq!(state["vrchat"]["started_by_bridge"], true, "{state}");
+    assert!(opener.launchers_ended.lock().unwrap().is_empty(), "a start that works has nothing ended");
+    assert_eq!(client.tool("list_sessions", json!({})).unwrap()["persons_vrchats_running"], 0);
+    assert_eq!(opener.game_of(1).unwrap().launches().len(), 2);
+}
+
+#[test]
+fn a_start_given_up_on_whose_vrchat_comes_up_later_is_its_session_never_the_persons() {
+    let limit = Duration::from_secs(5);
+    let (_main, opener, _bridge, _server, client) = lab_with_sessions_timed("given-up", limit);
+    let id = client.tool("open_session", json!({ "profile": 1 })).unwrap()["session"].as_str().unwrap().to_string();
+    let game = opener.game_of(1).unwrap();
+    // The next start: the anti-cheat says it loaded, and VRChat takes longer than both waits.
+    *opener.launcher_said.lock().unwrap() = super::sessions::launcher_outcome(LOADED_301);
+    game.set_behaviour(|b| b.comes_up_after = Some(limit * 2 + Duration::from_secs(4)));
+    let launched = Instant::now();
+    let failed = client.fails("go_to_world", json!({ "session": id, "world_id": LAB_WORLD_A }), "start_failed");
+    let message = failed["message"].as_str().unwrap();
+    assert!(message.contains("said 301") && message.contains("looked again") && !message.contains("nothing of this start is left running"), "{failed}");
+    assert!(failed["next"].as_str().unwrap().contains("get_state"), "{failed}");
+    assert_eq!(opener.launchers_ended.lock().unwrap().as_slice(), [(9010, 9011)]);
+    // It comes up: the session's own, where its start was going, never the person's.
+    *opener.persons.lock().unwrap() = vec![4243];
+    let deadline = launched + limit * 2 + Duration::from_secs(4) + PATIENCE;
+    let state = loop {
+        let state = client.tool("get_state", json!({ "session": id })).unwrap();
+        if state["vrchat"]["started_by_bridge"] == true && state["place"]["in_world"] == true || Instant::now() > deadline {
+            break state;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    assert_eq!(state["vrchat"]["started_by_bridge"], true, "{state}");
+    assert_eq!(state["place"]["world_id"], LAB_WORLD_A, "{state}");
+    assert_eq!(client.tool("list_sessions", json!({})).unwrap()["persons_vrchats_running"], 1, "only the person's own VRChat");
+    assert_eq!(game.launches().len(), 2, "taken, not launched again");
+    // And it is driven as the bridge's: a screenshot is not refused as not_started_by_bridge.
+    if let Err(refused) = client.tool("screenshot", json!({ "session": id })) {
+        assert_ne!(refused["code"], "not_started_by_bridge", "{refused}");
+    }
+}
+
+#[test]
+fn open_session_takes_the_vrchat_a_failed_start_of_its_profile_left_running() {
+    let limit = Duration::from_secs(5);
+    let (_main, opener, bridge, _server, client) = lab_with_sessions_timed("left-running", limit);
+    *opener.launcher_said.lock().unwrap() = super::sessions::launcher_outcome(LOADED_301);
+    *opener.launches_come_up_after.lock().unwrap() = Some(limit * 2 + Duration::from_secs(3));
+    let launched = Instant::now();
+    client.fails("open_session", json!({ "profile": 1 }), "start_failed");
+    assert!(bridge.sides.lock().unwrap().is_empty());
+    let first = opener.games.lock().unwrap()[0].0.clone();
+    assert!(opener.forgotten.lock().unwrap().contains(&first));
+    // Its VRChat comes up after all (profile 1, the session's ports): the next open_session takes it, launching nothing.
+    std::thread::sleep((launched + limit * 2 + Duration::from_secs(4)).saturating_duration_since(Instant::now()));
+    *opener.launches_come_up_after.lock().unwrap() = None;
+    let opened = client.tool("open_session", json!({ "profile": 1 })).expect("adopted");
+    assert_eq!(opened["adopted"], true, "{opened}");
+    assert!(opened["next"].as_str().unwrap().contains("Nothing was launched"), "{opened}");
+    let id = opened["session"].as_str().unwrap().to_string();
+    let game = opener.game_of(1).unwrap();
+    assert_eq!(game.launches().len(), 1, "no second VRChat");
+    assert_eq!(client.tool("get_state", json!({ "session": id })).unwrap()["vrchat"]["started_by_bridge"], true);
+    assert_eq!(client.tool("list_sessions", json!({})).unwrap()["persons_vrchats_running"], 0);
+    // A VRChat the bridge did not start in another profile (no session's marks) is never taken.
+    *opener.others.lock().unwrap() = vec![2];
+    client.fails("open_session", json!({ "profile": 2 }), "profile_in_use");
+    let refused = opener.games.lock().unwrap().iter().find(|g| g.1 == 2).map(|g| g.0.clone()).unwrap();
+    assert!(opener.forgotten.lock().unwrap().contains(&refused), "what the refusal made is given back");
+    assert_eq!(opener.game_of(2).unwrap().launches().len(), 0);
 }

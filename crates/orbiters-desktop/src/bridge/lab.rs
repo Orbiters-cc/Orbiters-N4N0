@@ -114,6 +114,9 @@ struct State {
     launches: Vec<LaunchPlan>,
     log_serial: u32,
     closes: u32,
+    resizes: u32,
+    /// The window's real client size at each click (from Windows, not from what the bridge passed).
+    clicked_at_size: Vec<(u32, u32)>,
 }
 
 /// One OSC message the stand-in received.
@@ -235,6 +238,32 @@ impl LabGame {
     #[cfg(test)]
     pub fn closes(&self) -> u32 {
         self.state.lock().unwrap().closes
+    }
+
+    #[cfg(test)]
+    pub fn resizes(&self) -> u32 {
+        self.state.lock().unwrap().resizes
+    }
+
+    /// The window's client size, from Windows, at each left click.
+    #[cfg(test)]
+    pub fn clicked_at_size(&self) -> Vec<(u32, u32)> {
+        self.state.lock().unwrap().clicked_at_size.clone()
+    }
+
+    /// VRChat goes somewhere else by itself (a portal, a home): its log says it joined there.
+    #[cfg(test)]
+    pub fn moves_to(&self, world: &str, instance: &str) {
+        self.write_join(world, instance, if world == LAB_WORLD_A { "Lab World A" } else { "Lab World B" }); // i18n: not shown
+    }
+
+    /// Someone resizes the window, as the owner did to profile 1's on 2026-11-15 (the real call, on the fake window).
+    #[cfg(test)]
+    pub fn resize_by_hand(&self, width: u32, height: u32) {
+        let pid = self.state.lock().unwrap().pid;
+        if let Some(window) = pid.and_then(|pid| self.window(pid)) {
+            super::win::resize_client(window.handle, width, height);
+        }
     }
 
     #[cfg(test)]
@@ -414,6 +443,12 @@ impl Game for LabGame {
         state.foreground = state.behaviour.focus_works;
     }
 
+    /// The real call on the fake window, which is off every screen and never activated.
+    fn resize(&self, window: &GameWindow, width: u32, height: u32) {
+        self.state.lock().unwrap().resizes += 1;
+        super::win::resize_client(window.handle, width, height);
+    }
+
     fn close(&self, window: &GameWindow) -> Result<(), Failure> {
         self.state.lock().unwrap().closes += 1;
         super::win::close_window(window.handle)
@@ -485,6 +520,8 @@ impl Game for LabGame {
                 }
                 Input::MoveTo { x, y } => state.pointer = Some((x, y)),
                 Input::Button { button: MouseButton::Left, down: true } => {
+                    let size = super::win::window_of(std::process::id(), Some(&self.title)).map(|w| (w.width, w.height));
+                    state.clicked_at_size.extend(size);
                     let near = state.pointer.is_some_and(|(x, y): (u32, u32)| x.abs_diff(CAMERA_ICON.0) < 40 && y.abs_diff(CAMERA_ICON.1) < 40);
                     if state.menu_open && near {
                         state.camera_open = true;

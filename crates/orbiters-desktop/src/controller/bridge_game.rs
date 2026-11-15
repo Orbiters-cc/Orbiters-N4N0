@@ -228,6 +228,10 @@ impl Game for RealGame {
         win::bring_forward(window.handle);
     }
 
+    fn resize(&self, window: &GameWindow, width: u32, height: u32) {
+        win::resize_client(window.handle, width, height);
+    }
+
     fn close(&self, window: &GameWindow) -> Result<(), Failure> {
         win::close_window(window.handle)
     }

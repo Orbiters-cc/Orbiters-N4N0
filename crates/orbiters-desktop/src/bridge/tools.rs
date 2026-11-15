@@ -31,6 +31,8 @@ const TURN_RATE: f64 = 165.0;
 /// after the pointer came (and, worse, the next click then landed on a page that had not changed); after some 500 ms they all held.
 const CLICK_HOVER: Duration = Duration::from_millis(500);
 const CLICK_HOLD: Duration = Duration::from_millis(100);
+/// How long a window put back to its size may take to be that size.
+const WINDOW_SETTLE: Duration = Duration::from_secs(2);
 /// What an avatar without the kit means for a picture.
 const NO_KIT: &str = "The avatar worn has no N4N0 capture kit, so a recording would have no camera poses and no keyframes, and nothing to reconstruct.";
 
@@ -63,7 +65,7 @@ You drive VRChat on this computer, in desktop mode, through this bridge. A perso
 2. `find_worlds` for world ids, unless you were given them. `source`: search, visited, favorites, trending (VRChat's \"Hot\" row), popular, active, and what VRChat highlights: spotlight_pc and spotlight_cross_platform (its two Spotlight rows). Each page has up to 24 worlds; `more` says whether `next_page` has more. For all of a list, page until `more` is false (VRChat's lists go 21 pages deep, 504 worlds at most), and drop the ids you already have: the lists overlap.\n\
 3. `go_to_world` with a `world_id`. It makes a private instance of your own, starts VRChat in it (closing the last one first), brings it to the foreground, and waits. If `arrived` is false, call `wait_for` with `until: in_world`.\n\
 4. `screenshot` to see where you are. A dark picture is the loading screen: wait a little.\n\
-5. Open VRChat's camera, which only the menus can do: `press` `esc`, `screenshot`, `mouse` `click` on the camera icon in the menu's bottom row (about 640, 620 at 1280 by 720), `screenshot`, and `click` on the Stream Camera tile (about 597, 345). The menu closes and the camera's panel stays on the screen. `get_state` says `camera.open`. Leave the camera's settings alone: the app sets Stream and Spout itself when it records. **Look at a screenshot after every click, and before the next one:** a click can miss, its page may not have changed, and the same spot on the page you are really on may be a shop banner. If the page is not what you expected, `press` `esc` closes everything: start again.\n\
+5. Open VRChat's camera, which only the menus can do: `press` `esc`, `screenshot`, `mouse` `click` on the camera icon in the menu's bottom row (about 640, 620 at 1280 by 720), `screenshot`, and `click` on the Stream Camera tile (about 597, 345). The menu closes and the camera's panel stays on the screen. `get_state` says `camera.open`. Those coordinates hold because the bridge keeps VRChat's window at the size it started with (1280 by 720): if someone resized it, the next `screenshot` puts it back first, without bringing it forward (`window_restored: true`), and a `click` or `move` on a resized window is refused with `window_resized` and clicks nothing (take a screenshot, then click). Still check each spot in your last screenshot: they are where the icon and the tile usually are. Leave the camera's settings alone: the app sets Stream and Spout itself when it records. **Look at a screenshot after every click, and before the next one:** a click can miss, its page may not have changed, and the same spot on the page you are really on may be a shop banner. If the page is not what you expected, `press` `esc` closes everything: start again.\n\
 6. If `camera.pose_known` is false, `turn` by a few degrees: VRChat says where its camera is when it moves.\n\
 7. Before opening the camera, walk somewhere worth a picture with `walk` and `turn`, looking with `screenshot` between moves: with the camera or a menu open the avatar does not move (`speed_seen` 0), and the picture starts where the camera opens. `press` `esc` closes the camera again. `turn` is approximate: judge by the pictures. `walk` tells you if the avatar did not seem to move.\n\
 8. `take_3d_picture` with `length_s` 1, 4 or 8. It waits for the recording to be saved and gives the `session`. Take a few from different places: 4 or 8 seconds in the open, 1 second for a close look.\n\
@@ -82,6 +84,8 @@ A tour of worlds for labels goes, for each world: `go_to_world` (and `wait_for` 
 ## When to give up on a world\n\n\
 Move on to the next world, and say so at the end, when:\n\
 - `go_to_world` or `wait_for` fails with `start_timeout`, or the world does not load within about four minutes;\n\
+- `landed_elsewhere` twice for the same world: VRChat put the start in another instance than its own private one, and the bridge closed it at once (it never stays in an instance that is not your own private one). After the first, call `go_to_world` again;\n\
+- the world opens on a screen of its own (a language or rules page, \"press Tab\") that `press` (`tab`, `e`, `f`, `q`, the digits `0` to `9`) and a `click` on what you saw do not get you past;\n\
 - a picture comes back with `no_keyframes`: if it happens in two worlds, stop the whole run and tell the person;\n\
 - after about ten moves you cannot find a place to stand, or the spawn is a closed room;\n\
 - somebody else appears (`place.others_here` above 0): go elsewhere rather than picture them.\n\n\
@@ -179,7 +183,7 @@ pub fn list() -> Value {
         {
             "name": "press",
             "title": "Press an input",
-            "description": format!("Presses one input for a short time, then lets go. OSC inputs need no focus: jump; quick_menu opens or closes the menu; look_horizontal, move_vertical and move_horizontal are axes taking value from -1 to 1. Keys need VRChat to be the foreground window: esc is the Quick Menu, r the Action Menu, c crouch, z prone. Only these names exist: {}. Nothing that types or speaks is among them.", input::input_names().join(", ")),
+            "description": format!("Presses one input for a short time, then lets go. OSC inputs need no focus: jump; quick_menu opens or closes the menu; look_horizontal, move_vertical and move_horizontal are axes taking value from -1 to 1. Keys need VRChat to be the foreground window: esc is the Quick Menu, r the Action Menu, c crouch, z prone; tab, e, f, q and the digits 0 to 9 are for worlds' own screens and games (a language page that asks for Tab, \"press E\"). Only these names exist: {}. Nothing that types or speaks is among them.", input::input_names().join(", ")),
             "inputSchema": { "type": "object", "properties": {
                 "input": { "type": "string", "enum": input::input_names() },
                 "seconds": { "type": "number", "exclusiveMinimum": 0, "maximum": 10, "description": "Default 0.1." },
@@ -322,6 +326,25 @@ pub fn paused_failure(paused: &Paused) -> Failure {
 /// Whether two instances are one: VRChat's log may leave out what the API's name of it has at its end.
 fn same_instance(a: &str, b: &str) -> bool {
     a.split('~').next() == b.split('~').next()
+}
+
+/// A place as `world:number`, what tells two instances apart.
+pub(crate) fn place_key(world: &str, instance: &str) -> String {
+    format!("{}:{}", world.to_ascii_lowercase(), instance.split('~').next().unwrap_or_default())
+}
+
+/// Where the game is now, as a place key, when it is in a world.
+fn place_of(seen: &Seen) -> Option<String> {
+    match (seen.in_world, &seen.world_id, &seen.instance) {
+        (true, Some(world), Some(instance)) => Some(place_key(world, instance)),
+        _ => None,
+    }
+}
+
+/// Whether the game is in a strict private instance of its own: of the app's VRChat account, or of the side session's.
+fn own_private(seen: &Seen) -> bool {
+    seen.in_world
+        && seen.instance.as_deref().is_some_and(|i| seen.vrchat_user.iter().chain(seen.session_account.iter()).any(|(me, _)| private_instance_of(i, me)))
 }
 
 fn file_name(path: &std::path::Path) -> String {
@@ -514,6 +537,34 @@ impl Bridge {
         s.game.window(pid).ok_or_else(|| Failure::new("no_window", "VRChat has no window yet.", "Wait a moment and call get_state."))
     }
 
+    /// The window at the size its VRChat started with, put back if someone changed it: what a screenshot shows and where a
+    /// click lands are then the same pixels as the guide's (VRChat lays its menus out by the window's size; the first world tour
+    /// found its window at 1777 by 1117, where the guide's camera icon at (640, 620) is not). Without activating it or bringing
+    /// it to the front: the foreground stays whoever's it is. Whether it was put back.
+    fn fit_window(&self, s: &Session, pid: u32, window: GameWindow) -> (GameWindow, bool) {
+        let Some((width, height)) = s.run.lock().unwrap().size else { return (window, false) };
+        if (window.width, window.height) == (width, height) || window.width == 0 || window.height == 0 {
+            return (window, false);
+        }
+        s.game.resize(&window, width, height);
+        // Unity lays the new size out on its next frames.
+        let begin = Instant::now();
+        let mut now = window;
+        while begin.elapsed() < WINDOW_SETTLE {
+            std::thread::sleep(Duration::from_millis(100));
+            now = s.game.window(pid).unwrap_or(now);
+            if (now.width, now.height) == (width, height) {
+                std::thread::sleep(Duration::from_millis(400));
+                break;
+            }
+        }
+        let fitted = (now.width, now.height) == (width, height);
+        if fitted {
+            self.log(true, format!("VRChat's window was {} by {}: put back to {width} by {height}.", window.width, window.height));
+        }
+        (now, fitted)
+    }
+
     /// Follows the game: the start's arrival or its end, and the game going away.
     pub(super) fn follow_game(&self, s: &Session) {
         // Lent to a side session: what the app sees is that VRChat's, which says nothing of this one's.
@@ -523,6 +574,10 @@ impl Bridge {
         let seen = s.game.seen();
         let mut run = s.run.lock().unwrap();
         let mut settled = false;
+        // Where it is now, when that is this VRChat's own news: not a place it was in or asked for before this start (a log
+        // the app still follows after a restart shows the last world until the new VRChat writes its own).
+        let here = place_of(&seen).filter(|k| seen.pid.is_some() && seen.pid == run.pid.or(seen.pid) && !run.earlier.contains(k));
+        let mut leave: Option<String> = None;
         if let Some(going) = run.going.clone() {
             if going.started {
                 if run.pid.is_none() && seen.pid.is_some() {
@@ -535,38 +590,97 @@ impl Bridge {
                     && seen.pid.is_some()
                     && seen.world_id.as_deref() == Some(&going.world_id)
                     && seen.instance.as_deref().is_some_and(|i| same_instance(i, &going.instance));
+                let asked = place_key(&going.world_id, &going.instance);
                 if arrived {
                     let world = going.world_id.to_ascii_lowercase();
                     if !run.been.contains(&world) {
                         run.been.push(world);
                     }
+                    run.placed = Some(asked);
+                    run.going = None;
+                    settled = true;
+                } else if let Some(key) = here.as_ref().filter(|k| **k != asked) {
+                    // VRChat joined somewhere else than the instance made for this start (its fallback when a join is refused is
+                    // the account's home, and a home or a world can be public): left at once, before anything is sent there.
+                    leave = Some(self.why_elsewhere(&seen, &going, key));
                     run.going = None;
                     settled = true;
                 } else if going.since.elapsed() > self.timing.start_limit {
                     run.going = None;
                     run.event = Some(self.why_no_arrival(&seen, &going));
+                    run.left = false;
                     settled = true;
                 }
             }
+        } else if let (Some(placed), Some(key)) = (run.placed.clone(), here.as_ref()) {
+            // Arrived, then moved (a portal, VRChat sending it home): its own private instances only, or it leaves.
+            if *key != placed && run.pid.is_some() && !run.closing {
+                if own_private(&seen) {
+                    run.placed = Some(key.clone());
+                } else {
+                    leave = Some(format!(
+                        "VRChat moved from its private instance to {} ({}, {} other people there): the bridge closed it at once, and nothing was sent there.",
+                        seen.instance.as_deref().unwrap_or("?"),
+                        Self::kind_of_instance(seen.instance.as_deref().unwrap_or_default()),
+                        seen.others,
+                    ));
+                }
+            }
         }
-        // The game this bridge started went away by itself.
+        if let Some(why) = leave {
+            run.placed = None;
+            run.event = Some(why.clone());
+            run.left = true;
+            run.leaving = true;
+            let pid = run.pid;
+            drop(run);
+            self.release_session(s);
+            if let Some(window) = pid.and_then(|pid| s.game.window(pid)) {
+                let _ = s.game.close(&window);
+            }
+            self.log(false, why);
+            if settled {
+                s.game.hold_reconstructions(false);
+            }
+            return;
+        }
+        // The game this bridge started went away by itself (or as the bridge left a place it must not be in).
         if !run.closing && run.going.as_ref().is_none_or(|g| g.started) && run.pid.is_some() && run.pid != seen.pid {
             let running = run.going.is_some();
             run.pid = None;
+            run.placed = None;
             if running {
                 run.going = None;
                 settled = true;
             }
-            run.event = Some("VRChat closed or crashed by itself.".into());
-            drop(run);
-            self.release_session(s);
-            self.log(false, "VRChat closed or crashed by itself.");
+            if std::mem::take(&mut run.leaving) {
+                drop(run);
+                self.release_session(s);
+            } else {
+                run.event = Some("VRChat closed or crashed by itself.".into());
+                run.left = false;
+                drop(run);
+                self.release_session(s);
+                self.log(false, "VRChat closed or crashed by itself.");
+            }
         } else {
             drop(run);
         }
         if settled {
             s.game.hold_reconstructions(false);
         }
+    }
+
+    /// Why a start was left: it joined another instance than its own new private one.
+    fn why_elsewhere(&self, seen: &Seen, going: &Going, key: &str) -> String {
+        let instance = seen.instance.as_deref().unwrap_or_default();
+        let kind = if own_private(seen) { "another private instance of this account's" } else { Self::kind_of_instance(instance) };
+        let world = seen.world_name.clone().unwrap_or_else(|| seen.world_id.clone().unwrap_or_default());
+        let what = if seen.world_id.as_deref() == Some(&going.world_id) { "the right world but".to_string() } else { format!("{world}, not {},", going.world_id) };
+        format!(
+            "VRChat joined {what} another instance than the private one made for this start: {key} ({kind}, {} other people there). The bridge closed it at once, and nothing was sent there.",
+            seen.others,
+        )
     }
 
     /// Why a start did not arrive, in a sentence a model can act on.
@@ -828,6 +942,19 @@ impl Bridge {
             let mut run = s.run.lock().unwrap();
             run.last_instance = Some(Instant::now());
             run.event = None;
+            run.left = false;
+            // What it was in and asked for until now is the past: a log still showing it is no news of this start.
+            let mut earlier: Vec<String> = run.placed.take().into_iter().chain(place_of(&seen)).collect();
+            if let Some(going) = run.going.as_ref() {
+                earlier.push(place_key(&going.world_id, &going.instance));
+            }
+            for key in earlier {
+                if !run.earlier.contains(&key) {
+                    run.earlier.push(key);
+                }
+            }
+            let drop_old = run.earlier.len().saturating_sub(64);
+            run.earlier.drain(..drop_old);
             run.going = Some(Going { world_id: world_id.to_string(), instance: instance.clone(), since: Instant::now(), started: false });
         }
         // From here on, ending early must hand the reconstructions back.
@@ -882,9 +1009,12 @@ impl Bridge {
         let event = s.run.lock().unwrap().event.clone();
         let seen = s.game.seen();
         if let Some(event) = event {
-            return Err(Failure::new("start_timeout", event, "Call close_vrchat and go on with the next world. If this is the first world, tell the person."));
+            return Err(Self::start_failure(s, event, "Call close_vrchat and go on with the next world. If this is the first world, tell the person."));
         }
         Self::in_private_instance(&seen)?;
+        if let Some(window) = seen.pid.and_then(|pid| s.game.window(pid)) {
+            s.run.lock().unwrap().size = Some((window.width, window.height));
+        }
         let foreground = self.forward_on_arrival(s, &seen);
         let capture_kit = s.game.capture_kit();
         Ok(json!({
@@ -903,6 +1033,19 @@ impl Bridge {
                 "Look with screenshot. Windows did not give VRChat the focus, so keys and the mouse are refused until focus_game works or the person clicks it; walk and turn work without it. The camera must be opened in each new start of VRChat, which takes the mouse."
             },
         }))
+    }
+
+    /// A start's failure: it did not arrive (`start_timeout`), or it landed elsewhere and was left (`landed_elsewhere`).
+    fn start_failure(s: &Session, event: String, next: &str) -> Failure {
+        if s.run.lock().unwrap().left {
+            Failure::new(
+                "landed_elsewhere",
+                event,
+                "Call go_to_world again: it makes a new private instance of your own. If it happens again, go on with the next world and tell the person at the end.",
+            )
+        } else {
+            Failure::new("start_timeout", event, next.to_string())
+        }
     }
 
     /// A game just arrived in its world: it gets the foreground, or an unattended run could not open its camera. The person
@@ -1012,7 +1155,7 @@ impl Bridge {
                 let event = s.run.lock().unwrap().event.clone();
                 return Err(event.map_or_else(
                     || Failure::new("vrchat_not_running", "VRChat is not running, and nothing is on its way.", "Call go_to_world."),
-                    |event| Failure::new("start_timeout", event, "Go on with the next world. If this is the first world, tell the person."),
+                    |event| Self::start_failure(s, event, "Go on with the next world. If this is the first world, tell the person."),
                 ));
             }
             let world_id = seen.world_id.unwrap_or_default();
@@ -1032,6 +1175,8 @@ impl Bridge {
             Self::in_private_instance(&seen)?;
         }
         let window = self.window(s, pid)?;
+        // Only with the person away from the computer: they may be looking at this window at the size they gave it.
+        let (window, restored) = if self.paused().is_none() { self.fit_window(s, pid, window) } else { (window, false) };
         let max_width = args["max_width"].as_u64().unwrap_or(WINDOW_WIDTH as u64).clamp(320, 2560) as u32;
         let shot = s.game.capture(&window, max_width)?;
         let scale = if window.width == 0 { 1.0 } else { shot.width as f64 / window.width as f64 };
@@ -1044,6 +1189,7 @@ impl Bridge {
             "scale": scale,
             "foreground": s.game.is_foreground(&window),
             "all_black": shot.all_black,
+            "window_restored": restored,
         });
         Ok(Answer::Picture(info, shot))
     }
@@ -1154,6 +1300,18 @@ impl Bridge {
         let (_, pid) = self.may_act(s)?;
         let window = self.window(s, pid)?;
         self.focus_for(s, &window)?;
+        // The coordinates are for the size it started with (see fit_window), as the screenshots are. A window someone had
+        // resized is put back first, and nothing is clicked on a page the agent has not seen at that size.
+        if matches!(action, "move" | "click") {
+            let (_, restored) = self.fit_window(s, pid, window);
+            if restored {
+                return Err(Failure::new(
+                    "window_resized",
+                    "Someone had resized VRChat's window. It was put back to the size it started with, so its menus moved: nothing was clicked.",
+                    "Take a screenshot (its pixels are the window's again) and click on what it shows.",
+                ));
+            }
+        }
         let inside = || -> Result<(u32, u32), Failure> {
             let (x, y) = (args["x"].as_u64(), args["y"].as_u64());
             let (Some(x), Some(y)) = (x, y) else {
@@ -1943,7 +2101,7 @@ mod tests {
 
     #[test]
     fn the_guide_explains_the_loop_and_when_to_give_up() {
-        for words in ["go_to_world", "take_3d_picture", "close_vrchat", "give up", "world_labels", "label_world", "spotlight_pc", "next_page", "paused_by_person", "no_keyframes", "open_session", "needs_sign_in", "focus_busy", "close_session", "take_over"] {
+        for words in ["go_to_world", "take_3d_picture", "close_vrchat", "give up", "world_labels", "label_world", "spotlight_pc", "next_page", "paused_by_person", "no_keyframes", "open_session", "needs_sign_in", "focus_busy", "close_session", "take_over", "landed_elsewhere", "window_resized", "`tab`"] {
             assert!(GUIDE.contains(words), "{words}");
         }
     }

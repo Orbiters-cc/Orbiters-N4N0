@@ -273,6 +273,8 @@ pub trait Game: Send + Sync {
     fn is_foreground(&self, window: &GameWindow) -> bool;
     /// Asks Windows to bring `window` forward. Whether it worked is [`Game::is_foreground`]'s to say.
     fn bring_forward(&self, window: &GameWindow);
+    /// Gives the window this client size again (someone resized it), without activating it or changing what is in front.
+    fn resize(&self, _window: &GameWindow, _width: u32, _height: u32) {}
     /// Asks the window to close, as its own close button does.
     fn close(&self, window: &GameWindow) -> Result<(), Failure>;
     /// The window's own picture (never the desktop), at most `max_width` wide.

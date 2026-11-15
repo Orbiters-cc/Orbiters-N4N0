@@ -1351,7 +1351,7 @@ fn two_sessions_are_driven_at_once_without_cross_talk() {
     client.tool("close_session", json!({ "session": one })).unwrap();
     client.fails("walk", json!({ "session": one, "direction": "forward", "seconds": 0.1 }), "unknown_session");
     assert!(opener.forgotten.lock().unwrap().contains(&one));
-    assert_eq!(g1.closes(), 2, "once to go to the world, once at the end");
+    assert_eq!(g1.closes(), 2, "once to go to the world from the account's home, once at the end");
     assert_eq!(client.tool("get_state", json!({ "session": two })).unwrap()["vrchat"]["running"], true, "the other session goes on");
 }
 
@@ -1408,11 +1408,11 @@ fn a_session_beyond_what_is_allowed_is_refused_with_its_reason() {
     client.fails("open_session", json!({ "profile": 1 }), "low_memory");
     *opener.memory.lock().unwrap() = Some(16 << 30);
     // Easy Anti-Cheat of a VRChat that just closed: no launch until it unloaded.
-    *opener.eac.lock().unwrap() = super::sessions::Eac { service: "STOPPED".into(), driver: "RUNNING".into(), vrchat_runs: false, launcher_runs: false };
+    *opener.eac.lock().unwrap() = super::sessions::Eac { service: "STOPPED".into(), driver: "RUNNING".into(), vrchat_runs: false, launcher_runs: false, delete_pending: false };
     let busy = client.fails("open_session", json!({ "profile": 1 }), "eac_busy");
     assert!(busy["retry_after_s"].as_u64().is_some());
     assert!(opener.games.lock().unwrap().iter().all(|g| g.2.launches().is_empty()), "nothing was launched");
-    *opener.eac.lock().unwrap() = super::sessions::Eac { service: "ABSENT".into(), driver: "ABSENT".into(), vrchat_runs: false, launcher_runs: false };
+    *opener.eac.lock().unwrap() = super::sessions::Eac { service: "ABSENT".into(), driver: "ABSENT".into(), vrchat_runs: false, launcher_runs: false, delete_pending: false };
     *opener.limit.lock().unwrap() = 1;
     open_and_arrive(&client, 1, LAB_WORLD_A);
     let full = client.fails("open_session", json!({ "profile": 2 }), "too_many_sessions");
@@ -1663,6 +1663,18 @@ fn a_tour_publishes_its_pictures_where_it_was_told_and_frees_them_once_safe() {
     assert!(freed["freed_mb"].as_f64().unwrap() > 0.2, "{freed}");
     assert!(!game.dir().join(&names[0]).join("keyframes").exists() && game.dir().join(&names[0]).exists(), "its 3D view stays");
 
+    // Orbiters asks to wait (429, 2026-11-15: twelve uploads an hour): the answer says so with the seconds, the picture stays
+    // queued, asking again sends nothing more, and its files stay until it is published.
+    publish.state.lock().unwrap().rate_limited = Some(1200);
+    let limited = client.tool("publish_3d_picture", json!({ "picture": names[0], "visibility": "private" })).unwrap();
+    assert_eq!((limited["code"].as_str(), limited["retry_after_s"].as_u64(), limited["publish"]["state"].as_str()), (Some("rate_limited"), Some(1200), Some("rate_limited")), "{limited}");
+    assert!(limited["next"].as_str().unwrap().contains("queued"), "{limited}");
+    client.tool("publish_3d_picture", json!({ "picture": names[0], "visibility": "private" })).unwrap();
+    assert_eq!(publish.state.lock().unwrap().asked.len(), 1, "queued once, not asked again");
+    client.fails("free_picture_files", json!({ "picture": names[0], "what": "everything" }), "publish_under_way");
+    client.fails("orbiters_environment", json!({ "action": "switch", "to": "development" }), "publish_under_way");
+    publish.let_through();
+
     // Published to production: two private, the best public last.
     for (i, name) in names.iter().enumerate() {
         let visibility = if i == 2 { "public" } else { "private" };
@@ -1725,4 +1737,86 @@ fn the_camera_is_placed_for_a_view_and_more_rows_are_sources() {
     assert_eq!(playlists["playlists"][0]["group"], "worlds1", "{playlists}");
     client.tool("find_worlds", json!({ "source": "playlists", "group": "worlds1" })).unwrap();
     client.fails("find_worlds", json!({ "source": "playlists", "group": "worlds9" }), "unknown_playlist");
+}
+
+#[test]
+fn a_tour_travels_in_its_running_vrchat_and_starts_it_once() {
+    // 2026-11-15: every go_to_world started the side session's VRChat again (~40 Easy Anti-Cheat driver installs in two
+    // hours), and the run ended with that driver service stuck until Windows restarts. Now the running game travels.
+    let (_main, opener, _bridge, _server, client) = lab_with_sessions("travel");
+    *opener.links_open_page.lock().unwrap() = true;
+    let opened = client.tool("open_session", json!({ "profile": 1 })).unwrap();
+    let id = opened["session"].as_str().unwrap().to_string();
+    let game = opener.game_of(1).unwrap();
+    game.set_behaviour(|b| b.focus_works = true);
+    *opener.foreground.lock().unwrap() = Some(1);
+    // From the account's home (where open_session starts it) nothing may be looked at or clicked: the first world is a start.
+    let first = client.tool("go_to_world", json!({ "session": id, "world_id": LAB_WORLD_A })).unwrap();
+    assert_eq!((first["arrived"].as_bool(), first["travelled"].as_bool()), (Some(true), None), "{first}");
+    assert_eq!((game.launches().len(), game.links().len()), (2, 0));
+    for (round, world) in [LAB_WORLD_B, LAB_WORLD_A, LAB_WORLD_B].into_iter().enumerate() {
+        // VRChat shows the world's page for the link: the answer says to click Join, and nothing was started or closed.
+        let went = client.tool("go_to_world", json!({ "session": id, "world_id": world })).unwrap();
+        assert_eq!((went["arrived"].as_bool(), went["travelled"].as_bool()), (Some(false), Some(true)), "{went}");
+        assert!(went["next"].as_str().unwrap().contains("Join"), "{went}");
+        assert!(game.world_page_up());
+        assert_eq!(game.links().len(), round + 1);
+        assert_eq!(game.links()[round].world_id, world);
+        client.tool("screenshot", json!({ "session": id })).unwrap();
+        client.tool("mouse", json!({ "session": id, "action": "click", "x": 320, "y": 180 })).unwrap();
+        let there = client.tool("wait_for", json!({ "session": id, "until": "in_world", "timeout_s": 5 })).unwrap();
+        assert_eq!(there["arrived"], true, "{there}");
+        let state = client.tool("get_state", json!({ "session": id })).unwrap();
+        assert_eq!(state["place"]["world_id"], world, "{state}");
+        assert!(state["place"]["instance"].as_str().unwrap().contains("~private(usr_00000001"), "its own private instance: {state}");
+    }
+    assert_eq!((game.launches().len(), game.closes()), (2, 1), "four worlds, one start after the home one");
+    // A VRChat that travels at once answers arrived.
+    game.set_behaviour(|b| b.link_opens_page = false);
+    let went = client.tool("go_to_world", json!({ "session": id, "world_id": LAB_WORLD_A })).unwrap();
+    assert_eq!((went["arrived"].as_bool(), went["travelled"].as_bool()), (Some(true), Some(true)), "{went}");
+    // The link pipe is another VRChat's (the person's, started first): never written to; started again, and said why.
+    game.set_behaviour(|b| b.link_refused = true);
+    let went = client.tool("go_to_world", json!({ "session": id, "world_id": LAB_WORLD_B })).unwrap();
+    assert_eq!(went["arrived"], true, "{went}");
+    assert!(went["started_again_because"].as_str().unwrap().contains("another VRChat"), "{went}");
+    assert_eq!((game.launches().len(), game.closes(), game.links().len()), (3, 2, 4));
+    // Asked for, a start again.
+    game.set_behaviour(|b| b.link_refused = false);
+    let went = client.tool("go_to_world", json!({ "session": id, "world_id": LAB_WORLD_A, "relaunch": true })).unwrap();
+    assert_eq!(went["arrived"], true, "{went}");
+    assert_eq!((game.launches().len(), game.links().len()), (4, 4));
+}
+
+#[test]
+fn a_start_that_cannot_come_up_releases_everything_and_says_why() {
+    let (_main, opener, bridge, _server, client) = lab_with_sessions("start-failed");
+    // Easy Anti-Cheat's driver service marked for deletion (2026-11-15 07:17): nothing is tried.
+    *opener.eac.lock().unwrap() = super::sessions::Eac { service: "STOPPED".into(), driver: "STOPPED".into(), vrchat_runs: false, launcher_runs: false, delete_pending: true };
+    let stuck = client.fails("open_session", json!({ "profile": 1 }), "eac_stuck");
+    assert!(stuck["message"].as_str().unwrap().contains("until Windows restarts"), "{stuck}");
+    assert!(opener.games.lock().unwrap().iter().all(|g| g.2.launches().is_empty()), "nothing was launched");
+    assert!(bridge.sides.lock().unwrap().is_empty());
+    let first = opener.games.lock().unwrap()[0].0.clone();
+    assert!(opener.forgotten.lock().unwrap().contains(&first), "what the refused start took was given back");
+    *opener.eac.lock().unwrap() = super::sessions::Eac { service: "ABSENT".into(), driver: "ABSENT".into(), vrchat_runs: false, launcher_runs: false, delete_pending: false };
+    // The launcher hangs on its error window (07:04: "Launch Error (30005)"), then says so in its log: ended, and plain words.
+    *opener.launches_hang.lock().unwrap() = true;
+    *opener.launcher_said.lock().unwrap() = Some((30005, "EAC unload timeout".into()));
+    let begin = Instant::now();
+    let failed = client.fails("open_session", json!({ "profile": 1 }), "start_failed");
+    assert!(begin.elapsed() < Duration::from_secs(10), "known from the launcher's log, not after 30 s");
+    assert_eq!(failed["retry_after_s"], 90, "{failed}");
+    assert!(failed["message"].as_str().unwrap().contains("30005"), "{failed}");
+    assert_eq!(opener.launchers_ended.lock().unwrap().as_slice(), [(9010, 9011)], "its own launcher ended");
+    let second = opener.games.lock().unwrap()[1].0.clone();
+    assert!(opener.forgotten.lock().unwrap().contains(&second), "its OSC listener and mark released");
+    assert!(bridge.sides.lock().unwrap().is_empty(), "no session left behind");
+    // The launcher said 1072 (marked for deletion) after a start: eac_stuck too.
+    *opener.launcher_said.lock().unwrap() = Some((206, "CreateService failed with 1072".into()));
+    client.fails("open_session", json!({ "profile": 1 }), "eac_stuck");
+    // Once it can, the same profile opens at once: nothing of the failed starts is in the way.
+    *opener.launches_hang.lock().unwrap() = false;
+    *opener.launcher_said.lock().unwrap() = None;
+    open_and_arrive(&client, 1, LAB_WORLD_A);
 }

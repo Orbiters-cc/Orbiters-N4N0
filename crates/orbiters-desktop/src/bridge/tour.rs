@@ -45,7 +45,7 @@ pub fn list() -> Vec<Value> {
         json!({
             "name": "publish_3d_picture",
             "title": "Publish a 3D picture",
-            "description": "Publishes a 3D picture this bridge took (its `session` from take_3d_picture or pictures) to Orbiters, in the environment get_state's `orbiters` names, under that account, attached to the world it was taken in: exactly Photos & captures' Share publicly (visibility public) or an upload kept to the account (private). Its reconstruction must be done. It is published as it is: other people see a public one on the world's page, orbiters.cc's Map explorer and N4N0's Worlds in 3D. Orbiters lists one public 3D picture per account and world: a newer public one takes the older one's place in the public listing (the older stays on Orbiters, the account's own). So publish a world's other pictures private and the best one public, last. Waits up to wait_s and answers the item's id and link, or where it stands (pictures reads it later). Publish only pictures that show the world well: a black, blurred or empty one is not worth publishing.",
+            "description": "Publishes a 3D picture this bridge took (its `session` from take_3d_picture or pictures) to Orbiters, in the environment get_state's `orbiters` names, under that account, attached to the world it was taken in: exactly Photos & captures' Share publicly (visibility public), or an upload kept on the account and listed nowhere (private: only the account sees it, in its gallery). Pictures are published one at a time in the order asked; when Orbiters asks to wait (it allows only so many uploads an hour), the answer says `rate_limited` with `retry_after_s` and the picture stays queued and goes by itself. Its reconstruction must be done. It is published as it is: other people see a public one on the world's page, orbiters.cc's Map explorer and N4N0's Worlds in 3D. Orbiters lists one public 3D picture per account and world: a newer public one takes the older one's place in the public listing (the older stays on Orbiters, the account's own). So publish a world's other pictures private and the best one public, last. Waits up to wait_s and answers the item's id and link, or where it stands (pictures reads it later). Publish only pictures that show the world well: a black, blurred or empty one is not worth publishing.",
             "inputSchema": { "type": "object", "properties": {
                 "picture": { "type": "string", "description": "The picture's session name." },
                 "visibility": { "type": "string", "enum": ["public", "private"], "description": "Default public." },
@@ -163,7 +163,7 @@ impl Bridge {
         }
         let journal: Vec<String> = self.journal.lock().unwrap().pictures.iter().rev().take(200).map(|p| p.session.clone()).collect();
         let dir = publish.sessions_dir();
-        if journal.iter().any(|s| matches!(publish.published(&dir.join(s)), PublishSeen::Running { .. })) {
+        if journal.iter().any(|s| matches!(publish.published(&dir.join(s)), PublishSeen::Running { .. } | PublishSeen::RateLimited { .. })) {
             return Err(Failure::new("publish_under_way", "A picture is being published to the active environment.", "Wait for it (pictures), then switch.").retry_after(30));
         }
         publish.set_environment(development)?;
@@ -289,27 +289,37 @@ impl Bridge {
         }
         let wanted = |seen: &PublishSeen| matches!(seen, PublishSeen::Done { public: p, .. } if *p || !public);
         let now = publish.published(&dir);
-        if !matches!(now, PublishSeen::Running { .. }) && !wanted(&now) {
+        if !matches!(now, PublishSeen::Running { .. } | PublishSeen::RateLimited { .. }) && !wanted(&now) {
             publish.publish(&dir, &world_id, picture.world_name.as_deref().unwrap_or_default(), public)?;
             self.log(true, format!("publish {} ({})", picture.session, if public { "public" } else { "private" })); // i18n: not shown (the bridge's log)
         }
         let wait = Duration::from_secs_f64(args["wait_s"].as_f64().unwrap_or(45.0).clamp(0.0, 50.0));
         self.wait_until(wait, call, || !matches!(publish.published(&dir), PublishSeen::Running { .. }))?;
         let seen = publish.published(&dir);
+        let retry_after_s = match &seen {
+            PublishSeen::RateLimited { retry_after_s, .. } => Some(*retry_after_s),
+            _ => None,
+        };
         let next = match &seen {
+            PublishSeen::RateLimited { .. } => "Orbiters asked to wait before more uploads (it allows only so many an hour): this picture is queued and goes by itself after retry_after_s, with the others in the order asked. Do not ask again: go on touring and taking pictures, and queue more with publish_3d_picture; pictures says when each is done.",
             PublishSeen::Done { .. } => "Published. Its files here can go now: free_picture_files with what everything, when you no longer need it here.",
             PublishSeen::Running { .. } => "Still under way: call pictures with this picture in a minute.",
             PublishSeen::Failed { explicit: true, .. } => "Orbiters asks for a confirmation that only the person gives for explicit content in public: publish it private, and tell the person.",
             PublishSeen::Failed { .. } => "Not published. Try once more later; if it fails again, leave it and tell the person with its message.",
             PublishSeen::None => "It did not start: try again.",
         };
-        Ok(Answer::Data(json!({
+        let mut answer = json!({
             "picture": picture.session,
             "world_id": world_id,
             "orbiters": environment_json(&env),
             "publish": publish_json(&seen),
             "next": next,
-        })))
+        });
+        if let Some(wait) = retry_after_s {
+            answer["code"] = json!("rate_limited");
+            answer["retry_after_s"] = json!(wait);
+        }
+        Ok(Answer::Data(answer))
     }
 
     fn free_picture_files(&self, args: &Value) -> Result<Answer, Failure> {
@@ -335,7 +345,7 @@ impl Bridge {
             return Err(Failure::new("reconstruction_waiting", format!("Its reconstruction is {state}: it needs these files."), "Free it once its reconstruction is done.").retry_after(60));
         }
         let published = publish.published(&dir);
-        if matches!(published, PublishSeen::Running { .. }) {
+        if matches!(published, PublishSeen::Running { .. } | PublishSeen::RateLimited { .. }) {
             return Err(Failure::new("publish_under_way", "It is being published.", "Wait for it (pictures), then free it.").retry_after(30));
         }
         let files = self.game.picture_files(&dir);

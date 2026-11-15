@@ -260,9 +260,30 @@ impl std::fmt::Display for RevisionConflict {
 }
 impl std::error::Error for RevisionConflict {}
 
-/// Shared by uploads and sharing so a 409 keeps its machine-readable meaning.
+/// Orbiters refused a request for coming too often (429, `backend/src/middleware/requestLimit.js`: fixed windows per scope,
+/// `Retry-After` set): nothing was done, and the same request works again once `retry_after_s` have passed. Its window
+/// counts refused requests too, though they never lengthen it.
+#[derive(Debug)]
+pub struct RateLimited {
+    pub retry_after_s: u64,
+    pub message: String,
+}
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for RateLimited {}
+
+/// A `Retry-After` header's seconds (a date is not what Orbiters sends: a minute then).
+pub fn retry_after_seconds(value: Option<&str>) -> u64 {
+    value.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(60).max(1)
+}
+
+/// Shared by uploads and sharing so a 409 keeps its machine-readable meaning, and a 429 its wait.
 pub(crate) fn json<T: serde::de::DeserializeOwned>(response: ureq::http::Response<ureq::Body>) -> anyhow::Result<T> {
     let status = response.status().as_u16();
+    let retry_after = response.headers().get("retry-after").and_then(|h| h.to_str().ok()).map(str::to_owned);
     let text = response.into_body().with_config().limit(32 * 1024 * 1024).read_to_string()?;
     if !(200..300).contains(&status) {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
@@ -272,6 +293,9 @@ pub(crate) fn json<T: serde::de::DeserializeOwned>(response: ureq::http::Respons
         }
         if status == 409 && value["code"] == "revision-conflict" {
             return Err(RevisionConflict { revision: value["revision"].as_u64().unwrap_or(0), message }.into());
+        }
+        if status == 429 {
+            return Err(RateLimited { retry_after_s: retry_after_seconds(retry_after.as_deref()), message }.into());
         }
         return Err(ApiError { status, message }.into());
     }

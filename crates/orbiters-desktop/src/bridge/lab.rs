@@ -60,6 +60,13 @@ pub struct Behaviour {
     pub lent_away: bool,
     /// The account the game itself signed in with (a side session's profile), as its log says.
     pub account: Option<(String, String)>,
+    /// A link handed to the running game shows the world's page, which waits for a click on Join (VRChat, 2026-11-13);
+    /// off, it travels at once.
+    pub link_opens_page: bool,
+    /// VRChat's link pipe is another VRChat's: `send_link` is refused.
+    pub link_refused: bool,
+    /// `launch` starts a launcher that never brings a VRChat up (Easy Anti-Cheat's error window).
+    pub launch_hangs: bool,
 }
 
 impl Default for Behaviour {
@@ -79,6 +86,9 @@ impl Default for Behaviour {
             needs_sign_in: false,
             lent_away: false,
             account: None,
+            link_opens_page: true,
+            link_refused: false,
+            launch_hangs: false,
         }
     }
 }
@@ -119,6 +129,10 @@ struct State {
     resizes: u32,
     /// The window's real client size at each click (from Windows, not from what the bridge passed).
     clicked_at_size: Vec<(u32, u32)>,
+    /// Links handed to the running game.
+    links: Vec<LaunchPlan>,
+    /// The world's page a link opened, waiting for Join: world and instance.
+    world_page: Option<(String, String)>,
 }
 
 /// One OSC message the stand-in received.
@@ -230,6 +244,18 @@ impl LabGame {
 
     pub fn launches(&self) -> Vec<LaunchPlan> {
         self.state.lock().unwrap().launches.clone()
+    }
+
+    /// The links handed to the running game.
+    #[cfg(test)]
+    pub fn links(&self) -> Vec<LaunchPlan> {
+        self.state.lock().unwrap().links.clone()
+    }
+
+    /// The world's page a link opened is up, waiting for its Join button.
+    #[cfg(test)]
+    pub fn world_page_up(&self) -> bool {
+        self.state.lock().unwrap().world_page.is_some()
     }
 
     #[cfg(test)]
@@ -423,6 +449,9 @@ impl Game for LabGame {
             return Err(Failure::new("start_failed", "VRChat did not start: the lab says no.", "Ask the person to look at the computer.")); // i18n: not shown (an AI client reads it in the tool's answer; the lab is a fake VRChat for tests)
         }
         state.launches.push(plan.clone());
+        if state.behaviour.launch_hangs {
+            return Ok(());
+        }
         let window = LabWindow::open(&self.title).ok_or_else(|| Failure::new("start_failed", "The fake window did not open.", "This is the lab."))?; // i18n: not shown
         state.window = Some(window);
         state.pid = Some(std::process::id());
@@ -432,6 +461,22 @@ impl Game for LabGame {
         self.new_log();
         // Like VRChat, its log names the start's own arguments first.
         self.write_line("Launching with args"); // i18n: not shown
+        Ok(())
+    }
+
+    fn send_link(&self, plan: &LaunchPlan) -> Result<(), Failure> {
+        let mut state = self.state.lock().unwrap();
+        if state.pid.is_none() || state.behaviour.link_refused {
+            return Err(Failure::new("link_pipe_elsewhere", "VRChat's link pipe is another VRChat's.", "It is started in the instance instead.")); // i18n: not shown (the lab)
+        }
+        state.links.push(plan.clone());
+        if state.behaviour.link_opens_page {
+            state.world_page = Some((plan.world_id.clone(), plan.instance.clone()));
+        } else {
+            let load = state.behaviour.load;
+            state.joining = Some((Instant::now() + load, plan.world_id.clone(), plan.instance.clone()));
+            state.player_from = Some(Instant::now() + load + state.behaviour.player_after);
+        }
         Ok(())
     }
 
@@ -534,6 +579,12 @@ impl Game for LabGame {
                     let near = state.pointer.is_some_and(|(x, y): (u32, u32)| x.abs_diff(CAMERA_ICON.0) < 40 && y.abs_diff(CAMERA_ICON.1) < 40);
                     if state.menu_open && near {
                         state.camera_open = true;
+                    }
+                    // The world's page a link opened: its Join button.
+                    if let Some((world, instance)) = state.world_page.take() {
+                        let load = state.behaviour.load;
+                        state.joining = Some((Instant::now() + load, world, instance));
+                        state.player_from = Some(Instant::now() + load + state.behaviour.player_after);
                     }
                 }
                 _ => {}
@@ -1036,6 +1087,8 @@ pub struct LabPublishState {
     pub fails: Option<String>,
     pub switches: Vec<bool>,
     pub free_gb: f64,
+    /// Orbiters asks to wait this many seconds (429): what is asked is queued, nothing done until [`LabPublish::let_through`].
+    pub rate_limited: Option<u64>,
 }
 
 impl LabPublish {
@@ -1052,8 +1105,24 @@ impl LabPublish {
                 fails: None,
                 switches: Vec::new(),
                 free_gb: 20.0,
+                rate_limited: None,
             })),
         })
+    }
+
+    /// Orbiters' wait is over: what was queued is published (as the real queue does by itself).
+    #[cfg(test)]
+    pub fn let_through(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.rate_limited = None;
+        let website = if st.development { "https://dev.orbiters.cc/" } else { "https://orbiters.cc/" };
+        let queued: Vec<PathBuf> = st.published.iter().filter(|(_, (_, s))| matches!(s, PublishSeen::RateLimited { .. })).map(|(p, _)| p.clone()).collect();
+        for (n, path) in queued.into_iter().enumerate() {
+            let public = st.asked.iter().rev().find(|(p, _)| *p == path).is_some_and(|(_, public)| *public);
+            let development = st.development;
+            let id = 1000 + n as u64;
+            st.published.insert(path, (development, PublishSeen::Done { id, public, link: format!("{website}gallery"), world_id: LAB_WORLD_A.into() }));
+        }
     }
 }
 
@@ -1089,6 +1158,11 @@ impl Publish for LabPublish {
             let mut st = self.state.lock().unwrap();
             st.asked.push((session.to_path_buf(), public));
             let development = st.development;
+            if let Some(wait) = st.rate_limited {
+                let ahead = st.published.values().filter(|(_, s)| matches!(s, PublishSeen::RateLimited { .. })).count();
+                st.published.insert(session.to_path_buf(), (development, PublishSeen::RateLimited { retry_after_s: wait, ahead }));
+                return Ok(());
+            }
             st.published.insert(session.to_path_buf(), (development, PublishSeen::Running { stage: "sending".into(), sent: 0, total: 10 }));
             (development, st.fails.clone())
         };
@@ -1152,6 +1226,14 @@ pub struct LabOpener {
     /// Profiles whose account is not signed in.
     pub signed_out: Mutex<Vec<u32>>,
     pub forgotten: Mutex<Vec<String>>,
+    /// What Easy Anti-Cheat's launcher says of a launch that ended.
+    pub launcher_said: Mutex<Option<(i64, String)>>,
+    /// The OSC ports whose start's launcher was ended.
+    pub launchers_ended: Mutex<Vec<(u16, u16)>>,
+    /// New sessions' launches never bring a VRChat up.
+    pub launches_hang: Mutex<bool>,
+    /// New sessions' VRChats show the world's page for a link (as VRChat does) instead of travelling at once.
+    pub links_open_page: Mutex<bool>,
 }
 
 impl LabOpener {
@@ -1159,7 +1241,7 @@ impl LabOpener {
         Arc::new(Self {
             root: root.to_path_buf(),
             games: Mutex::default(),
-            eac: Mutex::new(super::sessions::Eac { service: "ABSENT".into(), driver: "ABSENT".into(), vrchat_runs: false, launcher_runs: false }),
+            eac: Mutex::new(super::sessions::Eac { service: "ABSENT".into(), driver: "ABSENT".into(), vrchat_runs: false, launcher_runs: false, delete_pending: false }),
             others: Mutex::default(),
             persons: Mutex::default(),
             limit: Mutex::new(super::sessions::DEFAULT_LIMIT),
@@ -1167,6 +1249,10 @@ impl LabOpener {
             foreground: Mutex::new(None),
             signed_out: Mutex::default(),
             forgotten: Mutex::default(),
+            launcher_said: Mutex::default(),
+            launchers_ended: Mutex::default(),
+            launches_hang: Mutex::default(),
+            links_open_page: Mutex::default(),
         })
     }
 
@@ -1180,7 +1266,10 @@ impl super::game::Opener for LabOpener {
     fn side(&self, session: &str, profile: u32, _osc: (u16, u16)) -> Result<Arc<dyn Game>, Failure> {
         let game = LabGame::with_osc_also(&self.root.join(session), None, None);
         let signed_out = self.signed_out.lock().unwrap().contains(&profile);
+        let (hang, page) = (*self.launches_hang.lock().unwrap(), *self.links_open_page.lock().unwrap());
         game.set_behaviour(|b| {
+            b.launch_hangs = hang;
+            b.link_opens_page = page;
             b.needs_sign_in = signed_out;
             b.account = (!signed_out).then(|| (format!("usr_{profile:08}-0000-4000-8000-000000000000"), format!("Lab Profile {profile}"))); // i18n: not shown
         });
@@ -1222,5 +1311,14 @@ impl super::game::Opener for LabOpener {
 
     fn foreground_pid(&self) -> Option<u32> {
         *self.foreground.lock().unwrap()
+    }
+
+    fn launcher_outcome(&self, _since: std::time::SystemTime) -> Option<(i64, String)> {
+        self.launcher_said.lock().unwrap().clone()
+    }
+
+    fn end_launcher(&self, osc: (u16, u16)) -> usize {
+        self.launchers_ended.lock().unwrap().push(osc);
+        1
     }
 }

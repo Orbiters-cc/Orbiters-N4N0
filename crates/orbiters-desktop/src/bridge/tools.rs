@@ -77,7 +77,7 @@ You drive VRChat on this computer, in desktop mode, through this bridge. A perso
 ## The loop\n\n\
 1. `get_state`. Its `next` says what to do. If `vrchat.running` is true and `vrchat.started_by_bridge` false, that VRChat is the person's: do nothing to it and tell them.\n\
 2. `find_worlds` for world ids, unless you were given them. `source`: search, visited, favorites, trending (VRChat's \"Hot\" row), popular, active, and what VRChat highlights: spotlight_pc and spotlight_cross_platform (its two Spotlight rows); VRChat's other rows of its Worlds menu: community_labs, random, avatar_worlds, games, updated_recently, new, classics; and playlists, the person's own world playlists (the favourite groups of the VRChat account signed in in Orbiters - N4N0: without `group` it lists them, then pass one's `group`). Each page has up to 24 worlds; `more` says whether `next_page` has more. For all of a list, page until `more` is false (VRChat's lists go 21 pages deep, 504 worlds at most), and drop the ids you already have: the lists overlap.\n\
-3. `go_to_world` with a `world_id`. It makes a private instance of your own, starts VRChat in it (closing the last one first), brings it to the foreground, and waits. If `arrived` is false, call `wait_for` with `until: in_world`.\n\
+3. `go_to_world` with a `world_id`. It makes a private instance of your own, starts VRChat in it (closing the last one first), brings it to the foreground, and waits. In a side session already in a private instance of its own, the running VRChat travels instead (no restart): VRChat then shows the world's page, and the answer (`travelled` true, `arrived` false) asks you to take a screenshot and click its Join button. If `arrived` is false, call `wait_for` with `until: in_world`.\n\
 4. `screenshot` to see where you are. A dark picture is the loading screen: wait a little.\n\
 5. Open VRChat's camera, which only the menus can do: `press` `esc`, `screenshot`, `mouse` `click` on the camera icon in the menu's bottom row (about 640, 620 at 1280 by 720), `screenshot`, and `click` on the Stream Camera tile (about 597, 345). The menu closes and the camera's panel stays on the screen. `get_state` says `camera.open`. Those coordinates hold because the bridge keeps VRChat's window at the size it started with (1280 by 720): if someone resized it, the next `screenshot` puts it back first, without bringing it forward (`window_restored: true`), and a `click` or `move` on a resized window is refused with `window_resized` and clicks nothing (take a screenshot, then click). Still check each spot in your last screenshot: they are where the icon and the tile usually are. Leave the camera's settings alone: the app sets Stream and Spout itself when it records. **Look at a screenshot after every click, and before the next one:** a click can miss, its page may not have changed, and the same spot on the page you are really on may be a shop banner. If the page is not what you expected, `press` `esc` closes everything: start again.\n\
 6. If `camera.pose_known` is false, `turn` by a few degrees: VRChat says where its camera is when it moves.\n\
@@ -90,7 +90,7 @@ You drive VRChat on this computer, in desktop mode, through this bridge. A perso
 Several agents (and the person) can each have a VRChat on this computer at the same time. Tools without `session` drive the **main** session, as above: VRChat's default profile, only while the person runs no VRChat of their own. To work beside others, open a session of your own:\n\n\
 1. `open_session` with a `profile` (1, 2…; ask the person which one if they did not say). It starts VRChat in that profile, at that account's home, and gives you `session`: **pass it to every tool** from then on. Only you have it.\n\
 2. If `needs_sign_in` is true, the profile has no account signed in: stop and tell the person to sign in on that VRChat's window (its title is VRChat). Never type there, never look for a password. `wait_for` with `until: signed_in` waits for them.\n\
-3. Then the loop above, with your `session`: `go_to_world` restarts your session's VRChat in a new private instance of your profile's own account, `walk`, `turn`, `screenshot`, the camera, `take_3d_picture`.\n\
+3. Then the loop above, with your `session`: `go_to_world` takes your session's VRChat to a new private instance of your profile's own account. The first one starts it again in that instance (it opened at the account's home); from then on the running VRChat travels: take a screenshot, click the world page's Join (or Go) button, and `wait_for` `in_world`. A tour is one start of VRChat: every start makes Easy Anti-Cheat install its driver again, and long runs of starts have left it stuck until Windows restarted (`eac_stuck`: then stop starting VRChat and tell the person). Only if travelling does nothing for a minute: `go_to_world` with `relaunch: true`. `walk`, `turn`, `screenshot`, the camera, `take_3d_picture`.\n\
 4. `close_session` at the end. A session left without any call for 10 minutes may be taken over by another agent (`open_session` with `take_over`): yours is then refused with `session_taken_over`.\n\n\
 What is shared, and how: `walk`, `turn`, the OSC inputs and `screenshot` need nothing of anyone else's and run side by side in every session. **Keys and clicks** (`press` of a key, `mouse`, `focus_game`) need your window in the foreground, which only one window can have: they take turns. A refusal `focus_busy` says how long to wait (`retry_after_s`, a few seconds: a turn is yours while you keep using it, and passes to the next session 8 s after your last key or click). They also wait while the person uses the computer at all (`paused_by_person`), and are refused with `person_vrchat_has_focus` while the person's own VRChat has the foreground: the bridge never takes it from them. **3D pictures** borrow Orbiters - N4N0's capture: one at a time on this computer (`picture_busy`: wait), and none while the person's own VRChat runs (`app_in_use`: the capture is theirs then). The person's input in your session's window pauses your session only. One account cannot be in two VRChats: each profile has its own. `list_sessions` shows them all.\n\n\
 ## Labels\n\n\
@@ -147,11 +147,12 @@ pub fn list() -> Value {
         {
             "name": "go_to_world",
             "title": "Go to a world",
-            "description": "Goes to a new private instance of a world, owned by the signed-in VRChat account: makes the instance through VRChat's API, closes the VRChat this bridge started if it runs, starts VRChat in desktop mode in a window, and waits up to about 40 s. Going to a world takes as long as a start of the game, about a minute or more. Returns `arrived`; if false, call wait_for with until in_world. Only private instances exist here: there is no way to name an instance, or to join anyone. At most one every 30 s.",
+            "description": "Goes to a new private instance of a world, owned by the signed-in VRChat account. In a side session whose VRChat runs, the running game travels: the instance's link is handed to it (no restart, no Easy Anti-Cheat start); VRChat may then show the world's page with a Join button, which you click (the answer says so: `travelled` true and `arrived` false). Otherwise (main session, nothing running, or `relaunch`) it starts VRChat in desktop mode in a window in the instance, closing the one this bridge started, which takes about a minute. Waits up to about 40 s. Returns `arrived`; if false, call wait_for with until in_world. Only private instances exist here: there is no way to name an instance, or to join anyone. At most one every 30 s.",
             "inputSchema": { "type": "object", "properties": {
                 "world_id": { "type": "string", "description": "wrld_… from find_worlds." },
                 "region": { "type": "string", "enum": ["eu", "us", "use", "jp"], "description": "Where the instance runs. Default eu." },
                 "profile": { "type": "integer", "minimum": 0, "description": "VRChat's --profile, when the signed-in account is on another profile than the default." },
+                "relaunch": { "type": "boolean", "description": "Side session: start its VRChat again in the instance instead of travelling in the running game. Only when travelling did not work: every start of VRChat starts Easy Anti-Cheat again, and long runs of starts have left its driver stuck until Windows restarted." },
             }, "required": ["world_id"], "additionalProperties": false },
             "annotations": acts,
         },
@@ -1000,7 +1001,17 @@ impl Bridge {
         let (instance, owner) = if s.is_main() {
             (s.game.create_private_instance(world_id, region)?, seen.vrchat_user.as_ref().map(|u| u.0.clone()))
         } else {
-            let Some((account, _)) = seen.session_account.clone() else { return Err(sign_in_failure(s)) };
+            let Some((account, _)) = seen.session_account.clone() else {
+                // Not running and its account not known yet: not a sign-in page, but a start that never came up.
+                if !seen.running {
+                    return Err(Failure::new(
+                        "vrchat_not_running",
+                        "This session's VRChat is not running (its start failed or it closed) and its account is not known yet.",
+                        "Call close_session, then open_session again.",
+                    ));
+                }
+                return Err(sign_in_failure(s));
+            };
             (sessions::own_private_instance(&account, region), Some(account))
         };
         // What came from the outside is checked again here: only a private instance of this account gets started.
@@ -1032,7 +1043,28 @@ impl Bridge {
         }
         // From here on, ending early must hand the reconstructions back.
         s.game.hold_reconstructions(true);
+        let relaunch = args["relaunch"].as_bool().unwrap_or(false);
+        let mut travelled = false;
+        let mut why_started: Option<String> = None;
         let start = (|| {
+            // A side session's running VRChat travels in the game: its link pipe is handed the instance's link, as launch.exe
+            // does. Starting VRChat again for each world (the first tours) started Easy Anti-Cheat again each time: ~40 driver
+            // installs in two hours, and that run ended with its driver service stuck "marked for deletion" until Windows
+            // restarted (2026-11-14 22:13 and 2026-11-15 07:04). A tour is one start now.
+            // Only from its own private instance: elsewhere (the account's home after open_session) the world's page and its
+            // Join button could not be looked at or clicked, as nothing is done outside one's own private instance.
+            if !s.is_main() && pid.is_some() && !relaunch && own_private(&seen) {
+                self.release_session(s);
+                let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: s.profile, osc: s.osc };
+                match s.game.send_link(&plan) {
+                    Ok(()) => {
+                        travelled = true;
+                        self.log(true, format!("link to {world_id} handed to the running VRChat"));
+                        return Ok(());
+                    }
+                    Err(refused) => why_started = Some(refused.message),
+                }
+            }
             if let Some(pid) = pid {
                 self.release_session(s);
                 self.close_and_wait(s, pid, call)?;
@@ -1051,6 +1083,9 @@ impl Bridge {
             let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile, osc: None };
             // Beside side sessions, one launch at a time: a new VRChat is told apart by appearing after its launch.
             let _one = self.launching.lock().unwrap();
+            if self.opener.lock().unwrap().clone().is_some_and(|o| o.eac().delete_pending) {
+                return Err(sessions::Eac::stuck_failure());
+            }
             s.game.launch(&plan)
         })();
         if let Err(failure) = start {
@@ -1065,8 +1100,18 @@ impl Bridge {
                 going.since = Instant::now();
             }
         }
-        let arrived = self.wait_until(Duration::from_secs(40), call, || !self.is_going(s))?;
-        Ok(Answer::Data(self.world_outcome(s, arrived, world_id)?))
+        // A link VRChat takes travels within seconds, or shows the world's page and waits for its Join button.
+        let arrived = self.wait_until(Duration::from_secs(if travelled { 8 } else { 40 }), call, || !self.is_going(s))?;
+        let mut outcome = self.world_outcome(s, arrived, world_id)?;
+        if travelled {
+            outcome["travelled"] = json!(true);
+            if !arrived {
+                outcome["next"] = json!("The running VRChat was handed the instance's link (no restart). It shows the world's page with a Join (or Go) button: take a screenshot, click that button, then call wait_for with until in_world. If the screenshot shows no such page and nothing changes for a minute, call go_to_world again with relaunch true.");
+            }
+        } else if let Some(why) = why_started {
+            outcome["started_again_because"] = json!(why);
+        }
+        Ok(Answer::Data(outcome))
     }
 
     fn is_going(&self, s: &Session) -> bool {
@@ -1811,7 +1856,12 @@ impl Bridge {
         let game = opener.side(&id, profile, osc)?;
         let s = Session::new(&id, Some(profile), Some(osc), game);
         *s.lease.lock().unwrap() = Some(Lease { owner: owner.clone(), last_call: Instant::now() });
-        self.launch_side(&s, LaunchPlan { world_id: String::new(), instance: String::new(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: Some(profile), osc: Some(osc) }, call)?;
+        // A start that fails releases all it took: its OSC listener and its mark (2026-11-15 07:13: a failed start kept port
+        // 9011 bound until the app restarted, and every open_session after it answered port_taken).
+        if let Err(failure) = self.launch_side(&s, LaunchPlan { world_id: String::new(), instance: String::new(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: Some(profile), osc: Some(osc) }, call) {
+            opener.forget(&id);
+            return Err(failure);
+        }
         self.sides.lock().unwrap().push(s.clone());
         // Its log says who signed in, or that it waits for one.
         let known = self.wait_until(Duration::from_secs(40), call, || {
@@ -1829,7 +1879,7 @@ impl Bridge {
             "next": if seen.needs_sign_in {
                 "This profile has no account signed in: stop and tell the person to sign in on its VRChat window. Never type there yourself. Then wait_for until signed_in.".to_string()
             } else if known {
-                format!("Pass session \"{id}\" to every tool from now on. Then go_to_world: it starts this session's VRChat again in a private instance.")
+                format!("Pass session \"{id}\" to every tool from now on. Then go_to_world: the first one starts this session's VRChat again in a private instance of its own; later ones travel in the running game.")
             } else {
                 format!("VRChat is still starting: call get_state with session \"{id}\" in a moment.")
             },
@@ -1837,23 +1887,56 @@ impl Bridge {
     }
 
     /// Starts a side session's VRChat: one launch at a time on this computer, once Easy Anti-Cheat allows it, and known by
-    /// its process before the next launch may start.
+    /// its process before the next launch may start. Nothing is tried while Easy Anti-Cheat's driver service is marked for
+    /// deletion (`eac_stuck`: no launch can work until Windows restarts). A launch that brings no VRChat up has its launcher
+    /// ended (it hangs on its error window otherwise) and answers what Easy Anti-Cheat's launcher said.
     fn launch_side(&self, s: &Session, plan: LaunchPlan, call: &Call) -> Result<(), Failure> {
         let opener = self.opener.lock().unwrap().clone().ok_or_else(|| Failure::new("sessions_unavailable", "This bridge cannot open sessions here.", "Use the main session."))?;
         let _one = self.launching.lock().unwrap();
-        // Easy Anti-Cheat of a VRChat that just closed: wait for it, within the call.
-        if !self.wait_until(Duration::from_secs(30).min(self.timing.start_limit), call, || opener.eac().may_launch())? {
-            return Err(opener.eac().failure());
+        // Easy Anti-Cheat of a VRChat that just closed: wait for it, within the call. Read every 2 s, not at every look: each
+        // reading is a query of the service manager.
+        let eac = std::sync::Mutex::new((opener.eac(), Instant::now()));
+        let now = || {
+            let mut seen = eac.lock().unwrap();
+            if seen.1.elapsed() >= Duration::from_secs(2) {
+                *seen = (opener.eac(), Instant::now());
+            }
+            seen.0.clone()
+        };
+        if now().delete_pending {
+            return Err(sessions::Eac::stuck_failure());
         }
-        s.game.launch(&plan)?;
-        let started = self.wait_until(Duration::from_secs(30), call, || s.game.seen().pid.is_some())?;
+        if !self.wait_until(Duration::from_secs(30).min(self.timing.start_limit), call, || {
+            let e = now();
+            e.delete_pending || e.may_launch()
+        })? {
+            return Err(now().failure());
+        }
+        if now().delete_pending {
+            return Err(sessions::Eac::stuck_failure());
+        }
+        let began = std::time::SystemTime::now();
+        let osc = plan.osc;
+        let launched = s.game.launch(&plan);
+        let outcome = std::sync::Mutex::new(None);
+        let started = launched.is_ok()
+            && self.wait_until(Duration::from_secs(30), call, || {
+                if s.game.seen().pid.is_some() {
+                    return true;
+                }
+                let said = opener.launcher_outcome(began);
+                let ended = said.is_some();
+                *outcome.lock().unwrap() = said;
+                ended
+            })?;
         let pid = s.game.seen().pid;
         if !started || pid.is_none() {
-            return Err(Failure::new(
-                "start_failed",
-                "VRChat did not start within 30 s: Easy Anti-Cheat may show a launch error on the screen.",
-                "Call get_state; if a session cannot start twice, stop and tell the person.",
-            ));
+            // What this start left (a launcher hung on "Launch Error (30005)", 2026-11-15 07:04) goes now.
+            let ended = osc.map_or(0, |osc| opener.end_launcher(osc));
+            let said = outcome.lock().unwrap().clone().or_else(|| opener.launcher_outcome(began));
+            self.log(false, format!("VRChat did not start ({}); {ended} launcher process(es) of this start ended", said.as_ref().map_or("no outcome".to_string(), |(c, w)| format!("{c}: {w}"))));
+            launched?;
+            return Err(sessions::launch_failure(said.as_ref()));
         }
         s.run.lock().unwrap().pid = pid;
         Ok(())
@@ -2236,7 +2319,7 @@ mod tests {
 
     #[test]
     fn the_guide_explains_the_loop_and_when_to_give_up() {
-        for words in ["go_to_world", "take_3d_picture", "close_vrchat", "give up", "world_labels", "label_world", "spotlight_pc", "next_page", "paused_by_person", "no_keyframes", "open_session", "needs_sign_in", "focus_busy", "close_session", "take_over", "landed_elsewhere", "window_resized", "`tab`"] {
+        for words in ["go_to_world", "take_3d_picture", "close_vrchat", "give up", "world_labels", "label_world", "spotlight_pc", "next_page", "paused_by_person", "no_keyframes", "open_session", "needs_sign_in", "Join", "eac_stuck", "relaunch", "focus_busy", "close_session", "take_over", "landed_elsewhere", "window_resized", "`tab`"] {
             assert!(GUIDE.contains(words), "{words}");
         }
     }

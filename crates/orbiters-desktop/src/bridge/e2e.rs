@@ -1921,3 +1921,78 @@ fn open_session_takes_the_vrchat_a_failed_start_of_its_profile_left_running() {
     assert!(opener.forgotten.lock().unwrap().contains(&refused), "what the refusal made is given back");
     assert_eq!(opener.game_of(2).unwrap().launches().len(), 0);
 }
+
+#[test]
+fn a_vr_session_tours_while_the_person_uses_the_computer() {
+    // nofocus, 2026-11-15: with the person at the computer every key and click of a desktop session answers paused_by_person, and
+    // its camera opens only through the menu: the tour stood still. A VR session goes on: no key, no click, no focus of theirs.
+    let (_main, opener, bridge, _server, client) = lab_with_sessions("vr");
+    *opener.links_open_page.lock().unwrap() = true;
+    // Where nobody set the sandbox up: said, nothing started.
+    let none = client.fails("open_session", json!({ "profile": 1, "vr": true }), "vr_unavailable");
+    assert!(none["message"].as_str().unwrap().contains("vrchat_bridge_vr_sandbox"), "{none}");
+    assert!(opener.games.lock().unwrap().is_empty(), "nothing was made");
+    // The person's VR in use: refused with its reason, nothing launched, the turn not kept.
+    *opener.vr.lock().unwrap() = Some(Some("the owner's headset connected through Virtual Desktop".into()));
+    let busy = client.fails("open_session", json!({ "profile": 1, "vr": true }), "vr_busy");
+    assert!(busy["message"].as_str().unwrap().contains("Virtual Desktop"), "{busy}");
+    assert!(opener.games.lock().unwrap().iter().all(|g| g.2.launches().is_empty()));
+    // Free: the sandbox's turn first, then VRChat in VR mode with the profile's own ports.
+    *opener.vr.lock().unwrap() = Some(None);
+    let opened = client.tool("open_session", json!({ "profile": 1, "vr": true })).unwrap();
+    let id = opened["session"].as_str().unwrap().to_string();
+    let game = opener.game_of(1).unwrap();
+    let rig = opener.rigs.lock().unwrap().last().unwrap().clone();
+    assert_eq!(rig.calls.lock().unwrap().first().map(String::as_str), Some("take"), "SteamVR before VRChat");
+    let args = game.launches()[0].args();
+    assert!(!args.contains(&"--no-vr".to_string()), "VR mode: {args:?}");
+    assert!(args.contains(&"--profile=1".to_string()) && args.contains(&"--osc=9010:127.0.0.1:9011".to_string()), "{args:?}");
+    // The person works from now on: their input anywhere, another program in front.
+    *opener.foreground.lock().unwrap() = Some(4242);
+    game.set_foreground(false);
+    bridge.heard(Heard::PersonInput);
+    let went = client.tool("go_to_world", json!({ "session": id, "world_id": LAB_WORLD_A })).unwrap();
+    assert_eq!(went["arrived"], true, "{went}");
+    assert!(game.launches().iter().all(|p| !p.args().contains(&"--no-vr".to_string())), "a start again stays in VR");
+    bridge.heard(Heard::PersonInput);
+    let went = client.tool("go_to_world", json!({ "session": id, "world_id": LAB_WORLD_B })).unwrap();
+    assert_eq!(went["travelled"], true, "{went}");
+    assert!(game.world_page_up(), "the world's page waits for Join");
+    // Its screenshot is the headset's eye; a click there is the laser and the trigger, not the person's mouse.
+    let shot = client.tool("screenshot", json!({ "session": id, "max_width": 810 })).unwrap();
+    assert_eq!((shot["vr"].as_bool(), shot["image_width"].as_u64(), shot["image_height"].as_u64()), (Some(true), Some(810), Some(900)), "{shot}");
+    bridge.heard(Heard::PersonInput);
+    let clicked = client.tool("mouse", json!({ "session": id, "action": "click", "x": 405, "y": 520 })).unwrap();
+    assert_eq!(clicked["over"], "vr_controller", "{clicked}");
+    assert!(rig.calls.lock().unwrap().contains(&"point 405 520 810 900 true".to_string()), "{:?}", rig.calls.lock().unwrap());
+    assert!(game.injected().is_empty(), "no key or click of this computer's");
+    let there = client.tool("wait_for", json!({ "session": id, "until": "in_world", "timeout_s": 5 })).unwrap();
+    assert_eq!(there["arrived"], true, "{there}");
+    // Keys and the focus do not exist here: said, with what to use.
+    let key = client.fails("press", json!({ "session": id, "input": "esc" }), "vr_session");
+    assert!(key["next"].as_str().unwrap().contains("open_camera"), "{key}");
+    client.fails("focus_game", json!({ "session": id }), "vr_session");
+    // The camera: the controllers' route, then Stream over OSC; then the picture as always, the person still working.
+    bridge.heard(Heard::PersonInput);
+    let camera = client.tool("open_camera", json!({ "session": id })).unwrap();
+    assert_eq!(camera["camera"], "open", "{camera}");
+    assert!(rig.calls.lock().unwrap().contains(&"camera".to_string()));
+    assert!(game.heard().iter().any(|(h, _)| h.address == "/usercamera/Mode"), "Stream asked over OSC");
+    client.tool("walk", json!({ "session": id, "direction": "forward", "seconds": 0.2 })).unwrap();
+    bridge.heard(Heard::PersonInput);
+    let picture = client.tool("take_3d_picture", json!({ "session": id, "length_s": 4 })).unwrap();
+    assert!(picture["session"].is_string() || picture["saved"].is_boolean() || picture.is_object(), "{picture}");
+    assert!(game.injected().is_empty(), "still nothing of the person's keyboard or mouse");
+    // The hotkey still holds it.
+    bridge.heard(Heard::Hotkey);
+    client.fails("open_camera", json!({ "session": id }), "paused_held");
+    bridge.heard(Heard::Hotkey);
+    // A desktop session's camera: the menu's clicks, said.
+    let desktop = client.tool("open_session", json!({ "profile": 2 })).unwrap();
+    let d = desktop["session"].as_str().unwrap().to_string();
+    client.fails("open_camera", json!({ "session": d }), "desktop_session");
+    // Closed: the sandbox turn is given back.
+    client.tool("wait_for", json!({ "session": id, "until": "picture_saved", "timeout_s": 20 })).unwrap();
+    client.tool("close_session", json!({ "session": id })).unwrap();
+    assert_eq!(rig.calls.lock().unwrap().last().map(String::as_str), Some("release"), "{:?}", rig.calls.lock().unwrap());
+}

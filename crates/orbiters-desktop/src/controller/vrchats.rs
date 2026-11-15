@@ -433,6 +433,31 @@ mod tests {
         assert_eq!(sessions::default_target(&runs).map(|r| r.pid), Some(37076));
     }
 
+    /// A VR session of the bridge's (nofocus, on the VR sandbox): its VRChat starts without `--no-vr` but with its profile's
+    /// `--profile` and `--osc`, as `LaunchPlan` writes them. It is an agent's, in VR, never the person's: held by a session or
+    /// left by one, it is never the default target, even when it is the only VRChat in VR or the only one running.
+    #[test]
+    fn a_vr_sessions_vrchat_is_an_agents_in_vr_never_the_persons() {
+        let plan = crate::bridge::game::LaunchPlan { world_id: String::new(), instance: String::new(), width: 1280, height: 720, profile: Some(2), osc: sessions::ports_of(2), vr: true };
+        let mut log = format!("2026.11.15 15:40:00 Debug      -  Launching with args: {}\n", plan.args().len() + 1);
+        log.push_str("2026.11.15 15:40:00 Debug      -  Arg: C:\\Program Files (x86)\\Steam\\steamapps\\common\\VRChat\\VRChat.exe\n");
+        for arg in plan.args() {
+            log.push_str(&format!("2026.11.15 15:40:00 Debug      -  Arg: {arg}\n"));
+        }
+        let vr = run_of(51000, 1_794_757_200, None, Some(&facts(&log)));
+        assert_eq!((vr.profile, vr.osc_in, vr.desktop, vr.driver.clone()), (2, 9020, Some(false), Driver::Bridge));
+        assert_eq!(sessions::default_target(std::slice::from_ref(&vr)).map(|r| r.pid), None, "alone, still not the person's");
+        let own = run_of(37076, 1_794_749_922, None, Some(&facts(OWN_LOG)));
+        let sides = sessions::Sides::default();
+        sides.put(sessions::SideMark { session: "p2-0123456789ab".into(), profile: 2, osc_in: 9020, osc_out: 9021, pid: Some(51000), log: None, query: None });
+        sides.set_roster(vec![vr, own]);
+        let runs = sides.roster();
+        assert_eq!(runs.iter().find(|r| r.pid == 51000).map(|r| r.driver.clone()), Some(Driver::Session("p2-0123456789ab".into())));
+        assert_eq!(sides.target().map(|t| t.pid), Some(37076), "his own desktop VRChat is the target");
+        let shown = shown(&runs[0], Some(37076), None);
+        assert_eq!((shown.desktop, shown.driver), (Some(false), crate::state::VrchatDriverShown::Agent { session: "p2-0123…".into() }));
+    }
+
     #[test]
     fn a_process_takes_the_log_made_as_it_started() {
         // 12:24:58 a start that failed; 12:25:13 the tour's VRChat, log 12:25:15; 13:38:42 his own, log 13:38:44.

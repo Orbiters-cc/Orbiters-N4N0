@@ -114,6 +114,33 @@ Ownership: `open_session` returns an id with an unguessable part; every call wit
 a session without a call for 10 minutes may be taken over (`open_session` with `take_over`: same VRChat, new id, the old id refused with
 `session_taken_over`). The person's own VRChat, and any VRChat the bridge did not start, is never driven, focused away from, or closed.
 
+### VR sessions: the tour goes on while the person works (2026-11-15)
+
+Measured on profile 1's desktop VRChat with the owner at the computer (report `vr-feedback-1111/done7-nofocus.md`): VRChat in desktop
+mode takes keys and clicks only from raw input of the foreground window. Window messages, even with a faked activation, do nothing.
+Its camera cannot be opened over OSC: `/usercamera/Mode` is not even stored while the camera is closed, and `/dolly/Play` does nothing.
+The camera also closes at every world change, and the Join of a world page needs a click. So a desktop session needs the person away
+for every world. Window captures and OSC movement work in the background.
+
+`open_session {profile, vr: true}` makes a **VR session**:
+
+- It takes a turn on the developer VR sandbox (`tools/vr-sandbox`, `sandbox.py acquire --keep-app`): SteamVR with the emulated headset
+  and controllers, the person's installed app left running. It only exists where `experimental.vrchat_bridge_vr_sandbox` names that
+  folder; otherwise `vr_unavailable`. The person's own VR refuses it (`vr_busy`): their headset on Virtual Desktop, their SteamVR, or
+  their VRChat.
+- Then VRChat starts as for any side session, without `--no-vr`, so it takes SteamVR.
+- `screenshot` is the left eye (`sandbox.py call capture`).
+- `mouse move|click` aims the right controller's laser through a pixel of that picture (sandbox action `point`: VRChat's laser is
+  64.5° below the controller's -Z) and pulls the trigger.
+- `open_camera` is the Action Menu route (`camera`) plus OSC Stream.
+- `press` of keys and `focus_game` answer `vr_session`.
+- None of this is the person's keyboard or mouse, so `paused_by_person` does not apply. The hotkey and Pause still do.
+- The turn is renewed every 2 minutes while the session lives. `close_session` gives it back.
+
+The app leaves the sandbox's SteamVR alone (`steamvr_start::sandbox_runs`: the external driver named `orbiters_sandbox` in
+`openvrpaths.vrpath`): no overlay, no sound devices, no SteamVR start choice. Measured cost of a VR VRChat (1080x1200 eyes, 72 Hz) beside
+the desktop one: GPU 35-41 %, 6.2 GB of graphics memory and 82 W in all, against 38 %, 2.9 GB and 37 W before.
+
 The resource `bridge://guide` and the prompt `world_tour` explain the loop to an agent, including when to give up on a world. Every refusal has a
 `code`, a `message` and a `next` (and `retry_after_s` when that is the answer).
 

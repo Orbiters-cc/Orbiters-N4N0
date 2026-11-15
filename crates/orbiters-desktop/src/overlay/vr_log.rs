@@ -3,8 +3,13 @@
 
 use std::time::{Duration, Instant};
 
-/// A line now.
+/// A line now. Never from tests: their scanners, pages and overlays would write into the person's own `vr-test.log`
+/// (found 2026-11-15: a desktop test run's lines among Enzo's).
 pub fn line(text: &str) {
+    if cfg!(test) {
+        let _ = text;
+        return;
+    }
     let dir = orbiters_core::paths::logs_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;

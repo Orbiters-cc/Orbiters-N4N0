@@ -90,6 +90,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut said: Option<OrbitStatus> = None;
     let mut last_turn = Instant::now();
     let mut last_look = None::<Instant>;
+    let mut camera = detect::CameraWatch::default();
+    let mut last_camera_look = None::<Instant>;
+    let mut was_menu = false;
+    // When VRChat's camera panel was last seen, as said to the service (it is part of what proves a live camera before a recording), at most twice a second.
+    let mut panel_seen_ns: Option<u64> = None;
     let mut frames_seen = FrameRate::default();
     let clicks = Clicks::start();
     loop {
@@ -104,7 +109,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let found = game.find(&snap);
         // Exclusive full screen shows no other window: say so, and do nothing.
         let exclusive = found.is_some_and(|_| full_screen_exclusive());
-        let status = OrbitStatus { note: exclusive.then(|| mark("VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.").to_string()), steamvr_overrides: None, camera_note: None, camera_provisional: false, camera_panel_seen_ns: None, camera_scale_measured: false };
+        let status = OrbitStatus { note: exclusive.then(|| mark("VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.").to_string()), steamvr_overrides: None, camera_note: None, camera_provisional: false, camera_panel_seen_ns: panel_seen_ns, camera_scale_measured: false };
         if said.as_ref() != Some(&status) {
             backend.orbit_status(status.clone());
             said = Some(status);
@@ -115,6 +120,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             // The parts of menus that closed are kept for a while; with the game behind another window nothing else comes by to let them go.
             panels.let_go(turn);
             pill.show(None, pos2(0.0, 0.0), vec2(0.0, 0.0));
+            camera.reset();
+            panel_seen_ns = None;
             if watcher.wants_frames() || !panels.is_empty() || capture.is_some() {
                 watcher.reset();
                 capture = None;
@@ -126,10 +133,20 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             std::thread::sleep(REST);
             continue;
         };
+        // VRChat's camera panel: for the person's own VRChat only, never one an agent drives through the bridge (its sessions' VRChats, the app's when the bridge
+        // started it, one lent to the app for a picture): those are the agent's, and it clicks on that panel.
+        let camera_wanted = camera_tools_here(&snap);
+        if !camera_wanted {
+            camera.reset();
+        }
         if let Some(key) = keys.pressed() {
             watcher.pressed(key, turn);
+            if key == MenuKey::Esc {
+                camera.esc(turn);
+            }
         }
-        if watcher.wants_frames() {
+        let camera_frames = camera_wanted && camera.wants_frames(snap.camera_open_said, turn);
+        if watcher.wants_frames() || camera_frames {
             if capture.is_none() {
                 if gpu.is_none() {
                     gpu = Gpu::new().map_err(|e| eprintln!("capture: {e}")).ok();
@@ -141,30 +158,55 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 }
             }
             if let Some(c) = capture.as_mut() {
-                // New frames, at the pace of the looks.
-                if last_look.is_none_or(|t: Instant| turn.duration_since(t) >= watcher.look_every(turn)) {
-                    last_look = Some(turn);
+                // New frames, at the pace of the looks: the menus' and the camera's each at its own.
+                let menus = watcher.wants_frames() && last_look.is_none_or(|t: Instant| turn.duration_since(t) >= watcher.look_every(turn));
+                let panel = camera_frames && last_camera_look.is_none_or(|t: Instant| turn.duration_since(t) >= detect::CAMERA_LOOK_EVERY);
+                if menus || panel {
                     let client_size = client_size(window);
-                    let found = c.look(window, client_size);
-                    if let Some((found, coming)) = found {
+                    if let Some(looked) = c.look(window, client_size, menus, panel) {
                         frames_seen.count(turn);
-                        watcher.frame_coming(found, coming, turn);
+                        if let Some((found, coming)) = looked.menu {
+                            last_look = Some(turn);
+                            watcher.frame_coming(found, coming, turn);
+                        }
+                        if let Some(found) = looked.camera {
+                            last_camera_look = Some(turn);
+                            camera.frame(found, turn);
+                        }
                     }
                 }
             }
         }
         let seen = watcher.tick(turn);
-        if !watcher.wants_frames() && capture.is_some() {
-            capture = None;
-        }
-        let open = match seen {
+        let menu = match seen {
             Seen::Open(Around::Wheel) if snap.settings.orbit.around_wheel() => Some(Around::Wheel),
             Seen::Open(Around::QuickMenu) if snap.settings.orbit.around_quick_menu() => Some(Around::QuickMenu),
             _ => None,
         };
+        // A menu of VRChat's that went may have opened its camera (with OSC off, nothing else says so).
+        let menu_up = matches!(seen, Seen::Open(_));
+        if was_menu && !menu_up {
+            camera.menu_went(turn);
+        }
+        was_menu = menu_up;
+        let panel = if camera_wanted { camera.tick(snap.camera_open_said, turn) } else { None };
+        panel_seen_ns = match panel {
+            Some(_) if panel_seen_ns.is_none_or(|at| orbiters_core::clock::now_ns().saturating_sub(at) >= 500_000_000) => Some(orbiters_core::clock::now_ns()),
+            Some(_) => panel_seen_ns,
+            None => None,
+        };
+        if !watcher.wants_frames() && !(camera_wanted && camera.wants_frames(snap.camera_open_said, turn)) && capture.is_some() {
+            capture = None;
+        }
+        // VRChat's menus first: they close its camera on the desktop.
+        let open = menu.or(panel.filter(|_| !menu_up).map(|_| Around::Camera));
         let size = client_size(window);
         let origin = client_origin(window);
-        let places = open.map_or_else(Vec::new, |menu| zones::layout_as(menu, size, snap.settings.orbit.layout == orbiters_core::settings::OrbitLayout::Strip));
+        let places = match (open, panel) {
+            (Some(Around::Camera), Some(panel)) => zones::camera_on_screen(panel, size),
+            (Some(menu), _) => zones::layout_as(menu, size, snap.settings.orbit.layout == orbiters_core::settings::OrbitLayout::Strip),
+            (None, _) => Vec::new(),
+        };
         panels.takeover_place = zones::place(Zone::Takeover, size);
         panels.back_place = zones::place(Zone::SheetBack, size);
         panels.hint_place = zones::place(Zone::SheetHint, size);
@@ -174,7 +216,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer.stop();
             windows.hide_all();
             pill.show(panels.away_words(&snap), origin, size);
-            std::thread::sleep(if watcher.wants_frames() { TURN } else { REST });
+            std::thread::sleep(if watcher.wants_frames() || camera_frames { TURN } else { REST });
             continue;
         }
         pill.show(None, origin, size);
@@ -235,6 +277,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let wait = TURN.saturating_sub(turn.elapsed());
         std::thread::sleep(wait);
     }
+}
+
+/// Whether the camera's column is for this VRChat: the setting is on, and it is the person's own, not one an agent drives through the bridge.
+fn camera_tools_here(snap: &Snapshot) -> bool {
+    let driven = snap.vrchat.pid.is_some_and(|pid| snap.bridge.driven.contains(&pid));
+    snap.settings.orbit.camera_tiles && !driven
 }
 
 /// Whether the scroll wheel picks a cell of the ring, with no key held ([`scroll`]). Off since dev.25: in dev.24 a scroll's click that opened a sheet froze the
@@ -549,8 +597,17 @@ struct Capture {
     item: GraphicsCaptureItem,
     winrt: IDirect3DDevice,
     size: (i32, i32),
-    staging: [Option<(ID3D11Texture2D, u32, u32)>; 2],
-    buffers: [Vec<u8>; 2],
+    staging: Vec<Option<(ID3D11Texture2D, u32, u32)>>,
+    buffers: Vec<Vec<u8>>,
+}
+
+/// Where a part was read from and how: x0, y0, width, height, the bytes of a row.
+type ReadPart = (u32, u32, u32, u32, u32);
+
+/// What a look at a frame found: VRChat's menu and whether its wheel's rim is in place, when the menus were looked for; its camera panel's place, when that was.
+struct Looked {
+    menu: Option<(Option<Around>, bool)>,
+    camera: Option<Option<egui::Rect>>,
 }
 
 /// The Direct3D device captures use, kept for as long as the process lasts: it holds nothing and does nothing between captures.
@@ -590,11 +647,12 @@ impl Capture {
         let _ = session.SetIsCursorCaptureEnabled(false);
         let _ = session.SetIsBorderRequired(false);
         session.StartCapture().map_err(|e| text("start", e))?;
-        Ok(Self { device, context, pool, session, item, winrt, size: (size.Width, size.Height), staging: [None, None], buffers: [Vec::new(), Vec::new()] })
+        Ok(Self { device, context, pool, session, item, winrt, size: (size.Width, size.Height), staging: Vec::new(), buffers: Vec::new() })
     }
 
-    /// The newest frame's look: `None` when no new frame came. The window's title bar and borders are in the frame, its client area counted from its own corner.
-    fn look(&mut self, window: HWND, client: Vec2) -> Option<(Option<Around>, bool)> {
+    /// The newest frame's look, for VRChat's `menus`, its `camera` panel or both: `None` when no new frame came. The window's title bar and borders are in the frame,
+    /// its client area counted from its own corner.
+    fn look(&mut self, window: HWND, client: Vec2, menus: bool, camera: bool) -> Option<Looked> {
         let mut newest = None;
         while let Ok(frame) = self.pool.TryGetNextFrame() {
             newest = Some(frame);
@@ -612,9 +670,18 @@ impl Capture {
         // SAFETY: the surface is a Direct3D 11 texture, as the pool was made for.
         let texture: ID3D11Texture2D = unsafe { access.GetInterface() }.ok()?;
         let (dx, dy) = client_in_frame(window);
-        let parts = detect::parts(client);
-        let mut read: [Option<(u32, u32, u32, u32, u32)>; 2] = [None, None];
+        // Each part keeps its slot, and so its staging texture, whichever of them a look reads: the menus' two first, the camera's lines after them.
+        let menu_parts = detect::parts(client);
+        let camera_parts = detect::camera_parts(client);
+        let parts: Vec<Option<egui::Rect>> =
+            menu_parts.iter().map(|r| menus.then_some(*r)).chain(camera_parts.iter().map(|r| camera.then_some(*r))).collect();
+        if self.buffers.len() < parts.len() {
+            self.buffers.resize_with(parts.len(), Vec::new);
+            self.staging.resize_with(parts.len(), || None);
+        }
+        let mut read: Vec<Option<ReadPart>> = vec![None; parts.len()];
         for (i, part) in parts.iter().enumerate() {
+            let Some(part) = part else { continue };
             let (x0, y0) = (part.min.x.max(0.0) as u32, part.min.y.max(0.0) as u32);
             let (width, height) = (part.width().ceil() as u32, part.height().ceil() as u32);
             if width == 0 || height == 0 {
@@ -640,7 +707,15 @@ impl Capture {
             let (x0, y0, width, height, stride) = read[i]?;
             Some(Part { x0, y0, width, height, stride, bgra: &self.buffers[i] })
         };
-        Some((detect::look(&part(0)?, &part(1)?, client), detect::wheel_coming(&part(0)?, client)))
+        let menu = if menus { Some((detect::look(&part(0)?, &part(1)?, client), detect::wheel_coming(&part(0)?, client))) } else { None };
+        let camera = if camera {
+            let from = menu_parts.len();
+            let lines: Option<Vec<Part<'_>>> = (from..parts.len()).map(part).collect();
+            Some(detect::camera_panel(&lines?, client))
+        } else {
+            None
+        };
+        Some(Looked { menu, camera })
     }
 
     fn staging_for(&mut self, i: usize, width: u32, height: u32) -> Option<ID3D11Texture2D> {
@@ -1491,18 +1566,23 @@ mod tests {
     /// until each part rests where it goes. `sheet` presses All tools on the wing first, and waits for its page.
     fn put_up(open: Around, client: Vec2, sheet: bool) -> (Panels, Windows, StandIn, Pos2) {
         let snap = crate::screenshot::idle_snapshot(&orbiters_core::settings::Settings::default(), &[]);
+        let strip = snap.settings.orbit.layout == orbiters_core::settings::OrbitLayout::Strip;
+        put_up_as(open, client, sheet, zones::layout_as(open, client, strip), snap)
+    }
+
+    /// The same with the parts in `places` and the service saying `snap`.
+    fn put_up_as(open: Around, client: Vec2, sheet: bool, places: Vec<Placed>, snap: Snapshot) -> (Panels, Windows, StandIn, Pos2) {
         let mut panels = Panels::new(Arc::new(crate::screenshot::Still), 1.0, true);
         let mut windows = Windows::default();
         let corner = off_screen(client);
         let stand_in = StandIn::new(corner, client);
         let origin = pos2(corner.x as f32, corner.y as f32);
-        let strip = snap.settings.orbit.layout == orbiters_core::settings::OrbitLayout::Strip;
         panels.takeover_place = zones::place(Zone::Takeover, client);
         panels.back_place = zones::place(Zone::SheetBack, client);
         panels.hint_place = zones::place(Zone::SheetHint, client);
         let turn = |panels: &mut Panels, windows: &mut Windows| {
             pump();
-            panels.set_open(Some(open), zones::layout_as(open, client, strip), &snap);
+            panels.set_open(Some(open), places.clone(), &snap);
             panels.follow(&snap, 0);
             panels.menu_turn(&snap);
             panels.step_springs(0.05);
@@ -1630,6 +1710,68 @@ mod tests {
                 assert!(got != stand_in.0, "page {sheet}: the middle of {:?} is ours", panel.zone);
             }
         }
+    }
+
+    /// Enzo, 2026-11-15 (L-desk-camera): with VRChat's camera panel open on the desktop the mouse is free, as with the Quick Menu. N4N0's column at the panel's left
+    /// takes a plain click on each of its tools; every other point of the window, the camera's picture and VRChat's own buttons under it above all, is VRChat's, also
+    /// while the corners round the panel say a code is looked for (their window lets every click through).
+    #[test]
+    fn with_vrchat_s_camera_open_only_the_column_takes_the_mouse() {
+        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        for (client, panel) in [
+            (vec2(1280.0, 720.0), egui::Rect::from_min_max(pos2(332.0, 185.0), pos2(948.0, 535.0))),
+            (vec2(1920.0, 1080.0), egui::Rect::from_min_max(pos2(498.0, 277.5), pos2(1422.0, 802.5))),
+        ] {
+            for looking in [false, true] {
+                let mut snap = crate::screenshot::idle_snapshot(&orbiters_core::settings::Settings::default(), &[]);
+                snap.steamvr.running = false;
+                snap.camera_open_said = Some(true);
+                if looking {
+                    snap.camera_tools.qr = crate::controller::camera_tools::Qr::Looking;
+                }
+                let (panels, windows, stand_in, origin) = put_up_as(Around::Camera, client, false, zones::camera_on_screen(panel, client), snap);
+                hit_testing_reads_the_pixels(origin, &stand_in);
+                let column = [Zone::CameraPeople, Zone::CameraWorld, Zone::CameraRecord, Zone::CameraQr];
+                for zone in column {
+                    let part = panels.all().find(|p| p.zone == zone && p.shown).unwrap_or_else(|| panic!("{client:?}: no {zone:?}"));
+                    let middle = part.placed.rect.center();
+                    let got = under(POINT { x: origin.x as i32 + middle.x as i32, y: origin.y as i32 + middle.y as i32 });
+                    assert_eq!(windows.list.get(&zone).map(|w| w.hwnd), Some(got), "{client:?}: a click on {zone:?} is not ours");
+                    assert_eq!(hit(&panels, middle).map(|(i, _)| panels.all().nth(i).expect("a part").zone), Some(zone), "{client:?}: the pointer on {zone:?} is not on it");
+                }
+                assert_eq!(panels.all().any(|p| p.zone == Zone::CameraScan && p.shown), looking, "the corners show while a code is looked for, and only then");
+                let seen = grid(&windows, &stand_in, origin, client);
+                let ours = seen.iter().filter(|(_, z)| z.is_some()).count();
+                eprintln!("camera {client:?}, looking {looking}: {} points, {} reach VRChat, {ours} ours", seen.len(), seen.len() - ours); // i18n: not shown (a test's measurement)
+                let k = panel.height() / 350.0;
+                let buttons = egui::Rect::from_min_max(pos2(panel.left() + 51.0 * k, panel.bottom()), pos2(panel.right() + 25.0 * k, panel.bottom() + 86.0 * k));
+                for (p, zone) in &seen {
+                    if zone.is_some() {
+                        assert!(hit(&panels, *p).is_some(), "{client:?}: {p:?} goes to {zone:?}, where nothing of ours is pressed");
+                        assert!(column.contains(&zone.unwrap()) || zone == &Some(Zone::CameraAct), "{client:?}: {p:?} goes to {zone:?}");
+                    }
+                    if panel.expand(2.0).contains(*p) || buttons.contains(*p) {
+                        assert_eq!(*zone, None, "{client:?}: {p:?}, on VRChat's camera, goes to ours");
+                    }
+                }
+                assert!(ours > 0);
+            }
+        }
+    }
+
+    /// The camera's column is the person's: a VRChat the bridge started (main's or a side session's, lent to the app or not) never gets it, as an agent clicks on
+    /// that panel; and the setting turns it off.
+    #[test]
+    fn the_camera_column_is_only_for_the_person_s_own_vrchat() {
+        let mut snap = crate::screenshot::idle_snapshot(&orbiters_core::settings::Settings::default(), &[]);
+        snap.vrchat.pid = Some(4242);
+        assert!(camera_tools_here(&snap));
+        snap.bridge.driven = vec![17, 4242];
+        assert!(!camera_tools_here(&snap), "a VRChat the bridge drives");
+        snap.bridge.driven = vec![17];
+        assert!(camera_tools_here(&snap), "the bridge drives another one beside it");
+        snap.settings.orbit.camera_tiles = false;
+        assert!(!camera_tools_here(&snap), "turned off in Settings");
     }
 
     #[test]

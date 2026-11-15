@@ -933,6 +933,7 @@ pub(super) fn camera_shots(out: &Path) -> anyhow::Result<()> {
     for (name, facts, right) in &states {
         camera_state(name, out, facts, *right)?;
     }
+    desk_camera_shots(out)?;
     let hd = vec2(1280.0, 720.0);
     let desk = Facts { desktop: true, vr_close: false, ..recording.clone() };
     wheel_scene("orbit-wheel-recording", out, hd, &desk, None, None, false)?;
@@ -944,6 +945,60 @@ pub(super) fn camera_shots(out: &Path) -> anyhow::Result<()> {
     qm_scene("orbit-sheet-head-stop-vr", out, hd, &Facts { desktop: false, vr_close: true, sheet: Some(Sheet::Instances), sheet_title: "Instances".into(), ..desk.clone() }, None, Some(Sheet::Instances))?;
     qm_scene("orbit-sheet-head-stopping", out, hd, &Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), recording: false, rec_stopping: true, beside_wing: true, ..desk.clone() }, None, Some(Sheet::All))?;
     qm_scene("orbit-sheet-pictures-idle", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), beside_wing: true, ..Facts { desktop: true, ..idle.clone() } }, None, Some(Sheet::Pictures))?;
+    Ok(())
+}
+
+/// L-desk-camera: the column beside VRChat's camera panel in desktop mode, in each of its states, over real frames of the game with the panel open (the bridge's
+/// Stream camera at 1280 x 720, and a darker one stretched to 1920 x 1080): the panel found on the frame as the desktop finds it ([`detect::camera_panel_in`]),
+/// the parts placed as the desktop places them ([`zones::camera_on_screen`]). `orbit-desk-camera-<state>.png`, `orbit-desk-camera-1080-idle.png`.
+fn desk_camera_shots(out: &Path) -> anyhow::Result<()> {
+    use crate::overlay::orbit::detect;
+    use orbiters_n4n0_core::menu::PhotoMode;
+    use panels::{Action, CameraNow, CameraQr, DemoSwitch};
+    let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/desktop");
+    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, camera: CameraNow { kit: Some(true), ..Default::default() }, ..Default::default() };
+    let no_kit = Facts { no_kit: true, camera: CameraNow { kit: Some(false), demo: Some(DemoSwitch::Offered), ..Default::default() }, ..idle.clone() };
+    let states: Vec<(&str, Facts)> = vec![
+        ("idle", idle.clone()),
+        ("point-people", Facts { pointed: Some(Action::Picture(PhotoMode::People)), ..idle.clone() }),
+        ("point-qr", Facts { pointed: Some(Action::CameraQr), ..idle.clone() }),
+        ("waiting", Facts { picture_wait: Some(orbiters_n4n0::status::PhotoWait::Move), picture_mode: Some(PhotoMode::World), ..idle.clone() }),
+        ("countdown", Facts { countdown: Some(3), picture_mode: Some(PhotoMode::People), capture_busy: true, ..idle.clone() }),
+        ("flying", Facts { picture_flying: true, picture_mode: Some(PhotoMode::World), capture_busy: true, ..idle.clone() }),
+        ("recording", Facts { recording: true, recording_seconds: Some(42), capture_busy: true, ..idle.clone() }),
+        ("qr-looking", Facts { camera: CameraNow { qr: CameraQr::Looking, ..idle.camera.clone() }, ..idle.clone() }),
+        ("qr-no-picture", Facts { camera: CameraNow { qr: CameraQr::NoPicture(orbiters_i18n::tr(&orbiters_n4n0_core::qr::no_camera_note(Some(true))).into()), ..idle.camera.clone() }, ..idle.clone() }),
+        ("no-kit", no_kit),
+    ];
+    let shots: Vec<(&str, Option<(u32, u32)>, Vec<(&str, Facts)>)> =
+        vec![("panel-bright-station.jpg", None, states.clone()), ("panel-corridor.jpg", Some((1920, 1080)), vec![("1080-idle", idle.clone()), ("1080-recording", states[6].1.clone())])];
+    for (file, size, states) in shots {
+        let mut frame = image::open(folder.join(file))?.to_rgba8();
+        if let Some((w, h)) = size {
+            frame = image::imageops::resize(&frame, w, h, image::imageops::FilterType::Triangle);
+        }
+        let (w, h) = frame.dimensions();
+        let bgra: Vec<u8> = frame.pixels().flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+        let panel = detect::camera_panel_in(&bgra, w, h).ok_or_else(|| anyhow::anyhow!("no camera panel found on {file}"))?;
+        let client = vec2(w as f32, h as f32);
+        for (state, facts) in states {
+            let mut image = frame.as_raw().clone();
+            for placed in zones::camera_on_screen(panel, client) {
+                if placed.zone.only_while_needed() && !panels::needed(placed.zone, &facts) {
+                    continue;
+                }
+                if placed.zone == Zone::CameraCaption && panels::camera_words(&facts).is_none() {
+                    continue;
+                }
+                let hovered = facts.pointed.and_then(|a| panels::items(placed.zone, placed.logical(), &facts).iter().position(|i| i.action == a));
+                let (pixels, px) = picture(&placed, &facts, hovered, None);
+                blit(&mut image, w, &pixels, px, placed.rect.min);
+            }
+            let path = out.join(format!("orbit-desk-camera-{state}.png"));
+            save_png(&path, &over_ground(&image, w, h))?;
+            println!("{}: the panel at {panel:?}", path.display());
+        }
+    }
     Ok(())
 }
 

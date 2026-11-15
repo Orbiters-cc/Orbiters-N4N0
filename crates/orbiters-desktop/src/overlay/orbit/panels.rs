@@ -2274,6 +2274,8 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Record => (tr("Record a 3D scene").into(), tr("Walk around with VRChat's camera; Orbiters makes a 3D scene of what it saw.").into()),
         Action::StopRecording => (tr("Stop recording").into(), tr("Orbiters then turns it into a 3D scene.").into()),
         Action::CameraQr if facts.camera.qr != CameraQr::Off => (tr("Stop looking for a code").into(), tr("The camera goes back to being only a camera.").into()),
+        // On the desktop nothing covers the camera: a code's page opens in the browser (L-desk-camera).
+        Action::CameraQr if facts.desktop => (tr("QR code").into(), tr("Point VRChat's camera at a code: its page opens in your browser.").into()),
         Action::CameraQr => (tr("QR code").into(), tr("Point VRChat's camera at a code: its page opens right above the camera.").into()),
         Action::DemoAvatar => (tr("Wear the demo avatar").into(), tr("A public avatar with the capture kit, to take 3D pictures now. Change back in VRChat's menu.").into()),
         Action::WebOpen => (tr("Open in browser").into(), tr("This page in your computer's browser.").into()),
@@ -4139,8 +4141,13 @@ pub fn camera_words(facts: &Facts) -> Option<(String, String)> {
     if camera.finding {
         return Some((tr("Finding VRChat's camera…").into(), tr("These settle beside it as soon as Orbiters sees it.").into()));
     }
+    // A 3D picture asked for from the desktop's column waits until VRChat says where its camera is (L-desk-camera): what to do is said here, by the tile pressed.
+    if let Some(wait) = facts.picture_wait.filter(|_| facts.desktop) {
+        return Some(wait_words(wait, facts.picture_mode, tr("Click it again to call it off")));
+    }
     match &camera.qr {
         CameraQr::NoPicture(how) => return Some((tr("VRChat's camera sends no picture to read").into(), how.clone())),
+        CameraQr::Looking if facts.desktop => return Some((tr("Looking for a QR code…").into(), tr("Point the camera at it. Its page opens in your browser.").into())),
         CameraQr::Looking => return Some((tr("Looking for a QR code…").into(), tr("Point the camera at it. Its page opens above the camera.").into())),
         CameraQr::Cut => return Some((tr("A QR code is cut by the edge").into(), tr("Move the camera so all of the code is in its picture.").into())),
         CameraQr::Unclear => return Some((tr("A QR code is in view").into(), tr("Hold the camera still and a little closer, facing the code.").into())),

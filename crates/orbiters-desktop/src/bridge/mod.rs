@@ -107,6 +107,10 @@ pub struct Status {
     pub hotkey_taken: bool,
     /// The agents it can be added to, and what each of them has.
     pub clients: Vec<clients::ClientStatus>,
+    /// The VRChats its sessions started (process ids, main's and the side sessions'): they are the agent's, and the person's tools stay off them (the desktop's
+    /// camera column, `overlay::orbit::desktop`).
+    #[serde(default)]
+    pub driven: Vec<u32>,
 }
 
 /// What Settings asks of the service.
@@ -384,6 +388,10 @@ impl Bridge {
         status.client = self.client_seen();
         status.acting = self.in_flight.load(Ordering::Relaxed) > 0;
         status.log = self.log.lock().unwrap().iter().cloned().collect();
+        let mut driven: Vec<u32> = self.sessions().iter().filter_map(|s| s.run.lock().unwrap().pid).collect();
+        driven.sort_unstable();
+        driven.dedup();
+        status.driven = driven;
     }
 
     /// The pause as Settings shows it: which kind, not its countdown, or the state would change every second.

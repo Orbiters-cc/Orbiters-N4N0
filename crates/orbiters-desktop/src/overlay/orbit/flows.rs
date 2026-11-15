@@ -1293,6 +1293,8 @@ struct Heard {
     n4n0: std::sync::Mutex<Vec<crate::ipc::N4n0Command>>,
     sign_ins: std::sync::atomic::AtomicUsize,
     boosters: std::sync::Mutex<Vec<String>>,
+    /// What the camera's tools asked of the service: `record`, `qr on`, `qr off`.
+    camera: std::sync::Mutex<Vec<String>>,
 }
 
 impl Heard {
@@ -1321,6 +1323,12 @@ impl crate::backend::Backend for Heard {
         0
     }
     fn attach(&self, _ctx: &egui::Context) {}
+    fn start_camera_recording(&self) {
+        self.camera.lock().unwrap().push("record".into());
+    }
+    fn camera_qr(&self, active: bool) {
+        self.camera.lock().unwrap().push(if active { "qr on" } else { "qr off" }.into());
+    }
     fn start_capture(&self) {}
     fn stop_capture(&self) {}
     fn pause_capture(&self, _paused: bool) {}
@@ -2193,4 +2201,77 @@ fn usage_reaches_a_server_under_test() {
     let waiting = spool.waiting().len();
     assert!(waiting > 10, "{waiting}");
     assert_eq!(spool.send(&orbiters_core::account::Api::at(&base)), crate::usage::spool::Sent::Taken(waiting));
+}
+
+/// A person at VRChat's desktop camera (L-desk-camera): the app sees no headset, VRChat says its camera is open, the column is up beside its panel.
+fn at_the_desktop_camera() -> (Person, Arc<Heard>) {
+    let (mut person, heard) = Person::heard();
+    let mut snap = (*person.snap).clone();
+    snap.steamvr.running = false;
+    snap.camera_open_said = Some(true);
+    snap.worn_kit = Some(true);
+    person.snap = Arc::new(snap);
+    person.around = Some(Around::Camera);
+    person.turns(3);
+    assert!(person.panels.facts.desktop, "the desktop");
+    (person, heard)
+}
+
+/// Enzo, 2026-11-15 (L-desk-camera): the column beside the desktop's camera panel has the headset's four tools, and each does its work with what the desktop has:
+/// a 3D picture is asked for and starts once VRChat says where its camera is (the service's wait, which a second press calls off), Record records VRChat's camera,
+/// the QR code makes the camera look for a code. None is a dead button.
+#[test]
+fn beside_the_desktop_camera_each_tool_does_its_work() {
+    use orbiters_n4n0_core::menu::PhotoMode;
+    let (mut person, heard) = at_the_desktop_camera();
+    for action in [Action::Picture(PhotoMode::People), Action::Picture(PhotoMode::World), Action::Record, Action::CameraQr] {
+        assert!(person.find(action).is_some(), "no {action:?} beside the desktop's camera");
+    }
+    assert!(person.press(Action::Picture(PhotoMode::People)).clicked);
+    assert!(heard.said().iter().any(|c| c.starts_with("Photo3DWhenCamera")), "no 3D picture asked for: {:?}", heard.said());
+    assert_eq!(person.panels.facts.picture_mode, Some(PhotoMode::People));
+    assert!(person.press(Action::Record).clicked);
+    assert!(person.press(Action::CameraQr).clicked);
+    assert_eq!(*heard.camera.lock().unwrap(), ["record", "qr on"]);
+}
+
+/// Waiting for VRChat to say where its camera is, the desktop's column says so under the tiles, and how to call it off; the countdown is on the tile pressed.
+#[test]
+fn the_desktop_camera_s_column_says_what_a_3d_picture_waits_for() {
+    use super::panels::camera_words;
+    use orbiters_n4n0_core::menu::PhotoMode;
+    let (mut person, _) = at_the_desktop_camera();
+    person.press(Action::Picture(PhotoMode::World));
+    let mut snap = (*person.snap).clone();
+    snap.n4n0.photo_wait = Some(orbiters_n4n0::status::PhotoWait::Move);
+    person.snap = Arc::new(snap);
+    person.panels.hover(None);
+    person.turns(3);
+    let said = camera_words(&person.panels.facts).expect("words under the tiles");
+    assert_eq!(said.0, orbiters_i18n::tr("Move VRChat's camera a little"));
+    assert!(person.panels.all().any(|p| p.zone == Zone::CameraCaption && p.shown));
+    let mut snap = (*person.snap).clone();
+    snap.n4n0.photo_wait = None;
+    snap.n4n0.photo_countdown = Some(3);
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.countdown, Some(3), "the tile counts down");
+}
+
+/// On the desktop nothing may lie on the camera's picture: a code found opens its page in the person's browser, once for that scan, and no page shows over the
+/// camera. In a headset the page still opens over it (`a_code_found_beside_the_camera_opens_its_page_over_it_once`).
+#[test]
+fn a_code_found_beside_the_desktop_camera_opens_in_the_browser() {
+    use crate::controller::camera_tools::Qr;
+    let (mut person, heard) = at_the_desktop_camera();
+    assert_eq!(super::panels::caption(Action::CameraQr, &person.panels.facts).map(|c| c.1), Some(orbiters_i18n::tr("Point VRChat's camera at a code: its page opens in your browser.").to_string()));
+    let mut snap = (*person.snap).clone();
+    snap.camera_tools.qr = Qr::Found { url: "https://orbiters.cc/w/silent-dawn".into() };
+    snap.camera_tools.qr_generation = 3;
+    person.snap = Arc::new(snap);
+    person.turns(5);
+    assert_eq!(person.panels.opened_in_browser, ["https://orbiters.cc/w/silent-dawn"], "opened once");
+    assert!(person.panels.facts.camera.web.is_none(), "a page over the camera");
+    assert!(!person.panels.all().any(|p| matches!(p.zone, Zone::CameraWeb | Zone::CameraWebBar)));
+    assert_eq!(heard.camera.lock().unwrap().last().map(String::as_str), Some("qr off"), "the scan stops once its code is found");
 }

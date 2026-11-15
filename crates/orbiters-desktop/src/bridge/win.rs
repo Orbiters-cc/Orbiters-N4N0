@@ -309,7 +309,7 @@ mod imp {
                 }
                 // MIB_UDPTABLE_OWNER_PID: a count, then rows of (address, port in network order, process id).
                 let count = (buffer[0] as usize).min((buffer.len() - 1) / 3);
-                for row in buffer[1..1 + count * 3].chunks_exact(3) {
+                for row in buffer[1..1 + count * 3].as_chunks::<3>().0 {
                     let port = u16::from_be((row[1] & 0xFFFF) as u16);
                     owners.insert(port, row[2]);
                 }

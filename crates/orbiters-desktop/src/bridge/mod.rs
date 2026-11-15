@@ -387,7 +387,7 @@ impl Bridge {
         }
         let now = Instant::now();
         match self.presence.lock().unwrap().paused(now) {
-            Some(Paused::Held) => return Some(Paused::Held),
+            Some(Paused::Held) => Some(Paused::Held),
             _ => session.presence.lock().unwrap().paused(now),
         }
     }

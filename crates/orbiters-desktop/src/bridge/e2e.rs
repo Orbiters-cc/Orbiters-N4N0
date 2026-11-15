@@ -1234,6 +1234,11 @@ fn two_sessions_are_driven_at_once_without_cross_talk() {
     let (s1, s2) = (client.tool("get_state", json!({ "session": one })).unwrap(), client.tool("get_state", json!({ "session": two })).unwrap());
     assert_eq!((s1["place"]["world_id"].as_str(), s2["place"]["world_id"].as_str()), (Some(LAB_WORLD_A), Some(LAB_WORLD_B)));
     assert_eq!(s1["session"]["account"]["name"], "Lab Profile 1");
+    // Each in a strict private instance of its own account, not of the app's (VRChat refuses another account there).
+    assert!(s1["place"]["instance"].as_str().unwrap().contains("~private(usr_00000001-"), "{s1}");
+    assert!(s2["place"]["instance"].as_str().unwrap().contains("~private(usr_00000002-"), "{s2}");
+    assert_eq!((s1["place"]["private"].as_bool(), s2["place"]["private"].as_bool()), (Some(true), Some(true)));
+    assert!(main.instances().is_empty() && opener.game_of(1).unwrap().instances().is_empty(), "no API instance for a side session");
     assert_eq!(s2["session"]["profile"], 2);
     assert_eq!(client.state()["vrchat"]["running"], false, "the main session still has no VRChat");
     // A picture in each, the camera opened through each session's own window (one keyboard turn after the other).

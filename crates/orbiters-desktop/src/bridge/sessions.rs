@@ -227,6 +227,13 @@ pub fn datagram_filter(sides: std::sync::Arc<Sides>) -> orbiters_core::osc::Data
     })
 }
 
+/// A new strict private instance of `account`, as VRChat's own client names one: what a side session joins.
+pub fn own_private_instance(account: &str, region: &str) -> String {
+    let id = uuid::Uuid::new_v4();
+    let number = u32::from_le_bytes(id.as_bytes()[..4].try_into().unwrap_or_default()) % 90_000 + 10_000;
+    format!("{number}~private({account})~region({region})~nonce({id})")
+}
+
 /// The `--osc` argument of a side session.
 pub fn osc_arg(osc_in: u16, osc_out: u16) -> String {
     format!("--osc={osc_in}:127.0.0.1:{osc_out}")
@@ -328,6 +335,16 @@ pub fn service_state(sc_output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_side_sessions_instance_is_a_strict_private_one_of_its_own_account() {
+        let account = "usr_dfc96b2c-1aec-4775-9557-eef94a7f02c3";
+        let instance = own_private_instance(account, "eu");
+        assert!(orbiters_core::vrchat_api::private_instance_of(&instance, account), "{instance}");
+        assert!(!orbiters_core::vrchat_api::private_instance_of(&instance, "usr_1339e525-d75d-4832-9104-98dd89287681"));
+        assert!(!instance.contains("canRequestInvite") && instance.contains("~nonce("));
+        assert_ne!(instance, own_private_instance(account, "eu"));
+    }
 
     #[test]
     fn side_ports_are_their_own_and_never_vrchats_defaults() {

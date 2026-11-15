@@ -66,7 +66,7 @@ You drive VRChat on this computer, in desktop mode, through this bridge. A perso
 Several agents (and the person) can each have a VRChat on this computer at the same time. Tools without `session` drive the **main** session, as above: VRChat's default profile, only while the person runs no VRChat of their own. To work beside others, open a session of your own:\n\n\
 1. `open_session` with a `profile` (1, 2…; ask the person which one if they did not say). It starts VRChat in that profile, at that account's home, and gives you `session`: **pass it to every tool** from then on. Only you have it.\n\
 2. If `needs_sign_in` is true, the profile has no account signed in: stop and tell the person to sign in on that VRChat's window (its title is VRChat). Never type there, never look for a password. `wait_for` with `until: signed_in` waits for them.\n\
-3. Then the loop above, with your `session`: `go_to_world` restarts your session's VRChat in a private instance (made by the account signed in in Orbiters - N4N0, which your profile's account joins), `walk`, `turn`, `screenshot`, the camera, `take_3d_picture`.\n\
+3. Then the loop above, with your `session`: `go_to_world` restarts your session's VRChat in a new private instance of your profile's own account, `walk`, `turn`, `screenshot`, the camera, `take_3d_picture`.\n\
 4. `close_session` at the end. A session left without any call for 10 minutes may be taken over by another agent (`open_session` with `take_over`): yours is then refused with `session_taken_over`.\n\n\
 What is shared, and how: `walk`, `turn`, the OSC inputs and `screenshot` need nothing of anyone else's and run side by side in every session. **Keys and clicks** (`press` of a key, `mouse`, `focus_game`) need your window in the foreground, which only one window can have: they take turns. A refusal `focus_busy` says how long to wait (`retry_after_s`, a few seconds: a turn is yours while you keep using it, and passes to the next session 8 s after your last key or click). They also wait while the person uses the computer at all (`paused_by_person`), and are refused with `person_vrchat_has_focus` while the person's own VRChat has the foreground: the bridge never takes it from them. **3D pictures** borrow Orbiters - N4N0's capture: one at a time on this computer (`picture_busy`: wait), and none while the person's own VRChat runs (`app_in_use`: the capture is theirs then). The person's input in your session's window pauses your session only. One account cannot be in two VRChats: each profile has its own. `list_sessions` shows them all.\n\n\
 ## When to give up on a world\n\n\
@@ -561,7 +561,9 @@ impl Bridge {
         let window = seen.pid.filter(|_| started_by_bridge).and_then(|pid| s.game.window(pid));
         let camera_open = if started_by_bridge { s.game.camera_open() } else { None };
         let capture_kit = if started_by_bridge && seen.local_player.is_some() { s.game.capture_kit() } else { None };
-        let private = seen.vrchat_user.as_ref().zip(seen.instance.as_deref()).is_some_and(|((me, _), i)| seen.in_world && private_instance_of(i, me));
+        let private = seen.in_world && seen.instance.as_deref().is_some_and(|i| {
+            seen.vrchat_user.iter().chain(seen.session_account.iter()).any(|(me, _)| private_instance_of(i, me))
+        });
         let paused = self.paused_in(s);
         let picture_list: Vec<Value> = pictures.iter().map(|p| self.picture_json(s, p, &seen)).collect();
         let mut next = Self::next_step(&seen, &paused, started_by_bridge, private, going.is_some(), camera_open, capture_kit);
@@ -748,9 +750,17 @@ impl Bridge {
             )
             .retry_after(seconds));
         }
-        let instance = s.game.create_private_instance(world_id, region)?;
+        // A side session's account cannot travel to a private instance of the app's account ("You are not allowed to
+        // travel to that location", measured 2026-11-15): it makes its own, as VRChat's client does, strict private and owned
+        // by its own account (`<n>~private(<its usr>)~region(<r>)~nonce(<uuid>)`: joined at once, 2026-11-15 03:11).
+        let (instance, owner) = if s.is_main() {
+            (s.game.create_private_instance(world_id, region)?, seen.vrchat_user.as_ref().map(|u| u.0.clone()))
+        } else {
+            let Some((account, _)) = seen.session_account.clone() else { return Err(sign_in_failure(s)) };
+            (sessions::own_private_instance(&account, region), Some(account))
+        };
         // What came from the outside is checked again here: only a private instance of this account gets started.
-        if !seen.vrchat_user.as_ref().is_some_and(|(me, _)| private_instance_of(&instance, me)) {
+        if !owner.is_some_and(|me| private_instance_of(&instance, &me)) {
             return Err(Failure::new(
                 "not_private_instance",
                 "VRChat's API did not make a private instance, so it is not joined.",

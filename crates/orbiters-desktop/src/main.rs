@@ -48,6 +48,7 @@ mod streams;
 mod tracking;
 mod tray;
 mod upload_prep;
+mod usage;
 mod views;
 mod worlds;
 mod window;

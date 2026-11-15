@@ -1661,6 +1661,8 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
 
     fn act(&mut self, actions: Vec<Action>, entries: &[Entry], overlay: &vr::Overlay, steamvr: &vr::Client) {
         for action in actions {
+            // Counted by its name alone: a world's id, an instance, a comment are texts, and `stable_name` drops them.
+            crate::usage::press(&crate::usage::stable_name(&format!("WorldPanel({action:?})")));
             match action {
                 Action::Show(id) => {
                     let Some(entry) = entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)).filter(|e| e.capture).cloned() else {

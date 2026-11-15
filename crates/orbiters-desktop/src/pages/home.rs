@@ -120,6 +120,11 @@ pub struct State {
 }
 
 impl State {
+    /// The feature's page shown on Home, if one is (the usage statistics name it).
+    pub fn shown(&self) -> Option<Page> {
+        self.shown.filter(|p| *p != Page::Home)
+    }
+
     /// Back to Home itself (the sidebar's Home pressed on a feature's page).
     pub fn back_home(&mut self) {
         if let Some(host) = self.host.as_mut() {
@@ -885,6 +890,7 @@ fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Ve
         let hover = anim::toggle(ui.ctx(), id.with("hover"), enabled && resp.hovered(), Spring::SOFT);
         let press = anim::toggle(ui.ctx(), id.with("press"), enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
         if enabled && widgets::pressed(&resp) {
+            widgets::note_press(title);
             acts.push(Act::Press(Target::TakeOf(mode)));
         }
         if enabled {

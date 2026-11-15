@@ -71,6 +71,11 @@ fn menu_press_compatible(shown: &orbiters_n4n0_core::menu::Menu, live: &orbiters
         && layout::state(shown, row) == layout::state(live, row)
 }
 
+/// A press's name for the usage statistics: the action's own (`Capture(3)` is `Capture`, `Page(Key('a'))` is `Page.Key`).
+fn usage_name(action: &Action) -> String {
+    crate::usage::stable_name(&format!("{action:?}"))
+}
+
 /// Whether the desktop's panels are wanted: VRChat runs without SteamVR, on this computer, and the setting says so.
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
     orbiters_core::osc::VRCHAT_RUNS_HERE && snap.vrchat.running && !snap.vrchat.remote && !snap.steamvr.running && snap.settings.orbit.any()
@@ -936,6 +941,8 @@ pub struct Panels {
     header_pointer: Option<Pos2>,
     pressed_late: Option<Action>,
     pressed_facts: Option<Facts>,
+    /// Where the person is, as last told to the usage statistics: which menu is up, the sheet on it, N4N0's page on that.
+    usage_here: Option<(Option<Around>, Option<Sheet>, Option<Page>)>,
     /// Each screen as it was left: by its sheet and its name. N4N0's pages keep their results in the menu itself, which goes on being there, and the page they were on here.
     kept: HashMap<(Sheet, String), Kept>,
     kept_pages: HashMap<String, Page>,
@@ -1060,6 +1067,7 @@ impl Panels {
             header_pointer: None,
             pressed_late: None,
             pressed_facts: None,
+            usage_here: None,
             kept: HashMap::new(),
             kept_pages: HashMap::new(),
             trail: Vec::new(),
@@ -1112,6 +1120,27 @@ impl Panels {
     }
 
     /// The sheet is open.
+    /// Where the person is, told to the usage statistics when it changed: `qm`, `wheel` or `camera` for the menu up, then the sheet on it and
+    /// N4N0's page on that (`qm/Menu/Music`), `closed` with no menu up. A comparison a frame; a name only on a change.
+    fn note_screen(&mut self) {
+        let sheet = self.open.and(self.facts.sheet);
+        let page = matches!(sheet, Some(Sheet::Menu | Sheet::Results)).then_some(self.stage.host.menu.page);
+        let here = (self.open, sheet, page);
+        if self.usage_here == Some(here) || !crate::usage::enabled() {
+            return;
+        }
+        self.usage_here = Some(here);
+        let menu = match self.open {
+            None => "closed",
+            Some(Around::QuickMenu) => "qm",
+            Some(Around::Wheel) => "wheel",
+            Some(Around::Camera) => "camera",
+        };
+        let sheet = sheet.map(|s| format!("{s:?}")).unwrap_or_default();
+        let page = page.map(|p| crate::usage::stable_name(&format!("{p:?}"))).unwrap_or_default();
+        crate::usage::enter(&crate::usage::screen_name([menu.into(), sheet.into(), page.into()]));
+    }
+
     pub fn sheet_open(&self) -> bool {
         self.takeover.is_some()
     }
@@ -1851,6 +1880,7 @@ impl Panels {
     }
 
     pub fn follow(&mut self, snap: &Snapshot, library: u64) {
+        self.note_screen();
         // Amortize invalidated cache destruction: one picture pair per input turn.
         drop(self.stage.retired.pop());
         // A code found beside the camera: its page opens over the camera, once for each scan, and the camera stops looking (Enzo, F17).
@@ -1909,6 +1939,7 @@ impl Panels {
         }
         // What a press in a list turned out to press, now it was let go without moving.
         if let Some(action) = self.pressed_late.take() {
+            crate::usage::press(&usage_name(&action));
             self.act(action, snap, &mut Pressed::default());
             self.pressed_facts = None;
         }
@@ -2516,6 +2547,7 @@ impl Panels {
                             if !menu_press_compatible(shown, &host.menu, element) { return out; }
                             panel.pressed = Some(element);
                             out.clicked = true;
+                            crate::usage::press(&crate::usage::stable_name(&format!("Menu({:?})", e.target)));
                             let effects = host.press(e.target);
                             let closing = host.effects(effects, snap, &self.backend) || !host.menu.open;
                             host.dirty = true;
@@ -2541,6 +2573,13 @@ impl Panels {
                 look = panel.items.get(i).map(|item| item.look);
                 from = Some(panel.zone);
                 break;
+            }
+        }
+        // Counted where it is pressed, except a press in a list that may yet be a drag: that one when it is let go (`pressed_late`).
+        if let Some(pressed) = action {
+            let waits = matches!((self.facts.sheet, &look), (Some(sheet), Some(look)) if panels::scrolls_with_a_drag(sheet, look));
+            if !waits && pressed != Action::Idle {
+                crate::usage::press(&usage_name(&pressed));
             }
         }
         // A tool's tile or tab pressed while its page is open closes it, and VRChat's menu is there again under it (Enzo, 2026-11-11). Only a tool's own tile or tab:

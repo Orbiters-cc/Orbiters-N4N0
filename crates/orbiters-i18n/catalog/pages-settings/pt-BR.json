@@ -601,5 +601,10 @@
   "microphone\u0004Default": "Padrão",
   "Its level cannot be read now": "O nível não pode ser lido agora",
   "Find the camera on screen": "Encontrar a câmera na tela",
-  "Also looks for the camera's panel in what VRChat shows and moves the tiles onto it. Off by default: it can put them in the wrong place. It keeps nothing it sees.": "Também procura o painel da câmera no que o VRChat mostra e coloca os blocos nele. Desligado por padrão: pode colocá-los no lugar errado. Não guarda nada do que vê."
+  "Also looks for the camera's panel in what VRChat shows and moves the tiles onto it. Off by default: it can put them in the wrong place. It keeps nothing it sees.": "Também procura o painel da câmera no que o VRChat mostra e coloca os blocos nele. Desligado por padrão: pode colocá-los no lugar errado. Não guarda nada do que vê.",
+  "This beta counts which pages and buttons you use": "Esta beta conta quais páginas e botões você usa",
+  "Only their names, in what order and when, with this version of the app, to see what to make easier. Never what you type or say, translations, pictures, QR codes or links, worlds, instances, people, files, or your account.": "Só os nomes deles, em que ordem e quando, com esta versão do app, para ver o que deixar mais fácil. Nunca o que você digita ou fala, traduções, imagens, QR codes ou links, mundos, instâncias, pessoas, arquivos nem sua conta.",
+  "You can turn it off at any time in Settings › Beta usage statistics.": "Você pode desligar quando quiser em Configurações › Estatísticas de uso da beta.",
+  "Beta usage statistics": "Estatísticas de uso da beta",
+  "Counts which pages and buttons of Orbiters - N4N0 you use, in what order and when, to see what to make easier. Never what you type or say, translations, pictures, QR codes or links, worlds, instances, people, files, or your account. Turned off, nothing more is counted and what was waiting to be sent is deleted.": "Conta quais páginas e botões do Orbiters - N4N0 você usa, em que ordem e quando, para ver o que deixar mais fácil. Nunca o que você digita ou fala, traduções, imagens, QR codes ou links, mundos, instâncias, pessoas, arquivos nem sua conta. Desligado, nada mais é contado e o que esperava para ser enviado é apagado."
 }

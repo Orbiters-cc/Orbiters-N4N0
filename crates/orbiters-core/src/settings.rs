@@ -94,6 +94,23 @@ pub struct Settings {
     pub experimental: ExperimentalSettings,
     /// Live translation of the text seen in VR (the orbit menu's Translation): off until turned on.
     pub translate: TranslateSettings,
+    /// The beta's usage statistics (which controls and pages are used): on unless turned off, told once.
+    pub usage: UsageSettings,
+}
+
+/// The beta's usage statistics (`orbiters-desktop`'s `usage`): the names of the pages and controls used, never what is typed, said or seen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageSettings {
+    pub enabled: bool,
+    /// The notice that says what is recorded was shown (closed by the person).
+    pub told: bool,
+}
+
+impl Default for UsageSettings {
+    fn default() -> Self {
+        Self { enabled: true, told: false }
+    }
 }
 
 /// Live translation: the text the headset shows (signs, posters, chat bubbles) read a few times a second and its
@@ -788,6 +805,7 @@ impl Default for Settings {
             vr_audio: VrAudioSettings::default(),
             experimental: ExperimentalSettings::default(),
             translate: TranslateSettings::default(),
+            usage: UsageSettings::default(),
         }
     }
 }

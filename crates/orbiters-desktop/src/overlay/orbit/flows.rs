@@ -2128,3 +2128,34 @@ fn switching_pages_never_shows_no_page() {
         person.turns_until("the next page shown", |p| { assert!(sheet_seen(p), "no page shown as the next one comes"); settled(p) && p.panels.stage.presented.as_ref().is_some_and(|(_, f, _)| f.sheet == to) });
     }
 }
+
+/// The beta's usage statistics follow the person through the menus: which menu, sheet and N4N0 page they are on, and what they press there, by names that
+/// are the same in every language and hold nothing typed.
+#[test]
+fn usage_follows_the_menus_and_their_presses() {
+    crate::usage::reset();
+    crate::usage::set_enabled(true);
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::Worlds);
+    person.turns(2);
+    person.press(Action::All);
+    person.turns(2);
+    person.press(Action::Settings);
+    person.turns(3);
+    person.press(Action::CloseSheet);
+    person.turns(2);
+    person.around = None;
+    person.turns(2);
+    let steps = crate::usage::take();
+    crate::usage::set_enabled(false);
+    let entered: Vec<(&str, Option<&str>)> = steps.iter().filter(|s| s.kind == crate::usage::Kind::Enter).map(|s| (s.screen.as_str(), s.from.as_deref())).collect();
+    assert_eq!(
+        entered,
+        vec![("qm", None), ("qm/Worlds", Some("qm")), ("qm/All", Some("qm/Worlds")), ("qm/Settings", Some("qm/All")), ("qm", Some("qm/Settings")), ("closed", Some("qm"))],
+        "{steps:?}"
+    );
+    let pressed: Vec<(&str, &str)> = steps.iter().filter(|s| s.kind == crate::usage::Kind::Press).map(|s| (s.screen.as_str(), s.control.as_deref().unwrap())).collect();
+    assert_eq!(pressed, vec![("qm", "Worlds"), ("qm/Worlds", "All"), ("qm/All", "Settings"), ("qm/Settings", "CloseSheet")], "{steps:?}");
+}

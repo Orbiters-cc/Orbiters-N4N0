@@ -601,5 +601,10 @@
   "microphone\u0004Default": "Por defecto",
   "Its level cannot be read now": "Su nivel no se puede leer ahora",
   "Find the camera on screen": "Buscar la cámara en pantalla",
-  "Also looks for the camera's panel in what VRChat shows and moves the tiles onto it. Off by default: it can put them in the wrong place. It keeps nothing it sees.": "También busca el panel de la cámara en lo que muestra VRChat y coloca los mosaicos sobre él. Desactivado por defecto: puede ponerlos en el lugar equivocado. No guarda nada de lo que ve."
+  "Also looks for the camera's panel in what VRChat shows and moves the tiles onto it. Off by default: it can put them in the wrong place. It keeps nothing it sees.": "También busca el panel de la cámara en lo que muestra VRChat y coloca los mosaicos sobre él. Desactivado por defecto: puede ponerlos en el lugar equivocado. No guarda nada de lo que ve.",
+  "This beta counts which pages and buttons you use": "Esta beta cuenta qué páginas y botones usas",
+  "Only their names, in what order and when, with this version of the app, to see what to make easier. Never what you type or say, translations, pictures, QR codes or links, worlds, instances, people, files, or your account.": "Solo sus nombres, en qué orden y cuándo, con esta versión de la app, para ver qué conviene hacer más fácil. Nunca lo que escribes o dices, traducciones, imágenes, códigos QR o enlaces, mundos, instancias, personas, archivos ni tu cuenta.",
+  "You can turn it off at any time in Settings › Beta usage statistics.": "Puedes desactivarlo cuando quieras en Configuración › Estadísticas de uso de la beta.",
+  "Beta usage statistics": "Estadísticas de uso de la beta",
+  "Counts which pages and buttons of Orbiters - N4N0 you use, in what order and when, to see what to make easier. Never what you type or say, translations, pictures, QR codes or links, worlds, instances, people, files, or your account. Turned off, nothing more is counted and what was waiting to be sent is deleted.": "Cuenta qué páginas y botones de Orbiters - N4N0 usas, en qué orden y cuándo, para ver qué conviene hacer más fácil. Nunca lo que escribes o dices, traducciones, imágenes, códigos QR o enlaces, mundos, instancias, personas, archivos ni tu cuenta. Desactivado, no se cuenta nada más y se borra lo que esperaba para enviarse."
 }

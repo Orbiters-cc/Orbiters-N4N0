@@ -156,7 +156,7 @@ fn error_from(status: u16, body: &str) -> AssistantError {
 
 /// What a person reads when Orbiters cannot be reached at all (no connection, refused, no name, timed out): one plain
 /// sentence, never the operating system's words; those go to the log.
-pub const UNREACHABLE: &str = "N4N0 can't reach Orbiters right now. Try again in a moment.";
+pub const UNREACHABLE: &str = orbiters_i18n::mark("N4N0 can't reach Orbiters right now. Try again in a moment.");
 
 /// Whether `e` says Orbiters could not be reached at all, rather than that it answered with a refusal or something
 /// unreadable.

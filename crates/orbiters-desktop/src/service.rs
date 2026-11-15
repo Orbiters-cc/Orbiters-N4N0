@@ -56,6 +56,8 @@ pub struct Service {
     /// Tracking smoothing's driver, kept in step with the settings ([`Service::keep_tracking`]).
     smoothing: Mutex<crate::tracking::Smoothing>,
     quitting: AtomicBool,
+    /// The beta's usage statistics, a session per link, waiting for Orbiters (`usage::spool`).
+    usage: Arc<crate::usage::spool::Spool>,
     #[cfg(windows)]
     main_thread: u32,
     #[cfg(not(windows))]
@@ -80,6 +82,7 @@ impl Service {
             steamvr_start_seen: Mutex::new(None),
             smoothing: Mutex::new(Default::default()),
             quitting: AtomicBool::new(false),
+            usage: Arc::default(),
             #[cfg(windows)]
             main_thread: unsafe { windows::Win32::System::Threading::GetCurrentThreadId() },
             #[cfg(not(windows))]
@@ -325,6 +328,13 @@ impl Service {
         }
     }
 
+    /// The usage statistics turned off: what waits is forgotten at once, not at the next upload.
+    fn follow_usage_switch(&self) {
+        if !self.ctl.view().settings.usage.enabled {
+            self.usage.forget();
+        }
+    }
+
     /// Restarts into an update's setup (controller/update.rs): starts it, then quits; the setup replaces the files
     /// once the app has gone and starts it again, with its window if one is open now, in the tray otherwise.
     fn restart_into(&self, setup: &std::path::Path, dir: &std::path::Path) {
@@ -352,8 +362,15 @@ impl Service {
             ToService::TestPattern => report(ctl.start_test_capture()),
             ToService::Scan => report(ctl.take_scan()),
             ToService::ImportRaw { dir } => report(ctl.import_raw_capture(dir)),
-            ToService::SaveSettings { settings } => ctl.save_settings(*settings),
-            ToService::PatchSettings { patch } => ctl.patch_settings(&patch),
+            ToService::SaveSettings { settings } => {
+                ctl.save_settings(*settings);
+                self.follow_usage_switch();
+            }
+            ToService::PatchSettings { patch } => {
+                ctl.patch_settings(&patch);
+                self.follow_usage_switch();
+            }
+            ToService::Usage { steps } => self.usage.steps(link, steps, ctl.view().settings.usage.enabled),
             ToService::PatchSmoothing { id, patch } => {
                 ctl.patch_settings(&patch);
                 ctl.update(|s| s.smoothing_revision += 1);
@@ -515,6 +532,7 @@ impl Service {
         // Subscribed before it is listed: the snapshot is in its mailbox before anything else can be (a Show).
         self.ctl.subscribe(mailbox.clone());
         let id = self.next_link.fetch_add(1, Ordering::Relaxed);
+        self.usage.linked(id, role);
         self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone(),
             #[cfg(test)]
             writes,
@@ -536,6 +554,7 @@ impl Service {
             }
         }
         mailbox.close();
+        self.usage.unlinked(id, self.ctl.view().settings.usage.enabled);
         self.links.lock().unwrap().retain(|l| l.id != id);
         let still_there = self.links.lock().unwrap().iter().any(|l| l.role == role);
         if role == Role::Overlay && !still_there {
@@ -635,6 +654,9 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         }
     }));
 
+    service.usage.open(orbiters_core::paths::local_data_root().join("usage"));
+    let ctl = service.ctl.clone();
+    service.usage.clone().run(move || ctl.view().settings.usage.enabled);
     service.accept(listener)?;
 
     if !hidden {

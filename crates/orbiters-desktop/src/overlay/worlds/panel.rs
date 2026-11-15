@@ -2613,9 +2613,10 @@ impl Panel {
             p.galley(pos2(right, y - galley.size().y / 2.0), galley, theme::FG_3);
             right -= 18.0;
         }
-        let on_capture = hole.is_some_and(|h| self.pointer.is_some_and(|at| h.contains(at)));
-        let flips = place.is_some_and(|(_, n, _, _)| n > 1);
-        let on_band = flips && !on_capture && self.pointer.is_some_and(|at| VR_FLIP_BAND.contains(at));
+        // What the stick does where the laser is, by the same rule as the stick itself.
+        let spot = self.pointer.and_then(|at| self.stick_spot(d, at.x, at.y));
+        let on_capture = spot == Some(StickSpot::InCapture);
+        let on_band = spot == Some(StickSpot::Flip);
         let near = d.status.small_near;
         // Each part: its icon, its words, lit or not.
         let mut parts: Vec<(&str, &str, bool)> = Vec::new();

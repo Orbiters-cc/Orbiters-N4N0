@@ -22,6 +22,7 @@ pub mod game;
 pub mod guard;
 pub mod input;
 pub mod journal;
+pub mod vr;
 pub mod keeper;
 pub mod lab;
 pub mod map;
@@ -196,6 +197,10 @@ pub struct Session {
     /// Who drives it, for side sessions.
     pub(crate) lease: Mutex<Option<sessions::Lease>>,
     pub(crate) opened: Instant,
+    /// A VR session's sandbox (vr.rs): its VRChat runs in VR, driven by emulated controllers, not keys and clicks.
+    pub(crate) vr: Mutex<Option<Arc<dyn vr::VrRig>>>,
+    /// A VR session's last screenshot size: `mouse` takes its pixels.
+    pub(crate) vr_shot: Mutex<Option<(u32, u32)>>,
 }
 
 impl Session {
@@ -211,7 +216,14 @@ impl Session {
             presence: Mutex::default(),
             lease: Mutex::new(None),
             opened: Instant::now(),
+            vr: Mutex::new(None),
+            vr_shot: Mutex::new(None),
         })
+    }
+
+    /// The sandbox of a VR session.
+    pub fn vr(&self) -> Option<Arc<dyn vr::VrRig>> {
+        self.vr.lock().unwrap().clone()
     }
 
     pub fn is_main(&self) -> bool {
@@ -587,6 +599,10 @@ impl Bridge {
                 self.log(false, tr("Input was still down past its time: released."));
             }
             session.game.tick();
+            // A VR session's sandbox turn ends by itself after 10 quiet minutes: kept while the session lives.
+            if let Some(rig) = session.vr() {
+                rig.keep();
+            }
             self.follow_game(&session);
         }
     }

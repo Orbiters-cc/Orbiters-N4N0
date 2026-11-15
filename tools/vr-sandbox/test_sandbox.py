@@ -206,6 +206,66 @@ class BridgeSessionsBeside(unittest.TestCase):
         stopped = {'services': {'EasyAntiCheat_EOS': {'state': 'STOPPED'}, 'EasyAntiCheat_EOSSys': {'state': 'RUNNING'}}, 'processes': [], 'beside': []}
         self.assertFalse(sandbox.vrchat_life.idle(stopped), 'alone, the 2026-11-13 rule stands')
 
+    def launched_with(self, profile):
+        """The command line `Session.launch` gives launch.exe, with EAC idle and VRChat up at once."""
+        from unittest import mock
+        s = sandbox.Session()
+        s.j = {'processes': []}
+        with mock.patch.object(sandbox.vrchat_life, 'wait_idle', return_value=0),              mock.patch.object(sandbox.vrchat_life, 'Sampler'),              mock.patch.object(sandbox, 'atomic_json'),              mock.patch.object(sandbox.subprocess, 'Popen') as popen,              mock.patch.object(sandbox.Session, 'record'),              mock.patch.object(sandbox.Session, 'vrchat', return_value={'pid': 5, 'create_time': 2e9}):
+            s.launch('vrchat://launch?ref=orbiters.cc&id=x', profile)
+        return popen.call_args[0][0][1:], s
+
     def test_the_vr_launch_names_the_default_profile(self):
+        args, s = self.launched_with(0)
+        self.assertEqual(args[:2], ['vrchat://launch?ref=orbiters.cc&id=x', '--profile=0'])
+        self.assertFalse(any(a.startswith('--osc') for a in args), "the owner's VRChat keeps VRChat's own OSC ports")
+        self.assertNotIn('--no-vr', args)
+        self.assertEqual(s.osc_in(), 9000)
+
+    def test_a_bridge_sessions_vr_launch_has_its_profile_and_its_osc_ports(self):
+        args, s = self.launched_with(1)
+        self.assertIn('--profile=1', args)
+        self.assertIn('--osc=9010:127.0.0.1:9011', args, 'the ports the bridge gives profile 1 (sessions.rs)')
+        self.assertNotIn('--no-vr', args, 'VR mode: controllers, not the keyboard and mouse')
+        self.assertEqual(s.osc_in(), 9010, 'neutral and camera_mode talk to that VRChat')
+        self.assertFalse(sandbox.vrchat_life.bridge_session(0, type('P', (), {'cmdline': lambda self: ['VRChat.exe', *args]})()),
+                         'a VR VRChat of the sandbox is never taken for a desktop bridge session')
+
+    def test_keep_app_leaves_the_installed_app_running(self):
         source = Path(sandbox.__file__).read_text(encoding='utf-8')
-        self.assertIn("[str(launcher),url,'--profile=0',", source)
+        self.assertIn("if not keep_app:self.stop_installed_app()", source)
+        self.assertIn("'--keep-app'", source)
+
+
+class PointingTheLaser(unittest.TestCase):
+    """`point`: the controller is placed so that VRChat's laser (laser_deg below its -Z) goes through the picked pixel."""
+    def view(self, yaw_deg=0.0):
+        import math
+        c, s = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
+        head = [c, 0, s, 0.2, 0, 1, 0, 1.65, -s, 0, c, -0.1]
+        eye = [1, 0, 0, -0.032, 0, 1, 0, 0, 0, 0, 1, 0.015]
+        return {'head': head, 'eyes': [{'eye_to_head': eye, 'projection': [-1.0, 1.0, -1.2, 1.2]}]}
+
+    def laser(self, view, pixel, laser_deg=64.5):
+        import geometry, math
+        position, q = geometry.pointing_pose(view, pixel, [1000, 1000], {'origin': [0, 0, 0], 'rotate_xyz': [-laser_deg, 0, 0]})
+        a = math.radians(laser_deg)
+        return position, geometry.rotate(q, [0, -math.sin(a), -math.cos(a)])
+
+    def test_the_laser_goes_through_the_picked_pixel(self):
+        import math
+        for yaw in (0.0, 35.0, -120.0):
+            v = self.view(yaw)
+            for pixel, ray in (([500, 500], [0, 0, -1]), ([750, 250], [0.5, 0.6, -1]), ([100, 900], [-0.8, -0.96, -1])):
+                _, laser = self.laser(v, pixel)
+                c, s = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+                world = [c * ray[0] + s * ray[2], ray[1], -s * ray[0] + c * ray[2]]
+                n = math.sqrt(sum(x * x for x in world))
+                for got, want in zip(laser, [x / n for x in world]):
+                    self.assertAlmostEqual(got, want, places=6, msg=(yaw, pixel))
+
+    def test_the_controller_sits_just_in_front_of_the_eye(self):
+        position, _ = self.laser(self.view(0.0), [500, 500])
+        self.assertAlmostEqual(position[0], 0.2 - 0.032, places=6)
+        self.assertAlmostEqual(position[1], 1.65, places=6)
+        self.assertAlmostEqual(position[2], -0.1 + 0.015 - 0.05, places=6)

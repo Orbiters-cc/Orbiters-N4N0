@@ -43,9 +43,43 @@ pub fn ready_session() -> Option<Session> {
     ready.then_some(server)
 }
 
+/// Whether the SteamVR that runs is the developer VR sandbox's (`tools/vr-sandbox`, an emulated headset that a VR session of
+/// the VRChat bridge drives, docs/vr-sandbox.md): its driver is the one external driver in `openvrpaths.vrpath`. The app
+/// then leaves it alone, as if no SteamVR ran (no overlay, no sound devices, no SteamVR start choice): it is not the
+/// person's VR, and the person goes on working beside it (nofocus, 2026-11-15).
+pub fn sandbox_runs() -> bool {
+    let Some(base) = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from) else { return false };
+    let Ok(text) = std::fs::read_to_string(base.join("openvr").join("openvrpaths.vrpath")) else { return false };
+    sandbox_in_vrpath(&text, |dir| std::fs::read_to_string(dir.join("driver.vrdrivermanifest")).ok())
+}
+
+/// [`sandbox_runs`] on the file's text: an external driver whose manifest names `orbiters_sandbox`.
+pub fn sandbox_in_vrpath(text: &str, manifest: impl Fn(&std::path::Path) -> Option<String>) -> bool {
+    let Ok(paths) = serde_json::from_str::<serde_json::Value>(text) else { return false };
+    paths["external_drivers"].as_array().is_some_and(|drivers| {
+        drivers.iter().filter_map(|d| d.as_str()).any(|dir| {
+            manifest(std::path::Path::new(dir))
+                .and_then(|m| serde_json::from_str::<serde_json::Value>(&m).ok())
+                .is_some_and(|m| m["name"] == "orbiters_sandbox")
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_sandboxs_steamvr_is_told_by_its_driver_and_the_persons_is_not() {
+        // As the sandbox writes it (2026-11-15, during a session).
+        let sandbox = r#"{"config":["C:\\Program Files (x86)\\Steam\\config"],"external_drivers":["C:\\Users\\Enzo\\.orbiters-build\\vr-sandbox\\driver"],"runtime":["C:\\Steam\\steamapps\\common\\SteamVR"],"version":1}"#;
+        let manifest = |dir: &std::path::Path| dir.ends_with("driver").then(|| r#"{"alwaysActivate": false, "name": "orbiters_sandbox"}"#.to_string());
+        assert!(sandbox_in_vrpath(sandbox, manifest));
+        let persons = r#"{"external_drivers":["C:\\Steam\\steamapps\\common\\Virtual Desktop Streamer\\OpenVR"],"runtime":["C:\\Steam"]}"#;
+        let vd = |_: &std::path::Path| Some(r#"{"name": "virtualdesktop"}"#.to_string());
+        assert!(!sandbox_in_vrpath(persons, vd), "the person's own drivers");
+        assert!(!sandbox_in_vrpath(r#"{"runtime":["C:\\Steam"]}"#, manifest), "no external driver");
+        assert!(!sandbox_in_vrpath("not json", manifest));
+    }
     #[test]
     fn no_readiness_hint_safe_mode_missing_unreadable_rotated_logs_are_bounded() {
         // No file I/O: all absent, unreadable, rotated or differently worded logs

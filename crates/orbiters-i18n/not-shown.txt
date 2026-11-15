@@ -11,6 +11,7 @@ crates/orbiters-desktop/src/link_between.rs
 crates/orbiters-desktop/src/bridge/tools.rs
 crates/orbiters-desktop/src/bridge/projects.rs
 crates/orbiters-desktop/src/bridge/sandbox.rs
+crates/orbiters-desktop/src/bridge/vr.rs
 crates/orbiters-desktop/src/bridge/sessions.rs
 crates/orbiters-desktop/src/controller/bridge_side.rs
 crates/orbiters-desktop/src/bridge/tour.rs

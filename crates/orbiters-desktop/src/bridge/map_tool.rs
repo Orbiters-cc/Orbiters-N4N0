@@ -510,9 +510,11 @@ impl Bridge {
         self.maps.record(&s.id, seen.world_id.as_deref(), Move::Walk { off: off_of(direction), metres });
     }
 
-    /// Notes a turn the bridge sent (none while the camera or a menu is open: then it turns nothing).
+    /// Notes a turn the bridge sent. On the desktop none while the camera or a menu is open (then it turns nothing); a VR
+    /// session's avatar turns with its camera open too. VR sessions are otherwise the same to the map: `/usercamera/Pose`,
+    /// the recording's poses and its skeleton band are the same world frame there.
     pub(super) fn map_turned(&self, s: &Session, degrees: f64) {
-        if s.game.camera_open() == Some(true) {
+        if s.vr().is_none() && s.game.camera_open() == Some(true) {
             return;
         }
         self.maps.record(&s.id, s.game.seen().world_id.as_deref(), Move::Turn { degrees: degrees as f32 });

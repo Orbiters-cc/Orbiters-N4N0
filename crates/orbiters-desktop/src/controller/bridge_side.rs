@@ -239,6 +239,12 @@ impl Opener for RealOpener {
         win::foreground_pid()
     }
 
+    fn vr_rig(&self, session: &str) -> Option<Arc<dyn crate::bridge::vr::VrRig>> {
+        let set = self.ctl.upgrade()?.with_settings(|s| s.experimental.vrchat_bridge_vr_sandbox.clone());
+        let root = crate::bridge::vr::sandbox_root(&set)?;
+        Some(Arc::new(crate::bridge::vr::SandboxRig::new(root, session)))
+    }
+
     fn set_main(&self, pid: Option<u32>) {
         if let Some(sides) = self.sides() {
             sides.set_main(pid);

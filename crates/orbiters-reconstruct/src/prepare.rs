@@ -107,6 +107,15 @@ impl Prepared {
         if let Some(p) = &l.first_problem {
             out.push(format!("first unreadable keyframe: {p}"));
         }
+        if let Some(f) = self.depth.as_ref().filter(|f| f.blind_votes > 0) {
+            out.push(format!(
+                "nothing there looking more than 10° down: {} of {} known samples ({:.1} %){}",
+                f.blind_below,
+                f.blind_votes,
+                f.blind_share() * 100.0,
+                if f.blind_world { ": the world draws its surfaces without depth (its zeros stay sky: a backdrop from the camera's path)" } else { "" }
+            ));
+        }
         if let Some(f) = &self.depth {
             out.push(format!(
                 "depth validation: {} of {} samples unknown ({} marked by the decoder); \"never reads\" rule {}: {} of {} tile positions never read ({} of their samples kept as sky); {} misread tiles, {} impossibly near samples",

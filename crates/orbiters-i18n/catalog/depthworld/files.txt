@@ -1,0 +1,2 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+# None: this area holds the texts of a change to files other areas cover (VR1115 L-bad-capture, a world that gives no depth).

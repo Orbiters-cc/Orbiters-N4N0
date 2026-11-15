@@ -36,6 +36,18 @@ fn vrchat_pids() -> Vec<u32> {
         .collect()
 }
 
+/// The VRChats running now with when each started (Unix seconds; 0 when Windows would not say).
+fn vrchat_starts() -> Vec<(u32, u64)> {
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
+    system
+        .processes()
+        .values()
+        .filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat"))
+        .map(|p| (p.pid().as_u32(), p.start_time()))
+        .collect()
+}
+
 fn launcher_runs() -> bool {
     let mut system = sysinfo::System::new();
     system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
@@ -573,6 +585,56 @@ impl Game for SideGame {
             self.sides.launching(false);
         }
         started
+    }
+
+    fn adopt(&self, since: Option<SystemTime>) -> Option<u32> {
+        let dir = orbiters_core::paths::vrchat_log_dir()?;
+        let floor = since.and_then(|t| t.checked_sub(LOG_CREATED_SLACK));
+        // Its log: created since the bridge's launch (when known), written to within three minutes, not of a VRChat that quit,
+        // and whose command line is this session's start.
+        let (log, created) = std::fs::read_dir(&dir)
+            .ok()?
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("output_log_"))
+            .filter_map(|e| {
+                let meta = e.metadata().ok()?;
+                let created = meta.created().or_else(|_| meta.modified()).ok()?;
+                meta.modified().ok()?.elapsed().is_ok_and(|d| d < Duration::from_secs(180)).then_some((e.path(), created))
+            })
+            .filter(|(_, created)| floor.is_none_or(|f| *created >= f))
+            .filter(|(path, _)| !sessions::log_says_quit(&sessions::read_tail(path, 4096)))
+            .filter(|(path, _)| sessions::complete_args(&sessions::read_head(path, 64 * 1024)).is_some_and(|args| sessions::started_for(&args, self.profile, self.osc)))
+            .max_by_key(|(path, _)| path.file_name().map(|n| n.to_os_string()))?;
+        let created_s = created.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs();
+        let since_s = since.and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs());
+        // Its process: the one VRChat that no other session and not the main one has, started in the minute before its log was
+        // made (12:25: process 12:25:13, log 12:25:15) and not before the launch. Two such, or none: nothing is taken.
+        let me = self.id();
+        let others: Vec<u32> = self.sides.marks().into_iter().filter(|m| m.session != me).filter_map(|m| m.pid).collect();
+        let main = self.sides.main_pid();
+        let candidates: Vec<u32> = vrchat_starts()
+            .into_iter()
+            .filter(|(pid, _)| !others.contains(pid) && main != Some(*pid))
+            .filter(|(_, start)| *start > 0 && *start <= created_s + 5 && start + 60 >= created_s && since_s.is_none_or(|s| start + 1 >= s))
+            .map(|(pid, _)| pid)
+            .collect();
+        let [pid] = candidates[..] else { return None };
+        {
+            let mut st = self.state.lock().unwrap();
+            if st.log.as_ref() != Some(&log) {
+                st.watcher = Some(LogWatcher::of_file(log.clone()));
+                st.log = Some(log.clone());
+                st.read_to = 0;
+            }
+            st.followed.retain(|f| f != &log);
+            st.pid = Some(pid);
+            if st.launched.is_none() {
+                st.launched = Some((Instant::now(), created));
+            }
+            st.looked = None;
+        }
+        self.look();
+        Some(pid)
     }
 
     fn send_link(&self, plan: &LaunchPlan) -> Result<(), Failure> {

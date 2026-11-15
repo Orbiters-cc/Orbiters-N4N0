@@ -23,6 +23,9 @@ const WINDOW_HEIGHT: u32 = 720;
 const LONGEST_WAIT_S: f64 = 50.0;
 /// How long a closing game may take.
 const CLOSE_LIMIT: Duration = Duration::from_secs(30);
+/// How long after a start was given up on its VRChat is still looked for: the slowest start seen took about a minute (the
+/// first after Windows restarted, 2026-11-15 12:24).
+const GIVEN_UP_WATCHED: Duration = Duration::from_secs(300);
 /// How fast the avatar turns with `/input/LookLeft` and `Right`, about, degrees a second. Not VRChat's number: it publishes
 /// none, and it depends on the look settings. Measured on Enzo's VRChat on 2026-11-06, in desktop mode: holding it 1 s turned
 /// about 170 degrees, and 2 s about 325, judged by the screenshots of a straight corridor.
@@ -613,6 +616,7 @@ impl Bridge {
 
     /// Follows the game: the start's arrival or its end, and the game going away.
     pub(super) fn follow_game(&self, s: &Session) {
+        self.adopt_given_up(s);
         // Lent to a side session: what the app sees is that VRChat's, which says nothing of this one's.
         if s.is_main() && s.game.lent_away() {
             return;
@@ -1828,13 +1832,30 @@ impl Bridge {
             self.log(true, format!("session of profile {profile} taken over by {owner}"));
             return Ok(Answer::Data(json!({ "session": renamed.id, "profile": profile, "taken_over": true, "state": self.state(&renamed) })));
         }
-        // Not a profile the person's VRChat runs: one account cannot be in two VRChats, and theirs is never touched.
+        // Not a profile the person's VRChat runs: one account cannot be in two VRChats, and theirs is never touched. Unless that
+        // VRChat is a start of this profile's session itself (its profile and its OSC ports, which only the bridge passes), left
+        // by a start answered failed or by an earlier run of the app: it becomes this session's instead of a second launch.
         if opener.others_profiles().contains(&profile) {
-            return Err(Failure::new(
-                "profile_in_use",
-                format!("A VRChat the bridge did not start runs with profile {profile}: it is the person's."),
-                "Use another profile.",
-            ));
+            let id = sessions::new_id(profile);
+            let game = opener.side(&id, profile, osc)?;
+            let Some(pid) = game.adopt(None) else {
+                opener.forget(&id);
+                return Err(Failure::new(
+                    "profile_in_use",
+                    format!("A VRChat the bridge did not start runs with profile {profile}: it is the person's."),
+                    "Use another profile.",
+                ));
+            };
+            let s = Session::new(&id, Some(profile), Some(osc), game);
+            *s.lease.lock().unwrap() = Some(Lease { owner: owner.clone(), last_call: Instant::now() });
+            s.run.lock().unwrap().pid = Some(pid);
+            self.sides.lock().unwrap().push(s.clone());
+            let known = self.wait_until(Duration::from_secs(10), call, || {
+                let seen = s.game.seen();
+                seen.needs_sign_in || seen.session_account.is_some()
+            })?;
+            self.log(true, format!("session of profile {profile} opened for {owner} on the VRChat of an earlier start (process {pid})"));
+            return Ok(self.opened(&s, osc, known, true));
         }
         let running = self.sessions().iter().filter(|s| !s.is_main() || s.pid().is_some()).count();
         let limit = opener.limit();
@@ -1869,21 +1890,31 @@ impl Bridge {
             seen.needs_sign_in || seen.session_account.is_some()
         })?;
         self.log(true, format!("session of profile {profile} opened for {owner}"));
+        Ok(self.opened(&s, osc, known, false))
+    }
+
+    /// What `open_session` answers for a session opened: on a VRChat it started, or on one of an earlier start of this
+    /// profile's session that was still running (`adopted`).
+    fn opened(&self, s: &Session, osc: (u16, u16), known: bool, adopted: bool) -> Answer {
+        let (id, profile) = (s.id.clone(), s.profile.unwrap_or(0));
         let seen = s.game.seen();
-        Ok(Answer::Data(json!({
+        Answer::Data(json!({
             "session": id,
             "profile": profile,
             "signed_in_as": seen.session_account.as_ref().map(|a| a.1.clone()),
             "needs_sign_in": seen.needs_sign_in,
             "osc_ports": { "in": osc.0, "out": osc.1 },
+            "adopted": adopted,
             "next": if seen.needs_sign_in {
                 "This profile has no account signed in: stop and tell the person to sign in on its VRChat window. Never type there yourself. Then wait_for until signed_in.".to_string()
+            } else if adopted {
+                format!("Nothing was launched: this session took the VRChat an earlier start of profile {profile} left running (process {}). Pass session \"{id}\" to every tool from now on; call get_state first. go_to_world travels in it while it is in a private instance of its own, and starts it again otherwise.", s.pid().unwrap_or(0))
             } else if known {
                 format!("Pass session \"{id}\" to every tool from now on. Then go_to_world: the first one starts this session's VRChat again in a private instance of its own; later ones travel in the running game.")
             } else {
                 format!("VRChat is still starting: call get_state with session \"{id}\" in a moment.")
             },
-        })))
+        }))
     }
 
     /// Starts a side session's VRChat: one launch at a time on this computer, once Easy Anti-Cheat allows it, and known by
@@ -1919,32 +1950,103 @@ impl Bridge {
         let osc = plan.osc;
         let launched = s.game.launch(&plan);
         let outcome = std::sync::Mutex::new(None);
-        let started = launched.is_ok()
-            && self.wait_until(Duration::from_secs(30), call, || {
+        // Up to its VRChat's process. Only a failure Easy Anti-Cheat's launcher names ends the wait early: its "301, 'Easy
+        // Anti-Cheat successfully loaded in-game'" comes about 1.5 s after the launch and before VRChat.exe (2026-11-15 12:25:
+        // taken for a failure, it disowned the VRChat it had just started), and it then waits for the game's window.
+        let wait = Duration::from_secs(30).min(self.timing.start_limit);
+        // The call ending early (client gone, person back) still leaves a start whose VRChat may come: it is looked for.
+        let given_up = |failure: Failure| {
+            let pid = s.game.seen().pid;
+            let mut run = s.run.lock().unwrap();
+            if pid.is_none() {
+                run.given_up = Some((Instant::now(), began, run.going.clone()));
+            } else {
+                run.pid = pid;
+            }
+            failure
+        };
+        let mut started = launched.is_ok()
+            && self.wait_until(wait, call, || {
                 if s.game.seen().pid.is_some() {
                     return true;
                 }
                 let said = opener.launcher_outcome(began);
-                let ended = said.is_some();
+                let failed = said.as_ref().is_some_and(|(code, _)| sessions::launcher_said(*code) == sessions::LauncherSaid::Failed);
                 *outcome.lock().unwrap() = said;
-                ended
-            })?;
-        let pid = s.game.seen().pid;
-        if !started || pid.is_none() {
-            // What this start left (a launcher hung on "Launch Error (30005)", 2026-11-15 07:04) goes now.
-            let ended = osc.map_or(0, |osc| opener.end_launcher(osc));
-            let said = outcome.lock().unwrap().clone().or_else(|| opener.launcher_outcome(began));
-            self.log(false, format!("VRChat did not start ({}); {ended} launcher process(es) of this start ended", said.as_ref().map_or("no outcome".to_string(), |(c, w)| format!("{c}: {w}"))));
-            launched?;
-            return Err(sessions::launch_failure(said.as_ref()));
+                failed
+            })
+            .map_err(given_up)?;
+        let loading = || outcome.lock().unwrap().as_ref().is_none_or(|(code, _)| sessions::launcher_said(*code) != sessions::LauncherSaid::Failed);
+        if launched.is_ok() && !started && s.game.seen().pid.is_none() && loading() {
+            // The anti-cheat said it loaded (or nothing it knows): the game comes, a cold start after Windows restarted took the
+            // longest. As long again.
+            started = self.wait_until(wait, call, || s.game.seen().pid.is_some()).map_err(given_up)?;
         }
-        s.run.lock().unwrap().pid = pid;
+        let mut pid = s.game.seen().pid;
+        if !started || pid.is_none() {
+            // What this start left (a launcher hung on "Launch Error (30005)", 2026-11-15 07:04) goes now. Then its VRChat is
+            // looked for once more: a start is never answered failed while its VRChat runs.
+            let ended = osc.map_or(0, |osc| opener.end_launcher(osc));
+            pid = s.game.seen().pid.or_else(|| s.game.adopt(Some(began)));
+            let said = outcome.lock().unwrap().clone().or_else(|| opener.launcher_outcome(began));
+            let said_words = said.as_ref().map_or("no outcome".to_string(), |(c, w)| format!("{c}: {w}"));
+            if pid.is_none() {
+                self.log(false, format!("VRChat did not come up ({said_words}); {ended} launcher process(es) of this start ended, no VRChat of it runs"));
+                launched?;
+                let mut run = s.run.lock().unwrap();
+                run.pid = None;
+                run.given_up = Some((Instant::now(), began, run.going.clone()));
+                drop(run);
+                return Err(sessions::launch_failure(said.as_ref(), ended));
+            }
+            self.log(true, format!("VRChat of this start came up late ({said_words}): kept as this session's"));
+        }
+        let mut run = s.run.lock().unwrap();
+        run.pid = pid;
+        run.given_up = None;
         Ok(())
+    }
+
+    /// A side session's start the bridge gave up on, whose VRChat came up afterwards (same profile, the session's own OSC
+    /// ports, started after the launch: [`super::game::Game::adopt`]): it is this session's, never the person's. Where the
+    /// start was going is followed again.
+    pub(super) fn adopt_given_up(&self, s: &Session) {
+        if s.is_main() {
+            return;
+        }
+        let since = {
+            let mut run = s.run.lock().unwrap();
+            match &run.given_up {
+                Some((at, _, _)) if at.elapsed() > GIVEN_UP_WATCHED => {
+                    run.given_up = None;
+                    return;
+                }
+                Some((_, began, _)) if run.pid.is_none() => *began,
+                _ => return,
+            }
+        };
+        let Some(pid) = s.game.adopt(Some(since)) else { return };
+        let mut run = s.run.lock().unwrap();
+        let Some((_, _, going)) = run.given_up.take() else { return };
+        run.pid = Some(pid);
+        let resumed = run.going.is_none() && going.is_some();
+        if resumed {
+            run.going = going.map(|g| Going { started: true, since: Instant::now(), ..g });
+        }
+        drop(run);
+        if resumed {
+            s.game.hold_reconstructions(true);
+        }
+        self.log(true, format!("the VRChat of a start given up on came up (process {pid}): it is this session's"));
     }
 
     /// `list_sessions`.
     fn list_sessions(&self) -> Value {
         let opener = self.opener.lock().unwrap().clone();
+        // A VRChat of a start given up on is its session's before the person's are counted.
+        for s in self.sessions() {
+            self.adopt_given_up(&s);
+        }
         let sessions: Vec<Value> = self
             .sessions()
             .iter()

@@ -341,21 +341,61 @@ pub fn launcher_outcome(log: &str) -> Option<(i64, String)> {
     Some((code.trim().parse().ok()?, words))
 }
 
-/// What a launch that Easy Anti-Cheat's launcher ended (or that never brought a VRChat up) answers, from that log's outcome.
-pub fn launch_failure(outcome: Option<&(i64, String)>) -> Failure {
-    if outcome.is_some_and(|(_, words)| words.contains("1072")) {
+/// What an outcome of Easy Anti-Cheat's launcher means. Read from this computer's 171 launcher logs of 2026-11-09 to 15
+/// (`anticheatlauncher.log` and its `anticheatlauncher-backup-*.log`): 154 said `301, 'Easy Anti-Cheat successfully loaded
+/// in-game'`, each followed by "waiting for game window to become visible" and VRChat's window; 17 said `206` (`'CreateService
+/// failed with 1072.'` 9 times, `'EAC unload timeout'` 7 times, once garbled words), each followed by "Terminating with: 206"
+/// and no game. On 2026-11-15 12:25 the 301 line came 1.5 s after the launch, before VRChat.exe was seen: taking it for a
+/// failure disowned the VRChat it had just started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LauncherSaid {
+    /// 301: the anti-cheat is loaded and the game is starting.
+    Loaded,
+    /// 206: the launch failed, no game comes.
+    Failed,
+    /// A code never seen here: not a failure by itself. Whether VRChat of this start runs decides.
+    Unknown,
+}
+
+pub fn launcher_said(code: i64) -> LauncherSaid {
+    match code {
+        301 => LauncherSaid::Loaded,
+        206 => LauncherSaid::Failed,
+        _ => LauncherSaid::Unknown,
+    }
+}
+
+/// What a launch answers when no VRChat of it was found running, from the launcher log's outcome. `ended`: how many launcher
+/// processes of this start the bridge ended; it looked for this start's VRChat after that and found none.
+pub fn launch_failure(outcome: Option<&(i64, String)>, ended: usize) -> Failure {
+    if outcome.is_some_and(|(code, words)| launcher_said(*code) == LauncherSaid::Failed && words.contains("1072")) {
         return Eac::stuck_failure();
     }
-    let said = outcome.map_or_else(
-        || "Easy Anti-Cheat's launcher wrote no outcome (it may have shown \"Launch Error (30005)\")".to_string(),
-        |(code, words)| format!("Easy Anti-Cheat's launcher said {code}: {words}"),
+    let checked = format!(
+        "The bridge ended {ended} launcher process(es) of this start, then looked again: no VRChat of this start runs. If one still comes up in this session's profile with its OSC ports, this session takes it as its own (get_state says so)."
     );
-    Failure::new(
-        "start_failed",
-        format!("VRChat did not start: {said}. The bridge closed the launcher it had started; nothing of this start is left running."),
-        "Wait 90 s (Easy Anti-Cheat unloads its driver about 77 s after a VRChat quits), then call go_to_world or open_session once more. If it fails again, stop starting VRChat and tell the person.",
-    )
-    .retry_after(90)
+    let (said, next) = match outcome {
+        Some((code, words)) if launcher_said(*code) == LauncherSaid::Failed => (
+            format!("VRChat did not start: Easy Anti-Cheat's launcher said {code}: {words}."),
+            "Wait 90 s (Easy Anti-Cheat unloads its driver about 77 s after a VRChat quits), then call go_to_world or open_session once more. If it fails again, stop starting VRChat and tell the person.",
+        ),
+        Some((code, words)) => (
+            format!("Easy Anti-Cheat's launcher said {code} ({words}), but no VRChat of this start came up in time."),
+            "Call get_state in a minute: a VRChat of this start that comes up late is this session's. If none has come, call go_to_world or open_session once more; if that fails too, stop starting VRChat and tell the person.",
+        ),
+        None => (
+            "VRChat did not start: Easy Anti-Cheat's launcher wrote no outcome (it may have shown \"Launch Error (30005)\").".to_string(),
+            "Wait 90 s (Easy Anti-Cheat unloads its driver about 77 s after a VRChat quits), then call go_to_world or open_session once more. If it fails again, stop starting VRChat and tell the person.",
+        ),
+    };
+    Failure::new("start_failed", format!("{said} {checked}"), next).retry_after(90)
+}
+
+/// Whether a VRChat's command line (its log's `Arg:` lines) is a start of the bridge's side session of `profile` on `osc`:
+/// that profile and those OSC ports, which only the bridge passes. Never one of the default profile (the person's and the
+/// main session's) or without these ports.
+pub fn started_for(args: &[String], profile: u32, osc: (u16, u16)) -> bool {
+    profile != 0 && ports_of(profile) == Some(osc) && args.iter().any(|a| *a == format!("--profile={profile}")) && args.iter().any(|a| *a == osc_arg(osc.0, osc.1))
 }
 
 /// Whether a VRChat log is of a VRChat that has quit: its last lines say so (`VRCApplication: HandleApplicationQuit`).
@@ -502,13 +542,75 @@ mod tests {
 ";
         let outcome = launcher_outcome(log).unwrap();
         assert_eq!(outcome, (206, "CreateService failed with 1072".to_string()));
-        assert_eq!(launch_failure(Some(&outcome)).code, "eac_stuck");
-        let other = launch_failure(Some(&(30005, "EAC unload timeout".into())));
-        assert_eq!((other.code, other.retry_after_s), ("start_failed", Some(90)));
-        assert!(other.message.contains("30005") && other.message.contains("closed the launcher"), "{}", other.message);
-        let none = launch_failure(None);
+        assert_eq!(launch_failure(Some(&outcome), 0).code, "eac_stuck");
+        let none = launch_failure(None, 1);
         assert_eq!(none.code, "start_failed");
         assert_eq!(launcher_outcome("[x] Log file open"), None);
+    }
+
+    /// The launcher's outcomes, verbatim from this computer's logs (`anticheatlauncher-backup-2026.11.15-11.24.59.log`, the
+    /// 12:25 `anticheatlauncher.log`, `-06.04.55`, `-2026.11.13-15.16.54`): 301 is the game starting, 206 a failure.
+    #[test]
+    fn easy_anti_cheats_outcomes_are_read_from_evidence_and_only_a_known_failure_fails() {
+        let loaded = "[11:25:13:653] [Windows] [EAC Bootstrapper] [Info] Launcher finished with: 301, 'Easy Anti-Cheat successfully loaded in-game'.
+[11:25:13:653] [Windows] [EAC Bootstrapper] [Info] Successfully initialized the Easy Anti-Cheat module, waiting for game window to become visible.
+[11:25:13:653] [Windows] [EAC Bootstrapper] [Info] Unlocking the launch lock, allowing next game to launch to take place.
+";
+        let said = launcher_outcome(loaded).unwrap();
+        assert_eq!(said, (301, "Easy Anti-Cheat successfully loaded in-game".to_string()));
+        assert_eq!(launcher_said(said.0), LauncherSaid::Loaded, "12:25: VRChat.exe 8244 came up right after this line");
+        let stuck = launcher_outcome("[06:04:55:187] [Windows] [EAC Bootstrapper] [Info] Launcher finished with: 206, 'CreateService failed with 1072.'.\n").unwrap();
+        assert_eq!(launcher_said(stuck.0), LauncherSaid::Failed);
+        let timeout = launcher_outcome(
+            "[15:16:39:736] [Windows] [EAC Bootstrapper] [Info] Launcher finished with: 206, 'EAC unload timeout'.
+[15:16:39:737] [Windows] [EAC Bootstrapper] [Info] Unlocking the launch lock, allowing next game to launch to take place.
+[15:16:54:678] [Windows] [EAC Bootstrapper] [Info] Terminating with: 206.
+",
+        )
+        .unwrap();
+        assert_eq!(timeout, (206, "EAC unload timeout".to_string()));
+        assert_eq!(launcher_said(timeout.0), LauncherSaid::Failed);
+        assert_eq!(launcher_said(0), LauncherSaid::Unknown, "a code never seen is no failure by itself");
+        assert_eq!(launcher_said(30005), LauncherSaid::Unknown, "30005 is the error window's number, never a launcher outcome here");
+        // What a start that came to nothing says: what was checked, never "nothing is left running" unchecked.
+        let failed = launch_failure(Some(&timeout), 1);
+        assert_eq!((failed.code, failed.retry_after_s), ("start_failed", Some(90)));
+        assert!(failed.message.contains("EAC unload timeout") && failed.message.contains("ended 1 launcher") && failed.message.contains("looked again"), "{}", failed.message);
+        assert!(!failed.message.contains("nothing of this start is left running"));
+        let late = launch_failure(Some(&said), 0);
+        assert_eq!(late.code, "start_failed");
+        assert!(late.message.contains("said 301") && late.message.contains("came up in time") && !late.message.contains("did not start"), "{}", late.message);
+        assert!(late.next.contains("get_state"), "{}", late.next);
+    }
+
+    /// Only the bridge's own side-session start is ever taken as a session's: the 12:25 VRChat's command line, verbatim, and
+    /// the same without the session's marks.
+    #[test]
+    fn a_vrchat_is_a_sessions_own_only_by_its_profile_and_its_osc_ports() {
+        let log = "2026.11.15 12:25:17 Debug      -  Launching with args: 12
+2026.11.15 12:25:17 Debug      -  Arg: C:\\Program Files (x86)\\Steam\\steamapps\\common\\VRChat\\VRChat.exe
+2026.11.15 12:25:17 Debug      -  Arg: vrchat://launch?ref=orbiters.cc&id=wrld_19150cfd-170b-4ca7-a32e-6ba0ae080c09:14696~private(usr_dfc96b2c-1aec-4775-9557-eef94a7f02c3)~region(eu)~nonce(a805a8c8-7d15-4cad-a193-a992918219bf)
+2026.11.15 12:25:17 Debug      -  Arg: --no-vr
+2026.11.15 12:25:17 Debug      -  Arg: -screen-fullscreen
+2026.11.15 12:25:17 Debug      -  Arg: 0
+2026.11.15 12:25:17 Debug      -  Arg: -screen-width
+2026.11.15 12:25:17 Debug      -  Arg: 1280
+2026.11.15 12:25:17 Debug      -  Arg: -screen-height
+2026.11.15 12:25:17 Debug      -  Arg: 720
+2026.11.15 12:25:17 Debug      -  Arg: --profile=1
+2026.11.15 12:25:17 Debug      -  VRCFlowCommandLine resolved --profile=1
+2026.11.15 12:25:17 Debug      -  Arg: --osc=9010:127.0.0.1:9011
+2026.11.15 12:25:17 Debug      -  Arg: --startup-begin-ts=5136942001
+";
+        let args = complete_args(log).unwrap();
+        assert!(started_for(&args, 1, (9010, 9011)));
+        assert!(!started_for(&args, 2, (9020, 9021)), "another profile's session");
+        assert!(!started_for(&args, 1, (9020, 9021)), "ports not its profile's");
+        let without = |drop: &str| args.iter().filter(|a| !a.starts_with(drop)).cloned().collect::<Vec<_>>();
+        assert!(!started_for(&without("--osc"), 1, (9010, 9011)), "profile 1 without the session's ports: the person's");
+        assert!(!started_for(&without("--profile"), 1, (9010, 9011)), "the default profile: never");
+        let person = vec!["VRChat.exe".to_string(), "--profile=0".to_string(), osc_arg(9010, 9011)];
+        assert!(!started_for(&person, 0, (9010, 9011)), "profile 0 is never a session's");
     }
 
     #[test]

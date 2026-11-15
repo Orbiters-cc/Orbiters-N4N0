@@ -939,6 +939,11 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     pub fn draft_for_test(&self) -> &str { &self.panel.draft }
 
     #[cfg(test)]
+    pub fn list_scroll_for_test(&self) -> f32 {
+        self.panel.list_scroll_for_test()
+    }
+
+    #[cfg(test)]
     pub fn page_for_test(&self) -> panel::Page {
         self.panel.page
     }

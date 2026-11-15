@@ -1236,8 +1236,9 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
                 y += 52.0;
             }
         }
-        // What was done about the wearer, in its own words.
-        if let Some(line) = session.reconstruction.as_ref().and_then(orbiters_core::picture::wearer_line) {
+        // What was done about the wearer, and a world that gave no depth, in their own words.
+        let lines = session.reconstruction.as_ref().map(|r| [orbiters_core::picture::wearer_line(r), orbiters_core::picture::depth_line(r)]).unwrap_or_default();
+        for line in lines.into_iter().flatten() {
             let job = cu.painter().layout_job(Txt::new(line, 12.0).color(theme::FG_3).line_height(17.0).job(side.width() - 8.0));
             let h = job.size().y;
             cu.painter().galley(pos2(side.left() + 4.0, y), job, theme::FG_3);

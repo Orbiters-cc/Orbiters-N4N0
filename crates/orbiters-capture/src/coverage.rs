@@ -38,7 +38,22 @@ pub struct Coverage {
     base_y: Option<f32>,
     /// Camera positions of the depth frames, every one.
     path: Vec<[f32; 3]>,
+    /// Known samples counted (those [`Coverage::add_depth`] reads), and those of them that read "nothing there" looking
+    /// more than [`BLIND_BELOW_DEG`] down: see [`Coverage::depth_blind`].
+    votes: u64,
+    blind_below: u64,
 }
+
+/// A world that draws its surfaces without depth (orbiters-reconstruct's depthfix, rule "blind world"): the capture kit
+/// reads Unity's camera depth texture, which only holds what the world's shaders draw into it, so such a world's walls
+/// and floors read "nothing there", the code of the sky. Nothing below the horizon is sky: in 冥滩酒吧｜DeathStranding
+/// (2026-11-15) 38 % and 45 % of all samples read nothing looking more than 10° down, in twelve captures of seven other
+/// worlds the same day at most 0.5 %.
+pub const BLIND_BELOW_DEG: f32 = 10.0;
+/// The share of the known samples that makes a world blind...
+pub const BLIND_SHARE: f32 = 0.05;
+/// ...once this many depth frames have been read (about two seconds).
+pub const BLIND_MIN_FRAMES: usize = 8;
 
 fn cell_of(x: f32, z: f32) -> (i32, i32) {
     ((x / CELL_M).floor() as i32, (z / CELL_M).floor() as i32)
@@ -46,7 +61,13 @@ fn cell_of(x: f32, z: f32) -> (i32, i32) {
 
 impl Coverage {
     pub fn new() -> Self {
-        Self { cells: HashMap::new(), base_y: None, path: Vec::new() }
+        Self { cells: HashMap::new(), base_y: None, path: Vec::new(), votes: 0, blind_below: 0 }
+    }
+
+    /// Whether the world draws what the camera sees without depth ([`BLIND_SHARE`]), once [`BLIND_MIN_FRAMES`] depth
+    /// frames have come: its 3D picture can only come from colour.
+    pub fn depth_blind(&self) -> bool {
+        self.path.len() >= BLIND_MIN_FRAMES && self.votes > 0 && self.blind_below as f32 >= BLIND_SHARE * self.votes as f32
     }
 
     /// Adds a depth frame's known samples: `camera_to_world` and `projection` from its strip, `codes` its decoded
@@ -63,8 +84,20 @@ impl Coverage {
                     continue;
                 }
                 let (gx, gy) = layout.region_sample(r, s);
-                let Some(z) = depth::dequantize(codes[(gy * grid_width + gx) as usize]) else { continue };
+                let code = codes[(gy * grid_width + gx) as usize];
+                if code == depth::UNKNOWN {
+                    continue;
+                }
+                self.votes += 1;
                 let (u, v) = layout.grid_pixel(gx, gy);
+                let Some(z) = depth::dequantize(code) else {
+                    // Nothing there: where it looks below the horizon, no sky can be.
+                    let (x, y) = ((u as f32 - k.cx) / k.fx, (v as f32 - k.cy) / k.fy);
+                    let d = [0, 1, 2].map(|i| right[i] * x - up[i] * y + forward[i]);
+                    let length = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-12);
+                    self.blind_below += u64::from(d[1] / length < -BLIND_BELOW_DEG.to_radians().sin());
+                    continue;
+                };
                 let (x, y) = ((u as f32 - k.cx) / k.fx * z, (v as f32 - k.cy) / k.fy * z);
                 let p = [0, 1, 2].map(|i| pos[i] + right[i] * x - up[i] * y + forward[i] * z);
                 let (dx, dz) = (pos[0] - p[0], pos[2] - p[2]);
@@ -280,6 +313,40 @@ mod tests {
             }
         }
         (m, projection, layout, gw, codes)
+    }
+
+    /// Sky above the horizon is no sign of a blind world; a floor and walls that read "nothing there" are, once eight
+    /// depth frames have come (冥滩酒吧｜DeathStranding: its room drew no depth, a few props did).
+    #[test]
+    fn a_world_whose_surfaces_read_nothing_is_blind() {
+        // Facing away from the wall: everything above the horizon is sky, every frame.
+        let mut open = Coverage::new();
+        for k in 0..20 {
+            let (m, p, layout, gw, codes) = frame([0.0, 1.6, 0.0], 180.0 + k as f32);
+            open.add_depth(&m, &p, &layout, gw, &codes);
+        }
+        assert!(!open.depth_blind() && open.blind_below == 0 && open.votes > 0);
+        // The same room drawing no depth but for a prop: every sample nothing there, a patch of them read.
+        let mut blind = Coverage::new();
+        for k in 0..BLIND_MIN_FRAMES {
+            let (m, p, layout, gw, mut codes) = frame([0.0, 1.6, 0.0], k as f32);
+            for (i, c) in codes.iter_mut().enumerate() {
+                if i % 50 != 0 {
+                    *c = 0;
+                }
+            }
+            assert!(!blind.depth_blind(), "told only once enough frames came");
+            blind.add_depth(&m, &p, &layout, gw, &codes);
+        }
+        assert!(blind.depth_blind(), "{} of {}", blind.blind_below, blind.votes);
+        // Unread samples (the decoder's unknowns) are no votes either way.
+        let mut unread = Coverage::new();
+        for k in 0..20 {
+            let (m, p, layout, gw, mut codes) = frame([0.0, 1.6, 0.0], k as f32);
+            codes.iter_mut().for_each(|c| *c = depth::UNKNOWN);
+            unread.add_depth(&m, &p, &layout, gw, &codes);
+        }
+        assert!(!unread.depth_blind() && unread.votes == 0);
     }
 
     #[test]

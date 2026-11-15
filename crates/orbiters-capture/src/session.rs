@@ -43,6 +43,14 @@ pub enum Warning {
     Disk,
     /// The frame source (a Spout sender that cannot be opened, frames of a raw capture that cannot be read).
     Source,
+    /// The world gives no depth for what the camera sees (crate::coverage::Coverage::depth_blind).
+    Depth,
+}
+
+/// What to tell the person when the world turns out to give no depth (crate::coverage::Coverage::depth_blind): the 3D
+/// picture can only be rebuilt from colour, and looks poor.
+fn depth_blind_message() -> &'static str {
+    tr("This world gives no depth for most of what you see here, so the 3D picture will look poor: it can only be rebuilt from colour.")
 }
 
 /// A session's rig faces so far, when not one of them could be read: what to tell the person. A face camera that does not project as
@@ -535,6 +543,8 @@ pub struct CaptureSession {
     raw_depth_kept: u32,
     /// What the depth frames have seen, for the capture page's coverage map.
     coverage: Coverage,
+    /// Whether the person was told the world gives no depth (once a recording).
+    told_depth_blind: bool,
     /// Bytes of the pictures written, and the files that could not be.
     written: u64,
     write_errors: u64,
@@ -717,6 +727,7 @@ impl CaptureSession {
             decode_time_total: 0.0,
             raw_depth_kept: 0,
             coverage: Coverage::new(),
+            told_depth_blind: false,
             fps_window: (Instant::now(), 0),
             written: 0,
             write_errors: 0,
@@ -1321,6 +1332,10 @@ impl CaptureSession {
                                 p.record.depth_index = index;
                                 self.stats.depth_frames += 1;
                                 self.coverage.add_depth(&p.record.camera_to_world, &p.record.projection, &d.layout, d.grid_width, &d.codes);
+                                if !self.told_depth_blind && self.coverage.depth_blind() {
+                                    self.told_depth_blind = true;
+                                    self.warn(Warning::Depth, depth_blind_message().into());
+                                }
                             }
                             // A few frames with tiles that could not be read, as received: what the world's
                             // post-processing did to the symbols, for whoever improves the decoder next.

@@ -7,7 +7,7 @@
 //! `orbiters-desktop --bridge-lab` runs it with the real MCP listener and the real keeper, behind a stand-in for Orbiters'
 //! `features/mine`, so that any MCP client can drive it: `scripts/bridge-lab.mjs` does, with the official SDK.
 
-use super::game::{CaptureSeen, Failure, Feedback, FeedbackAccount, Find, Game, GameWindow, LaunchPlan, OscArg, PictureFiles, ReconstructionSeen, Seen, Shot, WorldCard, WorldPage};
+use super::game::{CaptureSeen, DiskSeen, EnvironmentSeen, Failure, Feedback, FeedbackAccount, Publish, PublishSeen, Find, Game, GameWindow, LaunchPlan, OscArg, PictureFiles, ReconstructionSeen, Seen, Shot, WorldCard, WorldPage};
 use orbiters_n4n0_core::feedback::{FeedbackAsk, LabelCount, WorldFeedback};
 use super::input::{Input, MouseButton};
 use orbiters_core::settings::{Photo3dLength, PictureMode};
@@ -102,6 +102,8 @@ struct State {
     menu_open: bool,
     camera_open: bool,
     pose_known: bool,
+    /// Where its camera was put (`set_camera_pose`), else where it opened.
+    camera_pose: Option<[f32; 6]>,
     capture_state: String,
     session: Option<PathBuf>,
     recording_until: Option<Instant>,
@@ -344,6 +346,13 @@ impl LabGame {
     }
 }
 
+impl LabGame {
+    /// The lab's folder: its log, and its pictures' sessions.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
 impl Game for LabGame {
     fn seen(&self) -> Seen {
         self.advance();
@@ -544,6 +553,10 @@ impl Game for LabGame {
         }
         let number = state.pictures.len() + state.session.is_some() as usize;
         let session = self.dir.join(format!("session-{number}-{length:?}"));
+        // A folder as a recording leaves one: its keyframes and the rest (the tour's tools measure and free it).
+        let _ = std::fs::create_dir_all(session.join("keyframes"));
+        let _ = std::fs::write(session.join("keyframes").join("0.qoi"), vec![0u8; 300_000]);
+        let _ = std::fs::write(session.join("manifest.json"), b"{}");
         state.session = Some(session);
         state.capture_state = "recording".into();
         let record = state.behaviour.record;
@@ -567,6 +580,20 @@ impl Game for LabGame {
 
     fn hold_reconstructions(&self, hold: bool) {
         self.state.lock().unwrap().hold = hold;
+    }
+
+    fn favorite_groups(&self) -> Result<Vec<(String, String)>, Failure> {
+        Ok(vec![("worlds1".into(), "Lab playlist".into())]) // i18n: not shown
+    }
+
+    fn camera_pose(&self) -> Option<[f32; 6]> {
+        let state = self.state.lock().unwrap();
+        state.pose_known.then(|| state.camera_pose.unwrap_or([1.0, 1.5, 2.0, 0.0, 90.0, 0.0]))
+    }
+
+    fn set_camera_pose(&self, pose: [f32; 6]) -> Result<(), Failure> {
+        self.state.lock().unwrap().camera_pose = Some(pose);
+        Ok(())
     }
 }
 
@@ -827,6 +854,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let bridge = super::Bridge::with_timing(game.clone(), Some(exe), timing);
     bridge.set_opener(LabOpener::new(&dir.join("sessions")));
     bridge.set_feedback(LabFeedback::signed_in());
+    bridge.set_publish(LabPublish::new(&dir));
     let stand_in = StandIn::start();
     let flag = Arc::new(LabFlag { api: orbiters_core::account::Api::at(&stand_in.address), signed_in: AtomicBool::new(true), enabled: AtomicBool::new(true) });
     let keeper = super::keeper::Keeper::new(
@@ -986,6 +1014,125 @@ impl Feedback for LabFeedback {
             None if on => labels.push((label, 1, true)),
             None => {}
         }
+    }
+}
+
+/// The lab's Orbiters for the tour's tools: an environment switch, publishing that answers after a moment (or fails), and
+/// pictures' files deleted for real in the lab's own folder.
+pub struct LabPublish {
+    pub dir: PathBuf,
+    pub state: Arc<Mutex<LabPublishState>>,
+}
+
+pub struct LabPublishState {
+    pub development: bool,
+    /// Accounts saved for production and development.
+    pub signed_in: (bool, bool),
+    pub labels_pending: u32,
+    /// Every publish asked: folder, public.
+    pub asked: Vec<(PathBuf, bool)>,
+    pub published: HashMap<PathBuf, (bool, PublishSeen)>,
+    /// Publishing fails with this sentence.
+    pub fails: Option<String>,
+    pub switches: Vec<bool>,
+    pub free_gb: f64,
+}
+
+impl LabPublish {
+    /// In development, signed in to both environments.
+    pub fn new(dir: &Path) -> Arc<Self> {
+        Arc::new(Self {
+            dir: dir.to_path_buf(),
+            state: Arc::new(Mutex::new(LabPublishState {
+                development: true,
+                signed_in: (true, true),
+                labels_pending: 0,
+                asked: Vec::new(),
+                published: HashMap::new(),
+                fails: None,
+                switches: Vec::new(),
+                free_gb: 20.0,
+            })),
+        })
+    }
+}
+
+impl Publish for LabPublish {
+    fn environment(&self) -> EnvironmentSeen {
+        let st = self.state.lock().unwrap();
+        let (server, website) = if st.development { ("http://127.0.0.1:4100/", "https://dev.orbiters.cc/") } else { ("https://api.orbiters.cc/", "https://orbiters.cc/") };
+        let here = if st.development { st.signed_in.1 } else { st.signed_in.0 };
+        let other = if st.development { st.signed_in.0 } else { st.signed_in.1 };
+        EnvironmentSeen {
+            development: st.development,
+            server: server.into(),
+            website: website.into(),
+            account: here.then(|| (Some("Lab member".to_string()), Some(if st.development { "7" } else { "70" }.to_string()))), // i18n: not shown
+            other_signed_in: other,
+            labels_pending: st.labels_pending,
+        }
+    }
+
+    fn set_environment(&self, development: bool) -> Result<(), Failure> {
+        let mut st = self.state.lock().unwrap();
+        st.development = development;
+        st.switches.push(development);
+        Ok(())
+    }
+
+    fn sessions_dir(&self) -> PathBuf {
+        self.dir.clone()
+    }
+
+    fn publish(&self, session: &Path, world_id: &str, _world_name: &str, public: bool) -> Result<(), Failure> {
+        let (development, fails) = {
+            let mut st = self.state.lock().unwrap();
+            st.asked.push((session.to_path_buf(), public));
+            let development = st.development;
+            st.published.insert(session.to_path_buf(), (development, PublishSeen::Running { stage: "sending".into(), sent: 0, total: 10 }));
+            (development, st.fails.clone())
+        };
+        let (state, session, world) = (self.state.clone(), session.to_path_buf(), world_id.to_string());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            let mut st = state.lock().unwrap();
+            let id = st.asked.len() as u64;
+            let website = if development { "https://dev.orbiters.cc/" } else { "https://orbiters.cc/" };
+            let seen = match fails {
+                Some(message) => PublishSeen::Failed { message, explicit: false },
+                None => PublishSeen::Done {
+                    id,
+                    public,
+                    link: if public { format!("{website}maps/{world}/captures/{id}") } else { format!("{website}gallery") },
+                    world_id: world,
+                },
+            };
+            st.published.insert(session, (development, seen));
+        });
+        Ok(())
+    }
+
+    fn published(&self, session: &Path) -> PublishSeen {
+        let st = self.state.lock().unwrap();
+        match st.published.get(session) {
+            Some((development, seen)) if *development == st.development => seen.clone(),
+            _ => PublishSeen::None,
+        }
+    }
+
+    fn delete(&self, session: &Path, everything: bool) -> Result<u64, Failure> {
+        let before = orbiters_core::bundle::folder_size(session);
+        let gone = if everything { std::fs::remove_dir_all(session) } else { std::fs::remove_dir_all(session.join("keyframes")) };
+        gone.map_err(|e| Failure::new("not_freed", e.to_string(), "This is the lab."))?; // i18n: not shown
+        Ok(before - orbiters_core::bundle::folder_size(session))
+    }
+
+    fn size(&self, session: &Path) -> u64 {
+        orbiters_core::bundle::folder_size(session)
+    }
+
+    fn disks(&self) -> Vec<DiskSeen> {
+        vec![DiskSeen { drive: "L:".into(), free_gb: self.state.lock().unwrap().free_gb, holds: vec!["pictures", "app"] }]
     }
 }
 

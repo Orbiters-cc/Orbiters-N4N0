@@ -503,6 +503,19 @@ impl super::Controller {
         self.world_feedback.lock().unwrap().port_note.clone()
     }
 
+    /// World label changes and comments waiting to be sent (to whichever environment is active when they go).
+    pub(super) fn feedback_pending(&self) -> u32 {
+        self.world_feedback.lock().unwrap().queue.items.len() as u32
+    }
+
+    /// The Development environment was switched: what Orbiters answered for worlds is the other server's, so it is read again.
+    pub(super) fn world_feedback_environment_changed(&self) {
+        let mut rt = self.world_feedback.lock().unwrap();
+        rt.known.clear();
+        rt.menu_errors.clear();
+        rt.sent = None;
+    }
+
     fn feedback_follow(self: &Shared) -> bool {
         let development = self.settings().development;
         let signed_in = self.feedback_api().is_some();

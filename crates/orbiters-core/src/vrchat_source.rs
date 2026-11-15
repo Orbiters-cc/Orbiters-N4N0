@@ -133,6 +133,13 @@ impl Source {
         };
         api.find_worlds(list, page)
     }
+    /// The signed-in VRChat account's world playlists (favourite groups): tag and name. Needs the personal session.
+    pub fn favorite_world_groups(&self) -> anyhow::Result<Vec<(String, String)>> {
+        match self.direct(|c| c.favorite_world_groups()) {
+            Some(r) => r,
+            None => Err(Error::Unauthorized.into()),
+        }
+    }
     /// A new private instance of `world`, owned by the signed-in account. Needs the personal session.
     pub fn create_private_instance(&self, world: &str, region: &str) -> anyhow::Result<String> {
         match self.direct(|c| c.create_private_instance(world, region)) {

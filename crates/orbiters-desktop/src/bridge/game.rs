@@ -111,6 +111,11 @@ pub enum Find {
     SpotlightPc,
     /// VRChat's "Spotlight - Cross Platform" row.
     SpotlightCrossPlatform,
+    /// Another of VRChat's world rows (its Worlds menu: Community Labs, Random, Avatar Worlds, Games, Updated Recently, New,
+    /// Classics).
+    Row(orbiters_core::maps::Row),
+    /// A world playlist (favourite group) of the app's VRChat account, by its tag.
+    FavoriteGroup(String),
 }
 
 /// A page of worlds, and whether another follows.
@@ -255,6 +260,63 @@ pub trait Feedback: Send + Sync {
     fn ask(&self, ask: orbiters_n4n0_core::feedback::FeedbackAsk);
 }
 
+/// The Orbiters environment the app talks to now (its Settings' Development environment switch): where labels, 3D picture
+/// shares and its updates go, and the account signed in there.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct EnvironmentSeen {
+    pub development: bool,
+    /// The API's address.
+    pub server: String,
+    /// The website, whose pages a published picture's link is on.
+    pub website: String,
+    /// The Orbiters account saved for this environment: name and numeric id (`None`: nobody is signed in there).
+    pub account: Option<(Option<String>, Option<String>)>,
+    /// Whether an account is saved for the other environment (switching there needs no sign-in).
+    pub other_signed_in: bool,
+    /// World labels and comments still waiting to be sent (they go to whichever environment is active when they are sent).
+    pub labels_pending: u32,
+}
+
+/// Where a 3D picture's publishing stands.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PublishSeen {
+    /// Not published to the active environment from this computer.
+    None,
+    /// Under way: `preparing`, `sending` (bytes), `sharing`, `waiting`.
+    Running { stage: String, sent: u64, total: u64 },
+    /// On Orbiters: its item id, whether it is listed for everyone, its page.
+    Done { id: u64, public: bool, link: String, world_id: String },
+    Failed { message: String, explicit: bool },
+}
+
+/// A drive the pictures use, and what is free on it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DiskSeen {
+    pub drive: String,
+    pub free_gb: f64,
+    /// What it holds for the pictures: `pictures` (the sessions folder), `app` (Orbiters - N4N0's data and logs).
+    pub holds: Vec<&'static str>,
+}
+
+/// Publishing a session's 3D picture to Orbiters, the app's environment, and its files on this computer: the real one is the
+/// tray service's (controller/bridge_publish.rs, Photos & captures' own share), the other the lab's.
+pub trait Publish: Send + Sync {
+    fn environment(&self) -> EnvironmentSeen;
+    /// Turns the app's Development environment on or off, as its Settings switch does.
+    fn set_environment(&self, development: bool) -> Result<(), Failure>;
+    /// The sessions folder (pictures are named by their folder in it).
+    fn sessions_dir(&self) -> PathBuf;
+    /// Starts publishing a reconstructed session to the active environment; `public`: listed for everyone.
+    fn publish(&self, session: &Path, world_id: &str, world_name: &str, public: bool) -> Result<(), Failure>;
+    fn published(&self, session: &Path) -> PublishSeen;
+    /// Deletes the session's capture files, keeping its 3D view (`everything` false), or the whole folder: bytes freed.
+    fn delete(&self, session: &Path, everything: bool) -> Result<u64, Failure>;
+    /// Bytes a session folder holds now.
+    fn size(&self, session: &Path) -> u64;
+    fn disks(&self) -> Vec<DiskSeen>;
+}
+
 /// VRChat as far as the tools care.
 pub trait Game: Send + Sync {
     fn seen(&self) -> Seen;
@@ -302,6 +364,18 @@ pub trait Game: Send + Sync {
     /// VRChat's for a few seconds, and nothing of the main session's may go there.
     fn lent_away(&self) -> bool {
         false
+    }
+    /// The world playlists (favourite groups) of the VRChat account signed in in Orbiters - N4N0: tag and name.
+    fn favorite_groups(&self) -> Result<Vec<(String, String)>, Failure> {
+        Ok(Vec::new())
+    }
+    /// Where VRChat's camera is, as it last said (`/usercamera/Pose`: x, y, z in metres, pitch, yaw, roll in degrees).
+    fn camera_pose(&self) -> Option<[f32; 6]> {
+        None
+    }
+    /// Puts VRChat's camera there (`/usercamera/Pose`), and takes it as the camera's pose a 3D picture starts from.
+    fn set_camera_pose(&self, _pose: [f32; 6]) -> Result<(), Failure> {
+        Err(Failure::new("camera_unavailable", "This VRChat's camera cannot be placed from here.", "Walk and turn instead.")) // i18n: not shown (an AI client reads it in the tool's answer)
     }
 }
 

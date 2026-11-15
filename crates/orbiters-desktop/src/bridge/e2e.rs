@@ -1595,3 +1595,134 @@ fn find_worlds_pages_every_list_and_reaches_vrchats_spotlight() {
     client.tool("find_worlds", json!({ "source": "visited", "page": 40 })).expect("the visited worlds are this computer's own, as deep as they go");
     client.fails("find_worlds", json!({ "source": "featured" }), "bad_arguments");
 }
+
+// ---- The world tour's kit (VR1115 L-tour): the environment, publishing, the pictures' files, labels after a restart
+
+/// Opens the lab's camera and makes its pose known, as an agent does through the menu.
+fn open_camera(game: &LabGame, client: &Client) {
+    game.set_foreground(true);
+    client.tool("press", json!({ "input": "esc" })).unwrap();
+    client.tool("mouse", json!({ "action": "click", "x": CAMERA_ICON.0, "y": CAMERA_ICON.1 })).unwrap();
+    client.tool("press", json!({ "input": "esc" })).unwrap();
+    client.tool("turn", json!({ "degrees": 10 })).unwrap();
+}
+
+/// A tour switches the app to the environment it was told (never silently: said, logged, refused while labels wait), takes
+/// three 8 s pictures in one world without opening the camera again, publishes them there (two private, the best public, with
+/// the item's id and link), frees their files once that is safe, and after a restart still knows the worlds it was in and the
+/// pictures it took.
+#[test]
+fn a_tour_publishes_its_pictures_where_it_was_told_and_frees_them_once_safe() {
+    let (game, bridge, _server, client) = lab("tourkit");
+    let publish = super::lab::LabPublish::new(game.dir());
+    bridge.set_publish(publish.clone());
+    let journal = game.dir().join("journal.json");
+    bridge.keep_journal(&journal);
+    bridge.set_feedback(super::lab::LabFeedback::signed_in());
+
+    // Where things go is always said.
+    let state = client.state();
+    assert_eq!((state["orbiters"]["environment"].as_str(), state["orbiters"]["signed_in"].as_bool()), (Some("development"), Some(true)), "{state}");
+    assert_eq!(state["disks"][0]["free_gb"], 20.0);
+    let read = client.tool("orbiters_environment", json!({ "action": "read" })).unwrap();
+    assert!(read["switching_changes"].as_str().unwrap().contains("update feed"), "{read}");
+    // Not while labels wait: they would go to the other one.
+    publish.state.lock().unwrap().labels_pending = 2;
+    client.fails("orbiters_environment", json!({ "action": "switch", "to": "production" }), "labels_waiting");
+    assert!(publish.state.lock().unwrap().switches.is_empty());
+    publish.state.lock().unwrap().labels_pending = 0;
+    let switched = client.tool("orbiters_environment", json!({ "action": "switch", "to": "production" })).unwrap();
+    assert_eq!((switched["switched"].as_bool(), switched["before"]["environment"].as_str(), switched["orbiters"]["environment"].as_str()), (Some(true), Some("development"), Some("production")), "{switched}");
+    assert!(switched["what_changed"].as_str().unwrap().contains("account"));
+    assert_eq!(publish.state.lock().unwrap().switches, [false]);
+    let again = client.tool("orbiters_environment", json!({ "action": "switch", "to": "production" })).unwrap();
+    assert_eq!(again["switched"], false, "{again}");
+    let mut logged = crate::bridge::Status::default();
+    bridge.status_into(&mut logged);
+    assert!(logged.log.iter().any(|l| l.text.contains("switched to production")), "the switch is in the bridge's log");
+
+    // Three 8 s pictures in a row, the camera opened once.
+    arrive(&client);
+    open_camera(&game, &client);
+    let mut names = Vec::new();
+    for _ in 0..3 {
+        let picture = client.tool("take_3d_picture", json!({ "length_s": 8 })).unwrap();
+        assert_eq!(picture["saved"], true, "{picture}");
+        names.push(picture["session"].as_str().unwrap().to_string());
+    }
+    assert_eq!(client.state()["camera"]["open"], true, "still open for the next one");
+    client.fails("publish_3d_picture", json!({ "picture": names[0] }), "not_reconstructed");
+    client.fails("publish_3d_picture", json!({ "picture": "..\\elsewhere" }), "unknown_picture");
+    client.fails("free_picture_files", json!({ "picture": names[0], "what": "capture_files" }), "reconstruction_waiting");
+    client.tool("close_vrchat", json!({})).unwrap();
+    assert!(until(Duration::from_secs(10), || client.tool("wait_for", json!({ "until": "reconstructions_done", "timeout_s": 2 })).unwrap()["done"] == true));
+
+    // Not deleted whole before it is safe on Orbiters; its recording may go once its 3D view is made.
+    client.fails("free_picture_files", json!({ "picture": names[0], "what": "everything" }), "not_published");
+    let freed = client.tool("free_picture_files", json!({ "picture": names[0], "what": "capture_files" })).unwrap();
+    assert!(freed["freed_mb"].as_f64().unwrap() > 0.2, "{freed}");
+    assert!(!game.dir().join(&names[0]).join("keyframes").exists() && game.dir().join(&names[0]).exists(), "its 3D view stays");
+
+    // Published to production: two private, the best public last.
+    for (i, name) in names.iter().enumerate() {
+        let visibility = if i == 2 { "public" } else { "private" };
+        let published = client.tool("publish_3d_picture", json!({ "picture": name, "visibility": visibility })).unwrap();
+        assert_eq!((published["publish"]["state"].as_str(), published["orbiters"]["environment"].as_str()), (Some("done"), Some("production")), "{published}");
+        assert_eq!(published["publish"]["public"], i == 2);
+        assert_eq!(published["world_id"], LAB_WORLD_A);
+    }
+    let last = client.tool("pictures", json!({ "picture": names[2] })).unwrap();
+    assert!(last["publish"]["link"].as_str().unwrap().starts_with(&format!("https://orbiters.cc/maps/{LAB_WORLD_A}/captures/")), "{last}");
+    assert_eq!(publish.state.lock().unwrap().asked.len(), 3, "each once");
+    // Published again: nothing sent twice.
+    client.tool("publish_3d_picture", json!({ "picture": names[2] })).unwrap();
+    assert_eq!(publish.state.lock().unwrap().asked.len(), 3);
+    let listed = client.tool("pictures", json!({})).unwrap();
+    assert_eq!(listed["pictures"].as_array().unwrap().len(), 3);
+    assert_eq!(client.tool("pictures", json!({ "unpublished": true })).unwrap()["pictures"].as_array().unwrap().len(), 0);
+    assert_eq!(client.state()["pictures"][0]["publish"]["state"], "done");
+    let gone = client.tool("free_picture_files", json!({ "picture": names[1], "what": "everything" })).unwrap();
+    assert!(gone["freed_mb"].as_f64().unwrap() > 0.2 && !game.dir().join(&names[1]).exists(), "{gone}");
+    assert_eq!(client.tool("pictures", json!({ "picture": names[1] })).unwrap()["reconstruction"]["state"], "deleted");
+
+    // Not signed in there: nothing sent. Low on disk: get_state says so first.
+    publish.state.lock().unwrap().signed_in.0 = false;
+    client.fails("publish_3d_picture", json!({ "picture": names[0] }), "orbiters_not_signed_in");
+    publish.state.lock().unwrap().free_gb = 3.0;
+    let low = client.state();
+    assert!(low["next"].as_str().unwrap().contains("free_picture_files"), "{low}");
+
+    // A restart: the journal still knows the world it was in and the pictures it took.
+    let (_game2, bridge2, _server2, client2) = lab("tourkit-restart");
+    bridge2.keep_journal(&journal);
+    bridge2.set_publish(publish.clone());
+    bridge2.set_feedback(super::lab::LabFeedback::signed_in());
+    client2.tool("label_world", json!({ "world_id": LAB_WORLD_A, "add": ["bright"] })).expect("a world arrived in before the restart");
+    client2.fails("label_world", json!({ "world_id": LAB_WORLD_B, "add": ["bright"] }), "not_seen_here");
+    assert_eq!(client2.tool("pictures", json!({})).unwrap()["taken_in_all"], 3);
+}
+
+/// Vantage without walking: the open camera is put higher and further, from where it is and the way it looks, and a picture
+/// starts there; VRChat's other rows and the person's playlists are sources.
+#[test]
+fn the_camera_is_placed_for_a_view_and_more_rows_are_sources() {
+    let (game, _bridge, _server, client) = lab("aim");
+    arrive(&client);
+    client.fails("aim_camera", json!({ "up_m": 3 }), "camera_closed");
+    open_camera(&game, &client);
+    // The lab's camera opens at (1, 1.5, 2) looking along +X (yaw 90).
+    let aimed = client.tool("aim_camera", json!({ "forward_m": 4, "right_m": 1, "up_m": 3, "turn_deg": -30, "pitch_deg": 20 })).unwrap();
+    let to: Vec<f64> = aimed["to"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    assert_eq!(to, [5.0, 4.5, 1.0, 20.0, 60.0, 0.0], "{aimed}");
+    assert_eq!(aimed["moved_m"], 5.1);
+    client.fails("aim_camera", json!({ "up_m": 40 }), "bad_arguments");
+    let picture = client.tool("take_3d_picture", json!({ "length_s": 8 })).unwrap();
+    assert_eq!(picture["saved"], true);
+
+    let rows = client.tool("find_worlds", json!({ "source": "games" })).unwrap();
+    assert!(!rows["worlds"].as_array().unwrap().is_empty(), "{rows}");
+    let playlists = client.tool("find_worlds", json!({ "source": "playlists" })).unwrap();
+    assert_eq!(playlists["playlists"][0]["group"], "worlds1", "{playlists}");
+    client.tool("find_worlds", json!({ "source": "playlists", "group": "worlds1" })).unwrap();
+    client.fails("find_worlds", json!({ "source": "playlists", "group": "worlds9" }), "unknown_playlist");
+}

@@ -114,7 +114,7 @@ pub fn values(pose: &[f32; 6], hips: &Hips) -> [f32; 4] {
 
 impl super::Controller {
     /// Where VRChat last said its camera is (`/usercamera/Pose`: x, y, z in metres, pitch, yaw, roll in degrees).
-    fn camera_pose(&self) -> Option<[f32; 6]> {
+    pub(super) fn camera_pose(&self) -> Option<[f32; 6]> {
         let osc = self.osc_values.lock().unwrap();
         osc.latest.get(POSE).map(|(v, _)| floats(v)).filter(|v| v.len() == 6 && v.iter().any(|f| *f != 0.0)).and_then(|v| v.try_into().ok())
     }

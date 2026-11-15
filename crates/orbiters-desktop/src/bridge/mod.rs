@@ -21,6 +21,7 @@ mod e2e;
 pub mod game;
 pub mod guard;
 pub mod input;
+pub mod journal;
 pub mod keeper;
 pub mod lab;
 pub mod mcp;
@@ -29,6 +30,7 @@ pub mod projects;
 pub mod sandbox;
 pub mod sessions;
 pub mod tools;
+pub mod tour;
 pub mod win;
 
 use game::{Failure, Game, OscArg};
@@ -309,6 +311,10 @@ pub struct Bridge {
     pub(crate) opener: Mutex<Option<Arc<dyn game::Opener>>>,
     /// N4N0's world feedback, for the label tools (`None`: they say it is not there).
     pub(crate) feedback: Mutex<Option<Arc<dyn game::Feedback>>>,
+    /// Publishing pictures, the app's environment and the pictures' files (`None`: those tools say it is not there).
+    pub(crate) publish: Mutex<Option<Arc<dyn game::Publish>>>,
+    /// The worlds arrived in and the pictures taken, kept across restarts (journal.rs).
+    pub(crate) journal: Mutex<journal::Journal>,
     /// One launch of VRChat at a time on this computer: a new VRChat is told apart from the others by appearing after it.
     pub(crate) launching: Mutex<()>,
     pub(crate) focus: Mutex<FocusTurn>,
@@ -340,6 +346,8 @@ impl Bridge {
             sides: Mutex::new(Vec::new()),
             opener: Mutex::new(None),
             feedback: Mutex::new(None),
+            publish: Mutex::new(None),
+            journal: Mutex::default(),
             launching: Mutex::new(()),
             focus: Mutex::default(),
             log: Mutex::new(VecDeque::new()),
@@ -423,6 +431,15 @@ impl Bridge {
 
     pub fn set_feedback(&self, feedback: Arc<dyn game::Feedback>) {
         *self.feedback.lock().unwrap() = Some(feedback);
+    }
+
+    pub fn set_publish(&self, publish: Arc<dyn game::Publish>) {
+        *self.publish.lock().unwrap() = Some(publish);
+    }
+
+    /// Keeps the journal in `path` from now on (read from it now).
+    pub fn keep_journal(&self, path: &std::path::Path) {
+        *self.journal.lock().unwrap() = journal::Journal::at(path);
     }
 
     /// What the person's listener heard.

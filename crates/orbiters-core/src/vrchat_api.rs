@@ -448,7 +448,28 @@ pub fn world_list_path(list: &crate::maps::WorldList, page: usize) -> String {
         WorldList::Active => format!("/worlds/active?n={n}&offset={offset}"),
         WorldList::Favorites => format!("/worlds/favorites?n={n}&offset={offset}"),
         WorldList::Spotlight(row) => format!("/worlds?tag={}&sort=updated&order=descending&releaseStatus=public&n={n}&offset={offset}", row.tag()),
+        WorldList::Row(row) => {
+            let (sort, tag) = row.query();
+            let tag = tag.map(|t| format!("tag={t}&")).unwrap_or_default();
+            format!("/worlds?{tag}sort={sort}&order=descending&releaseStatus=public&n={n}&offset={offset}")
+        }
+        WorldList::FavoriteGroup(group) => format!("/worlds/favorites?tag={}&n={n}&offset={offset}", encode(group)),
     }
+}
+
+/// `GET /favorite/groups`' world groups: tag and name (the tag when it has none). A group of another type, or with a tag that
+/// is not a plain word, is left out.
+fn parse_favorite_groups(body: &[u8]) -> Result<Vec<(String, String)>> {
+    let list: Vec<serde_json::Value> = serde_json::from_slice(body).map_err(|_| Error::InvalidResponse)?;
+    Ok(list
+        .iter()
+        .filter(|g| g["type"] == "world")
+        .filter_map(|g| {
+            let tag = g["name"].as_str().filter(|t| !t.is_empty() && t.len() <= 64 && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))?;
+            let name = g["displayName"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(tag);
+            Some((tag.to_string(), name.to_string()))
+        })
+        .collect())
 }
 
 /// VRChat's `LimitedWorld` list as the Map explorer's worlds (pictures over https only: they are shown, fetched without
@@ -1026,7 +1047,7 @@ impl Client {
     pub fn find_worlds(&mut self, list: &crate::maps::WorldList, page: usize) -> Result<(Vec<crate::maps::FoundWorld>, bool)> {
         self.authenticated()?;
         let path = world_list_path(list, page);
-        let keep = if *list == crate::maps::WorldList::Favorites { Duration::from_secs(60) } else { Duration::from_secs(300) };
+        let keep = if matches!(list, crate::maps::WorldList::Favorites | crate::maps::WorldList::FavoriteGroup(_)) { Duration::from_secs(60) } else { Duration::from_secs(300) };
         if let Some((_, worlds, more)) = self.world_lists.get(&path).filter(|(at, ..)| at.elapsed() < keep) {
             return Ok((worlds.clone(), *more));
         }
@@ -1037,6 +1058,13 @@ impl Client {
         }
         self.world_lists.insert(path, (Instant::now(), worlds.clone(), more));
         Ok((worlds, more))
+    }
+    /// The account's world favourite groups, its playlists of worlds in VRChat's menu (Favorites 1 to 4, more with VRC+):
+    /// each one's tag (`worlds1`…, what `/worlds/favorites?tag=` takes) and the name the account gave it, in VRChat's order.
+    pub fn favorite_world_groups(&mut self) -> Result<Vec<(String, String)>> {
+        self.authenticated()?;
+        let r = self.get("favorites", "/favorite/groups?type=world&n=50")?;
+        parse_favorite_groups(&r.body)
     }
     /// The first bounded batch of fresh visible instances; remaining holds the exact IDs for continuation.
     pub fn world_instances(&mut self, world: &str) -> Result<WorldInstances> {
@@ -1554,6 +1582,17 @@ fn image_url_allowed(url: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn vrchats_other_rows_and_the_accounts_playlists_are_asked_as_its_client_asks_them() {
+        use crate::maps::{Row, WorldList};
+        assert_eq!(world_list_path(&WorldList::Row(Row::Games), 0), "/worlds?tag=author_tag_game&sort=heat&order=descending&releaseStatus=public&n=25&offset=0");
+        assert_eq!(world_list_path(&WorldList::Row(Row::CommunityLabs), 2), "/worlds?sort=labs&order=descending&releaseStatus=public&n=25&offset=48");
+        assert_eq!(world_list_path(&WorldList::Row(Row::New), 0), "/worlds?sort=publication&order=descending&releaseStatus=public&n=25&offset=0");
+        assert_eq!(world_list_path(&WorldList::FavoriteGroup("worlds2".into()), 1), "/worlds/favorites?tag=worlds2&n=25&offset=24");
+        let body = br#"[{"id":"fvgrp_1","name":"worlds1","displayName":"Chill spots","type":"world"},{"name":"avatars1","displayName":"Mine","type":"avatar"},{"name":"worlds2","displayName":"","type":"world"},{"name":"../x","type":"world"}]"#;
+        assert_eq!(parse_favorite_groups(body).unwrap(), [("worlds1".to_string(), "Chill spots".to_string()), ("worlds2".to_string(), "worlds2".to_string())]);
+    }
+
     #[test]
     fn only_the_strict_private_instance_of_its_owner_counts() {
         let me = "usr_1339e525-d75d-4832-9104-98dd89287681";

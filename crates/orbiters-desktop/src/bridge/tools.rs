@@ -36,6 +36,20 @@ const WINDOW_SETTLE: Duration = Duration::from_secs(2);
 /// What an avatar without the kit means for a picture.
 const NO_KIT: &str = "The avatar worn has no N4N0 capture kit, so a recording would have no camera poses and no keyframes, and nothing to reconstruct.";
 
+/// VRChat's other world rows, as find_worlds names them.
+const ROWS: [(&str, orbiters_core::maps::Row); 7] = [
+    ("community_labs", orbiters_core::maps::Row::CommunityLabs),
+    ("random", orbiters_core::maps::Row::Random),
+    ("avatar_worlds", orbiters_core::maps::Row::AvatarWorlds),
+    ("games", orbiters_core::maps::Row::Games),
+    ("updated_recently", orbiters_core::maps::Row::UpdatedRecently),
+    ("new", orbiters_core::maps::Row::New),
+    ("classics", orbiters_core::maps::Row::Classics),
+];
+/// How far `aim_camera` moves VRChat's camera in one call, metres each way: the 3D picture's flight goes 10 m from where it
+/// starts, and a camera much further from the avatar than that is not measured.
+const AIM_REACH_M: f64 = 25.0;
+
 /// A tool's answer.
 pub enum Answer {
     Data(Value),
@@ -43,9 +57,9 @@ pub enum Answer {
 }
 
 /// The tools that act on one VRChat, and take `session`.
-const VRCHAT_TOOLS: [&str; 15] = [
+const VRCHAT_TOOLS: [&str; 16] = [
     "get_state", "find_worlds", "go_to_world", "close_vrchat", "wait_for", "screenshot", "walk", "turn", "press", "mouse", "focus_game", "wear_avatar", "take_3d_picture",
-    "world_labels", "label_world",
+    "aim_camera", "world_labels", "label_world",
 ];
 /// How long the label tools wait for Orbiters to answer, by default.
 const LABELS_WAIT_S: f64 = 20.0;
@@ -62,13 +76,13 @@ pub const GUIDE: &str = "# Taking 3D pictures from world to world\n\n\
 You drive VRChat on this computer, in desktop mode, through this bridge. A person may be at the computer: they always win, and the bridge will tell you when they took over.\n\n\
 ## The loop\n\n\
 1. `get_state`. Its `next` says what to do. If `vrchat.running` is true and `vrchat.started_by_bridge` false, that VRChat is the person's: do nothing to it and tell them.\n\
-2. `find_worlds` for world ids, unless you were given them. `source`: search, visited, favorites, trending (VRChat's \"Hot\" row), popular, active, and what VRChat highlights: spotlight_pc and spotlight_cross_platform (its two Spotlight rows). Each page has up to 24 worlds; `more` says whether `next_page` has more. For all of a list, page until `more` is false (VRChat's lists go 21 pages deep, 504 worlds at most), and drop the ids you already have: the lists overlap.\n\
+2. `find_worlds` for world ids, unless you were given them. `source`: search, visited, favorites, trending (VRChat's \"Hot\" row), popular, active, and what VRChat highlights: spotlight_pc and spotlight_cross_platform (its two Spotlight rows); VRChat's other rows of its Worlds menu: community_labs, random, avatar_worlds, games, updated_recently, new, classics; and playlists, the person's own world playlists (the favourite groups of the VRChat account signed in in Orbiters - N4N0: without `group` it lists them, then pass one's `group`). Each page has up to 24 worlds; `more` says whether `next_page` has more. For all of a list, page until `more` is false (VRChat's lists go 21 pages deep, 504 worlds at most), and drop the ids you already have: the lists overlap.\n\
 3. `go_to_world` with a `world_id`. It makes a private instance of your own, starts VRChat in it (closing the last one first), brings it to the foreground, and waits. If `arrived` is false, call `wait_for` with `until: in_world`.\n\
 4. `screenshot` to see where you are. A dark picture is the loading screen: wait a little.\n\
 5. Open VRChat's camera, which only the menus can do: `press` `esc`, `screenshot`, `mouse` `click` on the camera icon in the menu's bottom row (about 640, 620 at 1280 by 720), `screenshot`, and `click` on the Stream Camera tile (about 597, 345). The menu closes and the camera's panel stays on the screen. `get_state` says `camera.open`. Those coordinates hold because the bridge keeps VRChat's window at the size it started with (1280 by 720): if someone resized it, the next `screenshot` puts it back first, without bringing it forward (`window_restored: true`), and a `click` or `move` on a resized window is refused with `window_resized` and clicks nothing (take a screenshot, then click). Still check each spot in your last screenshot: they are where the icon and the tile usually are. Leave the camera's settings alone: the app sets Stream and Spout itself when it records. **Look at a screenshot after every click, and before the next one:** a click can miss, its page may not have changed, and the same spot on the page you are really on may be a shop banner. If the page is not what you expected, `press` `esc` closes everything: start again.\n\
 6. If `camera.pose_known` is false, `turn` by a few degrees: VRChat says where its camera is when it moves.\n\
 7. Before opening the camera, walk somewhere worth a picture with `walk` and `turn`, looking with `screenshot` between moves: with the camera or a menu open the avatar does not move (`speed_seen` 0), and the picture starts where the camera opens. `press` `esc` closes the camera again. `turn` is approximate: judge by the pictures. `walk` tells you if the avatar did not seem to move.\n\
-8. `take_3d_picture` with `length_s` 1, 4 or 8. It waits for the recording to be saved and gives the `session`. Take a few from different places: 4 or 8 seconds in the open, 1 second for a close look.\n\
+8. `take_3d_picture` with `length_s` 1, 4 or 8. It waits for the recording to be saved and gives the `session`. Take a few from different places: 4 or 8 seconds in the open, 1 second for a close look. The camera stays open after a picture, so the next one needs no menu; but the avatar does not walk while it is open (see Viewpoints for moving between pictures).\n\
 9. Label the world, if you were asked to: `world_labels` lists the labels N4N0 offers (a fixed list) and those the world already has; `label_world` with `add` gives the ones that fit **what you saw** in your screenshots there, and only those (see Labels below).\n\
 10. `go_to_world` with the next world, and so on.\n\
 11. `close_vrchat` at the end. Reconstructions follow the app's own setting: they run beside VRChat, or wait for it to close (`get_state`'s `reconstructions` and each picture's `reconstruction` say which). Then `wait_for` with `until: reconstructions_done`, as many times as it takes, and report each session's `reconstruction` from `get_state`, which says `failed` and why when one did not finish.\n\n\
@@ -80,7 +94,14 @@ Several agents (and the person) can each have a VRChat on this computer at the s
 4. `close_session` at the end. A session left without any call for 10 minutes may be taken over by another agent (`open_session` with `take_over`): yours is then refused with `session_taken_over`.\n\n\
 What is shared, and how: `walk`, `turn`, the OSC inputs and `screenshot` need nothing of anyone else's and run side by side in every session. **Keys and clicks** (`press` of a key, `mouse`, `focus_game`) need your window in the foreground, which only one window can have: they take turns. A refusal `focus_busy` says how long to wait (`retry_after_s`, a few seconds: a turn is yours while you keep using it, and passes to the next session 8 s after your last key or click). They also wait while the person uses the computer at all (`paused_by_person`), and are refused with `person_vrchat_has_focus` while the person's own VRChat has the foreground: the bridge never takes it from them. **3D pictures** borrow Orbiters - N4N0's capture: one at a time on this computer (`picture_busy`: wait), and none while the person's own VRChat runs (`app_in_use`: the capture is theirs then). The person's input in your session's window pauses your session only. One account cannot be in two VRChats: each profile has its own. `list_sessions` shows them all.\n\n\
 ## Labels\n\n\
-A tour of worlds for labels goes, for each world: `go_to_world` (and `wait_for` in_world), `screenshot`, `turn` and `walk` to look around with more screenshots (the spawn alone rarely shows what a world is), the camera and `take_3d_picture`, then `world_labels`, then `label_world` with the labels that match what you saw. Labels are N4N0's world label feedback: the same list, rules and account as a person's Label it on N4N0's worlds page. They are published on Orbiters under the Orbiters account signed in in Orbiters - N4N0 (`world_labels`' `account` says which, and on which server), and other people see and count them. So give a label only for what your screenshots show (a mirror, pens, a video player, a game, nature, a city, bright or dark, a quiet place for sleeping or chilling), never from the world's name or description, and give fewer rather than doubtful ones. ai-world (made with AI) needs a `reason` of at least 10 words saying what you saw; ai-thumbnail says the world's own picture (its thumbnail in VRChat's menus) looks made with AI. `remove` takes back a label you gave. Only worlds this session is in, or arrived in during this run, can be labelled. A world with none that fits gets none: say so in your report. Orbiters takes one label change a world (several labels together count once) and about 120 an hour from an account: past that, `sent` is false and Orbiters - N4N0 sends them later by itself, within a day.\n\n\
+A tour of worlds for labels goes, for each world: `go_to_world` (and `wait_for` in_world), `screenshot`, `turn` and `walk` to look around with more screenshots (the spawn alone rarely shows what a world is), the camera and `take_3d_picture`, then `world_labels`, then `label_world` with the labels that match what you saw. Labels are N4N0's world label feedback: the same list, rules and account as a person's Label it on N4N0's worlds page. They are published on Orbiters under the Orbiters account signed in in Orbiters - N4N0 (`world_labels`' `account` says which, and on which server), and other people see and count them. So give a label only for what your screenshots show (a mirror, pens, a video player, a game, nature, a city, bright or dark, a quiet place for sleeping or chilling), never from the world's name or description, and give fewer rather than doubtful ones. ai-world (made with AI) needs a `reason` of at least 10 words saying what you saw; ai-thumbnail says the world's own picture (its thumbnail in VRChat's menus) looks made with AI. `remove` takes back a label you gave. Only worlds a session of this bridge arrived in can be labelled (the bridge keeps them across restarts of the app, so a world seen before an update can still be labelled after it). A world with none that fits gets none: say so in your report. Orbiters takes one label change a world (several labels together count once) and about 120 an hour from an account: past that, `sent` is false and Orbiters - N4N0 sends them later by itself, within a day.\n\n\
+## Viewpoints\n\n\
+A 3D picture is made of what the camera sees as it flies around the spot it opens at: what is behind a wall, or out of its sight, is not in it. So three pictures of a world are three different places, never three from one spot: (1) a high point that overlooks much of the world (stairs, a balcony, a roof, a hill: walk there with screenshots between moves, `press` `jump` to get onto things), facing the open; (2) the middle of its main space, facing what it is about (a stage, a fountain, a skyline, a bar); (3) somewhere else of its own: another room, the outside, a view back over the whole. Before each picture, look at a screenshot with the camera open: turn until the interesting part is in the middle, with open space in front rather than a wall a metre away.\n\n\
+Two ways to get there. **aim_camera** moves the open camera itself, without the avatar and without the menus: `up_m` 3 to 8 lifts it over tables, railings and crowds of objects so much more of the world is in sight, `forward_m`/`right_m` take it out over a plaza or into the next room, `turn_deg` and `pitch_deg` (positive looks down; 15 to 30 from high up) aim it. A picture flies around the camera's spot and comes back to it, so: picture, aim_camera to the next spot, picture, and so on, with a screenshot after every move (nothing stops the camera in a wall, under a floor or outside the world: if the panel shows that, move it back). Or walk: `press` `esc` closes the camera, walk and `press` `jump` to get onto things, then open the camera again through the menu as in step 5 (the camera opens in front of the avatar). Good spots are up a stair or on a balcony looking over the main space, in the middle of the main space at eye height facing what it is about, and at an edge looking back over all of it.\n\n\
+## Publishing on Orbiters, and the disk\n\n\
+`get_state`'s `orbiters` says which Orbiters environment Orbiters - N4N0 talks to (production is orbiters.cc, what everyone sees; development is the server on this computer) and under which account, and its `disks` how much room is left. Labels (label_world) and pictures (publish_3d_picture) go to that environment. If the person asked for another one, `orbiters_environment` with `action: switch` switches the whole app, as its Settings switch does (its answer says what changes for the person: the account, the update feed, where labels and pictures go): do it once, say so in your report, and never switch back unless the person asked. It is refused while labels still wait to be sent.\n\n\
+For each world: take at least three pictures from different places (see Viewpoints). Once a picture's `reconstruction` is done (`pictures` lists every picture the bridge took, even before a restart, with its reconstruction and publishing), `publish_3d_picture` a world's other pictures with `visibility: private` and its best one `public`, last: Orbiters lists one public 3D picture per account and world, so a later public one takes an earlier one's place. The answer gives the item's `id` and `link`. When reconstructions wait for VRChat to close (`waiting_starts`), publish a world's pictures later, from another world: `pictures` with `unpublished: true` lists what is left. Publish only pictures that show the world (not a black, blurred or empty one).\n\n\
+Room on this computer: an 8 s picture takes about 230 MB (a world of three 0.7 to 1.1 GB) until it is reconstructed; its keyframes and depth frames are 190 MB of it, and only its reconstruction reads them. Once a picture is reconstructed, `free_picture_files` with `capture_files` deletes those and keeps its 3D view and all that publishing reads (about 45 MB left); once it is published, `everything` deletes it whole (it stays on Orbiters, in the account's gallery). Pictures taken before this build are found by `pictures` too. Do it for each published picture as you go: a tour of hundreds of pictures fills the disk within hours otherwise. When `get_state` says `disk_warning`, free files before the next picture.\n\n\
 ## When to give up on a world\n\n\
 Move on to the next world, and say so at the end, when:\n\
 - `go_to_world` or `wait_for` fails with `start_timeout`, or the world does not load within about four minutes;\n\
@@ -114,10 +135,11 @@ pub fn list() -> Value {
         {
             "name": "find_worlds",
             "title": "Find worlds",
-            "description": "Lists worlds to go to, with their ids for go_to_world: up to 24 a page, `more` true when `next_page` has more. Use it when you were not given world ids. The popular worlds are popular, trending and active; what VRChat highlights is spotlight_pc and spotlight_cross_platform, its two Spotlight rows. VRChat's lists go at most 21 pages deep (pages 0 to 20, 504 worlds). VRChat's API is rate limited: page one call at a time, and only as far as you need; the lists overlap, so drop ids you already have.",
+            "description": "Lists worlds to go to, with their ids for go_to_world: up to 24 a page, `more` true when `next_page` has more. Use it when you were not given world ids. The popular worlds are popular, trending and active; what VRChat highlights is spotlight_pc and spotlight_cross_platform, its two Spotlight rows; its Worlds menu's other rows are community_labs, random, avatar_worlds, games, updated_recently, new and classics; the person's own world playlists are playlists (first without group to list them). VRChat's lists go at most 21 pages deep (pages 0 to 20, 504 worlds). VRChat's API is rate limited: page one call at a time, and only as far as you need; the lists overlap, so drop ids you already have.",
             "inputSchema": { "type": "object", "properties": {
-                "source": { "type": "string", "enum": ["search", "visited", "favorites", "trending", "popular", "active", "spotlight_pc", "spotlight_cross_platform"], "description": "search: by name, needs query. visited: where this account has been, latest first. favorites: this account's favorite worlds. trending: what is hot right now (VRChat's Hot row). popular: most played of all time. active: most people in them now. spotlight_pc and spotlight_cross_platform: the worlds VRChat highlights in its Spotlight - PC and Spotlight - Cross Platform rows, latest updated first." },
+                "source": { "type": "string", "enum": ["search", "visited", "favorites", "playlists", "trending", "popular", "active", "spotlight_pc", "spotlight_cross_platform", "community_labs", "random", "avatar_worlds", "games", "updated_recently", "new", "classics"], "description": "search: by name, needs query. visited: where this account has been, latest first. favorites: this account's favorite worlds. playlists: the world playlists (favourite groups) of the VRChat account signed in in Orbiters - N4N0 (the person's main account): without group it lists them, with group that one's worlds. trending: what is hot right now (VRChat's Hot row). popular: most played of all time. active: most people in them now. spotlight_pc and spotlight_cross_platform: the worlds VRChat highlights in its Spotlight - PC and Spotlight - Cross Platform rows, latest updated first. community_labs, random, avatar_worlds, games, updated_recently, new, classics: VRChat's other rows of its Worlds menu, as its own client asks for them." },
                 "query": { "type": "string", "description": "Words in the world's name, for source search." },
+                "group": { "type": "string", "description": "For source playlists: a playlist's group from its list (worlds1…)." },
                 "page": { "type": "integer", "minimum": 0, "description": "From 0; at most 20 but for visited." },
             }, "required": ["source"], "additionalProperties": false },
             "annotations": read_only,
@@ -234,6 +256,19 @@ pub fn list() -> Value {
             "annotations": acts,
         },
         {
+            "name": "aim_camera",
+            "title": "Place VRChat's camera",
+            "description": "Moves VRChat's open camera itself, over OSC, without the avatar walking: forward_m, right_m and up_m from where it is (along where it looks, level; up is straight up), turn_deg to turn it (positive right), pitch_deg to tilt it (0 level, positive looks down). take_3d_picture then flies around that spot and comes back to it. Use it to get above a crowd of objects or a wall, out over a plaza, to look down over the world from higher, or to face what is interesting, between pictures without the menus. At most 25 m each way a call; nothing stops the camera going into a wall or out of the world: look with screenshot (the camera's panel shows what it sees) after each move. Needs the camera open and its pose known.",
+            "inputSchema": { "type": "object", "properties": {
+                "forward_m": { "type": "number", "minimum": -25, "maximum": 25 },
+                "right_m": { "type": "number", "minimum": -25, "maximum": 25 },
+                "up_m": { "type": "number", "minimum": -25, "maximum": 25 },
+                "turn_deg": { "type": "number", "minimum": -180, "maximum": 180 },
+                "pitch_deg": { "type": "number", "minimum": -80, "maximum": 80, "description": "Absolute. Default: as it is." },
+            }, "additionalProperties": false },
+            "annotations": acts,
+        },
+        {
             "name": "world_labels",
             "title": "Read a world's labels",
             "description": format!("Reads the labels N4N0 lets people give worlds (`offered`: a fixed list, only these ids exist, each with its English name and, for ai-world, the reason it needs) and those the world already has (`labels`: how many people gave each, and `mine` for the signed-in Orbiters account's own), and which account and server label_world would publish under. Without world_id: the world this session is in. Call it after looking around a world, before label_world. {LABELS_ARE}"),
@@ -246,7 +281,7 @@ pub fn list() -> Value {
         {
             "name": "label_world",
             "title": "Label a world",
-            "description": format!("Gives a world labels from world_labels' list (`add`), or takes back labels you gave (`remove`), exactly as a person's Label it on N4N0's worlds page: the same queue, rules, limits and account. {LABELS_ARE} Any id outside the list is refused, and nothing is sent then. ai-world also needs `reason`: at least 10 words, at most 500 characters, saying what you saw. Only for the world this session is in, or one it arrived in during this run (default: the one it is in). Waits up to wait_s for Orbiters to take it and returns the world's labels; `sent` false means it is queued and Orbiters - N4N0 keeps trying by itself."),
+            "description": format!("Gives a world labels from world_labels' list (`add`), or takes back labels you gave (`remove`), exactly as a person's Label it on N4N0's worlds page: the same queue, rules, limits and account. {LABELS_ARE} Any id outside the list is refused, and nothing is sent then. ai-world also needs `reason`: at least 10 words, at most 500 characters, saying what you saw. Only for a world a session of this bridge arrived in, now or earlier, even before a restart of the app (default: the one it is in). It goes to the Orbiters environment get_state's `orbiters` names. Waits up to wait_s for Orbiters to take it and returns the world's labels; `sent` false means it is queued and Orbiters - N4N0 keeps trying by itself."),
             "inputSchema": { "type": "object", "properties": {
                 "world_id": { "type": "string", "description": "wrld_…; default: the world this session is in." },
                 "add": { "type": "array", "items": { "type": "string", "enum": label_ids() }, "uniqueItems": true, "description": "Labels to give: only those that match what you saw there." },
@@ -297,6 +332,7 @@ pub fn list() -> Value {
         }
         tool
     })
+    .chain(super::tour::list())
     .chain(super::projects::list())
     .chain(super::sandbox::list())
     .collect::<Vec<Value>>()
@@ -354,7 +390,7 @@ fn file_name(path: &std::path::Path) -> String {
 impl Bridge {
     /// One tool call, whose outcome goes to the log (all but what only reads: those fill it with nothing).
     pub fn call(&self, name: &str, args: &Value, call: &Call) -> Result<Answer, Failure> {
-        let acts = !matches!(name, "get_state" | "wait_for" | "find_worlds" | "list_sessions" | "world_labels") && !super::projects::reads(name);
+        let acts = !matches!(name, "get_state" | "wait_for" | "find_worlds" | "list_sessions" | "world_labels") && !super::projects::reads(name) && !super::tour::reads(name);
         let result = match name {
             "vr_sandbox" => {
                 if !matches!(args["action"].as_str(), Some("stop" | "restore" | "status")) {
@@ -364,6 +400,7 @@ impl Bridge {
                 self.exclusively(&main, || self.sandbox_call(args))
             }
             unity if super::projects::NAMES.contains(&unity) => self.projects.call(unity, args, call, self.paused()),
+            tour if super::tour::NAMES.contains(&tour) => self.tour_call(tour, args, call),
             "open_session" => self.open_session(args, call),
             "list_sessions" => Ok(Answer::Data(self.list_sessions())),
             "close_session" => self.session_of(args, true).and_then(|s| self.exclusively(&s, || self.close_session(&s, call))),
@@ -391,6 +428,7 @@ impl Bridge {
                     "mouse" => self.exclusively(s, || self.mouse(s, args)),
                     "focus_game" => self.exclusively(s, || self.focus_game(s)),
                     "wear_avatar" => self.exclusively(s, || self.wear_avatar(s, args)),
+                    "aim_camera" => self.exclusively(s, || self.aim_camera(s, args, call)),
                     "world_labels" => self.world_labels(s, args),
                     "label_world" => self.exclusively(s, || self.label_world(s, args)),
                     _ => self.exclusively(s, || self.take_3d_picture(s, args, call)),
@@ -425,6 +463,13 @@ impl Bridge {
             "wear_avatar" => format!("wear {}", args["avatar_id"].as_str().unwrap_or("?")),
             "take_3d_picture" => format!("3D picture of {} s", args["length_s"].as_u64().unwrap_or(4)),
             "screenshot" => "screenshot".into(),
+            "aim_camera" => format!(
+                "camera {:+.1} m forward, {:+.1} m right, {:+.1} m up, turned {:+.0}°",
+                number(args, "forward_m", 0.0),
+                number(args, "right_m", 0.0),
+                number(args, "up_m", 0.0),
+                number(args, "turn_deg", 0.0)
+            ),
             "label_world" => {
                 let ids = |k: &str| args[k].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default();
                 format!("label {}: +[{}] -[{}]", args["world_id"].as_str().unwrap_or("this world"), ids("add"), ids("remove"))
@@ -572,6 +617,10 @@ impl Bridge {
             return;
         }
         let seen = s.game.seen();
+        // The account a side session's VRChat is signed in with: its private instances are a bridge session's own.
+        if let Some((account, _)) = seen.session_account.as_ref().filter(|_| !s.is_main()) {
+            self.journal.lock().unwrap().account(account);
+        }
         let mut run = s.run.lock().unwrap();
         let mut settled = false;
         // Where it is now, when that is this VRChat's own news: not a place it was in or asked for before this start (a log
@@ -593,6 +642,7 @@ impl Bridge {
                 let asked = place_key(&going.world_id, &going.instance);
                 if arrived {
                     let world = going.world_id.to_ascii_lowercase();
+                    self.journal.lock().unwrap().arrived(&world, seen.world_name.as_deref(), s.profile.unwrap_or(0));
                     if !run.been.contains(&world) {
                         run.been.push(world);
                     }
@@ -724,6 +774,7 @@ impl Bridge {
         let paused = self.paused_in(s);
         let picture_list: Vec<Value> = pictures.iter().map(|p| self.picture_json(s, p, &seen)).collect();
         let mut next = Self::next_step(&seen, &paused, started_by_bridge, private, going.is_some(), camera_open, capture_kit);
+        let (orbiters, disks, disk_warning) = self.orbiters_state();
         if seen.needs_sign_in {
             next = sign_in_failure(s).next;
         } else if s.is_main() && seen.running && !started_by_bridge {
@@ -775,7 +826,10 @@ impl Bridge {
                 "waiting_starts": seen.queue_waits_for,
             },
             "pictures": picture_list,
-            "next": next,
+            "orbiters": orbiters,
+            "disks": disks,
+            "next": match &disk_warning { Some(w) => format!("{w} Then: {next}"), None => next },
+            "disk_warning": disk_warning,
         })
     }
 
@@ -831,11 +885,12 @@ impl Bridge {
             "frames": s.game.picture_files(&picture.session).frames,
             "keyframes": s.game.picture_files(&picture.session).keyframes,
             "reconstruction": self.reconstruction_of(s, &picture.session, seen),
+            "publish": self.publish_of(&picture.session),
         })
     }
 
     /// Where a session's reconstruction stands.
-    fn reconstruction_of(&self, s: &Session, session: &std::path::Path, seen: &Seen) -> Value {
+    pub(super) fn reconstruction_of(&self, s: &Session, session: &std::path::Path, seen: &Seen) -> Value {
         if let Some(job) = seen.reconstruction.as_ref().filter(|j| j.session == session) {
             return json!({ "state": "running", "stage": job.stage, "progress": job.progress });
         }
@@ -869,11 +924,29 @@ impl Bridge {
             Some("trending") => Find::Trending,
             Some("spotlight_pc") => Find::SpotlightPc,
             Some("spotlight_cross_platform") => Find::SpotlightCrossPlatform,
+            Some(row) if ROWS.iter().any(|(name, _)| *name == row) => Find::Row(ROWS.iter().find(|(name, _)| *name == row).map(|(_, r)| *r).unwrap_or(orbiters_core::maps::Row::Random)),
+            Some("playlists") => {
+                let groups = s.game.favorite_groups()?;
+                let Some(group) = args["group"].as_str() else {
+                    return Ok(Answer::Data(json!({
+                        "playlists": groups.iter().map(|(tag, name)| json!({ "group": tag, "name": name })).collect::<Vec<_>>(),
+                        "next": if groups.is_empty() {
+                            "The VRChat account signed in in Orbiters - N4N0 has no world playlists: use another source."
+                        } else {
+                            "find_worlds with source playlists and one of these groups lists its worlds."
+                        },
+                    })));
+                };
+                if !groups.iter().any(|(tag, _)| tag == group) {
+                    return Err(Failure::new("unknown_playlist", format!("{group:?} is not one of this account's world playlists."), "find_worlds with source playlists and no group lists them."));
+                }
+                Find::FavoriteGroup(group.to_string())
+            }
             _ => {
                 return Err(Failure::new(
                     "bad_arguments",
-                    "source must be search, visited, favorites, trending, popular, active, spotlight_pc or spotlight_cross_platform.",
-                    "Pass one of those.",
+                    "source must be one of find_worlds' sources.",
+                    "Pass one of those: search, visited, favorites, playlists, trending, popular, active, spotlight_pc, spotlight_cross_platform, community_labs, random, avatar_worlds, games, updated_recently, new, classics.",
                 ))
             }
         };
@@ -1064,7 +1137,7 @@ impl Bridge {
     }
 
     /// Waits until `done`, the time is up (`false`), or the call has to end.
-    fn wait_until(&self, limit: Duration, call: &Call, done: impl Fn() -> bool) -> Result<bool, Failure> {
+    pub(super) fn wait_until(&self, limit: Duration, call: &Call, done: impl Fn() -> bool) -> Result<bool, Failure> {
         let begin = Instant::now();
         loop {
             if done() {
@@ -1483,6 +1556,15 @@ impl Bridge {
             ));
         }
         let session = seen.capture.session.clone().unwrap_or_default();
+        self.journal.lock().unwrap().pictured(super::journal::Picture {
+            session: file_name(&session),
+            world_id: seen.world_id.clone(),
+            world_name: seen.world_name.clone(),
+            length_s,
+            profile: s.profile.unwrap_or(0),
+            at: orbiters_core::visited::now(),
+            freed: None,
+        });
         s.run.lock().unwrap().pictures.push(PictureRecord {
             session: session.clone(),
             world_id: seen.world_id.clone(),
@@ -1511,6 +1593,56 @@ impl Bridge {
             "keyframes": files.keyframes,
             "reconstruction": self.reconstruction_of(s, &session, &seen),
             "next": if saved { "Take another, or go on. Its reconstruction follows the app's setting: `reconstruction` says where it stands." } else { "Still recording: call wait_for with until picture_saved." },
+        })))
+    }
+}
+
+impl Bridge {
+    /// `aim_camera`: VRChat's open camera put somewhere else, over OSC, from where it is now.
+    fn aim_camera(&self, s: &Session, args: &Value, call: &Call) -> Result<Answer, Failure> {
+        let (seen, _) = self.may_act(s)?;
+        if !matches!(seen.capture.state.as_str(), "idle" | "") {
+            return Err(Failure::new("picture_under_way", "A recording is under way: its flight moves the camera.", "Call wait_for with until picture_saved first."));
+        }
+        if s.game.camera_open() != Some(true) {
+            return Err(Failure::new(
+                "camera_closed",
+                "VRChat's camera is not open.",
+                "press esc, screenshot, click the camera icon in the menu's bottom row, screenshot, click Stream Camera.",
+            ));
+        }
+        let Some(from) = s.game.camera_pose() else {
+            return Err(Failure::new("camera_pose_unknown", "VRChat has not said where its camera is.", "turn by a few degrees, then try again."));
+        };
+        let get = |key: &str, limit: f64| -> Result<f32, Failure> {
+            let v = number(args, key, 0.0);
+            if !v.is_finite() || v.abs() > limit {
+                return Err(Failure::new("bad_arguments", format!("{key} is at most {limit} each way."), "Move in steps, looking with screenshot between them."));
+            }
+            Ok(v as f32)
+        };
+        let (forward, right, up, turn) = (get("forward_m", AIM_REACH_M)?, get("right_m", AIM_REACH_M)?, get("up_m", AIM_REACH_M)?, get("turn_deg", 180.0)?);
+        // VRChat gives Unity's Euler angles, 0 to 360: a pitch of 350 looks up by 10.
+        let level = |a: f32| if a > 180.0 { a - 360.0 } else { a };
+        let pitch = match args["pitch_deg"].as_f64() {
+            Some(p) if p.is_finite() && p.abs() <= 80.0 => p as f32,
+            Some(_) => return Err(Failure::new("bad_arguments", "pitch_deg is from -80 to 80.", "0 is level, positive looks down.")),
+            None => level(from[3]),
+        };
+        // Unity: yaw turns forward (+Z) towards +X; forward and right are level.
+        let yaw = from[4].to_radians();
+        let (sin, cos) = yaw.sin_cos();
+        let to = [from[0] + forward * sin + right * cos, from[1] + up, from[2] + forward * cos - right * sin, pitch, (from[4] + turn).rem_euclid(360.0), 0.0];
+        s.game.set_camera_pose(to)?;
+        // VRChat's camera eases to a pose: a moment before the screenshot shows it there.
+        self.wait_until(Duration::from_millis(600), call, || false)?;
+        let moved = ((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2) + (to[2] - from[2]).powi(2)).sqrt();
+        let round = |p: [f32; 6]| p.map(|v| (v * 100.0).round() / 100.0);
+        Ok(Answer::Data(json!({
+            "from": round(from),
+            "to": round(to),
+            "moved_m": (f64::from(moved) * 10.0).round() / 10.0,
+            "next": "Look with screenshot: the camera's panel shows what it sees from there. If it is in a wall, under the floor or facing nothing, aim_camera again. Then take_3d_picture: it flies around this spot.",
         })))
     }
 }
@@ -1977,11 +2109,13 @@ impl Bridge {
             let seen = s.game.seen();
             let here = seen.in_world && seen.world_id.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(&world));
             let run = s.run.lock().unwrap();
-            let been = run.been.contains(&world) || run.pictures.iter().any(|p| p.world_id.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(&world)));
+            let been = run.been.contains(&world)
+                || run.pictures.iter().any(|p| p.world_id.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(&world)))
+                || self.journal.lock().unwrap().was_in(&world);
             if !here && !been {
                 return Err(Failure::new(
                     "not_seen_here",
-                    "This session has not been in that world during this run: labels are only for worlds you saw yourself.",
+                    "No session of this bridge has been in that world (the bridge keeps the worlds its sessions arrived in, across restarts): labels are only for worlds you saw yourself.",
                     "go_to_world to it and look around with screenshots first, then label it.",
                 ));
             }
@@ -2056,8 +2190,9 @@ mod tests {
         let tools = list();
         let tools = tools.as_array().unwrap();
         let vrchat = tools.iter().filter(|t| !t["name"].as_str().unwrap().starts_with("unity_")).count();
-        // The thirteen of a game, two for its labels, and three for the sessions (and the sandbox's, in its builds).
-        assert!(vrchat <= 19, "few: {vrchat}");
+        // The thirteen of a game, two for its labels, three for the sessions, four for a tour's environment, publishing and
+        // pictures (and the sandbox's, in its builds).
+        assert!(vrchat <= 23, "few: {vrchat}");
         assert_eq!(tools.len(), vrchat + super::super::projects::NAMES.len(), "the Unity projects tools after them");
         for tool in tools {
             assert!(tool["description"].as_str().unwrap().len() > 60, "{tool}");

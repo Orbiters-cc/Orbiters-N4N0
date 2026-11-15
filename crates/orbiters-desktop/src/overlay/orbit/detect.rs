@@ -230,9 +230,25 @@ const CAMERA_RIM_QUIET: f32 = 24.0;
 /// The share of rows that must agree on each side, and of all the looks that must find the rim itself.
 const CAMERA_RIM_FOUND: f32 = 0.8;
 const CAMERA_RIM_SEEN: f32 = 0.65;
-/// How large it may be against a 16:9 window's at its size (its own place at 720 tall, scaled by the smaller of width / 1280 and height / 720): what was measured is 1,
-/// and other shapes were not; a dark centred window frame of a world at 0.46 and the Quick Menu's frame at 1.57 are not it.
-const CAMERA_SCALE: [f32; 2] = [0.8, 1.4];
+/// How far from each way it may scale it is looked for ([`camera_halves`]): a dark centred window frame of a world at 0.46 and the Quick Menu's frame at 1.57 of the
+/// 16:9 size are not it.
+const CAMERA_SCALE: [f32; 2] = [0.8, 1.25];
+
+/// Half the rim's outside width it would have in a window of `client`, each way VRChat may scale it. Measured with the window's height at 16:9 (720, 540, 600 tall in
+/// Enzo's `two-vrchats.png`, 1080): `h / 720`. Other shapes were not measured (no game was ours to resize, 2026-11-15, and his screen is 2560 x 1440, 16:9, where all
+/// three agree), so the panel is also looked for as VRChat's own Quick Menu scales (`zones::quick_menu`) and as the width alone would scale it.
+pub fn camera_halves(client: Vec2) -> [f32; 3] {
+    let (w, h) = (client.x, client.y);
+    let by_height = h / 720.0;
+    let menu = by_height * ((w / h.max(1.0)) / (16.0 / 9.0)).min(1.0).powf(0.28);
+    [by_height, menu, w / 1280.0].map(|k| CAMERA_PANEL[0] / 2.0 * k)
+}
+
+/// Where its rim would be, centred, each way it may scale ([`camera_halves`]).
+pub fn camera_expected(client: Vec2) -> Vec<Rect> {
+    let tall = CAMERA_PANEL[1] / CAMERA_PANEL[0];
+    camera_halves(client).iter().map(|half| Rect::from_center_size(pos2(client.x / 2.0, client.y / 2.0), vec2(half * 2.0, half * 2.0 * tall)).round()).collect()
+}
 
 /// What of a frame the camera's look reads: thin rows across the whole window and thin columns down it ([`CAMERA_ROWS`], [`CAMERA_COLUMNS`]), about 1% of it.
 pub fn camera_parts(client: Vec2) -> Vec<Rect> {
@@ -296,11 +312,12 @@ pub fn camera_panel(parts: &[Part], client: Vec2) -> Option<Rect> {
     let rows: Vec<(i32, Vec<f32>)> = parts[..CAMERA_ROWS.len()].iter().map(|p| (p.y0 as i32, line_of(p, true))).collect();
     let columns: Vec<Vec<f32>> = parts[CAMERA_ROWS.len()..].iter().map(|p| line_of(p, false)).collect();
     let tall = CAMERA_PANEL[1] / CAMERA_PANEL[0];
-    let usual = CAMERA_PANEL[0] / 2.0 * (client.x / 1280.0).min(client.y / 720.0);
-    let widest = ((w / 2 - 6) as f32).min((h / 2 - 6) as f32 / tall).min(usual * CAMERA_SCALE[1]) as i32;
-    let narrowest = (usual * CAMERA_SCALE[0]).max(60.0) as i32;
+    let fits = ((w / 2 - 6) as f32).min((h / 2 - 6) as f32 / tall) as i32;
+    let mut halves: Vec<i32> = camera_halves(client).iter().flat_map(|m| ((m * CAMERA_SCALE[0]).max(60.0) as i32)..=((m * CAMERA_SCALE[1]) as i32).min(fits)).collect();
+    halves.sort_unstable();
+    halves.dedup();
     let mut best: Option<(f32, Rect)> = None;
-    for half in narrowest..=widest {
+    for half in halves {
         let thick = ((half * 2) as f32 * CAMERA_RIM).round().max(3.0) as i32;
         let high = half as f32 * tall;
         let left = w / 2 - half;
@@ -351,37 +368,153 @@ pub fn camera_panel(parts: &[Part], client: Vec2) -> Option<Rect> {
     best.map(|(_, r)| r)
 }
 
-/// [`camera_panel`] on a whole frame of `width` x `height` (top-down BGRA, no padding), read through the same parts as the capture reads: for tests and pictures.
-pub fn camera_panel_in(bgra: &[u8], width: u32, height: u32) -> Option<Rect> {
-    let client = vec2(width as f32, height as f32);
-    let parts: Vec<Part> = camera_parts(client)
+/// What a look says of the rim at a place where the panel was: there, clearly gone, or nothing can be told (a world as dark as the rim, a cursor or a flash over it).
+/// Gone: hardly any look finds it, and most of them see something else than a dark band in a dark world (pitch dark tells nothing either way).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rim {
+    There,
+    Gone,
+    Unclear,
+}
+
+/// The share of the rim's looks ([`camera_rim_at`]) that find it, at or above which it is there, and at or under which it is gone. On 90 real 1280 x 720 frames
+/// (2026-11-15, bridge reports, nofocus, the fixtures) at the panel's place: 8 to 14 of 14 with the panel, 0 to 6 without it (the Quick Menu's frames reach 6).
+const RIM_THERE: f32 = 0.5;
+const RIM_GONE: f32 = 0.3;
+/// Brighter than this where the rim should be, nothing of a dark glass is there (it is about 50 over the brightest sky).
+const RIM_GONE_BRIGHT: f32 = 95.0;
+
+/// The rim at `rect` (where the panel is, or would be): its two sides along the rows that cross them, its top and its foot down the columns.
+pub fn camera_rim_at(parts: &[Part], client: Vec2, rect: Rect) -> Rim {
+    if parts.len() != CAMERA_ROWS.len() + CAMERA_COLUMNS.len() || rect.width() < 20.0 {
+        return Rim::Unclear;
+    }
+    let h = client.y.round() as i32;
+    let thick = (rect.width() * CAMERA_RIM).round().max(3.0) as i32;
+    let high = rect.height() / 2.0;
+    let (mut there, mut against, mut quiet, mut looks) = (0, 0, 0, 0);
+    let mut look = |line: &[f32], from: i32, slack: i32| {
+        looks += 1;
+        if rim_near(line, from, thick, slack).is_some() {
+            there += 1;
+        } else if quiet_near(line, from, thick, slack) {
+            quiet += 1;
+        } else if (-slack..=slack).all(|d| {
+            let (a, b) = (from + d, from + d + thick);
+            a < 0 || b > line.len() as i32 || mean(line, a, b) > RIM_GONE_BRIGHT
+        }) {
+            against += 1;
+        }
+    };
+    for part in &parts[..CAMERA_ROWS.len()] {
+        if ((part.y0 as i32 - h / 2).abs() as f32) > high * 0.75 {
+            continue;
+        }
+        let line = line_of(part, true);
+        look(&line, rect.left().round() as i32, 2);
+        look(&line, rect.right().round() as i32 - thick, 2);
+    }
+    for part in &parts[CAMERA_ROWS.len()..] {
+        if !(rect.left()..=rect.right()).contains(&(part.x0 as f32)) {
+            continue;
+        }
+        let line = line_of(part, false);
+        look(&line, rect.top().round() as i32, 3);
+        look(&line, rect.bottom().round() as i32 - thick, 3);
+    }
+    if looks == 0 {
+        return Rim::Unclear;
+    }
+    let (there, against, quiet, looks) = (there as f32, against as f32, quiet as f32, looks as f32);
+    if there >= looks * RIM_THERE {
+        Rim::There
+    } else if against >= looks * 0.6 || (there <= looks * RIM_GONE && quiet < looks * 0.5) {
+        Rim::Gone
+    } else {
+        Rim::Unclear
+    }
+}
+
+/// One look for the camera's panel: where it is found, and what became of its rim where it was shown.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraLook {
+    pub found: Option<Rect>,
+    pub at_shown: Rim,
+}
+
+/// A look at a frame's camera parts. Where the panel shows and its rim is still there, that is all (no search). Otherwise it is searched for at every size; and where
+/// VRChat says its camera is open (`open`), also at the places it would be, which a dark world can leave too faint for the search (`41-avatar-back`: 8 of 12 looks).
+pub fn camera_look(parts: &[Part], client: Vec2, shown: Option<Rect>, open: bool) -> CameraLook {
+    let at_shown = shown.map_or(Rim::Unclear, |r| camera_rim_at(parts, client, r));
+    if at_shown == Rim::There {
+        return CameraLook { found: shown, at_shown };
+    }
+    let found = camera_panel(parts, client).or_else(|| if open { camera_expected(client).into_iter().find(|r| camera_rim_at(parts, client, *r) == Rim::There) } else { None });
+    CameraLook { found, at_shown }
+}
+
+/// The camera parts of a whole frame of `width` x `height` (top-down BGRA, no padding), as the capture reads them.
+pub fn camera_parts_in(bgra: &[u8], width: u32, height: u32) -> Vec<Part<'_>> {
+    camera_parts(vec2(width as f32, height as f32))
         .iter()
         .map(|r| {
             let (x0, y0) = (r.min.x as u32, r.min.y as u32);
             let start = ((y0 * width + x0) * 4) as usize;
             Part { x0, y0, width: r.width().ceil() as u32, height: r.height().ceil() as u32, stride: width * 4, bgra: &bgra[start.min(bgra.len())..] }
         })
-        .collect();
-    camera_panel(&parts, client)
+        .collect()
+}
+
+/// [`camera_panel`] on a whole frame of `width` x `height` (top-down BGRA, no padding), read through the same parts as the capture reads: for tests and pictures.
+pub fn camera_panel_in(bgra: &[u8], width: u32, height: u32) -> Option<Rect> {
+    camera_panel(&camera_parts_in(bgra, width, height), vec2(width as f32, height as f32))
 }
 
 /// Looks while VRChat's camera panel shows: tiny, so often enough that what goes is gone within a few frames.
 pub const CAMERA_LOOK_EVERY: Duration = Duration::from_millis(30);
 /// With VRChat's OSC silent (turned off), a menu that closed may have opened the camera: looked for that long after.
 pub const CAMERA_LOOK_AFTER_MENU: Duration = Duration::from_millis(2500);
+/// The rim must be seen gone for this long, and in this many looks, with no look seeing it there in between, before the column goes on the frames' word alone.
+pub const CAMERA_GONE_FOR: Duration = Duration::from_millis(350);
+pub const CAMERA_GONE_LOOKS: u32 = 4;
+/// With VRChat's OSC silent, a panel nothing has seen there for this long (a world too dark to tell) goes: nothing else would ever take it away.
+pub const CAMERA_UNSEEN_FOR: Duration = Duration::from_secs(3);
+
+/// Why the column went (`vr-test.log`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraGone {
+    /// VRChat said over OSC that its camera closed.
+    Closed,
+    /// Esc: VRChat's Quick Menu comes, which closes the camera.
+    Esc,
+    /// Its rim was seen gone, long enough and often enough.
+    RimGone,
+    /// With VRChat's OSC silent: not seen there for a long time, or no frames.
+    Unseen,
+    /// The game behind another window, the setting off, a bridge's VRChat.
+    Reset,
+}
 
 /// From VRChat's word over OSC and the frames to whether its camera panel shows on the desktop, and where (tested without any window).
 ///
 /// VRChat says over OSC when its camera opens and closes (`/usercamera/Mode`, 0 when closed: 2 then 0 at a world change, `nofocus-plan.md`), but a value written to it
-/// is kept while no camera opens (the memory note `vrchat-camera-desktop`), and the panel can be out of view with the camera open. So OSC only says when to look, and
-/// closes at once; the frames say whether the panel is there: two looks in a row to show, two without it to go. Esc opens the Quick Menu, which closes the camera:
-/// the tools go with the key.
+/// is kept while no camera opens (the memory note `vrchat-camera-desktop`). So OSC says when to look, and closes at once; the frames say whether the panel is there:
+/// two looks in a row that find it to show. **Once shown, it stays until there is evidence that the panel is gone** (L-deskcam-glitch, 2026-11-15: two looks without
+/// it took it away, and in a dark world or a busy one a look in three could not tell, so it blinked): OSC saying closed, Esc, or its rim seen gone at its place for
+/// [`CAMERA_GONE_FOR`] and [`CAMERA_GONE_LOOKS`] with no look seeing it there. A look that cannot tell ([`Rim::Unclear`]) changes nothing, nor do frames that stop
+/// coming while VRChat says its camera is open.
 #[derive(Debug, Default)]
 pub struct CameraWatch {
     shown: Option<Rect>,
     candidate: Option<Rect>,
     hits: u32,
-    misses: u32,
+    /// Since when, and in how many looks, its rim has been seen gone with no look seeing it there.
+    gone_since: Option<Instant>,
+    gone_looks: u32,
+    /// The last look that saw it there.
+    seen_there: Option<Instant>,
+    /// Found somewhere else than where it shows, in so many looks in a row.
+    elsewhere: Option<(Rect, u32)>,
     last_frame: Option<Instant>,
     /// Esc was pressed: until then the panel's frames are its closing.
     gone_until: Option<Instant>,
@@ -391,12 +524,25 @@ pub struct CameraWatch {
     client: Option<Vec2>,
     /// `shown` was carried over from another size of the window, not yet seen at this one: the next look that finds it near takes its place to the pixel.
     carried: bool,
+    /// Why it last went, once: for the log.
+    went: Option<CameraGone>,
+}
+
+/// Two places of the panel that are the same one: within a few pixels, and a little more in a large window.
+fn near(a: Rect, b: Rect) -> bool {
+    let slack = 4.0 + 0.004 * a.height().max(b.height()) * 4.0;
+    (a.min - b.min).length() <= slack && (a.max - b.max).length() <= slack
 }
 
 impl CameraWatch {
     /// Where its panel shows now.
     pub fn shown(&self) -> Option<Rect> {
         self.shown
+    }
+
+    /// Why it went, once, since this was last asked.
+    pub fn take_went(&mut self) -> Option<CameraGone> {
+        self.went.take()
     }
 
     /// Whether the capture should look for it, with VRChat's `said` over OSC.
@@ -427,39 +573,82 @@ impl CameraWatch {
         self.shown = self.shown.map(carry);
         self.candidate = self.candidate.map(carry);
         self.carried = self.shown.is_some();
-        self.misses = 0;
+        self.gone_since = None;
+        self.gone_looks = 0;
+        self.elsewhere = None;
     }
 
     /// Esc: VRChat's Quick Menu comes, its camera goes. Gone now, and its closing is not taken for it.
     pub fn esc(&mut self, now: Instant) {
-        self.shown = None;
-        self.candidate = None;
-        self.hits = 0;
+        if self.shown.is_some() {
+            self.went = Some(CameraGone::Esc);
+        }
+        self.hide();
         self.gone_until = Some(now + STILL_GOING);
     }
 
-    /// A new frame's look: the panel's place, or `None`.
+    fn hide(&mut self) {
+        self.shown = None;
+        self.candidate = None;
+        self.hits = 0;
+        self.gone_since = None;
+        self.gone_looks = 0;
+        self.elsewhere = None;
+        self.carried = false;
+    }
+
+    /// A new frame's look that only says where it found the panel: its rim where it shows counts as there when found there, and as unclear otherwise.
     pub fn frame(&mut self, found: Option<Rect>, now: Instant) -> Option<Rect> {
+        let at_shown = match (found, self.shown) {
+            (Some(f), Some(s)) if near(f, s) => Rim::There,
+            _ => Rim::Unclear,
+        };
+        self.look(CameraLook { found, at_shown }, now)
+    }
+
+    /// A new frame's look ([`camera_look`]).
+    pub fn look(&mut self, look: CameraLook, now: Instant) -> Option<Rect> {
         self.last_frame = Some(now);
-        let found = found.filter(|_| !self.gone_until.is_some_and(|u| now < u));
-        let near = |a: Rect, b: Rect| (a.min - b.min).length() <= 4.0 && (a.max - b.max).length() <= 4.0;
+        let closing = self.gone_until.is_some_and(|u| now < u);
+        let found = look.found.filter(|_| !closing);
         match self.shown {
-            Some(shown) => match found {
-                Some(f) if near(f, shown) => {
-                    self.misses = 0;
+            Some(shown) => {
+                let there = look.at_shown == Rim::There || found.is_some_and(|f| near(f, shown));
+                if there {
+                    self.seen_there = Some(now);
+                    self.gone_since = None;
+                    self.gone_looks = 0;
+                    self.elsewhere = None;
                     if std::mem::take(&mut self.carried) {
+                        self.shown = found.or(Some(shown));
+                    }
+                    return self.shown;
+                }
+                // Found whole somewhere else, twice in a row: it moved (another size of window, settled).
+                if let Some(f) = found {
+                    let again = self.elsewhere.filter(|(e, _)| near(*e, f)).map_or(1, |(_, n)| n + 1);
+                    self.elsewhere = Some((f, again));
+                    if again >= LOOKS_TO_OPEN {
                         self.shown = Some(f);
+                        self.seen_there = Some(now);
+                        self.gone_since = None;
+                        self.gone_looks = 0;
+                        self.elsewhere = None;
+                        self.carried = false;
+                        return self.shown;
+                    }
+                } else {
+                    self.elsewhere = None;
+                }
+                if look.at_shown == Rim::Gone {
+                    let since = *self.gone_since.get_or_insert(now);
+                    self.gone_looks += 1;
+                    if self.gone_looks >= CAMERA_GONE_LOOKS && now.duration_since(since) >= CAMERA_GONE_FOR {
+                        self.went = Some(CameraGone::RimGone);
+                        self.hide();
                     }
                 }
-                _ => {
-                    self.misses += 1;
-                    if self.misses >= LOOKS_TO_CLOSE {
-                        self.shown = None;
-                        self.candidate = found;
-                        self.hits = u32::from(found.is_some());
-                    }
-                }
-            },
+            }
             None => {
                 match (found, self.candidate) {
                     (Some(f), Some(c)) if near(f, c) => self.hits += 1,
@@ -470,29 +659,40 @@ impl CameraWatch {
                 }
                 if self.hits >= LOOKS_TO_OPEN {
                     self.shown = found;
-                    self.misses = 0;
+                    self.seen_there = Some(now);
+                    self.gone_since = None;
+                    self.gone_looks = 0;
                 }
             }
         }
         self.shown
     }
 
-    /// Time passing, with VRChat's `said`: closed over OSC, it goes at once; with no frames, nothing can be said and it goes.
+    /// Time passing, with VRChat's `said`: closed over OSC, it goes at once. With OSC silent, frames that stop or a long time unseen take it away; while VRChat says
+    /// its camera is open, nothing but the evidence above does.
     pub fn tick(&mut self, said: Option<bool>, now: Instant) -> Option<Rect> {
         if said == Some(false) {
+            let went = self.shown.is_some().then_some(CameraGone::Closed);
             self.reset();
+            self.went = went;
+            return None;
         }
-        if self.shown.is_some() && self.last_frame.is_none_or(|f| now.duration_since(f) >= NO_FRAME) {
-            self.shown = None;
-            self.candidate = None;
-            self.hits = 0;
+        if self.shown.is_some() && said.is_none() {
+            let no_frames = self.last_frame.is_none_or(|f| now.duration_since(f) >= NO_FRAME);
+            let unseen = self.seen_there.is_none_or(|t| now.duration_since(t) >= CAMERA_UNSEEN_FOR);
+            if no_frames || unseen {
+                self.went = Some(CameraGone::Unseen);
+                self.hide();
+            }
         }
         self.shown
     }
 
     /// VRChat behind another window, the setting off, a bridge's VRChat: nothing shows, nothing is looked for.
     pub fn reset(&mut self) {
+        let went = self.shown.is_some().then_some(CameraGone::Reset);
         *self = Self::default();
+        self.went = went;
     }
 }
 
@@ -769,6 +969,8 @@ mod tests {
             let want = match name.as_str() {
                 "panel-enzo-cut" => Rect::from_min_max(pos2(329.0, 174.0), pos2(947.0, 530.0)),
                 "panel-forest-960" => Rect::from_min_max(pos2(249.0, 138.0), pos2(711.0, 403.0)),
+                // His second window (`logs7/two-vrchats.png`, cut to its client area).
+                "panel-enzo-1066" => Rect::from_min_max(pos2(276.0, 154.0), pos2(790.0, 446.0)),
                 _ => Rect::from_min_max(pos2(332.0, 185.0), pos2(948.0, 535.0)),
             };
             assert!((found.min - want.min).length() <= 2.5 && (found.max - want.max).length() <= 2.5, "{name} ({client:?}): {found:?}, not {want:?}");
@@ -789,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn the_camera_tools_come_on_two_frames_of_the_panel_and_go_on_two_without() {
+    fn the_camera_tools_come_on_two_frames_of_the_panel_and_stay_through_looks_that_cannot_tell() {
         let t0 = Instant::now();
         let mut c = CameraWatch::default();
         assert!(!c.wants_frames(None, t0), "nothing to look for with OSC silent and no menu gone");
@@ -797,17 +999,39 @@ mod tests {
         assert!(c.wants_frames(Some(true), t0), "VRChat says its camera is open: look");
         assert_eq!(c.frame(Some(panel()), at(t0, 16)), None, "one frame is not enough");
         assert_eq!(c.frame(Some(panel()), at(t0, 33)), Some(panel()));
-        assert_eq!(c.tick(Some(true), at(t0, 40)), Some(panel()));
-        // A frame without it (a hitch, the avatar's hand) keeps it; two in a row take it.
-        assert_eq!(c.frame(None, at(t0, 60)), Some(panel()));
-        assert_eq!(c.frame(Some(panel()), at(t0, 90)), Some(panel()));
-        assert_eq!(c.frame(None, at(t0, 120)), Some(panel()));
-        assert_eq!(c.frame(None, at(t0, 150)), None);
+        // Looks that find nothing and cannot tell (a hitch, the avatar's hand, a dark world) take nothing away, however many in a row.
+        for ms in (60..5000).step_by(30) {
+            assert_eq!(c.frame(None, at(t0, ms)), Some(panel()), "at {ms}");
+            assert_eq!(c.tick(Some(true), at(t0, ms)), Some(panel()));
+        }
         // A panel that moved a pixel is the same panel.
         let moved = panel().translate(vec2(1.0, 0.0));
-        c.frame(Some(panel()), at(t0, 200));
-        c.frame(Some(panel()), at(t0, 230));
-        assert_eq!(c.frame(Some(moved), at(t0, 260)), Some(panel()));
+        assert_eq!(c.frame(Some(moved), at(t0, 5100)), Some(panel()));
+        assert_eq!(c.take_went(), None);
+    }
+
+    /// L-deskcam-glitch: the frames alone take the column away only on evidence: its rim seen gone at its place in [`CAMERA_GONE_LOOKS`] looks over
+    /// [`CAMERA_GONE_FOR`], with no look seeing it there in between.
+    #[test]
+    fn the_rim_seen_gone_long_enough_takes_the_tools_and_less_does_not() {
+        let t0 = Instant::now();
+        let mut c = CameraWatch::default();
+        let gone = CameraLook { found: None, at_shown: Rim::Gone };
+        let there = CameraLook { found: Some(panel()), at_shown: Rim::There };
+        c.look(there, at(t0, 0));
+        c.look(there, at(t0, 30));
+        // Three looks see it gone, then one sees it: nothing changes.
+        for ms in [60, 90, 120] {
+            assert_eq!(c.look(gone, at(t0, ms)), Some(panel()));
+        }
+        c.look(there, at(t0, 150));
+        // Four quick looks are not long enough.
+        for ms in [180, 210, 240, 270] {
+            assert_eq!(c.look(gone, at(t0, ms)), Some(panel()), "at {ms}");
+        }
+        // Gone for long enough, in enough looks: it goes, saying why.
+        assert_eq!(c.look(gone, at(t0, 180) + CAMERA_GONE_FOR), None);
+        assert_eq!(c.take_went(), Some(CameraGone::RimGone));
     }
 
     /// L-fullscreen-resize: VRChat's window goes full screen (and back) with its camera open. The column's place is the new window's at once, in the turn the size
@@ -884,18 +1108,133 @@ mod tests {
         c.frame(Some(panel()), at(t0, 400));
         c.frame(Some(panel()), at(t0, 430));
         assert!(c.wants_frames(None, at(t0, 60_000)), "it shows: looked at as long as it does");
-        c.frame(None, at(t0, 60_030));
-        c.frame(None, at(t0, 60_060));
+        // With nothing to say it is closed, a panel unseen for a long time goes.
+        for ms in (460..3400).step_by(30) {
+            c.frame(None, at(t0, ms));
+            c.tick(None, at(t0, ms));
+        }
+        assert_eq!(c.shown(), None);
+        assert_eq!(c.take_went(), Some(CameraGone::Unseen));
         assert!(!c.wants_frames(None, at(t0, 60_100)), "gone, and no menu since: no capture");
     }
 
+    /// Frames that stop (a hitch, a loading screen) take nothing away while VRChat says its camera is open; with OSC silent, nothing else can say it, and it goes.
     #[test]
-    fn the_camera_tools_go_when_frames_stop() {
+    fn frames_that_stop_take_the_tools_only_when_vrchat_says_nothing() {
         let t0 = Instant::now();
         let mut c = CameraWatch::default();
         c.frame(Some(panel()), at(t0, 16));
         c.frame(Some(panel()), at(t0, 33));
-        assert_eq!(c.tick(Some(true), at(t0, 33) + NO_FRAME), None);
+        assert_eq!(c.tick(Some(true), at(t0, 33) + NO_FRAME * 5), Some(panel()));
+        assert_eq!(c.tick(None, at(t0, 33) + NO_FRAME * 5), None);
+    }
+
+    /// One frame of the panel cut from a real one, scaled to `client` (VRChat's panel scales with the window's height: 540, 600, 720 and 1080 measured): the parts a
+    /// look reads, as BGRA.
+    fn frame_at(name: &str, client: Vec2) -> Vec<u8> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/desktop").join(name);
+        let image = image::open(path).unwrap().to_rgba8();
+        let (w, h) = (client.x as u32, client.y as u32);
+        // Scaled by the height about the centre; a wider or narrower window gets the world's edges stretched to its sides, the panel staying as the height scales it.
+        let k = client.y / image.height() as f32;
+        let scaled = image::imageops::resize(&image, (image.width() as f32 * k).round() as u32, h, image::imageops::FilterType::Triangle);
+        let mut out = image::imageops::resize(&scaled, w, h, image::imageops::FilterType::Triangle);
+        let left = (w as i64 - scaled.width() as i64) / 2;
+        image::imageops::overlay(&mut out, &scaled, left, 0);
+        out.pixels().flat_map(|p| [p[2], p[1], p[0], 255]).collect()
+    }
+
+    /// The rim's place in `client`, scaled by the height from the 1280 x 720 one.
+    fn rim_in(client: Vec2) -> Rect {
+        Rect::from_center_size(pos2(client.x / 2.0, client.y / 2.0), vec2(616.0, 350.0) * client.y / 720.0)
+    }
+
+    /// L-deskcam-glitch, missing in full screen: the panel at Enzo's screen (2560 x 1440, 16:9, 100 % scale), at 1920 x 1080, in his own second window (1066 x 600,
+    /// cut from `logs7/two-vrchats.png`), and in windows of other shapes (ultrawide, 4:3) where it scales with the height; in the dark-room frame too.
+    #[test]
+    fn the_desktop_camera_panel_is_found_at_his_sizes_and_other_shapes() {
+        for client in [vec2(2560.0, 1440.0), vec2(1920.0, 1080.0), vec2(3440.0, 1440.0), vec2(1440.0, 1080.0), vec2(1600.0, 900.0)] {
+            for name in ["panel-bright-station.jpg", "panel-dark-side.jpg", "panel-corridor.jpg"] {
+                let bgra = frame_at(name, client);
+                let parts = camera_parts_in(&bgra, client.x as u32, client.y as u32);
+                let found = camera_panel(&parts, client).unwrap_or_else(|| panic!("{name} at {client:?}: not found"));
+                let want = rim_in(client);
+                let slack = 2.5 * client.y / 720.0;
+                assert!((found.min - want.min).length() <= slack && (found.max - want.max).length() <= slack, "{name} at {client:?}: {found:?}, not {want:?}");
+                assert_eq!(camera_rim_at(&parts, client, want), Rim::There, "{name} at {client:?}");
+            }
+            let bgra = frame_at("none-after-esc.jpg", client);
+            let parts = camera_parts_in(&bgra, client.x as u32, client.y as u32);
+            assert_eq!(camera_panel(&parts, client), None, "none-after-esc at {client:?}");
+            assert_eq!(camera_rim_at(&parts, client, rim_in(client)), Rim::Gone, "none-after-esc at {client:?}");
+        }
+        let two = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/desktop/panel-enzo-1066.jpg");
+        let (client, found) = panel_on(&two);
+        assert_eq!(client, vec2(1066.0, 600.0));
+        let found = found.expect("his second window");
+        assert!((found.width() - 514.0).abs() <= 3.0 && (found.center() - pos2(533.0, 300.0)).length() <= 3.0, "{found:?}: scaled with the height (616 x 600 / 720)");
+    }
+
+    /// What a look costs the looks' thread at Enzo's screen size: the search at every size, and the look while the panel shows, which only checks its rim.
+    #[test]
+    fn what_a_camera_look_costs_at_his_screen_size() {
+        let client = vec2(2560.0, 1440.0);
+        let bgra = frame_at("panel-bright-station.jpg", client);
+        let parts = camera_parts_in(&bgra, 2560, 1440);
+        let time = |shown: Option<Rect>| {
+            let began = Instant::now();
+            for _ in 0..20 {
+                std::hint::black_box(camera_look(&parts, client, shown, true));
+            }
+            began.elapsed().as_secs_f64() * 1000.0 / 20.0
+        };
+        let (search, held) = (time(None), time(Some(rim_in(client))));
+        eprintln!("camera look at 2560 x 1440: search {search:.2} ms, while shown {held:.3} ms"); // i18n: not shown (a test's measurement)
+        assert!(held * 5.0 < search, "the look while shown checks the rim only");
+    }
+
+    /// L-deskcam-glitch, blinking: a replay of looks at real frames in which one look in three cannot tell (the world gone pitch dark around and inside the panel) and
+    /// one in seven is a flash over everything: the column comes once and never goes; then VRChat's camera closes with no word from OSC (the frame after Esc, with
+    /// the corridor where the rim was), and it goes once, within half a second.
+    #[test]
+    fn a_replay_with_ambiguous_frames_never_flickers() {
+        let client = vec2(2560.0, 1440.0);
+        let (w, h) = (client.x as u32, client.y as u32);
+        let shown_frames: Vec<Vec<u8>> = ["panel-bright-station.jpg", "panel-dark-side.jpg", "panel-corridor.jpg", "panel-flying.jpg"].iter().map(|n| frame_at(n, client)).collect();
+        let dark: Vec<u8> = shown_frames[1].iter().enumerate().map(|(i, v)| if i % 4 == 3 { 255 } else { v / 9 }).collect();
+        let flash: Vec<u8> = shown_frames[0].iter().enumerate().map(|(i, v)| if i % 4 == 3 { 255 } else { v.saturating_add(70) }).collect();
+        let gone = frame_at("none-after-esc.jpg", client);
+        let t0 = Instant::now();
+        let mut c = CameraWatch::default();
+        let (mut changes, mut was) = (0, None);
+        let mut unclear = 0;
+        for n in 0..400u64 {
+            let bgra = if n % 3 == 2 { &dark } else if n % 7 == 6 { &flash } else { &shown_frames[(n % 4) as usize] };
+            let parts = camera_parts_in(bgra, w, h);
+            let look = camera_look(&parts, client, c.shown(), true);
+            unclear += u32::from(look.at_shown != Rim::There && c.shown().is_some());
+            let now = at(t0, n * 30);
+            c.look(look, now);
+            let shown = c.tick(Some(true), now);
+            if shown.is_some() != was.is_some() {
+                changes += 1;
+            }
+            was = shown;
+        }
+        assert_eq!(changes, 1, "it came once and stayed");
+        assert!(unclear > 100, "the replay had {unclear} looks that did not see the rim there: it is a test of something");
+        let parts = camera_parts_in(&gone, w, h);
+        let mut went_at = None;
+        for n in 400..440u64 {
+            let now = at(t0, n * 30);
+            c.look(camera_look(&parts, client, c.shown(), true), now);
+            if c.tick(Some(true), now).is_none() && went_at.is_none() {
+                went_at = Some(n);
+            }
+        }
+        let went_at = went_at.expect("the panel's closing seen");
+        assert!((went_at - 400) * 30 <= 500, "gone {} ms after", (went_at - 400) * 30);
+        assert_eq!(c.take_went(), Some(CameraGone::RimGone));
     }
 
     #[test]

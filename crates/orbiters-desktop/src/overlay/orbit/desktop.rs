@@ -79,9 +79,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut windows = Windows::default();
     let mut panels = Panels::new(backend.clone(), 1.0, true);
     let mut watcher = Watcher::default();
-    // Ready before any key: making it takes more than 100 ms, as long as VRChat takes to show a menu.
-    let mut gpu = Gpu::new().map_err(|e| eprintln!("capture: {e}")).ok();
-    let mut capture: Option<Capture> = None;
+    // The capture and its looks, off this thread: nothing here waits for the GPU.
+    let looker = Looker::start();
+    let mut camera_log = CameraLog::default();
+    // Asked once a second at most: it is the shell's.
+    let mut exclusive_said = (false, None::<Instant>);
     let mut keys = Keys::default();
     let mut hints = Hints::default();
     let mut pill = Pill::default();
@@ -89,9 +91,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut scroller = scroll::Scroller::default();
     let mut said: Option<OrbitStatus> = None;
     let mut last_turn = Instant::now();
-    let mut last_look = None::<Instant>;
     let mut camera = detect::CameraWatch::default();
-    let mut last_camera_look = None::<Instant>;
     let mut was_menu = false;
     // When VRChat's camera panel was last seen, as said to the service (it is part of what proves a live camera before a recording), at most twice a second.
     let mut panel_seen_ns: Option<u64> = None;
@@ -108,7 +108,14 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         let found = game.find(&snap);
         // Exclusive full screen shows no other window: say so, and do nothing.
-        let exclusive = found.is_some_and(|_| full_screen_exclusive());
+        if found.is_some() && exclusive_said.1.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(1)) {
+            let now_exclusive = full_screen_exclusive();
+            if now_exclusive != exclusive_said.0 {
+                super::super::vr_log::line(&format!("desk: exclusive full screen {now_exclusive}")); // i18n: not shown (a log's line)
+            }
+            exclusive_said = (now_exclusive, Some(Instant::now()));
+        }
+        let exclusive = found.is_some() && exclusive_said.0;
         let status = OrbitStatus { note: exclusive.then(|| mark("VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.").to_string()), steamvr_overrides: None, camera_note: None, camera_provisional: false, camera_panel_seen_ns: panel_seen_ns, camera_scale_measured: false };
         if said.as_ref() != Some(&status) {
             backend.orbit_status(status.clone());
@@ -122,9 +129,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pill.show(None, pos2(0.0, 0.0), vec2(0.0, 0.0));
             camera.reset();
             panel_seen_ns = None;
-            if watcher.wants_frames() || !panels.is_empty() || capture.is_some() {
+            looker.ask(None);
+            let _ = looker.answers();
+            camera_log.turn(turn.elapsed(), false, None, camera.take_went(), snap.camera_open_said, vec2(0.0, 0.0), false);
+            if watcher.wants_frames() || !panels.is_empty() {
                 watcher.reset();
-                capture = None;
                 pointer.stop();
                 panels.set_open(None, Vec::new(), &snap);
                 windows.hide_all();
@@ -148,37 +157,27 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
         }
         let camera_frames = camera_wanted && camera.wants_frames(snap.camera_open_said, turn);
-        if watcher.wants_frames() || camera_frames {
-            if capture.is_none() {
-                if gpu.is_none() {
-                    gpu = Gpu::new().map_err(|e| eprintln!("capture: {e}")).ok();
-                }
-                capture = gpu.as_ref().and_then(|g| Capture::new(window, g).map_err(|e| eprintln!("capture: {e}")).ok());
-                // A device lost (a driver's update, say) is made again next time.
-                if capture.is_none() {
-                    gpu = None;
-                }
+        // What the looks found since the last turn; then what they look for now, at the pace of each.
+        for answer in looker.answers() {
+            frames_seen.count(answer.at);
+            camera_log.look(&answer);
+            if let Some((found, coming)) = answer.menu {
+                watcher.frame_coming(found, coming, answer.at);
             }
-            if let Some(c) = capture.as_mut() {
-                // New frames, at the pace of the looks: the menus' and the camera's each at its own.
-                let menus = watcher.wants_frames() && last_look.is_none_or(|t: Instant| turn.duration_since(t) >= watcher.look_every(turn));
-                let panel = camera_frames && last_camera_look.is_none_or(|t: Instant| turn.duration_since(t) >= detect::CAMERA_LOOK_EVERY);
-                if menus || panel {
-                    let client_size = client_size(window);
-                    if let Some(looked) = c.look(window, client_size, menus, panel) {
-                        frames_seen.count(turn);
-                        if let Some((found, coming)) = looked.menu {
-                            last_look = Some(turn);
-                            watcher.frame_coming(found, coming, turn);
-                        }
-                        if let Some(found) = looked.camera {
-                            last_camera_look = Some(turn);
-                            camera.frame(found, turn);
-                        }
-                    }
-                }
+            if let Some(look) = answer.camera.filter(|_| camera_wanted) {
+                camera.look(look, answer.at);
             }
         }
+        let asked = (watcher.wants_frames() || camera_frames).then(|| Ask {
+            window: window.0 as isize,
+            client: client_size(window),
+            menus: watcher.wants_frames(),
+            menu_every: watcher.look_every(turn),
+            camera: camera_frames,
+            shown: camera.shown(),
+            open: snap.camera_open_said == Some(true),
+        });
+        looker.ask(asked);
         let seen = watcher.tick(turn);
         let menu = match seen {
             Seen::Open(Around::Wheel) if snap.settings.orbit.around_wheel() => Some(Around::Wheel),
@@ -197,9 +196,6 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             Some(_) => panel_seen_ns,
             None => None,
         };
-        if !watcher.wants_frames() && !(camera_wanted && camera.wants_frames(snap.camera_open_said, turn)) && capture.is_some() {
-            capture = None;
-        }
         // VRChat's menus first: they close its camera on the desktop.
         let open = menu.or(panel.filter(|_| !menu_up).map(|_| Around::Camera));
         let size = client_size(window);
@@ -218,6 +214,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer.stop();
             windows.hide_all();
             pill.show(panels.away_words(&snap), origin, size);
+            camera_log.turn(turn.elapsed(), false, panel, camera.take_went(), snap.camera_open_said, size, camera_frames);
             std::thread::sleep(if watcher.wants_frames() || camera_frames { TURN } else { REST });
             continue;
         }
@@ -273,9 +270,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             panels.release();
         }
         // What came into view lies over everything of ours, the pointer included: it goes back on top.
+        let painted = windows.painted;
         if windows.show(&mut panels, &snap, origin, open) {
             pointer.raise();
         }
+        camera_log.turn(turn.elapsed(), windows.painted != painted, panel, camera.take_went(), snap.camera_open_said, size, camera_frames);
         let wait = TURN.saturating_sub(turn.elapsed());
         std::thread::sleep(wait);
     }
@@ -609,7 +608,7 @@ type ReadPart = (u32, u32, u32, u32, u32);
 /// What a look at a frame found: VRChat's menu and whether its wheel's rim is in place, when the menus were looked for; its camera panel's place, when that was.
 struct Looked {
     menu: Option<(Option<Around>, bool)>,
-    camera: Option<Option<egui::Rect>>,
+    camera: Option<detect::CameraLook>,
 }
 
 /// The Direct3D device captures use, kept for as long as the process lasts: it holds nothing and does nothing between captures.
@@ -654,7 +653,8 @@ impl Capture {
 
     /// The newest frame's look, for VRChat's `menus`, its `camera` panel or both: `None` when no new frame came. The window's title bar and borders are in the frame,
     /// its client area counted from its own corner.
-    fn look(&mut self, window: HWND, client: Vec2, menus: bool, camera: bool) -> Option<Looked> {
+    /// `shown`: where the camera's panel shows now, and `open`: VRChat says its camera is open ([`detect::camera_look`]).
+    fn look(&mut self, window: HWND, client: Vec2, menus: bool, camera: bool, shown: Option<egui::Rect>, open: bool) -> Option<Looked> {
         let mut newest = None;
         while let Ok(frame) = self.pool.TryGetNextFrame() {
             newest = Some(frame);
@@ -713,7 +713,7 @@ impl Capture {
         let camera = if camera {
             let from = menu_parts.len();
             let lines: Option<Vec<Part<'_>>> = (from..parts.len()).map(part).collect();
-            Some(detect::camera_panel(&lines?, client))
+            Some(detect::camera_look(&lines?, client, shown, open))
         } else {
             None
         };
@@ -752,6 +752,203 @@ impl Drop for Capture {
         let _ = self.session.Close();
         let _ = self.pool.Close();
         let _ = &self.item;
+    }
+}
+
+// --------------------------------------------------------------------------------------------- the looks, on a thread of their own
+
+/// What the loop asks of the looks now: which window, which of VRChat's things to look for, and at what pace.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Ask {
+    window: isize,
+    client: Vec2,
+    menus: bool,
+    menu_every: Duration,
+    camera: bool,
+    /// Where the camera's panel shows, and whether VRChat says its camera is open.
+    shown: Option<egui::Rect>,
+    open: bool,
+}
+
+/// What a look found, and when its frame was read.
+struct Answer {
+    at: Instant,
+    menu: Option<(Option<Around>, bool)>,
+    camera: Option<detect::CameraLook>,
+    /// How long the look took, reading the frame's parts back from the GPU included.
+    took: Duration,
+}
+
+/// Windows Graphics Capture and the looks at its frames, on a thread of their own (L-deskcam-glitch, 2026-11-15). They ran in the turn that also moves, paints and
+/// presses the panels: each look copies its parts out of the GPU and waits for that copy (`Map` right after `CopySubresourceRegion` makes the CPU wait for the GPU to
+/// reach the copy, behind whatever VRChat has queued: in full screen at 2560 x 1440 the GPU is busiest), once for each part, and with VRChat's camera open there are
+/// nine parts every 30 ms. Every such wait was a turn in which the column neither moved, nor answered the mouse, nor painted: the column ran at the pace of the
+/// GPU's queue, not of the screen. Now the loop only says what it wants ([`Looker::ask`]) and takes what was found ([`Looker::answers`]); it never waits for the GPU.
+struct Looker {
+    asked: Arc<std::sync::Mutex<Option<Ask>>>,
+    answers: std::sync::mpsc::Receiver<Answer>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Looker {
+    fn start() -> Self {
+        let asked: Arc<std::sync::Mutex<Option<Ask>>> = Arc::default();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, answers) = std::sync::mpsc::channel();
+        let (wanted, stopping) = (asked.clone(), stop.clone());
+        let thread = std::thread::Builder::new()
+            .name("orbit-looks".into())
+            .spawn(move || {
+                // SAFETY: this thread's own WinRT apartment, for the capture made on it.
+                unsafe {
+                    let _ = RoInitialize(RO_INIT_MULTITHREADED);
+                }
+                let mut gpu: Option<Gpu> = None;
+                let mut capture: Option<(isize, Capture)> = None;
+                let (mut last_menu, mut last_camera) = (None::<Instant>, None::<Instant>);
+                while !stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                    let Some(ask) = *wanted.lock().unwrap() else {
+                        // Nothing to look for: no capture at all.
+                        capture = None;
+                        std::thread::sleep(Duration::from_millis(15));
+                        continue;
+                    };
+                    if capture.as_ref().is_none_or(|(w, _)| *w != ask.window) {
+                        capture = None;
+                        if gpu.is_none() {
+                            gpu = Gpu::new().map_err(|e| eprintln!("capture: {e}")).ok();
+                        }
+                        let window = HWND(ask.window as *mut _);
+                        capture = gpu.as_ref().and_then(|g| Capture::new(window, g).map_err(|e| eprintln!("capture: {e}")).ok()).map(|c| (ask.window, c));
+                        // A device lost (a driver's update, say) is made again next time.
+                        if capture.is_none() {
+                            gpu = None;
+                            std::thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                    }
+                    let now = Instant::now();
+                    let menus = ask.menus && last_menu.is_none_or(|t| now.duration_since(t) >= ask.menu_every);
+                    let camera = ask.camera && last_camera.is_none_or(|t| now.duration_since(t) >= detect::CAMERA_LOOK_EVERY);
+                    if !menus && !camera {
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    let Some((window, c)) = capture.as_mut() else { continue };
+                    let looked = c.look(HWND(*window as *mut _), ask.client, menus, camera, ask.shown, ask.open);
+                    let Some(looked) = looked else {
+                        // No new frame yet.
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    };
+                    if menus {
+                        last_menu = Some(now);
+                    }
+                    if camera {
+                        last_camera = Some(now);
+                    }
+                    if tx.send(Answer { at: now, menu: looked.menu, camera: looked.camera, took: now.elapsed() }).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok();
+        Self { asked, answers, stop, thread }
+    }
+
+    /// What to look for from now on; `None`: nothing, and the capture goes.
+    fn ask(&self, ask: Option<Ask>) {
+        let mut asked = self.asked.lock().unwrap();
+        if *asked != ask {
+            *asked = ask;
+        }
+    }
+
+    /// What was found since the last call, in order.
+    fn answers(&self) -> Vec<Answer> {
+        self.answers.try_iter().collect()
+    }
+}
+
+impl Drop for Looker {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// What the column and the looks did, said in `vr-test.log` every 10 s while VRChat's camera is looked for, and each time the column comes or goes, with why: what
+/// L-deskcam-glitch could not be told from (2026-11-15: the desktop's process said nothing anywhere).
+#[derive(Default)]
+struct CameraLog {
+    since: Option<Instant>,
+    looks: u32,
+    look_ms: f32,
+    slowest_look_ms: f32,
+    there: u32,
+    gone: u32,
+    unclear: u32,
+    turns: u32,
+    slowest_turn_ms: f32,
+    paints: u32,
+    was: Option<egui::Rect>,
+}
+
+impl CameraLog {
+    fn look(&mut self, answer: &Answer) {
+        if let Some(look) = answer.camera {
+            let ms = answer.took.as_secs_f32() * 1000.0;
+            self.looks += 1;
+            self.look_ms += ms;
+            self.slowest_look_ms = self.slowest_look_ms.max(ms);
+            match look.at_shown {
+                detect::Rim::There => self.there += 1,
+                detect::Rim::Gone => self.gone += 1,
+                detect::Rim::Unclear => self.unclear += 1,
+            }
+        }
+    }
+
+    /// A turn of the loop, how long it took and whether it painted a part; `shown` where the column stands, `went` why it went, `said` VRChat's word over OSC.
+    fn turn(&mut self, took: Duration, painted: bool, shown: Option<egui::Rect>, went: Option<detect::CameraGone>, said: Option<bool>, client: Vec2, looking: bool) {
+        if shown != self.was {
+            match (self.was, shown) {
+                (None, Some(at)) => super::super::vr_log::line(&format!("desk camera: column shown at {at:?} in {}x{} (osc {said:?})", client.x, client.y)), // i18n: not shown (a log's line)
+                (Some(_), None) => super::super::vr_log::line(&format!("desk camera: column gone ({went:?}, osc {said:?}) in {}x{}", client.x, client.y)), // i18n: not shown (a log's line)
+                (Some(_), Some(at)) => super::super::vr_log::line(&format!("desk camera: column moved to {at:?} in {}x{}", client.x, client.y)), // i18n: not shown (a log's line)
+                (None, None) => {}
+            }
+            self.was = shown;
+        }
+        if !looking && shown.is_none() {
+            self.since = None;
+            return;
+        }
+        let ms = took.as_secs_f32() * 1000.0;
+        self.turns += 1;
+        self.slowest_turn_ms = self.slowest_turn_ms.max(ms);
+        self.paints += u32::from(painted);
+        let since = *self.since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= Duration::from_secs(10) {
+            let secs = since.elapsed().as_secs_f32();
+            super::super::vr_log::line(&format!(
+                "desk camera: {:.0} looks/s, {:.1} ms each (slowest {:.1}); rim there {} gone {} unclear {}; {:.0} turns/s, slowest {:.1} ms, {} with a paint; shown {}", // i18n: not shown (a log's line)
+                self.looks as f32 / secs,
+                self.look_ms / self.looks.max(1) as f32,
+                self.slowest_look_ms,
+                self.there,
+                self.gone,
+                self.unclear,
+                self.turns as f32 / secs,
+                self.slowest_turn_ms,
+                self.paints,
+                shown.is_some()
+            ));
+            *self = Self { was: self.was, since: Some(Instant::now()), ..Self::default() };
+        }
     }
 }
 
@@ -966,6 +1163,8 @@ impl Drop for PanelWindow {
 #[derive(Default)]
 struct Windows {
     list: HashMap<Zone, PanelWindow>,
+    /// Pictures put in windows so far: what the log counts.
+    painted: u64,
 }
 
 impl Windows {
@@ -983,7 +1182,9 @@ impl Windows {
     /// which then lies over all others.
     fn show(&mut self, panels: &mut Panels, snap: &Snapshot, origin: Pos2, open: Option<Around>) -> bool {
         let list = &mut self.list;
+        let painted = &mut self.painted;
         panels.paint(snap, |panel, changed| {
+            *painted += 1;
             let [w, h] = panel.px;
             let clicks = catches_mouse(panel.zone, open);
             let window = list.entry(panel.zone).and_modify(|window| {
@@ -1781,6 +1982,76 @@ mod tests {
         assert!(camera_tools_here(&snap), "the bridge drives another one beside it");
         snap.settings.orbit.camera_tiles = false;
         assert!(!camera_tools_here(&snap), "turned off in Settings");
+    }
+
+    /// L-deskcam-glitch, the column's lag: at rest beside VRChat's camera panel at Enzo's screen size (2560 x 1440), a turn of the loop paints nothing and moves no
+    /// window, and costs little; when the countdown changes, one tile is painted again and that turn stays short. Measured times are printed for the report.
+    #[test]
+    fn the_camera_column_at_rest_costs_a_turn_nothing_and_a_countdown_one_tile() {
+        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        for client in [vec2(1280.0, 720.0), vec2(2560.0, 1440.0)] {
+            let panel = egui::Rect::from_center_size(pos2(client.x / 2.0, client.y / 2.0), vec2(616.0, 350.0) * client.y / 720.0);
+            let mut snap = crate::screenshot::idle_snapshot(&orbiters_core::settings::Settings::default(), &[]);
+            snap.steamvr.running = false;
+            snap.camera_open_said = Some(true);
+            snap.worn_kit = Some(true);
+            let places = zones::camera_on_screen(panel, client);
+            let (mut panels, mut windows, _stand_in, origin) = put_up_as(Around::Camera, client, false, places.clone(), snap.clone());
+            let mut turn = |panels: &mut Panels, windows: &mut Windows, snap: &Snapshot| {
+                let began = Instant::now();
+                pump();
+                panels.set_open(Some(Around::Camera), places.clone(), snap);
+                panels.follow(snap, 0);
+                panels.menu_turn(snap);
+                panels.step_springs(0.008);
+                let moved: Vec<POINT> = windows.list.values().map(|w| w.at).collect();
+                windows.show(panels, snap, origin, Some(Around::Camera));
+                let still = windows.list.values().map(|w| w.at).collect::<Vec<_>>() == moved;
+                (began.elapsed(), still)
+            };
+            for _ in 0..20 {
+                turn(&mut panels, &mut windows, &snap);
+            }
+            let painted = windows.painted;
+            let mut at_rest = Vec::new();
+            for _ in 0..200 {
+                let (took, still) = turn(&mut panels, &mut windows, &snap);
+                assert!(still, "{client:?}: a window moved at rest");
+                at_rest.push(took.as_secs_f64() * 1000.0);
+            }
+            assert_eq!(windows.painted, painted, "{client:?}: a part was painted again with nothing changed");
+            // The countdown of a 3D picture: one second's change.
+            let mut counting = snap.clone();
+            counting.n4n0.photo_countdown = Some(3);
+            let (took, _) = turn(&mut panels, &mut windows, &counting);
+            let repainted = windows.painted - painted;
+            at_rest.sort_by(f64::total_cmp);
+            let (median, worst) = (at_rest[at_rest.len() / 2], at_rest[at_rest.len() - 1]);
+            eprintln!("column turn {client:?}: at rest median {median:.3} ms, slowest {worst:.3} ms; countdown turn {:.3} ms, {repainted} parts painted", took.as_secs_f64() * 1000.0); // i18n: not shown (a test's measurement)
+            assert!(repainted >= 1 && repainted <= 3, "{client:?}: the countdown painted {repainted} parts");
+            assert!(median < 4.0, "{client:?}: a turn at rest takes {median} ms");
+        }
+    }
+
+    /// The loop never waits for the capture: asking for looks and taking their answers return at once, while the looks' thread is busy failing to capture a window
+    /// that cannot be captured (and so sleeps between tries).
+    #[test]
+    fn asking_for_looks_never_waits_for_the_capture() {
+        let looker = Looker::start();
+        let ask = Ask { window: 0x7fff_fff0, client: vec2(2560.0, 1440.0), menus: true, menu_every: Duration::ZERO, camera: true, shown: None, open: true };
+        let mut slowest = Duration::ZERO;
+        let began = Instant::now();
+        while began.elapsed() < Duration::from_millis(400) {
+            let t = Instant::now();
+            looker.ask(Some(ask));
+            let answers = looker.answers();
+            slowest = slowest.max(t.elapsed());
+            assert!(answers.is_empty(), "nothing can be looked at in no window");
+            std::thread::sleep(Duration::from_millis(8));
+        }
+        looker.ask(None);
+        eprintln!("asking for looks: slowest {:.3} ms", slowest.as_secs_f64() * 1000.0); // i18n: not shown (a test's measurement)
+        assert!(slowest < Duration::from_millis(5), "{slowest:?}");
     }
 
     #[test]

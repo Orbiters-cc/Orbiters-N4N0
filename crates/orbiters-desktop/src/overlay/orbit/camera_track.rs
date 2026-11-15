@@ -1819,29 +1819,60 @@ mod tests {
     }
 
     /// How often it finds them, by how large the panel is and by how it leans and turns: printed, and held to.
+    ///
+    /// Its 294 looks run on every core: one after the other in a debug build they took five minutes, the whole of the
+    /// desktop tests' run (`cargo test` waits for its slowest test, and every other one is done after about 90 s).
+    /// Each look is the same as before and the results are counted in the same order.
     #[test]
     fn how_often_it_finds_the_panel_at_the_sizes_a_person_sees() {
         let leans = [-45.0, -30.0, -15.0, 0.0, 15.0, 30.0, 45.0];
         let turns = [1.0, 0.9, 0.8];
+        let scales = [1.3f32, 1.0, 0.8, 0.7, 0.6, 0.5, 0.4];
         let pictures = headset_pictures();
-        for scale in [1.3f32, 1.0, 0.8, 0.7, 0.6, 0.5, 0.4] {
+        let looks: Vec<(f32, usize, f32, f32)> = scales
+            .iter()
+            .flat_map(|&scale| (0..pictures.len()).flat_map(move |n| leans.iter().flat_map(move |&lean| turns.iter().map(move |&turned| (scale, n, lean, turned)))))
+            .collect();
+        // What each look found, with the panel's true X and chevron in that picture.
+        type Look = (Option<Found>, [f32; 2], [f32; 2]);
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(looks.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let results: Vec<Look> = {
+            let mut out: Vec<Option<Look>> = (0..looks.len()).map(|_| None).collect();
+            let done: Vec<Vec<(usize, Look)>> = std::thread::scope(|s| {
+                let workers: Vec<_> = (0..threads)
+                    .map(|_| {
+                        s.spawn(|| {
+                            let mut mine = Vec::new();
+                            loop {
+                                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let Some(&(scale, n, lean, turned)) = looks.get(i) else { break mine };
+                                let p = &pictures[n];
+                                let (picture, to) = seen(p, lean, scale, turned);
+                                mine.push((i, (find(&picture, p.width, p.height, p.width * 4), to(p.x), to(p.chevron))));
+                            }
+                        })
+                    })
+                    .collect();
+                workers.into_iter().map(|w| w.join().unwrap()).collect()
+            });
+            for (i, look) in done.into_iter().flatten() {
+                out[i] = Some(look);
+            }
+            out.into_iter().map(Option::unwrap).collect()
+        };
+        for scale in scales {
             let (mut hit, mut straight, mut tries) = (0, 0, 0);
             let mut missed = Vec::new();
-            for (n, p) in pictures.iter().enumerate() {
-                for lean in leans {
-                    for turned in turns {
-                        let (picture, to) = seen(p, lean, scale, turned);
-                        tries += 1;
-                        let found = find(&picture, p.width, p.height, p.width * 4);
-                        if found.is_some_and(|f| near(f.x, to(p.x), 9.0) && near(f.chevron, to(p.chevron), 12.0)) {
-                            hit += 1;
-                            straight += (turned == 1.0) as usize;
-                        } else {
-                            missed.push((n, lean, turned, found.is_some()));
-                            if let Some(f) = found {
-                                println!("  wrong at {scale} {n} {lean} {turned}: {:?} {:?} and not {:?} {:?}", f.x, f.chevron, to(p.x), to(p.chevron));
-                            }
-                        }
+            for (&(_, n, lean, turned), (found, x, chevron)) in looks.iter().zip(&results).filter(|(l, _)| l.0 == scale) {
+                tries += 1;
+                if found.is_some_and(|f| near(f.x, *x, 9.0) && near(f.chevron, *chevron, 12.0)) {
+                    hit += 1;
+                    straight += (turned == 1.0) as usize;
+                } else {
+                    missed.push((n, lean, turned, found.is_some()));
+                    if let Some(f) = found {
+                        println!("  wrong at {scale} {n} {lean} {turned}: {:?} {:?} and not {:?} {:?}", f.x, f.chevron, x, chevron);
                     }
                 }
             }

@@ -1006,6 +1006,21 @@ fn tour(client: &Client, game: &LabGame) {
     assert!(state["bridge"]["last_event"].is_null(), "closing it was the agent's own doing, no news: {state}");
 }
 
+/// What the app's status says of the VRChats the bridge's sessions started: the desktop's camera column stays off those (L-desk-camera).
+#[test]
+fn the_status_names_the_vrchats_the_bridge_drives() {
+    let (_game, bridge, _server, _client) = lab("driven");
+    let mut status = Status::default();
+    bridge.status_into(&mut status);
+    assert!(status.driven.is_empty(), "none started yet");
+    bridge.main.run.lock().unwrap().pid = Some(4242);
+    bridge.status_into(&mut status);
+    assert_eq!(status.driven, [4242]);
+    bridge.main.run.lock().unwrap().pid = None;
+    bridge.status_into(&mut status);
+    assert!(status.driven.is_empty(), "closed: no longer the agent's");
+}
+
 #[test]
 fn the_whole_loop_runs_unattended() {
     let (game, bridge, _server, client) = lab("tour");

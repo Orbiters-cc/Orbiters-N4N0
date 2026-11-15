@@ -135,8 +135,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         };
         // VRChat's camera panel: for the person's own VRChat only, never one an agent drives through the bridge (its sessions' VRChats, the app's when the bridge
         // started it, one lent to the app for a picture): those are the agent's, and it clicks on that panel.
-        let driven = snap.vrchat.pid.is_some_and(|pid| snap.bridge.driven.contains(&pid));
-        let camera_wanted = snap.settings.orbit.camera_tiles && !driven;
+        let camera_wanted = camera_tools_here(&snap);
         if !camera_wanted {
             camera.reset();
         }
@@ -278,6 +277,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let wait = TURN.saturating_sub(turn.elapsed());
         std::thread::sleep(wait);
     }
+}
+
+/// Whether the camera's column is for this VRChat: the setting is on, and it is the person's own, not one an agent drives through the bridge.
+fn camera_tools_here(snap: &Snapshot) -> bool {
+    let driven = snap.vrchat.pid.is_some_and(|pid| snap.bridge.driven.contains(&pid));
+    snap.settings.orbit.camera_tiles && !driven
 }
 
 /// Whether the scroll wheel picks a cell of the ring, with no key held ([`scroll`]). Off since dev.25: in dev.24 a scroll's click that opened a sheet froze the
@@ -596,6 +601,9 @@ struct Capture {
     buffers: Vec<Vec<u8>>,
 }
 
+/// Where a part was read from and how: x0, y0, width, height, the bytes of a row.
+type ReadPart = (u32, u32, u32, u32, u32);
+
 /// What a look at a frame found: VRChat's menu and whether its wheel's rim is in place, when the menus were looked for; its camera panel's place, when that was.
 struct Looked {
     menu: Option<(Option<Around>, bool)>,
@@ -666,12 +674,12 @@ impl Capture {
         let menu_parts = detect::parts(client);
         let camera_parts = detect::camera_parts(client);
         let parts: Vec<Option<egui::Rect>> =
-            menu_parts.iter().map(|r| Some(*r).filter(|_| menus)).chain(camera_parts.iter().map(|r| Some(*r).filter(|_| camera))).collect();
+            menu_parts.iter().map(|r| menus.then_some(*r)).chain(camera_parts.iter().map(|r| camera.then_some(*r))).collect();
         if self.buffers.len() < parts.len() {
             self.buffers.resize_with(parts.len(), Vec::new);
             self.staging.resize_with(parts.len(), || None);
         }
-        let mut read: Vec<Option<(u32, u32, u32, u32, u32)>> = vec![None; parts.len()];
+        let mut read: Vec<Option<ReadPart>> = vec![None; parts.len()];
         for (i, part) in parts.iter().enumerate() {
             let Some(part) = part else { continue };
             let (x0, y0) = (part.min.x.max(0.0) as u32, part.min.y.max(0.0) as u32);
@@ -1749,6 +1757,21 @@ mod tests {
                 assert!(ours > 0);
             }
         }
+    }
+
+    /// The camera's column is the person's: a VRChat the bridge started (main's or a side session's, lent to the app or not) never gets it, as an agent clicks on
+    /// that panel; and the setting turns it off.
+    #[test]
+    fn the_camera_column_is_only_for_the_person_s_own_vrchat() {
+        let mut snap = crate::screenshot::idle_snapshot(&orbiters_core::settings::Settings::default(), &[]);
+        snap.vrchat.pid = Some(4242);
+        assert!(camera_tools_here(&snap));
+        snap.bridge.driven = vec![17, 4242];
+        assert!(!camera_tools_here(&snap), "a VRChat the bridge drives");
+        snap.bridge.driven = vec![17];
+        assert!(camera_tools_here(&snap), "the bridge drives another one beside it");
+        snap.settings.orbit.camera_tiles = false;
+        assert!(!camera_tools_here(&snap), "turned off in Settings");
     }
 
     #[test]

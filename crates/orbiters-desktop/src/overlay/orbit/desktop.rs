@@ -662,15 +662,18 @@ impl Capture {
         // SAFETY: the surface is a Direct3D 11 texture, as the pool was made for.
         let texture: ID3D11Texture2D = unsafe { access.GetInterface() }.ok()?;
         let (dx, dy) = client_in_frame(window);
-        let menu_parts: Vec<egui::Rect> = if menus { detect::parts(client).to_vec() } else { Vec::new() };
-        let camera_parts = if camera { detect::camera_parts(client) } else { Vec::new() };
-        let parts: Vec<egui::Rect> = menu_parts.iter().chain(&camera_parts).copied().collect();
+        // Each part keeps its slot, and so its staging texture, whichever of them a look reads: the menus' two first, the camera's lines after them.
+        let menu_parts = detect::parts(client);
+        let camera_parts = detect::camera_parts(client);
+        let parts: Vec<Option<egui::Rect>> =
+            menu_parts.iter().map(|r| Some(*r).filter(|_| menus)).chain(camera_parts.iter().map(|r| Some(*r).filter(|_| camera))).collect();
         if self.buffers.len() < parts.len() {
             self.buffers.resize_with(parts.len(), Vec::new);
             self.staging.resize_with(parts.len(), || None);
         }
         let mut read: Vec<Option<(u32, u32, u32, u32, u32)>> = vec![None; parts.len()];
         for (i, part) in parts.iter().enumerate() {
+            let Some(part) = part else { continue };
             let (x0, y0) = (part.min.x.max(0.0) as u32, part.min.y.max(0.0) as u32);
             let (width, height) = (part.width().ceil() as u32, part.height().ceil() as u32);
             if width == 0 || height == 0 {

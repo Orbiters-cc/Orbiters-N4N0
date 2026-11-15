@@ -4307,6 +4307,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbiters-qr"
+version = "0.3.5-dev.56"
+dependencies = [
+ "png",
+ "qrcode",
+ "rqrr",
+]
+
+[[package]]
 name = "orbiters-reconstruct"
 version = "0.3.5-dev.56"
 dependencies = [

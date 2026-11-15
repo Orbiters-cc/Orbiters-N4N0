@@ -402,6 +402,7 @@ fn real_captures() {
                 std::fs::write(std::path::Path::new(&dir).join(format!("{}.json", c.session)), serde_json::to_vec(&small).unwrap()).unwrap();
             }
         }
+        let (captures, elsewhere) = one_place(captures);
         let map = Map::build(captures);
         let built = t.elapsed() - read;
         let size = map.size();
@@ -425,8 +426,74 @@ fn real_captures() {
             "route": route, "walk": avatar.map(|a| walk_steps(&route, a.heading, 4.0)),
             "centre_checks": checks,
             "openings": map.openings().iter().map(|o| (map.cell_centre(o[o.len() / 2]), o.len())).collect::<Vec<_>>(),
-            "read_ms": read.as_millis(), "build_ms": built.as_millis(),
+            "read_ms": read.as_millis(), "build_ms": built.as_millis(), "elsewhere": elsewhere.iter().map(|c| c.session.clone()).collect::<Vec<_>>(),
         });
         std::fs::write(out.join(format!("world{n}.json")), serde_json::to_vec_pretty(&answer).unwrap()).unwrap();
     }
+}
+
+/// A picture's share as the tour left it on 2026-11-15, decimated (voxels with two points or more, 60 positions of its path).
+fn fixture(json: &str) -> Arc<Capture> {
+    Arc::new(serde_json::from_str(json).unwrap())
+}
+
+/// Prismic's Avatar Search, two pictures: an empty grey box about 20 m across, walled all round, open to the sky (the tour's
+/// screenshots of 2026-11-15 06:00), the avatar standing in its south-west corner. One picture is enough.
+#[test]
+fn a_real_empty_walled_box_is_one_picture() {
+    let map = Map::build(vec![fixture(include_str!("map_fixtures/prismic-1.json")), fixture(include_str!("map_fixtures/prismic-2.json"))]);
+    let size = map.size();
+    assert!((17.0..=25.0).contains(&size.extent_m[0]) && (17.0..=25.0).contains(&size.extent_m[1]), "{size:?}");
+    assert_eq!(size.areas, 1, "{size:?}");
+    let verdict = map.verdict(&size);
+    assert!(verdict.simple && verdict.pictures == 1, "{size:?} {verdict:?}");
+    assert!((map.floor - 0.0).abs() <= 0.2, "the floor 1.66 m (eye height) under where the camera opened at 1.64: {}", map.floor);
+    // aim_camera put the second picture's camera at x -9.74, against the west wall.
+    assert_eq!(map.check_point(map.captures[1].centre).at, "near_solid");
+    assert_eq!(map.check_point([0.0, 1.6, 0.0]).at, "free", "the middle of the box");
+    assert_eq!(map.check_point([-10.1, 2.0, 0.0]).at, "solid", "in the west wall (x -10.25 to -9.75)");
+    assert_eq!(map.check_point([0.0, 1.6, 40.0]).at, "outside");
+}
+
+/// Japan Street: an L of station corridors with gates (the tour's thumbnail: a corridor with ticket gates); the picture saw two
+/// arms from their corner. More than one picture; a suggestion down an arm, 10 m or more away, walkable from the avatar.
+#[test]
+fn real_corridors_lead_on_and_a_walk_goes_down_them() {
+    let map = Map::build(vec![fixture(include_str!("map_fixtures/japan-street.json"))]);
+    let size = map.size();
+    let verdict = map.verdict(&size);
+    assert_eq!(verdict.pictures, 3, "{size:?} {verdict:?}");
+    assert!((map.floor - 0.98).abs() <= 0.2, "{}", map.floor);
+    let suggestions = map.suggestions(&size);
+    let first = suggestions.first().expect("somewhere to go");
+    assert!(first.from_centres_m >= APART_M, "{first:?}");
+    let a = map.captures[0].avatar.unwrap();
+    let route = map.route([a.hips[0], a.hips[2]], first.stand).expect("down the corridor");
+    let steps = walk_steps(&route, a.heading, 4.0);
+    assert!(steps.len() <= 5, "a few turns and walks: {steps:?}");
+    assert!(steps.iter().map(|s| s.walk_m).sum::<f32>() >= 9.0, "{steps:?}");
+    for w in route.windows(2) {
+        assert!(map.check_walk(w[0], heading_of(w[1][0] - w[0][0], w[1][1] - w[0][1]), dist2(w[0], w[1])).stops != Some("blocked"), "{route:?}");
+    }
+}
+
+/// Blonix Dungeon: the spawn is a closed rock cell (the tour: "cell corner with a torch", its door would not open). The plan
+/// says it saw only a small closed space, and to look for the way out, rather than calling the world simple.
+#[test]
+fn a_real_closed_cell_is_said_to_be_small_not_the_world() {
+    let map = Map::build(vec![fixture(include_str!("map_fixtures/blonix-cell.json"))]);
+    let size = map.size();
+    let verdict = map.verdict(&size);
+    assert!(!verdict.simple, "{verdict:?}");
+    assert!(verdict.why.contains("small closed space"), "{verdict:?}");
+}
+
+#[test]
+fn pictures_kilometres_apart_are_other_parts_of_the_world() {
+    let near = capture("near", &two_rooms(), ([0.0, 0.0], [24.0, 10.0]), [4.0, 5.0], None);
+    let mut far = (*capture("far", &two_rooms(), ([0.0, 0.0], [24.0, 10.0]), [4.0, 5.0], None)).clone();
+    far.centre = [900.0, 1.6, 3000.0];
+    let (here, elsewhere) = one_place(vec![Arc::new(far), near]);
+    assert_eq!((here.len(), elsewhere.len()), (1, 1));
+    assert_eq!(here[0].session, "near", "the plan is of where the newest picture is");
 }

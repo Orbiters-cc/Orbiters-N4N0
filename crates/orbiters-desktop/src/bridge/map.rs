@@ -267,6 +267,15 @@ fn around(path: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
     ([lo[0] - AROUND_M, lo[1] - BELOW_M, lo[2] - AROUND_M], [hi[0] + AROUND_M, hi[1] + ABOVE_M, hi[2] + AROUND_M])
 }
 
+/// How far apart two pictures may be and still map one place: further is another part of the world (a teleport).
+pub const ONE_PLACE_M: f32 = 150.0;
+
+/// The captures that map the same place as the last one (within [`ONE_PLACE_M`] of it), and those that do not.
+pub fn one_place(captures: Vec<std::sync::Arc<Capture>>) -> (Vec<std::sync::Arc<Capture>>, Vec<std::sync::Arc<Capture>>) {
+    let Some(last) = captures.last().map(|c| c.centre) else { return (captures, Vec::new()) };
+    captures.into_iter().partition(|c| dist3(c.centre, last) <= ONE_PLACE_M)
+}
+
 /// What a plan cell is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -828,6 +837,11 @@ impl Map {
     }
 }
 
+/// Metres between two points.
+pub fn dist3_of(a: [f32; 3], b: [f32; 3]) -> f32 {
+    dist3(a, b)
+}
+
 fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
     ((0..3).map(|k| (a[k] - b[k]).powi(2)).sum::<f32>()).sqrt()
 }
@@ -1085,7 +1099,8 @@ impl Map {
         if size.areas > 1 {
             reasons.push(format!("{} separate areas", size.areas));
         }
-        if size.openings > 0 && size.closed < 0.85 {
+        // A plain wall a flight saw little of leaves stretches of edge unseen: only a space open on much of its edge counts them.
+        if size.openings > 0 && size.closed < 0.65 {
             reasons.push(format!("{} openings into parts no picture saw", size.openings));
         }
         if big > 30.0 {
@@ -1094,11 +1109,19 @@ impl Map {
         if size.height_m > 8.0 {
             reasons.push(format!("{:.0} m high", size.height_m));
         }
-        if reasons.is_empty() && size.closed >= 0.7 && big <= 30.0 && cluttered < 0.03 {
+        if reasons.is_empty() && size.closed >= 0.65 && big <= 30.0 && size.walkable_m2 < 40.0 {
+            return Verdict {
+                pictures: 1,
+                simple: false,
+                why: format!("The pictures saw only a small closed space, {:.0} by {:.0} m: a spawn room, a cell or a booth. If it is the whole world, one picture is enough; first look for a door, a button or a teleporter out of it.", size.extent_m[0], size.extent_m[1]),
+            };
+        }
+        if reasons.is_empty() && size.closed >= 0.65 && big <= 30.0 && cluttered < 0.03 {
+            let gaps = if size.openings > 0 { format!(" ({} stretches of its edge no picture saw: most likely plain wall; if one is a door, look)", size.openings) } else { String::new() };
             return Verdict {
                 pictures: 1,
                 simple: true,
-                why: format!("A simple space: {:.0} by {:.0} m, closed all round ({:.0}% wall), little standing in it: one picture shows it.", size.extent_m[0], size.extent_m[1], size.closed * 100.0),
+                why: format!("A simple space: {:.0} by {:.0} m, closed ({:.0}% of its edge is wall){gaps}, little standing in it: one picture shows it.", size.extent_m[0], size.extent_m[1], size.closed * 100.0),
             };
         }
         if reasons.is_empty() {
@@ -1463,6 +1486,32 @@ pub struct WalkStep {
 
 /// A route's corners as turns and walks from a heading, at `speed` metres a second.
 pub fn walk_steps(corners: &[[f32; 2]], mut heading: f32, speed: f32) -> Vec<WalkStep> {
+    // Few steps: a corner less than 0.6 m from the last, or turning less than 25 degrees, is walked through.
+    let mut near: Vec<[f32; 2]> = Vec::new();
+    for (i, &p) in corners.iter().enumerate() {
+        if let Some(&q) = near.last() {
+            if dist2(q, p) < 0.6 {
+                // The end is where to go: it takes the place of a corner just before it.
+                if i + 1 == corners.len() && near.len() > 1 {
+                    near.pop();
+                } else {
+                    continue;
+                }
+            }
+        }
+        near.push(p);
+    }
+    let mut kept: Vec<[f32; 2]> = Vec::new();
+    for (i, &p) in near.iter().enumerate() {
+        if i > 0 && i + 1 < near.len() {
+            let (o, n) = (*kept.last().unwrap(), near[i + 1]);
+            if wrap(heading_of(n[0] - p[0], n[1] - p[1]) - heading_of(p[0] - o[0], p[1] - o[1])).abs() < 25.0 {
+                continue;
+            }
+        }
+        kept.push(p);
+    }
+    let corners = kept;
     let mut steps = Vec::new();
     for w in corners.windows(2) {
         let (dx, dz) = (w[1][0] - w[0][0], w[1][1] - w[0][1]);

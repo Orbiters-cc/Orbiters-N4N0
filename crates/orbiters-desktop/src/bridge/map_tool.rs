@@ -228,6 +228,11 @@ impl Bridge {
             let message = if pictures.is_empty() { "This bridge has no 3D picture of this world yet.".to_string() } else { "None of this world's pictures has a finished reconstruction yet.".to_string() };
             return Err(Failure::new("no_map", message, NO_MAP_NEXT).retry_after(if pictures.is_empty() { 0 } else { 60 }));
         }
+        // Pictures far from the newest are of another part of the world (a teleport): the plan is of where the newest is.
+        let (used, elsewhere) = map::one_place(used);
+        for c in &elsewhere {
+            left_out.push(json!({ "picture": c.session, "why": format!("taken {:.0} m away, in another part of the world", r1(map::dist3_of(c.centre, used.last().map_or(c.centre, |u| u.centre)))) }));
+        }
         let key: Vec<String> = used.iter().map(|c| c.session.clone()).collect();
         if let Some((w, k, m)) = &*self.maps.built.lock().unwrap() {
             if w == world && *k == key {

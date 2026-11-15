@@ -941,9 +941,14 @@ impl Windows {
 
 /// Whether the window of a part in `zone` takes the mouse from VRChat where it has pixels, with the menu `open` up; where it does not, the mouse reaches VRChat exactly
 /// as if Orbiters were not running.
+///
+/// With VRChat's wheel open, none does. VRChat then holds Windows' pointer at its window's centre (its slice follows the mouse's movement and its click goes where the
+/// pointer is held), and the ring's 3D pictures cell lies over that point at every window size (160 hundredths of the wheel's radius up and left of its centre): Windows
+/// gave that cell every press, which it did nothing with, and VRChat's wheel never had a click (Enzo, 2026-11-15, dev.56; every build since the ring, 2026-11-06). The
+/// ring takes nothing from Windows' pointer anyway: its cells are pressed through Left Alt's pointer, whose hook keeps the mouse from everything while it lasts, and
+/// through the number keys; a page opened from the wheel has that hook too.
 fn catches_mouse(zone: Zone, open: Option<Around>) -> bool {
-    let _ = open;
-    !zone.passes_clicks()
+    !zone.passes_clicks() && open != Some(Around::Wheel)
 }
 
 /// Places the windows in the order they lie: what comes into view goes above what shows, so the sheet's page stays over its back. Says whether one came into view.

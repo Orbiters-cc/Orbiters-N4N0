@@ -290,6 +290,10 @@ pub struct Eac {
     pub vrchat_runs: bool,
     /// The launcher or the bootstrapper of a launch still runs.
     pub launcher_runs: bool,
+    /// The driver service's registry key has `DeleteFlag = 1`: Windows marked it for deletion and something still holds it.
+    /// Easy Anti-Cheat's launcher then fails with "CreateService failed with 1072" (measured 2026-11-15 07:17, and the same
+    /// state on 2026-11-14 22:13): no VRChat starts on this computer until Windows restarts.
+    pub delete_pending: bool,
 }
 
 impl Eac {
@@ -297,7 +301,7 @@ impl Eac {
     /// at once (measured 2026-11-15, three times). With none, they must be stopped or gone first: a launch while the
     /// driver of a VRChat that just quit is still running fails with "EAC unload timeout" (30005, 2026-11-13).
     pub fn may_launch(&self) -> bool {
-        if self.launcher_runs {
+        if self.launcher_runs || self.delete_pending {
             return false;
         }
         let stopped = |s: &str| matches!(s, "STOPPED" | "ABSENT");
@@ -316,6 +320,59 @@ impl Eac {
         )
         .retry_after(30)
     }
+
+    /// What a launch answers while the driver service is marked for deletion: nothing is tried, as no launch can work.
+    pub fn stuck_failure() -> Failure {
+        Failure::new(
+            "eac_stuck",
+            "Easy Anti-Cheat's driver service (EasyAntiCheat_EOSSys) is marked for deletion: VRChat cannot start on this computer until Windows restarts. Nothing was started.",
+            "Stop starting VRChat and tell the person: restarting the computer clears it. A VRChat already running goes on working: keep using it.",
+        )
+    }
+}
+
+/// The last outcome Easy Anti-Cheat's launcher wrote in its log (`anticheatlauncher.log`: `Launcher finished with: 206,
+/// 'CreateService failed with 1072.'.`): its code and its words. `None` while no launch has finished.
+pub fn launcher_outcome(log: &str) -> Option<(i64, String)> {
+    let line = log.lines().rev().find(|l| l.contains("Launcher finished with: "))?;
+    let rest = line.split_once("Launcher finished with: ")?.1;
+    let (code, words) = rest.split_once(',').unwrap_or((rest, ""));
+    let words = words.trim().trim_end_matches('.').trim_matches('\'').trim_end_matches('.').to_string();
+    Some((code.trim().parse().ok()?, words))
+}
+
+/// What a launch that Easy Anti-Cheat's launcher ended (or that never brought a VRChat up) answers, from that log's outcome.
+pub fn launch_failure(outcome: Option<&(i64, String)>) -> Failure {
+    if outcome.is_some_and(|(_, words)| words.contains("1072")) {
+        return Eac::stuck_failure();
+    }
+    let said = outcome.map_or_else(
+        || "Easy Anti-Cheat's launcher wrote no outcome (it may have shown \"Launch Error (30005)\")".to_string(),
+        |(code, words)| format!("Easy Anti-Cheat's launcher said {code}: {words}"),
+    );
+    Failure::new(
+        "start_failed",
+        format!("VRChat did not start: {said}. The bridge closed the launcher it had started; nothing of this start is left running."),
+        "Wait 90 s (Easy Anti-Cheat unloads its driver about 77 s after a VRChat quits), then call go_to_world or open_session once more. If it fails again, stop starting VRChat and tell the person.",
+    )
+    .retry_after(90)
+}
+
+/// Whether a VRChat log is of a VRChat that has quit: its last lines say so (`VRCApplication: HandleApplicationQuit`).
+/// Windows dates a log at its process's end, so a log written to a minute ago can be of a VRChat that is gone.
+pub fn log_says_quit(tail: &str) -> bool {
+    tail.contains("HandleApplicationQuit")
+}
+
+/// The end of a file, at most `most` bytes.
+pub fn read_tail(path: &Path, most: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else { return String::new() };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = file.seek(SeekFrom::Start(len.saturating_sub(most)));
+    let mut bytes = Vec::new();
+    let _ = file.take(most).read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// `sc queryex`'s state line, `ABSENT` for a service that is not installed (1060).
@@ -418,7 +475,7 @@ mod tests {
 
     #[test]
     fn a_launch_waits_for_easy_anti_cheat() {
-        let eac = |service: &str, driver: &str, vrchat_runs, launcher_runs| Eac { service: service.into(), driver: driver.into(), vrchat_runs, launcher_runs };
+        let eac = |service: &str, driver: &str, vrchat_runs, launcher_runs| Eac { service: service.into(), driver: driver.into(), vrchat_runs, launcher_runs, delete_pending: false };
         assert!(eac("ABSENT", "ABSENT", false, false).may_launch(), "nothing loaded");
         assert!(eac("STOPPED", "STOPPED", false, false).may_launch(), "stopped but not deleted does not block (2026-11-13)");
         assert!(eac("RUNNING", "RUNNING", true, false).may_launch(), "beside a running VRChat (2026-11-15)");
@@ -430,5 +487,37 @@ mod tests {
         let sc = "SERVICE_NAME: EasyAntiCheat_EOS\n        TYPE               : 10  WIN32_OWN_PROCESS\n        STATE              : 4  RUNNING\n                                (STOPPABLE)\n        PID                : 27436\n";
         assert_eq!(service_state(sc), "RUNNING");
         assert_eq!(service_state("[SC] EnumQueryServicesStatus:OpenService FAILED 1060:\n\nThe specified service does not exist"), "ABSENT");
+    }
+
+    #[test]
+    fn a_driver_marked_for_deletion_refuses_every_launch_with_its_reason() {
+        // 2026-11-15 07:17: STOPPED, Start 4, DeleteFlag 1, and every launch, cold ones included, refused.
+        let stuck = Eac { service: "STOPPED".into(), driver: "STOPPED".into(), vrchat_runs: false, launcher_runs: false, delete_pending: true };
+        assert!(!stuck.may_launch());
+        assert!(!Eac { vrchat_runs: true, service: "RUNNING".into(), driver: "RUNNING".into(), ..stuck.clone() }.may_launch());
+        // The launcher's own log of that launch, as it was (times UTC).
+        let log = "[06:17:32:094] [Windows] [EAC Bootstrapper] [Info] Connect result: No error (0) Response Code: 200 Destination IP: 52.222.201.96
+                   [06:17:33:444] [Windows] [EAC Bootstrapper] [Info] Launcher finished with: 206, 'CreateService failed with 1072.'.
+                   [06:17:33:444] [Windows] [EAC Bootstrapper] [Info] Unlocking the launch lock, allowing next game to launch to take place.
+";
+        let outcome = launcher_outcome(log).unwrap();
+        assert_eq!(outcome, (206, "CreateService failed with 1072".to_string()));
+        assert_eq!(launch_failure(Some(&outcome)).code, "eac_stuck");
+        let other = launch_failure(Some(&(30005, "EAC unload timeout".into())));
+        assert_eq!((other.code, other.retry_after_s), ("start_failed", Some(90)));
+        assert!(other.message.contains("30005") && other.message.contains("closed the launcher"), "{}", other.message);
+        let none = launch_failure(None);
+        assert_eq!(none.code, "start_failed");
+        assert_eq!(launcher_outcome("[x] Log file open"), None);
+    }
+
+    #[test]
+    fn a_log_of_a_vrchat_that_quit_is_nobody_running() {
+        // The tour's own last VRChat (07-03-20), quit at 07:04:51: still "written to lately", but gone.
+        let tail = "2026.11.15 07:04:50 Debug      -  [VRCTrackingManager] [IK Debug Log] Set Graceful Quit: True
+                    2026.11.15 07:04:51 Debug      -  VRCApplication: HandleApplicationQuit at 89.79087
+";
+        assert!(log_says_quit(tail));
+        assert!(!log_says_quit("2026.11.15 07:04:44 Debug      -  [VRCTrackingSteam] FPS: 75.8"));
     }
 }

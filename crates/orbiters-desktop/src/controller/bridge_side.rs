@@ -42,18 +42,43 @@ fn launcher_runs() -> bool {
     system.processes().values().any(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "start_protected_game.exe" | "launch.exe"))
 }
 
+/// A service's state from a short-lived `sc.exe queryex`, which is given 5 s and then ended: a hung query would hold a handle
+/// of the service, and a service marked for deletion is deleted only once every handle of it is closed.
 fn sc_state(service: &str) -> String {
     let mut command = std::process::Command::new("sc.exe");
-    command.args(["queryex", service]);
+    command.args(["queryex", service]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).stdin(std::process::Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    match command.output() {
-        Ok(out) => sessions::service_state(&String::from_utf8_lossy(&out.stdout)),
-        Err(_) => "UNKNOWN".into(),
+    let Ok(mut child) = command.spawn() else { return "UNKNOWN".into() };
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return "UNKNOWN".into();
+            }
+        }
     }
+    let mut out = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        use std::io::Read;
+        let _ = stdout.read_to_string(&mut out);
+    }
+    sessions::service_state(&out)
+}
+
+/// Easy Anti-Cheat's launcher logs (`%APPDATA%\EasyAntiCheat\<product>\<deployment>\anticheatlauncher.log`), rewritten at
+/// each launch.
+fn launcher_logs() -> Vec<PathBuf> {
+    let Some(root) = std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("EasyAntiCheat")) else { return Vec::new() };
+    let dirs = |p: &Path| std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect::<Vec<_>>();
+    dirs(&root).iter().flat_map(|product| dirs(product)).map(|d| d.join("anticheatlauncher.log")).filter(|p| p.is_file()).collect()
 }
 
 /// What the bridge asks of the computer for its sessions.
@@ -68,6 +93,15 @@ impl RealOpener {
         Self { ctl, exe, games: Mutex::default() }
     }
 
+    /// The bridge asks for a profile's game only while no session of it lives: a game still here on these ports is a start
+    /// that failed or was left (2026-11-15 07:13: its OSC listener kept 9011 until the app restarted). It goes, its port freed.
+    fn drop_stale(&self, osc: (u16, u16)) {
+        let stale: Vec<String> = self.games.lock().unwrap().iter().filter(|(_, g)| g.osc == osc).map(|(id, _)| id.clone()).collect();
+        for id in stale {
+            self.forget(&id);
+        }
+    }
+
     fn sides(&self) -> Option<Arc<Sides>> {
         self.ctl.upgrade().map(|c| c.sides.clone())
     }
@@ -75,6 +109,7 @@ impl RealOpener {
 
 impl Opener for RealOpener {
     fn side(&self, session: &str, profile: u32, osc: (u16, u16)) -> Result<Arc<dyn Game>, Failure> {
+        self.drop_stale(osc);
         let ctl = self.ctl.upgrade().ok_or_else(|| Failure::new("app_closing", "Orbiters - N4N0 is closing.", "Stop here."))?; // i18n: not shown
         let game = SideGame::new(Arc::downgrade(&ctl), self.exe.clone(), session, profile, osc, ctl.sides.clone())?;
         self.games.lock().unwrap().insert(session.to_string(), game.clone());
@@ -82,10 +117,15 @@ impl Opener for RealOpener {
     }
 
     fn forget(&self, session: &str) {
-        if let Some(game) = self.games.lock().unwrap().remove(session) {
+        let game = self.games.lock().unwrap().remove(session);
+        if let Some(game) = game {
             game.stop.store(true, Ordering::Relaxed);
             if game.lent_to_me() {
                 game.unlend();
+            }
+            // Its OSC port is free once this returns (the listener looks at `stop` every 250 ms).
+            if let Some(listener) = game.listener.lock().unwrap().take() {
+                let _ = listener.join();
             }
         }
         if let Some(sides) = self.sides() {
@@ -127,6 +167,9 @@ impl Opener for RealOpener {
             .filter(|e| e.file_name().to_string_lossy().starts_with("output_log_"))
             .filter(|e| e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|d| d < Duration::from_secs(180))))
             .filter(|e| !marks.iter().any(|m| m.log.as_deref() == Some(e.path().as_path())))
+            // A VRChat that quit dates its log as it ends: the session's own last one, closed a moment ago, is nobody running
+            // (2026-11-15 07:13: open_session answered profile_in_use for it).
+            .filter(|e| !sessions::log_says_quit(&sessions::read_tail(&e.path(), 4096)))
             .filter_map(|e| sessions::complete_args(&sessions::read_head(&e.path(), 64 * 1024)))
             .filter(|args| !marks.iter().any(|m| args.contains(&sessions::osc_arg(m.osc_in, m.osc_out))))
             .map(|args| args.iter().find_map(|a| a.strip_prefix("--profile=").and_then(|p| p.parse().ok())).unwrap_or(0))
@@ -139,7 +182,30 @@ impl Opener for RealOpener {
             driver: sc_state("EasyAntiCheat_EOSSys"),
             vrchat_runs: !vrchat_pids().is_empty(),
             launcher_runs: launcher_runs(),
+            delete_pending: win::service_delete_pending("EasyAntiCheat_EOSSys"),
         }
+    }
+
+    fn launcher_outcome(&self, since: SystemTime) -> Option<(i64, String)> {
+        launcher_logs()
+            .into_iter()
+            .filter(|p| std::fs::metadata(p).and_then(|m| m.modified()).is_ok_and(|t| t + LOG_CREATED_SLACK >= since))
+            .find_map(|p| sessions::launcher_outcome(&sessions::read_tail(&p, 16 * 1024)))
+    }
+
+    fn end_launcher(&self, osc: (u16, u16)) -> usize {
+        let arg = sessions::osc_arg(osc.0, osc.1);
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always));
+        // Only a launcher of this session's own start: its command line carries this session's `--osc` (2026-11-15 07:13: the
+        // hung start_protected_game.exe's did).
+        system
+            .processes()
+            .values()
+            .filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "start_protected_game.exe" | "launch.exe"))
+            .filter(|p| p.cmd().iter().any(|a| a.to_string_lossy().contains(&arg)))
+            .filter(|p| p.kill())
+            .count()
     }
 
     fn memory_free(&self) -> Option<u64> {
@@ -202,6 +268,8 @@ pub(crate) struct SideGame {
     /// What its VRChat sent to its out port.
     values: Arc<Mutex<Latest>>,
     stop: Arc<AtomicBool>,
+    /// The thread listening on its out port: joined when the session goes, so the port is free again.
+    listener: Mutex<Option<std::thread::JoinHandle<()>>>,
     state: Mutex<SideState>,
 }
 
@@ -218,7 +286,7 @@ impl SideGame {
         let sender = UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| Failure::new("osc_failed", format!("No OSC socket: {e}"), "Tell the person."))?; // i18n: not shown
         let values = Arc::new(Mutex::new(Latest::default()));
         let stop = Arc::new(AtomicBool::new(false));
-        {
+        let listener = {
             let (values, stop) = (values.clone(), stop.clone());
             std::thread::Builder::new()
                 .name("bridge-side-osc".into())
@@ -242,8 +310,8 @@ impl SideGame {
                         }
                     }
                 })
-                .map_err(|e| Failure::new("osc_failed", format!("No OSC listener: {e}"), "Tell the person."))?; // i18n: not shown
-        }
+                .map_err(|e| Failure::new("osc_failed", format!("No OSC listener: {e}"), "Tell the person."))? // i18n: not shown
+        };
         sides.put(SideMark { session: session.to_string(), profile, osc_in: osc.0, osc_out: osc.1, pid: None, log: None, query: None });
         Ok(Arc::new(Self {
             inner: RealGame::new(ctl, exe),
@@ -254,6 +322,7 @@ impl SideGame {
             sender,
             values,
             stop,
+            listener: Mutex::new(Some(listener)),
             state: Mutex::default(),
         }))
     }
@@ -486,12 +555,16 @@ impl Game for SideGame {
         {
             let mut st = self.state.lock().unwrap();
             let last_picture = st.last_picture.take();
+            // A profile's account does not change between its starts: kept, so that a start that failed is not taken for a
+            // profile waiting at its sign-in page (2026-11-15 07:09: go_to_world answered a stale needs_sign_in). The new
+            // VRChat's log says it again, or that it waits for a sign-in.
+            let account = st.account.take();
             let mut followed = std::mem::take(&mut st.followed);
             followed.extend(st.log.take());
             // A handful is enough: older logs are minutes old, past any launch's moment.
             let drop_old = followed.len().saturating_sub(8);
             followed.drain(..drop_old);
-            *st = SideState { launched: Some((Instant::now(), SystemTime::now())), before: vrchat_pids(), last_picture, followed, ..Default::default() };
+            *st = SideState { launched: Some((Instant::now(), SystemTime::now())), before: vrchat_pids(), last_picture, followed, account, ..Default::default() };
         }
         self.values.lock().unwrap().clone_from(&Latest::default());
         self.sides.launching(true);
@@ -500,6 +573,23 @@ impl Game for SideGame {
             self.sides.launching(false);
         }
         started
+    }
+
+    fn send_link(&self, plan: &LaunchPlan) -> Result<(), Failure> {
+        use super::travel::Travel as _;
+        let Some(pid) = self.state.lock().unwrap().pid else {
+            return Err(Failure::new("link_unavailable", "This session's VRChat is not running.", "It is started in the instance instead.")); // i18n: not shown (an AI client reads it)
+        };
+        let (pipe, server) = super::travel::Real.connect().map_err(|e| Failure::new("link_unavailable", format!("VRChat's link pipe cannot be opened: {e}"), "It is started in the instance instead."))?; // i18n: not shown (an AI client reads it)
+        // Only the first VRChat started serves the pipe: written to anyone else's, the link would move the person's VRChat.
+        if server != Some(pid) {
+            return Err(Failure::new(
+                "link_pipe_elsewhere",
+                format!("VRChat's link pipe is served by another VRChat (process {}), not this session's ({pid}).", server.map_or("unknown".to_string(), |p| p.to_string())), // i18n: not shown (an AI client reads it)
+                "It is started in the instance instead.", // i18n: not shown (an AI client reads it)
+            ));
+        }
+        pipe.send(&super::travel::link(&plan.world_id, &plan.instance)).map_err(|e| Failure::new("link_unavailable", format!("VRChat did not take the link: {e}"), "It is started in the instance instead.")) // i18n: not shown (an AI client reads it)
     }
 
     fn window(&self, pid: u32) -> Option<GameWindow> {
@@ -717,6 +807,33 @@ impl Controller {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Two free loopback ports.
+    fn free_ports() -> (u16, u16) {
+        let a = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        let b = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        (a.local_addr().unwrap().port(), b.local_addr().unwrap().port())
+    }
+
+    /// 2026-11-15 07:13: a start that failed kept its session's OSC listener, and every open_session after it answered
+    /// port_taken (the port held by the app itself) until the app restarted. A game left on those ports is recognised as the
+    /// bridge's own and goes before a new one binds them; a forgotten one frees its port at once.
+    #[test]
+    fn a_failed_starts_osc_listener_is_its_own_and_is_freed_for_the_next() {
+        let osc = free_ports();
+        let opener = RealOpener::new(Weak::new(), PathBuf::new());
+        let left = SideGame::new(Weak::new(), PathBuf::new(), "p1-000000000001", 1, osc, Arc::new(Sides::default())).unwrap();
+        opener.games.lock().unwrap().insert("p1-000000000001".into(), left);
+        let taken = SideGame::new(Weak::new(), PathBuf::new(), "p1-000000000002", 1, osc, Arc::new(Sides::default())).err().expect("held by the left one");
+        assert_eq!(taken.code, "port_taken");
+        // What open_session does next: the left game goes, then the port is free (the app here is closing, so no game).
+        assert_eq!(opener.side("p1-000000000002", 1, osc).err().map(|f| f.code), Some("app_closing"));
+        assert!(opener.games.lock().unwrap().is_empty());
+        let next = SideGame::new(Weak::new(), PathBuf::new(), "p1-000000000003", 1, osc, Arc::new(Sides::default())).expect("the port is free again");
+        opener.games.lock().unwrap().insert("p1-000000000003".into(), next);
+        opener.forget("p1-000000000003");
+        UdpSocket::bind(("127.0.0.1", osc.1)).expect("freed when forgotten");
+    }
 
     /// A log as profile 1's VRChat writes it (its first lines as on 2026-11-15, 04:58:40).
     fn write_log(path: &Path, world: &str) {

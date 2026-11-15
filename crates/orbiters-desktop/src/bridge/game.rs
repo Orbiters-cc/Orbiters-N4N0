@@ -233,6 +233,14 @@ pub trait Opener: Send + Sync {
     fn foreground_pid(&self) -> Option<u32>;
     /// The main session's VRChat, the bridge's own: a side session's picture may borrow the app from it.
     fn set_main(&self, _pid: Option<u32>) {}
+    /// What Easy Anti-Cheat's launcher said when it finished a launch at `since` or later: its code and its words.
+    fn launcher_outcome(&self, _since: std::time::SystemTime) -> Option<(i64, String)> {
+        None
+    }
+    /// Ends what is left of a start of the session on these OSC ports (a launcher hung on an error window): how many processes.
+    fn end_launcher(&self, _osc: (u16, u16)) -> usize {
+        0
+    }
 }
 
 /// The Orbiters account world labels go under: the one signed in in Orbiters - N4N0's Settings, on the server its
@@ -288,6 +296,10 @@ pub enum PublishSeen {
     /// On Orbiters: its item id, whether it is listed for everyone, its page.
     Done { id: u64, public: bool, link: String, world_id: String },
     Failed { message: String, explicit: bool },
+    /// Waits in the publishing queue because Orbiters asked to wait (429 with `Retry-After`): it goes by itself once
+    /// `retry_after_s` have passed, nothing is sent meanwhile, and what Orbiters already accepted of it is not sent again.
+    /// `ahead`: pictures queued before it.
+    RateLimited { retry_after_s: u64, ahead: usize },
 }
 
 /// A drive the pictures use, and what is free on it.
@@ -329,6 +341,13 @@ pub trait Game: Send + Sync {
     fn create_private_instance(&self, world: &str, region: &str) -> Result<String, Failure>;
     fn find_worlds(&self, find: &Find, page: usize) -> Result<WorldPage, Failure>;
     fn launch(&self, plan: &LaunchPlan) -> Result<(), Failure>;
+    /// Hands the plan's launch link to this game's own running VRChat through VRChat's link pipe, as `launch.exe` does for a
+    /// running game: no new process, so no Easy Anti-Cheat start. Refused unless that VRChat is the pipe's server (only the
+    /// first VRChat started on a computer serves it). VRChat may show the world's page with a Join button instead of
+    /// travelling at once (measured 2026-11-13).
+    fn send_link(&self, _plan: &LaunchPlan) -> Result<(), Failure> {
+        Err(Failure::new("link_unavailable", "This VRChat cannot be handed a link from here.", "It is started again in the instance instead.")) // i18n: not shown (an AI client reads it in the tool's answer)
+    }
     /// The window of the process `pid`, while it has one.
     fn window(&self, pid: u32) -> Option<GameWindow>;
     /// Whether `window` is the foreground window at this moment.

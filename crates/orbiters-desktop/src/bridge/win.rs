@@ -72,6 +72,9 @@ mod imp {
     pub fn foreground_pid() -> Option<u32> {
         None
     }
+    pub fn service_delete_pending(_service: &str) -> bool {
+        false
+    }
 }
 
 #[cfg(windows)]
@@ -351,6 +354,20 @@ mod imp {
             }
         }
         owners
+    }
+
+    /// Whether the service's registry key says Windows marked it for deletion (`DeleteFlag` 1): read from the registry, never
+    /// through the service manager, so that the bridge holds no handle of the service at any moment.
+    pub fn service_delete_pending(service: &str) -> bool {
+        use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD};
+        let mut value = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let key = format!(r"SYSTEM\CurrentControlSet\Services\{service}");
+        // SAFETY: a u32 and its size are passed; the names live for the call.
+        let status = unsafe {
+            RegGetValueW(HKEY_LOCAL_MACHINE, &HSTRING::from(key), &HSTRING::from("DeleteFlag"), RRF_RT_REG_DWORD, None, Some(&mut value as *mut u32 as *mut _), Some(&mut size))
+        };
+        status.is_ok() && value != 0
     }
 
     /// The process whose window is the foreground now.

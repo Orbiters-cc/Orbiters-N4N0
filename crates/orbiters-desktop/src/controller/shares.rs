@@ -1057,6 +1057,15 @@ fn share_with(
         let made_with = sent_edits.as_deref().unwrap_or(&uploaded_edits);
         anyhow::ensure!(now == made_with, "{}", tr(EDITED_MEANWHILE));
     }
+    // Kept on the account and listed nowhere: the upload already is that (sent with visibility private). Asking Orbiters to
+    // share it with nobody is refused ("Choose someone to share with.", the world tour's first publish, 2026-11-15), so a
+    // private share with no recipient asks nothing more than the item, to remember it.
+    if !request.public && request.recipients.is_empty() {
+        let item = api.capture_item(token, kind, id)?;
+        step(steps, "kept private", &mut at); // i18n: not shown
+        save_record(records, entry, &item)?;
+        return Ok(shares::Shared::Item { item });
+    }
     report(Stage::Sharing);
     let shared = api.share_capture(token, kind, id, request);
     step(steps, "shared", &mut at);
@@ -1425,9 +1434,11 @@ pub(crate) mod tests {
                     let _ = stream.shutdown(std::net::Shutdown::Both);
                     continue;
                 }
+                // As Orbiters' limiter: a refusal for coming too often says when to come back.
+                let wait = if status == 429 { "Retry-After: 1200\r\n" } else { "" };
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                    "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\n{wait}Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
                     answer.len()
                 );
             }
@@ -2003,6 +2014,50 @@ pub(crate) mod tests {
         assert_eq!(item.capture.map(|c| c.revision), Some(3));
         println!("6. updated again: revision 3; {} splats deleted in all", n / 4);
         let _ = std::fs::remove_file(records);
+    }
+
+    /// Private is an upload kept on the account and listed nowhere: no share with nobody is asked (Orbiters refuses it with
+    /// "Choose someone to share with.", the tour's first publish on 2026-11-15). A 429 is said with its Retry-After, and a
+    /// publish stopped after its upload was accepted goes on with the share alone: nothing is sent twice.
+    #[test]
+    fn a_private_publish_is_kept_on_the_account_and_a_wait_is_said_and_resumed_without_sending_again() {
+        let private = shares::Share { public: false, recipients: Vec::new(), ..Default::default() };
+        let public = shares::Share { public: true, recipients: Vec::new(), ..Default::default() };
+        let kept = serde_json::json!({ "item": Item { kind: Kind::Capture, id: 5, mine: true, can_share: true, public: false, ..Default::default() } }).to_string();
+        let added = |id: u64| format!(r#"{{"type":"capture","id":{id},"visibility":"private"}}"#);
+        let too_many = r#"{"error":"Too many attempts. Please wait before trying again."}"#.to_string();
+
+        let (dir, _session, records, mut entry) = uploaded_session("private", None);
+        std::fs::remove_file(&records).unwrap();
+        entry.world_id = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd".into();
+        let (api, seen) = stand_in(vec![("POST /maps/worlds/", 200, added(5)), ("GET /captures/capture/5", 200, kept.clone())]);
+        let result = share_with(&api, "token", Ok(records.clone()), &entry, &private, &|_| {}, &mut Vec::new(), &prepared).unwrap();
+        assert!(matches!(result, shares::Shared::Item { ref item } if item.id == 5 && !item.public));
+        let asked = requests(&seen);
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert!(asked[0].starts_with("POST /maps/worlds/") && asked[0].ends_with("/previews") && asked[1] == "GET /captures/capture/5", "{asked:?}");
+        let uploaded = std::str::from_utf8(&seen.lock().unwrap()[0].1).unwrap().contains(r#""visibility":"private""#);
+        assert!(uploaded, "sent as private");
+        assert_eq!(record_of(&records).unwrap().item.map(|i| i.id), Some(5), "remembered: published, private");
+        std::fs::remove_dir_all(dir).ok();
+
+        // Orbiters' limiter refuses the upload: said with its wait, nothing remembered as sent.
+        let (dir, _session, records, mut entry) = uploaded_session("limited", None);
+        std::fs::remove_file(&records).unwrap();
+        entry.world_id = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd".into();
+        let (api, _seen) = stand_in(vec![("POST /maps/worlds/", 429, too_many.clone())]);
+        let refused = share_with(&api, "token", Ok(records.clone()), &entry, &public, &|_| {}, &mut Vec::new(), &prepared).unwrap_err();
+        let limited = refused.downcast_ref::<shares::RateLimited>().expect("a wait, not a failure");
+        assert_eq!(limited.retry_after_s, 1200);
+        assert!(record_of(&records).is_none());
+        // Uploaded, then the share refused: the next try only shares.
+        let (api, _seen) = stand_in(vec![("POST /maps/worlds/", 200, added(6)), ("POST /captures/capture/6/share", 429, too_many), ("GET /captures/capture/6", 200, capture_at(6, 1))]);
+        let refused = share_with(&api, "token", Ok(records.clone()), &entry, &public, &|_| {}, &mut Vec::new(), &prepared).unwrap_err();
+        assert!(refused.downcast_ref::<shares::RateLimited>().is_some(), "{refused}");
+        let (api, seen) = stand_in(vec![("POST /captures/capture/6/share", 200, capture_at(6, 1))]);
+        share_with(&api, "token", Ok(records.clone()), &entry, &public, &|_| {}, &mut Vec::new(), &prepared).unwrap();
+        assert_eq!(requests(&seen), ["POST /captures/capture/6/share"], "its upload is not sent again");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     /// An item uploaded before (its record says so) is shared with one request: nothing sent again, nothing fetched.

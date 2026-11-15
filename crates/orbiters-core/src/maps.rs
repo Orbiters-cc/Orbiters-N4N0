@@ -261,6 +261,27 @@ pub enum WorldList {
     Trending,
     /// The signed-in VRChat account's favorite worlds (VRChat only).
     Favorites,
+    /// What VRChat highlights: the worlds of one of its Spotlight rows, latest updated first (VRChat only).
+    Spotlight(Spotlight),
+}
+
+/// VRChat's Spotlight rows, as its client's world rows name them (`GET /config`, `dynamicWorldRows`, read 2026-11-15:
+/// "Spotlight - PC" is `tag=admin_spotlight_pc`, "Spotlight - Cross Platform" `tag=admin_spotlight_xplat`, both sorted by
+/// `updated`, descending).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Spotlight {
+    Pc,
+    CrossPlatform,
+}
+
+impl Spotlight {
+    /// The tag VRChat gives the worlds of the row.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Spotlight::Pc => "admin_spotlight_pc",
+            Spotlight::CrossPlatform => "admin_spotlight_xplat",
+        }
+    }
 }
 
 /// Worlds a page of a [`WorldList`] holds, as the Map explorer pages them.
@@ -312,7 +333,7 @@ pub fn found_path(list: &WorldList, page: usize) -> Option<String> {
             Some(format!("maps/search?q={}&page={page}", crate::vrchat_api::encode(&q)))
         }
         WorldList::Popular => Some(format!("maps/featured?page={page}")),
-        WorldList::Active | WorldList::Trending | WorldList::Favorites => None,
+        WorldList::Active | WorldList::Trending | WorldList::Favorites | WorldList::Spotlight(_) => None,
     }
 }
 
@@ -691,6 +712,7 @@ mod tests {
         assert_eq!(found_path(&WorldList::Popular, 99).as_deref(), Some("maps/featured?page=20"));
         assert_eq!(found_path(&WorldList::Favorites, 0), None);
         assert_eq!(found_path(&WorldList::Active, 0), None);
+        assert_eq!(found_path(&WorldList::Spotlight(Spotlight::Pc), 0), None, "only VRChat knows its Spotlight");
         let found = parse_found(
             r#"{"items":[{"worldId":"wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b","name":"Palm Point","pictures":2.0,"preview":null},
             {"worldId":"wrld_../x","name":"bad"},{"worldId":"wrld_4cf554b4-430c-4f8f-b53e-1f294eed230c"}],"hasMore":false}"#,

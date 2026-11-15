@@ -7,7 +7,8 @@
 //! `orbiters-desktop --bridge-lab` runs it with the real MCP listener and the real keeper, behind a stand-in for Orbiters'
 //! `features/mine`, so that any MCP client can drive it: `scripts/bridge-lab.mjs` does, with the official SDK.
 
-use super::game::{CaptureSeen, Failure, Find, Game, GameWindow, LaunchPlan, OscArg, PictureFiles, ReconstructionSeen, Seen, Shot, WorldCard};
+use super::game::{CaptureSeen, Failure, Feedback, FeedbackAccount, Find, Game, GameWindow, LaunchPlan, OscArg, PictureFiles, ReconstructionSeen, Seen, Shot, WorldCard, WorldPage};
+use orbiters_n4n0_core::feedback::{FeedbackAsk, LabelCount, WorldFeedback};
 use super::input::{Input, MouseButton};
 use orbiters_core::settings::{Photo3dLength, PictureMode};
 use orbiters_core::vrchat_log::LogWatcher;
@@ -365,11 +366,16 @@ impl Game for LabGame {
         Ok(instance)
     }
 
-    fn find_worlds(&self, find: &Find, _page: usize) -> Result<Vec<WorldCard>, Failure> {
+    fn find_worlds(&self, find: &Find, page: usize) -> Result<WorldPage, Failure> {
         let card = |id: &str, name: &str| WorldCard { id: id.to_string(), name: name.to_string(), author: None, occupants: None, last_visit: None };
-        Ok(match find {
-            Find::Search(query) if !query.to_lowercase().contains("lab") => Vec::new(),
-            _ => vec![card(LAB_WORLD_A, "Lab World A"), card(LAB_WORLD_B, "Lab World B")], // i18n: not shown
+        Ok(match (find, page) {
+            (Find::Search(query), _) if !query.to_lowercase().contains("lab") => WorldPage::default(),
+            // VRChat's Spotlight rows, a world a page, two pages; every list as deep as VRChat's for popular.
+            (Find::SpotlightPc | Find::SpotlightCrossPlatform, 0) => WorldPage { worlds: vec![card(LAB_WORLD_A, "Lab World A")], more: true }, // i18n: not shown
+            (Find::SpotlightPc | Find::SpotlightCrossPlatform, 1) => WorldPage { worlds: vec![card(LAB_WORLD_B, "Lab World B")], more: false }, // i18n: not shown
+            (Find::Popular, p) if p > 0 => WorldPage { worlds: vec![card(LAB_WORLD_B, "Lab World B")], more: true }, // i18n: not shown
+            (_, 0) => WorldPage { worlds: vec![card(LAB_WORLD_A, "Lab World A"), card(LAB_WORLD_B, "Lab World B")], more: *find == Find::Popular }, // i18n: not shown
+            _ => WorldPage::default(),
         })
     }
 
@@ -783,6 +789,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let timing = super::Timing { instance_every: Duration::from_secs(1), start_limit: Duration::from_secs(20) };
     let bridge = super::Bridge::with_timing(game.clone(), Some(exe), timing);
     bridge.set_opener(LabOpener::new(&dir.join("sessions")));
+    bridge.set_feedback(LabFeedback::signed_in());
     let stand_in = StandIn::start();
     let flag = Arc::new(LabFlag { api: orbiters_core::account::Api::at(&stand_in.address), signed_in: AtomicBool::new(true), enabled: AtomicBool::new(true) });
     let keeper = super::keeper::Keeper::new(
@@ -854,6 +861,95 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     keeper.shutdown();
     Ok(())
+}
+
+/// The lab's world feedback: Orbiters as far as the label tools care, answering at once (or never, or refusing), and every
+/// ask recorded.
+#[derive(Default)]
+pub struct LabFeedback {
+    pub state: Mutex<LabFeedbackState>,
+}
+
+#[derive(Default)]
+pub struct LabFeedbackState {
+    pub account: Option<FeedbackAccount>,
+    /// Orbiters cannot be reached: asks stay pending.
+    pub offline: bool,
+    /// Orbiters refuses every ask with this sentence.
+    pub refuses: Option<String>,
+    pub asks: Vec<FeedbackAsk>,
+    /// Worlds asked about with show.
+    pub shown: Vec<String>,
+    /// By world: label id, how many gave it, whether the account did.
+    pub labels: HashMap<String, Vec<(String, u32, bool)>>,
+    pub justification: HashMap<String, String>,
+    pending: HashMap<String, u32>,
+    errors: HashMap<String, String>,
+}
+
+impl LabFeedback {
+    /// Signed in to the development server as `Lab member`.
+    pub fn signed_in() -> Arc<Self> {
+        let lab = Self::default();
+        lab.state.lock().unwrap().account = Some(FeedbackAccount {
+            server: "http://127.0.0.1:4100/".into(),
+            development: true,
+            name: Some("Lab member".into()), // i18n: not shown
+            id: Some("7".into()),
+        });
+        Arc::new(lab)
+    }
+}
+
+impl Feedback for LabFeedback {
+    fn account(&self) -> Option<FeedbackAccount> {
+        self.state.lock().unwrap().account.clone()
+    }
+
+    fn show(&self, world: &str) {
+        self.state.lock().unwrap().shown.push(world.to_string());
+    }
+
+    fn feedback(&self, world: &str) -> WorldFeedback {
+        let st = self.state.lock().unwrap();
+        WorldFeedback {
+            world: world.to_string(),
+            loading: st.offline && !st.labels.contains_key(world),
+            labels: st.labels.get(world).map(|l| l.iter().map(|(id, count, mine)| LabelCount { id: id.clone(), count: *count, mine: *mine }).collect()).unwrap_or_default(),
+            justification: st.justification.get(world).cloned(),
+            pending: st.pending.get(world).copied().unwrap_or(0),
+            error: st.errors.get(world).cloned(),
+            ..Default::default()
+        }
+    }
+
+    fn ask(&self, ask: FeedbackAsk) {
+        let mut st = self.state.lock().unwrap();
+        st.asks.push(ask.clone());
+        let FeedbackAsk::Label { world, label, on, text } = ask else { return };
+        st.errors.remove(&world);
+        if let Some(refusal) = st.refuses.clone() {
+            st.errors.insert(world, refusal);
+            return;
+        }
+        if st.offline {
+            *st.pending.entry(world).or_default() += 1;
+            return;
+        }
+        if let Some(text) = text {
+            st.justification.insert(world.clone(), text);
+        }
+        let labels = st.labels.entry(world).or_default();
+        match labels.iter_mut().find(|l| l.0 == label) {
+            Some(l) if l.2 != on => {
+                l.1 = if on { l.1 + 1 } else { l.1.saturating_sub(1) };
+                l.2 = on;
+            }
+            Some(_) => {}
+            None if on => labels.push((label, 1, true)),
+            None => {}
+        }
+    }
 }
 
 /// The lab's side sessions: each a [`LabGame`] of its own (its window, log, OSC port), and a computer whose Easy Anti-Cheat,

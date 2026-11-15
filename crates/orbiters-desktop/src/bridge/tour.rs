@@ -364,6 +364,10 @@ impl Bridge {
                 "publish_3d_picture first (or what capture_files, which keeps its 3D view).",
             ));
         }
+        if everything {
+            // The world's map keeps what this picture saw (map_tool.rs).
+            self.map_keep(&publish.sessions_dir(), &picture.session);
+        }
         let freed = publish.delete(&dir, everything)?;
         let what = if everything { "everything" } else { "capture_files" };
         self.journal.lock().unwrap().freed(&picture.session, what);

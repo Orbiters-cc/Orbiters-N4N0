@@ -536,6 +536,14 @@ fn tool_result(answer: Result<Answer, super::game::Failure>) -> Value {
             "structuredContent": info,
             "isError": false,
         }),
+        Ok(Answer::Image(info, bytes, mime)) => json!({
+            "content": [
+                { "type": "image", "data": base64::engine::general_purpose::STANDARD.encode(&bytes), "mimeType": mime },
+                { "type": "text", "text": info.to_string() },
+            ],
+            "structuredContent": info,
+            "isError": false,
+        }),
         Err(failure) => {
             let data = tools::failure_json(&failure);
             json!({ "content": [{ "type": "text", "text": data.to_string() }], "structuredContent": data, "isError": true })

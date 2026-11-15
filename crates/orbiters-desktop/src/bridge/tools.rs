@@ -51,12 +51,14 @@ const ROWS: [(&str, orbiters_core::maps::Row); 7] = [
 ];
 /// How far `aim_camera` moves VRChat's camera in one call, metres each way: the 3D picture's flight goes 10 m from where it
 /// starts, and a camera much further from the avatar than that is not measured.
-const AIM_REACH_M: f64 = 25.0;
+pub(super) const AIM_REACH_M: f64 = 25.0;
 
 /// A tool's answer.
 pub enum Answer {
     Data(Value),
     Picture(Value, Shot),
+    /// Data with an image made here (a map's plan), and its media type.
+    Image(Value, Vec<u8>, &'static str),
 }
 
 /// The tools that act on one VRChat, and take `session`.
@@ -337,6 +339,7 @@ pub fn list() -> Value {
         tool
     })
     .chain(super::tour::list())
+    .chain(super::map_tool::list())
     .chain(super::projects::list())
     .chain(super::sandbox::list())
     .collect::<Vec<Value>>()
@@ -394,7 +397,7 @@ fn file_name(path: &std::path::Path) -> String {
 impl Bridge {
     /// One tool call, whose outcome goes to the log (all but what only reads: those fill it with nothing).
     pub fn call(&self, name: &str, args: &Value, call: &Call) -> Result<Answer, Failure> {
-        let acts = !matches!(name, "get_state" | "wait_for" | "find_worlds" | "list_sessions" | "world_labels") && !super::projects::reads(name) && !super::tour::reads(name);
+        let acts = !matches!(name, "get_state" | "wait_for" | "find_worlds" | "list_sessions" | "world_labels" | "map_plan" | "map_check") && !super::projects::reads(name) && !super::tour::reads(name);
         let result = match name {
             "vr_sandbox" => {
                 if !matches!(args["action"].as_str(), Some("stop" | "restore" | "status")) {
@@ -405,6 +408,7 @@ impl Bridge {
             }
             unity if super::projects::NAMES.contains(&unity) => self.projects.call(unity, args, call, self.paused()),
             tour if super::tour::NAMES.contains(&tour) => self.tour_call(tour, args, call),
+            map if super::map_tool::NAMES.contains(&map) => self.session_of(args, true).and_then(|s| self.map_call(map, &s, args)),
             "open_session" => self.open_session(args, call),
             "list_sessions" => Ok(Answer::Data(self.list_sessions())),
             "close_session" => self.session_of(args, true).and_then(|s| self.exclusively(&s, || self.close_session(&s, call))),
@@ -1344,13 +1348,22 @@ impl Bridge {
             }
             Self::in_private_instance(&seen)
         };
+        let direction = args["direction"].as_str().unwrap_or("forward");
+        let run = args["run"].as_bool().unwrap_or(false);
+        // What the map shows ahead, before the avatar goes (none without a map of this world or a known avatar).
+        let map = self.map_note_for_walk(s, direction, seconds.as_secs_f32(), run);
         let held = self.press_for(s, call, &holds, seconds, None, &still_ok)?;
         let speed_seen = speed.lock().unwrap().or(s.game.seen().speed);
+        self.map_walked(s, direction, held.as_secs_f64(), speed_seen, run);
         let note = match speed_seen {
             Some(s) if s < 0.1 => Some("VRChat reported no movement: blocked, seated, or a menu open. Look with screenshot."),
             _ => None,
         };
-        Ok(Answer::Data(json!({ "walked_s": held.as_secs_f64(), "speed_seen": speed_seen, "note": note })))
+        let mut answer = json!({ "walked_s": held.as_secs_f64(), "speed_seen": speed_seen, "note": note });
+        if let Some(map) = map {
+            answer["map"] = map;
+        }
+        Ok(Answer::Data(answer))
     }
 
     fn turn(&self, s: &Session, args: &Value, call: &Call) -> Result<Answer, Failure> {
@@ -1364,6 +1377,7 @@ impl Bridge {
         let address = if degrees > 0.0 { "/input/LookRight" } else { "/input/LookLeft" };
         let holds = [(Hold::OscButton(address), Some(OscArg::Int(1)), None)];
         let held = self.press_for(s, call, &holds, seconds, None, &self.still_private(s))?;
+        self.map_turned(s, degrees);
         Ok(Answer::Data(json!({
             "turned_about_degrees": degrees,
             "held_s": held.as_secs_f64(),
@@ -1687,12 +1701,17 @@ impl Bridge {
         self.wait_until(Duration::from_millis(600), call, || false)?;
         let moved = ((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2) + (to[2] - from[2]).powi(2)).sqrt();
         let round = |p: [f32; 6]| p.map(|v| (v * 100.0).round() / 100.0);
-        Ok(Answer::Data(json!({
+        let mut answer = json!({
             "from": round(from),
             "to": round(to),
             "moved_m": (f64::from(moved) * 10.0).round() / 10.0,
             "next": "Look with screenshot: the camera's panel shows what it sees from there. If it is in a wall, under the floor or facing nothing, aim_camera again. Then take_3d_picture: it flies around this spot.",
-        })))
+        });
+        // What this world's map says of the spot: a warning, never a refusal (the map has holes).
+        if let Some(map) = self.map_note_for_camera(s, [to[0], to[1], to[2]]) {
+            answer["map"] = map;
+        }
+        Ok(Answer::Data(answer))
     }
 }
 

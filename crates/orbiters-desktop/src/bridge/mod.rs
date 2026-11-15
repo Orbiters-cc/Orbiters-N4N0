@@ -24,6 +24,8 @@ pub mod input;
 pub mod journal;
 pub mod keeper;
 pub mod lab;
+pub mod map;
+pub mod map_tool;
 pub mod mcp;
 pub mod person;
 pub mod projects;
@@ -328,6 +330,8 @@ pub struct Bridge {
     stops: AtomicU64,
     /// The Unity projects tools and their jobs.
     pub projects: projects::Projects,
+    /// The worlds' maps from their 3D pictures, and the avatars' moves (map_tool.rs).
+    pub(crate) maps: map_tool::Maps,
 }
 
 impl Bridge {
@@ -358,6 +362,7 @@ impl Bridge {
             in_flight: AtomicUsize::new(0),
             stops: AtomicU64::new(0),
             projects: projects::Projects::default(),
+            maps: map_tool::Maps::default(),
         })
     }
 

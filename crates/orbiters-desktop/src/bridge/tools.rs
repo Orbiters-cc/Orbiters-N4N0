@@ -2395,8 +2395,8 @@ mod tests {
         let tools = tools.as_array().unwrap();
         let vrchat = tools.iter().filter(|t| !t["name"].as_str().unwrap().starts_with("unity_")).count();
         // The thirteen of a game, two for its labels, three for the sessions, four for a tour's environment, publishing and
-        // pictures (and the sandbox's, in its builds).
-        assert!(vrchat <= 23, "few: {vrchat}");
+        // pictures, two for the map that guides its next picture (and the sandbox's, in its builds).
+        assert!(vrchat <= 25, "few: {vrchat}");
         assert_eq!(tools.len(), vrchat + super::super::projects::NAMES.len(), "the Unity projects tools after them");
         for tool in tools {
             assert!(tool["description"].as_str().unwrap().len() > 60, "{tool}");

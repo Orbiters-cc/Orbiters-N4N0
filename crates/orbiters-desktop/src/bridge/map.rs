@@ -124,7 +124,11 @@ impl Capture {
         let eye_height = read_eye_height(dir).unwrap_or(EYE_HEIGHT);
         let ply = std::fs::read(dir.join("reconstruction").join("splats.ply")).map_err(|e| format!("no finished reconstruction ({e})"))?;
         let points = ply_points(&ply)?;
-        let voxels = voxelize(&points, &path);
+        let mut voxels = voxelize(&points, &path);
+        // The avatar stood still while the camera flew: its own body is no wall.
+        if let Some(a) = avatar {
+            voxels.retain(|v| !on_avatar(&a, v));
+        }
         let taken = std::fs::metadata(dir.join("manifest.json")).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
         Ok(Capture {
             session,
@@ -230,6 +234,12 @@ pub fn ply_points(data: &[u8]) -> Result<Vec<[f32; 3]>, String> {
     Ok(out)
 }
 
+/// Whether a voxel is the avatar's own body: within 0.7 m of its hips across, from just over the floor to over its head.
+fn on_avatar(a: &Avatar, v: &[i32; 4]) -> bool {
+    let p = [0, 1, 2].map(|k| (v[k] as f32 + 0.5) * VOXEL);
+    ((p[0] - a.hips[0]).powi(2) + (p[2] - a.hips[2]).powi(2)).sqrt() <= 0.7 && p[1] > a.hips[1] - 0.85 && p[1] < a.hips[1] + 1.2
+}
+
 /// The points around the flight (stray ones at thousands of metres left out), counted per [`VOXEL`].
 fn voxelize(points: &[[f32; 3]], path: &[[f32; 3]]) -> Vec<[i32; 4]> {
     let (lo, hi) = around(path);
@@ -298,6 +308,12 @@ pub struct Map {
     pub raised: Vec<f32>,
     /// The floor level the avatar stands on.
     pub floor: f32,
+    /// Unknown cells joined to the plan's edge through unknown ones.
+    outer: Vec<bool>,
+    /// Cells inside seen space: all around them seen (holes allowed), some floor seen near.
+    core: Vec<bool>,
+    /// Walkable cells beside a core: the space that counts.
+    main: Vec<bool>,
     pub captures: Vec<std::sync::Arc<Capture>>,
 }
 
@@ -358,6 +374,9 @@ impl Map {
             ground: Vec::new(),
             raised: Vec::new(),
             floor: 0.0,
+            outer: Vec::new(),
+            core: Vec::new(),
+            main: Vec::new(),
             captures,
         };
         for c in map.captures.clone() {
@@ -370,6 +389,7 @@ impl Map {
         }
         map.carve();
         map.plan();
+        map.shape();
         map
     }
 
@@ -430,6 +450,16 @@ impl Map {
                 }
             }
         }
+        // Where the camera flew was open.
+        for c in self.captures.clone() {
+            for p in &c.path {
+                if let Some(i) = self.index_of(*p) {
+                    if !solid[i] {
+                        self.rays[i] = self.rays[i].saturating_add(1);
+                    }
+                }
+            }
+        }
         let targets: Vec<usize> = (0..solid.len()).filter(|&i| solid[i]).collect();
         let every = (targets.len() / 200_000).max(1);
         let step = self.voxel * 0.5;
@@ -483,7 +513,7 @@ impl Map {
                     for z in cz * per..((cz + 1) * per).min(self.dims[2]) {
                         for y in 0..dy {
                             if self.solid_at([x, y, z]) && (y + 1 >= dy || !self.solid_at([x, y + 1, z])) {
-                                heights.push(self.lo[1] + (y + 1) as f32 * self.voxel);
+                                heights.push(self.lo[1] + (y as f32 + 0.5) * self.voxel);
                             }
                         }
                     }
@@ -560,9 +590,10 @@ impl Map {
                 } else {
                     Cell::Unknown
                 };
+                // Seen from above: rays crossed the space over it.
                 if let Some(h) = tops[c].iter().copied().filter(|h| *h > g + 2.2).find(|h| {
-                    let i = self.voxel_of([self.lo[0] + (cx * per) as f32 * self.voxel, h + 1.0, self.lo[2] + (cz * per) as f32 * self.voxel]);
-                    i.is_some_and(|i| !self.solid_at(i))
+                    let i = self.voxel_of([self.lo[0] + (cx * per) as f32 * self.voxel + self.voxel * 0.5, h + 0.5, self.lo[2] + (cz * per) as f32 * self.voxel + self.voxel * 0.5]);
+                    i.is_some_and(|i| self.open_at(i))
                 }) {
                     raised[c] = h;
                 }
@@ -590,7 +621,7 @@ impl Map {
             }
             if let Some((&y, &n)) = layers.iter().max_by_key(|(y, n)| (**n, **y)) {
                 if n >= 8 {
-                    return (y + 1) as f32 * VOXEL;
+                    return (y as f32 + 0.5) * VOXEL;
                 }
             }
             return a.hips[1] - HIPS_PER_EYE * eye;
@@ -868,55 +899,89 @@ pub struct Verdict {
 }
 
 impl Map {
-    /// Open areas: walkable cells shrunk by half a metre (so a door narrower than about 1.5 m splits two rooms), connected.
-    /// Returns each walkable cell's area (usize::MAX: none) and the areas' sizes in cells.
-    pub fn areas(&self) -> (Vec<usize>, Vec<usize>) {
+    /// Unknown cells joined to the plan's edge through unknown ones (what no picture saw, out to the unseen world), and the
+    /// main space: walkable cells beside a core of seen space (three cells across, holes in it allowed, some floor seen
+    /// near), so that thin streaks of rays into the void and specks are not taken for rooms or places to go.
+    fn shape(&mut self) {
         let [pw, pd] = self.plan_dims;
-        let walk: Vec<bool> = self.cells.iter().map(|c| c.walkable()).collect();
-        let core: Vec<bool> = (0..pw * pd)
-            .map(|c| {
+        let mut outer = vec![false; pw * pd];
+        let mut queue: VecDeque<usize> = (0..pw * pd)
+            .filter(|&c| {
                 let (x, z) = (c / pd, c % pd);
-                walk[c] && neighbours8(x, z, pw, pd).all(|n| walk[n])
+                self.cells[c] == Cell::Unknown && (x == 0 || z == 0 || x + 1 == pw || z + 1 == pd)
             })
             .collect();
+        for &c in &queue {
+            outer[c] = true;
+        }
+        while let Some(c) = queue.pop_front() {
+            for n in neighbours4(c / pd, c % pd, pw, pd) {
+                if self.cells[n] == Cell::Unknown && !outer[n] {
+                    outer[n] = true;
+                    queue.push_back(n);
+                }
+            }
+        }
+        let space: Vec<bool> = (0..pw * pd).map(|c| self.cells[c].walkable() || (self.cells[c] == Cell::Unknown && !outer[c])).collect();
+        let window = |c: usize, r: i64| {
+            let (x, z) = ((c / pd) as i64, (c % pd) as i64);
+            (-r..=r).flat_map(move |ox| (-r..=r).map(move |oz| (x + ox, z + oz))).filter(|&(nx, nz)| nx >= 0 && nz >= 0 && (nx as usize) < pw && (nz as usize) < pd).map(move |(nx, nz)| nx as usize * pd + nz as usize)
+        };
+        let core: Vec<bool> = (0..pw * pd).map(|c| space[c] && window(c, 1).count() == 9 && window(c, 1).all(|n| space[n]) && window(c, 2).filter(|&n| self.cells[n] == Cell::Floor).count() >= 3).collect();
+        let main: Vec<bool> = (0..pw * pd).map(|c| self.cells[c].walkable() && window(c, 1).any(|n| core[n])).collect();
+        self.outer = outer;
+        self.core = core;
+        self.main = main;
+    }
+
+    /// Areas apart from each other: the cores' connected parts (a door narrower than about 1.5 m splits two rooms), with the
+    /// main cells around them. Each main cell's area (usize::MAX: none) and the areas' sizes in cells.
+    pub fn areas(&self) -> (Vec<usize>, Vec<usize>) {
+        let [pw, pd] = self.plan_dims;
         let mut area = vec![usize::MAX; pw * pd];
         let mut sizes = Vec::new();
         for start in 0..pw * pd {
-            if !core[start] || area[start] != usize::MAX {
+            if !self.core[start] || area[start] != usize::MAX {
                 continue;
             }
             let id = sizes.len();
-            let mut n = 0;
             let mut queue = VecDeque::from([start]);
             area[start] = id;
             while let Some(c) = queue.pop_front() {
-                n += 1;
                 for m in neighbours4(c / pd, c % pd, pw, pd) {
-                    if core[m] && area[m] == usize::MAX {
+                    if self.core[m] && area[m] == usize::MAX {
                         area[m] = id;
                         queue.push_back(m);
                     }
                 }
             }
-            sizes.push(n);
+            sizes.push(0);
         }
-        // The rim cells take their nearest core's area.
+        // The main cells take their nearest core's area.
         let mut queue: VecDeque<usize> = (0..pw * pd).filter(|&c| area[c] != usize::MAX).collect();
         while let Some(c) = queue.pop_front() {
             for m in neighbours4(c / pd, c % pd, pw, pd) {
-                if walk[m] && area[m] == usize::MAX {
+                if self.main[m] && area[m] == usize::MAX {
                     area[m] = area[c];
                     queue.push_back(m);
                 }
             }
         }
+        for c in 0..pw * pd {
+            if area[c] != usize::MAX && self.main[c] {
+                sizes[area[c]] += 1;
+            } else if !self.main[c] {
+                area[c] = usize::MAX;
+            }
+        }
         (area, sizes)
     }
 
-    /// Unknown cells beside walkable ones, grouped into openings (by touch); each opening's cells.
+    /// Openings: unseen space joined to the unseen world, beside the main space (doors, corridors, the edge of an outdoor
+    /// space), each opening's cells. Holes in a seen floor are not openings.
     pub fn openings(&self) -> Vec<Vec<usize>> {
         let [pw, pd] = self.plan_dims;
-        let frontier: Vec<bool> = (0..pw * pd).map(|c| self.cells[c] == Cell::Unknown && neighbours4(c / pd, c % pd, pw, pd).any(|n| self.cells[n].walkable())).collect();
+        let frontier: Vec<bool> = (0..pw * pd).map(|c| self.outer[c] && neighbours4(c / pd, c % pd, pw, pd).any(|n| self.main[n])).collect();
         let mut seen = vec![false; pw * pd];
         let mut out = Vec::new();
         for start in 0..pw * pd {
@@ -935,7 +1000,7 @@ impl Map {
                     }
                 }
             }
-            // A metre at least: one stray hole in a floor is not a way anywhere.
+            // A metre at least: a speck is not a way anywhere.
             if group.len() as f32 * self.cell >= 1.0 {
                 out.push(group);
             }
@@ -945,7 +1010,8 @@ impl Map {
 
     pub fn size(&self) -> Size {
         let [pw, pd] = self.plan_dims;
-        let known: Vec<usize> = (0..pw * pd).filter(|&c| self.cells[c] != Cell::Unknown).collect();
+        let walled = |c: usize| self.cells[c] == Cell::Blocked && neighbours4(c / pd, c % pd, pw, pd).any(|n| self.main[n]);
+        let known: Vec<usize> = (0..pw * pd).filter(|&c| self.main[c] || walled(c)).collect();
         let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
         for &c in &known {
             let p = self.cell_centre(c);
@@ -955,28 +1021,34 @@ impl Map {
             }
         }
         let extent = if known.is_empty() { [0.0, 0.0] } else { [round1(hi[0] - lo[0] + self.cell), round1(hi[1] - lo[1] + self.cell)] };
-        let walkable = self.cells.iter().filter(|c| c.walkable()).count() as f32 * self.cell * self.cell;
+        let walkable = self.main.iter().filter(|m| **m).count() as f32 * self.cell * self.cell;
+        // The highest solid thing over the main space.
+        let per = (self.cell / self.voxel).round().max(1.0) as usize;
         let mut top = self.floor;
-        for (i, &n) in self.points.iter().enumerate() {
-            if n >= SOLID {
-                let y = self.lo[1] + ((i / self.dims[2]) % self.dims[1] + 1) as f32 * self.voxel;
-                top = top.max(y);
+        for c in (0..pw * pd).filter(|&c| self.main[c] || walled(c)) {
+            let (cx, cz) = (c / pd, c % pd);
+            for x in cx * per..((cx + 1) * per).min(self.dims[0]) {
+                for z in cz * per..((cz + 1) * per).min(self.dims[2]) {
+                    if let Some(y) = (0..self.dims[1]).rev().find(|&y| self.solid_at([x, y, z])) {
+                        top = top.max(self.lo[1] + (y + 1) as f32 * self.voxel);
+                    }
+                }
             }
         }
         let (_, sizes) = self.areas();
         let areas = sizes.iter().filter(|&&n| n as f32 * self.cell * self.cell >= 6.0).count();
         let openings = self.openings();
-        // The edge of the walkable space: its cells' neighbours that are not walkable, wall or unknown.
+        // The edge of the main space: wall, or the unseen world.
         let (mut wall, mut unknown) = (0usize, 0usize);
         for c in 0..pw * pd {
-            if !self.cells[c].walkable() {
+            if !self.main[c] {
                 continue;
             }
             for n in neighbours4(c / pd, c % pd, pw, pd) {
-                match self.cells[n] {
-                    Cell::Blocked => wall += 1,
-                    Cell::Unknown => unknown += 1,
-                    _ => {}
+                if self.cells[n] == Cell::Blocked {
+                    wall += 1;
+                } else if self.outer[n] {
+                    unknown += 1;
                 }
             }
         }
@@ -994,7 +1066,7 @@ impl Map {
     /// opening into the unseen, or a large space is more.
     pub fn verdict(&self, size: &Size) -> Verdict {
         let [pw, pd] = self.plan_dims;
-        let walk = self.cells.iter().filter(|c| c.walkable()).count().max(1);
+        let walk = self.main.iter().filter(|m| **m).count().max(1);
         // Things standing in the space (not its walls): blocked cells with walkable cells on two opposite sides.
         let furniture = (0..pw * pd)
             .filter(|&c| {
@@ -1004,7 +1076,7 @@ impl Map {
                     && z > 0
                     && x + 1 < pw
                     && z + 1 < pd
-                    && ((self.cells[c - pd].walkable() && self.cells[c + pd].walkable()) || (self.cells[c - 1].walkable() && self.cells[c + 1].walkable()))
+                    && ((self.main[c - pd] && self.main[c + pd]) || (self.main[c - 1] && self.main[c + 1]))
             })
             .count();
         let cluttered = furniture as f32 / walk as f32;
@@ -1042,7 +1114,7 @@ impl Map {
         let [pw, pd] = self.plan_dims;
         let centres: Vec<[f32; 3]> = self.captures.iter().map(|c| c.centre).collect();
         let (area, _) = self.areas();
-        let pictured: Vec<usize> = centres.iter().filter_map(|c| self.nearest_walkable([c[0], c[2]])).map(|c| area[c]).collect();
+        let pictured: Vec<usize> = centres.iter().filter_map(|c| self.nearest_main([c[0], c[2]])).map(|c| area[c]).collect();
         let openings = self.openings();
         let mut opening_of = vec![usize::MAX; pw * pd];
         for (k, g) in openings.iter().enumerate() {
@@ -1055,7 +1127,7 @@ impl Map {
         let apart = if big >= APART_M * 1.4 { APART_M } else { (big * 0.5).max(2.0) };
         let mut candidates = Vec::new();
         for c in 0..pw * pd {
-            if !self.cells[c].walkable() || clearance[c] < 2 {
+            if !self.main[c] || clearance[c] < 2 {
                 continue;
             }
             let at = self.cell_centre(c);
@@ -1143,6 +1215,8 @@ impl Map {
                 let Some(c) = self.plan_cell([at[0] + f[0] * s, at[1] + f[1] * s]) else { break };
                 match self.cells[c] {
                     Cell::Blocked if self.blocks_view(c, eye) => break,
+                    // A hole in a seen floor is seen past.
+                    Cell::Unknown if !self.outer[c] => along += 1,
                     Cell::Unknown => {
                         if opening_of[c] != usize::MAX {
                             match openings.iter_mut().find(|o| o.0 == opening_of[c]) {
@@ -1189,7 +1263,7 @@ impl Map {
         let mut d = vec![u8::MAX; pw * pd];
         let mut queue = VecDeque::new();
         for c in 0..pw * pd {
-            if !self.cells[c].walkable() {
+            if self.cells[c] == Cell::Blocked || self.outer[c] {
                 d[c] = 0;
                 queue.push_back(c);
             }
@@ -1208,10 +1282,29 @@ impl Map {
         for c in 0..pw * pd {
             let (x, z) = (c / pd, c % pd);
             // The plan's edge is not known to be open.
-            let edge = x.min(z).min(pw - 1 - x).min(pd - 1 - z) as u8;
+            let edge = x.min(z).min(pw - 1 - x).min(pd - 1 - z).min(8) as u8;
             d[c] = d[c].min(edge + 1).min(8);
         }
         d
+    }
+
+    /// The main cell nearest a point (x, z), within 3 m.
+    fn nearest_main(&self, p: [f32; 2]) -> Option<usize> {
+        let c = self.plan_cell(p)?;
+        let [pw, pd] = self.plan_dims;
+        let r = (3.0 / self.cell) as i64;
+        let (cx, cz) = ((c / pd) as i64, (c % pd) as i64);
+        let mut best: Option<(i64, usize)> = None;
+        for x in (cx - r).max(0)..=(cx + r).min(pw as i64 - 1) {
+            for z in (cz - r).max(0)..=(cz + r).min(pd as i64 - 1) {
+                let n = x as usize * pd + z as usize;
+                let d = (x - cx).pow(2) + (z - cz).pow(2);
+                if self.main[n] && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, n));
+                }
+            }
+        }
+        best.map(|b| b.1)
     }
 
     /// The walkable cell nearest a point (x, z), within 3 m.
@@ -1247,6 +1340,8 @@ impl Map {
             let base = match self.cells[c] {
                 Cell::Floor => 1.0,
                 Cell::Open => 1.6,
+                // A hole in a seen floor: most likely floor too.
+                Cell::Unknown if !self.outer[c] => 3.0,
                 _ => return None,
             };
             Some(base * if clearance[c] <= 1 { 4.0 } else { 1.0 })
@@ -1267,7 +1362,7 @@ impl Map {
                 let (nx, nz) = (n / pd, n % pd);
                 let diagonal = nx != x && nz != z;
                 // No cutting a wall's corner.
-                if diagonal && (!self.cells[nx * pd + z].walkable() || !self.cells[x * pd + nz].walkable()) {
+                if diagonal && (cost(nx * pd + z).is_none() || cost(x * pd + nz).is_none()) {
                     continue;
                 }
                 let g = best[c] + step * if diagonal { std::f32::consts::SQRT_2 } else { 1.0 };
@@ -1313,7 +1408,7 @@ impl Map {
             for side in [-0.3, 0.0, 0.3] {
                 let n = [-(b[1] - a[1]) / length.max(1e-6), (b[0] - a[0]) / length.max(1e-6)];
                 let q = [p[0] + n[0] * side, p[1] + n[1] * side];
-                if !self.plan_cell(q).is_some_and(|c| self.cells[c].walkable()) {
+                if !self.plan_cell(q).is_some_and(|c| self.cells[c].walkable() || (self.cells[c] == Cell::Unknown && !self.outer[c])) {
                     return false;
                 }
             }

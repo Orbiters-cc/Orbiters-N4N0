@@ -1297,6 +1297,8 @@ pub struct OrbitVr {
     camera_heads: std::collections::VecDeque<(Instant, Matrix34,[Option<Matrix34>;2])>,
     trigger_was: [bool; 2],
     pointing_since: Instant,
+    /// When where a laser is on the camera's parts was last noted.
+    laser_said: super::super::vr_log::Every,
     last_turn: Instant,
     instance: Option<String>,
     told: Option<OrbitStatus>,
@@ -1376,6 +1378,7 @@ impl OrbitVr {
             camera_heads: Default::default(),
             trigger_was: [true; 2],
             pointing_since: now,
+            laser_said: Default::default(),
             last_turn: now,
             instance: None,
             told: None,
@@ -1830,6 +1833,13 @@ impl OrbitVr {
             (panel, logical)
         });
         self.panels.hover(pointer);
+        // Where a laser is on the camera's parts, and what a press there hit: a headset's session says what a press did.
+        if let Some((zone, at)) = pointer.and_then(|(panel, at)| self.panels.all().nth(panel).map(|p| (p.zone, at))).filter(|(zone, _)| Zone::CAMERA.contains(zone)) {
+            let pressing = self.active.is_some_and(|h| triggers[h] != self.trigger_was[h]);
+            if pressing || self.laser_said.due(Duration::from_millis(500)) {
+                super::super::vr_log::line(&format!("laser: {} on {zone:?} at ({:.0}, {:.0}){}", if self.active == Some(0) { "left" } else { "right" }, at.x, at.y, if pressing { ", trigger changed" } else { "" })); // i18n: not shown (a log's line)
+            }
+        }
         let mut turn = Turn::default();
         if let Some(h) = self.active {
             let (down, was) = (triggers[h], self.trigger_was[h]);

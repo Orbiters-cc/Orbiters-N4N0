@@ -91,7 +91,8 @@ fn main() -> anyhow::Result<()> {
     let mut page = WebPage::new(960, 720)?;
     page.navigate(&format!("http://127.0.0.1:{port}/"))?;
     fn pixel(f: &Frame, x: usize, y: usize, rgb: &[u8]) -> bool {
-        f.rgba.get((y * f.width as usize + x) * 4..(y * f.width as usize + x) * 4 + 3) == Some(rgb)
+        // Pictures come as JPEG: within a few levels.
+        f.rgba.get((y * f.width as usize + x) * 4..(y * f.width as usize + x) * 4 + 3).is_some_and(|p| p.iter().zip(rgb).all(|(a, b)| a.abs_diff(*b) <= 4))
     }
     let (_, f) = wait(&mut page, |s, f| s.load == Load::Loaded && f.as_ref().is_some_and(|f| pixel(f, 400, 400, &[16, 40, 60])))?;
     let first = f.unwrap();

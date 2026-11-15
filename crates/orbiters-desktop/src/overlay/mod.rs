@@ -12,7 +12,7 @@
 //! when SteamVR quits or its server is gone, with [`EXIT_STEAMVR_GONE`].
 
 mod actions;
-mod vr_log;
+pub(crate) mod vr_log;
 pub mod slots;
 mod booster;
 pub mod calibration;
@@ -627,6 +627,7 @@ fn while_hidden(events: &mut Vec<Event>) {
 }
 
 /// Why the overlay's session ended.
+#[derive(Debug)]
 enum Ended {
     /// The service closed it (the setting was turned off, the app quits) or went away.
     Closed,
@@ -637,7 +638,14 @@ enum Ended {
 }
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
-    match session(args)? {
+    // How it ended, in `vr-test.log`: the overlay's own stderr reaches nobody, and an end at a press left no trace
+    // (K-qr-page, 2026-11-14 22:08).
+    let ended = session(args);
+    match &ended {
+        Ok(how) => vr_log::line(&format!("overlay ended: {how:?}")), // i18n: not shown (a log's line)
+        Err(e) => vr_log::line(&format!("overlay ended with an error: {e:#}")), // i18n: not shown (a log's line)
+    }
+    match ended? {
         Ended::Closed | Ended::Retry => Ok(()),
         // Everything was put back as the session ended: only the exit code is left to say.
         Ended::SteamVrGone => std::process::exit(EXIT_STEAMVR_GONE),
@@ -852,6 +860,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let turn = Instant::now();
         t.menu.worlds.view.input_turn(turn);
         if client.should_close() {
+            vr_log::line(&format!("overlay: its link to the service ended: {}", client.ended_because().unwrap_or_else(|| "no reason given".into()))); // i18n: not shown (a log's line)
             return Ok(Ended::Closed);
         }
         while let Some(e) = steamvr.poll_event() {

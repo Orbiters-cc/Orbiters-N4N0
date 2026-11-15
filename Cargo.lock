@@ -4179,6 +4179,7 @@ dependencies = [
  "orbiters-n4n0-core",
  "orbiters-openvr",
  "orbiters-projects",
+ "orbiters-qr",
  "orbiters-reconstruct",
  "orbiters-smooth",
  "orbiters-sound",
@@ -4192,7 +4193,6 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "rosc",
- "rqrr",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4307,6 +4307,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbiters-qr"
+version = "0.3.5-dev.56"
+dependencies = [
+ "png",
+ "qrcode",
+ "rqrr",
+]
+
+[[package]]
 name = "orbiters-reconstruct"
 version = "0.3.5-dev.58"
 dependencies = [
@@ -4390,6 +4399,7 @@ version = "0.3.5-dev.58"
 dependencies = [
  "orbiters-contracts",
  "orbiters-i18n",
+ "qrcode",
  "windows 0.62.2",
 ]
 
@@ -4477,6 +4487,8 @@ dependencies = [
  "url",
  "webview2-com",
  "windows 0.62.2",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

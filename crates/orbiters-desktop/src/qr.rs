@@ -1,9 +1,12 @@
-//! N4N0's QR code scanner on this computer (`orbiters_n4n0::Host::qr_scan`): a thread of its own, below normal priority,
-//! reads VRChat's stream camera through Spout (`VRCSender1`, or Settings' Spout sender) about three times a second,
-//! makes a grey copy of the frame no wider than [`MOST_WIDTH`] (the whole picture one time, its middle at full detail
-//! the next, for a code further away) and decodes the QR codes in it with `rqrr`. N4N0 decides what opens.
+//! N4N0's QR code scanner on this computer (`orbiters_n4n0::Host::qr_scan`), also the one beside VRChat's camera in VR: a
+//! thread of its own, below normal priority, reads VRChat's stream camera through Spout (`VRCSender1`, or Settings' Spout
+//! sender) about three times a second and reads the codes in it with [`orbiters_qr`] (the whole picture one look, a closer
+//! one where a code was glimpsed or the middle the next, the middle the third: styled codes too, in negative, coloured,
+//! with a logo). A code seen but not read is said ([`QrSeen::Glimpse`]): cut by the picture's edge, or not clear yet.
+//! N4N0 decides what opens. What it saw is noted in `vr-test.log` every ten seconds while it looks.
 
-use orbiters_n4n0::{QrEvents, QrScan, QrSeen};
+pub use orbiters_qr::{grey, Pixels, View, MOST_WIDTH};
+use orbiters_n4n0::{QrEvents, QrGlimpse, QrScan, QrSeen};
 use orbiters_i18n::tr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,8 +14,6 @@ use std::time::Duration;
 
 /// The time between two looks at the camera.
 pub const EVERY: Duration = Duration::from_millis(330);
-/// A grey copy is at most this wide (and as many rows as keep the picture's shape).
-pub const MOST_WIDTH: usize = 960;
 /// VRChat's camera's Spout sender.
 #[cfg(windows)]
 const VRCHAT_SENDER: &str = "VRCSender1";
@@ -24,61 +25,54 @@ const NO_PICTURE_AFTER: Duration = Duration::from_millis(2500);
 /// camera sent nothing when the scanner had not looked.
 #[cfg(windows)]
 const NO_PICTURE_LOOKS: u32 = (NO_PICTURE_AFTER.as_millis() / EVERY.as_millis()) as u32;
+/// How often what the scanner saw is noted.
+#[cfg(windows)]
+const NOTE_EVERY: Duration = Duration::from_secs(10);
 
-/// A frame's pixels as Spout lends them: 4 bytes a pixel, `stride` bytes a row.
-pub struct Pixels<'a> {
-    pub width: usize,
-    pub height: usize,
-    pub stride: usize,
-    pub data: &'a [u8],
-    /// Blue first (BGRA) rather than red.
-    pub bgra: bool,
-}
-
-/// Which part of a frame a look decodes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum View {
-    /// The whole picture, shrunk to [`MOST_WIDTH`].
-    Whole,
-    /// Its middle, half as wide and high, at full detail (shrunk only past [`MOST_WIDTH`]).
-    Middle,
-}
-
-/// A grey copy of `view` of `frame`: (width, height, one byte a pixel). Each grey pixel is the mean of the square of
-/// pixels it covers (Rec. 601 luma of the sRGB codes, which is what a QR decoder thresholds anyway).
-pub fn grey(frame: &Pixels<'_>, view: View) -> (usize, usize, Vec<u8>) {
-    let (x0, y0, w, h) = match view {
-        View::Whole => (0, 0, frame.width, frame.height),
-        View::Middle => (frame.width / 4, frame.height / 4, frame.width / 2, frame.height / 2),
-    };
-    let step = w.div_ceil(MOST_WIDTH).max(1);
-    let (gw, gh) = (w / step, h / step);
-    let (r, b) = if frame.bgra { (2, 0) } else { (0, 2) };
-    let mut out = vec![0u8; gw * gh];
-    for gy in 0..gh {
-        for gx in 0..gw {
-            let mut sum = 0u32;
-            for dy in 0..step {
-                let row = (y0 + gy * step + dy) * frame.stride;
-                for dx in 0..step {
-                    let i = row + (x0 + gx * step + dx) * 4;
-                    let p = &frame.data[i..i + 4];
-                    sum += 77 * p[r] as u32 + 150 * p[1] as u32 + 29 * p[b] as u32;
-                }
-            }
-            out[gy * gw + gx] = (sum / (256 * (step * step) as u32)) as u8;
-        }
-    }
-    (gw, gh, out)
-}
-
-/// The texts of the QR codes in a grey picture.
+/// The texts of the QR codes in a grey picture (every way [`orbiters_qr::read`] has).
 pub fn decode(width: usize, height: usize, grey: &[u8]) -> Vec<String> {
-    if width < 21 || height < 21 {
-        return Vec::new();
+    orbiters_qr::read(width, height, grey, false).codes
+}
+
+/// What is said of a code glimpsed but not read: it must be seen in two of the last three looks at the whole picture
+/// (one look's glimpse may be a passing likeness), and is unsaid once two looks in a row saw none.
+#[derive(Default)]
+pub struct Glimpses {
+    recent: [Option<QrGlimpse>; 3],
+    said: Option<QrGlimpse>,
+}
+
+impl Glimpses {
+    /// A look at the whole picture saw `seen`: what is to be said now, when it changed.
+    pub fn look(&mut self, seen: Option<orbiters_qr::Glimpse>) -> Option<Option<QrGlimpse>> {
+        let seen = seen.map(|g| match g {
+            orbiters_qr::Glimpse::Cut => QrGlimpse::Cut,
+            orbiters_qr::Glimpse::Unclear => QrGlimpse::Unclear,
+        });
+        self.recent.rotate_right(1);
+        self.recent[0] = seen;
+        let counted = |g: QrGlimpse| self.recent.iter().filter(|r| **r == Some(g)).count();
+        let now = if self.recent[0].is_none() && self.recent[1].is_none() {
+            None
+        } else if counted(QrGlimpse::Cut) >= 2 {
+            Some(QrGlimpse::Cut)
+        } else if self.recent.iter().filter(|r| r.is_some()).count() >= 2 {
+            // Cut once, unclear once: seen, whichever it is.
+            Some(if counted(QrGlimpse::Cut) > 0 && self.said == Some(QrGlimpse::Cut) { QrGlimpse::Cut } else { QrGlimpse::Unclear })
+        } else {
+            self.said
+        };
+        (now != self.said).then(|| {
+            self.said = now;
+            now
+        })
     }
-    let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| grey[y * width + x]);
-    prepared.detect_grids().into_iter().filter_map(|grid| grid.decode().ok().map(|(_, text)| text)).collect()
+
+    /// A code was read: nothing glimpsed is said any more.
+    pub fn read(&mut self) -> Option<Option<QrGlimpse>> {
+        self.recent = [None; 3];
+        self.said.take().map(|_| None)
+    }
 }
 
 /// The scan's handle: dropped, its thread stops at its next look.
@@ -145,9 +139,11 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
     let mut last_frame: Option<Instant> = None;
     // What was last said of the camera (nothing yet).
     let mut said: Option<bool> = None;
-    let mut look = 0u64;
+    let mut looks = orbiters_qr::Looks::default();
+    let mut glimpses = Glimpses::default();
     // Looks since the last frame (or the start) that found none.
     let mut looks_without = 0u32;
+    let mut note = Note::default();
     while !stop.load(Ordering::Relaxed) {
         let begun = Instant::now();
         if !connected {
@@ -158,6 +154,7 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
                         // A few one-pixel rows tell a new frame from the last (VRChat's sender counts none).
                         let (w, h) = (info.width, info.height);
                         receiver.set_probe((1..=4).map(|k| h * k / 5).filter(|&y| y < h).map(|y| [0, y, w, y + 1]).collect());
+                        crate::overlay::vr_log::line(&format!("qr scan: reading \"{name}\", {w} x {h}")); // i18n: not shown (a log's line)
                     }
                     Err(e) => eprintln!("qr: \"{name}\" could not be opened: {e}"),
                 }
@@ -166,7 +163,6 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
         let mut found = Vec::new();
         let mut framed = false;
         if connected {
-            let view = if look % 2 == 0 { View::Whole } else { View::Middle };
             let read = receiver.receive(Duration::from_millis(250), |f| {
                 let pixels = Pixels {
                     width: f.width as usize,
@@ -175,14 +171,26 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
                     data: f.data,
                     bgra: f.order == orbiters_spout::ChannelOrder::Bgra,
                 };
-                grey(&pixels, view)
+                (looks.copy(&pixels), (pixels.width, pixels.height))
             });
             match read {
-                Ok(Some((w, h, picture))) => {
+                Ok(Some((copy, size))) => {
                     last_frame = Some(Instant::now());
                     framed = true;
-                    look += 1;
-                    found = decode(w, h, &picture);
+                    let at = Instant::now();
+                    let reading = looks.read(&copy);
+                    note.looked(copy.look, size, at.elapsed(), &reading);
+                    found = reading.codes;
+                    let change = if !found.is_empty() {
+                        glimpses.read()
+                    } else if copy.look == orbiters_qr::Look::Whole {
+                        glimpses.look(reading.glimpse)
+                    } else {
+                        None
+                    };
+                    if let Some(glimpse) = change {
+                        events(QrSeen::Glimpse(glimpse));
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -209,7 +217,67 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
         for text in found {
             events(QrSeen::Code(text));
         }
+        note.maybe(connected);
         std::thread::sleep(EVERY.saturating_sub(begun.elapsed()));
+    }
+}
+
+/// What the scanner saw over [`NOTE_EVERY`], for `vr-test.log`: Enzo's session must say what the reader was given and
+/// what it made of it (his two codes of 2026-11-14 left no trace).
+#[cfg(windows)]
+#[derive(Default)]
+struct Note {
+    since: Option<std::time::Instant>,
+    looks: [u32; 3],
+    size: (usize, usize),
+    took: Duration,
+    slowest: Duration,
+    read: u32,
+    cut: u32,
+    unclear: u32,
+}
+
+#[cfg(windows)]
+impl Note {
+    fn looked(&mut self, look: orbiters_qr::Look, size: (usize, usize), took: Duration, reading: &orbiters_qr::Reading) {
+        let k = match look {
+            orbiters_qr::Look::Whole => 0,
+            orbiters_qr::Look::Closer(_) => 1,
+            orbiters_qr::Look::Middle => 2,
+        };
+        self.looks[k] += 1;
+        self.size = size;
+        self.took += took;
+        self.slowest = self.slowest.max(took);
+        self.read += !reading.codes.is_empty() as u32;
+        match reading.glimpse {
+            Some(orbiters_qr::Glimpse::Cut) => self.cut += 1,
+            Some(orbiters_qr::Glimpse::Unclear) => self.unclear += 1,
+            None => {}
+        }
+    }
+
+    fn maybe(&mut self, connected: bool) {
+        let since = *self.since.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() < NOTE_EVERY {
+            return;
+        }
+        let n: u32 = self.looks.iter().sum();
+        let mean = if n > 0 { self.took.as_secs_f64() * 1000.0 / n as f64 } else { 0.0 };
+        crate::overlay::vr_log::line(&format!(
+            "qr scan: {n} looks in {:.0} s (whole {}, closer {}, middle {}) of {} x {} frames, reading {mean:.1} ms each (slowest {:.1}); codes read {}, glimpsed cut {}, unclear {}; connected {connected}", // i18n: not shown (a log's line)
+            since.elapsed().as_secs_f64(),
+            self.looks[0],
+            self.looks[1],
+            self.looks[2],
+            self.size.0,
+            self.size.1,
+            self.slowest.as_secs_f64() * 1000.0,
+            self.read,
+            self.cut,
+            self.unclear
+        ));
+        *self = Self { since: Some(std::time::Instant::now()), ..Default::default() };
     }
 }
 
@@ -335,6 +403,52 @@ mod tests {
         }
         assert_eq!(gone, Some(QrSeen::Camera(false)), "the camera was never said to have stopped: {seen:?}");
         drop(scan);
+    }
+
+    /// K-qr-detect: Enzo's shot1 was a light code on a purple poster: never read by 0.3.5-dev.56 (rqrr reads dark modules on
+    /// light only). The scanner's looks read it now, and say a code cut by the frame's edge.
+    #[test]
+    fn a_code_in_negative_is_read_and_a_cut_one_is_said() {
+        let link = "https://qrco.de/bdeKjG";
+        let (w, h) = (1920, 1080);
+        let (mut data, stride) = frame_with_code(link, w, h, 760, 300, 9);
+        // In negative, on purple: light modules, a dark ground.
+        for px in data.chunks_mut(4) {
+            let v = px[0];
+            px.copy_from_slice(&[(255 - v) / 2 + 60, (255 - v) / 3 + 20, (255 - v) / 2 + 70, 255]);
+        }
+        let frame = Pixels { width: w, height: h, stride, data: &data, bgra: true };
+        let (gw, gh, picture) = grey(&frame, View::Whole);
+        assert!(orbiters_qr::read_with(gw, gh, &picture, true, &[orbiters_qr::Pass::Rows]).codes.is_empty(), "rqrr alone, as before");
+        let mut looks = orbiters_qr::Looks::default();
+        let copy = looks.copy(&frame);
+        assert_eq!(looks.read(&copy).codes, [link]);
+        // The same code with a third of it past the right edge.
+        let (data, stride) = frame_with_code(link, w, h, w - 200, 400, 9);
+        let frame = Pixels { width: w, height: h, stride, data: &data, bgra: true };
+        let mut looks = orbiters_qr::Looks::default();
+        let copy = looks.copy(&frame);
+        let reading = looks.read(&copy);
+        assert!(reading.codes.is_empty());
+        assert_eq!(reading.glimpse, Some(orbiters_qr::Glimpse::Cut));
+    }
+
+    /// What is said of a glimpsed code: only once two of three looks saw it, unsaid after two looks without, at once when a
+    /// code is read.
+    #[test]
+    fn a_glimpse_is_said_when_it_holds() {
+        use orbiters_qr::Glimpse;
+        let mut said = Glimpses::default();
+        assert_eq!(said.look(Some(Glimpse::Cut)), None, "one look is not enough");
+        assert_eq!(said.look(Some(Glimpse::Cut)), Some(Some(QrGlimpse::Cut)));
+        assert_eq!(said.look(Some(Glimpse::Cut)), None, "said once");
+        assert_eq!(said.look(None), None, "one look without: still there");
+        assert_eq!(said.look(None), Some(None), "two: gone");
+        assert_eq!(said.look(Some(Glimpse::Unclear)), None);
+        assert_eq!(said.look(None), None);
+        assert_eq!(said.look(Some(Glimpse::Unclear)), Some(Some(QrGlimpse::Unclear)), "two of three");
+        assert_eq!(said.read(), Some(None), "read: unsaid at once");
+        assert_eq!(said.read(), None);
     }
 
     #[test]

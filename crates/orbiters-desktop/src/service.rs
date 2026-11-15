@@ -252,6 +252,7 @@ impl Service {
             if !overlay_due(exited, started.elapsed(), *steamvr, Some(session), *failures) {
                 return;
             }
+            crate::overlay::vr_log::line(&format!("service: the SteamVR overlay ended (exit code {exited:?}) after {} s; starting it again", started.elapsed().as_secs())); // i18n: not shown (a log's line)
         }
         let failures = overlay.as_ref().filter(|(_, _, prior, _)| *prior == Some(session)).map_or(1, |(_, _, _, n)| n.saturating_add(1));
         let mut cmd = Command::new(&self.exe);

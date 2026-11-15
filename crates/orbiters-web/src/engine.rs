@@ -1,7 +1,7 @@
 use super::*;
 use base64::Engine;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::mpsc::Receiver,
     time::{Duration, Instant},
@@ -62,6 +62,36 @@ unsafe fn cdp(web: &ICoreWebView2, method: &str, args: serde_json::Value, closed
         })),
     )?;
     pump_wait(&rx, closed, Duration::from_secs(15))
+}
+/// A DevTools call not waited for: a page's input and the pictures' acknowledgements must never hold up the loop (each
+/// waited call cost a round trip, and a laser sliding the page sends 90 a second: K-qr-page, 2026-11-15). Failures are
+/// counted.
+unsafe fn cdp_async(web: &ICoreWebView2, method: &str, args: serde_json::Value, failures: &Rc<Cell<u32>>) -> windows::core::Result<()> {
+    let failures = failures.clone();
+    web.CallDevToolsProtocolMethod(
+        PCWSTR(wide(method).as_ptr()),
+        PCWSTR(wide(&args.to_string()).as_ptr()),
+        &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |e, raw| {
+            if e.is_err() || raw.contains("\"error\"") {
+                failures.set(failures.get() + 1);
+            }
+            Ok(())
+        })),
+    )
+}
+/// A page's picture, as the screencast sends it: JPEG, decoded to RGBA.
+fn decode_jpeg(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+    use zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options);
+    let rgba = decoder.decode().map_err(|e| anyhow::anyhow!("page picture: {e:?}"))?;
+    let info = decoder.info().ok_or_else(|| anyhow::anyhow!("page picture without a size"))?;
+    anyhow::ensure!(rgba.len() == info.width as usize * info.height as usize * 4, "page picture of the wrong size");
+    Ok((info.width as u32, info.height as u32, rgba))
+}
+/// How long a navigation has run, for the notes.
+fn since(started: &Cell<Option<Instant>>) -> u128 {
+    started.get().map_or(0, |t| t.elapsed().as_millis())
 }
 struct Resources {
     controller: Option<ICoreWebView2Controller>,
@@ -196,6 +226,10 @@ unsafe fn run_sta(
         &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |e,_|{let _=tx.send(e);Ok(())})))?;
     pump_wait(&scriptrx, &closed, Duration::from_secs(15))?;
     let mut token = 0;
+    // When the current navigation started, and whether its first picture was noted.
+    let started: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
+    let drawn = Rc::new(Cell::new(false));
+    let failures: Rc<Cell<u32>> = Rc::new(Cell::new(0));
     let navigation = Rc::new(RefCell::new(0u64));
     let pending: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let capture_navigation = Rc::new(RefCell::new(u64::MAX));
@@ -204,6 +238,7 @@ unsafe fn run_sta(
     let p = pending.clone();
     let live = active.clone();
     let s = shared.clone();
+    let (at, first) = (started.clone(), drawn.clone());
     web.add_NavigationStarting(
         &NavigationStartingEventHandler::create(Box::new(move |_, args| {
             if let Some(a) = args {
@@ -213,10 +248,19 @@ unsafe fn run_sta(
                 } else {
                     let mut id = 0;
                     a.NavigationId(&mut id)?;
+                    let mut redirected = BOOL(0);
+                    a.IsRedirected(&mut redirected)?;
+                    // A redirect keeps its navigation (and its time); a new one starts both again.
+                    if id != *nav.borrow() || at.get().is_none() {
+                        at.set(Some(Instant::now()));
+                        first.set(false);
+                    }
                     *nav.borrow_mut() = id;
                     *p.borrow_mut() = None;
                     *live.borrow_mut() = false;
                     let mut s = s.lock().unwrap();
+                    let host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+                    s.note(format!("{} {host} ({} ms into it)", if redirected.as_bool() { "redirected to" } else { "opening" }, since(&at))); // i18n: not shown (a log's line)
                     s.state.url = display_text(&url, 8192);
                     s.state.title.clear();
                     s.state.load = Load::Loading;
@@ -231,6 +275,7 @@ unsafe fn run_sta(
     let nav = navigation.clone();
     let live = active.clone();
     let p = pending.clone();
+    let at = started.clone();
     web.add_NavigationCompleted(
         &NavigationCompletedEventHandler::create(Box::new(move |_, args| {
             if let Some(a) = args {
@@ -244,13 +289,37 @@ unsafe fn run_sta(
                 let mut ok = BOOL(0);
                 a.IsSuccess(&mut ok)?;
                 *live.borrow_mut() = ok.as_bool();
-                s.lock().unwrap().state.load = if ok.as_bool() {
+                let mut s = s.lock().unwrap();
+                s.state.load = if ok.as_bool() {
+                    s.note(format!("loaded after {} ms", since(&at))); // i18n: not shown (a log's line)
                     Load::Loaded
                 } else {
                     let mut reason = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
                     a.WebErrorStatus(&mut reason)?;
+                    s.note(format!("failed after {} ms: error {}", since(&at), reason.0)); // i18n: not shown (a log's line)
                     Load::Failed(format!("navigation error {}", reason.0))
                 };
+            }
+            Ok(())
+        })),
+        &mut token,
+    )?;
+    // The page's pictures from the moment its content is read, not from its load event: a page whose last picture or
+    // tracker never finishes loading showed nothing, "Opening the page..." for as long as it took (linktr.ee: 16 s).
+    let web2: ICoreWebView2_2 = web.cast()?;
+    let s = shared.clone();
+    let nav = navigation.clone();
+    let live = active.clone();
+    let at = started.clone();
+    web2.add_DOMContentLoaded(
+        &DOMContentLoadedEventHandler::create(Box::new(move |_, args| {
+            if let Some(a) = args {
+                let mut id = 0;
+                a.NavigationId(&mut id)?;
+                if id == *nav.borrow() {
+                    *live.borrow_mut() = true;
+                    s.lock().unwrap().note(format!("content read after {} ms", since(&at))); // i18n: not shown (a log's line)
+                }
             }
             Ok(())
         })),
@@ -364,7 +433,9 @@ unsafe fn run_sta(
     let process_failed = failed.clone();
     web.add_ProcessFailed(
         &ProcessFailedEventHandler::create(Box::new(move |_, _| {
-            s.lock().unwrap().state.load = Load::Failed("WebView2 page process failed".into());
+            let mut s = s.lock().unwrap();
+            s.note("the page's process failed".into()); // i18n: not shown (a log's line)
+            s.state.load = Load::Failed("WebView2 page process failed".into());
             *process_failed.borrow_mut() = true;
             Ok(())
         })),
@@ -410,10 +481,11 @@ unsafe fn run_sta(
         if !capturing && *active.borrow() {
             *pending.borrow_mut() = None;
             *capture_navigation.borrow_mut() = *navigation.borrow();
-            cdp(&web, "Page.startScreencast", serde_json::json!({"format":"png","maxWidth":dimensions.0,"maxHeight":dimensions.1}), &closed)?;
+            cdp(&web, "Page.startScreencast", serde_json::json!({"format":"jpeg","quality":88,"maxWidth":dimensions.0,"maxHeight":dimensions.1}), &closed)?;
             capturing = true;
         }
-        for _ in 0..64 {
+        let mut wheel: Option<(f64, f64, f64, f64)> = None;
+        for _ in 0..256 {
             match rx.try_recv() {
                 #[cfg(test)]
                 Ok(Command::Fixture(html)) => {
@@ -445,23 +517,35 @@ unsafe fn run_sta(
                     *pending.borrow_mut() = None;
                 }
                 Ok(Command::Input(i)) => {
-                    let (kind, x, y, dx, dy) = match i {
-                        Input::Move { x, y } => ("mouseMoved", x, y, 0., 0.),
+                    // Wheel steps that follow each other are one: a slide sends one a turn.
+                    if let Input::Wheel { x, y, dx, dy } = i {
+                        wheel = Some(match wheel {
+                            Some((_, _, wx, wy)) => (x, y, wx + dx, wy + dy),
+                            None => (x, y, dx, dy),
+                        });
+                        continue;
+                    }
+                    if let Some((x, y, dx, dy)) = wheel.take() {
+                        cdp_async(&web, "Input.dispatchMouseEvent", serde_json::json!({"type":"mouseWheel","x":x,"y":y,"button":"none","buttons":if pressed{1}else{0},"deltaX":dx,"deltaY":dy}), &failures)?;
+                    }
+                    let (kind, x, y) = match i {
+                        Input::Move { x, y } => ("mouseMoved", x, y),
                         Input::Press { x, y } => {
                             pressed = true;
-                            ("mousePressed", x, y, 0., 0.)
+                            ("mousePressed", x, y)
                         }
                         Input::Release { x, y } => {
                             pressed = false;
-                            ("mouseReleased", x, y, 0., 0.)
+                            ("mouseReleased", x, y)
                         }
-                        Input::Wheel { x, y, dx, dy } => ("mouseWheel", x, y, dx, dy),
+                        Input::Wheel { .. } => unreachable!("taken above"),
                     };
-                    cdp(
+                    let click = kind == "mousePressed" || kind == "mouseReleased";
+                    cdp_async(
                         &web,
                         "Input.dispatchMouseEvent",
-                        serde_json::json!({"type":kind,"x":x,"y":y,"button":if kind=="mousePressed"||kind=="mouseReleased"{"left"}else{"none"},"buttons":if pressed{1}else{0},"clickCount":if kind=="mousePressed"||kind=="mouseReleased"{1}else{0},"deltaX":dx,"deltaY":dy}),
-                        &closed,
+                        serde_json::json!({"type":kind,"x":x,"y":y,"button":if click{"left"}else{"none"},"buttons":if pressed{1}else{0},"clickCount":if click{1}else{0}}),
+                        &failures,
                     )?;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -471,29 +555,34 @@ unsafe fn run_sta(
                 }
             }
         }
-        // Back-pressure Chromium by acknowledging at most ten frames per second. Static pages emit nothing.
-        if last.elapsed() >= Duration::from_millis(100) {
+        if let Some((x, y, dx, dy)) = wheel.take() {
+            cdp_async(&web, "Input.dispatchMouseEvent", serde_json::json!({"type":"mouseWheel","x":x,"y":y,"button":"none","buttons":if pressed{1}else{0},"deltaX":dx,"deltaY":dy}), &failures)?;
+        }
+        if failures.get() > 0 {
+            shared.lock().unwrap().note(format!("{} page calls failed", failures.replace(0))); // i18n: not shown (a log's line)
+        }
+        // The newest picture, as soon as one came, at most 40 a second: acknowledging it is what lets Chromium send the next
+        // (at most one waits), so a page that does not change sends nothing, and one that scrolls is seen scrolling.
+        if last.elapsed() >= Duration::from_millis(25) {
             let raw = pending.borrow_mut().take();
             if let Some(raw) = raw {
                 let frame_navigation = *capture_navigation.borrow();
                 let v: serde_json::Value = serde_json::from_str(&raw)?;
-                cdp(&web, "Page.screencastFrameAck", serde_json::json!({"sessionId":v["sessionId"]}), &closed)?;
+                cdp_async(&web, "Page.screencastFrameAck", serde_json::json!({"sessionId":v["sessionId"]}), &failures)?;
+                last = Instant::now();
                 let bytes = base64::engine::general_purpose::STANDARD.decode(v["data"].as_str().unwrap_or(""))?;
-                let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-                decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
-                let mut reader = decoder.read_info()?;
-                let mut rgba = vec![0; reader.output_buffer_size().unwrap_or(0)];
-                let info = reader.next_frame(&mut rgba)?;
-                rgba.truncate(info.buffer_size());
-                if !current_frame(frame_navigation, *navigation.borrow(), (info.width, info.height), dimensions, *active.borrow()) {
+                let (width, height, rgba) = decode_jpeg(&bytes)?;
+                if !current_frame(frame_navigation, *navigation.borrow(), *active.borrow()) {
                     continue;
                 }
                 let mut s = shared.lock().unwrap();
+                if !drawn.replace(true) {
+                    s.note(format!("first picture {width} x {height} after {} ms", since(&started))); // i18n: not shown (a log's line)
+                }
                 if s.frame.as_ref().is_none_or(|f| f.rgba.as_ref() != rgba.as_slice()) {
                     seq += 1;
-                    s.frame = Some(Frame { width: info.width, height: info.height, rgba: rgba.into(), sequence: seq });
+                    s.frame = Some(Frame { width, height, rgba: rgba.into(), sequence: seq });
                 }
-                last = Instant::now();
             }
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -505,8 +594,10 @@ fn verify_profile(actual: &std::path::Path, owned: &std::path::Path) -> anyhow::
     anyhow::ensure!(std::fs::canonicalize(actual)? == std::fs::canonicalize(owned)?, "effective profile override rejected");
     Ok(())
 }
-fn current_frame(frame_nav: u64, nav: u64, frame_size: (u32, u32), size: (u32, u32), active: bool) -> bool {
-    active && frame_nav == nav && frame_size == size
+/// A picture is shown only for the navigation it was taken of. Its size is whatever Chromium sent (the overlay fits it to
+/// the page's place): a picture rejected for its size left the page on "Opening the page..." for good.
+fn current_frame(frame_nav: u64, nav: u64, active: bool) -> bool {
+    active && frame_nav == nav
 }
 #[cfg(test)]
 mod tests {
@@ -519,11 +610,10 @@ mod tests {
         assert!(super::verify_profile(owned.path(), owned.path()).is_ok());
     }
     #[test]
-    fn delayed_navigation_and_resize_frames_are_rejected() {
-        assert!(!super::current_frame(1, 2, (960, 720), (960, 720), true));
-        assert!(!super::current_frame(2, 2, (960, 720), (800, 600), true));
-        assert!(!super::current_frame(2, 2, (800, 600), (800, 600), false));
-        assert!(super::current_frame(2, 2, (800, 600), (800, 600), true));
+    fn delayed_navigation_frames_are_rejected_and_any_size_is_shown() {
+        assert!(!super::current_frame(1, 2, true));
+        assert!(!super::current_frame(2, 2, false));
+        assert!(super::current_frame(2, 2, true));
     }
     use super::*;
     #[test]

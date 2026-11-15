@@ -902,7 +902,7 @@ pub(super) fn camera_shots(out: &Path) -> anyhow::Result<()> {
         Facts { camera, ..idle.clone() }
     };
     let no_kit = |demo: Option<DemoSwitch>| Facts { no_kit: true, camera: CameraNow { kit: Some(false), demo, ..Default::default() }, ..idle.clone() };
-    let page = |state: WebState| Some(WebPage { url: "https://orbiters.cc/w/silent-dawn?from=qr".into(), title: String::new(), state, picture: None });
+    let page = |state: WebState| Some(WebPage { url: "https://orbiters.cc/w/silent-dawn?from=qr".into(), title: String::new(), state, picture: None, busy: false });
     let recording = Facts { recording: true, recording_seconds: Some(42), capture_busy: true, ..idle.clone() };
     let states: Vec<(&str, Facts, bool)> = vec![
         ("orbit-camera-idle", idle.clone(), false),
@@ -919,7 +919,11 @@ pub(super) fn camera_shots(out: &Path) -> anyhow::Result<()> {
         ("orbit-camera-demo-done", Facts { camera: CameraNow { demo: Some(DemoSwitch::Done), ..idle.camera.clone() }, ..idle.clone() }, false),
         ("orbit-camera-qr-looking", camera(&|c| c.qr = CameraQr::Looking), false),
         ("orbit-camera-qr-no-picture", camera(&|c| c.qr = CameraQr::NoPicture(orbiters_i18n::tr(&orbiters_n4n0_core::qr::no_camera_note(Some(true))).into())), false),
+        ("orbit-camera-qr-cut", camera(&|c| c.qr = CameraQr::Cut), false),
+        ("orbit-camera-qr-unclear", camera(&|c| c.qr = CameraQr::Unclear), false),
+        ("orbit-camera-qr-not-a-link", camera(&|c| c.qr = CameraQr::NotALink), false),
         ("orbit-camera-web-loading", camera(&|c| c.web = page(WebState::Loading)), false),
+        ("orbit-camera-web-slow", camera(&|c| c.web = page(WebState::Slow)), false),
         ("orbit-camera-web-page", camera(&|c| c.web = Some(WebPage { title: "Silent Dawn · Orbiters".into(), ..page(WebState::Shown).expect("a page") })), false),
         ("orbit-camera-web-failed", camera(&|c| c.web = page(WebState::Failed("The site did not answer.".into()))), false),
         ("orbit-camera-recording", recording.clone(), false),

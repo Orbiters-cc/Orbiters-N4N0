@@ -63,6 +63,17 @@ pub(crate) enum Command {
 pub(crate) struct Shared {
     state: State,
     frame: Option<Frame>,
+    /// What happened, in order, for the overlay's log (a few lines a page; never what the page holds).
+    notes: Vec<String>,
+}
+
+impl Shared {
+    fn note(&mut self, line: String) {
+        // Bounded: a page that navigates without end must not grow it.
+        if self.notes.len() < 64 {
+            self.notes.push(line);
+        }
+    }
 }
 /// All methods are nonblocking: bounded command mailbox and a latest-frame slot.
 /// `poll` returns None on brief contention; retain the previous snapshot then.
@@ -76,13 +87,15 @@ impl WebPage {
     pub fn new(width: u32, height: u32) -> anyhow::Result<Self> {
         size(width, height)?;
         let (tx, rx) = mpsc::sync_channel(64);
-        let shared = Arc::new(Mutex::new(Shared { state: State { load: Load::Loading, url: String::new(), title: String::new() }, frame: None }));
+        let shared = Arc::new(Mutex::new(Shared { state: State { load: Load::Loading, url: String::new(), title: String::new() }, frame: None, notes: Vec::new() }));
         let s = shared.clone();
         let closed = Arc::new(AtomicBool::new(false));
         let closing = closed.clone();
         std::thread::Builder::new().name("camera-web".into()).spawn(move || {
             if let Err(e) = engine::run(width, height, rx, s.clone(), closing) {
-                s.lock().unwrap().state.load = Load::Failed(display_text(&format!("{e:#}"), 1024));
+                let mut s = s.lock().unwrap();
+                s.note(format!("engine stopped: {e:#}")); // i18n: not shown (a log's line)
+                s.state.load = Load::Failed(display_text(&format!("{e:#}"), 1024));
             }
         })?;
         Ok(Self { tx, shared, closed, seen: 0 })
@@ -114,6 +127,10 @@ impl WebPage {
         let changed = seq != self.seen;
         self.seen = seq;
         Some((s.state.clone(), s.frame.clone(), changed))
+    }
+    /// What the engine noted since the last call (when it started, loaded, first drew; what failed), for a log.
+    pub fn notes(&self) -> Vec<String> {
+        self.shared.try_lock().map(|mut s| std::mem::take(&mut s.notes)).unwrap_or_default()
     }
     /// Signals shutdown without joining on the overlay thread. Poll until Closed for cleanup completion.
     pub fn close(&self) {
@@ -214,7 +231,9 @@ mod live_review_tests {
         let address = listener.local_addr().unwrap();
         let mut page = WebPage::new(640, 480).unwrap();
         page.send(Command::Fixture(format!(r#"<body style='margin:0;background:#135'><script>document.title='x'.repeat(4000000);fetch('http://{address}/fetch').catch(()=>{{}});new WebSocket('ws://{address}/ws');new WebSocket('wss://{address}/wss');let worker=new Worker(URL.createObjectURL(new Blob(["fetch('http://{address}/worker')"],{{type:'text/javascript'}})));</script><img src='http://{address}/image'><iframe src='http://{address}/frame'></iframe>"#))).unwrap();
-        wait(&mut page, |s, f| s.title.len() == 512 && f.as_ref().is_some_and(|f| f.width == 640 && f.rgba[400 * 640 * 4..400 * 640 * 4 + 3] == [17, 51, 85]));
+        // Pictures come as JPEG: a flat colour within a few levels.
+        let near = |a: &[u8], b: [u8; 3]| a.iter().zip(b).all(|(&x, y)| x.abs_diff(y) <= 4);
+        wait(&mut page, |s, f| s.title.len() == 512 && f.as_ref().is_some_and(|f| f.width == 640 && near(&f.rgba[400 * 640 * 4..400 * 640 * 4 + 3], [17, 51, 85])));
         for _ in 0..10000 {
             if let Some((s, _, _)) = page.poll() {
                 assert_eq!(s.title.len(), 512);

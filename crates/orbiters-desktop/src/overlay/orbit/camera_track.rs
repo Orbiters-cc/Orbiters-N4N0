@@ -1829,10 +1829,16 @@ mod tests {
         let turns = [1.0, 0.9, 0.8];
         let scales = [1.3f32, 1.0, 0.8, 0.7, 0.6, 0.5, 0.4];
         let pictures = headset_pictures();
-        let looks: Vec<(f32, usize, f32, f32)> = scales
-            .iter()
-            .flat_map(|&scale| (0..pictures.len()).flat_map(move |n| leans.iter().flat_map(move |&lean| turns.iter().map(move |&turned| (scale, n, lean, turned)))))
-            .collect();
+        let mut looks: Vec<(f32, usize, f32, f32)> = Vec::new();
+        for scale in scales {
+            for n in 0..pictures.len() {
+                for lean in leans {
+                    for turned in turns {
+                        looks.push((scale, n, lean, turned));
+                    }
+                }
+            }
+        }
         // What each look found, with the panel's true X and chevron in that picture.
         type Look = (Option<Found>, [f32; 2], [f32; 2]);
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(looks.len());

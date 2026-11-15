@@ -159,6 +159,9 @@ pub struct ExperimentalSettings {
     pub vrchat_bridge: bool,
     /// How many VRChats the bridge may run at once (its sessions, `docs/vrchat-bridge.md`); 0: the default, 2.
     pub vrchat_bridge_sessions: u8,
+    /// The developer VR sandbox's folder (`tools/vr-sandbox` of a checkout of this repository, with Python and psutil), for the
+    /// bridge's VR sessions (`open_session` with `vr`, docs/vrchat-bridge.md): empty, none. Not shown in Settings.
+    pub vrchat_bridge_vr_sandbox: String,
 }
 
 /// The sound devices Windows uses by default while SteamVR runs: set for all three of Windows' roles (console,

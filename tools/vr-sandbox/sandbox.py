@@ -365,7 +365,7 @@ class Session:
             d.p[:] = NEUTRAL_POSES[i]
             d.q[:] = [1, 0, 0, 0]
 
-    def start(self, stream='shared'):
+    def start(self, stream='shared', keep_app=False):
         ROOT.mkdir(parents=True, exist_ok=True)
         running = processes()
         if running:
@@ -415,8 +415,12 @@ class Session:
         self.j['autolaunch_disabled']=report;atomic_json(JOURNAL,self.j)
         # Enzo's installed Orbiters must not attach to the emulated SteamVR (its overlays would be in every turn's
         # pictures and it would write his real logs about sandbox runs): stopped before SteamVR starts, back at the end.
-        self.stop_installed_app()
-        self.eac.write('session_start', session=identity, render=self.render)
+        # keep_app (a VRChat bridge session in VR, nofocus 2026-11-15): the person's installed Orbiters runs the bridge
+        # that drives this session's VRChat, so it stays; that build leaves a sandbox's SteamVR alone (no overlay, no sound
+        # devices: `orbiters_core::steamvr_sandbox`).
+        self.j['keep_app']=bool(keep_app);atomic_json(JOURNAL,self.j)
+        if not keep_app:self.stop_installed_app()
+        self.eac.write('session_start', session=identity, render=self.render, keep_app=bool(keep_app))
         proc = subprocess.Popen([str(RUNTIME/'bin/win64/vrstartup.exe')], creationflags=subprocess.CREATE_NO_WINDOW)
         self.record()
         self.publish()
@@ -457,6 +461,10 @@ class Session:
                 self.j['processes'].append(p)
                 known.add((p['pid'],p['create_time']))
         atomic_json(JOURNAL, self.j)
+
+    def osc_in(self):
+        """The OSC port the session's VRChat listens on: 9000, or its profile's own (bridge convention 9000+10N)."""
+        return (self.j or {}).get('osc_in',9000)
 
     def vrchat(self):
         """The session's live VRChat (journal identity), or None."""
@@ -512,7 +520,7 @@ class Session:
         v=self.vrchat()
         if not v:return {**done,'vrchat':'not running'}
         for address,payload in ((b'/usercamera/Mode\0\0\0\0',b',i\0\0'+struct.pack('>i',0)),(b'/usercamera/Flying\0\0',b',F\0\0')):
-            with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as osc:osc.sendto(address+payload,('127.0.0.1',9000))
+            with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as osc:osc.sendto(address+payload,('127.0.0.1',self.osc_in()))
         done['osc']={'camera_mode':0,'camera_flying':False}
         done['menus']=self.close_menus(v)
         done['avatar_moved_since_launch']=self.j.get('moved',False)
@@ -679,7 +687,7 @@ class Session:
                 address=b'/usercamera/Mode';payload=b',i\0\0'+struct.pack('>i',value)
             address+=b'\0'*(4-len(address)%4)
             packet=address+payload
-            with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as osc:osc.sendto(packet,('127.0.0.1',9000))
+            with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as osc:osc.sendto(packet,('127.0.0.1',self.osc_in()))
             return {'requested':value,'address':address.rstrip(b'\0').decode(),'verify':'Read OSCQuery and inspect the camera; a write is not proof.'}
         if action=='app':
             exe=Path(args['app_exe']).resolve()
@@ -704,14 +712,39 @@ class Session:
         if action=='vrchat':
             world,instance,user=args['world_id'],args['instance'],args['user_id']
             if not re.fullmatch(r'wrld_[0-9a-f-]{36}',world) or not re.fullmatch(r'usr_[0-9a-f-]{36}',user):raise ValueError('invalid identity')
-            if not re.fullmatch(r'[0-9]+~private\('+re.escape(user)+r'\)~region\((eu|us|use|jp)\)',instance):raise ValueError('only a strict private instance of this account')
+            if not re.fullmatch(r'[0-9]+~private\('+re.escape(user)+r'\)~region\((eu|us|use|jp)\)(~nonce\([0-9a-f-]{36}\))?',instance):raise ValueError('only a strict private instance of this account')
+            profile=args.get('profile',0)
+            if type(profile) is not int or not 0<=profile<=9:raise ValueError('profile must be an integer 0..9')
             url=f'vrchat://launch?ref=orbiters.cc&id={world}:{instance}'
             if self.vrchat():
                 raise RuntimeError('VRChat already runs in this shared session: use it. A link sent to a running VRChat only opens '
                                    'its world page (it does not travel), so another world or a fresh spawn needs '
                                    '`sandbox.py acquire --owner <you> --cold`.')
             if any(p['name'].lower()=='vrchat.exe' for p in processes()):raise RuntimeError('A VRChat this session did not start is running')
-            return self.launch(url)
+            return self.launch(url,profile)
+        if action=='point':
+            # Aims a controller so that VRChat's laser goes through one pixel of the left eye picture (a `capture`), then,
+            # with click, presses the trigger: the VR stand-in for a mouse click, needing no window focus (nofocus,
+            # 2026-11-15). VRChat draws its laser about 64.5 deg below the controller's -Z (measured on its camera's X,
+            # done4-camera); `laser_deg` overrides it. Inspect a capture after a point without click: the laser's dot
+            # shows where a click would land.
+            import geometry
+            hand=args.get('device','right')
+            if hand not in ('left','right'):raise ValueError('controller required')
+            pixel,size=args.get('pixel'),args.get('size')
+            if not (isinstance(pixel,list) and isinstance(size,list) and len(pixel)==2 and len(size)==2 and all(isinstance(x,(int,float)) and math.isfinite(x) for x in pixel+size)
+                    and 0<=pixel[0]<=size[0] and 0<=pixel[1]<=size[1] and min(size)>0):raise ValueError('pixel [x,y] inside size [w,h] required')
+            laser=float(args.get('laser_deg',64.5))
+            if not 30<=laser<=80:raise ValueError('laser_deg 30..80')
+            result=subprocess.run([str(ROOT/'probe.exe'),'view'],capture_output=True,text=True,timeout=30,creationflags=subprocess.CREATE_NO_WINDOW)
+            if result.returncode:raise RuntimeError(result.stderr)
+            position,rotation=geometry.pointing_pose(json.loads(result.stdout),pixel,size,{'origin':[0,0,0],'rotate_xyz':[-laser,0,0]})
+            moved=self.call({'action':'pose','device':hand,'position':position,'rotation':rotation,'duration_s':.15})
+            if args.get('click'):
+                self.stop.wait(.25)
+                self.call({'action':'input','device':hand,'input':'trigger','value':1,'duration_s':.15})
+                self.stop.wait(.3)
+            return {'pointed':moved,'clicked':bool(args.get('click')),'laser_deg':laser,'verify':'Capture again: the page should have changed (or, without click, the laser dot shows the target).'}
         if action=='motion_capture':
             seconds=float(args.get('duration_s',0));frames=args.get('frames',24)
             target=args.get('position');rotation=args.get('rotation')
@@ -801,7 +834,7 @@ class Session:
                 return {'device':args['device'],'input':args['input'],'value':value}
         raise ValueError('unknown action')
 
-    def launch(self,url):
+    def launch(self,url,profile=0):
         """Cold VRChat start through its EAC launcher, only once anti-cheat is fully idle; the launch is watched
         and a "Launch Error" window of the bootstrapper is detected, logged with the EAC state, closed, and retried
         once after EAC is idle again."""
@@ -815,7 +848,10 @@ class Session:
             self.eac.write('vrchat_launch',attempt=attempt,eac_idle_wait_s=waited,instance=url.split('id=',1)[1],steamvr=any(p['name'].lower()=='vrserver.exe' for p in processes()))
             # --profile=0 (the default, the owner's account) named: launch.exe hands a bare link to a VRChat already running
             # (a bridge session started first owns VRChat's link pipe) instead of starting one; with --profile it always starts.
-            proc=subprocess.Popen([str(launcher),url,'--profile=0','-screen-fullscreen','0','-screen-width','1280','-screen-height','720'],creationflags=subprocess.CREATE_NO_WINDOW)
+            # A profile of its own (a bridge session's account) gets that profile's OSC ports, as the bridge gives them.
+            osc=[f'--osc={9000+10*profile}:127.0.0.1:{9001+10*profile}'] if profile else []
+            self.j['osc_in']=9000+10*profile;self.j['profile']=profile;atomic_json(JOURNAL,self.j)
+            proc=subprocess.Popen([str(launcher),url,f'--profile={profile}',*osc,'-screen-fullscreen','0','-screen-width','1280','-screen-height','720'],creationflags=subprocess.CREATE_NO_WINDOW)
             error=None
             try:
                 while time.time()-began<120:
@@ -837,10 +873,10 @@ class Session:
             time.sleep(30)
         raise RuntimeError('EAC showed "Launch Error" twice (pictures: '+json.dumps(error)+'); state in '+str(EAC_LOG))
 
-def serve(owner=None,stream='shared'):
+def serve(owner=None,stream='shared',keep_app=False):
     s=Session()
     try:
-        s.start(stream)
+        s.start(stream,keep_app)
         if owner:
             result,token=lease.acquire(s.lease,owner,time.time())
             if result=='granted':s.grant_file(owner,token);s.eac.write('turn_start',owner=owner);s.publish()
@@ -922,9 +958,9 @@ def spawn(spec):
     except OSError:child=subprocess.Popen(spec['command'],stdout=out,stderr=err,stdin=subprocess.DEVNULL,creationflags=flags)  # the job forbids breakaway
     print(child.pid,flush=True)
 
-def start_controller(owner=None):
+def start_controller(owner=None,keep_app=False):
     ROOT.mkdir(parents=True,exist_ok=True)
-    command=[sys.executable,__file__,'start']+(['--owner',owner] if owner else [])
+    command=[sys.executable,__file__,'start']+(['--owner',owner] if owner else [])+(['--keep-app'] if keep_app else [])
     with (ROOT/'server-err.log').open('a') as err:err.write('\n'+time.strftime('%Y-%m-%d %H:%M:%S')+' start '+(owner or '')+'\n')
     child=psutil.Process(detached(command,str(ROOT/'server-out.log'),str(ROOT/'server-err.log')))
     deadline=time.monotonic()+45
@@ -955,7 +991,7 @@ def write_render(size):
     if size==DEFAULT_RENDER:RENDER.unlink(missing_ok=True)
     else:RENDER.write_text(f'{size[0]} {size[1]}\n')
 
-def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say=print):
+def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say=print,keep_app=False):
     """Takes a turn on the shared session, starting the session if none runs. Waits (polling) for its turn and for
     the owner's own VR use to end. A different render size or cold=True restarts SteamVR and VRChat: the driver
     reads the render size once, when SteamVR loads it."""
@@ -973,7 +1009,7 @@ def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say
             else:
                 if render:write_render(render)
                 try:
-                    start_controller(owner)
+                    start_controller(owner,keep_app)
                     render=cold=None  # a fresh session already has them
                     continue
                 except RuntimeError as error:reason=str(error)
@@ -1018,14 +1054,15 @@ def main(argv):
     parser.add_argument('--app')
     parser.add_argument('--logs')
     parser.add_argument('--force',action='store_true')
+    parser.add_argument('--keep-app',action='store_true',help="leave the person's installed Orbiters running (its bridge drives a VR session)")
     a=parser.parse_intermixed_args(argv)
     cmd=a.command
     if cmd in ('call','release','renew','shutdown','neutral','app_stop') and not controller_alive():
         raise SystemExit('No shared sandbox session runs; take a turn first: python tools/vr-sandbox/sandbox.py acquire --owner <stream>')
-    if cmd=='start':serve(owner=a.owner,stream=a.owner or 'shared');return
+    if cmd=='start':serve(owner=a.owner,stream=a.owner or 'shared',keep_app=a.keep_app);return
     if cmd=='acquire':
         if not a.owner:raise SystemExit('acquire needs --owner <stream>')
-        print(json.dumps(acquire_turn(a.owner,a.wait,parse_render(a.render),a.cold,a.app,a.logs)));return
+        print(json.dumps(acquire_turn(a.owner,a.wait,parse_render(a.render),a.cold,a.app,a.logs,keep_app=a.keep_app)));return
     if cmd=='yield':
         YIELD.parent.mkdir(parents=True,exist_ok=True);YIELD.write_text(time.strftime('%Y-%m-%d %H:%M:%S'))
         j=controller_alive()

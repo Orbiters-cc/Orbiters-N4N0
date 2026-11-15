@@ -179,6 +179,8 @@ pub struct LaunchPlan {
     pub profile: Option<u32>,
     /// A side session's OSC ports, in and out (`--osc=<in>:127.0.0.1:<out>`); `None`: VRChat's defaults, for the app.
     pub osc: Option<(u16, u16)>,
+    /// VR mode: no `--no-vr`, so VRChat takes the SteamVR that runs (a VR session's, the sandbox's emulated headset).
+    pub vr: bool,
 }
 
 impl LaunchPlan {
@@ -189,7 +191,6 @@ impl LaunchPlan {
     /// VRChats never share 9000 and 9001 (sessions.rs).
     pub fn args(&self) -> Vec<String> {
         let mut args = vec![
-            "--no-vr".to_string(),
             "-screen-fullscreen".to_string(),
             "0".to_string(),
             "-screen-width".to_string(),
@@ -197,6 +198,9 @@ impl LaunchPlan {
             "-screen-height".to_string(),
             self.height.to_string(),
         ];
+        if !self.vr {
+            args.insert(0, "--no-vr".to_string());
+        }
         if let Some(profile) = self.profile {
             args.push(format!("--profile={profile}"));
         }
@@ -240,6 +244,10 @@ pub trait Opener: Send + Sync {
     /// Ends what is left of a start of the session on these OSC ports (a launcher hung on an error window): how many processes.
     fn end_launcher(&self, _osc: (u16, u16)) -> usize {
         0
+    }
+    /// The VR sandbox for a VR session `session` (vr.rs): `None` where the person set none.
+    fn vr_rig(&self, _session: &str) -> Option<std::sync::Arc<dyn super::vr::VrRig>> {
+        None
     }
 }
 
@@ -412,7 +420,7 @@ mod tests {
 
     #[test]
     fn the_start_goes_to_desktop_mode_in_a_window_into_the_instance() {
-        let plan = LaunchPlan { world_id: "wrld_1".into(), instance: "123~private(usr_1)~region(eu)".into(), width: 1280, height: 720, profile: None, osc: None };
+        let plan = LaunchPlan { world_id: "wrld_1".into(), instance: "123~private(usr_1)~region(eu)".into(), width: 1280, height: 720, profile: None, osc: None, vr: false };
         assert_eq!(
             plan.args(),
             [

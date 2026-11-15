@@ -164,6 +164,26 @@ Action Menu; the person's current binding closes that menu when the button is
 released. Inspect an eye capture before selecting a menu item. The Action Menu's
 Tools route opens the camera; writing OSC Mode is not evidence of opening it.
 
+## Bridge VR sessions (`--keep-app`, `profile`, `point`)
+
+The VRChat bridge's VR sessions (docs/vrchat-bridge.md, "VR sessions") take turns here like any agent, as owner
+`bridge-<session id>`:
+
+- `acquire --keep-app` starts a session that leaves the person's installed Orbiters running: its bridge drives the
+  session's VRChat. Builds with `steamvr_start::sandbox_runs` keep their overlay and sound devices off this SteamVR.
+  Without the flag, the installed app is stopped as before.
+- The `vrchat` action takes `profile` (1-9). VRChat then starts with `--profile=N --osc=<9000+10N>:127.0.0.1:<9001+10N>`,
+  the bridge's ports for that profile, and `neutral`/`camera_mode` talk to that port. Profile 0 keeps VRChat's defaults.
+  A bridge VR session starts its VRChat itself, so the sandbox records no VRChat of its own then.
+- `point {pixel:[x,y], size:[w,h], device, click, laser_deg}` aims the controller so that VRChat's laser (64.5 deg below
+  its -Z by default) goes through that pixel of the left eye picture, then pulls the trigger if `click` is set.
+
+Measured 2026-11-15 13:35-13:38: `acquire --keep-app --render default` beside a desktop bridge VRChat and the person's work.
+A profile-2 VRChat came up in VR at 13:36:10 (`StartVRSDK: OpenVRLoader`, the two sandbox controllers) without taking
+the foreground. `camera` opened the camera (`/usercamera/Mode` 1), OSC Mode 2 made it Stream, and `Streaming` true put up
+Spout `VRCSender1`. `/usercamera/Pose` moved it, and VRChat echoed the pose on 9021. Cost: GPU 35-41 %, 6.2 GB, 82 W with
+both VRChats.
+
 ## Recovery
 
 ```powershell

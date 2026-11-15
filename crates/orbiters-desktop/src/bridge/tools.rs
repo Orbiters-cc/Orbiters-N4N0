@@ -1449,7 +1449,7 @@ impl Bridge {
         if running >= limit {
             return Err(Failure::new(
                 "too_many_sessions",
-                format!("The bridge runs {running} VRChat sessions, the most this computer is set to carry ({limit}: Settings, Experimental, VRChat sessions at once). Each VRChat in a world takes 2 to 6 GB of graphics memory and about 2 GB of memory."),
+                format!("The bridge runs {running} VRChat sessions, the most this computer is set to carry ({limit}: `experimental.vrchat_bridge_sessions` in Orbiters - N4N0's settings, which the person can raise to 4). Each VRChat in a world takes 2 to 6 GB of graphics memory and about 2 GB of memory."),
                 "Close a session you no longer need (close_session), or use one you have.",
             ));
         }

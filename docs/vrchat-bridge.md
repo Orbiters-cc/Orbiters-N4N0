@@ -62,8 +62,8 @@ Needed as well: signed in to VRChat in Settings (private instances are made with
 | `screenshot` | VRChat's window as a JPEG, with timestamp, sizes and scale. |
 | `walk` | Over OSC, at most 10 s a call. Says the speed VRChat reported. |
 | `turn` | Over OSC, about so many degrees at 165°/s (measured), and says it is approximate. |
-| `press` | One input for a short time: `jump`, `quick_menu`, axes over OSC; a short list of keys. |
-| `mouse` | Moves the pointer or clicks in the window, or looks (relative). |
+| `press` | One input for a short time: `jump`, `quick_menu`, axes over OSC; a short list of keys (movement, `esc`, `r`, and for worlds' own screens and games `tab`, `e`, `f`, `q`, `0` to `9`). |
+| `mouse` | Moves the pointer or clicks in the window, or looks (relative). Coordinates are for the size the window started with: a window someone resized is put back first (never activated, never brought to the front) and the click refused with `window_resized`, so that the agent looks again. `screenshot` puts it back too (`window_restored`), while the person is away. |
 | `focus_game` | Asks Windows to bring the game forward: Windows may say no. |
 | `wear_avatar` | Changes to an avatar by its `avtr_` id, over OSC, and waits for the change. Only when the person asked. Says `changed` false when VRChat did not take it, and `avatar.capture_kit`. |
 | `take_3d_picture` | 1, 4 or 8 seconds, then the session and its reconstruction's state. |
@@ -160,13 +160,15 @@ the part that must be this service's own (the checks before anything else) is mo
 - **Only the game it started.** A VRChat the person started is theirs: not moved, not looked at, not closed. `tools.rs`, `ours`.
 - **Only private instances of the signed-in account.** `go_to_world` takes a world id and a region, nothing that names an instance. The answer of VRChat's
   API is checked, and so is what the game's log says: `private_instance_of` accepts `~private(<me>)` only, not invite+, friends, friends+, group, public or
-  anyone else's. Anywhere else, movement, input, pictures and screenshots are refused and the agent is told; it can leave.
+  anyone else's. Anywhere else, movement, input, pictures and screenshots are refused and the agent is told. A start that joins any other instance than the
+  one made for it, and a VRChat that moves on from its private instance to one that is not its own private one, is closed by the bridge at once
+  (`landed_elsewhere`, with the instance, its kind and how many people were there): it never stays. `tools.rs`, `follow_game`.
 - **Keyboard and mouse only into the foreground game window.** Checked right before `SendInput`, and during a held key. Mouse positions must be inside the
   window. OSC needs no focus, and is the first choice. The bridge asks Windows to bring the game forward on arrival and through `focus_game`, only while the person is not paused-for (no
   input of theirs for 30 s): an unattended run cannot open the camera otherwise.
 - **Screenshots are of that window only.** Windows Graphics Capture for that handle in a short-lived process (the service loads no GPU driver), `PrintWindow` for
   the same handle if that fails. Never the desktop.
-- **Nothing types or speaks.** The inputs are an allow-list without `Y`, Enter, letters that type, `/input/Voice` or `/chatbox/*`. A click can reach anything on the game's
+- **Nothing types or speaks.** The inputs are an allow-list without `Y`, `V`, Enter, Backspace, the F keys, Ctrl, Alt, `/input/Voice` or `/chatbox/*`; its letters and digits (movement, `e`, `f`, `q`, `0` to `9`, `tab` for worlds' own screens) type only into a text field already open, and nothing on the list opens one. A click can reach anything on the game's
   menus, invites and avatars included: the guide and the tool's description forbid those, and nothing can enforce it. An avatar the person named goes through `wear_avatar`, never the menus.
 - **The person always wins.** Any real key or mouse movement (Raw Input, whichever window has the focus, told from our own by having a device;
   `GetLastInputInfo` as a second opinion) pauses the agent and releases input; it goes on 30 s after the last of it. `Ctrl+Alt+F12` or Pause pause it until resumed. Stop

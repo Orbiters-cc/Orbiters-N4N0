@@ -156,6 +156,19 @@ pub(crate) struct Run {
     /// The worlds this session arrived in (lowercase ids), oldest first: the only ones its agent may label, besides the
     /// one it is in.
     pub been: Vec<String>,
+    /// The instance its VRChat arrived in last (`world:number`, [`tools::place_key`]): moved anywhere else not its own
+    /// private, the bridge leaves.
+    pub placed: Option<String>,
+    /// Instances this session was in or asked for before the start under way: what a log still shows of them is the past,
+    /// never where a new start landed.
+    pub earlier: Vec<String>,
+    /// The bridge closed its VRChat because it was somewhere it must not be: its going away is that, not a crash.
+    pub leaving: bool,
+    /// The last event is such a leaving (`landed_elsewhere`).
+    pub left: bool,
+    /// The window's client size when its VRChat arrived (what `-screen-width` and `-screen-height` asked): the size clicks'
+    /// coordinates are for, put back when someone changed it.
+    pub size: Option<(u32, u32)>,
 }
 
 /// One VRChat the bridge drives (bridge/sessions.rs): `main`, the app's own, or a side session beside anything else.

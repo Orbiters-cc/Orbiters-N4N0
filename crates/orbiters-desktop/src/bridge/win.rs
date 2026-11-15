@@ -52,6 +52,7 @@ mod imp {
         false
     }
     pub fn bring_forward(_handle: isize) {}
+    pub fn resize_client(_handle: isize, _width: u32, _height: u32) {}
     pub fn close_window(_handle: isize) -> Result<(), Failure> {
         Err(Failure::new("not_windows", "The bridge is for Windows.", "Run it on Windows.")) // i18n: not shown (an AI client reads it in the tool's answer)
     }
@@ -85,9 +86,10 @@ mod imp {
         MOUSEINPUT, MOUSE_EVENT_FLAGS,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindow, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-        PostMessageW, SetForegroundWindow, ShowWindow, SwitchToThisWindow, GW_OWNER, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-        SM_YVIRTUALSCREEN, SW_RESTORE, WM_CLOSE,
+        EnumWindows, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+        IsWindowVisible, IsZoomed, PostMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, SwitchToThisWindow, GW_OWNER, SM_CXVIRTUALSCREEN,
+        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_RESTORE,
+        SW_SHOWNOACTIVATE, WM_CLOSE,
     };
 
     fn hwnd(handle: isize) -> HWND {
@@ -154,6 +156,38 @@ mod imp {
             if GetForegroundWindow() != h {
                 SwitchToThisWindow(h, true);
             }
+        }
+    }
+
+    /// Gives the window a client area of `width` by `height` where it is, never activating it, never changing what is in
+    /// front: what the person sees in front stays in front, and the foreground stays theirs. A maximized window is restored
+    /// first (without activation); a minimized one is left alone.
+    pub fn resize_client(handle: isize, width: u32, height: u32) {
+        // SAFETY: plain calls on a window handle; a window gone meanwhile only makes them fail.
+        unsafe {
+            let h = hwnd(handle);
+            if IsIconic(h).as_bool() {
+                return;
+            }
+            if IsZoomed(h).as_bool() {
+                let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
+            }
+            let (mut outer, mut inner) = (RECT::default(), RECT::default());
+            if GetWindowRect(h, &mut outer).is_err() || GetClientRect(h, &mut inner).is_err() {
+                return;
+            }
+            // The frame stays as it is: the new outer size is the client asked for plus what the frame takes now.
+            let frame_w = (outer.right - outer.left) - (inner.right - inner.left);
+            let frame_h = (outer.bottom - outer.top) - (inner.bottom - inner.top);
+            let _ = SetWindowPos(
+                h,
+                None,
+                0,
+                0,
+                width as i32 + frame_w,
+                height as i32 + frame_h,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            );
         }
     }
 

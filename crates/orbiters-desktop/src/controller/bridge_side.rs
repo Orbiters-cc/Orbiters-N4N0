@@ -188,6 +188,8 @@ struct SideState {
     lent_at: Option<Instant>,
     /// Its last picture's session.
     last_picture: Option<PathBuf>,
+    /// The logs of its earlier VRChats: never this start's.
+    followed: Vec<PathBuf>,
 }
 
 pub(crate) struct SideGame {
@@ -296,7 +298,7 @@ impl SideGame {
         }
         if st.log.is_none() {
             if let Some(dir) = orbiters_core::paths::vrchat_log_dir() {
-                st.log = own_log(&dir, launched_at, &sessions::osc_arg(self.osc.0, self.osc.1));
+                st.log = own_log(&dir, launched_at, &sessions::osc_arg(self.osc.0, self.osc.1), &st.followed);
                 if let Some(log) = &st.log {
                     st.watcher = Some(LogWatcher::of_file(log.clone()));
                 }
@@ -363,13 +365,22 @@ fn flatten(packet: rosc::OscPacket, out: &mut Vec<rosc::OscMessage>) {
     }
 }
 
-/// This session's log: the newest written since its launch whose arguments name its own `--osc`.
-fn own_log(dir: &Path, since: SystemTime, osc: &str) -> Option<PathBuf> {
+/// How much earlier than the launch a log may say it was created (clock steps between the call and the file system).
+const LOG_CREATED_SLACK: Duration = Duration::from_millis(250);
+
+/// This session's log: the newest **created** since its launch whose arguments name its own `--osc`, and none it followed
+/// before. Not "written to lately": the VRChat this session closed a moment ago, in the same profile with the same `--osc`,
+/// last wrote its log as it quit (Windows dates a log when its handle closes, at the process's end), and the first look after
+/// the launch comes before the new VRChat has made its own (2 s at least). On the first world tour (2026-11-15, 04:45 to 05:16)
+/// that look took the old log every time the old VRChat had quit less than about 7 s before: the session followed the
+/// previous world for the whole start (no arrival, its dead OSCQuery port so no camera and no kit) until `start_timeout`.
+fn own_log(dir: &Path, since: SystemTime, osc: &str, followed: &[PathBuf]) -> Option<PathBuf> {
     std::fs::read_dir(dir)
         .ok()?
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with("output_log_"))
-        .filter(|e| e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t + Duration::from_secs(5) >= since))
+        .filter(|e| !followed.iter().any(|f| f == &e.path()))
+        .filter(|e| e.metadata().and_then(|m| m.created().or_else(|_| m.modified())).is_ok_and(|t| t + LOG_CREATED_SLACK >= since))
         .filter(|e| sessions::complete_args(&sessions::read_head(&e.path(), 64 * 1024)).is_some_and(|args| args.iter().any(|a| a == osc)))
         .max_by_key(|e| e.file_name())
         .map(|e| e.path())
@@ -475,7 +486,12 @@ impl Game for SideGame {
         {
             let mut st = self.state.lock().unwrap();
             let last_picture = st.last_picture.take();
-            *st = SideState { launched: Some((Instant::now(), SystemTime::now())), before: vrchat_pids(), last_picture, ..Default::default() };
+            let mut followed = std::mem::take(&mut st.followed);
+            followed.extend(st.log.take());
+            // A handful is enough: older logs are minutes old, past any launch's moment.
+            let drop_old = followed.len().saturating_sub(8);
+            followed.drain(..drop_old);
+            *st = SideState { launched: Some((Instant::now(), SystemTime::now())), before: vrchat_pids(), last_picture, followed, ..Default::default() };
         }
         self.values.lock().unwrap().clone_from(&Latest::default());
         self.sides.launching(true);
@@ -496,6 +512,10 @@ impl Game for SideGame {
 
     fn bring_forward(&self, window: &GameWindow) {
         win::bring_forward(window.handle);
+    }
+
+    fn resize(&self, window: &GameWindow, width: u32, height: u32) {
+        win::resize_client(window.handle, width, height);
     }
 
     fn close(&self, window: &GameWindow) -> Result<(), Failure> {
@@ -671,5 +691,45 @@ impl Controller {
         }
         drop(osc);
         self.update(|s| s.camera_open_said = camera_open);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A log as profile 1's VRChat writes it (its first lines as on 2026-11-15, 04:58:40).
+    fn write_log(path: &Path, world: &str) {
+        let mut f = std::fs::File::create(path).unwrap();
+        writeln!(f, "2026.11.15 04:58:40 Debug      -  Launching with args: 3").unwrap();
+        writeln!(f, "2026.11.15 04:58:40 Debug      -  Arg: vrchat://launch?ref=orbiters.cc&id={world}:84156~private(usr_dfc96b2c-1aec-4775-9557-eef94a7f02c3)~region(eu)").unwrap();
+        writeln!(f, "2026.11.15 04:58:40 Debug      -  Arg: --profile=1").unwrap();
+        writeln!(f, "2026.11.15 04:58:40 Debug      -  Arg: --osc=9010:127.0.0.1:9011").unwrap();
+    }
+
+    #[test]
+    fn a_start_follows_its_own_new_log_never_the_one_its_last_vrchat_just_left() {
+        let dir = std::env::temp_dir().join(format!("orbiters-own-log-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let osc = sessions::osc_arg(9010, 9011);
+        // The session's last VRChat, in the last world: made a while ago, written to until it quit, a moment before the launch.
+        let old = dir.join("output_log_2026-11-15_04-57-20.txt");
+        write_log(&old, "wrld_41efe3b1-9931-40ab-a15d-6946d22481b5");
+        std::thread::sleep(Duration::from_millis(600));
+        std::fs::OpenOptions::new().append(true).open(&old).unwrap().write_all(b"2026.11.15 04:58:30 Debug      -  uSpeak: Stop Microphone\n").unwrap();
+        let since = SystemTime::now();
+        // The first look after the launch: the new VRChat has no log yet. The old one, written to 0 s ago, is not this start's.
+        assert_eq!(own_log(&dir, since, &osc, &[]), None, "the log its previous VRChat just left is not this start's");
+        // Then the new VRChat makes its own: that one, at once.
+        std::thread::sleep(Duration::from_millis(50));
+        let new = dir.join("output_log_2026-11-15_04-58-38.txt");
+        write_log(&new, "wrld_ae001ea3-ed05-42f0-adf2-3d47efd10a77");
+        assert_eq!(own_log(&dir, since, &osc, &[]), Some(new.clone()));
+        // A log this session followed before is never taken again, whatever its dates.
+        assert_eq!(own_log(&dir, since, &osc, std::slice::from_ref(&new)), None);
+        // Another session's log (other ports) is not this one's.
+        assert_eq!(own_log(&dir, since, &sessions::osc_arg(9020, 9021), &[]), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

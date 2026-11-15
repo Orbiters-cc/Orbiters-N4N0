@@ -659,35 +659,106 @@ fn only_private_instances_of_ones_own_are_acted_in() {
         ("12345~private(usr_someone-else)~region(eu)", "someone else's"),
         ("12345~group(grp_1)~groupAccessType(public)~region(eu)", "a group's"),
     ] {
-        let (game, _bridge, _server, client) = lab_giving_up("private");
+        // A long limit: the leaving has to come from seeing where it is, not from giving up on the start (Wizard Showdown's
+        // start_timeout on 2026-11-15 came after four minutes, and said nothing of whether anyone was there).
+        let (game, _bridge, _server, client) = lab("private");
         game.set_behaviour(|b| b.land_in = Some(instance.to_string()));
-        // VRChat ended up elsewhere than asked: never counted as arrived.
-        let answer = client.tool("go_to_world", json!({ "world_id": LAB_WORLD_A }));
-        assert!(matches!(&answer, Err(f) if f["code"] == "start_timeout") || matches!(&answer, Ok(a) if a["arrived"] == false), "{instance}: {answer:?}");
-        // Whatever the answer was, a look at the state shows where it is, and that nothing is allowed there.
-        assert!(until(PATIENCE, || client.state()["place"]["in_world"] == true), "{instance}");
-        assert_eq!(client.state()["place"]["private"], false, "{instance}");
-        assert!(client.state()["next"].as_str().unwrap().contains("not private") || client.state()["vrchat"]["started_by_bridge"] == true);
+        let begin = Instant::now();
+        // VRChat ended up elsewhere than asked: never counted as arrived, and left at once, saying where it was.
+        let failure = client.fails("go_to_world", json!({ "world_id": LAB_WORLD_A }), "landed_elsewhere");
+        assert!(begin.elapsed() < Duration::from_secs(10), "{instance}: left as soon as it was seen, not at the time limit");
+        let message = failure["message"].as_str().unwrap();
+        assert!(message.contains(code) && message.contains("12345") && message.contains("closed it"), "{instance}: {failure}");
+        assert!(failure["next"].as_str().unwrap().contains("go_to_world"), "{failure}");
+        assert!(game.closes() >= 1, "{instance}: closed");
+        assert!(until(PATIENCE, || client.state()["vrchat"]["running"] == false), "{instance}: gone");
+        let state = client.state();
+        assert!(state["bridge"]["last_event"].as_str().unwrap().contains(code), "{state}");
+        assert!(!state["bridge"]["last_event"].as_str().unwrap().contains("crashed"), "its going is the bridge's doing: {state}");
         for (tool, args) in [
             ("walk", json!({ "direction": "forward", "seconds": 1 })),
-            ("turn", json!({ "degrees": 10 })),
             ("press", json!({ "input": "jump" })),
-            ("mouse", json!({ "action": "look", "dx": 1 })),
-            ("take_3d_picture", json!({})),
-            ("focus_game", json!({})),
             ("screenshot", json!({})),
+            ("take_3d_picture", json!({})),
         ] {
-            let failure = client.fails(tool, args, "not_private_instance");
-            assert!(failure["message"].as_str().unwrap().contains(code), "{instance}: {failure}");
+            client.fails(tool, args, "vrchat_not_running");
         }
         assert_eq!(game.heard().iter().filter(|(h, _)| h.address.starts_with("/input/")).count(), 0, "not one input went out");
         assert!(game.instances().iter().all(|i| i.contains("~private(") && !i.contains("canRequestInvite")), "only private instances were ever made");
-        // Going elsewhere and closing stay possible.
-        client.tool("close_vrchat", json!({})).expect("it can always leave");
+        assert!(!game.reconstructions_held());
     }
     let tools = super::tools::list();
     let go = tools.as_array().unwrap().iter().find(|t| t["name"] == "go_to_world").unwrap();
     assert_eq!(go["inputSchema"]["additionalProperties"], false, "no way to name an instance");
+}
+
+#[test]
+fn a_vrchat_that_moves_from_its_private_instance_to_a_public_one_is_left_at_once() {
+    let (game, _bridge, _server, client) = lab("moved");
+    arrive(&client);
+    // Somewhere else of its own, strictly private: it stays, and that is where it is now.
+    game.moves_to(LAB_WORLD_B, &format!("20001~private({LAB_USER})~region(eu)"));
+    assert!(until(PATIENCE, || client.state()["place"]["world_id"] == LAB_WORLD_B), "{}", client.state());
+    assert_eq!(client.state()["vrchat"]["running"], true);
+    assert_eq!(game.closes(), 0);
+    // A public one (a portal, a home): closed by the bridge itself, and said.
+    game.moves_to(LAB_WORLD_B, "30001~region(eu)");
+    assert!(until(PATIENCE, || client.state()["vrchat"]["running"] == false), "{}", client.state());
+    assert_eq!(game.closes(), 1);
+    let event = client.state()["bridge"]["last_event"].as_str().unwrap().to_string();
+    assert!(event.contains("public") && event.contains("closed it"), "{event}");
+    assert_eq!(game.heard().iter().filter(|(h, _)| h.address.starts_with("/input/")).count(), 0);
+}
+
+#[test]
+fn a_restart_never_takes_what_its_last_vrchat_showed_for_its_new_place() {
+    // The app follows the newest log, which until the new VRChat writes its own is the last one: its world and instance
+    // are the past (the first world tour's side session followed the last world for each whole start). Neither an arrival
+    // nor a reason to leave.
+    let (game, _bridge, _server, client) = lab("restart");
+    arrive(&client);
+    std::thread::sleep(Duration::from_millis(60));
+    game.set_behaviour(|b| b.load = Duration::from_millis(1500));
+    let begin = Instant::now();
+    let arrived = client.tool("go_to_world", json!({ "world_id": LAB_WORLD_A })).expect("arrives");
+    assert_eq!(arrived["arrived"], true, "{arrived}");
+    assert!(begin.elapsed() >= Duration::from_millis(1400), "not on the old log's word");
+    assert_eq!(game.closes(), 1, "only the close of the last world's VRChat");
+    assert_eq!(arrived["instance"].as_str().unwrap().split('~').next(), game.instances().last().unwrap().split(':').nth(1).unwrap().split('~').next());
+}
+
+#[test]
+fn a_window_someone_resized_is_put_back_before_anything_is_clicked() {
+    let (game, bridge, _server, client) = lab("resized");
+    arrive(&client);
+    game.set_foreground(true);
+    // The owner made profile 1's window 1777 by 1117 on 2026-11-15: the guide's (640, 620) was not the camera icon there.
+    game.resize_by_hand(900, 500);
+    assert_eq!(client.state()["vrchat"]["window"]["width"], 900);
+    // A click on a page the agent has not seen at that size: put back, and nothing clicked.
+    let failure = client.fails("mouse", json!({ "action": "click", "x": CAMERA_ICON.0, "y": CAMERA_ICON.1 }), "window_resized");
+    assert!(failure["next"].as_str().unwrap().contains("screenshot"), "{failure}");
+    assert!(game.injected().is_empty(), "nothing clicked");
+    assert_eq!(client.state()["vrchat"]["window"]["width"], 640);
+    assert_eq!(client.state()["vrchat"]["window"]["height"], 360);
+    // A screenshot puts it back too, and says so; then the click lands where the guide says, at the size it was made for.
+    game.resize_by_hand(900, 500);
+    let (_, body) = client.rpc("tools/call", json!({ "name": "screenshot", "arguments": {} }));
+    let info = &body["result"]["structuredContent"];
+    assert_eq!(info["window_restored"], true, "{info}");
+    assert_eq!((info["window_width"].clone(), info["window_height"].clone()), (json!(640), json!(360)));
+    client.tool("press", json!({ "input": "esc" })).unwrap();
+    client.tool("mouse", json!({ "action": "click", "x": CAMERA_ICON.0, "y": CAMERA_ICON.1 })).unwrap();
+    assert_eq!(game.clicked_at_size(), vec![(640, 360)]);
+    assert_eq!(client.state()["camera"]["open"], true);
+    // Never by taking the foreground: the bridge asked Windows for nothing but the size.
+    assert!(game.resizes() >= 2);
+    // With the person at the computer, a screenshot leaves the size they gave it.
+    game.resize_by_hand(900, 500);
+    bridge.heard(super::person::Heard::PersonInput);
+    let failure = client.fails("screenshot", json!({}), "paused_by_person");
+    assert!(failure["retry_after_s"].as_u64().is_some());
+    assert_eq!(client.state()["vrchat"]["window"]["width"], 900);
 }
 
 #[test]
@@ -1007,10 +1078,11 @@ fn an_avatar_is_worn_when_asked_and_says_so_when_vrchat_does_not_take_it() {
 fn a_public_instance_changes_no_avatar() {
     let (game, _bridge, _server, client) = lab_giving_up("wear-public");
     game.set_behaviour(|b| b.land_in = Some("12345~region(eu)".to_string()));
-    let _ = client.tool("go_to_world", json!({ "world_id": LAB_WORLD_A }));
-    assert!(until(Duration::from_secs(3), || client.state()["place"]["in_world"] == true));
-    client.fails("wear_avatar", json!({ "avatar_id": "avtr_4f3b5bc4-87f0-4872-bc7e-22c5c071fdcf" }), "not_private_instance");
-    assert!(client.state()["avatar"]["name"] == "Lab Avatar", "unchanged");
+    // The bridge leaves a public instance at once; whatever comes before or after that, no avatar changes there.
+    client.fails("go_to_world", json!({ "world_id": LAB_WORLD_A }), "landed_elsewhere");
+    let answer = client.tool("wear_avatar", json!({ "avatar_id": "avtr_4f3b5bc4-87f0-4872-bc7e-22c5c071fdcf" })).unwrap_err();
+    assert!(answer["code"] == "not_private_instance" || answer["code"] == "vrchat_not_running", "{answer}");
+    assert!(client.state()["avatar"]["name"] != "Lab Avatar avtr_4f3b5bc4-87f0-4872-bc7e-22c5c071fdcf", "unchanged");
 }
 
 #[test]

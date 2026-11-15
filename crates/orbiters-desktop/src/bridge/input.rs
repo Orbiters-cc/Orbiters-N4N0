@@ -96,9 +96,13 @@ pub const OSC_INPUTS: [(&str, &str, bool); 5] = [
     ("move_horizontal", "/input/Horizontal", true),
 ];
 
-/// The keys an agent may press: movement, the Esc menu, the Action Menu. No letter that types (nothing could reach the
-/// chatbox: `Y` opens it and it stays out, as does Enter), no combination: only one key at a time, by these names.
-pub const KEYS: [(&str, u16, bool); 14] = [
+/// The keys an agent may press: movement, the Esc menu, the Action Menu, and what worlds commonly ask for on their own
+/// screens and in their games (Tab on SlashCo VR's language page, met on the first world tour on 2026-11-15; E, F and Q to
+/// use and pick up; digits for a choice). None of them is bound by VRChat's desktop mode to anything outside the world. The
+/// chatbox (`Y`), push-to-talk (`V`), Enter, Backspace, the F keys (VRChat's hand gestures, Steam's screenshot), Ctrl and Alt
+/// (VRChat's shortcuts, Alt+F4) and anything that combines stay out: only one key at a time, by these names. A letter or a
+/// digit types only into a text field that is open, and nothing here opens one (VRChat's keyboard needs a click on a field).
+pub const KEYS: [(&str, u16, bool); 28] = [
     ("esc", 0x01, false),
     ("r", 0x13, false),
     ("w", 0x11, false),
@@ -113,6 +117,20 @@ pub const KEYS: [(&str, u16, bool); 14] = [
     ("down", 0x50, true),
     ("left", 0x4B, true),
     ("right", 0x4D, true),
+    ("tab", 0x0F, false),
+    ("e", 0x12, false),
+    ("f", 0x21, false),
+    ("q", 0x10, false),
+    ("1", 0x02, false),
+    ("2", 0x03, false),
+    ("3", 0x04, false),
+    ("4", 0x05, false),
+    ("5", 0x06, false),
+    ("6", 0x07, false),
+    ("7", 0x08, false),
+    ("8", 0x09, false),
+    ("9", 0x0A, false),
+    ("0", 0x0B, false),
 ];
 
 /// The names [`press`](super::tools) takes, for its description and its errors.
@@ -202,7 +220,7 @@ mod tests {
     #[test]
     fn nothing_that_can_type_or_speak_is_on_the_lists() {
         let names = input_names();
-        for name in ["y", "enter", "t", "v", "/chatbox/input", "voice", "panic"] {
+        for name in ["y", "enter", "t", "v", "/chatbox/input", "voice", "panic", "backspace", "ctrl", "alt", "f12", "f1", "m"] {
             assert!(!names.contains(&name), "{name}");
         }
         assert!(OSC_INPUTS.iter().all(|i| i.1.starts_with("/input/") && !i.1.contains("Voice")));
@@ -211,6 +229,15 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
+        let mut scans: Vec<u16> = KEYS.iter().map(|k| k.1).collect();
+        scans.sort_unstable();
+        scans.dedup();
+        assert_eq!(scans.len(), KEYS.len(), "each scan code once");
+        // What worlds ask for on their own entry screens (SlashCo VR: "[PC: TAB]").
+        for name in ["tab", "e", "f", "q", "1", "0"] {
+            assert!(names.contains(&name), "{name}");
+        }
+        assert_eq!(KEYS.iter().find(|k| k.0 == "tab").map(|k| (k.1, k.2)), Some((0x0F, false)), "Tab's scan code");
     }
 
     #[test]

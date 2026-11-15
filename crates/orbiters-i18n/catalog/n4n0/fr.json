@@ -348,5 +348,7 @@
   "{reason}: a QR code here opens only http or https pages": "{reason} : un QR code ici n’ouvre que des pages http ou https",
   "{time} · muted": "{time} · micro coupé",
   "✓ Link copied": "✓ Lien copié",
-  "panel\u0004Search videos": "Rechercher"
+  "panel\u0004Search videos": "Rechercher",
+  "A QR code is cut by the camera's edge: bring all of it into the picture": "Un QR code est coupé par le bord de la caméra : faites-le entrer en entier dans l’image",
+  "A QR code is in view: hold the camera still, a little closer": "Un QR code est en vue : tenez la caméra immobile, un peu plus près"
 }

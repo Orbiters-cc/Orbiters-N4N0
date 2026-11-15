@@ -23,7 +23,9 @@ impl Proxy {
             let count = Arc::new(AtomicUsize::new(0));
             while !flag.load(Ordering::Relaxed) {
                 if let Ok((s, _)) = listener.accept() {
-                    if count.load(Ordering::Relaxed) >= 32 {
+                    // Bounded, but well above Chromium's own 32 sockets a proxy: tunnels Chromium has let go may still be
+                    // draining here, and a connection dropped at accept fails a page's request (a page that never loads).
+                    if count.load(Ordering::Relaxed) >= 256 {
                         continue;
                     }
                     count.fetch_add(1, Ordering::Relaxed);
@@ -34,7 +36,8 @@ impl Proxy {
                         count.fetch_sub(1, Ordering::Relaxed);
                     });
                 } else {
-                    std::thread::sleep(Duration::from_millis(10));
+                    // Each new connection waits for this at most.
+                    std::thread::sleep(Duration::from_millis(2));
                 }
             }
         });

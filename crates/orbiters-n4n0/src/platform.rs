@@ -59,6 +59,17 @@ pub enum QrSeen {
     Code(String),
     /// The scanner cannot run: why (it stops).
     Failed(String),
+    /// A code is in view but could not be read (how), or no longer (`None`). Said when it changes.
+    Glimpse(Option<QrGlimpse>),
+}
+
+/// A QR code seen but not read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum QrGlimpse {
+    /// Part of it is outside the camera's picture: nothing can read it until all of it is in.
+    Cut,
+    /// All of it seems in the picture but it could not be read yet (small, blurred, at a steep angle).
+    Unclear,
 }
 
 /// What a QR code scanner tells N4N0 ([`QrSeen`]); never called once the scan was dropped and its thread saw it.

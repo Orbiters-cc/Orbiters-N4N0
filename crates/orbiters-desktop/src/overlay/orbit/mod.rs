@@ -1814,6 +1814,9 @@ impl Panels {
             Qr::Looking => panels::CameraQr::Looking,
             Qr::NoStream => panels::CameraQr::NoPicture(orbiters_i18n::tr(&orbiters_n4n0_core::qr::no_camera_note(snap.camera_open_said)).to_string()),
             Qr::Error(why) => panels::CameraQr::NoPicture(orbiters_i18n::tr(why).to_string()),
+            Qr::Seen(orbiters_n4n0::QrGlimpse::Cut) => panels::CameraQr::Cut,
+            Qr::Seen(orbiters_n4n0::QrGlimpse::Unclear) => panels::CameraQr::Unclear,
+            Qr::NotALink => panels::CameraQr::NotALink,
             // Found: its page opens over the camera, and the scan stops.
             Qr::Off | Qr::Found { .. } => panels::CameraQr::Off,
         };
@@ -3035,10 +3038,28 @@ impl Panels {
             Action::WebOpen => {
                 if !self.web_picture_is_current() { return; }
                 if let Some(url) = self.web.as_ref().map(|w| w.url.clone()) {
-                    if let Err(e) = crate::controller::open_url(&url) {
-                        super::vr_log::line(&format!("camera page: the browser did not open: {e:#}")); // i18n: not shown (a log's line)
+                    // On a thread of its own: the shell's open can take seconds (a browser starting) and runs COM and its own
+                    // message loop, none of which may happen on the thread that draws VR (K-qr-page: Orbiters' overlay ended
+                    // at this press on 2026-11-14).
+                    super::vr_log::line(&format!("camera page: opening {} in the browser", panels::web_host(&url))); // i18n: not shown (a log's line)
+                    let spawned = std::thread::Builder::new().name("open-in-browser".into()).spawn(move || {
+                        let at = Instant::now();
+                        match crate::controller::open_url(&url) {
+                            Ok(()) => super::vr_log::line(&format!("camera page: the browser was asked in {} ms", at.elapsed().as_millis())), // i18n: not shown (a log's line)
+                            Err(e) => super::vr_log::line(&format!("camera page: the browser did not open: {e:#}")), // i18n: not shown (a log's line)
+                        }
+                    });
+                    if let Err(e) = spawned {
+                        super::vr_log::line(&format!("camera page: the browser could not be asked: {e}")); // i18n: not shown (a log's line)
                     }
                 }
+            }
+            Action::WebRetry => {
+                if !self.web_picture_is_current() { return; }
+                if let Some(web) = self.web.as_mut() {
+                    web.retry();
+                }
+                self.camera_dirty();
             }
             Action::WebClose => {
                 if !self.web_picture_is_current() { return; }

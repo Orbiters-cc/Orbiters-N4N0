@@ -30,7 +30,7 @@ mod tests;
 
 pub use command::Command;
 pub use platform::{
-    language_of, Actions, Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Mouse, MouseState, NoMouse, Osc, Platform, QrEvents, QrScan, QrSeen,
+    language_of, Actions, Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Mouse, MouseState, NoMouse, Osc, Platform, QrEvents, QrGlimpse, QrScan, QrSeen,
     Scene, Sounds, VoiceEnded, VoiceEvents, VoiceWorker,
 };
 pub use runtime::{N4n0, Shared, Source};

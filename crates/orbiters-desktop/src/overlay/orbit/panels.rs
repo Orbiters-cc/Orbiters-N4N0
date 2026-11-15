@@ -172,6 +172,8 @@ pub enum Action {
     WebOpen,
     WebClose,
     WebPage,
+    /// The page over the camera opened again (it was slow or failed).
+    WebRetry,
     /// A page of N4N0's menu on the sheet.
     Page(Target),
     /// Everything, on the sheet.
@@ -721,6 +723,12 @@ pub enum CameraQr {
     Looking,
     /// VRChat's camera sends no picture to read: how to make it.
     NoPicture(String),
+    /// Looking, and a code is in view: part of it outside the camera's picture.
+    Cut,
+    /// Looking, and a code is in view that could not be read yet.
+    Unclear,
+    /// Looking: a code was read that holds no web link.
+    NotALink,
 }
 
 /// A page opened from a code, as its bar and its view show it.
@@ -731,11 +739,15 @@ pub struct WebPage {
     pub state: WebState,
     /// The page as drawn, once it is.
     pub picture: Option<TextureId>,
+    /// The engine is still loading it (shown or not).
+    pub busy: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WebState {
     Loading,
+    /// No picture of it yet, long after it was opened (`camera_web::SLOW_AFTER`): said, with Try again.
+    Slow,
     Shown,
     /// Why not.
     Failed(String),
@@ -936,8 +948,14 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::CameraScan => vec![Item { action: Action::Idle, rect: whole, look: Look::Scan }],
         Zone::CameraWebBar => web_bar(w, h, facts),
         Zone::CameraWeb => {
-            let shown = facts.camera.web.as_ref().is_some_and(|web| web.state == WebState::Shown);
-            vec![Item { action: if shown { Action::WebPage } else { Action::Idle }, rect: whole, look: Look::Web }]
+            let state = facts.camera.web.as_ref().map(|web| &web.state);
+            let mut items = vec![Item { action: if state == Some(&WebState::Shown) { Action::WebPage } else { Action::Idle }, rect: whole, look: Look::Web }];
+            // Slow or failed: a way out on the page itself, beside the bar's Open in browser and close.
+            if matches!(state, Some(WebState::Slow | WebState::Failed(_))) {
+                let (bw, bh) = (200.0, 44.0);
+                items.push(Item { action: Action::WebRetry, rect: r((w - bw) / 2.0, h / 2.0 + 112.0, bw, bh), look: Look::WebButton { icon: icons::ARROW_CLOCKWISE, label: tr("Try again") } });
+            }
+            items
         }
         Zone::WheelStop | Zone::QmStop if stop_shown(facts) => vec![Item { action: stop_action(facts), rect: whole, look: Look::Stop }],
         Zone::WheelStop | Zone::QmStop => Vec::new(),
@@ -2259,7 +2277,8 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::DemoAvatar => (tr("Wear the demo avatar").into(), tr("A public avatar with the capture kit, to take 3D pictures now. Change back in VRChat's menu.").into()),
         Action::WebOpen => (tr("Open in browser").into(), tr("This page in your computer's browser.").into()),
         Action::WebClose => (tr("Close the page").into(), tr("The camera stays as it is.").into()),
-        Action::WebPage => (tr("The page").into(), tr("Scroll with your stick, or point and press.").into()),
+        Action::WebPage => (tr("The page").into(), tr("Press to click. Hold and slide to scroll, or use your stick.").into()),
+        Action::WebRetry => (tr("Try again").into(), tr("Opens this page again over the camera.").into()),
         Action::Page(Target::Instances) => (tr("Instances").into(), tr("Where you were lately. Go back with an invite.").into()),
         Action::Page(Target::History) => (tr("Your captures").into(), tr("Your 3D pictures and scenes: see them, share them.").into()),
         Action::Page(Target::YouTube) => ("YouTube".into(), tr("Find a video, and put its link in the world's video player.").into()),
@@ -3398,8 +3417,10 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.rect_filled(rect, round, look::PANEL);
             let (icon, ink) = match web.state {
                 WebState::Loading => (icons::CIRCLE_NOTCH, look::MUTED),
+                // Shown while the rest of it still loads: the turning mark says so.
+                WebState::Shown if web.busy => (icons::CIRCLE_NOTCH, theme::mix(theme::INDIGO, Color32::WHITE, 0.3)),
                 WebState::Shown => (icons::GLOBE, theme::mix(theme::INDIGO, Color32::WHITE, 0.3)),
-                WebState::Failed(_) => (icons::WARNING, theme::WARN),
+                WebState::Slow | WebState::Failed(_) => (icons::WARNING, theme::WARN),
             };
             widgets::icon(p, pos2(rect.left() + 18.0, rect.center().y), icon, 16.0, ink);
             let name = if web.title.trim().is_empty() { web_host(&web.url) } else { web.title.clone() };
@@ -3425,6 +3446,15 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             match (&web.state, web.picture) {
                 (WebState::Shown, Some(id)) => {
                     p.add(egui::epaint::RectShape::filled(rect, round, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
+                }
+                (WebState::Slow, _) => {
+                    p.rect_filled(rect, round, look::OPAQUE);
+                    let c = rect.center();
+                    widgets::icon(p, c - vec2(0.0, 46.0), icons::CLOCK, 40.0, look::MUTED);
+                    text(p, c, Align2::CENTER_CENTER, &fit(p, tr("This page is slow to open"), &look::font(17.0, weight::BOLD), rect.width() - 40.0), 17.0, weight::BOLD, look::LABEL);
+                    wrapped_center(p, c + vec2(0.0, 26.0), tr("It is still trying. Try again, or open it in your computer's browser."), rect.width() - 60.0);
+                    let small = look::font(12.5, weight::MEDIUM);
+                    p.text(c + vec2(0.0, 78.0), Align2::CENTER_CENTER, fit(p, &web_host(&web.url), &small, rect.width() - 40.0), small, look::MUTED);
                 }
                 (WebState::Failed(_), _) => {
                     p.rect_filled(rect, round, look::OPAQUE);
@@ -4064,7 +4094,7 @@ fn stop_words(facts: &Facts) -> String {
 }
 
 /// A page's site, from its link: what its bar says until the page names itself.
-fn web_host(url: &str) -> String {
+pub(super) fn web_host(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     rest.split(['/', '?', '#']).next().unwrap_or(rest).to_string()
 }
@@ -4108,6 +4138,9 @@ pub fn camera_words(facts: &Facts) -> Option<(String, String)> {
     match &camera.qr {
         CameraQr::NoPicture(how) => return Some((tr("VRChat's camera sends no picture to read").into(), how.clone())),
         CameraQr::Looking => return Some((tr("Looking for a QR code…").into(), tr("Point the camera at it. Its page opens above the camera.").into())),
+        CameraQr::Cut => return Some((tr("A QR code is cut by the edge").into(), tr("Move the camera so all of the code is in its picture.").into())),
+        CameraQr::Unclear => return Some((tr("A QR code is in view").into(), tr("Hold the camera still and a little closer, facing the code.").into())),
+        CameraQr::NotALink => return Some((tr("This code holds no web page").into(), tr("Only codes with a web link open here. Still looking…").into())),
         CameraQr::Off => {}
     }
     if facts.rec_stopping {

@@ -562,6 +562,8 @@ pub struct Client {
     /// A page asked for with the last Show.
     show_page: Mutex<Option<String>>,
     close: AtomicBool,
+    /// Why the link ended, first reason only (`vr-test.log` says it when the overlay ends with it: K-qr-page).
+    ended: Mutex<Option<String>>,
     /// The window is behind VRChat ([`Client::set_background`]).
     background: AtomicBool,
     repaint: Mutex<Option<egui::Context>>,
@@ -610,6 +612,7 @@ impl Client {
             show: AtomicBool::new(false),
             show_page: Mutex::new(None),
             close: AtomicBool::new(false),
+            ended: Mutex::new(None),
             background: AtomicBool::new(false),
             repaint: Mutex::new(None),
         });
@@ -617,7 +620,13 @@ impl Client {
         let c = client.clone();
         std::thread::Builder::new().name("service-link".into()).spawn(move || {
             for line in reader.lines() {
-                let Ok(line) = line else { break };
+                let line = match line {
+                    Ok(line) => line,
+                    Err(e) => {
+                        c.because(format!("the link was lost: {e}")); // i18n: not shown (a log's line)
+                        break;
+                    }
+                };
                 if let Some(parts) = changed_parts(&line) {
                     // The state changed: its parts, and a frame for them as for a whole snapshot.
                     if c.take_changes(parts) {
@@ -627,10 +636,14 @@ impl Client {
                     }
                     continue;
                 }
-                let Ok(msg) = serde_json::from_str::<ToClient>(&line) else {
-                    // It may have been the state: what this client holds can no longer be trusted to be it.
-                    c.disconnect();
-                    break;
+                let msg = match serde_json::from_str::<ToClient>(&line) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        // It may have been the state: what this client holds can no longer be trusted to be it.
+                        c.because(format!("a message from the service could not be read: {e} ({}...)", line.chars().take(48).collect::<String>())); // i18n: not shown (a log's line)
+                        c.disconnect();
+                        break;
+                    }
                 };
                 let news = matches!(msg, ToClient::Snapshot { .. });
                 match msg {
@@ -670,12 +683,14 @@ impl Client {
                         c.show.store(true, Ordering::Relaxed);
                     }
                     ToClient::Close => {
+                        c.because("the service asked it to close".into()); // i18n: not shown (a log's line)
                         c.close.store(true, Ordering::Relaxed);
                         leave_soon();
                     }
                 }
                 c.repaint(news);
             }
+            c.because("the service ended the link".into()); // i18n: not shown (a log's line)
             c.disconnect();
         })?;
         Ok(client)
@@ -759,7 +774,8 @@ impl Client {
         let mut held = self.state.lock().unwrap();
         if held.closed { return false; }
         let mut next = (*held.service).clone();
-        if orbiters_core::slice::apply_changes(&mut next, parts).is_err() {
+        if let Err(e) = orbiters_core::slice::apply_changes(&mut next, parts) {
+            self.because(format!("a change of state could not be applied: {e:?}")); // i18n: not shown (a log's line)
             self.close_locked(&mut held);
             drop(held);
             self.finish_close();
@@ -854,6 +870,15 @@ impl Client {
 
     pub fn should_close(&self) -> bool {
         self.close.load(Ordering::Relaxed)
+    }
+
+    /// Why the link ended, once it did.
+    pub fn ended_because(&self) -> Option<String> {
+        self.ended.lock().unwrap().clone()
+    }
+
+    fn because(&self, why: String) {
+        self.ended.lock().unwrap().get_or_insert(why);
     }
 }
 

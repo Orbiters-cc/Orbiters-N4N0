@@ -1415,3 +1415,111 @@ fn the_main_session_waits_while_a_side_sessions_picture_borrows_the_app() {
     assert_eq!(client.state()["vrchat"]["started_by_bridge"], true, "still the bridge's after the lend: not taken for gone");
     client.tool("walk", json!({ "direction": "forward", "seconds": 0.2 })).unwrap();
 }
+
+// ---- World labels (VR1115 labels): N4N0's world label feedback, from the bridge
+
+/// The label tools over the real transport: only N4N0's own labels, only for a world this session saw, the reason ai-world
+/// needs, under the signed-in Orbiters account, refused when there is none, and what Orbiters answered.
+#[test]
+fn labels_are_given_from_the_offered_list_for_a_world_seen_here() {
+    let (_game, bridge, _server, client) = lab("labels");
+    let feedback = super::lab::LabFeedback::signed_in();
+    bridge.set_feedback(feedback.clone());
+    let (_, listed) = client.rpc("tools/list", json!({}));
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    let ids: Vec<&str> = orbiters_contracts::world_feedback::labels().iter().map(|l| l.id.as_str()).collect();
+    for name in ["world_labels", "label_world"] {
+        let tool = tools.iter().find(|t| t["name"] == name).expect(name);
+        let description = tool["description"].as_str().unwrap();
+        assert!(description.contains("published") && description.contains("actually saw"), "{name} says what labels are: {description}");
+        assert!(tool["inputSchema"]["properties"]["session"].is_object(), "{name} takes the session");
+    }
+    let label = tools.iter().find(|t| t["name"] == "label_world").unwrap();
+    assert_eq!(label["inputSchema"]["properties"]["add"]["items"]["enum"], json!(ids), "the vocabulary, and nothing else");
+
+    client.fails("label_world", json!({ "add": ["mirror"] }), "not_in_world");
+    client.fails("label_world", json!({ "world_id": LAB_WORLD_B, "add": ["mirror"] }), "not_seen_here");
+    arrive(&client);
+    let read = client.tool("world_labels", json!({})).unwrap();
+    assert_eq!(read["world_id"], LAB_WORLD_A);
+    assert_eq!(read["offered"].as_array().unwrap().len(), ids.len());
+    let ai = read["offered"].as_array().unwrap().iter().find(|l| l["id"] == "ai-world").unwrap();
+    assert_eq!(ai["needs_reason"]["min_words"], 10);
+    assert_eq!((read["account"]["environment"].as_str(), read["account"]["name"].as_str()), (Some("development"), Some("Lab member")));
+    assert_eq!(read["account"]["server"], "http://127.0.0.1:4100/");
+    assert_eq!(read["world"]["read"], true);
+    assert_eq!(feedback.state.lock().unwrap().shown, [LAB_WORLD_A], "read as opening it on the worlds page does");
+
+    // Nothing outside the list, nothing half sent.
+    let unknown = client.fails("label_world", json!({ "add": ["mirror", "beautiful"] }), "unknown_label");
+    assert!(unknown["message"].as_str().unwrap().contains("video-player"), "the list is in the refusal: {unknown}");
+    client.fails("label_world", json!({ "add": ["ai-world"] }), "reason_needed");
+    client.fails("label_world", json!({ "add": ["ai-world"], "reason": "looks generated" }), "reason_needed"); // i18n: not shown (a test)
+    client.fails("label_world", json!({ "add": ["mirror"], "reason": "a mirror in the hall" }), "bad_arguments"); // i18n: not shown (a test)
+    client.fails("label_world", json!({ "add": ["mirror"], "remove": ["mirror"] }), "bad_arguments");
+    client.fails("label_world", json!({}), "bad_arguments");
+    assert!(feedback.state.lock().unwrap().asks.is_empty(), "a refused call sends nothing");
+
+    let given = client.tool("label_world", json!({ "add": ["mirror", "pens"] })).unwrap();
+    assert_eq!((given["sent"].as_bool(), given["not_as_asked"].as_array().map(Vec::len)), (Some(true), Some(0)), "{given}");
+    let mine: Vec<&str> = given["world"]["labels"].as_array().unwrap().iter().filter(|l| l["mine"] == true).map(|l| l["id"].as_str().unwrap()).collect();
+    assert_eq!(mine, ["mirror", "pens"]);
+    let reason = "The trees, the sky and the water all look like one generated painting."; // i18n: not shown (a test)
+    let changed = client.tool("label_world", json!({ "add": ["ai-world"], "remove": ["pens"], "reason": reason })).unwrap();
+    assert_eq!(changed["sent"], true, "{changed}");
+    {
+        let st = feedback.state.lock().unwrap();
+        assert_eq!(
+            st.asks[2..],
+            [
+                orbiters_n4n0_core::feedback::FeedbackAsk::Label { world: LAB_WORLD_A.into(), label: "ai-world".into(), on: true, text: Some(reason.into()) },
+                orbiters_n4n0_core::feedback::FeedbackAsk::Label { world: LAB_WORLD_A.into(), label: "pens".into(), on: false, text: None },
+            ],
+            "the asks of presses on the worlds page"
+        );
+    }
+
+    // A world arrived in earlier in this run may still be labelled from the next one.
+    let moved = client.tool("go_to_world", json!({ "world_id": LAB_WORLD_B })).unwrap();
+    assert_eq!(moved["arrived"], true, "{moved}");
+    assert_eq!(client.state()["place"]["world_id"], LAB_WORLD_B);
+    client.tool("label_world", json!({ "world_id": LAB_WORLD_A, "add": ["dark"] })).unwrap();
+    client.fails("label_world", json!({ "world_id": "wrld_x", "add": ["dark"] }), "bad_world_id");
+
+    // Refused by Orbiters, queued while it cannot be reached, nothing without an account.
+    feedback.state.lock().unwrap().refuses = Some("Slow down a little and try again.".into()); // i18n: not shown (a test)
+    let refused = client.fails("label_world", json!({ "world_id": LAB_WORLD_A, "add": ["chill"] }), "labels_not_taken");
+    assert!(refused["message"].as_str().unwrap().contains("Slow down"), "{refused}");
+    {
+        let mut st = feedback.state.lock().unwrap();
+        st.refuses = None;
+        st.offline = true;
+    }
+    let queued = client.tool("label_world", json!({ "world_id": LAB_WORLD_A, "add": ["chill"], "wait_s": 0.3 })).unwrap();
+    assert_eq!((queued["sent"].as_bool(), queued["world"]["pending"].as_u64()), (Some(false), Some(1)), "{queued}");
+    feedback.state.lock().unwrap().account = None;
+    let asks = feedback.state.lock().unwrap().asks.len();
+    client.fails("label_world", json!({ "add": ["city"] }), "orbiters_not_signed_in");
+    assert_eq!(feedback.state.lock().unwrap().asks.len(), asks, "nothing sent without an account");
+    assert_eq!(client.tool("world_labels", json!({})).unwrap()["account"]["signed_in"], false);
+}
+
+/// `find_worlds` reaches what VRChat highlights (its two Spotlight rows) and pages every list to its end, saying when it is.
+#[test]
+fn find_worlds_pages_every_list_and_reaches_vrchats_spotlight() {
+    let (_game, _bridge, _server, client) = lab("find-worlds");
+    for source in ["spotlight_pc", "spotlight_cross_platform"] {
+        let first = client.tool("find_worlds", json!({ "source": source })).unwrap();
+        assert_eq!((first["worlds"][0]["id"].as_str(), first["more"].as_bool(), first["next_page"].as_u64()), (Some(LAB_WORLD_A), Some(true), Some(1)), "{first}");
+        let second = client.tool("find_worlds", json!({ "source": source, "page": 1 })).unwrap();
+        assert_eq!((second["worlds"][0]["id"].as_str(), second["more"].as_bool()), (Some(LAB_WORLD_B), Some(false)), "{second}");
+        assert!(second["next_page"].is_null());
+    }
+    // VRChat's lists are read 21 pages deep: the last says it is, and past it is refused rather than the last again.
+    assert_eq!(client.tool("find_worlds", json!({ "source": "popular", "page": 19 })).unwrap()["more"], true);
+    let last = client.tool("find_worlds", json!({ "source": "popular", "page": 20 })).unwrap();
+    assert_eq!((last["more"].as_bool(), last["next_page"].is_null()), (Some(false), true), "{last}");
+    client.fails("find_worlds", json!({ "source": "popular", "page": 21 }), "bad_arguments");
+    client.tool("find_worlds", json!({ "source": "visited", "page": 40 })).expect("the visited worlds are this computer's own, as deep as they go");
+    client.fails("find_worlds", json!({ "source": "featured" }), "bad_arguments");
+}

@@ -447,6 +447,37 @@ pub fn client_id() -> String {
 mod tests {
     use super::*;
 
+    /// VR1115 labels, a real check against the development server on this computer, never production: it takes a label
+    /// from the Orbiters account saved for it (read only), shows it as the member's own, and takes it back; an id outside the
+    /// list is refused. `cargo test -p orbiters-core --lib -- --ignored live_dev_server --nocapture`.
+    #[test]
+    #[ignore = "talks to the development server on 127.0.0.1:4100 with the account saved for it"]
+    fn live_dev_server_takes_a_label_and_gives_it_back() {
+        let server = crate::account::Server::Development;
+        assert_eq!(server.api(), "http://127.0.0.1:4100/", "the development server only");
+        let account = crate::account::read(server).expect("an Orbiters account saved for the development server");
+        let api = crate::account::Api::new(server);
+        let client = Client { api: &api, token: Some(&account.token) };
+        // Silent Beach, one of VRChat's popular worlds (find_worlds popular, page 20, 2026-11-15).
+        let world = "wrld_99a5eb21-1d58-4f13-b66a-73d327c42705";
+        let mine = |view: &ServerView| view.mine.as_ref().is_some_and(|m| m.labels.iter().any(|l| l == "chill"));
+        let count = |view: &ServerView| view.labels.iter().find(|l| l.id == "chill").map_or(0, |l| l.count);
+        let before = client.read(world).expect("read");
+        let had = mine(&before);
+        println!("account {:?} (id {:?}) on {}: chill {} before, count {}", account.username, account.user, server.api(), had, count(&before));
+        let set = |on: bool| Set { labels: [("chill".to_string(), on)].into_iter().collect(), ..Default::default() };
+        let changed = client.set(world, &set(!had)).expect("set");
+        println!("after: mine {}, count {}", mine(&changed), count(&changed));
+        assert_eq!(mine(&changed), !had);
+        let back = client.set(world, &set(had)).expect("set back");
+        println!("back: mine {}, count {}", mine(&back), count(&back));
+        assert_eq!((mine(&back), count(&back)), (had, count(&before)), "as it was");
+        let unknown = Set { labels: [("beautiful".to_string(), true)].into_iter().collect(), ..Default::default() };
+        let refused = client.set(world, &unknown);
+        println!("unknown label: {refused:?}");
+        assert!(matches!(refused, Err(Failure::Refused { code: Some(Refusal::UnknownLabel), .. })), "{refused:?}");
+    }
+
     fn set(liked: Option<bool>, labels: &[(&str, bool)]) -> Action {
         Action::Set(Set { liked, labels: labels.iter().map(|(l, on)| (l.to_string(), *on)).collect(), justification: None })
     }

@@ -3,11 +3,11 @@
 //! `burst.rs`, and Windows.
 
 use super::{Controller, Shared};
-use crate::bridge::game::{CaptureSeen, Failure, Find, Game, GameWindow, LaunchPlan, OscArg, PictureFiles, ReconstructionSeen, Seen, Shot, WorldCard};
+use crate::bridge::game::{CaptureSeen, Failure, Find, Game, GameWindow, LaunchPlan, OscArg, PictureFiles, ReconstructionSeen, Seen, Shot, WorldCard, WorldPage};
 use crate::bridge::input::Input;
 use crate::bridge::keeper::{Flag, Keeper};
 use crate::bridge::{capture, win, Bridge, Command};
-use orbiters_core::maps::WorldList;
+use orbiters_core::maps::{Spotlight, WorldList};
 use orbiters_core::settings::{Photo3dLength, PictureMode};
 use orbiters_core::vrchat_api::Error as VrchatError;
 use std::path::{Path, PathBuf};
@@ -166,28 +166,32 @@ impl Game for RealGame {
         self.ctl()?.vrchat_source().create_private_instance(world, region).map_err(|e| api_failure(e, "making the instance")) // i18n: not shown
     }
 
-    fn find_worlds(&self, find: &Find, page: usize) -> Result<Vec<WorldCard>, Failure> {
+    fn find_worlds(&self, find: &Find, page: usize) -> Result<WorldPage, Failure> {
         let ctl = self.ctl()?;
         let list = match find {
             Find::Visited => {
                 let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
                 let mut worlds: Vec<(&String, &orbiters_core::visited::WorldVisits)> = history.worlds.iter().collect();
                 worlds.sort_by_key(|(_, w)| std::cmp::Reverse(w.last()));
-                return Ok(worlds
+                let more = worlds.len() > (page + 1) * WORLDS_A_PAGE;
+                let worlds = worlds
                     .into_iter()
                     .skip(page * WORLDS_A_PAGE)
                     .take(WORLDS_A_PAGE)
                     .map(|(id, w)| WorldCard { id: id.clone(), name: w.name.clone().unwrap_or_default(), author: None, occupants: None, last_visit: w.last() })
-                    .collect());
+                    .collect();
+                return Ok(WorldPage { worlds, more });
             }
             Find::Search(query) => WorldList::Search(query.clone()),
             Find::Favorites => WorldList::Favorites,
             Find::Popular => WorldList::Popular,
             Find::Active => WorldList::Active,
             Find::Trending => WorldList::Trending,
+            Find::SpotlightPc => WorldList::Spotlight(Spotlight::Pc),
+            Find::SpotlightCrossPlatform => WorldList::Spotlight(Spotlight::CrossPlatform),
         };
         let found = ctl.vrchat_source().worlds(&list, page).map_err(|e| api_failure(e, "finding worlds"))?; // i18n: not shown
-        Ok(found
+        let worlds = found
             .items
             .into_iter()
             .map(|f| WorldCard {
@@ -197,7 +201,8 @@ impl Game for RealGame {
                 occupants: f.occupants,
                 last_visit: None,
             })
-            .collect())
+            .collect();
+        Ok(WorldPage { worlds, more: found.more })
     }
 
     fn launch(&self, plan: &LaunchPlan) -> Result<(), Failure> {
@@ -392,6 +397,7 @@ impl Controller {
         let game = Arc::new(RealGame::new(Arc::downgrade(self), exe.clone()));
         let bridge = Bridge::new(game, Some(exe.clone()));
         bridge.set_opener(Arc::new(super::bridge_side::RealOpener::new(Arc::downgrade(self), exe)));
+        bridge.set_feedback(Arc::new(super::world_feedback::RealFeedback { ctl: Arc::downgrade(self) }));
         bridge.projects.set_host(Arc::new(RealProjectsHost { ctl: Arc::downgrade(self) }));
         let flag = Arc::new(RealFlag { ctl: Arc::downgrade(self) });
         let ctl = Arc::downgrade(self);

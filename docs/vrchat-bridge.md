@@ -55,7 +55,7 @@ Needed as well: signed in to VRChat in Settings (private instances are made with
 | Tool | What for |
 | --- | --- |
 | `get_state` | Everything readable, and `next`: what to do now. |
-| `find_worlds` | World ids: search, visited, favorites, trending (VRChat's `sort=heat`), popular, active. |
+| `find_worlds` | World ids: search, visited, favorites, trending (VRChat's `sort=heat`, its "Hot" row), popular, active, and what VRChat highlights: `spotlight_pc` and `spotlight_cross_platform`, its two Spotlight rows (`tag=admin_spotlight_pc` / `admin_spotlight_xplat`, `sort=updated`, as VRChat's own `GET /config` `dynamicWorldRows` name them, read 2026-11-15). 24 worlds a page, `more` and `next_page`; VRChat's lists are read 21 pages deep (504 worlds), past that `bad_arguments`. |
 | `go_to_world` | A new private instance of a world, and VRChat started in it (closing the last one). |
 | `close_vrchat` | Closes the game the bridge started. Reconstructions then run. |
 | `wait_for` | Waits for arrival, closing, a saved picture, reconstructions, the end of a pause. |
@@ -67,6 +67,8 @@ Needed as well: signed in to VRChat in Settings (private instances are made with
 | `focus_game` | Asks Windows to bring the game forward: Windows may say no. |
 | `wear_avatar` | Changes to an avatar by its `avtr_` id, over OSC, and waits for the change. Only when the person asked. Says `changed` false when VRChat did not take it, and `avatar.capture_kit`. |
 | `take_3d_picture` | 1, 4 or 8 seconds, then the session and its reconstruction's state. |
+| `world_labels` | N4N0's world labels (the fixed list of contracts `Schemas/world-feedback-labels.json`, with the reason `ai-world` needs), a world's labels with their counts and the account's own, and the Orbiters account and server labels go under. Default: the session's world. |
+| `label_world` | Gives (`add`) or takes back (`remove`) labels on a world this session is in or arrived in during the run, through the very queue a person's Label it on the worlds page uses (`Controller::world_feedback_ask`): same rules, account and limits (120 changes an hour, one per world). Anything outside the list is refused and nothing is sent; no Orbiters account, `orbiters_not_signed_in`. The descriptions say labels are a published, person-facing judgement, given only for what the agent saw. |
 | `open_session` | A VRChat of its own in a profile (`--profile=N`, N ≥ 1), beside any other VRChat: its `session` id, its account or `needs_sign_in`. |
 | `list_sessions` | The sessions, their profiles, accounts, worlds, who drives each and how long it has been idle (ids shortened). |
 | `close_session` | Closes a session's VRChat and ends the session. |

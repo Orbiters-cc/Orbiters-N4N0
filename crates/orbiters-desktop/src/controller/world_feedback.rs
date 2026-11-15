@@ -510,6 +510,41 @@ impl super::Controller {
     }
 }
 
+/// World feedback for the VRChat bridge's label tools (bridge/tools.rs `world_labels`, `label_world`): what a press on the
+/// worlds page asks goes through [`super::Controller::world_feedback_ask`] here too, so the queue, the account, Orbiters'
+/// rules and its limits are the person's own.
+pub(super) struct RealFeedback {
+    pub(super) ctl: std::sync::Weak<super::Controller>,
+}
+
+impl crate::bridge::game::Feedback for RealFeedback {
+    fn account(&self) -> Option<crate::bridge::game::FeedbackAccount> {
+        let (server, name, id) = self.ctl.upgrade()?.feedback_account()?;
+        Some(crate::bridge::game::FeedbackAccount {
+            server: server.api().to_string(),
+            development: server == orbiters_core::account::Server::Development,
+            name,
+            id,
+        })
+    }
+
+    fn show(&self, world: &str) {
+        if let Some(ctl) = self.ctl.upgrade() {
+            ctl.world_feedback_ask(FeedbackAsk::Show { world: world.to_string() });
+        }
+    }
+
+    fn feedback(&self, world: &str) -> WorldFeedback {
+        self.ctl.upgrade().map(|ctl| ctl.world_feedback.lock().unwrap().feedback_of(&world.to_ascii_lowercase())).unwrap_or_default()
+    }
+
+    fn ask(&self, ask: FeedbackAsk) {
+        if let Some(ctl) = self.ctl.upgrade() {
+            ctl.world_feedback_ask(ask);
+        }
+    }
+}
+
 /// Starts world feedback: the log's follower, the calls to Orbiters and the local address.
 pub(super) fn spawn(ctl: Shared) {
     let c = ctl.clone();
@@ -836,6 +871,41 @@ mod tests {
         assert_eq!(rfc3339_seconds("2026-10-29T21:04:00Z"), 1_793_307_840);
         assert_eq!(rfc3339_seconds("2026-10-29T21:04:00.000Z"), 1_793_307_840);
         assert_eq!(rfc3339_seconds("1970-01-01T00:00:00Z"), 0);
+    }
+
+    /// VR1115 labels: the bridge's label_world asks what presses of Label it on the worlds page ask, into the same queue
+    /// (one coalesced set for the world, sent under the signed-in account), and reads back what the menus show.
+    #[test]
+    fn a_bridge_label_goes_the_way_of_a_press() {
+        use crate::bridge::game::Feedback;
+        let ctl = super::super::Controller::new(orbiters_core::settings::Settings::default());
+        let queue_path = std::env::temp_dir().join(format!("orbiters-feedback-bridge-{}.json", std::process::id()));
+        {
+            let mut rt = ctl.world_feedback.lock().unwrap();
+            rt.queue = Queue::default();
+            rt.queue_path = queue_path.clone();
+        }
+        let feedback = RealFeedback { ctl: std::sync::Arc::downgrade(&ctl) };
+        assert!(feedback.account().is_none(), "a test has no Orbiters account");
+        feedback.ask(FeedbackAsk::Label { world: WORLD.to_uppercase().replace("WRLD", "wrld"), label: "mirror".into(), on: true, text: None });
+        feedback.ask(FeedbackAsk::Label { world: WORLD.into(), label: "pens".into(), on: true, text: None });
+        feedback.ask(FeedbackAsk::Label { world: WORLD.into(), label: "dark".into(), on: false, text: None });
+        {
+            let rt = ctl.world_feedback.lock().unwrap();
+            assert_eq!(rt.queue.items.len(), 1, "one set for the world, as presses make: {:?}", rt.queue.items);
+            assert_eq!(rt.queue.items[0].world, WORLD, "by its lowercase id");
+            let Action::Set(set) = &rt.queue.items[0].action else { panic!() };
+            assert_eq!(
+                set.labels.iter().map(|(k, v)| (k.as_str(), *v)).collect::<Vec<_>>(),
+                [("dark", false), ("mirror", true), ("pens", true)]
+            );
+            assert!(Queue::load(&queue_path, now_ms()).items.len() == 1, "kept on disk at once, as a press");
+        }
+        let known = feedback.feedback(WORLD);
+        assert_eq!(known.pending, 1);
+        assert!(known.labels.iter().any(|l| l.id == "mirror" && l.mine) && known.labels.iter().any(|l| l.id == "pens" && l.mine), "{known:?}");
+        assert!(!known.labels.iter().any(|l| l.id == "dark" && l.mine));
+        let _ = std::fs::remove_file(&queue_path);
     }
 
     #[test]

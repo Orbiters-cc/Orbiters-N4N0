@@ -2,14 +2,16 @@
 //! done, and say when to use them and what comes back. A refusal always says why (`code`, `message`) and what to do next
 //! (`next`), and the state a model reads is one call away (`get_state`).
 
-use super::game::{Failure, Find, GameWindow, LaunchPlan, OscArg, Seen, Shot};
+use super::game::{Failure, Feedback, FeedbackAccount, Find, GameWindow, LaunchPlan, OscArg, Seen, Shot};
 use super::input::{self, Hold, Input, MouseButton, KEYS, OSC_INPUTS};
 use super::person::{Paused, HOTKEY, RESUME_AFTER};
 use super::sessions::{self, Lease};
 use super::{Bridge, Call, Going, PictureRecord, Session};
 use orbiters_core::settings::{Photo3dLength, PictureMode};
 use orbiters_core::vrchat_api::private_instance_of;
+use orbiters_contracts::world_feedback as contract;
 use orbiters_core::vrchat_log::is_world_id;
+use orbiters_n4n0_core::feedback::{FeedbackAsk, WorldFeedback};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -39,9 +41,14 @@ pub enum Answer {
 }
 
 /// The tools that act on one VRChat, and take `session`.
-const VRCHAT_TOOLS: [&str; 13] = [
+const VRCHAT_TOOLS: [&str; 15] = [
     "get_state", "find_worlds", "go_to_world", "close_vrchat", "wait_for", "screenshot", "walk", "turn", "press", "mouse", "focus_game", "wear_avatar", "take_3d_picture",
+    "world_labels", "label_world",
 ];
+/// How long the label tools wait for Orbiters to answer, by default.
+const LABELS_WAIT_S: f64 = 20.0;
+/// What labels are, for a model: they are read by people.
+const LABELS_ARE: &str = "Labels are a person-facing judgement: they are published on Orbiters under the signed-in Orbiters account, shown to everyone who looks at the world in N4N0 and counted. Give one only for what you actually saw in this world yourself, in your own screenshots (a mirror you saw, pens you found, a video player, a city street, a dark place), never from its name, its description, its picture or a guess; when in doubt, leave it out.";
 
 /// A session id as the log shows it: not the whole of it, which is the key to it.
 fn short_id(id: &str) -> String {
@@ -53,15 +60,16 @@ pub const GUIDE: &str = "# Taking 3D pictures from world to world\n\n\
 You drive VRChat on this computer, in desktop mode, through this bridge. A person may be at the computer: they always win, and the bridge will tell you when they took over.\n\n\
 ## The loop\n\n\
 1. `get_state`. Its `next` says what to do. If `vrchat.running` is true and `vrchat.started_by_bridge` false, that VRChat is the person's: do nothing to it and tell them.\n\
-2. `find_worlds` for world ids (`source`: search, visited, favorites, trending, popular or active), unless you were given them.\n\
+2. `find_worlds` for world ids, unless you were given them. `source`: search, visited, favorites, trending (VRChat's \"Hot\" row), popular, active, and what VRChat highlights: spotlight_pc and spotlight_cross_platform (its two Spotlight rows). Each page has up to 24 worlds; `more` says whether `next_page` has more. For all of a list, page until `more` is false (VRChat's lists go 21 pages deep, 504 worlds at most), and drop the ids you already have: the lists overlap.\n\
 3. `go_to_world` with a `world_id`. It makes a private instance of your own, starts VRChat in it (closing the last one first), brings it to the foreground, and waits. If `arrived` is false, call `wait_for` with `until: in_world`.\n\
 4. `screenshot` to see where you are. A dark picture is the loading screen: wait a little.\n\
 5. Open VRChat's camera, which only the menus can do: `press` `esc`, `screenshot`, `mouse` `click` on the camera icon in the menu's bottom row (about 640, 620 at 1280 by 720), `screenshot`, and `click` on the Stream Camera tile (about 597, 345). The menu closes and the camera's panel stays on the screen. `get_state` says `camera.open`. Leave the camera's settings alone: the app sets Stream and Spout itself when it records. **Look at a screenshot after every click, and before the next one:** a click can miss, its page may not have changed, and the same spot on the page you are really on may be a shop banner. If the page is not what you expected, `press` `esc` closes everything: start again.\n\
 6. If `camera.pose_known` is false, `turn` by a few degrees: VRChat says where its camera is when it moves.\n\
 7. Before opening the camera, walk somewhere worth a picture with `walk` and `turn`, looking with `screenshot` between moves: with the camera or a menu open the avatar does not move (`speed_seen` 0), and the picture starts where the camera opens. `press` `esc` closes the camera again. `turn` is approximate: judge by the pictures. `walk` tells you if the avatar did not seem to move.\n\
 8. `take_3d_picture` with `length_s` 1, 4 or 8. It waits for the recording to be saved and gives the `session`. Take a few from different places: 4 or 8 seconds in the open, 1 second for a close look.\n\
-9. `go_to_world` with the next world, and so on.\n\
-10. `close_vrchat` at the end. Reconstructions follow the app's own setting: they run beside VRChat, or wait for it to close (`get_state`'s `reconstructions` and each picture's `reconstruction` say which). Then `wait_for` with `until: reconstructions_done`, as many times as it takes, and report each session's `reconstruction` from `get_state`, which says `failed` and why when one did not finish.\n\n\
+9. Label the world, if you were asked to: `world_labels` lists the labels N4N0 offers (a fixed list) and those the world already has; `label_world` with `add` gives the ones that fit **what you saw** in your screenshots there, and only those (see Labels below).\n\
+10. `go_to_world` with the next world, and so on.\n\
+11. `close_vrchat` at the end. Reconstructions follow the app's own setting: they run beside VRChat, or wait for it to close (`get_state`'s `reconstructions` and each picture's `reconstruction` say which). Then `wait_for` with `until: reconstructions_done`, as many times as it takes, and report each session's `reconstruction` from `get_state`, which says `failed` and why when one did not finish.\n\n\
 ## Sessions: several VRChats at once\n\n\
 Several agents (and the person) can each have a VRChat on this computer at the same time. Tools without `session` drive the **main** session, as above: VRChat's default profile, only while the person runs no VRChat of their own. To work beside others, open a session of your own:\n\n\
 1. `open_session` with a `profile` (1, 2…; ask the person which one if they did not say). It starts VRChat in that profile, at that account's home, and gives you `session`: **pass it to every tool** from then on. Only you have it.\n\
@@ -69,6 +77,8 @@ Several agents (and the person) can each have a VRChat on this computer at the s
 3. Then the loop above, with your `session`: `go_to_world` restarts your session's VRChat in a new private instance of your profile's own account, `walk`, `turn`, `screenshot`, the camera, `take_3d_picture`.\n\
 4. `close_session` at the end. A session left without any call for 10 minutes may be taken over by another agent (`open_session` with `take_over`): yours is then refused with `session_taken_over`.\n\n\
 What is shared, and how: `walk`, `turn`, the OSC inputs and `screenshot` need nothing of anyone else's and run side by side in every session. **Keys and clicks** (`press` of a key, `mouse`, `focus_game`) need your window in the foreground, which only one window can have: they take turns. A refusal `focus_busy` says how long to wait (`retry_after_s`, a few seconds: a turn is yours while you keep using it, and passes to the next session 8 s after your last key or click). They also wait while the person uses the computer at all (`paused_by_person`), and are refused with `person_vrchat_has_focus` while the person's own VRChat has the foreground: the bridge never takes it from them. **3D pictures** borrow Orbiters - N4N0's capture: one at a time on this computer (`picture_busy`: wait), and none while the person's own VRChat runs (`app_in_use`: the capture is theirs then). The person's input in your session's window pauses your session only. One account cannot be in two VRChats: each profile has its own. `list_sessions` shows them all.\n\n\
+## Labels\n\n\
+A tour of worlds for labels goes, for each world: `go_to_world` (and `wait_for` in_world), `screenshot`, `turn` and `walk` to look around with more screenshots (the spawn alone rarely shows what a world is), the camera and `take_3d_picture`, then `world_labels`, then `label_world` with the labels that match what you saw. Labels are N4N0's world label feedback: the same list, rules and account as a person's Label it on N4N0's worlds page. They are published on Orbiters under the Orbiters account signed in in Orbiters - N4N0 (`world_labels`' `account` says which, and on which server), and other people see and count them. So give a label only for what your screenshots show (a mirror, pens, a video player, a game, nature, a city, bright or dark, a quiet place for sleeping or chilling), never from the world's name or description, and give fewer rather than doubtful ones. ai-world (made with AI) needs a `reason` of at least 10 words saying what you saw; ai-thumbnail says the world's own picture (its thumbnail in VRChat's menus) looks made with AI. `remove` takes back a label you gave. Only worlds this session is in, or arrived in during this run, can be labelled. A world with none that fits gets none: say so in your report. Orbiters takes one label change a world (several labels together count once) and about 120 an hour from an account: past that, `sent` is false and Orbiters - N4N0 sends them later by itself, within a day.\n\n\
 ## When to give up on a world\n\n\
 Move on to the next world, and say so at the end, when:\n\
 - `go_to_world` or `wait_for` fails with `start_timeout`, or the world does not load within about four minutes;\n\
@@ -100,11 +110,11 @@ pub fn list() -> Value {
         {
             "name": "find_worlds",
             "title": "Find worlds",
-            "description": "Lists worlds to go to, with their ids for go_to_world. Use it when you were not given world ids. VRChat's API is rate limited: search for what you need rather than paging through everything.",
+            "description": "Lists worlds to go to, with their ids for go_to_world: up to 24 a page, `more` true when `next_page` has more. Use it when you were not given world ids. The popular worlds are popular, trending and active; what VRChat highlights is spotlight_pc and spotlight_cross_platform, its two Spotlight rows. VRChat's lists go at most 21 pages deep (pages 0 to 20, 504 worlds). VRChat's API is rate limited: page one call at a time, and only as far as you need; the lists overlap, so drop ids you already have.",
             "inputSchema": { "type": "object", "properties": {
-                "source": { "type": "string", "enum": ["search", "visited", "favorites", "trending", "popular", "active"], "description": "search: by name, needs query. visited: where this account has been, latest first. favorites: this account's favorite worlds. trending: what is hot right now. popular: most played of all time. active: most people in them now." },
+                "source": { "type": "string", "enum": ["search", "visited", "favorites", "trending", "popular", "active", "spotlight_pc", "spotlight_cross_platform"], "description": "search: by name, needs query. visited: where this account has been, latest first. favorites: this account's favorite worlds. trending: what is hot right now (VRChat's Hot row). popular: most played of all time. active: most people in them now. spotlight_pc and spotlight_cross_platform: the worlds VRChat highlights in its Spotlight - PC and Spotlight - Cross Platform rows, latest updated first." },
                 "query": { "type": "string", "description": "Words in the world's name, for source search." },
-                "page": { "type": "integer", "minimum": 0, "description": "From 0." },
+                "page": { "type": "integer", "minimum": 0, "description": "From 0; at most 20 but for visited." },
             }, "required": ["source"], "additionalProperties": false },
             "annotations": read_only,
         },
@@ -220,6 +230,29 @@ pub fn list() -> Value {
             "annotations": acts,
         },
         {
+            "name": "world_labels",
+            "title": "Read a world's labels",
+            "description": format!("Reads the labels N4N0 lets people give worlds (`offered`: a fixed list, only these ids exist, each with its English name and, for ai-world, the reason it needs) and those the world already has (`labels`: how many people gave each, and `mine` for the signed-in Orbiters account's own), and which account and server label_world would publish under. Without world_id: the world this session is in. Call it after looking around a world, before label_world. {LABELS_ARE}"),
+            "inputSchema": { "type": "object", "properties": {
+                "world_id": { "type": "string", "description": "wrld_…; default: the world this session is in." },
+                "wait_s": { "type": "number", "minimum": 0, "maximum": 30, "description": "How long to wait for Orbiters' answer. Default 20." },
+            }, "additionalProperties": false },
+            "annotations": read_only,
+        },
+        {
+            "name": "label_world",
+            "title": "Label a world",
+            "description": format!("Gives a world labels from world_labels' list (`add`), or takes back labels you gave (`remove`), exactly as a person's Label it on N4N0's worlds page: the same queue, rules, limits and account. {LABELS_ARE} Any id outside the list is refused, and nothing is sent then. ai-world also needs `reason`: at least 10 words, at most 500 characters, saying what you saw. Only for the world this session is in, or one it arrived in during this run (default: the one it is in). Waits up to wait_s for Orbiters to take it and returns the world's labels; `sent` false means it is queued and Orbiters - N4N0 keeps trying by itself."),
+            "inputSchema": { "type": "object", "properties": {
+                "world_id": { "type": "string", "description": "wrld_…; default: the world this session is in." },
+                "add": { "type": "array", "items": { "type": "string", "enum": label_ids() }, "uniqueItems": true, "description": "Labels to give: only those that match what you saw there." },
+                "remove": { "type": "array", "items": { "type": "string", "enum": label_ids() }, "uniqueItems": true, "description": "Labels you gave before, to take back." },
+                "reason": { "type": "string", "description": "Only with ai-world in add: why you think it was made with AI, at least 10 words, from what you saw." },
+                "wait_s": { "type": "number", "minimum": 0, "maximum": 30, "description": "Default 20." },
+            }, "additionalProperties": false },
+            "annotations": acts,
+        },
+        {
             "name": "open_session",
             "title": "Open a VRChat session of your own",
             "description": "Starts VRChat in a profile of its own (VRChat's --profile, each with its own signed-in account), in desktop mode, beside any other VRChat on this computer, the person's included, and gives you its `session` id: pass it to every other tool from then on, and nobody else drives it. Use it to work at the same time as other agents or the person. It starts at that account's home; go_to_world then takes it to a private instance. If `needs_sign_in` is true, stop and tell the person to sign in on that window: never type there. A session left without any call for 10 minutes may be taken over by another agent with take_over.",
@@ -298,7 +331,7 @@ fn file_name(path: &std::path::Path) -> String {
 impl Bridge {
     /// One tool call, whose outcome goes to the log (all but what only reads: those fill it with nothing).
     pub fn call(&self, name: &str, args: &Value, call: &Call) -> Result<Answer, Failure> {
-        let acts = !matches!(name, "get_state" | "wait_for" | "find_worlds" | "list_sessions") && !super::projects::reads(name);
+        let acts = !matches!(name, "get_state" | "wait_for" | "find_worlds" | "list_sessions" | "world_labels") && !super::projects::reads(name);
         let result = match name {
             "vr_sandbox" => {
                 if !matches!(args["action"].as_str(), Some("stop" | "restore" | "status")) {
@@ -335,6 +368,8 @@ impl Bridge {
                     "mouse" => self.exclusively(s, || self.mouse(s, args)),
                     "focus_game" => self.exclusively(s, || self.focus_game(s)),
                     "wear_avatar" => self.exclusively(s, || self.wear_avatar(s, args)),
+                    "world_labels" => self.world_labels(s, args),
+                    "label_world" => self.exclusively(s, || self.label_world(s, args)),
                     _ => self.exclusively(s, || self.take_3d_picture(s, args, call)),
                 }
             }
@@ -367,6 +402,10 @@ impl Bridge {
             "wear_avatar" => format!("wear {}", args["avatar_id"].as_str().unwrap_or("?")),
             "take_3d_picture" => format!("3D picture of {} s", args["length_s"].as_u64().unwrap_or(4)),
             "screenshot" => "screenshot".into(),
+            "label_world" => {
+                let ids = |k: &str| args[k].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                format!("label {}: +[{}] -[{}]", args["world_id"].as_str().unwrap_or("this world"), ids("add"), ids("remove"))
+            }
             unity if unity.starts_with("unity_") => {
                 let words: Vec<&str> = ["action", "what", "package", "path", "url", "id", "name", "template", "job"]
                     .iter()
@@ -497,6 +536,10 @@ impl Bridge {
                     && seen.world_id.as_deref() == Some(&going.world_id)
                     && seen.instance.as_deref().is_some_and(|i| same_instance(i, &going.instance));
                 if arrived {
+                    let world = going.world_id.to_ascii_lowercase();
+                    if !run.been.contains(&world) {
+                        run.been.push(world);
+                    }
                     run.going = None;
                     settled = true;
                 } else if going.since.elapsed() > self.timing.start_limit {
@@ -710,10 +753,24 @@ impl Bridge {
             Some("popular") => Find::Popular,
             Some("active") => Find::Active,
             Some("trending") => Find::Trending,
-            _ => return Err(Failure::new("bad_arguments", "source must be search, visited, favorites, trending, popular or active.", "Pass one of those.")),
+            Some("spotlight_pc") => Find::SpotlightPc,
+            Some("spotlight_cross_platform") => Find::SpotlightCrossPlatform,
+            _ => {
+                return Err(Failure::new(
+                    "bad_arguments",
+                    "source must be search, visited, favorites, trending, popular, active, spotlight_pc or spotlight_cross_platform.",
+                    "Pass one of those.",
+                ))
+            }
         };
-        let worlds = s.game.find_worlds(&find, page)?;
-        Ok(Answer::Data(json!({ "worlds": worlds, "page": page })))
+        // VRChat's lists are read this deep and no deeper: a page past it would be the last one again.
+        let last = orbiters_core::maps::FOUND_PAGES;
+        if find != Find::Visited && page > last {
+            return Err(Failure::new("bad_arguments", format!("VRChat's lists go {} pages deep: page is at most {last}.", last + 1), "That list is done: go on with another source."));
+        }
+        let found = s.game.find_worlds(&find, page)?;
+        let more = found.more && (find == Find::Visited || page < last);
+        Ok(Answer::Data(json!({ "worlds": found.worlds, "page": page, "more": more, "next_page": more.then_some(page + 1) })))
     }
 
     fn go_to_world(&self, s: &Session, args: &Value, call: &Call) -> Result<Answer, Failure> {
@@ -1596,6 +1653,224 @@ impl Bridge {
     }
 }
 
+/// The labels N4N0 offers, by id (contracts `Schemas/world-feedback-labels.json`, the list the worlds page shows).
+fn label_ids() -> Vec<&'static str> {
+    contract::labels().iter().map(|l| l.id.as_str()).collect()
+}
+
+/// The labels N4N0 offers, for a model: id, English name, and what the one needing a reason asks.
+fn offered_labels() -> Value {
+    contract::labels()
+        .iter()
+        .map(|l| {
+            json!({
+                "id": l.id,
+                "name": l.name("en"),
+                "needs_reason": l.justify.map(|words| json!({
+                    "min_words": words,
+                    "max_characters": contract::max_justification(),
+                    "question": l.question("en"),
+                })),
+            })
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
+/// A world's labels as the label tools answer them.
+fn labels_json(feedback: &WorldFeedback) -> Value {
+    json!({
+        "read": !feedback.loading,
+        "labels": feedback.labels.iter().map(|l| json!({
+            "id": l.id,
+            "name": contract::label(&l.id).map_or(l.id.as_str(), |known| known.name("en")),
+            "count": l.count,
+            "mine": l.mine,
+        })).collect::<Vec<_>>(),
+        "my_reason": feedback.justification,
+        "pending": feedback.pending,
+        "error": feedback.error,
+    })
+}
+
+fn account_json(account: Option<&FeedbackAccount>) -> Value {
+    match account {
+        Some(a) => json!({
+            "signed_in": true,
+            "name": a.name,
+            "id": a.id,
+            "server": a.server,
+            "environment": if a.development { "development" } else { "production" },
+        }),
+        None => json!({ "signed_in": false }),
+    }
+}
+
+impl Bridge {
+    fn feedback_seam(&self) -> Result<Arc<dyn Feedback>, Failure> {
+        self.feedback.lock().unwrap().clone().ok_or_else(|| {
+            Failure::new("labels_unavailable", "World labels cannot be reached from this bridge.", "Go on without labels and tell the person.")
+        })
+    }
+
+    /// The world a label tool is about: `world_id`, else the one the session is in (lowercase).
+    fn labels_world(s: &Session, args: &Value) -> Result<String, Failure> {
+        if let Some(id) = args["world_id"].as_str() {
+            if !is_world_id(id) {
+                return Err(Failure::new("bad_world_id", format!("{id:?} is not a world id."), "Pass a wrld_… id, or none for the world this session is in."));
+            }
+            return Ok(id.to_ascii_lowercase());
+        }
+        let seen = s.game.seen();
+        match seen.world_id.filter(|_| seen.in_world) {
+            Some(id) => Ok(id.to_ascii_lowercase()),
+            None => Err(Failure::new("not_in_world", "This session is in no world, and no world_id was given.", "Pass world_id, or go_to_world first.")),
+        }
+    }
+
+    /// Waits up to `wait` for `done` on what is known of `world`'s feedback; what is known then.
+    fn feedback_until(feedback: &dyn Feedback, world: &str, wait: Duration, done: impl Fn(&WorldFeedback) -> bool) -> WorldFeedback {
+        let begin = Instant::now();
+        loop {
+            let known = feedback.feedback(world);
+            if done(&known) || known.error.is_some() || begin.elapsed() >= wait {
+                return known;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// `world_labels`.
+    fn world_labels(&self, s: &Session, args: &Value) -> Result<Answer, Failure> {
+        let world = Self::labels_world(s, args)?;
+        let feedback = self.feedback_seam()?;
+        let account = feedback.account();
+        feedback.show(&world);
+        let wait = Duration::from_secs_f64(number(args, "wait_s", LABELS_WAIT_S).clamp(0.0, 30.0));
+        let known = Self::feedback_until(&*feedback, &world, wait, |k| !k.loading);
+        let next = match (&account, known.loading) {
+            (None, _) => "No Orbiters account is signed in in Orbiters - N4N0, so label_world is refused: tell the person to sign in to Orbiters in its Settings.",
+            (_, true) => "Orbiters has not answered for this world yet: call world_labels again in a minute.",
+            _ => "Give only the offered labels that match what you saw in this world, with label_world, or none.",
+        };
+        Ok(Answer::Data(json!({
+            "world_id": world,
+            "account": account_json(account.as_ref()),
+            "offered": offered_labels(),
+            "world": labels_json(&known),
+            "rules": LABELS_ARE,
+            "next": next,
+        })))
+    }
+
+    /// `label_world`: the person's press of Label it, for a world this session saw.
+    fn label_world(&self, s: &Session, args: &Value) -> Result<Answer, Failure> {
+        if let Some(Paused::Held) = self.paused_in(s) {
+            return Err(paused_failure(&Paused::Held));
+        }
+        let world = Self::labels_world(s, args)?;
+        let ids = |key: &str| -> Result<Vec<&'static contract::Label>, Failure> {
+            let Some(items) = args[key].as_array() else { return Ok(Vec::new()) };
+            let mut labels: Vec<&'static contract::Label> = Vec::new();
+            for item in items {
+                let id = item.as_str().unwrap_or_default();
+                let label = contract::label(id).ok_or_else(|| {
+                    Failure::new(
+                        "unknown_label",
+                        format!("{id:?} is not one of N4N0's labels, so nothing was sent. Only these exist: {}.", label_ids().join(", ")),
+                        "Call world_labels for the list, and pass only its ids.",
+                    )
+                })?;
+                if !labels.contains(&label) {
+                    labels.push(label);
+                }
+            }
+            Ok(labels)
+        };
+        let (add, remove) = (ids("add")?, ids("remove")?);
+        if add.is_empty() && remove.is_empty() {
+            return Err(Failure::new("bad_arguments", "Neither add nor remove names a label.", "Pass the labels to give in add, or those to take back in remove."));
+        }
+        if let Some(both) = add.iter().find(|l| remove.contains(l)) {
+            return Err(Failure::new("bad_arguments", format!("{} is both in add and in remove.", both.id), "Name each label once."));
+        }
+        let reason = args["reason"].as_str().map(str::trim).filter(|r| !r.is_empty());
+        let justified = add.iter().find(|l| l.justify.is_some());
+        let reason = match (justified, reason) {
+            (Some(label), reason) => Some(contract::justification(label, reason.unwrap_or_default()).map_err(|refusal| match refusal {
+                contract::Refusal::JustificationTooLong => Failure::new(
+                    "reason_too_long",
+                    format!("The reason for {} is longer than {} characters.", label.id, contract::max_justification()),
+                    "Say it shorter.",
+                ),
+                _ => Failure::new(
+                    "reason_needed",
+                    format!("{} needs a reason of at least {} words: {}", label.id, label.justify.unwrap_or(0), label.question("en").unwrap_or_default()),
+                    "Pass reason with what you saw that makes you think so, or leave the label out.",
+                ),
+            })?),
+            (None, Some(_)) => {
+                return Err(Failure::new("bad_arguments", "reason is only for a label that needs one (ai-world), and none is in add.", "Leave reason out."));
+            }
+            (None, None) => None,
+        };
+        // Only what this session saw: the world it is in, one it arrived in during this run, or one it pictured.
+        {
+            let seen = s.game.seen();
+            let here = seen.in_world && seen.world_id.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(&world));
+            let run = s.run.lock().unwrap();
+            let been = run.been.contains(&world) || run.pictures.iter().any(|p| p.world_id.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(&world)));
+            if !here && !been {
+                return Err(Failure::new(
+                    "not_seen_here",
+                    "This session has not been in that world during this run: labels are only for worlds you saw yourself.",
+                    "go_to_world to it and look around with screenshots first, then label it.",
+                ));
+            }
+        }
+        let feedback = self.feedback_seam()?;
+        let Some(account) = feedback.account() else {
+            return Err(Failure::new(
+                "orbiters_not_signed_in",
+                "No Orbiters account is signed in in Orbiters - N4N0: labels are given under one, so nothing was sent.",
+                "Tell the person to sign in to Orbiters in Orbiters - N4N0's Settings, then label the world again.",
+            ));
+        };
+        for label in &add {
+            let text = label.justify.and(reason.clone());
+            feedback.ask(FeedbackAsk::Label { world: world.clone(), label: label.id.clone(), on: true, text });
+        }
+        for label in &remove {
+            feedback.ask(FeedbackAsk::Label { world: world.clone(), label: label.id.clone(), on: false, text: None });
+        }
+        let wait = Duration::from_secs_f64(number(args, "wait_s", LABELS_WAIT_S).clamp(0.0, 30.0));
+        let known = Self::feedback_until(&*feedback, &world, wait, |k| k.pending == 0 && !k.loading);
+        if let Some(error) = &known.error {
+            return Err(Failure::new(
+                "labels_not_taken",
+                format!("Orbiters did not take the labels: {error}"),
+                "Call world_labels to see what the world has now; if it says to sign in, tell the person.",
+            ));
+        }
+        let sent = known.pending == 0 && !known.loading;
+        let mine = |id: &str| known.labels.iter().any(|l| l.id == id && l.mine);
+        let not_as_asked: Vec<&str> =
+            add.iter().filter(|l| !mine(&l.id)).chain(remove.iter().filter(|l| mine(&l.id))).map(|l| l.id.as_str()).collect();
+        Ok(Answer::Data(json!({
+            "world_id": world,
+            "sent": sent,
+            "account": account_json(Some(&account)),
+            "world": labels_json(&known),
+            "not_as_asked": not_as_asked,
+            "next": if sent {
+                "Done. Go on with the next world."
+            } else {
+                "Queued: Orbiters has not taken it yet, and Orbiters - N4N0 keeps trying by itself. Go on; world_labels later shows whether it went."
+            },
+        })))
+    }
+}
+
 /// A tool's error as MCP gives it: to the model, as a result it can read.
 pub fn failure_json(failure: &Failure) -> Value {
     serde_json::to_value(failure).unwrap_or_else(|_| json!({ "code": failure.code }))
@@ -1623,8 +1898,8 @@ mod tests {
         let tools = list();
         let tools = tools.as_array().unwrap();
         let vrchat = tools.iter().filter(|t| !t["name"].as_str().unwrap().starts_with("unity_")).count();
-        // The thirteen of a game, and three for the sessions (and the sandbox's, in its builds).
-        assert!(vrchat <= 17, "few: {vrchat}");
+        // The thirteen of a game, two for its labels, and three for the sessions (and the sandbox's, in its builds).
+        assert!(vrchat <= 19, "few: {vrchat}");
         assert_eq!(tools.len(), vrchat + super::super::projects::NAMES.len(), "the Unity projects tools after them");
         for tool in tools {
             assert!(tool["description"].as_str().unwrap().len() > 60, "{tool}");
@@ -1668,7 +1943,7 @@ mod tests {
 
     #[test]
     fn the_guide_explains_the_loop_and_when_to_give_up() {
-        for words in ["go_to_world", "take_3d_picture", "close_vrchat", "give up", "paused_by_person", "no_keyframes", "open_session", "needs_sign_in", "focus_busy", "close_session", "take_over"] {
+        for words in ["go_to_world", "take_3d_picture", "close_vrchat", "give up", "world_labels", "label_world", "spotlight_pc", "next_page", "paused_by_person", "no_keyframes", "open_session", "needs_sign_in", "focus_busy", "close_session", "take_over"] {
             assert!(GUIDE.contains(words), "{words}");
         }
     }

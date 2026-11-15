@@ -107,6 +107,17 @@ pub enum Find {
     Popular,
     Active,
     Trending,
+    /// VRChat's "Spotlight - PC" row (`orbiters_core::maps::Spotlight`).
+    SpotlightPc,
+    /// VRChat's "Spotlight - Cross Platform" row.
+    SpotlightCrossPlatform,
+}
+
+/// A page of worlds, and whether another follows.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct WorldPage {
+    pub worlds: Vec<WorldCard>,
+    pub more: bool,
 }
 
 /// A world an agent can pick.
@@ -219,6 +230,31 @@ pub trait Opener: Send + Sync {
     fn set_main(&self, _pid: Option<u32>) {}
 }
 
+/// The Orbiters account world labels go under: the one signed in in Orbiters - N4N0's Settings, on the server its
+/// Development environment switch chose.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FeedbackAccount {
+    /// The API's address (`https://api.orbiters.cc/`, or the development server's `http://127.0.0.1:4100/`).
+    pub server: String,
+    pub development: bool,
+    /// The account's name and numeric id, when the saved account names them.
+    pub name: Option<String>,
+    pub id: Option<String>,
+}
+
+/// N4N0's world feedback as the bridge's label tools use it: the real one is the tray service's (controller/world_feedback.rs,
+/// the very queue and calls a person's press on the worlds page goes through), the other the lab's.
+pub trait Feedback: Send + Sync {
+    /// The account labels go under; `None` while none is signed in.
+    fn account(&self) -> Option<FeedbackAccount>;
+    /// Asks Orbiters for `world`'s feedback now, as opening it on the worlds page does.
+    fn show(&self, world: &str);
+    /// What is known of `world`'s feedback now (its `loading` true until Orbiters answered once).
+    fn feedback(&self, world: &str) -> orbiters_n4n0_core::feedback::WorldFeedback;
+    /// What a person's press asks: queued on disk, sent under the account, retried.
+    fn ask(&self, ask: orbiters_n4n0_core::feedback::FeedbackAsk);
+}
+
 /// VRChat as far as the tools care.
 pub trait Game: Send + Sync {
     fn seen(&self) -> Seen;
@@ -229,7 +265,7 @@ pub trait Game: Send + Sync {
     /// A new private instance of `world`, owned by the signed-in VRChat account. Only ever that kind: nothing here can
     /// name another instance, or make a public, friends or group one.
     fn create_private_instance(&self, world: &str, region: &str) -> Result<String, Failure>;
-    fn find_worlds(&self, find: &Find, page: usize) -> Result<Vec<WorldCard>, Failure>;
+    fn find_worlds(&self, find: &Find, page: usize) -> Result<WorldPage, Failure>;
     fn launch(&self, plan: &LaunchPlan) -> Result<(), Failure>;
     /// The window of the process `pid`, while it has one.
     fn window(&self, pid: u32) -> Option<GameWindow>;

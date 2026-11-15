@@ -7,7 +7,7 @@
 
 use super::bridge_game::{api_failure, RealGame};
 use super::{Controller, Shared};
-use crate::bridge::game::{CaptureSeen, Failure, Find, Game, GameWindow, LaunchPlan, Opener, OscArg, PictureFiles, ReconstructionSeen, Seen, Shot, WorldCard};
+use crate::bridge::game::{CaptureSeen, Failure, Find, Game, GameWindow, LaunchPlan, Opener, OscArg, PictureFiles, ReconstructionSeen, Seen, Shot, WorldPage};
 use crate::bridge::input::Input;
 use crate::bridge::sessions::{self, Eac, SideMark, Sides};
 use crate::bridge::win;
@@ -467,7 +467,7 @@ impl Game for SideGame {
         self.ctl()?.vrchat_source().create_private_instance(world, region).map_err(|e| api_failure(e, "making the instance")) // i18n: not shown
     }
 
-    fn find_worlds(&self, find: &Find, page: usize) -> Result<Vec<WorldCard>, Failure> {
+    fn find_worlds(&self, find: &Find, page: usize) -> Result<WorldPage, Failure> {
         self.inner.find_worlds(find, page)
     }
 

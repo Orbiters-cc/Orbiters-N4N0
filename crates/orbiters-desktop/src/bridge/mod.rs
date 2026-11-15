@@ -153,6 +153,9 @@ pub(crate) struct Run {
     pub pictures: Vec<PictureRecord>,
     /// The last thing that happened by itself: the game gone, a start that did not arrive.
     pub event: Option<String>,
+    /// The worlds this session arrived in (lowercase ids), oldest first: the only ones its agent may label, besides the
+    /// one it is in.
+    pub been: Vec<String>,
 }
 
 /// One VRChat the bridge drives (bridge/sessions.rs): `main`, the app's own, or a side session beside anything else.
@@ -291,6 +294,8 @@ pub struct Bridge {
     pub(crate) sides: Mutex<Vec<Arc<Session>>>,
     /// What starts side sessions and knows the computer (`None`: none can be opened).
     pub(crate) opener: Mutex<Option<Arc<dyn game::Opener>>>,
+    /// N4N0's world feedback, for the label tools (`None`: they say it is not there).
+    pub(crate) feedback: Mutex<Option<Arc<dyn game::Feedback>>>,
     /// One launch of VRChat at a time on this computer: a new VRChat is told apart from the others by appearing after it.
     pub(crate) launching: Mutex<()>,
     pub(crate) focus: Mutex<FocusTurn>,
@@ -321,6 +326,7 @@ impl Bridge {
             guard_exe,
             sides: Mutex::new(Vec::new()),
             opener: Mutex::new(None),
+            feedback: Mutex::new(None),
             launching: Mutex::new(()),
             focus: Mutex::default(),
             log: Mutex::new(VecDeque::new()),
@@ -400,6 +406,10 @@ impl Bridge {
     /// What starts side sessions and knows the computer.
     pub fn set_opener(&self, opener: Arc<dyn game::Opener>) {
         *self.opener.lock().unwrap() = Some(opener);
+    }
+
+    pub fn set_feedback(&self, feedback: Arc<dyn game::Feedback>) {
+        *self.feedback.lock().unwrap() = Some(feedback);
     }
 
     /// What the person's listener heard.

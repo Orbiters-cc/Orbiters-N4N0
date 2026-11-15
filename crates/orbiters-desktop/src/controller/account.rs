@@ -336,6 +336,13 @@ impl Controller {
         Some(rt.account.as_ref().map(|a| (Api::new(server), a.token.clone())))
     }
 
+    /// The server and the saved account's name and id, when one is saved: whom world labels go under.
+    pub(super) fn feedback_account(&self) -> Option<(Server, Option<String>, Option<String>)> {
+        let rt = self.account_runtime.lock().unwrap();
+        let (server, _) = rt.read?;
+        rt.account.as_ref().map(|a| (server, a.username.clone(), a.user.clone()))
+    }
+
     /// The API and credential for calls to Orbiters, when an account is saved (checked or not).
     pub fn account_api(&self) -> Option<(Api, String)> {
         let rt = self.account_runtime.lock().unwrap();

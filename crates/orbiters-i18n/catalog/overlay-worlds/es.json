@@ -259,5 +259,22 @@
   "Stick: move around": "Palanca: moverte",
   "Grip: take it": "Agarre: tomarlo",
   "Stick left or right: another capture": "Palanca a izquierda o derecha: otra captura",
-  "{at} of {count}": "{at} de {count}"
+  "{at} of {count}": "{at} de {count}",
+  "You are there": "Ya estás ahí",
+  "VRChat took you to this instance.": "VRChat te llevó a esta instancia.",
+  "Taking you there": "Te llevamos allí",
+  "Your VRChat has the instance and takes you there now. If it shows the world's page instead, press Join on it.": "Tu VRChat recibió la instancia y te lleva allí ahora. Si en cambio muestra la página del mundo, pulsa Unirse en ella.",
+  "Starting VRChat": "Iniciando VRChat",
+  "VRChat is starting, right in this instance.": "VRChat se está iniciando directamente en esta instancia.",
+  "Another VRChat on this computer, one of Orbiters' AI bridge, receives VRChat's links: going there directly would move it, not yours.": "Otro VRChat de este ordenador, uno del puente de IA de Orbiters, recibe los enlaces de VRChat: ir directamente movería ese, no el tuyo.",
+  "Your VRChat did not take the link to go there directly.": "Tu VRChat no aceptó el enlace para ir allí directamente.",
+  "Your VRChat runs on another device: Orbiters cannot take it there directly.": "Tu VRChat se ejecuta en otro dispositivo: Orbiters no puede llevarlo allí directamente.",
+  "Send me an invite instead": "Prefiero una invitación",
+  "Join": "Unirse",
+  "Pick an instance, or make one: Orbiters takes you there in VRChat.": "Elige una instancia o crea una: Orbiters te lleva allí en VRChat.",
+  "Making the instance, then taking you there…": "Creando la instancia y llevándote allí…",
+  "Taking you there…": "Llevándote allí…",
+  "Orbiters' AI bridge is using VRChat with your account on this computer: go there once it is done.": "El puente de IA de Orbiters está usando VRChat con tu cuenta en este ordenador: ve cuando termine.",
+  "VRChat could not be started there: {error}": "No se pudo iniciar VRChat allí: {error}",
+  "The instance could not be made: {e}": "No se pudo crear la instancia: {e}"
 }

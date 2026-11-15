@@ -192,10 +192,12 @@ pub enum Target {
     OpenWeb,
     /// Reads the world's feedback again, after Orbiters did not answer.
     RetryFeedback,
-    /// An instance of the Go there list (its place in the list): the invite to it.
+    /// An instance of the Go there list (its place in the list): there, directly.
     GoInstance(usize),
-    /// A new instance of this kind ([`go::NEW_KINDS`]), then the invite to it.
+    /// A new instance of this kind ([`go::NEW_KINDS`]), then there.
     NewInstance(u8),
+    /// On the card of a direct trip: an invite to it instead.
+    GoInvite,
     /// The region a new instance is made in: the next one.
     GoRegion,
     /// The list of instances read again.
@@ -225,7 +227,7 @@ pub enum Action {
     Open,
     /// Search what is typed now (Done), without waiting for the typing to pause.
     Search,
-    /// A world (its id) in VRChat: an invite to oneself when signed in to VRChat, else VRChat's launcher.
+    /// A world (its id): its Go there page, its instances read.
     Join(String),
     /// A world's page on vrchat.com (its id), in the computer's browser.
     OpenWeb(String),
@@ -233,10 +235,12 @@ pub enum Action {
     SignIn,
     /// The world's feedback asked for again (Orbiters did not answer).
     RetryFeedback,
-    /// An invite to oneself to this exact instance of this world (listed or made in this scope).
+    /// To this exact instance of this world (listed or made in this scope), directly.
     GoTo { world: String, instance: String },
-    /// A new instance of `world`, then the invite to it.
+    /// A new instance of `world`, then there.
     NewInstance { world: String, access: orbiters_core::vrchat_api::CreateAccess, region: orbiters_core::vrchat_api::InstanceRegion },
+    /// An invite to oneself to this instance, instead of the direct trip.
+    InviteInstead { world: String, instance: String },
 }
 
 /// What a stick does where a laser is on a capture's side panel in a headset (K-small-stick, K-carousel): elsewhere it is VRChat's.
@@ -1728,6 +1732,13 @@ impl Panel {
                     None => Vec::new(),
                 }
             }
+            Target::GoInvite => {
+                let go = &status.go;
+                match go.went.as_ref().filter(|g| go.busy.is_none() && g.how == crate::controller::travel::Went::Direct && !g.arrived) {
+                    Some(g) => vec![Action::InviteInstead { world: go.world.clone(), instance: g.instance.id.clone() }],
+                    None => Vec::new(),
+                }
+            }
             Target::NewInstance(k) => {
                 let go = &status.go;
                 let Some(access) = go::NEW_KINDS.get(k as usize).copied().filter(|_| go.busy.is_none() && !go.world.is_empty()) else { return Vec::new() };
@@ -2516,7 +2527,7 @@ impl Panel {
                 }
                 Target::SmallBack => pill_button(p, *rect, Some(icons::ARROW_U_UP_LEFT), tr("Back here"), orbit_look::accent(), orbit_look::on_accent(), h, pr, rest),
                 Target::Join => {
-                    let (glyph, label) = if status.list.vrchat { (icons::ENVELOPE_SIMPLE, tr("Invite me")) } else { (icons::PLAY, tr("Go there")) };
+                    let (glyph, label) = (if status.list.vrchat { icons::SIGN_IN } else { icons::PLAY }, tr("Go there"));
                     if entry.capture && vr {
                         pill_button(p, *rect, Some(glyph), label, RAISED2, theme::FG, h, pr, rest);
                     } else if entry.capture {
@@ -3665,14 +3676,26 @@ mod tests {
         assert!(panel.press(Target::GoRegion, &d, 3.0).is_empty());
         assert_eq!(panel.press(Target::NewInstance(4), &d, 3.0), [Action::NewInstance { world: HOME.into(), access: CreateAccess::Invite, region: InstanceRegion::Us }], "the region picked");
         // One on its way: nothing more is sent.
-        let busy = Status { go: super::go::GoView { busy: Some(super::go::GoBusy::Inviting), ..listed.clone() }, ..signed_in.clone() };
+        let busy = Status { go: super::go::GoView { busy: Some(super::go::GoBusy::Going), ..listed.clone() }, ..signed_in.clone() };
         let d = data(&entries, &busy, &feedback, &facts);
         assert!(panel.press(Target::GoInstance(0), &d, 4.0).is_empty() && panel.press(Target::NewInstance(0), &d, 4.0).is_empty());
-        // Sent: the way back to the list; Back, the world's page.
-        let sent = Status { go: super::go::GoView { invited: Some(instance("48213~hidden(usr_a)~region(eu)~nonce(x)", true)), ..listed }, ..signed_in.clone() };
-        let d = data(&entries, &sent, &feedback, &facts);
+        // On the way directly (L-go-direct): the way back to the list, and an invite instead should VRChat only show the world.
+        use crate::controller::travel::{Detour, Went};
+        let gone = |how, arrived| Status { go: super::go::GoView { went: Some(super::go::GoneTo { instance: instance("48213~hidden(usr_a)~region(eu)~nonce(x)", true), how, arrived }), ..listed.clone() }, ..signed_in.clone() };
+        let direct = gone(Went::Direct, false);
+        let d = data(&entries, &direct, &feedback, &facts);
         let targets: Vec<Target> = panel.targets(&d).into_iter().map(|(t, _)| t).filter(|t| *t != Target::Back).collect();
-        assert_eq!(targets, [Target::GoRetry], "the invite's card, and the way back to the list");
+        assert_eq!(targets, [Target::GoRetry, Target::GoInvite], "the trip's card, the way back to the list, the invite instead");
+        assert_eq!(panel.press(Target::GoInvite, &d, 4.5), [Action::InviteInstead { world: HOME.into(), instance: "48213~hidden(usr_a)~region(eu)~nonce(x)".into() }]);
+        // Arrived, started, or an invite already: nothing more to ask.
+        for status in [gone(Went::Direct, true), gone(Went::Started, false), gone(Went::Invited(Detour::OtherVrchat), false)] {
+            let d = data(&entries, &status, &feedback, &facts);
+            let targets: Vec<Target> = panel.targets(&d).into_iter().map(|(t, _)| t).filter(|t| *t != Target::Back).collect();
+            assert_eq!(targets, [Target::GoRetry]);
+            assert!(panel.press(Target::GoInvite, &d, 4.6).is_empty());
+        }
+        let sent = gone(Went::Invited(Detour::Asked), false);
+        let d = data(&entries, &sent, &feedback, &facts);
         assert_eq!(panel.press(Target::GoRetry, &d, 5.0), [Action::Join(HOME.into())]);
         panel.press(Target::Back, &d, 6.0);
         assert_eq!(panel.page, Page::Detail);

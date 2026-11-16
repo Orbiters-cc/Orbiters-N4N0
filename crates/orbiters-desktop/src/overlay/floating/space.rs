@@ -115,6 +115,28 @@ pub fn orthonormal(m: &Matrix34) -> Option<Matrix34> {
     Some(from_axes(x, cross(z, x), z, position(m)))
 }
 
+/// How far below the controller's −Z VRChat's laser points on Touch controllers (`oculus_touch`), from the controller's own pose (SteamVR's
+/// `/pose/raw`, which VRChat binds for every controller): 40 degrees, straight ahead (no sideways turn), both hands alike.
+/// Measured 2026-11-16 in the VR sandbox (Quest Pro render model, the profile Enzo's Quest Pro has over Virtual Desktop): VRChat's cyan laser
+/// triangulated from both eye pictures in four poses and both hands came out 39.97 to 41.35 degrees below, 0.0 to 1.1 degrees sideways
+/// (`vr-feedback-1111/pointer/laser3d.py`, captures c8, c9, c12, c14).
+pub const VRCHAT_TOUCH_LASER_DOWN_DEG: f32 = 40.0;
+/// A point VRChat's Touch laser passes through, in the controller's own frame (metres): its line runs 3.45 cm under the controller's origin
+/// and 2.88 cm behind it (the same measurements: within 0.6 cm of this in every pose; x within 0.1 cm of 0 for either hand).
+/// SteamVR's `/pose/tip` for the same controller (render model `tip`: 37.4 degrees, from (-1.67, -2.52, 2.47) cm on the right hand) runs
+/// 1.7 cm to the side and 2.6 degrees higher: 2.4 cm off at 15 cm, 3.7 cm at 0.5 m and 5.8 cm at 1 m, left of and above VRChat's spot for
+/// the right hand, as in Enzo's picture D of 2026-11-16 (4-5 cm).
+pub const VRCHAT_TOUCH_LASER_FROM: V3 = [0.0, -0.0345, 0.0288];
+
+/// VRChat's laser on a Touch controller as a frame (its origin where the laser starts, its −Z the way it points), from the controller's own
+/// pose (the device's pose, `/pose/raw`).
+pub fn vrchat_touch_laser(controller: &Matrix34) -> Matrix34 {
+    let (s, c) = VRCHAT_TOUCH_LASER_DOWN_DEG.to_radians().sin_cos();
+    // Turned about X by −40 degrees: −Z goes to (0, −sin, −cos).
+    let laser = from_axes([1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c], VRCHAT_TOUCH_LASER_FROM);
+    compose(controller, &laser)
+}
+
 /// A laser: where it starts (its controller's tip) and the way it points (the tip's −Z).
 pub fn ray(tip: &Matrix34) -> (V3, V3) {
     (position(tip), unit(scale(axis(tip, 2), -1.0)).unwrap_or([0.0, 0.0, -1.0]))
@@ -296,6 +318,29 @@ mod tests {
 
     fn close(a: V3, b: V3) -> bool {
         length(sub(a, b)) < 1e-4
+    }
+
+    /// VRChat's Touch laser as measured in the sandbox (2026-11-16): 40 degrees under the controller's −Z, straight ahead, through
+    /// (0, −3.45, 2.88) cm; and how far SteamVR's Quest Pro tip (render model `tip`, which our laser used) lands from it.
+    #[test]
+    fn vrchats_touch_laser_is_the_measured_line() {
+        let (o, d) = ray(&vrchat_touch_laser(&Matrix34::IDENTITY));
+        assert!(close(o, [0.0, -0.0345, 0.0288]));
+        assert!(close(d, [0.0, -40f32.to_radians().sin(), -40f32.to_radians().cos()]));
+        // Turned and moved with the controller.
+        let held = from_axes([0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.2, 1.3, -0.4]);
+        let (o2, d2) = ray(&vrchat_touch_laser(&held));
+        assert!(close(o2, [0.2 + 0.0288, 1.3 - 0.0345, -0.4]) && close(d2, [-40f32.to_radians().cos(), -40f32.to_radians().sin(), 0.0]));
+        // The Quest Pro's tip (right hand), against VRChat's line on a plane square to VRChat's laser at 15 cm, 0.5 m and 1 m: 2.4, 3.7 and 5.8 cm apart.
+        let (s, c) = 37.4f32.to_radians().sin_cos();
+        let tip = from_axes([1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c], [-0.016694, -0.02522, 0.024687]);
+        let (to, td) = ray(&tip);
+        for (at, low, high) in [(0.15, 0.022, 0.026), (0.5, 0.035, 0.038), (1.0, 0.056, 0.06)] {
+            let target = add(o, scale(d, at));
+            let t = dot(sub(target, to), d) / dot(td, d);
+            let off = length(sub(add(to, scale(td, t)), target));
+            assert!(off > low && off < high, "{at} m: {off}");
+        }
     }
 
     fn head_at(p: V3) -> Matrix34 {

@@ -9,13 +9,15 @@
 //!   in reach of each other; 24 mm with the head 30 cm away from where the arms reach.
 //! - **Grab.** A grip pressed (as VRChat's own binding clicks it: `vrchat_grip`) with VRChat's grab point ([`GRAB_POINT`], beside the
 //!   controller, towards the palm) within [`GRAB_REACH_M`] of the panel's box ([`GRAB_BOX`], VRChat's own pickup box) takes it; it then moves rigidly with that controller (measured 2 mm, 2.5 degrees) until that grip is let go, and stays where it
-//!   was let go. A grip pressed by the other hand while one holds it does nothing, and it does not pass to that hand when the first lets go
-//!   (a new press is needed). Both grips pressed in the same frame: the right hand takes it. Its camera modes do not move it.
-//! - **Close.** Its X closes it; VRChat's laser from the controller points [`LASER_DOWN_DEG`] below the controller's −Z. A trigger pressed while
+//!   was let go. A grip pressed by the other hand while one holds it, within reach, takes it over (Enzo, 2026-11-16: "if we grab it with hand A,
+//!   and while still grabbed we try to grab it with hand B, it should be transferred to hand B"); the first hand's grip, still held, does not take
+//!   it back until it is let go and pressed again. Both grips pressed in the same frame: the right hand takes it. Its camera modes do not move it.
+//! - **Close.** Its X closes it; VRChat's laser is the one measured on Touch controllers ([`space::vrchat_touch_laser`]). A trigger pressed while
 //!   that laser is on the X is seen here ([`Reckon::step`]), with no overlay over VRChat's button, so VRChat gets its click whole.
 
 use orbiters_openvr::Matrix34;
 
+use super::super::floating::space;
 use super::camera_track::{PANEL_SIZE, PANEL_X};
 
 /// From the left controller's pose to the point the panel is laid from, in that controller's frame (metres).
@@ -35,12 +37,13 @@ pub const GRAB_REACH_M: f32 = 0.14;
 /// did not, mirrored between the hands (sandbox 2026-11-14, 24 grips, `testdata_camera/sandbox-2026-11-14/reach.json`). Fitted on those and
 /// the 13 grips of 2026-11-13 with VRChat's box: all 37 agree, 14 mm from the nearest; the controller's origin got 8 of the 24 wrong.
 pub const GRAB_POINT: [f32; 3] = [-0.07, -0.03, 0.035];
-/// How far below the controller's −Z VRChat's laser points: VRChat closed its camera for aims 62 and 67 degrees up from 12 cm in front, not 57
-/// or 75 (m4), and for 62 not 55 (m1).
-pub const LASER_DOWN_DEG: f32 = 64.5;
-/// How near the X a laser's spot counts as on it, in the panel's units (the button is about 30 across, the next one 40 away; 5 degrees of aim
-/// are 15 units there).
-pub const CLOSE_RADIUS: f32 = 13.0;
+/// Where VRChat's X takes a laser, in the panel's units from its middle (y down): its picture's place [`PANEL_X`] one unit higher. With
+/// VRChat's measured laser ([`space::vrchat_touch_laser`]) the 11 aims of 2026-11-13 (camera4 m1 and m4, from 11-12 cm) land 0.0 units from
+/// [`PANEL_X`] for the four that closed it straight on, 15.2 above for the one at 67 degrees that closed it too, 14.7 below for 57 degrees and
+/// 20 or more for the rest, which did not: the button reaches further up than down.
+pub const CLOSE_AT: [f32; 2] = [PANEL_X[0], PANEL_X[1] - 1.0];
+/// How near [`CLOSE_AT`] a laser's spot counts as on the X, in the panel's units (the button is about 30 across).
+pub const CLOSE_RADIUS: f32 = 15.0;
 
 /// VRChat's own left wrist, as it says over OSC (`/tracking/vrsystem/leftwrist/pose`, sent to Orbiters' port every frame): where its avatar's
 /// hand really is. With an avatar whose arm cannot reach the controller, the panel opens by that hand, not by the controller (sandbox r2: 24 cm).
@@ -157,10 +160,10 @@ pub fn within_reach(panel: &Matrix34, point: [f32; 3], reach: f32) -> bool {
     dot(d, d).sqrt() <= reach
 }
 
-/// VRChat's laser from a controller: where it starts and the way it goes.
+/// VRChat's laser from a controller (its own pose): where it starts and the way it goes. Measured on Touch controllers; assumed the same on
+/// others (VRChat's laser there was not measured).
 pub fn laser(hand: &Matrix34) -> ([f32; 3], [f32; 3]) {
-    let (s, c) = LASER_DOWN_DEG.to_radians().sin_cos();
-    (column(hand, 3), turn(hand, [0.0, -s, -c]))
+    space::ray(&space::vrchat_touch_laser(hand))
 }
 
 /// Where a laser lands on the panel, in its units from its middle (y down, as [`PANEL_X`]), if it lands on its front.
@@ -175,10 +178,21 @@ pub fn laser_spot(panel: &Matrix34, panel_unit: f32, origin: [f32; 3], along: [f
     Some([(o[0] + d[0] * t) / panel_unit, -(o[1] + d[1] * t) / panel_unit])
 }
 
+/// How near VRChat's X (its middle, [`CLOSE_AT`]) a laser leaves the click to VRChat alone: our camera tools beside the panel take neither
+/// hover nor press from it (Enzo, 2026-11-16, picture D: one pull closed VRChat's camera and pressed our "3D of people" too). 4 cm: the
+/// X's own reach (1 cm) and the whole error picture D showed before our laser followed VRChat's, so that even then the click would have been
+/// VRChat's alone. Only the corner of the column's top tile nearest the X lies that near (about its inner 16 of 92 units).
+pub const BY_THE_X_M: f32 = 0.04;
+
+/// Whether a laser (`origin`, `along`) is within [`BY_THE_X_M`] of VRChat's X on the panel: a click there is VRChat's.
+pub fn by_the_close(panel: &Matrix34, panel_unit: f32, origin: [f32; 3], along: [f32; 3]) -> bool {
+    laser_spot(panel, panel_unit, origin, along).is_some_and(|s| (s[0] - CLOSE_AT[0]).hypot(s[1] - CLOSE_AT[1]) * panel_unit <= BY_THE_X_M)
+}
+
 /// Whether a laser from `hand` is on the panel's X.
 pub fn on_close(panel: &Matrix34, panel_unit: f32, hand: &Matrix34) -> bool {
     let (o, d) = laser(hand);
-    laser_spot(panel, panel_unit, o, d).is_some_and(|s| (s[0] - PANEL_X[0]).hypot(s[1] - PANEL_X[1]) <= CLOSE_RADIUS)
+    laser_spot(panel, panel_unit, o, d).is_some_and(|s| (s[0] - CLOSE_AT[0]).hypot(s[1] - CLOSE_AT[1]) <= CLOSE_RADIUS)
 }
 
 /// What a step says happened.
@@ -186,8 +200,10 @@ pub fn on_close(panel: &Matrix34, panel_unit: f32, hand: &Matrix34) -> bool {
 pub struct Happened {
     pub taken: Option<usize>,
     pub let_go: Option<usize>,
-    /// The other hand pressed its grip while one held it (or in the frame it let go): VRChat ignores that press, and so does this.
+    /// The other hand pressed its grip in the frame the holding hand let go, or out of reach: that press does nothing.
     pub ignored: Option<usize>,
+    /// It passed from this hand to the other, which pressed its grip within reach while this one held it (`taken` is the other).
+    pub passed_from: Option<usize>,
     /// A trigger was pressed on its X: VRChat closes its camera panel (in stream mode its camera may stay on, and OSC then says nothing).
     pub closed: bool,
     /// A trigger pressed (hand), and where the laser this assumes for VRChat landed on the panel then, in its units (the X is at [`PANEL_X`]).
@@ -250,15 +266,28 @@ impl Reckon {
             None => at,
         };
         if let Some(hand) = self.held {
+            let other = 1 - hand;
+            let pressed = grips[other] && !was_grips[other];
             if !grips[hand] {
                 self.held = None;
                 self.at = Some(room);
                 happened.let_go = Some(hand);
-            }
-            // The other hand's press while one holds it does nothing, in VRChat as here; it is told, for the log.
-            let other = 1 - hand;
-            if grips[other] && !was_grips[other] {
-                happened.ignored = Some(other);
+                // Pressed in the very frame the holder let go: nothing (sandbox 2026-11-16: VRChat left it lying).
+                if pressed {
+                    happened.ignored = Some(other);
+                }
+            } else if pressed {
+                // The other hand takes it over while this one still holds it (Enzo, 2026-11-16, in his headset). This hand's grip, still held,
+                // is no new press: it gets it back only by letting go and pressing again. Out of reach, the press does nothing.
+                match hands[other].filter(|pose| within_grab(&room, pose, other)) {
+                    Some(pose) => {
+                        self.held = Some(other);
+                        self.at = Some(then(&undone(&pose), &room));
+                        happened.taken = Some(other);
+                        happened.passed_from = Some(hand);
+                    }
+                    None => happened.ignored = Some(other),
+                }
             }
         } else {
             // Both grips pressed in the same frame: VRChat gives it to the right hand, wherever the hands are (sandbox 2026-11-16, 10 of 11
@@ -388,28 +417,57 @@ mod tests {
         assert!(checked >= 8);
     }
 
+    /// Enzo, 2026-11-16 (REQUEST9): "if we grab it with hand A, and while still grabbed we try to grab it with hand B, it should be transferred
+    /// to hand B and not stay in hand A". B takes it, A lets go of it although its grip is still held, and A gets it back only with a new press.
     #[test]
-    fn the_second_hand_neither_takes_it_nor_gets_it_handed_over() {
+    fn a_second_hand_takes_it_over_and_the_first_needs_a_new_press() {
         let panel = facing([0.0, 1.34, -0.35], [0.0, 1.65, 0.0]);
         let near = |dx: f32| Some(Matrix34 { m: [[1.0, 0.0, 0.0, dx], [0.0, 1.0, 0.0, 1.32], [0.0, 0.0, 1.0, -0.31]] });
+        for (a, b) in [(1usize, 0usize), (0, 1)] {
+            let grips = |a_held: bool, b_held: bool| { let mut g = [false; 2]; g[a] = a_held; g[b] = b_held; g };
+            let hands = |a_at: f32, b_at: f32| { let mut h = [None; 2]; h[a] = near(a_at); h[b] = near(b_at); h };
+            let mut reckon = Reckon::lying_at(panel);
+            reckon.step(hands(0.0, -0.1), [false; 2], [false; 2]);
+            assert_eq!(reckon.step(hands(0.0, -0.1), grips(true, false), [false; 2]).1.taken, Some(a));
+            // B grips while A holds: B takes it over.
+            let (taken, h) = reckon.step(hands(0.0, -0.1), grips(true, true), [false; 2]);
+            assert_eq!((h.taken, h.passed_from, h.ignored, h.let_go), (Some(b), Some(a), None, None), "{a} to {b}");
+            assert_eq!(reckon.held_hand(), Some(b));
+            // B moving moves it; A moving (its grip still held) does not.
+            let (moved, _) = reckon.step(hands(0.0, -0.3), grips(true, true), [false; 2]);
+            assert!((apart(&taken.unwrap(), &moved.unwrap()) - 0.2).abs() < 1e-5);
+            let (still, _) = reckon.step(hands(0.25, -0.3), grips(true, true), [false; 2]);
+            assert!(apart(&moved.unwrap(), &still.unwrap()) < 1e-6, "the first hand's held grip does not take it back");
+            // B lets go: it lies there; A's grip, held all along, is no new press.
+            reckon.step(hands(0.25, -0.3), grips(true, false), [false; 2]);
+            let (lying, _) = reckon.step(hands(0.4, -0.3), grips(true, false), [false; 2]);
+            assert!(apart(&still.unwrap(), &lying.unwrap()) < 1e-6);
+            assert_eq!(reckon.held_hand(), None);
+            // A presses again (near it): A takes it.
+            reckon.step(hands(-0.3, -0.3), grips(false, false), [false; 2]);
+            assert_eq!(reckon.step(hands(-0.3, -0.3), grips(true, false), [false; 2]).1.taken, Some(a));
+        }
+        // A press out of reach while one holds it does nothing, and is told.
         let mut reckon = Reckon::lying_at(panel);
         reckon.step([near(-0.1), near(0.0)], [false; 2], [false; 2]);
-        assert_eq!(reckon.step([near(-0.1), near(0.0)], [false, true], [false; 2]).1.taken, Some(1));
-        // The left grips too, while the right holds: nothing; the left moving does not move it.
-        let (a, h) = reckon.step([near(-0.1), near(0.0)], [true, true], [false; 2]);
-        assert_eq!((h.taken, h.ignored), (None, Some(0)), "told as ignored, for the log");
-        let (b, _) = reckon.step([near(-0.3), near(0.0)], [true, true], [false; 2]);
-        assert!(apart(&a.unwrap(), &b.unwrap()) < 1e-6);
-        // The right lets go: it stays, and the left (still gripping) does not get it.
-        reckon.step([near(-0.3), near(0.0)], [true, false], [false; 2]);
-        let (c, _) = reckon.step([near(-0.5), near(0.0)], [true, false], [false; 2]);
-        assert!(apart(&b.unwrap(), &c.unwrap()) < 1e-6);
+        reckon.step([near(-1.0), near(0.0)], [false, true], [false; 2]);
+        let (_, h) = reckon.step([near(-1.0), near(0.0)], [true, true], [false; 2]);
+        assert_eq!((h.taken, h.ignored), (None, Some(0)));
+        assert_eq!(reckon.held_hand(), Some(1));
+        // Pressed in the very frame the holder lets go: it lies there (as VRChat did in the sandbox).
+        let mut reckon = Reckon::lying_at(panel);
+        reckon.step([near(-0.1), near(0.0)], [false; 2], [false; 2]);
+        reckon.step([near(-0.1), near(0.0)], [false, true], [false; 2]);
+        let (_, h) = reckon.step([near(-0.1), near(0.0)], [true, false], [false; 2]);
+        assert_eq!((h.taken, h.let_go, h.ignored), (None, Some(1), Some(0)));
         assert_eq!(reckon.held_hand(), None);
     }
 
     /// Every two-hand sequence measured on VRChat's real panel in the sandbox (2026-11-16, `testdata_camera/sandbox-2026-11-16/hands.json`):
     /// replayed through VRChat's grip thresholds as Enzo's binding has them and this reckoning, each hand's move must carry the panel
     /// exactly when it carried VRChat's. Before this change the same-frame presses gave it to the left hand, where VRChat gave it to the right.
+    /// Where Enzo's correction of 2026-11-16 changes the verdict (a second hand's press while one holds it takes it over; the sandbox's VRChat
+    /// had ignored it), the step's `owner` verdict is the one expected: 13 of the 50 moves.
     #[test]
     fn two_hands_take_and_leave_it_as_vrchat_did() {
         use super::super::vrchat_grip::{Grips, STEAMVR_CLICK, VRCHAT_SHIPPED};
@@ -421,7 +479,7 @@ mod tests {
         let clicks = [Some(VRCHAT_SHIPPED), Some(STEAMVR_CLICK)];
         let sequences = data["sequences"].as_array().unwrap();
         assert!(sequences.len() >= 20);
-        let mut moves = 0;
+        let (mut moves, mut owner) = (0, 0);
         for sequence in sequences {
             let name = sequence["name"].as_str().unwrap();
             let offsets = [sequence["offsets"][0].as_f64().unwrap() as f32, sequence["offsets"][1].as_f64().unwrap() as f32];
@@ -449,13 +507,16 @@ mod tests {
                     let after = step(&at, pulls);
                     let moved = sub(column(&after, 3), column(&now, 3));
                     let ours = if dot(sub(moved, by), sub(moved, by)).sqrt() < 0.002 { "followed" } else if dot(moved, moved).sqrt() < 0.001 { "stayed" } else { "other" };
-                    assert_eq!(ours, s["vrchat"].as_str().unwrap(), "{name}: the {} hand moved", s["move"]);
+                    let expected = s.get("owner").unwrap_or(&s["vrchat"]).as_str().unwrap();
+                    assert_eq!(ours, expected, "{name}: the {} hand moved", s["move"]);
+                    owner += s.get("owner").is_some() as usize;
                     now = after;
                     moves += 1;
                 }
             }
         }
         assert!(moves >= 50, "{moves}");
+        assert_eq!(owner, 13, "the steps Enzo's correction changes");
     }
 
     #[test]
@@ -478,6 +539,48 @@ mod tests {
         let mut reckon = Reckon::lying_at(panel);
         reckon.step([None, None], [false; 2], [false, true]);
         assert!(!reckon.step([None, Some(hand)], [false; 2], [false, true]).1.closed);
+    }
+
+    /// Enzo's picture D (2026-11-16): with the laser on VRChat's X, our "3D of people" beside it took the click too. A laser within 4 cm of the
+    /// X is VRChat's alone; the column's tiles further away keep theirs.
+    #[test]
+    fn a_laser_by_vrchats_x_is_left_to_vrchat() {
+        use super::super::zones::{self, Zone};
+        let panel = facing([0.0, 1.34, -0.35], [0.0, 1.65, 0.0]);
+        let unit = PANEL_WIDTH_M / PANEL_SIZE[0];
+        let (side, up, nz) = (column(&panel, 0), column(&panel, 1), column(&panel, 2));
+        // A laser straight at a place of the panel's plane, in its units from its middle (y down), from 30 cm in front.
+        let at = |x: f32, y: f32| -> ([f32; 3], [f32; 3]) {
+            let p = add(add(column(&panel, 3), side.map(|v| v * x * unit)), up.map(|v| v * -y * unit));
+            (add(p, nz.map(|v| v * 0.3)), nz.map(|v| -v))
+        };
+        let (o, d) = at(CLOSE_AT[0], CLOSE_AT[1]);
+        assert!(by_the_close(&panel, unit, o, d));
+        // Picture D's spot: the top right corner of our top tile, the one nearest the X.
+        let people = zones::in_units(Zone::CameraPeople).rect;
+        let (o, d) = at(people.max.x - 4.0, people.min.y + 4.0);
+        assert!(by_the_close(&panel, unit, o, d), "picture D's spot is left to VRChat");
+        // The middle of every tile of the column, and of the line under the panel, stays ours.
+        for zone in [Zone::CameraPeople, Zone::CameraWorld, Zone::CameraRecord, Zone::CameraQr, Zone::CameraCaption, Zone::CameraAct] {
+            let c = zones::in_units(zone).rect.center();
+            let (o, d) = at(c.x, c.y);
+            assert!(!by_the_close(&panel, unit, o, d), "{zone:?}");
+        }
+        // How much of the top tile is given up: under a fifth of it.
+        let mut given = 0;
+        for i in 0..92 {
+            for j in 0..60 {
+                let (o, d) = at(people.min.x + i as f32 + 0.5, people.min.y + j as f32 + 0.5);
+                given += by_the_close(&panel, unit, o, d) as usize;
+            }
+        }
+        assert!(given * 5 < 92 * 60, "{given} of {}", 92 * 60);
+        // Every recorded press that closed VRChat's camera was by the X.
+        let data = recorded();
+        for aim in data["aims"].as_array().unwrap().iter().chain(data["aims_m4"].as_array().unwrap()).filter(|a| a["closed_in_vrchat"].as_bool().unwrap()) {
+            let (o, d) = laser(&m(&aim["hand"]));
+            assert!(by_the_close(&m(&aim["panel"]), aim["unit"].as_f64().unwrap() as f32, o, d), "{}", aim["name"]);
+        }
     }
 
     /// VRChat's own wrist gives where the panel opens (m3, poses in SteamVR's standing space); the controller rule too, within reach.

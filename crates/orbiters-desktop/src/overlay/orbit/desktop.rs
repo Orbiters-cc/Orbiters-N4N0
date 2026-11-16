@@ -2053,7 +2053,22 @@ mod tests {
                     let found = hit(&self.panels, middle).map(|(i, _)| self.panels.all().nth(i).expect("a part").zone);
                     let window = found.and_then(|z| self.windows.list.get(&z)).map(|w| w.hwnd);
                     if window != Some(got) {
-                        wrong.push(format!("{when}: the middle of {:?} is found on {found:?}, and Windows gives it to {}", panel.zone, if got == self.stand_in.0 { "VRChat".to_string() } else { format!("{:?}", self.windows.list.iter().find(|(_, w)| w.hwnd == got).map(|(z, _)| *z)) }));
+                        // What tells a window lying under another from a window with nothing painted there.
+                        let ours: Vec<HWND> = self.windows.list.values().map(|w| w.hwnd).collect();
+                        let order: Vec<Zone> = from_the_top(&ours).iter().filter_map(|h| self.windows.list.iter().find(|(_, w)| w.hwnd == *h).map(|(z, _)| *z)).collect();
+                        let facts = found.and_then(|z| self.windows.list.get(&z)).map(|w| {
+                            let (x, y) = (origin.x as i32 + middle.x as i32 - w.at.x, origin.y as i32 + middle.y as i32 - w.at.y);
+                            let inside = x >= 0 && y >= 0 && x < w.size.cx && y < w.size.cy;
+                            // SAFETY: the DIB section holds the window's pixels while it lives; read inside them only.
+                            let alpha = inside.then(|| unsafe { *w.bits.add(((y * w.size.cx + x) * 4 + 3) as usize) });
+                            format!("its window shown {} at {:?} size {:?} alpha {}, its pixel there alpha {alpha:?}", w.shown, w.at, w.size, w.alpha)
+                        });
+                        wrong.push(format!(
+                            "{when}: the middle of {:?} is found on {found:?}, and Windows gives it to {} ({}; ours from the top: {order:?})",
+                            panel.zone,
+                            if got == self.stand_in.0 { "VRChat".to_string() } else { format!("{:?}", self.windows.list.iter().find(|(_, w)| w.hwnd == got).map(|(z, _)| *z)) },
+                            facts.unwrap_or_default()
+                        ));
                     }
                 }
             }

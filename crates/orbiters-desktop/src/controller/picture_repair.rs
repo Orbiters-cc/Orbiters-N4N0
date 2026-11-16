@@ -142,7 +142,8 @@ mod tests {
         assert!(requests(&seen).is_empty(), "a dry run sends nothing");
         assert!(matches!(repair(&api, "token", &missing, here, false), Outcome::Given { sent: true, bytes, .. } if bytes > 0));
         assert_eq!(requests(&seen), ["POST /captures/capture/3/picture"]);
-        let sent = &seen.lock().unwrap()[0].1;
+        // (A copy: a reference would hold the stand-in's lock to the end of the test.)
+        let sent = seen.lock().unwrap()[0].1.clone();
         assert!(sent.windows(4).any(|w| w == [0xFF, 0xD8, 0xFF, 0xE0]) || sent.windows(3).any(|w| w == [0xFF, 0xD8, 0xFF]), "a JPEG");
         // Run again (Orbiters now lists its picture): nothing sent.
         assert_eq!(repair(&api, "token", &capture_item(3, false, true), here, false), Outcome::Has);

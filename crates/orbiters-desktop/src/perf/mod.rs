@@ -81,6 +81,14 @@ impl Part {
     }
 }
 
+/// Time parts of a process spend on threads of their own (the desktop panels' window looks), nanoseconds, by part.
+static ELSEWHERE: [AtomicU64; Part::ALL.len()] = [const { AtomicU64::new(0) }; Part::ALL.len()];
+
+/// `part` worked `took` on another thread of this process: the loop's meter counts it in its next summary.
+pub fn elsewhere(part: Part, took: Duration) {
+    ELSEWHERE[part as usize].fetch_add(took.as_nanos() as u64, Ordering::Relaxed);
+}
+
 static UPLOADS: AtomicU64 = AtomicU64::new(0);
 static UPLOAD_PIXELS: AtomicU64 = AtomicU64::new(0);
 
@@ -153,6 +161,9 @@ impl TurnMeter {
             return None;
         }
         let per_s = |d: Duration| d.as_secs_f32() * 1000.0 / seconds;
+        for (i, part) in self.parts.iter_mut().enumerate() {
+            *part += Duration::from_nanos(ELSEWHERE[i].swap(0, Ordering::Relaxed));
+        }
         let (uploads, pixels) = uploads_now();
         let parts = Part::ALL.iter().map(|p| (p.key().to_string(), round2(per_s(self.parts[*p as usize])))).filter(|(_, ms)| *ms >= 0.01).collect();
         let vrchat = orbiters_booster::frames::summarize(&self.frames, self.refresh_hz.unwrap_or(90.0));

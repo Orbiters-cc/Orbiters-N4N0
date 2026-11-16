@@ -321,7 +321,7 @@ impl Store {
                         written: change.value,
                         stage: Stage::Intended,
                         at: now.clone(),
-                        app_version: env!("CARGO_PKG_VERSION").to_string(),
+                        app_version: orbiters_version::get().to_string(),
                         leave_with: change.leave_with.clone(),
                     });
                 }

@@ -49,8 +49,16 @@ pub enum Warning {
 
 /// What to tell the person when the world turns out to give no depth (crate::coverage::Coverage::depth_blind): the 3D
 /// picture can only be rebuilt from colour, and looks poor.
-fn depth_blind_message() -> &'static str {
-    tr("This world gives no depth for most of what you see here, so the 3D picture will look flat and poor away from where the camera went.")
+/// `probed`: whether the capture kit's depth probe ran in any of the session's depth frames (contracts' `depth::probe_stamp`).
+/// A kit with the probe measures depth in a world that leaves Unity's depth texture empty: such a world is then blind
+/// only where it draws without any depth (glass, water, effects). A kit before it can do no better: the avatar needs
+/// uploading again with the current Orbiters Toolkit.
+fn depth_blind_message(probed: bool) -> &'static str {
+    if probed {
+        tr("This world draws most of what you see here without any depth, so the 3D picture will look flat and poor away from where the camera went.")
+    } else {
+        tr("This world gives no depth for most of what you see here, so the 3D picture will look flat and poor away from where the camera went. Upload your avatar again with the current Orbiters Toolkit: its capture kit then measures depth in worlds like this one.")
+    }
 }
 
 /// A session's rig faces so far, when not one of them could be read: what to tell the person. A face camera that does not project as
@@ -109,6 +117,8 @@ struct Decoded {
     grid_width: u32,
     codes: Vec<u16>,
     tiles_rejected: u32,
+    /// The depth probe's stamp (contracts' `depth::probe_stamp`).
+    probed: Option<bool>,
     bytes: u64,
 }
 
@@ -317,7 +327,8 @@ fn decode_depth(decoder: &mut depth::Decoder, job: &DepthJob) -> Result<Option<D
         eprintln!("write {}: {e}", job.path.display());
         e.to_string()
     })?;
-    Ok(Some(Decoded { layout: d.layout, grid_width: d.grid_width, codes: d.codes, tiles_rejected: d.tiles_rejected, bytes: bytes.len() as u64 }))
+    let probed = depth::probe_stamp(&view, false);
+    Ok(Some(Decoded { layout: d.layout, grid_width: d.grid_width, codes: d.codes, tiles_rejected: d.tiles_rejected, probed, bytes: bytes.len() as u64 }))
 }
 
 /// Frame-sized buffers the threads hand back, for the next copies (a fresh 8–33 MB buffer per keyframe costs its page
@@ -612,7 +623,7 @@ const RAW_DEPTH_FRAMES: u32 = 3;
 
 impl CaptureSession {
     pub fn start(cmd: &StartCapture, source_description: String, folder_hint: &str) -> anyhow::Result<Self> {
-        let mut manifest = SessionManifest::new(uuid::Uuid::new_v4().to_string(), orbiters_core::now_utc_iso(), orbiters_core::APP_VERSION);
+        let mut manifest = SessionManifest::new(uuid::Uuid::new_v4().to_string(), orbiters_core::now_utc_iso(), orbiters_core::app_version());
         manifest.world = cmd.world.clone();
         manifest.consent = cmd.consent.clone();
         manifest.capture.mode = cmd.mode;
@@ -1331,10 +1342,13 @@ impl CaptureSession {
                                 p.record.flags |= record_flags::DEPTH;
                                 p.record.depth_index = index;
                                 self.stats.depth_frames += 1;
+                                if d.probed == Some(true) {
+                                    self.stats.depth_probed += 1;
+                                }
                                 self.coverage.add_depth(&p.record.camera_to_world, &p.record.projection, &d.layout, d.grid_width, &d.codes);
                                 if !self.told_depth_blind && self.coverage.depth_blind() {
                                     self.told_depth_blind = true;
-                                    self.warn(Warning::Depth, depth_blind_message().into());
+                                    self.warn(Warning::Depth, depth_blind_message(self.stats.depth_probed > 0).into());
                                 }
                             }
                             // A few frames with tiles that could not be read, as received: what the world's
@@ -2057,6 +2071,36 @@ mod tests {
         assert!(rig_faces_unread(0, 29).is_none());
         assert!(rig_faces_unread(0, 30).is_some());
         assert!(rig_faces_unread(1, 3000).is_none());
+    }
+
+    /// A world that leaves the depth texture empty: with a kit from before the depth probe the person is told how to get
+    /// depth there (upload again with the current Toolkit); with the probe, the world draws without any depth, and an upload
+    /// would change nothing.
+    #[test]
+    fn the_blind_world_notice_tells_an_older_kit_what_to_do() {
+        assert!(depth_blind_message(false).contains("Upload your avatar again with the current Orbiters Toolkit"));
+        assert!(!depth_blind_message(true).contains("Toolkit"));
+        assert!(depth_blind_message(true).contains("without any depth"));
+    }
+
+    /// The stamp the session counts probed depth frames by (contracts' `depth::probe_stamp`): a depth frame's black leftover
+    /// band (every kit before Toolkit 0.5.2) reads as no probe, the stamp's squares as the probe.
+    #[test]
+    fn the_probe_stamp_tells_a_probed_depth_frame() {
+        let (w, h) = (1280u32, 720u32);
+        let mut image = orbiters_contracts::image::RgbaImage::new(w, h);
+        let view = |img: &orbiters_contracts::image::RgbaImage| depth::probe_stamp(&img.view(), false);
+        assert_eq!(view(&image), Some(false));
+        let layout = depth::DepthLayout::new(w, h).unwrap();
+        let gy = layout.tiles_y * layout.tile_px;
+        for y in gy..h {
+            for x in 0..w {
+                if (x / depth::PROBE_STAMP_SQUARE + y / depth::PROBE_STAMP_SQUARE) % 2 == 0 {
+                    image.set(x, y, [102, 102, 102]);
+                }
+            }
+        }
+        assert_eq!(view(&image), Some(true));
     }
 
     /// A rig frame from an avatar uploaded with an older Toolkit: its strip names the square layout, and its faces are read

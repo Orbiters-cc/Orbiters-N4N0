@@ -290,10 +290,14 @@ fn what_no_depth_has_seen_is_not_flown_to() {
     let person = Person { head: [0.0, 1.5, 3.0], ground: 0.0 };
     let start: Pose = [0.0, 1.6, 0.0, 0.0, 0.0, 0.0];
     let pieces = plan(start, P11, RATE, Photo3dLength::Standard, &[person], &seen);
-    // No sweep, no hop: only the way home from where it stands.
-    assert_eq!(pieces.len(), 1);
-    assert!(pieces[0].rig);
-    assert!(pieces[0].poses.iter().all(|p| length_of(p, &start) < 1e-3), "{:?}", pieces[0].poses.first());
+    // The person is still gone around (N-people-mode, 2026-11-16: a picture of people goes around them past what depth did not
+    // see), close to them; the room's hops go nowhere unseen: after the sweeps, only the way home.
+    let around: Vec<&Pose> = pieces.iter().filter(|p| !p.rig).flat_map(|p| &p.poses).collect();
+    assert!(!around.is_empty(), "the person is gone around");
+    assert!(around.iter().all(|p| flat(place(p), person.head) < 3.6 || length_of(p, &start) < 3.2), "{:?}", around.iter().find(|p| flat(place(p), person.head) >= 3.6));
+    let room: Vec<&Piece> = pieces.iter().filter(|p| p.rig).collect();
+    assert_eq!(room.len(), 1, "no hop, only the way home");
+    ends_home(&room[0].poses, start);
 }
 
 #[test]
@@ -742,5 +746,166 @@ fn replay_a_session() {
             })
             .collect();
         println!("{k:3} eye {:6.2} {:6.2} {:5.2} forward {:5.2} {:5.2} {:5.2} {text}", frame.eye[0], frame.eye[1], frame.eye[2], frame.forward[0], frame.forward[1], frame.forward[2]);
+    }
+}
+
+/// N-people-mode (Enzo, 2026-11-16): what follows the opening turns. Enough depth: around, either picture. Too little: a picture of
+/// people still goes around its people, blind; a picture of the world, or of nobody, flies the older blind flight. Turns are
+/// repeated while depth is short, three at most.
+#[test]
+fn a_picture_of_people_goes_around_them_with_or_without_depth() {
+    use PictureMode::{People, World};
+    assert_eq!(choose(People, LEAST_DEPTH_FRAMES, 1), Choice::Around);
+    assert_eq!(choose(World, LEAST_DEPTH_FRAMES, 1), Choice::Around);
+    assert_eq!(choose(People, 1, 1), Choice::AroundBlind, "1 to 4 depth frames: 4 of his 10 pictures of people on 2026-11-15");
+    assert_eq!(choose(People, 0, 0), Choice::Blind, "nobody to go around");
+    assert_eq!(choose(World, 1, 2), Choice::Blind);
+    assert!(look_again(1, 1) && look_again(2, 2) && !look_again(2, MOST_LOOKS) && !look_again(LEAST_DEPTH_FRAMES, 1));
+}
+
+/// Blind, the people's flight still circles the wearer from every side with the rig off, close enough to fill the frame, and keeps
+/// its seconds; what a depth frame did measure still stops it.
+#[test]
+fn without_depth_a_picture_of_people_still_circles_them_close() {
+    let wearer = Person { head: [HIPS[0], HIPS[1] + 0.38 * EYE_HEIGHT, HIPS[2]], ground: HIPS[1] - 0.62 * EYE_HEIGHT };
+    for length in [Photo3dLength::Standard, Photo3dLength::Full] {
+        let seen = Seen { blind: true, ..Seen::default() };
+        let mut flight = Flight::new(START, P11, RATE, length, PictureMode::People, &[wearer], true);
+        let pieces: Vec<Piece> = std::iter::from_fn(|| flight.next(&seen)).collect();
+        let around: Vec<Pose> = pieces.iter().filter(|p| !p.rig).flat_map(|p| p.poses.clone()).collect();
+        let split = Split::of(length, PictureMode::People, 1);
+        assert!(around.len() as f32 / RATE as f32 >= 0.9 * split.people, "{length:?}: {} s around him", around.len() as f32 / RATE as f32);
+        let mut bins = [false; 12];
+        for p in &around {
+            let d = flat(place(p), wearer.head);
+            assert!((0.8..3.5).contains(&d), "{length:?}: {d} m from him");
+            bins[((p[0] - HIPS[0]).atan2(p[2] - HIPS[2]).to_degrees().rem_euclid(360.0) / 30.0) as usize % 12] = true;
+        }
+        assert_eq!(bins.iter().filter(|b| **b).count(), 12, "{length:?}: every side");
+        let poses: Vec<Pose> = pieces.iter().flat_map(|p| p.poses.clone()).collect();
+        ends_home(&poses, START);
+    }
+    // A wall a depth frame measured still stands: no blind sweep enters the real room's walls.
+    let room = room();
+    let mut seen = Seen { blind: true, ..Seen::default() };
+    for f in room.start_frames.iter().take(1) {
+        seen.add(f.clone());
+    }
+    let people = start_people(&seen);
+    let mut flight = Flight::new(START, P11, RATE, Photo3dLength::Standard, PictureMode::People, &people, true);
+    let pieces: Vec<Piece> = std::iter::from_fn(|| flight.next(&seen)).collect();
+    assert!(pieces.iter().any(|p| !p.rig), "it went around him");
+}
+
+/// A camera zoomed in to 21° (P11 5.26, ESCAPISM and Sunset Bay) plans its sweeps as at the usual zoom: in the real room they find a
+/// way round him, where sweeps 5 to 6 m out found none.
+#[test]
+fn a_zoomed_in_camera_still_goes_around_close() {
+    let room = room();
+    let mut seen = after_look(&room, START);
+    let people = start_people(&seen);
+    let mut flight = Flight::new(START, 5.26, RATE, Photo3dLength::Standard, PictureMode::People, &people, true);
+    let mut around = Vec::new();
+    while let Some(piece) = flight.next(&seen) {
+        for p in piece.poses.iter().step_by(11) {
+            seen.add(draw_frame(&room.voxels, p));
+        }
+        if !piece.rig {
+            around.extend(piece.poses);
+        }
+    }
+    assert!(around.len() as f32 / RATE as f32 > 2.0, "{} s around him", around.len() as f32 / RATE as f32);
+    assert!(around.iter().all(|p| flat(place(p), people[0].head) < 3.6), "sweeps stand as at the usual zoom, not 5 to 6 m out");
+}
+
+/// Extra opening turns come off the room's seconds, never the people's.
+#[test]
+fn longer_opening_turns_cost_the_room_not_the_people() {
+    let wearer = Person { head: [HIPS[0], HIPS[1] + 0.38 * EYE_HEIGHT, HIPS[2]], ground: HIPS[1] - 0.62 * EYE_HEIGHT };
+    let seen = Seen { blind: true, ..Seen::default() };
+    let seconds = |spent: f32| {
+        let mut flight = Flight::new(START, P11, RATE, Photo3dLength::Full, PictureMode::People, &[wearer], true);
+        flight.spend(spent);
+        let pieces: Vec<Piece> = std::iter::from_fn(|| flight.next(&seen)).collect();
+        (pieces.iter().filter(|p| !p.rig).map(|p| p.poses.len()).sum::<usize>(), seconds_of(&pieces))
+    };
+    let (people_0, all_0) = seconds(0.0);
+    let (people_2, all_2) = seconds(2.0 * LOOK_S);
+    assert_eq!(people_0, people_2);
+    assert!(all_2 < all_0 - 0.5 * LOOK_S, "{all_2} s against {all_0} s");
+}
+
+/// The flight this code flies over Enzo's pictures of 2026-11-15/16 (N-people-mode): each session's own start pose, wearer and
+/// depth frames up to its first move, the faces its first frame showed (`FACES`: a JSON object of session name to
+/// `orbiters-reconstruct --find-faces` output), and frames drawn from what all its depth measured as the flight goes. What really
+/// flew is measured from the recordings themselves (capture3d/flight.py). `SESSIONS=<dir> FACES=<file> cargo test -p
+/// orbiters-desktop flights_of_the_evening -- --ignored --nocapture`.
+#[test]
+#[ignore = "reads Enzo's recordings"]
+fn flights_of_the_evening() {
+    let sessions = std::path::PathBuf::from(std::env::var("SESSIONS").unwrap());
+    let faces: serde_json::Value = std::env::var("FACES").ok().and_then(|f| serde_json::from_slice(&std::fs::read(f).ok()?).ok()).unwrap_or_default();
+    let mut names: Vec<String> = std::fs::read_dir(&sessions).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    println!("| Recording | Picture | Depth frames at the look | Choice | People | Seconds | Around people | Keyframes | Of the wearer, near | Sides of him (of 12) |");
+    println!("|---|---|---|---|---|---|---|---|---|---|");
+    for name in names {
+        let dir = sessions.join(&name);
+        let Some(picture) = orbiters_core::picture::Picture::read(&dir) else { continue };
+        let Some(rec) = recorded(&dir) else { continue };
+        let face = &faces[&name];
+        let framing = Framing {
+            width: face["width"].as_u64().unwrap_or(1920) as u32,
+            height: face["height"].as_u64().unwrap_or(1080) as u32,
+            p00: face["p00"].as_f64().unwrap_or(P00 as f64) as f32,
+            p11: face["p11"].as_f64().unwrap_or(P11 as f64) as f32,
+        };
+        let boxes: Vec<[f32; 5]> = face["boxes"].as_array().map(|a| a.iter().map(|b| std::array::from_fn(|k| b[k].as_f64().unwrap_or(0.0) as f32)).collect()).unwrap_or_default();
+        // The wearer's own body is in nobody's way (controller/burst.rs), unless `OWN_BODY_BLOCKS` asks how it flew before that.
+        let left_out = rec.hips.zip(rec.eye_height).map(|(hips, eye_height)| LeftOut { hips, eye_height }).filter(|_| std::env::var("OWN_BODY_BLOCKS").is_err());
+        let mut seen = Seen { left_out, ..Seen::default() };
+        for f in &rec.room.start_frames {
+            seen.add(f.clone());
+        }
+        let at_look = seen.frames.len();
+        let people = people(rec.start, framing, &boxes, rec.hips, rec.eye_height, &seen);
+        let choice = choose(picture.mode, at_look, people.len());
+        if choice == Choice::Blind {
+            println!("| {name} | {:?} | {at_look} | {choice:?} | {} | | | | | |", picture.mode, people.len());
+            continue;
+        }
+        seen.blind = choice == Choice::AroundBlind;
+        // Zoomed in, the camera flies at the usual zoom (burst::zoom_for_flight).
+        let mut flight = Flight::new(rec.start, P11, RATE, picture.length, picture.mode, &people, true);
+        let mut pieces = Vec::new();
+        while let Some(piece) = flight.next(&seen) {
+            for p in piece.poses.iter().step_by(11) {
+                seen.add(draw_frame(&rec.room.voxels, p));
+            }
+            pieces.push(piece);
+        }
+        let around = pieces.iter().filter(|p| !p.rig).map(|p| p.poses.len()).sum::<usize>() as f32 / RATE as f32;
+        let views = kept(&pieces);
+        let (mut near, mut sides) = (0, [false; 12]);
+        if let Some(hips) = rec.hips {
+            for (v, rig) in &views {
+                let chest = [hips[0], hips[1] + 0.25, hips[2]];
+                if let Some((x, y, z)) = project(v, chest) {
+                    if !rig && (0.0..1920.0).contains(&x) && (0.0..1080.0).contains(&y) && z < 4.0 {
+                        near += 1;
+                        sides[((v[0] - hips[0]).atan2(v[2] - hips[2]).to_degrees().rem_euclid(360.0) / 30.0) as usize % 12] = true;
+                    }
+                }
+            }
+        }
+        println!(
+            "| {name} | {:?} | {at_look} | {choice:?} | {} | {:.1} | {around:.1} | {} | {near} | {} |",
+            picture.mode,
+            people.len(),
+            seconds_of(&pieces),
+            views.len(),
+            sides.iter().filter(|s| **s).count()
+        );
+        ends_home(&poses_of(&pieces), rec.start);
     }
 }

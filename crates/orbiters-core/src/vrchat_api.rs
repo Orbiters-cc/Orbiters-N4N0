@@ -13,7 +13,10 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 const BASE: &str = "https://api.vrchat.cloud/api/1";
-const UA: &str = concat!("Orbiters-N4N0/", env!("CARGO_PKG_VERSION"), " blackorbit.eclaire@gmail.com");
+const UA_CONTACT: &str = concat!(" blackorbit.eclaire@gmail.com");
+fn user_agent() -> String {
+    format!("Orbiters-N4N0/{}{UA_CONTACT}", crate::app_version())
+}
 const ENTROPY: &[u8] = b"Orbiters.N4N0 VRChat session";
 
 /// A short-lived grant for one Orbiters identity. Revocation is permanent: a new grant needs a new client.
@@ -648,7 +651,7 @@ impl Client {
             .max_redirects(0)
             .timeout_connect(Some(Duration::from_secs(10)))
             .timeout_global(Some(Duration::from_secs(30)))
-            .user_agent(UA)
+            .user_agent(user_agent())
             .build()
             .new_agent();
         Self {

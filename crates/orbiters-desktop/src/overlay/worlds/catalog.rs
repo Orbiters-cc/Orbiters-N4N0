@@ -185,10 +185,15 @@ impl Entry {
         }
     }
 
-    /// Whether `query` (any case) is in its world's name, its author's or its sharer's, or found it.
+    /// Whether `query` finds its world's name, its author's or its sharer's however they are written
+    /// ([`orbiters_core::search`]), or found it.
     pub fn matches(&self, query: &str) -> bool {
-        let q = query.trim().to_lowercase();
-        q.is_empty() || self.search.contains(&q) || self.found_by.as_deref() == Some(q.as_str())
+        self.matches_query(&orbiters_core::search::Query::new(query), query)
+    }
+
+    /// [`Entry::matches`] with the query folded once for a whole list; `typed` is what was typed.
+    pub fn matches_query(&self, q: &orbiters_core::search::Query, typed: &str) -> bool {
+        q.matches_any(self.search.split('\n')) || self.found_by.as_deref() == Some(typed.trim().to_lowercase().as_str())
     }
 
     /// Whether the player whose VRChat name is `me` may see it: everyone, or one of those it is shared with.
@@ -1032,6 +1037,18 @@ mod tests {
         assert_eq!(find("blackorbit"), vec![7]);
         assert_eq!(find("  dawn "), vec![9]);
         assert!(find("nothing like it").is_empty());
+    }
+
+    /// A world or a sharer whose name is decorated (full-width, spaced letters) is found by its plain letters; the
+    /// name and the author are not run together.
+    #[test]
+    fn search_finds_decorated_names() {
+        let e = Entry::local("C:/c/1".into(), "\u{FF2D}\u{FF49}\u{FF44}\u{FF4E}\u{FF49}\u{FF47}\u{FF48}\u{FF54} \u{2606} Roof".into(), 1);
+        assert!(e.matches("midnight roof") && e.matches("MIDNIGHT") && e.matches("roof"));
+        let entries = parse(LISTING).unwrap();
+        let find = |q: &str| entries.iter().filter(|e| e.matches(q)).map(|e| e.id).collect::<Vec<_>>();
+        assert_eq!(find("\u{FF2D}\u{FF25}\u{FF29}"), vec![9], "typed in full-width, found in plain letters");
+        assert_eq!(find("m e i"), vec![9]);
     }
 
     #[test]

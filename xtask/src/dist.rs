@@ -51,9 +51,10 @@ pub struct Options {
 }
 
 pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
-    let version = crate::workspace_version()?;
+    let version = crate::release_version()?;
     // Whoever asks: a stable version's programs are never compiled as development builds are.
     options.profile.for_version(&version)?;
+    crate::ensure_versions_agree(&version)?;
     let target = crate::target_dir();
     let signer = Signer::new(config)?;
     anyhow::ensure!(signer.is_some() || options.unsigned, "{}", SIGNING_HELP);

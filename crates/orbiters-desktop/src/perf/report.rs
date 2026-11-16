@@ -52,7 +52,7 @@ pub fn make(lines: &[Line], snap: &Snapshot) -> Value {
         "kind": "n4n0-performance-report",
         "version": 1,
         "id": report_id(),
-        "app_version": orbiters_core::APP_VERSION,
+        "app_version": orbiters_core::app_version(),
         "made": orbiters_core::now_utc_iso(),
         "machine": machine(),
         "windows": windows_facts(&by_pid),

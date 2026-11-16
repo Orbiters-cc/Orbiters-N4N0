@@ -196,3 +196,15 @@ fn a_scan_costs_less_than_sysinfo_s_refresh() {
     println!("one look at {} processes: sysinfo {sys:.2} ms, NtQuerySystemInformation {ours:.2} ms", scan().len());
     assert!(ours <= sys * 1.5 + 0.5, "sysinfo {sys} ms, scan {ours} ms");
 }
+
+/// Work done on another thread (the desktop panels' window looks) lands in the loop's next summary, once.
+#[test]
+fn time_spent_on_another_thread_is_counted_once() {
+    let start = Instant::now();
+    let mut m = TurnMeter::new("orbit-desktop-test", start);
+    elsewhere(Part::Capture, Duration::from_millis(120));
+    let t = m.take(start + Duration::from_secs(10)).unwrap();
+    assert!(t.parts.iter().any(|(k, ms)| k == "capture" && *ms >= 12.0), "{:?}", t.parts);
+    let again = m.take(start + Duration::from_secs(20)).unwrap();
+    assert!(!again.parts.iter().any(|(k, _)| k == "capture"), "{:?}", again.parts);
+}

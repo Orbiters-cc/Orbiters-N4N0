@@ -141,6 +141,11 @@ impl Controller {
                     self.publish();
                 }
             };
+            if whole {
+                // Its card on Orbiters keeps its picture once the folder is gone (shares.log says what was given, or
+                // what could not be: the person asked for the folder to go, so it goes all the same).
+                let _ = super::shares::keep_pictures_on_orbiters(&dir);
+            }
             let result = if whole { cleanup::delete_session(&dir, &mut freed) } else { cleanup::keep_only_view(&dir, &mut freed) };
             let mut rt = self.cleanup.lock().unwrap();
             match result {

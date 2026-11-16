@@ -2044,9 +2044,11 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             }
             _ => String::new(),
         },
-        Content::VolumeLabel => match menu.volume {
-            Some(v) if v.muted => tr("Muted").into(),
-            Some(v) => tr!("Volume {percent} %", percent = v.percent),
+        Content::VolumeLabel => match menu.playing_volume() {
+            Some(super::PlayingVolume::App(v) | super::PlayingVolume::Computer(v)) if v.muted => tr("Muted").into(),
+            Some(super::PlayingVolume::App(v) | super::PlayingVolume::Computer(v)) => tr!("Volume {percent} %", percent = v.percent),
+            // Short: the screen's line is 16 letters.
+            Some(super::PlayingVolume::NotFound) => tr("No sound found").into(),
             None => String::new(),
         },
         Content::LightState => match menu.light {
@@ -2497,7 +2499,7 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::Light | Target::LightSwitch => menu.light.is_some_and(|l| l.on),
         Target::LightColor(i) => menu.light.is_some_and(|l| l.color == i),
         Target::LightLevel(i) => menu.light.is_some_and(|l| l.level_choice() == i as usize),
-        Target::Mute => menu.volume.is_some_and(|v| v.muted),
+        Target::Mute => matches!(menu.playing_volume(), Some(super::PlayingVolume::App(v) | super::PlayingVolume::Computer(v)) if v.muted),
         // The default state's mark: chosen, ringed in green.
         Target::StateMark(i) => menu.page_states().get(i as usize).is_some_and(|s| s.default),
         Target::DraftSize => menu.draft.size,
@@ -2531,7 +2533,8 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         // Previous, or back to the start of what has nothing before it.
         Target::MediaPrevious => !menu.media.as_ref().is_some_and(|m| m.can_previous || (m.can_seek && m.duration.is_some())),
         Target::MediaNext => !menu.media.as_ref().is_some_and(|m| m.can_next),
-        Target::Mute | Target::VolumeDown | Target::VolumeUp => menu.volume.is_none(),
+        // Off where there is no volume to set: nothing plays, or the app playing makes no sound the system knows of.
+        Target::Mute | Target::VolumeDown | Target::VolumeUp => !matches!(menu.playing_volume(), Some(super::PlayingVolume::App(_) | super::PlayingVolume::Computer(_))),
         Target::LightSwitch | Target::LightColor(_) | Target::LightLevel(_) => menu.light.is_none(),
         // Only the copied result offers Drop, where a card can be dropped.
         Target::Drop(i) => !menu.can_drop || menu.page_results().get(i as usize).is_none_or(|v| menu.copied.as_deref() != Some(v.id.as_str())),
@@ -2956,6 +2959,15 @@ mod tests {
         assert!(!shown(&menu).contains(&Target::MediaPrevious) && shown(&menu).contains(&Target::MediaNext));
         assert_eq!(text(&menu, Content::MediaState), "Playing · 1:23 / 4:03 · Spotify");
         assert_eq!(text(&menu, Content::VolumeLabel), "Volume 40 %");
+        // The app's own volume where the system has one (Enzo, 2026-11-16), and its keys off when it has no sound.
+        menu.media.as_mut().unwrap().sound = super::super::AppSound::Level(super::super::Volume { percent: 25, muted: false });
+        assert_eq!(text(&menu, Content::VolumeLabel), "Volume 25 %");
+        assert_eq!(target_state(&menu, Target::VolumeUp), target_state(&menu, Target::MediaNext), "on");
+        menu.media.as_mut().unwrap().sound = super::super::AppSound::NotFound;
+        assert_eq!(text(&menu, Content::VolumeLabel), "No sound found");
+        assert!(text(&menu, Content::VolumeLabel).chars().count() <= 16);
+        assert_eq!(target_state(&menu, Target::VolumeUp), target_state(&menu, Target::MediaPrevious), "off, as Previous is here");
+        menu.media.as_mut().unwrap().sound = super::super::AppSound::Unknown;
         assert_eq!(text(&menu, Content::TileNote(4)), "Midnight City");
         assert_eq!(picture_key(&menu, &l.pictures[0]), None, "no art yet");
         menu.media.as_mut().unwrap().art = Some("art:1".into());

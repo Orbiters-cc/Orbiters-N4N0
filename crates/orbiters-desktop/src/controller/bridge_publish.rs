@@ -268,6 +268,15 @@ impl crate::bridge::game::Publish for RealPublish {
         let ctl = self.ctl()?;
         crate::upload_prep::forget(session);
         let result = if everything {
+            // Its gallery card on Orbiters shows the picture Orbiters keeps of it: never deleted before that is there.
+            let problems = super::shares::keep_pictures_on_orbiters(session);
+            if !problems.is_empty() {
+                return Err(Failure::new(
+                    "picture_not_on_orbiters",
+                    format!("Its upload on Orbiters has no picture and none could be given from its folder: {}", problems.join("; ")),
+                    "Keep its files (capture_files frees most of them) and tell the person.",
+                ));
+            }
             orbiters_core::cleanup::delete_session(session, &mut |_| {})
         } else {
             orbiters_core::cleanup::drop_recording(session, &mut |_| {})

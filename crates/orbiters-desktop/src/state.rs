@@ -784,7 +784,7 @@ impl Snapshot {
             camera_tools: Default::default(),
             projects_changed: 0,
             perf: Default::default(),
-            version: orbiters_core::APP_VERSION.into(),
+            version: orbiters_core::app_version().into(),
             vrchat: VrchatStatus {
                 running: false,
                 pid: None,

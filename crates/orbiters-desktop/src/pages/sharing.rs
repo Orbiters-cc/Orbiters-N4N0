@@ -331,6 +331,14 @@ impl Dialog {
             self.selected.insert("usr_0".into());
             self.selected.insert("usr_2".into());
             self.message = "A little moment from last night ✨".into();
+            if state == "friends-search" {
+                // VRChat names as people decorate them, and what someone types to find one of them.
+                let names = ["\u{FF4E}\u{FF45}\u{FF4F}\u{FF4E}\u{FF49}\u{FF58}", "Neon Fox", "\u{2727} \u{0274}\u{1D07}\u{1D0F} \u{2727}", "n e o n i x \u{1F338}"]; // i18n: not shown (people's names)
+                self.friends_list.extend(names.iter().enumerate().map(|(i, n)| Friend { id: format!("usr_s{i}"), name: (*n).into(), image: None }));
+                self.selected.clear();
+                self.message.clear();
+                self.query = "neonix".into();
+            }
             if state == "friends-error" {
                 self.friends_list.clear();
                 self.selected.clear();
@@ -545,7 +553,7 @@ impl Dialog {
         let entry = self.layers.layered(&self.entry);
         let large = match (&entry.local, &entry.remote) {
             (Some(controller::Local::Picture(path)), _) => Some(Picture::Shot { path: path.clone(), size: 0, width: 2048 }),
-            (None, Some(item)) if item.picture.is_some() && !self.fixture_active => Some(Picture::Capture { development, id: item.id, large: true }),
+            (None, Some(item)) if !self.fixture_active => controller::remote_picture(item, development, true),
             _ => None,
         };
         (entry.picture.clone(), large)
@@ -1598,7 +1606,7 @@ impl Dialog {
         ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
         ui.add_space(12.0);
 
-        let q = self.query.trim().to_lowercase();
+        let q = orbiters_core::search::Query::new(&self.query);
         let scope = crate::controller::vrchat_data::Scope::of(cx.snap);
         if self.friends.running() && self.friends_list.is_empty() {
             let (r, _) = ui.allocate_exact_size(vec2(w, widgets::CHIP_H * 2.0 + 8.0), Sense::hover());
@@ -1629,7 +1637,7 @@ impl Dialog {
             };
             paragraph(ui, text, 12.5, theme::FG_3, w);
         } else {
-            let matches: Vec<Friend> = self.friends_list.iter().filter(|f| q.is_empty() || f.name.to_lowercase().contains(&q)).cloned().collect();
+            let matches = found_friends(&self.friends_list, &q);
             let pictures: Vec<Option<egui::TextureHandle>> = matches
                 .iter()
                 .map(|f| f.image.as_ref().and_then(|url| self.pictures.get(&ctx, &crate::worlds::Picture::Profile { scope: scope.clone(), url: url.clone() })))
@@ -1981,6 +1989,12 @@ fn megabytes(bytes: u64) -> String {
     } else {
         tr!("{size} KB", size = bytes.div_ceil(1000))
     }
+}
+
+/// The friends whose name `q` finds however it is written (full-width, spaced, decorated: [`orbiters_core::search`]),
+/// best matches first, all of them when nothing is typed.
+fn found_friends(friends: &[Friend], q: &orbiters_core::search::Query) -> Vec<Friend> {
+    orbiters_core::search::filter_ranked(q, friends.iter(), |f| vec![f.name.as_str()]).into_iter().cloned().collect()
 }
 
 /// Who a share goes to, as the start of what is said while it goes: "Sharing with Alex", "Sharing publicly and with 3 friends".
@@ -2419,5 +2433,25 @@ mod tests {
         h.settle();
         assert!(h.control("Update the shared capture").is_some_and(|(_, on)| on));
         assert!(h.control("Share to …").is_some(), "its other actions stay");
+    }
+
+    /// Enzo typed "neonix" and his friend, whose VRChat name is written in full-width letters, was not found
+    /// ("No friend called "neonix"."): the share sheet finds a friend however the name is written, best match first.
+    #[test]
+    fn the_share_sheet_finds_a_friend_whose_name_is_decorated() {
+        let friend = |id: &str, name: &str| Friend { id: id.into(), name: name.into(), image: None };
+        let list = [
+            friend("usr_a", "Neon Fox"),
+            friend("usr_b", "\u{FF4E}\u{FF45}\u{FF4F}\u{FF4E}\u{FF49}\u{FF58}"),
+            friend("usr_c", "Alex"),
+            friend("usr_d", "n e o n i x \u{1F338}"),
+            friend("usr_e", "\u{1D40D}\u{1D41E}\u{1D428}\u{1D427}\u{1D422}\u{1D431}"),
+        ];
+        let ids = |typed: &str| found_friends(&list, &orbiters_core::search::Query::new(typed)).into_iter().map(|f| f.id).collect::<Vec<_>>();
+        assert_eq!(ids("neonix"), ["usr_b", "usr_d", "usr_e"], "the full-width name first, as it is an exact match");
+        assert_eq!(ids("  NEONIX "), ["usr_b", "usr_d", "usr_e"]);
+        assert_eq!(ids("neon"), ["usr_a", "usr_b", "usr_d", "usr_e"]);
+        assert_eq!(ids(""), ["usr_a", "usr_b", "usr_c", "usr_d", "usr_e"], "nothing typed: everyone, in the list's order");
+        assert!(ids("neonixx").is_empty());
     }
 }

@@ -11,7 +11,8 @@
 //! part and for the whole blind flight (controller/rig.rs), about every other colour frame then carries six more views, one
 //! along each axis around it.
 //!
-//! **VRChat's zoom is never touched.** Close-ups through `/usercamera/Zoom` were tried in 0.3.4-dev.27 and removed: the
+//! **VRChat's zoom is only set back to its default for a picture taken zoomed in** ([`zoom_for_flight`], since 2026-11-16), once
+//! before the flight and once after it. Close-ups through `/usercamera/Zoom` were tried in 0.3.4-dev.27 and removed: the
 //! slider is a focal length, not a field of view (the projection's P11 is Zoom / 19.7 on the two values ever recorded: 45
 //! gives 47.3°, 20 gives 89°, so "zoomed in to 20" zoomed out, which Enzo saw), each change takes VRChat 0.8 s to finish, and,
 //! worst of all, VRChat takes no `/usercamera/Pose` from the first Zoom message until 0.6 to 0.9 s after the last: in the three
@@ -264,11 +265,54 @@ fn read_start_frame(session: &std::path::Path) -> Option<StartFrame> {
 const READ_START_MS: u64 = 1500;
 /// From a frame's arrival to its record and depth file on disk: frames wait for the keyframes before them to be written.
 const DEPTH_LATENCY: Duration = Duration::from_millis(120);
-/// With fewer depth frames than this after the opening turn (a world's post-processing, a capture kit without them), nothing
-/// tells where the camera can go: the blind flight. About 9 are usual.
-const LEAST_DEPTH_FRAMES: usize = 3;
+use around::LEAST_DEPTH_FRAMES;
 /// VRChat's camera at its default zoom, 47.3° vertically, when the start frame could not be read.
 const DEFAULT_P11: f32 = 2.2857;
+pub const ZOOM: &str = "/usercamera/Zoom";
+/// VRChat's default zoom ([`DEFAULT_P11`]).
+const DEFAULT_ZOOM: f32 = 45.0;
+/// A camera zoomed in further than this (as its frames' P11) flies at [`DEFAULT_ZOOM`] and is zoomed back after: 15 % past the
+/// default, so a slider left near it is left alone.
+const ZOOMED_P11: f32 = DEFAULT_P11 * 1.15;
+/// From a `/usercamera/Zoom` message until VRChat takes poses again: 0.6 to 0.9 s measured on 2026-11-04, so the opening turn
+/// waits this long instead of [`SETTLE`].
+const ZOOM_FREEZE: Duration = Duration::from_millis(1000);
+
+/// The zoom a picture flies at and the one it puts back, for a camera whose frames have `p11`: `None` when it is left as it is.
+///
+/// Why a picture touches the zoom again (the module's notes say why it stopped): Enzo's pictures of people in ESCAPISM and Sunset
+/// Bay (2026-11-15/16) were zoomed in to 21° (P11 5.26). Each frame then saw a fifth of what it does at 47°, the opening turn
+/// measured too little to fly by, and sweeps sized for that framing stood 5 to 6 m from the people: four of the five flew the
+/// blind flight or went around nobody. One change before the flight costs one freeze, while the camera stands anyway, and one
+/// after it, when nothing moves any more; the first frames, zoomed as he framed them, are where the 3D view opens.
+pub fn zoom_for_flight(p11: f32) -> Option<(f32, f32)> {
+    (p11.is_finite() && p11 > ZOOMED_P11).then(|| (DEFAULT_ZOOM, (p11 * ZOOM_PER_P11).round()))
+}
+
+/// The P11 of the first colour frame recorded in `session` (its strip's projection), waiting at most `wait` for it.
+fn first_p11(session: &std::path::Path, wait: Duration) -> Option<f32> {
+    use orbiters_contracts::frame_record::{record_flags, FrameRecord, RECORD_SIZE};
+    use orbiters_contracts::strip::flags;
+    let begin = Instant::now();
+    loop {
+        if let Ok(bytes) = std::fs::read(session.join(orbiters_contracts::manifest::FRAMES_FILE)) {
+            let first = bytes.chunks_exact(RECORD_SIZE).filter_map(|c| FrameRecord::from_bytes(c).ok()).find(|r| {
+                r.has(record_flags::STRIP_OK) && flags::kind(r.strip_flags) == flags::KIND_COLOUR && flags::face(r.strip_flags) == 0
+            });
+            if let Some(r) = first {
+                return Some(r.projection[1]);
+            }
+        }
+        if begin.elapsed() >= wait {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// What a picture's flight did, kept in its session for whoever looks into a picture afterwards (the installed app's error
+/// output goes nowhere).
+pub const FLIGHT_FILE: &str = "flight.txt";
 
 /// N4N0's camera rig's parameters for a camera pose, with the avatar's hips at `hips`: following it, where it stands
 /// from the hips (each axis over [`rig::REACH_M`]) and its turn from them (over [`rig::YAW_DEG`]), level on upright
@@ -393,10 +437,22 @@ impl super::Controller {
             let reading = session.clone().filter(|_| picture && mode == PictureMode::People).map(|dir| std::thread::spawn(move || read_start_frame(&dir)));
             // Remote User hides the other players from VRChat's camera; the rig's six cameras have no such mask.
             let room_rig = mode == PictureMode::People || ctl.others_here() == 0;
-            std::thread::sleep(SETTLE);
             let send = |address: &str, args: Vec<rosc::OscType>| {
                 let _ = ctl.with_osc(|o| o.send(address, args));
             };
+            let mut told: Vec<String> = Vec::new();
+            // A camera zoomed in flies at the usual zoom (zoom_for_flight), and gets its own back at the end.
+            let zoom = (picture && !ctl.with_settings(|s| s.dolly_streams))
+                .then(|| session.as_deref().and_then(|dir| first_p11(dir, Duration::from_millis(400))))
+                .flatten()
+                .and_then(|p11| zoom_for_flight(p11).map(|z| (p11, z)));
+            if let Some((p11, (to, back))) = zoom {
+                send(ZOOM, vec![rosc::OscType::Float(to)]);
+                told.push(format!("zoomed in (P11 {p11:.2}): flies at zoom {to}, back to {back} after")); // i18n: not shown
+                std::thread::sleep(ZOOM_FREEZE);
+            } else {
+                std::thread::sleep(SETTLE);
+            }
             // Smoothing would trail the swing behind.
             send(SMOOTH, vec![rosc::OscType::Bool(false)]);
             let camera = |p: &[f32; 6]| (POSE.to_string(), p.iter().map(|v| rosc::OscType::Float(*v)).collect::<Vec<_>>());
@@ -428,8 +484,10 @@ impl super::Controller {
                 let mut flying = fly(&around::look(pose, RATE_HZ), false);
                 frame = reading.and_then(|r| r.join().ok()).flatten();
                 let mut seen = around::Seen::default();
-                // A wearer the frames show, and who leaves the picture afterwards, is in nobody's way.
-                if mode == PictureMode::World && !ctl.hiding_self() {
+                // A wearer the frames show is in nobody's way: in a picture of the world they leave it afterwards, in one of people they
+                // are what it goes around. Held up by their own body, a camera held at their chest (ESCAPISM and Trash Compactor,
+                // 2026-11-15/16) found no way out to the ring around them and went around nobody.
+                if !ctl.hiding_self() {
                     seen.left_out = ctl.hips_now().zip(eye_height).map(|(hips, eye_height)| around::LeftOut { hips, eye_height });
                 }
                 if let Some(dir) = &session {
@@ -439,21 +497,35 @@ impl super::Controller {
                     live.poll(&mut seen);
                     // No depth with Remote User off is the one thing no recording shows the answer to: it may be what took
                     // the kit away. The blind flight goes through walls, so it comes back on, and the camera looks again.
+                    let mut looks = 1;
                     if seen.frames.len() < LEAST_DEPTH_FRAMES && ctl.hiding_others() && ctl.others_cost_the_strip() {
                         flying = flying && fly(&around::look(pose, RATE_HZ), false);
+                        looks += 1;
                         std::thread::sleep(DEPTH_LATENCY);
                         live.poll(&mut seen);
                     }
-                    if seen.frames.len() >= LEAST_DEPTH_FRAMES {
+                    // A slow stream gives a turn few depth frames: the camera turns again, a little longer to wait for a flight that
+                    // knows where it goes.
+                    while flying && around::look_again(seen.frames.len(), looks) {
+                        flying = fly(&around::look(pose, RATE_HZ), false);
+                        looks += 1;
+                        std::thread::sleep(DEPTH_LATENCY);
+                        live.poll(&mut seen);
+                    }
+                    let hips = frame.as_ref().and_then(|f| f.hips).or_else(|| ctl.hips_now());
+                    let framing = frame.as_ref().map_or_else(Default::default, |f| around::Framing { width: f.width, height: f.height, p00: f.p00, p11: f.p11 });
+                    let boxes = frame.as_ref().map_or(&[][..], |f| &f.boxes[..]);
+                    // A wearer hidden from the picture (Local User off, hide_self.rs) has nobody to go and see.
+                    let people = around::people(pose, framing, boxes, hips, eye_height.filter(|_| !ctl.hiding_self()), &seen);
+                    let choice = around::choose(mode, seen.frames.len(), people.len());
+                    told.push(format!("{mode:?} {length:?}: {looks} opening turns, {} depth frames, {} people ({} faces in the first frame), {choice:?}", seen.frames.len(), people.len(), boxes.len())); // i18n: not shown
+                    if choice != around::Choice::Blind {
                         around = true;
-                        let hips = frame.as_ref().and_then(|f| f.hips).or_else(|| ctl.hips_now());
-                        let framing =
-                            frame.as_ref().map_or_else(Default::default, |f| around::Framing { width: f.width, height: f.height, p00: f.p00, p11: f.p11 });
-                        let boxes = frame.as_ref().map_or(&[][..], |f| &f.boxes[..]);
-                        // A wearer hidden from the picture (Local User off, hide_self.rs) has nobody to go and see.
-                        let people = around::people(pose, framing, boxes, hips, eye_height.filter(|_| !ctl.hiding_self()), &seen);
-                        let p11 = frame.as_ref().map_or(DEFAULT_P11, |f| f.p11).max(0.1);
+                        seen.blind = choice == around::Choice::AroundBlind;
+                        // The frames' own zoom, unless the flight set it back to the usual one.
+                        let p11 = if zoom.is_some() { DEFAULT_P11 } else { frame.as_ref().map_or(DEFAULT_P11, |f| f.p11).max(0.1) };
                         let mut flight = around::Flight::new(pose, p11, RATE_HZ, length, mode, &people, room_rig);
+                        flight.spend((looks - 1) as f32 * around::LOOK_S);
                         while let Some(piece) = flying.then(|| flight.next(&seen)).flatten() {
                             if piece.rig {
                                 // The rig where the camera is, then on: every other colour frame gets its six views.
@@ -465,9 +537,7 @@ impl super::Controller {
                             flying = fly(&piece.poses, piece.rig);
                             live.poll(&mut seen);
                         }
-                        for line in &flight.log {
-                            eprintln!("3d picture: {line}");
-                        }
+                        told.extend(flight.log.iter().cloned());
                     }
                 }
             } else {
@@ -494,6 +564,18 @@ impl super::Controller {
                 }
             }
             send(POSE, pose.iter().map(|v| rosc::OscType::Float(*v)).collect());
+            if let Some((_, (_, back))) = zoom {
+                send(ZOOM, vec![rosc::OscType::Float(back)]);
+            }
+            if !around {
+                told.push("the older flight: blind, or the 1 s sweep".into()); // i18n: not shown
+            }
+            for line in &told {
+                eprintln!("3d picture: {line}");
+            }
+            if let Some(dir) = &session {
+                let _ = std::fs::write(dir.join(FLIGHT_FILE), told.join("\n") + "\n");
+            }
             ctl.hold_rig(false);
             if let Some(smooth) = smooth.filter(|s| *s) {
                 send(SMOOTH, vec![rosc::OscType::Bool(smooth)]);
@@ -568,6 +650,57 @@ impl super::Controller {
 mod tests {
     use super::*;
     use orbiters_i18n::{in_language, Language};
+
+    /// A camera zoomed in flies at VRChat's default zoom and gets its own back; one at (or near) the default, or wider, is left alone.
+    #[test]
+    fn a_zoomed_in_camera_flies_at_the_usual_zoom_and_gets_its_own_back() {
+        assert_eq!(zoom_for_flight(5.26), Some((45.0, 104.0)), "ESCAPISM's and Sunset Bay's 21°");
+        assert_eq!(zoom_for_flight(DEFAULT_P11), None);
+        assert_eq!(zoom_for_flight(2.5), None, "near the default");
+        assert_eq!(zoom_for_flight(1.0159), None, "zoomed out to 89°");
+        assert_eq!(zoom_for_flight(f32::NAN), None);
+    }
+
+    /// The first colour frame's zoom is read from the recording's own records, rig faces and depth frames aside.
+    #[test]
+    fn the_zoom_is_read_from_the_first_colour_frame() {
+        use orbiters_contracts::frame_record::{record_flags, FrameRecord};
+        use orbiters_contracts::strip::flags;
+        let dir = std::env::temp_dir().join(format!("orbiters-first-p11-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(first_p11(&dir, Duration::ZERO), None, "nothing recorded yet");
+        let record = |kind: u32, face: u32, p11: f32| {
+            FrameRecord {
+                flags: record_flags::STRIP_OK,
+                frame_index: 0,
+                capture_time_ns: 0,
+                game_time: 0.0,
+                strip_flags: kind | face << flags::FACE_SHIFT,
+                camera_to_world: [0.0; 12],
+                projection: [1.0, p11, 0.0, 0.0],
+                near: 0.05,
+                far: 1000.0,
+                width: 1920,
+                height: 1080,
+                keyframe_index: -1,
+                depth_index: -1,
+                video_frame: -1,
+                corrected_bits: 0,
+                patch: [[0.0; 3]; 6],
+                min_contrast: 0.0,
+            }
+            .to_bytes()
+        };
+        let mut bytes = Vec::new();
+        bytes.extend(record(flags::KIND_DEPTH, 0, 9.0));
+        bytes.extend(record(flags::KIND_RIG, 3, 1.0));
+        bytes.extend(record(flags::KIND_COLOUR, 0, 5.26));
+        bytes.extend(record(flags::KIND_COLOUR, 0, 2.2857));
+        std::fs::write(dir.join(orbiters_contracts::manifest::FRAMES_FILE), bytes).unwrap();
+        assert_eq!(first_p11(&dir, Duration::ZERO), Some(5.26));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// What stops a 3D picture is told in English in any language: N4N0 keys its translation on that text where it draws it (its screen has no
     /// Japanese), and the bridge hands it to an AI. A scan has no such reader: a toast says it in the person's language.

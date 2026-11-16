@@ -457,6 +457,11 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         // Enzo's IMG1 (2026-11-11): All tools with what plays, its timeline, its volume at 0 and its two links.
         let playing = Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), music: Some(("DJ Brace - 2016 DMC Online Finals (Winning Routine)".into(), true)), music_times: Some((364, 364)), volume: Some((0, false)), can_copy_playing: true, can_drop_playing: true, ..facts.clone() };
         qm_scene(&playing, None, Some(Sheet::All), &format!("vr-sheet-{world}-all-playing"))?;
+        // Enzo, 2026-11-16: the volume is the playing app's own (its buttons say so under the pointer), or shows as not found.
+        let app = Facts { volume: Some((35, false)), music_app: "Chrome".into(), pointed: Some(Action::Volume(true)), ..playing.clone() };
+        qm_scene(&app, None, Some(Sheet::All), &format!("vr-sheet-{world}-all-playing-app-volume"))?;
+        let unfound = Facts { volume: None, volume_unfound: true, ..playing.clone() };
+        qm_scene(&unfound, None, Some(Sheet::All), &format!("vr-sheet-{world}-all-playing-no-app-sound"))?;
         // A capture around the person: Hide 3D and Small here in the head, the tabs as icons where their names do not fit.
         let around = Facts { sheet: Some(Sheet::Instances), sheet_title: "Instances".into(), view_showing: true, ..facts.clone() };
         qm_scene(&around, None, Some(Sheet::Instances), &format!("vr-sheet-{world}-instances-capture"))?;
@@ -908,6 +913,11 @@ pub(super) fn camera_shots(out: &Path) -> anyhow::Result<()> {
         ("orbit-camera-idle", idle.clone(), false),
         ("orbit-camera-right", camera(&|c| c.on_the_right = true), true),
         ("orbit-camera-point-record", Facts { pointed: Some(Action::Record), ..idle.clone() }, false),
+        // N-length-switch: the pictures' length on both 3D tiles, pointed (its caption says what a press makes it), at 1 and 8 s, on the right.
+        ("orbit-camera-point-length", Facts { pointed: Some(Action::PictureLength), ..idle.clone() }, false),
+        ("orbit-camera-length-1", Facts { length: orbiters_core::settings::Photo3dLength::Quick, ..idle.clone() }, false),
+        ("orbit-camera-length-8", Facts { length: orbiters_core::settings::Photo3dLength::Full, ..idle.clone() }, false),
+        ("orbit-camera-length-8-right", Facts { length: orbiters_core::settings::Photo3dLength::Full, ..camera(&|c| c.on_the_right = true) }, true),
         ("orbit-camera-finding", camera(&|c| c.finding = true), false),
         ("orbit-camera-countdown", Facts { countdown: Some(3), picture_mode: Some(PhotoMode::People), capture_busy: true, ..idle.clone() }, false),
         ("orbit-camera-no-kit", no_kit(Some(DemoSwitch::Offered)), false),
@@ -962,6 +972,8 @@ fn desk_camera_shots(out: &Path) -> anyhow::Result<()> {
         ("idle", idle.clone()),
         ("point-people", Facts { pointed: Some(Action::Picture(PhotoMode::People)), ..idle.clone() }),
         ("point-qr", Facts { pointed: Some(Action::CameraQr), ..idle.clone() }),
+        ("point-length", Facts { pointed: Some(Action::PictureLength), ..idle.clone() }),
+        ("length-8", Facts { length: orbiters_core::settings::Photo3dLength::Full, ..idle.clone() }),
         ("waiting", Facts { picture_wait: Some(orbiters_n4n0::status::PhotoWait::Move), picture_mode: Some(PhotoMode::World), ..idle.clone() }),
         ("countdown", Facts { countdown: Some(3), picture_mode: Some(PhotoMode::People), capture_busy: true, ..idle.clone() }),
         ("flying", Facts { picture_flying: true, picture_mode: Some(PhotoMode::World), capture_busy: true, ..idle.clone() }),

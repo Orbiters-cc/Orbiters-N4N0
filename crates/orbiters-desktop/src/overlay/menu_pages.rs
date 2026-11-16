@@ -249,6 +249,7 @@ pub(crate) fn sample_media() -> Media {
         duration: Some(243),
         art: Some(SAMPLE_ART.into()),
         video: None,
+        sound: Default::default(),
     }
 }
 

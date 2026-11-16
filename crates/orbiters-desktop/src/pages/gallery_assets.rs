@@ -164,20 +164,20 @@ impl State {
         self.get(id)?.pictures.get(n?)
     }
 
-    /// The assets' showcase pictures as the gallery's entries, those `q` (lowercase) finds by the asset's name or
+    /// The assets' showcase pictures as the gallery's entries, those `q` finds by the asset's name or
     /// kind, who posted it or its words. Each asset's group sits at its newest picture's time, its pictures in its
     /// page's order.
-    pub fn entries(&self, q: &str, development: bool) -> Vec<Entry> {
+    pub fn entries(&self, q: &orbiters_core::search::Query, development: bool) -> Vec<Entry> {
         let mut out = Vec::new();
         for a in &self.assets {
             let kind = assets::kind_label(&a.asset.kind);
-            let asset_found = q.is_empty() || [a.asset.name.to_lowercase(), kind.to_lowercase(), tr(kind).to_lowercase()].iter().any(|s| s.contains(q));
+            let asset_found = q.matches_any([a.asset.name.as_str(), kind, tr(kind)]);
             let taken = controller::unix(a.date());
             for (n, p) in a.pictures.iter().enumerate() {
                 let author = p.author.as_ref().map(|m| m.username.clone()).unwrap_or_default();
                 if !asset_found {
-                    let words = p.message.as_ref().map(|m| m.content.to_lowercase()).unwrap_or_default();
-                    if ![author.to_lowercase(), words].iter().any(|s| s.contains(q)) {
+                    let words = p.message.as_ref().map(|m| m.content.as_str()).unwrap_or_default();
+                    if !(q.matches(&author) || q.in_text(words)) {
                         continue;
                     }
                 }
@@ -292,7 +292,7 @@ mod tests {
         let mut state = State::default();
         // The real links, not this computer's pictures standing in for them.
         state.stage_assets();
-        let entries = state.entries("", false);
+        let entries = state.entries(&orbiters_core::search::Query::new(""), false);
         let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
         assert_eq!(keys, ["asset:41:0", "asset:41:1", "asset:41:2", "asset:77:0", "asset:77:1"], "an asset without showcase pictures has no group");
         assert!(entries.iter().all(|e| e.local.is_none() && e.remote.is_none() && owns(&e.key)));
@@ -305,10 +305,10 @@ mod tests {
         assert_eq!(state.labels(&entries[0]), Some(("by Mika".into(), "Made by you".into())));
         assert_eq!(state.labels(&entries[4]).unwrap().1, "Yours on Orbiters");
         assert_eq!(state.page("asset:77:1", Server::Production).as_deref(), Some("https://orbiters.cc/assets/77"));
-        assert_eq!(state.entries("racer", false).len(), 2, "found by the asset's name");
-        assert_eq!(state.entries("avatar", false).len(), 5, "and by its kind");
-        assert_eq!(state.entries("mika", false).len(), 2, "or by who posted it");
-        assert_eq!(state.entries("night ride", false).len(), 1, "or by its words");
+        assert_eq!(state.entries(&orbiters_core::search::Query::new("racer"), false).len(), 2, "found by the asset's name");
+        assert_eq!(state.entries(&orbiters_core::search::Query::new("avatar"), false).len(), 5, "and by its kind");
+        assert_eq!(state.entries(&orbiters_core::search::Query::new("mika"), false).len(), 2, "or by who posted it");
+        assert_eq!(state.entries(&orbiters_core::search::Query::new("night ride"), false).len(), 1, "or by its words");
         let shown: Vec<String> = entries.iter().map(|e| e.key.clone()).collect();
         let (list, about, index, _) = state.window(&shown, "asset:77:0", false).unwrap();
         assert_eq!((list.len(), index, about[index].title.as_str()), (5, 3, "Neon Racer"));

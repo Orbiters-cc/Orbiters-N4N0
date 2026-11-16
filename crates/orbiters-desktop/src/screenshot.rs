@@ -2148,6 +2148,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
 
     for name in [
         "gallery-mixed",
+        "gallery-server-only",
         "gallery-mine",
         "gallery-shared",
         "gallery-search",
@@ -2156,6 +2157,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         "gallery-grantee",
         "gallery-friends",
         "gallery-friends-error",
+        "gallery-friends-search",
         "gallery-explicit",
         "gallery-error",
         "gallery-picture",
@@ -2275,7 +2277,11 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
 
     // Home's music is the overlay's sample song, never what this computer plays.
     crate::media::watcher().stand_in(crate::media::Reading {
-        media: Some(crate::overlay::menu_pages::sample_media()),
+        // Its own volume as Windows' mixer has it (Enzo, 2026-11-16: the card sets the app playing only).
+        media: Some(orbiters_n4n0_core::menu::Media {
+            sound: orbiters_n4n0_core::menu::AppSound::Level(orbiters_n4n0_core::menu::Volume { percent: 35, muted: false }),
+            ..crate::overlay::menu_pages::sample_media()
+        }),
         volume: Some(orbiters_n4n0_core::menu::Volume { percent: 40, muted: false }),
         art: Some(std::sync::Arc::new(crate::media::Art { key: crate::overlay::menu_pages::SAMPLE_ART.into(), rgb: crate::overlay::menu_pages::sample_art() })),
     });

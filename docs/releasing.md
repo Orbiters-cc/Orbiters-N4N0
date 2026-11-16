@@ -4,7 +4,7 @@ A release is a version bump, built on this computer (not on GitHub's runners), p
 release of [Orbiters-cc/Orbiters-N4N0](https://github.com/Orbiters-cc/Orbiters-N4N0/releases) with the setup attached:
 
 ```sh
-cargo xtask bump 0.2.0          # the workspace's version, in Cargo.toml and Cargo.lock
+cargo xtask bump 0.2.0          # the release's version: .cargo/config.toml (a stable one also Cargo.toml and Cargo.lock)
 git commit -am "Orbiters - N4N0 0.2.0" && git push
 cargo xtask release             # --unsigned until code signing is set up (GitHub only)
 ```
@@ -69,7 +69,7 @@ applications with two renames (the old one goes back if the second fails) and op
 | Command | What it does |
 |---|---|
 | `cargo xtask keygen` | Creates the release key, once. The private half goes to `~/.orbiters-release/update-signing-key`, the public half to `crates/orbiters-update/update-key.pub`, which is committed and built into every app. |
-| `cargo xtask bump <version>` | Sets `[workspace.package] version` and updates Cargo.lock. Every program and the release carry this version. |
+| `cargo xtask bump <version>` | Sets `ORBITERS_VERSION` in `.cargo/config.toml`: every program and the release carry this version (`orbiters-version` says how the libraries get it). A stable version also sets `[workspace.package] version` and updates Cargo.lock; a development one (`--dev`) changes the config alone, so only the programs recompile, and `dist` refuses a stable version whose crates say another. |
 | `cargo xtask dist` | Writes `target/dist/<version>/` (details below). `--unsigned` makes a test build, and `--programs <folder>` packs programs already built there instead of building them. Neither gets a release file, so `publish` cannot put them out. `--dev` compiles as `release --dev` does (below), and is refused for a version that is not a development one (`0.3.6-dev.2`): a stable version's setup is only ever made with the full profile. |
 | `cargo xtask publish` | Uploads `target/dist/<version>/` to the server and makes it the channel's release (`--force` publishes a version that is not newer than the current one). Use it again after an upload that was cut. |
 | `cargo xtask release` | Runs the checks, `dist`, `publish`, the tag, then `github`. `--notes <file>` adds release notes (plain text, shown in the app's Settings and on GitHub). `--unsigned`: no Authenticode signatures, no `publish`. |

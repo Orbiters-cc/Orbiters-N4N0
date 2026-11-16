@@ -93,7 +93,7 @@ fn tidy(keep: Option<&str>) {
 pub fn pending_setup() -> Option<(PathBuf, PathBuf)> {
     let (dir, _) = InstallRecord::of_this_program()?;
     let ready = read_ready()?;
-    if ready.started || !orbiters_update::is_newer(&ready.version, orbiters_core::APP_VERSION) {
+    if ready.started || !orbiters_update::is_newer(&ready.version, orbiters_core::app_version()) {
         return None;
     }
     let setup = orbiters_update::setup_file(&ready.version);
@@ -134,7 +134,7 @@ impl Controller {
         }
         // An update that installed (this app is its version or newer) leaves its setup behind.
         match read_ready() {
-            Some(ready) if orbiters_update::is_newer(&ready.version, orbiters_core::APP_VERSION) => {}
+            Some(ready) if orbiters_update::is_newer(&ready.version, orbiters_core::app_version()) => {}
             _ => tidy(None),
         }
         self.update(|s| {
@@ -236,7 +236,7 @@ impl Controller {
         };
         let checked = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default();
         self.update(|s| s.update.checked = Some(checked));
-        if !orbiters_update::is_newer(&release.version, orbiters_core::APP_VERSION) {
+        if !orbiters_update::is_newer(&release.version, orbiters_core::app_version()) {
             self.update(|s| s.update.state = UpdateState::Idle);
             tidy(None);
             return;

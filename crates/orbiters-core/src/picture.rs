@@ -81,10 +81,13 @@ pub fn wearer_goes(session: &Path) -> bool {
     if let Some(choice) = WearerChoice::read(session) {
         return choice.take_out;
     }
-    match Picture::read(session).map(|p| p.wearer) {
-        Some(Left::InPicture) => true,
-        Some(Left::Out) => false,
-        Some(Left::NotAsked) => asked_out_by_the_mask(session),
+    match Picture::read(session).map(|p| (p.mode, p.wearer)) {
+        Some((_, Left::InPicture)) => true,
+        Some((_, Left::Out)) => false,
+        // A picture of the world is of the place around: whoever took it goes, whether or not the app could ask the avatar to
+        // hide (Enzo, 2026-11-16). "Reconstruct with my avatar" brings them back ([`WearerChoice`]).
+        Some((PictureMode::World, Left::NotAsked)) => true,
+        Some((PictureMode::People, Left::NotAsked)) => asked_out_by_the_mask(session),
         None => asked_out_by_the_mask(session),
     }
 }
@@ -225,6 +228,29 @@ mod tests {
         // A report from before any of this still reads.
         std::fs::write(rec::dir(&dir).join(rec::REPORT_FILE), r#"{"gaussians":4}"#).unwrap();
         assert_eq!(rec::read_report(&dir).map(|r| r.wearer), Some(None));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// N-world-hide-self (Enzo, 2026-11-16): a picture of the world is reconstructed without its wearer from the first run,
+    /// however the app fared asking the avatar to hide; a picture of people keeps them; the person's word wins both ways.
+    #[test]
+    fn a_world_picture_leaves_its_wearer_out_unless_told_and_a_people_picture_keeps_them() {
+        let dir = std::env::temp_dir().join(format!("orbiters-world-wearer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let world = Picture { mode: PictureMode::World, length: Photo3dLength::Standard, wearer: Left::NotAsked, others: Left::NotAsked };
+        world.save(&dir).unwrap();
+        assert!(wearer_goes(&dir), "nobody asked the avatar (no kit to hide it, camera not driven): it still goes");
+        Picture { wearer: Left::InPicture, ..world }.save(&dir).unwrap();
+        assert!(wearer_goes(&dir), "it could not hide: it goes afterwards");
+        Picture { wearer: Left::Out, ..world }.save(&dir).unwrap();
+        assert!(!wearer_goes(&dir), "hidden by VRChat: nothing is in the frames to take out");
+        let people = Picture { mode: PictureMode::People, ..world };
+        people.save(&dir).unwrap();
+        assert!(!wearer_goes(&dir), "a picture of people keeps whoever took it");
+        world.save(&dir).unwrap();
+        WearerChoice { take_out: false }.save(&dir).unwrap();
+        assert!(!wearer_goes(&dir), "Reconstruct with my avatar brings them back");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

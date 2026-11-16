@@ -33,6 +33,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn main() {
+    // The release's version, for the libraries too (orbiters-version says why it is given here).
+    orbiters_version::set(env!("ORBITERS_VERSION"));
     orbiters_core::panic_log::install();
     // Warnings and errors it reports are written in the language of the app that reads them.
     Settings::speak_saved_language();
@@ -382,7 +384,7 @@ fn finish(current: &mut Option<Running>, out: &mut Output, reason: &str) -> Opti
 
 fn run_worker() -> anyhow::Result<()> {
     let mut out = Output(std::io::stdout());
-    out.emit(&WorkerEvent::Ready { version: orbiters_core::APP_VERSION.into() });
+    out.emit(&WorkerEvent::Ready { version: orbiters_core::app_version().into() });
     let (tx, rx) = crossbeam_channel::unbounded::<WorkerCommand>();
     let errors = crossbeam_channel::unbounded::<String>();
     {

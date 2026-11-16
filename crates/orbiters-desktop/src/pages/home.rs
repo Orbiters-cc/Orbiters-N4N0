@@ -18,7 +18,7 @@ use orbiters_core::settings::Settings;
 use orbiters_i18n::{mark, tr, tr_ctx};
 use orbiters_n4n0_core::menu::layout::{self, Content, Icon, Tint, HOME_TILES, MORE_CARDS_QR};
 use orbiters_n4n0_core::menu::strings::{self, Strings, Text};
-use orbiters_n4n0_core::menu::{Call, Effect, Media, MediaCommand, Menu, Page, PhotoLength, PhotoMode, Target, Volume, TIMERS};
+use orbiters_n4n0_core::menu::{Call, Effect, Media, MediaCommand, Menu, Page, PhotoLength, PhotoMode, PlayingVolume, Target, Volume, TIMERS};
 use orbiters_n4n0_core::youtube::Video;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
@@ -284,10 +284,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 effects.extend(host.menu.set_query(&text));
             }
             Act::Call(i) => effects.extend(host.menu.call_contact(i)),
-            Act::Volume(percent) => {
-                host.menu.volume = Some(Volume { percent, muted: false });
-                effects.push(Effect::Media(MediaCommand::Volume(percent)));
-            }
+            // The playing app's own volume (the computer's where apps have none), shown at once.
+            Act::Volume(percent) => effects.extend(host.menu.set_playing_volume(percent)),
             // Shown where it goes at once; the computer follows.
             Act::Seek(at) => {
                 if let Some(media) = host.menu.media.as_mut() {
@@ -1033,9 +1031,28 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
                     }
                 });
             }
-            if let Some(volume) = menu.volume {
+            // The app playing alone, where Windows gives each app a volume (Enzo, 2026-11-16); the speakers where apps have none.
+            let app = media.map(|m| m.app.as_str()).filter(|app| !app.is_empty());
+            let volume = match menu.playing_volume() {
+                Some(PlayingVolume::App(volume)) => Some((volume, app.map_or_else(|| tr("Only this app: other sounds stay as they are.").to_string(), |app| tr!("Only {app}: other sounds stay as they are.", app = app)))),
+                Some(PlayingVolume::Computer(volume)) => Some((volume, tr("This computer's speakers.").to_string())),
+                Some(PlayingVolume::NotFound) => {
+                    widgets::separator(ui);
+                    let why = app.map_or_else(|| tr("No sound from this app to set yet.").to_string(), |app| tr!("No sound from {app} to set yet.", app = app));
+                    widgets::field(ui, tr("Volume"), Some(&why), 340.0, |ui| {
+                        // Off, and nothing set in its place: not the computer's volume, not another app's.
+                        ui.add_enabled_ui(false, |ui| {
+                            let mut none = 0.0;
+                            widgets::slider(ui, "orbiters-home-volume", &mut none, 0.0..=100.0, 1.0, |_| "\u{2013}".to_string());
+                        });
+                    });
+                    None
+                }
+                None => None,
+            };
+            if let Some((volume, says)) = volume {
                 widgets::separator(ui);
-                widgets::field(ui, tr("Volume"), Some(tr("This computer's speakers.")), 340.0, |ui| {
+                widgets::field(ui, tr("Volume"), Some(&says), 340.0, |ui| {
                     let mut percent = volume.percent as f32;
                     let format = |v: f32| if volume.muted { tr("Muted").to_string() } else { format!("{v:.0} %") };
                     if widgets::slider(ui, "orbiters-home-volume", &mut percent, 0.0..=100.0, 1.0, format) {

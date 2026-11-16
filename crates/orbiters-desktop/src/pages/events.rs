@@ -1698,13 +1698,12 @@ impl State {
 
     /// The events the search shows, soonest first.
     fn shown(&self) -> Vec<Card> {
-        let q = self.query.trim().to_lowercase();
+        let q = orbiters_core::search::Query::new(&self.query);
         let hit = |c: &Card| {
-            q.is_empty()
-                || c.title.to_lowercase().contains(&q)
-                || c.description.to_lowercase().contains(&q)
-                || c.community.as_ref().is_some_and(|h| h.name.to_lowercase().contains(&q))
-                || c.world.as_ref().and_then(|w| w.name.as_ref()).is_some_and(|n| n.to_lowercase().contains(&q))
+            q.matches(&c.title)
+                || q.in_text(&c.description)
+                || c.community.as_ref().is_some_and(|h| q.matches(&h.name))
+                || c.world.as_ref().and_then(|w| w.name.as_ref()).is_some_and(|n| q.matches(n))
         };
         self.cards.iter().filter(|c| hit(c)).cloned().collect()
     }

@@ -1,0 +1,1179 @@
+{
+ "about": "Two-hand grabs of VRChat camera panel in the SteamVR sandbox, 2026-11-16 (vr1116/camhand, camhand/h1 h5 h7 hands.jsonl). Panel: a sighting (standing space). Hands start in front of it (nz 0.05, up -0.02), left at -offsets[0] and right at +offsets[1] along its width, level. Steps: pull = grip pulls set in one frame; frame = one more frame; move = a hand moved by `by` in the panel axes (width, up, towards the head) and whether VRChat panel followed it. Thresholds: Enzo binding (left 0.7/0.55, right 0.25/0.2).",
+ "panel": [
+  [
+   0.9998738169670105,
+   -0.0014577036490663886,
+   -0.015820255503058434,
+   -0.000594709999859333
+  ],
+  [
+   0.011702137999236584,
+   0.7410789728164673,
+   0.6713159084320068,
+   1.3394699096679688
+  ],
+  [
+   0.010745478793978691,
+   -0.6714162826538086,
+   0.7410025000572205,
+   -0.3453754782676697
+  ]
+ ],
+ "sequences": [
+  {
+   "name": "second grips while right holds",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      -0.06,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "right": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      0,
+      0,
+      0.05
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "pull": {
+      "left": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      -0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    }
+   ]
+  },
+  {
+   "name": "left pulled to 0.5 (under its threshold) while right holds, past it after right let go",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "left": 0.5
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "right": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "followed"
+    }
+   ]
+  },
+  {
+   "name": "left presses in the frame right lets go",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "right": 0,
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "stayed"
+    }
+   ]
+  },
+  {
+   "name": "right holds, left grips, right lets go and grips again",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "right": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "move": "left",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "stayed"
+    }
+   ]
+  },
+  {
+   "name": "second grips while left holds",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "move": "left",
+     "by": [
+      0,
+      -0.06,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "left": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0,
+      0.05
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "pull": {
+      "right": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      -0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    }
+   ]
+  },
+  {
+   "name": "right pulled to 0.15 (under its threshold) while left holds, past it after left let go",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "right": 0.15
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "followed"
+    }
+   ]
+  },
+  {
+   "name": "right presses in the frame left lets go",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "left": 0,
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "stayed"
+    }
+   ]
+  },
+  {
+   "name": "left holds, right grips, left lets go and grips again",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "stayed"
+    }
+   ]
+  },
+  {
+   "name": "left presses 100 ms after right let go",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "right": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "followed"
+    }
+   ]
+  },
+  {
+   "name": "left presses 300 ms after right let go",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "right": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "followed"
+    }
+   ]
+  },
+  {
+   "name": "right holds, left grips and lets go first",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "right": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "stayed"
+    }
+   ]
+  },
+  {
+   "name": "right holds, left grips, both let go together",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "right": 0,
+      "left": 0
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "move": "left",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "stayed"
+    }
+   ]
+  },
+  {
+   "name": "left eased to 0.6, right grips, left dips to 0.5",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 0.6
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 0.5
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "move": "left",
+     "by": [
+      0,
+      0,
+      0.05
+     ],
+     "vrchat": "stayed"
+    }
+   ]
+  },
+  {
+   "name": "right eased to 0.22, left grips, right dips to 0.17",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "right": 0.22
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "right",
+     "by": [
+      0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "right": 0.17
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0,
+      0.05
+     ],
+     "vrchat": "stayed"
+    }
+   ]
+  },
+  {
+   "name": "both press in one frame, left 0.05 right 0.05 from the middle",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1 x2, h5",
+   "steps": [
+    {
+     "pull": {
+      "left": 1,
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      -0.06,
+      0,
+      0
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "followed"
+    }
+   ]
+  },
+  {
+   "name": "both press in one frame, left 0.0 right 0.12 from the middle",
+   "offsets": [
+    0.0,
+    0.12
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "left": 1,
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      -0.06,
+      0,
+      0
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "followed"
+    }
+   ]
+  },
+  {
+   "name": "both press in one frame, left 0.12 right 0.0 from the middle",
+   "offsets": [
+    0.12,
+    0.0
+   ],
+   "runs": "h7 x2 (h1: the left, once)",
+   "steps": [
+    {
+     "pull": {
+      "left": 1,
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      -0.06,
+      0,
+      0
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "followed"
+    }
+   ]
+  },
+  {
+   "name": "both press in one frame, left 0.03 right 0.07 from the middle",
+   "offsets": [
+    0.03,
+    0.07
+   ],
+   "runs": "h5 x2",
+   "steps": [
+    {
+     "pull": {
+      "left": 1,
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      -0.06,
+      0,
+      0
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "followed"
+    }
+   ]
+  },
+  {
+   "name": "both press in one frame, left 0.07 right 0.03 from the middle",
+   "offsets": [
+    0.07,
+    0.03
+   ],
+   "runs": "h5 x2",
+   "steps": [
+    {
+     "pull": {
+      "left": 1,
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      -0.06,
+      0,
+      0
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "followed"
+    }
+   ]
+  },
+  {
+   "name": "left presses a frame before the other",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      -0.06,
+      0,
+      0
+     ],
+     "vrchat": "followed"
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "stayed"
+    }
+   ]
+  },
+  {
+   "name": "right presses a frame before the other",
+   "offsets": [
+    0.05,
+    0.05
+   ],
+   "runs": "h1",
+   "steps": [
+    {
+     "pull": {
+      "right": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "pull": {
+      "left": 1
+     }
+    },
+    {
+     "frame": 1
+    },
+    {
+     "move": "left",
+     "by": [
+      -0.06,
+      0,
+      0
+     ],
+     "vrchat": "stayed"
+    },
+    {
+     "move": "right",
+     "by": [
+      0,
+      0.06,
+      0
+     ],
+     "vrchat": "followed"
+    }
+   ]
+  }
+ ]
+}

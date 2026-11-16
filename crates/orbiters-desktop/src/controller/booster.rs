@@ -406,7 +406,7 @@ fn read_to_put_back() -> Vec<ToPutBack> {
 
 /// Test builds only: what the 10-minute test needs.
 pub(crate) fn dev_build() -> bool {
-    orbiters_core::APP_VERSION.contains("-dev")
+    orbiters_core::app_version().contains("-dev")
 }
 
 fn open_folder(path: &std::path::Path) {

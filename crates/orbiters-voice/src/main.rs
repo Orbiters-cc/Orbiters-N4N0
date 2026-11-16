@@ -947,6 +947,8 @@ fn transcribe_files(files: &[String]) -> anyhow::Result<()> {
 }
 
 fn main() {
+    // The release's version, for the libraries too (orbiters-version says why it is given here).
+    orbiters_version::set(env!("ORBITERS_VERSION"));
     orbiters_core::panic_log::install();
     orbiters_core::leave_with_parent();
     // What it reports is written in the language of the app that reads it.

@@ -302,7 +302,8 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             .sessions
             .as_ref()
             .map(|l| {
-                let matches = |s: &SessionSummary| q.is_empty() || title(s).to_lowercase().contains(&q) || s.dir.to_string_lossy().to_lowercase().contains(&q);
+                let find = orbiters_core::search::Query::new(&q);
+                let matches = |s: &SessionSummary| find.matches(&title(s)) || (!q.is_empty() && s.dir.to_string_lossy().to_lowercase().contains(&q));
                 l.iter().enumerate().filter(|(_, s)| matches(s)).map(|(i, _)| i).collect()
             })
             .unwrap_or_default();

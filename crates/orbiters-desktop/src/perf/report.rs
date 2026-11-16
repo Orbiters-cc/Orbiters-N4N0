@@ -51,6 +51,7 @@ pub fn make(lines: &[Line], snap: &Snapshot) -> Value {
     json!({
         "kind": "n4n0-performance-report",
         "version": 1,
+        "id": report_id(),
         "app_version": orbiters_core::APP_VERSION,
         "made": orbiters_core::now_utc_iso(),
         "machine": machine(),
@@ -65,6 +66,17 @@ pub fn make(lines: &[Line], snap: &Snapshot) -> Value {
         "hint": lines.last().and_then(|l| l.hint.clone()),
         "lines": lines,
     })
+}
+
+/// 32 hexadecimal characters at random: Orbiters keeps a report sent twice once.
+pub(super) fn report_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let half = || {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+        h.finish()
+    };
+    format!("{:016x}{:016x}", half(), half())
 }
 
 /// The report made to fit [`MOST_BYTES`]: its oldest lines go first.

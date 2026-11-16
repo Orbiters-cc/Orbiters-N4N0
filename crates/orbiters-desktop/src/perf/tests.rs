@@ -161,3 +161,12 @@ fn the_summary_reads_in_every_language() {
         assert!(lines.iter().all(|l| !l.contains('{')), "{language:?}: a value not filled: {lines:?}");
     }
 }
+
+#[test]
+fn reports_have_ids_of_their_own() {
+    let a = report::report_id();
+    let b = report::report_id();
+    assert_eq!(a.len(), 32);
+    assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_ne!(a, b);
+}

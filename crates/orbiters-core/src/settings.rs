@@ -117,11 +117,14 @@ pub struct UsageSettings {
     pub enabled: bool,
     /// The notice that says what is recorded was shown (closed by the person).
     pub told: bool,
+    /// The notice was shown since it also says performance figures and the hardware class are sent (2026-11-16): shown again once to
+    /// those who closed the first one.
+    pub told_perf: bool,
 }
 
 impl Default for UsageSettings {
     fn default() -> Self {
-        Self { enabled: true, told: false }
+        Self { enabled: true, told: false, told_perf: false }
     }
 }
 

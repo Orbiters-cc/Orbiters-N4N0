@@ -159,6 +159,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     let mut settings = Settings { picture_folders, sessions_dir: sessions.clone(), raw_captures_dir: raw.clone(), ..Settings::default() };
     // The usage statistics' notice was closed: it shows in its own scene ("usage-notice") alone.
     settings.usage.told = true;
+    settings.usage.told_perf = true;
     let mut scale = 1.0f32;
     let mut height = 820.0f32;
     let mut width = 1280.0f32;

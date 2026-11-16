@@ -194,6 +194,18 @@ pub fn summary(report: &Value) -> Vec<String> {
     out
 }
 
+/// The basic hardware class the beta's performance figures carry (`crate::usage::perf`): the processor's model, the graphics
+/// card with the most memory of its own, and the RAM rounded to whole gigabytes. Nothing else of the computer.
+pub fn hardware_class() -> (String, String, u32) {
+    let mut system = sysinfo::System::new();
+    system.refresh_cpu_all();
+    let cpu = system.cpus().first().map(|c| c.brand().trim().to_string()).unwrap_or_default();
+    let gpus = gpus();
+    let gpu = gpus.as_array().and_then(|list| list.iter().max_by(|a, b| a["dedicated_mb"].as_f64().unwrap_or(0.0).total_cmp(&b["dedicated_mb"].as_f64().unwrap_or(0.0)))).and_then(|g| g["name"].as_str()).unwrap_or("").to_string();
+    let ram_gb = super::memory_mb().map_or(0, |(total, _)| (total / 1024.0).round() as u32);
+    (cpu, gpu, ram_gb)
+}
+
 /// The processor, its cores, memory, graphics cards and displays.
 fn machine() -> Value {
     let mut system = sysinfo::System::new();

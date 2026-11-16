@@ -659,6 +659,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     }));
 
     service.usage.open(crate::usage::spool::folder());
+    crate::usage::spool::set_current(service.usage.clone());
     let ctl = service.ctl.clone();
     service.usage.clone().run(move || ctl.view().settings.usage.enabled);
     service.accept(listener)?;

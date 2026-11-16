@@ -886,21 +886,6 @@ pub(super) fn asktoggle_shots(out: &Path) -> anyhow::Result<()> {
         let talk = Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk: TalkNow::AssistantOff, beside_wing: true, ..off(base) };
         qm_scene(&format!("asktoggle-{place}-talk-off"), out, hd, &talk, None, Some(Sheet::Talk))?;
     }
-    // The switch's looks compared (Enzo, 2026-11-16: "the switch is super ugly"): the side tiles, the strip and All tools in a headset, on and off, in each.
-    let chosen = panels::ASSIST_LOOK.load(std::sync::atomic::Ordering::Relaxed);
-    for look in 0..3u8 {
-        panels::ASSIST_LOOK.store(look, std::sync::atomic::Ordering::Relaxed);
-        for (state, facts) in [("on", vr.clone()), ("off", off(&vr))] {
-            qm_scene(&format!("asktoggle-look{look}-vr-qm-{state}"), out, hd, &facts, None, None)?;
-            qm_scene(&format!("asktoggle-look{look}-vr-all-{state}"), out, hd, &Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), beside_wing: true, ..facts.clone() }, None, Some(Sheet::All))?;
-            for (zone, name, facts) in [(Zone::WingTalk, "wing", facts.clone()), (Zone::QmStrip, "strip", strip(&facts))] {
-                let placed = zones::place(zone, vec2(3840.0, 2160.0)).expect("it fits");
-                let (pixels, px) = picture(&placed, &facts, None, None);
-                save_png(&out.join(format!("asktoggle-look{look}-tile-{name}-{state}.png")), &over_ground(&pixels, px[0], px[1]))?;
-            }
-        }
-    }
-    panels::ASSIST_LOOK.store(chosen, std::sync::atomic::Ordering::Relaxed);
     // Large: the tiles alone. Their parts: the tile 0, the band round the switch, the switch last.
     let big = vec2(3840.0, 2160.0);
     for (zone, name, facts) in [(Zone::WingTalk, "wing", vr.clone()), (Zone::QmStrip, "strip", strip(&vr))] {

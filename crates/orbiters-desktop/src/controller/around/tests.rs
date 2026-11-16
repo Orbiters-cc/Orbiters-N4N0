@@ -290,10 +290,14 @@ fn what_no_depth_has_seen_is_not_flown_to() {
     let person = Person { head: [0.0, 1.5, 3.0], ground: 0.0 };
     let start: Pose = [0.0, 1.6, 0.0, 0.0, 0.0, 0.0];
     let pieces = plan(start, P11, RATE, Photo3dLength::Standard, &[person], &seen);
-    // No sweep, no hop: only the way home from where it stands.
-    assert_eq!(pieces.len(), 1);
-    assert!(pieces[0].rig);
-    assert!(pieces[0].poses.iter().all(|p| length_of(p, &start) < 1e-3), "{:?}", pieces[0].poses.first());
+    // The person is still gone around (N-people-mode, 2026-11-16: a picture of people goes around them past what depth did not
+    // see), close to them; the room's hops go nowhere unseen: after the sweeps, only the way home.
+    let around: Vec<&Pose> = pieces.iter().filter(|p| !p.rig).flat_map(|p| &p.poses).collect();
+    assert!(!around.is_empty(), "the person is gone around");
+    assert!(around.iter().all(|p| flat(place(p), person.head) < 3.6 || length_of(p, &start) < 3.2), "{:?}", around.iter().find(|p| flat(place(p), person.head) >= 3.6));
+    let room: Vec<&Piece> = pieces.iter().filter(|p| p.rig).collect();
+    assert_eq!(room.len(), 1, "no hop, only the way home");
+    ends_home(&room[0].poses, start);
 }
 
 #[test]

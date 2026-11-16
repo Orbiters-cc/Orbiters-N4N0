@@ -1132,6 +1132,20 @@ impl Flight {
                 return Some(sweep.poses(&route, self.at, seconds, self.rate));
             }
         }
+        // Depth that saw too little of the ring (a zoomed-in opening turn: ESCAPISM 01-31-03, six frames of 21° each, and nobody
+        // gone around): a picture of people still goes around them, past what no frame saw, as [`Seen::blind`] does; what a frame
+        // measured still stops it.
+        if !seen.blind {
+            let blind = Seen { blind: true, ..seen.clone() };
+            for &rise in rises {
+                let sweep = Sweep::new(group, kind, rise, self.p11);
+                if let Some(route) = sweep.route(&blind, place(&self.at), self.turn) {
+                    self.log.push(format!("{kind:?} sweep around {:?} past what depth did not see", group.head)); // i18n: not shown
+                    self.turn = -self.turn;
+                    return Some(sweep.poses(&route, self.at, seconds, self.rate));
+                }
+            }
+        }
         None
     }
 

@@ -56,6 +56,28 @@ pub fn body(mut report: Report, picture: Option<Vec<u8>>) -> serde_json::Value {
     }
 }
 
+/// What Orbiters answered a post.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Posted {
+    /// 2xx.
+    Taken,
+    /// Answered with this status (404 or 405: an older server without the route).
+    Refused(u16),
+    /// Not reached.
+    Unreached(String),
+}
+
+/// Posts `body` to `route` of `api` (`n4n0/menu-reports`, or another beta report's route): the one way the beta's reports are sent,
+/// shared by every kind of report (the menu mismatch reports, stream lag's performance reports). Blocking.
+pub fn post(api: &orbiters_core::account::Api, route: &str, body: &serde_json::Value) -> Posted {
+    let answer = api.agent().post(&api.url(route)).config().timeout_global(Some(Duration::from_secs(30))).http_status_as_error(false).build().send_json(body);
+    match answer {
+        Ok(r) if r.status().is_success() => Posted::Taken,
+        Ok(r) => Posted::Refused(r.status().as_u16()),
+        Err(e) => Posted::Unreached(e.to_string()),
+    }
+}
+
 /// Sends every kept report not yet sent, one after another. Blocking: run it on a thread of its own.
 pub fn unsent(api: &orbiters_core::account::Api, kept: &[Kept]) -> Outcome {
     let mut out = Outcome::default();
@@ -69,21 +91,12 @@ pub fn unsent(api: &orbiters_core::account::Api, kept: &[Kept]) -> Outcome {
             }
         };
         let picture = report.picture.as_ref().and_then(|_| std::fs::read(k.dir.join(PICTURE)).ok());
-        let answer = api
-            .agent()
-            .post(&api.url("n4n0/menu-reports"))
-            .config()
-            .timeout_global(Some(Duration::from_secs(30)))
-            .http_status_as_error(false)
-            .build()
-            .send_json(&body(report, picture));
-        match answer {
-            Ok(r) if r.status().is_success() => {
+        match post(api, "n4n0/menu-reports", &body(report, picture)) {
+            Posted::Taken => {
                 let _ = std::fs::write(k.dir.join(SENT), super::iso(super::now_ms()));
                 out.sent += 1;
             }
-            Ok(r) => {
-                let status = r.status().as_u16();
+            Posted::Refused(status) => {
                 out.failed += 1;
                 out.refused |= status == 404 || status == 405;
                 out.why = Some(format!("Orbiters answered {status}"));
@@ -91,7 +104,7 @@ pub fn unsent(api: &orbiters_core::account::Api, kept: &[Kept]) -> Outcome {
                     break;
                 }
             }
-            Err(e) => {
+            Posted::Unreached(e) => {
                 out.failed += 1;
                 out.why = Some(format!("Orbiters not reached: {e}"));
                 break;

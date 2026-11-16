@@ -13,6 +13,7 @@
 //! What it costs: a clock read and an addition per part per turn, one system call every ten seconds, and a line of about
 //! 1 KB. Nothing reads the GPU's counters or opens another process here: the Performance report does that once, when asked.
 
+mod facts;
 pub mod report;
 #[cfg(test)]
 mod tests;
@@ -495,14 +496,14 @@ impl Hint {
             _ => tr("N4N0 is using more of your processor than it should"),
         };
         let advice = match (self.key.as_str(), self.part.as_deref()) {
-            ("reconstruct_gpu", _) => tr("Settings › 3D pictures: make them after VRChat closes."),
-            ("translate_memory", _) | (_, Some("translate")) => tr("Turn off Translation in the menus around VRChat's, or translate with an AI app on another computer."),
-            ("panels_gpu", _) | (_, Some("orbit")) => tr("Settings › VR menus: turn off the panels around the Quick Menu or the wheel, or set their motion to Matched."),
+            ("reconstruct_gpu", _) => tr("Settings › Capture › Reconstruct while VRChat runs: choose After VRChat."),
+            ("translate_memory", _) | (_, Some("translate")) => tr("Turn off Translation, or have an AI app on another computer translate."),
+            ("panels_gpu", _) | (_, Some("orbit")) => tr("Settings › Performance: turn off Around the Quick Menu, or Around the Action Menu's wheel."),
             (_, Some("view3d")) => tr("Close the 3D capture shown in your headset."),
             (_, Some("floating")) => tr("Turn off the watch, or close the floating panel."),
             (_, Some("walk")) => tr("Turn off Fast walk."),
             (_, Some("menu")) => tr("Close N4N0's menu when you do not use it."),
-            ("desktop_cpu", _) | (_, Some("capture")) => tr("Settings › VR menus: turn off the panels around the Quick Menu or the wheel."),
+            ("desktop_cpu", _) | (_, Some("capture")) => tr("Settings › Performance: turn off Around the Quick Menu, or Around the Action Menu's wheel."),
             _ => tr("Make a Performance report in Settings and send it: it says what takes the time."),
         };
         (title.to_string(), advice.to_string())

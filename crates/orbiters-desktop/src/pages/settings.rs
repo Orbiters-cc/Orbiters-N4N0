@@ -360,6 +360,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply |= widgets::toggle(ui, "usage-statistics", &mut draft.usage.enabled);
                     },
                 );
+                widgets::separator(ui);
+                super::perf_card::show(ui, cx.ctl, snap);
             }));
 
             if vrchat_here {

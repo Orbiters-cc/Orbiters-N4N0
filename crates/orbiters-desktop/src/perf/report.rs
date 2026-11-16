@@ -18,13 +18,6 @@ use std::time::Duration;
 /// The largest request sent (the server takes up to 1 MB): the oldest lines go first.
 pub const MOST_BYTES: usize = 900 * 1024;
 
-/// Programs that matter beside VRChat in VR: overlays, VR tools, streamers, recorders, other game overlays.
-pub const KNOWN_PROGRAMS: &[&str] = &[
-    "OVR Toolkit", "XSOverlay", "AdvancedSettings", "OVRAdvancedSettings", "SpaceCalibrator", "fpsVR", "OVRdrop", "DesktopPlus", "VRCX", "VRCFaceTracking", "VRCOSC", "VirtualDesktop.Streamer",
-    "VirtualDesktop.Service", "OVRServer_x64", "OculusClient", "SlimeVR", "slimevr", "Standable", "VRChatOSCRouter", "Wallpaper64", "wallpaper32", "obs64", "Discord", "MSIAfterburner", "RTSS",
-    "NVIDIA Overlay", "NVIDIA Share", "GameBar", "XboxGameBarWidgets", "Medal", "Overwolf", "Steam", "vrmonitor", "VRCVideoCacher", "ALVR", "PimaxClient", "Bigscreen", "Kinect", "Spout",
-    "VoiceMeeter", "voicemeeter8x64", "NVBroadcast", "iCUE", "LGHUB", "SignalRgb", "ArmouryCrate", "lghub_agent", "Razer Synapse 3", "WMIRegistrationService",
-];
 
 /// The settings that change what N4N0 costs, each by name (never the whole file: it holds paths and words of the person's).
 pub fn settings(snap: &Snapshot) -> Value {
@@ -51,7 +44,7 @@ pub fn settings(snap: &Snapshot) -> Value {
 pub fn make(lines: &[Line], snap: &Snapshot) -> Value {
     let running = super::scan();
     let names: Vec<String> = running.iter().map(|p| p.name.trim_end_matches(".exe").to_string()).collect();
-    let mut known: Vec<&str> = KNOWN_PROGRAMS.iter().copied().filter(|k| names.iter().any(|n| n.eq_ignore_ascii_case(k))).collect();
+    let mut known: Vec<&str> = super::facts::KNOWN_PROGRAMS.iter().copied().filter(|k| names.iter().any(|n| n.eq_ignore_ascii_case(k))).collect();
     known.dedup();
     let pids: Vec<u32> = running.iter().filter(|p| super::is_ours(&p.name) || p.name.eq_ignore_ascii_case("vrchat.exe") || p.name.eq_ignore_ascii_case("vrcompositor.exe")).map(|p| p.pid).collect();
     let by_pid: Vec<(u32, String)> = running.iter().filter(|p| pids.contains(&p.pid)).map(|p| (p.pid, p.name.clone())).collect();
@@ -110,8 +103,8 @@ pub fn send(report: &Value) -> Result<(), String> {
         .send_json(json!({ "report": fitted(report.clone()) }));
     match answer {
         Ok(r) if r.status().is_success() => Ok(()),
-        Ok(r) => Err(format!("Orbiters answered {}", r.status().as_u16())),
-        Err(e) => Err(format!("Orbiters not reached: {e}")),
+        Ok(r) => Err(format!("Orbiters answered {}", r.status().as_u16())), // i18n: not shown (a log's line)
+        Err(e) => Err(format!("Orbiters not reached: {e}")), // i18n: not shown (a log's line)
     }
 }
 
@@ -318,30 +311,10 @@ fn displays() -> Value {
 fn windows_facts(by_pid: &[(u32, String)]) -> Value {
     use std::os::windows::process::CommandExt;
     let pids = by_pid.iter().map(|(p, _)| p.to_string()).collect::<Vec<_>>().join(",");
-    let script = format!(
-        r#"$ErrorActionPreference='SilentlyContinue'
-$o=[ordered]@{{}}
-$os=Get-CimInstance Win32_OperatingSystem
-$o.os="$($os.Caption) $($os.Version)"
-$r=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-$o.build="$($r.DisplayVersion) $($r.CurrentBuild).$($r.UBR)"
-$o.antivirus=@(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | ForEach-Object {{ $_.displayName }})
-$o.power_plan=((powercfg /getactivescheme) -replace '^.*\(','' -replace '\)\s*$','')
-$b=Get-CimInstance Win32_Battery
-$o.battery=[bool]$b
-$o.on_battery=[bool]($b -and $b.BatteryStatus -eq 1)
-$o.openxr_runtime=(Get-ItemProperty 'HKLM:\SOFTWARE\Khronos\OpenXR\1').ActiveRuntime -replace '^.*\\',''
-$o.game_mode=(Get-ItemProperty 'HKCU:\Software\Microsoft\GameBar').AutoGameModeEnabled
-$o.hags=(Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers').HwSchMode
-$pids=@({pids})
-$c=Get-Counter -Counter '\GPU Engine(*)\Utilization Percentage','\GPU Process Memory(*)\Dedicated Usage','\GPU Adapter Memory(*)\Dedicated Usage' -SampleInterval 1 -MaxSamples 3
-$g=@{{}}
-foreach($s in $c.CounterSamples){{ if($s.InstanceName -match 'pid_(\d+)_'){{ $p=[int]$Matches[1]; if($pids -contains $p){{ $k="$p"; if(-not $g[$k]){{ $g[$k]=@{{gpu_percent=0.0;dedicated_mb=0.0}} }}; if($s.Path -like '*utilization percentage'){{ $g[$k].gpu_percent+=$s.CookedValue/3 }} else {{ $g[$k].dedicated_mb=[math]::Max($g[$k].dedicated_mb,$s.CookedValue/1MB) }} }} }} elseif($s.Path -like '*gpu adapter memory*'){{ $o.adapter_dedicated_used_mb=[math]::Max([double]$o.adapter_dedicated_used_mb,$s.CookedValue/1MB) }} }}
-$o.gpu_by_pid=$g
-$o | ConvertTo-Json -Depth 4 -Compress"#
-    );
+    let script = super::facts::script(&pids);
     let child = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .args(super::facts::POWERSHELL_ARGS)
+        .arg(&script)
         .creation_flags(0x0800_0000)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -354,7 +327,7 @@ $o | ConvertTo-Json -Depth 4 -Compress"#
             Ok(None) if began.elapsed() < Duration::from_secs(40) => std::thread::sleep(Duration::from_millis(100)),
             _ => {
                 let _ = child.kill();
-                return json!({ "error": "timed out" });
+                return json!({ "error": "timed out" }); // i18n: not shown (a value in the report's file)
             }
         }
     }

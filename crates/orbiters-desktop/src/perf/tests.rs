@@ -38,7 +38,7 @@ fn reconstruction_is_named_when_vrchat_is_short_of_graphics_time() {
     let lines = vec![l; 6];
     assert_eq!(hint(&lines).map(|h| h.key), Some("reconstruct_gpu".into()));
     let (title, advice) = hint(&lines).unwrap().words();
-    assert!(title.contains("3D picture") && advice.contains("after VRChat"), "{title} / {advice}");
+    assert!(title.contains("3D picture") && advice.contains("After VRChat"), "{title} / {advice}");
 }
 
 #[test]

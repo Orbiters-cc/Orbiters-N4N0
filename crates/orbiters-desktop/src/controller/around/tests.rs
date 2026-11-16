@@ -744,3 +744,89 @@ fn replay_a_session() {
         println!("{k:3} eye {:6.2} {:6.2} {:5.2} forward {:5.2} {:5.2} {:5.2} {text}", frame.eye[0], frame.eye[1], frame.eye[2], frame.forward[0], frame.forward[1], frame.forward[2]);
     }
 }
+
+/// N-people-mode (Enzo, 2026-11-16): what follows the opening turns. Enough depth: around, either picture. Too little: a picture of
+/// people still goes around its people, blind; a picture of the world, or of nobody, flies the older blind flight. Turns are
+/// repeated while depth is short, three at most.
+#[test]
+fn a_picture_of_people_goes_around_them_with_or_without_depth() {
+    use PictureMode::{People, World};
+    assert_eq!(choose(People, LEAST_DEPTH_FRAMES, 1), Choice::Around);
+    assert_eq!(choose(World, LEAST_DEPTH_FRAMES, 1), Choice::Around);
+    assert_eq!(choose(People, 1, 1), Choice::AroundBlind, "1 to 4 depth frames: 4 of his 10 pictures of people on 2026-11-15");
+    assert_eq!(choose(People, 0, 0), Choice::Blind, "nobody to go around");
+    assert_eq!(choose(World, 1, 2), Choice::Blind);
+    assert!(look_again(1, 1) && look_again(2, 2) && !look_again(2, MOST_LOOKS) && !look_again(LEAST_DEPTH_FRAMES, 1));
+}
+
+/// Blind, the people's flight still circles the wearer from every side with the rig off, close enough to fill the frame, and keeps
+/// its seconds; what a depth frame did measure still stops it.
+#[test]
+fn without_depth_a_picture_of_people_still_circles_them_close() {
+    let wearer = Person { head: [HIPS[0], HIPS[1] + 0.38 * EYE_HEIGHT, HIPS[2]], ground: HIPS[1] - 0.62 * EYE_HEIGHT };
+    for length in [Photo3dLength::Standard, Photo3dLength::Full] {
+        let seen = Seen { blind: true, ..Seen::default() };
+        let mut flight = Flight::new(START, P11, RATE, length, PictureMode::People, &[wearer], true);
+        let pieces: Vec<Piece> = std::iter::from_fn(|| flight.next(&seen)).collect();
+        let around: Vec<Pose> = pieces.iter().filter(|p| !p.rig).flat_map(|p| p.poses.clone()).collect();
+        let split = Split::of(length, PictureMode::People, 1);
+        assert!(around.len() as f32 / RATE as f32 >= 0.9 * split.people, "{length:?}: {} s around him", around.len() as f32 / RATE as f32);
+        let mut bins = [false; 12];
+        for p in &around {
+            let d = flat(place(p), wearer.head);
+            assert!((0.8..3.5).contains(&d), "{length:?}: {d} m from him");
+            bins[((p[0] - HIPS[0]).atan2(p[2] - HIPS[2]).to_degrees().rem_euclid(360.0) / 30.0) as usize % 12] = true;
+        }
+        assert_eq!(bins.iter().filter(|b| **b).count(), 12, "{length:?}: every side");
+        let poses: Vec<Pose> = pieces.iter().flat_map(|p| p.poses.clone()).collect();
+        ends_home(&poses, START);
+    }
+    // A wall a depth frame measured still stands: no blind sweep enters the real room's walls.
+    let room = room();
+    let mut seen = Seen { blind: true, ..Seen::default() };
+    for f in room.start_frames.iter().take(1) {
+        seen.add(f.clone());
+    }
+    let people = start_people(&seen);
+    let mut flight = Flight::new(START, P11, RATE, Photo3dLength::Standard, PictureMode::People, &people, true);
+    let pieces: Vec<Piece> = std::iter::from_fn(|| flight.next(&seen)).collect();
+    assert!(pieces.iter().any(|p| !p.rig), "it went around him");
+}
+
+/// A camera zoomed in to 21° (P11 5.26, ESCAPISM and Sunset Bay) plans its sweeps as at the usual zoom: in the real room they find a
+/// way round him, where sweeps 5 to 6 m out found none.
+#[test]
+fn a_zoomed_in_camera_still_goes_around_close() {
+    let room = room();
+    let mut seen = after_look(&room, START);
+    let people = start_people(&seen);
+    let mut flight = Flight::new(START, 5.26, RATE, Photo3dLength::Standard, PictureMode::People, &people, true);
+    let mut around = Vec::new();
+    while let Some(piece) = flight.next(&seen) {
+        for p in piece.poses.iter().step_by(11) {
+            seen.add(draw_frame(&room.voxels, p));
+        }
+        if !piece.rig {
+            around.extend(piece.poses);
+        }
+    }
+    assert!(around.len() as f32 / RATE as f32 > 2.0, "{} s around him", around.len() as f32 / RATE as f32);
+    assert!(around.iter().all(|p| flat(place(p), people[0].head) < 3.6), "sweeps stand as at the usual zoom, not 5 to 6 m out");
+}
+
+/// Extra opening turns come off the room's seconds, never the people's.
+#[test]
+fn longer_opening_turns_cost_the_room_not_the_people() {
+    let wearer = Person { head: [HIPS[0], HIPS[1] + 0.38 * EYE_HEIGHT, HIPS[2]], ground: HIPS[1] - 0.62 * EYE_HEIGHT };
+    let seen = Seen { blind: true, ..Seen::default() };
+    let seconds = |spent: f32| {
+        let mut flight = Flight::new(START, P11, RATE, Photo3dLength::Full, PictureMode::People, &[wearer], true);
+        flight.spend(spent);
+        let pieces: Vec<Piece> = std::iter::from_fn(|| flight.next(&seen)).collect();
+        (pieces.iter().filter(|p| !p.rig).map(|p| p.poses.len()).sum::<usize>(), seconds_of(&pieces))
+    };
+    let (people_0, all_0) = seconds(0.0);
+    let (people_2, all_2) = seconds(2.0 * LOOK_S);
+    assert_eq!(people_0, people_2);
+    assert!(all_2 < all_0 - 0.5 * LOOK_S, "{all_2} s against {all_0} s");
+}

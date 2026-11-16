@@ -250,6 +250,11 @@ pub struct Seen {
     pub frames: Vec<SeenFrame>,
     /// A wearer who stays in the frames and leaves the picture afterwards (crate wearer): no obstacle.
     pub left_out: Option<LeftOut>,
+    /// What no depth frame has seen counts as free: a picture of people whose opening turns gave too few depth frames still
+    /// goes around them, as the blind flight went everywhere, and stops only at what a frame did measure. Without this, Enzo's
+    /// pictures of people on 2026-11-15 (4 of 10) flew the blind flight of a picture of the world: around the camera's own
+    /// place and 10 m out, never around the friends they were of.
+    pub blind: bool,
 }
 
 /// Where a wearer stands who is in the depth now and will not be in the picture. In the corridor of the first real picture
@@ -305,7 +310,7 @@ impl Seen {
         // the capture, docs/3d-picture-angles-2026-11-04.md), in the air.
         if surface > 0 && free < TORN_OFF * surface {
             Clear::Surface
-        } else if free > 0 {
+        } else if free > 0 || self.blind {
             Clear::Free
         } else {
             Clear::Unknown
@@ -883,6 +888,42 @@ pub fn look(start: Pose, rate: u32) -> Vec<Pose> {
         .collect()
 }
 
+/// With fewer depth frames than this after the opening turns (a world's post-processing, a capture kit without them, a stream at
+/// a dozen frames a second), nothing tells where the camera can go. About 9 are usual.
+pub const LEAST_DEPTH_FRAMES: usize = 3;
+/// Opening turns at most while depth frames are fewer than [`LEAST_DEPTH_FRAMES`]. On 2026-11-15 the stream gave 11 to 20 frames
+/// a second in some worlds, one in eight or so a depth frame: one turn of [`LOOK_S`] brought 1 to 4, and the picture flew blind.
+pub const MOST_LOOKS: usize = 3;
+
+/// Whether the camera turns once more where it stands before flying: after `looks` turns, depth has given `depth_frames`.
+pub fn look_again(depth_frames: usize, looks: usize) -> bool {
+    depth_frames < LEAST_DEPTH_FRAMES && looks < MOST_LOOKS
+}
+
+/// What a 3D picture flies after its opening turns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choice {
+    /// [`Flight`], where depth says the camera can go.
+    Around,
+    /// [`Flight`] around the people with what depth never saw taken as free ([`Seen::blind`]).
+    AroundBlind,
+    /// The older blind flight (controller/burst.rs `path`): around the camera's own place and out through the room.
+    Blind,
+}
+
+/// The flight for a picture of `mode` with `depth_frames` after its opening turns and `people` to go around. A picture of people
+/// goes around them with or without depth: the blind flight is a picture of the room, and that is what made people and world
+/// look alike (Enzo, 2026-11-16).
+pub fn choose(mode: PictureMode, depth_frames: usize, people: usize) -> Choice {
+    if depth_frames >= LEAST_DEPTH_FRAMES {
+        Choice::Around
+    } else if mode == PictureMode::People && people > 0 {
+        Choice::AroundBlind
+    } else {
+        Choice::Blind
+    }
+}
+
 /// The pitches of a picture of the world's further turns, degrees: a positive one looks down.
 const TILTED_TURNS: [f32; 2] = [-40.0, 40.0];
 
@@ -936,6 +977,12 @@ fn sweeps_of(seconds: f32) -> Vec<(Kind, f32)> {
 /// A sweep in less than this leaves more than about 15° between colour frames.
 const LEAST_SWEEP_S: f32 = 0.6;
 
+/// The narrowest framing a flight is planned for, as a projection's P11 (about 42° vertically). Sweeps stand as far from a
+/// person as frames them: zoomed in to 21° (P11 5.26, Enzo's pictures of ESCAPISM and Sunset Bay, 2026-11-15/16) that was
+/// 5 to 6 m, a ring no room had free, so nobody was gone around. The camera is set back to its usual zoom for the flight
+/// (controller/burst.rs); should it stay zoomed, a nearer sweep that frames part of a person still sees them from every side.
+pub const PLAN_P11_MOST: f32 = 2.6;
+
 /// A part of a flight: its poses, and whether the rig goes with them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Piece {
@@ -957,6 +1004,8 @@ enum Task {
 pub struct Flight {
     start: Pose,
     p11: f32,
+    /// The seconds the people have, whatever else is cut.
+    people_s: f32,
     rate: u32,
     tasks: VecDeque<Task>,
     at: Pose,
@@ -1000,7 +1049,8 @@ impl Flight {
         tasks.push_back(Task::Room);
         Self {
             start,
-            p11,
+            p11: p11.min(PLAN_P11_MOST),
+            people_s: split.people,
             rate,
             tasks,
             at: start,
@@ -1013,6 +1063,12 @@ impl Flight {
             mode,
             log: Vec::new(),
         }
+    }
+
+    /// `seconds` more went to opening turns than [`LOOK_S`]: they come off the room's part, never off the people's, so the
+    /// picture keeps about its length.
+    pub fn spend(&mut self, seconds: f32) {
+        self.total = (self.total - seconds.max(0.0)).max(self.people_s);
     }
 
     /// The next piece, planned from what `seen` knows now. `None`: the flight is over and the camera is home.

@@ -184,7 +184,7 @@ fn orbiters_takes_them_refuses_them_or_is_not_there() {
     assert_eq!(sent["path"], "/n4n0/metrics");
     let install = sent["install"].as_str().unwrap();
     assert!(install.len() == 32 && install.bytes().all(|b| b.is_ascii_hexdigit()), "a random id: {install}");
-    let allowed = ["session", "surface", "build", "os", "lang", "at", "kind", "screen", "from", "control"];
+    let allowed = ["session", "surface", "build", "os", "lang", "at", "kind", "screen", "from", "control", "debug", "sandbox", "agent"];
     for event in sent["events"].as_array().unwrap() {
         for key in event.as_object().unwrap().keys() {
             assert!(allowed.contains(&key.as_str()), "{key} is not a field of the contract");
@@ -210,5 +210,110 @@ fn orbiters_takes_them_refuses_them_or_is_not_there() {
     assert_eq!(spool.send(&orbiters_core::account::Api::at(&base)), Sent::Kept);
     assert_eq!(spool.send(&orbiters_core::account::Api::at("http://127.0.0.1:9/")), Sent::Kept);
     assert_eq!(spool.waiting().len(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The performance figures (`usage::perf`): windows wait beside the events, on disk, go in the same request with the team's code, and
+/// are forgotten with them; while the statistics are off nothing is summed.
+#[test]
+fn performance_windows_go_with_the_events_and_are_forgotten_with_them() {
+    use super::perf::{Context, Sample};
+    let dir = temp_dir("perf");
+    let spool = filled(&dir);
+    let (sessions, screens) = spool.context();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(screens.get("vrchat-desktop").map(String::as_str), Some("wheel"), "the screen the session is on");
+    let sample = |at: u64, screen: &str| Sample {
+        at,
+        seconds: 10.0,
+        context: Context { mode: "desktop".into(), screens: [("vrchat-desktop".to_string(), screen.to_string())].into(), sessions: sessions.clone(), active: vec![] },
+        cpu_system: 20.0,
+        cores: 8,
+        ..Default::default()
+    };
+    spool.perf(sample(1_000_000, "wheel"), false);
+    spool.perf(sample(1_010_000, "wheel"), false);
+    spool.perf(sample(1_020_000, "wheel/Pictures"), false);
+    assert!(spool.perf_waiting().is_empty(), "off: nothing summed");
+    spool.origin(true, Some("0123456789abcdef".into()));
+    spool.perf(sample(1_000_000, "wheel"), true);
+    spool.perf(sample(1_010_000, "wheel"), true);
+    spool.perf(sample(1_020_000, "wheel/Pictures"), true);
+    let waiting = spool.perf_waiting();
+    assert_eq!(waiting.len(), 1, "the window closed by the change of screen");
+    assert!(waiting[0].agent && waiting[0].samples == 2 && waiting[0].sessions == sessions);
+    // Kept on disk.
+    let again = Spool::default();
+    again.open(dir.clone());
+    assert_eq!(again.perf_waiting(), waiting);
+    // One request: the events, the window, the team's code.
+    let (base, got) = server(200);
+    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base)), Sent::Taken(4));
+    assert!(spool.perf_waiting().is_empty() && spool.waiting().is_empty());
+    let sent = got.lock().unwrap()[0].clone();
+    assert_eq!(sent["team"], "0123456789abcdef");
+    assert_eq!(sent["perf"].as_array().unwrap().len(), 1);
+    assert_eq!(sent["perf"][0]["screens"]["vrchat-desktop"], "wheel");
+    assert_eq!(sent["perf"][0]["cpu_system"]["mean"], 20.0);
+    // Forgotten with the events, file too.
+    spool.perf(sample(1_030_000, "wheel"), true);
+    spool.perf(sample(1_100_000, "wheel"), true);
+    assert_eq!(spool.perf_waiting().len(), 1);
+    spool.forget();
+    assert!(spool.perf_waiting().is_empty() && !dir.join("perf-waiting.jsonl").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Opt-in, against a server under test (`ORBITERS_USAGE_API=http://127.0.0.1:4100 cargo test -p orbiters-desktop -- --ignored
+/// performance_reaches --nocapture`): this computer's real samples (the self-check's system call and Windows' GPU counters, as the
+/// service takes them) summed into windows by the real spool while a session goes from the Quick Menu to Worlds, and sent over HTTP
+/// as the app sends them. Prints what each part of a sample cost. `ORBITERS_PERF_EVERY` (seconds, default 10) and
+/// `ORBITERS_PERF_SAMPLES` (default 9) change the pace.
+#[test]
+#[ignore]
+fn performance_reaches_a_server_under_test() {
+    use std::time::{Duration, Instant};
+    let Ok(base) = std::env::var("ORBITERS_USAGE_API") else { return };
+    let every = std::env::var("ORBITERS_PERF_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(10u64);
+    let samples = std::env::var("ORBITERS_PERF_SAMPLES").ok().and_then(|v| v.parse().ok()).unwrap_or(9usize);
+    let dir = temp_dir("perf-e2e");
+    let spool = Spool::default();
+    spool.open(dir.clone());
+    spool.linked(1, Role::Overlay);
+    spool.steps(1, vec![step(Kind::Enter, "qm", Some("closed"), None)], true);
+    let mut keeper = crate::perf::Keeper::new(dir.join("perf.jsonl"));
+    let mut gpu = crate::perf::gpu::Gpu::open();
+    eprintln!("GPU counters: {}", if gpu.is_some() { "open" } else { "none" });
+    let _ = keeper.sample(Instant::now(), "desktop", vec![]);
+    let _ = gpu.as_mut().and_then(crate::perf::gpu::Gpu::sample);
+    let (mut scan_us, mut gpu_us, mut sum_us) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..samples {
+        std::thread::sleep(Duration::from_secs(every));
+        if i == samples / 2 {
+            spool.steps(1, vec![step(Kind::Press, "qm", None, Some("Worlds")), step(Kind::Enter, "qm/Worlds", Some("qm"), None)], true);
+        }
+        let began = Instant::now();
+        let line = keeper.sample(Instant::now(), "desktop", vec![]).expect("a line");
+        let scanned = began.elapsed();
+        let now = gpu.as_mut().and_then(crate::perf::gpu::Gpu::sample);
+        let counted = began.elapsed() - scanned;
+        let mode = if line.vrchat.is_some() { "desktop" } else { "idle" };
+        let (sessions, screens) = spool.context();
+        let active = super::perf::active(&crate::state::Snapshot::new(orbiters_core::settings::Settings::default()), &line, &screens);
+        let context = super::perf::Context { mode: mode.into(), screens, sessions, active };
+        let s = super::perf::sample(&line, now.as_ref(), context, now_ms(), began.elapsed());
+        spool.perf(s, true);
+        let total = began.elapsed();
+        scan_us.push(scanned.as_micros());
+        gpu_us.push(counted.as_micros());
+        sum_us.push((total - scanned - counted).as_micros());
+    }
+    eprintln!("sample cost, µs: system call {scan_us:?}; GPU counters {gpu_us:?}; summing and keeping {sum_us:?}");
+    let waiting = spool.waiting().len() + spool.perf_waiting().len();
+    for w in spool.perf_waiting() {
+        eprintln!("{}", serde_json::to_string(&w).unwrap());
+    }
+    assert!(spool.perf_waiting().len() >= 1);
+    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base)), Sent::Taken(waiting));
     let _ = std::fs::remove_dir_all(&dir);
 }

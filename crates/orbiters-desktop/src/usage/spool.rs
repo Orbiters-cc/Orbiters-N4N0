@@ -214,6 +214,7 @@ impl Spool {
         self.lock().waiting.iter().cloned().collect()
     }
 
+    #[cfg(test)]
     pub fn perf_waiting(&self) -> Vec<super::perf::Window> {
         self.lock().perf.iter().cloned().collect()
     }
@@ -244,14 +245,6 @@ impl Spool {
         load(&mut inner);
         let agent = inner.agent;
         if let Some(window) = inner.windows.push(sample, agent) {
-            keep_perf(&mut inner, window);
-        }
-    }
-
-    /// The window being summed, closed now and kept (the app is quitting).
-    pub fn close_perf(&self) {
-        let mut inner = self.lock();
-        if let Some(window) = inner.windows.close() {
             keep_perf(&mut inner, window);
         }
     }

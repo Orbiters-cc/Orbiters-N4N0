@@ -821,7 +821,9 @@ pub fn hit(layout: &Layout, x: f32, y: f32) -> Option<(usize, Target)> {
 /// What only the overlay shows on a page, never the avatar's screen, not even in its page's picture: the menu mismatch buttons' switch on
 /// Suggest features and its sentence.
 pub fn overlay_only(target: Target) -> bool {
-    target == Target::MismatchButtons
+    // The assistant's switch is pressed on the avatar's screen too, but its picture keeps the plain microphone: a switch
+    // drawn there could never say whether it is on.
+    matches!(target, Target::MismatchButtons | Target::Assistant)
 }
 
 /// A page's text that only the overlay shows (see [`overlay_only`]).
@@ -1658,8 +1660,20 @@ pub fn layout(page: ScreenPage) -> Layout {
             slots.add(100, 456, 76, 20, Style::Accent, Content::FriendNote);
         }
     }
+    // Every Home's microphone switches N4N0's assistant on or off (Enzo, 2026-11-16). Last of all the page's elements: the
+    // avatars uploaded before it keep every other element at the index their package's layout table has, and simply have
+    // no row for this one (nothing to highlight; the press is the desktop's, which finds it here).
+    if icons.iter().any(|(r, icon, _)| *icon == Icon::Microphone && *r == ASSISTANT_MIC) {
+        elements.push(element(Target::Assistant, ASSISTANT_SWITCH, Look::Round));
+    }
     Layout { page, elements, slots: slots.slots, pictures, labels, icons, boxes }
 }
+
+/// Where every Home has its microphone.
+pub const ASSISTANT_MIC: Rect = Rect::new(32, 24, 56, 56);
+/// What a press takes there to switch N4N0's assistant: the microphone and a little around it (13 mm on the avatar's screen
+/// past each side of the picture's microphone, and still 12 pixels clear of the tiles under it).
+pub const ASSISTANT_SWITCH: Rect = Rect::new(24, 16, 72, 68);
 
 /// What N4N0 says on the simple Home, under the status line: one line of so many characters at a time.
 pub const SIMPLE_HEARD_COLUMNS: usize = 60;
@@ -1900,8 +1914,12 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
     }
     match content {
         Content::Status => {
-            if menu.listening {
+            if menu.assistant == Some(false) {
+                tr("Assistant off: tap the microphone to turn it on").into()
+            } else if menu.listening {
                 tr("Listening… say what you want").into()
+            } else if menu.assistant == Some(true) {
+                tr("Tap a tile, or call N4N0. The mic turns me off").into()
             } else {
                 tr("Tap a tile, or call N4N0 again to talk").into()
             }
@@ -2524,6 +2542,7 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::Smoothing(i) => menu.tracking.as_ref().is_some_and(|t| t.on && t.ms.get((i / 4) as usize).is_some_and(|&ms| super::smoothing_choice(ms) == (i % 4) as usize)),
         Target::SuggestTalk => menu.dictating,
         Target::MismatchButtons => menu.mismatch_buttons == Some(true),
+        Target::Assistant => menu.assistant == Some(true),
         // The timeline's segments the music reached.
         Target::Timeline(i) => menu.media.as_ref().is_some_and(|m| timeline_lit(m, i)),
         // A friend chosen on Share to ….
@@ -2541,6 +2560,8 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::StayHere => !menu.on_screen,
         // The overlay's alone: the avatar's screen has no menu mismatch buttons.
         Target::MismatchButtons => menu.mismatch_buttons.is_none(),
+        // N4N0 off: no assistant to switch.
+        Target::Assistant => menu.assistant.is_none(),
         Target::Suggestion(i) => menu.shown_suggestions().nth(i as usize).is_none(),
         Target::Copy(i) => i as usize >= menu.page_results().len(),
         Target::Contact(i) => i as usize >= menu.page_contacts().len() || menu.call.is_some(),

@@ -13,6 +13,9 @@ pub enum Command {
     AskTalk { down: bool },
     /// Audio output owns this gate until playback drains, so the answer cannot become input.
     AskPlayback { active: bool },
+    /// N4N0's assistant switched on or off from a menu (Settings' switch, the overlay's tiles, Home's microphone): off, it stops
+    /// at once whatever it was doing (listening, the microphone, an answer under way).
+    Assistant { on: bool },
     /// Explicit retry after a microphone/worker failure; rechecks every preflight requirement.
     AskRetry,
     /// A question typed in the window or the overlay.

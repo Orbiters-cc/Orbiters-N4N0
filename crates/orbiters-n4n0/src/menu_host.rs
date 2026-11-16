@@ -204,6 +204,8 @@ impl<P: Pictures> MenuHost<P> {
         changed |= set(&mut m.fast_walk, settings.walk_boost.enabled);
         // The overlay's Suggest features has the switch of the menu mismatch buttons, the setting Settings › Beta feedback shows too.
         changed |= set(&mut m.mismatch_buttons, Some(settings.mismatch.buttons));
+        // Home's microphone switches N4N0's assistant: whether it is on (nothing to switch while N4N0 is off).
+        changed |= set(&mut m.assistant, settings.n4n0.enabled.then_some(settings.n4n0.assistant));
         changed |= set(&mut m.desktop_mode, n4n0.desktop_mode);
         let said = n4n0.light.map(|l| Light { on: l.on, color: l.color, level: l.level });
         let light = match self.light_set {
@@ -537,6 +539,8 @@ impl<P: Pictures> MenuHost<P> {
                     changed.walk_boost.enabled = on;
                     service.save_settings(settings, &changed);
                 }
+                // Through N4N0, which stops whatever the assistant was doing as it saves the setting.
+                Effect::Assistant(on) => service.command(Command::Assistant { on }),
                 Effect::MismatchButtons(on) => {
                     let mut changed = settings.clone();
                     changed.mismatch.buttons = on;

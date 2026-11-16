@@ -759,7 +759,8 @@ impl N4n0 {
             let rt = self.n4n0.lock().unwrap();
             (rt.pins_due.is_some_and(|t| t <= now), rt.screen.available)
         };
-        let (settings, walk, tracking) = self.with_settings(|s| (TickSettings::of(&s.n4n0, pins_due), s.walk_boost.enabled, s.tracking.clone()));
+        let (settings, walk, tracking, assistant) =
+            self.with_settings(|s| (TickSettings::of(&s.n4n0, pins_due), s.walk_boost.enabled, s.tracking.clone(), s.n4n0.enabled.then_some(s.n4n0.assistant)));
         let scene = self.host.scene();
         // What the Tracking page shows, and the versions at the bottom of Home.
         let smoothing = self.host.smoothing();
@@ -853,6 +854,8 @@ impl N4n0 {
                 let (small, large) = contract::SCREEN_SIZES;
                 out.push((parameter(params::SCREEN_SIZE), OscType::Float(((size - small) / (large - small)).clamp(0.0, 1.0))));
             }
+            // Home's microphone switches the assistant: whether it is on, as Settings says.
+            rt.screen.menu.assistant = assistant;
             out.extend(crate::screen::tick(&mut rt, now, &calls, walk, scene.vrchat_pid, &self.device.media, &mut followups));
             // The Menu toggle in N4N0's expressions menu says whether the menu shows, however it opened or closed.
             out.extend(rt.menu_param_step(now));
@@ -1463,6 +1466,40 @@ impl N4n0 {
         }
     }
 
+    /// N4N0's assistant switched on or off (the same setting as Settings › N4N0's): off, nothing of it goes on a moment longer.
+    pub(crate) fn assistant_switch(self: &Shared, on: bool) {
+        let _lifecycle = self.voice_lifecycle.lock();
+        self.update_settings(|s| s.n4n0.assistant = on);
+        if !on {
+            self.assistant_quiet();
+        }
+        self.n4n0.lock().unwrap().screen.menu.assistant = Some(on);
+        // The microphone is let go (or taken again) now, not at the next second's look.
+        self.voice_follow();
+        self.publish();
+    }
+
+    /// The assistant is off: what it listens to is dropped, an answer under way stops and what arrived of it leaves the panel.
+    pub(crate) fn assistant_quiet(self: &Shared) {
+        let _lifecycle = self.voice_lifecycle.lock();
+        self.voice_cancel();
+        let mut rt = self.n4n0.lock().unwrap();
+        rt.listening = None;
+        rt.voice.automatic = false;
+        rt.voice.finalizing = false;
+        rt.voice.provisional = None;
+        rt.voice.level = 0.0;
+        rt.voice.speech = false;
+        rt.screen.menu.listening = false;
+        if let Some(turn) = rt.turn.take() {
+            turn.cancel.store(true, Ordering::Relaxed);
+            rt.generation += 1;
+            if let Some(sender) = rt.sender.as_mut().filter(|s| s.streaming()) {
+                sender.hide();
+            }
+        }
+    }
+
     /// The avatar menu's Talk button (or the window's, or the overlay's), pressed or let go. Letting go ends the
     /// sentence: the worker transcribes it and answers that listen by its number ([`N4n0::heard`]).
     pub(crate) fn talk(self: &Shared, down: bool, source: Source) {
@@ -1685,6 +1722,7 @@ impl N4n0 {
             Command::Talk { down } => self.talk(down, Source::Window),
             Command::AskPage { open } => self.ask_page(open),
             Command::AskRetry => self.ask_retry(),
+            Command::Assistant { on } => self.assistant_switch(on),
             Command::AskTalk { down } => self.ask_talk(down),
             Command::AskPlayback { active } => {
                 self.n4n0.lock().unwrap().voice.output_playing = active;

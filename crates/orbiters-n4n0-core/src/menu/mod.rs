@@ -675,6 +675,10 @@ pub enum Target {
     /// Suggest features on the overlay: the beta's menu mismatch buttons on or off (the switch of Settings › Beta feedback, the same
     /// setting; Enzo, 2026-11-16). Not on the avatar's screen: [`Menu::mismatch_buttons`] is `None` there.
     MismatchButtons,
+    /// The simple Home's microphone: N4N0's assistant (listening, answers) on or off, the setting of Settings › N4N0's AI
+    /// assistant (Enzo, 2026-11-16: "a little switch on the corner of the feature tile"). The overlay draws a switch there; the
+    /// avatar's screen keeps the microphone of its package's picture, and its status line says what a press does.
+    Assistant,
     /// Music: the world's video, watched on the computer from where the world is, or saved in N4N0's videos.
     WatchVideo,
     SaveVideo,
@@ -815,6 +819,8 @@ pub enum Effect {
     Dictate,
     /// The beta's menu mismatch buttons on or off (Suggest features' switch, the setting Settings › Beta feedback shows too).
     MismatchButtons(bool),
+    /// N4N0's assistant on or off (Home's microphone switch, the setting Settings › N4N0 shows too).
+    Assistant(bool),
     /// Send this suggestion to Orbiters (`voice`: some of it was said, not typed).
     SendSuggestion {
         text: String,
@@ -908,6 +914,8 @@ pub struct Menu {
     /// The beta's menu mismatch buttons, on or off, where this menu has their switch (the overlay's Suggest features); `None` where it
     /// has not (the avatar's screen, whose older packages have no such switch on that page).
     pub mismatch_buttons: Option<bool>,
+    /// N4N0's assistant on or off, where N4N0 runs (`None`: N4N0 itself is off, and Home's microphone presses nothing).
+    pub assistant: Option<bool>,
     /// The screen stays where it is (`N4N0/Screen/Pinned`, as the avatar says; the Action Menu sets it too).
     pub pinned: bool,
     /// This menu shows on the avatar's screen, which is what Stay here keeps in place (no button in the overlay, whose
@@ -1412,6 +1420,16 @@ impl Menu {
                 vec![Effect::SendSuggestion { text: self.suggestion.trim().to_string(), voice: self.suggestion_voice }]
             }
             Target::SuggestSend => Vec::new(),
+            Target::Assistant => match self.assistant {
+                Some(on) => {
+                    self.assistant = Some(!on);
+                    if on {
+                        self.listening = false;
+                    }
+                    vec![Effect::Assistant(!on)]
+                }
+                None => Vec::new(),
+            },
             Target::MismatchButtons => match self.mismatch_buttons {
                 Some(on) => {
                     self.mismatch_buttons = Some(!on);

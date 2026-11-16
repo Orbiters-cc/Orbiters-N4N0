@@ -1919,6 +1919,7 @@ impl N4n0 {
                     }
                 }
                 Effect::FastWalk(on) => self.update_settings(|s| s.walk_boost.enabled = on),
+                Effect::Assistant(on) => self.assistant_switch(on),
                 Effect::StayHere(on) => self.send_parameter(params::SCREEN_PINNED, OscType::Bool(on)),
                 Effect::CallContact { id } => {
                     let n = self.clone();

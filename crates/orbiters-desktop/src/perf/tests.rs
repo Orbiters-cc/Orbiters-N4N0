@@ -190,7 +190,7 @@ fn a_scan_costs_less_than_sysinfo_s_refresh() {
         runs.sort_by(f64::total_cmp);
         runs[runs.len() / 2]
     };
-    let sys = time(&mut || system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory()));
+    let sys = time(&mut || { system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory()); });
     let ours = time(&mut || drop(scan()));
     println!("one look at {} processes: sysinfo {sys:.2} ms, NtQuerySystemInformation {ours:.2} ms", scan().len());
     assert!(ours <= sys * 1.5 + 0.5, "sysinfo {sys} ms, scan {ours} ms");

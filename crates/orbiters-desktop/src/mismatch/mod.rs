@@ -317,7 +317,7 @@ pub fn press(kind: Kind, context: Context, settings: &orbiters_core::settings::S
     let pressed = now_ms();
     let id = uuid::Uuid::new_v4().simple().to_string();
     let dir = folder().join(format!("{}-{}-{}", stamp(pressed), kind.key(), &id[..6]));
-    note("press", || format!("{} pressed", kind.key()));
+    note("press", || format!("{} pressed", kind.key())); // i18n: not shown (a menu mismatch report's line)
     let settings = menu_settings(settings);
     let out = dir.clone();
     let _ = std::thread::Builder::new().name("mismatch-report".into()).spawn(move || {

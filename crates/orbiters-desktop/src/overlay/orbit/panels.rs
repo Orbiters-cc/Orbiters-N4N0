@@ -188,6 +188,8 @@ pub enum Action {
     Worlds,
     /// A 3D picture of people, of the world.
     Picture(PhotoMode),
+    /// The next 3D picture's length, the next of 1, 4 and 8 s (Enzo, 2026-11-16: from the camera's tools, without the Capture page).
+    PictureLength,
     /// Starts a recording: only beside VRChat's camera, whose picture it records (Enzo, F14 and F15).
     Record,
     /// Stops the recording under way. Nothing that shows it ever starts one (Enzo, F13).
@@ -617,6 +619,8 @@ pub struct Facts {
     pub camera: CameraNow,
     /// A 3D picture's timer, in seconds.
     pub timer: u32,
+    /// A 3D picture's length (the Capture page's "Picture length"): on the camera's 3D tiles, where it changes too.
+    pub length: orbiters_core::settings::Photo3dLength,
     /// How far the sheet's list is scrolled, in its page's units, and the layout the app's own gallery uses.
     pub gallery_scroll: f32,
     pub gallery_layout: orbiters_core::settings::GalleryLayout,
@@ -905,6 +909,8 @@ pub enum Look {
     Stop,
     /// A tile beside VRChat's camera: a 3D picture, Record, the QR code.
     CameraPicture(PhotoMode),
+    /// The 3D pictures' length on a 3D tile: 1, 4 or 8 s, the next one when pressed.
+    CameraLength(PhotoMode),
     CameraRecord,
     CameraQr,
     /// The button under the camera's tiles.
@@ -963,8 +969,15 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::BloomNext => vec![Item { action: Action::Next, rect: whole, look: Look::Transport(icons::SKIP_FORWARD) }],
         Zone::WheelCaption | Zone::QmCaption | Zone::CameraCaption => vec![Item { action: Action::Idle, rect: whole, look: Look::Caption }],
         // Enzo: what takes a picture or reads a code, at the camera that does it.
-        Zone::CameraPeople => vec![Item { action: Action::Picture(PhotoMode::People), rect: whole, look: Look::CameraPicture(PhotoMode::People) }],
-        Zone::CameraWorld => vec![Item { action: Action::Picture(PhotoMode::World), rect: whole, look: Look::CameraPicture(PhotoMode::World) }],
+        Zone::CameraPeople | Zone::CameraWorld => {
+            let mode = if zone == Zone::CameraPeople { PhotoMode::People } else { PhotoMode::World };
+            let mut out = vec![Item { action: Action::Picture(mode), rect: whole, look: Look::CameraPicture(mode) }];
+            // The length on the tile, pressed apart from it (on top: [`hit`] finds the last first). Not where the tile is locked.
+            if !facts.no_kit {
+                out.push(Item { action: Action::PictureLength, rect: length_chip(whole), look: Look::CameraLength(mode) });
+            }
+            out
+        }
         Zone::CameraRecord => vec![Item { action: camera_record_action(facts), rect: whole, look: Look::CameraRecord }],
         // It looks for a code around the camera itself, and stops: no page of its own (Enzo, F17).
         Zone::CameraQr => vec![Item { action: Action::CameraQr, rect: whole, look: Look::CameraQr }],
@@ -2315,6 +2328,10 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Mute => (tr("Mute").into(), tr("Your computer's sound, on or off.").into()),
         Action::Pictures => (tr("Pictures").into(), tr("Take a 3D picture, record a scene, see your captures.").into()),
         Action::All => (tr("All tools").into(), tr("Everything Orbiters can do from here.").into()),
+        Action::PictureLength => (
+            tr!("3D pictures of {seconds} s", seconds = length_seconds(facts.length)),
+            tr!("Press for {seconds} s. Longer flies around more, and takes longer to make.", seconds = length_seconds(next_length(facts.length))),
+        ),
         Action::Record => (tr("Record a 3D scene").into(), tr("Walk around with VRChat's camera; Orbiters makes a 3D scene of what it saw.").into()),
         Action::StopRecording => (tr("Stop recording").into(), tr("Orbiters then turns it into a 3D scene.").into()),
         Action::CameraQr if facts.camera.qr != CameraQr::Off => (tr("Stop looking for a code").into(), tr("The camera goes back to being only a camera.").into()),
@@ -3383,12 +3400,31 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let counting = facts.countdown.filter(|_| mine);
             let flying = facts.picture_flying && mine;
             camera_tile_back(p, rect, hovered, pressed, (counting.is_some() || flying).then_some(tint), off);
+            // With its length beside it ([`length_chip`]), the icon stands left of the middle.
+            let face = if off { rect } else { Rect::from_min_max(rect.min, pos2(rect.right() - (rect.right() - length_chip(rect).left()) * 0.9, rect.bottom())) };
+            let at = pos2(face.center().x, rect.center().y - 9.0);
             match counting {
-                Some(seconds) => camera_tile_face(p, rect, None, &seconds.to_string(), label, tint, off),
-                None => camera_tile_face(p, rect, Some(icon), "", label, tint, off),
+                Some(seconds) => text(p, at, Align2::CENTER_CENTER, &seconds.to_string(), 22.0, weight::BOLD, Color32::WHITE),
+                None => widgets::icon(p, at, icon, 24.0, if off { theme::FG_4 } else { tint }),
             }
+            camera_label(p, rect, label, if off { theme::FG_4 } else { look::LABEL });
             if off {
                 widgets::icon(p, rect.right_top() + vec2(-11.0, 11.0), icons::LOCK_SIMPLE, 11.0, look::MUTED);
+            }
+        }
+        Look::CameraLength(mode) => {
+            let tint = if mode == PhotoMode::People { theme::VIOLET } else { look::accent() };
+            let chip = rect.shrink2(vec2(3.0, 5.0));
+            let round = look::radius(chip.height() / 2.0);
+            p.rect_filled(chip, round, theme::mix(look::TILE, tint, if pressed { 0.5 } else if hovered { 0.38 } else { 0.22 }));
+            p.rect_stroke(chip, round, Stroke::new(if hovered { 1.5 } else { 1.0 }, theme::alpha(tint, if hovered { 0.95 } else { 0.6 })), egui::StrokeKind::Inside);
+            // Its seconds, and three marks for 1, 4 and 8 s with this one lit: it goes round them.
+            let words = format!("{} s", length_seconds(facts.length));
+            text(p, pos2(chip.center().x, chip.center().y - 3.0), Align2::CENTER_CENTER, &words, 12.0, weight::BOLD, Color32::WHITE);
+            let lit = LENGTHS.iter().position(|l| *l == facts.length).unwrap_or(1);
+            for k in 0..LENGTHS.len() {
+                let at = pos2(chip.center().x + (k as f32 - 1.0) * 6.0, chip.bottom() - 4.5);
+                p.circle_filled(at, if k == lit { 2.0 } else { 1.4 }, if k == lit { Color32::WHITE } else { theme::alpha(Color32::WHITE, 0.35) });
             }
         }
         Look::CameraRecord => {
@@ -4130,6 +4166,30 @@ fn camera_label(p: &Painter, rect: Rect, label: &str, ink: Color32) {
     }
     let font = look::font(size, weight::SEMIBOLD);
     p.text(pos2(rect.center().x, rect.bottom() - 13.0), Align2::CENTER_CENTER, fit(p, label, &font, rect.width() - 6.0), font, ink);
+}
+
+/// The lengths the camera's 3D tiles go round, in order.
+const LENGTHS: [orbiters_core::settings::Photo3dLength; 3] =
+    [orbiters_core::settings::Photo3dLength::Quick, orbiters_core::settings::Photo3dLength::Standard, orbiters_core::settings::Photo3dLength::Full];
+
+/// The length after `length`: 1, 4, 8 s, then 1 s again.
+pub fn next_length(length: orbiters_core::settings::Photo3dLength) -> orbiters_core::settings::Photo3dLength {
+    LENGTHS[(LENGTHS.iter().position(|l| *l == length).unwrap_or(1) + 1) % LENGTHS.len()]
+}
+
+/// A length's seconds, as the Capture page names them.
+pub fn length_seconds(length: orbiters_core::settings::Photo3dLength) -> u32 {
+    match length {
+        orbiters_core::settings::Photo3dLength::Quick => 1,
+        orbiters_core::settings::Photo3dLength::Standard => 4,
+        orbiters_core::settings::Photo3dLength::Full => 8,
+    }
+}
+
+/// Where a 3D tile's length sits on it (`tile` in the tile's units): its upper right, beside the icon and over the name, as big as
+/// leaves the icon and the name their room, for a laser to find from a few steps away.
+pub fn length_chip(tile: Rect) -> Rect {
+    Rect::from_min_max(pos2(tile.left() + tile.width() * 0.52, tile.top()), pos2(tile.right(), tile.top() + tile.height() * 0.62))
 }
 
 /// What a recording's Stop says beside its square: its clock, or what it is doing.

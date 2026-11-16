@@ -830,3 +830,76 @@ fn longer_opening_turns_cost_the_room_not_the_people() {
     assert_eq!(people_0, people_2);
     assert!(all_2 < all_0 - 0.5 * LOOK_S, "{all_2} s against {all_0} s");
 }
+
+/// The flight this code flies over Enzo's pictures of 2026-11-15/16 (N-people-mode): each session's own start pose, wearer and
+/// depth frames up to its first move, the faces its first frame showed (`FACES`: a JSON object of session name to
+/// `orbiters-reconstruct --find-faces` output), and frames drawn from what all its depth measured as the flight goes. What really
+/// flew is measured from the recordings themselves (capture3d/flight.py). `SESSIONS=<dir> FACES=<file> cargo test -p
+/// orbiters-desktop flights_of_the_evening -- --ignored --nocapture`.
+#[test]
+#[ignore = "reads Enzo's recordings"]
+fn flights_of_the_evening() {
+    let sessions = std::path::PathBuf::from(std::env::var("SESSIONS").unwrap());
+    let faces: serde_json::Value = std::env::var("FACES").ok().and_then(|f| serde_json::from_slice(&std::fs::read(f).ok()?).ok()).unwrap_or_default();
+    let mut names: Vec<String> = std::fs::read_dir(&sessions).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    println!("| Recording | Picture | Depth frames at the look | Choice | People | Seconds | Around people | Keyframes | Of the wearer, near | Sides of him (of 12) |");
+    println!("|---|---|---|---|---|---|---|---|---|---|");
+    for name in names {
+        let dir = sessions.join(&name);
+        let Some(picture) = orbiters_core::picture::Picture::read(&dir) else { continue };
+        let Some(rec) = recorded(&dir) else { continue };
+        let face = &faces[&name];
+        let framing = Framing {
+            width: face["width"].as_u64().unwrap_or(1920) as u32,
+            height: face["height"].as_u64().unwrap_or(1080) as u32,
+            p00: face["p00"].as_f64().unwrap_or(P00 as f64) as f32,
+            p11: face["p11"].as_f64().unwrap_or(P11 as f64) as f32,
+        };
+        let boxes: Vec<[f32; 5]> = face["boxes"].as_array().map(|a| a.iter().map(|b| std::array::from_fn(|k| b[k].as_f64().unwrap_or(0.0) as f32)).collect()).unwrap_or_default();
+        let mut seen = Seen::default();
+        for f in &rec.room.start_frames {
+            seen.add(f.clone());
+        }
+        let at_look = seen.frames.len();
+        let people = people(rec.start, framing, &boxes, rec.hips, rec.eye_height, &seen);
+        let choice = choose(picture.mode, at_look, people.len());
+        if choice == Choice::Blind {
+            println!("| {name} | {:?} | {at_look} | {choice:?} | {} | | | | | |", picture.mode, people.len());
+            continue;
+        }
+        seen.blind = choice == Choice::AroundBlind;
+        // Zoomed in, the camera flies at the usual zoom (burst::zoom_for_flight).
+        let mut flight = Flight::new(rec.start, P11, RATE, picture.length, picture.mode, &people, true);
+        let mut pieces = Vec::new();
+        while let Some(piece) = flight.next(&seen) {
+            for p in piece.poses.iter().step_by(11) {
+                seen.add(draw_frame(&rec.room.voxels, p));
+            }
+            pieces.push(piece);
+        }
+        let around = pieces.iter().filter(|p| !p.rig).map(|p| p.poses.len()).sum::<usize>() as f32 / RATE as f32;
+        let views = kept(&pieces);
+        let (mut near, mut sides) = (0, [false; 12]);
+        if let Some(hips) = rec.hips {
+            for (v, rig) in &views {
+                let chest = [hips[0], hips[1] + 0.25, hips[2]];
+                if let Some((x, y, z)) = project(v, chest) {
+                    if !rig && (0.0..1920.0).contains(&x) && (0.0..1080.0).contains(&y) && z < 4.0 {
+                        near += 1;
+                        sides[((v[0] - hips[0]).atan2(v[2] - hips[2]).to_degrees().rem_euclid(360.0) / 30.0) as usize % 12] = true;
+                    }
+                }
+            }
+        }
+        println!(
+            "| {name} | {:?} | {at_look} | {choice:?} | {} | {:.1} | {around:.1} | {} | {near} | {} |",
+            picture.mode,
+            people.len(),
+            seconds_of(&pieces),
+            views.len(),
+            sides.iter().filter(|s| **s).count()
+        );
+        ends_home(&poses_of(&pieces), rec.start);
+    }
+}

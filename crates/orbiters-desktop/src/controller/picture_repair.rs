@@ -77,7 +77,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
 /// Every 3D capture of the account, page after page.
 fn mine(api: &Api, token: &str) -> anyhow::Result<Vec<Item>> {
-    let mut query = shares::Query { filter: "mine".into(), kind: Some(Kind::Capture), limit: 50, ..Default::default() };
+    let mut query = shares::Query { filter: "mine".into(), kind: Some(Kind::Capture), limit: 48, ..Default::default() };
     let mut feed = shares::Feed::default();
     loop {
         let page = api.captures(token, &query)?;

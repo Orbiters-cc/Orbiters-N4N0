@@ -2260,12 +2260,20 @@ fn the_camera_s_3d_tiles_show_and_change_the_pictures_length() {
         assert_eq!(person.panels.facts.length, Photo3dLength::Standard, "the setting's default, 4 s");
         let tiles: Vec<Zone> = person.panels.all().filter(|p| p.items.iter().any(|i| i.action == Action::PictureLength)).map(|p| p.zone).collect();
         assert_eq!(tiles, [Zone::CameraPeople, Zone::CameraWorld], "desktop {desktop}: the length is on both 3D tiles, and nowhere else");
-        for want in [Photo3dLength::Full, Photo3dLength::Quick, Photo3dLength::Standard, Photo3dLength::Full] {
+        for want in [Photo3dLength::Full, Photo3dLength::Quick, Photo3dLength::Standard] {
             assert!(person.press(Action::PictureLength).clicked);
             assert_eq!(person.panels.facts.length, want, "desktop {desktop}");
             assert_eq!(length_said(&heard), Some(serde_json::to_value(want).unwrap()), "desktop {desktop}: saved as the Capture page's setting");
+            // The service says it back.
+            let mut snap = (*person.snap).clone();
+            snap.settings.photo_3d = want;
+            person.snap = Arc::new(snap);
+            person.turns(2);
+            assert_eq!(person.panels.facts.length, want);
         }
-        // The settings have not said 8 s back yet (this backend keeps them as they were): the picture still takes 8 s.
+        // 8 s chosen, and the settings have not said it back yet: the picture pressed at once still takes 8 s.
+        assert!(person.press(Action::PictureLength).clicked);
+        assert_eq!(person.panels.facts.length, Photo3dLength::Full);
         heard.patches.lock().unwrap().clear();
         assert!(person.press(Action::Picture(PhotoMode::World)).clicked);
         assert_eq!(length_said(&heard), Some(serde_json::to_value(Photo3dLength::Full).unwrap()), "desktop {desktop}: {:?}", heard.patches.lock().unwrap());

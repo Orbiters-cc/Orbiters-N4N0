@@ -857,7 +857,9 @@ fn flights_of_the_evening() {
             p11: face["p11"].as_f64().unwrap_or(P11 as f64) as f32,
         };
         let boxes: Vec<[f32; 5]> = face["boxes"].as_array().map(|a| a.iter().map(|b| std::array::from_fn(|k| b[k].as_f64().unwrap_or(0.0) as f32)).collect()).unwrap_or_default();
-        let mut seen = Seen::default();
+        // The wearer's own body is in nobody's way (controller/burst.rs), unless `OWN_BODY_BLOCKS` asks how it flew before that.
+        let left_out = rec.hips.zip(rec.eye_height).map(|(hips, eye_height)| LeftOut { hips, eye_height }).filter(|_| std::env::var("OWN_BODY_BLOCKS").is_err());
+        let mut seen = Seen { left_out, ..Seen::default() };
         for f in &rec.room.start_frames {
             seen.add(f.clone());
         }

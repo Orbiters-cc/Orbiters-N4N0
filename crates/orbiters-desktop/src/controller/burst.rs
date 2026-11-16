@@ -484,8 +484,10 @@ impl super::Controller {
                 let mut flying = fly(&around::look(pose, RATE_HZ), false);
                 frame = reading.and_then(|r| r.join().ok()).flatten();
                 let mut seen = around::Seen::default();
-                // A wearer the frames show, and who leaves the picture afterwards, is in nobody's way.
-                if mode == PictureMode::World && !ctl.hiding_self() {
+                // A wearer the frames show is in nobody's way: in a picture of the world they leave it afterwards, in one of people they
+                // are what it goes around. Held up by their own body, a camera held at their chest (ESCAPISM and Trash Compactor,
+                // 2026-11-15/16) found no way out to the ring around them and went around nobody.
+                if !ctl.hiding_self() {
                     seen.left_out = ctl.hips_now().zip(eye_height).map(|(hips, eye_height)| around::LeftOut { hips, eye_height });
                 }
                 if let Some(dir) = &session {

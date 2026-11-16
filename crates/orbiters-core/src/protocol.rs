@@ -191,6 +191,9 @@ pub struct CaptureStats {
     pub strip_failed: u64,
     pub keyframes: u64,
     pub depth_frames: u64,
+    /// Depth frames whose capture kit's depth probe ran (their stamp says so: contracts' `depth::probe_stamp`): depth
+    /// where the world leaves Unity's depth texture empty. 0 with a kit from before Orbiters Toolkit 0.5.2.
+    pub depth_probed: u64,
     pub gated: u64,
     /// Keyframes dropped because encoding fell behind.
     pub dropped: u64,

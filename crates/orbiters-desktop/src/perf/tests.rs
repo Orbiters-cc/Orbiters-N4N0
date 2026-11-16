@@ -109,7 +109,8 @@ fn the_keeper_keeps_an_hour_and_samples_this_computer() {
     assert_eq!(l.turns.len(), 1);
     assert_eq!(l.features, vec!["watch".to_string()]);
     if cfg!(windows) {
-        assert!(l.ours.iter().any(|p| p.pid == std::process::id()) || l.ours.is_empty(), "the test runs as orbiters-desktop-<hash>.exe");
+        assert!(l.ours.iter().all(|p| is_ours(&p.name)), "only Orbiters' own processes: {:?}", l.ours);
+        assert!(scan().iter().any(|p| p.pid == std::process::id()), "the scan sees this process");
         assert!(l.ram_total_mb > 0.0 && l.logical_processors > 0);
     }
     for i in 0..(KEPT + 10) {

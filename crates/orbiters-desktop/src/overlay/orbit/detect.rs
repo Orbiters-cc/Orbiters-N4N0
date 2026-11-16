@@ -387,6 +387,10 @@ pub struct CameraWatch {
     gone_until: Option<Instant>,
     /// With OSC silent, looked for until then.
     look_until: Option<Instant>,
+    /// The size of VRChat's window's client area the places above are in.
+    client: Option<Vec2>,
+    /// `shown` was carried over from another size of the window, not yet seen at this one: the next look that finds it near takes its place to the pixel.
+    carried: bool,
 }
 
 impl CameraWatch {
@@ -409,6 +413,23 @@ impl CameraWatch {
         self.look_until = Some(now + CAMERA_LOOK_AFTER_MENU);
     }
 
+    /// VRChat's window's client area is `client` now. Of another size (full screen, maximised, dragged, another screen), the panel is where it now goes at once: it is
+    /// centred in the window and scales with it (`done7-deskcam.md`: the same at 960 x 540, 1280 x 720 and 1920 x 1080), so its place is carried over, and the frames
+    /// of the new size confirm it. Until then the column would stand at the old size and place over the new window (L-fullscreen-resize), and two looks that miss it
+    /// there would take it away and bring it back.
+    pub fn follow_size(&mut self, client: Vec2) {
+        let Some(was) = self.client.replace(client) else { return };
+        if was == client || was.y <= 0.0 || client.y <= 0.0 {
+            return;
+        }
+        let k = client.y / was.y;
+        let carry = |r: Rect| Rect::from_center_size(pos2(client.x / 2.0, client.y / 2.0) + (r.center() - pos2(was.x / 2.0, was.y / 2.0)) * k, r.size() * k);
+        self.shown = self.shown.map(carry);
+        self.candidate = self.candidate.map(carry);
+        self.carried = self.shown.is_some();
+        self.misses = 0;
+    }
+
     /// Esc: VRChat's Quick Menu comes, its camera goes. Gone now, and its closing is not taken for it.
     pub fn esc(&mut self, now: Instant) {
         self.shown = None;
@@ -426,6 +447,9 @@ impl CameraWatch {
             Some(shown) => match found {
                 Some(f) if near(f, shown) => {
                     self.misses = 0;
+                    if std::mem::take(&mut self.carried) {
+                        self.shown = Some(f);
+                    }
                 }
                 _ => {
                     self.misses += 1;
@@ -784,6 +808,44 @@ mod tests {
         c.frame(Some(panel()), at(t0, 200));
         c.frame(Some(panel()), at(t0, 230));
         assert_eq!(c.frame(Some(moved), at(t0, 260)), Some(panel()));
+    }
+
+    /// L-fullscreen-resize: VRChat's window goes full screen (and back) with its camera open. The column's place is the new window's at once, in the turn the size
+    /// changed, not the old window's for two looks and then nothing for two more; the frames of the new size then confirm it, to the pixel.
+    #[test]
+    fn the_camera_panel_follows_the_window_s_size_at_once() {
+        let t0 = Instant::now();
+        let mut c = CameraWatch::default();
+        let (small, full) = (vec2(1280.0, 720.0), vec2(1920.0, 1080.0));
+        // Measured at 1080 (`done7-deskcam.md`): the 1280 x 720 rim scaled by 1.5 about the window's centre.
+        let at_full = Rect::from_min_max(pos2(498.0, 277.5), pos2(1422.0, 802.5));
+        c.follow_size(small);
+        c.frame(Some(panel()), at(t0, 16));
+        assert_eq!(c.frame(Some(panel()), at(t0, 33)), Some(panel()));
+        c.follow_size(small);
+        assert_eq!(c.shown(), Some(panel()), "the same size: nothing moves");
+        c.follow_size(full);
+        assert_eq!(c.shown(), Some(at_full), "full screen: where the panel now is, before any frame");
+        // The first frames of the new size find it a pixel off: it stays, and takes the place the frame measured.
+        let seen = at_full.translate(vec2(1.0, -1.0));
+        assert_eq!(c.frame(Some(seen), at(t0, 60)), Some(seen));
+        assert_eq!(c.frame(Some(at_full), at(t0, 90)), Some(seen), "then it is held, as ever");
+        // And back to the window.
+        c.follow_size(small);
+        let back = c.shown().expect("still shown");
+        assert!((back.min - panel().min).length() < 1.5 && (back.max - panel().max).length() < 1.5, "{back:?}");
+        assert_eq!(c.frame(Some(panel()), at(t0, 120)), Some(panel()));
+        // A window of another shape, where the panel does not lie where it was carried: two looks put it where the frames see it, as before.
+        c.follow_size(vec2(1600.0, 720.0));
+        let elsewhere = Rect::from_min_max(pos2(400.0, 150.0), pos2(1100.0, 550.0));
+        c.frame(Some(elsewhere), at(t0, 150));
+        c.frame(Some(elsewhere), at(t0, 180));
+        c.frame(Some(elsewhere), at(t0, 210));
+        assert_eq!(c.frame(Some(elsewhere), at(t0, 240)), Some(elsewhere));
+        // Reset (game behind another window): the next size is only taken as it is.
+        c.reset();
+        c.follow_size(full);
+        assert_eq!(c.shown(), None);
     }
 
     #[test]

@@ -1072,6 +1072,12 @@ impl Panel {
         self.page != Page::Browse
     }
 
+    /// How far down its list it is, for the tests.
+    #[cfg(test)]
+    pub fn list_scroll_for_test(&self) -> f32 {
+        self.vr_scroll
+    }
+
     /// The list moved by so much, by a stick or a wheel.
     pub fn scroll_by(&mut self, by: f32) {
         self.vr_throw = 0.0;

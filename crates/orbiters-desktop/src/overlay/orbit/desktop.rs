@@ -139,6 +139,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         if !camera_wanted {
             camera.reset();
         }
+        // VRChat's window of another size: its camera panel's place goes with it now, not two looks later.
+        camera.follow_size(client_size(window));
         if let Some(key) = keys.pressed() {
             watcher.pressed(key, turn);
             if key == MenuKey::Esc {
@@ -1524,6 +1526,13 @@ mod tests {
     impl StandIn {
         fn new(at: POINT, size: Vec2) -> Self {
             unsafe extern "system" fn plain(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+                use windows::Win32::UI::WindowsAndMessaging::{MINMAXINFO, WM_GETMINMAXINFO};
+                // Any size, as a game's window in full screen on a screen larger than this computer's: Windows holds a window to its screens' size otherwise.
+                if message == WM_GETMINMAXINFO {
+                    // SAFETY: the system passes a MINMAXINFO with this message.
+                    unsafe { (*(lparam.0 as *mut MINMAXINFO)).ptMaxTrackSize = POINT { x: 16384, y: 16384 } };
+                    return LRESULT(0);
+                }
                 // SAFETY: what the system passed on.
                 unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
             }
@@ -1795,5 +1804,449 @@ mod tests {
         assert_eq!(from_the_top(&[bloom, arrow])[0], bloom, "what the raise below is for");
         pointer.raise();
         assert_eq!(from_the_top(&[ring, bloom, arrow]), [arrow, bloom, ring]);
+    }
+
+    // --------------------------------------------------------------------------------------------- L-fullscreen-resize
+
+    use super::super::{Action, Pressed, Sheet};
+
+    /// VRChat's camera panel's rim in a window of `client`: centred, scaling with the window (measured at 960 x 540, 1280 x 720 and 1920 x 1080, `done7-deskcam.md`).
+    fn camera_rim(client: Vec2) -> egui::Rect {
+        egui::Rect::from_center_size(pos2(client.x / 2.0, client.y / 2.0), vec2(616.0, 350.0) * client.y / 720.0)
+    }
+
+    /// What is up over the stand-in: VRChat's menu, and what of ours shows with it.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Up {
+        /// The Quick Menu with its side tiles alone.
+        Tiles,
+        /// The Quick Menu with this page open beside its tiles.
+        Page(Sheet),
+        /// The 3D worlds' page, its list scrolled down: Enzo's picture (`logs7/fullscreen-resize.png`).
+        WorldsList,
+        /// The 3D worlds' page on a world chosen, with its small 3D view.
+        WorldChosen,
+        /// VRChat's wheel with our ring.
+        Wheel,
+        /// A page opened from the wheel.
+        WheelPage,
+        /// VRChat's camera with our column at its left.
+        Camera,
+    }
+
+    impl Up {
+        fn name(self) -> String {
+            match self {
+                Up::Page(sheet) => format!("page-{sheet:?}").to_lowercase(),
+                other => format!("{other:?}").to_lowercase(),
+            }
+        }
+    }
+
+    /// What a part had that a change of the window's size must leave as it was.
+    #[derive(Debug, PartialEq)]
+    struct Held {
+        sheet: Option<Sheet>,
+        title: String,
+        scroll: f32,
+        world: Option<(crate::overlay::worlds::panel::Page, String, bool)>,
+        list: Option<f32>,
+    }
+
+    /// The desktop's parts as [`run`] turns them, over a stand-in for VRChat's window that is moved and resized for real through Windows: each turn reads its client
+    /// area's size and place back as `run` does ([`client_size`], [`client_origin`]) and lays everything out from them.
+    struct Rig {
+        panels: Panels,
+        windows: Windows,
+        stand_in: StandIn,
+        snap: Snapshot,
+        open: Around,
+        up: Up,
+    }
+
+    impl Rig {
+        fn new(up: Up, client: Vec2) -> Self {
+            let mut snap = crate::screenshot::idle_snapshot(&orbiters_core::settings::Settings::default(), &[]);
+            let open = match up {
+                Up::Wheel | Up::WheelPage => Around::Wheel,
+                Up::Camera => Around::Camera,
+                _ => Around::QuickMenu,
+            };
+            if up == Up::Camera {
+                snap.steamvr.running = false;
+                snap.camera_open_said = Some(true);
+            }
+            let stand_in = StandIn::new(off_screen(client), client);
+            let mut rig = Self { panels: Panels::new(Arc::new(crate::screenshot::Still), 1.0, true), windows: Windows::default(), stand_in, snap, open, up };
+            rig.settle("the menu's parts");
+            let snap = rig.snap.clone();
+            match up {
+                Up::Page(sheet) => {
+                    if sheet == Sheet::Menu {
+                        rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::States;
+                    }
+                    rig.panels.open_sheet(sheet, "", &snap);
+                }
+                Up::WheelPage => rig.panels.open_sheet(Sheet::All, "", &snap),
+                Up::WorldsList | Up::WorldChosen => {
+                    rig.panels.act(Action::Worlds, &snap, &mut Pressed::default());
+                    assert_eq!(rig.panels.facts.sheet, Some(Sheet::Worlds), "the 3D worlds' page opened");
+                    let listing = (1..=40)
+                        .map(|n| format!(r#"{{"slot":{n},"key":{n},"id":{n},"worldId":"wrld_00000000-0000-0000-0000-{n:012}","name":"World {n}","author":"Maker {n}","uploader":"a","view":{{"position":[0,1,0],"target":[0,1,1]}}}}"#))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let entries = crate::overlay::worlds::catalog::parse(&format!(r#"{{"previews":[{listing}]}}"#)).expect("a listing");
+                    // The page's own read of the listing first: what it brings would replace this one, and take the list back to its top, at any moment.
+                    let began = Instant::now();
+                    while rig.panels.stage.worlds.as_ref().is_some_and(|w| w.listing_read_for_test()) {
+                        assert!(began.elapsed() < Duration::from_secs(30), "the listing's read never ended");
+                        rig.turn();
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    let worlds = rig.panels.stage.worlds.as_mut().expect("the worlds' page");
+                    worlds.listing_for_test(entries.clone());
+                    rig.settle("its list");
+                    if up == Up::WorldsList {
+                        // The list knows how far it goes once it has drawn the 40 worlds: until then a scroll is held at its top.
+                        let began = Instant::now();
+                        while rig.panels.stage.worlds.as_ref().is_some_and(|w| w.list_scroll_for_test() < 260.0) {
+                            assert!(began.elapsed() < Duration::from_secs(20), "the list never scrolled");
+                            if let Some(worlds) = rig.panels.stage.worlds.as_mut() {
+                                worlds.scroll_by(260.0 - worlds.list_scroll_for_test());
+                            }
+                            rig.turn();
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    } else {
+                        rig.panels.stage.worlds.as_mut().expect("the worlds' page").pick_for_test(entries[6].clone());
+                    }
+                }
+                _ => {}
+            }
+            rig.settle("everything at rest");
+            if up == Up::WorldsList {
+                assert!(rig.held().list.is_some_and(|s| s > 100.0), "the list is scrolled down: {:?}", rig.held());
+                assert!(!rig.panels.stage.worlds.as_ref().is_some_and(|w| w.listing_read_for_test()), "no read of the listing under way");
+            }
+            rig
+        }
+
+        fn client(&self) -> Vec2 {
+            client_size(self.stand_in.0)
+        }
+
+        fn origin(&self) -> Pos2 {
+            client_origin(self.stand_in.0)
+        }
+
+        /// Where the parts go in a window of `client`, as `run` lays them.
+        fn places(&self, client: Vec2) -> Vec<Placed> {
+            match self.open {
+                Around::Camera => zones::camera_on_screen(camera_rim(client), client),
+                menu => zones::layout_as(menu, client, self.snap.settings.orbit.layout == orbiters_core::settings::OrbitLayout::Strip),
+            }
+        }
+
+        /// One turn of [`run`]'s loop, from the window as it is now.
+        fn turn(&mut self) {
+            pump();
+            let (client, origin) = (self.client(), self.origin());
+            let places = self.places(client);
+            self.panels.takeover_place = zones::place(Zone::Takeover, client);
+            self.panels.back_place = zones::place(Zone::SheetBack, client);
+            self.panels.hint_place = zones::place(Zone::SheetHint, client);
+            self.panels.set_open(Some(self.open), places, &self.snap);
+            self.panels.follow(&self.snap, 0);
+            self.panels.menu_turn(&self.snap);
+            self.panels.step_springs(0.05);
+            self.windows.show(&mut self.panels, &self.snap, origin, Some(self.open));
+        }
+
+        fn at_rest(&self) -> bool {
+            self.panels.all().filter(|p| p.shown).all(|p| p.painted && p.appear.settled()) && (!self.panels.sheet_open() || self.panels.takeover.as_ref().is_some_and(|p| p.painted))
+        }
+
+        fn settle(&mut self, what: &str) {
+            let began = Instant::now();
+            loop {
+                self.turn();
+                if self.at_rest() {
+                    break;
+                }
+                assert!(began.elapsed() < Duration::from_secs(20), "{:?} {what}: it never came", self.up);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            // A few more, for what loads on a first picture.
+            for _ in 0..3 {
+                self.turn();
+            }
+        }
+
+        /// VRChat's window goes to `at` with a client area of `client`, through Windows, as full screen, maximising, a drag or a change of screen does.
+        fn change(&mut self, at: POINT, client: Vec2) {
+            // SAFETY: the stand-in's own window.
+            unsafe {
+                SetWindowPos(self.stand_in.0, None, at.x, at.y, client.x as i32, client.y as i32, SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER)
+                    .expect("the stand-in moves");
+            }
+            pump();
+            assert_eq!(self.client(), client, "Windows gave the stand-in another size");
+        }
+
+        fn held(&self) -> Held {
+            let worlds = self.panels.stage.worlds.as_ref().filter(|_| self.panels.facts.sheet == Some(Sheet::Worlds));
+            Held {
+                sheet: self.panels.facts.sheet,
+                title: self.panels.facts.sheet_title.clone(),
+                scroll: self.panels.facts.gallery_scroll,
+                world: worlds.and_then(|w| w.shown_world_for_test()),
+                list: worlds.map(|w| w.list_scroll_for_test()),
+            }
+        }
+
+        /// What is wrong with what shows now: a part not where the window's size puts it, a window of ours not where its part is or of another size, a window up with no
+        /// part, a part up with no window.
+        fn wrong(&self, when: &str) -> Vec<String> {
+            let (client, origin) = (self.client(), self.origin());
+            let mut wants: HashMap<Zone, Placed> = self.places(client).into_iter().map(|p| (p.zone, p)).collect();
+            for zone in [Zone::Takeover, Zone::SheetBack, Zone::SheetHint] {
+                if let Some(place) = zones::place(zone, client) {
+                    wants.insert(zone, place);
+                }
+            }
+            let mut wrong = Vec::new();
+            for panel in self.panels.all() {
+                if let Some(want) = wants.get(&panel.zone) {
+                    if panel.placed.rect != want.rect {
+                        wrong.push(format!("{when}: {:?} lies at {:?}, the window puts it at {:?}", panel.zone, panel.placed.rect, want.rect));
+                    }
+                }
+                if !(panel.shown && panel.painted) {
+                    continue;
+                }
+                match self.windows.list.get(&panel.zone).filter(|w| w.shown) {
+                    Some(window) => {
+                        let (_, at, _) = placed_at(panel, origin);
+                        if window.at != at || window.size.cx != panel.px[0] as i32 || window.size.cy != panel.px[1] as i32 {
+                            wrong.push(format!("{when}: the window of {:?} is at {:?} {:?}, its part at {at:?} {:?}", panel.zone, window.at, window.size, panel.px));
+                        }
+                    }
+                    None => wrong.push(format!("{when}: {:?} shows with no window up", panel.zone)),
+                }
+            }
+            for (zone, window) in &self.windows.list {
+                if window.shown && !self.panels.all().any(|p| p.zone == *zone && p.shown && p.painted) {
+                    wrong.push(format!("{when}: the window of {zone:?} shows with no part of it up"));
+                }
+            }
+            wrong
+        }
+
+        /// What is wrong with the mouse now (the grid test of `done6-deskwheel.md`, at the window's new size): a point that goes to a window of ours where nothing of ours
+        /// is pressed, a part whose middle Windows gives to another window than the one of the part the pointer is found on there; with the wheel, any point of ours.
+        fn mouse_wrong(&self, when: &str) -> Vec<String> {
+            let (client, origin) = (self.client(), self.origin());
+            let mut wrong = Vec::new();
+            let seen = grid(&self.windows, &self.stand_in, origin, client);
+            for (p, zone) in &seen {
+                if zone.is_some() && (self.open == Around::Wheel || hit(&self.panels, *p).is_none()) {
+                    wrong.push(format!("{when}: {p:?} goes to {zone:?}, where nothing of ours is pressed"));
+                    break;
+                }
+            }
+            if self.open != Around::Wheel {
+                for panel in self.panels.all().filter(|p| p.shown && p.painted && !p.zone.passes_clicks()) {
+                    let middle = panel.placed.rect.center();
+                    let got = under(POINT { x: origin.x as i32 + middle.x as i32, y: origin.y as i32 + middle.y as i32 });
+                    let found = hit(&self.panels, middle).map(|(i, _)| self.panels.all().nth(i).expect("a part").zone);
+                    let window = found.and_then(|z| self.windows.list.get(&z)).map(|w| w.hwnd);
+                    if window != Some(got) {
+                        // What tells a window lying under another from a window with nothing painted there.
+                        let ours: Vec<HWND> = self.windows.list.values().map(|w| w.hwnd).collect();
+                        let order: Vec<Zone> = from_the_top(&ours).iter().filter_map(|h| self.windows.list.iter().find(|(_, w)| w.hwnd == *h).map(|(z, _)| *z)).collect();
+                        let facts = found.and_then(|z| self.windows.list.get(&z)).map(|w| {
+                            let (x, y) = (origin.x as i32 + middle.x as i32 - w.at.x, origin.y as i32 + middle.y as i32 - w.at.y);
+                            let inside = x >= 0 && y >= 0 && x < w.size.cx && y < w.size.cy;
+                            // SAFETY: the DIB section holds the window's pixels while it lives; read inside them only.
+                            let alpha = inside.then(|| unsafe { *w.bits.add(((y * w.size.cx + x) * 4 + 3) as usize) });
+                            format!("its window shown {} at {:?} size {:?} alpha {}, its pixel there alpha {alpha:?}", w.shown, w.at, w.size, w.alpha)
+                        });
+                        wrong.push(format!(
+                            "{when}: the middle of {:?} is found on {found:?}, and Windows gives it to {} ({}; ours from the top: {order:?})",
+                            panel.zone,
+                            if got == self.stand_in.0 { "VRChat".to_string() } else { format!("{:?}", self.windows.list.iter().find(|(_, w)| w.hwnd == got).map(|(z, _)| *z)) },
+                            facts.unwrap_or_default()
+                        ));
+                    }
+                }
+            }
+            wrong
+        }
+
+        /// What shows over the window now, as Windows composes it (each window of ours at its place, its pixels with its alpha, in the order they lie) over a stand-in of
+        /// the game and of VRChat's menu, saved as `<name>.png` in `ORBITERS_RESIZE_SHOTS` when that is set.
+        fn picture(&self, name: &str) {
+            let Some(dir) = std::env::var_os("ORBITERS_RESIZE_SHOTS") else { return };
+            let (client, origin) = (self.client(), self.origin());
+            let (w, h) = (client.x as i32, client.y as i32);
+            let mut image = image::RgbImage::from_fn(w as u32, h as u32, |_, y| {
+                let t = y as f32 / h as f32;
+                image::Rgb([(14.0 + 10.0 * t) as u8, (20.0 + 18.0 * t) as u8, (34.0 + 30.0 * t) as u8])
+            });
+            let mut fill = |r: egui::Rect, c: [u8; 3], round: bool| {
+                for y in r.top().max(0.0) as i32..(r.bottom() as i32).min(h) {
+                    for x in r.left().max(0.0) as i32..(r.right() as i32).min(w) {
+                        let d = (pos2(x as f32 + 0.5, y as f32 + 0.5) - r.center()) / (r.size() / 2.0);
+                        if !round || d.length() <= 1.0 {
+                            image.put_pixel(x as u32, y as u32, image::Rgb(c));
+                        }
+                    }
+                }
+            };
+            let (center, unit) = zones::frame(self.open, client);
+            match self.open {
+                Around::Wheel => {
+                    fill(egui::Rect::from_center_size(center, vec2(200.0, 200.0) * unit), [7, 55, 58], true);
+                    fill(egui::Rect::from_center_size(center, vec2(96.0, 96.0) * unit), [22, 34, 43], true);
+                }
+                Around::QuickMenu => {
+                    let r = |x0: f32, y0: f32, x1: f32, y1: f32| egui::Rect::from_min_max(center + vec2(x0, y0) * unit, center + vec2(x1, y1) * unit);
+                    fill(r(-351.0, -150.0, 351.0, 186.0), [25, 34, 42], false);
+                    fill(r(-188.0, -204.0, 188.0, 204.0), [22, 34, 43], false);
+                }
+                Around::Camera => {
+                    let rim = camera_rim(client);
+                    fill(rim, [40, 44, 52], false);
+                    fill(rim.shrink(8.0 * client.y / 720.0), [120, 150, 170], false);
+                }
+            }
+            let ours: Vec<HWND> = self.windows.list.values().map(|w| w.hwnd).collect();
+            for hwnd in from_the_top(&ours).into_iter().rev() {
+                let Some(window) = self.windows.list.values().find(|w| w.hwnd == hwnd) else { continue };
+                let (ww, wh) = (window.size.cx, window.size.cy);
+                // SAFETY: the DIB section holds ww x wh 32-bit pixels while the window lives.
+                let bits = unsafe { std::slice::from_raw_parts(window.bits, (ww * wh * 4) as usize) };
+                let (ox, oy) = (window.at.x - origin.x as i32, window.at.y - origin.y as i32);
+                let k = window.alpha as f32 / 255.0;
+                for y in 0..wh {
+                    for x in 0..ww {
+                        let (dx, dy) = (ox + x, oy + y);
+                        if dx < 0 || dy < 0 || dx >= w || dy >= h {
+                            continue;
+                        }
+                        let i = ((y * ww + x) * 4) as usize;
+                        let a = bits[i + 3] as f32 / 255.0 * k;
+                        if a <= 0.0 {
+                            continue;
+                        }
+                        let d = image.get_pixel_mut(dx as u32, dy as u32);
+                        for (c, s) in [(0, bits[i + 2]), (1, bits[i + 1]), (2, bits[i])] {
+                            d.0[c] = (s as f32 * k + d.0[c] as f32 * (1.0 - a)).round().clamp(0.0, 255.0) as u8;
+                        }
+                    }
+                }
+            }
+            let path = std::path::PathBuf::from(dir).join(format!("{name}.png"));
+            image.save(&path).expect("the picture is saved");
+            eprintln!("picture: {}", path.display()); // i18n: not shown (a test's output)
+        }
+    }
+
+    /// The changes of VRChat's window a person makes, from a 1280 x 720 window: where its client area goes and its size. Full screen (Alt+Enter, F11 and VRChat's own
+    /// setting all make the same change: the client area becomes the screen's) and back, maximised and restored, dragged to other sizes and shapes, onto a larger screen
+    /// with another scale (this process is per-monitor DPI aware, so a new scale is a new size in pixels), the screen's resolution changed, moved without a new size.
+    fn changes() -> Vec<(&'static str, Vec2, POINT)> {
+        // Off every screen, with room for the largest.
+        let base = off_screen(vec2(2560.0, 1440.0));
+        let at = |dx: i32, dy: i32| POINT { x: base.x + dx, y: base.y + dy };
+        vec![
+            ("full-screen", vec2(1920.0, 1080.0), at(0, 0)),
+            ("windowed-again", vec2(1280.0, 720.0), at(300, 160)),
+            ("maximised", vec2(1920.0, 1017.0), at(0, 23)),
+            ("restored", vec2(1280.0, 720.0), at(300, 160)),
+            ("dragged-wider", vec2(1366.0, 768.0), at(300, 160)),
+            ("dragged-taller", vec2(1100.0, 800.0), at(300, 160)),
+            ("other-screen", vec2(2560.0, 1440.0), at(0, 0)),
+            ("resolution", vec2(1600.0, 900.0), at(0, 0)),
+            ("moved", vec2(1600.0, 900.0), at(120, 40)),
+            ("windowed-last", vec2(1280.0, 720.0), at(300, 160)),
+        ]
+    }
+
+    /// Runs `up` through `changes`, from a 1280 x 720 window: after each change, from the very next turn, every part of ours is where the new window puts it (never at
+    /// the old size or place, nor a mix of both), and at rest the mouse goes where they are drawn and what they had is still there. Says all that went wrong.
+    fn follow_through(up: Up, changes: &[(&'static str, Vec2, POINT)], pictures: &[Vec2]) -> Vec<String> {
+        let start = vec2(1280.0, 720.0);
+        let mut rig = Rig::new(up, start);
+        let name = up.name();
+        let mut wrong = rig.wrong(&format!("{name} windowed"));
+        let held = rig.held();
+        rig.picture(&format!("{name}-1280x720-windowed"));
+        for (what, client, at) in changes {
+            rig.change(*at, *client);
+            rig.turn();
+            let size = format!("{}x{}", client.x, client.y);
+            let shot = pictures.contains(client);
+            if shot {
+                rig.picture(&format!("{name}-{size}-{what}-first-turn"));
+            }
+            wrong.extend(rig.wrong(&format!("{name} {what} {size}, the first turn")));
+            rig.settle(what);
+            if shot {
+                rig.picture(&format!("{name}-{size}-{what}"));
+            }
+            let when = format!("{name} {what} {size}, at rest");
+            wrong.extend(rig.wrong(&when));
+            wrong.extend(rig.mouse_wrong(&when));
+            if rig.panels.sheet_open() || matches!(up, Up::Page(_) | Up::WheelPage | Up::WorldsList | Up::WorldChosen) {
+                assert!(rig.panels.takeover.as_ref().is_some_and(|p| p.painted && p.shown), "{when}: the page is still up");
+            }
+            let now = rig.held();
+            if now != held {
+                wrong.push(format!("{when}: it had {held:?}, it has {now:?}"));
+            }
+        }
+        wrong
+    }
+
+    /// Enzo, 2026-11-15 (`logs7/fullscreen-resize.png`): the 3D worlds' page open beside VRChat's Quick Menu in a window, and VRChat put in full screen. The page's head
+    /// and its frame, and the side tiles, came to the full screen's size and place; the page itself (its search, chips and cards) stayed at the window's old size and
+    /// place, in a corner, over an empty body. Every part must be where the full screen puts it from the next turn on, the list where it was scrolled to, and back.
+    #[test]
+    fn the_worlds_page_follows_vrchat_going_full_screen() {
+        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let all = changes();
+        let his: Vec<_> = all.iter().filter(|(what, _, _)| matches!(*what, "full-screen" | "windowed-again" | "other-screen")).cloned().collect();
+        let wrong = follow_through(Up::WorldsList, &his, &[vec2(1280.0, 720.0), vec2(1920.0, 1080.0), vec2(2560.0, 1440.0)]);
+        assert!(wrong.is_empty(), "{} things wrong:\n{}", wrong.len(), wrong.join("\n"));
+    }
+
+    /// Every kind of change of VRChat's window, with every kind of part of ours up: the side tiles alone, a page of each kind (the 3D worlds' list and a world chosen
+    /// with its small 3D view among them), the wheel's ring, a page from the wheel, the camera's column.
+    #[test]
+    fn every_part_follows_every_change_of_vrchat_s_window() {
+        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let ups = [
+            Up::Tiles,
+            Up::WorldsList,
+            Up::WorldChosen,
+            Up::Page(Sheet::All),
+            Up::Page(Sheet::Pictures),
+            Up::Page(Sheet::Instances),
+            Up::Page(Sheet::Menu),
+            Up::Page(Sheet::Talk),
+            Up::Page(Sheet::Settings),
+            Up::Wheel,
+            Up::WheelPage,
+            Up::Camera,
+        ];
+        let pictures = [vec2(1280.0, 720.0), vec2(1920.0, 1080.0), vec2(2560.0, 1440.0)];
+        let mut wrong = Vec::new();
+        for up in ups {
+            let found = follow_through(up, &changes(), &pictures);
+            eprintln!("{up:?}: {} things wrong", found.len()); // i18n: not shown (a test's measurement)
+            wrong.extend(found);
+        }
+        assert!(wrong.is_empty(), "{} things wrong:\n{}", wrong.len(), wrong.join("\n"));
     }
 }

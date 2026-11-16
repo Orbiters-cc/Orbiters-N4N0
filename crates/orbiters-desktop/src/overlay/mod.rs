@@ -358,6 +358,13 @@ impl Canvas {
         Self { size: egui::vec2(width as f32, height as f32) / zoom, zoom, ..Self::new(width, height) }
     }
 
+    /// Of `width` x `height` pixels at `zoom` pixels a point from now on: the same interface, its textures and its look, painted whole next.
+    pub fn resize(&mut self, width: u32, height: u32, zoom: f32) {
+        self.painter.resize(width, height);
+        self.size = egui::vec2(width as f32, height as f32) / zoom;
+        self.zoom = zoom;
+    }
+
     /// One whose frames take the look chosen for the menus around VRChat's.
     pub fn in_orbit_look(mut self) -> Self {
         self.restyle = Some(orbit::retro::pass);
@@ -1294,6 +1301,27 @@ fn thumbnail() -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L-fullscreen-resize: a page's canvas taken to another size and back (VRChat's window full screen, then windowed again) still draws its text: the textures its
+    /// interface sent once are kept. A canvas made anew under the same interface drew nothing at a size the interface had drawn at before.
+    #[test]
+    fn a_canvas_resized_and_back_still_draws_its_text() {
+        let draw = |p: &egui::Painter| {
+            p.rect_filled(egui::Rect::from_min_size(pos2(4.0, 4.0), egui::vec2(40.0, 20.0)), 4.0, egui::Color32::from_rgb(40, 160, 120));
+            p.text(pos2(8.0, 30.0), egui::Align2::LEFT_TOP, "Worlds", egui::FontId::proportional(14.0), egui::Color32::WHITE);
+        };
+        let seen = |pixels: &[u8]| pixels.chunks_exact(4).filter(|px| px[3] > 0).count();
+        let mut canvas = Canvas::zoomed(200, 100, 1.0);
+        let first = seen(canvas.paint(0.0, draw));
+        assert!(first > 0);
+        canvas.resize(400, 200, 2.0);
+        let bigger = seen(canvas.paint(0.1, draw));
+        assert!(bigger > first * 3, "twice as large: {bigger} painted pixels, {first} before");
+        canvas.resize(200, 100, 1.0);
+        let back = seen(canvas.paint(0.2, draw));
+        assert_eq!(back, first, "back at the first size, the same picture");
+        assert_eq!(canvas.damage(), Some([0, 0, 200, 100]), "painted whole after a new size");
+    }
 
     #[test]
     fn a_press_cut_by_the_dashboard_closing_is_let_go() {

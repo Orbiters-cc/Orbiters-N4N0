@@ -145,3 +145,30 @@ fn nothing_is_kept_while_the_switch_is_off() {
     assert!(ring(|r| r.is_empty()));
     assert!(!on());
 }
+
+/// Send reports as the Settings card's button does (`send::unsent`), against a server under test: `ORBITERS_MENU_REPORTS_API` (e.g.
+/// `http://127.0.0.1:4100/`) and a folder of real reports in `ORBITERS_MENU_REPORTS_DIR` (copied first: the folder itself is not marked).
+/// Run with `--ignored`.
+#[test]
+#[ignore]
+fn kept_reports_reach_a_server_under_test() {
+    let (Some(base), Some(from)) = (std::env::var_os("ORBITERS_MENU_REPORTS_API"), std::env::var_os("ORBITERS_MENU_REPORTS_DIR")) else {
+        panic!("set ORBITERS_MENU_REPORTS_API and ORBITERS_MENU_REPORTS_DIR");
+    };
+    let root = std::env::temp_dir().join(format!("menu-reports-send-{}", uuid::Uuid::new_v4().simple()));
+    for k in kept_in(std::path::Path::new(&from)) {
+        let to = root.join(k.dir.file_name().unwrap());
+        std::fs::create_dir_all(&to).unwrap();
+        for f in [REPORT, PICTURE] {
+            let _ = std::fs::copy(k.dir.join(f), to.join(f));
+        }
+    }
+    let kept = kept_in(&root);
+    assert!(!kept.is_empty(), "reports to send");
+    let out = send::unsent(&orbiters_core::account::Api::at(&base.to_string_lossy()), &kept);
+    eprintln!("sent {} of {}: {out:?}", out.sent, kept.len());
+    assert_eq!(out.sent, kept.len(), "{out:?}");
+    assert!(kept_in(&root).iter().all(|k| k.sent), "each marked sent");
+    assert_eq!(send::unsent(&orbiters_core::account::Api::at(&base.to_string_lossy()), &kept_in(&root)).sent, 0, "nothing sent twice");
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -127,6 +127,9 @@ pub struct State {
     stage_instance: bool,
     /// Screenshots of the gallery itself: this computer's items cut to the fixture's two.
     fixture_locals: bool,
+    /// Screenshots (`gallery-server-only`): captures on Orbiters only, none on this computer, their pictures read as the
+    /// app reads them (from the server `ORBITERS_PUBLIC_API` names).
+    fixture_server_only: bool,
     /// The cards chosen, a rubber band and a drag out of the window.
     select: super::gallery_select::Selection,
     /// The galleries of the member's communities and their windows (an asset's picture opens in their window too).
@@ -155,6 +158,34 @@ pub struct State {
     /// Reconstruct again's question from a card's menu, over the page ([`super::reconstruct_again`]).
     again: Option<again::Ask>,
 }
+/// Screenshots: the world tour's captures of 2026-11-15 as Orbiters lists them once their folders here were deleted
+/// (L-no-thumbnails): two worlds, private uploads and one public per world, each with its picture on Orbiters.
+fn server_only_feed(template: &orbiters_core::shares::Item) -> Vec<orbiters_core::shares::Item> {
+    use orbiters_core::shares;
+    let worlds = [("wrld_6f3c1a8e-2b1d-4c55-9f00-3a5e8d7c1b21", "Audience Anarchy"), ("wrld_0a9d7e2c-5f4b-4e1a-8c3d-7b6a5f4e3d21", "Freddy's Custom Pizzeria 2.0")]; // i18n: not shown (VRChat world names: data, never translated)
+    let made = [(66, 0, true, "2026-11-15T12:27:33.000Z"), (65, 0, false, "2026-11-15T12:26:56.000Z"), (61, 1, true, "2026-11-15T12:24:21.000Z"), (62, 1, false, "2026-11-15T12:24:40.000Z"), (64, 1, false, "2026-11-15T12:23:08.000Z"), (63, 1, false, "2026-11-15T12:22:47.000Z")];
+    made.into_iter()
+        .map(|(id, world, public, taken)| {
+            let mut item = template.clone();
+            item.kind = shares::Kind::Capture;
+            item.id = id;
+            item.mine = true;
+            item.public = public;
+            item.grants.clear();
+            item.picture = None;
+            item.world = shares::World { id: worlds[world].0.into(), name: worlds[world].1.into(), thumbnail_url: None };
+            item.taken_at = Some(taken.into());
+            item.created_at = taken.into();
+            item.instance_id = Some(format!("{}~hidden(usr_3f0d9d62-6a55-4f07-9a0e-5b1d2b7f6c11)~region(eu)", 30000 + world * 7));
+            item.source_key = None;
+            let mut capture = item.capture.clone().unwrap_or_default();
+            capture.picture_url = Some(format!("/captures/capture/{id}/file?part=picture"));
+            item.capture = Some(capture);
+            item
+        })
+        .collect()
+}
+
 impl State {
     pub fn stage_folders(&mut self) { self.folders.stage(); }
     /// The folders' fixture with the popover closed, for a scenario that opens it with a click.
@@ -300,6 +331,10 @@ impl State {
         self.fixture_locals = name.starts_with("gallery-");
         if self.fixture_locals {
             self.stage_locals();
+        }
+        self.fixture_server_only = name == "gallery-server-only";
+        if self.fixture_server_only {
+            self.feed.items = server_only_feed(&self.feed.items[0]);
         }
         if name == "gallery-public" {
             self.feed.items[0].public = true;
@@ -654,7 +689,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         let mut entries: Vec<Entry> = state
             .locals
             .iter()
-            .filter(|_| state.filter.own() && state.filter != Filter::Shared)
+            .filter(|_| state.filter.own() && state.filter != Filter::Shared && !state.fixture_server_only)
             // Screenshots: one of this computer's, and the made-up pictures.
             .enumerate()
             .filter(|(n, e)| !state.fixture || *n == 0 || state.fixture_extra.iter().any(|x| x.key == e.key))
@@ -673,10 +708,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                 }
             } else {
                 let mut e = controller::remote_entry(item.clone());
-                if item.picture.is_some() && !state.fixture {
-                    e.picture = Some(crate::worlds::Picture::Capture { development, id: item.id, large: false });
+                if !state.fixture {
+                    // On Orbiters only (its folder here deleted, or never here): the picture Orbiters keeps of it.
+                    e.picture = controller::remote_picture(item, development, false).or(e.picture);
                 }
-                if state.fixture {
+                if state.fixture_server_only {
+                    e.picture = controller::remote_picture(item, development, false);
+                } else if state.fixture {
                     e.picture = state.locals.iter().filter_map(|e| e.picture.clone()).nth(if item.mine { 0 } else { 1 });
                 }
                 entries.push(e);
@@ -1095,8 +1133,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     if let Some((e, thumb)) = clicked {
         let mut e = e;
         if let Some(item) = e.remote.as_ref() {
-            if item.picture.is_some() && !state.fixture && e.picture.is_none() {
-                e.picture = Some(crate::worlds::Picture::Capture { development, id: item.id, large: false });
+            if !state.fixture && e.picture.is_none() {
+                e.picture = controller::remote_picture(item, development, false);
             }
         }
         state.dialog = Some(Dialog::new(&ctx, e, false).from(thumb, picture_radius(layout)));

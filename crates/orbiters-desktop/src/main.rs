@@ -98,6 +98,7 @@ fn main() -> anyhow::Result<()> {
         Some("--gpu-bench") => bench::run(&args[1..]),
         Some("--idle-frames") => idle_frames::run(&args[1..]),
         Some("--publish-cost") => controller::publish_cost::run(&args[1..]),
+        Some("--repair-capture-pictures") => controller::picture_repair::run(&args[1..]),
         Some("--link-smoke") => link_smoke::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),
         Some("--overlay") => overlay::run(&args[1..]),

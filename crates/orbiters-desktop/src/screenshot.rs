@@ -2120,6 +2120,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
 
     for name in [
         "gallery-mixed",
+        "gallery-server-only",
         "gallery-mine",
         "gallery-shared",
         "gallery-search",

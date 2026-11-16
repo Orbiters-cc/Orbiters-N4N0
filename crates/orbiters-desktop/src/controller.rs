@@ -407,6 +407,7 @@ pub(crate) mod menu_shares;
 mod n4n0;
 mod performance;
 pub mod publish_cost;
+pub mod picture_repair;
 mod rig;
 mod scan;
 pub mod shares;

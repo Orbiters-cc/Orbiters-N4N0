@@ -171,8 +171,7 @@ impl State {
         let mut out = Vec::new();
         for a in &self.assets {
             let kind = assets::kind_label(&a.asset.kind);
-            let shown_kind = tr(kind);
-            let asset_found = q.matches_any([a.asset.name.as_str(), kind, &*shown_kind]);
+            let asset_found = q.matches_any([a.asset.name.as_str(), kind, tr(kind)]);
             let taken = controller::unix(a.date());
             for (n, p) in a.pictures.iter().enumerate() {
                 let author = p.author.as_ref().map(|m| m.username.clone()).unwrap_or_default();

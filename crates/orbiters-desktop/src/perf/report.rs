@@ -125,7 +125,8 @@ pub fn summary(report: &Value) -> Vec<String> {
     let mut out = Vec::new();
     let m = &report["machine"];
     let text = |v: &Value| v.as_str().unwrap_or("?").to_string();
-    out.push(tr!("Processor: {name}, {cores} cores, {threads} threads", name = text(&m["cpu"]), cores = m["physical_cores"].as_u64().unwrap_or(0), threads = m["logical_processors"].as_u64().unwrap_or(0)));
+    let (cores, threads) = (m["physical_cores"].as_u64().unwrap_or(0), m["logical_processors"].as_u64().unwrap_or(0));
+    out.push(tr!("Processor: {name}, {cores} cores, {threads} threads", name = text(&m["cpu"]), cores = cores, threads = threads));
     if let Some(classes) = m["core_kinds"].as_array().filter(|c| c.len() > 1) {
         let kinds: Vec<String> = classes.iter().map(|c| c["cores"].as_u64().unwrap_or(0).to_string()).collect();
         out.push(tr!("Kinds of cores (efficiency first): {kinds}", kinds = kinds.join(" + ")));

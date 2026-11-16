@@ -458,12 +458,7 @@ mod tests {
         snap.bridge.allowed = true;
         let code = team_code(&snap).unwrap();
         assert_eq!(code.len(), 16);
-        // The server's side computes the same (backend services/n4n0/usageExclusions.js accountCode).
-        assert_eq!(code, team_code_of("blackorbit"));
-    }
-
-    fn team_code_of(name: &str) -> String {
-        use sha2::{Digest, Sha256};
-        Sha256::digest(format!("orbiters-n4n0-usage\u{0}{name}").as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
+        // The server computes the same from the name (backend services/n4n0/usageExclusions.js accountCode; its test has this value).
+        assert_eq!(code, "b14959feefef8a1f");
     }
 }

@@ -4101,18 +4101,25 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let size = (rect.height() * 0.42).clamp(18.0, 32.0);
             let top = rect.center().y - (size + 3.0 + 11.0) / 2.0;
             let icon = Rect::from_center_size(pos2(rect.center().x, top + size / 2.0), Vec2::splat(size));
+            // A cell too small for both (the strip's): the switch and the name alone, the name under the switch.
             let (size, top, mic_x) = match facts.n4n0.then(|| assistant_switch_rect(rect)) {
                 Some(switch) if icon.intersects(switch) && switch.left() - rect.left() >= size + 8.0 => (size, top, (rect.left() + switch.left()) / 2.0),
                 Some(switch) if icon.intersects(switch) => {
                     let room = rect.bottom() - switch.bottom() - 4.0;
-                    let size = (room - 3.0 - 11.0 - 4.0).min(size).max(16.0);
-                    (size, (switch.bottom() + rect.bottom()) / 2.0 - (size + 3.0 + 11.0) / 2.0, rect.center().x)
+                    if room >= 16.0 + 3.0 + 11.0 + 4.0 {
+                        let size = (room - 3.0 - 11.0 - 4.0).min(size);
+                        (size, (switch.bottom() + rect.bottom()) / 2.0 - (size + 3.0 + 11.0) / 2.0, rect.center().x)
+                    } else {
+                        (0.0, (switch.bottom() + rect.bottom()) / 2.0 - (3.0 + 11.0) / 2.0, rect.center().x)
+                    }
                 }
                 _ => (size, top, rect.center().x),
             };
             let mic = pos2(mic_x, top + size / 2.0);
-            widgets::icon(p, mic, icons::MICROPHONE, size, color);
-            if off {
+            if size > 0.0 {
+                widgets::icon(p, mic, icons::MICROPHONE, size, color);
+            }
+            if off && size > 0.0 {
                 let arm = size * 0.36;
                 p.line_segment([mic + vec2(-arm, -arm), mic + vec2(arm, arm)], Stroke::new(2.0, color));
             }

@@ -1959,6 +1959,8 @@ impl N4n0 {
                 }),
                 Effect::Dictate => self.menu_listen(),
                 Effect::SendSuggestion { text, voice } => self.suggestion_send(text, voice, true),
+                // The overlay's switch alone: the avatar's screen has none (its menu's `mismatch_buttons` stays `None`).
+                Effect::MismatchButtons(_) => {}
                 Effect::WatchVideo { link } => {
                     if let Err(e) = self.host.watch(&link) {
                         self.notify(NoticeKind::Warning, e);

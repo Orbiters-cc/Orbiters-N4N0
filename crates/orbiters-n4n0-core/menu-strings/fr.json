@@ -86,6 +86,8 @@
     "suggest.talk": "Parler",
     "suggest.send": "Envoyer",
     "suggest.hint": "Que devrait faire N4N0 ensuite ? L'équipe Orbiters lit chaque idée.",
+    "suggest.mismatch": "Boutons de décalage des menus",
+    "suggest.mismatch_note": "Trois boutons au poignet signalent les menus qui ne collent pas à VRChat ; chaque rapport reste sur cet ordinateur.",
     "home.capture": "Capture 3D",
     "home.more": "Plus",
     "more.title": "Plus",

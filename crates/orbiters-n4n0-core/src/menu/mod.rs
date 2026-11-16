@@ -672,6 +672,9 @@ pub enum Target {
     SuggestType,
     SuggestTalk,
     SuggestSend,
+    /// Suggest features on the overlay: the beta's menu mismatch buttons on or off (the switch of Settings › Beta feedback, the same
+    /// setting; Enzo, 2026-11-16). Not on the avatar's screen: [`Menu::mismatch_buttons`] is `None` there.
+    MismatchButtons,
     /// Music: the world's video, watched on the computer from where the world is, or saved in N4N0's videos.
     WatchVideo,
     SaveVideo,
@@ -810,6 +813,8 @@ pub enum Effect {
     },
     /// Listen to the person for the suggestion they dictate (Suggest features' Talk).
     Dictate,
+    /// The beta's menu mismatch buttons on or off (Suggest features' switch, the setting Settings › Beta feedback shows too).
+    MismatchButtons(bool),
     /// Send this suggestion to Orbiters (`voice`: some of it was said, not typed).
     SendSuggestion {
         text: String,
@@ -900,6 +905,9 @@ pub struct Menu {
     /// N4N0 listens to the person.
     pub listening: bool,
     pub fast_walk: bool,
+    /// The beta's menu mismatch buttons, on or off, where this menu has their switch (the overlay's Suggest features); `None` where it
+    /// has not (the avatar's screen, whose older packages have no such switch on that page).
+    pub mismatch_buttons: Option<bool>,
     /// The screen stays where it is (`N4N0/Screen/Pinned`, as the avatar says; the Action Menu sets it too).
     pub pinned: bool,
     /// This menu shows on the avatar's screen, which is what Stay here keeps in place (no button in the overlay, whose
@@ -1404,6 +1412,13 @@ impl Menu {
                 vec![Effect::SendSuggestion { text: self.suggestion.trim().to_string(), voice: self.suggestion_voice }]
             }
             Target::SuggestSend => Vec::new(),
+            Target::MismatchButtons => match self.mismatch_buttons {
+                Some(on) => {
+                    self.mismatch_buttons = Some(!on);
+                    vec![Effect::MismatchButtons(!on)]
+                }
+                None => Vec::new(),
+            },
             Target::WatchVideo => match &self.world_video {
                 Some(video) => {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());

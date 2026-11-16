@@ -818,6 +818,17 @@ pub fn hit(layout: &Layout, x: f32, y: f32) -> Option<(usize, Target)> {
 
 /// What a pointer at (`x`, `y`) hovers and presses on `menu`'s page: the last drawn element there that shows and is
 /// available now (a hidden button lets the row under it take the press: a result's Drop before its link is copied).
+/// What only the overlay shows on a page, never the avatar's screen, not even in its page's picture: the menu mismatch buttons' switch on
+/// Suggest features and its sentence.
+pub fn overlay_only(target: Target) -> bool {
+    target == Target::MismatchButtons
+}
+
+/// A page's text that only the overlay shows (see [`overlay_only`]).
+pub fn overlay_only_text(text: Text) -> bool {
+    text == Text::SuggestMismatchNote
+}
+
 pub fn hit_pointable(layout: &Layout, menu: &Menu, x: f32, y: f32) -> Option<(usize, Target)> {
     layout.elements.iter().enumerate().rev().find(|(_, e)| e.rect.contains(x, y) && state(menu, e).pointable()).map(|(i, e)| (i, e.target))
 }
@@ -1274,12 +1285,16 @@ pub fn layout(page: ScreenPage) -> Layout {
             elements.push(with(element(Target::SuggestType, Rect::new(32, 316, 220, 72), Look::KeyDark), Some(Icon::Keyboard), Some(Text::SuggestType)));
             elements.push(with(element(Target::SuggestTalk, Rect::new(268, 316, 220, 72), Look::KeyDark), Some(Icon::Microphone), Some(Text::SuggestTalk)));
             elements.push(with(element(Target::SuggestSend, Rect::new(772, 316, 220, 72), Look::Accent), Some(Icon::Send), Some(Text::SuggestSend)));
+            // The overlay's switch of the menu mismatch buttons, last: an avatar's screen built before it has five elements on this page
+            // and never shows it (hidden there, `Menu::mismatch_buttons` is `None`); its sentence is under it, the hint at the foot.
+            elements.push(with(element(Target::MismatchButtons, Rect::new(32, 432, 960, 60), Look::Chip), Some(Icon::Chat), Some(Text::SuggestMismatch)));
             labels.push(Label { x: 104, y: 34, size: 32, text: Text::SuggestTitle, style: Style::Primary, bold: true, width: 888 });
-            labels.push(Label { x: 32, y: 488, size: 24, text: Text::SuggestHint, style: Style::Secondary, bold: false, width: 960 });
+            labels.push(Label { x: 32, y: 536, size: 24, text: Text::SuggestHint, style: Style::Secondary, bold: false, width: 960 });
+            labels.push(Label { x: 32, y: 500, size: 20, text: Text::SuggestMismatchNote, style: Style::Secondary, bold: false, width: 960 });
             for line in 0..SUGGEST_LINES as u16 {
                 slots.add(56, 116 + line * 40, SUGGEST_COLUMNS as u8, 24, Style::Primary, Content::SuggestLine(line as u8));
             }
-            slots.add(32, 420, 60, 24, Style::Accent, Content::SuggestNote);
+            slots.add(32, 400, 60, 24, Style::Accent, Content::SuggestNote);
         }
         ScreenPage::HomeSimple | ScreenPage::HomeQuiet | ScreenPage::HomeSimpleStay | ScreenPage::HomeQuietStay => {
             // Three large tiles (YouTube, 3D capture, More), three buttons under them (fast walk, calls, states), and at
@@ -2508,6 +2523,7 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::TrackingSwitch => menu.tracking.as_ref().is_some_and(|t| t.on),
         Target::Smoothing(i) => menu.tracking.as_ref().is_some_and(|t| t.on && t.ms.get((i / 4) as usize).is_some_and(|&ms| super::smoothing_choice(ms) == (i % 4) as usize)),
         Target::SuggestTalk => menu.dictating,
+        Target::MismatchButtons => menu.mismatch_buttons == Some(true),
         // The timeline's segments the music reached.
         Target::Timeline(i) => menu.media.as_ref().is_some_and(|m| timeline_lit(m, i)),
         // A friend chosen on Share to ….
@@ -2523,6 +2539,8 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
     let hidden = match target {
         // What stays is the avatar's screen: the overlay's menu always comes to the headset.
         Target::StayHere => !menu.on_screen,
+        // The overlay's alone: the avatar's screen has no menu mismatch buttons.
+        Target::MismatchButtons => menu.mismatch_buttons.is_none(),
         Target::Suggestion(i) => menu.shown_suggestions().nth(i as usize).is_none(),
         Target::Copy(i) => i as usize >= menu.page_results().len(),
         Target::Contact(i) => i as usize >= menu.page_contacts().len() || menu.call.is_some(),

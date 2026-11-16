@@ -152,6 +152,9 @@ texts! {
     SuggestTalk = "suggest.talk" => "Talk",
     SuggestSend = "suggest.send" => "Send",
     SuggestHint = "suggest.hint" => "What should N4N0 do next? The Orbiters team reads every idea.",
+    /// Suggest features on the overlay: the menu mismatch buttons' switch and what they show and record.
+    SuggestMismatch = "suggest.mismatch" => "Menu mismatch buttons",
+    SuggestMismatchNote = "suggest.mismatch_note" => "Three wrist buttons report menus that do not match VRChat's; each report stays on this computer.",
     /// The simple Home's large tiles (from screen version 10): 3D capture and More.
     HomeCapture = "home.capture" => "3D capture",
     HomeMore = "home.more" => "More",

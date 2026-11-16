@@ -86,6 +86,8 @@
     "suggest.talk": "Hablar",
     "suggest.send": "Enviar",
     "suggest.hint": "¿Qué debería hacer N4N0 ahora? El equipo de Orbiters lee cada idea.",
+    "suggest.mismatch": "Botones de desajuste de menús",
+    "suggest.mismatch_note": "Tres botones en la muñeca avisan de menús distintos a los de VRChat; cada informe queda en este ordenador.",
     "home.capture": "Captura 3D",
     "home.more": "Más",
     "more.title": "Más",

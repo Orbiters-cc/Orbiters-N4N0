@@ -202,6 +202,8 @@ impl<P: Pictures> MenuHost<P> {
             }
         }
         changed |= set(&mut m.fast_walk, settings.walk_boost.enabled);
+        // The overlay's Suggest features has the switch of the menu mismatch buttons, the setting Settings › Beta feedback shows too.
+        changed |= set(&mut m.mismatch_buttons, Some(settings.mismatch.buttons));
         changed |= set(&mut m.desktop_mode, n4n0.desktop_mode);
         let said = n4n0.light.map(|l| Light { on: l.on, color: l.color, level: l.level });
         let light = match self.light_set {
@@ -535,6 +537,11 @@ impl<P: Pictures> MenuHost<P> {
                     changed.walk_boost.enabled = on;
                     service.save_settings(settings, &changed);
                 }
+                Effect::MismatchButtons(on) => {
+                    let mut changed = settings.clone();
+                    changed.mismatch.buttons = on;
+                    service.save_settings(settings, &changed);
+                }
                 Effect::CallContact { id } => service.command(Command::Call { contact: id }),
                 Effect::Answer => service.command(Command::AnswerCall),
                 Effect::HangUp => service.command(Command::EndCall),
@@ -812,6 +819,42 @@ mod tests {
         n4n0.states.note = Some(StatesNote { id: 8, text: "VRChat said no again".into(), error: true });
         h.follow(&n4n0, &settings);
         assert_eq!(h.menu.notice.as_deref(), Some("VRChat said no again"));
+    }
+
+    /// The overlay's Suggest features has the switch of the menu mismatch buttons: it shows the setting Settings › Beta feedback shows
+    /// (changed there, it follows), and a press saves the other value in the same setting.
+    #[test]
+    fn suggest_s_switch_is_the_beta_feedback_setting() {
+        use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
+        let mut h = host();
+        let mut settings = Settings::default();
+        h.open(&settings);
+        let n4n0 = N4n0Status::default();
+        h.follow(&n4n0, &settings);
+        h.menu.page = Page::Suggest;
+        assert_eq!(h.menu.mismatch_buttons, Some(false));
+        let page = layout::cached(ScreenPage::Suggest);
+        let switch = page.elements.iter().find(|e| e.target == Target::MismatchButtons).expect("on the page");
+        assert!(layout::state(&h.menu, switch).pointable() && !layout::state(&h.menu, switch).on);
+        // Turned on in Settings: on here.
+        settings.mismatch.buttons = true;
+        h.dirty = false;
+        h.follow(&n4n0, &settings);
+        assert!(h.dirty && layout::state(&h.menu, switch).on);
+        // Pressed here: off at once, and saved off.
+        let service = Recorder::default();
+        let effects = h.press(Target::MismatchButtons);
+        assert_eq!(effects, vec![Effect::MismatchButtons(false)]);
+        assert!(!layout::state(&h.menu, switch).on);
+        h.effects(effects, &settings, &service);
+        let saved = service.saved.lock().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(!saved[0].mismatch.buttons && saved[0].mismatch.picture == settings.mismatch.picture);
+        // A menu that never had the setting (the avatar's screen): no switch, a press does nothing.
+        let mut screen = orbiters_n4n0_core::menu::Menu::default();
+        screen.page = Page::Suggest;
+        assert!(layout::state(&screen, switch).hidden);
+        assert!(screen.press(Target::MismatchButtons).is_empty());
     }
 
     #[test]

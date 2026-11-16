@@ -86,6 +86,8 @@
     "suggest.talk": "Falar",
     "suggest.send": "Enviar",
     "suggest.hint": "O que o N4N0 deveria fazer agora? A equipe Orbiters lê cada ideia.",
+    "suggest.mismatch": "Botões de descompasso dos menus",
+    "suggest.mismatch_note": "Três botões no pulso avisam de menus diferentes dos do VRChat; cada relatório fica neste computador.",
     "home.capture": "Captura 3D",
     "home.more": "Mais",
     "more.title": "Mais",

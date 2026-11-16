@@ -4097,18 +4097,20 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             } else {
                 look::LABEL
             };
-            // Its icon and name, under the switch on its corner when the switch would be on the icon.
+            // Its icon and name where they always are; when the switch on its corner would be on the icon, the icon beside the switch, or both under it.
             let size = (rect.height() * 0.42).clamp(18.0, 32.0);
-            let icon_at = |middle: f32, size: f32| Rect::from_center_size(pos2(rect.center().x, middle - (3.0 + 11.0) / 2.0), Vec2::splat(size));
-            let (size, middle) = match facts.n4n0.then(|| assistant_switch_rect(rect)) {
-                Some(switch) if icon_at(rect.center().y, size).intersects(switch) => {
+            let top = rect.center().y - (size + 3.0 + 11.0) / 2.0;
+            let icon = Rect::from_center_size(pos2(rect.center().x, top + size / 2.0), Vec2::splat(size));
+            let (size, top, mic_x) = match facts.n4n0.then(|| assistant_switch_rect(rect)) {
+                Some(switch) if icon.intersects(switch) && switch.left() - rect.left() >= size + 8.0 => (size, top, (rect.left() + switch.left()) / 2.0),
+                Some(switch) if icon.intersects(switch) => {
                     let room = rect.bottom() - switch.bottom() - 4.0;
-                    ((room - 3.0 - 11.0 - 4.0).min(size).max(16.0), (switch.bottom() + rect.bottom()) / 2.0)
+                    let size = (room - 3.0 - 11.0 - 4.0).min(size).max(16.0);
+                    (size, (switch.bottom() + rect.bottom()) / 2.0 - (size + 3.0 + 11.0) / 2.0, rect.center().x)
                 }
-                _ => (size, rect.center().y),
+                _ => (size, top, rect.center().x),
             };
-            let top = middle - (size + 3.0 + 11.0) / 2.0;
-            let mic = pos2(rect.center().x, top + size / 2.0);
+            let mic = pos2(mic_x, top + size / 2.0);
             widgets::icon(p, mic, icons::MICROPHONE, size, color);
             if off {
                 let arm = size * 0.36;

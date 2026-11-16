@@ -351,7 +351,7 @@ static WRISTS_HANDED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 fn wrist_said(s: &mut Snapshot, hand: usize, pose: [f32; 6], now: u64) -> bool {
     s.vrchat_wrists[hand] = Some(pose);
     s.vrchat_wrists_ns[hand] = now;
-    let wanted = s.camera_open_said == Some(true) && s.steamvr.running;
+    let wanted = (s.camera_open_said == Some(true) && s.steamvr.running) || crate::perf::old_publishing();
     if !wanted || now.saturating_sub(WRISTS_HANDED[hand].load(Ordering::Relaxed)) < 50_000_000 {
         return false;
     }
@@ -2850,7 +2850,7 @@ fn spawn_watchers(ctl: Shared) {
                     }
                     // The developer VR sandbox's SteamVR (a bridge VR session's emulated headset) is not the person's VR: no
                     // overlay, sound devices or start choice for it (steamvr_start::sandbox_runs).
-                    let steamvr_pid = named(&["vrserver.exe", "vrserver"]).filter(|_| !crate::steamvr_start::sandbox_runs());
+                    let steamvr_pid = named(&["vrserver.exe", "vrserver"]).filter(|_| !crate::steamvr_start::sandbox_runs() || crate::steamvr_start::sandbox_test_app());
                     let steamvr = steamvr_pid.is_some();
                     let was = running;
                     // A VRChat on the network counts as running, for N4N0 and the interface; `remote` says it costs

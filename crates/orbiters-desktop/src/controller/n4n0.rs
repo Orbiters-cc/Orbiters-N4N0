@@ -260,6 +260,9 @@ static SPEED_HANDED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 fn motion_news(before: Option<crate::state::AvatarMotion>, now: crate::state::AvatarMotion) -> bool {
     use std::sync::atomic::Ordering;
     let Some(before) = before else { return true };
+    if crate::perf::old_publishing() {
+        return before != now;
+    }
     let class = |speed: f32| if !speed.is_finite() { 3 } else if speed < 0.15 { 0 } else if speed < 0.4 { 1 } else { 2 };
     if before.in_station != now.in_station || before.seated != now.seated || class(before.speed) != class(now.speed) || before.speed_at_ms.is_some() != now.speed_at_ms.is_some() {
         if let Some(at) = now.speed_at_ms {

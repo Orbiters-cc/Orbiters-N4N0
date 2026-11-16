@@ -546,6 +546,14 @@ pub fn hint(lines: &[Line]) -> Option<Hint> {
     None
 }
 
+/// A debug build measuring what the fixes of N-friend-lag gained: with `perf-old-publishing.flag` in the logs' folder when it
+/// starts, VRChat's wrists and speed publish the state as 0.3.5 did (every wrist at most 20 times a second a hand, every speed).
+/// Never in a build people run.
+pub fn old_publishing() -> bool {
+    static OLD: OnceLock<bool> = OnceLock::new();
+    cfg!(debug_assertions) && *OLD.get_or_init(|| orbiters_core::paths::logs_dir().join("perf-old-publishing.flag").exists())
+}
+
 /// The causes the person said not to be told again (`perf-hints.json` in the configuration folder).
 fn hints_file() -> PathBuf {
     orbiters_core::paths::config_dir().join("perf-hints.json")

@@ -53,6 +53,13 @@ pub fn sandbox_runs() -> bool {
     sandbox_in_vrpath(&text, |dir| std::fs::read_to_string(dir.join("driver.vrdrivermanifest")).ok())
 }
 
+/// A debug build the sandbox itself started for a test (its `app` action sets `ORBITERS_VR_SANDBOX_ROOT`): the sandbox's
+/// SteamVR is the one it is there to test, so it is taken as SteamVR. Since the tour's VR sessions (0e8b23ff) every app left
+/// it alone, test builds included, and no overlay ever started in the sandbox (N-friend-lag, 2026-11-16).
+pub fn sandbox_test_app() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some()
+}
+
 /// [`sandbox_runs`] on the file's text: an external driver whose manifest names `orbiters_sandbox`.
 pub fn sandbox_in_vrpath(text: &str, manifest: impl Fn(&std::path::Path) -> Option<String>) -> bool {
     let Ok(paths) = serde_json::from_str::<serde_json::Value>(text) else { return false };

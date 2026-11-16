@@ -5322,8 +5322,12 @@ mod tests {
             if switch.bottom() < tile.bottom() {
                 assert_eq!(at(switch.center_bottom() + vec2(0.0, 2.0)), Some(Action::Idle), "{name}: under it");
             }
-            // The tile's own middle and its other corners open Ask N4N0.
-            for p in [tile.left_bottom() + vec2(3.0, -3.0), tile.left_top() + vec2(3.0, 3.0), tile.right_bottom() - vec2(3.0, 3.0)] {
+            // The tile's own middle and its other corners open Ask N4N0 (on a wide tile the right end is all the switch's).
+            let mut rest = vec![tile.left_bottom() + vec2(3.0, -3.0), tile.left_top() + vec2(3.0, 3.0), pos2(tile.left() + (switch.left() - tile.left()) / 2.0, tile.center().y)];
+            if switch.bottom() < tile.bottom() {
+                rest.push(tile.right_bottom() - vec2(3.0, 3.0));
+            }
+            for p in rest {
                 assert_eq!(at(p), Some(Action::Talk), "{name}: {p:?}");
             }
             apart_from_assistant_switch(list);

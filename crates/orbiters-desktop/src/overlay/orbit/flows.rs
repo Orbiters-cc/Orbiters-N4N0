@@ -2326,3 +2326,50 @@ fn a_code_found_beside_the_desktop_camera_opens_in_the_browser() {
     assert!(!person.panels.all().any(|p| matches!(p.zone, Zone::CameraWeb | Zone::CameraWebBar)));
     assert_eq!(heard.camera.lock().unwrap().last().map(String::as_str), Some("qr off"), "the scan stops once its code is found");
 }
+
+/// Enzo, 2026-11-16: "I would like to be able to grab the volume slider like for the timeline position slider." Now playing's level is grabbed where pressed, follows
+/// the pointer while held (even off the bar, past its ends), sets the volume as it goes and where it is let go: the playing app's (the computer's where apps have
+/// none), the same setting as its minus and plus.
+#[test]
+fn now_playing_s_volume_is_grabbed_and_dragged_as_its_timeline_is() {
+    use orbiters_n4n0_core::menu::PlayingVolume;
+    let mut person = Person::with_a_song();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::All);
+    person.turns_until("Now playing's volume", |p| p.find(Action::VolumeBar).is_some());
+    let (part, at) = person.find(Action::VolumeBar).unwrap();
+    let grab = person.panels.all().nth(part).unwrap().items.iter().find(|i| i.action == Action::VolumeBar).unwrap().rect;
+    let x = |f: f32| grab.left() + 13.0 + (grab.width() - 26.0) * f;
+    let level = |p: &Person| match p.panels.stage.host.menu.playing_volume() {
+        Some(PlayingVolume::App(v) | PlayingVolume::Computer(v)) => v.percent,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(level(&person), 40);
+    // Grabbed near its left: set there at once.
+    person.panels.hover(Some((part, egui::pos2(x(0.1), at.y))));
+    person.turn();
+    let snap = person.snap.clone();
+    person.panels.press(&snap);
+    person.turn();
+    assert_eq!(level(&person), 10);
+    // Dragged right, the hand drifting off the bar and past its end: it follows, set as it goes.
+    for (f, dy) in [(0.5, 10.0), (0.8, 30.0), (1.4, 30.0)] {
+        std::thread::sleep(super::VOLUME_EVERY);
+        person.panels.hover(Some((part, egui::pos2(x(f), at.y + dy))));
+        person.turn();
+    }
+    assert_eq!(person.panels.facts.volume.map(|v| v.0), Some(100), "shown where it is held");
+    assert_eq!(level(&person), 100);
+    // Let go a little back: where it was let go, and no longer held.
+    person.panels.hover(Some((part, egui::pos2(x(0.6), at.y))));
+    person.turn();
+    person.panels.release();
+    person.turn();
+    assert_eq!(level(&person), 60);
+    assert!(person.panels.volume_held.is_none());
+    // Pointing at it again without a press moves nothing.
+    person.panels.hover(Some((part, egui::pos2(x(0.2), at.y))));
+    person.turns(2);
+    assert_eq!(level(&person), 60);
+}

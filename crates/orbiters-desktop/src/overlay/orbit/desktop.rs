@@ -97,6 +97,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut panel_seen_ns: Option<u64> = None;
     let mut frames_seen = FrameRate::default();
     let clicks = Clicks::start();
+    // The performance self-check (`perf`): this loop's cost, to the service every ten seconds.
+    let mut meter = crate::perf::TurnMeter::new("orbit-desktop", Instant::now());
     loop {
         let turn = Instant::now();
         let dt = turn.duration_since(last_turn).as_secs_f32();
@@ -139,6 +141,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 windows.hide_all();
             }
             keys.reset();
+            beat(&mut meter, &backend, turn);
             std::thread::sleep(REST);
             continue;
         };
@@ -214,6 +217,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             pointer.stop();
             windows.hide_all();
             pill.show(panels.away_words(&snap), origin, size);
+            beat(&mut meter, &backend, turn);
             camera_log.turn(turn.elapsed(), false, panel, camera.take_went(), snap.camera_open_said, size, camera_frames);
             std::thread::sleep(if watcher.wants_frames() || camera_frames { TURN } else { REST });
             continue;
@@ -274,9 +278,18 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         if windows.show(&mut panels, &snap, origin, open) {
             pointer.raise();
         }
+        beat(&mut meter, &backend, turn);
         camera_log.turn(turn.elapsed(), windows.painted != painted, panel, camera.take_went(), snap.camera_open_said, size, camera_frames);
         let wait = TURN.saturating_sub(turn.elapsed());
         std::thread::sleep(wait);
+    }
+}
+
+/// A turn of the loop ended (its wait not counted): the self-check notes it, and sends its ten seconds when they are up.
+fn beat(meter: &mut crate::perf::TurnMeter, backend: &Ctl, turn: Instant) {
+    meter.turn(turn.elapsed());
+    if let Some(turns) = meter.take(Instant::now()) {
+        backend.perf_turns(turns);
     }
 }
 
@@ -837,7 +850,9 @@ impl Looker {
                         continue;
                     }
                     let Some((window, c)) = capture.as_mut() else { continue };
+                    let began = Instant::now();
                     let looked = c.look(HWND(*window as *mut _), ask.client, menus, camera, ask.shown, ask.open);
+                    crate::perf::elsewhere(crate::perf::Part::Capture, began.elapsed());
                     let Some(looked) = looked else {
                         // No new frame yet.
                         std::thread::sleep(Duration::from_millis(2));
@@ -1102,6 +1117,7 @@ impl PanelWindow {
         let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8 };
         let origin = POINT { x: 0, y: 0 };
         // SAFETY: live handles; the structures outlive the call.
+        crate::perf::uploaded(u64::from(self.size.cx.max(0) as u32) * u64::from(self.size.cy.max(0) as u32));
         unsafe {
             let screen = GetDC(None);
             let updated = UpdateLayeredWindow(self.hwnd, Some(screen), Some(&at), Some(&self.size), Some(self.dc), Some(&origin), COLORREF(0), Some(&blend), ULW_ALPHA);

@@ -119,6 +119,10 @@ pub trait Backend: Send + Sync {
     fn walk_path(&self, _path: crate::state::WalkPath) {}
     /// What the overlay concluded of the frames.
     fn booster_report(&self, _report: crate::booster::OverlayReport) {}
+    /// A loop's last ten seconds (`perf`).
+    fn perf_turns(&self, _turns: crate::perf::ProcessTurns) {}
+    /// The Performance report: make it, send it, mute a hint (`perf`).
+    fn perf(&self, _command: crate::perf::Command) {}
     /// What a surface asks of the FPS booster.
     fn booster(&self, _command: crate::booster::Command) {}
     /// Sets the walk boost's strength (0 to 1), saved and sent to the avatar's `N4N0/WalkBoost`.
@@ -343,6 +347,14 @@ impl Backend for Remote {
         self.0.send(&ToService::BoosterReport { report: Box::new(report) });
     }
 
+    fn perf_turns(&self, turns: crate::perf::ProcessTurns) {
+        self.0.send(&ToService::PerfTurns { turns: Box::new(turns) });
+    }
+
+    fn perf(&self, command: crate::perf::Command) {
+        self.0.send(&ToService::PerfReport { command });
+    }
+
     fn booster(&self, command: crate::booster::Command) {
         self.0.send(&ToService::Booster { command });
     }
@@ -559,6 +571,14 @@ impl Backend for Local {
 
     fn frames(&self, chunk: crate::state::FrameChunk) {
         self.ctl.frames(chunk);
+    }
+
+    fn perf_turns(&self, turns: crate::perf::ProcessTurns) {
+        crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).turns(turns);
+    }
+
+    fn perf(&self, command: crate::perf::Command) {
+        self.ctl.perf(command);
     }
 
     fn headset(&self, in_use: bool) {

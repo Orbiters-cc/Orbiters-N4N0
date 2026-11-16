@@ -217,6 +217,8 @@ pub struct Controller {
     /// What tracking smoothing's driver does now (the service's keeper says), for N4N0's Tracking page.
     tracking_note: Mutex<String>,
     quitting: AtomicBool,
+    /// The last Performance report made, for Send (`perf`).
+    perf_last: Mutex<Option<serde_json::Value>>,
 }
 
 const TOGGLE_NONE: u8 = 0;
@@ -337,6 +339,26 @@ fn calibration_info(stored: &StoredCalibration) -> CalibrationInfo {
 
 pub type Shared = Arc<Controller>;
 
+/// When the service last handed out a wrist of VRChat's ([`wrist_said`]), each hand's, on the shared clock.
+static WRISTS_HANDED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+/// VRChat's wrist pose for `hand` (it says both every frame over OSC, `/tracking/vrsystem/*wrist/pose`): kept in the state
+/// always, and handed out (returns true: publish) at most 20 times a second, only while VRChat's camera is said open in
+/// VR, the one time anything reads them (the camera's tools in the headset, `camera_reckon`). Handing the whole state out
+/// for each, whatever showed, was 40 publishes a second with both hands, most of what the service published in VR (Enzo's
+/// 0.3.5 session of 2026-11-15: 2,000 to 2,500 a minute for six hours, 20 a minute without VRChat; N-friend-lag). The
+/// opening of the camera publishes the latest one with it.
+fn wrist_said(s: &mut Snapshot, hand: usize, pose: [f32; 6], now: u64) -> bool {
+    s.vrchat_wrists[hand] = Some(pose);
+    s.vrchat_wrists_ns[hand] = now;
+    let wanted = (s.camera_open_said == Some(true) && s.steamvr.running) || crate::perf::old_publishing();
+    if !wanted || now.saturating_sub(WRISTS_HANDED[hand].load(Ordering::Relaxed)) < 50_000_000 {
+        return false;
+    }
+    WRISTS_HANDED[hand].store(now, Ordering::Relaxed);
+    true
+}
+
 /// How often the service publishes its state, for `logs/publishes.log`: a real session's answer to what the
 /// architecture review could only estimate (DRT-1). Counts only, one line a minute at most.
 #[derive(Default)]
@@ -405,6 +427,7 @@ mod language;
 mod maps;
 pub(crate) mod menu_shares;
 mod n4n0;
+mod perf;
 mod performance;
 pub mod publish_cost;
 pub mod picture_repair;
@@ -502,6 +525,7 @@ impl Controller {
             kit_rearm: AtomicBool::new(false),
             tracking_note: Mutex::new(String::new()),
             quitting: AtomicBool::new(false),
+            perf_last: Mutex::new(None),
         })
     }
 
@@ -547,6 +571,7 @@ impl Controller {
         self.start_language();
         self.start_vrchat_login();
         self.start_n4n0();
+        self.start_perf();
         self.start_calls();
         self.start_updates();
     }
@@ -1526,14 +1551,8 @@ impl Controller {
                     if let Some(hand) = wrist.filter(|_| values.len() == 6) {
                         let floats: Vec<f32> = values.iter().filter_map(|v| if let OscValue::Float(f) = v { Some(*f) } else { None }).collect();
                         if let Ok(pose) = <[f32; 6]>::try_from(floats.as_slice()) {
-                            // VRChat says it every frame: the overlay (another process) gets it at most 20 times a second.
                             let now = orbiters_core::clock::now_ns();
-                            self.update_if(|s| {
-                                if now.saturating_sub(s.vrchat_wrists_ns[hand]) < 50_000_000 { return false; }
-                                s.vrchat_wrists[hand] = Some(pose);
-                                s.vrchat_wrists_ns[hand] = now;
-                                true
-                            });
+                            self.update_if(|s| wrist_said(s, hand, pose, now));
                         }
                     }
                     if address == orbiters_n4n0_core::states::EYE_HEIGHT {
@@ -3037,6 +3056,46 @@ mod tests {
                 (179, "2 publishes in a minute, at most 1 in one second, to 3 readers".to_string())
             ]
         );
+    }
+
+    /// N-friend-lag: VRChat's wrists come every frame; they are kept, and the state goes out for them at most 20 times a
+    /// second a hand, only while VRChat's camera is open in VR (the camera's tools read them then, and nothing else).
+    #[test]
+    fn vrchat_wrists_are_handed_out_only_while_its_camera_is_open_in_vr() {
+        let mut s = Snapshot::new(Settings::default());
+        // Far ahead of any time another test gave hand 1.
+        let base = 9_000_000_000_000_000u64;
+        let frame = 11_111_111u64;
+        let mut handed = 0;
+        for f in 0..90u64 {
+            handed += super::wrist_said(&mut s, 1, [f as f32; 6], base + f * frame) as u32;
+        }
+        assert_eq!(handed, 0, "camera closed: nothing handed out");
+        assert_eq!(s.vrchat_wrists[1], Some([89.0; 6]), "but the latest kept");
+        assert_eq!(s.vrchat_wrists_ns[1], base + 89 * frame);
+        s.camera_open_said = Some(true);
+        for f in 90..180u64 {
+            handed += super::wrist_said(&mut s, 1, [f as f32; 6], base + f * frame) as u32;
+        }
+        assert_eq!(handed, 0, "desktop mode (no SteamVR): the tools there do not read them");
+        s.steamvr.running = true;
+        for f in 180..270u64 {
+            handed += super::wrist_said(&mut s, 1, [f as f32; 6], base + f * frame) as u32;
+        }
+        assert!((18..=20).contains(&handed), "{handed} in a second at 90 Hz");
+    }
+
+    /// The same through VRChat's OSC: a second of wrists with the camera closed publishes nothing.
+    #[test]
+    fn a_second_of_vrchat_wrists_publishes_nothing_with_its_camera_closed() {
+        let ctl = Controller::new(Settings::default());
+        let before = ctl.publishes.load(Ordering::Relaxed);
+        for f in 0..90 {
+            let pose = (0..6).map(|i| OscValue::Float((f * 6 + i) as f32)).collect();
+            ctl.on_osc_events(&mut vec![OscEvent::Values { address: "/tracking/vrsystem/leftwrist/pose".into(), values: pose }], clock::now_ns(), RECORD_PARAMETER);
+        }
+        assert_eq!(ctl.publishes.load(Ordering::Relaxed), before);
+        assert!(ctl.snapshot.lock().unwrap().vrchat_wrists[0].is_some());
     }
 
     /// A publish hands out a snapshot that shares every part with the one before, but those that changed; a part that

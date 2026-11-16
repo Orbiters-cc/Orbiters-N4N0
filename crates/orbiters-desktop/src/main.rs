@@ -34,6 +34,7 @@ mod media;
 mod menu_host;
 mod mixer_inbox;
 mod overlay;
+mod perf;
 mod pages;
 mod qr;
 mod reconstruct;

@@ -815,7 +815,8 @@ impl Looker {
                         continue;
                     };
                     if capture.as_ref().is_none_or(|(w, _)| *w != ask.window) {
-                        capture = None;
+                        // The old window's capture ends before the new one starts.
+                        drop(capture.take());
                         if gpu.is_none() {
                             gpu = Gpu::new().map_err(|e| eprintln!("capture: {e}")).ok();
                         }
@@ -913,6 +914,7 @@ impl CameraLog {
     }
 
     /// A turn of the loop, how long it took and whether it painted a part; `shown` where the column stands, `went` why it went, `said` VRChat's word over OSC.
+    #[allow(clippy::too_many_arguments)]
     fn turn(&mut self, took: Duration, painted: bool, shown: Option<egui::Rect>, went: Option<detect::CameraGone>, said: Option<bool>, client: Vec2, looking: bool) {
         if shown != self.was {
             match (self.was, shown) {
@@ -1997,7 +1999,7 @@ mod tests {
             snap.worn_kit = Some(true);
             let places = zones::camera_on_screen(panel, client);
             let (mut panels, mut windows, _stand_in, origin) = put_up_as(Around::Camera, client, false, places.clone(), snap.clone());
-            let mut turn = |panels: &mut Panels, windows: &mut Windows, snap: &Snapshot| {
+            let turn = |panels: &mut Panels, windows: &mut Windows, snap: &Snapshot| {
                 let began = Instant::now();
                 pump();
                 panels.set_open(Some(Around::Camera), places.clone(), snap);

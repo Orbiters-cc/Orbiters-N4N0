@@ -213,9 +213,37 @@ pub fn target_dir() -> PathBuf {
 
 /// The release's version: `ORBITERS_VERSION` under `[env]` in `.cargo/config.toml`, which every program is built with
 /// (`orbiters-version` says why). A development bump changes it alone; a stable one also `[workspace.package] version`.
+///
+/// It is the newer of that value and the crates' version, never older than either: on 2026-11-16 the merge that brought
+/// this scheme carried a config written at 0.3.5 onto a main whose crates were at 0.3.6-dev.7, and `bump --dev`
+/// continued from 0.3.5 to 0.3.6-dev.1, below the release already out.
 pub fn release_version() -> anyhow::Result<String> {
-    let text = std::fs::read_to_string(root().join(".cargo").join("config.toml"))?;
-    env_version_line(&text).map(|(_, v)| v).context("no ORBITERS_VERSION under [env] in .cargo/config.toml")
+    let config = std::fs::read_to_string(root().join(".cargo").join("config.toml"))?;
+    let crates = std::fs::read_to_string(root().join("Cargo.toml"))?;
+    current_version(&config, &crates)
+}
+
+/// The release's version from the texts of `.cargo/config.toml` and the root `Cargo.toml`: the newer of the two.
+fn current_version(config: &str, cargo_toml: &str) -> anyhow::Result<String> {
+    let env = env_version_line(config).map(|(_, v)| v).context("no ORBITERS_VERSION under [env] in .cargo/config.toml")?;
+    let crates = version_line(cargo_toml).map(|(_, v)| v).context("no version under [workspace.package] in Cargo.toml")?;
+    Ok(if orbiters_update::is_newer(&crates, &env) { crates } else { env })
+}
+
+/// `text` (`.cargo/config.toml`) with `ORBITERS_VERSION` set to `version`.
+fn with_release_version(text: &str, version: &str) -> anyhow::Result<String> {
+    let (line, _) = env_version_line(text).context("no ORBITERS_VERSION under [env] in .cargo/config.toml")?;
+    let mut lines: Vec<String> = text.lines().map(String::from).collect();
+    lines[line] = format!("ORBITERS_VERSION = \"{version}\"");
+    Ok(lines.join("\n") + "\n")
+}
+
+/// `text` (the root `Cargo.toml`) with `[workspace.package] version` set to `version`.
+fn with_crate_version(text: &str, version: &str) -> anyhow::Result<String> {
+    let (line, _) = version_line(text).context("no version under [workspace.package] in Cargo.toml")?;
+    let mut lines: Vec<String> = text.lines().map(String::from).collect();
+    lines[line] = format!("version = \"{version}\"");
+    Ok(lines.join("\n") + "\n")
 }
 
 /// The crates' own version (`[workspace.package] version` in the root Cargo.toml): the last stable release's.
@@ -431,21 +459,13 @@ fn bump(version: &str) -> anyhow::Result<()> {
     let version = version.trim_start_matches('v');
     anyhow::ensure!(orbiters_update::is_newer(version, &release_version()?), "{version} is not after the current version, {}", release_version()?);
     let config = root().join(".cargo").join("config.toml");
-    let text = std::fs::read_to_string(&config)?;
-    let (line, _) = env_version_line(&text).context("no ORBITERS_VERSION under [env] in .cargo/config.toml")?;
-    let mut lines: Vec<String> = text.lines().map(String::from).collect();
-    lines[line] = format!("ORBITERS_VERSION = \"{version}\"");
-    std::fs::write(&config, lines.join("\n") + "\n")?;
+    std::fs::write(&config, with_release_version(&std::fs::read_to_string(&config)?, version)?)?;
     if is_development(version) {
         // The crates keep the last stable version: only the programs, which read ORBITERS_VERSION, recompile.
         println!("Version {version}. Commit .cargo/config.toml, then: cargo xtask release --dev");
     } else {
         let path = root().join("Cargo.toml");
-        let text = std::fs::read_to_string(&path)?;
-        let (line, _) = version_line(&text).context("no version under [workspace.package] in Cargo.toml")?;
-        let mut lines: Vec<String> = text.lines().map(String::from).collect();
-        lines[line] = format!("version = \"{version}\"");
-        std::fs::write(&path, lines.join("\n") + "\n")?;
+        std::fs::write(&path, with_crate_version(&std::fs::read_to_string(&path)?, version)?)?;
         run(cargo().args(["update", "--workspace", "--offline"]))?;
         println!("Version {version}. Commit .cargo/config.toml, Cargo.toml and Cargo.lock, push, then: cargo xtask release");
     }
@@ -563,6 +583,42 @@ mod tests {
         // The repository's own config has one, and a stable one agrees with the crates.
         let version = release_version().unwrap();
         assert!(is_development(&version) || crate_version().unwrap() == version, "{version}");
+    }
+
+    /// The repository's ORBITERS_VERSION is never older than its crates' version: a merge that carries an older config
+    /// value is caught here, before a bump goes backwards (0.3.6-dev.1 after 0.3.6-dev.7 on 2026-11-16).
+    #[test]
+    fn the_config_version_is_not_older_than_the_crates() {
+        let config = std::fs::read_to_string(root().join(".cargo").join("config.toml")).unwrap();
+        let env = env_version_line(&config).unwrap().1;
+        let crates = crate_version().unwrap();
+        assert!(!orbiters_update::is_newer(&crates, &env), "ORBITERS_VERSION {env} is older than the crates' {crates}");
+    }
+
+    /// Bumps go on from the real current version: dev.N gives dev.N+1, also when the config value is stale, and a stable
+    /// bump still sets both and is followed by the next patch's dev.1.
+    #[test]
+    fn a_bump_goes_on_from_the_current_version() {
+        let config = |v: &str| format!("[alias]\nxtask = \"run --package xtask --\"\n[env]\nCMAKE_POLICY_VERSION_MINIMUM = \"3.5\"\nORBITERS_VERSION = \"{v}\"\n");
+        let crates = |v: &str| format!("[workspace]\nmembers = []\n[workspace.package]\nversion = \"{v}\"\nedition = \"2021\"\n");
+        // Both in step on the new scheme.
+        let now = current_version(&config("0.3.6-dev.8"), &crates("0.3.6-dev.7")).unwrap();
+        assert_eq!(next_dev_version(&now).unwrap(), "0.3.6-dev.9");
+        // The stale config of 2026-11-16: the crates' dev.7 wins, the next is dev.8.
+        let now = current_version(&config("0.3.5"), &crates("0.3.6-dev.7")).unwrap();
+        assert_eq!(now, "0.3.6-dev.7");
+        let next = next_dev_version(&now).unwrap();
+        assert_eq!(next, "0.3.6-dev.8");
+        // A dev bump writes the config alone, and the next bump continues from it.
+        let after = with_release_version(&config("0.3.5"), &next).unwrap();
+        assert!(after.contains("CMAKE_POLICY_VERSION_MINIMUM = \"3.5\"") && after.contains("xtask = "));
+        assert_eq!(next_dev_version(&current_version(&after, &crates("0.3.6-dev.7")).unwrap()).unwrap(), "0.3.6-dev.9");
+        // A stable bump sets both; they agree, and the next development version is the next patch's first.
+        let (config_after, crates_after) = (with_release_version(&after, "0.3.6").unwrap(), with_crate_version(&crates("0.3.6-dev.7"), "0.3.6").unwrap());
+        assert_eq!(current_version(&config_after, &crates_after).unwrap(), "0.3.6");
+        assert_eq!(version_line(&crates_after).unwrap().1, "0.3.6");
+        assert_eq!(next_dev_version("0.3.6").unwrap(), "0.3.7-dev.1");
+        assert!(orbiters_update::is_newer("0.3.6", "0.3.6-dev.8"));
     }
 
     /// Each program gives the libraries its version first thing (a worker that did not would report the crates'

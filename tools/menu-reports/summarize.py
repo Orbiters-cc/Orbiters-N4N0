@@ -83,6 +83,8 @@ def open_kind(text):
 def fault(r):
     """Which side of the rules is at fault, from the kind and what was taken as open."""
     k, o = r.get("kind"), open_kind(taken(r))
+    if k == "menu-should-be-off" and state(r).get("a part of ours is up around VRChat's menus") == "false" and state(r).get("N4N0's own menu open") != "true":
+        return "nothing of ours was up at the press: a part that went just before it, a part outside the menus (the 3D view, a floating panel), or a press made by mistake"
     if k == "menu-should-be-off":
         return f"ours took {o} as open and nothing closed it: the rule that opened or kept it ({rule(r)})" if o not in ("nothing",) else "ours took nothing as open, yet something of ours showed: a part left up (a page, a held view, a let-go delay)"
     want = "wheel" if k == "wheel-should-be-on" else "quick menu"
@@ -145,6 +147,9 @@ def summarize(reports, n):
                     vr_words[e["text"][:60]] += 1
         if vr_words:
             out.append("VRChat's log within 10 s before to 4 s after: " + "; ".join(f"{t} ({c})" for t, c in vr_words.most_common(6)))
+        seen_tabs = sum(1 for r in rs if any("tabs found Some" in e["text"] and "taken as Closed" in e["text"] for e in r.get("timeline", []) if -30000 <= e["t"] <= 0))
+        if seen_tabs:
+            out.append(f"The headset-picture check saw VRChat's Quick Menu tabs while the rules took it as closed (no verdict, nothing done) in {seen_tabs} of {len(rs)} reports: QmCheck::found and its verdict are where to look")
         controllers = collections.Counter(", ".join(c or "?" for c in r.get("controllers", [])) or "desktop" for r in rs)
         out.append("Controllers: " + "; ".join(f"{c} ({k})" for c, k in controllers.most_common()))
         out.append("")

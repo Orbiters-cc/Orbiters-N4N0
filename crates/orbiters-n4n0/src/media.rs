@@ -10,12 +10,14 @@
 //! What a browser or YouTube's app plays is looked up on YouTube ([`Links`]): the media controls give no link, and the
 //! menus offer the video's link to copy and drop as they do a search result's.
 
-use orbiters_n4n0_core::menu::{Media, MediaCommand, Volume};
+use orbiters_n4n0_core::menu::{AppSound, Media, MediaCommand, Volume};
 use orbiters_n4n0_core::picture::{self, Rgb};
 use orbiters_n4n0_core::youtube::{self, Video};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+pub mod app_sound;
 
 /// How long a [`Watcher::want`] keeps the readings coming.
 const WANT_FOR: Duration = Duration::from_secs(3);
@@ -265,6 +267,17 @@ impl Watcher {
                     volume.muted = muted;
                 }
             }
+            // The app's own volume, where it has one (the next reading says what the mixer has).
+            MediaCommand::AppVolume(percent) => {
+                if let Some(media) = reading.media.as_mut().filter(|m| matches!(m.sound, AppSound::Level(_))) {
+                    media.sound = AppSound::Level(Volume { percent: percent.min(100), muted: false });
+                }
+            }
+            MediaCommand::AppMute(muted) => {
+                if let Some(AppSound::Level(volume)) = reading.media.as_mut().map(|m| &mut m.sound) {
+                    volume.muted = muted;
+                }
+            }
             // Shown where it goes at once (the next reading says where the app took it).
             MediaCommand::Seek(at) => {
                 if let Some(media) = reading.media.as_mut() {
@@ -492,5 +505,91 @@ mod tests {
         let read = watcher.fresh(Duration::from_secs(5));
         assert!(!read.media.unwrap().playing, "the backend's own reading says so too");
         assert_eq!(asked.lock().unwrap().as_slice(), &[MediaCommand::Pause]);
+    }
+
+    /// A mixer the test changes from outside while the watcher reads it.
+    struct Shared(Arc<Mutex<app_sound::StandIn>>);
+
+    impl app_sound::Mixer for Shared {
+        fn sounds(&mut self) -> Vec<app_sound::Sound> {
+            self.0.lock().unwrap().sounds()
+        }
+        fn processes(&mut self) -> Vec<app_sound::Process> {
+            self.0.lock().unwrap().processes()
+        }
+        fn windows_of(&mut self, id: &str) -> Vec<u32> {
+            self.0.lock().unwrap().windows_of(id)
+        }
+        fn set(&mut self, index: usize, level: Option<f32>, muted: Option<bool>) -> Result<(), String> {
+            self.0.lock().unwrap().set(index, level, muted)
+        }
+    }
+
+    /// A browser playing through a backend as Windows' is: the app's own volume read from the mixer, the computer's
+    /// kept apart.
+    struct Browser {
+        apps: app_sound::AppVolume<Shared>,
+        computer: Arc<Mutex<Volume>>,
+    }
+
+    impl MediaBackend for Browser {
+        fn run(&mut self, command: MediaCommand) -> Result<(), String> {
+            match command {
+                MediaCommand::AppVolume(percent) => self.apps.set_level("Chrome", percent),
+                MediaCommand::AppMute(muted) => self.apps.set_muted("Chrome", muted),
+                MediaCommand::Volume(percent) => {
+                    *self.computer.lock().unwrap() = Volume { percent, muted: false };
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }
+
+        fn read(&mut self, _previous: &Reading) -> Reading {
+            let media = Media { title: "A video".into(), app: "Chrome".into(), playing: true, sound: self.apps.read("Chrome"), ..Default::default() };
+            Reading { media: Some(media), volume: Some(*self.computer.lock().unwrap()), art: None }
+        }
+    }
+
+    /// Enzo, 2026-11-16: the card's volume is the playing app's. Pressed in the menu, it reaches the app's sound in
+    /// the mixer and not the computer's volume nor VRChat's sound; changed in the mixer, the next reading follows;
+    /// gone from the mixer, it shows as not found and sets nothing.
+    #[test]
+    fn the_card_volume_sets_the_playing_app_and_follows_the_mixer() {
+        use app_sound::{process, sound, StandIn};
+        use orbiters_n4n0_core::menu::{AppSound, Effect, Menu, Target};
+        let mixer = Arc::new(Mutex::new(StandIn {
+            processes: vec![process(100, 0, "explorer.exe", 1), process(200, 100, "chrome.exe", 2), process(210, 200, "chrome.exe", 3), process(300, 100, "VRChat.exe", 4)],
+            sounds: vec![sound("Headset", 210, 0.5, true), sound("Headset", 300, 0.9, true)],
+            ..Default::default()
+        }));
+        let computer = Arc::new(Mutex::new(Volume { percent: 80, muted: false }));
+        let (m, c) = (Shared(mixer.clone()), computer.clone());
+        let watcher = Watcher::with_links(move || Box::new(Browser { apps: app_sound::AppVolume::new(m), computer: c }), Links::new(Arc::new(|_: &str, _: &str| Ok(Vec::new()))));
+        let mut menu = Menu::default();
+        let reading = watcher.fresh(Duration::from_secs(5));
+        menu.media = reading.media.clone();
+        menu.volume = reading.volume;
+        assert_eq!(menu.media.as_ref().unwrap().sound, AppSound::Level(Volume { percent: 50, muted: false }));
+        for effect in menu.press(Target::VolumeUp) {
+            let Effect::Media(command) = effect else { panic!("{effect:?}") };
+            assert_eq!(command, MediaCommand::AppVolume(55));
+            watcher.command(command);
+        }
+        let reading = watcher.fresh(Duration::from_secs(5));
+        assert_eq!(reading.media.as_ref().unwrap().sound, AppSound::Level(Volume { percent: 55, muted: false }));
+        assert_eq!(mixer.lock().unwrap().sounds[0].level, 0.55);
+        assert_eq!(mixer.lock().unwrap().sounds[1].level, 0.9, "VRChat's sound untouched");
+        assert_eq!(*computer.lock().unwrap(), Volume { percent: 80, muted: false }, "the computer's volume untouched");
+        // Moved in Windows' mixer.
+        mixer.lock().unwrap().sounds[0].level = 0.2;
+        mixer.lock().unwrap().sounds[0].muted = true;
+        assert_eq!(watcher.fresh(Duration::from_secs(5)).media.unwrap().sound, AppSound::Level(Volume { percent: 20, muted: true }));
+        // The tab let its sound go.
+        mixer.lock().unwrap().sounds.remove(0);
+        menu.media = watcher.fresh(Duration::from_secs(5)).media;
+        assert_eq!(menu.media.as_ref().unwrap().sound, AppSound::NotFound);
+        assert!(menu.press(Target::VolumeUp).is_empty() && menu.press(Target::Mute).is_empty(), "nothing to set, and not the computer's");
+        assert_eq!(*computer.lock().unwrap(), Volume { percent: 80, muted: false });
     }
 }

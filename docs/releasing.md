@@ -4,7 +4,7 @@ A release is a version bump, built on this computer (not on GitHub's runners), p
 release of [Orbiters-cc/Orbiters-N4N0](https://github.com/Orbiters-cc/Orbiters-N4N0/releases) with the setup attached:
 
 ```sh
-cargo xtask bump 0.2.0          # the workspace's version, in Cargo.toml and Cargo.lock
+cargo xtask bump 0.2.0          # the release's version: .cargo/config.toml (a stable one also Cargo.toml and Cargo.lock)
 git commit -am "Orbiters - N4N0 0.2.0" && git push
 cargo xtask release             # --unsigned until code signing is set up (GitHub only)
 ```

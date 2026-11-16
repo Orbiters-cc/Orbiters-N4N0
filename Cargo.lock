@@ -4059,7 +4059,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-audio"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "orbiters-core",
@@ -4071,9 +4071,10 @@ dependencies = [
 
 [[package]]
 name = "orbiters-booster"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "dirs 6.0.0",
+ "orbiters-version",
  "serde",
  "serde_json",
  "time",
@@ -4082,7 +4083,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-call"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4092,6 +4093,7 @@ dependencies = [
  "orbiters-core",
  "orbiters-i18n",
  "orbiters-sound",
+ "orbiters-version",
  "rtc",
  "serde",
  "serde_json",
@@ -4101,7 +4103,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-capture"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -4112,6 +4114,7 @@ dependencies = [
  "orbiters-i18n",
  "orbiters-openvr",
  "orbiters-spout",
+ "orbiters-version",
  "serde",
  "serde_json",
  "uuid",
@@ -4129,7 +4132,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-core"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4141,6 +4144,7 @@ dependencies = [
  "orbiters-booster",
  "orbiters-contracts",
  "orbiters-i18n",
+ "orbiters-version",
  "ring",
  "rosc",
  "rusqlite",
@@ -4150,6 +4154,7 @@ dependencies = [
  "sha2 0.10.9",
  "socket2",
  "time",
+ "unicode-normalization",
  "ureq 3.4.2",
  "uuid",
  "windows 0.62.2",
@@ -4157,7 +4162,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-desktop"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4187,6 +4192,7 @@ dependencies = [
  "orbiters-translate",
  "orbiters-ui",
  "orbiters-update",
+ "orbiters-version",
  "orbiters-web",
  "png",
  "qrcode",
@@ -4209,14 +4215,14 @@ dependencies = [
 
 [[package]]
 name = "orbiters-i18n"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "orbiters-n4n0"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "orbiters-contracts",
@@ -4232,7 +4238,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-n4n0-core"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "orbiters-contracts",
@@ -4249,7 +4255,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-n4n0-mobile"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "orbiters-core",
@@ -4263,7 +4269,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-openvr"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "orbiters-contracts",
  "orbiters-i18n",
@@ -4273,7 +4279,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-projects"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -4308,7 +4314,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-qr"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "png",
  "qrcode",
@@ -4317,7 +4323,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-reconstruct"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "ash",
@@ -4332,6 +4338,7 @@ dependencies = [
  "orbiters-core",
  "orbiters-i18n",
  "orbiters-openvr",
+ "orbiters-version",
  "ort",
  "png",
  "rayon",
@@ -4345,7 +4352,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-setup"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -4368,7 +4375,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-smooth"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "orbiters-i18n",
@@ -4377,14 +4384,14 @@ dependencies = [
 
 [[package]]
 name = "orbiters-smooth-driver"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "orbiters-smooth",
 ]
 
 [[package]]
 name = "orbiters-sound"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -4395,7 +4402,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-spout"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "orbiters-contracts",
  "orbiters-i18n",
@@ -4405,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-translate"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "egui",
@@ -4422,7 +4429,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-ui"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -4440,12 +4447,13 @@ dependencies = [
 
 [[package]]
 name = "orbiters-update"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "dirs 6.0.0",
  "orbiters-i18n",
+ "orbiters-version",
  "ring",
  "semver",
  "serde",
@@ -4458,8 +4466,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbiters-version"
+version = "0.3.6-dev.7"
+
+[[package]]
 name = "orbiters-voice"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "bzip2 0.4.4",
@@ -4467,6 +4479,7 @@ dependencies = [
  "orbiters-core",
  "orbiters-i18n",
  "orbiters-n4n0-core",
+ "orbiters-version",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4477,7 +4490,7 @@ dependencies = [
 
 [[package]]
 name = "orbiters-web"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7028,6 +7041,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
+name = "unicode-normalization"
+version = "0.1.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
+dependencies = [
+ "tinyvec",
+]
+
+[[package]]
 name = "unicode-properties"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8432,7 +8454,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.3.5"
+version = "0.3.6-dev.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

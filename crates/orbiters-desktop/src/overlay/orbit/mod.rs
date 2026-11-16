@@ -39,7 +39,7 @@ use egui::{pos2, vec2, ColorImage, Pos2, TextureHandle, TextureId, TextureOption
 use orbiters_core::settings::MenuLook;
 use orbiters_i18n::{mark, tr, tr_ctx};
 use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
-use orbiters_n4n0_core::menu::{Effect, Page, Target};
+use orbiters_n4n0_core::menu::{Effect, Page, PlayingVolume, Target};
 use panels::{Action, Facts, Item, Recent, Sheet};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -910,6 +910,8 @@ pub struct Panels {
     turning: Option<Pos2>,
     /// A colour being chosen along the bar: seen at once, saved when let go, and when it last showed.
     hue_held: Option<([u8; 3], Instant)>,
+    /// A 3D picture length chosen on the camera's tiles, and when: shown and used until the settings have it.
+    length_held: Option<(orbiters_core::settings::Photo3dLength, Instant)>,
     /// A smoothing slider held, where it is seen; saved when let go.
     smoothing_held: Option<(panels::Smoothed, u16)>,
     /// The FPS booster's sheet: its Details page, its one question, and the stop a press is held on.
@@ -1014,6 +1016,8 @@ pub struct Panels {
 /// How long Stop says Stopping after a press while the service has not said so yet; how long the camera says the demo avatar was put on.
 const STOP_SAID_FOR: Duration = Duration::from_secs(4);
 const DEMO_DONE_SAID_FOR: Duration = Duration::from_secs(20);
+/// How long a 3D picture length chosen on the camera's tiles is shown before the settings say it back: a save reaches them in a few frames.
+const LENGTH_HELD_FOR: Duration = Duration::from_secs(3);
 
 /// Where on the page the keyboard starts (N4N0's search page: `layout::KEY_ROWS_Y`, a little over its first row).
 const KEYS_TOP: f32 = 300.0;
@@ -1050,6 +1054,7 @@ impl Panels {
             view_plate: Vec::new(),
             turning: None,
             hue_held: None,
+            length_held: None,
             smoothing_held: None,
             booster_details: false,
             booster_asking: false,
@@ -1381,6 +1386,8 @@ impl Panels {
         // On the desktop VRChat lights what lies under the pointer, sheet or no sheet. Where the wing leaves the row under its tabs free.
         let band = self.hint_place.filter(|_| back.is_some() && around == Some(Around::QuickMenu) && self.facts.desktop && !places.iter().any(|p| p.zone == Zone::QmStrip));
         let places: Vec<Placed> = places.into_iter().chain(back).chain(band).chain(peek).collect();
+        // The page itself first: the head and the band below are placed from where it goes.
+        self.follow_page_place();
         // Moved or another size: the parts of a size stay as they are, those changed are made anew.
         let unchanged = self.list.len() == places.len() && self.list.iter().zip(&places).all(|(a, b)| a.placed == *b);
         if !unchanged {
@@ -1446,15 +1453,7 @@ impl Panels {
         let ask_enter = sheet == Sheet::Talk && self.facts.sheet != Some(Sheet::Talk);
         if self.facts.sheet == Some(Sheet::Talk) && sheet != Sheet::Talk { self.stop_talking(); }
         self.keep_screen();
-        let size = place.rect.size() * self.sharp;
-        let px = [size.x.round() as u32, size.y.round() as u32];
-        if self.stage.px != px {
-            let ctx = self.stage.canvas.ctx().clone();
-            let textures = self.stage.canvas.textures.clone();
-            self.stage.canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
-            self.stage.canvas.ctx = ctx; self.stage.canvas.textures = textures;
-            self.stage.px = px; self.stage.cache.clear(); self.stage.presented = None; self.stage.presented_scene = None;
-        }
+        self.size_stage(&place);
         if self.worlds_here && self.stage.worlds.is_none() {
             self.stage.worlds = Some(Worlds::alone_with_textures(self.stage.canvas.ctx().clone(), self.stage.canvas.textures.clone()));
             self.stage.worlds.as_mut().unwrap().snapshot_mode(self.stage.async_pages);
@@ -1508,6 +1507,54 @@ impl Panels {
             panel.dirty = true;
         }
         self.stage.canvas.invalidate();
+    }
+
+    /// The sheet's page drawn at the size of `place`: its canvas of that many pixels from now on (its interface, the textures it already sent and all that its pages
+    /// hold, kept), and what was painted at another size let go. A canvas made anew with the old interface lacked those textures, which an interface sends once: back
+    /// at a size it had drawn at before (no new fonts to send), the page was painted with nothing on it (L-fullscreen-resize).
+    fn size_stage(&mut self, place: &Placed) {
+        let size = place.rect.size() * self.sharp;
+        let px = [size.x.round() as u32, size.y.round() as u32];
+        if self.stage.px != px {
+            self.stage.canvas.resize(px[0], px[1], px[0] as f32 / layout::WIDTH as f32);
+            self.stage.px = px; self.stage.cache.clear(); self.stage.presented = None; self.stage.presented_scene = None;
+        }
+    }
+
+    /// The page up goes where the sheet goes now ([`Panels::takeover_place`]). On the desktop that place follows VRChat's window: in full screen, maximised, dragged
+    /// to another size or onto another screen, the page's head (a part like the others) followed at once, and the page itself stayed at the size and place it was
+    /// opened at, drawn small in a corner with the new head over an empty body (Enzo, 2026-11-15, L-fullscreen-resize). Moved, it only moves; of another size, it is
+    /// drawn again at that size, from what it holds (the page, its scroll, the world chosen, what is open on it), and shows only once that picture is there, in the
+    /// same turn as its new head: never at the old size over the new layout.
+    fn follow_page_place(&mut self) {
+        let (Some(place), Some(page)) = (self.takeover_place, self.takeover.as_mut()) else { return };
+        if page.placed == place {
+            return;
+        }
+        if page.fits(&place, self.sharp) {
+            page.placed = place;
+            return;
+        }
+        let mut fresh = Panel::new(place, self.sharp, 0, false);
+        // Its pictures' textures are the stage's, which stays: nothing is loaded again.
+        fresh.pictures = std::mem::take(&mut page.pictures);
+        fresh.shown = page.shown;
+        self.takeover = Some(fresh);
+        self.size_stage(&place);
+        // What was being painted, or kept, at the old size is not shown.
+        self.stage.epoch = self.stage.epoch.wrapping_add(1);
+        self.stage.painter.cancel_page(self.stage.epoch);
+        self.stage.sheet_picture = None;
+        self.stage.restore = true;
+        self.stage.stale = false;
+        self.stage.host.dirty = true;
+        self.stage.canvas.invalidate();
+        if let Some(worlds) = self.stage.worlds.as_mut() {
+            worlds.repaint();
+        }
+        for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack) {
+            back.dirty = true;
+        }
     }
 
     /// What is being said ends with its page: nobody should be listened to with no sign of it.
@@ -2271,6 +2318,8 @@ impl Panels {
             art: None,
             no_kit: snap.worn_kit == Some(false),
             timer: snap.settings.photo_3d_timer,
+            // The length just chosen here, until the settings say it back.
+            length: self.length_held.filter(|(_, at)| at.elapsed() < LENGTH_HELD_FOR).map_or(snap.settings.photo_3d, |(length, _)| length),
             can_call: menu.calls_ready,
             mics: self.facts.mics.clone(),
             mic_choices: self.facts.mic_choices.clone(),
@@ -2337,7 +2386,16 @@ impl Panels {
             wake_word: snap.settings.n4n0.wake_words.first().filter(|_| snap.settings.n4n0.wake_word).cloned(),
             gallery_scroll: self.facts.gallery_scroll,
             gallery_layout: snap.settings.photos_layout,
-            volume: menu.volume.as_ref().map(|v| (v.percent, v.muted)),
+            // The playing app's own volume where Windows has one for it, the computer's where apps have none (Enzo, 2026-11-16).
+            volume: match menu.playing_volume() {
+                Some(PlayingVolume::App(v) | PlayingVolume::Computer(v)) => Some((v.percent, v.muted)),
+                Some(PlayingVolume::NotFound) | None => None,
+            },
+            volume_unfound: menu.playing_volume() == Some(PlayingVolume::NotFound),
+            music_app: match (&menu.media, menu.playing_volume()) {
+                (Some(m), Some(PlayingVolume::App(_))) => m.app.clone(),
+                _ => String::new(),
+            },
             music_times: menu.media.as_ref().and_then(|m| {
                 let of = m.duration?;
                 // Under the pointer it is where the pointer is; just moved, where it was moved to until the app says so too.
@@ -2927,6 +2985,8 @@ impl Panels {
                     panel.dirty = true;
                 }
                 let host = &mut self.stage.host;
+                // The length the tiles show, even one chosen a moment ago that the settings do not have yet.
+                host.menu.photo_length = orbiters_n4n0::menu::photo_length(self.facts.length);
                 let mut effects = host.press(Target::TakeOf(mode));
                 // On the desktop the camera cannot be open under these menus, so the picture is asked for and waits for it.
                 let mut waits = None;
@@ -2941,6 +3001,18 @@ impl Panels {
                 host.effects(effects, snap, &self.backend);
                 if let Some(seconds) = waits {
                     self.backend.n4n0(crate::ipc::N4n0Command::Photo3DWhenCamera { seconds });
+                }
+            }
+            // 1, 4, 8 s, then 1 s again: the Capture page's setting, shown on both 3D tiles.
+            Action::PictureLength => {
+                let length = panels::next_length(self.facts.length);
+                self.length_held = Some((length, Instant::now()));
+                self.facts.length = length;
+                let mut settings = snap.settings.clone();
+                settings.photo_3d = length;
+                self.backend.save_changes(&snap.settings, &settings);
+                for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+                    panel.dirty = true;
                 }
             }
             // Beside VRChat's camera alone, whose picture it records (Enzo, F14 and F15): no other part has Record, and this one does nothing elsewhere.

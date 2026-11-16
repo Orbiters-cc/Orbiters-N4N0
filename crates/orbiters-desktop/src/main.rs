@@ -35,6 +35,7 @@ mod menu_host;
 mod mismatch;
 mod mixer_inbox;
 mod overlay;
+mod perf;
 mod pages;
 mod qr;
 mod reconstruct;
@@ -75,6 +76,8 @@ fn sandbox_switches() {
 }
 
 fn main() -> anyhow::Result<()> {
+    // The release's version, for the libraries too (orbiters-version says why it is given here).
+    orbiters_version::set(env!("ORBITERS_VERSION"));
     sandbox_switches();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let private_roots = harness::prepare(&args)?;
@@ -99,6 +102,7 @@ fn main() -> anyhow::Result<()> {
         Some("--gpu-bench") => bench::run(&args[1..]),
         Some("--idle-frames") => idle_frames::run(&args[1..]),
         Some("--publish-cost") => controller::publish_cost::run(&args[1..]),
+        Some("--repair-capture-pictures") => controller::picture_repair::run(&args[1..]),
         Some("--link-smoke") => link_smoke::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),
         Some("--overlay") => overlay::run(&args[1..]),

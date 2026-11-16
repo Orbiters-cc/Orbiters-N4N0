@@ -1,0 +1,3 @@
+# Texts that read the same in every language.
+# A display: its size and refresh rate.
+{}×{} {} Hz

@@ -566,7 +566,7 @@ impl Projects {
             .projects
             .iter()
             .filter(|p| include_hidden || !hidden::contains(&hidden, &p.path))
-            .filter(|p| query.as_ref().is_none_or(|q| p.name.to_lowercase().contains(q) || p.path.to_string_lossy().to_lowercase().contains(q)))
+            .filter(|p| query.as_ref().is_none_or(|q| orbiters_core::search::Query::new(q).matches(&p.name) || p.path.to_string_lossy().to_lowercase().contains(q)))
             .map(|p| project_json(p, &hidden, &editors))
             .collect();
         let scanning = self.jobs.lock().unwrap().list.iter().any(|j| j.lane == Lane::Scan && !j.done());
@@ -654,7 +654,7 @@ impl Projects {
             .packages
             .iter()
             .filter(|p| !p.versions.is_empty() || p.installed.is_some())
-            .filter(|p| query.as_ref().is_none_or(|q| p.name.to_lowercase().contains(q) || p.display_name.to_lowercase().contains(q)))
+            .filter(|p| query.as_ref().is_none_or(|q| orbiters_core::search::Query::new(q).matches_any([p.name.as_str(), p.display_name.as_str()])))
             .collect();
         Ok(json!({
             "total": matching.len(),
@@ -1308,7 +1308,7 @@ impl Projects {
                 return Ok(outcome);
             }
             if let (Some(avatar), Some(asset)) = (avatar, server.n4n0_gallery_asset_id()) {
-                let r = orbiters_projects::setup::request(avatar, asset, server.api(), env!("CARGO_PKG_VERSION")).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
+                let r = orbiters_projects::setup::request(avatar, asset, server.api(), env!("ORBITERS_VERSION")).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
                 orbiters_projects::setup::write(&path, &r).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
                 outcome["setup_request"] = json!(r.id);
                 outcome["next"] = json!("The Toolkit in Unity adds N4N0 to the avatar and saves the scene: open the project (unity_editor open), then unity_get_job shows the setup's result under result.now.");

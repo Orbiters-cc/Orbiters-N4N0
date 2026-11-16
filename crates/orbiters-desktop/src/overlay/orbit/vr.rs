@@ -902,7 +902,7 @@ impl OrbitVr {
             super::super::vr_log::line(&format!("camera reckon: {happened:?}, grips {grips:?}, pulls {pulls:?}, triggers {triggers:?}, predicted {:.1} ms", prediction * 1000.0)); // i18n: not shown (diagnostics)
             if sandbox {
                 // When each take and let-go was seen, against the sandbox's commanded input times (same clock: QueryPerformanceCounter).
-                let line = serde_json::json!({ "ns": orbiters_core::clock::now_ns(), "prediction_s": prediction, "taken": happened.taken, "let_go": happened.let_go, "grips": grips, "pulls": pulls, "hands": hands.map(|h| h.map(|h| h.m)), "panel": frame.map(|f| f.m) });
+                let line = serde_json::json!({ "ns": orbiters_core::clock::now_ns(), "prediction_s": prediction, "taken": happened.taken, "let_go": happened.let_go, "ignored": happened.ignored, "grips": grips, "pulls": pulls, "hands": hands.map(|h| h.map(|h| h.m)), "panel": frame.map(|f| f.m) });
                 if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(orbiters_core::paths::logs_dir().join("camera-events.jsonl")) {
                     use std::io::Write;
                     let _ = writeln!(file, "{line}");

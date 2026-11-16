@@ -16,6 +16,7 @@ pub mod language_card;
 pub mod mic;
 pub mod mic_grid;
 pub mod n4n0;
+mod perf_card;
 pub mod network;
 pub mod projects;
 pub mod reconstruct_again;

@@ -261,7 +261,7 @@ fn fill_host(hardware: &mut Hardware) {
 }
 
 fn send(api: &Api, token: &str, samples: &[Sample], hardware: &Hardware) -> anyhow::Result<()> {
-    let body = json!({ "client": concat!("Orbiters - N4N0 ", env!("CARGO_PKG_VERSION")), "hardware": hardware, "samples": samples });
+    let body = json!({ "client": concat!("Orbiters - N4N0 ", env!("ORBITERS_VERSION")), "hardware": hardware, "samples": samples });
     let response = api.agent().post(&api.url("maps/performance")).header("Authorization", &format!("Bearer {token}")).send_json(&body)?;
     let _: serde_json::Value = Api::json(response)?;
     Ok(())

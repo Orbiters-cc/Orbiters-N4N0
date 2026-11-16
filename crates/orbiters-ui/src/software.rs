@@ -134,6 +134,18 @@ impl Software {
         (self.width as u32, self.height as u32)
     }
 
+    /// Of `width` x `height` pixels from now on, its textures kept: the interface that draws here sent them once, and sends only what changes after (a new framebuffer
+    /// with the same interface drew every frame without them: nothing at all where text and shapes go). The next frame is painted whole.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        (self.width, self.height) = (width as usize, height as usize);
+        self.pixels = Vec::new();
+        self.backdrop = None;
+        self.tiles.clear();
+        self.next_tiles.clear();
+        self.damage = None;
+        self.stale = true;
+    }
+
     /// The next frame is painted whole, and its damage is all of it (the picture handed on was lost, say).
     pub fn invalidate(&mut self) {
         self.stale = true;

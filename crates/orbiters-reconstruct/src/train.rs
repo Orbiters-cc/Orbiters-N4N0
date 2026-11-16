@@ -791,6 +791,7 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
         if it % 500 == 1 {
             // While VRChat runs on this GPU, SteamVR's frame timing paces the steps (crate::governor).
             match gpu.follow_vrchat() {
+                Some(true) if gpu.governor.as_ref().is_some_and(|g| g.on_desktop()) => eprintln!("it {it}: VRChat on the desktop: training on at most a third of the GPU"),
                 Some(true) => eprintln!("it {it}: training between VRChat's frames (SteamVR's frame timing)"),
                 Some(false) => eprintln!("it {it}: VRChat closed: training at full speed"),
                 None => {}

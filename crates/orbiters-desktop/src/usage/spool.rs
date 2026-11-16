@@ -111,7 +111,7 @@ impl Spool {
         let event = |session: &Session, at: u64, kind: &str| Event {
             session: session.id.clone(),
             surface: session.surface.into(),
-            build: env!("CARGO_PKG_VERSION").into(),
+            build: env!("ORBITERS_VERSION").into(),
             os: std::env::consts::OS.into(),
             lang: lang.clone(),
             at,
@@ -154,7 +154,7 @@ impl Spool {
         let end = Event {
             session: session.id,
             surface: session.surface.into(),
-            build: env!("CARGO_PKG_VERSION").into(),
+            build: env!("ORBITERS_VERSION").into(),
             os: std::env::consts::OS.into(),
             lang: orbiters_i18n::language().tag().into(),
             at: now_ms(),

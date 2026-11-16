@@ -490,6 +490,9 @@ pub struct Media {
     /// The YouTube video it is (its id), once found: a browser or YouTube's app plays it (`orbiters_n4n0::media` looks
     /// it up). Its link can be copied and dropped as the results' are.
     pub video: Option<String>,
+    /// The playing app's own volume, the one Windows' volume mixer has for it (Enzo, 2026-11-16: the card's volume
+    /// changes the app playing, never the whole computer).
+    pub sound: AppSound,
 }
 
 impl Media {
@@ -499,11 +502,36 @@ impl Media {
     }
 }
 
-/// The computer's volume (its default speakers), in percent.
+/// The computer's volume (its default speakers), or an app's own, in percent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Volume {
     pub percent: u8,
     pub muted: bool,
+}
+
+/// The volume of the app playing, as the system's mixer has one for each app.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AppSound {
+    /// This system gives apps no volume of their own (a Mac, a phone, a made-up reading): what plays is under the
+    /// computer's volume, as before.
+    #[default]
+    Unknown,
+    /// The app's own volume (all its sounds, on every device), and whether all of them are muted.
+    Level(Volume),
+    /// The app was looked for in the mixer and makes no sound there (it has not played yet, or let its sound go while
+    /// paused): there is nothing to set, and the computer's volume is not set in its place.
+    NotFound,
+}
+
+/// What the volume beside what plays sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayingVolume {
+    /// The playing app's own volume ([`MediaCommand::AppVolume`]).
+    App(Volume),
+    /// The computer's, where apps have none of their own ([`AppSound::Unknown`]).
+    Computer(Volume),
+    /// The app playing has no sound to set: the volume shows as not available, and nothing is set.
+    NotFound,
 }
 
 /// What the music page (or N4N0's assistant) asks of the computer.
@@ -516,9 +544,12 @@ pub enum MediaCommand {
     Next,
     /// To this many seconds from the start of what plays (when the app lets others move in its timeline).
     Seek(u32),
-    /// The volume to this percent (unmuted).
+    /// The computer's volume to this percent (unmuted).
     Volume(u8),
     Mute(bool),
+    /// The playing app's own volume to this percent (unmuted), leaving the computer's and every other app's alone.
+    AppVolume(u8),
+    AppMute(bool),
 }
 
 /// N4N0's light as the avatar holds it (`N4N0/Light/On`, `N4N0/Light/Color`, `N4N0/Light/Level`).
@@ -1139,6 +1170,33 @@ impl Menu {
         }
     }
 
+    /// The volume beside what plays (Now playing, the music page, Home's music): the playing app's own where the system
+    /// has one per app, the computer's where it has none. Nothing plays: no volume (there is no app to set).
+    pub fn playing_volume(&self) -> Option<PlayingVolume> {
+        match self.media.as_ref()?.sound {
+            AppSound::Level(volume) => Some(PlayingVolume::App(volume)),
+            AppSound::NotFound => Some(PlayingVolume::NotFound),
+            AppSound::Unknown => self.volume.map(PlayingVolume::Computer),
+        }
+    }
+
+    /// Sets the volume beside what plays to `percent` (unmuted), shown at once: what to ask the computer, or nothing
+    /// when there is no volume to set.
+    pub fn set_playing_volume(&mut self, percent: u8) -> Option<Effect> {
+        let level = Volume { percent: percent.min(100), muted: false };
+        match self.playing_volume()? {
+            PlayingVolume::App(_) => {
+                self.media.as_mut()?.sound = AppSound::Level(level);
+                Some(Effect::Media(MediaCommand::AppVolume(level.percent)))
+            }
+            PlayingVolume::Computer(_) => {
+                self.volume = Some(level);
+                Some(Effect::Media(MediaCommand::Volume(level.percent)))
+            }
+            PlayingVolume::NotFound => None,
+        }
+    }
+
     /// The person pressed `target`. Leaving the QR code scanner's page stops it.
     pub fn press(&mut self, target: Target) -> Vec<Effect> {
         let scanner = self.page == Page::Qr && self.open;
@@ -1650,24 +1708,32 @@ impl Menu {
                 Some(media) if media.can_next => vec![Effect::Media(MediaCommand::Next)],
                 _ => Vec::new(),
             },
-            Target::VolumeDown | Target::VolumeUp => match self.volume.as_mut() {
-                Some(volume) => {
+            Target::VolumeDown | Target::VolumeUp => match self.playing_volume() {
+                Some(PlayingVolume::App(volume) | PlayingVolume::Computer(volume)) => {
                     let percent = if target == Target::VolumeUp {
                         volume.percent.saturating_add(VOLUME_STEP).min(100)
                     } else {
                         volume.percent.saturating_sub(VOLUME_STEP)
                     };
-                    *volume = Volume { percent, muted: false };
-                    vec![Effect::Media(MediaCommand::Volume(percent))]
+                    self.set_playing_volume(percent).into_iter().collect()
                 }
-                None => Vec::new(),
+                Some(PlayingVolume::NotFound) | None => Vec::new(),
             },
-            Target::Mute => match self.volume.as_mut() {
-                Some(volume) => {
-                    volume.muted = !volume.muted;
-                    vec![Effect::Media(MediaCommand::Mute(volume.muted))]
+            Target::Mute => match self.playing_volume() {
+                Some(PlayingVolume::App(volume)) => {
+                    if let Some(media) = self.media.as_mut() {
+                        media.sound = AppSound::Level(Volume { muted: !volume.muted, ..volume });
+                    }
+                    vec![Effect::Media(MediaCommand::AppMute(!volume.muted))]
                 }
-                None => Vec::new(),
+                Some(PlayingVolume::Computer(_)) => match self.volume.as_mut() {
+                    Some(volume) => {
+                        volume.muted = !volume.muted;
+                        vec![Effect::Media(MediaCommand::Mute(volume.muted))]
+                    }
+                    None => Vec::new(),
+                },
+                Some(PlayingVolume::NotFound) | None => Vec::new(),
             },
             // Choosing a colour or a brightness turns the light on.
             Target::LightSwitch | Target::LightColor(_) | Target::LightLevel(_) => match self.light.as_mut() {
@@ -2115,10 +2181,11 @@ impl Menu {
         self.sharing.as_deref().and_then(|key| self.captures.find(key))
     }
 
-    /// The friends Share to … lists: those whose name has [`Menu::find`] (case aside), every one without it.
+    /// The friends Share to … lists: those whose name [`Menu::find`] finds however the name is written (full-width,
+    /// spaced, decorated: [`orbiters_core::search`]), best matches first; every one without it.
     pub fn found_friends(&self) -> Vec<&Friend> {
-        let find = self.find.trim().to_lowercase();
-        self.friends.list().iter().filter(|f| find.is_empty() || f.name.to_lowercase().contains(&find)).collect()
+        let find = orbiters_core::search::Query::new(&self.find);
+        orbiters_core::search::filter_ranked(&find, self.friends.list().iter(), |f| vec![f.name.as_str()])
     }
 
     /// Share to …'s friends on the page shown.
@@ -2583,6 +2650,41 @@ pub fn clock(seconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Enzo, 2026-11-16: the volume beside what plays is the playing app's alone where the system has one per app;
+    /// the computer's volume is never set from it then, and an app without sound sets nothing.
+    #[test]
+    fn the_volume_beside_what_plays_sets_the_app_playing_only() {
+        let mut menu = Menu { pages: Pages::Six, ..Default::default() };
+        menu.open();
+        menu.press(Target::Music);
+        menu.volume = Some(Volume { percent: 70, muted: false });
+        assert_eq!(menu.playing_volume(), None, "nothing plays: no app to set");
+        assert!(menu.press(Target::VolumeUp).is_empty() && menu.press(Target::Mute).is_empty());
+        assert_eq!(menu.volume, Some(Volume { percent: 70, muted: false }));
+
+        let app = Volume { percent: 40, muted: true };
+        menu.media = Some(Media { title: "A song".into(), sound: AppSound::Level(app), ..Default::default() });
+        assert_eq!(menu.playing_volume(), Some(PlayingVolume::App(app)));
+        assert_eq!(menu.press(Target::VolumeUp), vec![Effect::Media(MediaCommand::AppVolume(45))]);
+        assert_eq!(menu.media.as_ref().unwrap().sound, AppSound::Level(Volume { percent: 45, muted: false }), "shown at once, unmuted");
+        assert_eq!(menu.press(Target::VolumeDown), vec![Effect::Media(MediaCommand::AppVolume(40))]);
+        assert_eq!(menu.press(Target::Mute), vec![Effect::Media(MediaCommand::AppMute(true))]);
+        assert_eq!(menu.media.as_ref().unwrap().sound, AppSound::Level(Volume { percent: 40, muted: true }));
+        assert_eq!(menu.set_playing_volume(130), Some(Effect::Media(MediaCommand::AppVolume(100))));
+        assert_eq!(menu.volume, Some(Volume { percent: 70, muted: false }), "the computer's volume untouched");
+
+        menu.media.as_mut().unwrap().sound = AppSound::NotFound;
+        assert_eq!(menu.playing_volume(), Some(PlayingVolume::NotFound));
+        assert!(menu.press(Target::VolumeUp).is_empty() && menu.press(Target::VolumeDown).is_empty() && menu.press(Target::Mute).is_empty());
+        assert_eq!(menu.set_playing_volume(10), None);
+        assert_eq!(menu.volume, Some(Volume { percent: 70, muted: false }), "never the computer's in its place");
+
+        // Where apps have no volume of their own (a Mac): the computer's, as before.
+        menu.media.as_mut().unwrap().sound = AppSound::Unknown;
+        assert_eq!(menu.press(Target::VolumeDown), vec![Effect::Media(MediaCommand::Volume(65))]);
+        assert_eq!(menu.volume, Some(Volume { percent: 65, muted: false }));
+    }
 
     #[test]
     fn music_and_light_presses_show_at_once_and_ask_the_hosts() {
@@ -3300,6 +3402,23 @@ mod tests {
         menu.set_captures(failed);
         assert_eq!(text(&menu, Content::HistoryTitle), "Not shared: Sign in to Orbiters first");
         assert!(text(&menu, Content::CaptureMeta(1)).ends_with("· Not shared"));
+        // A friend whose VRChat name is decorated is found by its plain letters, an exact match first.
+        let decorated = ["Neon Fox", "\u{FF4E}\u{FF45}\u{FF4F}\u{FF4E}\u{FF49}\u{FF58}", "\u{0274}\u{1D07}\u{1D0F}\u{0274}\u{026A}x \u{2727}"];
+        menu.set_friends(Friends::ready(decorated.iter().enumerate().map(|(i, n)| f(&format!("usr_d{i}"), n)).collect()));
+        let found = |menu: &Menu| {
+            let mut ids: Vec<String> = menu.found_friends().iter().map(|f| f.id.clone()).collect();
+            ids.sort();
+            ids
+        };
+        menu.find = "neonix".into();
+        assert_eq!(found(&menu), ["usr_d1", "usr_d2"]);
+        menu.find = "neon".into();
+        assert_eq!(found(&menu), ["usr_d0", "usr_d1", "usr_d2"]);
+        menu.find = "neo nix".into();
+        assert_eq!(found(&menu), ["usr_d1", "usr_d2"], "typed with a space, found the same");
+        menu.find = "Neon Fox".into();
+        assert_eq!(found(&menu), ["usr_d0"]);
+        menu.find.clear();
         // Closing the menu on Share to … forgets the friends too.
         menu.press(Target::ShareTo(2));
         assert_eq!(menu.press(Target::Close), [Effect::Friends(false), Effect::Close]);

@@ -480,6 +480,11 @@ pub enum Picture {
     Profile { scope: crate::controller::vrchat_data::Scope, url: String },
     /// A protected sharing-contract picture, fetched with the current environment's account on a loader thread.
     Capture { development: bool, id: u64, large: bool },
+    /// A 3D capture's own picture on Orbiters (its item's `capture.pictureUrl`, which names its revision), its thumbnail
+    /// unless `large`: what the card of a capture that is on Orbiters only shows (its folder on this computer deleted,
+    /// or never here). Read with the account when signed in, and kept on this computer once read
+    /// ([`capture_view_file`]): deleting a capture's local files never takes its card's picture away.
+    CaptureView { development: bool, id: u64, url: String, large: bool },
     /// A screenshot, at most `width` wide.
     Shot { path: PathBuf, size: u64, width: u32 },
     /// A layer of a multi-layer picture ([`Layer`]), at most `width` wide, with its transparency.
@@ -735,6 +740,18 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
             let image = image::load_from_memory(&bytes).ok()?.thumbnail(if *large { 2048 } else { 560 }, if *large { 4096 } else { 1120 }).to_rgba8();
             Some(ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw()))
         }
+        Picture::CaptureView { development, id, url, large } => {
+            let server = if *development { Server::Development } else { Server::Production };
+            // As the other public reads: another server when `ORBITERS_PUBLIC_API` names one (screenshots), asked
+            // without the account and kept in memory only.
+            let (api, token) = match std::env::var("ORBITERS_PUBLIC_API") {
+                Ok(base) if !base.is_empty() => (Api::at(&base), None),
+                _ => (Api::new(server), orbiters_core::account::read(server).map(|a| a.token)),
+            };
+            let file = keep.then(|| capture_view_file(*development, *id, url, *large));
+            let image = capture_view(&api, token.as_deref(), url, *large, file.as_deref())?;
+            Some(ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw()))
+        }
         Picture::EventCover { development, id } => {
             let server = if *development { Server::Development } else { Server::Production };
             let api = Api::new(server);
@@ -820,6 +837,37 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
             Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
         }
     }
+}
+
+/// Where a capture's picture on Orbiters is kept once read ([`Picture::CaptureView`]): by environment, capture and the
+/// address it was read at (a new picture or revision is another address, so another file).
+pub fn capture_view_file(development: bool, id: u64, url: &str, large: bool) -> PathBuf {
+    // FNV-1a: the same name in every build.
+    let h = url.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    let env = if development { "dev" } else { "prod" };
+    cache_dir().join("captures").join(format!("{env}-{id}-{h:016x}{}.img", if large { "-large" } else { "" }))
+}
+
+/// A capture's picture on Orbiters as RGBA, at most 560 (or, `large`, 2048) wide: from `file` when kept there and
+/// readable, else asked of `api` (with `token`) and then kept in `file`.
+pub(crate) fn capture_view(api: &Api, token: Option<&str>, url: &str, large: bool, file: Option<&Path>) -> Option<image::RgbaImage> {
+    let kept = file.and_then(|f| std::fs::read(f).ok()).and_then(|b| image::load_from_memory(&b).ok());
+    let picture = match kept {
+        Some(p) => p,
+        None => {
+            let bytes = api.capture_picture(token, url, !large).ok()?;
+            let picture = image::load_from_memory(&bytes).ok()?;
+            if let Some(f) = file {
+                if f.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) {
+                    let _ = orbiters_core::write_atomic(f, &bytes);
+                }
+            }
+            picture
+        }
+    };
+    let (w, h) = if large { (2048, 4096) } else { (560, 1120) };
+    // Made smaller to fit, never larger.
+    Some(if picture.width() > w || picture.height() > h { picture.thumbnail(w, h) } else { picture }.to_rgba8())
 }
 
 /// A picture with transparency at most `max_width` wide (a box filter in whole steps, as [`bundle::downscale`]),

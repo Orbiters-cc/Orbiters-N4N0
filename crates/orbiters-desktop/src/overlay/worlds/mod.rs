@@ -938,6 +938,17 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     #[cfg(test)]
     pub fn draft_for_test(&self) -> &str { &self.panel.draft }
 
+    /// Whether a read of the listing is under way, for the tests: what it brings replaces a listing put in meanwhile.
+    #[cfg(test)]
+    pub fn listing_read_for_test(&self) -> bool {
+        self.catalog.snapshot().1
+    }
+
+    #[cfg(test)]
+    pub fn list_scroll_for_test(&self) -> f32 {
+        self.panel.list_scroll_for_test()
+    }
+
     #[cfg(test)]
     pub fn page_for_test(&self) -> panel::Page {
         self.panel.page
@@ -1051,7 +1062,10 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             Shown::List(list) => {
                 let listed = self.finder.list(&list);
                 let (found_by, first): (Option<&str>, Vec<&Entry>) = match &list {
-                    WorldList::Search(q) => (Some(q.as_str()), captures.iter().filter(|e| e.matches(q)).collect()),
+                    WorldList::Search(q) => {
+                        let folded = orbiters_core::search::Query::new(q);
+                        (Some(q.as_str()), captures.iter().filter(|e| e.matches_query(&folded, q)).collect())
+                    }
                     _ => (None, Vec::new()),
                 };
                 finder::merge(&captures, &first, &listed.items, found_by, &feedback)

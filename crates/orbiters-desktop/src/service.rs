@@ -469,6 +469,8 @@ impl Service {
             }
             ToService::WalkBoost { strength } => ctl.set_walk_boost(strength, false),
             ToService::BoosterReport { report } => ctl.booster_report(*report),
+            ToService::PerfTurns { turns } => crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).turns(*turns),
+            ToService::PerfReport { command } => ctl.perf(command),
             ToService::Booster { command } => ctl.booster_command(command),
             ToService::WalkPath { path } => ctl.set_walk_path(crate::tracking::walk_path_said(path)),
             // Which Talk button is held matters: the service lets it go when that window or overlay goes away.

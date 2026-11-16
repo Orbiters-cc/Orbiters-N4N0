@@ -2433,9 +2433,9 @@ fn media_line(command: orbiters_n4n0_core::menu::MediaCommand) -> String {
         MediaCommand::Next => tr("N4N0: music skipped to the next").into(),
         MediaCommand::Previous => tr("N4N0: music went back").into(),
         MediaCommand::Seek(at) => tr!("N4N0: music moved to {time}", time = orbiters_n4n0_core::menu::clock(at as u64)),
-        MediaCommand::Volume(v) => tr!("N4N0: music volume at {percent} %", percent = v),
-        MediaCommand::Mute(true) => tr("N4N0: music muted").into(),
-        MediaCommand::Mute(false) => tr("N4N0: music unmuted").into(),
+        MediaCommand::Volume(v) | MediaCommand::AppVolume(v) => tr!("N4N0: music volume at {percent} %", percent = v),
+        MediaCommand::Mute(true) | MediaCommand::AppMute(true) => tr("N4N0: music muted").into(),
+        MediaCommand::Mute(false) | MediaCommand::AppMute(false) => tr("N4N0: music unmuted").into(),
     }
 }
 

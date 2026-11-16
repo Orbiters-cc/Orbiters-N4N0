@@ -16,7 +16,7 @@ use orbiters_n4n0_core::text::Message;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Weak;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Where N4N0 keeps its files: the app's (its videos and the avatars' states beside the settings). Tests never touch the
 /// person's: theirs go to a folder of their own.
@@ -189,7 +189,7 @@ impl Host for Link {
     }
 
     /// VRChat's `InStation`, `Seated` or `VelocityMagnitude`: the SteamVR tab's walk boost carries only while VRChat
-    /// walks the avatar. Published only when what they say changes; a new avatar says it again.
+    /// walks the avatar. Published only when what they say changes ([`motion_news`]); a new avatar says it again.
     fn motion(&self, said: Option<(&str, &OscValue)>) {
         self.with(|c| match said {
             None => {
@@ -207,9 +207,9 @@ impl Host for Link {
                         },
                         _ => return false,
                     }
-                    let changed = s.vrchat.motion != Some(motion);
+                    let news = motion_news(s.vrchat.motion, motion);
                     s.vrchat.motion = Some(motion);
-                    changed
+                    news
                 });
             }
         });
@@ -250,6 +250,59 @@ impl Osc for Link {
     }
 }
 
+/// The N4N0 page's footprint rows from `(name, cpu percent of a core, memory MB)` of every process.
+fn footprint<'a>(processes: impl Iterator<Item = (&'a str, f32, f32)>) -> Vec<ProcessUsage> {
+    let groups: [(&str, &[&str]); 5] = [
+        ("Orbiters - N4N0", &["orbiters-desktop.exe", "orbiters-desktop"]),
+        (mark("Capture worker"), &["orbiters-capture.exe", "orbiters-capture"]),
+        (mark("N4N0's ears"), &["orbiters-voice.exe", "orbiters-voice"]),
+        (mark("Reconstruction"), &["orbiters-reconstruct.exe", "orbiters-reconstruct"]),
+        ("VRChat", &["vrchat.exe", "vrchat"]),
+    ];
+    let processes: Vec<(String, f32, f32)> = processes.map(|(n, c, m)| (n.to_lowercase(), c, m)).collect();
+    let mut usage = Vec::new();
+    for (label, names) in groups {
+        let mut found = processes.iter().filter(|(n, _, _)| names.contains(&n.as_str())).peekable();
+        if found.peek().is_none() {
+            continue;
+        }
+        let (cpu, memory) = found.fold((0.0f32, 0.0f32), |(c, m), p| (c + p.1, m + p.2));
+        usage.push(ProcessUsage { name: tr(label).to_string(), cpu_percent: cpu, memory_mb: memory });
+    }
+    usage
+}
+
+/// When a motion of VRChat's was last handed out only for its speed (milliseconds since 1970), see [`motion_news`].
+static SPEED_HANDED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether a motion VRChat said is worth handing the state out for (it is kept either way): a station or a seat, or the
+/// speed crossing what Fast walk tells apart (still under 0.15 m/s, walking from 0.4), at once; another speed at most four
+/// times a second. VRChat says `VelocityMagnitude` at its frame rate while the avatar moves, and each one, its time
+/// changing, published the whole state (N-friend-lag).
+fn motion_news(before: Option<crate::state::AvatarMotion>, now: crate::state::AvatarMotion) -> bool {
+    use std::sync::atomic::Ordering;
+    let Some(before) = before else { return true };
+    if crate::perf::old_publishing() {
+        return before != now;
+    }
+    let class = |speed: f32| if !speed.is_finite() { 3 } else if speed < 0.15 { 0 } else if speed < 0.4 { 1 } else { 2 };
+    if before.in_station != now.in_station || before.seated != now.seated || class(before.speed) != class(now.speed) || before.speed_at_ms.is_some() != now.speed_at_ms.is_some() {
+        if let Some(at) = now.speed_at_ms {
+            SPEED_HANDED_MS.store(at, Ordering::Relaxed);
+        }
+        return true;
+    }
+    if before.speed == now.speed {
+        return false;
+    }
+    let at = now.speed_at_ms.unwrap_or(0);
+    if at.saturating_sub(SPEED_HANDED_MS.load(Ordering::Relaxed)) < 250 {
+        return false;
+    }
+    SPEED_HANDED_MS.store(at, Ordering::Relaxed);
+    true
+}
+
 impl Controller {
     /// N4N0 starts, with the service's own watch beside it: the footprint of Orbiters' processes and VRChat's (the N4N0
     /// page's), the world performance summaries still waiting (VRChat closed before they were sent), and the 3D captures
@@ -259,10 +312,15 @@ impl Controller {
         let ctl = self.clone();
         let _ = std::thread::Builder::new().name("n4n0-resources".into()).spawn(move || {
             let mut system = sysinfo::System::new();
+            let mut before: Option<(Instant, Vec<crate::perf::Raw>)> = None;
             let mut beat = 0u64;
             while !ctl.n4n0.stopped() {
                 if beat.is_multiple_of(3) {
-                    ctl.n4n0_resources(&mut system);
+                    if cfg!(windows) {
+                        ctl.n4n0_resources_scanned(&mut before);
+                    } else {
+                        ctl.n4n0_resources(&mut system);
+                    }
                 }
                 // Where the 3D captures N4N0's menu shows stand (their recording, 3D view and shares).
                 ctl.menu_captures_tick();
@@ -301,33 +359,23 @@ impl Controller {
         self.n4n0.say_quick(text);
     }
 
+    /// [`Controller::n4n0_resources`] from one `NtQuerySystemInformation` call (`perf::scan`) instead of sysinfo's refresh,
+    /// which opened every process: 8 ms a look instead of 61 ms with 494 processes on Enzo's PC, every 3 s whether the
+    /// page shows or not (N-friend-lag, `perf::tests::a_scan_costs_less_than_sysinfo_s_refresh`).
+    fn n4n0_resources_scanned(&self, before: &mut Option<(Instant, Vec<crate::perf::Raw>)>) {
+        let now = Instant::now();
+        let scan = crate::perf::scan();
+        let Some((then, old)) = before.replace((now, scan.clone())) else { return };
+        let used = crate::perf::uses(&old, &scan, now.duration_since(then).as_secs_f32());
+        self.n4n0.set_resources(footprint(used.iter().map(|p| (p.name.as_str(), p.cpu, p.working_mb))));
+    }
+
     /// CPU and memory of Orbiters' processes and VRChat's (the N4N0 page's footprint).
     fn n4n0_resources(&self, system: &mut sysinfo::System) {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
         system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory());
-        let groups: [(&str, &[&str]); 5] = [
-            ("Orbiters - N4N0", &["orbiters-desktop.exe", "orbiters-desktop"]),
-            (mark("Capture worker"), &["orbiters-capture.exe", "orbiters-capture"]),
-            (mark("N4N0's ears"), &["orbiters-voice.exe", "orbiters-voice"]),
-            (mark("Reconstruction"), &["orbiters-reconstruct.exe", "orbiters-reconstruct"]),
-            ("VRChat", &["vrchat.exe", "vrchat"]),
-        ];
-        let mut usage = Vec::new();
-        for (label, names) in groups {
-            let (mut cpu, mut memory, mut any) = (0.0f32, 0u64, false);
-            for p in system.processes().values() {
-                let n = p.name().to_string_lossy().to_lowercase();
-                if names.contains(&n.as_str()) {
-                    any = true;
-                    cpu += p.cpu_usage();
-                    memory += p.memory();
-                }
-            }
-            if any {
-                usage.push(ProcessUsage { name: tr(label).to_string(), cpu_percent: cpu, memory_mb: memory as f32 / (1024.0 * 1024.0) });
-            }
-        }
-        self.n4n0.set_resources(usage);
+        let processes: Vec<(String, f32, f32)> = system.processes().values().map(|p| (p.name().to_string_lossy().into_owned(), p.cpu_usage(), p.memory() as f32 / (1024.0 * 1024.0))).collect();
+        self.n4n0.set_resources(footprint(processes.iter().map(|(n, c, m)| (n.as_str(), *c, *m))));
     }
 }
 
@@ -381,5 +429,43 @@ mod tests {
             }
         }
         assert!(offs.contains(&format!("{PARAMETERS_PREFIX}{}", orbiters_contracts::n4n0::params::SCREEN_OPEN)), "{offs:?}");
+    }
+}
+
+#[cfg(test)]
+mod motion_news_tests {
+    use super::motion_news;
+    use crate::state::AvatarMotion;
+
+    /// N-friend-lag: VRChat says `VelocityMagnitude` every frame while walking; the state goes out four times a second
+    /// for it, and at once when Fast walk's reading of it changes (still, between, walking) or a station or seat does.
+    #[test]
+    fn walking_hands_its_speed_out_four_times_a_second_not_at_vrchats_frame_rate() {
+        let m = |speed: f32, at: u64| AvatarMotion { speed, speed_at_ms: Some(at), ..Default::default() };
+        let base = 40_000_000_000u64;
+        let mut before = Some(m(1.0, base));
+        let mut handed = 0;
+        for f in 1..=90u64 {
+            let now = m(1.0 + f as f32 * 0.001, base + f * 11);
+            handed += motion_news(before, now) as u32;
+            before = Some(now);
+        }
+        assert!((3..=5).contains(&handed), "{handed} in a second at 90 Hz");
+        let last = before.unwrap();
+        assert!(motion_news(before, m(0.05, last.speed_at_ms.unwrap() + 1)), "stopping is said at once");
+        assert!(motion_news(Some(m(0.05, 1)), AvatarMotion { in_station: true, ..m(0.05, 2) }), "a station at once");
+        assert!(!motion_news(Some(m(0.05, 1)), m(0.05, 2)), "the same speed again is nothing new");
+        assert!(motion_news(None, m(0.0, 1)), "the first is news");
+    }
+}
+
+#[cfg(test)]
+mod footprint_tests {
+    /// The N4N0 page's footprint groups processes by program, whatever the case of their names, and leaves out absent ones.
+    #[test]
+    fn the_footprint_groups_processes_by_program() {
+        let rows = super::footprint([("orbiters-desktop.exe", 1.5, 100.0), ("Orbiters-Desktop.exe", 0.5, 50.0), ("VRChat.exe", 60.0, 7000.0), ("other.exe", 99.0, 1.0)].into_iter());
+        let got: Vec<(String, f32, f32)> = rows.iter().map(|r| (r.name.clone(), r.cpu_percent, r.memory_mb)).collect();
+        assert_eq!(got, vec![("Orbiters - N4N0".to_string(), 2.0, 150.0), ("VRChat".to_string(), 60.0, 7000.0)]);
     }
 }

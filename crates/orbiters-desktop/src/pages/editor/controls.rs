@@ -549,8 +549,8 @@ fn font_list(fonts: &mut Fonts, ui: &mut Ui, id: Id, chosen: &mut String) {
     let w = ui.available_width();
     widgets::search_field(ui, id.with("search"), &mut fonts.query, tr("Search fonts"), w);
     ui.add_space(8.0);
-    let q = fonts.query.trim().to_lowercase();
-    let shown: Vec<FontInfo> = fonts.list.iter().filter(|f| q.is_empty() || f.name.to_lowercase().contains(&q)).cloned().collect();
+    let q = orbiters_core::search::Query::new(&fonts.query);
+    let shown: Vec<FontInfo> = fonts.list.iter().filter(|f| q.matches(&f.name)).cloned().collect();
     let loading = fonts.installed.as_ref().is_some_and(|j| j.running());
     let ctx = ui.ctx().clone();
     let row_h = 40.0;

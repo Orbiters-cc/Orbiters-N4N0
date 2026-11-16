@@ -352,7 +352,7 @@ pub fn build(kind: Kind, id: String, pressed: u64, context: Context, settings: s
         kind,
         pressed_at: iso(pressed),
         pressed_ms: pressed,
-        build: env!("CARGO_PKG_VERSION").to_owned(),
+        build: env!("ORBITERS_VERSION").to_owned(),
         os: std::env::consts::OS.to_owned(),
         language: orbiters_i18n::language().tag().to_owned(),
         surface: context.surface,

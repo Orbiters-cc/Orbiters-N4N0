@@ -337,10 +337,11 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
     let mine = cx.ctl.maps();
     let q = state.query.trim().to_lowercase();
     if state.shown.as_ref().is_none_or(|(asked, _)| *asked != q) {
+        let find = orbiters_core::search::Query::new(&q);
         let shown = state
             .worlds
             .as_ref()
-            .map(|l| l.iter().enumerate().filter(|(_, w)| q.is_empty() || w.name.to_lowercase().contains(&q) || w.id.contains(&q)).map(|(i, _)| i).collect())
+            .map(|l| l.iter().enumerate().filter(|(_, w)| find.matches(&w.name) || (!q.is_empty() && w.id.contains(&q))).map(|(i, _)| i).collect())
             .unwrap_or_default();
         state.shown = Some((q.clone(), shown));
     }

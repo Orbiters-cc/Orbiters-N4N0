@@ -40,7 +40,7 @@ fn a_report_holds_thirty_seconds_before_the_press_and_a_few_after() {
     assert_eq!(report.timeline.len(), 35);
     assert_eq!(report.kind, Kind::WheelShouldBeOn);
     assert_eq!(report.format, FORMAT);
-    assert_eq!(report.build, env!("CARGO_PKG_VERSION"));
+    assert_eq!(report.build, env!("ORBITERS_VERSION"));
     assert_eq!(report.picture.as_deref(), Some(PICTURE));
     // The JSON an agent reads: the kind by its key, and every part named.
     let json = serde_json::to_value(&report).unwrap();

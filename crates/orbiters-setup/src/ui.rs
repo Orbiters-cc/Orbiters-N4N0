@@ -167,7 +167,7 @@ impl Setup {
     }
 
     fn version(&self) -> &str {
-        self.index.as_ref().map(|i| i.version.as_str()).unwrap_or(env!("CARGO_PKG_VERSION"))
+        self.index.as_ref().map(|i| i.version.as_str()).unwrap_or(env!("ORBITERS_VERSION"))
     }
 
     fn go(&mut self, page: Page, now: f64) {

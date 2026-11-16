@@ -437,5 +437,9 @@
   "Desktop": "デスクトップ",
   "VR": "VR",
   "Camera open": "カメラ：開",
-  "Camera closed": "カメラ：閉"
+  "Camera closed": "カメラ：閉",
+  "Only this app: other sounds stay as they are.": "このアプリだけ。ほかの音はそのままです。",
+  "Only {app}: other sounds stay as they are.": "{app} だけ。ほかの音はそのままです。",
+  "No sound from this app to set yet.": "このアプリにはまだ調整できる音がありません。",
+  "No sound from {app} to set yet.": "{app} にはまだ調整できる音がありません。"
 }

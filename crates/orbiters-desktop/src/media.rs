@@ -3,6 +3,10 @@
 //! process's watcher (`orbiters_n4n0::media::Watcher`) on a thread of its own, only while something shows them. The
 //! SteamVR overlay, the window and the tray service each have theirs.
 //!
+//! The volume shown beside what plays is the playing app's own on Windows (its audio sessions on every output device,
+//! as Windows' volume mixer has one slider per app: `orbiters_n4n0::media::app_sound`); the speakers' volume is still
+//! read and set for N4N0's assistant, which speaks of the computer's volume.
+//!
 //! macOS tells other programs nothing about what plays (its media controls are closed to them), so a Mac reads the two
 //! players that answer Apple events, Music and Spotify, when they are already running. What else plays is not shown.
 
@@ -22,8 +26,10 @@ pub fn watcher() -> &'static Arc<Watcher> {
 #[cfg(windows)]
 mod platform {
     use super::{Reading, ART_MAX_BYTES};
+    use orbiters_n4n0::media::app_sound::{AppVolume, Mixer, Process, Sound};
     use orbiters_n4n0::media::{art, MediaBackend};
-    use orbiters_n4n0_core::menu::{Media as Playing, MediaCommand, Volume};
+    use orbiters_n4n0_core::menu::{AppSound, Media as Playing, MediaCommand, Volume};
+    use std::collections::HashMap;
     use windows::Media::Control::{
         GlobalSystemMediaTransportControlsSession as Session, GlobalSystemMediaTransportControlsSessionManager as Manager,
         GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
@@ -38,6 +44,8 @@ mod platform {
 
     pub struct Media {
         manager: Option<Manager>,
+        /// The playing app's own sounds in Windows' mixer: what the card's volume reads and sets.
+        apps: AppVolume<Sessions>,
         /// What the last art was read for (the same song keeps its art), and how many times it was asked for (apps
         /// often give a new song's art a moment after its title).
         art_for: Option<(String, String, String)>,
@@ -51,7 +59,7 @@ mod platform {
         pub fn new() -> Self {
             // SAFETY: this thread's own COM apartment, multithreaded, for the media controls and the speakers.
             let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-            Self { manager: None, art_for: None, art_tries: 0 }
+            Self { manager: None, apps: AppVolume::new(Sessions::default()), art_for: None, art_tries: 0 }
         }
 
         fn session(&mut self) -> Option<Session> {
@@ -73,6 +81,17 @@ mod platform {
                 }
                 // SAFETY: as above.
                 MediaCommand::Mute(muted) => unsafe { speakers()?.SetMute(muted, std::ptr::null()) },
+                // The playing app's own sounds, and nothing else (the speakers' volume, other apps' sounds).
+                MediaCommand::AppVolume(_) | MediaCommand::AppMute(_) => {
+                    let Some(id) = self.session().and_then(|s| s.SourceAppUserModelId().ok()).map(|id| id.to_string_lossy()) else { return Ok(()) };
+                    let done = match command {
+                        MediaCommand::AppVolume(percent) => self.apps.set_level(&id, percent),
+                        MediaCommand::AppMute(muted) => self.apps.set_muted(&id, muted),
+                        _ => Ok(()),
+                    };
+                    // E_FAIL: logged by the media thread.
+                    done.map_err(|e| windows::core::Error::new(windows::core::HRESULT(0x8000_4005_u32 as i32), e))
+                }
                 _ => {
                     let Some(session) = self.session() else { return Ok(()) };
                     let done = match command {
@@ -108,7 +127,14 @@ mod platform {
                 self.art_for = None;
                 return Reading { media: None, volume, art: None };
             };
-            let media = playing(&session);
+            let mut media = playing(&session);
+            if let Some(m) = media.as_mut() {
+                // Read every time: a change in Windows' mixer or in the app shows within a reading.
+                m.sound = match session.SourceAppUserModelId() {
+                    Ok(id) => self.apps.read(&id.to_string_lossy()),
+                    Err(_) => AppSound::NotFound,
+                };
+            }
             let key = media.as_ref().map(|m| (m.title.clone(), m.artist.clone(), m.album.clone()));
             let changed = key != self.art_for;
             if changed {
@@ -191,7 +217,170 @@ mod platform {
             art: None,
             // Looked up on YouTube by the watcher (`orbiters_n4n0::media::Links`).
             video: None,
+            // Read from the mixer by `read_now`.
+            sound: AppSound::NotFound,
         })
+    }
+
+    /// Windows' audio sessions on every output device that is on (a headset's as much as the default speakers'), and
+    /// the processes they belong to (`orbiters_n4n0::media::app_sound` tells which are the playing app's).
+    #[derive(Default)]
+    pub struct Sessions {
+        /// The volumes of the sessions the last [`Mixer::sounds`] listed, in its order.
+        volumes: Vec<windows::Win32::Media::Audio::ISimpleAudioVolume>,
+        /// What was read of each process (its start time and package), by its number, parent and program: a process
+        /// is opened once.
+        known: HashMap<(u32, u32, String), (Option<u64>, Option<String>)>,
+    }
+
+    impl Mixer for Sessions {
+        fn sounds(&mut self) -> Vec<Sound> {
+            use windows::core::Interface;
+            use windows::Win32::Media::Audio::{
+                AudioSessionStateActive, AudioSessionStateExpired, IAudioSessionControl2, IAudioSessionManager2, ISimpleAudioVolume, DEVICE_STATE_ACTIVE,
+            };
+            self.volumes.clear();
+            let mut out = Vec::new();
+            // SAFETY: COM calls on this thread's apartment, on interfaces held here; each is released when dropped.
+            unsafe {
+                let Ok(devices) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else { return out };
+                let Ok(collection) = devices.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) else { return out };
+                for i in 0..collection.GetCount().unwrap_or(0) {
+                    let Ok(device) = collection.Item(i) else { continue };
+                    let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else { continue };
+                    let Ok(sessions) = manager.GetSessionEnumerator() else { continue };
+                    for j in 0..sessions.GetCount().unwrap_or(0) {
+                        let Ok(control) = sessions.GetSession(j) else { continue };
+                        let Ok(state) = control.GetState() else { continue };
+                        if state == AudioSessionStateExpired {
+                            continue;
+                        }
+                        let pid = control.cast::<IAudioSessionControl2>().and_then(|c| c.GetProcessId()).unwrap_or(0);
+                        let Ok(volume) = control.cast::<ISimpleAudioVolume>() else { continue };
+                        let (Ok(level), Ok(muted)) = (volume.GetMasterVolume(), volume.GetMute()) else { continue };
+                        out.push(Sound { device: i.to_string(), pid, level, muted: muted.as_bool(), playing: state == AudioSessionStateActive });
+                        self.volumes.push(volume);
+                    }
+                }
+            }
+            out
+        }
+
+        fn processes(&mut self) -> Vec<Process> {
+            use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+            let mut out = Vec::new();
+            // SAFETY: a snapshot closed below, read with an entry of the size it says.
+            unsafe {
+                let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
+                let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+                let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+                while more {
+                    let length = entry.szExeFile.iter().position(|c| *c == 0).unwrap_or(entry.szExeFile.len());
+                    out.push(Process {
+                        pid: entry.th32ProcessID,
+                        parent: entry.th32ParentProcessID,
+                        exe: String::from_utf16_lossy(&entry.szExeFile[..length]),
+                        started: None,
+                        package: None,
+                    });
+                    more = Process32NextW(snapshot, &mut entry).is_ok();
+                }
+                let _ = windows::Win32::Foundation::CloseHandle(snapshot);
+            }
+            let mut known = HashMap::with_capacity(out.len());
+            for process in &mut out {
+                let key = (process.pid, process.parent, process.exe.clone());
+                let read = self.known.remove(&key).unwrap_or_else(|| opened(process.pid));
+                (process.started, process.package) = read.clone();
+                known.insert(key, read);
+            }
+            // The processes that ended are forgotten.
+            self.known = known;
+            out
+        }
+
+        fn windows_of(&mut self, id: &str) -> Vec<u32> {
+            use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY};
+            use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+            use windows::Win32::System::Variant::VT_LPWSTR;
+            use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
+            use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible};
+            /// `PKEY_AppUserModel_ID`: the app a window says it is, by which the taskbar groups it.
+            const APP_ID: PROPERTYKEY = PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3), pid: 5 };
+            unsafe extern "system" fn each(h: HWND, data: LPARAM) -> windows::core::BOOL {
+                // SAFETY: `data` is the list below, alive for the call to `EnumWindows` on this thread only.
+                let found = unsafe { &mut *(data.0 as *mut Vec<HWND>) };
+                // SAFETY: a window handed over by `EnumWindows`.
+                if unsafe { IsWindowVisible(h) }.as_bool() {
+                    found.push(h);
+                }
+                windows::core::BOOL(1)
+            }
+            let mut windows: Vec<HWND> = Vec::new();
+            let mut out = Vec::new();
+            // SAFETY: the callback fills `windows` during this call only; a window gone meanwhile only makes a call fail;
+            // the property's value is cleared when dropped.
+            unsafe {
+                let _ = EnumWindows(Some(each), LPARAM(&mut windows as *mut Vec<HWND> as isize));
+                for h in windows {
+                    let Ok(store) = SHGetPropertyStoreForWindow::<IPropertyStore>(h) else { continue };
+                    let Ok(value) = store.GetValue(&APP_ID) else { continue };
+                    let value: PROPVARIANT = value;
+                    let inner = &value.Anonymous.Anonymous;
+                    if inner.vt != VT_LPWSTR || !inner.Anonymous.pwszVal.to_string().is_ok_and(|w| w.trim().eq_ignore_ascii_case(id.trim())) {
+                        continue;
+                    }
+                    let mut pid = 0;
+                    GetWindowThreadProcessId(h, Some(&mut pid));
+                    if pid != 0 && !out.contains(&pid) {
+                        out.push(pid);
+                    }
+                }
+            }
+            out
+        }
+
+        fn set(&mut self, index: usize, level: Option<f32>, muted: Option<bool>) -> Result<(), String> {
+            let volume = self.volumes.get(index).ok_or("that sound ended")?; // i18n: not shown (logged by the media thread)
+            // SAFETY: a session's volume held since the last listing; no event context.
+            unsafe {
+                if let Some(level) = level {
+                    volume.SetMasterVolume(level.clamp(0.0, 1.0), std::ptr::null()).map_err(|e| e.to_string())?;
+                }
+                if let Some(muted) = muted {
+                    volume.SetMute(muted, std::ptr::null()).map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// When process `pid` started, and its app id when it belongs to a package (a store app). Only what any program
+    /// may ask of another (`PROCESS_QUERY_LIMITED_INFORMATION`); a process that refuses gives nothing.
+    fn opened(pid: u32) -> (Option<u64>, Option<String>) {
+        use windows::core::PWSTR;
+        use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, FILETIME};
+        use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
+        use windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        if pid == 0 {
+            return (None, None);
+        }
+        // SAFETY: a handle opened here for reading and closed below; buffers of the sizes passed.
+        unsafe {
+            let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return (None, None) };
+            let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+            let started = GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user)
+                .ok()
+                .map(|_| (created.dwHighDateTime as u64) << 32 | created.dwLowDateTime as u64);
+            let mut wide = [0u16; 256];
+            let mut length = wide.len() as u32;
+            let package = (GetApplicationUserModelId(process, &mut length, Some(PWSTR(wide.as_mut_ptr()))) == ERROR_SUCCESS)
+                .then(|| String::from_utf16_lossy(&wide[..(length as usize).saturating_sub(1).min(wide.len())]))
+                .map(|id| id.trim_end_matches('\0').to_string())
+                .filter(|id| !id.is_empty());
+            let _ = CloseHandle(process);
+            (started, package)
+        }
     }
 
     /// The art's bytes (JPEG or PNG), when the app gives some.
@@ -208,6 +397,108 @@ mod platform {
         let mut bytes = vec![0u8; read.Length().ok()? as usize];
         reader.ReadBytes(&mut bytes).ok()?;
         Some(bytes)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use orbiters_n4n0::media::app_sound::app_pids;
+        use std::time::Duration;
+        use windows::Win32::Media::Audio::{IAudioClient, IAudioRenderClient, ISimpleAudioVolume, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED};
+        use windows::Win32::System::Com::CoTaskMemFree;
+
+        /// Every other sound of the mixer, by device and process: (device, pid, level in thousandths, muted), sorted.
+        fn others(mixer: &mut Sessions, me: u32) -> Vec<(String, u32, i32, bool)> {
+            let mut out: Vec<_> = mixer.sounds().into_iter().filter(|s| s.pid != me).map(|s| (s.device, s.pid, (s.level * 1000.0).round() as i32, s.muted)).collect();
+            out.sort();
+            out
+        }
+
+        /// The real mixer, quietly: this test's own process plays silence on the default speakers and is "the app";
+        /// its volume is read, set, changed from outside (through the stream's own volume, as Windows' mixer does) and
+        /// read again, and every other sound on every device is checked untouched. Nothing is heard and no one else's
+        /// volume moves (`cargo test -p orbiters-desktop media::platform::tests -- --ignored --nocapture`).
+        #[test]
+        #[ignore]
+        fn sets_only_this_process_sound_on_this_computer() {
+            // SAFETY: this thread's apartment; a shared-mode stream of silence on the default speakers, stopped below.
+            let (client, own) = unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+                let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+                let client: IAudioClient = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia).unwrap().Activate(CLSCTX_ALL, None).unwrap();
+                let format = client.GetMixFormat().unwrap();
+                client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 10_000_000, 0, format, None).unwrap();
+                CoTaskMemFree(Some(format as _));
+                let frames = client.GetBufferSize().unwrap();
+                let render: IAudioRenderClient = client.GetService().unwrap();
+                render.GetBuffer(frames).unwrap();
+                render.ReleaseBuffer(frames, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32).unwrap();
+                client.Start().unwrap();
+                let own: ISimpleAudioVolume = client.GetService().unwrap();
+                (client, own)
+            };
+            let me = std::process::id();
+            let exe = std::env::current_exe().unwrap().file_name().unwrap().to_string_lossy().into_owned();
+            let mut apps = AppVolume::new(Sessions::default());
+            let before = others(&mut apps.mixer, me);
+            let first = (0..30).find_map(|_| match apps.read(&exe) {
+                AppSound::Level(v) => Some(v),
+                _ => {
+                    std::thread::sleep(Duration::from_millis(100));
+                    None
+                }
+            });
+            println!("{exe} (pid {me}): {first:?}, {} other sounds", before.len());
+            let first = first.expect("this process's sound is found in the mixer");
+            apps.set_level(&exe, 30).unwrap();
+            // SAFETY: reads and sets of this stream's own volume.
+            let level = unsafe { own.GetMasterVolume() }.unwrap();
+            assert!((level - 0.30).abs() < 0.005, "the stream's own volume is now {level}");
+            assert_eq!(apps.read(&exe), AppSound::Level(Volume { percent: 30, muted: false }));
+            // SAFETY: as above.
+            unsafe {
+                own.SetMasterVolume(0.6, std::ptr::null()).unwrap();
+                own.SetMute(true, std::ptr::null()).unwrap();
+            }
+            assert_eq!(apps.read(&exe), AppSound::Level(Volume { percent: 60, muted: true }), "a change made elsewhere shows");
+            apps.set_level(&exe, first.percent).unwrap();
+            assert_eq!(apps.read(&exe), AppSound::Level(Volume { percent: first.percent, muted: false }), "turning it up unmutes");
+            let after = others(&mut apps.mixer, me);
+            // SAFETY: the stream started above.
+            unsafe {
+                let _ = client.Stop();
+            }
+            // Sounds that came or went meanwhile (another app starting) are not counted; every one in both is unchanged.
+            let changed: Vec<_> = before.iter().filter(|b| !after.contains(b) && after.iter().any(|a| a.0 == b.0 && a.1 == b.1)).collect();
+            println!("other sounds before {} after {}; changed: {changed:?}", before.len(), after.len());
+            assert!(changed.is_empty(), "another app's sound moved: {changed:?}");
+        }
+
+        /// What plays now and which of the mixer's sounds are its, read only: nothing is set
+        /// (`cargo test -p orbiters-desktop maps_what_plays_now -- --ignored --nocapture`).
+        #[test]
+        #[ignore]
+        fn maps_what_plays_now() {
+            let mut media = Media::new();
+            let Some(session) = media.session() else {
+                println!("nothing tells Windows it plays");
+                return;
+            };
+            let id = session.SourceAppUserModelId().unwrap().to_string_lossy();
+            let mut mixer = Sessions::default();
+            let sounds = mixer.sounds();
+            let processes = mixer.processes();
+            let pids = app_pids(&id, &processes, || mixer.windows_of(&id));
+            println!("playing: {id:?} ({})", orbiters_n4n0::media::app_name(&id));
+            for p in processes.iter().filter(|p| pids.contains(&p.pid)) {
+                println!("  process {} {} (parent {}, package {:?})", p.pid, p.exe, p.parent, p.package);
+            }
+            for s in &sounds {
+                let exe = processes.iter().find(|p| p.pid == s.pid).map_or("?", |p| p.exe.as_str());
+                println!("  {} sound: device {} pid {} {exe} level {:.2} muted {} playing {}", if pids.contains(&s.pid) { "APP" } else { "   " }, s.device, s.pid, s.level, s.muted, s.playing);
+            }
+            println!("the card shows: {:?}", AppVolume::new(Sessions::default()).read(&id));
+        }
     }
 }
 
@@ -315,7 +606,7 @@ end tell"#
             MediaCommand::Next => "next track".into(), // i18n: not shown
             MediaCommand::Previous => "previous track".into(), // i18n: not shown
             MediaCommand::Seek(seconds) => format!("set player position to {seconds}"), // i18n: not shown
-            MediaCommand::Volume(_) | MediaCommand::Mute(_) => return None,
+            MediaCommand::Volume(_) | MediaCommand::Mute(_) | MediaCommand::AppVolume(_) | MediaCommand::AppMute(_) => return None,
         })
     }
 
@@ -346,6 +637,8 @@ end tell"#
             duration,
             art: None,
             video: None,
+            // macOS has no volume per app: the card's is the computer's, as before.
+            sound: orbiters_n4n0_core::menu::AppSound::Unknown,
         };
         Some((media, link))
     }

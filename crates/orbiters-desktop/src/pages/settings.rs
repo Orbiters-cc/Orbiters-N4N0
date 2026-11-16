@@ -194,7 +194,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::separator(ui);
                 let places = [
                     SegOption::new(WhilePlaying::GraphicsCard, tr("Graphics card"))
-                        .hint(tr("Fastest; in VR it trains in the time VRChat's frames leave idle, so slower while the game is busy")),
+                        .hint(tr("Fastest; in VR it trains in the time VRChat's frames leave idle, on the desktop on at most a third of the card, so slower while the game runs")),
                     SegOption::new(WhilePlaying::IntegratedGpu, tr("Integrated GPU"))
                         .hint(tr("About 40 times slower, and VRChat keeps its frame rate; once VRChat closes it starts again on the graphics card")),
                     SegOption::new(WhilePlaying::AfterVrchat, tr("After VRChat")).hint(tr("Reconstructions wait until VRChat closes or the headset has been off a minute")),
@@ -366,6 +366,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply |= widgets::toggle(ui, "usage-statistics", &mut draft.usage.enabled);
                     },
                 );
+                widgets::separator(ui);
+                super::perf_card::show(ui, cx.ctl, snap);
             }));
 
             if vrchat_here {

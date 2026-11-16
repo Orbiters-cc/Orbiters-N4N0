@@ -732,11 +732,14 @@ pub struct Snapshot {
     /// looks again.
     #[serde(default)]
     pub projects_changed: u64,
+    /// The performance self-check's hint and the last Performance report (`perf`).
+    #[serde(default)]
+    pub perf: Slice<crate::perf::PerfView>,
 }
 
 orbiters_core::parts!(Snapshot {
     plain: [smoothing_revision, version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, vrchat_wrists, vrchat_wrists_ns, camera_tools, projects_changed],
-    slices: [sources, mics, osc, lan, capture, settings, storage, worker, steamvr, reconstruct_queue, account, uploads, update, vr_audio, orbit, booster, translate],
+    slices: [sources, mics, osc, lan, capture, settings, storage, worker, steamvr, reconstruct_queue, account, uploads, update, vr_audio, orbit, booster, translate, perf],
     identity: [capture_shares],
     nested: [vrchat, n4n0],
 });
@@ -780,7 +783,8 @@ impl Snapshot {
             vrchat_wrists_ns: [0; 2],
             camera_tools: Default::default(),
             projects_changed: 0,
-            version: orbiters_core::APP_VERSION.into(),
+            perf: Default::default(),
+            version: orbiters_core::app_version().into(),
             vrchat: VrchatStatus {
                 running: false,
                 pid: None,

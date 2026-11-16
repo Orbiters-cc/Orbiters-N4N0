@@ -5,6 +5,7 @@ crates/orbiters-desktop/src/screenshot.rs
 crates/orbiters-desktop/src/bench.rs
 crates/orbiters-desktop/src/idle_frames.rs
 crates/orbiters-desktop/src/controller/publish_cost.rs
+crates/orbiters-desktop/src/controller/picture_repair.rs
 crates/orbiters-desktop/src/link_smoke.rs
 crates/orbiters-desktop/src/link_between.rs
 # What AI clients read, not people.
@@ -31,6 +32,8 @@ errors-only crates/orbiters-reconstruct
 crates/orbiters-n4n0-mobile
 # The FPS booster without its interface: logs, a journal and a test harness; its words are in orbiters-desktop/src/booster.rs.
 crates/orbiters-booster
+# The running program's version holder: a developer's assertion only.
+crates/orbiters-version
 
 crates/orbiters-desktop/src/harness.rs
 crates/orbiters-desktop/src/overlay/orbit/paint_bench.rs
@@ -55,3 +58,7 @@ crates/orbiters-desktop/src/usage
 # Sends menu mismatch reports; its words are for the log.
 crates/orbiters-desktop/src/mismatch/send.rs
 crates/orbiters-desktop/src/mismatch/tests.rs
+crates/orbiters-desktop/src/perf/facts.rs
+crates/orbiters-desktop/src/perf/tests.rs
+# Matching tables for searches by name: letters, never shown.
+crates/orbiters-core/src/search.rs

@@ -107,7 +107,7 @@
   "Experimental": "試験的機能",
   "Face and avatar parameters": "顔とアバターのパラメーター",
   "Fast walk's lesser mode": "早歩きの簡易モード",
-  "Fastest; in VR it trains in the time VRChat's frames leave idle, so slower while the game is busy": "最速です。VRでは、VRChatのフレームの合間の空き時間に学習するため、ゲームが忙しい間は遅くなります",
+  "Fastest; in VR it trains in the time VRChat's frames leave idle, on the desktop on at most a third of the card, so slower while the game runs": "最速です。VRではVRChatのフレームの合間の空き時間に、デスクトップではカードの3分の1までを使って学習するため、ゲーム中は遅くなります",
   "Find it by itself": "自動で探す",
   "Finish in your browser": "ブラウザーで完了してください",
   "Flagged as explicit": "センシティブな内容として指定されています",

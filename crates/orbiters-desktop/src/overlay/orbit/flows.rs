@@ -1296,6 +1296,8 @@ struct Heard {
     boosters: std::sync::Mutex<Vec<String>>,
     /// What the camera's tools asked of the service: `record`, `qr on`, `qr off`.
     camera: std::sync::Mutex<Vec<String>>,
+    /// The settings' changes asked for, in order.
+    patches: std::sync::Mutex<Vec<serde_json::Value>>,
 }
 
 impl Heard {
@@ -1335,7 +1337,9 @@ impl crate::backend::Backend for Heard {
     fn pause_capture(&self, _paused: bool) {}
     fn start_test_capture(&self) {}
     fn import_raw_capture(&self, _dir: std::path::PathBuf) {}
-    fn patch_settings(&self, _patch: serde_json::Value) {}
+    fn patch_settings(&self, patch: serde_json::Value) {
+        self.patches.lock().unwrap().push(patch);
+    }
     fn trash_session(&self, _dir: std::path::PathBuf) {}
     fn clean_up(&self, _trim: Vec<std::path::PathBuf>, _delete: Vec<std::path::PathBuf>) {}
     fn reconstruct(&self, _dir: std::path::PathBuf) {}
@@ -2234,6 +2238,52 @@ fn beside_the_desktop_camera_each_tool_does_its_work() {
     assert!(person.press(Action::Record).clicked);
     assert!(person.press(Action::CameraQr).clicked);
     assert_eq!(*heard.camera.lock().unwrap(), ["record", "qr on"]);
+}
+
+/// N-length-switch (Enzo, 2026-11-16: "switch between 1, 4 and 8 sec captures directly from the overlay camera UI"): in the headset and
+/// on the desktop, both 3D tiles show the length and their chip goes round 1, 4 and 8 s, saved as the Capture page's one setting; a
+/// picture pressed at once after takes the length just chosen, not the one the settings had a moment before.
+#[test]
+fn the_camera_s_3d_tiles_show_and_change_the_pictures_length() {
+    use orbiters_core::settings::Photo3dLength;
+    use orbiters_n4n0_core::menu::PhotoMode;
+    for desktop in [true, false] {
+        let (mut person, heard) = at_the_desktop_camera();
+        if !desktop {
+            let mut snap = (*person.snap).clone();
+            snap.steamvr.running = true;
+            person.snap = Arc::new(snap);
+            person.turns(3);
+            assert!(!person.panels.facts.desktop);
+        }
+        let length_said = |heard: &Heard| heard.patches.lock().unwrap().iter().rev().find_map(|p| p.get("photo_3d").cloned());
+        assert_eq!(person.panels.facts.length, Photo3dLength::Standard, "the setting's default, 4 s");
+        let tiles: Vec<Zone> = person.panels.all().filter(|p| p.items.iter().any(|i| i.action == Action::PictureLength)).map(|p| p.zone).collect();
+        assert_eq!(tiles, [Zone::CameraPeople, Zone::CameraWorld], "desktop {desktop}: the length is on both 3D tiles, and nowhere else");
+        for want in [Photo3dLength::Full, Photo3dLength::Quick, Photo3dLength::Standard] {
+            assert!(person.press(Action::PictureLength).clicked);
+            assert_eq!(person.panels.facts.length, want, "desktop {desktop}");
+            assert_eq!(length_said(&heard), Some(serde_json::to_value(want).unwrap()), "desktop {desktop}: saved as the Capture page's setting");
+            // The service says it back.
+            let mut snap = (*person.snap).clone();
+            snap.settings.photo_3d = want;
+            person.snap = Arc::new(snap);
+            person.turns(2);
+            assert_eq!(person.panels.facts.length, want);
+        }
+        // 8 s chosen, and the settings have not said it back yet: the picture pressed at once still takes 8 s.
+        assert!(person.press(Action::PictureLength).clicked);
+        assert_eq!(person.panels.facts.length, Photo3dLength::Full);
+        heard.patches.lock().unwrap().clear();
+        assert!(person.press(Action::Picture(PhotoMode::World)).clicked);
+        assert_eq!(length_said(&heard), Some(serde_json::to_value(Photo3dLength::Full).unwrap()), "desktop {desktop}: {:?}", heard.patches.lock().unwrap());
+        // No capture kit: the tile is locked, and so is its length.
+        let mut snap = (*person.snap).clone();
+        snap.worn_kit = Some(false);
+        person.snap = Arc::new(snap);
+        person.turns(3);
+        assert!(person.find(Action::PictureLength).is_none());
+    }
 }
 
 /// Waiting for VRChat to say where its camera is, the desktop's column says so under the tiles, and how to call it off; the countdown is on the tile pressed.

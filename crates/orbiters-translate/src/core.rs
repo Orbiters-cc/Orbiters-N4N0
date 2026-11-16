@@ -623,7 +623,9 @@ mod tests {
     }
 
     /// A [`Stepped`] translator's core, its word, what it was asked and how many lines it handed out.
-    fn stepped() -> (Core, std::sync::mpsc::Sender<()>, Arc<std::sync::Mutex<Vec<Vec<String>>>>, Arc<std::sync::atomic::AtomicUsize>) {
+    type Asked = Arc<std::sync::Mutex<Vec<Vec<String>>>>;
+    type Handed = Arc<std::sync::atomic::AtomicUsize>;
+    fn stepped() -> (Core, std::sync::mpsc::Sender<()>, Asked, Handed) {
         let (go, gate) = std::sync::mpsc::channel();
         let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
         let handed = Arc::new(std::sync::atomic::AtomicUsize::new(0));

@@ -207,6 +207,7 @@ impl Presenter {
 
     /// Shows a picture on `handle` that differs from the last one shown there only in `changed` (x0, y0, x1, y1).
     fn show_part(&mut self, overlay: &vr::Overlay, handle: vr::OverlayHandle, rgba: &[u8], width: u32, height: u32, changed: [u32; 4]) {
+        crate::perf::uploaded(u64::from(changed[2].saturating_sub(changed[0])) * u64::from(changed[3].saturating_sub(changed[1])));
         #[cfg(windows)]
         if let Some(gpu) = self.device() {
             let failed = match gpu.present_part(overlay, handle, rgba, width, height, changed) {
@@ -398,6 +399,13 @@ impl Canvas {
     /// stays crisp).
     pub fn zoomed(width: u32, height: u32, zoom: f32) -> Self {
         Self { size: egui::vec2(width as f32, height as f32) / zoom, zoom, ..Self::new(width, height) }
+    }
+
+    /// Of `width` x `height` pixels at `zoom` pixels a point from now on: the same interface, its textures and its look, painted whole next.
+    pub fn resize(&mut self, width: u32, height: u32, zoom: f32) {
+        self.painter.resize(width, height);
+        self.size = egui::vec2(width as f32, height as f32) / zoom;
+        self.zoom = zoom;
     }
 
     /// One whose frames take the look chosen for the menus around VRChat's.
@@ -901,8 +909,13 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let mut worn_read: Option<Instant> = None;
     // A frame of the headset, the longest wait for the compositor's next one (its advice).
     let frame_ms = steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map_or(11, |hz| (1000.0 / hz).ceil() as u32).clamp(4, 50);
+    // The performance self-check: what each part of the turn costs, sent to the service every ten seconds (`perf`).
+    let refresh_hz = steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0);
+    let mut meter = crate::perf::TurnMeter::new("overlay", Instant::now());
+    meter.headset(steamvr.string_property(0, vr::prop::MODEL_NUMBER));
     loop {
         let turn = Instant::now();
+        let mut part = turn;
         t.menu.worlds.view.input_turn(turn);
         if client.should_close() {
             vr_log::line(&format!("overlay: its link to the service ended: {}", client.ended_because().unwrap_or_else(|| "no reason given".into()))); // i18n: not shown (a log's line)
@@ -1026,7 +1039,10 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         }
         // VRChat's frame times also pace N4N0's projected screen (the owner's steps follow the frame rate).
         // Read whatever the settings say: the FPS booster's logger runs at every level, Off included.
+        meter.add(crate::perf::Part::SteamVr, part);
+        part = Instant::now();
         let chunk = frames.update(&steamvr, vrchat_scene);
+        meter.frames(frames.fresh(), refresh_hz);
         if snap.settings.world_performance || snap.settings.n4n0.enabled {
             if let Some(chunk) = chunk {
                 backend.frames(chunk);
@@ -1040,6 +1056,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let place = snap.vrchat.running.then(|| snap.vrchat.world.instance.clone()).flatten();
         // Every action set at once, then what reads them; a failed read leaves the last frame's states, not to be
         // taken for new ones (a press counted twice, a stick still pushed).
+        meter.add(crate::perf::Part::Frames, part);
+        part = Instant::now();
         let input_read = actions.update(&steamvr);
         let moment = walk::Moment {
             settings: &snap.settings.walk_boost,
@@ -1056,6 +1074,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 .map(|m| walk::Motion { in_station: m.in_station || m.seated, speed: if m.speed_at_ms.is_some() { m.speed } else { f32::NAN }, speed_at_ms: m.speed_at_ms }),
             input_read,
         };
+        meter.add(crate::perf::Part::SteamVr, part);
+        part = Instant::now();
         t.walk.update(&steamvr, &moment);
         t.state.walk_taken = t.walk.taken_lately(Instant::now());
         if let Some(path) = t.walk.path_changed() {
@@ -1096,6 +1116,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let mut mismatch_pressed = None;
         // The floating panel, the watch and N4N0's menu, used with the controllers' own lasers beside VRChat
         // (overlay/floating): first, so that the menu reads this turn's laser events, and the watch opens it now.
+        meter.add(crate::perf::Part::Walk, part);
+        part = Instant::now();
         let mut watch = false;
         if let Some(floating) = t.floating.as_mut() {
             let pointables = t.menu.pointables();
@@ -1141,6 +1163,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             vr_log::line(&format!("3D view: SteamVR had no overlay slot left; {freed} hidden parts gave theirs back, trying again")); // i18n: not shown (a log's line)
             t.menu.worlds.view.room_made(&overlay, &steamvr);
         }
+        meter.add(crate::perf::Part::Floating, part);
+        part = Instant::now();
         // Whether a menu of ours is up (live translation does not read what is under one).
         let mut menus_up = false;
         // The panels around VRChat's menus, and whose trigger VRChat does not get from the next read on.
@@ -1227,10 +1251,15 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         if let Some(kind) = mismatch_pressed {
             mismatch_report(kind, &steamvr, &snap, t.orbit.as_ref(), menus_up, dashboard, vrchat_scene, t.menu.host.menu.open);
         }
+        meter.add(crate::perf::Part::Orbit, part);
+        part = Instant::now();
         if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button, watch) {
             sounds.click();
         }
+        meter.add(crate::perf::Part::Menu, part);
+        part = Instant::now();
         t.menu.worlds.view.publish(&overlay);
+        meter.add(crate::perf::Part::View3d, part);
         // Live translation: the turn only records the head and shows what the reading thread found.
         // Nor while VRChat has no scene to show (a loading screen's texts were read and translated in the sandbox).
         let covered = dashboard || menus_up || t.menu.host.menu.open || t.menu.worlds.small_showing() || !vrchat_scene;
@@ -1247,6 +1276,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let walk_hand = if snap.settings.walk_boost.hand == orbiters_core::settings::Hand::Left { 0 } else { 1 };
         t.translate.update(translate::Cx { overlay: &overlay, steamvr: &steamvr, presenter: &mut presenter, snap: &snap, backend: &backend, covered, frames: frames.fresh(), sticks, walk_hand, dashboard });
         stall.note(began.elapsed(), || t.translate.doing());
+        meter.add(crate::perf::Part::Translate, began);
+        part = Instant::now();
         if !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &snap)) {
             shown = Some(snap.clone());
             next_frame = Some(next_frame.map_or(Instant::now(), |f| f.min(Instant::now())));
@@ -1294,14 +1325,21 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         } else if !visible {
             while_hidden(&mut events);
         }
+        meter.add(crate::perf::Part::Tab, part);
+        part = Instant::now();
         t.menu.worlds.view.publish(&overlay);
+        meter.add(crate::perf::Part::View3d, part);
+        let mut busy = turn.elapsed();
         if t.walk.moving() {
             // Walk boost moves the play space once per frame the compositor shows: unsynchronised steps judder.
             if overlay.wait_frame_sync(frame_ms).is_err() {
                 std::thread::sleep(TURN.saturating_sub(turn.elapsed()));
             }
             std::thread::sleep(SHORTEST_TURN.saturating_sub(turn.elapsed()));
+            let began = Instant::now();
             t.menu.worlds.view.update(&overlay, &steamvr);
+            meter.add(crate::perf::Part::View3d, began);
+            busy += began.elapsed();
         } else {
             // Keep input at its existing cadence. Only displayed 3D content gets short, high-resolution service
             // slices: a completed texture need not wait through the rest of this turn. No tick-based channel waits.
@@ -1311,9 +1349,16 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 let left = end.saturating_duration_since(now);
                 std::thread::sleep(worlds::pacing::service_slice(left, t.menu.worlds.view.wake_after(now)));
                 if t.menu.worlds.view.active() {
+                    let began = Instant::now();
                     t.menu.worlds.view.update(&overlay, &steamvr);
+                    meter.add(crate::perf::Part::View3d, began);
+                    busy += began.elapsed();
                 }
             }
+        }
+        meter.turn(busy);
+        if let Some(turns) = meter.take(Instant::now()) {
+            backend.perf_turns(turns);
         }
     }
 }
@@ -1356,6 +1401,27 @@ fn thumbnail() -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L-fullscreen-resize: a page's canvas taken to another size and back (VRChat's window full screen, then windowed again) still draws its text: the textures its
+    /// interface sent once are kept. A canvas made anew under the same interface drew nothing at a size the interface had drawn at before.
+    #[test]
+    fn a_canvas_resized_and_back_still_draws_its_text() {
+        let draw = |p: &egui::Painter| {
+            p.rect_filled(egui::Rect::from_min_size(pos2(4.0, 4.0), egui::vec2(40.0, 20.0)), 4.0, egui::Color32::from_rgb(40, 160, 120));
+            p.text(pos2(8.0, 30.0), egui::Align2::LEFT_TOP, "Worlds", egui::FontId::proportional(14.0), egui::Color32::WHITE);
+        };
+        let seen = |pixels: &[u8]| pixels.chunks_exact(4).filter(|px| px[3] > 0).count();
+        let mut canvas = Canvas::zoomed(200, 100, 1.0);
+        let first = seen(canvas.paint(0.0, draw));
+        assert!(first > 0);
+        canvas.resize(400, 200, 2.0);
+        let bigger = seen(canvas.paint(0.1, draw));
+        assert!(bigger > first * 3, "twice as large: {bigger} painted pixels, {first} before");
+        canvas.resize(200, 100, 1.0);
+        let back = seen(canvas.paint(0.2, draw));
+        assert_eq!(back, first, "back at the first size, the same picture");
+        assert_eq!(canvas.damage(), Some([0, 0, 200, 100]), "painted whole after a new size");
+    }
 
     #[test]
     fn a_press_cut_by_the_dashboard_closing_is_let_go() {

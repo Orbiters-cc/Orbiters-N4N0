@@ -988,11 +988,12 @@ const CLEAR: Rect = Rect { min: Pos2 { x: 952.0, y: 96.0 }, max: Pos2 { x: 992.0
 impl Panel {
     /// The results for the search typed so far, kept to the labels picked, in the order chosen.
     pub fn results<'a>(&self, d: &Data<'a>) -> Vec<&'a Entry> {
+        let q = orbiters_core::search::Query::new(&self.query);
         let mut out: Vec<&'a Entry> = d
             .entries
             .iter()
             .filter(|e| {
-                e.matches(&self.query) && (!self.official || e.official) && (!self.has_3d || e.capture) && self.labels.iter().all(|l| d.label_count(e, l) > 0)
+                e.matches_query(&q, &self.query) && (!self.official || e.official) && (!self.has_3d || e.capture) && self.labels.iter().all(|l| d.label_count(e, l) > 0)
             })
             .collect();
         match self.sort {
@@ -1069,6 +1070,12 @@ impl Panel {
     /// Whether a Back here stays on this panel: what was opened from what it opened on.
     pub fn goes_back_within(&self) -> bool {
         self.page != Page::Browse
+    }
+
+    /// How far down its list it is, for the tests.
+    #[cfg(test)]
+    pub fn list_scroll_for_test(&self) -> f32 {
+        self.vr_scroll
     }
 
     /// The list moved by so much, by a stick or a wheel.

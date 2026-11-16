@@ -437,5 +437,9 @@
   "Desktop": "Escritorio",
   "VR": "VR",
   "Camera open": "Cámara abierta",
-  "Camera closed": "Cámara cerrada"
+  "Camera closed": "Cámara cerrada",
+  "Only this app: other sounds stay as they are.": "Solo esta app: los demás sonidos se quedan como están.",
+  "Only {app}: other sounds stay as they are.": "Solo {app}: los demás sonidos se quedan como están.",
+  "No sound from this app to set yet.": "Esta app aún no tiene sonido que ajustar.",
+  "No sound from {app} to set yet.": "{app} aún no tiene sonido que ajustar."
 }

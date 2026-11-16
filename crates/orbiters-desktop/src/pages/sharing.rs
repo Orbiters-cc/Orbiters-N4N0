@@ -333,7 +333,7 @@ impl Dialog {
             self.message = "A little moment from last night ✨".into();
             if state == "friends-search" {
                 // VRChat names as people decorate them, and what someone types to find one of them.
-                let names = ["\u{FF4E}\u{FF45}\u{FF4F}\u{FF4E}\u{FF49}\u{FF58}", "Neon Fox", "\u{2727} \u{0274}\u{1D07}\u{1D0F} \u{2727}", "n e o n i x \u{1F338}"];
+                let names = ["\u{FF4E}\u{FF45}\u{FF4F}\u{FF4E}\u{FF49}\u{FF58}", "Neon Fox", "\u{2727} \u{0274}\u{1D07}\u{1D0F} \u{2727}", "n e o n i x \u{1F338}"]; // i18n: not shown (people's names)
                 self.friends_list.extend(names.iter().enumerate().map(|(i, n)| Friend { id: format!("usr_s{i}"), name: (*n).into(), image: None }));
                 self.selected.clear();
                 self.message.clear();

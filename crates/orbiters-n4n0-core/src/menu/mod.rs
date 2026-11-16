@@ -3304,10 +3304,19 @@ mod tests {
         // A friend whose VRChat name is decorated is found by its plain letters, an exact match first.
         let decorated = ["Neon Fox", "\u{FF4E}\u{FF45}\u{FF4F}\u{FF4E}\u{FF49}\u{FF58}", "\u{0274}\u{1D07}\u{1D0F}\u{0274}\u{026A}x \u{2727}"];
         menu.set_friends(Friends::ready(decorated.iter().enumerate().map(|(i, n)| f(&format!("usr_d{i}"), n)).collect()));
+        let found = |menu: &Menu| {
+            let mut ids: Vec<String> = menu.found_friends().iter().map(|f| f.id.clone()).collect();
+            ids.sort();
+            ids
+        };
         menu.find = "neonix".into();
-        assert_eq!(menu.found_friends().iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["usr_d1", "usr_d2"]);
+        assert_eq!(found(&menu), ["usr_d1", "usr_d2"]);
         menu.find = "neon".into();
-        assert_eq!(menu.found_friends().iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["usr_d0", "usr_d1", "usr_d2"]);
+        assert_eq!(found(&menu), ["usr_d0", "usr_d1", "usr_d2"]);
+        menu.find = "neo nix".into();
+        assert_eq!(found(&menu), ["usr_d1", "usr_d2"], "typed with a space, found the same");
+        menu.find = "Neon Fox".into();
+        assert_eq!(found(&menu), ["usr_d0"]);
         menu.find.clear();
         // Closing the menu on Share to … forgets the friends too.
         menu.press(Target::ShareTo(2));

@@ -291,11 +291,11 @@ fn mismatch_report(kind: crate::mismatch::Kind, steamvr: &vr::Client, snap: &cra
     types.dedup();
     let bindings = types.iter().map(|c| (c.clone(), actions::binding_in_use(steamvr, c))).collect();
     let mut state = orbit.map(|o| o.mismatch_state()).unwrap_or_default();
-    state.push(("a part of ours is up around VRChat's menus".into(), ours_up.to_string()));
-    state.push(("N4N0's own menu open".into(), n4n0_menu.to_string()));
-    state.push(("SteamVR's dashboard up".into(), dashboard.to_string()));
-    state.push(("VRChat shows a scene".into(), scene.to_string()));
-    state.push(("VRChat's camera open (OSC)".into(), format!("{:?}", snap.camera_open_said)));
+    state.push(("a part of ours is up around VRChat's menus".into(), ours_up.to_string())); // i18n: not shown (a menu mismatch report's line)
+    state.push(("N4N0's own menu open".into(), n4n0_menu.to_string())); // i18n: not shown (a menu mismatch report's line)
+    state.push(("SteamVR's dashboard up".into(), dashboard.to_string())); // i18n: not shown (a menu mismatch report's line)
+    state.push(("VRChat shows a scene".into(), scene.to_string())); // i18n: not shown (a menu mismatch report's line)
+    state.push(("VRChat's camera open (OSC)".into(), format!("{:?}", snap.camera_open_said))); // i18n: not shown (a menu mismatch report's line)
     let picture = if snap.settings.mismatch.picture {
         let read = orbiters_openvr::mirror::EyeReader::new(steamvr.dxgi_adapter_index())
             .and_then(|reader| reader.read(&steamvr.compositor().map_err(|e| e.to_string())?, orbiters_openvr::compositor::Eye::Left));
@@ -1091,8 +1091,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let button = input_read && actions.menu_pressed(&steamvr);
         // The menu mismatch buttons' switch, and what VRChat and SteamVR say that the menus' rules hang on.
         crate::mismatch::set_on(snap.settings.mismatch.buttons);
-        crate::mismatch::note_change("vr: VRChat shows a scene, SteamVR's dashboard is up", &mut mismatch_noted.scene, (vrchat_scene, dashboard));
-        crate::mismatch::note_change("vrchat: OSC receiving, in a station or seated", &mut mismatch_noted.osc, (snap.osc.receiving, snap.vrchat.motion.map(|m| (m.in_station, m.seated))));
+        crate::mismatch::note_change("vr: VRChat shows a scene, SteamVR's dashboard is up", &mut mismatch_noted.scene, (vrchat_scene, dashboard)); // i18n: not shown (a menu mismatch report's line)
+        crate::mismatch::note_change("vrchat: OSC receiving, in a station or seated", &mut mismatch_noted.osc, (snap.osc.receiving, snap.vrchat.motion.map(|m| (m.in_station, m.seated)))); // i18n: not shown (a menu mismatch report's line)
         let mut mismatch_pressed = None;
         // The floating panel, the watch and N4N0's menu, used with the controllers' own lasers beside VRChat
         // (overlay/floating): first, so that the menu reads this turn's laser events, and the watch opens it now.
@@ -1159,7 +1159,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             if turn.clicked {
                 sounds.click();
             }
-            crate::mismatch::note_change("decide: ours up around VRChat's menus", &mut mismatch_noted.ours, turn.menus_up.len());
+            crate::mismatch::note_change("decide: ours up around VRChat's menus", &mut mismatch_noted.ours, turn.menus_up.len()); // i18n: not shown (a menu mismatch report's line)
             t.menu.worlds.from_elsewhere(turn.worlds);
             t.menu.worlds.small_place(turn.small_place);
             t.menu.worlds.small_opening(turn.small_opening);

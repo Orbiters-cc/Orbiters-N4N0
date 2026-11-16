@@ -10,3 +10,4 @@ crates/orbiters-desktop/src/overlay/floating/panel.rs
 crates/orbiters-desktop/src/overlay/floating/watch.rs
 crates/orbiters-desktop/src/overlay/menu.rs
 crates/orbiters-desktop/src/overlay/eye_picture.rs
+crates/orbiters-desktop/src/overlay/floating/strip.rs

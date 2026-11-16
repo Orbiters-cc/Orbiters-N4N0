@@ -102,14 +102,14 @@ impl MenuButtons {
     pub fn main_menu_opened(&mut self) {
         self.reset();
         self.main_menu = true;
-        self.why = "the Quick Menu's tabs were gone from the eye's picture after a click VRChat got: its Main Menu, most likely";
+        self.why = "the Quick Menu's tabs were gone from the eye's picture after a click VRChat got: its Main Menu, most likely"; // i18n: not shown (a menu mismatch report's line)
     }
 
     /// VRChat's Quick Menu was seen up on `hand` while these took it as closed.
     pub fn seen_open(&mut self, hand: usize) {
         self.open = Open::QuickMenu(hand);
         self.main_menu = false;
-        self.why = "the Quick Menu's tabs were seen in the eye's picture while it was taken as closed";
+        self.why = "the Quick Menu's tabs were seen in the eye's picture while it was taken as closed"; // i18n: not shown (a menu mismatch report's line)
     }
 
     /// The hand that last pressed the menu button.
@@ -121,14 +121,14 @@ impl MenuButtons {
     pub fn walking(&mut self) {
         if matches!(self.open, Open::QuickMenu(_)) {
             self.open = Open::Closed;
-            self.why = "the left stick walked: VRChat closes its Quick Menu then";
+            self.why = "the left stick walked: VRChat closes its Quick Menu then"; // i18n: not shown (a menu mismatch report's line)
         }
     }
 
     /// VRChat's camera opened: its wheel goes then (Enzo).
     pub fn camera_opened(&mut self) {
         self.open = Open::Closed;
-        self.why = "VRChat said its camera opened: its wheel goes then";
+        self.why = "VRChat said its camera opened: its wheel goes then"; // i18n: not shown (a menu mismatch report's line)
         self.press = None;
         self.closed_ahead = None;
         self.toggle = None;
@@ -161,7 +161,7 @@ impl MenuButtons {
                 // The wheel takes the place of what was open.
                 if held >= HOLD && !on_wheel {
                     if self.open != Open::Wheel(hand) {
-                        self.why = "menu button held past HOLD (500 ms) with no wheel open on that hand: the wheel";
+                        self.why = "menu button held past HOLD (500 ms) with no wheel open on that hand: the wheel"; // i18n: not shown (a menu mismatch report's line)
                     }
                     self.open = Open::Wheel(hand);
                     self.main_menu = false;
@@ -173,16 +173,16 @@ impl MenuButtons {
                 }
                 if on_wheel {
                     self.open = Open::Closed;
-                    self.why = "menu button pressed and let go on that hand's open wheel: closed";
+                    self.why = "menu button pressed and let go on that hand's open wheel: closed"; // i18n: not shown (a menu mismatch report's line)
                 } else if held < HOLD && std::mem::take(&mut self.main_menu) {
                     // VRChat's Main Menu was up: this press closed it, and nothing opened.
                     self.open = Open::Closed;
-                    self.why = "short press with VRChat's Main Menu taken as up: it closed, nothing opened";
+                    self.why = "short press with VRChat's Main Menu taken as up: it closed, nothing opened"; // i18n: not shown (a menu mismatch report's line)
                 } else if held < HOLD {
                     self.why = match self.open {
-                        Open::Wheel(_) => "short press with a wheel open: the wheel closed",
-                        open if open == Open::QuickMenu(hand) => "short press on the Quick Menu's own hand: closed",
-                        _ => "short press (under HOLD) let go: the Quick Menu on that hand",
+                        Open::Wheel(_) => "short press with a wheel open: the wheel closed", // i18n: not shown (a menu mismatch report's line)
+                        open if open == Open::QuickMenu(hand) => "short press on the Quick Menu's own hand: closed", // i18n: not shown (a menu mismatch report's line)
+                        _ => "short press (under HOLD) let go: the Quick Menu on that hand", // i18n: not shown (a menu mismatch report's line)
                     };
                     // As VRChat must, this waits for the release: only then is it known not to be the wheel's. With a wheel open on either hand it only closes the wheel, and it
                     // takes another press for the Quick Menu (Enzo). A Quick Menu on the other hand gives way to it ("opening the right quick menu closes the left").
@@ -825,13 +825,13 @@ impl OrbitVr {
     /// of ours shows.
     pub fn mismatch_state(&self) -> Vec<(String, String)> {
         vec![
-            ("taken as open".into(), format!("{:?}", self.buttons.open())),
+            ("taken as open".into(), format!("{:?}", self.buttons.open())), // i18n: not shown (a menu mismatch report's line)
             ("why".into(), self.buttons.why().into()),
-            ("press under way (hand, ms held, began on its wheel)".into(), format!("{:?}", self.buttons.press.map(|(h, at, w)| (h, at.elapsed().as_millis(), w)))),
-            ("Main Menu taken as up".into(), self.buttons.main_menu.to_string()),
-            ("last hand".into(), format!("{:?}", self.buttons.last)),
+            ("press under way (hand, ms held, began on its wheel)".into(), format!("{:?}", self.buttons.press.map(|(h, at, w)| (h, at.elapsed().as_millis(), w)))), // i18n: not shown (a menu mismatch report's line)
+            ("Main Menu taken as up".into(), self.buttons.main_menu.to_string()), // i18n: not shown (a menu mismatch report's line)
+            ("last hand".into(), format!("{:?}", self.buttons.last)), // i18n: not shown (a menu mismatch report's line)
             ("ours".into(), self.doing()),
-            ("Quick Menu check".into(), format!("{:?}", self.qm_check.why())),
+            ("Quick Menu check".into(), format!("{:?}", self.qm_check.why())), // i18n: not shown (a menu mismatch report's line)
         ]
     }
 
@@ -1563,8 +1563,8 @@ impl OrbitVr {
             if self.last_shown || self.block.blocked() != [false; 2] {
                 self.close(&mut cx);
             }
-            self.buttons.reset_because(if !wanted { "turned off, or VRChat not running" } else if cx.dashboard { "SteamVR's dashboard is up" } else { "VRChat shows no scene (loading)" });
-            crate::mismatch::note_change("decide: taken as open, and why", &mut self.noted.open, (self.buttons.open(), self.buttons.why()));
+            self.buttons.reset_because(if !wanted { "turned off, or VRChat not running" } else if cx.dashboard { "SteamVR's dashboard is up" } else { "VRChat shows no scene (loading)" }); // i18n: not shown (a menu mismatch report's line)
+            crate::mismatch::note_change("decide: taken as open, and why", &mut self.noted.open, (self.buttons.open(), self.buttons.why())); // i18n: not shown (a menu mismatch report's line)
             self.stuck.beat(false);
             return Turn::default();
         }
@@ -1574,9 +1574,9 @@ impl OrbitVr {
         // A new instance: whatever was open went with the last.
         let instance = cx.snap.vrchat.world.instance.clone();
         if instance != self.instance {
-            crate::mismatch::note("vrchat: instance changed", || format!("world {:?}", instance.as_deref().map(|i| i.split(':').next().unwrap_or_default())));
+            crate::mismatch::note("vrchat: instance changed", || format!("world {:?}", instance.as_deref().map(|i| i.split(':').next().unwrap_or_default()))); // i18n: not shown (a menu mismatch report's line)
             self.instance = instance;
-            self.buttons.reset_because("a new instance");
+            self.buttons.reset_because("a new instance"); // i18n: not shown (a menu mismatch report's line)
         }
         if now.duration_since(self.tune_read) >= Duration::from_secs(1) {
             self.tune_read = now;
@@ -1588,8 +1588,8 @@ impl OrbitVr {
         }
         let down = if cx.input_read { cx.actions.orbit_menu_buttons(cx.steamvr) } else { [false; 2] };
         if cx.input_read {
-            crate::mismatch::note_change("input: menu buttons [left, right]", &mut self.noted.down, down);
-            crate::mismatch::note_change("input: triggers [left, right]", &mut self.noted.triggers, cx.actions.triggers());
+            crate::mismatch::note_change("input: menu buttons [left, right]", &mut self.noted.down, down); // i18n: not shown (a menu mismatch report's line)
+            crate::mismatch::note_change("input: triggers [left, right]", &mut self.noted.triggers, cx.actions.triggers()); // i18n: not shown (a menu mismatch report's line)
             self.buttons.step(down, now);
             if let Some(hand) = self.buttons.quick_menu_to_toggle() {
                 super::super::vr_log::line(&format!("buttons: toggling VRChat's Quick Menu on hand {hand}, open {:?}", self.buttons.open())); // i18n: not shown (a log's line)
@@ -1604,11 +1604,11 @@ impl OrbitVr {
             if self.walking_since.is_some_and(|since| now.duration_since(since) >= WALKS_AFTER) {
                 self.buttons.walking();
             }
-            crate::mismatch::note_change("input: left stick pushed (quarters, walks at 2)", &mut self.noted.stick, (stick * 4.0).round() as i32);
+            crate::mismatch::note_change("input: left stick pushed (quarters, walks at 2)", &mut self.noted.stick, (stick * 4.0).round() as i32); // i18n: not shown (a menu mismatch report's line)
         }
         // VRChat's wheel goes when its camera opens.
         let camera = cx.snap.camera_open_said;
-        crate::mismatch::note_change("vrchat: camera open (OSC)", &mut self.noted.camera, camera);
+        crate::mismatch::note_change("vrchat: camera open (OSC)", &mut self.noted.camera, camera); // i18n: not shown (a menu mismatch report's line)
         let camera_just_opened = camera == Some(true) && self.camera_was != Some(true);
         if camera_just_opened {
             self.buttons.camera_opened();
@@ -1619,7 +1619,7 @@ impl OrbitVr {
             self.quick_menu_looks(&cx, now);
         }
         let open = self.buttons.open();
-        crate::mismatch::note_change("decide: taken as open, and why", &mut self.noted.open, (open, self.buttons.why()));
+        crate::mismatch::note_change("decide: taken as open, and why", &mut self.noted.open, (open, self.buttons.why())); // i18n: not shown (a menu mismatch report's line)
         // VRChat's camera panel, seen on its window while it says its camera is open, with neither of its menus up.
         // Looked for even with a menu up: VRChat's camera is opened from one, and what follows the buttons may still say it is open.
         let camera_wanted = settings.camera_tiles && camera == Some(true);
@@ -1890,7 +1890,7 @@ impl OrbitVr {
             self.pointing_since = now;
         }
         if now.duration_since(self.pointing_since) >= IDLE_OPEN {
-            self.buttons.reset_because("no press and no laser on our parts for IDLE_OPEN (300 s)");
+            self.buttons.reset_because("no press and no laser on our parts for IDLE_OPEN (300 s)"); // i18n: not shown (a menu mismatch report's line)
         }
         // The pointer: the hand that pressed stays; else the right, else the left.
         if self.active.is_none_or(|h| hits[h].is_none() && !triggers[h]) {

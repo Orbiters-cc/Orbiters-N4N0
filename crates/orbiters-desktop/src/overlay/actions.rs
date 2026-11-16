@@ -298,8 +298,8 @@ const APP_KEY_SECTION: &std::ffi::CStr = c"cc.orbiters.n4n0";
 pub fn binding_in_use(steamvr: &vr::Client, controller: &str) -> String {
     let key = std::ffi::CString::new(format!("{controller}_250820_CurrentURL_steamvrinput")).unwrap_or_default();
     match steamvr.setting_string(APP_KEY_SECTION, &key) {
-        Some(url) if !url.is_empty() => format!("saved: {url}"),
-        _ => format!("N4N0's own: bindings_{controller}.json"),
+        Some(url) if !url.is_empty() => format!("saved: {url}"), // i18n: not shown (a menu mismatch report's line)
+        _ => format!("N4N0's own: bindings_{controller}.json"), // i18n: not shown (a menu mismatch report's line)
     }
 }
 

@@ -127,7 +127,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         // Only with VRChat itself in front, or a panel's window: anything else in front and it all goes at once.
         let in_front = found.filter(|h| !exclusive && foreground_is(*h, &windows));
-        crate::mismatch::note_change("window: VRChat in front, its size", &mut noted.front, in_front.map(|w| { let s = client_size(w); (s.x as i32, s.y as i32) }));
+        crate::mismatch::note_change("window: VRChat in front, its size", &mut noted.front, in_front.map(|w| { let s = client_size(w); (s.x as i32, s.y as i32) })); // i18n: not shown (a menu mismatch report's line)
         let Some(window) = in_front else {
             corner.show(false, pos2(0.0, 0.0), vec2(0.0, 0.0), turn);
             // The parts of menus that closed are kept for a while; with the game behind another window nothing else comes by to let them go.
@@ -152,10 +152,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         if !camera_wanted {
             camera.reset();
         }
-        crate::mismatch::note_change("input: Left Alt held", &mut noted.alt, alt_held());
-        crate::mismatch::note_change("vrchat: camera open (OSC)", &mut noted.camera, snap.camera_open_said);
+        crate::mismatch::note_change("input: Left Alt held", &mut noted.alt, alt_held()); // i18n: not shown (a menu mismatch report's line)
+        crate::mismatch::note_change("vrchat: camera open (OSC)", &mut noted.camera, snap.camera_open_said); // i18n: not shown (a menu mismatch report's line)
         if let Some(key) = keys.pressed() {
-            crate::mismatch::note("input: key", || format!("{key:?}"));
+            crate::mismatch::note("input: key", || format!("{key:?}")); // i18n: not shown (a menu mismatch report's line)
             watcher.pressed(key, turn);
             if key == MenuKey::Esc {
                 camera.esc(turn);
@@ -182,7 +182,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                     if let Some(looked) = c.look(window, client_size, menus, panel) {
                         frames_seen.count(turn);
                         if let Some((found, coming)) = looked.menu {
-                            crate::mismatch::note_change("look: VRChat's window shows (menu, the wheel's rim coming)", &mut noted.look, (found, coming));
+                            crate::mismatch::note_change("look: VRChat's window shows (menu, the wheel's rim coming)", &mut noted.look, (found, coming)); // i18n: not shown (a menu mismatch report's line)
                             last_look = Some(turn);
                             watcher.frame_coming(found, coming, turn);
                         }
@@ -196,7 +196,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         let seen = watcher.tick(turn);
         if noted.seen != Some(seen) {
-            crate::mismatch::note("decide: seen", || format!("{:?} -> {seen:?} ({})", noted.seen, watcher.why()));
+            crate::mismatch::note("decide: seen", || format!("{:?} -> {seen:?} ({})", noted.seen, watcher.why())); // i18n: not shown (a menu mismatch report's line)
             noted.seen = Some(seen);
         }
         let menu = match seen {
@@ -221,7 +221,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         // VRChat's menus first: they close its camera on the desktop.
         let open = menu.or(panel.filter(|_| !menu_up).map(|_| Around::Camera));
-        crate::mismatch::note_change("decide: ours follow", &mut noted.open, open);
+        crate::mismatch::note_change("decide: ours follow", &mut noted.open, open); // i18n: not shown (a menu mismatch report's line)
         let size = client_size(window);
         let origin = client_origin(window);
         // The menu mismatch corner: shown, its clicks and keys, a report for a press. Never anything more.
@@ -239,11 +239,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             let state = vec![
                 ("seen".to_owned(), format!("{seen:?}")),
                 ("watcher".to_owned(), watcher.why()),
-                ("ours follow".to_owned(), format!("{open:?}")),
+                ("ours follow".to_owned(), format!("{open:?}")), // i18n: not shown (a menu mismatch report's line)
                 ("ours".to_owned(), panels.doing()),
-                ("VRChat's camera panel seen".to_owned(), format!("{:?}", panel.is_some())),
-                ("window client size".to_owned(), format!("{} x {}", size.x, size.y)),
-                ("Left Alt held".to_owned(), alt_held().to_string()),
+                ("VRChat's camera panel seen".to_owned(), format!("{:?}", panel.is_some())), // i18n: not shown (a menu mismatch report's line)
+                ("window client size".to_owned(), format!("{} x {}", size.x, size.y)), // i18n: not shown (a menu mismatch report's line)
+                ("Left Alt held".to_owned(), alt_held().to_string()), // i18n: not shown (a menu mismatch report's line)
             ];
             let picture = if snap.settings.mismatch.picture { screen_picture(origin, size) } else { None };
             crate::mismatch::press(kind, crate::mismatch::Context { surface: "desktop".into(), state, ..Default::default() }, &snap.settings, snap.vrchat.world.log_file.clone(), picture);
@@ -1177,7 +1177,7 @@ impl Corner {
         let (rect, zoom) = Self::rect(client);
         let px = [rect.width().ceil() as u32, rect.height().ceil() as u32];
         if self.px != px || self.window.is_none() {
-            self.window = PanelWindow::new(px[0], px[1], true).map_err(|e| eprintln!("mismatch corner window: {e}")).ok();
+            self.window = PanelWindow::new(px[0], px[1], true).map_err(|e| eprintln!("mismatch corner window: {e}")).ok(); // i18n: not shown (a menu mismatch report's line)
             self.canvas = Some(crate::overlay::Canvas::zoomed(px[0], px[1], zoom));
             self.px = px;
             self.zoom = zoom;
@@ -1970,7 +1970,7 @@ mod tests {
             corner.show(true, origin, client, Instant::now());
             corner.raise();
             pump();
-            let hwnd = corner.window.as_ref().expect("its window").hwnd;
+            let hwnd = corner.window.as_ref().expect("its window").hwnd; // i18n: not shown (a menu mismatch report's line)
             let (rect, zoom) = Corner::rect(client);
             let mut points: Vec<Pos2> = (0..(client.y as i32 / 6)).flat_map(|y| (0..(client.x as i32 / 6)).map(move |x| pos2(x as f32 * 6.0 + 3.0, y as f32 * 6.0 + 3.0))).collect();
             let centre = pos2((client.x / 2.0).floor(), (client.y / 2.0).floor());
@@ -1980,22 +1980,25 @@ mod tests {
                 let got = under(POINT { x: origin.x as i32 + p.x as i32, y: origin.y as i32 + p.y as i32 });
                 if got == hwnd {
                     on_corner += 1;
-                    assert!(rect.contains(p) && Corner::row_at(((p - rect.min) / zoom).to_pos2()).is_some(), "{open:?} {client:?}: {p:?} goes to the corner off its rows");
+                    // A row's edge is smoothed over a pixel or so.
+                    let q = ((p - rect.min) / zoom).to_pos2();
+                    let on_row = [0.0, -2.0, 2.0].iter().any(|dy| Corner::row_at(q + vec2(0.0, dy / zoom)).is_some() || Corner::row_at(q + vec2(dy / zoom, 0.0)).is_some());
+                    assert!(rect.expand(2.0).contains(p) && on_row, "{open:?} {client:?}: {p:?} goes to the corner off its rows"); // i18n: not shown (a menu mismatch report's line)
                 } else if got != stand_in.0 {
-                    assert!(windows.list.values().any(|w| w.hwnd == got), "{open:?} {client:?}: {p:?} goes to a window neither ours nor VRChat's");
-                    assert!(open != Around::Wheel, "{open:?} {client:?}: with the wheel open {p:?} goes to a part of ours");
+                    assert!(windows.list.values().any(|w| w.hwnd == got), "{open:?} {client:?}: {p:?} goes to a window neither ours nor VRChat's"); // i18n: not shown (a menu mismatch report's line)
+                    assert!(open != Around::Wheel, "{open:?} {client:?}: with the wheel open {p:?} goes to a part of ours"); // i18n: not shown (a menu mismatch report's line)
                     on_ours += 1;
                 }
             }
             eprintln!("mismatch corner, {open:?} {client:?}: {on_corner} points on its rows, {on_ours} on our parts"); // i18n: not shown (a test's measurement)
             assert!(on_corner > 0);
-            assert_eq!(under(POINT { x: origin.x as i32 + centre.x as i32, y: origin.y as i32 + centre.y as i32 }), stand_in.0, "{open:?} {client:?}: the centre is VRChat's");
+            assert_eq!(under(POINT { x: origin.x as i32 + centre.x as i32, y: origin.y as i32 + centre.y as i32 }), stand_in.0, "{open:?} {client:?}: the centre is VRChat's"); // i18n: not shown (a menu mismatch report's line)
             for kind in crate::mismatch::Kind::ALL {
                 let i = crate::mismatch::Kind::ALL.iter().position(|k| *k == kind).expect("a kind") as f32;
                 let middle = rect.min + vec2(Corner::SIZE.x / 2.0, i * (Corner::ROW + Corner::GAP) + Corner::ROW / 2.0) * zoom;
                 let screen = (origin.x as i32 + middle.x as i32, origin.y as i32 + middle.y as i32);
-                assert_eq!(under(POINT { x: screen.0, y: screen.1 }), hwnd, "{open:?} {client:?}: the middle of {kind:?} is the corner's, above everything of ours");
-                assert_eq!(corner.clicked(screen), Some(kind), "{open:?} {client:?}: a click there is {kind:?}");
+                assert_eq!(under(POINT { x: screen.0, y: screen.1 }), hwnd, "{open:?} {client:?}: the middle of {kind:?} is the corner's, above everything of ours"); // i18n: not shown (a menu mismatch report's line)
+                assert_eq!(corner.clicked(screen), Some(kind), "{open:?} {client:?}: a click there is {kind:?}"); // i18n: not shown (a menu mismatch report's line)
             }
         }
     }
@@ -2005,11 +2008,11 @@ mod tests {
     fn the_mismatch_corner_lies_on_nothing_of_ours_nor_on_vrchat_s_hints() {
         for client in [vec2(1280.0, 720.0), vec2(1920.0, 1080.0), vec2(960.0, 540.0), vec2(1000.0, 900.0), vec2(1000.0, 1000.0), vec2(1280.0, 800.0), vec2(2560.0, 1080.0), vec2(3440.0, 1440.0), vec2(800.0, 600.0)] {
             let (rect, _) = Corner::rect(client);
-            assert!(egui::Rect::from_min_size(pos2(0.0, 0.0), client).contains_rect(rect), "{client:?}: in the window");
-            assert!(rect.top() >= client.y * 0.3, "{client:?}: clear of VRChat's hints in the top corners");
+            assert!(egui::Rect::from_min_size(pos2(0.0, 0.0), client).contains_rect(rect), "{client:?}: in the window"); // i18n: not shown (a menu mismatch report's line)
+            assert!(rect.top() >= client.y * 0.3, "{client:?}: clear of VRChat's hints in the top corners"); // i18n: not shown (a menu mismatch report's line)
             let parts = [zones::layout_as(Around::QuickMenu, client, true), zones::layout(Around::QuickMenu, client), zones::layout(Around::Wheel, client)].concat();
             for part in parts.iter().chain(zones::place(Zone::SheetHint, client).iter()) {
-                assert!(!part.rect.intersects(rect), "{client:?}: the corner {rect:?} lies on {:?} {:?}", part.zone, part.rect);
+                assert!(!part.rect.intersects(rect), "{client:?}: the corner {rect:?} lies on {:?} {:?}", part.zone, part.rect); // i18n: not shown (a menu mismatch report's line)
             }
         }
     }

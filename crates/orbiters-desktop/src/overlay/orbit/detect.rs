@@ -542,7 +542,7 @@ impl Watcher {
     /// Where its counting stands, for a menu mismatch report ([`crate::mismatch`]).
     pub fn why(&self) -> String {
         format!(
-            "candidate {:?}, hits {} (opens at {LOOKS_TO_OPEN}), misses {}, closing {:?}, R pressed first {}, opened on the rim alone {}, looking after a key {}",
+            "candidate {:?}, hits {} (opens at {LOOKS_TO_OPEN}), misses {}, closing {:?}, R pressed first {}, opened on the rim alone {}, looking after a key {}", // i18n: not shown (a menu mismatch report's line)
             self.candidate,
             self.hits,
             self.misses,

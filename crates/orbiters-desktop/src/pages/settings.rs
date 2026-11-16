@@ -49,6 +49,8 @@ pub struct State {
     experimental: super::experimental::State,
     /// The FPS booster's card.
     booster: super::booster_card::State,
+    /// Beta feedback: the menu mismatch buttons and their reports.
+    beta: super::beta_feedback::State,
 }
 
 impl State {
@@ -124,6 +126,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let mut m = super::Masonry::new(ui, "settings");
             m.add(1, |ui| account(ui, cx, &mut state.confirm_sign_out));
             m.add(13, |ui| apply |= super::language_card::card(ui, cx, 13, &mut draft));
+            // Where a beta tester gives feedback: high up, found without scrolling.
+            if orbiters_core::osc::VRCHAT_RUNS_HERE {
+                m.add(17, |ui| apply |= super::beta_feedback::card(ui, cx, 17, &mut state.beta, &mut draft));
+            }
             // High up: one control someone comes for, not to be scrolled to past capture's settings.
             if orbiters_core::osc::VRCHAT_RUNS_HERE {
                 m.add(15, |ui| apply |= super::booster_card::card(ui, cx, 15, &mut state.booster, &mut draft));

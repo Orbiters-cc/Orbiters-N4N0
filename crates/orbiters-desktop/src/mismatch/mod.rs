@@ -184,7 +184,7 @@ pub fn note_change<T: PartialEq + std::fmt::Debug>(source: &str, was: &mut Optio
     }
     if on() {
         let text = match was {
-            Some(old) => format!("{old:?} -> {now:?}"),
+            Some(old) => format!("{old:?} -> {now:?}"), // i18n: not shown (a menu mismatch report's line)
             None => format!("{now:?}"),
         };
         note(source, || text);
@@ -467,11 +467,11 @@ pub fn vrchat_said(line: &str) -> Option<String> {
     let said = said.split_once(" -  ").map_or(said, |(_, s)| s).trim();
     let lower = said.to_lowercase();
     // A person: their name follows these, or their id is in it.
-    const PERSON: [&str; 9] = ["usr_", "onplayer", "displayname", "player ", "user ", "avatar ", "invite", "friend", "@"];
+    const PERSON: [&str; 9] = ["usr_", "onplayer", "displayname", "player ", "user ", "avatar ", "invite", "friend", "@"]; // i18n: not shown (a menu mismatch report's line)
     if PERSON.iter().any(|p| lower.contains(p)) {
         return None;
     }
-    const ABOUT: [&str; 14] = ["menu", "quickmenu", "actionmenu", "keyboard", "input", "camera", "osc", "joining wrld_", "entering room", "onleftroom", "left room", "vrcuimanager", "controller", "steamvr"];
+    const ABOUT: [&str; 14] = ["menu", "quickmenu", "actionmenu", "keyboard", "input", "camera", "osc", "joining wrld_", "entering room", "onleftroom", "left room", "vrcuimanager", "controller", "steamvr"]; // i18n: not shown (a menu mismatch report's line)
     if !ABOUT.iter().any(|a| lower.contains(a)) {
         return None;
     }

@@ -624,8 +624,13 @@ pub struct Facts {
     /// How far the sheet's list is scrolled, in its page's units, and the layout the app's own gallery uses.
     pub gallery_scroll: f32,
     pub gallery_layout: orbiters_core::settings::GalleryLayout,
-    /// The computer's volume, and whether it is muted; where what plays is and how long it lasts; whether the app playing it lets others move in it.
+    /// The volume of the app playing (the computer's where apps have none of their own), and whether it is muted; where what plays is and how long it lasts; whether the app
+    /// playing it lets others move in it.
     pub volume: Option<(u8, bool)>,
+    /// The app playing makes no sound Windows' mixer knows of: its volume shows as not found, and nothing is set (never the computer's in its place).
+    pub volume_unfound: bool,
+    /// The app playing, by name ("Chrome"), for what its volume's buttons say.
+    pub music_app: String,
     pub music_times: Option<(u32, u32)>,
     pub can_seek: bool,
     /// What the world's video player has.
@@ -2022,7 +2027,7 @@ fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
         out.push(Item { action: Action::Next, rect: at(x + 56.0 + PLAY_W, 44.0), look: Look::Transport(icons::SKIP_FORWARD) });
     }
     if facts.music_times.is_some_and(|t| t.1 > 0) {
-        out.push(Item { action: if facts.can_seek { Action::Timeline } else { Action::Idle }, rect: timeline_rect(panel, facts.volume.is_some()), look: Look::Timeline });
+        out.push(Item { action: if facts.can_seek { Action::Timeline } else { Action::Idle }, rect: timeline_rect(panel, facts.volume.is_some() || facts.volume_unfound), look: Look::Timeline });
     }
     // In its corner, off what it says: its link once it is known, and what puts it in the world once it is copied.
     if facts.can_copy_playing {
@@ -2324,6 +2329,11 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
             facts.worlds_visited.get(group).map_or_else(|| tr("A world").to_string(), |v| v.name.clone()),
             tr("Its page: comments, labels, pictures, who made it.").into(),
         ),
+        // The app playing alone (Enzo, 2026-11-16), where apps have a volume of their own.
+        Action::Volume(up) if !facts.music_app.is_empty() => {
+            (if up { tr("Louder") } else { tr("Quieter") }.into(), tr!("Only {app}'s volume: other sounds stay as they are.", app = facts.music_app))
+        }
+        Action::Mute if !facts.music_app.is_empty() => (tr("Mute").into(), tr!("Only {app}'s sound, on or off.", app = facts.music_app)),
         Action::Volume(up) => (if up { tr("Louder") } else { tr("Quieter") }.into(), tr("Your computer's volume.").into()),
         Action::Mute => (tr("Mute").into(), tr("Your computer's sound, on or off.").into()),
         Action::Pictures => (tr("Pictures").into(), tr("Take a 3D picture, record a scene, see your captures.").into()),
@@ -3279,6 +3289,14 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 let level = if muted { 0.0 } else { percent as f32 / 100.0 };
                 p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * level, 7.0)), look::radius(3.5), look::LABEL);
                 p.circle_filled(pos2(bar.left() + bar.width() * level, bar.center().y), 8.0, look::LABEL);
+            } else if facts.volume_unfound {
+                // In the volume's place, quiet: the app playing has no sound to set (Enzo, 2026-11-16: never the whole computer's in its place).
+                let right = rect.right() - 16.0;
+                let left = right - VOLUME_CLUSTER + 14.0;
+                let y = rect.top() + VOLUME_ROW;
+                widgets::icon(p, pos2(left + 10.0, y), icons::SPEAKER_X, 18.0, look::MUTED);
+                let font = look::font(14.0, weight::MEDIUM);
+                p.text(pos2(left + 26.0, y), Align2::LEFT_CENTER, fit(p, tr("App's sound not found"), &font, right - left - 26.0), font, look::MUTED);
             }
         }
         Look::Picture(mode) => picture_button(p, zone, shape, rect, mode, facts, hovered, pressed),
@@ -5339,7 +5357,19 @@ mod tests {
         let rect = sheet_items(Sheet::All, &movable).into_iter().find(|i| matches!(i.look, Look::Timeline)).unwrap();
         assert_eq!(rect.action, Action::Timeline);
         assert!((timeline_fraction(&movable, timeline_bar(rect.rect).center().x).unwrap() - 0.5).abs() < 0.001);
-        assert_eq!(timeline_fraction(&Facts { music_times: None, ..movable }, 300.0), None);
+        assert_eq!(timeline_fraction(&Facts { music_times: None, ..movable.clone() }, 300.0), None);
+
+        // Enzo, 2026-11-16: the volume is the playing app's alone, and says so; an app without sound has no volume buttons (nothing to set, not the computer's
+        // in its place), its place kept clear of the timeline.
+        let app = Facts { volume: Some((50, false)), music_app: "Chrome".into(), ..movable.clone() };
+        assert!(caption(Action::Volume(true), &app).unwrap().1.contains("Chrome"));
+        assert!(caption(Action::Mute, &app).unwrap().1.contains("Chrome"));
+        assert_eq!(caption(Action::Volume(true), &Facts { music_app: String::new(), ..app.clone() }).unwrap().1, tr("Your computer's volume."), "where apps have none of their own");
+        let unfound = Facts { volume: None, volume_unfound: true, ..movable.clone() };
+        let items = sheet_items(Sheet::All, &unfound);
+        assert!(!items.iter().any(|i| matches!(i.action, Action::Volume(_) | Action::Mute)));
+        let timeline = |facts: &Facts| sheet_items(Sheet::All, facts).into_iter().find(|i| matches!(i.look, Look::Timeline)).unwrap().rect;
+        assert_eq!(timeline(&unfound), timeline(&app), "the volume's place kept");
     }
 
     #[test]

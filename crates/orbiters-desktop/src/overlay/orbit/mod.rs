@@ -39,7 +39,7 @@ use egui::{pos2, vec2, ColorImage, Pos2, TextureHandle, TextureId, TextureOption
 use orbiters_core::settings::MenuLook;
 use orbiters_i18n::{mark, tr, tr_ctx};
 use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
-use orbiters_n4n0_core::menu::{Effect, Page, Target};
+use orbiters_n4n0_core::menu::{Effect, Page, PlayingVolume, Target};
 use panels::{Action, Facts, Item, Recent, Sheet};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -2344,7 +2344,16 @@ impl Panels {
             wake_word: snap.settings.n4n0.wake_words.first().filter(|_| snap.settings.n4n0.wake_word).cloned(),
             gallery_scroll: self.facts.gallery_scroll,
             gallery_layout: snap.settings.photos_layout,
-            volume: menu.volume.as_ref().map(|v| (v.percent, v.muted)),
+            // The playing app's own volume where Windows has one for it, the computer's where apps have none (Enzo, 2026-11-16).
+            volume: match menu.playing_volume() {
+                Some(PlayingVolume::App(v) | PlayingVolume::Computer(v)) => Some((v.percent, v.muted)),
+                Some(PlayingVolume::NotFound) | None => None,
+            },
+            volume_unfound: menu.playing_volume() == Some(PlayingVolume::NotFound),
+            music_app: match (&menu.media, menu.playing_volume()) {
+                (Some(m), Some(PlayingVolume::App(_))) => m.app.clone(),
+                _ => String::new(),
+            },
             music_times: menu.media.as_ref().and_then(|m| {
                 let of = m.duration?;
                 // Under the pointer it is where the pointer is; just moved, where it was moved to until the app says so too.

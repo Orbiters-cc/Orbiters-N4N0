@@ -258,7 +258,7 @@ fn performance_windows_go_with_the_events_and_are_forgotten_with_them() {
     // Forgotten with the events, file too.
     spool.perf(sample(1_030_000, "wheel"), true);
     spool.perf(sample(1_100_000, "wheel"), true);
-    assert_eq!(spool.perf_waiting().len(), 1);
+    assert_eq!(spool.perf_waiting().len(), 2, "the Pictures window, then a minute of the wheel");
     spool.forget();
     assert!(spool.perf_waiting().is_empty() && !dir.join("perf-waiting.jsonl").exists());
     let _ = std::fs::remove_dir_all(&dir);

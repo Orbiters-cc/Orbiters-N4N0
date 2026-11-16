@@ -61,8 +61,12 @@ fn a_pid_used_again_is_another_process() {
     assert_eq!(uses(&[a], &[b], 10.0)[0].cpu, 1.0);
 }
 
+/// The meter's tests share the process-wide time counted on other threads (`elsewhere`): they take turns, or one sees the other's.
+static ELSEWHERE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn the_meter_sums_parts_per_second_and_waits_for_its_window() {
+    let _alone = ELSEWHERE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
     let start = Instant::now();
     let mut m = TurnMeter::new("overlay", start);
     m.parts[Part::Orbit as usize] = Duration::from_millis(500);
@@ -200,6 +204,7 @@ fn a_scan_costs_less_than_sysinfo_s_refresh() {
 /// Work done on another thread (the desktop panels' window looks) lands in the loop's next summary, once.
 #[test]
 fn time_spent_on_another_thread_is_counted_once() {
+    let _alone = ELSEWHERE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
     let start = Instant::now();
     let mut m = TurnMeter::new("orbit-desktop-test", start);
     elsewhere(Part::Capture, Duration::from_millis(120));

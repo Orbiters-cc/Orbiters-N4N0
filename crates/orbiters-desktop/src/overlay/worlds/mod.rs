@@ -1051,7 +1051,10 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             Shown::List(list) => {
                 let listed = self.finder.list(&list);
                 let (found_by, first): (Option<&str>, Vec<&Entry>) = match &list {
-                    WorldList::Search(q) => (Some(q.as_str()), captures.iter().filter(|e| e.matches(q)).collect()),
+                    WorldList::Search(q) => {
+                        let folded = orbiters_core::search::Query::new(q);
+                        (Some(q.as_str()), captures.iter().filter(|e| e.matches_query(&folded, q)).collect())
+                    }
                     _ => (None, Vec::new()),
                 };
                 finder::merge(&captures, &first, &listed.items, found_by, &feedback)

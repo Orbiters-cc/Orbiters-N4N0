@@ -367,6 +367,7 @@ impl State {
             "gallery-grantee",
             "gallery-friends",
             "gallery-friends-error",
+            "gallery-friends-search",
             "gallery-explicit",
             "gallery-error",
             "gallery-picture",
@@ -720,12 +721,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                 entries.push(e);
             }
         }
-        entries.retain(|e| e.world_name.to_lowercase().contains(&q));
+        let find = orbiters_core::search::Query::new(&q);
+        entries.retain(|e| find.matches(&e.world_name));
         if state.filter.communities() {
-            entries.extend(state.community.entries(&q));
+            entries.extend(state.community.entries(&find));
         }
         if state.filter.assets() {
-            entries.extend(state.assets.entries(&q, development));
+            entries.extend(state.assets.entries(&find, development));
         }
         entries.sort_by_key(|e| std::cmp::Reverse(e.taken));
         state.community.gather(&mut entries);

@@ -21,6 +21,7 @@ pub mod paths;
 pub mod pose;
 pub mod protocol;
 pub mod reconstruction;
+pub mod search;
 pub mod settings;
 pub mod shares;
 pub mod slice;

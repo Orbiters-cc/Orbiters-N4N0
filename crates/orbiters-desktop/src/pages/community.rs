@@ -220,8 +220,8 @@ impl State {
         self.galleries.as_ref()?.get(id)
     }
 
-    /// The pictures as the gallery's entries, those `q` (lowercase) finds: their gallery, event, author or words.
-    pub fn entries(&self, q: &str) -> Vec<Entry> {
+    /// The pictures as the gallery's entries, those `q` finds: their gallery, event, author or words.
+    pub fn entries(&self, q: &orbiters_core::search::Query) -> Vec<Entry> {
         let mut out = Vec::new();
         for p in &self.feed.items {
             if self.chosen.is_some_and(|c| c != p.gallery_id) {
@@ -231,9 +231,9 @@ impl State {
             let name = g.map(|g| g.name.clone()).unwrap_or_else(|| tr("Community gallery").into());
             let author = p.author.as_ref().map(|a| a.username.clone()).unwrap_or_default();
             if !q.is_empty() {
-                let event = p.event.as_ref().map(|e| e.title.to_lowercase()).unwrap_or_default();
-                let words = p.message.as_ref().map(|m| m.content.to_lowercase()).unwrap_or_default();
-                if ![name.to_lowercase(), author.to_lowercase(), event, words].iter().any(|s| s.contains(q)) {
+                let event = p.event.as_ref().map(|e| e.title.as_str()).unwrap_or_default();
+                let words = p.message.as_ref().map(|m| m.content.as_str()).unwrap_or_default();
+                if !(q.matches_any([name.as_str(), author.as_str(), event]) || q.in_text(words)) {
                     continue;
                 }
             }
@@ -1297,7 +1297,7 @@ mod tests {
         let event = Card { id: "e1".into(), ..Default::default() };
         let picture = |id, gallery_id, event: Option<Card>| community::Picture { id, gallery_id, event, ..Default::default() };
         state.feed.items = vec![picture(1, 31, Some(event.clone())), picture(2, 12, None), picture(3, 31, Some(event.clone())), picture(4, 12, None)];
-        let mut entries = state.entries("");
+        let mut entries = state.entries(&orbiters_core::search::Query::new(""));
         let order = |e: &[Entry]| e.iter().map(|e| e.key.clone()).collect::<Vec<_>>();
         state.gather(&mut entries);
         assert_eq!(order(&entries), ["community:1", "community:3", "community:2", "community:4"]);

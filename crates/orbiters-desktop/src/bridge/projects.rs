@@ -566,7 +566,7 @@ impl Projects {
             .projects
             .iter()
             .filter(|p| include_hidden || !hidden::contains(&hidden, &p.path))
-            .filter(|p| query.as_ref().is_none_or(|q| p.name.to_lowercase().contains(q) || p.path.to_string_lossy().to_lowercase().contains(q)))
+            .filter(|p| query.as_ref().is_none_or(|q| orbiters_core::search::Query::new(q).matches(&p.name) || p.path.to_string_lossy().to_lowercase().contains(q)))
             .map(|p| project_json(p, &hidden, &editors))
             .collect();
         let scanning = self.jobs.lock().unwrap().list.iter().any(|j| j.lane == Lane::Scan && !j.done());
@@ -654,7 +654,7 @@ impl Projects {
             .packages
             .iter()
             .filter(|p| !p.versions.is_empty() || p.installed.is_some())
-            .filter(|p| query.as_ref().is_none_or(|q| p.name.to_lowercase().contains(q) || p.display_name.to_lowercase().contains(q)))
+            .filter(|p| query.as_ref().is_none_or(|q| orbiters_core::search::Query::new(q).matches_any([p.name.as_str(), p.display_name.as_str()])))
             .collect();
         Ok(json!({
             "total": matching.len(),

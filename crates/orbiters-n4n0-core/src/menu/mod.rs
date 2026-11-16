@@ -2115,10 +2115,11 @@ impl Menu {
         self.sharing.as_deref().and_then(|key| self.captures.find(key))
     }
 
-    /// The friends Share to … lists: those whose name has [`Menu::find`] (case aside), every one without it.
+    /// The friends Share to … lists: those whose name [`Menu::find`] finds however the name is written (full-width,
+    /// spaced, decorated: [`orbiters_core::search`]), best matches first; every one without it.
     pub fn found_friends(&self) -> Vec<&Friend> {
-        let find = self.find.trim().to_lowercase();
-        self.friends.list().iter().filter(|f| find.is_empty() || f.name.to_lowercase().contains(&find)).collect()
+        let find = orbiters_core::search::Query::new(&self.find);
+        orbiters_core::search::filter_ranked(&find, self.friends.list().iter(), |f| vec![f.name.as_str()])
     }
 
     /// Share to …'s friends on the page shown.
@@ -3300,6 +3301,23 @@ mod tests {
         menu.set_captures(failed);
         assert_eq!(text(&menu, Content::HistoryTitle), "Not shared: Sign in to Orbiters first");
         assert!(text(&menu, Content::CaptureMeta(1)).ends_with("· Not shared"));
+        // A friend whose VRChat name is decorated is found by its plain letters, an exact match first.
+        let decorated = ["Neon Fox", "\u{FF4E}\u{FF45}\u{FF4F}\u{FF4E}\u{FF49}\u{FF58}", "\u{0274}\u{1D07}\u{1D0F}\u{0274}\u{026A}x \u{2727}"];
+        menu.set_friends(Friends::ready(decorated.iter().enumerate().map(|(i, n)| f(&format!("usr_d{i}"), n)).collect()));
+        let found = |menu: &Menu| {
+            let mut ids: Vec<String> = menu.found_friends().iter().map(|f| f.id.clone()).collect();
+            ids.sort();
+            ids
+        };
+        menu.find = "neonix".into();
+        assert_eq!(found(&menu), ["usr_d1", "usr_d2"]);
+        menu.find = "neon".into();
+        assert_eq!(found(&menu), ["usr_d0", "usr_d1", "usr_d2"]);
+        menu.find = "neo nix".into();
+        assert_eq!(found(&menu), ["usr_d1", "usr_d2"], "typed with a space, found the same");
+        menu.find = "Neon Fox".into();
+        assert_eq!(found(&menu), ["usr_d0"]);
+        menu.find.clear();
         // Closing the menu on Share to … forgets the friends too.
         menu.press(Target::ShareTo(2));
         assert_eq!(menu.press(Target::Close), [Effect::Friends(false), Effect::Close]);

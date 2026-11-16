@@ -86,13 +86,12 @@ impl Row {
         Bookmark { url: self.url.clone(), title: self.title.clone(), channel: self.channel.clone(), world: self.world.clone(), added: now }
     }
 
-    /// Whether the search `q` (lowercase) finds it: its title, channel, world or link.
+    /// Whether the search `q` (lowercase) finds it: its title, channel or world however they are written
+    /// ([`orbiters_core::search`]), or its link.
     fn matches(&self, q: &str) -> bool {
-        q.is_empty()
-            || [self.title.as_deref(), self.channel.as_deref(), self.world.as_deref(), Some(self.url.as_str())]
-                .iter()
-                .flatten()
-                .any(|t| t.to_lowercase().contains(q))
+        let find = orbiters_core::search::Query::new(q);
+        find.matches_any([self.title.as_deref(), self.channel.as_deref(), self.world.as_deref()].into_iter().flatten())
+            || (!q.trim().is_empty() && self.url.to_lowercase().contains(q.trim()))
     }
 }
 

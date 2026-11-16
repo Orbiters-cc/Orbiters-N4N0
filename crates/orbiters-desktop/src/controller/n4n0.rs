@@ -189,7 +189,7 @@ impl Host for Link {
     }
 
     /// VRChat's `InStation`, `Seated` or `VelocityMagnitude`: the SteamVR tab's walk boost carries only while VRChat
-    /// walks the avatar. Published only when what they say changes; a new avatar says it again.
+    /// walks the avatar. Published only when what they say changes ([`motion_news`]); a new avatar says it again.
     fn motion(&self, said: Option<(&str, &OscValue)>) {
         self.with(|c| match said {
             None => {
@@ -207,9 +207,9 @@ impl Host for Link {
                         },
                         _ => return false,
                     }
-                    let changed = s.vrchat.motion != Some(motion);
+                    let news = motion_news(s.vrchat.motion, motion);
                     s.vrchat.motion = Some(motion);
-                    changed
+                    news
                 });
             }
         });
@@ -248,6 +248,34 @@ impl Osc for Link {
     fn vrchat_values(&self) -> Vec<(String, OscValue)> {
         self.with(|c| c.vrchat_values()).unwrap_or_default()
     }
+}
+
+/// When a motion of VRChat's was last handed out only for its speed (milliseconds since 1970), see [`motion_news`].
+static SPEED_HANDED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether a motion VRChat said is worth handing the state out for (it is kept either way): a station or a seat, or the
+/// speed crossing what Fast walk tells apart (still under 0.15 m/s, walking from 0.4), at once; another speed at most four
+/// times a second. VRChat says `VelocityMagnitude` at its frame rate while the avatar moves, and each one, its time
+/// changing, published the whole state (N-friend-lag).
+fn motion_news(before: Option<crate::state::AvatarMotion>, now: crate::state::AvatarMotion) -> bool {
+    use std::sync::atomic::Ordering;
+    let Some(before) = before else { return true };
+    let class = |speed: f32| if !speed.is_finite() { 3 } else if speed < 0.15 { 0 } else if speed < 0.4 { 1 } else { 2 };
+    if before.in_station != now.in_station || before.seated != now.seated || class(before.speed) != class(now.speed) || before.speed_at_ms.is_some() != now.speed_at_ms.is_some() {
+        if let Some(at) = now.speed_at_ms {
+            SPEED_HANDED_MS.store(at, Ordering::Relaxed);
+        }
+        return true;
+    }
+    if before.speed == now.speed {
+        return false;
+    }
+    let at = now.speed_at_ms.unwrap_or(0);
+    if at.saturating_sub(SPEED_HANDED_MS.load(Ordering::Relaxed)) < 250 {
+        return false;
+    }
+    SPEED_HANDED_MS.store(at, Ordering::Relaxed);
+    true
 }
 
 impl Controller {
@@ -381,5 +409,32 @@ mod tests {
             }
         }
         assert!(offs.contains(&format!("{PARAMETERS_PREFIX}{}", orbiters_contracts::n4n0::params::SCREEN_OPEN)), "{offs:?}");
+    }
+}
+
+#[cfg(test)]
+mod motion_news_tests {
+    use super::motion_news;
+    use crate::state::AvatarMotion;
+
+    /// N-friend-lag: VRChat says `VelocityMagnitude` every frame while walking; the state goes out four times a second
+    /// for it, and at once when Fast walk's reading of it changes (still, between, walking) or a station or seat does.
+    #[test]
+    fn walking_hands_its_speed_out_four_times_a_second_not_at_vrchats_frame_rate() {
+        let m = |speed: f32, at: u64| AvatarMotion { speed, speed_at_ms: Some(at), ..Default::default() };
+        let base = 40_000_000_000u64;
+        let mut before = Some(m(1.0, base));
+        let mut handed = 0;
+        for f in 1..=90u64 {
+            let now = m(1.0 + f as f32 * 0.001, base + f * 11);
+            handed += motion_news(before, now) as u32;
+            before = Some(now);
+        }
+        assert!((3..=5).contains(&handed), "{handed} in a second at 90 Hz");
+        let last = before.unwrap();
+        assert!(motion_news(before, m(0.05, last.speed_at_ms.unwrap() + 1)), "stopping is said at once");
+        assert!(motion_news(Some(m(0.05, 1)), AvatarMotion { in_station: true, ..m(0.05, 2) }), "a station at once");
+        assert!(!motion_news(Some(m(0.05, 1)), m(0.05, 2)), "the same speed again is nothing new");
+        assert!(motion_news(None, m(0.0, 1)), "the first is news");
     }
 }

@@ -280,7 +280,8 @@ fn performance_reaches_a_server_under_test() {
     let spool = Spool::default();
     spool.open(dir.clone());
     spool.linked(1, Role::Overlay);
-    spool.steps(1, vec![step(Kind::Enter, "qm", Some("closed"), None)], true);
+    let now_step = |kind, screen: &str, from: Option<&str>, control: Option<&str>| Step { at: now_ms(), ..step(kind, screen, from, control) };
+    spool.steps(1, vec![now_step(Kind::Enter, "qm", Some("closed"), None)], true);
     let mut keeper = crate::perf::Keeper::new(dir.join("perf.jsonl"));
     let mut gpu = crate::perf::gpu::Gpu::open();
     eprintln!("GPU counters: {}", if gpu.is_some() { "open" } else { "none" });
@@ -290,7 +291,7 @@ fn performance_reaches_a_server_under_test() {
     for i in 0..samples {
         std::thread::sleep(Duration::from_secs(every));
         if i == samples / 2 {
-            spool.steps(1, vec![step(Kind::Press, "qm", None, Some("Worlds")), step(Kind::Enter, "qm/Worlds", Some("qm"), None)], true);
+            spool.steps(1, vec![now_step(Kind::Press, "qm", None, Some("Worlds")), now_step(Kind::Enter, "qm/Worlds", Some("qm"), None)], true);
         }
         let began = Instant::now();
         let line = keeper.sample(Instant::now(), "desktop", vec![]).expect("a line");

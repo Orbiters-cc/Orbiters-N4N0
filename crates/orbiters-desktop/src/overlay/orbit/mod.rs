@@ -1504,16 +1504,14 @@ impl Panels {
         self.stage.canvas.invalidate();
     }
 
-    /// The sheet's page drawn at the size of `place`: its canvas made anew at that many pixels (its interface, textures and all that its pages hold, kept), and what was
-    /// painted at another size let go.
+    /// The sheet's page drawn at the size of `place`: its canvas of that many pixels from now on (its interface, the textures it already sent and all that its pages
+    /// hold, kept), and what was painted at another size let go. A canvas made anew with the old interface lacked those textures, which an interface sends once: back
+    /// at a size it had drawn at before (no new fonts to send), the page was painted with nothing on it (L-fullscreen-resize).
     fn size_stage(&mut self, place: &Placed) {
         let size = place.rect.size() * self.sharp;
         let px = [size.x.round() as u32, size.y.round() as u32];
         if self.stage.px != px {
-            let ctx = self.stage.canvas.ctx().clone();
-            let textures = self.stage.canvas.textures.clone();
-            self.stage.canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
-            self.stage.canvas.ctx = ctx; self.stage.canvas.textures = textures;
+            self.stage.canvas.resize(px[0], px[1], px[0] as f32 / layout::WIDTH as f32);
             self.stage.px = px; self.stage.cache.clear(); self.stage.presented = None; self.stage.presented_scene = None;
         }
     }

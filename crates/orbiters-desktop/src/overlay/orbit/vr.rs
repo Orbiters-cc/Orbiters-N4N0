@@ -63,12 +63,14 @@ pub struct MenuButtons {
     main_menu: bool,
     /// The hand of the last press.
     last: Option<usize>,
+    /// Why `open` is what it is: the rule that last changed it (for the menu mismatch reports, [`crate::mismatch`]).
+    why: &'static str,
 }
 
 impl Default for MenuButtons {
     fn default() -> Self {
         // Buttons taken as held: one already down when this starts presses nothing.
-        Self { open: Open::Closed, down: [true; 2], press: None, closed_ahead: None, toggle: None, main_menu: false, last: None }
+        Self { open: Open::Closed, down: [true; 2], press: None, closed_ahead: None, toggle: None, main_menu: false, last: None, why: "start" }
     }
 }
 
@@ -77,23 +79,37 @@ impl MenuButtons {
         self.open
     }
 
+    /// The rule that last changed what is taken as open.
+    pub fn why(&self) -> &'static str {
+        self.why
+    }
+
+    /// [`MenuButtons::reset`], saying why.
+    pub fn reset_because(&mut self, why: &'static str) {
+        self.reset();
+        self.why = why;
+    }
+
     /// Nothing is open: the person said so with the parts' close, or VRChat is not where a menu can be (a world change, the dashboard, it closed), or nothing happened for a long time.
     pub fn reset(&mut self) {
         self.open = Open::Closed;
         self.press = None;
         self.main_menu = false;
+        self.why = "reset";
     }
 
     /// VRChat's Quick Menu was seen to go under a click of one of its buttons: its Main Menu took its place, most likely (`qm_buttons`).
     pub fn main_menu_opened(&mut self) {
         self.reset();
         self.main_menu = true;
+        self.why = "the Quick Menu's tabs were gone from the eye's picture after a click VRChat got: its Main Menu, most likely";
     }
 
     /// VRChat's Quick Menu was seen up on `hand` while these took it as closed.
     pub fn seen_open(&mut self, hand: usize) {
         self.open = Open::QuickMenu(hand);
         self.main_menu = false;
+        self.why = "the Quick Menu's tabs were seen in the eye's picture while it was taken as closed";
     }
 
     /// The hand that last pressed the menu button.
@@ -105,12 +121,14 @@ impl MenuButtons {
     pub fn walking(&mut self) {
         if matches!(self.open, Open::QuickMenu(_)) {
             self.open = Open::Closed;
+            self.why = "the left stick walked: VRChat closes its Quick Menu then";
         }
     }
 
     /// VRChat's camera opened: its wheel goes then (Enzo).
     pub fn camera_opened(&mut self) {
         self.open = Open::Closed;
+        self.why = "VRChat said its camera opened: its wheel goes then";
         self.press = None;
         self.closed_ahead = None;
         self.toggle = None;
@@ -142,6 +160,9 @@ impl MenuButtons {
                 }
                 // The wheel takes the place of what was open.
                 if held >= HOLD && !on_wheel {
+                    if self.open != Open::Wheel(hand) {
+                        self.why = "menu button held past HOLD (500 ms) with no wheel open on that hand: the wheel";
+                    }
                     self.open = Open::Wheel(hand);
                     self.main_menu = false;
                 }
@@ -152,10 +173,17 @@ impl MenuButtons {
                 }
                 if on_wheel {
                     self.open = Open::Closed;
+                    self.why = "menu button pressed and let go on that hand's open wheel: closed";
                 } else if held < HOLD && std::mem::take(&mut self.main_menu) {
                     // VRChat's Main Menu was up: this press closed it, and nothing opened.
                     self.open = Open::Closed;
+                    self.why = "short press with VRChat's Main Menu taken as up: it closed, nothing opened";
                 } else if held < HOLD {
+                    self.why = match self.open {
+                        Open::Wheel(_) => "short press with a wheel open: the wheel closed",
+                        open if open == Open::QuickMenu(hand) => "short press on the Quick Menu's own hand: closed",
+                        _ => "short press (under HOLD) let go: the Quick Menu on that hand",
+                    };
                     // As VRChat must, this waits for the release: only then is it known not to be the wheel's. With a wheel open on either hand it only closes the wheel, and it
                     // takes another press for the Quick Menu (Enzo). A Quick Menu on the other hand gives way to it ("opening the right quick menu closes the left").
                     self.open = match self.open {
@@ -170,6 +198,16 @@ impl MenuButtons {
         self.down = down;
         self.open
     }
+}
+
+/// What the VR menus last noted for the menu mismatch reports.
+#[derive(Debug, Default)]
+struct Noted {
+    down: Option<[bool; 2]>,
+    triggers: Option<[bool; 2]>,
+    stick: Option<i32>,
+    camera: Option<Option<bool>>,
+    open: Option<(Open, &'static str)>,
 }
 
 /// A pose on a hand, as saved: three rows of a matrix.
@@ -783,6 +821,20 @@ impl OrbitVr {
     fn camera_stereo_recent(&self) -> bool {
         self.camera_stereo_at.is_some_and(|at|at.elapsed()<Duration::from_secs(2))
     }
+    /// The menus' state for a menu mismatch report ([`crate::mismatch`]): what the buttons take as open and why, the press under way, what
+    /// of ours shows.
+    pub fn mismatch_state(&self) -> Vec<(String, String)> {
+        vec![
+            ("taken as open".into(), format!("{:?}", self.buttons.open())),
+            ("why".into(), self.buttons.why().into()),
+            ("press under way (hand, ms held, began on its wheel)".into(), format!("{:?}", self.buttons.press.map(|(h, at, w)| (h, at.elapsed().as_millis(), w)))),
+            ("Main Menu taken as up".into(), self.buttons.main_menu.to_string()),
+            ("last hand".into(), format!("{:?}", self.buttons.last)),
+            ("ours".into(), self.doing()),
+            ("Quick Menu check".into(), format!("{:?}", self.qm_check.why())),
+        ]
+    }
+
     /// What is up, for a note in the log when a turn took too long.
     pub fn doing(&self) -> String {
         format!("open {:?}, {}", self.panels.open_menu(), self.panels.doing()) // i18n: not shown (a note in the log)
@@ -1249,6 +1301,8 @@ pub struct OrbitVr {
     /// Since when the left stick has been pushed far enough to walk.
     walking_since: Option<Instant>,
     buttons: MenuButtons,
+    /// What was last noted for the menu mismatch reports, to note only changes ([`crate::mismatch::note_change`]).
+    noted: Noted,
     block: Block,
     stuck: Stuck,
     lasers: Lasers,
@@ -1340,6 +1394,7 @@ impl OrbitVr {
             camera_was: None,
             walking_since: None,
             buttons: MenuButtons::default(),
+            noted: Noted::default(),
             block: Block::default(),
             stuck: Stuck::start(),
             lasers: Lasers::new(overlay, &format!("{key}.orbit"))?,
@@ -1508,7 +1563,8 @@ impl OrbitVr {
             if self.last_shown || self.block.blocked() != [false; 2] {
                 self.close(&mut cx);
             }
-            self.buttons.reset();
+            self.buttons.reset_because(if !wanted { "turned off, or VRChat not running" } else if cx.dashboard { "SteamVR's dashboard is up" } else { "VRChat shows no scene (loading)" });
+            crate::mismatch::note_change("decide: taken as open, and why", &mut self.noted.open, (self.buttons.open(), self.buttons.why()));
             self.stuck.beat(false);
             return Turn::default();
         }
@@ -1518,8 +1574,9 @@ impl OrbitVr {
         // A new instance: whatever was open went with the last.
         let instance = cx.snap.vrchat.world.instance.clone();
         if instance != self.instance {
+            crate::mismatch::note("vrchat: instance changed", || format!("world {:?}", instance.as_deref().map(|i| i.split(':').next().unwrap_or_default())));
             self.instance = instance;
-            self.buttons.reset();
+            self.buttons.reset_because("a new instance");
         }
         if now.duration_since(self.tune_read) >= Duration::from_secs(1) {
             self.tune_read = now;
@@ -1531,6 +1588,8 @@ impl OrbitVr {
         }
         let down = if cx.input_read { cx.actions.orbit_menu_buttons(cx.steamvr) } else { [false; 2] };
         if cx.input_read {
+            crate::mismatch::note_change("input: menu buttons [left, right]", &mut self.noted.down, down);
+            crate::mismatch::note_change("input: triggers [left, right]", &mut self.noted.triggers, cx.actions.triggers());
             self.buttons.step(down, now);
             if let Some(hand) = self.buttons.quick_menu_to_toggle() {
                 super::super::vr_log::line(&format!("buttons: toggling VRChat's Quick Menu on hand {hand}, open {:?}", self.buttons.open())); // i18n: not shown (a log's line)
@@ -1545,9 +1604,11 @@ impl OrbitVr {
             if self.walking_since.is_some_and(|since| now.duration_since(since) >= WALKS_AFTER) {
                 self.buttons.walking();
             }
+            crate::mismatch::note_change("input: left stick pushed (quarters, walks at 2)", &mut self.noted.stick, (stick * 4.0).round() as i32);
         }
         // VRChat's wheel goes when its camera opens.
         let camera = cx.snap.camera_open_said;
+        crate::mismatch::note_change("vrchat: camera open (OSC)", &mut self.noted.camera, camera);
         let camera_just_opened = camera == Some(true) && self.camera_was != Some(true);
         if camera_just_opened {
             self.buttons.camera_opened();
@@ -1558,6 +1619,7 @@ impl OrbitVr {
             self.quick_menu_looks(&cx, now);
         }
         let open = self.buttons.open();
+        crate::mismatch::note_change("decide: taken as open, and why", &mut self.noted.open, (open, self.buttons.why()));
         // VRChat's camera panel, seen on its window while it says its camera is open, with neither of its menus up.
         // Looked for even with a menu up: VRChat's camera is opened from one, and what follows the buttons may still say it is open.
         let camera_wanted = settings.camera_tiles && camera == Some(true);
@@ -1828,7 +1890,7 @@ impl OrbitVr {
             self.pointing_since = now;
         }
         if now.duration_since(self.pointing_since) >= IDLE_OPEN {
-            self.buttons.reset();
+            self.buttons.reset_because("no press and no laser on our parts for IDLE_OPEN (300 s)");
         }
         // The pointer: the hand that pressed stays; else the right, else the left.
         if self.active.is_none_or(|h| hits[h].is_none() && !triggers[h]) {

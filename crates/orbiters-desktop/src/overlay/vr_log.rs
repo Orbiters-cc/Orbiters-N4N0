@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 /// A line now. Never from tests: their scanners, pages and overlays would write into the person's own `vr-test.log`
 /// (found 2026-11-15: a desktop test run's lines among Enzo's).
 pub fn line(text: &str) {
+    // Every line is also a clue for a menu mismatch report, while those are on.
+    crate::mismatch::note("vr-test.log", || text.to_owned());
     if cfg!(test) {
         let _ = text;
         return;

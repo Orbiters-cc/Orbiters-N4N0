@@ -17,6 +17,7 @@ pub mod input;
 pub mod laser;
 pub mod panel;
 pub mod space;
+pub mod strip;
 pub mod watch;
 
 use super::actions::Actions;
@@ -71,6 +72,8 @@ pub struct Turn {
     /// N4N0's menu, held, is here now; it was let go this turn.
     pub menu_moved: Option<vr::Matrix34>,
     pub menu_released: bool,
+    /// A row of the menu mismatch strip was pressed: what it says is to be reported ([`crate::mismatch`]).
+    pub mismatch: Option<crate::mismatch::Kind>,
 }
 
 /// The mouse events the lasers make for N4N0's menu's overlays (surfaces [`MENU`] onwards): moves, the button down and
@@ -140,6 +143,8 @@ impl MouseSurfaces {
 pub struct Floating {
     panel: Panel,
     watch: Watch,
+    /// The menu mismatch strip (none when SteamVR would not make its overlay).
+    strip: Option<strip::Strip>,
     lasers: laser::Lasers,
     input: Interaction,
     mouse: MouseSurfaces,
@@ -159,6 +164,7 @@ impl Floating {
         Ok(Self {
             panel: Panel::new(overlay, key)?,
             watch: Watch::new(overlay, key)?,
+            strip: strip::Strip::new(overlay, key).map_err(|e| eprintln!("{e}")).ok(),
             lasers: laser::Lasers::new(overlay, key)?,
             input: Interaction::default(),
             mouse: MouseSurfaces::default(),
@@ -173,6 +179,9 @@ impl Floating {
     pub fn destroy(&self, overlay: &vr::Overlay) {
         self.panel.destroy(overlay);
         self.watch.destroy(overlay);
+        if let Some(strip) = &self.strip {
+            strip.destroy(overlay);
+        }
         self.lasers.destroy(overlay);
     }
 
@@ -197,7 +206,9 @@ impl Floating {
         let asked = state.take_float();
         let was_open = self.panel.is_open();
         let mut turn = Turn::default();
-        if !settings.watch && !self.panel.is_shown() && !asked && cx.menu.is_empty() {
+        // The menu mismatch strip shows whenever its switch is on: the moments it is for are those where N4N0's menus are wrong.
+        let strip_on = cx.snap.settings.mismatch.buttons && self.strip.is_some();
+        if !settings.watch && !strip_on && !self.panel.is_shown() && !asked && cx.menu.is_empty() {
             if !self.resting {
                 self.rest(cx.overlay, cx.presenter, state, cx.backend);
             }
@@ -232,13 +243,18 @@ impl Floating {
             .flatten();
         let live = !cx.snap.settings.reduce_motion;
         let watch = self.watch.place(cx.overlay, watch_at, head.as_ref(), dt, live);
+        // The strip on the same wrist, beside it, unless that hand holds the panel or SteamVR's dashboard has the controllers.
+        let strip_at = (strip_on && !cx.dashboard && self.input.holding() != Some(watch_hand))
+            .then(|| devices[watch_hand].zip(grip(watch_hand)).map(|(d, g)| (d, watch_right, g)))
+            .flatten();
+        let strip = self.strip.as_mut().and_then(|s| s.place(cx.overlay, strip_at));
 
         // Who points at what.
         let panel_targets = self.panel.targets();
         if let Some(head) = head.as_ref().filter(|_| self.panel.is_open()) {
             self.panel.face(cx.overlay, head);
         }
-        let pointing = !cx.dashboard && cx.input_read && head.is_some() && (panel_targets.is_some() || watch.is_some() || !cx.menu.is_empty());
+        let pointing = !cx.dashboard && cx.input_read && head.is_some() && (panel_targets.is_some() || watch.is_some() || strip.is_some() || !cx.menu.is_empty());
         let outcome = match head.filter(|_| pointing) {
             Some(head) => {
                 let lasers = cx.actions.lasers(cx.steamvr, seconds);
@@ -257,6 +273,7 @@ impl Floating {
                     bar: panel_targets.map(|t| t.1),
                     handle: panel_targets.map(|t| (BarButton::handle_uv(), t.2)),
                     watch: watch.map(|q| (watch_hand, q)),
+                    strip: strip.map(|q| (watch_hand, q)),
                 };
                 let outcome = self.input.step(&head, hands, &targets);
                 self.lasers_for(cx.overlay, cx.presenter, &outcome, &hands, &devices, &head, &targets);
@@ -292,6 +309,14 @@ impl Floating {
             clicked = true;
             turn.toggle_menu = true;
         }
+        // The mismatch strip: a report, nothing else.
+        if let Some(kind) = outcome.strip_press.and_then(|uv| strip::row_at(uv[1])) {
+            clicked = true;
+            turn.mismatch = Some(kind);
+            if let Some(s) = self.strip.as_mut() {
+                s.pressed(kind, now);
+            }
+        }
         // The bar's buttons.
         if let Some(button) = outcome.bar_press.map(|uv| self.panel.picture_uv(uv)).and_then(BarButton::at) {
             clicked = true;
@@ -323,6 +348,9 @@ impl Floating {
         let hover = outcome.bar_hover.map(|uv| self.panel.picture_uv(uv)).and_then(BarButton::at);
         self.panel.paint_bar(cx.overlay, cx.presenter, hover, lit);
         self.watch.paint(cx.overlay, cx.presenter, outcome.watch_hover, cx.menu_open);
+        if let Some(s) = self.strip.as_mut() {
+            s.paint(cx.overlay, cx.presenter, outcome.strip_hover.and_then(|uv| strip::row_at(uv[1])), now);
+        }
         turn.clicked = clicked;
         turn
     }
@@ -336,6 +364,7 @@ impl Floating {
                     Target::Surface(s) => targets.surfaces[s]?.quad.transform,
                     Target::Bar => targets.bar?.transform,
                     Target::Watch => targets.watch?.1.transform,
+                    Target::Strip => targets.strip?.1.transform,
                 };
                 Some(laser::Laser { device, grip: h.grip, tip: h.tip, eyes: space::position(head), end: hit.point, surface, pressed: h.trigger })
             });
@@ -351,6 +380,9 @@ impl Floating {
         }
         self.mouse.let_go_all(&mut |h, e| overlay.inject_event(h, e));
         self.watch.place(overlay, None, None, 0.0, false);
+        if let Some(s) = self.strip.as_mut() {
+            s.place(overlay, None);
+        }
         for hand in 0..2 {
             self.lasers.update(overlay, presenter, hand, None);
         }

@@ -32,6 +32,7 @@ mod mac_update;
 mod mailbox;
 mod media;
 mod menu_host;
+mod mismatch;
 mod mixer_inbox;
 mod overlay;
 mod pages;

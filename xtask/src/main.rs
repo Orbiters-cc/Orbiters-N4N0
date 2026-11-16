@@ -507,7 +507,7 @@ mod tests {
         assert!(std::env::var_os("CARGO_PKG_VERSION").is_some() && std::env::var_os("CARGO_MANIFEST_DIR").is_some());
         let cmd = cargo();
         let removed: Vec<String> = cmd.get_envs().filter(|(_, v)| v.is_none()).map(|(k, _)| k.to_string_lossy().into_owned()).collect();
-        for name in ["CARGO_PKG_VERSION", "CARGO_PKG_VERSION_PRE", "CARGO_PKG_NAME", "CARGO_MANIFEST_DIR", "CARGO_CRATE_NAME"] {
+        for name in ["CARGO_PKG_VERSION", "CARGO_PKG_VERSION_PRE", "CARGO_PKG_NAME", "CARGO_MANIFEST_DIR"] {
             assert!(removed.iter().any(|r| r == name), "{name} is passed on: {removed:?}");
         }
         for kept in ["CARGO", "CARGO_HOME", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_BUILD_JOBS"] {

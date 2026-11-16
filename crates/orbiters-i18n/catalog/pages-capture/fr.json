@@ -441,5 +441,8 @@
   "Only this app: other sounds stay as they are.": "Seulement cette app : les autres sons restent tels quels.",
   "Only {app}: other sounds stay as they are.": "Seulement {app} : les autres sons restent tels quels.",
   "No sound from this app to set yet.": "Cette app n’a pas encore de son à régler.",
-  "No sound from {app} to set yet.": "{app} n’a pas encore de son à régler."
+  "No sound from {app} to set yet.": "{app} n’a pas encore de son à régler.",
+  "Beta feedback": "Retours bêta",
+  "Menu mismatch buttons": "Boutons de décalage des menus",
+  "Three buttons, on your wrist in VR and in a corner of VRChat's window on the desktop, to press when N4N0's menus do not match VRChat's; each press keeps a report on this computer, never what you type or say.": "Trois boutons, sur ton poignet en VR et dans un coin de la fenêtre de VRChat sur le bureau, à presser quand les menus de N4N0 ne correspondent pas à ceux de VRChat ; chaque appui garde un rapport sur cet ordinateur, jamais ce que tu écris ou dis."
 }

@@ -545,7 +545,7 @@ impl Dialog {
         let entry = self.layers.layered(&self.entry);
         let large = match (&entry.local, &entry.remote) {
             (Some(controller::Local::Picture(path)), _) => Some(Picture::Shot { path: path.clone(), size: 0, width: 2048 }),
-            (None, Some(item)) if item.picture.is_some() && !self.fixture_active => Some(Picture::Capture { development, id: item.id, large: true }),
+            (None, Some(item)) if !self.fixture_active => controller::remote_picture(item, development, true),
             _ => None,
         };
         (entry.picture.clone(), large)

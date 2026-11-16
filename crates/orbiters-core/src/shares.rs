@@ -301,6 +301,16 @@ pub(crate) fn json<T: serde::de::DeserializeOwned>(response: ureq::http::Respons
     }
     Ok(serde_json::from_str(&text)?)
 }
+/// Whether `address` is a 3D capture's picture on the server asked ([`Api::capture_picture`]): a path of its own API
+/// (`/captures/capture/<id>/file?part=picture`, with its revision), never another host's address.
+pub fn capture_picture_address(address: &str) -> bool {
+    let Some(rest) = address.strip_prefix("/captures/capture/") else { return false };
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let mut parts = path.split('/');
+    let id_ok = parts.next().is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()));
+    id_ok && parts.next() == Some("file") && parts.next().is_none() && query.split('&').any(|p| p == "part=picture")
+        && address.bytes().all(|b| b.is_ascii_alphanumeric() || b"/?&=_-.".contains(&b))
+}
 fn path(kind: Kind, id: u64) -> String {
     format!("captures/{}/{id}", kind.path())
 }
@@ -323,6 +333,28 @@ impl Api {
             r = r.query("cursor", c);
         }
         json(r.call()?)
+    }
+    /// A 3D capture's picture (its item's `capture.pictureUrl`), its 640-pixel thumbnail when `thumbnail`: what a card
+    /// shows of a capture that is on Orbiters only (contracts `Docs/capture-sharing.md`, Capture picture). Asked with the
+    /// account when signed in (a private capture, one shared with it), and only at an address of this server's captures:
+    /// the credential never goes elsewhere.
+    pub fn capture_picture(&self, token: Option<&str>, address: &str, thumbnail: bool) -> anyhow::Result<Vec<u8>> {
+        anyhow::ensure!(capture_picture_address(address), "not a capture picture's address: {address}"); // i18n: not shown (a server answering otherwise; only logged)
+        let mut address = address.to_string();
+        if thumbnail {
+            address.push(if address.contains('?') { '&' } else { '?' });
+            address.push_str("thumbnail=true");
+        }
+        let mut request = self.agent().get(&self.url(&address));
+        if let Some(token) = token {
+            request = request.header("Authorization", &format!("Bearer {token}"));
+        }
+        let response = request.call()?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(ApiError { status, message: String::new() }.into());
+        }
+        Ok(response.into_body().with_config().limit(16 << 20).read_to_vec()?)
     }
     pub fn capture_item(&self, token: &str, kind: Kind, id: u64) -> anyhow::Result<Item> {
         Ok(json::<ItemAnswer>(self.agent().get(&self.url(&path(kind, id))).header("Authorization", &format!("Bearer {token}")).call()?)?.item)
@@ -414,6 +446,24 @@ impl Api {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The account's credential goes only with a capture picture's address on the server it was given for.
+    #[test]
+    fn only_a_capture_pictures_own_address_is_asked_with_the_account() {
+        for ok in ["/captures/capture/61/file?part=picture", "/captures/capture/7/file?part=picture&v=2"] {
+            assert!(capture_picture_address(ok), "{ok}");
+        }
+        for bad in [
+            "https://elsewhere.example/captures/capture/61/file?part=picture",
+            "//elsewhere.example/captures/capture/61/file?part=picture",
+            "/captures/capture/61/file",
+            "/captures/capture/61/file?part=sky",
+            "/captures/capture/x/file?part=picture",
+            "/captures/capture/61/../../users/me?part=picture",
+            "/captures/picture/61/file?part=picture",
+        ] {
+            assert!(!capture_picture_address(bad), "{bad}");
+        }
+    }
     #[test]
     fn contract_json() {
         let feed: Feed = serde_json::from_str(include_str!("../tests/fixtures/captures.json")).unwrap();

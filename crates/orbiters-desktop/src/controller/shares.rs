@@ -661,6 +661,19 @@ pub fn remote_entry(item: Item) -> Entry {
     }
 }
 
+/// What the card of an item on Orbiters shows when nothing on this computer does (its capture's folder deleted, or
+/// never here), in the environment `development` names: a picture's own picture, a 3D capture's picture (its 3D view as
+/// uploaded with it, `capture.pictureUrl`); `large` for a window. None when Orbiters has none.
+pub fn remote_picture(item: &Item, development: bool, large: bool) -> Option<crate::worlds::Picture> {
+    match item.kind {
+        Kind::Picture => item.picture.is_some().then_some(crate::worlds::Picture::Capture { development, id: item.id, large }),
+        Kind::Capture => {
+            let url = item.capture.as_ref()?.picture_url.as_ref().filter(|u| shares::capture_picture_address(u))?;
+            Some(crate::worlds::Picture::CaptureView { development, id: item.id, url: url.clone(), large })
+        }
+    }
+}
+
 /// The size of a capture's picture: its frames without the strip at the top and the skeleton band's rows at the bottom
 /// ([`orbiters_core::bundle::capture_picture_rect`], as its thumbnail is cropped). None when the manifest has no size.
 pub fn session_picture_size(width: u32, height: u32) -> Option<[u32; 2]> {
@@ -864,6 +877,44 @@ fn save_record_edits(records: anyhow::Result<&Path>, entry: &Entry, item: &Item,
     }
     Ok(())
 }
+/// Before a capture's folder is deleted (the library's Delete, the bridge's `free_picture_files everything`): its uploads
+/// on Orbiters (this computer's records, each environment signed in) have their picture there, given now from the folder
+/// when one had none, so that its card in every gallery still shows it once the folder is gone. What could not be done,
+/// in words for a log; nothing asked of Orbiters when the records say the picture is there.
+pub fn keep_pictures_on_orbiters(dir: &Path) -> Vec<String> {
+    let mut problems = Vec::new();
+    for server in [Server::Production, Server::Development] {
+        let Ok(file) = records_path(server) else { continue };
+        let result = api(server).and_then(|(api, token)| keep_picture_with(&api, &token, &file, dir));
+        match result {
+            Ok(Some(id)) => share_log(&format!("3D capture {} gave capture {id} its picture before its folder was deleted", dir.display())), // i18n: not shown
+            Ok(None) => {}
+            Err(e) => {
+                let problem = format!("{}: {e:#}", if server == Server::Development { "development" } else { "production" }); // i18n: not shown (a log line)
+                share_log(&format!("3D capture {} has no picture on Orbiters, none given before its folder was deleted ({problem})", dir.display())); // i18n: not shown
+                problems.push(problem);
+            }
+        }
+    }
+    problems
+}
+/// [`keep_pictures_on_orbiters`] for one account's `records`: the capture's id when its picture was given now.
+pub(crate) fn keep_picture_with(api: &Api, token: &str, records: &Path, dir: &Path) -> anyhow::Result<Option<u64>> {
+    let Some(record) = read_records(records).into_iter().find(|r| r.path == dir && r.uploaded.kind == Kind::Capture) else { return Ok(None) };
+    if record.item.as_ref().and_then(|i| i.capture.as_ref()).is_some_and(|c| c.picture_url.is_some()) {
+        return Ok(None);
+    }
+    let mut item = api.capture_item(token, Kind::Capture, record.uploaded.id)?;
+    let given = item.capture.as_ref().is_some_and(|c| c.picture_url.is_none());
+    if given {
+        let jpeg = crate::capture_picture::jpeg(dir).ok_or_else(|| anyhow::anyhow!("no picture can be made from its folder"))?; // i18n: not shown (a log line)
+        item = api.set_capture_picture(token, item.id, jpeg)?;
+    }
+    let mut entry = remote_entry(item.clone());
+    entry.local = Some(Local::Session(dir.to_path_buf()));
+    save_record_edits(Ok(records), &entry, &item, None)?;
+    Ok(given.then_some(item.id))
+}
 /// Its upload is not on Orbiters any more (removed there): its record goes, so that a share uploads it again.
 fn forget_record(path: &Path, dir: &Path, id: u64) {
     let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
@@ -1061,8 +1112,9 @@ fn share_with(
     // share it with nobody is refused ("Choose someone to share with.", the world tour's first publish, 2026-11-15), so a
     // private share with no recipient asks nothing more than the item, to remember it.
     if !request.public && request.recipients.is_empty() {
-        let item = api.capture_item(token, kind, id)?;
+        let mut item = api.capture_item(token, kind, id)?;
         step(steps, "kept private", &mut at); // i18n: not shown
+        give_picture(api, token, entry, &mut item, steps, &mut at);
         save_record(records, entry, &item)?;
         return Ok(shares::Shared::Item { item });
     }
@@ -1072,19 +1124,7 @@ fn share_with(
     match shared {
         Ok(mut result) => {
             if let shares::Shared::Item { item } = &mut result {
-                // A public capture uploaded without its picture gets it now: its public page's link previews show it.
-                if let (true, Kind::Capture, true, Some(Local::Session(dir))) = (item.public, item.kind, item.mine, entry.local.as_ref()) {
-                    if item.capture.as_ref().is_some_and(|c| c.picture_url.is_none()) {
-                        match crate::capture_picture::jpeg(dir).map(|jpeg| api.set_capture_picture(token, item.id, jpeg)) {
-                            Some(Ok(with_picture)) => {
-                                *item = with_picture;
-                                step(steps, "gave it its picture", &mut at); // i18n: not shown
-                            }
-                            Some(Err(e)) => step(steps, &format!("its picture failed ({e})"), &mut at), // i18n: not shown
-                            None => {}
-                        }
-                    }
-                }
+                give_picture(api, token, entry, item, steps, &mut at);
                 save_record(records, entry, item)?;
             }
             Ok(result)
@@ -1098,6 +1138,24 @@ fn share_with(
             }
             Err(e)
         }
+    }
+}
+
+/// A capture of this account uploaded without its picture (one uploaded before captures had them, or while its picture
+/// could not leave the app) gets it now, public or private alike: every gallery's card of it shows that picture once its
+/// folder here is gone, and its public page's link previews show it. A failure is noted and changes nothing else.
+fn give_picture(api: &Api, token: &str, entry: &Entry, item: &mut Item, steps: &mut Vec<String>, at: &mut Instant) {
+    let Some(Local::Session(dir)) = entry.local.as_ref() else { return };
+    if item.kind != Kind::Capture || !item.mine || item.capture.as_ref().is_none_or(|c| c.picture_url.is_some()) {
+        return;
+    }
+    match crate::capture_picture::jpeg(dir).map(|jpeg| api.set_capture_picture(token, item.id, jpeg)) {
+        Some(Ok(with_picture)) => {
+            *item = with_picture;
+            step(steps, "gave it its picture", at); // i18n: not shown
+        }
+        Some(Err(e)) => step(steps, &format!("its picture failed ({e})"), at), // i18n: not shown
+        None => {}
     }
 }
 
@@ -1255,6 +1313,10 @@ pub(crate) fn update_against(api: Api, records: PathBuf, prepare: SharedPrepare)
     })
 }
 /// A line in `%LOCALAPPDATA%/Orbiters/logs/shares.log`, kept under 1 MB (the last one renamed .old). Tests write none.
+/// A line in shares.log (what the repair of captures' pictures sent: controller/picture_repair.rs).
+pub(crate) fn note(line: &str) {
+    share_log(line);
+}
 fn share_log(line: &str) {
     #[cfg(not(test))]
     {
@@ -2238,5 +2300,198 @@ pub(crate) mod tests {
         different = item;
         different.source_key = None;
         assert!(!matches_item(&entry, &different));
+    }
+
+
+    /// A small picture as PNG bytes (what a stand-in Orbiters serves as a capture's picture).
+    pub(crate) fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        use image::ImageEncoder;
+        let rgb: Vec<u8> = (0..w * h).flat_map(|i| [(i % 251) as u8, 90, 200]).collect();
+        let mut out = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut out).write_image(&rgb, w, h, image::ExtendedColorType::Rgb8).unwrap();
+        out
+    }
+
+    /// A stand-in for Orbiters that serves `bytes` as a picture to every request: each request line and whether it came
+    /// with the account's credential.
+    pub(crate) fn picture_server(bytes: Vec<u8>) -> (Api, std::sync::Arc<Mutex<Vec<(String, bool)>>>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = Api::at(&format!("http://{}/", listener.local_addr().unwrap()));
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let mut signed = false;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header.trim().is_empty() {
+                        break;
+                    }
+                    signed |= header.to_ascii_lowercase().starts_with("authorization: bearer token");
+                }
+                log.lock().unwrap().push((line.split_whitespace().take(2).collect::<Vec<_>>().join(" "), signed));
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len());
+                let _ = stream.write_all(&bytes);
+            }
+        });
+        (api, seen)
+    }
+
+    /// A 3D capture of this account on Orbiters (`id`), with its picture there or not.
+    pub(crate) fn capture_item(id: u64, public: bool, pictured: bool) -> Item {
+        let capture = shares::Capture {
+            splat_count: 2000,
+            preview_url: format!("/captures/capture/{id}/file"),
+            picture_url: pictured.then(|| format!("/captures/capture/{id}/file?part=picture")),
+            revision: 1,
+            ..Default::default()
+        };
+        Item { kind: Kind::Capture, id, mine: true, can_share: true, public, capture: Some(capture), ..Default::default() }
+    }
+
+    /// L-no-thumbnails (2026-11-15): the world tour's captures, published and then deleted from this computer, showed
+    /// grey cards in Photos & captures. Orbiters had every one's picture (`capture.pictureUrl`, private and public alike);
+    /// the card of a capture on Orbiters only was given none (only a picture's own picture was asked for). Now it is
+    /// that picture, read with the account and kept on this computer: shown again with Orbiters out of reach.
+    #[test]
+    fn a_published_capture_whose_folder_is_gone_still_shows_its_picture() {
+        let (api, seen) = picture_server(png_bytes(64, 36));
+        let cache = std::env::temp_dir().join(format!("orbiters-capture-view-{}", uuid::Uuid::new_v4()));
+        for (id, public) in [(65, false), (66, true)] {
+            let item = capture_item(id, public, true);
+            // As the gallery lists it with no folder here.
+            let entry = remote_entry(item.clone());
+            assert!(entry.local.is_none());
+            let picture = remote_picture(&item, false, false).expect("a card picture for a capture on Orbiters only");
+            let crate::worlds::Picture::CaptureView { development: false, id: got, url, large: false } = &picture else { panic!("{picture:?}") };
+            assert_eq!((*got, url.as_str()), (id, format!("/captures/capture/{id}/file?part=picture").as_str()));
+            let file = cache.join(format!("{id}.img"));
+            let image = crate::worlds::capture_view(&api, Some("token"), url, false, Some(&file)).expect("its picture");
+            assert_eq!((image.width(), image.height()), (64, 36));
+            assert!(file.is_file(), "kept on this computer");
+            // Orbiters out of reach: the kept one.
+            let gone = Api::at("http://127.0.0.1:9/");
+            assert!(crate::worlds::capture_view(&gone, Some("token"), url, false, Some(&file)).is_some());
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [("GET /captures/capture/65/file?part=picture&thumbnail=true".to_string(), true), ("GET /captures/capture/66/file?part=picture&thumbnail=true".to_string(), true)],
+            "the thumbnail, asked as the account, once each"
+        );
+        // The window's large picture is the whole one; no picture on Orbiters, no card picture; a picture's own as before.
+        let item = capture_item(66, true, true);
+        assert!(matches!(remote_picture(&item, true, true), Some(crate::worlds::Picture::CaptureView { development: true, large: true, .. })));
+        assert!(remote_picture(&capture_item(67, false, false), false, false).is_none());
+        let mut elsewhere = capture_item(68, true, true);
+        elsewhere.capture.as_mut().unwrap().picture_url = Some("https://elsewhere.example/captures/capture/68/file?part=picture".into());
+        assert!(remote_picture(&elsewhere, false, false).is_none(), "the credential never goes to another host");
+        let picture = Item { kind: Kind::Picture, id: 9, picture: Some(shares::Picture::default()), ..Default::default() };
+        assert_eq!(remote_picture(&picture, false, false), Some(crate::worlds::Picture::Capture { development: false, id: 9, large: false }));
+        std::fs::remove_dir_all(cache).ok();
+    }
+
+    /// A reconstructed session in its own sessions folder, with the picture a share sends (its thumbnail).
+    fn pictured_session(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("orbiters-parity-{name}-{}", uuid::Uuid::new_v4()));
+        let session = root.join("Freddy's Custom Pizzeria 2.0 2026-11-15 13-24-21");
+        std::fs::create_dir_all(orbiters_core::reconstruction::dir(&session)).unwrap();
+        let mut m = orbiters_contracts::manifest::SessionManifest::new("Freddy".into(), "2026-11-15T12:24:21Z".into(), "test");
+        m.world = Some(orbiters_contracts::manifest::WorldInfo { id: Some("wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd".into()), name: Some("Freddy's Custom Pizzeria 2.0".into()), ..Default::default() });
+        std::fs::write(session.join("manifest.json"), serde_json::to_vec(&m).unwrap()).unwrap();
+        let pixels: Vec<u8> = (0..32 * 18).flat_map(|i| [(i % 255) as u8, 80, 160, 255]).collect();
+        std::fs::write(session.join(orbiters_core::bundle::PICTURE_THUMBNAIL_FILE), orbiters_contracts::qoi::encode(&pixels, 32, 18, 4)).unwrap();
+        (root, session)
+    }
+
+    /// The bytes of a multipart body's part `name`.
+    fn part(body: &[u8], name: &str) -> Option<Vec<u8>> {
+        let marker = format!("name=\"{name}\"");
+        let at = body.windows(marker.len()).position(|w| w == marker.as_bytes())?;
+        let start = at + body[at..].windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+        let end = start + body[start..].windows(4).position(|w| w == b"\r\n--")?;
+        Some(body[start..end].to_vec())
+    }
+
+    /// The bridge's `publish_3d_picture` (its entry: `session_entry`) uploads exactly the picture Photos & captures' own
+    /// share (its entry: the library's) uploads with a capture, private and public alike.
+    #[test]
+    fn the_bridges_publish_sends_the_picture_a_persons_share_sends() {
+        let (root, session) = pictured_session("bridge");
+        let bridge = session_entry(&session, Server::Development).unwrap();
+        let person = local_entries_at(&root, Default::default(), &root.join("no-history.json"), None)
+            .into_iter()
+            .find(|e| e.local.as_ref().is_some_and(|l| l.path() == session))
+            .expect("listed by the library");
+        let expected = crate::capture_picture::jpeg(&session).unwrap();
+        let added = r#"{"type":"capture","id":5,"visibility":"private"}"#.to_string();
+        let item = |public: bool| serde_json::json!({ "item": capture_item(5, public, true) }).to_string();
+        let shared = |public: bool| serde_json::to_string(&shares::Shared::Item { item: capture_item(5, public, true) }).unwrap();
+        for public in [false, true] {
+            let request = shares::Share { public, ..Default::default() };
+            let mut pictures = Vec::new();
+            for (who, entry) in [("bridge", &bridge), ("person", &person)] {
+                let records = root.join(format!("records-{who}-{public}.json"));
+                let (api, seen) = stand_in(vec![("POST /maps/worlds/", 200, added.clone()), ("GET /captures/capture/5", 200, item(public)), ("POST /captures/capture/5/share", 200, shared(public))]);
+                share_with(&api, "token", Ok(records), entry, &request, &|_| {}, &mut Vec::new(), &prepared).unwrap();
+                let seen = seen.lock().unwrap();
+                let (_, body) = seen.iter().find(|(r, _)| r.ends_with("/previews")).expect("uploaded");
+                pictures.push(part(body, "picture").unwrap_or_else(|| panic!("{who} sent no picture (public {public})")));
+            }
+            assert_eq!(pictures[0], expected, "the bridge's picture (public {public})");
+            assert_eq!(pictures[0], pictures[1], "the same as a person's share (public {public})");
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Uploaded without its picture (before captures had them, or while it could not leave the app): a private publish
+    /// gives it now as a public share did, and freeing its folder gives it first, so its card keeps a picture; with the
+    /// picture there, nothing more is asked.
+    #[test]
+    fn a_capture_without_its_picture_gets_it_private_or_before_its_folder_goes() {
+        let (root, session) = pictured_session("give");
+        let mut entry = session_entry(&session, Server::Development).unwrap();
+        entry.world_id = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd".into();
+        let private = shares::Share { public: false, ..Default::default() };
+        let without = serde_json::json!({ "item": capture_item(5, false, false) }).to_string();
+        let with = serde_json::json!({ "item": capture_item(5, false, true) }).to_string();
+        let records = root.join("records.json");
+        let (api, seen) = stand_in(vec![
+            ("POST /maps/worlds/", 200, r#"{"type":"capture","id":5,"visibility":"private"}"#.to_string()),
+            ("GET /captures/capture/5", 200, without.clone()),
+            ("POST /captures/capture/5/picture", 200, with.clone()),
+        ]);
+        share_with(&api, "token", Ok(records.clone()), &entry, &private, &|_| {}, &mut Vec::new(), &prepared).unwrap();
+        let asked = requests(&seen);
+        assert_eq!(&asked[1..], ["GET /captures/capture/5", "POST /captures/capture/5/picture"], "{asked:?}");
+        assert_eq!(part(&seen.lock().unwrap()[2].1, "picture"), crate::capture_picture::jpeg(&session));
+        assert!(record_of(&records).unwrap().item.unwrap().capture.unwrap().picture_url.is_some(), "remembered with its picture");
+
+        // Before its folder is deleted: the record says it has its picture, nothing asked.
+        let (api, seen) = stand_in(vec![]);
+        assert_eq!(keep_picture_with(&api, "token", &records, &session).unwrap(), None);
+        assert!(requests(&seen).is_empty());
+        // A record without it: asked, given, remembered.
+        let mut kept = read_records(&records);
+        kept[0].item = Some(capture_item(5, false, false));
+        std::fs::write(&records, serde_json::to_vec(&kept).unwrap()).unwrap();
+        let (api, seen) = stand_in(vec![("GET /captures/capture/5", 200, without), ("POST /captures/capture/5/picture", 200, with)]);
+        assert_eq!(keep_picture_with(&api, "token", &records, &session).unwrap(), Some(5));
+        assert_eq!(requests(&seen), ["GET /captures/capture/5", "POST /captures/capture/5/picture"]);
+        assert!(record_of(&records).unwrap().item.unwrap().capture.unwrap().picture_url.is_some());
+        // Nothing to make it from: said, so the bridge keeps the folder.
+        std::fs::remove_file(session.join(orbiters_core::bundle::PICTURE_THUMBNAIL_FILE)).unwrap();
+        let mut kept = read_records(&records);
+        kept[0].item = Some(capture_item(5, false, false));
+        std::fs::write(&records, serde_json::to_vec(&kept).unwrap()).unwrap();
+        let (api, _) = stand_in(vec![("GET /captures/capture/5", 200, serde_json::json!({ "item": capture_item(5, false, false) }).to_string())]);
+        assert!(keep_picture_with(&api, "token", &records, &session).is_err());
+        std::fs::remove_dir_all(root).ok();
     }
 }

@@ -806,6 +806,62 @@ fn wheel_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Optio
 }
 
 /// A stand-in of the Quick Menu with the wing beside it, and a sheet in front when one is open.
+/// `--only mismatch`: the beta's menu mismatch buttons ([`crate::mismatch`]). On the desktop, the corner over a stand-in of VRChat's window with N4N0's parts:
+/// the Quick Menu with the wing, with the strip in a squarish window (the corner is lifted over it), with a page open, and the wheel, one row saying Noted.
+/// In VR, the strip as SteamVR gets it: at rest, under a laser, saying Noted.
+pub(super) fn mismatch_shots(out: &Path) -> anyhow::Result<()> {
+    use crate::mismatch::Kind;
+    use crate::overlay::floating::strip;
+    use crate::overlay::orbit::desktop::{paint_corner, Corner};
+    let facts = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), ..Default::default() };
+    let strip_facts = Facts { orbit: orbiters_core::settings::OrbitSettings { layout: orbiters_core::settings::OrbitLayout::Strip, ..facts.orbit }, ..facts.clone() };
+    let shots: [(&str, Vec2, Around, &Facts, Option<panels::Sheet>, Option<Kind>); 5] = [
+        ("mismatch-desk-qm", vec2(1280.0, 720.0), Around::QuickMenu, &facts, None, None),
+        ("mismatch-desk-qm-page", vec2(1280.0, 720.0), Around::QuickMenu, &facts, Some(panels::Sheet::Menu), Some(Kind::QuickMenuShouldBeOn)),
+        ("mismatch-desk-qm-strip-square", vec2(1000.0, 900.0), Around::QuickMenu, &strip_facts, None, None),
+        ("mismatch-desk-wheel", vec2(1280.0, 720.0), Around::Wheel, &facts, None, Some(Kind::WheelShouldBeOn)),
+        ("mismatch-desk-wheel-1080", vec2(1920.0, 1080.0), Around::Wheel, &facts, None, None),
+    ];
+    for (name, client, around, facts, sheet, noted) in shots {
+        let (w, h) = (client.x as u32, client.y as u32);
+        let mut ground = Canvas::new(w, h);
+        stand_in_menu(around, client, &mut ground);
+        let mut image = ground.pixels().to_vec();
+        for placed in zones::layout_as(around, client, facts.orbit.layout == orbiters_core::settings::OrbitLayout::Strip) {
+            let (pixels, px) = picture(&placed, facts, None, None);
+            blit(&mut image, w, &pixels, px, placed.rect.min);
+        }
+        if let Some(sheet) = sheet {
+            let back = zones::place(Zone::SheetBack, client).expect("it fits");
+            let (pixels, px) = picture(&back, facts, None, None);
+            blit(&mut image, w, &pixels, px, back.rect.min);
+            let page = zones::place(Zone::Takeover, client).expect("it fits");
+            let pixels = sheet_picture(sheet, facts, [page.rect.width() as u32, page.rect.height() as u32]);
+            blit(&mut image, w, &pixels, [page.rect.width() as u32, page.rect.height() as u32], page.rect.min);
+        }
+        let (rect, zoom) = Corner::rect(client);
+        let px = [rect.width().ceil() as u32, rect.height().ceil() as u32];
+        let mut corner = Canvas::zoomed(px[0], px[1], zoom);
+        for _ in 0..2 {
+            corner.paint(0.0, |p| paint_corner(p, noted));
+        }
+        blit(&mut image, w, corner.pixels(), px, rect.min);
+        let path = out.join(format!("{name}.png"));
+        save_png(&path, &over_ground(&image, w, h))?;
+        println!("{}", path.display());
+    }
+    for (name, hover, noted) in [("mismatch-vr-strip", None, None), ("mismatch-vr-strip-laser", Some(Kind::WheelShouldBeOn), None), ("mismatch-vr-strip-noted", None, Some(Kind::MenuShouldBeOff))] {
+        let mut canvas = Canvas::new(strip::PX[0], strip::PX[1]);
+        for _ in 0..2 {
+            canvas.paint(0.0, |p| strip::paint(p, hover, noted));
+        }
+        let path = out.join(format!("{name}.png"));
+        save_png(&path, &over_ground(canvas.pixels(), strip::PX[0], strip::PX[1]))?;
+        println!("{}", path.display());
+    }
+    Ok(())
+}
+
 fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<usize>, sheet: Option<panels::Sheet>) -> anyhow::Result<()> {
     let (w, h) = (client.x as u32, client.y as u32);
     let mut ground = Canvas::new(w, h);

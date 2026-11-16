@@ -207,7 +207,7 @@ impl Floating {
         let was_open = self.panel.is_open();
         let mut turn = Turn::default();
         // The menu mismatch strip shows whenever its switch is on: the moments it is for are those where N4N0's menus are wrong.
-        let strip_on = cx.snap.settings.mismatch.buttons && self.strip.is_some();
+        let strip_on = crate::mismatch::switches(&cx.snap.settings).buttons && self.strip.is_some();
         if !settings.watch && !strip_on && !self.panel.is_shown() && !asked && cx.menu.is_empty() {
             if !self.resting {
                 self.rest(cx.overlay, cx.presenter, state, cx.backend);

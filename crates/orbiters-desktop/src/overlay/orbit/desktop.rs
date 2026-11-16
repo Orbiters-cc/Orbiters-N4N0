@@ -108,8 +108,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         if client.should_close() || !super::wanted_on_desktop(&snap) {
             return Ok(());
         }
-        crate::mismatch::set_on(snap.settings.mismatch.buttons);
-        let mismatch_on = snap.settings.mismatch.buttons;
+        let mismatch_on = crate::mismatch::switches(&snap.settings).buttons;
+        crate::mismatch::set_on(mismatch_on);
         // The corner's clicks: its own, kept apart from the panels'.
         let corner_clicks: Vec<bool> = MOUSE.with(|m| {
             let mut m = m.borrow_mut();
@@ -245,7 +245,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 ("window client size".to_owned(), format!("{} x {}", size.x, size.y)), // i18n: not shown (a menu mismatch report's line)
                 ("Left Alt held".to_owned(), alt_held().to_string()), // i18n: not shown (a menu mismatch report's line)
             ];
-            let picture = if snap.settings.mismatch.picture { screen_picture(origin, size) } else { None };
+            let picture = if crate::mismatch::switches(&snap.settings).picture { screen_picture(origin, size) } else { None };
             crate::mismatch::press(kind, crate::mismatch::Context { surface: "desktop".into(), state, ..Default::default() }, &snap.settings, snap.vrchat.world.log_file.clone(), picture);
         }
         let places = match (open, panel) {
@@ -1108,7 +1108,7 @@ fn placed_at(panel: &Panel, origin: Pos2) -> (Zone, POINT, u8) {
 /// corners), above every window of ours, each pressed with a plain click or with Left Alt and its function key, which also works while VRChat's wheel holds the
 /// pointer at its window's centre. Only its rows take the mouse; a press says Noted on its row for a moment and reports, nothing else.
 #[derive(Default)]
-pub(super) struct Corner {
+pub(crate) struct Corner {
     window: Option<PanelWindow>,
     canvas: Option<crate::overlay::Canvas>,
     px: [u32; 2],
@@ -1121,7 +1121,7 @@ pub(super) struct Corner {
 
 impl Corner {
     /// Its size in its units (pixels of a 720 high window), its margin from the window's edges.
-    pub(super) const SIZE: Vec2 = vec2(268.0, 3.0 * Self::ROW + 2.0 * Self::GAP);
+    pub(crate) const SIZE: Vec2 = vec2(268.0, 3.0 * Self::ROW + 2.0 * Self::GAP);
     const ROW: f32 = 30.0;
     const GAP: f32 = 5.0;
     pub(super) const MARGIN: f32 = 14.0;
@@ -1129,7 +1129,7 @@ impl Corner {
     /// Where it lies in a window of `client` pixels (window pixels), and its zoom: in the bottom left corner, lifted over any part of ours that any of the
     /// menus' layouts puts there (the strip under the Quick Menu in a squarish window), so that it stays in one place for a window's size and covers none of
     /// them. Only a page of ours, open, may lie under it, and it stays above that.
-    pub(super) fn rect(client: Vec2) -> (egui::Rect, f32) {
+    pub(crate) fn rect(client: Vec2) -> (egui::Rect, f32) {
         let zoom = (client.y / 720.0).clamp(0.75, 2.0);
         let size = Self::SIZE * zoom;
         let first = egui::Rect::from_min_size(pos2(Self::MARGIN * zoom, client.y - Self::MARGIN * zoom - size.y), size);
@@ -1234,7 +1234,7 @@ impl Corner {
 }
 
 /// The corner's picture in its units: a row a kind, its words and its keys, the one just pressed saying Noted.
-pub(super) fn paint_corner(p: &egui::Painter, noted: Option<crate::mismatch::Kind>) {
+pub(crate) fn paint_corner(p: &egui::Painter, noted: Option<crate::mismatch::Kind>) {
     use orbiters_ui::theme::{self, weight, Txt};
     for (i, kind) in crate::mismatch::Kind::ALL.into_iter().enumerate() {
         let r = egui::Rect::from_min_size(pos2(0.0, i as f32 * (Corner::ROW + Corner::GAP)), vec2(Corner::SIZE.x, Corner::ROW));

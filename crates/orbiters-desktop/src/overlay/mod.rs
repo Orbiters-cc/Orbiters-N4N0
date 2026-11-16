@@ -296,7 +296,7 @@ fn mismatch_report(kind: crate::mismatch::Kind, steamvr: &vr::Client, snap: &cra
     state.push(("SteamVR's dashboard up".into(), dashboard.to_string())); // i18n: not shown (a menu mismatch report's line)
     state.push(("VRChat shows a scene".into(), scene.to_string())); // i18n: not shown (a menu mismatch report's line)
     state.push(("VRChat's camera open (OSC)".into(), format!("{:?}", snap.camera_open_said))); // i18n: not shown (a menu mismatch report's line)
-    let picture = if snap.settings.mismatch.picture {
+    let picture = if crate::mismatch::switches(&snap.settings).picture {
         let read = orbiters_openvr::mirror::EyeReader::new(steamvr.dxgi_adapter_index())
             .and_then(|reader| reader.read(&steamvr.compositor().map_err(|e| e.to_string())?, orbiters_openvr::compositor::Eye::Left));
         match read {
@@ -1090,7 +1090,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         }
         let button = input_read && actions.menu_pressed(&steamvr);
         // The menu mismatch buttons' switch, and what VRChat and SteamVR say that the menus' rules hang on.
-        crate::mismatch::set_on(snap.settings.mismatch.buttons);
+        crate::mismatch::set_on(crate::mismatch::switches(&snap.settings).buttons);
         crate::mismatch::note_change("vr: VRChat shows a scene, SteamVR's dashboard is up", &mut mismatch_noted.scene, (vrchat_scene, dashboard)); // i18n: not shown (a menu mismatch report's line)
         crate::mismatch::note_change("vrchat: OSC receiving, in a station or seated", &mut mismatch_noted.osc, (snap.osc.receiving, snap.vrchat.motion.map(|m| (m.in_station, m.seated)))); // i18n: not shown (a menu mismatch report's line)
         let mut mismatch_pressed = None;
@@ -1123,6 +1123,15 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 steamvr.poses(vr::Universe::Standing, &mut head);
                 let head = head[0].pose_is_valid.then_some(head[0].device_to_absolute);
                 t.menu.carry(&overlay, turn.menu_moved, turn.menu_released, head.as_ref());
+            }
+        }
+        // In the VR sandbox only (a debug build it started): a press of the strip asked for by a file, for making reports of known cases.
+        if cfg!(debug_assertions) && mismatch_pressed.is_none() && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
+            if let Some(file) = std::env::var_os("ORBITERS_SANDBOX_LOGS").map(|d| std::path::PathBuf::from(d).join("mismatch-press.txt")).filter(|f| f.is_file()) {
+                let asked = std::fs::read_to_string(&file).unwrap_or_default();
+                let _ = std::fs::remove_file(&file);
+                mismatch_pressed = crate::mismatch::Kind::from_key(asked.trim());
+                vr_log::line(&format!("mismatch: the sandbox asked for a press: {asked:?}")); // i18n: not shown (a log's line)
             }
         }
         // The 3D view found SteamVR's overlay slots all taken (Enzo's overlay apps hold many of its 128): the parts around VRChat's menus that

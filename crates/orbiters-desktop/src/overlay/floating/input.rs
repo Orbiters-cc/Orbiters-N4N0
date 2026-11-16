@@ -212,15 +212,16 @@ impl Interaction {
                     consider(Target::Watch, watch.hit(o, d, WATCH_MARGIN_M));
                 }
             }
+            out.lasers[i] = best;
+            // The mismatch strip as the watch: its fingertip near it wins, else a laser on it when nearer than the rest.
             if let Some((_, strip)) = targets.strip.filter(|(on, _)| *on != i) {
                 let (at, gap) = strip.nearest(o);
                 if gap < super::strip::TOUCH_M {
-                    best = Some((Target::Strip, at));
-                } else {
-                    consider(Target::Strip, strip.hit(o, d, 0.0));
+                    out.lasers[i] = Some((Target::Strip, at));
+                } else if let Some(hit) = strip.hit(o, d, 0.0).filter(|h| out.lasers[i].is_none_or(|(_, b)| h.distance < b.distance)) {
+                    out.lasers[i] = Some((Target::Strip, hit));
                 }
             }
-            out.lasers[i] = best;
         }
 
         // A grip with the laser on a surface (or the panel's bar), at the panel's handle or at a surface takes what it

@@ -156,6 +156,23 @@ pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
+/// The switches as a process that draws menus reads them: the settings; in the VR sandbox (a debug build it started), also on while its logs folder
+/// holds `mismatch-on.txt`, so that a test turn does not change the settings other turns read.
+pub fn switches(settings: &orbiters_core::settings::Settings) -> orbiters_core::settings::MismatchSettings {
+    if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
+        static LOOKED: Mutex<Option<(std::time::Instant, bool)>> = Mutex::new(None);
+        let mut looked = LOOKED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if looked.is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(1)) {
+            let on = std::env::var_os("ORBITERS_SANDBOX_LOGS").is_some_and(|d| PathBuf::from(d).join("mismatch-on.txt").is_file());
+            *looked = Some((std::time::Instant::now(), on));
+        }
+        if looked.is_some_and(|(_, on)| on) {
+            return orbiters_core::settings::MismatchSettings { buttons: true, picture: true };
+        }
+    }
+    settings.mismatch
+}
+
 /// Whether the buttons are on, as this process last heard.
 pub fn on() -> bool {
     ON.load(Ordering::Relaxed)

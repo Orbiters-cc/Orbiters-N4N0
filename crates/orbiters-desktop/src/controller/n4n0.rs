@@ -16,7 +16,7 @@ use orbiters_n4n0_core::text::Message;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Weak;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Where N4N0 keeps its files: the app's (its videos and the avatars' states beside the settings). Tests never touch the
 /// person's: theirs go to a folder of their own.
@@ -250,6 +250,28 @@ impl Osc for Link {
     }
 }
 
+/// The N4N0 page's footprint rows from `(name, cpu percent of a core, memory MB)` of every process.
+fn footprint<'a>(processes: impl Iterator<Item = (&'a str, f32, f32)>) -> Vec<ProcessUsage> {
+    let groups: [(&str, &[&str]); 5] = [
+        ("Orbiters - N4N0", &["orbiters-desktop.exe", "orbiters-desktop"]),
+        (mark("Capture worker"), &["orbiters-capture.exe", "orbiters-capture"]),
+        (mark("N4N0's ears"), &["orbiters-voice.exe", "orbiters-voice"]),
+        (mark("Reconstruction"), &["orbiters-reconstruct.exe", "orbiters-reconstruct"]),
+        ("VRChat", &["vrchat.exe", "vrchat"]),
+    ];
+    let processes: Vec<(String, f32, f32)> = processes.map(|(n, c, m)| (n.to_lowercase(), c, m)).collect();
+    let mut usage = Vec::new();
+    for (label, names) in groups {
+        let mut found = processes.iter().filter(|(n, _, _)| names.contains(&n.as_str())).peekable();
+        if found.peek().is_none() {
+            continue;
+        }
+        let (cpu, memory) = found.fold((0.0f32, 0.0f32), |(c, m), p| (c + p.1, m + p.2));
+        usage.push(ProcessUsage { name: tr(label).to_string(), cpu_percent: cpu, memory_mb: memory });
+    }
+    usage
+}
+
 /// When a motion of VRChat's was last handed out only for its speed (milliseconds since 1970), see [`motion_news`].
 static SPEED_HANDED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -290,10 +312,15 @@ impl Controller {
         let ctl = self.clone();
         let _ = std::thread::Builder::new().name("n4n0-resources".into()).spawn(move || {
             let mut system = sysinfo::System::new();
+            let mut before: Option<(Instant, Vec<crate::perf::Raw>)> = None;
             let mut beat = 0u64;
             while !ctl.n4n0.stopped() {
                 if beat.is_multiple_of(3) {
-                    ctl.n4n0_resources(&mut system);
+                    if cfg!(windows) {
+                        ctl.n4n0_resources_scanned(&mut before);
+                    } else {
+                        ctl.n4n0_resources(&mut system);
+                    }
                 }
                 // Where the 3D captures N4N0's menu shows stand (their recording, 3D view and shares).
                 ctl.menu_captures_tick();
@@ -332,33 +359,23 @@ impl Controller {
         self.n4n0.say_quick(text);
     }
 
+    /// [`Controller::n4n0_resources`] from one `NtQuerySystemInformation` call (`perf::scan`) instead of sysinfo's refresh,
+    /// which opened every process: 8 ms a look instead of 61 ms with 494 processes on Enzo's PC, every 3 s whether the
+    /// page shows or not (N-friend-lag, `perf::tests::a_scan_costs_less_than_sysinfo_s_refresh`).
+    fn n4n0_resources_scanned(&self, before: &mut Option<(Instant, Vec<crate::perf::Raw>)>) {
+        let now = Instant::now();
+        let scan = crate::perf::scan();
+        let Some((then, old)) = before.replace((now, scan.clone())) else { return };
+        let used = crate::perf::uses(&old, &scan, now.duration_since(then).as_secs_f32());
+        self.n4n0.set_resources(footprint(used.iter().map(|p| (p.name.as_str(), p.cpu, p.working_mb))));
+    }
+
     /// CPU and memory of Orbiters' processes and VRChat's (the N4N0 page's footprint).
     fn n4n0_resources(&self, system: &mut sysinfo::System) {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
         system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory());
-        let groups: [(&str, &[&str]); 5] = [
-            ("Orbiters - N4N0", &["orbiters-desktop.exe", "orbiters-desktop"]),
-            (mark("Capture worker"), &["orbiters-capture.exe", "orbiters-capture"]),
-            (mark("N4N0's ears"), &["orbiters-voice.exe", "orbiters-voice"]),
-            (mark("Reconstruction"), &["orbiters-reconstruct.exe", "orbiters-reconstruct"]),
-            ("VRChat", &["vrchat.exe", "vrchat"]),
-        ];
-        let mut usage = Vec::new();
-        for (label, names) in groups {
-            let (mut cpu, mut memory, mut any) = (0.0f32, 0u64, false);
-            for p in system.processes().values() {
-                let n = p.name().to_string_lossy().to_lowercase();
-                if names.contains(&n.as_str()) {
-                    any = true;
-                    cpu += p.cpu_usage();
-                    memory += p.memory();
-                }
-            }
-            if any {
-                usage.push(ProcessUsage { name: tr(label).to_string(), cpu_percent: cpu, memory_mb: memory as f32 / (1024.0 * 1024.0) });
-            }
-        }
-        self.n4n0.set_resources(usage);
+        let processes: Vec<(String, f32, f32)> = system.processes().values().map(|p| (p.name().to_string_lossy().into_owned(), p.cpu_usage(), p.memory() as f32 / (1024.0 * 1024.0))).collect();
+        self.n4n0.set_resources(footprint(processes.iter().map(|(n, c, m)| (n.as_str(), *c, *m))));
     }
 }
 
@@ -439,5 +456,16 @@ mod motion_news_tests {
         assert!(motion_news(Some(m(0.05, 1)), AvatarMotion { in_station: true, ..m(0.05, 2) }), "a station at once");
         assert!(!motion_news(Some(m(0.05, 1)), m(0.05, 2)), "the same speed again is nothing new");
         assert!(motion_news(None, m(0.0, 1)), "the first is news");
+    }
+}
+
+#[cfg(test)]
+mod footprint_tests {
+    /// The N4N0 page's footprint groups processes by program, whatever the case of their names, and leaves out absent ones.
+    #[test]
+    fn the_footprint_groups_processes_by_program() {
+        let rows = super::footprint([("orbiters-desktop.exe", 1.5, 100.0), ("Orbiters-Desktop.exe", 0.5, 50.0), ("VRChat.exe", 60.0, 7000.0), ("other.exe", 99.0, 1.0)].into_iter());
+        let got: Vec<(String, f32, f32)> = rows.iter().map(|r| (r.name.clone(), r.cpu_percent, r.memory_mb)).collect();
+        assert_eq!(got, vec![("Orbiters - N4N0".to_string(), 2.0, 150.0), ("VRChat".to_string(), 60.0, 7000.0)]);
     }
 }

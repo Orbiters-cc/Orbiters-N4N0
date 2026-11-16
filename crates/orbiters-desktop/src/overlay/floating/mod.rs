@@ -381,7 +381,7 @@ impl Floating {
         self.mouse.let_go_all(&mut |h, e| overlay.inject_event(h, e));
         self.watch.place(overlay, None, None, 0.0, false);
         if let Some(s) = self.strip.as_mut() {
-            s.place(overlay, None);
+            s.place(overlay, None, None);
         }
         for hand in 0..2 {
             self.lasers.update(overlay, presenter, hand, None);

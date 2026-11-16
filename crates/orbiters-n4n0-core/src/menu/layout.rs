@@ -2895,7 +2895,10 @@ mod tests {
         // An older screen has no States page: it shows its Home; and the six-tile Home's layout is as it was.
         menu.pages = Pages::Six;
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSix);
-        assert_eq!(six.elements.len(), 7, "six tiles and Close, as screens of version 3 and 4 have them");
+        // The assistant's switch on the microphone comes after them (2026-11-16): an older screen has no row for it, every other keeps its index.
+        assert_eq!(six.elements.len(), 8);
+        assert_eq!(six.elements[..7].iter().filter(|e| e.target == Target::Assistant).count(), 0, "six tiles and Close, as screens of version 3 and 4 have them");
+        assert_eq!(six.elements[7].target, Target::Assistant);
         let results = cached(ScreenPage::Results);
         let drops: Vec<usize> = results.elements.iter().enumerate().filter(|(_, e)| matches!(e.target, Target::Drop(_))).map(|(i, _)| i).collect();
         assert_eq!(drops, (13..18).collect::<Vec<_>>(), "Drop comes after every element older screens know, which keep their indices");

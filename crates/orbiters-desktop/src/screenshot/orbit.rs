@@ -867,6 +867,42 @@ pub(super) fn mismatch_shots(out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `--only asktoggle`: the assistant's switch on Ask N4N0's corner (Enzo, 2026-11-16), on and off: the Quick Menu with the wing and with the strip, All tools
+/// and Ask N4N0's page, on the desktop and with a headset's facts; and the wing's and the strip's Ask N4N0 large, at rest, its switch pointed at, the tile
+/// pointed at, as SteamVR gets their pictures.
+pub(super) fn asktoggle_shots(out: &Path) -> anyhow::Result<()> {
+    use panels::{Sheet, TalkNow};
+    let hd = vec2(1280.0, 720.0);
+    let desk = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), ..Default::default() };
+    let vr = Facts { desktop: false, vr_close: true, can_call: true, can_states: true, can_light: true, ..desk.clone() };
+    let strip = |f: &Facts| Facts { orbit: orbiters_core::settings::OrbitSettings { layout: orbiters_core::settings::OrbitLayout::Strip, ..f.orbit }, ..f.clone() };
+    let off = |f: &Facts| Facts { assistant_off: true, ..f.clone() };
+    for (place, base) in [("desk", &desk), ("vr", &vr)] {
+        for (state, facts) in [("on", base.clone()), ("off", off(base))] {
+            qm_scene(&format!("asktoggle-{place}-qm-{state}"), out, hd, &facts, None, None)?;
+            qm_scene(&format!("asktoggle-{place}-qm-strip-{state}"), out, hd, &strip(&facts), None, None)?;
+            qm_scene(&format!("asktoggle-{place}-all-{state}"), out, hd, &Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), beside_wing: true, ..facts.clone() }, None, Some(Sheet::All))?;
+        }
+        let talk = Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk: TalkNow::AssistantOff, beside_wing: true, ..off(base) };
+        qm_scene(&format!("asktoggle-{place}-talk-off"), out, hd, &talk, None, Some(Sheet::Talk))?;
+    }
+    // Large: the tiles alone. Their parts: the tile 0, the band round the switch, the switch last.
+    let big = vec2(3840.0, 2160.0);
+    for (zone, name, facts) in [(Zone::WingTalk, "wing", vr.clone()), (Zone::QmStrip, "strip", strip(&vr))] {
+        let placed = zones::place(zone, big).expect("it fits");
+        let items = panels::items(zone, placed.logical(), &facts);
+        let talk = items.iter().position(|i| i.action == panels::Action::Talk);
+        let switch = items.iter().position(|i| i.action == panels::Action::AssistantSwitch);
+        for (state, facts, hover) in [("on", facts.clone(), None), ("off", off(&facts), None), ("on-point-switch", facts.clone(), switch), ("off-point-switch", off(&facts), switch), ("on-point-tile", facts.clone(), talk)] {
+            let (pixels, px) = picture(&placed, &facts, hover, None);
+            let path = out.join(format!("asktoggle-tile-{name}-{state}.png"));
+            save_png(&path, &over_ground(&pixels, px[0], px[1]))?;
+            println!("{}", path.display());
+        }
+    }
+    Ok(())
+}
+
 fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<usize>, sheet: Option<panels::Sheet>) -> anyhow::Result<()> {
     let (w, h) = (client.x as u32, client.y as u32);
     let mut ground = Canvas::new(w, h);

@@ -263,6 +263,10 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("mismatch") {
         return orbit::mismatch_shots(&out);
     }
+    if only.as_deref() == Some("asktoggle") {
+        orbit::asktoggle_shots(&out)?;
+        return crate::overlay::menu_pages::asktoggle_pictures(&out);
+    }
     if only.as_deref() == Some("worlds-overlay") {
         return worlds_overlay::shots(&out);
     }

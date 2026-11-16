@@ -663,6 +663,16 @@ fn backdrop(p: &Painter, origin: Pos2, layout: &Layout, listening: Option<f64>, 
     }
 }
 
+/// The avatar's screen as near as the overlay can draw it, for review: the page's picture (what its package has) with the texts over it. The
+/// screen's own shader also lights what is hovered, pressed and on, which this leaves out.
+pub fn draw_screen_like(p: &Painter, origin: Pos2, menu: &orbiters_n4n0_core::menu::Menu, skin: &Skin) {
+    let layout = layout::cached(ScreenPage::of(menu));
+    draw_chrome(p, origin, layout, skin);
+    for s in &layout.slots {
+        slot(p, s, &layout::slot_text(menu, s), origin, &skin.palette);
+    }
+}
+
 /// Everything on a page that never changes: what the avatar's screen has as the page's picture.
 pub fn draw_chrome(p: &Painter, origin: Pos2, layout: &Layout, skin: &Skin) {
     backdrop(p, origin, layout, None, skin, false);

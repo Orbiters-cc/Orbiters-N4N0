@@ -4074,6 +4074,7 @@ name = "orbiters-booster"
 version = "0.3.5"
 dependencies = [
  "dirs 6.0.0",
+ "orbiters-version",
  "serde",
  "serde_json",
  "time",
@@ -4092,6 +4093,7 @@ dependencies = [
  "orbiters-core",
  "orbiters-i18n",
  "orbiters-sound",
+ "orbiters-version",
  "rtc",
  "serde",
  "serde_json",
@@ -4112,6 +4114,7 @@ dependencies = [
  "orbiters-i18n",
  "orbiters-openvr",
  "orbiters-spout",
+ "orbiters-version",
  "serde",
  "serde_json",
  "uuid",
@@ -4141,6 +4144,7 @@ dependencies = [
  "orbiters-booster",
  "orbiters-contracts",
  "orbiters-i18n",
+ "orbiters-version",
  "ring",
  "rosc",
  "rusqlite",
@@ -4187,6 +4191,7 @@ dependencies = [
  "orbiters-translate",
  "orbiters-ui",
  "orbiters-update",
+ "orbiters-version",
  "orbiters-web",
  "png",
  "qrcode",
@@ -4332,6 +4337,7 @@ dependencies = [
  "orbiters-core",
  "orbiters-i18n",
  "orbiters-openvr",
+ "orbiters-version",
  "ort",
  "png",
  "rayon",
@@ -4446,6 +4452,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs 6.0.0",
  "orbiters-i18n",
+ "orbiters-version",
  "ring",
  "semver",
  "serde",
@@ -4458,6 +4465,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbiters-version"
+version = "0.3.5"
+
+[[package]]
 name = "orbiters-voice"
 version = "0.3.5"
 dependencies = [
@@ -4467,6 +4478,7 @@ dependencies = [
  "orbiters-core",
  "orbiters-i18n",
  "orbiters-n4n0-core",
+ "orbiters-version",
  "serde",
  "serde_json",
  "sha2 0.10.9",

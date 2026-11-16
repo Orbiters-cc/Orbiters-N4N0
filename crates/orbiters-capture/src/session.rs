@@ -623,7 +623,7 @@ const RAW_DEPTH_FRAMES: u32 = 3;
 
 impl CaptureSession {
     pub fn start(cmd: &StartCapture, source_description: String, folder_hint: &str) -> anyhow::Result<Self> {
-        let mut manifest = SessionManifest::new(uuid::Uuid::new_v4().to_string(), orbiters_core::now_utc_iso(), orbiters_core::APP_VERSION);
+        let mut manifest = SessionManifest::new(uuid::Uuid::new_v4().to_string(), orbiters_core::now_utc_iso(), orbiters_core::app_version());
         manifest.world = cmd.world.clone();
         manifest.consent = cmd.consent.clone();
         manifest.capture.mode = cmd.mode;

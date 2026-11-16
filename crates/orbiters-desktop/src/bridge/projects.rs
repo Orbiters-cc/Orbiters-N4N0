@@ -1308,7 +1308,7 @@ impl Projects {
                 return Ok(outcome);
             }
             if let (Some(avatar), Some(asset)) = (avatar, server.n4n0_gallery_asset_id()) {
-                let r = orbiters_projects::setup::request(avatar, asset, server.api(), env!("CARGO_PKG_VERSION")).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
+                let r = orbiters_projects::setup::request(avatar, asset, server.api(), env!("ORBITERS_VERSION")).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
                 orbiters_projects::setup::write(&path, &r).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
                 outcome["setup_request"] = json!(r.id);
                 outcome["next"] = json!("The Toolkit in Unity adds N4N0 to the avatar and saves the scene: open the project (unity_editor open), then unity_get_job shows the setup's result under result.now.");

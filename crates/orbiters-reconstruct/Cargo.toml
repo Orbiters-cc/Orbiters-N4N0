@@ -10,6 +10,7 @@ name = "orbiters-reconstruct"
 path = "src/main.rs"
 
 [dependencies]
+orbiters-version = { workspace = true }
 orbiters-i18n = { workspace = true }
 orbiters-core = { workspace = true }
 orbiters-contracts = { workspace = true }

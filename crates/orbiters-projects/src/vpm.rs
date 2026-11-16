@@ -70,7 +70,7 @@ pub struct View {
 }
 
 fn http() -> anyhow::Result<reqwest::Client> {
-    Ok(reqwest::Client::builder().user_agent(concat!("Orbiters-N4N0/", env!("CARGO_PKG_VERSION"))).timeout(std::time::Duration::from_secs(90)).build()?)
+    Ok(reqwest::Client::builder().user_agent(format!("Orbiters-N4N0/{}", orbiters_core::app_version())).timeout(std::time::Duration::from_secs(90)).build()?)
 }
 fn gui_config(root: &Path) -> PathBuf {
     root.join("vrc-get/gui-config.json")

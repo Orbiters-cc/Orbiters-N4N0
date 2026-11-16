@@ -136,7 +136,7 @@ pub fn resolve_all_in(cache: &Path, list: &[Sources]) -> Vec<Option<Image>> {
 
 fn client() -> Option<reqwest::Client> {
     reqwest::Client::builder()
-        .user_agent(concat!("Orbiters-N4N0/", env!("CARGO_PKG_VERSION"), " (package icons)"))
+        .user_agent(format!("Orbiters-N4N0/{} (package icons)", orbiters_core::app_version())) // i18n: not shown (a user agent)
         .connect_timeout(Duration::from_secs(6))
         .timeout(Duration::from_secs(12))
         .redirect(reqwest::redirect::Policy::limited(5))

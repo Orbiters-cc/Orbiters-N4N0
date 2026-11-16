@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/orbiters-web", "crates/orbiters-qr", "crates/orbiters-projects", "crates/orbiters-booster", "crates/orbiters-core", "crates/orbiters-i18n", "crates/orbiters-spout", "crates/orbiters-capture", "crates/orbiters-ui", "crates/orbiters-desktop", "crates/orbiters-openvr", "crates/orbiters-reconstruct", "crates/orbiters-sound", "crates/orbiters-n4n0-core", "crates/orbiters-n4n0", "crates/orbiters-n4n0-mobile", "crates/orbiters-audio", "crates/orbiters-voice", "crates/orbiters-call", "crates/orbiters-update", "crates/orbiters-setup", "crates/orbiters-smooth", "crates/orbiters-smooth-driver", "crates/orbiters-translate", "xtask"]
+members = ["crates/orbiters-web", "crates/orbiters-qr", "crates/orbiters-projects", "crates/orbiters-booster", "crates/orbiters-core", "crates/orbiters-i18n", "crates/orbiters-spout", "crates/orbiters-capture", "crates/orbiters-ui", "crates/orbiters-desktop", "crates/orbiters-openvr", "crates/orbiters-reconstruct", "crates/orbiters-sound", "crates/orbiters-n4n0-core", "crates/orbiters-n4n0", "crates/orbiters-n4n0-mobile", "crates/orbiters-audio", "crates/orbiters-voice", "crates/orbiters-call", "crates/orbiters-update", "crates/orbiters-setup", "crates/orbiters-smooth", "crates/orbiters-smooth-driver", "crates/orbiters-translate", "crates/orbiters-version", "xtask"]
 
 [workspace.package]
 version = "0.3.6-dev.7"
@@ -28,6 +28,7 @@ orbiters-reconstruct = { path = "crates/orbiters-reconstruct" }
 # defaults of an entry here.
 orbiters-smooth = { path = "crates/orbiters-smooth" }
 orbiters-translate = { path = "crates/orbiters-translate" }
+orbiters-version = { path = "crates/orbiters-version" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

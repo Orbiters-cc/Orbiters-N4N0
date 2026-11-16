@@ -56,7 +56,8 @@ const HOOK_RETRY_MS: u64 = 1000;
 const WALK_WRITER_CHECK_MS: u64 = 500;
 
 /// The crate version, reported in the control block's heartbeat.
-const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+// The release's version (`.cargo/config.toml` [env], set by `cargo xtask bump`): this DLL is a program of its own.
+const DRIVER_VERSION: &str = env!("ORBITERS_VERSION");
 
 /// Everything the driver keeps. One instance, [`STATE`]. The pose hook touches only the lock-free parts (the
 /// settings cache, the filter bank and the counters); the rest is set up in `Init`/`RunFrame` and torn down in

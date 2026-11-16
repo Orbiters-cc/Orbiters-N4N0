@@ -9,6 +9,7 @@ publish.workspace = true
 test-support = []
 
 [dependencies]
+orbiters-version = { workspace = true }
 orbiters-i18n = { workspace = true }
 orbiters-booster = { workspace = true }
 orbiters-contracts = { workspace = true }

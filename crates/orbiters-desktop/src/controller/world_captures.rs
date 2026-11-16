@@ -446,7 +446,7 @@ fn status(
         schema: SCHEMA,
         world_id: world.to_string(),
         updated_utc: String::new(),
-        app: format!("Orbiters - N4N0 {}", orbiters_core::APP_VERSION),
+        app: format!("Orbiters - N4N0 {}", orbiters_core::app_version()),
         signed_in: matches!(snapshot.account.state, AccountState::SignedIn { .. }),
         development: Server::current() == Server::Development,
         captures,

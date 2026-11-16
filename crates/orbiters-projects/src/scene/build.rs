@@ -561,7 +561,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     report.ms = start.elapsed().as_secs_f64() * 1000.0;
     let header = Header {
         written_utc: now_utc(),
-        generator: format!("Orbiters - N4N0 {} (from the project's files)", env!("CARGO_PKG_VERSION")), // i18n: not shown (a stored name or detail of the scene file)
+        generator: format!("Orbiters - N4N0 {} (from the project's files)", orbiters_core::app_version()), // i18n: not shown (a stored name or detail of the scene file)
         unity: unity_version(project),
         scene: file::Scene { name: scene.name.clone(), path: prefab::rel(assets, &scene.path), guid: scene.guid.clone() },
         kind,

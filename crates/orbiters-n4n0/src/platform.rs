@@ -169,7 +169,7 @@ pub trait Host: Send + Sync + 'static {
     }
     /// The app's version, which N4N0's menu shows and suggestions carry.
     fn app_version(&self) -> String {
-        orbiters_core::APP_VERSION.into()
+        orbiters_core::app_version().into()
     }
     /// Opens a video's link (http or https) on the device, to watch it there.
     fn watch(&self, _link: &str) -> Result<(), String> {

@@ -162,7 +162,7 @@ pub struct State {
 /// (L-no-thumbnails): two worlds, private uploads and one public per world, each with its picture on Orbiters.
 fn server_only_feed(template: &orbiters_core::shares::Item) -> Vec<orbiters_core::shares::Item> {
     use orbiters_core::shares;
-    let worlds = [("wrld_6f3c1a8e-2b1d-4c55-9f00-3a5e8d7c1b21", "Audience Anarchy"), ("wrld_0a9d7e2c-5f4b-4e1a-8c3d-7b6a5f4e3d21", "Freddy's Custom Pizzeria 2.0")];
+    let worlds = [("wrld_6f3c1a8e-2b1d-4c55-9f00-3a5e8d7c1b21", "Audience Anarchy"), ("wrld_0a9d7e2c-5f4b-4e1a-8c3d-7b6a5f4e3d21", "Freddy's Custom Pizzeria 2.0")]; // i18n: not shown (VRChat world names: data, never translated)
     let made = [(66, 0, true, "2026-11-15T12:27:33.000Z"), (65, 0, false, "2026-11-15T12:26:56.000Z"), (61, 1, true, "2026-11-15T12:24:21.000Z"), (62, 1, false, "2026-11-15T12:24:40.000Z"), (64, 1, false, "2026-11-15T12:23:08.000Z"), (63, 1, false, "2026-11-15T12:22:47.000Z")];
     made.into_iter()
         .map(|(id, world, public, taken)| {

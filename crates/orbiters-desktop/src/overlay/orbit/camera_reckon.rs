@@ -10,7 +10,7 @@
 //! - **Grab.** A grip pressed (as VRChat's own binding clicks it: `vrchat_grip`) with VRChat's grab point ([`GRAB_POINT`], beside the
 //!   controller, towards the palm) within [`GRAB_REACH_M`] of the panel's box ([`GRAB_BOX`], VRChat's own pickup box) takes it; it then moves rigidly with that controller (measured 2 mm, 2.5 degrees) until that grip is let go, and stays where it
 //!   was let go. A grip pressed by the other hand while one holds it does nothing, and it does not pass to that hand when the first lets go
-//!   (a new press is needed). Its camera modes do not move it.
+//!   (a new press is needed). Both grips pressed in the same frame: the right hand takes it. Its camera modes do not move it.
 //! - **Close.** Its X closes it; VRChat's laser from the controller points [`LASER_DOWN_DEG`] below the controller's −Z. A trigger pressed while
 //!   that laser is on the X is seen here ([`Reckon::step`]), with no overlay over VRChat's button, so VRChat gets its click whole.
 
@@ -186,6 +186,8 @@ pub fn on_close(panel: &Matrix34, panel_unit: f32, hand: &Matrix34) -> bool {
 pub struct Happened {
     pub taken: Option<usize>,
     pub let_go: Option<usize>,
+    /// The other hand pressed its grip while one held it (or in the frame it let go): VRChat ignores that press, and so does this.
+    pub ignored: Option<usize>,
     /// A trigger was pressed on its X: VRChat closes its camera panel (in stream mode its camera may stay on, and OSC then says nothing).
     pub closed: bool,
     /// A trigger pressed (hand), and where the laser this assumes for VRChat landed on the panel then, in its units (the X is at [`PANEL_X`]).
@@ -253,8 +255,16 @@ impl Reckon {
                 self.at = Some(room);
                 happened.let_go = Some(hand);
             }
+            // The other hand's press while one holds it does nothing, in VRChat as here; it is told, for the log.
+            let other = 1 - hand;
+            if grips[other] && !was_grips[other] {
+                happened.ignored = Some(other);
+            }
         } else {
-            for hand in 0..2 {
+            // Both grips pressed in the same frame: VRChat gives it to the right hand, wherever the hands are (sandbox 2026-11-16, 10 of 11
+            // tries, the left 0 to 12 cm nearer its middle). Ours gave it to the left: VRChat's panel then went with one hand and the tools
+            // with the other, and stayed so until the camera was reopened (Enzo: "on our camera overlay it does grab the overlay").
+            for hand in [1, 0] {
                 if grips[hand] && !was_grips[hand] {
                     if let Some(pose) = hands[hand].filter(|pose| within_grab(&room, pose, hand)) {
                         self.held = Some(hand);
@@ -387,7 +397,7 @@ mod tests {
         assert_eq!(reckon.step([near(-0.1), near(0.0)], [false, true], [false; 2]).1.taken, Some(1));
         // The left grips too, while the right holds: nothing; the left moving does not move it.
         let (a, h) = reckon.step([near(-0.1), near(0.0)], [true, true], [false; 2]);
-        assert_eq!(h.taken, None);
+        assert_eq!((h.taken, h.ignored), (None, Some(0)), "told as ignored, for the log");
         let (b, _) = reckon.step([near(-0.3), near(0.0)], [true, true], [false; 2]);
         assert!(apart(&a.unwrap(), &b.unwrap()) < 1e-6);
         // The right lets go: it stays, and the left (still gripping) does not get it.
@@ -395,6 +405,57 @@ mod tests {
         let (c, _) = reckon.step([near(-0.5), near(0.0)], [true, false], [false; 2]);
         assert!(apart(&b.unwrap(), &c.unwrap()) < 1e-6);
         assert_eq!(reckon.held_hand(), None);
+    }
+
+    /// Every two-hand sequence measured on VRChat's real panel in the sandbox (2026-11-16, `testdata_camera/sandbox-2026-11-16/hands.json`):
+    /// replayed through VRChat's grip thresholds as Enzo's binding has them and this reckoning, each hand's move must carry the panel
+    /// exactly when it carried VRChat's. Before this change the same-frame presses gave it to the left hand, where VRChat gave it to the right.
+    #[test]
+    fn two_hands_take_and_leave_it_as_vrchat_did() {
+        use super::super::vrchat_grip::{Grips, STEAMVR_CLICK, VRCHAT_SHIPPED};
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/sandbox-2026-11-16/hands.json");
+        let data: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let panel = m(&data["panel"]);
+        let (side, up, nz) = (column(&panel, 0), column(&panel, 1), column(&panel, 2));
+        let along = |v: &Value| -> [f32; 3] { let c = |i: usize| v[i].as_f64().unwrap() as f32; std::array::from_fn(|i| side[i] * c(0) + up[i] * c(1) + nz[i] * c(2)) };
+        let clicks = [Some(VRCHAT_SHIPPED), Some(STEAMVR_CLICK)];
+        let sequences = data["sequences"].as_array().unwrap();
+        assert!(sequences.len() >= 20);
+        let mut moves = 0;
+        for sequence in sequences {
+            let name = sequence["name"].as_str().unwrap();
+            let offsets = [sequence["offsets"][0].as_f64().unwrap() as f32, sequence["offsets"][1].as_f64().unwrap() as f32];
+            let front = add(add(column(&panel, 3), nz.map(|v| v * 0.05)), up.map(|v| v * -0.02));
+            let mut at = [add(front, side.map(|v| -v * offsets[0])), add(front, side.map(|v| v * offsets[1]))];
+            let level = |p: [f32; 3]| Matrix34 { m: std::array::from_fn(|i| { let mut r = [0.0; 4]; r[i] = 1.0; r[3] = p[i]; r }) };
+            let (mut grips, mut reckon, mut pulls) = (Grips::default(), Reckon::lying_at(panel), [0.0f32; 2]);
+            let mut step = |at: &[[f32; 3]; 2], pulls: [f32; 2]| {
+                let held = grips.step(pulls.map(Some), clicks, [false; 2]);
+                reckon.step([Some(level(at[0])), Some(level(at[1]))], held, [false; 2]).0.unwrap()
+            };
+            let mut now = step(&at, pulls);
+            for s in sequence["steps"].as_array().unwrap() {
+                if let Some(set) = s["pull"].as_object() {
+                    for (hand, value) in set {
+                        pulls[if hand == "left" { 0 } else { 1 }] = value.as_f64().unwrap() as f32;
+                    }
+                    now = step(&at, pulls);
+                } else if s.get("frame").is_some() {
+                    now = step(&at, pulls);
+                } else {
+                    let hand = if s["move"] == "left" { 0 } else { 1 };
+                    let by = along(&s["by"]);
+                    at[hand] = add(at[hand], by);
+                    let after = step(&at, pulls);
+                    let moved = sub(column(&after, 3), column(&now, 3));
+                    let ours = if dot(sub(moved, by), sub(moved, by)).sqrt() < 0.002 { "followed" } else if dot(moved, moved).sqrt() < 0.001 { "stayed" } else { "other" };
+                    assert_eq!(ours, s["vrchat"].as_str().unwrap(), "{name}: the {} hand moved", s["move"]);
+                    now = after;
+                    moves += 1;
+                }
+            }
+        }
+        assert!(moves >= 50, "{moves}");
     }
 
     #[test]

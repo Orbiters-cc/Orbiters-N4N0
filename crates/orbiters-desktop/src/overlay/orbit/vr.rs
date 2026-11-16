@@ -902,7 +902,7 @@ impl OrbitVr {
             super::super::vr_log::line(&format!("camera reckon: {happened:?}, grips {grips:?}, pulls {pulls:?}, triggers {triggers:?}, predicted {:.1} ms", prediction * 1000.0)); // i18n: not shown (diagnostics)
             if sandbox {
                 // When each take and let-go was seen, against the sandbox's commanded input times (same clock: QueryPerformanceCounter).
-                let line = serde_json::json!({ "ns": orbiters_core::clock::now_ns(), "prediction_s": prediction, "taken": happened.taken, "let_go": happened.let_go, "ignored": happened.ignored, "grips": grips, "pulls": pulls, "hands": hands.map(|h| h.map(|h| h.m)), "panel": frame.map(|f| f.m) });
+                let line = serde_json::json!({ "ns": orbiters_core::clock::now_ns(), "prediction_s": prediction, "taken": happened.taken, "let_go": happened.let_go, "ignored": happened.ignored, "passed_from": happened.passed_from, "grips": grips, "pulls": pulls, "hands": hands.map(|h| h.map(|h| h.m)), "panel": frame.map(|f| f.m) });
                 if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(orbiters_core::paths::logs_dir().join("camera-events.jsonl")) {
                     use std::io::Write;
                     let _ = writeln!(file, "{line}");
@@ -1869,6 +1869,9 @@ impl OrbitVr {
         let triggers = cx.actions.orbit_triggers(cx.steamvr, self.block.blocked());
         // Where each part is seen, smoothed or on its spring, and not where it is going: a pointer on what it sees is on it.
         let where_seen: Vec<(Quad, Placed)> = quads.iter().zip(self.panels.all()).zip(&placing).map(|((q, p), place)| (seen_at(q.0, place, p.shown), q.1)).collect();
+        // VRChat's camera panel, while our tools stand around it: a laser by its X is VRChat's alone (`camera_reckon::by_the_close`).
+        let camera_panel = self.plane.filter(|_| menu == Some(Around::Camera));
+        let mut by_the_x = [false; 2];
         let hits: [Option<(usize, [f32; 2], space::Hit)>; 2] = std::array::from_fn(|i| {
             // The hand that holds the menu points at nothing.
             if matches!(open, Open::Wheel(h) | Open::QuickMenu(h) if h == i) {
@@ -1876,9 +1879,19 @@ impl OrbitVr {
             }
             lasers[i].and_then(|tip| {
                 let (o, d) = space::ray(&tip);
-                laser_on(&where_seen, o, d)
+                let hit = laser_on(&where_seen, o, d)?;
+                if camera_panel.is_some_and(|c| Zone::CAMERA.contains(&where_seen[hit.0].1.zone) && super::camera_reckon::by_the_close(&c.frame, c.unit, o, d)) {
+                    by_the_x[i] = true;
+                    return None;
+                }
+                Some(hit)
             })
         });
+        for hand in 0..2 {
+            if by_the_x[hand] && triggers[hand] != self.trigger_was[hand] && triggers[hand] {
+                super::super::vr_log::line(&format!("laser: {} pressed by VRChat's camera X, left to VRChat (our camera tools took nothing)", if hand == 0 { "left" } else { "right" })); // i18n: not shown (a log's line)
+            }
+        }
         // What each hand's stick does where its laser is: moves in the 3D capture lying in the page's hole, or flips the captures on its side panel (K-small-stick, K-carousel).
         let stick_spots: [Option<super::super::worlds::panel::StickSpot>; 2] = std::array::from_fn(|i| hits[i].and_then(|(panel, uv, _)| self.panels.stick_spot(panel, uv)));
         let hands: [HandNow; 2] = std::array::from_fn(|i| HandNow { on_panel: hits[i].is_some(), trigger: triggers[i] });

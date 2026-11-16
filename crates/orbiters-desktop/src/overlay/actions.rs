@@ -10,6 +10,7 @@ use orbiters_i18n::tr;
 use orbiters_n4n0::input::{Pad, Pads};
 use orbiters_openvr::input::{ActionHandle, ActionSetHandle, ActiveSet, OVERLAY_GLOBAL_PRIORITY_MIN};
 use orbiters_openvr::{self as vr};
+use super::floating::space;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -421,6 +422,9 @@ pub struct Actions {
     /// The manifest could not be loaded: why (said once).
     pub failed: Option<Unavailable>,
     menu_down: bool,
+    /// Each hand's controller (left, right), and whether VRChat's Touch laser is the one to point with on it ([`laser_follows_vrchat`]),
+    /// as last asked of SteamVR: its controller type is read once per device, not every frame.
+    laser_kinds: std::sync::Mutex<[Option<(u32, bool)>; 2]>,
 }
 
 /// Why SteamVR's input could not be set up. SteamVR's error stays a code and is put into words where it is drawn
@@ -523,10 +527,11 @@ impl Actions {
                 sets: vec![walk.set, menu.0, avatar, panel, orbit_set, grip_set],
                 failed: None,
                 menu_down: false,
+                laser_kinds: Default::default(),
             },
             Err(e) => {
                 eprintln!("SteamVR actions unavailable: {e}");
-                Self { walk: None, menu: None, taps: Taps::default(), presses: None, press_down: [false; 2], pads: None, panel: None, orbit: None, grip: None, blocked: [false; 2], small_view: None, sticks_taken: [false; 2], sets: Vec::new(), failed: Some(e), menu_down: false }
+                Self { walk: None, menu: None, taps: Taps::default(), presses: None, press_down: [false; 2], pads: None, panel: None, orbit: None, grip: None, blocked: [false; 2], small_view: None, sticks_taken: [false; 2], sets: Vec::new(), failed: Some(e), menu_down: false, laser_kinds: Default::default() }
             }
         }
     }
@@ -632,14 +637,49 @@ impl Actions {
         self.press_down
     }
 
-    /// Each hand's laser (left, right): its controller's tip in the standing play space, its −Z the way it points, as
-    /// SteamVR predicts it `seconds` from now. `None` for a hand whose tip is not bound or not tracked.
+    /// Each hand's laser (left, right) in the standing play space, its −Z the way it points, as SteamVR predicts it `seconds` from now.
+    /// `None` for a hand whose tip is not bound or not tracked.
+    ///
+    /// On Touch controllers it is VRChat's own laser ([`space::vrchat_touch_laser`] from the controller's pose), so that ours lands where
+    /// VRChat's does (Enzo, 2026-11-16, picture D: our laser ended 4-5 cm left of and above VRChat's, on our "3D of people" beside VRChat's
+    /// close X). On other controllers VRChat's laser was not measured: the tip SteamVR gives (`/pose/tip`) stays.
     pub fn lasers(&self, steamvr: &vr::Client, seconds: f32) -> [Option<vr::Matrix34>; 2] {
         let (Some((lasers, _)), Ok(input)) = (self.panel, steamvr.input()) else { return [None; 2] };
-        lasers.map(|action| {
-            let data = input.pose(action, vr::Universe::Standing, seconds).ok()?;
-            (data.active && data.pose.pose_is_valid).then_some(data.pose.device_to_absolute)
-        })
+        let mut devices: Option<Box<[vr::Pose; vr::MAX_DEVICES]>> = None;
+        let roles = [vr::ControllerRole::LeftHand, vr::ControllerRole::RightHand];
+        let mut out = [None; 2];
+        for hand in 0..2 {
+            let Ok(data) = input.pose(lasers[hand], vr::Universe::Standing, seconds) else { continue };
+            if !(data.active && data.pose.pose_is_valid) {
+                continue;
+            }
+            let tip = data.pose.device_to_absolute;
+            let raw = steamvr.controller_index(roles[hand]).filter(|&d| (d as usize) < vr::MAX_DEVICES && self.follows_vrchat(steamvr, hand, d)).and_then(|d| {
+                let poses = devices.get_or_insert_with(|| {
+                    let mut poses = Box::new([vr::Pose::default(); vr::MAX_DEVICES]);
+                    steamvr.predicted_poses(vr::Universe::Standing, seconds, &mut poses);
+                    poses
+                });
+                let pose = poses[d as usize];
+                pose.pose_is_valid.then_some(pose.device_to_absolute)
+            });
+            out[hand] = Some(raw.map_or(tip, |raw| space::vrchat_touch_laser(&raw)));
+        }
+        out
+    }
+
+    /// Whether this hand's controller (`device`) points with VRChat's Touch laser, read once per device.
+    fn follows_vrchat(&self, steamvr: &vr::Client, hand: usize, device: u32) -> bool {
+        let Ok(mut kinds) = self.laser_kinds.lock() else { return false };
+        match kinds[hand] {
+            Some((known, follows)) if known == device => follows,
+            _ => {
+                let kind = steamvr.string_property(device, vr::prop::CONTROLLER_TYPE);
+                let follows = laser_follows_vrchat(kind.as_deref());
+                kinds[hand] = Some((device, follows));
+                follows
+            }
+        }
     }
 
     /// Missing/inactive action data is unknown, distinct from a released grip.
@@ -659,6 +699,13 @@ impl Actions {
         let (Some((_, grabs)), Ok(input)) = (self.panel, steamvr.input()) else { return [false; 2] };
         grabs.map(|action| input.digital(action).is_ok_and(|d| d.active && d.state))
     }
+}
+
+/// Whether a controller of this SteamVR type points with VRChat's laser as measured on Touch controllers ([`space::VRCHAT_TOUCH_LASER_DOWN_DEG`]).
+/// Measured: `oculus_touch` (the type Quest, Quest Pro and Rift controllers have in SteamVR, through Virtual Desktop, Steam Link or Oculus
+/// Link alike). Not measured, so they keep SteamVR's tip: Index (`knuckles`), Vive wands (`vive_controller`), WMR, Cosmos, Focus 3 and the rest.
+pub fn laser_follows_vrchat(controller_type: Option<&str>) -> bool {
+    controller_type == Some("oculus_touch")
 }
 
 /// The set that takes a trigger from VRChat, for each hand blocked and that hand only: the other keeps its trigger.
@@ -770,6 +817,15 @@ fn pad(position: Option<(f32, f32)>, touch: bool, click: bool, force: Option<f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Touch controllers point with VRChat's measured laser; the others keep SteamVR's tip (not measured).
+    #[test]
+    fn only_touch_controllers_follow_vrchats_laser() {
+        assert!(laser_follows_vrchat(Some("oculus_touch")));
+        for other in [Some("knuckles"), Some("vive_controller"), Some("holographic_controller"), Some("vive_cosmos_controller"), None] {
+            assert!(!laser_follows_vrchat(other), "{other:?}");
+        }
+    }
 
     #[test]
     fn a_steamvr_input_error_is_put_into_the_language_it_is_drawn_in() {

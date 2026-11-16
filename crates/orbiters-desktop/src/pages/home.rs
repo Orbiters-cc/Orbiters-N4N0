@@ -1197,6 +1197,24 @@ fn suggest(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
             acts.push(Act::Press(Target::SuggestSend));
         }
     });
+    // The beta's menu mismatch buttons, the same setting as Settings › Beta feedback's switch (Enzo, 2026-11-16).
+    if let Some(on) = menu.mismatch_buttons {
+        ui.add_space(12.0);
+        section(ui, cx, 2, icons::CHAT_CIRCLE_TEXT, tr("Beta feedback"), None, |ui| {
+            widgets::field(
+                ui,
+                tr("Menu mismatch buttons"),
+                Some(tr("Three buttons, on your wrist in VR and in a corner of VRChat's window on the desktop, to press when N4N0's menus do not match VRChat's; each press keeps a report on this computer, never what you type or say.")),
+                48.0,
+                |ui| {
+                    let mut shown = on;
+                    if widgets::toggle(ui, "home-mismatch-buttons", &mut shown) {
+                        acts.push(Act::Press(Target::MismatchButtons));
+                    }
+                },
+            );
+        });
+    }
 }
 
 /// The QR code scanner: what it does now (VRChat's stream camera is read while this page shows), how to turn the stream

@@ -560,13 +560,15 @@ mod tests {
         assert!(!out.watch_hover && !out.watch_press);
     }
 
-    /// The menu mismatch strip on the left wrist, beside the watch: the right hand presses one of its rows by laser or fingertip, the left
+    /// The menu mismatch strip on the left wrist, over the watch: the right hand presses one of its rows by laser or fingertip, the left
     /// hand's own laser does nothing on it, and the press says which row (its v) whatever N4N0's menu does.
     #[test]
     fn the_other_hand_presses_a_row_of_the_mismatch_strip() {
         use super::super::strip;
         let watch = Quad { transform: facing([-0.2, 1.2, -0.3], [0.0, 1.6, 0.0], [0.0, 1.0, 0.0]).unwrap(), width: 0.045, height: 0.045 };
-        let band = Quad { transform: space::offset(&watch.transform, [strip::BESIDE_M, 0.0, 0.0]), width: strip::WIDTH_M, height: strip::height_m() };
+        // Just over the watch as the eyes see it, facing them (`space::over_watch`).
+        let rise = 0.045 / 2.0 + strip::GAP_M + strip::height_m() / 2.0;
+        let band = Quad { transform: space::offset(&watch.transform, [0.0, rise, strip::LIFT_M]), width: strip::WIDTH_M, height: strip::height_m() };
         let t = Targets { watch: Some((0, watch)), strip: Some((0, band)), ..Default::default() };
         // The last row (Quick menu should be on), by the right hand's laser.
         let row = space::apply(&band.transform, [0.0, -band.height / 3.0, 0.0]);

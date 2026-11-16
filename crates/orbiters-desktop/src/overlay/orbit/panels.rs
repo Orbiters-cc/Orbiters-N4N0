@@ -259,6 +259,8 @@ pub enum Action {
     WorldInfo(usize),
     /// The computer's volume up or down, and muted or not.
     Volume(bool),
+    /// The volume's level, grabbed and dragged along as the timeline is (Enzo, 2026-11-16): where the pointer is.
+    VolumeBar,
     Mute,
     /// A microphone made Windows' default.
     MicDefault(usize),
@@ -2001,10 +2003,29 @@ const PLAYING_LINK_H: f32 = 42.0;
 
 /// Where the volume's level lies between its minus and its plus: its thumb (8 across its middle) stays clear of both at 0 and at 100 (IMG1: on the minus).
 fn volume_bar(panel: Rect) -> Rect {
-    const THUMB: f32 = 8.0;
+    volume_bar_in(volume_grab(panel))
+}
+
+/// The level's own room inside where it is grabbed.
+const VOLUME_INSET: f32 = 8.0 + 5.0;
+
+/// Where the volume's level is grabbed: all between its minus and its plus, as tall as they are.
+fn volume_grab(panel: Rect) -> Rect {
     let right = panel.right() - 16.0;
     let (minus_right, plus_left) = (right - VOLUME_BUTTON - VOLUME_TRACK, right - VOLUME_BUTTON);
-    Rect::from_min_max(pos2(minus_right + THUMB + 5.0, panel.top() + VOLUME_ROW - 3.5), pos2(plus_left - THUMB - 5.0, panel.top() + VOLUME_ROW + 3.5))
+    Rect::from_min_max(pos2(minus_right, panel.top() + VOLUME_ROW - VOLUME_BUTTON / 2.0), pos2(plus_left, panel.top() + VOLUME_ROW + VOLUME_BUTTON / 2.0))
+}
+
+fn volume_bar_in(grab: Rect) -> Rect {
+    Rect::from_min_max(pos2(grab.left() + VOLUME_INSET, grab.center().y - 3.5), pos2(grab.right() - VOLUME_INSET, grab.center().y + 3.5))
+}
+
+/// The volume (0 to 100) where the pointer is at `x` along Now playing's level, as [`timeline_fraction`] is for what plays; none without a
+/// level to set.
+pub fn volume_at(facts: &Facts, x: f32) -> Option<u8> {
+    let rect = sheet_items(Sheet::All, facts).into_iter().find(|i| i.action == Action::VolumeBar)?.rect;
+    let bar = volume_bar_in(rect);
+    Some((((x - bar.left()) / bar.width().max(1.0)).clamp(0.0, 1.0) * 100.0).round() as u8)
 }
 
 /// Where Now playing's words and controls start, after its picture: the picture as high as the panel where that leaves the row of controls its room (previous, play, next,
@@ -2046,6 +2067,8 @@ fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
         out.push(Item { action: Action::Volume(true), rect: top(right - b, b), look: Look::Transport(icons::PLUS) });
         out.push(Item { action: Action::Volume(false), rect: top(right - b - VOLUME_TRACK - b, b), look: Look::Transport(icons::MINUS) });
         out.push(Item { action: Action::Mute, rect: top(right - b - VOLUME_TRACK - b - 44.0, b), look: Look::Transport(if muted { icons::SPEAKER_X } else { icons::SPEAKER_HIGH }) });
+        // Its level, grabbed and dragged as the timeline is (drawn with the card).
+        out.push(Item { action: Action::VolumeBar, rect: volume_grab(panel), look: Look::Blank });
     }
     out
 }
@@ -2334,6 +2357,8 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
             (if up { tr("Louder") } else { tr("Quieter") }.into(), tr!("Only {app}'s volume: other sounds stay as they are.", app = facts.music_app))
         }
         Action::Mute if !facts.music_app.is_empty() => (tr("Mute").into(), tr!("Only {app}'s sound, on or off.", app = facts.music_app)),
+        Action::VolumeBar if !facts.music_app.is_empty() => (tr("Volume").into(), tr!("Only {app}'s volume: other sounds stay as they are.", app = facts.music_app)),
+        Action::VolumeBar => (tr("Volume").into(), tr("Your computer's volume.").into()),
         Action::Volume(up) => (if up { tr("Louder") } else { tr("Quieter") }.into(), tr("Your computer's volume.").into()),
         Action::Mute => (tr("Mute").into(), tr("Your computer's sound, on or off.").into()),
         Action::Pictures => (tr("Pictures").into(), tr("Take a 3D picture, record a scene, see your captures.").into()),
@@ -5370,6 +5395,19 @@ mod tests {
         assert!(!items.iter().any(|i| matches!(i.action, Action::Volume(_) | Action::Mute)));
         let timeline = |facts: &Facts| sheet_items(Sheet::All, facts).into_iter().find(|i| matches!(i.look, Look::Timeline)).unwrap().rect;
         assert_eq!(timeline(&unfound), timeline(&app), "the volume's place kept");
+        // Its level is grabbed and dragged as the timeline is (Enzo, 2026-11-16): between its minus and its plus, on none of the card's other controls, its
+        // ends 0 and 100 where its thumb is drawn there; none where there is no volume.
+        let items = sheet_items(Sheet::All, &app);
+        let grab = items.iter().find(|i| i.action == Action::VolumeBar).expect("its level takes the pointer").rect;
+        for other in items.iter().filter(|i| matches!(i.action, Action::Volume(_) | Action::Mute | Action::Timeline | Action::PlayingLink(_))) {
+            assert!(!other.rect.intersects(grab.shrink(0.5)), "{:?} on the level", other.action);
+        }
+        assert!(grab.height() >= 36.0 && grab.width() >= 70.0, "large enough for a laser: {grab:?}");
+        let bar = volume_bar_in(grab);
+        assert_eq!((volume_at(&app, bar.left()), volume_at(&app, bar.center().x), volume_at(&app, bar.right())), (Some(0), Some(50), Some(100)));
+        assert_eq!((volume_at(&app, grab.left() - 40.0), volume_at(&app, grab.right() + 40.0)), (Some(0), Some(100)), "held past its ends");
+        assert_eq!(volume_at(&unfound, 300.0), None);
+        assert!(caption(Action::VolumeBar, &app).unwrap().1.contains("Chrome"));
     }
 
     #[test]

@@ -234,6 +234,57 @@ pub fn on_wrist(right: bool) -> Matrix34 {
     from_axes(x, cross(z, x), z, [side * 0.035, -0.035, 0.18])
 }
 
+/// The eyes' place and their up (the head's +Y), in the space of `grip`, a controller's pose: what the wrist's parts turn to.
+pub fn eyes_in(grip: &Matrix34, head: &Matrix34) -> (V3, V3) {
+    let inv = inverse(grip);
+    (apply(&inv, position(head)), rotate(&inv, axis(head, 1)))
+}
+
+/// Eyes for when SteamVR gives no head pose: 40 cm before the watch's face, its top up, so the wrist's parts keep the
+/// place [`on_wrist`] gives them.
+pub fn eyes_before_watch(right: bool) -> (V3, V3) {
+    let w = on_wrist(right);
+    (apply(&w, [0.0, 0.0, 0.4]), axis(&w, 1))
+}
+
+/// `m` turned about its own +Z (its face stays where it looks) so that its picture's top is `up` as far as it can be.
+///
+/// The watch's frame ([`on_wrist`]) takes its top from the controller's +Y, the thumb's side: right way up while the
+/// hand is held thumb up, as the sandbox's emulated arm was, but upside down for the pose people look at a watch in,
+/// palm down with the thumb towards the chest (Enzo's headset, 2026-11-16). Turned to the eyes' up it reads right way up
+/// whatever way the wrist is turned.
+pub fn upright(m: &Matrix34, up: V3) -> Matrix34 {
+    let z = axis(m, 2);
+    match unit(sub(up, scale(z, dot(up, z)))) {
+        Some(y) => from_axes(cross(y, z), y, z, position(m)),
+        None => *m,
+    }
+}
+
+/// The watch on the `right` wrist or the left, in its controller's space, its face's top turned to `up` (the eyes' up
+/// in that space, [`eyes_in`]).
+pub fn watch_upright(right: bool, up: V3) -> Matrix34 {
+    upright(&on_wrist(right), up)
+}
+
+/// A quad `height` tall that faces `eyes` (in the controller's space, as `up`), just over the watch as the eyes see it:
+/// its picture's top is the eyes' up, it stands `gap` clear of the watch's disc and `lift` before the wrist towards the
+/// eyes (never in the arm, never on the watch). The menu mismatch strip's place.
+pub fn over_watch(right: bool, eyes: V3, up: V3, height: f32, gap: f32, lift: f32) -> Matrix34 {
+    let w = on_wrist(right);
+    let face = |at: V3| {
+        let z = unit(sub(eyes, at)).unwrap_or(axis(&w, 2));
+        let y = unit(sub(up, scale(z, dot(up, z)))).or_else(|| unit(sub(axis(&w, 1), scale(z, dot(axis(&w, 1), z))))).unwrap_or([0.0, 1.0, 0.0]);
+        (cross(y, z), y, z)
+    };
+    let watch = position(&w);
+    let (_, y, z) = face(watch);
+    let rise = super::watch::WIDTH_M / 2.0 + gap + height / 2.0;
+    let at = add(add(watch, scale(y, rise)), scale(z, lift));
+    let (x, y, z) = face(at);
+    from_axes(x, y, z, at)
+}
+
 /// How much the watch shows (0 to 1), as XSOverlay's wrist does: as its face turns to the eyes and the eyes look at it.
 pub fn watch_shown(watch: &Matrix34, head: &Matrix34) -> f32 {
     let Some(to_eyes) = unit(sub(position(head), position(watch))) else { return 0.0 };

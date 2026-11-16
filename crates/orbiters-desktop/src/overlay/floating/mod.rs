@@ -247,7 +247,7 @@ impl Floating {
         let strip_at = (strip_on && !cx.dashboard && self.input.holding() != Some(watch_hand))
             .then(|| devices[watch_hand].zip(grip(watch_hand)).map(|(d, g)| (d, watch_right, g)))
             .flatten();
-        let strip = self.strip.as_mut().and_then(|s| s.place(cx.overlay, strip_at));
+        let strip = self.strip.as_mut().and_then(|s| s.place(cx.overlay, strip_at, head.as_ref()));
 
         // Who points at what.
         let panel_targets = self.panel.targets();
@@ -381,7 +381,7 @@ impl Floating {
         self.mouse.let_go_all(&mut |h, e| overlay.inject_event(h, e));
         self.watch.place(overlay, None, None, 0.0, false);
         if let Some(s) = self.strip.as_mut() {
-            s.place(overlay, None);
+            s.place(overlay, None, None);
         }
         for hand in 0..2 {
             self.lasers.update(overlay, presenter, hand, None);

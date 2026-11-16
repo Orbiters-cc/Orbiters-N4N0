@@ -306,6 +306,8 @@ const RESTS_HOLD: usize = 160 << 20;
 
 /// How often a colour held on the bar shows: every part is painted for it.
 const HUE_EVERY: Duration = Duration::from_millis(60);
+/// How often a held volume level is set while it moves (each setting is a call into every audio session of the app).
+const VOLUME_EVERY: Duration = Duration::from_millis(100);
 
 /// How long a second ring stays open after the pointer left it and its cell: a hand crossing the gap must not close it.
 pub const BLOOM_GRACE: Duration = Duration::from_millis(350);
@@ -928,6 +930,11 @@ pub struct Panels {
     resume: Option<(Sheet, String, f32)>,
     seek_late: Option<f32>,
     seek_asked: Option<(u32, Instant)>,
+    /// The volume's level held (grabbed and dragged as the timeline is): where it is shown while held, the last level asked and when, and
+    /// the level to ask at the next turn.
+    volume_held: Option<u8>,
+    volume_sent: Option<(u8, Instant)>,
+    volume_late: Option<u8>,
     /// Captures of this computer's gallery asked to show in 3D, for the view that shows them.
     local_asked: Vec<super::worlds::Relayed>,
     /// Lists give at their ends and come back: not with Reduce motion.
@@ -1065,6 +1072,9 @@ impl Panels {
             resume: None,
             seek_late: None,
             seek_asked: None,
+            volume_held: None,
+            volume_sent: None,
+            volume_late: None,
             local_asked: Vec::new(),
             elastic: true,
             throw: 0.0,
@@ -2017,6 +2027,14 @@ impl Panels {
         if self.stop_asked.is_some() && matches!(snap.capture.state, CaptureState::Idle) {
             self.stop_asked = None;
         }
+        // The volume's level, held or let go: the app's volume (the computer's where apps have none), shown at once.
+        if let Some(percent) = self.volume_late.take() {
+            let host = &mut self.stage.host;
+            if let Some(effect) = host.menu.set_playing_volume(percent) {
+                self.volume_sent = Some((percent, Instant::now()));
+                host.effects(vec![effect], snap, &self.backend);
+            }
+        }
         // Along what plays, now it was let go.
         if let Some(fraction) = self.seek_late.take() {
             let host = &mut self.stage.host;
@@ -2387,8 +2405,9 @@ impl Panels {
             gallery_scroll: self.facts.gallery_scroll,
             gallery_layout: snap.settings.photos_layout,
             // The playing app's own volume where Windows has one for it, the computer's where apps have none (Enzo, 2026-11-16).
+            // Held, where it is held (a reading of the mixer in between never pulls it back).
             volume: match menu.playing_volume() {
-                Some(PlayingVolume::App(v) | PlayingVolume::Computer(v)) => Some((v.percent, v.muted)),
+                Some(PlayingVolume::App(v) | PlayingVolume::Computer(v)) => Some(self.volume_held.map_or((v.percent, v.muted), |held| (held, false))),
                 Some(PlayingVolume::NotFound) | None => None,
             },
             volume_unfound: menu.playing_volume() == Some(PlayingVolume::NotFound),
@@ -2495,6 +2514,15 @@ impl Panels {
         }
         if let (Some(_), Some(p)) = (self.seeking, self.sheet_pointer) {
             self.seeking = panels::timeline_fraction(&self.facts, p.x).or(self.seeking);
+        }
+        // The volume's level follows the pointer while held, and is set as it goes, ten times a second at most.
+        if let (Some(_), Some(p)) = (self.volume_held, self.sheet_pointer) {
+            if let Some(percent) = panels::volume_at(&self.facts, p.x) {
+                self.volume_held = Some(percent);
+                if self.volume_sent.is_none_or(|(sent, at)| sent != percent && at.elapsed() >= VOLUME_EVERY) {
+                    self.volume_late = Some(percent);
+                }
+            }
         }
         if let (Some((which, _)), Some(p)) = (self.smoothing_held, self.sheet_pointer) {
             self.smoothing_held = Some((which, panels::smoothing_at(p.x)));
@@ -2741,6 +2769,14 @@ impl Panels {
         // Across the FPS booster's stops: seen as it moves, chosen when let go.
         if let Some(Action::Set(panels::Pick::Booster(panels::BoosterPick::Level(level)))) = action {
             self.booster_held = Some(self.sheet_pointer.map_or(level, |p| panels::booster_level_at(p.x)));
+            return out;
+        }
+        // The volume's level: grabbed where pressed, set as it is dragged and where it is let go (as the timeline is held).
+        if action == Some(Action::VolumeBar) {
+            if let Some(percent) = self.sheet_pointer.and_then(|p| panels::volume_at(&self.facts, p.x)) {
+                self.volume_held = Some(percent);
+                self.volume_late = Some(percent);
+            }
             return out;
         }
         // Along what plays: where it is held, and moved there when let go.
@@ -3101,7 +3137,7 @@ impl Panels {
                 let effects = host.press(target);
                 host.effects(effects, snap, &self.backend);
             }
-            Action::Timeline => {}
+            Action::Timeline | Action::VolumeBar => {}
             Action::Talk => {
                 if self.facts.n4n0 {
                     self.open_sheet(Sheet::Talk, mark("Ask N4N0"), snap);
@@ -3278,6 +3314,13 @@ impl Panels {
         }
         if let Some(fraction) = self.seeking.take() {
             self.seek_late = Some(fraction);
+        }
+        if let Some(held) = self.volume_held.take() {
+            // Where it was let go.
+            let percent = self.sheet_pointer.and_then(|p| panels::volume_at(&self.facts, p.x)).unwrap_or(held);
+            if self.volume_sent.is_none_or(|(sent, _)| sent != percent) {
+                self.volume_late = Some(percent);
+            }
         }
         if let Some(drag) = self.drag.take() {
             if !drag.moved {

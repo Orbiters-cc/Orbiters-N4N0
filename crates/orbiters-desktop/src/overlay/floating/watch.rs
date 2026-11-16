@@ -23,8 +23,8 @@ const PRESSABLE: f32 = 0.5;
 pub struct Watch {
     handle: vr::OverlayHandle,
     canvas: Canvas,
-    /// The controller it is on (and which hand), while it is placed there.
-    on: Option<(u32, bool)>,
+    /// The controller it is on, and where on it SteamVR was last told, while it is placed there.
+    on: Option<(u32, Matrix34)>,
     fade: Follow,
     /// The alpha SteamVR was last told, and whether it shows.
     alpha: f32,
@@ -57,11 +57,15 @@ impl Watch {
             self.set_alpha(overlay, 0.0);
             return None;
         };
-        if self.on != Some((device, right)) {
-            let _ = overlay.set_transform_device_relative(self.handle, device, &space::on_wrist(right));
-            self.on = Some((device, right));
+        // On the back of the wrist, its mark turned right way up for the eyes whatever way the wrist is (palm down, its top would be
+        // the thumb's side, towards the chest: upside down, Enzo's headset 2026-11-16).
+        let up = head.map_or_else(|| space::eyes_before_watch(right).1, |h| space::eyes_in(&grip, h).1);
+        let relative = space::watch_upright(right, up);
+        if !self.on.is_some_and(|(d, told)| d == device && space::near(&told, &relative, 0.001, 0.0004)) {
+            let _ = overlay.set_transform_device_relative(self.handle, device, &relative);
+            self.on = Some((device, relative));
         }
-        let transform = space::compose(&grip, &space::on_wrist(right));
+        let transform = space::compose(&grip, &relative);
         let target = head.map_or(0.0, |h| space::watch_shown(&transform, h));
         if live {
             self.fade.step(target, dt, Spring::SNAPPY);

@@ -452,7 +452,8 @@ fn element(p: &Painter, e: &Element, origin: Pos2, ink: Ink, skin: &Skin) {
 }
 
 /// The page's own icons (N4N0's microphone, the 3D picture's cube), its panels and labels.
-fn furniture(p: &Painter, origin: Pos2, layout: &Layout, skin: &Skin) {
+/// `overlay`: what only the overlay has is drawn too ([`layout::overlay_only_text`]).
+fn furniture(p: &Painter, origin: Pos2, layout: &Layout, skin: &Skin, overlay: bool) {
     let pal = &skin.retro;
     // What N4N0 says: a panel as a tile's, N4N0 as a ring with its eyes at its top left.
     for b in &layout.boxes {
@@ -495,7 +496,7 @@ fn furniture(p: &Painter, origin: Pos2, layout: &Layout, skin: &Skin) {
             bracketed_icon(p, r, *icon, r.width() * 0.5, Ink { fill: pal.panel, stroke: pal.dim, text: pal.text, icon: color });
         }
     }
-    for label in &layout.labels {
+    for label in layout.labels.iter().filter(|l| overlay || !layout::overlay_only_text(l.text)) {
         let place = label_place(label);
         let color = if label.bold { pal.text } else { pal.style(label.style) };
         let fitted = fit(p, mono(skin.text(label.text), place.size, color), place.room);
@@ -506,8 +507,8 @@ fn furniture(p: &Painter, origin: Pos2, layout: &Layout, skin: &Skin) {
 /// Everything on a page that never changes, in the retro look: the avatar's retro screen has it as the page's picture.
 pub fn draw_chrome(p: &Painter, origin: Pos2, layout: &Layout, skin: &Skin) {
     frame(p, origin, Some(layout), skin);
-    furniture(p, origin, layout, skin);
-    for e in &layout.elements {
+    furniture(p, origin, layout, skin, false);
+    for e in layout.elements.iter().filter(|e| !layout::overlay_only(e.target)) {
         element(p, e, origin, skin.retro.ink(e.look), skin);
     }
     if layout.page == ScreenPage::Music || layout.page == ScreenPage::Mirror {
@@ -568,7 +569,7 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
     let page = ScreenPage::of(menu);
     let layout = layout::cached(page);
     frame(p, origin, Some(layout), skin);
-    furniture(p, origin, layout, skin);
+    furniture(p, origin, layout, skin, menu.mismatch_buttons.is_some());
     for (i, e) in layout.elements.iter().enumerate() {
         let state = layout::state(menu, e);
         if state.hidden {

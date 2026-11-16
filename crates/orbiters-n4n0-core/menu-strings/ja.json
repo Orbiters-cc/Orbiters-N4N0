@@ -86,6 +86,8 @@
     "suggest.talk": "話す",
     "suggest.send": "送信",
     "suggest.hint": "N4N0に次は何をしてほしい？Orbitersチームが全部読みます。",
+    "suggest.mismatch": "メニューずれ報告ボタン",
+    "suggest.mismatchNote": "手首の3つのボタンでVRChatと合わないメニューを報告。レポートはこのPCに保存されます。",
     "home.capture": "3Dキャプチャ",
     "home.more": "その他",
     "more.title": "その他",

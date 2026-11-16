@@ -475,6 +475,15 @@ fn element(p: &Painter, e: &Element, origin: Pos2, skin: &Skin) {
     }
     let label = e.label.map(|t| skin.text(t));
     let place = element_metrics(e).unwrap_or(Place { room: r.width(), size: 24.0 });
+    // A switch's row: its icon and name from its left, its switch at its right (drawn with its state, in `draw`).
+    if e.target == orbiters_n4n0_core::menu::Target::MismatchButtons {
+        widgets::icon(p, pos2(r.min.x + 36.0, r.center().y), glyph(e.icon.unwrap_or(Icon::Chat)), 26.0, pal.accent);
+        if let Some(label) = label {
+            let fitted = fit(p, Txt::new(label, 24.0).weight(weight::SEMIBOLD).color(pal.text), r.width() - 64.0 - SWITCH_ROOM);
+            widgets::text(p, pos2(r.min.x + 64.0, r.center().y), Align2::LEFT_CENTER, &fitted.txt);
+        }
+        return;
+    }
     match e.look {
         Look::Tile if tile_is_compact(e.rect) => {
             // A small tile (ten tiles): a smaller icon at its top left, the title beside it, its note under both.
@@ -554,6 +563,17 @@ fn element(p: &Painter, e: &Element, origin: Pos2, skin: &Skin) {
     }
 }
 
+/// The room a switch's row keeps at its right for its switch.
+const SWITCH_ROOM: f32 = 100.0;
+
+/// A switch at the right of row `r`, its knob at the right and the accent while `on`.
+fn switch(p: &Painter, r: Rect, on: bool, pal: &Palette) {
+    let track = Rect::from_center_size(pos2(r.max.x - 24.0 - 32.0, r.center().y), vec2(64.0, 36.0));
+    p.rect_filled(track, theme::radius(18.0), if on { pal.accent } else { theme::alpha(pal.muted, 0.45) });
+    let x = if on { track.max.x - 18.0 } else { track.min.x + 18.0 };
+    p.circle_filled(pos2(x, track.center().y), 13.0, Color32::WHITE);
+}
+
 /// Whether a home tile lays its icon beside its title (a tile half as wide again as it is tall, or wider) rather than
 /// above it.
 pub fn tile_is_wide(r: layout::Rect) -> bool {
@@ -585,7 +605,8 @@ fn n4n0_face(p: &Painter, center: Pos2, radius: f32, pal: &Palette) {
 }
 
 /// The card, the page's pictures and its fixed labels.
-fn backdrop(p: &Painter, origin: Pos2, layout: &Layout, listening: Option<f64>, skin: &Skin) {
+/// `overlay`: what only the overlay has is drawn too ([`layout::overlay_only_text`]).
+fn backdrop(p: &Painter, origin: Pos2, layout: &Layout, listening: Option<f64>, skin: &Skin, overlay: bool) {
     let pal = &skin.palette;
     let card = Rect::from_min_size(origin, vec2(layout::WIDTH as f32, layout::HEIGHT as f32));
     p.rect_filled(card, theme::radius(layout::CARD_RADIUS as f32), pal.card);
@@ -610,7 +631,7 @@ fn backdrop(p: &Painter, origin: Pos2, layout: &Layout, listening: Option<f64>, 
             p.circle_stroke(r.center(), r.width() / 2.0 + 3.0 + 4.0 * pulse, Stroke::new(2.0, theme::alpha(pal.accent, 0.7 - 0.5 * pulse)));
         }
     }
-    for label in &layout.labels {
+    for label in layout.labels.iter().filter(|l| overlay || !layout::overlay_only_text(l.text)) {
         let place = label_place(label);
         let txt = Txt::new(skin.text(label.text), place.size).weight(if label.bold { weight::SEMIBOLD } else { weight::MEDIUM }).color(pal.style(label.style));
         let fitted = fit(p, txt, place.room);
@@ -620,8 +641,8 @@ fn backdrop(p: &Painter, origin: Pos2, layout: &Layout, listening: Option<f64>, 
 
 /// Everything on a page that never changes: what the avatar's screen has as the page's picture.
 pub fn draw_chrome(p: &Painter, origin: Pos2, layout: &Layout, skin: &Skin) {
-    backdrop(p, origin, layout, None, skin);
-    for e in &layout.elements {
+    backdrop(p, origin, layout, None, skin, false);
+    for e in layout.elements.iter().filter(|e| !layout::overlay_only(e.target)) {
         element(p, e, origin, skin);
     }
     // The music's place for its art, which the art covers once it came (the screen leaves this page's placeholder to
@@ -741,7 +762,7 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
     let pal = &skin.palette;
     let page = ScreenPage::of(menu);
     let layout = layout::cached(page);
-    backdrop(p, origin, layout, menu.listening.then_some(view.time), skin);
+    backdrop(p, origin, layout, menu.listening.then_some(view.time), skin, menu.mismatch_buttons.is_some());
     for (i, e) in layout.elements.iter().enumerate() {
         let state = layout::state(menu, e);
         if state.hidden {
@@ -758,7 +779,10 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
         } else if view.hover == Some(i) {
             p.rect_filled(r, radius, if matches!(e.look, Look::Accent | Look::Danger) { theme::white(0.14) } else { theme::white(0.06) });
         }
-        if state.on && e.look == Look::Track {
+        if e.target == orbiters_n4n0_core::menu::Target::MismatchButtons {
+            // A switch says it is on by its knob, as Settings' switch of the same setting does.
+            switch(p, r, state.on, pal);
+        } else if state.on && e.look == Look::Track {
             // The screen's ring fills a segment as thin as this whole: the accent.
             p.rect_filled(r, radius, pal.accent);
         } else if state.on {

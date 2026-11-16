@@ -1130,7 +1130,8 @@ impl Corner {
     /// menus' layouts puts there (the strip under the Quick Menu in a squarish window), so that it stays in one place for a window's size and covers none of
     /// them. Only a page of ours, open, may lie under it, and it stays above that.
     pub(crate) fn rect(client: Vec2) -> (egui::Rect, f32) {
-        let zoom = (client.y / 720.0).clamp(0.75, 2.0);
+        // By the window's height, and by its width in a squarish window, where the wheel's second ring and caption leave a narrower column.
+        let zoom = (client.y / 720.0).min(client.x / 1050.0).clamp(0.75, 2.0);
         let size = Self::SIZE * zoom;
         let first = egui::Rect::from_min_size(pos2(Self::MARGIN * zoom, client.y - Self::MARGIN * zoom - size.y), size);
         let parts: Vec<egui::Rect> = [zones::layout_as(Around::QuickMenu, client, true), zones::layout(Around::QuickMenu, client), zones::layout(Around::Wheel, client)]

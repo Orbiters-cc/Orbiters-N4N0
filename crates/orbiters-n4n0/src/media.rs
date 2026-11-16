@@ -567,15 +567,13 @@ mod tests {
         let (m, c) = (Shared(mixer.clone()), computer.clone());
         let watcher = Watcher::with_links(move || Box::new(Browser { apps: app_sound::AppVolume::new(m), computer: c }), Links::new(Arc::new(|_: &str, _: &str| Ok(Vec::new()))));
         let mut menu = Menu::default();
+        menu.open();
         let reading = watcher.fresh(Duration::from_secs(5));
         menu.media = reading.media.clone();
         menu.volume = reading.volume;
         assert_eq!(menu.media.as_ref().unwrap().sound, AppSound::Level(Volume { percent: 50, muted: false }));
-        for effect in menu.press(Target::VolumeUp) {
-            let Effect::Media(command) = effect else { panic!("{effect:?}") };
-            assert_eq!(command, MediaCommand::AppVolume(55));
-            watcher.command(command);
-        }
+        assert_eq!(menu.press(Target::VolumeUp), vec![Effect::Media(MediaCommand::AppVolume(55))]);
+        watcher.command(MediaCommand::AppVolume(55));
         let reading = watcher.fresh(Duration::from_secs(5));
         assert_eq!(reading.media.as_ref().unwrap().sound, AppSound::Level(Volume { percent: 55, muted: false }));
         assert_eq!(mixer.lock().unwrap().sounds[0].level, 0.55);

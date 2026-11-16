@@ -2655,6 +2655,8 @@ mod tests {
     #[test]
     fn the_volume_beside_what_plays_sets_the_app_playing_only() {
         let mut menu = Menu { pages: Pages::Six, ..Default::default() };
+        menu.open();
+        menu.press(Target::Music);
         menu.volume = Some(Volume { percent: 70, muted: false });
         assert_eq!(menu.playing_volume(), None, "nothing plays: no app to set");
         assert!(menu.press(Target::VolumeUp).is_empty() && menu.press(Target::Mute).is_empty());

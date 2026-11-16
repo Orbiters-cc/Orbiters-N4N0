@@ -138,6 +138,45 @@ fn paint(canvas: &mut Canvas, draw: impl Fn(&egui::Painter)) -> Vec<u8> {
     rgba
 }
 
+/// `--screenshot <out> --only asktoggle`: N4N0's simple Home with the assistant's switch on its microphone (Enzo, 2026-11-16): as the overlay draws it, on,
+/// off, pointed at, in both looks; and as the avatar's screen shows it (its package's picture and the status line over it), on and off.
+pub(crate) fn asktoggle_pictures(out: &Path) -> anyhow::Result<()> {
+    let skin = &Skin::standard(Strings::english().clone());
+    let mut canvas = Canvas::new(WIDTH, HEIGHT);
+    let none = |_: &str| -> Option<TextureId> { None };
+    let base = |on: bool| {
+        let mut m = Menu::new(KeyboardLayout::Qwerty, 5, PhotoLength::Standard);
+        m.open();
+        m.pages = Pages::TwoPictures;
+        m.media = Some(sample_media());
+        m.assistant = Some(on);
+        m
+    };
+    let page = ScreenPage::of(&base(true));
+    let switch = layout::cached(page).elements.iter().position(|e| e.target == Target::Assistant);
+    for (name, on, hover) in [("on", true, None), ("off", false, None), ("on-point", true, switch), ("off-point", false, switch)] {
+        let menu = base(on);
+        for (retro, look) in [(false, ""), (true, "-retro")] {
+            let view = View { menu: &menu, hover, pressed: None, picture: &none, time: 0.4, skin };
+            let rgba = paint(&mut canvas, |p| if retro { menu_retro::draw(p, pos2(0.0, 0.0), &view) } else { menu_ui::draw(p, pos2(0.0, 0.0), &view) });
+            let path = out.join(format!("asktoggle-n4n0-menu-{}-{name}{look}.png", page.name()));
+            write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
+            println!("{}", path.display());
+        }
+    }
+    for (name, on) in [("on", true), ("off", false)] {
+        // On the avatar: its Home has Stay here.
+        let mut menu = base(on);
+        menu.on_screen = true;
+        menu.pages = Pages::StayHere;
+        let rgba = paint(&mut canvas, |p| menu_ui::draw_screen_like(p, pos2(0.0, 0.0), &menu, skin));
+        let path = out.join(format!("asktoggle-avatar-screen-{}-{name}.png", ScreenPage::of(&menu).name()));
+        write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
+        println!("{}", path.display());
+    }
+    Ok(())
+}
+
 /// The page texture: every page's unchanging part, slice by slice, straight alpha, in Orbiters' own look or the retro
 /// one (`retro`: the avatar's retro screen has these), in `skin`'s colours and texts.
 pub fn page_pictures(retro: bool, skin: &Skin) -> Vec<u8> {

@@ -577,6 +577,19 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
         }
         let r = rect(e.rect, origin);
         let down = view.pressed == Some(i);
+        // Home's microphone, the assistant's switch: struck through while off, bracketed while on (as every switch here).
+        if e.target == orbiters_n4n0_core::menu::Target::Assistant {
+            let mic = rect(layout::ASSISTANT_MIC, origin);
+            if !state.on {
+                p.line_segment([mic.left_top() + vec2(8.0, 8.0), mic.right_bottom() - vec2(8.0, 8.0)], Stroke::new(4.0, pal.hot));
+            }
+            if down || view.hover == Some(i) {
+                panel(p, mic.expand(6.0), 8.0, pal.line.gamma_multiply(0.10), Stroke::new(2.5, pal.hot));
+            } else if state.on {
+                brackets(p, mic.expand(6.0), 12.0, Stroke::new(3.0, pal.hot));
+            }
+            continue;
+        }
         element(p, e, origin, if down { pal.pressed(e.look) } else { pal.ink(e.look) }, skin);
         if state.unavailable {
             p.rect_filled(r, 0.0, pal.bg.gamma_multiply(0.6));

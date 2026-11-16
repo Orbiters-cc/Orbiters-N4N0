@@ -914,6 +914,8 @@ pub struct Panels {
     hue_held: Option<([u8; 3], Instant)>,
     /// A 3D picture length chosen on the camera's tiles, and when: shown and used until the settings have it.
     length_held: Option<(orbiters_core::settings::Photo3dLength, Instant)>,
+    /// The assistant switched on Ask N4N0's corner, and when: shown at once, until the settings say the same.
+    assistant_held: Option<(bool, Instant)>,
     /// A smoothing slider held, where it is seen; saved when let go.
     smoothing_held: Option<(panels::Smoothed, u16)>,
     /// The FPS booster's sheet: its Details page, its one question, and the stop a press is held on.
@@ -1062,6 +1064,7 @@ impl Panels {
             turning: None,
             hue_held: None,
             length_held: None,
+            assistant_held: None,
             smoothing_held: None,
             booster_details: false,
             booster_asking: false,
@@ -2331,6 +2334,7 @@ impl Panels {
             fast_walk: snap.settings.walk_boost.enabled,
             fast_walk_lesser: snap.steamvr.walk_path.and_then(crate::state::WalkPath::lesser_short),
             n4n0: snap.settings.n4n0.enabled,
+            assistant_off: !self.assistant_now(snap),
             music: menu.media.as_ref().map(|m| (m.title.clone(), m.playing)),
             music_by: menu.media.as_ref().map_or(String::new(), |m| m.artist.clone()),
             art: None,
@@ -2378,7 +2382,8 @@ impl Panels {
                 Vec::new()
             },
             videos_for: menu.results_for.clone(),
-            talk: talk_now(snap),
+            // Switched off by the person: what Ask N4N0 shows is how to turn it on again, whatever else would stop it.
+            talk: if self.assistant_now(snap) { talk_now(snap) } else { panels::TalkNow::AssistantOff },
             talk_auto: snap.n4n0.voice.automatic,
             talk_heard: snap.n4n0.voice.provisional.as_ref().filter(|_| self.facts.sheet == Some(Sheet::Talk)).map(|p| p.text.clone()),
             talk_signing_in: snap.account.state == crate::state::AccountState::SigningIn,
@@ -3143,8 +3148,13 @@ impl Panels {
                     self.open_sheet(Sheet::Talk, mark("Ask N4N0"), snap);
                 }
             }
+            Action::AssistantSwitch => {
+                let on = self.facts.assistant_off;
+                self.switch_assistant(on);
+            }
             Action::TalkToggle => match self.facts.talk {
                 panels::TalkNow::Off(_) => {}
+                panels::TalkNow::AssistantOff => self.switch_assistant(true),
                 // Signed out of Orbiters: the way to sign in, at once (F23).
                 panels::TalkNow::SignIn => self.backend.sign_in(),
                 panels::TalkNow::Failed => self.backend.n4n0(N4n0Command::AskRetry),
@@ -3991,6 +4001,30 @@ impl Drop for Panels {
         }
     }
 }
+
+impl Panels {
+    /// N4N0's assistant on or off: as just switched here for a moment, else as the settings say.
+    fn assistant_now(&self, snap: &Snapshot) -> bool {
+        self.assistant_held.filter(|(on, at)| *on != snap.settings.n4n0.assistant && at.elapsed() < ASSISTANT_HELD_FOR).map_or(snap.settings.n4n0.assistant, |(on, _)| on)
+    }
+
+    /// Switches N4N0's assistant (the setting of Settings › N4N0) through N4N0, which stops at once what it was doing when it goes
+    /// off: listening, the microphone, an answer under way.
+    fn switch_assistant(&mut self, on: bool) {
+        self.assistant_held = Some((on, Instant::now()));
+        self.facts.assistant_off = !on;
+        if !on {
+            self.facts.talk = panels::TalkNow::AssistantOff;
+        }
+        self.backend.n4n0(N4n0Command::Assistant { on });
+        for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+            panel.dirty = true;
+        }
+    }
+}
+
+/// How long a switch of the assistant shows before the settings must say the same.
+const ASSISTANT_HELD_FOR: Duration = Duration::from_secs(3);
 
 /// Where talking with N4N0 stands, and why it cannot when it cannot.
 fn talk_now(snap: &Snapshot) -> panels::TalkNow {

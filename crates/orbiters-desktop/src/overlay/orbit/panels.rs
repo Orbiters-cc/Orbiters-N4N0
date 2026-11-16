@@ -245,6 +245,9 @@ pub enum Action {
     ScrollBar,
     /// Starts or stops listening to the person.
     TalkToggle,
+    /// The switch on the corner of Ask N4N0's tiles: N4N0's assistant on or off, the setting of Settings › N4N0 (Enzo,
+    /// 2026-11-16: "a little switch on the corner of the feature tile, so I can immediately disable it").
+    AssistantSwitch,
     /// N4N0 forgets this conversation.
     NewConversation,
     /// A YouTube result, the `n`-th: its link, for the world's player.
@@ -374,6 +377,8 @@ pub enum TalkNow {
     Failed,
     /// It cannot now, and why.
     Off(&'static str),
+    /// The person switched N4N0's assistant off. Pressed, it is on again.
+    AssistantOff,
 }
 
 /// Why Drop link cannot put a card of what plays in the world.
@@ -606,6 +611,8 @@ pub struct Facts {
     pub fast_walk_lesser: Option<&'static str>,
     /// N4N0 is on: Ask has someone to talk to.
     pub n4n0: bool,
+    /// The person switched N4N0's assistant off (listening, answers): the switch on Ask N4N0's tiles.
+    pub assistant_off: bool,
     /// What plays on the computer.
     pub music: Option<(String, bool)>,
     /// Its artist or application, under its title.
@@ -938,6 +945,8 @@ pub enum Look {
     Transport(&'static str),
     /// Ask N4N0.
     Talk,
+    /// The assistant's switch on Ask N4N0's corner.
+    AssistantSwitch,
     /// The small close button.
     Close,
     /// Words about what is pointed at.
@@ -1024,7 +1033,7 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::WingYouTube => tile(Action::Page(Target::YouTube), icons::YOUTUBE_LOGO, "YouTube", false),
         Zone::WingInstances => tile(Action::Page(Target::Instances), icons::CLOCK, tr("Instances"), false),
         Zone::WingPictures => tile(Action::Pictures, icons::IMAGES, tr("Pictures"), false),
-        Zone::WingTalk => vec![Item { action: Action::Talk, rect: whole, look: Look::Talk }],
+        Zone::WingTalk => with_assistant_switch(vec![Item { action: Action::Talk, rect: whole, look: Look::Talk }], facts),
         Zone::WingAll => tile(Action::All, icons::SQUARES_FOUR, tr_ctx("tile", "All tools"), false),
         Zone::WingPlaying => vec![Item { action: Action::PlayPause, rect: whole, look: Look::Playing }],
         Zone::QmStrip => strip(w, h, facts),
@@ -1394,6 +1403,39 @@ fn strip(w: f32, h: f32, facts: &Facts) -> Vec<Item> {
     if hide {
         items.push(Item { action: Action::Hide, rect: r(w - PAD - HIDE_TILES, PAD, HIDE_TILES, h - PAD * 2.0), look: Look::HideWord });
     }
+    with_assistant_switch(items, facts)
+}
+
+/// Where the assistant's switch is on a tile of Ask N4N0: its top right corner, flush with the tile's edges (the corner is
+/// the easiest place to hit), about two fifths of the tile's smaller side wide. In a headset never under 30 units wide nor
+/// 19 high: a laser's or a fingertip's size there.
+pub fn assistant_switch_rect(tile: Rect) -> Rect {
+    let wide = (tile.width().min(tile.height()) * 0.44).clamp(30.0, 56.0).round();
+    let high = (wide * 0.62).round();
+    Rect::from_min_size(pos2(tile.right() - wide, tile.top()), vec2(wide, high))
+}
+
+/// How far round the switch a press does nothing: a laser or a finger that misses the switch by a little neither switches
+/// the assistant nor opens its page (Enzo, 2026-11-16, of neighbouring controls pressed by mistake).
+pub fn assistant_guard(switch: Rect) -> f32 {
+    (switch.height() * 0.3).round().max(5.0)
+}
+
+/// Ask N4N0's tiles with the assistant's switch on their corner, while N4N0 is on: the one part laid over another (the last
+/// part under a pointer is the one pressed, [`hit`]), with a band round it on the tile's side that takes presses and does
+/// nothing.
+fn with_assistant_switch(mut items: Vec<Item>, facts: &Facts) -> Vec<Item> {
+    if !facts.n4n0 {
+        return items;
+    }
+    let tiles: Vec<Rect> = items.iter().filter(|i| i.action == Action::Talk && matches!(i.look, Look::Talk | Look::Small { .. })).map(|i| i.rect).collect();
+    for tile in tiles {
+        let switch = assistant_switch_rect(tile);
+        let g = assistant_guard(switch);
+        let guard = Rect::from_min_max(pos2(switch.left() - g, switch.top()), pos2(switch.right(), switch.bottom() + g)).intersect(tile);
+        items.push(Item { action: Action::Idle, rect: guard, look: Look::Blank });
+        items.push(Item { action: Action::AssistantSwitch, rect: switch, look: Look::AssistantSwitch });
+    }
     items
 }
 
@@ -1456,7 +1498,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                     out.push(Item { action: *action, rect: r(x0 + c as f32 * (w + small_gap), y, w, small_h), look: Look::Small { icon, label, tint: tool_tint(*action) } });
                 }
             }
-            out
+            with_assistant_switch(out, facts)
         }
         Sheet::Results => {
             let (columns, width, height, top) = video_grid();
@@ -1965,6 +2007,7 @@ pub fn split_source(title: &str, by: &str) -> (Option<String>, String) {
 /// What an accessory of All tools does, in a few words for its tile: its caption says the whole of it.
 fn tile_line(action: Action, facts: &Facts) -> Option<String> {
     let line = match action {
+        Action::Talk if facts.n4n0 && facts.assistant_off => tr("Assistant off: nothing listens"),
         Action::Talk => tr("Your assistant, by voice"),
         Action::Page(Target::States) => tr("Your avatar's looks, in one go"),
         Action::Page(Target::Light) => tr("N4N0 as a light that follows you"),
@@ -2404,6 +2447,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
             TalkNow::Waiting => (tr("Listening for you").into(), tr("Just talk. Press to talk with the button instead.").into()),
             TalkNow::SignIn => (tr("Sign in to Orbiters").into(), tr("Your browser opens on your computer.").into()),
             TalkNow::Failed => (tr("Try again").into(), tr("The microphone stopped: press to listen again.").into()),
+            TalkNow::AssistantOff => (tr("Turn the assistant on").into(), tr("N4N0 listens and answers again.").into()),
             _ => (tr("Talk to N4N0").into(), tr("Press, speak, and press again.").into()),
         },
         Action::NewConversation => (tr("New conversation").into(), tr("N4N0 starts over.").into()),
@@ -2429,7 +2473,10 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Video(i) => (facts.videos.get(i).map_or(String::new(), |v| v.title.clone()), tr("Press to copy its link, for the world's video player.").into()),
         Action::VideoDrop(_) => (tr("Drop in world").into(), tr("Puts a card with the link in front of you, for anyone to grab.").into()),
         Action::ResultsBack => (tr("Search again").into(), tr("Back to the search, to change what you looked for.").into()),
+        Action::Talk if facts.n4n0 && facts.assistant_off => (tr("Ask N4N0").into(), tr("Its assistant is off: open it to turn it back on.").into()),
         Action::Talk if facts.n4n0 => (tr("Ask N4N0").into(), tr("Your assistant in VRChat: talk to it, and see all it said.").into()),
+        Action::AssistantSwitch if !facts.assistant_off => (tr("Assistant on").into(), tr("Press to turn it off: N4N0 stops listening and answering.").into()),
+        Action::AssistantSwitch => (tr("Assistant off").into(), tr("Press to turn it on: N4N0 listens and answers again.").into()),
         Action::Talk => (tr("Ask N4N0").into(), tr("Turn N4N0 on in Orbiters first.").into()),
         Action::OpenApp => (tr("Open Orbiters").into(), tr("The full app, on your computer.").into()),
         Action::SeeInApp => (tr("See it in 3D, in Orbiters").into(), tr("Opens it in Orbiters' own 3D viewer, on your computer.").into()),
@@ -2833,6 +2880,7 @@ fn draw_conversation(p: &Painter, facts: &Facts) {
             TalkNow::SignIn => (tr("Sign in first"), tr("N4N0 answers as your Orbiters account: sign in, then talk.")),
             TalkNow::Waiting | TalkNow::Listening(_) if facts.talk_auto => (tr("Go ahead"), tr("N4N0 hears when you start talking, and when you stop.")),
             TalkNow::Listening(_) => (tr("Go ahead"), tr("N4N0 is listening. Press the button again when you are done.")),
+            TalkNow::AssistantOff => (tr("The assistant is off"), tr("Turn it on with the button, or the switch on Ask N4N0's tile.")),
             _ => (tr("Nothing said yet"), tr("Press the button, and ask N4N0 anything.")),
         };
         text(p, pos2(TALK_LEFT + 2.0, TALK_TOP + 22.0), Align2::LEFT_CENTER, first, 27.0, weight::BOLD, look::LABEL);
@@ -3173,6 +3221,9 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         }
         Look::Small { icon, label, tint } => {
             let on = item.action == Action::FastWalk && facts.fast_walk;
+            // Ask N4N0's: room left for the assistant's switch on its corner, and grey while the assistant is off.
+            let switch_room = if item.action == Action::Talk && facts.n4n0 { assistant_switch_rect(rect).width() + 6.0 } else { 0.0 };
+            let tint = if item.action == Action::Talk && facts.n4n0 && facts.assistant_off { theme::FG_4 } else { tint };
             let radius = look::radius(look::TILE_RADIUS + 2.0);
             p.rect_filled(rect, radius, theme::mix(look::TILE, tint, if pressed { 0.28 } else if hovered { 0.2 } else { 0.08 }));
             if hovered || on {
@@ -3182,7 +3233,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             // before its name, on one line.
             if rect.height() < 70.0 {
                 widgets::icon(p, pos2(rect.left() + 22.0, rect.center().y), icon, 24.0, tint);
-                let (label, font) = fitted(p, label, 16.5, weight::BOLD, rect.width() - 48.0, 12.5);
+                let (label, font) = fitted(p, label, 16.5, weight::BOLD, rect.width() - 48.0 - switch_room, 12.5);
                 p.text(pos2(rect.left() + 40.0, rect.center().y), Align2::LEFT_CENTER, label, font, Color32::WHITE);
                 return;
             }
@@ -3197,7 +3248,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.rect_filled(chip, look::radius(12.0), theme::alpha(tint, 0.2));
             widgets::icon(p, chip.center(), icon, 25.0, tint);
             let x = chip.right() + 10.0;
-            let room = rect.right() - x - 10.0;
+            let room = rect.right() - x - 10.0 - switch_room;
             // What it does in a few words; the whole of it is in the caption when pointed.
             let said = tile_line(item.action, facts).or_else(|| caption(item.action, facts).map(|c| c.1)).filter(|_| room >= 140.0);
             // Its name whole, as large as it fits from 21.5 down to 16 (the retro look's French ran out at 21.5: "AVIS SUR LE M…").
@@ -3748,9 +3799,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 TalkNow::SignIn => (rest, look::LABEL, tr("Sign in to Orbiters"), tr("N4N0 answers as your account")),
                 TalkNow::Failed => (rest, theme::WARN, tr("The microphone stopped"), tr("Press to try again")),
                 TalkNow::Off(why) => (look::TILE, theme::FG_4, tr("Not available"), tr(why)),
+                // Switched off by the person: one press turns it on again, said plainly (never a button that does nothing).
+                TalkNow::AssistantOff => (rest, look::MUTED, tr("Assistant off"), tr("Press to turn it on")),
             };
             // How it listens, always in sight, over the button: by itself, or by the button (F24).
-            if !matches!(facts.talk, TalkNow::SignIn | TalkNow::Off(_)) {
+            if !matches!(facts.talk, TalkNow::SignIn | TalkNow::Off(_) | TalkNow::AssistantOff) {
                 let (glyph, words) = if facts.talk_auto { (icons::WAVEFORM, tr("Hands-free")) } else { (icons::CIRCLE, tr("By the button")) };
                 let font = look::font(16.0, weight::SEMIBOLD);
                 let wide = p.layout_no_wrap(words.to_string(), font.clone(), look::LABEL).size().x.min(rect.width() - 70.0);
@@ -3764,7 +3817,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             }
             p.circle_filled(center, radius, fill);
             match facts.talk {
-                TalkNow::Ready | TalkNow::SignIn | TalkNow::Failed => {
+                TalkNow::Ready | TalkNow::SignIn | TalkNow::Failed | TalkNow::AssistantOff => {
                     p.circle_stroke(center, radius, Stroke::new(3.0, Color32::from_white_alpha(if hovered { 110 } else { 54 })));
                 }
                 // Hands-free and waiting: a green ring, the microphone open.
@@ -3780,6 +3833,9 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 _ => icons::MICROPHONE,
             };
             widgets::icon(p, center, glyph, 96.0, ink);
+            if facts.talk == TalkNow::AssistantOff {
+                p.line_segment([center + vec2(-40.0, -40.0), center + vec2(40.0, 40.0)], Stroke::new(7.0, ink));
+            }
             let y = center.y + radius + 48.0;
             let color = if matches!(facts.talk, TalkNow::Listening(_) | TalkNow::Waiting) { look::accent() } else { look::LABEL };
             let big = look::font(30.0, weight::BOLD);
@@ -3791,6 +3847,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 TalkNow::SignIn if facts.talk_signing_in => Some(tr("Finish in your browser, on your computer")),
                 TalkNow::SignIn => Some(tr("Press: your browser opens on your computer")),
                 TalkNow::Waiting => Some(tr("Or press to talk with the button")),
+                TalkNow::AssistantOff => Some(tr("Nothing listens and nothing is sent while it is off")),
                 _ => None,
             };
             if let Some(third) = third {
@@ -4015,20 +4072,48 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         }
         Look::Talk => {
             let on = matches!(facts.talk, TalkNow::Listening(_));
+            // Switched off by the person: greyed and struck through, and said in words, so that it reads off at a glance.
+            let off = facts.n4n0 && facts.assistant_off;
             tile_back(p, rect, hovered, pressed, on);
             let color = if on {
                 look::accent()
-            } else if !facts.n4n0 {
+            } else if !facts.n4n0 || off {
                 theme::FG_4
             } else if hovered {
                 look::accent()
             } else {
                 look::LABEL
             };
-            let size = (rect.height() * 0.42).clamp(18.0, 32.0);
-            let top = rect.center().y - (size + 3.0 + 11.0) / 2.0;
-            widgets::icon(p, pos2(rect.center().x, top + size / 2.0), icons::MICROPHONE, size, color);
-            p.text(pos2(rect.center().x, top + size + 3.0 + 5.5), Align2::CENTER_CENTER, if on { tr("Listening") } else { tr_ctx("tile", "Ask N4N0") }, look::font(11.0, weight::SEMIBOLD), if on { look::accent() } else if facts.n4n0 { look::LABEL } else { theme::FG_4 });
+            // Its icon and name under the switch on its corner, when it has one.
+            let (room, middle) = if facts.n4n0 {
+                let switch = assistant_switch_rect(rect);
+                (rect.bottom() - switch.bottom() - 4.0, (switch.bottom() + rect.bottom()) / 2.0)
+            } else {
+                (rect.height(), rect.center().y)
+            };
+            let size = (rect.height() * 0.42).min(room - 3.0 - 11.0 - 4.0).clamp(16.0, 32.0);
+            let top = middle - (size + 3.0 + 11.0) / 2.0;
+            let mic = pos2(rect.center().x, top + size / 2.0);
+            widgets::icon(p, mic, icons::MICROPHONE, size, color);
+            if off {
+                let arm = size * 0.36;
+                p.line_segment([mic + vec2(-arm, -arm), mic + vec2(arm, arm)], Stroke::new(2.0, color));
+            }
+            let font = look::font(11.0, weight::SEMIBOLD);
+            let label = if on { tr("Listening") } else if off { tr_ctx("tile", "Assistant off") } else { tr_ctx("tile", "Ask N4N0") };
+            p.text(pos2(rect.center().x, top + size + 3.0 + 5.5), Align2::CENTER_CENTER, fit(p, label, &font, rect.width() - 6.0), font, if on { look::accent() } else if facts.n4n0 && !off { look::LABEL } else { theme::FG_4 });
+        }
+        Look::AssistantSwitch => {
+            // A switch as Settings' are: a pill, its knob to the right and in the accent when on. Ringed in the tile's own back so that it stands off it.
+            let track = Rect::from_center_size(rect.center() + vec2(rect.width() * 0.04, -rect.height() * 0.04), vec2(rect.width() * 0.74, rect.height() * 0.62));
+            let radius = look::radius(track.height() / 2.0);
+            let ring = if pressed { Color32::WHITE } else if hovered { look::accent() } else { Color32::from_black_alpha(150) };
+            p.rect_filled(track.expand(2.0), look::radius(track.height() / 2.0 + 2.0), ring);
+            let fill = if !facts.assistant_off { look::accent() } else { theme::mix(look::TILE, theme::FG_4, 0.45) };
+            p.rect_filled(track, radius, fill);
+            let knob = track.height() / 2.0 - 2.0;
+            let x = if !facts.assistant_off { track.right() - knob - 2.0 } else { track.left() + knob + 2.0 };
+            p.circle_filled(pos2(x, track.center().y), knob, if !facts.assistant_off { look::on_accent() } else { Color32::from_gray(225) });
         }
         Look::PlayingSmall => {
             tile_back(p, rect, hovered, pressed, false);
@@ -5156,8 +5241,9 @@ mod tests {
         for present in ["Call", "Saved looks", "Light", "Fast walk", "Smooth tracking"] {
             assert!(vr.contains(&present), "{present}");
         }
-        // They all fit the page, without overlapping.
+        // They all fit the page, without overlapping (but the assistant's switch, on Ask N4N0's corner).
         for list in [sheet_items(Sheet::All, &Facts { can_call: true, can_states: true, can_light: true, ..facts() }), sheet_items(Sheet::Pictures, &facts())] {
+            let list = apart_from_assistant_switch(list);
             for (i, a) in list.iter().enumerate() {
                 // The gallery runs past the page's foot, clipped, and scrolls.
                 let scrolls = matches!(a.look, Look::Capture(_));
@@ -5167,6 +5253,64 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `items` without the assistant's switch and the band round it, once it is checked that they lie on Ask N4N0's tile alone, the switch
+    /// last and so the one a press there takes.
+    fn apart_from_assistant_switch(items: Vec<Item>) -> Vec<Item> {
+        let corner = |i: &Item| i.action == Action::AssistantSwitch || (i.action == Action::Idle && matches!(i.look, Look::Blank));
+        for (n, part) in items.iter().enumerate().filter(|(_, i)| corner(i)) {
+            let tile = items.iter().find(|t| t.action == Action::Talk && t.rect.contains_rect(part.rect)).unwrap_or_else(|| panic!("{:?} off Ask N4N0's tile", part.rect));
+            for other in items.iter().filter(|o| !corner(o) && o.rect != tile.rect) {
+                assert!(!other.rect.intersects(part.rect), "{:?} on the switch's corner", other.action);
+            }
+            if part.action == Action::AssistantSwitch {
+                assert_eq!(hit(&items, part.rect.center()), Some(n), "the switch takes a press on it");
+            }
+        }
+        items.into_iter().filter(|i| !corner(i)).collect()
+    }
+
+    /// Ask N4N0's switch (Enzo, 2026-11-16): on its tile's corner on the wing, the strip and All tools, wherever N4N0 is on; a press on it
+    /// switches, a press just off it does nothing, and the rest of the tile still opens Ask N4N0. Never so small a laser or a finger misses it.
+    #[test]
+    fn ask_n4n0_has_the_assistant_switch_on_its_corner() {
+        let on = facts();
+        let lists = [
+            ("wing", items(Zone::WingTalk, vec2(78.0, 80.0), &on)),
+            ("strip", strip(600.0, 52.0, &on)),
+            ("all tools", sheet_items(Sheet::All, &on)),
+            ("all tools in a headset", sheet_items(Sheet::All, &Facts { desktop: false, can_call: true, can_states: true, can_light: true, ..on.clone() })),
+        ];
+        for (name, list) in lists {
+            let tile = list.iter().find(|i| i.action == Action::Talk).unwrap_or_else(|| panic!("{name}: no Ask N4N0")).rect;
+            let switches: Vec<&Item> = list.iter().filter(|i| i.action == Action::AssistantSwitch).collect();
+            assert_eq!(switches.len(), 1, "{name}");
+            let switch = switches[0].rect;
+            assert!(tile.contains_rect(switch) && switch.right() == tile.right() && switch.top() == tile.top(), "{name}: {switch:?} on {tile:?}'s top right corner");
+            assert!(switch.width() >= 30.0 && switch.height() >= 18.0, "{name}: {switch:?} large enough to hit");
+            assert!(switch.area() <= tile.area() * 0.3, "{name}: the tile stays mostly the page's");
+            let at = |p: Pos2| hit(&list, p).map(|i| list[i].action);
+            assert_eq!(at(switch.center()), Some(Action::AssistantSwitch), "{name}");
+            // Just off the switch, on the tile's side: nothing.
+            assert_eq!(at(switch.left_center() - vec2(2.0, 0.0)), Some(Action::Idle), "{name}: left of it");
+            assert_eq!(at(switch.center_bottom() + vec2(0.0, 2.0)), Some(Action::Idle), "{name}: under it");
+            // The tile's own middle and its other corners open Ask N4N0.
+            for p in [tile.left_bottom() + vec2(3.0, -3.0), tile.left_top() + vec2(3.0, 3.0), tile.right_bottom() - vec2(3.0, 3.0)] {
+                assert_eq!(at(p), Some(Action::Talk), "{name}: {p:?}");
+            }
+            apart_from_assistant_switch(list);
+        }
+        // N4N0 off: no assistant to switch.
+        for list in [items(Zone::WingTalk, vec2(78.0, 80.0), &Facts { n4n0: false, ..on.clone() }), sheet_items(Sheet::All, &Facts { n4n0: false, ..on.clone() })] {
+            assert!(list.iter().all(|i| i.action != Action::AssistantSwitch));
+        }
+        // Off, the tile says so, and its caption says how to have it back; the page's button turns it on.
+        let off = Facts { assistant_off: true, talk: TalkNow::AssistantOff, ..on.clone() };
+        assert_eq!(tile_line(Action::Talk, &off).as_deref(), Some(tr("Assistant off: nothing listens")));
+        assert_eq!(caption(Action::AssistantSwitch, &off).map(|c| c.0), Some(tr("Assistant off").to_string()));
+        assert_eq!(caption(Action::AssistantSwitch, &on).map(|c| c.0), Some(tr("Assistant on").to_string()));
+        assert_eq!(caption(Action::TalkToggle, &off).map(|c| c.0), Some(tr("Turn the assistant on").to_string()));
     }
 
     /// Round 8's judges: over cells whose keys work, numbered steps read as keys to press.
@@ -5303,7 +5447,7 @@ mod tests {
         let vr = Facts { vr_close: true, sheet: None, ..facts() };
         let found = hide(&vr);
         assert_eq!(found.len(), 1);
-        let all = strip(600.0, 52.0, &vr);
+        let all = apart_from_assistant_switch(strip(600.0, 52.0, &vr));
         for (i, a) in all.iter().enumerate() {
             assert!(a.rect.right() <= 600.0 && a.rect.width() >= 50.0, "{:?}", a.rect);
             for b in &all[i + 1..] {

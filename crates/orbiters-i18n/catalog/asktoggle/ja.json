@@ -1,0 +1,16 @@
+{
+  "Assistant off": "アシスタント オフ",
+  "Assistant on": "アシスタント オン",
+  "Assistant off: nothing listens": "アシスタント オフ：何も聞いていません",
+  "Its assistant is off: open it to turn it back on.": "アシスタントはオフです。開くとオンに戻せます。",
+  "Press to turn it off: N4N0 stops listening and answering.": "押すとオフ：N4N0は聞くのも答えるのもやめます。",
+  "Press to turn it on: N4N0 listens and answers again.": "押すとオン：N4N0がまた聞いて答えます。",
+  "Turn the assistant on": "アシスタントをオンにする",
+  "N4N0 listens and answers again.": "N4N0がまた聞いて答えます。",
+  "Press to turn it on": "押すとオンになります",
+  "Nothing listens and nothing is sent while it is off": "オフの間は何も聞かず、何も送りません",
+  "The assistant is off": "アシスタントはオフです",
+  "Turn it on with the button, or the switch on Ask N4N0's tile.": "ボタンか、「N4N0に聞く」タイルのスイッチでオンにできます。",
+  "Assistant off: tap the microphone to turn it on": "アシスタント オフ：マイクをタップでオン",
+  "Tap a tile, or call N4N0. The mic turns me off": "タイルをタップ、またはN4N0を呼んで。マイクでオフ"
+}

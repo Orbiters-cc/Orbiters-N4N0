@@ -1,0 +1,3 @@
+# The assistant's switch on Ask N4N0's tiles and Home's microphone (stream asktoggle, 2026-11-16). Its texts live in
+# panels.rs, mod.rs (area orbit) and layout.rs (area n4n0); kept here so that areas translated side by side never edit the
+# same file. Covers no file of its own.

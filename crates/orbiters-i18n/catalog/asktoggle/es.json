@@ -1,0 +1,16 @@
+{
+  "Assistant off": "Asistente desactivado",
+  "Assistant on": "Asistente activado",
+  "Assistant off: nothing listens": "Asistente desactivado: nada escucha",
+  "Its assistant is off: open it to turn it back on.": "Su asistente está desactivado: ábrelo para volver a activarlo.",
+  "Press to turn it off: N4N0 stops listening and answering.": "Pulsa para desactivarlo: N4N0 deja de escuchar y de responder.",
+  "Press to turn it on: N4N0 listens and answers again.": "Pulsa para activarlo: N4N0 vuelve a escuchar y a responder.",
+  "Turn the assistant on": "Activar el asistente",
+  "N4N0 listens and answers again.": "N4N0 vuelve a escuchar y a responder.",
+  "Press to turn it on": "Pulsa para activarlo",
+  "Nothing listens and nothing is sent while it is off": "Desactivado, nada escucha y nada se envía",
+  "The assistant is off": "El asistente está desactivado",
+  "Turn it on with the button, or the switch on Ask N4N0's tile.": "Actívalo con el botón o con el interruptor del mosaico Preguntar a N4N0.",
+  "Assistant off: tap the microphone to turn it on": "Asistente apagado: toca el micro para activarlo",
+  "Tap a tile, or call N4N0. The mic turns me off": "Toca un mosaico o llámame. El micro me apaga"
+}

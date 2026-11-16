@@ -574,6 +574,30 @@ fn switch(p: &Painter, r: Rect, on: bool, pal: &Palette) {
     p.circle_filled(pos2(x, track.center().y), 13.0, Color32::WHITE);
 }
 
+/// Home's microphone as the assistant's switch (Enzo, 2026-11-16): on, the green microphone of the page's picture with a
+/// switch on its corner, knob right; off, the microphone greyed and struck through, the switch's knob left. The whole
+/// place around it takes a press ([`layout::ASSISTANT_SWITCH`]), lit under a pointer as a round button is.
+fn assistant_switch(p: &Painter, origin: Pos2, on: bool, hovered: bool, pressed: bool, pal: &Palette) {
+    let mic = rect(layout::ASSISTANT_MIC, origin);
+    if pressed || hovered {
+        p.circle_filled(mic.center(), mic.width() / 2.0 + 6.0, theme::white(if pressed { 0.14 } else { 0.07 }));
+    }
+    if !on {
+        // Over the picture's green microphone: grey, and struck through.
+        p.circle_filled(mic.center(), mic.width() / 2.0, pal.raised);
+        widgets::icon(p, mic.center(), glyph(Icon::Microphone), mic.width() * 0.5, pal.muted);
+        let arm = mic.width() * 0.30;
+        p.line_segment([mic.center() + vec2(-arm, -arm), mic.center() + vec2(arm, arm)], Stroke::new(4.0, pal.card));
+        p.line_segment([mic.center() + vec2(-arm, -arm), mic.center() + vec2(arm, arm)], Stroke::new(2.5, pal.muted));
+    }
+    // The switch on the microphone's lower right corner, ringed in the card's colour so that it stands off the disc.
+    let track = Rect::from_center_size(mic.right_bottom() + vec2(-4.0, -6.0), vec2(36.0, 22.0));
+    p.rect_filled(track.expand(2.5), theme::radius(13.5), pal.card);
+    p.rect_filled(track, theme::radius(11.0), if on { pal.accent } else { theme::alpha(pal.muted, 0.6) });
+    let x = if on { track.max.x - 11.0 } else { track.min.x + 11.0 };
+    p.circle_filled(pos2(x, track.center().y), 8.0, Color32::WHITE);
+}
+
 /// Whether a home tile lays its icon beside its title (a tile half as wide again as it is tall, or wider) rather than
 /// above it.
 pub fn tile_is_wide(r: layout::Rect) -> bool {
@@ -766,6 +790,11 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
     for (i, e) in layout.elements.iter().enumerate() {
         let state = layout::state(menu, e);
         if state.hidden {
+            continue;
+        }
+        // Home's microphone with its switch: drawn whole here (no tile under it).
+        if e.target == orbiters_n4n0_core::menu::Target::Assistant {
+            assistant_switch(p, origin, state.on, view.hover == Some(i), view.pressed == Some(i), pal);
             continue;
         }
         element(p, e, origin, skin);

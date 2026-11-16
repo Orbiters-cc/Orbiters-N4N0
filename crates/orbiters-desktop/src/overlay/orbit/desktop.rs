@@ -1139,15 +1139,15 @@ impl Corner {
             .chain(zones::place(Zone::SheetHint, client))
             .map(|p| p.rect)
             .collect();
-        let mut r = first;
-        for _ in 0..6 {
-            let Some(top) = parts.iter().filter(|p| p.intersects(r.expand(4.0 * zoom))).map(|p| p.top()).reduce(f32::min) else { break };
-            r = r.translate(vec2(0.0, top - 6.0 * zoom - r.bottom()));
-        }
-        // VRChat's hints are in the window's top corners: no higher than this; with no room, at the bottom, above ours.
-        if r.top() < client.y * 0.3 {
-            r = first;
-        }
+        // The lowest place in the corner's column that lies on none of them, no higher than 30 % of the window (VRChat's hints are in its top
+        // corners); with no room, at the bottom, above ours.
+        let free = |r: &egui::Rect| !parts.iter().any(|p| p.intersects(r.expand(4.0 * zoom)));
+        let step = 4.0 * zoom;
+        let r = (0..)
+            .map(|i| first.translate(vec2(0.0, -(i as f32) * step)))
+            .take_while(|r| r.top() >= client.y * 0.3)
+            .find(free)
+            .unwrap_or(first);
         (r, zoom)
     }
 
@@ -1992,7 +1992,9 @@ mod tests {
             }
             eprintln!("mismatch corner, {open:?} {client:?}: {on_corner} points on its rows, {on_ours} on our parts"); // i18n: not shown (a test's measurement)
             assert!(on_corner > 0);
-            assert_eq!(under(POINT { x: origin.x as i32 + centre.x as i32, y: origin.y as i32 + centre.y as i32 }), stand_in.0, "{open:?} {client:?}: the centre is VRChat's"); // i18n: not shown (a menu mismatch report's line)
+            if open == Around::Wheel {
+                assert_eq!(under(POINT { x: origin.x as i32 + centre.x as i32, y: origin.y as i32 + centre.y as i32 }), stand_in.0, "{open:?} {client:?}: the centre, where VRChat holds the pointer with its wheel open, is VRChat's");
+            } // i18n: not shown (a menu mismatch report's line)
             for kind in crate::mismatch::Kind::ALL {
                 let i = crate::mismatch::Kind::ALL.iter().position(|k| *k == kind).expect("a kind") as f32;
                 let middle = rect.min + vec2(Corner::SIZE.x / 2.0, i * (Corner::ROW + Corner::GAP) + Corner::ROW / 2.0) * zoom;

@@ -482,6 +482,14 @@ fn vrchat_time(line: &str, offset: time::UtcOffset) -> Option<i64> {
 pub fn vrchat_said(line: &str) -> Option<String> {
     let said = line.get(19..)?.trim_start();
     let said = said.split_once(" -  ").map_or(said, |(_, s)| s).trim();
+    // An instance's id after the world's says who owns it: only the world is kept, before anything else is looked at.
+    let said = match said.find("wrld_") {
+        Some(i) => {
+            let end = said[i..].find([':', ' ']).map_or(said.len(), |e| i + e);
+            format!("{}{}", &said[..i], &said[i..end])
+        }
+        None => said.to_owned(),
+    };
     let lower = said.to_lowercase();
     // A person: their name follows these, or their id is in it.
     const PERSON: [&str; 9] = ["usr_", "onplayer", "displayname", "player ", "user ", "avatar ", "invite", "friend", "@"]; // i18n: not shown (a menu mismatch report's line)
@@ -492,14 +500,6 @@ pub fn vrchat_said(line: &str) -> Option<String> {
     if !ABOUT.iter().any(|a| lower.contains(a)) {
         return None;
     }
-    // An instance's id after the world's says who owns it: only the world is kept.
-    let said = match said.find("wrld_") {
-        Some(i) => {
-            let end = said[i..].find([':', ' ']).map_or(said.len(), |e| i + e);
-            format!("{}{}", &said[..i], &said[i..end])
-        }
-        None => said.to_owned(),
-    };
     let mut said = said;
     if said.len() > LONGEST {
         let mut cut = LONGEST;

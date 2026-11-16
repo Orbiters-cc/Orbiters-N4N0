@@ -816,7 +816,7 @@ impl Controller {
             WorkerEvent::Ready { version } => {
                 self.update(|s| {
                     s.worker.ready = true;
-                    s.worker.error = (version != orbiters_core::APP_VERSION).then(|| tr!("worker version {version} differs from the app", version = version));
+                    s.worker.error = (version != orbiters_core::app_version()).then(|| tr!("worker version {version} differs from the app", version = version));
                 });
                 // The microphones for the settings.
                 let ctl = self.clone();

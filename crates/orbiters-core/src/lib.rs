@@ -56,8 +56,9 @@ pub fn leave_with_parent() {
     }
 }
 
-/// Version of the app and its workers (they must match: the shell refuses a worker of another version).
-pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Version of the app and its workers (they must match: the shell refuses a worker of another version). Given by each
+/// program at start (`orbiters_version::set(env!("ORBITERS_VERSION"))`), not compiled in here: see `orbiters-version`.
+pub use orbiters_version::get as app_version;
 
 /// The TLS the HTTP clients use: on the desktop, ureq's native TLS (Windows' SChannel, certificates checked against
 /// Windows' store); on Android, rustls with ring (native TLS would mean OpenSSL there), checked against Mozilla's roots

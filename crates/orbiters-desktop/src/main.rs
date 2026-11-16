@@ -74,6 +74,8 @@ fn sandbox_switches() {
 }
 
 fn main() -> anyhow::Result<()> {
+    // The release's version, for the libraries too (orbiters-version says why it is given here).
+    orbiters_version::set(env!("ORBITERS_VERSION"));
     sandbox_switches();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let private_roots = harness::prepare(&args)?;

@@ -39,7 +39,7 @@ const LOOK_EVERY: Duration = Duration::from_millis(200);
 
 /// How the server calls itself.
 fn server_info() -> Value {
-    json!({ "name": "orbiters-n4n0-vrchat-bridge", "title": "Orbiters - N4N0: VRChat bridge", "version": orbiters_core::APP_VERSION })
+    json!({ "name": "orbiters-n4n0-vrchat-bridge", "title": "Orbiters - N4N0: VRChat bridge", "version": orbiters_core::app_version() })
 }
 
 const INSTRUCTIONS: &str = "Drives VRChat on this computer in desktop mode, in private instances only, to take 3D pictures from world to world. Read the resource bridge://guide (or the prompt world_tour) first, and call get_state whenever unsure: its `next` says what to do. The person at the computer always wins: a paused_by_person answer means wait.";

@@ -99,7 +99,7 @@ fn a_link_is_a_session_from_its_first_step_to_its_end() {
     let events = spool.waiting();
     let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(kinds, ["start", "enter", "press", "enter", "end"]);
-    assert!(events.iter().all(|e| e.surface == "vr" && e.session == events[0].session && e.build == env!("CARGO_PKG_VERSION")));
+    assert!(events.iter().all(|e| e.surface == "vr" && e.session == events[0].session && e.build == env!("ORBITERS_VERSION")));
     assert_eq!(events[4].screen.as_deref(), Some("qm/Worlds"), "where it ended");
     assert_eq!(events[3].from.as_deref(), Some("qm"));
     // Kept on disk: a new run sends what the last one could not.

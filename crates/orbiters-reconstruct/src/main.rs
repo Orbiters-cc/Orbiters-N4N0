@@ -700,6 +700,8 @@ fn vrchat(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn main() {
+    // The release's version, for the libraries too (orbiters-version says why it is given here).
+    orbiters_version::set(env!("ORBITERS_VERSION"));
     // Its messages read as the window it reports to does.
     orbiters_core::settings::Settings::speak_saved_language();
     orbiters_core::panic_log::install();

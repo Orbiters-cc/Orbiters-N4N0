@@ -260,7 +260,7 @@ pub fn key(session: &Path, settings: &str) -> anyhow::Result<String> {
     use orbiters_core::contracts::manifest;
     let hash = |file: &str| orbiters_core::visited::sha256_file(&session.join(file)).with_context(|| tr!("reading {path}", path = file));
     let program = std::env::current_exe().and_then(std::fs::metadata).map_or(0, |m| m.len());
-    Ok(format!("{}|{}|{program}|{}|{}|{settings}", String::from_utf8_lossy(MAGIC), env!("CARGO_PKG_VERSION"), hash(manifest::MANIFEST_FILE)?, hash(manifest::FRAMES_FILE)?))
+    Ok(format!("{}|{}|{program}|{}|{}|{settings}", String::from_utf8_lossy(MAGIC), orbiters_core::app_version(), hash(manifest::MANIFEST_FILE)?, hash(manifest::FRAMES_FILE)?))
 }
 
 /// The checkpoint of a session.

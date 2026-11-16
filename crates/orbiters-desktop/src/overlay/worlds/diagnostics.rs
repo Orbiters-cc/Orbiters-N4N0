@@ -125,7 +125,7 @@ impl Trace {
         let render = self.render.each_mut().map(Series::take);
         let ready = self.ready_delay.each_mut().map(Series::take);
         let summary = json!({
-            "at": orbiters_core::now_utc_iso(), "version": orbiters_core::APP_VERSION,
+            "at": orbiters_core::now_utc_iso(), "version": orbiters_core::app_version(),
             "seconds": now.saturating_duration_since(self.since).as_secs_f64(), "headset": self.headset,
             "kinds": ["wide", "face", "cube"], "render_wall_ms": render, "ready_to_submit_ms": ready,
             "texture_submission_ms": self.submit.take(), "admission_interval_ms": self.intervals.take(),

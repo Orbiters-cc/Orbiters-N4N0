@@ -204,7 +204,7 @@ impl WorldFeedbackRuntime {
         });
         serde_json::json!({
             "n4n0": contract::ANSWER_VERSION,
-            "app": format!("Orbiters - N4N0 {}", orbiters_core::APP_VERSION),
+            "app": format!("Orbiters - N4N0 {}", orbiters_core::app_version()),
             "signedIn": signed_in,
             "session": self.world.session,
             "seen": self.world.seen,

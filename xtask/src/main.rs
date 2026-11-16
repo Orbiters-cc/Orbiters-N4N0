@@ -211,10 +211,43 @@ pub fn target_dir() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| root().join("target"))
 }
 
-/// The workspace's version (`[workspace.package] version` in the root Cargo.toml): every program's, the release's.
-pub fn workspace_version() -> anyhow::Result<String> {
+/// The release's version: `ORBITERS_VERSION` under `[env]` in `.cargo/config.toml`, which every program is built with
+/// (`orbiters-version` says why). A development bump changes it alone; a stable one also `[workspace.package] version`.
+pub fn release_version() -> anyhow::Result<String> {
+    let text = std::fs::read_to_string(root().join(".cargo").join("config.toml"))?;
+    env_version_line(&text).map(|(_, v)| v).context("no ORBITERS_VERSION under [env] in .cargo/config.toml")
+}
+
+/// The crates' own version (`[workspace.package] version` in the root Cargo.toml): the last stable release's.
+pub fn crate_version() -> anyhow::Result<String> {
     let text = std::fs::read_to_string(root().join("Cargo.toml"))?;
     version_line(&text).map(|(_, v)| v).context("no version under [workspace.package] in Cargo.toml")
+}
+
+/// A stable release's programs carry its version as crates too; only development versions live in the config alone.
+pub fn ensure_versions_agree(version: &str) -> anyhow::Result<()> {
+    if !is_development(version) {
+        let crates = crate_version()?;
+        anyhow::ensure!(crates == version, "the release is {version} but the crates are {crates}: cargo xtask bump {version}");
+    }
+    Ok(())
+}
+
+/// The line index and value of `ORBITERS_VERSION = "…"` under `[env]`.
+fn env_version_line(toml: &str) -> Option<(usize, String)> {
+    let mut inside = false;
+    for (i, line) in toml.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed == "[env]";
+        } else if inside {
+            if let Some(rest) = trimmed.strip_prefix("ORBITERS_VERSION") {
+                let value = rest.trim_start().strip_prefix('=')?.trim().trim_matches('"');
+                return Some((i, value.to_string()));
+            }
+        }
+    }
+    None
 }
 
 /// The line index and value of `version = "…"` under `[workspace.package]`.
@@ -298,7 +331,7 @@ fn main() {
 }
 
 fn run_command(args: &[String]) -> anyhow::Result<()> {
-    command(args, &workspace_version)
+    command(args, &release_version)
 }
 
 /// A command, on the workspace whose version `version` reads.
@@ -313,7 +346,7 @@ fn command(args: &[String], version: &dyn Fn() -> anyhow::Result<String>) -> any
     };
     match args.first().map(String::as_str) {
         Some("keygen") => keygen(&Config::load()?, flag(rest, "--force")),
-        Some("bump") if flag(rest, "--dev") => bump(&next_dev_version(&workspace_version()?)?),
+        Some("bump") if flag(rest, "--dev") => bump(&next_dev_version(&release_version()?)?),
         Some("bump") => bump(rest.first().context("cargo xtask bump <version>")?),
         Some("dist") => {
             // On Windows and on a Mac alike, before a setting is read or a program built.
@@ -325,11 +358,11 @@ fn command(args: &[String], version: &dyn Fn() -> anyhow::Result<String>) -> any
             let options = dist::Options { unsigned: flag(rest, "--unsigned"), channel, notes: notes()?, programs, profile };
             dist::dist(&Config::load()?, &options).map(drop)
         }
-        Some("publish") if flag(rest, "--dev") => publish::publish_dev(&Config::load()?, &workspace_version()?, &channel, flag(rest, "--force")),
-        Some("publish") => publish::publish(&Config::load()?, &workspace_version()?, &channel, flag(rest, "--force")),
+        Some("publish") if flag(rest, "--dev") => publish::publish_dev(&Config::load()?, &release_version()?, &channel, flag(rest, "--force")),
+        Some("publish") => publish::publish(&Config::load()?, &release_version()?, &channel, flag(rest, "--force")),
         Some("release") if flag(rest, "--dev") => release_dev(&Config::load()?, &channel, notes()?, flag(rest, "--allow-dirty")),
         Some("release") => release(&Config::load()?, &channel, notes()?, flag(rest, "--allow-dirty"), flag(rest, "--unsigned")),
-        Some("github") => publish::github(&workspace_version()?, &notes()?, flag(rest, "--unsigned")),
+        Some("github") => publish::github(&release_version()?, &notes()?, flag(rest, "--unsigned")),
         _ => {
             println!("{HELP}");
             Ok(())
@@ -378,18 +411,25 @@ fn keygen(config: &Config, force: bool) -> anyhow::Result<()> {
 /// Sets the workspace's version, which every program and the release carry.
 fn bump(version: &str) -> anyhow::Result<()> {
     let version = version.trim_start_matches('v');
-    anyhow::ensure!(orbiters_update::is_newer(version, &workspace_version()?), "{version} is not after the current version, {}", workspace_version()?);
-    let path = root().join("Cargo.toml");
-    let text = std::fs::read_to_string(&path)?;
-    let (line, _) = version_line(&text).context("no version under [workspace.package] in Cargo.toml")?;
+    anyhow::ensure!(orbiters_update::is_newer(version, &release_version()?), "{version} is not after the current version, {}", release_version()?);
+    let config = root().join(".cargo").join("config.toml");
+    let text = std::fs::read_to_string(&config)?;
+    let (line, _) = env_version_line(&text).context("no ORBITERS_VERSION under [env] in .cargo/config.toml")?;
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
-    lines[line] = format!("version = \"{version}\"");
-    std::fs::write(&path, lines.join("\n") + "\n")?;
-    run(cargo().args(["update", "--workspace", "--offline"]))?;
+    lines[line] = format!("ORBITERS_VERSION = \"{version}\"");
+    std::fs::write(&config, lines.join("\n") + "\n")?;
     if is_development(version) {
-        println!("Version {version}. Commit Cargo.toml and Cargo.lock, then: cargo xtask release --dev");
+        // The crates keep the last stable version: only the programs, which read ORBITERS_VERSION, recompile.
+        println!("Version {version}. Commit .cargo/config.toml, then: cargo xtask release --dev");
     } else {
-        println!("Version {version}. Commit Cargo.toml and Cargo.lock, push, then: cargo xtask release");
+        let path = root().join("Cargo.toml");
+        let text = std::fs::read_to_string(&path)?;
+        let (line, _) = version_line(&text).context("no version under [workspace.package] in Cargo.toml")?;
+        let mut lines: Vec<String> = text.lines().map(String::from).collect();
+        lines[line] = format!("version = \"{version}\"");
+        std::fs::write(&path, lines.join("\n") + "\n")?;
+        run(cargo().args(["update", "--workspace", "--offline"]))?;
+        println!("Version {version}. Commit .cargo/config.toml, Cargo.toml and Cargo.lock, push, then: cargo xtask release");
     }
     Ok(())
 }
@@ -397,7 +437,7 @@ fn bump(version: &str) -> anyhow::Result<()> {
 /// Everything a version bump needs: the checks, `dist`, `publish`, the tag, the GitHub release. `unsigned`: before
 /// Authenticode signing is set up, a setup without signatures, on GitHub only.
 fn release(config: &Config, channel: &str, notes: String, allow_dirty: bool, unsigned: bool) -> anyhow::Result<()> {
-    let version = workspace_version()?;
+    let version = release_version()?;
     let tag = format!("desktop-v{version}");
 
     // The release names a commit: one that is committed, pushed, and not released yet.
@@ -449,7 +489,7 @@ fn next_dev_version(current: &str) -> anyhow::Result<String> {
 /// release, put in the development environment's feed on this computer, where installed apps switched to the
 /// development environment find it within two minutes, then pushed, tagged and made a GitHub pre-release.
 fn release_dev(config: &Config, channel: &str, notes: String, allow_dirty: bool) -> anyhow::Result<()> {
-    let version = workspace_version()?;
+    let version = release_version()?;
     anyhow::ensure!(is_development(&version), "{version} is not a development version: cargo xtask bump --dev, commit, then release --dev");
     if !allow_dirty {
         let changes = git(&["status", "--porcelain", "--untracked-files=no"])?;
@@ -480,6 +520,32 @@ fn release_dev(config: &Config, channel: &str, notes: String, allow_dirty: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_release_version_is_found_under_env() {
+        let toml = "[alias]\nORBITERS_VERSION = \"9\"\n[env]\nCMAKE_POLICY_VERSION_MINIMUM = \"3.5\"\nORBITERS_VERSION = \"0.3.6-dev.2\"\n";
+        assert_eq!(env_version_line(toml), Some((4, "0.3.6-dev.2".into())));
+        assert_eq!(env_version_line("[env]\nOTHER = \"1\"\n"), None);
+        // The repository's own config has one, and a stable one agrees with the crates.
+        let version = release_version().unwrap();
+        assert!(is_development(&version) || crate_version().unwrap() == version, "{version}");
+    }
+
+    /// Each program gives the libraries its version first thing (a worker that did not would report the crates'
+    /// version, and the shell refuses a worker of another version); setup and the SteamVR driver read it directly.
+    #[test]
+    fn every_program_gives_the_release_version_at_start() {
+        for crate_name in ["orbiters-desktop", "orbiters-capture", "orbiters-reconstruct", "orbiters-voice", "orbiters-call"] {
+            let main = std::fs::read_to_string(root().join("crates").join(crate_name).join("src").join("main.rs")).unwrap();
+            let body = main.split("\nfn main()").nth(1).unwrap_or_else(|| panic!("{crate_name} has no main"));
+            let first: String = body.lines().skip(1).filter(|l| !l.trim_start().starts_with("//")).take(1).collect();
+            assert_eq!(first.trim(), "orbiters_version::set(env!(\"ORBITERS_VERSION\"));", "{crate_name}");
+        }
+        for (crate_name, file) in [("orbiters-setup", "ui.rs"), ("orbiters-smooth-driver", "lib.rs")] {
+            let text = std::fs::read_to_string(root().join("crates").join(crate_name).join("src").join(file)).unwrap();
+            assert!(text.contains("env!(\"ORBITERS_VERSION\")") && !text.contains("CARGO_PKG_VERSION"), "{crate_name}");
+        }
+    }
 
     #[test]
     fn the_workspace_version_is_found_under_its_section() {

@@ -128,8 +128,8 @@ fn every_kind_has_its_own_words_key_and_key_on_the_desktop() {
     let mut digits = std::collections::HashSet::new();
     for k in Kind::ALL {
         assert!(keys.insert(k.key()));
-        assert!(digits.insert(k.digit()));
-        assert!(k.digit() >= 7, "1 to 6 are the ring's cells");
+        assert!(digits.insert(k.function_key()));
+        assert!((7..=12).contains(&k.function_key()), "F7 onwards: F1 to F5 are VRChat's own, Alt+F4 closes it");
         assert_eq!(Kind::from_key(k.key()), Some(k));
         assert!(!k.words().is_empty());
     }

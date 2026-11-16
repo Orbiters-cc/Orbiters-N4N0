@@ -11,7 +11,7 @@
 //! ring's last 30 s and those few seconds into a report, with the build, the controllers and their binding, the menus' state at the press,
 //! the lines of VRChat's log about its menus and worlds (never people), and, when its own switch is on, a small blurred picture of the game.
 //!
-//! **Never**: anything typed (no key but Esc, R, Left Alt, Alt+7..9 and the numbers is read), anything said, names of people (VRChat's log
+//! **Never**: anything typed (no key but Esc, R, Left Alt, Alt+F7..F9 and the numbers is read), anything said, names of people (VRChat's log
 //! lines with a person in them are dropped), the account. The picture is of the game, so it can show what the game showed: it is its own
 //! switch, off by default, and is made too small to read names.
 //!
@@ -84,8 +84,9 @@ impl Kind {
         }
     }
 
-    /// Its key on the desktop with Left Alt held, which works while VRChat's wheel holds the pointer: 7, 8, 9 (the ring's cells are 1 to 6).
-    pub fn digit(self) -> u8 {
+    /// Its function key on the desktop with Left Alt held (Alt+F7, Alt+F8, Alt+F9), which works while VRChat's wheel holds the pointer.
+    /// Not numbers: those press the ring's cells (and the second ring's, 7 and 8), and AltGr+number types characters on many keyboards.
+    pub fn function_key(self) -> u8 {
         7 + Kind::ALL.iter().position(|k| *k == self).unwrap_or(0) as u8
     }
 }

@@ -2314,7 +2314,10 @@ pub(crate) mod tests {
 
     /// A stand-in for Orbiters that serves `bytes` as a picture to every request: each request line and whether it came
     /// with the account's credential.
-    pub(crate) fn picture_server(bytes: Vec<u8>) -> (Api, std::sync::Arc<Mutex<Vec<(String, bool)>>>) {
+    /// Each request line a picture stand-in got, and whether it came with the account's credential.
+    pub(crate) type Asked = std::sync::Arc<Mutex<Vec<(String, bool)>>>;
+
+    pub(crate) fn picture_server(bytes: Vec<u8>) -> (Api, Asked) {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let api = Api::at(&format!("http://{}/", listener.local_addr().unwrap()));

@@ -2755,3 +2755,62 @@ fn ask_waits_for_approval_then_rearms() {
     n.ask_page(false);
     t.shutdown(&n);
 }
+
+/// Enzo, 2026-11-16: the switch on Ask N4N0's tile (and Home's microphone) turns the assistant off at once, not only its tile: the
+/// sentence it listens to is dropped, the microphone let go, an answer under way stopped, and nothing brings it back but the switch.
+#[test]
+fn switching_the_assistant_off_stops_all_of_it_at_once() {
+    use crate::status::VoiceReadiness;
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    // A server that takes the question and never answers: the answer stays under way.
+    let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+    t.sign_in(format!("http://{}/", silent.local_addr().unwrap()), "test");
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    n.ask("what time is it".into(), "typed");
+    assert!(n.n4n0.lock().unwrap().answering(), "an answer under way");
+    n.command(Command::Assistant { on: false });
+    assert!(!t.settings().n4n0.assistant, "the setting Settings shows, saved");
+    {
+        let rt = n.n4n0.lock().unwrap();
+        assert!(!rt.answering() && rt.listening.is_none(), "the answer and the listening stopped");
+        assert_eq!(rt.screen.menu.assistant, Some(false), "Home's microphone says it at once");
+    }
+    assert!(*worker.dropped.lock().unwrap(), "the microphone is let go");
+    assert_eq!(t.view().voice.readiness, VoiceReadiness::AssistantOff);
+    // Nothing brings it back: a hand on N4N0, Talk, the menu's listening, a question.
+    n.touch();
+    n.menu_listen();
+    n.command(Command::Talk { down: true });
+    n.voice_follow();
+    assert!(n.n4n0.lock().unwrap().listening.is_none());
+    assert_eq!(d.ears.workers.lock().unwrap().len(), 1, "no microphone taken again");
+    n.ask("and now".into(), "typed");
+    assert!(!n.n4n0.lock().unwrap().answering());
+    // On again, from the same switch.
+    n.command(Command::Assistant { on: true });
+    assert!(t.settings().n4n0.assistant);
+    assert_eq!(n.n4n0.lock().unwrap().screen.menu.assistant, Some(true));
+    assert_eq!(d.ears.workers.lock().unwrap().len(), 2, "it hears again");
+}
+
+/// Turned off in Settings (which saves the setting without N4N0's command): within the second's look, the same as the switch.
+#[test]
+fn the_assistant_turned_off_in_settings_stops_an_answer_too() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+    t.sign_in(format!("http://{}/", silent.local_addr().unwrap()), "test");
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    n.ask("what time is it".into(), "typed");
+    assert!(n.n4n0.lock().unwrap().answering());
+    t.settings.lock().unwrap().n4n0.assistant = false;
+    n.voice_follow();
+    let rt = n.n4n0.lock().unwrap();
+    assert!(!rt.answering() && rt.listening.is_none());
+    assert!(*worker.dropped.lock().unwrap());
+}

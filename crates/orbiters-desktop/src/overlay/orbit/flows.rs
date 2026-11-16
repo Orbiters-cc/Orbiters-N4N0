@@ -2373,3 +2373,41 @@ fn now_playing_s_volume_is_grabbed_and_dragged_as_its_timeline_is() {
     person.turns(2);
     assert_eq!(level(&person), 60);
 }
+
+/// Enzo, 2026-11-16: "a very easy way to disable the conversation / AI assistant feature of N4N0 from the overlay ... with a little switch on
+/// the corner of the feature tile". Through the hand: the switch on Ask N4N0's corner asks N4N0 to turn its assistant off and shows it off
+/// at once, opening nothing; the rest of the tile still opens Ask N4N0, whose button then offers to turn it on again, and does.
+#[test]
+fn ask_n4n0_s_switch_turns_the_assistant_off_and_its_page_on_again() {
+    use super::panels::TalkNow;
+    let (mut person, heard) = Person::heard();
+    let set = |person: &mut Person, on: bool| {
+        let mut snap = (*person.snap).clone();
+        snap.settings.n4n0.enabled = true;
+        snap.settings.n4n0.assistant = on;
+        person.snap = Arc::new(snap);
+        person.turns(2);
+    };
+    set(&mut person, true);
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    assert!(!person.panels.facts.assistant_off);
+    person.press(Action::AssistantSwitch);
+    assert!(heard.said().iter().any(|c| c.contains("Assistant") && c.contains("false")), "asked of N4N0: {:?}", heard.said());
+    assert!(person.panels.facts.assistant_off, "off at once, before the settings say it");
+    assert_eq!(person.panels.facts.sheet, None, "the switch opens nothing");
+    // N4N0 saved it: still off, and it stays so.
+    set(&mut person, false);
+    assert!(person.panels.facts.assistant_off);
+    // The tile itself: Ask N4N0, which says the assistant is off and how to have it back.
+    person.press(Action::Talk);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Talk));
+    assert_eq!(person.panels.facts.talk, TalkNow::AssistantOff);
+    let before = heard.said().len();
+    person.press(Action::TalkToggle);
+    let said = heard.said()[before..].to_vec();
+    assert!(said.iter().any(|c| c.contains("Assistant") && c.contains("true")), "turned on again: {said:?}");
+    assert!(!said.iter().any(|c| c.contains("AskTalk")), "nothing listened to by that press");
+    assert!(!person.panels.facts.assistant_off);
+}

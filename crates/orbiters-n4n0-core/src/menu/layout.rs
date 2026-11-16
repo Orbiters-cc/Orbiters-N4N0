@@ -3308,3 +3308,54 @@ mod tests {
         assert_eq!(said(Language::Fr, &menu), "1 enregistré pour cet avatar");
     }
 }
+
+#[cfg(test)]
+mod assistant_switch {
+    use super::*;
+    use crate::menu::{Effect, Menu, Page};
+
+    /// Home's microphone switches N4N0's assistant (Enzo, 2026-11-16) on every Home an avatar's screen may have: the last element
+    /// of the page, so that an avatar uploaded before it keeps every other element where its package's layout table has it; a press
+    /// on the microphone switches, the tiles under it keep theirs; the page's picture keeps its plain microphone.
+    #[test]
+    fn every_home_s_microphone_switches_the_assistant() {
+        let homes = [ScreenPage::Home, ScreenPage::HomeSix, ScreenPage::HomeSeven, ScreenPage::HomeTen, ScreenPage::HomeSimple, ScreenPage::HomeQuiet, ScreenPage::HomeSimpleStay, ScreenPage::HomeQuietStay];
+        let mut menu = Menu { open: true, page: Page::Home, assistant: Some(true), ..Default::default() };
+        for page in homes {
+            let l = layout(page);
+            let last = l.elements.last().unwrap();
+            assert_eq!(last.target, Target::Assistant, "{page:?}: last");
+            assert_eq!(l.elements.iter().filter(|e| e.target == Target::Assistant).count(), 1);
+            let (mx, my, mw, mh) = (ASSISTANT_MIC.x as f32, ASSISTANT_MIC.y as f32, ASSISTANT_MIC.w as f32, ASSISTANT_MIC.h as f32);
+            assert!(last.rect.contains(mx + 2.0, my + 2.0) && last.rect.contains(mx + mw - 2.0, my + mh - 2.0), "{page:?}: over the microphone");
+            assert!(overlay_only(Target::Assistant), "never in the page's picture");
+            assert_eq!(hit_near(&l, &menu, 60.0, 52.0).map(|h| h.1), Some(Target::Assistant), "{page:?}");
+            // Nothing else lies on it, and the elements under it are 12 pixels or more away.
+            for e in &l.elements[..l.elements.len() - 1] {
+                let gap_y = e.rect.y as i32 - (last.rect.y + last.rect.h) as i32;
+                let gap_x = e.rect.x as i32 - (last.rect.x + last.rect.w) as i32;
+                assert!(gap_y >= 12 || gap_x >= 12, "{page:?}: {:?} at {:?}", e.target, e.rect);
+                let (x, y) = (e.rect.x as f32 + 4.0, e.rect.y as f32 + 4.0);
+                if !state(&menu, e).pointable() {
+                    continue;
+                }
+                assert_eq!(hit_near(&l, &menu, x, y).map(|h| h.1), Some(e.target), "{page:?}: {:?} keeps its press", e.target);
+            }
+            // N4N0 off: nothing to switch, and the microphone presses nothing.
+            let off = Menu { assistant: None, ..menu.clone() };
+            assert!(state(&off, last).hidden);
+        }
+        // A press: off, said on the status line; again: on.
+        assert_eq!(menu.press(Target::Assistant), vec![Effect::Assistant(false)]);
+        assert_eq!(menu.assistant, Some(false));
+        let status = Slot { x: 0, y: 0, cols: 48, size: 24, style: Style::Accent, align: Align::Left, offset: 0, content: Content::Status };
+        assert_eq!(slot_text(&menu, &status), tr("Assistant off: tap the microphone to turn it on"));
+        assert_eq!(menu.press(Target::Assistant), vec![Effect::Assistant(true)]);
+        assert_eq!(slot_text(&menu, &status), tr("Tap a tile, or call N4N0. The mic turns me off"));
+        for text in ["Assistant off: tap the microphone to turn it on", "Tap a tile, or call N4N0. The mic turns me off"] {
+            assert!(text.chars().count() <= 48, "fits the status line: {text}");
+        }
+        let mut none = Menu { open: true, page: Page::Home, ..Default::default() };
+        assert!(none.press(Target::Assistant).is_empty());
+    }
+}

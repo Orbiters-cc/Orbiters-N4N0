@@ -861,6 +861,32 @@ mod tests {
         assert!(screen.press(Target::MismatchButtons).is_empty());
     }
 
+    /// Home's microphone switches N4N0's assistant (Enzo, 2026-11-16): it shows the setting Settings › N4N0 shows, and a press goes
+    /// through N4N0, which stops what the assistant was doing as it saves it.
+    #[test]
+    fn home_s_microphone_is_the_assistant_setting() {
+        let mut h = host();
+        let mut settings = Settings::default();
+        h.open(&settings);
+        let n4n0 = N4n0Status::default();
+        h.follow(&n4n0, &settings);
+        assert_eq!(h.menu.assistant, Some(true));
+        settings.n4n0.assistant = false;
+        h.dirty = false;
+        h.follow(&n4n0, &settings);
+        assert!(h.dirty && h.menu.assistant == Some(false));
+        let service = Recorder::default();
+        let effects = h.press(Target::Assistant);
+        assert_eq!(effects, vec![Effect::Assistant(true)]);
+        h.effects(effects, &settings, &service);
+        assert_eq!(*service.commands.lock().unwrap(), vec![Command::Assistant { on: true }]);
+        assert!(service.saved.lock().unwrap().is_empty(), "N4N0 saves it");
+        // N4N0 off: nothing to switch.
+        settings.n4n0.enabled = false;
+        h.follow(&n4n0, &settings);
+        assert_eq!(h.menu.assistant, None);
+    }
+
     #[test]
     fn the_card_out_and_a_stopped_picture_show_in_the_menu() {
         let mut h = host();

@@ -213,7 +213,8 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         ui.add_space(12.0);
     }
     let q = state.query.trim().to_lowercase();
-    let matches = |p: &&Project| q.is_empty() || p.name.to_lowercase().contains(&q) || p.path.to_string_lossy().to_lowercase().contains(&q);
+    let find = orbiters_core::search::Query::new(&q);
+    let matches = |p: &&Project| find.matches(&p.name) || (!q.is_empty() && p.path.to_string_lossy().to_lowercase().contains(&q));
     // Hidden projects only when asked for (dimmed and marked then).
     let hidden_n = state.scan.projects.iter().filter(|p| state.is_hidden(&p.path)).count();
     let shown = |p: &&Project| state.show_hidden || !state.is_hidden(&p.path);

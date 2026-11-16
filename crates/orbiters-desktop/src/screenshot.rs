@@ -2128,6 +2128,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         "gallery-grantee",
         "gallery-friends",
         "gallery-friends-error",
+        "gallery-friends-search",
         "gallery-explicit",
         "gallery-error",
         "gallery-picture",

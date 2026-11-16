@@ -92,6 +92,16 @@ impl Query {
         self.rank_any(names).is_some()
     }
 
+    /// Whether free text (a description, a message) has the query's words, folded the same way. Unlike a name, its
+    /// separators count: the letters of two words run together are not one word ("one onion" does not hold "neon").
+    pub fn in_text(&self, text: &str) -> bool {
+        if self.is_empty() {
+            return true;
+        }
+        let q = &self.key;
+        with_key(text, |k| tier(&k.plain, "", &q.plain, "").is_some() || ((k.latin.is_some() || q.latin.is_some()) && tier(k.latin_plain(), "", q.latin_plain(), "").is_some()))
+    }
+
     /// [`Query::rank`] on a key kept by the caller.
     pub fn rank_key(&self, k: &Key) -> Option<u8> {
         if self.is_empty() {
@@ -131,24 +141,36 @@ fn tier(plain: &str, compact: &str, q_plain: &str, q_compact: &str) -> Option<u8
     (!q_compact.is_empty() && compact.contains(q_compact)).then_some(4)
 }
 
-const CACHE_MAX: usize = 1 << 16;
+/// The cache holds at most this many bytes of names (about four times that with their keys and the map).
+const CACHE_BYTES: usize = 4 << 20;
 
-thread_local! {
-    static KEYS: RefCell<HashMap<Box<str>, Rc<Key>>> = RefCell::new(HashMap::new());
+#[derive(Default)]
+struct Cache {
+    keys: HashMap<Box<str>, Rc<Key>>,
+    bytes: usize,
 }
 
-/// The key of `name`, from this thread's cache (filled on first sight, emptied when it grows past 65,536 names).
+thread_local! {
+    static KEYS: RefCell<Cache> = RefCell::new(Cache::default());
+}
+
+/// The key of `name`, from this thread's cache (filled on first sight, emptied when its names pass 4 MB).
 fn with_key<R>(name: &str, f: impl FnOnce(&Key) -> R) -> R {
-    let key = KEYS.with(|keys| {
-        let mut keys = keys.borrow_mut();
-        if let Some(k) = keys.get(name) {
+    let key = KEYS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(k) = cache.keys.get(name) {
             return k.clone();
         }
-        if keys.len() >= CACHE_MAX {
-            keys.clear();
-        }
         let k = Rc::new(Key::new(name));
-        keys.insert(name.into(), k.clone());
+        if name.len() > CACHE_BYTES / 64 {
+            return k;
+        }
+        if cache.bytes + name.len() > CACHE_BYTES {
+            cache.keys.clear();
+            cache.bytes = 0;
+        }
+        cache.bytes += name.len();
+        cache.keys.insert(name.into(), k.clone());
         k
     });
     f(&key)
@@ -455,6 +477,16 @@ mod tests {
         assert_eq!(ranked.len(), names.len());
         let ranks: Vec<_> = names.iter().map(|n| q.rank(n)).collect();
         assert_eq!(ranks, [Some(1), Some(3), Some(0), Some(2), Some(0), Some(5), Some(4)]);
+    }
+
+    #[test]
+    fn free_text_keeps_its_words_apart() {
+        let q = Query::new("neon");
+        assert!(!q.in_text("one onion soup"), "letters of two words are not one word in a description");
+        assert!(q.in_text("Under the \u{FF2E}\u{FF25}\u{FF2F}\u{FF2E} lights"));
+        assert!(Query::new("cafe").in_text("Le Café des Étoiles"));
+        assert!(Query::new("").in_text("anything"));
+        assert!(Query::new("one onion").in_text("one onion soup"));
     }
 
     #[test]

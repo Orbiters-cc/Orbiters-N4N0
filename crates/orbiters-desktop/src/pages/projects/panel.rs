@@ -681,13 +681,13 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
     if state.view_loading() && state.view.packages.is_empty() {
         return;
     }
-    let q = state.package_query.trim().to_lowercase();
+    let find = orbiters_core::search::Query::new(&state.package_query);
     let list: Vec<vpm::Package> = state
         .view
         .packages
         .iter()
         .filter(|p| p.installed.is_none() && !versions(p, state.prerelease).is_empty())
-        .filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q) || p.display_name.to_lowercase().contains(&q))
+        .filter(|p| find.matches_any([p.name.as_str(), p.display_name.as_str()]))
         .cloned()
         .collect();
     let all = state.view.packages.iter().filter(|p| p.installed.is_none()).count();
@@ -709,7 +709,7 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
                 widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 12.0), Align2::LEFT_CENTER, &Txt::new(tr("No package matches."), 12.5).color(theme::FG_3));
                 ui.add_space(24.0);
             }
-            let shown = if state.all_packages || !q.is_empty() { list.len() } else { list.len().min(AVAILABLE_FIRST) };
+            let shown = if state.all_packages || !find.is_empty() { list.len() } else { list.len().min(AVAILABLE_FIRST) };
             for (i, pkg) in list.iter().take(shown).enumerate() {
                 if i > 0 {
                     widgets::separator(ui);
@@ -739,7 +739,7 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
                     }
                 });
             }
-            if list.len() > shown || (state.all_packages && list.len() > AVAILABLE_FIRST && q.is_empty()) {
+            if list.len() > shown || (state.all_packages && list.len() > AVAILABLE_FIRST && find.is_empty()) {
                 let label = if state.all_packages { tr("Show fewer").to_string() } else { tr!("Show all {count}", count = list.len()) };
                 let b = Button::new(&label).variant(Variant::Ghost).size(Size::Sm).id_salt("available-all");
                 let bw = b.desired_width(ui);

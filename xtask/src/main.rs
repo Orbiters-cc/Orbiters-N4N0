@@ -260,7 +260,25 @@ pub fn git(args: &[&str]) -> anyhow::Result<String> {
 pub fn cargo() -> Command {
     let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cmd.current_dir(root());
+    // `cargo xtask` is `cargo run`, which gives this program its own package's variables (CARGO_PKG_VERSION_PRE is the
+    // version being released). A cargo started from here passed them on to every build script, and ring's watches
+    // CARGO_MANIFEST_DIR, CARGO_PKG_NAME and CARGO_PKG_VERSION_*: each version bump, and each switch between a build made
+    // here and one made by hand, ran it again and recompiled ring and the 42 crates above it (rustls, reqwest, webrtc,
+    // sherpa-onnx's users...). Cargo sets them anew for each package it builds; nothing needs ours.
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(inherited_from_cargo_run) {
+            cmd.env_remove(&key);
+        }
+    }
     cmd
+}
+
+/// Whether `name` is one of the variables `cargo run` sets for the program it runs, rather than one of cargo's settings
+/// (CARGO, CARGO_HOME, CARGO_TARGET_DIR, CARGO_INCREMENTAL, CARGO_BUILD_*... are kept).
+fn inherited_from_cargo_run(name: &str) -> bool {
+    name.starts_with("CARGO_PKG_")
+        || name.starts_with("CARGO_BIN_")
+        || matches!(name, "CARGO_MANIFEST_DIR" | "CARGO_MANIFEST_PATH" | "CARGO_MANIFEST_LINKS" | "CARGO_CRATE_NAME" | "CARGO_PRIMARY_PACKAGE")
 }
 
 /// The release key's private half (PKCS#8), checked against the public half the apps are built with: a release they
@@ -480,6 +498,22 @@ fn release_dev(config: &Config, channel: &str, notes: String, allow_dirty: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cargo started for a release does not hand this program's package variables to build scripts (ring reran at
+    /// every version bump), and keeps cargo's own settings.
+    #[test]
+    fn a_cargo_started_here_gets_none_of_cargo_runs_package_variables() {
+        // `cargo test` sets these for this test binary too, as `cargo run` does for xtask.
+        assert!(std::env::var_os("CARGO_PKG_VERSION").is_some() && std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let cmd = cargo();
+        let removed: Vec<String> = cmd.get_envs().filter(|(_, v)| v.is_none()).map(|(k, _)| k.to_string_lossy().into_owned()).collect();
+        for name in ["CARGO_PKG_VERSION", "CARGO_PKG_VERSION_PRE", "CARGO_PKG_NAME", "CARGO_MANIFEST_DIR", "CARGO_CRATE_NAME"] {
+            assert!(removed.iter().any(|r| r == name), "{name} is passed on: {removed:?}");
+        }
+        for kept in ["CARGO", "CARGO_HOME", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_BUILD_JOBS"] {
+            assert!(!inherited_from_cargo_run(kept), "{kept}");
+        }
+    }
 
     #[test]
     fn the_workspace_version_is_found_under_its_section() {

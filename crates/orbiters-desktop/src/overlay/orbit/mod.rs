@@ -910,6 +910,8 @@ pub struct Panels {
     turning: Option<Pos2>,
     /// A colour being chosen along the bar: seen at once, saved when let go, and when it last showed.
     hue_held: Option<([u8; 3], Instant)>,
+    /// A 3D picture length chosen on the camera's tiles, and when: shown and used until the settings have it.
+    length_held: Option<(orbiters_core::settings::Photo3dLength, Instant)>,
     /// A smoothing slider held, where it is seen; saved when let go.
     smoothing_held: Option<(panels::Smoothed, u16)>,
     /// The FPS booster's sheet: its Details page, its one question, and the stop a press is held on.
@@ -1014,6 +1016,8 @@ pub struct Panels {
 /// How long Stop says Stopping after a press while the service has not said so yet; how long the camera says the demo avatar was put on.
 const STOP_SAID_FOR: Duration = Duration::from_secs(4);
 const DEMO_DONE_SAID_FOR: Duration = Duration::from_secs(20);
+/// How long a 3D picture length chosen on the camera's tiles is shown before the settings say it back: a save reaches them in a few frames.
+const LENGTH_HELD_FOR: Duration = Duration::from_secs(3);
 
 /// Where on the page the keyboard starts (N4N0's search page: `layout::KEY_ROWS_Y`, a little over its first row).
 const KEYS_TOP: f32 = 300.0;
@@ -1050,6 +1054,7 @@ impl Panels {
             view_plate: Vec::new(),
             turning: None,
             hue_held: None,
+            length_held: None,
             smoothing_held: None,
             booster_details: false,
             booster_asking: false,
@@ -2271,6 +2276,8 @@ impl Panels {
             art: None,
             no_kit: snap.worn_kit == Some(false),
             timer: snap.settings.photo_3d_timer,
+            // The length just chosen here, until the settings say it back.
+            length: self.length_held.filter(|(_, at)| at.elapsed() < LENGTH_HELD_FOR).map_or(snap.settings.photo_3d, |(length, _)| length),
             can_call: menu.calls_ready,
             mics: self.facts.mics.clone(),
             mic_choices: self.facts.mic_choices.clone(),
@@ -2927,6 +2934,8 @@ impl Panels {
                     panel.dirty = true;
                 }
                 let host = &mut self.stage.host;
+                // The length the tiles show, even one chosen a moment ago that the settings do not have yet.
+                host.menu.photo_length = orbiters_n4n0::menu::photo_length(self.facts.length);
                 let mut effects = host.press(Target::TakeOf(mode));
                 // On the desktop the camera cannot be open under these menus, so the picture is asked for and waits for it.
                 let mut waits = None;
@@ -2941,6 +2950,18 @@ impl Panels {
                 host.effects(effects, snap, &self.backend);
                 if let Some(seconds) = waits {
                     self.backend.n4n0(crate::ipc::N4n0Command::Photo3DWhenCamera { seconds });
+                }
+            }
+            // 1, 4, 8 s, then 1 s again: the Capture page's setting, shown on both 3D tiles.
+            Action::PictureLength => {
+                let length = panels::next_length(self.facts.length);
+                self.length_held = Some((length, Instant::now()));
+                self.facts.length = length;
+                let mut settings = snap.settings.clone();
+                settings.photo_3d = length;
+                self.backend.save_changes(&snap.settings, &settings);
+                for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+                    panel.dirty = true;
                 }
             }
             // Beside VRChat's camera alone, whose picture it records (Enzo, F14 and F15): no other part has Record, and this one does nothing elsewhere.

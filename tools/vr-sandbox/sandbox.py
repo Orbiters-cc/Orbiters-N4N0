@@ -1072,6 +1072,16 @@ def main(argv):
             wait_gone(j)
         YIELD.unlink(missing_ok=True)
         print(json.dumps({'yielded':True,'vr_processes_left':[p['name'] for p in processes()]}));return
+    if cmd=='restore-orphan':
+        # Run every few minutes by the scheduled task "Orbiters VR sandbox restore": the watcher started with a session
+        # dies with it when every python is killed at once (2026-11-16: the owner's SteamVR stayed forced on the sandbox headset).
+        # Acts only when the session's controller is gone; a live session is never touched.
+        if not JOURNAL.exists():return
+        j=json.loads(JOURNAL.read_text())
+        if j.get('restored') or (j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']})):return
+        try:print(json.dumps(restore_session(j['session'])))
+        except Exception as e:(ROOT/'restore-error.txt').write_text(time.strftime('%Y-%m-%d %H:%M:%S ')+str(e))
+        return
     if cmd=='restore':
         j=controller_alive()
         if j and not a.force:

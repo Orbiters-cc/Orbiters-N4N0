@@ -244,6 +244,11 @@ impl N4n0Runtime {
     }
 
     /// A turn is under way.
+    /// An answer is under way (a turn of the assistant).
+    pub(crate) fn answering(&self) -> bool {
+        self.turn.is_some()
+    }
+
     pub(crate) fn ask_busy(&self) -> bool {
         self.thinking() || !self.confirmations.is_empty() || !self.pending.is_empty()
             || self.voice.output_playing || self.voice.finalizing

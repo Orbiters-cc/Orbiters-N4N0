@@ -243,7 +243,7 @@ impl N4n0 {
         let settings = self.with_settings(|s| s.n4n0.clone());
         // Turned off anywhere (Settings' switch included): an answer under way or a sentence it listens to stops too.
         if !(settings.enabled && settings.assistant) {
-            let busy = { let rt = self.n4n0.lock().unwrap(); rt.turn.is_some() || rt.listening.is_some() };
+            let busy = { let rt = self.n4n0.lock().unwrap(); rt.answering() || rt.listening.is_some() };
             if busy { self.assistant_quiet(); }
         }
         self.ask_follow();

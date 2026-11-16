@@ -314,7 +314,7 @@ fn performance_reaches_a_server_under_test() {
     for w in spool.perf_waiting() {
         eprintln!("{}", serde_json::to_string(&w).unwrap());
     }
-    assert!(spool.perf_waiting().len() >= 1);
+    assert!(!spool.perf_waiting().is_empty());
     assert_eq!(spool.send(&orbiters_core::account::Api::at(&base)), Sent::Taken(waiting));
     let _ = std::fs::remove_dir_all(&dir);
 }

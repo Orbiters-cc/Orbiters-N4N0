@@ -20,8 +20,8 @@ pub enum Answer {
     Settings,
 }
 
-pub const TITLE: &str = mark("This beta counts which pages and buttons you use");
-pub const BODY: &str = mark("Only their names, in what order and when, with this version of the app, to see what to make easier. Never what you type or say, translations, pictures, QR codes or links, worlds, instances, people, files, or your account.");
+pub const TITLE: &str = mark("This beta counts which pages and buttons you use, and how the app performs");
+pub const BODY: &str = mark("Only their names, in what order and when, with this version of the app; and every few seconds how much processor, graphics card and memory the app, VRChat and the whole computer use, VRChat's frame rate in VR, and the basic hardware (processor and graphics card models, memory size, headset and its refresh rate). To see what to make easier and lighter. Never what you type or say, translations, pictures, QR codes or links, worlds, instances, people, files, window titles, other programs, or your account.");
 pub const OFF: &str = mark("You can turn it off at any time in Settings › Beta usage statistics.");
 
 /// Shows the card in `page` (the page's area, right of the sidebar) while `told` is false.

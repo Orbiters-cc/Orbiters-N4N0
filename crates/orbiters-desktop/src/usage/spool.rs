@@ -18,7 +18,12 @@ use std::time::Duration;
 pub const MAX_KEPT: usize = 10_000;
 /// Steps per request.
 pub const BATCH: usize = 500;
+/// Performance windows kept waiting at most (a day at one a minute, about 1.5 MB): the oldest go first.
+pub const MAX_PERF_KEPT: usize = 1440;
+/// Performance windows per request.
+pub const PERF_BATCH: usize = 120;
 const WAITING: &str = "waiting.jsonl";
+const PERF_WAITING: &str = "perf-waiting.jsonl";
 const INSTALL: &str = "install-id";
 
 /// One step as Orbiters receives it (backend `routes/n4n0Metrics.js`).
@@ -39,6 +44,14 @@ pub struct Event {
     pub from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<String>,
+    /// Where the session comes from, for the admin to leave out the team's own testing: a debug build, a run the VR sandbox started,
+    /// the VRChat bridge (an AI agent) driving at that moment. Absent when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub debug: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sandbox: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent: bool,
 }
 
 pub fn surface(role: Role) -> &'static str {
@@ -63,6 +76,12 @@ struct Inner {
     sessions: HashMap<u64, Session>,
     waiting: VecDeque<Event>,
     loaded: bool,
+    /// The performance windows waiting, and the one being summed.
+    perf: VecDeque<super::perf::Window>,
+    windows: super::perf::Windows,
+    /// The VRChat bridge drives now; the team account's code (`perf::team_code`).
+    agent: bool,
+    team: Option<String>,
 }
 
 /// What a request did with a batch.
@@ -106,6 +125,7 @@ impl Spool {
         let mut inner = self.lock();
         load(&mut inner);
         let lang = orbiters_i18n::language().tag().to_string();
+        let inner_agent = inner.agent;
         let Some(session) = inner.sessions.get_mut(&link) else { return };
         let mut events = Vec::with_capacity(steps.len() + 1);
         let event = |session: &Session, at: u64, kind: &str| Event {
@@ -119,6 +139,9 @@ impl Spool {
             screen: None,
             from: None,
             control: None,
+            debug: super::perf::debug_build(),
+            sandbox: super::perf::sandbox_run(),
+            agent: inner_agent,
         };
         for step in steps {
             // Checked again here: a client is not trusted with what leaves the computer.
@@ -162,6 +185,9 @@ impl Spool {
             screen: session.last,
             from: None,
             control: None,
+            debug: super::perf::debug_build(),
+            sandbox: super::perf::sandbox_run(),
+            agent: inner.agent,
         };
         keep(&mut inner, vec![end]);
     }
@@ -170,6 +196,8 @@ impl Spool {
     pub fn forget(&self) {
         let mut inner = self.lock();
         inner.waiting.clear();
+        inner.perf.clear();
+        inner.windows = Default::default();
         inner.install = None;
         for session in inner.sessions.values_mut() {
             session.started = false;
@@ -177,12 +205,48 @@ impl Spool {
         }
         if let Some(dir) = &inner.dir {
             let _ = std::fs::remove_file(dir.join(WAITING));
+            let _ = std::fs::remove_file(dir.join(PERF_WAITING));
             let _ = std::fs::remove_file(dir.join(INSTALL));
         }
     }
 
     pub fn waiting(&self) -> Vec<Event> {
         self.lock().waiting.iter().cloned().collect()
+    }
+
+    #[cfg(test)]
+    pub fn perf_waiting(&self) -> Vec<super::perf::Window> {
+        self.lock().perf.iter().cloned().collect()
+    }
+
+    /// What the usage statistics say N4N0 is on now: the sessions started and each surface's screen.
+    pub fn context(&self) -> (Vec<String>, std::collections::BTreeMap<String, String>) {
+        let inner = self.lock();
+        let mut sessions: Vec<String> = inner.sessions.values().filter(|s| s.started).map(|s| s.id.clone()).collect();
+        sessions.sort();
+        let screens = inner.sessions.values().filter_map(|s| s.last.clone().map(|l| (s.surface.to_string(), l))).collect();
+        (sessions, screens)
+    }
+
+    /// Where what is noted from now on comes from: the VRChat bridge driving, the team account's code.
+    pub fn origin(&self, agent: bool, team: Option<String>) {
+        let mut inner = self.lock();
+        inner.agent = agent;
+        inner.team = team;
+    }
+
+    /// A performance sample (`perf::sample`); a window it closes waits to be sent. Nothing is kept while the statistics are off.
+    pub fn perf(&self, sample: super::perf::Sample, enabled: bool) {
+        let mut inner = self.lock();
+        if !enabled {
+            inner.windows = Default::default();
+            return;
+        }
+        load(&mut inner);
+        let agent = inner.agent;
+        if let Some(window) = inner.windows.push(sample, agent) {
+            keep_perf(&mut inner, window);
+        }
     }
 
     /// The install's random id, made the first time it is needed.
@@ -206,11 +270,21 @@ impl Spool {
 
     /// Sends the oldest batch to `api`: the request runs without the lock, so steps keep arriving meanwhile.
     pub fn send(&self, api: &orbiters_core::account::Api) -> Sent {
-        let batch: Vec<Event> = self.lock().waiting.iter().take(BATCH).cloned().collect();
-        if batch.is_empty() {
+        let (batch, perf, team) = {
+            let inner = self.lock();
+            (inner.waiting.iter().take(BATCH).cloned().collect::<Vec<Event>>(), inner.perf.iter().take(PERF_BATCH).cloned().collect::<Vec<_>>(), inner.team.clone())
+        };
+        if batch.is_empty() && perf.is_empty() {
             return Sent::Nothing;
         }
-        let body = serde_json::json!({ "install": self.install(), "events": batch });
+        // `perf` and `team` are new (2026-11-16): an older server reads `install` and `events` and leaves the rest.
+        let mut body = serde_json::json!({ "install": self.install(), "events": batch });
+        if !perf.is_empty() {
+            body["perf"] = serde_json::json!(perf);
+        }
+        if let Some(team) = team {
+            body["team"] = serde_json::json!(team);
+        }
         let answer = api
             .agent()
             .post(&api.url("n4n0/metrics"))
@@ -222,23 +296,28 @@ impl Spool {
         let status = match answer {
             Ok(response) => response.status().as_u16(),
             Err(e) => {
-                eprintln!("usage statistics: Orbiters not reached ({e}), {} kept", batch.len());
+                eprintln!("usage statistics: Orbiters not reached ({e}), {} and {} performance windows kept", batch.len(), perf.len());
                 return Sent::Kept;
             }
         };
         let done = match status {
-            200..=299 => Sent::Taken(batch.len()),
+            200..=299 => Sent::Taken(batch.len() + perf.len()),
             408 | 429 => Sent::Kept,
-            400..=499 => Sent::Dropped(batch.len()),
+            400..=499 => Sent::Dropped(batch.len() + perf.len()),
             _ => Sent::Kept,
         };
-        if let Sent::Taken(n) | Sent::Dropped(n) = done {
+        if let Sent::Taken(_) | Sent::Dropped(_) = done {
             let mut inner = self.lock();
-            // Only those sent: the first `n`, unless a Forget came meanwhile.
-            let first = inner.waiting.iter().take(n).cloned().collect::<Vec<_>>();
+            // Only those sent: the first ones, unless a Forget came meanwhile.
+            let first = inner.waiting.iter().take(batch.len()).cloned().collect::<Vec<_>>();
             if first == batch {
-                inner.waiting.drain(..n);
+                inner.waiting.drain(..batch.len());
                 rewrite(&inner);
+            }
+            let first = inner.perf.iter().take(perf.len()).cloned().collect::<Vec<_>>();
+            if first == perf {
+                inner.perf.drain(..perf.len());
+                rewrite_perf(&inner);
             }
         }
         if let Sent::Dropped(n) = done {
@@ -263,6 +342,17 @@ impl Spool {
             }
         });
     }
+}
+
+/// The service's spool, for the performance self-check's thread (`controller::perf`): set once the service runs.
+static CURRENT: std::sync::OnceLock<std::sync::Arc<Spool>> = std::sync::OnceLock::new();
+
+pub fn set_current(spool: std::sync::Arc<Spool>) {
+    let _ = CURRENT.set(spool);
+}
+
+pub fn current() -> Option<&'static std::sync::Arc<Spool>> {
+    CURRENT.get()
 }
 
 /// Where the steps wait: `usage` in the local data folder. A debug build started by the VR sandbox keeps them in the sandbox's folder, as its
@@ -291,14 +381,51 @@ fn load(inner: &mut Inner) {
         return;
     }
     inner.loaded = true;
-    let Some(dir) = &inner.dir else { return };
-    let Ok(text) = std::fs::read_to_string(dir.join(WAITING)) else { return };
+    let Some(dir) = inner.dir.clone() else { return };
+    let text = std::fs::read_to_string(dir.join(WAITING)).unwrap_or_default();
     let mut read: VecDeque<Event> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     while read.len() > MAX_KEPT {
         read.pop_front();
     }
     read.extend(inner.waiting.drain(..));
     inner.waiting = read;
+    let mut perf: VecDeque<super::perf::Window> = std::fs::read_to_string(dir.join(PERF_WAITING)).map(|t| t.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()).unwrap_or_default();
+    while perf.len() > MAX_PERF_KEPT {
+        perf.pop_front();
+    }
+    perf.extend(inner.perf.drain(..));
+    inner.perf = perf;
+}
+
+fn keep_perf(inner: &mut Inner, window: super::perf::Window) {
+    inner.perf.push_back(window.clone());
+    if inner.perf.len() > MAX_PERF_KEPT {
+        inner.perf.pop_front();
+        rewrite_perf(inner);
+        return;
+    }
+    let Some(dir) = &inner.dir else { return };
+    let _ = std::fs::create_dir_all(dir);
+    if let (Ok(mut file), Ok(mut line)) = (std::fs::OpenOptions::new().create(true).append(true).open(dir.join(PERF_WAITING)), serde_json::to_string(&window)) {
+        line.push('\n');
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+fn rewrite_perf(inner: &Inner) {
+    let Some(dir) = &inner.dir else { return };
+    let _ = std::fs::create_dir_all(dir);
+    let mut lines = String::new();
+    for w in &inner.perf {
+        if let Ok(line) = serde_json::to_string(w) {
+            lines.push_str(&line);
+            lines.push('\n');
+        }
+    }
+    let tmp = dir.join("perf-waiting.jsonl.tmp");
+    if std::fs::write(&tmp, lines).is_ok() {
+        let _ = std::fs::rename(&tmp, dir.join(PERF_WAITING));
+    }
 }
 
 fn keep(inner: &mut Inner, events: Vec<Event>) {

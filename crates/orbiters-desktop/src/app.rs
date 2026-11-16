@@ -243,10 +243,10 @@ impl App {
             // From the top of the window: the content scrolls on under the title bar (see `pages::under_top`).
             let page_rect = Rect::from_min_max(pos2(body.left() + SIDEBAR_W, full.top()), body.max);
             self.page(ui, &snap, page_rect);
-            let told = self.usage_told || snap.settings.usage.told;
+            let told = self.usage_told || snap.settings.usage.told && snap.settings.usage.told_perf;
             if let Some(answer) = pages::usage_notice::show(ui, page_rect, told) {
                 self.usage_told = true;
-                self.ctl.patch_settings(serde_json::json!({ "usage": { "told": true } }));
+                self.ctl.patch_settings(serde_json::json!({ "usage": { "told": true, "told_perf": true } }));
                 if answer == pages::usage_notice::Answer::Settings {
                     self.set_page(Page::Settings, now);
                 }

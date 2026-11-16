@@ -14,6 +14,7 @@
 //! 1 KB. Nothing reads the GPU's counters or opens another process here: the Performance report does that once, when asked.
 
 mod facts;
+pub mod gpu;
 pub mod report;
 #[cfg(test)]
 mod tests;

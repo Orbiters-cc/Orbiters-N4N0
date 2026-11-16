@@ -11,6 +11,8 @@ impl Controller {
         let ctl = std::sync::Arc::downgrade(self);
         let _ = std::thread::Builder::new().name("perf".into()).spawn(move || {
             let mut next = Instant::now();
+            // Windows' GPU counters, opened while the usage statistics are on (`usage::perf`).
+            let mut gpu: Option<perf::gpu::Gpu> = None;
             loop {
                 std::thread::sleep(next.saturating_duration_since(Instant::now()).max(Duration::from_millis(100)));
                 let Some(ctl) = ctl.upgrade() else { return };
@@ -25,10 +27,15 @@ impl Controller {
                     (false, false) => "idle",
                 };
                 next = Instant::now() + if mode == "idle" { perf::QUIET_WINDOW } else { perf::WINDOW };
-                let lines = {
+                let began = Instant::now();
+                let (line, lines) = {
                     let mut keeper = perf::keeper().lock().unwrap_or_else(|e| e.into_inner());
-                    keeper.sample(Instant::now(), mode, perf::features(&snap)).map(|_| keeper.lines())
+                    match keeper.sample(Instant::now(), mode, perf::features(&snap)) {
+                        Some(line) => (Some(line), Some(keeper.lines())),
+                        None => (None, None),
+                    }
                 };
+                usage_sample(&snap, line.as_ref(), &mut gpu, began);
                 let Some(lines) = lines else { continue };
                 ctl.perf_follow(&lines);
             }
@@ -114,4 +121,29 @@ impl Controller {
             true
         });
     }
+}
+
+/// The beta's performance figures (`crate::usage::perf`): the self-check's sample with the GPU's counters and what N4N0 was doing, into
+/// the usage statistics' spool, while they are on. `began` is when the self-check's own sample started: the time to here is what the
+/// figures cost, the self-check's system call included.
+fn usage_sample(snap: &crate::state::Snapshot, line: Option<&perf::Line>, gpu: &mut Option<perf::gpu::Gpu>, began: Instant) {
+    use crate::usage::perf as up;
+    let Some(spool) = crate::usage::spool::current() else { return };
+    let enabled = snap.settings.usage.enabled;
+    spool.origin(up::agent_driving(snap), up::team_code(snap));
+    if !enabled {
+        *gpu = None;
+        spool.perf(Default::default(), false);
+        return;
+    }
+    if gpu.is_none() {
+        *gpu = perf::gpu::Gpu::open();
+    }
+    let now = gpu.as_mut().and_then(perf::gpu::Gpu::sample);
+    let Some(line) = line else { return };
+    let (sessions, screens) = spool.context();
+    let active = up::active(snap, line, &screens);
+    let context = up::Context { mode: line.mode.clone(), screens, sessions, active };
+    let sample = up::sample(line, now.as_ref(), context, crate::usage::now_ms(), began.elapsed());
+    spool.perf(sample, true);
 }

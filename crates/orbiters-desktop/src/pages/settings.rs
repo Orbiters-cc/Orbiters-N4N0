@@ -360,7 +360,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(
                     ui,
                     tr("Beta usage statistics"),
-                    Some(tr("Counts which pages and buttons of Orbiters - N4N0 you use, in what order and when, to see what to make easier. Never what you type or say, translations, pictures, QR codes or links, worlds, instances, people, files, or your account. Turned off, nothing more is counted and what was waiting to be sent is deleted.")),
+                    Some(tr("Counts which pages and buttons of Orbiters - N4N0 you use, in what order and when, and every few seconds how much processor, graphics card and memory the app, VRChat and the whole computer use, VRChat's frame rate in VR, and the basic hardware (processor and graphics card models, memory size, headset and its refresh rate), to see what to make easier and lighter. Never what you type or say, translations, pictures, QR codes or links, worlds, instances, people, files, window titles, other programs, or your account. Turned off, nothing more is counted and what was waiting to be sent is deleted.")),
                     48.0,
                     |ui| {
                         apply |= widgets::toggle(ui, "usage-statistics", &mut draft.usage.enabled);

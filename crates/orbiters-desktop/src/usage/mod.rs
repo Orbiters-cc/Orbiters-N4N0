@@ -13,6 +13,7 @@
 //! step itself, nothing on the frame's path but that. A thread of the process sends them to the service every few seconds
 //! ([`forward`]); the service adds the session and keeps them on disk, bounded, until Orbiters takes them ([`spool`]).
 
+pub mod perf;
 pub mod spool;
 
 use serde::{Deserialize, Serialize};

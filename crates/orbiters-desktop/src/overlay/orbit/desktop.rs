@@ -1906,11 +1906,19 @@ mod tests {
                     let worlds = rig.panels.stage.worlds.as_mut().expect("the worlds' page");
                     worlds.listing_for_test(entries.clone());
                     rig.settle("its list");
-                    let worlds = rig.panels.stage.worlds.as_mut().expect("the worlds' page");
                     if up == Up::WorldsList {
-                        worlds.scroll_by(260.0);
+                        // The list knows how far it goes once it has drawn the 40 worlds: until then a scroll is held at its top.
+                        let began = Instant::now();
+                        while rig.panels.stage.worlds.as_ref().is_some_and(|w| w.list_scroll_for_test() < 260.0) {
+                            assert!(began.elapsed() < Duration::from_secs(20), "the list never scrolled");
+                            if let Some(worlds) = rig.panels.stage.worlds.as_mut() {
+                                worlds.scroll_by(260.0 - worlds.list_scroll_for_test());
+                            }
+                            rig.turn();
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
                     } else {
-                        worlds.pick_for_test(entries[6].clone());
+                        rig.panels.stage.worlds.as_mut().expect("the worlds' page").pick_for_test(entries[6].clone());
                     }
                 }
                 _ => {}

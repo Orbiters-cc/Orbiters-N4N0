@@ -1426,10 +1426,53 @@ pub fn assistant_guard(switch: Rect) -> f32 {
     (switch.width().min(switch.height()) * 0.3).round().max(5.0)
 }
 
-/// The switch's pill in its place: as wide as most of it, as tall as a switch that wide, in its middle.
-fn assistant_track(place: Rect) -> Rect {
-    let wide = (place.width() * 0.72).min(place.height() / 0.62 * 0.9);
-    Rect::from_center_size(place.center(), vec2(wide, wide * 0.6))
+/// How the assistant's switch is drawn: renders of three looks were compared (2026-11-16, `asktoggle/shots2/`); see [`assistant_mark`].
+pub static ASSIST_LOOK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The assistant's switch in its place (`place`, what a press takes, larger than what is drawn). On a tile's corner: inside its rounded corner, as
+/// large as the "3D" badge on Worlds in 3D and ringed in the tile's colour as the badges are; at a row's end: in its middle, as a row of Settings has it.
+/// On: the product's green, its knob to the right. Off: a dark track with a hairline, its grey knob to the left.
+fn assistant_mark(p: &Painter, place: Rect, on: bool, hovered: bool, pressed: bool) {
+    let corner = place.height() < 26.0;
+    let high = if corner { (place.height() * 0.68).clamp(11.0, 15.0).round() } else { (place.height() * 0.42).clamp(14.0, 20.0).round() };
+    let inset = if corner { (place.height() * 0.24).clamp(3.0, 5.0).round() } else { 10.0 };
+    let look = ASSIST_LOOK.load(std::sync::atomic::Ordering::Relaxed);
+    if look == 2 {
+        // A tab cut from the tile's own corner, its power sign on it.
+        let wide = (high * 1.9).round();
+        let tab = if corner { Rect::from_min_size(pos2(place.right() - wide, place.top()), vec2(wide, high + inset)) } else { Rect::from_min_max(pos2(place.right() - wide, place.top()), place.max) };
+        let r = look::TILE_RADIUS as u8;
+        let shape = if corner { egui::CornerRadius { nw: 0, ne: r, sw: 8, se: 0 } } else { egui::CornerRadius { nw: 0, ne: r, sw: 0, se: r } };
+        p.rect_filled(tab, shape, if on { look::accent() } else { theme::mix(look::TILE, Color32::BLACK, 0.45) });
+        if hovered || pressed {
+            p.rect_stroke(tab.shrink(0.75), shape, Stroke::new(1.5, Color32::WHITE), egui::StrokeKind::Inside);
+        }
+        widgets::icon(p, tab.center(), icons::POWER, high * 0.8, if on { look::on_accent() } else { theme::FG_4 });
+        return;
+    }
+    let wide = (high * if look == 1 { 1.6 } else { 1.75 }).round();
+    let pill = Rect::from_min_size(pos2(place.right() - inset - wide, if corner { place.top() + inset } else { place.center().y - high / 2.0 }), vec2(wide, high));
+    let radius = look::radius(high / 2.0);
+    // Ringed in the tile's colour, as the badges are, so that it sits on the tile and not on what is under it; white under a pointer.
+    p.rect_filled(pill.expand(1.5), look::radius(high / 2.0 + 1.5), if hovered || pressed { Color32::WHITE } else { look::TILE });
+    if look == 1 {
+        // A chip with the power sign, filled when on, outlined when off.
+        if on {
+            p.rect_filled(pill, radius, look::accent());
+        } else {
+            p.rect_filled(pill, radius, theme::mix(look::TILE, Color32::BLACK, 0.45));
+            p.rect_stroke(pill, radius, Stroke::new(1.2, theme::FG_4), egui::StrokeKind::Inside);
+        }
+        widgets::icon(p, pill.center(), icons::POWER, high * 0.78, if on { look::on_accent() } else { theme::FG_4 });
+        return;
+    }
+    p.rect_filled(pill, radius, if on { look::accent() } else { theme::mix(look::TILE, Color32::BLACK, 0.45) });
+    if !on {
+        p.rect_stroke(pill, radius, Stroke::new(1.0, Color32::from_white_alpha(46)), egui::StrokeKind::Inside);
+    }
+    let knob = high / 2.0 - 2.0;
+    let x = if on { pill.right() - 2.0 - knob } else { pill.left() + 2.0 + knob };
+    p.circle_filled(pos2(x, pill.center().y), knob, if on { look::on_accent() } else { theme::FG_4 });
 }
 
 /// Ask N4N0's tiles with the assistant's switch on their corner, while N4N0 is on: the one part laid over another (the last
@@ -4084,71 +4127,46 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             }
         }
         Look::Talk => {
-            let on = matches!(facts.talk, TalkNow::Listening(_));
-            // Switched off by the person: greyed and struck through, and said in words, so that it reads off at a glance.
+            // Placed and sized as its neighbours' (Look::Tile): its icon and name in the middle, the switch on its corner never moves them (Enzo, 2026-11-16).
+            let listening = matches!(facts.talk, TalkNow::Listening(_));
+            // Switched off by the person: still a tile of the row, its microphone grey and struck through, said in words.
             let off = facts.n4n0 && facts.assistant_off;
-            tile_back(p, rect, hovered, pressed, on);
-            let color = if on {
-                look::accent()
-            } else if !facts.n4n0 || off {
-                theme::FG_4
-            } else if hovered {
-                look::accent()
-            } else {
-                look::LABEL
-            };
-            // Its icon and name where they always are; when the switch on its corner would be on the icon, the icon beside the switch, or both under it.
+            tile_back(p, rect, hovered, pressed, listening);
+            let ink = if listening { look::accent() } else if !facts.n4n0 || off { theme::FG_4 } else { part_ink(Action::Talk) };
+            if hovered && !look::retro() {
+                p.rect_filled(rect, look::radius(look::TILE_RADIUS), theme::alpha(ink, if pressed { 0.26 } else { 0.16 }));
+                p.rect_stroke(rect.shrink(0.75), look::radius(look::TILE_RADIUS), Stroke::new(2.0, ink), egui::StrokeKind::Middle);
+            }
             let size = (rect.height() * 0.42).clamp(18.0, 32.0);
             let top = rect.center().y - (size + 3.0 + 11.0) / 2.0;
-            let icon = Rect::from_center_size(pos2(rect.center().x, top + size / 2.0), Vec2::splat(size));
-            // A cell too small for both (the strip's): the switch and the name alone, the name under the switch.
-            let (size, top, mic_x) = match facts.n4n0.then(|| assistant_switch_rect(rect)) {
-                Some(switch) if icon.intersects(switch) && switch.left() - rect.left() >= size + 8.0 => (size, top, (rect.left() + switch.left()) / 2.0),
-                Some(switch) if icon.intersects(switch) => {
-                    let room = rect.bottom() - switch.bottom() - 4.0;
-                    if room >= 16.0 + 3.0 + 11.0 + 4.0 {
-                        let size = (room - 3.0 - 11.0 - 4.0).min(size);
-                        (size, (switch.bottom() + rect.bottom()) / 2.0 - (size + 3.0 + 11.0) / 2.0, rect.center().x)
-                    } else {
-                        (0.0, (switch.bottom() + rect.bottom()) / 2.0 - (3.0 + 11.0) / 2.0, rect.center().x)
-                    }
-                }
-                _ => (size, top, rect.center().x),
-            };
-            let mic = pos2(mic_x, top + size / 2.0);
-            if size > 0.0 {
-                widgets::icon(p, mic, icons::MICROPHONE, size, color);
+            let at = pos2(rect.center().x, top + size / 2.0);
+            widgets::icon(p, at, icons::MICROPHONE, size, ink);
+            if off {
+                // Struck through as the icon's own strokes are drawn, with a gap of the tile's colour on each side so that it reads as one mark.
+                let arm = size * 0.34;
+                let line = [at + vec2(-arm, -arm), at + vec2(arm, arm)];
+                p.line_segment(line, Stroke::new(size * 0.16, look::TILE));
+                p.line_segment(line, Stroke::new(size * 0.075, ink));
             }
-            if off && size > 0.0 {
-                let arm = size * 0.36;
-                p.line_segment([mic + vec2(-arm, -arm), mic + vec2(arm, arm)], Stroke::new(2.0, color));
-            }
-            let font = look::font(11.0, weight::SEMIBOLD);
-            // Off, in words; in a tile too narrow for them, the shortest.
-            let label = if on {
+            // Its name as the neighbours' are: the same size, smaller only as far as a language needs; "Assistant off" whole wherever it fits at the least size.
+            let label = if listening {
                 tr("Listening")
-            } else if off && p.layout_no_wrap(tr_ctx("tile", "Assistant off").to_string(), font.clone(), Color32::WHITE).size().x <= rect.width() - 6.0 {
-                tr_ctx("tile", "Assistant off")
             } else if off {
-                tr_ctx("assistant", "Off")
+                tr_ctx("tile", "Assistant off")
             } else {
                 tr_ctx("tile", "Ask N4N0")
             };
-            p.text(pos2(rect.center().x, top + size + 3.0 + 5.5), Align2::CENTER_CENTER, fit(p, label, &font, rect.width() - 6.0), font, if on { look::accent() } else if facts.n4n0 && !off { look::LABEL } else { theme::FG_4 });
+            let fits = |s: f32, l: &str| p.layout_no_wrap(l.to_string(), look::font(s, weight::BOLD), Color32::WHITE).size().x <= rect.width() - 6.0;
+            let label = if off && !fits(8.5, label) { tr_ctx("assistant", "Off") } else { label };
+            let mut font_size = if facts.desktop { 11.0 } else { 10.5 };
+            while font_size > 8.5 && !fits(font_size, label) {
+                font_size -= 0.5;
+            }
+            let words = look::font(font_size, weight::SEMIBOLD);
+            let tone = if listening { look::accent() } else if off { look::MUTED } else if facts.n4n0 { look::LABEL } else { theme::FG_4 };
+            p.text(pos2(rect.center().x, top + size + 3.0 + 5.5), Align2::CENTER_CENTER, label, words, tone);
         }
-        Look::AssistantSwitch => {
-            // A switch as Settings' are: a pill, its knob to the right and in the accent when on. Ringed dark so that it stands off the tile, white under a
-            // pointer (the one thing a press there does).
-            let track = assistant_track(rect);
-            let radius = look::radius(track.height() / 2.0);
-            let (ring, width) = if pressed || hovered { (Color32::WHITE, 2.5) } else { (Color32::from_black_alpha(150), 2.0) };
-            p.rect_filled(track.expand(width), look::radius(track.height() / 2.0 + width), ring);
-            let fill = if !facts.assistant_off { look::accent() } else { theme::mix(look::TILE, theme::FG_4, 0.45) };
-            p.rect_filled(track, radius, fill);
-            let knob = track.height() / 2.0 - 2.0;
-            let x = if !facts.assistant_off { track.right() - knob - 2.0 } else { track.left() + knob + 2.0 };
-            p.circle_filled(pos2(x, track.center().y), knob, if !facts.assistant_off { look::on_accent() } else { Color32::from_gray(225) });
-        }
+        Look::AssistantSwitch => assistant_mark(p, rect, !facts.assistant_off, hovered, pressed),
         Look::PlayingSmall => {
             tile_back(p, rect, hovered, pressed, false);
             let playing = facts.music.as_ref().is_some_and(|m| m.1);

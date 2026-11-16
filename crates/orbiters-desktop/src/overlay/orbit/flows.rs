@@ -15,8 +15,9 @@ struct Person {
     around: Option<Around>,
     /// The library's version, as the service says it: another one has the gallery's list read again.
     library: u64,
-    /// One person at a time: the look chosen (modern or retro) is the whole process's, as the app has one, and a retro test on another thread laid All tools out
-    /// under a modern one's press, which then missed its tile (two of these failed so beside the hole's retro runs).
+    /// One person at a time: the look chosen (modern or retro) was the whole process's, as the app has one, and a retro test on another thread laid All tools out
+    /// under a modern one's press, which then missed its tile (two of these failed so beside the hole's retro runs). In tests the look is now each thread's
+    /// (`panels::look::chosen`), which also keeps it from the tests that never took this lock (VR1115 flaky); the lock stays for what else these share.
     _alone: std::sync::MutexGuard<'static, ()>,
 }
 

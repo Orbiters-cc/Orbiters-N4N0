@@ -124,7 +124,7 @@ pub fn install(ctx: &egui::Context) {
     }
     ctx.set_fonts(defs);
 
-    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(LANGUAGE_FONTS), PREFERRED.load(Ordering::Relaxed)));
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(LANGUAGE_FONTS), preferred()));
     // Once per context, whatever calls this again.
     let added = ctx.data_mut(|d| std::mem::replace(d.get_temp_mut_or_default::<bool>(egui::Id::unique("orbiters-fonts-provider")), true));
     if !added {
@@ -321,7 +321,36 @@ static PREFERRED: AtomicU8 = AtomicU8::new(0);
 /// Microsoft YaHei, whose kanji are Chinese forms. Any other language goes back to the locale's choice. Letters a
 /// context already drew keep the face it found for them; call this before drawing.
 pub fn prefer_language(language: &str) {
-    PREFERRED.store(language_cjk(language).map_or(0, |c| 1 + c as u8), Ordering::Relaxed);
+    PREFERRED.store(preference(language), Ordering::Relaxed);
+}
+
+fn preference(language: &str) -> u8 {
+    language_cjk(language).map_or(0, |c| 1 + c as u8)
+}
+
+thread_local! {
+    /// What [`in_preferred_language`] asks for on this thread, over [`PREFERRED`].
+    static PREFERRED_HERE: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+}
+
+/// The preference that holds on this thread.
+fn preferred() -> u8 {
+    PREFERRED_HERE.with(std::cell::Cell::get).unwrap_or_else(|| PREFERRED.load(Ordering::Relaxed))
+}
+
+/// Runs `f` with texts drawn as [`prefer_language`] would have them, on this thread alone: tests side by side in one process do not see
+/// each other's. One that set the whole process's to Japanese for a while had every context painting on another thread find its faces
+/// anew halfway through what it drew, and the parts it compared differed (VR1115 flaky).
+pub fn in_preferred_language<R>(language: &str, f: impl FnOnce() -> R) -> R {
+    let was = PREFERRED_HERE.with(|h| h.replace(Some(preference(language))));
+    struct Restore(Option<u8>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PREFERRED_HERE.with(|h| h.set(self.0));
+        }
+    }
+    let _restore = Restore(was);
+    f()
 }
 
 /// Where a context notes which language its faces were found for.
@@ -331,7 +360,7 @@ const LANGUAGE_FONTS: &str = "orbiters-fonts-language";
 /// kanji already drawn on an English or French interface (a world's name) would come from Microsoft YaHei, in Chinese forms, for all the Japanese that follows. So when the
 /// language wants another font the context starts over, with no faces found.
 pub fn follow_language(ctx: &egui::Context) {
-    let now = PREFERRED.load(Ordering::Relaxed);
+    let now = preferred();
     let was = ctx.data(|d| d.get_temp::<u8>(egui::Id::unique(LANGUAGE_FONTS)));
     if was.is_some_and(|was| was != now) {
         // The fonts are the same, so setting them again does nothing: new providers make egui build its fonts anew, and
@@ -350,7 +379,7 @@ fn language_cjk(language: &str) -> Option<Cjk> {
 
 /// The CJK font to try first now: the one a language asked for, else the locale's.
 fn preferred_cjk(locale: Cjk) -> Cjk {
-    match PREFERRED.load(Ordering::Relaxed) {
+    match preferred() {
         1 => Cjk::Japanese,
         2 => Cjk::Simplified,
         3 => Cjk::Traditional,
@@ -742,6 +771,27 @@ mod tests {
         PREFERRED.store(0, Ordering::Relaxed);
         assert_eq!(found.as_deref(), Some("system:YuGothM.ttc#1"), "Japanese text on a computer in any language");
         assert!(bold.as_deref().is_some_and(|b| b.starts_with("system:YuGothB")), "{bold:?}");
+    }
+
+    /// VR1115 flaky: a test drawing N4N0's pages in Japanese set the preference for the whole process, and contexts painting on other threads found their
+    /// faces anew halfway through what they compared. One thread's preference is its own.
+    #[test]
+    fn a_preference_for_one_thread_leaves_the_process_and_the_others() {
+        let _one_at_a_time = PREFERRING.lock().unwrap_or_else(|e| e.into_inner());
+        let process = PREFERRED.load(Ordering::Relaxed);
+        let ctx = egui::Context::default();
+        install(&ctx);
+        in_preferred_language("ja", || {
+            assert_eq!(preferred(), 1 + Cjk::Japanese as u8);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    assert_eq!(preferred(), process, "another thread");
+                    follow_language(&ctx);
+                });
+            });
+        });
+        assert_eq!((preferred(), PREFERRED.load(Ordering::Relaxed)), (process, process), "and after");
+        assert_eq!(ctx.data(|d| d.get_temp::<u8>(egui::Id::unique(LANGUAGE_FONTS))), Some(process), "a context painting elsewhere kept its faces");
     }
 
     #[test]

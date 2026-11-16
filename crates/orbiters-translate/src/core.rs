@@ -596,13 +596,15 @@ mod tests {
         assert!(scene.quads.iter().any(|q| q.track == id), "no gap while the new translation is on its way");
     }
 
-    /// A translator that takes `per_line` for each line, one after the other, handing each out when done, and says
-    /// which lines it was asked for, in order.
-    struct Slow {
-        per_line: std::time::Duration,
+    /// A translator that hands out a line each time the test lets it (`go`), and says which lines it was asked for, in order.
+    /// Once `go` is dropped it runs freely. What it measures is in lines translated, not in time: with 150 ms a line by the wall
+    /// clock, "shown within 600 ms" failed on a loaded machine (VR1115 flaky) and said nothing about the order.
+    struct Stepped {
+        go: std::sync::mpsc::Receiver<()>,
         asked: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+        handed: Arc<std::sync::atomic::AtomicUsize>,
     }
-    impl Translator for Slow {
+    impl Translator for Stepped {
         fn translate(&mut self, batch: &Batch) -> Result<Vec<String>, Failure> {
             let mut out = Vec::new();
             self.translate_each(batch, &mut |_, t| out.push(t))?;
@@ -611,72 +613,100 @@ mod tests {
         fn translate_each(&mut self, batch: &Batch, each: &mut dyn FnMut(usize, String)) -> Result<(), Failure> {
             self.asked.lock().unwrap().push(batch.lines.iter().map(|l| l.text.clone()).collect());
             for (i, l) in batch.lines.iter().enumerate() {
-                std::thread::sleep(self.per_line);
+                // Waits for the test's word, or for nothing once it has none to give.
+                let _ = self.go.recv();
+                self.handed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 each(i, format!("T {}", l.text));
             }
             Ok(())
         }
     }
 
+    /// A [`Stepped`] translator's core, its word, what it was asked and how many lines it handed out.
+    fn stepped() -> (Core, std::sync::mpsc::Sender<()>, Arc<std::sync::Mutex<Vec<Vec<String>>>>, Arc<std::sync::atomic::AtomicUsize>) {
+        let (go, gate) = std::sync::mpsc::channel();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let core = Core::new(None, Box::new(Stepped { go: gate, asked: asked.clone(), handed: handed.clone() }), Reader { target: "en".into(), reads: vec![] });
+        (core, go, asked, handed)
+    }
+
+    /// Looks, 10 ms of the core's clock (`t`) a turn, until `done`; the translator answers on its own thread, so the turns wait a little
+    /// for it. The wall clock only says that it hangs.
+    fn until(what: &str, t: &mut f64, mut done: impl FnMut(f64) -> bool) {
+        let began = std::time::Instant::now();
+        loop {
+            *t += 0.01;
+            if done(*t) {
+                return;
+            }
+            assert!(began.elapsed() < std::time::Duration::from_secs(30), "{what}: never");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// Enzo's 2026-11-14 log: 40 to 215 lines followed, asked 24 at a time in reading order, 21 s a batch; the sign he
     /// looked at waited for whole batches before its own. The line looked at goes first, in a small batch, and shows
-    /// as soon as it is translated.
+    /// as soon as it is translated: after one line, not after its batch nor all 40.
     #[test]
     fn the_line_looked_at_is_translated_first_and_shows_at_once() {
-        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut core = Core::new(None, Box::new(Slow { per_line: std::time::Duration::from_millis(150), asked: asked.clone() }), Reader { target: "en".into(), reads: vec![] });
-        // Wait for the translator's thread to be ready.
+        let (mut core, go, asked, handed) = stepped();
         let texts: Vec<String> = (0..40).map(|i| format!("線{i}")).collect();
         // Lines from 60 degrees left to 57 right; the head looks at the one 21 degrees right ("線27").
         let lines = || texts.iter().enumerate().map(|(i, t)| line(t, i as f32 * 3.0 - 60.0)).collect::<Vec<_>>();
-        let start = std::time::Instant::now();
         core.tracker.update(0.0, lines(), &|_| Seen::Open);
-        let mut shown_after = None;
-        for k in 0..400 {
-            let scene = core.after_look(k as f64 * 0.01, gaze(21.0), Default::default());
-            if scene.quads.iter().any(|q| core.tracker.get(q.track).is_some_and(|t| t.text == "線27")) {
-                shown_after = Some(start.elapsed());
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let shown_after = shown_after.expect("the line looked at is shown");
+        let shown = |core: &mut Core, t: f64| {
+            let scene = core.after_look(t, gaze(21.0), Default::default());
+            scene.quads.iter().any(|q| core.tracker.get(q.track).is_some_and(|t| t.text == "線27"))
+        };
+        let mut t = 0.0;
+        until("the first batch asked for", &mut t, |t| {
+            assert!(!shown(&mut core, t), "nothing is translated yet");
+            !asked.lock().unwrap().is_empty()
+        });
         let first = asked.lock().unwrap()[0].clone();
-        assert!(first.len() <= MOST_IN_BATCH, "a small batch: {first:?}");
+        assert!(first.len() > 1 && first.len() <= MOST_IN_BATCH, "a small batch: {first:?}");
         assert_eq!(first[0], "線27", "the line looked at is asked for first: {first:?}");
         for near in ["線26", "線28"] {
             assert!(first.contains(&near.to_string()), "its neighbours come with it: {first:?}");
         }
-        // One line's time, not a batch's (6 × 150 ms) nor all 40 lines' (6 s).
-        assert!(shown_after < std::time::Duration::from_millis(600), "shown after {shown_after:?}");
+        // One line translated: the translator waits for the next word, so whatever this machine's speed, the line looked at
+        // is shown with only its own translation done.
+        go.send(()).unwrap();
+        until("the line looked at shown", &mut t, |t| shown(&mut core, t));
+        assert_eq!(handed.load(std::sync::atomic::Ordering::SeqCst), 1, "shown at its own line, not its batch's {}", first.len());
         // Every line is translated in the end.
-        for k in 0..1000 {
-            core.after_look(5.0 + k as f64 * 0.01, gaze(21.0), Default::default());
-            if core.tracker.tracks.iter().all(|t| core.cached(&t.text).is_some()) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("not every line was translated");
+        drop(go);
+        until("every line translated", &mut t, |t| {
+            core.after_look(t, gaze(21.0), Default::default());
+            core.tracker.tracks.iter().all(|t| core.cached(&t.text).is_some())
+        });
+        assert_eq!(handed.load(std::sync::atomic::Ordering::SeqCst), 40, "each line once");
     }
 
     /// A line turned to while a batch is on its way goes into the next batch, before the lines asked for earlier.
     #[test]
     fn a_line_turned_to_goes_before_those_waiting() {
-        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut core = Core::new(None, Box::new(Slow { per_line: std::time::Duration::from_millis(40), asked: asked.clone() }), Reader { target: "en".into(), reads: vec![] });
+        let (mut core, go, asked, _) = stepped();
         let texts: Vec<String> = (0..30).map(|i| format!("札{i}")).collect();
         let lines = || texts.iter().enumerate().map(|(i, t)| line(t, i as f32 * 4.0 - 60.0)).collect::<Vec<_>>();
         core.tracker.update(0.0, lines(), &|_| Seen::Open);
-        core.after_look(0.0, gaze(-60.0), Default::default());
-        // The head turns to the far right while the first batch (the far left) is being translated.
-        for k in 0..400 {
-            core.after_look(0.01 * k as f64, gaze(56.0), Default::default());
-            if core.cached("札29").is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let mut t = 0.0;
+        until("the first batch asked for", &mut t, |t| {
+            core.after_look(t, gaze(-60.0), Default::default());
+            !asked.lock().unwrap().is_empty()
+        });
+        // The head turns to the far right while the first batch (the far left) is being translated: it is held until the
+        // turn has been looked at a few times.
+        for _ in 0..5 {
+            t += 0.01;
+            core.after_look(t, gaze(56.0), Default::default());
         }
+        drop(go);
+        until("札29 translated", &mut t, |t| {
+            core.after_look(t, gaze(56.0), Default::default());
+            core.cached("札29").is_some()
+        });
         let asked = asked.lock().unwrap().clone();
         assert!(asked[0].contains(&"札0".to_string()), "{asked:?}");
         assert_eq!(asked[1][0], "札29", "the line turned to is next: {asked:?}");

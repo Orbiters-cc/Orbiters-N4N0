@@ -977,13 +977,17 @@ mod tests {
     fn texts_fit_their_places() {
         for name in LANGUAGES {
             let strings = Strings::parse(&base(name)).unwrap().strings;
-            orbiters_ui::fonts::prefer_language(strings.language());
-            let skin = Skin::standard(strings);
-            menu_ui::watch_shrinking();
-            for retro in [false, true] {
-                page_pictures(retro, &skin);
-            }
-            let shrunk = menu_ui::shrunk();
+            // In its own fonts on this thread alone, as `run` has them for the whole process: set for the process, Japanese's had the tests
+            // painting beside this one find their fonts anew halfway through a comparison (VR1115 flaky).
+            let language = strings.language().to_string();
+            let shrunk = orbiters_ui::fonts::in_preferred_language(&language, || {
+                let skin = Skin::standard(strings);
+                menu_ui::watch_shrinking();
+                for retro in [false, true] {
+                    page_pictures(retro, &skin);
+                }
+                menu_ui::shrunk()
+            });
             if name == "en" {
                 assert!(shrunk.is_empty(), "English drawn smaller: {shrunk:?}");
             }
@@ -992,7 +996,6 @@ mod tests {
                 assert!(*scale >= 0.75, "{name}: {text:?} shrinks to {:.0} %", scale * 100.0);
             }
         }
-        orbiters_ui::fonts::prefer_language("en");
     }
 
     #[test]

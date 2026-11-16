@@ -566,7 +566,7 @@ mod tests {
     fn the_other_hand_presses_a_row_of_the_mismatch_strip() {
         use super::super::strip;
         let watch = Quad { transform: facing([-0.2, 1.2, -0.3], [0.0, 1.6, 0.0], [0.0, 1.0, 0.0]).unwrap(), width: 0.045, height: 0.045 };
-        let band = Quad { transform: space::offset(&watch.transform, [0.085, 0.0, 0.0]), width: strip::WIDTH_M, height: strip::height_m() };
+        let band = Quad { transform: space::offset(&watch.transform, [strip::BESIDE_M, 0.0, 0.0]), width: strip::WIDTH_M, height: strip::height_m() };
         let t = Targets { watch: Some((0, watch)), strip: Some((0, band)), ..Default::default() };
         // The last row (Quick menu should be on), by the right hand's laser.
         let row = space::apply(&band.transform, [0.0, -band.height / 3.0, 0.0]);

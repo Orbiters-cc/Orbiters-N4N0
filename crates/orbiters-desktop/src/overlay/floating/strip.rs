@@ -17,10 +17,10 @@ use orbiters_ui::theme::{self, weight, Txt};
 use std::time::{Duration, Instant};
 
 /// Its size in the play space, and its picture's.
-pub const WIDTH_M: f32 = 0.11;
-pub const PX: [u32; 2] = [440, 300];
+pub const WIDTH_M: f32 = 0.14;
+pub const PX: [u32; 2] = [560, 300];
 /// How far its middle lies from the watch's, along the forearm, in metres.
-pub const BESIDE_M: f32 = 0.085;
+pub const BESIDE_M: f32 = 0.105;
 /// Over the panel and its bar, under the lasers, as the watch.
 const SORT_ORDER: u32 = 12;
 /// How long a row says "Noted" after its press.
@@ -155,8 +155,11 @@ pub fn paint(p: &egui::Painter, hover: Option<Kind>, noted: Option<Kind>) {
         } else {
             p.circle_filled(dot, 13.0, theme::ACCENT);
         }
-        let text = Txt::new(words, 30.0).weight(weight::SEMIBOLD).color(colour);
-        orbiters_ui::widgets::text_truncated(p, pos2(dot.x + 26.0, r.center().y), Align2::LEFT_CENTER, &text, r.right() - dot.x - 40.0);
+        // Every language's words whole: the size comes down until they fit (pt-BR and French are the longest).
+        let room = r.right() - dot.x - 44.0;
+        let size = crate::mismatch::fitting(p, words, &[30.0, 28.0, 26.0, 24.0, 22.0], room);
+        let text = Txt::new(words, size).weight(weight::SEMIBOLD).color(colour);
+        orbiters_ui::widgets::text_truncated(p, pos2(dot.x + 26.0, r.center().y), Align2::LEFT_CENTER, &text, room + 4.0);
     }
 }
 

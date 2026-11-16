@@ -1121,7 +1121,7 @@ pub(crate) struct Corner {
 
 impl Corner {
     /// Its size in its units (pixels of a 720 high window), its margin from the window's edges.
-    pub(crate) const SIZE: Vec2 = vec2(268.0, 3.0 * Self::ROW + 2.0 * Self::GAP);
+    pub(crate) const SIZE: Vec2 = vec2(320.0, 3.0 * Self::ROW + 2.0 * Self::GAP);
     const ROW: f32 = 30.0;
     const GAP: f32 = 5.0;
     pub(super) const MARGIN: f32 = 14.0;
@@ -1254,7 +1254,9 @@ pub(crate) fn paint_corner(p: &egui::Painter, noted: Option<crate::mismatch::Kin
         let keys = format!("Alt+F{}", kind.function_key());
         let caps = orbiters_ui::widgets::text(p, pos2(r.right() - 12.0, r.center().y), egui::Align2::RIGHT_CENTER, &Txt::new(&keys, 10.5).color(theme::FG_3));
         let (words, colour) = if is_noted { (orbiters_i18n::tr(crate::mismatch::NOTED_WORDS), theme::ACCENT) } else { (orbiters_i18n::tr(kind.words()), theme::FG) };
-        orbiters_ui::widgets::text_truncated(p, pos2(dot.x + 13.0, r.center().y), egui::Align2::LEFT_CENTER, &Txt::new(words, 13.0).weight(weight::SEMIBOLD).color(colour), caps.left() - dot.x - 20.0);
+        let room = caps.left() - dot.x - 20.0;
+        let size = crate::mismatch::fitting(p, words, &[13.0, 12.5, 12.0, 11.5, 11.0], room);
+        orbiters_ui::widgets::text_truncated(p, pos2(dot.x + 13.0, r.center().y), egui::Align2::LEFT_CENTER, &Txt::new(words, size).weight(weight::SEMIBOLD).color(colour), room + 2.0);
     }
 }
 
@@ -2010,6 +2012,14 @@ mod tests {
     fn the_mismatch_corner_lies_on_nothing_of_ours_nor_on_vrchat_s_hints() {
         for client in [vec2(1280.0, 720.0), vec2(1920.0, 1080.0), vec2(960.0, 540.0), vec2(1000.0, 900.0), vec2(1000.0, 1000.0), vec2(1280.0, 800.0), vec2(2560.0, 1080.0), vec2(3440.0, 1440.0), vec2(800.0, 600.0)] {
             let (rect, _) = Corner::rect(client);
+            let column = egui::Rect::from_min_max(pos2(0.0, client.y * 0.3), pos2(rect.right() + 8.0, client.y));
+            let blocking: Vec<(Zone, egui::Rect)> = [zones::layout_as(Around::QuickMenu, client, true), zones::layout(Around::QuickMenu, client), zones::layout(Around::Wheel, client)]
+                .concat()
+                .into_iter()
+                .filter(|p| p.rect.intersects(column))
+                .map(|p| (p.zone, p.rect))
+                .collect();
+            eprintln!("corner {client:?}: {rect:?}; in its column: {blocking:?}"); // i18n: not shown (a test's measurement)
             assert!(egui::Rect::from_min_size(pos2(0.0, 0.0), client).contains_rect(rect), "{client:?}: in the window"); // i18n: not shown (a menu mismatch report's line)
             assert!(rect.top() >= client.y * 0.3, "{client:?}: clear of VRChat's hints in the top corners"); // i18n: not shown (a menu mismatch report's line)
             let parts = [zones::layout_as(Around::QuickMenu, client, true), zones::layout(Around::QuickMenu, client), zones::layout(Around::Wheel, client)].concat();

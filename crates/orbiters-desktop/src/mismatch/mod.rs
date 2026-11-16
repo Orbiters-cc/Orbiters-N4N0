@@ -91,6 +91,16 @@ impl Kind {
     }
 }
 
+/// The largest of `sizes` at which `words` fit in `room` pixels on one line (measured in the regular face, the semibold drawn is a little wider).
+pub(crate) fn fitting(p: &egui::Painter, words: &str, sizes: &[f32], room: f32) -> f32 {
+    let last = *sizes.last().unwrap_or(&12.0);
+    sizes
+        .iter()
+        .copied()
+        .find(|&size| p.layout_no_wrap(words.to_owned(), egui::FontId::proportional(size), egui::Color32::WHITE).size().x * 1.08 <= room)
+        .unwrap_or(last)
+}
+
 /// What a button says for a moment after its press.
 pub const NOTED_WORDS: &str = mark("Noted");
 

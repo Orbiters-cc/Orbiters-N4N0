@@ -1985,9 +1985,9 @@ mod tests {
     }
 
     /// L-deskcam-glitch, the column's lag: at rest beside VRChat's camera panel at Enzo's screen size (2560 x 1440), a turn of the loop paints nothing and moves no
-    /// window, and costs little; when the countdown changes, one tile is painted again and that turn stays short. Measured times are printed for the report.
+    /// window, and costs little; when a recording starts, only what changed is painted again (Record and the words). Measured times are printed for the report.
     #[test]
-    fn the_camera_column_at_rest_costs_a_turn_nothing_and_a_countdown_one_tile() {
+    fn the_camera_column_at_rest_costs_a_turn_nothing_and_a_change_only_its_parts() {
         let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         for client in [vec2(1280.0, 720.0), vec2(2560.0, 1440.0)] {
             let panel = egui::Rect::from_center_size(pos2(client.x / 2.0, client.y / 2.0), vec2(616.0, 350.0) * client.y / 720.0);
@@ -2020,15 +2020,15 @@ mod tests {
                 at_rest.push(took.as_secs_f64() * 1000.0);
             }
             assert_eq!(windows.painted, painted, "{client:?}: a part was painted again with nothing changed");
-            // The countdown of a 3D picture: one second's change.
+            // A recording starts: Record becomes its clock and Stop, and the words under the tiles say so.
             let mut counting = snap.clone();
-            counting.n4n0.photo_countdown = Some(3);
+            counting.capture.state = crate::state::CaptureState::Recording;
             let (took, _) = turn(&mut panels, &mut windows, &counting);
             let repainted = windows.painted - painted;
             at_rest.sort_by(f64::total_cmp);
             let (median, worst) = (at_rest[at_rest.len() / 2], at_rest[at_rest.len() - 1]);
-            eprintln!("column turn {client:?}: at rest median {median:.3} ms, slowest {worst:.3} ms; countdown turn {:.3} ms, {repainted} parts painted", took.as_secs_f64() * 1000.0); // i18n: not shown (a test's measurement)
-            assert!(repainted >= 1 && repainted <= 3, "{client:?}: the countdown painted {repainted} parts");
+            eprintln!("column turn {client:?}: at rest median {median:.3} ms, slowest {worst:.3} ms; recording-starts turn {:.3} ms, {repainted} parts painted", took.as_secs_f64() * 1000.0); // i18n: not shown (a test's measurement)
+            assert!((1..=3).contains(&repainted), "{client:?}: a recording starting painted {repainted} parts");
             assert!(median < 4.0, "{client:?}: a turn at rest takes {median} ms");
         }
     }

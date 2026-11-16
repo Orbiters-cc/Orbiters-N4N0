@@ -457,6 +457,11 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         // Enzo's IMG1 (2026-11-11): All tools with what plays, its timeline, its volume at 0 and its two links.
         let playing = Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), music: Some(("DJ Brace - 2016 DMC Online Finals (Winning Routine)".into(), true)), music_times: Some((364, 364)), volume: Some((0, false)), can_copy_playing: true, can_drop_playing: true, ..facts.clone() };
         qm_scene(&playing, None, Some(Sheet::All), &format!("vr-sheet-{world}-all-playing"))?;
+        // Enzo, 2026-11-16: the volume is the playing app's own (its buttons say so under the pointer), or shows as not found.
+        let app = Facts { volume: Some((35, false)), music_app: "Chrome".into(), pointed: Some(Action::Volume(true)), ..playing.clone() };
+        qm_scene(&app, None, Some(Sheet::All), &format!("vr-sheet-{world}-all-playing-app-volume"))?;
+        let unfound = Facts { volume: None, volume_unfound: true, ..playing.clone() };
+        qm_scene(&unfound, None, Some(Sheet::All), &format!("vr-sheet-{world}-all-playing-no-app-sound"))?;
         // A capture around the person: Hide 3D and Small here in the head, the tabs as icons where their names do not fit.
         let around = Facts { sheet: Some(Sheet::Instances), sheet_title: "Instances".into(), view_showing: true, ..facts.clone() };
         qm_scene(&around, None, Some(Sheet::Instances), &format!("vr-sheet-{world}-instances-capture"))?;

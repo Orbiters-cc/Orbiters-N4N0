@@ -237,7 +237,7 @@ impl Mixer for StandIn {
     }
 
     fn set(&mut self, index: usize, level: Option<f32>, muted: Option<bool>) -> Result<(), String> {
-        let sound = self.sounds.get_mut(index).ok_or("no such sound")?;
+        let sound = self.sounds.get_mut(index).ok_or("no such sound")?; // i18n: not shown
         if let Some(level) = level {
             sound.level = level;
         }

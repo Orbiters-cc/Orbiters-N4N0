@@ -207,6 +207,7 @@ impl Presenter {
 
     /// Shows a picture on `handle` that differs from the last one shown there only in `changed` (x0, y0, x1, y1).
     fn show_part(&mut self, overlay: &vr::Overlay, handle: vr::OverlayHandle, rgba: &[u8], width: u32, height: u32, changed: [u32; 4]) {
+        crate::perf::uploaded(u64::from(changed[2].saturating_sub(changed[0])) * u64::from(changed[3].saturating_sub(changed[1])));
         #[cfg(windows)]
         if let Some(gpu) = self.device() {
             let failed = match gpu.present_part(overlay, handle, rgba, width, height, changed) {
@@ -858,8 +859,13 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let mut worn_read: Option<Instant> = None;
     // A frame of the headset, the longest wait for the compositor's next one (its advice).
     let frame_ms = steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map_or(11, |hz| (1000.0 / hz).ceil() as u32).clamp(4, 50);
+    // The performance self-check: what each part of the turn costs, sent to the service every ten seconds (`perf`).
+    let refresh_hz = steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0);
+    let mut meter = crate::perf::TurnMeter::new("overlay", Instant::now());
+    meter.headset(steamvr.string_property(0, vr::prop::MODEL_NUMBER));
     loop {
         let turn = Instant::now();
+        let mut part = turn;
         t.menu.worlds.view.input_turn(turn);
         if client.should_close() {
             vr_log::line(&format!("overlay: its link to the service ended: {}", client.ended_because().unwrap_or_else(|| "no reason given".into()))); // i18n: not shown (a log's line)
@@ -983,7 +989,10 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         }
         // VRChat's frame times also pace N4N0's projected screen (the owner's steps follow the frame rate).
         // Read whatever the settings say: the FPS booster's logger runs at every level, Off included.
+        meter.add(crate::perf::Part::SteamVr, part);
+        part = Instant::now();
         let chunk = frames.update(&steamvr, vrchat_scene);
+        meter.frames(frames.fresh(), refresh_hz);
         if snap.settings.world_performance || snap.settings.n4n0.enabled {
             if let Some(chunk) = chunk {
                 backend.frames(chunk);
@@ -997,6 +1006,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let place = snap.vrchat.running.then(|| snap.vrchat.world.instance.clone()).flatten();
         // Every action set at once, then what reads them; a failed read leaves the last frame's states, not to be
         // taken for new ones (a press counted twice, a stick still pushed).
+        meter.add(crate::perf::Part::Frames, part);
+        part = Instant::now();
         let input_read = actions.update(&steamvr);
         let moment = walk::Moment {
             settings: &snap.settings.walk_boost,
@@ -1013,6 +1024,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 .map(|m| walk::Motion { in_station: m.in_station || m.seated, speed: if m.speed_at_ms.is_some() { m.speed } else { f32::NAN }, speed_at_ms: m.speed_at_ms }),
             input_read,
         };
+        meter.add(crate::perf::Part::SteamVr, part);
+        part = Instant::now();
         t.walk.update(&steamvr, &moment);
         t.state.walk_taken = t.walk.taken_lately(Instant::now());
         if let Some(path) = t.walk.path_changed() {
@@ -1048,6 +1061,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let button = input_read && actions.menu_pressed(&steamvr);
         // The floating panel, the watch and N4N0's menu, used with the controllers' own lasers beside VRChat
         // (overlay/floating): first, so that the menu reads this turn's laser events, and the watch opens it now.
+        meter.add(crate::perf::Part::Walk, part);
+        part = Instant::now();
         let mut watch = false;
         if let Some(floating) = t.floating.as_mut() {
             let pointables = t.menu.pointables();
@@ -1083,6 +1098,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             vr_log::line(&format!("3D view: SteamVR had no overlay slot left; {freed} hidden parts gave theirs back, trying again")); // i18n: not shown (a log's line)
             t.menu.worlds.view.room_made(&overlay, &steamvr);
         }
+        meter.add(crate::perf::Part::Floating, part);
+        part = Instant::now();
         // Whether a menu of ours is up (live translation does not read what is under one).
         let mut menus_up = false;
         // The panels around VRChat's menus, and whose trigger VRChat does not get from the next read on.
@@ -1165,10 +1182,15 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 }
             }
         }
+        meter.add(crate::perf::Part::Orbit, part);
+        part = Instant::now();
         if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button, watch) {
             sounds.click();
         }
+        meter.add(crate::perf::Part::Menu, part);
+        part = Instant::now();
         t.menu.worlds.view.publish(&overlay);
+        meter.add(crate::perf::Part::View3d, part);
         // Live translation: the turn only records the head and shows what the reading thread found.
         // Nor while VRChat has no scene to show (a loading screen's texts were read and translated in the sandbox).
         let covered = dashboard || menus_up || t.menu.host.menu.open || t.menu.worlds.small_showing() || !vrchat_scene;
@@ -1185,6 +1207,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let walk_hand = if snap.settings.walk_boost.hand == orbiters_core::settings::Hand::Left { 0 } else { 1 };
         t.translate.update(translate::Cx { overlay: &overlay, steamvr: &steamvr, presenter: &mut presenter, snap: &snap, backend: &backend, covered, frames: frames.fresh(), sticks, walk_hand, dashboard });
         stall.note(began.elapsed(), || t.translate.doing());
+        meter.add(crate::perf::Part::Translate, began);
+        part = Instant::now();
         if !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &snap)) {
             shown = Some(snap.clone());
             next_frame = Some(next_frame.map_or(Instant::now(), |f| f.min(Instant::now())));
@@ -1232,14 +1256,21 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         } else if !visible {
             while_hidden(&mut events);
         }
+        meter.add(crate::perf::Part::Tab, part);
+        part = Instant::now();
         t.menu.worlds.view.publish(&overlay);
+        meter.add(crate::perf::Part::View3d, part);
+        let mut busy = turn.elapsed();
         if t.walk.moving() {
             // Walk boost moves the play space once per frame the compositor shows: unsynchronised steps judder.
             if overlay.wait_frame_sync(frame_ms).is_err() {
                 std::thread::sleep(TURN.saturating_sub(turn.elapsed()));
             }
             std::thread::sleep(SHORTEST_TURN.saturating_sub(turn.elapsed()));
+            let began = Instant::now();
             t.menu.worlds.view.update(&overlay, &steamvr);
+            meter.add(crate::perf::Part::View3d, began);
+            busy += began.elapsed();
         } else {
             // Keep input at its existing cadence. Only displayed 3D content gets short, high-resolution service
             // slices: a completed texture need not wait through the rest of this turn. No tick-based channel waits.
@@ -1249,9 +1280,16 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 let left = end.saturating_duration_since(now);
                 std::thread::sleep(worlds::pacing::service_slice(left, t.menu.worlds.view.wake_after(now)));
                 if t.menu.worlds.view.active() {
+                    let began = Instant::now();
                     t.menu.worlds.view.update(&overlay, &steamvr);
+                    meter.add(crate::perf::Part::View3d, began);
+                    busy += began.elapsed();
                 }
             }
+        }
+        meter.turn(busy);
+        if let Some(turns) = meter.take(Instant::now()) {
+            backend.perf_turns(turns);
         }
     }
 }

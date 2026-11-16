@@ -218,6 +218,14 @@ pub enum ToService {
     },
     /// Make VRChat find the OSC service again (it sends avatar parameters only to services it found).
     OscReconnect,
+    /// A loop's last ten seconds, for the performance self-check (`perf`).
+    PerfTurns {
+        turns: Box<crate::perf::ProcessTurns>,
+    },
+    /// The window asks for a Performance report (`send`: Orbiters gets the last one made), or mutes the self-check's hint.
+    PerfReport {
+        command: crate::perf::Command,
+    },
     /// VRChat's frames the overlay saw, for world performance statistics.
     Frames {
         chunk: crate::state::FrameChunk,
@@ -1151,6 +1159,7 @@ pub(crate) mod tests {
         s.camera_tools.qr_generation = 3;
         s.projects_changed = 5;
         s.translate.set(crate::state::TranslateStatus { lines: 3, ..Default::default() });
+        s.perf.set(crate::perf::PerfView { hint: Some(crate::perf::Hint { key: "overlay_cpu".into(), part: None }), report: None });
         let o = &mut s.n4n0;
         o.face = N4n0Face::Happy;
         o.listening = true;

@@ -217,6 +217,8 @@ pub struct Controller {
     /// What tracking smoothing's driver does now (the service's keeper says), for N4N0's Tracking page.
     tracking_note: Mutex<String>,
     quitting: AtomicBool,
+    /// The last Performance report made, for Send (`perf`).
+    perf_last: Mutex<Option<serde_json::Value>>,
 }
 
 const TOGGLE_NONE: u8 = 0;
@@ -405,6 +407,7 @@ mod language;
 mod maps;
 pub(crate) mod menu_shares;
 mod n4n0;
+mod perf;
 mod performance;
 pub mod publish_cost;
 mod rig;
@@ -501,6 +504,7 @@ impl Controller {
             kit_rearm: AtomicBool::new(false),
             tracking_note: Mutex::new(String::new()),
             quitting: AtomicBool::new(false),
+            perf_last: Mutex::new(None),
         })
     }
 
@@ -546,6 +550,7 @@ impl Controller {
         self.start_language();
         self.start_vrchat_login();
         self.start_n4n0();
+        self.start_perf();
         self.start_calls();
         self.start_updates();
     }

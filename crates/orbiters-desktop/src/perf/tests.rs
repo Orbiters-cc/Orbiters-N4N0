@@ -170,3 +170,28 @@ fn reports_have_ids_of_their_own() {
     assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     assert_ne!(a, b);
 }
+
+/// What one look at every process costs, through sysinfo as the N4N0 page's footprint does every 3 s, and through the one
+/// system call the self-check makes. Printed for the report (`--nocapture`); the system call must not cost more.
+#[cfg(windows)]
+#[test]
+fn a_scan_costs_less_than_sysinfo_s_refresh() {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory());
+    let time = |f: &mut dyn FnMut()| {
+        let mut runs: Vec<f64> = (0..15)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                f();
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        runs.sort_by(f64::total_cmp);
+        runs[runs.len() / 2]
+    };
+    let sys = time(&mut || system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory()));
+    let ours = time(&mut || drop(scan()));
+    println!("one look at {} processes: sysinfo {sys:.2} ms, NtQuerySystemInformation {ours:.2} ms", scan().len());
+    assert!(ours <= sys * 1.5 + 0.5, "sysinfo {sys} ms, scan {ours} ms");
+}

@@ -293,6 +293,16 @@ const APP_KEY_SECTION: &std::ffi::CStr = c"cc.orbiters.n4n0";
 /// A binding saved for this application, which SteamVR's own autosave also makes, is used in place of the default ones, and knows nothing of the action sets added since: on 2026-11-07
 /// Enzo's Touch controllers had one from two days before, so `/actions/orbit` was not bound and no panel ever opened in VR, with nothing to say so. So what a saved binding lacks is added to
 /// a copy of it, and the copy becomes the saved one: what the person chose stays. One that cannot be read goes, and the defaults apply. Before the manifest is set, which is when it is read.
+/// The binding SteamVR uses for this application's actions on `controller` (a controller type), for a menu mismatch report: a saved one
+/// (its address) or this application's own.
+pub fn binding_in_use(steamvr: &vr::Client, controller: &str) -> String {
+    let key = std::ffi::CString::new(format!("{controller}_250820_CurrentURL_steamvrinput")).unwrap_or_default();
+    match steamvr.setting_string(APP_KEY_SECTION, &key) {
+        Some(url) if !url.is_empty() => format!("saved: {url}"), // i18n: not shown (a menu mismatch report's line)
+        _ => format!("N4N0's own: bindings_{controller}.json"), // i18n: not shown (a menu mismatch report's line)
+    }
+}
+
 fn keep_saved_bindings_whole(steamvr: &vr::Client, dir: &Path) {
     use std::ffi::CString;
     let runtime = vr::runtime_dir();

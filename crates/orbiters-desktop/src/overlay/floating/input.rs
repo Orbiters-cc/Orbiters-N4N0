@@ -48,6 +48,8 @@ pub struct Targets {
     pub handle: Option<([f32; 4], V3)>,
     /// The watch, and the hand it is on (the other one presses it).
     pub watch: Option<(usize, Quad)>,
+    /// The menu mismatch strip, and the hand it is on (the other one presses it).
+    pub strip: Option<(usize, Quad)>,
 }
 
 impl Targets {
@@ -63,6 +65,7 @@ pub enum Target {
     Surface(usize),
     Bar,
     Watch,
+    Strip,
 }
 
 /// A hand this near the handle takes it with its grip, as N4N0's screen's handle is taken.
@@ -127,6 +130,9 @@ pub struct Outcome {
     /// A laser or a fingertip on the watch, and a trigger pulled there.
     pub watch_hover: bool,
     pub watch_press: bool,
+    /// A laser or a fingertip on the mismatch strip (u, v), and a trigger pulled there.
+    pub strip_hover: Option<[f32; 2]>,
+    pub strip_press: Option<[f32; 2]>,
     /// Where the held panel or menu is now; it was let go this turn (where it last was is to keep).
     pub moved: [Option<Matrix34>; CARRIED],
     pub released: [bool; CARRIED],
@@ -207,6 +213,15 @@ impl Interaction {
                 }
             }
             out.lasers[i] = best;
+            // The mismatch strip as the watch: its fingertip near it wins, else a laser on it when nearer than the rest.
+            if let Some((_, strip)) = targets.strip.filter(|(on, _)| *on != i) {
+                let (at, gap) = strip.nearest(o);
+                if gap < super::strip::TOUCH_M {
+                    out.lasers[i] = Some((Target::Strip, at));
+                } else if let Some(hit) = strip.hit(o, d, 0.0).filter(|h| out.lasers[i].is_none_or(|(_, b)| h.distance < b.distance)) {
+                    out.lasers[i] = Some((Target::Strip, hit));
+                }
+            }
         }
 
         // A grip with the laser on a surface (or the panel's bar), at the panel's handle or at a surface takes what it
@@ -238,6 +253,7 @@ impl Interaction {
             }
             match out.lasers[i] {
                 Some((Target::Watch, _)) => out.watch_press = true,
+                Some((Target::Strip, hit)) => out.strip_press = Some(hit.uv),
                 Some((Target::Bar, hit)) => match (targets.handle, targets.carried(PANEL)) {
                     (Some((r, _)), Some(panel)) if (r[0]..=r[2]).contains(&hit.uv[0]) && (r[1]..=r[3]).contains(&hit.uv[1]) => {
                         let at = out.moved[PANEL].unwrap_or(panel.transform);
@@ -289,6 +305,7 @@ impl Interaction {
         let hover = |t: Target| first.into_iter().chain([1, 0]).find_map(|i| out.lasers[i].filter(|(on, _)| *on == t)).map(|(_, hit)| hit.uv);
         out.bar_hover = hover(Target::Bar);
         out.watch_hover = hover(Target::Watch).is_some();
+        out.strip_hover = hover(Target::Strip);
         out.holding = self.holding();
         self.trigger = trigger;
         self.grab = grab;
@@ -332,6 +349,7 @@ mod tests {
             bar: Some(Quad { transform: bar, width: 0.3, height: 0.045 }),
             handle: Some(([0.3, 0.0, 0.7, 1.0], position(&bar))),
             watch: None,
+            strip: None,
         }
     }
 
@@ -540,6 +558,35 @@ mod tests {
         i.step(&head(), [None, Some(miss(false))], &t);
         let out = i.step(&head(), [None, Some(miss(true))], &t);
         assert!(!out.watch_hover && !out.watch_press);
+    }
+
+    /// The menu mismatch strip on the left wrist, beside the watch: the right hand presses one of its rows by laser or fingertip, the left
+    /// hand's own laser does nothing on it, and the press says which row (its v) whatever N4N0's menu does.
+    #[test]
+    fn the_other_hand_presses_a_row_of_the_mismatch_strip() {
+        use super::super::strip;
+        let watch = Quad { transform: facing([-0.2, 1.2, -0.3], [0.0, 1.6, 0.0], [0.0, 1.0, 0.0]).unwrap(), width: 0.045, height: 0.045 };
+        let band = Quad { transform: space::offset(&watch.transform, [strip::BESIDE_M, 0.0, 0.0]), width: strip::WIDTH_M, height: strip::height_m() };
+        let t = Targets { watch: Some((0, watch)), strip: Some((0, band)), ..Default::default() };
+        // The last row (Quick menu should be on), by the right hand's laser.
+        let row = space::apply(&band.transform, [0.0, -band.height / 3.0, 0.0]);
+        let own = hand([-0.25, 1.1, -0.1], row, false, false);
+        let mut i = Interaction::default();
+        assert!(i.step(&head(), [Some(own), None], &t).strip_hover.is_none(), "its own hand: nothing");
+        let other = |trigger| hand([0.15, 1.25, -0.15], row, trigger, false);
+        let out = i.step(&head(), [Some(own), Some(other(false))], &t);
+        assert_eq!(out.strip_hover.and_then(|uv| strip::row_at(uv[1])), Some(crate::mismatch::Kind::QuickMenuShouldBeOn));
+        let out = i.step(&head(), [Some(own), Some(other(true))], &t);
+        assert_eq!(out.strip_press.and_then(|uv| strip::row_at(uv[1])), Some(crate::mismatch::Kind::QuickMenuShouldBeOn));
+        assert!(!out.watch_press);
+        assert!(i.step(&head(), [Some(own), Some(other(true))], &t).strip_press.is_none(), "held: once");
+        // The fingertip on the first row, 2 cm off its face, pointing anywhere.
+        let mut i = Interaction::default();
+        let tip_at = space::apply(&band.transform, [0.0, band.height / 3.0, 0.02]);
+        let poke = |trigger| hand(tip_at, [5.0, 0.0, 0.0], trigger, false);
+        i.step(&head(), [None, Some(poke(false))], &t);
+        let out = i.step(&head(), [None, Some(poke(true))], &t);
+        assert_eq!(out.strip_press.and_then(|uv| strip::row_at(uv[1])), Some(crate::mismatch::Kind::MenuShouldBeOff));
     }
 
     /// The panel to the left and N4N0's menu ahead, with the 3D worlds' pill under the menu.

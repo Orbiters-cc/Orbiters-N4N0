@@ -96,6 +96,18 @@ pub struct Settings {
     pub translate: TranslateSettings,
     /// The beta's usage statistics (which controls and pages are used): on unless turned off, told once.
     pub usage: UsageSettings,
+    /// The beta's menu mismatch buttons (Settings, Beta feedback): off until turned on.
+    pub mismatch: MismatchSettings,
+}
+
+/// The beta's menu mismatch buttons (`orbiters-desktop`'s `mismatch`): three buttons always in view that say N4N0's menus do not match
+/// VRChat's, each press kept as a report with what led to it. Nothing is recorded while `buttons` is off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MismatchSettings {
+    pub buttons: bool,
+    /// A small, blurred picture of the game at the press goes with the report.
+    pub picture: bool,
 }
 
 /// The beta's usage statistics (`orbiters-desktop`'s `usage`): the names of the pages and controls used, never what is typed, said or seen.
@@ -811,6 +823,7 @@ impl Default for Settings {
             experimental: ExperimentalSettings::default(),
             translate: TranslateSettings::default(),
             usage: UsageSettings::default(),
+            mismatch: MismatchSettings::default(),
         }
     }
 }

@@ -55,6 +55,9 @@ crates/orbiters-desktop/src/steamvr_start.rs
 crates/orbiters-translate
 # The beta usage statistics: names that leave the computer (code and catalog names), never shown.
 crates/orbiters-desktop/src/usage
+# Sends menu mismatch reports; its words are for the log.
+crates/orbiters-desktop/src/mismatch/send.rs
+crates/orbiters-desktop/src/mismatch/tests.rs
 crates/orbiters-desktop/src/perf/facts.rs
 crates/orbiters-desktop/src/perf/tests.rs
 # Matching tables for searches by name: letters, never shown.

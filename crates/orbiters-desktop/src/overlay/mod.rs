@@ -272,6 +272,48 @@ impl PaintTextures {
     }
 }
 
+/// What the overlay last noted for the menu mismatch reports, to note only changes.
+#[derive(Default)]
+struct MismatchNoted {
+    scene: Option<(bool, bool)>,
+    osc: Option<(bool, Option<(bool, bool)>)>,
+    ours: Option<usize>,
+}
+
+/// A row of the menu mismatch strip was pressed in VR: the report of what led to it ([`crate::mismatch`]), with the controllers, their
+/// binding, the menus' state and, when asked for, a small picture of the left eye.
+#[allow(clippy::too_many_arguments)]
+fn mismatch_report(kind: crate::mismatch::Kind, steamvr: &vr::Client, snap: &crate::state::Snapshot, orbit: Option<&orbit::vr::OrbitVr>, ours_up: bool, dashboard: bool, scene: bool, n4n0_menu: bool) {
+    let controllers: Vec<Option<String>> = [vr::ControllerRole::LeftHand, vr::ControllerRole::RightHand]
+        .into_iter()
+        .map(|role| steamvr.controller_index(role).and_then(|d| steamvr.string_property(d, vr::prop::CONTROLLER_TYPE)))
+        .collect();
+    let mut types: Vec<String> = controllers.iter().flatten().cloned().collect();
+    types.dedup();
+    let bindings = types.iter().map(|c| (c.clone(), actions::binding_in_use(steamvr, c))).collect();
+    let mut state = orbit.map(|o| o.mismatch_state()).unwrap_or_default();
+    state.push(("a part of ours is up around VRChat's menus".into(), ours_up.to_string())); // i18n: not shown (a menu mismatch report's line)
+    state.push(("N4N0's own menu open".into(), n4n0_menu.to_string())); // i18n: not shown (a menu mismatch report's line)
+    state.push(("SteamVR's dashboard up".into(), dashboard.to_string())); // i18n: not shown (a menu mismatch report's line)
+    state.push(("VRChat shows a scene".into(), scene.to_string())); // i18n: not shown (a menu mismatch report's line)
+    state.push(("VRChat's camera open (OSC)".into(), format!("{:?}", snap.camera_open_said))); // i18n: not shown (a menu mismatch report's line)
+    let picture = if crate::mismatch::switches(&snap.settings).picture {
+        let read = orbiters_openvr::mirror::EyeReader::new(steamvr.dxgi_adapter_index())
+            .and_then(|reader| reader.read(&steamvr.compositor().map_err(|e| e.to_string())?, orbiters_openvr::compositor::Eye::Left));
+        match read {
+            Ok(p) => crate::mismatch::Picture::small(p.width, p.height, &p.rgba),
+            Err(e) => {
+                eprintln!("menu mismatch: the eye's picture could not be read: {e}"); // i18n: not shown (a log's line)
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let context = crate::mismatch::Context { surface: "vr".into(), controllers, bindings, state };
+    crate::mismatch::press(kind, context, &snap.settings, snap.vrchat.world.log_file.clone(), picture);
+}
+
 #[cfg(test)]
 mod review_texture_registration {
     use super::*;
@@ -818,6 +860,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     orbiters_ui::install(&ctx);
     let sounds = Sounds::start();
     let mut stall = Stalls::default();
+    let mut mismatch_noted = MismatchNoted::default();
     let mut input_log = vr_log::Every::default();
     // Whose stick VRChat does not get, while it moves in a 3D capture or flips captures (K-small-stick).
     let mut stick_take = actions::StickTake::default();
@@ -1066,6 +1109,11 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             backend.n4n0(N4n0Command::Input { pads: state });
         }
         let button = input_read && actions.menu_pressed(&steamvr);
+        // The menu mismatch buttons' switch, and what VRChat and SteamVR say that the menus' rules hang on.
+        crate::mismatch::set_on(crate::mismatch::switches(&snap.settings).buttons);
+        crate::mismatch::note_change("vr: VRChat shows a scene, SteamVR's dashboard is up", &mut mismatch_noted.scene, (vrchat_scene, dashboard)); // i18n: not shown (a menu mismatch report's line)
+        crate::mismatch::note_change("vrchat: OSC receiving, in a station or seated", &mut mismatch_noted.osc, (snap.osc.receiving, snap.vrchat.motion.map(|m| (m.in_station, m.seated)))); // i18n: not shown (a menu mismatch report's line)
+        let mut mismatch_pressed = None;
         // The floating panel, the watch and N4N0's menu, used with the controllers' own lasers beside VRChat
         // (overlay/floating): first, so that the menu reads this turn's laser events, and the watch opens it now.
         meter.add(crate::perf::Part::Walk, part);
@@ -1091,11 +1139,21 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 sounds.click();
             }
             watch = turn.toggle_menu;
+            mismatch_pressed = turn.mismatch;
             if turn.menu_moved.is_some() || turn.menu_released {
                 let mut head = [Pose::default(); MAX_DEVICES];
                 steamvr.poses(vr::Universe::Standing, &mut head);
                 let head = head[0].pose_is_valid.then_some(head[0].device_to_absolute);
                 t.menu.carry(&overlay, turn.menu_moved, turn.menu_released, head.as_ref());
+            }
+        }
+        // In the VR sandbox only (a debug build it started): a press of the strip asked for by a file, for making reports of known cases.
+        if cfg!(debug_assertions) && mismatch_pressed.is_none() && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
+            if let Some(file) = std::env::var_os("ORBITERS_SANDBOX_LOGS").map(|d| std::path::PathBuf::from(d).join("mismatch-press.txt")).filter(|f| f.is_file()) {
+                let asked = std::fs::read_to_string(&file).unwrap_or_default();
+                let _ = std::fs::remove_file(&file);
+                mismatch_pressed = crate::mismatch::Kind::from_key(asked.trim());
+                vr_log::line(&format!("mismatch: the sandbox asked for a press: {asked:?}")); // i18n: not shown (a log's line)
             }
         }
         // The 3D view found SteamVR's overlay slots all taken (Enzo's overlay apps hold many of its 128): the parts around VRChat's menus that
@@ -1134,6 +1192,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             if turn.clicked {
                 sounds.click();
             }
+            crate::mismatch::note_change("decide: ours up around VRChat's menus", &mut mismatch_noted.ours, turn.menus_up.len()); // i18n: not shown (a menu mismatch report's line)
             t.menu.worlds.from_elsewhere(turn.worlds);
             t.menu.worlds.small_place(turn.small_place);
             t.menu.worlds.small_opening(turn.small_opening);
@@ -1188,6 +1247,9 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                     vr_log::line(&format!("turn: read {} hand {hand} stick x {stick:.2} turned {:.4} rad steps {} menu up {menu_up}", read.is_some(), turned, t.menu.worlds.view.turns_in_steps())); // i18n: not shown (a log's line)
                 }
             }
+        }
+        if let Some(kind) = mismatch_pressed {
+            mismatch_report(kind, &steamvr, &snap, t.orbit.as_ref(), menus_up, dashboard, vrchat_scene, t.menu.host.menu.open);
         }
         meter.add(crate::perf::Part::Orbit, part);
         part = Instant::now();

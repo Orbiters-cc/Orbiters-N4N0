@@ -763,6 +763,20 @@ impl Watcher {
         self.seen
     }
 
+    /// Where its counting stands, for a menu mismatch report ([`crate::mismatch`]).
+    pub fn why(&self) -> String {
+        format!(
+            "candidate {:?}, hits {} (opens at {LOOKS_TO_OPEN}), misses {}, closing {:?}, R pressed first {}, opened on the rim alone {}, looking after a key {}", // i18n: not shown (a menu mismatch report's line)
+            self.candidate,
+            self.hits,
+            self.misses,
+            self.going.map(|(menu, _)| menu),
+            self.early,
+            self.confirm_by.is_some(),
+            self.until.is_some()
+        ) // i18n: not shown (a report's line)
+    }
+
     /// Whether the capture should run: there is something to look for.
     pub fn wants_frames(&self) -> bool {
         self.seen != Seen::Resting

@@ -260,6 +260,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("floating") {
         return floating::shots(&out, &settings);
     }
+    if only.as_deref() == Some("mismatch") {
+        return orbit::mismatch_shots(&out);
+    }
     if only.as_deref() == Some("worlds-overlay") {
         return worlds_overlay::shots(&out);
     }

@@ -13,5 +13,6 @@
   "Assistant off: tap the microphone to turn it on": "Asistente apagado: toca el micro para activarlo",
   "Tap a tile, or call N4N0. The mic turns me off": "Toca un mosaico o llámame. El micro me apaga",
   "Nothing listens, nothing is sent": "Nada escucha, nada se envía",
-  "assistant\u0004Off": "Desactivado"
+  "assistant\u0004Off": "Desactivado",
+  "tile\u0004Assistant off": "Asistente apagado"
 }

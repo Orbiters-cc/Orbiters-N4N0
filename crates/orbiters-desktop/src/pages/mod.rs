@@ -13,6 +13,7 @@ pub mod form;
 pub mod header;
 pub mod home;
 pub mod language_card;
+pub mod launcher;
 pub mod mic;
 pub mod mic_grid;
 pub mod n4n0;
@@ -91,6 +92,8 @@ pub enum Go {
     FreeSpace,
     /// Unity projects (Capture's avatar picker, when it has no avatar to offer).
     Projects,
+    /// Settings, where the VRChat account is signed in (the launcher's "Sign in to VRChat").
+    VrchatAccount,
 }
 
 impl Cx<'_> {

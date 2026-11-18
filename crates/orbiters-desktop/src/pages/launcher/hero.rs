@@ -1,0 +1,231 @@
+//! The top of Home: the two Play buttons, or a received invite's card with both Play buttons in it.
+
+use super::states::{self, PlayState};
+use super::{access_name, cover_uv, region_tag, Cx, State};
+use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, Sense, Ui};
+use orbiters_core::launcher::{Action, Invite, InviteKind, LaunchMode};
+use orbiters_i18n::tr;
+use orbiters_ui::anim::{self, Spring};
+use orbiters_ui::icons;
+use orbiters_ui::theme::{self, weight, Txt};
+use orbiters_ui::{paint, widgets};
+
+const PLAY_H: f32 = 84.0;
+const INVITE_H: f32 = 188.0;
+const LINE_H: f32 = 52.0;
+
+/// The invite to show: the newest one not put away.
+fn invite(state: &State) -> Option<Invite> {
+    state.data.invites.iter().find(|i| i.kind == InviteKind::Invite && !state.dismissed.contains(&i.id)).cloned()
+}
+
+/// Home's Play part as block `index`; nothing while there is nothing to play.
+pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
+    if !state.shown() {
+        return;
+    }
+    let play = states::play(&state.data);
+    let invite = invite(state);
+    let height = match (&invite, play) {
+        (Some(_), PlayState::Ready | PlayState::Starting(_) | PlayState::Running(_)) => INVITE_H,
+        (_, PlayState::Ready | PlayState::Starting(_)) => PLAY_H,
+        (_, PlayState::Running(_) | PlayState::NotInstalled) => LINE_H,
+        (_, PlayState::Unavailable) => return,
+    };
+    super::super::block(ui, cx, index, height, |ui, rect| match (invite, play) {
+        (Some(invite), PlayState::Ready | PlayState::Starting(_) | PlayState::Running(_)) => invite_card(ui, cx, state, rect, &invite, play),
+        (_, PlayState::Ready | PlayState::Starting(_)) => {
+            let gap = 12.0;
+            let w = (rect.width() - gap) * 0.5;
+            let vr = Rect::from_min_size(rect.min, vec2(w, rect.height()));
+            let desk = Rect::from_min_size(pos2(vr.right() + gap, rect.top()), vec2(w, rect.height()));
+            if play_button(ui, vr, LaunchMode::Vr, play, true) {
+                state.act(cx, anim::time(ui.ctx()), Action::Play { mode: LaunchMode::Vr, destination: None });
+            }
+            if play_button(ui, desk, LaunchMode::Desktop, play, true) {
+                state.act(cx, anim::time(ui.ctx()), Action::Play { mode: LaunchMode::Desktop, destination: None });
+            }
+        }
+        (_, PlayState::Running(mode)) => {
+            let p = ui.painter();
+            widgets::frame(p, rect, 16.0, theme::alpha(theme::ACCENT, 0.08));
+            widgets::status_dot(p, pos2(rect.left() + 24.0, rect.center().y), widgets::Tone::Ok, true);
+            let line = match mode {
+                LaunchMode::Vr => tr("VRChat is running in VR"),
+                LaunchMode::Desktop => tr("VRChat is running on the desktop"),
+            };
+            widgets::text(p, pos2(rect.left() + 42.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 14.0).weight(weight::MEDIUM));
+        }
+        (_, _) => {
+            let p = ui.painter();
+            widgets::frame(p, rect, 16.0, theme::surface_soft());
+            widgets::icon(p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, theme::WARN);
+            let line = tr("VRChat isn't installed on this computer: install it from Steam or the Meta app, then come back.");
+            widgets::text_truncated(p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), rect.width() - 60.0);
+        }
+    });
+}
+
+/// A big Play button: VR in Orbiters green, desktop in grey, an icon, a name and what it uses. While it starts, a
+/// turning ring and "Starting…"; the other one waits. Returns whether it was pressed.
+fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: bool) -> bool {
+    let ctx = ui.ctx().clone();
+    let (label, sub, glyph) = match mode {
+        LaunchMode::Vr => (tr("Play in VR"), tr("With your headset, through SteamVR"), icons::VIRTUAL_REALITY),
+        LaunchMode::Desktop => (tr("Play in Desktop"), tr("Keyboard and mouse, no headset"), icons::DESKTOP),
+    };
+    let starting = play == PlayState::Starting(mode);
+    let enabled = play == PlayState::Ready || (matches!(play, PlayState::Running(m) if m == mode));
+    let id = Id::new(("launcher-play", mode == LaunchMode::Vr, big));
+    let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
+    widgets::note_control(&ctx, label, rect, enabled);
+    let pressed = enabled && widgets::activated(&resp);
+    let hover = anim::toggle(&ctx, id.with("hover"), enabled && resp.hovered(), Spring::SNAPPY);
+    let down = anim::toggle(&ctx, id.with("down"), enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
+    let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.02 * down));
+    let mut p = ui.painter().clone();
+    if !enabled && !starting {
+        p.multiply_opacity(0.4);
+    }
+    let primary = mode == LaunchMode::Vr;
+    let (fill, fg, fg2) = if primary {
+        (theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover), theme::ON_ACCENT, theme::alpha(theme::ON_ACCENT, 0.72))
+    } else {
+        (theme::mix(theme::control(), theme::INK_600, hover), theme::FG, theme::FG_3)
+    };
+    let radius = if big { 20.0 } else { 16.0 };
+    widgets::frame(&p, r, radius, fill);
+    // The icon in a round of its own, nudged up on hover.
+    let chip = if big { 46.0 } else { 0.0 };
+    let mut x = r.left() + if big { 18.0 } else { 0.0 };
+    if big {
+        let c = pos2(x + chip * 0.5, r.center().y - 2.0 * hover);
+        p.circle_filled(c, chip * 0.5, if primary { theme::black(0.12) } else { theme::white(0.06) });
+        if starting {
+            let t = anim::clock(&ctx, 60.0) as f32;
+            paint::ring(&p, c, 12.0, 2.5, theme::alpha(fg, 0.25));
+            paint::arc(&p, c, 12.0, t * 6.0, 1.9, 2.5, fg);
+            ctx.request_repaint();
+        } else {
+            widgets::icon(&p, c, glyph, 24.0, fg);
+        }
+        x += chip + 14.0;
+        let title = if starting { tr("Starting VRChat…") } else { label };
+        let room = r.right() - x - 14.0;
+        widgets::text_truncated(&p, pos2(x, r.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD).tracking(-0.01).color(fg), room);
+        widgets::text_truncated(&p, pos2(x, r.center().y + 13.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(fg2), room);
+    } else {
+        // In the invite's card: a pill, the icon and the name centred.
+        let txt = Txt::new(label, 14.0).weight(weight::SEMIBOLD).color(fg);
+        let w = widgets::text_size(ui, &txt).x + 26.0;
+        let x0 = r.center().x - w * 0.5;
+        if starting {
+            let t = anim::clock(&ctx, 60.0) as f32;
+            paint::arc(&p, pos2(x0 + 9.0, r.center().y), 7.0, t * 6.0, 1.9, 2.0, fg);
+            ctx.request_repaint();
+        } else {
+            widgets::icon(&p, pos2(x0 + 9.0, r.center().y), glyph, 17.0, fg);
+        }
+        widgets::text(&p, pos2(x0 + 26.0, r.center().y), Align2::LEFT_CENTER, &txt);
+    }
+    if enabled {
+        resp.on_hover_cursor(CursorIcon::PointingHand);
+    }
+    pressed
+}
+
+/// A received invite: who, the world with its picture, the instance, the message and when; Play in VR and Play in
+/// Desktop accept it; × puts it away. While VRChat runs, one Join button sends it there.
+fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Invite, play: PlayState) {
+    let ctx = ui.ctx().clone();
+    let clock = anim::time(&ctx);
+    let p = ui.painter().clone();
+    // A soft green edge says it is for the person, now.
+    paint::shadow(&p, rect, 20.0, vec2(0.0, 10.0), 28.0, -8.0, theme::black(0.35));
+    widgets::frame(&p, rect, 20.0, theme::surface_strong());
+    paint::stroke_squircle(&p, rect, theme::squircle(20.0), egui::Stroke::new(1.0, theme::alpha(theme::ACCENT, 0.35)));
+    let pad = 16.0;
+    let pic_h = rect.height() - 2.0 * pad;
+    let pic_w = (pic_h * 16.0 / 9.0).min(rect.width() * 0.4);
+    let pic = Rect::from_min_size(rect.min + vec2(pad, pad), vec2(pic_w, pic_h));
+    let place = invite.place.clone();
+    let world_picture = place.as_ref().and_then(|pl| state.picture(&pl.world_picture));
+    match &world_picture {
+        Some(t) => paint::squircle_texture(&p, pic, [14.0; 4], t.id(), cover_uv(t.size_vec2(), pic.size()), egui::Color32::WHITE),
+        None => {
+            let c = widgets::name_color(place.as_ref().map_or("", |pl| pl.world_name.as_str()));
+            paint::fill_convex(&p, &paint::squircle_points(pic, theme::squircle(14.0)), |at| {
+                let t = ((at.x - pic.left()) / pic.width() + (at.y - pic.top()) / pic.height()) * 0.5;
+                theme::mix(theme::alpha(c, 0.35), theme::INK_800, t)
+            });
+            widgets::icon(&p, pic.center(), icons::GLOBE_HEMISPHERE_WEST, 30.0, theme::alpha(theme::FG, 0.5));
+        }
+    }
+    // The instance on the picture.
+    if let Some(pl) = &place {
+        let mut chips = access_name(pl.access).to_string();
+        if !pl.region.is_empty() {
+            chips = if chips.is_empty() { region_tag(&pl.region) } else { format!("{chips} · {}", region_tag(&pl.region)) };
+        }
+        if !chips.is_empty() {
+            let txt = Txt::new(chips, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+            let w = widgets::text_size(ui, &txt).x + 30.0;
+            let chip = Rect::from_min_size(pic.left_bottom() + vec2(8.0, -30.0), vec2(w, 22.0));
+            p.rect_filled(chip, theme::radius(11.0), theme::black(0.6));
+            widgets::icon(&p, pos2(chip.left() + 12.0, chip.center().y), super::access_icon(pl.access), 12.0, theme::FG);
+            widgets::text(&p, pos2(chip.left() + 22.0, chip.center().y), Align2::LEFT_CENTER, &txt);
+        }
+    }
+
+    let x = pic.right() + 18.0;
+    let right = rect.right() - pad;
+    let room = right - x - 36.0;
+    // Who, and when.
+    let from = Rect::from_min_size(pos2(x, rect.top() + pad), vec2(24.0, 24.0));
+    let icon = state.picture(&invite.from_icon);
+    widgets::avatar(&p, from, icon.as_ref(), &invite.from_name);
+    let who = orbiters_i18n::tr!("{name} invited you", name = invite.from_name);
+    let w = widgets::text_truncated(&p, pos2(from.right() + 8.0, from.center().y), Align2::LEFT_CENTER, &Txt::new(who, 13.0).weight(weight::MEDIUM).color(theme::FG_2), room - 70.0);
+    let when = super::super::ago(&ctx, invite.received_at.max(0) as u64, state.now().max(0) as u64);
+    widgets::text(&p, pos2(w.right() + 8.0, from.center().y), Align2::LEFT_CENTER, &Txt::new(format!("· {when}"), 12.0).color(theme::FG_4));
+    let close = Rect::from_center_size(pos2(right - 12.0, from.center().y), vec2(30.0, 30.0));
+    if widgets::activated(&widgets::IconButton::new(icons::X, orbiters_i18n::mark("Dismiss")).size(30.0, 14.0).id_salt(("launcher-invite-x", &invite.id)).show_at(ui, close)) {
+        state.act(cx, clock, Action::Dismiss { id: invite.id.clone() });
+    }
+    // The world.
+    let world = place.as_ref().map(|pl| pl.world_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| tr("A world").to_string());
+    widgets::text_truncated(&p, pos2(x, rect.top() + pad + 46.0), Align2::LEFT_CENTER, &Txt::new(world, 22.0).weight(weight::SEMIBOLD).tracking(-0.015), right - x);
+    if !invite.message.trim().is_empty() {
+        let quote = format!("“{}”", invite.message.trim());
+        widgets::text_truncated(&p, pos2(x, rect.top() + pad + 76.0), Align2::LEFT_CENTER, &Txt::new(quote, 13.5).color(theme::FG_2), right - x);
+    }
+    // Both Play buttons, or Join while VRChat runs.
+    let bh = 44.0;
+    let by = rect.bottom() - pad - bh;
+    match play {
+        PlayState::Running(mode) => {
+            let b = widgets::Button::new(tr("Join now")).icon(icons::ARROW_RIGHT).variant(widgets::Variant::Primary).size(widgets::Size::Lg).id_salt("launcher-invite-join");
+            let bw = b.desired_width(ui).max(160.0);
+            if b.show_at(ui, Rect::from_min_size(pos2(x, by), vec2(bw, bh))).clicked() {
+                state.act(cx, clock, Action::AcceptInvite { invite: invite.id.clone(), mode });
+            }
+        }
+        _ => {
+            let gap = 10.0;
+            let bw = ((right - x - gap) * 0.5).min(220.0);
+            let vr = Rect::from_min_size(pos2(x, by), vec2(bw, bh));
+            let desk = Rect::from_min_size(pos2(vr.right() + gap, by), vec2(bw, bh));
+            if play_button(ui, vr, LaunchMode::Vr, play, false) {
+                state.act(cx, clock, Action::AcceptInvite { invite: invite.id.clone(), mode: LaunchMode::Vr });
+            }
+            if play_button(ui, desk, LaunchMode::Desktop, play, false) {
+                state.act(cx, clock, Action::AcceptInvite { invite: invite.id.clone(), mode: LaunchMode::Desktop });
+            }
+        }
+    }
+    let more = state.data.invites.iter().filter(|i| i.kind == InviteKind::Invite && !state.dismissed.contains(&i.id)).count().saturating_sub(1);
+    if more > 0 {
+        let t = orbiters_i18n::tr!("{n} more invites", n = more);
+        widgets::text(&p, pos2(right, by + bh * 0.5), Align2::RIGHT_CENTER, &Txt::new(t, 12.0).color(theme::FG_4));
+    }
+}

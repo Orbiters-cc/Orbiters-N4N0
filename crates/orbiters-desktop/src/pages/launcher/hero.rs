@@ -112,8 +112,14 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
         x += chip + 14.0;
         let title = if starting { tr("Starting VRChat…") } else { label };
         let room = r.right() - x - 14.0;
-        widgets::text_truncated(&p, pos2(x, r.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD).tracking(-0.01).color(fg), room);
-        widgets::text_truncated(&p, pos2(x, r.center().y + 13.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(fg2), room);
+        // What it uses, when it fits whole; the name alone otherwise.
+        let sub = Txt::new(sub, 12.5).color(fg2);
+        let fits = widgets::text_size(ui, &sub).x <= room;
+        let dy = if fits { -10.0 } else { 0.0 };
+        widgets::text_truncated(&p, pos2(x, r.center().y + dy), Align2::LEFT_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD).tracking(-0.01).color(fg), room);
+        if fits {
+            widgets::text(&p, pos2(x, r.center().y + 13.0), Align2::LEFT_CENTER, &sub);
+        }
     } else {
         // In the invite's card: a pill, the icon and the name centred.
         let txt = Txt::new(label, 14.0).weight(weight::SEMIBOLD).color(fg);

@@ -476,8 +476,11 @@ fn column(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer: bool)
             let r = widgets::text(p, pos2(x, cy), Align2::LEFT_CENTER, &Txt::new(text, 12.0).color(theme::FG_2));
             x = r.right() + 14.0;
         };
-        part(p, Some((theme::ACCENT, true)), orbiters_i18n::tr!("{n} in game", n = in_game));
-        part(p, Some((theme::ACCENT, false)), orbiters_i18n::tr!("{n} on the website", n = web));
+        // A copy knows nobody's presence now: only how many.
+        if states::live(&state.data) == states::Live::SignedIn {
+            part(p, Some((theme::ACCENT, true)), orbiters_i18n::tr!("{n} in game", n = in_game));
+            part(p, Some((theme::ACCENT, false)), orbiters_i18n::tr!("{n} on the website", n = web));
+        }
         let total = orbiters_i18n::tr!("{n} friends", n = all);
         widgets::text(p, pos2(inner.right() - 8.0, cy), Align2::RIGHT_CENTER, &Txt::new(total, 12.0).color(theme::FG_4));
         y += 16.0 + 10.0;
@@ -504,9 +507,10 @@ mod tests {
         assert_eq!(side(668.0), Side::Rail);
         assert_eq!(side(1048.0), Side::Column(COLUMN_MIN.max(1048.0 * 0.3)));
         assert_eq!(side(2400.0), Side::Column(COLUMN_MAX));
-        // The default window (1280 points, the sidebar's 232 off) has the column and three feature tiles' room.
+        // The default window (1280 points, the sidebar's 232 off) has the column and three feature tiles' room (Home's
+        // margins 32 and 20, tiles of 210 at least, 16 apart).
         let Side::Column(w) = side(1048.0) else { panic!() };
-        assert!(1048.0 - w - GAP >= 3.0 * 210.0 + 2.0 * 16.0 + 64.0);
+        assert!(1048.0 - GAP - w - 52.0 >= 3.0 * 210.0 + 2.0 * 16.0);
     }
 
     #[test]

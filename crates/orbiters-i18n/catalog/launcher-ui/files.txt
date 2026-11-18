@@ -1,0 +1,7 @@
+# The VRChat launcher on Home (stream launcher-ui, REQUEST10, 2026-11-18): friends list, Play, invites, profile, boop.
+crates/orbiters-desktop/src/pages/launcher/mod.rs
+crates/orbiters-desktop/src/pages/launcher/list.rs
+crates/orbiters-desktop/src/pages/launcher/states.rs
+crates/orbiters-desktop/src/pages/launcher/row.rs
+crates/orbiters-desktop/src/pages/launcher/hero.rs
+crates/orbiters-desktop/src/pages/launcher/modal.rs

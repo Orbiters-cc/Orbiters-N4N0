@@ -35,7 +35,7 @@ pub(super) fn me(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer
             p.circle_filled(pic.center(), 21.0, theme::control());
             widgets::icon(&p, pic.center(), icons::USER, 19.0, theme::FG_3);
             widgets::text(&p, pos2(text_x, rect.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(tr("Friends"), 15.0).weight(weight::SEMIBOLD));
-            let line = if state.data.loading { tr("Reading your friends…") } else { tr("VRChat") };
+            let line = if state.data.loading { tr("Reading your friends…") } else { "VRChat" };
             widgets::text(&p, pos2(text_x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::FG_3));
         }
     }
@@ -135,7 +135,7 @@ pub(super) fn received(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: Rect,
         }
         let what = if accent { tr("booped you") } else { tr("asks for an invite") };
         let x = pic.right() + 10.0;
-        let room = rect.right() - x - if accent { 112.0 } else { 40.0 };
+        let room = rect.right() - x - if accent { 142.0 } else { 40.0 };
         widgets::text_truncated(&p, pos2(x, rect.center().y - 8.0), Align2::LEFT_CENTER, &Txt::new(&name, 13.0).weight(weight::SEMIBOLD), room);
         let when = super::super::ago(ui.ctx(), at.max(0) as u64, now.max(0) as u64);
         widgets::text_truncated(&p, pos2(x, rect.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(format!("{what} · {when}"), 11.5).color(theme::FG_3), room);
@@ -239,7 +239,7 @@ pub(super) fn boop_button(ui: &mut Ui, center: egui::Pos2, size: f32, salt: (&st
         Reach::Ready => {
             let resp = ui.interact(rect, id, Sense::click());
             pressed = widgets::activated(&resp);
-            widgets::note_control(&ctx, "Boop", rect, true);
+            widgets::note_control(&ctx, orbiters_i18n::mark("Boop"), rect, true);
             let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SNAPPY);
             resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Boop"));
             (theme::mix(theme::white(0.1), theme::alpha(theme::ACCENT, 0.3), hover), theme::mix(theme::FG, theme::ACCENT, hover))
@@ -365,7 +365,7 @@ fn header(ui: &mut Ui, state: &mut State, rect: Rect, group: &str, kind: GroupKi
     };
     let t = widgets::text_truncated(p, pos2(x, y), Align2::LEFT_CENTER, &title, rect.width() - 110.0);
     widgets::text(p, pos2(t.right() + 7.0, y), Align2::LEFT_CENTER, &Txt::new(count.to_string(), 11.5).weight(weight::MEDIUM).color(theme::FG_4));
-    if kind == GroupKind::Favourite && count > 0 {
+    if kind == GroupKind::Favourite && count > 0 && states::live(&state.data) == states::Live::SignedIn {
         let on = orbiters_i18n::tr!("{n} online", n = online);
         widgets::text(p, pos2(rect.right() - 36.0, y), Align2::RIGHT_CENTER, &Txt::new(on, 11.0).color(if online > 0 { theme::alpha(theme::ACCENT, 0.85) } else { theme::FG_4 }));
     }
@@ -429,16 +429,18 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
     if reveal > 0.01 {
         let mut right = card.right() - 10.0 + 8.0 * (1.0 - reveal);
         let mut q = ui.new_child(UiBuilder::new().max_rect(card).id_salt(("launcher-row-actions", group, &friend.id)));
+        // A person is in a favourite group and in their section: one button each, told apart by the section.
+        let salt = format!("{group}/{}", friend.id);
         q.multiply_opacity(reveal);
         if request_w > 0.0 {
             let r = Rect::from_min_max(pos2(right - request_w, card.center().y - 15.0), pos2(right, card.center().y + 15.0));
             let label = tr("Request invite");
-            if reach_pill(&mut q, r, ("launcher-request", friend.id.as_str()), request, icons::PAPER_PLANE_TILT, label, state.requested.get(&friend.id).copied(), clock) {
+            if reach_pill(&mut q, r, ("launcher-request", salt.as_str()), request, icons::PAPER_PLANE_TILT, label, state.requested.get(&friend.id).copied(), clock) {
                 state.act(cx, clock, Action::RequestInvite { to: friend.id.clone() });
             }
             right = r.left() - 6.0;
         }
-        if boop_shows && boop_button(&mut q, pos2(right - 16.0, card.center().y), 32.0, ("launcher-boop", friend.id.as_str()), boop, booped, clock) {
+        if boop_shows && boop_button(&mut q, pos2(right - 16.0, card.center().y), 32.0, ("launcher-boop", salt.as_str()), boop, booped, clock) {
             state.act(cx, clock, Action::Boop { to: friend.id.clone(), emoji: None });
         }
     }
@@ -509,7 +511,16 @@ pub(super) fn rail(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
     if in_game + web > 0 {
         widgets::count_badge(&p, top.right_top() + vec2(-4.0, 6.0), in_game + web);
     }
-    widgets::note_control(&ctx, "Friends", top, true);
+    // Something received (a boop, an invite request): a little green hand on the button's foot.
+    let got = state.data.boops.iter().any(|b| !state.dismissed.contains(&b.id))
+        || state.data.invites.iter().any(|i| i.kind == InviteKind::Request && !state.dismissed.contains(&i.id));
+    if got {
+        let c = top.left_bottom() + vec2(6.0, -6.0);
+        p.circle_filled(c, 10.0, column_fill());
+        p.circle_filled(c, 8.0, theme::ACCENT);
+        widgets::icon(&p, c, icons::HAND_WAVING, 10.0, theme::ON_ACCENT);
+    }
+    widgets::note_control(&ctx, orbiters_i18n::mark("Friends"), top, true);
     if widgets::activated(&resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Friends"))) {
         state.open_drawer(&ctx);
     }

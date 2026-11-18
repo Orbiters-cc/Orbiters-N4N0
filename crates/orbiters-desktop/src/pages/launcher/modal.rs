@@ -62,10 +62,12 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cloc
     let rect = Rect::from_min_max(from.min.lerp(target.min, k), from.max.lerp(target.max, k));
     let content = ((t - 0.35) / 0.65).clamp(0.0, 1.0);
 
-    let mut over = ui.new_child(UiBuilder::new().max_rect(page).layer_id(layer()));
-    over.set_clip_rect(page);
-    let scrim = over.interact(page, Id::unique("launcher-profile-scrim"), Sense::click());
-    over.painter().rect_filled(page, 0.0, theme::black(0.55 * t.clamp(0.0, 1.0)));
+    // The whole window dims (the sidebar too): one thing at a time.
+    let screen = ctx.content_rect();
+    let mut over = ui.new_child(UiBuilder::new().max_rect(screen).layer_id(layer()));
+    over.set_clip_rect(screen);
+    let scrim = over.interact(screen, Id::unique("launcher-profile-scrim"), Sense::click());
+    over.painter().rect_filled(screen, 0.0, theme::black(0.55 * t.clamp(0.0, 1.0)));
     let panel_resp = over.interact(rect, Id::unique("launcher-profile-panel"), Sense::click());
     paint::shadow(over.painter(), rect, 24.0, vec2(0.0, 24.0), 60.0, -10.0, theme::black(0.55 * t.clamp(0.0, 1.0)));
     widgets::frame(over.painter(), rect, 24.0, theme::surface_strong());
@@ -201,7 +203,7 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
                 let galley = ui.painter().layout_job(txt.job(ui.available_width()));
                 let h = galley.size().y + 24.0;
                 section(ui, h, &mut |ui, r| {
-                    widgets::text(ui.painter(), r.left_top() + vec2(0.0, 6.0), Align2::LEFT_CENTER, &Txt::caps(tr("About")));
+                    widgets::text(ui.painter(), r.left_top() + vec2(0.0, 6.0), Align2::LEFT_CENTER, &Txt::caps(tr("Bio")));
                     ui.painter().galley(r.left_top() + vec2(0.0, 18.0), galley.clone(), theme::FG_2);
                 });
             }
@@ -226,6 +228,11 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
                 });
             }
         });
+    });
+    // What scrolls on fades out at the panel's foot instead of being cut.
+    let fade = Rect::from_min_max(pos2(body.left(), body.bottom() - 28.0), pos2(body.right() - 10.0, body.bottom() - 1.0));
+    paint::fill_convex(&p, &[fade.left_top(), fade.right_top(), fade.right_bottom(), fade.left_bottom()], |at| {
+        theme::alpha(theme::surface_strong(), ((at.y - fade.top()) / fade.height()).clamp(0.0, 1.0))
     });
     closed
 }

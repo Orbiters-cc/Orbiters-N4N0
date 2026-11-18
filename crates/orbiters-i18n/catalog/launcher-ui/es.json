@@ -78,5 +78,7 @@
   "vrchat status\u0004Online": "En línea",
   "vrchat status\u0004Ask me": "Pregúntame",
   "vrchat status\u0004Busy": "Ocupado",
-  "vrchat status\u0004Offline": "Desconectado"
+  "vrchat status\u0004Offline": "Desconectado",
+  "request invite, short\u0004Request": "Pedir",
+  "Request an invite from {name}": "Pedir una invitación a {name}"
 }

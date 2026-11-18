@@ -78,5 +78,7 @@
   "vrchat status\u0004Online": "Online",
   "vrchat status\u0004Ask me": "Pergunte-me",
   "vrchat status\u0004Busy": "Ocupado",
-  "vrchat status\u0004Offline": "Offline"
+  "vrchat status\u0004Offline": "Offline",
+  "request invite, short\u0004Request": "Pedir",
+  "Request an invite from {name}": "Pedir um convite a {name}"
 }

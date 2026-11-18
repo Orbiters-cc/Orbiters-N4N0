@@ -78,5 +78,7 @@
   "vrchat status\u0004Online": "オンライン",
   "vrchat status\u0004Ask me": "きいてみてね",
   "vrchat status\u0004Busy": "取り込み中",
-  "vrchat status\u0004Offline": "オフライン"
+  "vrchat status\u0004Offline": "オフライン",
+  "request invite, short\u0004Request": "リクエスト",
+  "Request an invite from {name}": "{name} に招待をリクエスト"
 }

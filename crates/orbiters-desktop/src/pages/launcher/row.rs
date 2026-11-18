@@ -410,7 +410,7 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
     let booped = state.booped.get(&friend.id).cloned();
     let boop = states::boop(&state.data, &friend, booped.as_ref().map(|b| b.0), clock, now);
     let request_w = match request {
-        Reach::Ready => pill_width(ui, tr("Request invite")),
+        Reach::Ready => pill_width(ui, tr_ctx("request invite, short", "Request")),
         Reach::Sent => pill_width(ui, tr_ctx("sent", "Sent")),
         Reach::Cooling(_) => 74.0,
         _ => 0.0,
@@ -434,8 +434,14 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
         q.multiply_opacity(reveal);
         if request_w > 0.0 {
             let r = Rect::from_min_max(pos2(right - request_w, card.center().y - 15.0), pos2(right, card.center().y + 15.0));
-            let label = tr("Request invite");
-            if reach_pill(&mut q, r, ("launcher-request", salt.as_str()), request, icons::PAPER_PLANE_TILT, label, state.requested.get(&friend.id).copied(), clock) {
+            // Short on the row, so the name keeps its room; the whole words in its tooltip and the profile.
+            let label = tr_ctx("request invite, short", "Request");
+            let hint = orbiters_i18n::tr!("Request an invite from {name}", name = friend.name);
+            let pressed = reach_pill(&mut q, r, ("launcher-request", salt.as_str()), request, icons::PAPER_PLANE_TILT, label, state.requested.get(&friend.id).copied(), clock);
+            if request == Reach::Ready {
+                q.interact(r, Id::unique(("launcher-request-hint", salt.as_str())), Sense::hover()).on_hover_text(hint);
+            }
+            if pressed {
                 state.act(cx, clock, Action::RequestInvite { to: friend.id.clone() });
             }
             right = r.left() - 6.0;
@@ -456,7 +462,7 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
 fn second_line(p: &egui::Painter, friend: &Friend, at: egui::Pos2, room: f32, booped: bool) {
     if booped {
         widgets::icon(p, pos2(at.x + 6.0, at.y), icons::HAND_WAVING, 12.0, theme::ACCENT);
-        widgets::text(p, pos2(at.x + 17.0, at.y), Align2::LEFT_CENTER, &Txt::new(tr("Booped!"), 12.0).weight(weight::SEMIBOLD).color(theme::ACCENT));
+        widgets::text_truncated(p, pos2(at.x + 17.0, at.y), Align2::LEFT_CENTER, &Txt::new(tr("Booped!"), 12.0).weight(weight::SEMIBOLD).color(theme::ACCENT), room - 17.0);
         return;
     }
     let small = |t: &str| Txt::new(t, 12.0).color(theme::FG_3);

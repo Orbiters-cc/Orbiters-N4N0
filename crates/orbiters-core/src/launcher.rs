@@ -122,6 +122,12 @@ pub enum Whereabouts {
 pub struct Look {
     /// Picture behind the row and at the top of the modal; empty: none.
     pub banner: String,
+    /// VRChat's banner colour (`bannerType` `color`), RGB; drawn when there is no banner picture.
+    pub banner_colour: Option<[u8; 3]>,
+    /// VRChat's nameplate decoration (an inventory item's picture, drawn behind the row); empty: none.
+    pub nameplate: String,
+    /// VRChat's icon frame (an inventory item's picture, drawn around the icon); empty: none.
+    pub icon_frame: String,
     /// The small round picture: VRChat's chosen icon, else the profile picture override, else the avatar's picture.
     pub icon: String,
     pub rank: Rank,
@@ -342,7 +348,7 @@ pub fn sample() -> LauncherState {
     let friend = |n: u32, name: &str, status, text: &str, presence, whereabouts, platform, rank, groups: &[&str]| Friend {
         id: format!("usr_00000000-0000-4000-8000-{n:012}"),
         name: name.into(),
-        look: Look { banner: String::new(), icon: String::new(), rank, supporter: n % 3 == 0 },
+        look: Look { rank, supporter: n % 3 == 0, banner_colour: (n % 2 == 1).then_some([40, 60 + n as u8 * 20, 160]), ..Look::default() },
         status,
         status_text: text.into(),
         presence,

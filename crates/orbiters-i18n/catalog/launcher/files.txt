@@ -1,0 +1,3 @@
+# Home's launcher, the controller side (REQUEST10, stream launcher-core): what Play, invites, boops and invite requests say
+# when they cannot be done.
+crates/orbiters-desktop/src/controller/launcher.rs

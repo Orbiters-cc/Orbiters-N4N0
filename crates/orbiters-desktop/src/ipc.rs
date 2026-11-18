@@ -175,6 +175,10 @@ pub enum ToService {
     VrchatLogin {
         command: crate::controller::vrchat_login::Command,
     },
+    /// What Home's launcher asks (friends, invites, boops, Play).
+    Launcher {
+        action: orbiters_core::launcher::Action,
+    },
     VrchatData {
         id: String,
         scope: crate::controller::vrchat_data::Scope,

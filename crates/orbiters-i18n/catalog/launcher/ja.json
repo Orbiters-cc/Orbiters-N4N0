@@ -1,0 +1,10 @@
+{
+  "This invite is no longer here.": "この招待はもうありません。",
+  "VRChat runs on another device: Play works on the computer that runs it.": "VRChatは別のデバイスで動いています。プレイはVRChatを動かしているPCで使えます。",
+  "VRChat is already running.": "VRChatはすでに起動しています。",
+  "VRChat did not take the link. Sign in to VRChat in Settings so an invite can be sent instead.": "VRChatがリンクを受け取りませんでした。代わりに招待を送れるよう、設定でVRChatにサインインしてください。",
+  "Only the assistant's VRChat is running. Close it first.": "アシスタントのVRChatだけが起動しています。先に閉じてください。",
+  "VRChat could not be started: {reason}": "VRChatを起動できませんでした：{reason}",
+  "VRChat was not found on this computer. Install it from Steam, or start it once.": "このPCにVRChatが見つかりません。Steamからインストールするか、一度起動してください。",
+  "Sign in to VRChat in Settings to boop and ask for invites.": "Boopや招待のリクエストには、設定でVRChatにサインインしてください。"
+}

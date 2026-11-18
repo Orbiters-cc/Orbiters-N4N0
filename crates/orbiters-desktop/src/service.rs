@@ -405,6 +405,7 @@ impl Service {
             ToService::CancelSignIn => ctl.cancel_sign_in(),
             ToService::SignOut => report(ctl.sign_out()),
             ToService::VrchatLogin { command } => ctl.vrchat_command(command),
+            ToService::Launcher { action } => ctl.launcher_action(action),
             ToService::VrchatData { id, scope, request } => {
                 let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 if let Some(mailbox) = mailbox {

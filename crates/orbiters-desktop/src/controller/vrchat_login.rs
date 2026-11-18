@@ -361,6 +361,12 @@ impl Controller {
             }
         });
     }
+    /// The signed-in session's client while the feature is allowed for this Orbiters account (the launcher's calls).
+    pub(super) fn vrchat_signed_client(&self) -> Option<Arc<Mutex<Client>>> {
+        let (api, token) = self.vrchat_identity()?;
+        let rt = self.vrchat_login.lock().unwrap();
+        (rt.feature.allowed() && rt.identity.as_ref() == Some(&(api.url(""), token))).then(|| rt.client.clone())
+    }
     /// Call `avatar`, `friends`, `user`, `instance_alive` or `image` on a background thread.
     pub fn vrchat_source(&self) -> orbiters_core::vrchat_source::Source {
         let orbiters = self.vrchat_identity();

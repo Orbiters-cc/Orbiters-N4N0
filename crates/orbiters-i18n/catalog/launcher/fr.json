@@ -1,0 +1,10 @@
+{
+  "This invite is no longer here.": "Cette invitation n’est plus là.",
+  "VRChat runs on another device: Play works on the computer that runs it.": "VRChat tourne sur un autre appareil : Jouer marche sur l’ordinateur qui le fait tourner.",
+  "VRChat is already running.": "VRChat est déjà lancé.",
+  "VRChat did not take the link. Sign in to VRChat in Settings so an invite can be sent instead.": "VRChat n’a pas pris le lien. Connecte-toi à VRChat dans les Paramètres pour qu’une invitation soit envoyée à la place.",
+  "Only the assistant's VRChat is running. Close it first.": "Seul le VRChat de l’assistant est lancé. Ferme-le d’abord.",
+  "VRChat could not be started: {reason}": "VRChat n’a pas pu être lancé : {reason}",
+  "VRChat was not found on this computer. Install it from Steam, or start it once.": "VRChat est introuvable sur cet ordinateur. Installe-le depuis Steam, ou lance-le une fois.",
+  "Sign in to VRChat in Settings to boop and ask for invites.": "Connecte-toi à VRChat dans les Paramètres pour faire des boops et demander des invitations."
+}

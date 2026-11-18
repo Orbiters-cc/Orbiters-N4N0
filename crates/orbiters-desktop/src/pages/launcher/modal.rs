@@ -5,7 +5,7 @@ use super::row::{boop_button, burst, emoji_icon, reach_pill};
 use super::states::{self, Reach};
 use super::{access_icon, access_name, cover_uv, person_picture, rank_color, rank_name, region_tag, status_color, status_name, Cx, State};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Key, LayerId, Order, Pos2, Rect, Sense, Ui, UiBuilder};
-use orbiters_core::launcher::{Action, Friend, Platform, Profile, Whereabouts};
+use orbiters_core::launcher::{Action, Friend, InstanceAccess, Platform, Profile, Whereabouts};
 use orbiters_i18n::{tr, tr_ctx};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
@@ -299,7 +299,21 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
         Reach::Cooling(_) => 80.0,
         _ => 0.0,
     };
-    let room = r.right() - x - 14.0 - if pill_w > 0.0 { pill_w + 10.0 } else { 0.0 };
+    // Join where the instance takes anyone it shows to the account (public, friends+, friends, a group's public or
+    // plus): the Play path with that instance (the running VRChat's own way when one runs). Private ones: ask.
+    let join = match &friend.whereabouts {
+        Whereabouts::World(place)
+            if state.data.possible.play
+                && state.data.game != orbiters_core::launcher::Game::NotInstalled
+                && matches!(place.access, InstanceAccess::Public | InstanceAccess::FriendsPlus | InstanceAccess::Friends | InstanceAccess::GroupPublic | InstanceAccess::GroupPlus) =>
+        {
+            Some(place.clone())
+        }
+        _ => None,
+    };
+    let join_label = tr("Join");
+    let join_w = if join.is_some() { widgets::text_size(ui, &Txt::new(join_label, 12.5).weight(weight::SEMIBOLD)).x + 46.0 } else { 0.0 };
+    let room = r.right() - x - 14.0 - if pill_w > 0.0 { pill_w + 10.0 } else { 0.0 } - if join_w > 0.0 { join_w + 8.0 } else { 0.0 };
     widgets::text(&p, pos2(x, r.top() + 22.0), Align2::LEFT_CENTER, &Txt::caps(tr("Where they are")));
     widgets::text_truncated(&p, pos2(x, r.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(title, 16.0).weight(weight::SEMIBOLD), room);
     widgets::text_truncated(&p, pos2(x, r.bottom() - 22.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), room);
@@ -307,6 +321,13 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
         let pr = Rect::from_min_size(pos2(r.right() - 14.0 - pill_w, r.center().y - 18.0), vec2(pill_w, 36.0));
         if reach_pill(ui, pr, ("launcher-modal-request", friend.id.as_str()), reach, icons::PAPER_PLANE_TILT, label, state.requested.get(&friend.id).copied(), clock) {
             state.act(cx, clock, Action::RequestInvite { to: friend.id.clone() });
+        }
+    }
+    if let Some(place) = join {
+        let right = r.right() - 14.0 - if pill_w > 0.0 { pill_w + 8.0 } else { 0.0 };
+        let jr = Rect::from_min_size(pos2(right - join_w, r.center().y - 18.0), vec2(join_w, 36.0));
+        if reach_pill(ui, jr, ("launcher-modal-join", friend.id.as_str()), Reach::Ready, icons::PLAY, join_label, None, clock) {
+            state.act(cx, clock, Action::Play { mode: cx.snap.settings.launch.last_mode, destination: Some(place) });
         }
     }
 }

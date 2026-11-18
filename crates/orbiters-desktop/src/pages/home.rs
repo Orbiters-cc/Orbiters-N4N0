@@ -174,6 +174,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
     let State { host, shown, since, opened, focus, copied, states, pending, network, music: music_watch, launcher } = state;
+    launcher.wire(&ctx, cx);
     let host = host.get_or_insert_with(|| {
         // What it fetches (YouTube's answers, thumbnails) asks for a frame when it arrives.
         let mut host = MenuHost::waking(ctx.clone());

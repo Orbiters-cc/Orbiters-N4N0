@@ -142,6 +142,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 m.add(14, |ui| super::mic_grid::card(ui, cx, 14, &mut state.mic_grid));
             }
             m.add(10, |ui| vrchat_account(ui, cx, &mut state.vrchat));
+            // How Home's Play buttons start VRChat: only where VRChat runs.
+            if orbiters_core::osc::VRCHAT_RUNS_HERE {
+                m.add(18, |ui| apply |= super::launch_card::card(ui, cx, 18, &mut draft));
+            }
             // Only for an account the server says has it: nobody else sees a trace of it.
             if snap.bridge.allowed && orbiters_core::osc::VRCHAT_RUNS_HERE {
                 m.add(11, |ui| apply |= super::experimental::show(ui, cx, 11, &mut state.experimental, &mut draft.experimental));

@@ -2,6 +2,7 @@
 
 mod beta_feedback;
 mod booster_card;
+mod launch_card;
 mod translate_card;
 pub mod capture;
 pub mod community;

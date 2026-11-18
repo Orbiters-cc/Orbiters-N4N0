@@ -101,6 +101,13 @@ pub struct State {
     wanted: Vec<String>,
     /// A fixed clock (pictures of the page).
     now_fixed: Option<i64>,
+    /// Where pictures not handed in are loaded (VRChat's pictures read with the signed-in session, through the service),
+    /// and the session they are read with: set by [`State::wire`].
+    loader: Option<crate::worlds::Pictures>,
+    scope: Option<crate::controller::vrchat_data::Scope>,
+    ctx: Option<egui::Context>,
+    /// Data handed in from outside (pictures of the page): the snapshot's is then left alone.
+    staged: bool,
 }
 
 impl Default for State {
@@ -124,6 +131,10 @@ impl Default for State {
             pictures: HashMap::new(),
             wanted: Vec::new(),
             now_fixed: None,
+            loader: None,
+            scope: None,
+            ctx: None,
+            staged: false,
         }
     }
 }
@@ -132,6 +143,21 @@ impl State {
     /// What the controller knows now (the page keeps where the person was in the list).
     pub fn set_data(&mut self, data: Arc<LauncherState>) {
         self.data = data;
+        self.staged = true;
+    }
+
+    /// Each frame, before Home draws: the controller's state (the same `Arc` while nothing changed) and the loader of
+    /// the pictures it names.
+    pub fn wire(&mut self, ctx: &egui::Context, cx: &Cx) {
+        let data = cx.snap.launcher.arc();
+        if !self.staged && !Arc::ptr_eq(&data, &self.data) {
+            self.data = data;
+        }
+        if self.loader.is_none() {
+            self.loader = Some(crate::worlds::Pictures::with_backend(ctx, Some(cx.ctl.clone())));
+            self.ctx = Some(ctx.clone());
+        }
+        self.scope = Some(crate::controller::vrchat_data::Scope::of(cx.snap));
     }
 
     /// A picture by its URL, once loaded.
@@ -214,11 +240,21 @@ impl State {
         if url.is_empty() {
             return None;
         }
-        let found = self.pictures.get(url).cloned();
-        if found.is_none() && !self.wanted.iter().any(|w| w == url) {
+        if let Some(found) = self.pictures.get(url) {
+            return Some(found.clone());
+        }
+        // Loaded on its own threads (three, newest first, kept in memory): never waits here.
+        if let (Some(loader), Some(scope), Some(ctx)) = (self.loader.as_mut(), self.scope.as_ref(), self.ctx.as_ref()) {
+            if url.starts_with("https://") {
+                if let Some(t) = loader.get(ctx, &crate::worlds::Picture::Profile { scope: scope.clone(), url: url.to_string() }) {
+                    return Some(t);
+                }
+            }
+        }
+        if !self.wanted.iter().any(|w| w == url) {
             self.wanted.push(url.to_string());
         }
-        found
+        None
     }
 
     fn fold(&mut self, group: &str) {

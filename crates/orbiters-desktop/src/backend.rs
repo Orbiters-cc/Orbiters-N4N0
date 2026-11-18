@@ -85,6 +85,9 @@ pub trait Backend: Send + Sync {
     fn cancel_sign_in(&self);
     fn sign_out(&self);
     fn vrchat_login(&self, _command: crate::controller::vrchat_login::Command) {}
+    /// What the launcher on Home asks: play, accept an invite, request an invite, boop, a profile
+    /// (`orbiters_core::launcher`). The outcome comes in the snapshot's `launcher` (its `notice`).
+    fn launcher(&self, _action: orbiters_core::launcher::Action) {}
     /// Blocking read-only request. Call only from a page job or image loader.
     fn vrchat_data(&self, _scope: controller::vrchat_data::Scope, _request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         Err(tr("VRChat data is unavailable.").into())
@@ -293,6 +296,10 @@ impl Backend for Remote {
             s.vrchat_login.error = None;
         });
         self.0.send(&ToService::VrchatLogin { command });
+    }
+
+    fn launcher(&self, action: orbiters_core::launcher::Action) {
+        self.0.send(&ToService::Launcher { action });
     }
 
     fn request_worker_log(&self) {
@@ -535,6 +542,10 @@ impl Backend for Local {
 
     fn vrchat_login(&self, command: crate::controller::vrchat_login::Command) {
         self.ctl.vrchat_command(command);
+    }
+
+    fn launcher(&self, action: orbiters_core::launcher::Action) {
+        self.ctl.launcher_action(action);
     }
 
     fn request_worker_log(&self) {

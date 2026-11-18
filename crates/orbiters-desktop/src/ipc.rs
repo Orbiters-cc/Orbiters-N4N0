@@ -175,6 +175,10 @@ pub enum ToService {
     VrchatLogin {
         command: crate::controller::vrchat_login::Command,
     },
+    /// What Home's launcher asks (friends, invites, boops, Play).
+    Launcher {
+        action: orbiters_core::launcher::Action,
+    },
     VrchatData {
         id: String,
         scope: crate::controller::vrchat_data::Scope,
@@ -1160,6 +1164,7 @@ pub(crate) mod tests {
         s.projects_changed = 5;
         s.translate.set(crate::state::TranslateStatus { lines: 3, ..Default::default() });
         s.perf.set(crate::perf::PerfView { hint: Some(crate::perf::Hint { key: "overlay_cpu".into(), part: None }), report: None });
+        s.launcher.set(orbiters_core::launcher::sample());
         let o = &mut s.n4n0;
         o.face = N4n0Face::Happy;
         o.listening = true;

@@ -154,6 +154,10 @@ pub struct Controller {
     /// The Orbiters account's credential and a sign-in in progress (controller/account.rs).
     account_runtime: Mutex<account::AccountRuntime>,
     vrchat_login: Mutex<vrchat_login::Runtime>,
+    /// Home's launcher: friends, invites, boops, Play (controller/launcher.rs).
+    launcher: Mutex<launcher::Runtime>,
+    /// When Play last started VRChat ("starting" until it shows up).
+    launcher_started: Mutex<Option<Instant>>,
     /// The VRChat bridge's keeper (`crate::bridge`), in the tray service once it started.
     bridge: Mutex<Option<Arc<crate::bridge::keeper::Keeper>>>,
     /// The VRChats the bridge runs beside the person's (bridge/sessions.rs): the app follows none of them, unless lent.
@@ -423,6 +427,7 @@ mod dolly;
 pub(crate) mod hide_self;
 pub use hide_self::{upload_can_hide, uploaded_avatar_name};
 mod lan;
+pub mod launcher;
 mod language;
 mod maps;
 pub(crate) mod menu_shares;
@@ -489,6 +494,8 @@ impl Controller {
             avatar_changed_at: Mutex::new(None),
             account_runtime: Mutex::new(account::AccountRuntime::default()),
             vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
+            launcher: Mutex::new(launcher::Runtime::default()),
+            launcher_started: Mutex::new(None),
             bridge: Mutex::new(None),
             sides: Arc::default(),
             followed: Mutex::new(None),
@@ -570,6 +577,7 @@ impl Controller {
         crate::language::follow(&self.settings());
         self.start_language();
         self.start_vrchat_login();
+        self.start_launcher();
         self.start_n4n0();
         self.start_perf();
         self.start_calls();

@@ -614,6 +614,7 @@ impl App {
                     self.sessions.open_storage(false);
                 }
                 pages::Go::Projects => self.set_page(Page::Projects, anim::time(&ctx)),
+                pages::Go::VrchatAccount => self.set_page(Page::Settings, anim::time(&ctx)),
             }
         }
     }

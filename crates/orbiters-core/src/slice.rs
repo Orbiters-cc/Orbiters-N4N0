@@ -37,6 +37,11 @@ impl<T> Slice<T> {
     pub fn same(a: &Self, b: &Self) -> bool {
         Arc::ptr_eq(&a.arc, &b.arc)
     }
+
+    /// The part itself, shared: the same `Arc` for as long as nothing changes it (a page can key on its pointer).
+    pub fn arc(&self) -> Arc<T> {
+        self.arc.clone()
+    }
 }
 
 impl<T: PartialEq> Slice<T> {

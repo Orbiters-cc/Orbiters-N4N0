@@ -98,6 +98,8 @@ pub struct Settings {
     pub usage: UsageSettings,
     /// The beta's menu mismatch buttons (Settings, Beta feedback): off until turned on.
     pub mismatch: MismatchSettings,
+    /// How Home's Play buttons start VRChat (the launcher's performance launch options).
+    pub launch: crate::vrchat_launch::LaunchSettings,
 }
 
 /// The beta's menu mismatch buttons (`orbiters-desktop`'s `mismatch`): three buttons always in view that say N4N0's menus do not match
@@ -827,6 +829,7 @@ impl Default for Settings {
             translate: TranslateSettings::default(),
             usage: UsageSettings::default(),
             mismatch: MismatchSettings::default(),
+            launch: crate::vrchat_launch::LaunchSettings::default(),
         }
     }
 }

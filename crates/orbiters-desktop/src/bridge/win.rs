@@ -60,6 +60,12 @@ mod imp {
         Err(Failure::new("not_windows", "The bridge is for Windows.", "Run it on Windows.")) // i18n: not shown (an AI client reads it in the tool's answer)
     }
     pub fn release(_input: &[Input]) {}
+    pub fn steam_exe() -> Option<std::path::PathBuf> {
+        None
+    }
+    pub fn vrchat_launcher() -> Option<std::path::PathBuf> {
+        None
+    }
     pub fn start_vrchat(_args: &[String]) -> Result<(), Failure> {
         Err(Failure::new("not_windows", "The bridge is for Windows.", "Run it on Windows.")) // i18n: not shown (an AI client reads it in the tool's answer)
     }
@@ -289,12 +295,12 @@ mod imp {
     }
 
     /// Where Steam is, as Steam writes it.
-    pub(super) fn steam_exe() -> Option<std::path::PathBuf> {
+    pub fn steam_exe() -> Option<std::path::PathBuf> {
         registry(HKEY_CURRENT_USER, r"Software\Valve\Steam", Some("SteamExe")).map(std::path::PathBuf::from).filter(|p| p.is_file())
     }
 
     /// VRChat's own launcher, from the `vrchat://` link it registers.
-    pub(super) fn vrchat_launcher() -> Option<std::path::PathBuf> {
+    pub fn vrchat_launcher() -> Option<std::path::PathBuf> {
         let command = registry(HKEY_CLASSES_ROOT, r"VRChat\shell\open\command", None)?;
         launcher_of(&command).filter(|p| p.is_file())
     }

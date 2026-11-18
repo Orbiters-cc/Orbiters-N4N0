@@ -117,6 +117,8 @@ pub struct State {
     /// The music, looked at on a thread while a page shows it (`true`: with where it is in its timeline): the page is
     /// drawn again only when what it shows of the music changed.
     music: super::Watch<bool, Music>,
+    /// The VRChat launcher on Home itself: the friends list, Play, invites, profiles (REQUEST10).
+    launcher: super::launcher::State,
 }
 
 impl State {
@@ -135,6 +137,11 @@ impl State {
     /// The menu Home runs, once shown (the screenshot review opens its pages).
     pub fn menu_host(&mut self) -> Option<&mut MenuHost> {
         self.host.as_mut()
+    }
+
+    /// The launcher on Home (the controller hands it what it knows; the screenshot review stages it).
+    pub fn launcher_mut(&mut self) -> &mut super::launcher::State {
+        &mut self.launcher
     }
 
     /// The States page (the screenshot review opens an avatar's states).
@@ -166,7 +173,8 @@ fn go_home(host: &mut MenuHost) -> Vec<Effect> {
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
-    let State { host, shown, since, opened, focus, copied, states, pending, network, music: music_watch } = state;
+    let State { host, shown, since, opened, focus, copied, states, pending, network, music: music_watch, launcher } = state;
+    launcher.wire(&ctx, cx);
     let host = host.get_or_insert_with(|| {
         // What it fetches (YouTube's answers, thumbnails) asks for a frame when it arrives.
         let mut host = MenuHost::waking(ctx.clone());
@@ -224,8 +232,20 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let picture = |key: &str| host.picture(key, false);
     let copied_id = copied.as_ref().filter(|(_, at)| now - at < COPIED_FOR).map(|(id, _)| id.as_str());
     let from = orbiters_ui::blur::next_shape(ui);
-    egui::ScrollArea::vertical().id_salt(("home", page)).auto_shrink([false, false]).scroll_bar_rect(super::below_bar(ui, cx)).show(ui, |ui| {
-        egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 40 }).show(ui, |ui| {
+    // Home itself has the launcher on its right: the friends list (or its rail on a narrow window).
+    let full = ui.max_rect();
+    let side = (page == Page::Home && launcher.shown()).then(|| super::launcher::side(full.width()));
+    let (content, right_margin) = match side {
+        Some(s) => {
+            let column = Rect::from_min_max(pos2(full.right() - super::launcher::GAP - s.width(), full.top() + cx.top + 8.0), pos2(full.right() - super::launcher::GAP, full.bottom() - super::launcher::GAP));
+            (Rect::from_min_max(full.min, pos2(column.left(), full.bottom())), Some(column))
+        }
+        None => (full, None),
+    };
+    let mut left = ui.new_child(UiBuilder::new().max_rect(content).id_salt("home-content"));
+    let margin_right = if right_margin.is_some() { 20 } else { 32 };
+    egui::ScrollArea::vertical().id_salt(("home", page)).auto_shrink([false, false]).scroll_bar_rect(super::below_bar(&left, cx)).show(&mut left, |ui| {
+        egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: margin_right, top: 8 + cx.top as i8, bottom: 40 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             match page {
                 // The window never shows a dropped card itself (the avatar's screen does), nor the simple Home's More (its
@@ -233,7 +253,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 // World feedback is given from the world's window (Visited worlds) and the menus, not from this Home; the
                 // screen mirror shows only on the avatar's screen.
                 Page::Home | Page::Card | Page::More | Page::Feedback | Page::FeedbackLabels | Page::Comments | Page::Mirror => {
-                    home(ui, cx, menu, &idle, copied_id, network, &mut acts)
+                    home(ui, cx, menu, &idle, copied_id, network, launcher, &mut acts)
                 }
                 Page::Instances | Page::AddFriend => instances(ui, cx, menu, &mut acts),
                 Page::Search | Page::Results => youtube(ui, cx, menu, &picture, focus, copied_id, &mut acts),
@@ -259,6 +279,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     });
     // Down to where the content starts (its top margin).
     super::under_top(ui, cx, "home", from, ui.max_rect().top() + cx.top + 8.0);
+    if let (Some(column), Some(side)) = (right_margin, side) {
+        super::launcher::side_panel(ui, cx, launcher, column, side);
+        super::launcher::over_page(ui, cx, launcher, full);
+    }
     cx.visit = visit;
     cx.entered = entered;
 
@@ -333,7 +357,8 @@ fn idle_line(settings: &Settings) -> String {
     tr("Pick a feature, or hold Talk on N4N0's page to talk to it").into()
 }
 
-fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>, network: &mut super::network::State, acts: &mut Vec<Act>) {
+#[allow(clippy::too_many_arguments)]
+fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>, network: &mut super::network::State, launcher: &mut super::launcher::State, acts: &mut Vec<Act>) {
     block(ui, cx, 0, 72.0, |ui, rect| {
         let p = ui.painter();
         widgets::text(p, pos2(rect.left(), rect.top() + 7.0), Align2::LEFT_CENTER, &Txt::caps(tr("N4N0 menu")));
@@ -348,6 +373,9 @@ fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>,
             widgets::text_truncated(p, pos2(rect.left(), y), Align2::LEFT_CENTER, &Txt::new(idle, 13.0).color(theme::FG_3), rect.width() * 0.6);
         }
     });
+
+    // Play in VR, Play in Desktop, or an invite received with both in it.
+    super::launcher::hero(ui, cx, launcher, 1);
 
     // Until a VRChat on the network is connected, the first thing to do: most of what follows goes through it.
     if !orbiters_core::osc::VRCHAT_RUNS_HERE && !matches!(cx.snap.lan.link, crate::state::LanLink::Connected | crate::state::LanLink::Off) {

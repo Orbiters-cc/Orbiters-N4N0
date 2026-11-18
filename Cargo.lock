@@ -4141,6 +4141,7 @@ dependencies = [
  "if-addrs",
  "mdns-sd",
  "memchr",
+ "native-tls",
  "orbiters-booster",
  "orbiters-contracts",
  "orbiters-i18n",

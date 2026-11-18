@@ -46,6 +46,8 @@ mod capture_actions;
 mod pause_resume;
 mod language_live;
 mod vrchat_login;
+mod launcher;
+mod launcher_real;
 mod vr_audio;
 mod vrchat_bridge;
 mod worlds_overlay;
@@ -2280,6 +2282,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     floating::append(&mut scenarios);
     vr_audio::append(&mut scenarios);
     vrchat_bridge::append(&mut scenarios);
+    launcher::append(&mut scenarios);
+    launcher_real::append(&mut scenarios);
     // Last: they read a picture folder on another drive, and what comes after them can wait on a slow or failing one.
     gallery_folders::append(&mut scenarios);
 
@@ -2301,6 +2305,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             o != sc.name
                 && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
                 && !(o == "editor" && sc.name.starts_with("editor-"))
+                && !(o == "launcher" && sc.name.starts_with("launcher-") && !sc.name.starts_with("launcher-small"))
                 && !(o == "sharing" && (sc.name.starts_with("gallery-") || sc.name.starts_with("world-share")))
                 && !(o == "events" && (sc.name.starts_with("events") || sc.name.starts_with("gallery-community")))
         })) {
@@ -2445,6 +2450,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
                 stage_videos(&ctx, &mut app, sc.name);
             }
         }
+        launcher::stage(&ctx, &mut app, sc.name, f, sc.frames, t);
+        launcher_real::stage(&ctx, &mut app, sc.name, f);
         // What the person does on this frame of a Unity projects scenario: a press where a control was drawn.
         if let Some(p) = release.take() {
             input.events.push(Event::PointerButton { pos: p, button: release_button, pressed: false, modifiers: egui::Modifiers::NONE });

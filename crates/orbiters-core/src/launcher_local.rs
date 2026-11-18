@@ -25,8 +25,35 @@ pub fn vrcnext(dir: &Path) -> Option<LauncherState> {
     let file = caches.join("friends_cache.json");
     let friends: Value = serde_json::from_slice(&std::fs::read(&file).ok()?).ok()?;
     let favourites: Value = std::fs::read(caches.join("fav_friends_cache.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
-    let state = from_vrcnext(&friends, &favourites, modified(&file));
+    let mut state = from_vrcnext(&friends, &favourites, modified(&file));
+    // The friends VRCNext looked at closely keep VRChat's own addresses of their picture and banner, and the note.
+    if let Some(db) = crate::vrchat_accounts::open(&dir.join("VRCNData.db")) {
+        if let Ok(mut q) = db.prepare("SELECT user_id, image, profile_banner_url, profile_note FROM user_tracking WHERE profile_is_friend = 1") { // i18n: not shown (SQL)
+            let rows: Vec<[String; 4]> = q
+                .query_map([], |r| Ok([r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?]))
+                .map(|rows| rows.flatten().collect())
+                .unwrap_or_default();
+            fill_from_tracking(&mut state, &rows);
+        }
+    }
     (!state.friends.is_empty()).then_some(state)
+}
+
+/// VRCNext's `user_tracking` rows (id, picture, banner, note) fill what its friends cache left empty.
+pub fn fill_from_tracking(state: &mut LauncherState, rows: &[[String; 4]]) {
+    for [id, picture, banner, note] in rows {
+        if let Some(f) = state.friends.iter_mut().find(|f| &f.id == id) {
+            if f.look.icon.is_empty() && picture.starts_with("https://") {
+                f.look.icon = picture.clone();
+            }
+            if f.look.banner.is_empty() && banner.starts_with("https://") {
+                f.look.banner = banner.clone();
+            }
+            if f.note.is_empty() {
+                f.note = note.clone();
+            }
+        }
+    }
 }
 
 /// [`vrcnext`] on the two files' contents.
@@ -165,6 +192,10 @@ mod tests {
         let a = s.friend(A).unwrap();
         assert_eq!((a.status, a.look.rank, a.look.icon.as_str(), a.look.nameplate.as_str()), (Status::JoinMe, Rank::TrustedUser, "https://api.vrchat.cloud/a", ""));
         assert_eq!(s.friend(B).unwrap().last_seen, launcher_feed::seconds("2026-11-10T08:00:00Z"));
+        let mut s = s;
+        fill_from_tracking(&mut s, &[[B.into(), "https://api.vrchat.cloud/b".into(), "http://localhost/x".into(), "note".into()]]);
+        let b = s.friend(B).unwrap();
+        assert_eq!((b.look.icon.as_str(), b.look.banner.as_str(), b.note.as_str()), ("https://api.vrchat.cloud/b", "", "note"));
     }
 
     #[test]

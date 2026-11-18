@@ -71,3 +71,4 @@ crates/orbiters-core/src/pipeline.rs
 crates/orbiters-core/src/vrchat_launch.rs
 crates/orbiters-core/src/vrchat_api/social.rs
 crates/orbiters-desktop/src/controller/launcher_tests.rs
+crates/orbiters-core/src/launcher_live.rs

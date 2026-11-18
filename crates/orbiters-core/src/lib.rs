@@ -17,6 +17,8 @@ pub mod lan;
 pub mod launcher;
 pub mod launcher_feed;
 pub mod launcher_local;
+#[cfg(test)]
+mod launcher_live;
 pub mod maps;
 pub mod osc;
 pub mod pipeline;

@@ -82,11 +82,21 @@ impl Client {
         Ok((n("friends")?, n("groups")?))
     }
 
-    /// The (v1) notifications not hidden: invites, invite requests, friend requests (`getNotifications`).
+    /// The (v1) notifications not hidden: invites, invite requests, friend requests (`getNotifications`). Up to three
+    /// pages: on an account with many friend requests waiting, the first hundred can all be those (seen 2026-11-18).
     pub fn notifications(&mut self) -> Result<Vec<Value>> {
         self.authenticated()?;
-        let r = self.get("notifications", "/auth/user/notifications?hidden=false&n=100")?;
-        list(&r.body)
+        let mut all = Vec::new();
+        for page in 0..3 {
+            let r = self.get("notifications", &format!("/auth/user/notifications?hidden=false&n=100&offset={}", page * 100))?;
+            let items = list(&r.body)?;
+            let n = items.len();
+            all.extend(items);
+            if n < 100 {
+                break;
+            }
+        }
+        Ok(all)
     }
 
     /// The newer notifications: boops among them (`getNotificationV2s`, `/notifications`).
@@ -217,7 +227,7 @@ mod tests {
                 &format!("GET /profile/{A}"),
                 &format!("GET /users/{A}"),
                 &format!("GET /users/{A}/mutuals"),
-                "GET /auth/user/notifications?hidden=false&n=100",
+                "GET /auth/user/notifications?hidden=false&n=100&offset=0",
                 "GET /notifications?limit=100",
                 "GET /inventory/template/invt_1",
                 "GET /auth",

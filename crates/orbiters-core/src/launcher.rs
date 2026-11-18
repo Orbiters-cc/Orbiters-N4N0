@@ -348,7 +348,7 @@ pub fn sample() -> LauncherState {
     let friend = |n: u32, name: &str, status, text: &str, presence, whereabouts, platform, rank, groups: &[&str]| Friend {
         id: format!("usr_00000000-0000-4000-8000-{n:012}"),
         name: name.into(),
-        look: Look { rank, supporter: n % 3 == 0, banner_colour: (n % 2 == 1).then_some([40, 60 + n as u8 * 20, 160]), ..Look::default() },
+        look: Look { rank, supporter: n.is_multiple_of(3), banner_colour: (!n.is_multiple_of(2)).then_some([40, 60 + n as u8 * 20, 160]), ..Look::default() },
         status,
         status_text: text.into(),
         presence,

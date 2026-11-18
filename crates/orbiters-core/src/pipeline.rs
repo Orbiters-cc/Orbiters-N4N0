@@ -78,7 +78,7 @@ impl Decoder {
     }
 
     /// The next whole event, `Ok(None)` when more bytes are needed, `Err` when the stream is not a websocket's.
-    pub fn next(&mut self) -> Result<Option<Event>, Broken> {
+    pub fn next_event(&mut self) -> Result<Option<Event>, Broken> {
         loop {
             let b = &self.buffer;
             if b.len() < 2 {
@@ -178,10 +178,10 @@ impl<S: Read + Write> Connection<S> {
 
     /// The next text message; `Ok(None)` when the read timed out with nothing (the caller checks its stop flag and comes
     /// back). Pings are answered and sent here. `Err` when the connection is over.
-    pub fn next(&mut self) -> std::io::Result<Option<String>> {
+    pub fn next_message(&mut self) -> std::io::Result<Option<String>> {
         use std::io::{Error, ErrorKind};
         loop {
-            match self.decoder.next().map_err(|_| Error::from(ErrorKind::InvalidData))? {
+            match self.decoder.next_event().map_err(|_| Error::from(ErrorKind::InvalidData))? {
                 Some(Event::Text(t)) => return Ok(Some(t)),
                 Some(Event::Ping(p)) => self.stream.write_all(&frame(0xA, &p, mask()))?,
                 Some(Event::Pong) => {}
@@ -236,7 +236,7 @@ pub fn run(stop: &AtomicBool, mut token: impl FnMut() -> Option<String>, mut mes
                 connected(true);
                 wait = Duration::from_secs(5);
                 while !stop.load(Ordering::Acquire) {
-                    match c.next() {
+                    match c.next_message() {
                         Ok(Some(text)) => message(&text),
                         Ok(None) => {}
                         Err(_) => break,
@@ -314,7 +314,7 @@ mod tests {
             let mut got = vec![];
             for chunk in bytes.chunks(cut) {
                 d.push(chunk);
-                while let Some(e) = d.next().unwrap() {
+                while let Some(e) = d.next_event().unwrap() {
                     got.push(e);
                 }
             }
@@ -322,7 +322,7 @@ mod tests {
         }
         let mut d = Decoder::default();
         d.push(&server_frame(true, 0x0, b"x"));
-        assert_eq!(d.next(), Err(Broken), "a continuation with no start");
+        assert_eq!(d.next_event(), Err(Broken), "a continuation with no start");
     }
 
     #[test]
@@ -331,7 +331,7 @@ mod tests {
         assert_eq!(f, [0x81, 0x83, 1, 2, 3, 4, b'a' ^ 1, b'b' ^ 2, b'c' ^ 3]);
         let mut d = Decoder::default();
         d.push(&frame(0x1, "x".repeat(300).as_bytes(), [9, 8, 7, 6]));
-        assert_eq!(d.next().unwrap(), Some(Event::Text("x".repeat(300))), "a masked frame reads back");
+        assert_eq!(d.next_event().unwrap(), Some(Event::Text("x".repeat(300))), "a masked frame reads back");
     }
 
     /// A recorded exchange: the server's switch, then a message, a ping (answered with a pong), and its close.
@@ -361,8 +361,8 @@ mod tests {
         incoming.extend(server_frame(true, 0x1, b"{\"type\":\"friend-add\"}"));
         incoming.extend(server_frame(true, 0x8, &[]));
         let mut c = Connection::open(Recorded { incoming: std::io::Cursor::new(incoming), written: vec![] }, HOST, "/?authToken=t", "N4N0").unwrap();
-        assert_eq!(c.next().unwrap().as_deref(), Some("{\"type\":\"friend-add\"}"));
-        assert!(c.next().is_err(), "closed");
+        assert_eq!(c.next_message().unwrap().as_deref(), Some("{\"type\":\"friend-add\"}"));
+        assert!(c.next_message().is_err(), "closed");
         let written = &c.stream.written;
         let opening = written.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
         assert!(std::str::from_utf8(&written[..opening]).unwrap().starts_with("GET /?authToken=t HTTP/1.1"));

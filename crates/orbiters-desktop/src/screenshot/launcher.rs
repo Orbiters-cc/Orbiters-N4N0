@@ -14,7 +14,7 @@ pub(super) const NAMES: [&str; 9] =
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
     let base = scenarios[0].snapshot.clone();
     // Settings' Play VRChat card (its launch options), scrolled to.
-    for (name, scroll) in [("launcher-settings", 2600.0), ("launcher-settings-2", 3400.0)] {
+    for (name, scroll) in [("launcher-settings", 1500.0), ("launcher-settings-2", 2000.0)] {
         scenarios.push(Scenario {
             name,
             page: Page::Settings,

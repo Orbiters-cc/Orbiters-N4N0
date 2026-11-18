@@ -11,6 +11,8 @@ use std::sync::{
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
+mod social;
+pub use social::boop_body;
 
 const BASE: &str = "https://api.vrchat.cloud/api/1";
 const UA_CONTACT: &str = concat!(" blackorbit.eclaire@gmail.com");

@@ -85,9 +85,8 @@ pub trait Backend: Send + Sync {
     fn cancel_sign_in(&self);
     fn sign_out(&self);
     fn vrchat_login(&self, _command: crate::controller::vrchat_login::Command) {}
-    /// What Home's launcher asks; the outcome comes in the snapshot's `launcher` (its `notice`). Home's page (stream
-    /// launcher-ui) calls it once both branches are merged.
-    #[allow(dead_code)]
+    /// What the launcher on Home asks: play, accept an invite, request an invite, boop, a profile
+    /// (`orbiters_core::launcher`). The outcome comes in the snapshot's `launcher` (its `notice`).
     fn launcher(&self, _action: orbiters_core::launcher::Action) {}
     /// Blocking read-only request. Call only from a page job or image loader.
     fn vrchat_data(&self, _scope: controller::vrchat_data::Scope, _request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {

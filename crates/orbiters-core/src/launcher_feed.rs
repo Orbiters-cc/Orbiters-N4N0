@@ -246,7 +246,8 @@ pub fn favourites(list: &Value) -> BTreeMap<String, Vec<String>> {
 }
 
 /// Rebuilds [`LauncherState::groups`] from the friends: the favourite groups (kept in their order, with their names),
-/// then in game, website, offline. Each section's members by name; offline by last seen, newest first.
+/// then in game, website, offline. Each section's members by name; offline by last seen, newest first. In a favourite
+/// group, those in game come first, then those on the website, then the others (by name each).
 pub fn regroup(state: &mut LauncherState, favourite_groups: &[(String, String)]) {
     let mut by_name: Vec<&Friend> = state.friends.iter().collect();
     by_name.sort_by_key(|f| f.name.to_lowercase());
@@ -256,7 +257,15 @@ pub fn regroup(state: &mut LauncherState, favourite_groups: &[(String, String)])
             id: id.clone(),
             name: name.clone(),
             kind: GroupKind::Favourite,
-            members: by_name.iter().filter(|f| f.favourite_groups.contains(id)).map(|f| f.id.clone()).collect(),
+            members: {
+                let mut members: Vec<&&Friend> = by_name.iter().filter(|f| f.favourite_groups.contains(id)).collect();
+                members.sort_by_key(|f| match f.presence {
+                    Presence::InGame => 0,
+                    Presence::Website => 1,
+                    Presence::Offline => 2,
+                });
+                members.into_iter().map(|f| f.id.clone()).collect()
+            },
         })
         .collect();
     for (id, kind, presence) in [("in-game", GroupKind::InGame, Presence::InGame), ("website", GroupKind::Website, Presence::Website), ("offline", GroupKind::Offline, Presence::Offline)] {
@@ -327,12 +336,8 @@ pub fn boop_emojis() -> Vec<BoopEmoji> {
         ("default_heart", "❤️"),
         ("default_smile", "😊"),
         ("default_laugh", "😂"),
-        ("default_in_love", "😍"),
-        ("default_kiss", "😘"),
         ("default_confetti", "🎉"),
-        ("default_fire", "🔥"),
         ("default_music_note", "🎵"),
-        ("default_question", "❓"),
     ]
     .into_iter()
     .map(|(id, glyph)| BoopEmoji { id: id.into(), picture: String::new(), glyph: glyph.into() })

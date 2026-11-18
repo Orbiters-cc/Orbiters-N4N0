@@ -88,6 +88,12 @@ fn favourite_groups_keep_their_names_and_members() {
     regroup(&mut state, &groups);
     let names: Vec<_> = state.groups.iter().map(|g| (g.id.as_str(), g.members.len())).collect();
     assert_eq!(names, [("group_0", 0), ("group_1", 1), ("in-game", 1), ("website", 0), ("offline", 1)]);
+    // In a favourite group, who is in game comes first whatever the name.
+    for f in &mut state.friends {
+        f.favourite_groups = vec!["group_1".into()];
+    }
+    regroup(&mut state, &groups);
+    assert_eq!(state.groups[1].members, [A, B], "Nova (in game) before aaa (offline)");
 }
 
 #[test]

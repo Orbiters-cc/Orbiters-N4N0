@@ -288,10 +288,13 @@ pub(super) fn burst(p: &egui::Painter, center: egui::Pos2, t: f32, emoji: Option
 /// An icon for a boop's emoji when it has no picture: the sample's glyphs and VRChat's usual ones, a sparkle for the rest.
 pub(super) fn emoji_icon(id_or_glyph: &str) -> &'static str {
     match id_or_glyph {
-        "👋" | "sample_0" | "wave" => icons::HAND_WAVING,
-        "💖" | "❤️" | "sample_1" | "heart" | "love" => icons::HEART,
-        "😺" | "🐱" | "sample_2" | "cat" => icons::SMILEY_WINK,
-        "🎉" | "sample_3" | "confetti" | "party" => icons::CONFETTI,
+        // VRChat's default emoji ids (`launcher_feed::boop_emojis`) and the sample's.
+        "👋" | "sample_0" | "wave" | "default_hand_wave" => icons::HAND_WAVING,
+        "💖" | "❤️" | "sample_1" | "heart" | "love" | "default_heart" => icons::HEART,
+        "😊" | "default_smile" => icons::SMILEY,
+        "😺" | "🐱" | "😂" | "sample_2" | "cat" | "default_laugh" => icons::SMILEY_WINK,
+        "🎉" | "sample_3" | "confetti" | "party" | "default_confetti" => icons::CONFETTI,
+        "🎵" | "default_music_note" => icons::MUSIC_NOTES,
         _ => icons::SPARKLE,
     }
 }

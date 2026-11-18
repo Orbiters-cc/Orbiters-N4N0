@@ -113,19 +113,19 @@ fn read() -> &'static Real {
             }
             // The pictures of what is in view, in the list's order.
             let mut urls: Vec<String> = Vec::new();
-            let mut add = |f: &Friend| {
+            let add = |urls: &mut Vec<String>, f: &Friend| {
                 urls.extend([f.look.icon.clone(), f.look.nameplate.clone(), f.look.banner.clone(), f.look.icon_frame.clone()]);
                 if let Whereabouts::World(p) = &f.whereabouts {
                     urls.push(p.world_picture.clone());
                 }
             };
             if let Some(p) = &state.profile {
-                add(&p.friend);
+                add(&mut urls, &p.friend);
                 urls.push(p.picture.clone());
                 urls.extend(p.badges.iter().map(|b| b.picture.clone()));
             }
             for f in state.me.iter().chain(in_view.iter().filter_map(|id| state.friend(id))) {
-                add(f);
+                add(&mut urls, f);
             }
             let mut seen = std::collections::HashSet::new();
             urls.retain(|u| u.starts_with("https://") && seen.insert(u.clone()));

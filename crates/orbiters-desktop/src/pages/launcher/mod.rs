@@ -367,8 +367,13 @@ pub fn cover_uv(size: egui::Vec2, target: egui::Vec2) -> Rect {
 
 /// A person's round picture with their status dot at its foot (hollow while they are on the website), ringed by
 /// `ring` so it reads over anything.
-pub fn person_picture(p: &egui::Painter, rect: Rect, picture: Option<&egui::TextureHandle>, friend: &Friend, ring: Color32) {
+pub fn person_picture(p: &egui::Painter, rect: Rect, picture: Option<&egui::TextureHandle>, frame: Option<&egui::TextureHandle>, friend: &Friend, ring: Color32) {
     widgets::avatar(p, rect, picture, &friend.name);
+    // Their icon frame (a VRChat decoration) around it.
+    if let Some(frame) = frame {
+        let around = rect.expand(rect.width() * 0.16);
+        p.image(frame.id(), around, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    }
     let r = (rect.width() * 0.15).clamp(4.0, 9.0);
     let c = rect.right_bottom() - vec2(r * 0.95, r * 0.95);
     p.circle_filled(c, r + 2.5, ring);
@@ -397,6 +402,22 @@ pub fn banner(p: &egui::Painter, rect: Rect, radius: f32, texture: &egui::Textur
         // Opaque at the left, a veil at the right so the text stays readable.
         theme::alpha(fill, 1.0 - 0.62 * anim::ease::in_out(t))
     });
+}
+
+/// What is behind a person's row or head: their nameplate, else their banner, else their banner's colour as a soft
+/// wash, fading into `fill` towards the left from `from`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn backdrop(p: &egui::Painter, rect: Rect, radius: f32, state: &mut State, look: &orbiters_core::launcher::Look, fill: Color32, from: f32, strength: f32) {
+    let picture = state.picture(&look.nameplate).or_else(|| state.picture(&look.banner));
+    if let Some(texture) = picture {
+        banner(p, rect, radius, &texture, fill, from, strength);
+    } else if let Some([r, g, b]) = look.banner_colour {
+        let c = Color32::from_rgb(r, g, b);
+        paint::fill_convex(p, &paint::squircle_points(rect, radius), |at| {
+            let t = (((at.x - rect.left()) / rect.width().max(1.0) - from) / (1.0 - from).max(0.01)).clamp(0.0, 1.0);
+            theme::alpha(c, 0.42 * strength * anim::ease::in_out(t))
+        });
+    }
 }
 
 /// The column (or the rail) beside Home's content, at `rect`.

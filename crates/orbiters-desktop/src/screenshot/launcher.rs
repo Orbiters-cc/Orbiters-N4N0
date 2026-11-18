@@ -69,7 +69,16 @@ fn more_people(state: &mut LauncherState) {
         state.friends.push(Friend {
             id: id.clone(),
             name,
-            look: Look { banner: if n % 3 != 2 { format!("sample://banner/{}", n % 7) } else { String::new() }, icon: format!("sample://icon/{n}"), rank: ranks[n as usize % ranks.len()], supporter: n % 4 == 0 },
+            look: Look {
+                // Nameplates on some, banners on others, a banner colour on the rest.
+                banner: if n % 3 == 0 { format!("sample://banner/{}", n % 7) } else { String::new() },
+                nameplate: if n % 3 == 1 { format!("sample://banner/{}", (n + 3) % 7) } else { String::new() },
+                banner_colour: (n % 3 == 2).then_some([(40 + n * 23 % 160) as u8, 60, (180 - n * 17 % 120) as u8]),
+                icon_frame: if n % 7 == 3 { format!("sample://frame/{}", n % 3) } else { String::new() },
+                icon: format!("sample://icon/{n}"),
+                rank: ranks[n as usize % ranks.len()],
+                supporter: n % 4 == 0,
+            },
             status,
             status_text: TEXTS[n as usize % TEXTS.len()].into(),
             presence,
@@ -174,6 +183,23 @@ fn picture(url: &str) -> ColorImage {
         }
     };
     let px = |c: [f32; 3]| Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8);
+    if url.contains("/frame/") {
+        // A ring with little studs, transparent inside and out.
+        let n = 128usize;
+        let ring = rgb((hue + 0.1).fract(), 0.6, 0.95);
+        let mut pixels = Vec::with_capacity(n * n);
+        for y in 0..n {
+            for x in 0..n {
+                let (dx, dy) = (x as f32 / n as f32 - 0.5, y as f32 / n as f32 - 0.5);
+                let d = (dx * dx + dy * dy).sqrt();
+                let a = dy.atan2(dx);
+                let stud = (a * 6.0 / std::f32::consts::PI).fract().abs() < 0.18 && (0.43..0.5).contains(&d);
+                let band = (0.435..0.47).contains(&d);
+                pixels.push(if band || stud { px([ring[0] * (0.8 + 0.4 * dy.abs()), ring[1], ring[2] * 0.7]) } else { Color32::TRANSPARENT });
+            }
+        }
+        return ColorImage::new([n, n], pixels);
+    }
     if url.contains("/icon/") {
         let n = 96usize;
         let bg = rgb(hue, 0.45, 0.55);
@@ -240,7 +266,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
         let data = data(name);
         let mut urls: Vec<String> = Vec::new();
         for fr in data.friends.iter().chain(data.me.iter()) {
-            urls.extend([fr.look.icon.clone(), fr.look.banner.clone()]);
+            urls.extend([fr.look.icon.clone(), fr.look.banner.clone(), fr.look.nameplate.clone(), fr.look.icon_frame.clone()]);
             if let Whereabouts::World(p) = &fr.whereabouts {
                 urls.push(p.world_picture.clone());
             }

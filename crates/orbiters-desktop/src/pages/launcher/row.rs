@@ -3,7 +3,7 @@
 
 use super::list::{self, Row};
 use super::states::{self, Reach};
-use super::{banner, column_fill, person_picture, rank_color, status_name, where_line, Cx, State};
+use super::{column_fill, person_picture, rank_color, status_name, where_line, Cx, State};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui, UiBuilder};
 use orbiters_core::launcher::{Action, Friend, GroupKind, InviteKind, Presence, Whereabouts};
 use orbiters_i18n::{tr, tr_ctx};
@@ -15,8 +15,8 @@ use orbiters_ui::{paint, widgets};
 /// The account itself at the top: picture, name, status; Read again (and Close over the page).
 pub(super) fn me(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer: bool, clock: f64) {
     let me = state.data.me.clone();
-    if let Some(texture) = me.as_ref().and_then(|m| state.picture(&m.look.banner)) {
-        banner(ui.painter(), rect, 14.0, &texture, column_fill(), 0.15, 0.85);
+    if let Some(me) = &me {
+        super::backdrop(ui.painter(), rect, 14.0, state, &me.look, column_fill(), 0.15, 0.85);
     }
     let pic = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - 21.0), vec2(42.0, 42.0));
     let text_x = pic.right() + 12.0;
@@ -26,7 +26,8 @@ pub(super) fn me(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer
     match &me {
         Some(me) => {
             let picture = state.picture(&me.look.icon);
-            person_picture(&p, pic, picture.as_ref(), me, column_fill());
+            let frame = state.picture(&me.look.icon_frame);
+            person_picture(&p, pic, picture.as_ref(), frame.as_ref(), me, column_fill());
             widgets::text_truncated(&p, pos2(text_x, rect.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(&me.name, 15.0).weight(weight::SEMIBOLD), max_w);
             let line = if me.status_text.is_empty() { status_name(me.status).to_string() } else { me.status_text.clone() };
             widgets::text_truncated(&p, pos2(text_x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::FG_2), max_w);
@@ -392,9 +393,7 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
     let p = ui.painter().clone();
     let fill = theme::mix(column_fill(), theme::INK_800, hover.max(if open { 1.0 } else { 0.0 }));
     widgets::frame(&p, card, 14.0, fill);
-    if let Some(texture) = state.picture(&friend.look.banner) {
-        banner(&p, card, 14.0, &texture, fill, 0.32, 0.9);
-    }
+    super::backdrop(&p, card, 14.0, state, &friend.look, fill, 0.32, 0.9);
     let offline = friend.presence == Presence::Offline;
     let pic = Rect::from_center_size(pos2(card.left() + 26.0, card.center().y), vec2(40.0, 40.0));
     let picture = state.picture(&friend.look.icon);
@@ -402,7 +401,8 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
     if offline {
         faded.multiply_opacity(0.55);
     }
-    person_picture(&faded, pic, picture.as_ref(), &friend, fill);
+    let frame = state.picture(&friend.look.icon_frame);
+    person_picture(&faded, pic, picture.as_ref(), frame.as_ref(), &friend, fill);
 
     // The buttons at the end, on hover: their room comes off the text's.
     let now = state.now();
@@ -548,7 +548,8 @@ pub(super) fn rail(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
         let h = anim::toggle(&ctx, rid.with("hover"), resp.hovered(), Spring::SNAPPY);
         let r = Rect::from_center_size(c, vec2(40.0, 40.0) * (1.0 + 0.08 * h));
         let picture = state.picture(&friend.look.icon);
-        person_picture(&p, r, picture.as_ref(), &friend, column_fill());
+        let frame = state.picture(&friend.look.icon_frame);
+        person_picture(&p, r, picture.as_ref(), frame.as_ref(), &friend, column_fill());
         if resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(&friend.name).clicked() {
             state.open_profile(&ctx, &friend.id, r);
             state.act(cx, clock, Action::OpenProfile { id: friend.id.clone() });

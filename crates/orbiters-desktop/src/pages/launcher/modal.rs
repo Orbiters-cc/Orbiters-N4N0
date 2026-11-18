@@ -122,8 +122,8 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
             paint::squircle_texture(&p, band, [24.0, 24.0, 0.0, 0.0], texture.id(), uv, Color32::WHITE);
         }
         None => {
-            // Their own colour, as a soft wash.
-            let c = widgets::name_color(&friend.name);
+            // Their banner's colour, else their own colour, as a soft wash.
+            let c = friend.look.banner_colour.map_or_else(|| widgets::name_color(&friend.name), |[r, g, b]| Color32::from_rgb(r, g, b));
             paint::fill_convex(&p, &paint::rounded_rect_points_corners(band, [24.0, 24.0, 0.0, 0.0]), |at| {
                 let x = (at.x - band.left()) / band.width();
                 let y = (at.y - band.top()) / band.height();
@@ -143,7 +143,8 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
     let pic = Rect::from_min_size(pos2(f.left() + 28.0, band.bottom() - PICTURE * 0.62 + rise), vec2(PICTURE, PICTURE));
     p.circle_filled(pic.center(), PICTURE * 0.5 + 5.0, theme::surface_strong());
     let picture = state.picture(&friend.look.icon).or_else(|| state.picture(&profile.picture));
-    person_picture(&p, pic, picture.as_ref(), friend, theme::surface_strong());
+    let frame = state.picture(&friend.look.icon_frame);
+    person_picture(&p, pic, picture.as_ref(), frame.as_ref(), friend, theme::surface_strong());
 
     // Name, pronouns, VRC+, rank and platform.
     let x = pic.right() + 18.0;

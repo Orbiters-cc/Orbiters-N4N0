@@ -72,6 +72,8 @@ pub(super) struct Runtime {
     pictures: HashMap<String, Option<String>>,
     /// Which friend wears which decorations.
     worn: BTreeMap<String, Decorations>,
+    /// World id → its name and picture (`None` once asked and not given).
+    worlds: HashMap<String, Option<(String, String)>>,
     pipeline: Option<Arc<AtomicBool>>,
     /// The pipeline came back after a cut: read everything again (what came meanwhile was missed).
     resync: Arc<AtomicBool>,
@@ -88,6 +90,7 @@ impl Default for Runtime {
             cooldowns: Cooldowns::default(),
             pictures: HashMap::new(),
             worn: BTreeMap::new(),
+            worlds: HashMap::new(),
             pipeline: None,
             resync: Arc::new(AtomicBool::new(false)),
             game_checked: None,
@@ -216,7 +219,40 @@ impl Controller {
         }
         if let Some(client) = &client {
             self.launcher_resolve_pictures(client);
+            self.launcher_resolve_worlds(client);
         }
+    }
+
+    /// The names and pictures of the worlds friends are in (VRChat's friend list names the instance only): two a look,
+    /// each kept for the session (the client keeps worlds a day too).
+    fn launcher_resolve_worlds(&self, client: &Arc<Mutex<Client>>) {
+        let wanted: Vec<String> = {
+            let rt = self.launcher.lock().unwrap();
+            let mut ids = unnamed_worlds(&self.view().launcher);
+            ids.retain(|id| !rt.worlds.contains_key(id));
+            ids.truncate(2);
+            ids
+        };
+        let mut found = Vec::new();
+        for id in wanted {
+            let world = client.lock().unwrap().world(&id);
+            if matches!(world, Err(Error::RateLimited(_))) {
+                break;
+            }
+            found.push((id, world.ok().map(|w| (w.name, if w.thumbnail_image_url.is_empty() { w.image_url } else { w.thumbnail_image_url }))));
+        }
+        let worlds = {
+            let mut rt = self.launcher.lock().unwrap();
+            rt.worlds.extend(found);
+            rt.worlds.clone()
+        };
+        self.update(|s| {
+            let mut state = (*s.launcher).clone();
+            fill_worlds(&mut state, &worlds);
+            if state != *s.launcher {
+                *s.launcher = state;
+            }
+        });
     }
 
     fn launcher_game(&self, machine: &dyn Machine) {
@@ -545,6 +581,50 @@ impl Controller {
     #[cfg(test)]
     pub(super) fn launcher_machine(&self, machine: Arc<dyn Machine>) {
         self.launcher.lock().unwrap().machine = machine;
+    }
+}
+
+/// The worlds named by a place whose name is not known yet, friends in the list's order first.
+pub fn unnamed_worlds(state: &LauncherState) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let places = state
+        .invites
+        .iter()
+        .filter_map(|i| i.place.as_ref())
+        .chain(state.groups.iter().flat_map(|g| g.members.iter()).filter_map(|id| state.friend(id)).filter_map(|f| match &f.whereabouts {
+            orbiters_core::launcher::Whereabouts::World(p) => Some(p),
+            _ => None,
+        }));
+    for p in places {
+        if p.world_name.is_empty() && !ids.contains(&p.world_id) {
+            ids.push(p.world_id.clone());
+        }
+    }
+    ids
+}
+
+/// Writes the known worlds' names and pictures into every place of the state.
+pub fn fill_worlds(state: &mut LauncherState, worlds: &HashMap<String, Option<(String, String)>>) {
+    let fill = |p: &mut Place| {
+        if let Some(Some((name, picture))) = worlds.get(&p.world_id) {
+            if p.world_name.is_empty() {
+                p.world_name = name.clone();
+            }
+            if p.world_picture.is_empty() {
+                p.world_picture = picture.clone();
+            }
+        }
+    };
+    let friends = state.friends.iter_mut().chain(state.me.iter_mut()).chain(state.profile.iter_mut().map(|p| &mut p.friend));
+    for f in friends {
+        if let orbiters_core::launcher::Whereabouts::World(p) = &mut f.whereabouts {
+            fill(p);
+        }
+    }
+    for i in &mut state.invites {
+        if let Some(p) = &mut i.place {
+            fill(p);
+        }
     }
 }
 

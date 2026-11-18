@@ -160,3 +160,16 @@ fn the_profile_opens_at_once_then_fills_in() {
     c.launcher_do(Action::CloseProfile);
     assert!(c.view().launcher.profile.is_none());
 }
+
+#[test]
+fn worlds_get_their_names_once_known() {
+    let mut state = LauncherState::default();
+    state.friends = vec![launcher_feed::friend(&json!({"id": A, "displayName": "Nova", "location": format!("{W}:1~region(eu)"), "state": "online"}), true).unwrap()];
+    launcher_feed::regroup(&mut state, &[]);
+    assert_eq!(unnamed_worlds(&state), [W]);
+    let worlds: HashMap<String, Option<(String, String)>> = [(W.to_string(), Some(("Lounge".to_string(), "https://api.vrchat.cloud/w".to_string())))].into();
+    fill_worlds(&mut state, &worlds);
+    let orbiters_core::launcher::Whereabouts::World(p) = &state.friend(A).unwrap().whereabouts else { panic!() };
+    assert_eq!((p.world_name.as_str(), p.world_picture.as_str()), ("Lounge", "https://api.vrchat.cloud/w"));
+    assert!(unnamed_worlds(&state).is_empty());
+}

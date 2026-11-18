@@ -113,7 +113,7 @@ pub(super) fn received(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: Rect,
     let now = state.now();
     for (n, g) in got.into_iter().take(2).enumerate() {
         let rect = Rect::from_min_size(pos2(inner.left() + 2.0, y), vec2(inner.width() - 4.0, 48.0));
-        let (enter, dy) = widgets::entrance(ui, Id::new(("launcher-got", n, match &g {
+        let (enter, dy) = widgets::entrance(ui, Id::unique(("launcher-got", n, match &g {
             Got::Boop { id, .. } | Got::Request { id, .. } => id.clone(),
         })), 0.0, 0);
         let rect = rect.translate(vec2(0.0, dy * 0.4));
@@ -174,7 +174,7 @@ pub(super) fn received(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: Rect,
 /// seconds left while it cools down; nothing for what is not possible now. Returns whether it was pressed.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reach_pill(ui: &mut Ui, rect: Rect, salt: (&str, &str), reach: Reach, glyph: &str, label: &str, sent_at: Option<f64>, clock: f64) -> bool {
-    let id = Id::new(salt);
+    let id = Id::unique(salt);
     match reach {
         Reach::NotNow | Reach::SignIn => false,
         Reach::Ready => {
@@ -231,7 +231,7 @@ fn pill_width(ui: &Ui, label: &str) -> f32 {
 
 /// The round boop button: one press boops; its hand waves and little hearts burst from it.
 pub(super) fn boop_button(ui: &mut Ui, center: egui::Pos2, size: f32, salt: (&str, &str), reach: Reach, booped: Option<(f64, Option<String>)>, clock: f64) -> bool {
-    let id = Id::new(salt);
+    let id = Id::unique(salt);
     let rect = Rect::from_center_size(center, vec2(size, size));
     let ctx = ui.ctx().clone();
     let mut pressed = false;
@@ -321,7 +321,7 @@ pub(super) fn list(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, cloc
             }
         }
     });
-    state.anchor = list::anchor_at(&state.keys, &state.tops, output.state.offset.y);
+    state.anchor = list::anchor_at(&state.keys, &state.tops, output.state.clamped_offset().y);
 }
 
 fn empty(ui: &mut Ui, state: &State, rect: Rect) {
@@ -343,7 +343,7 @@ fn empty(ui: &mut Ui, state: &State, rect: Rect) {
 /// A section's header: its name and count; a press folds or opens it (remembered).
 #[allow(clippy::too_many_arguments)]
 fn header(ui: &mut Ui, state: &mut State, rect: Rect, group: &str, kind: GroupKind, name: &str, count: usize, online: usize, folded: bool) {
-    let id = Id::new(("launcher-header", group));
+    let id = Id::unique(("launcher-header", group));
     let resp = ui.interact(rect.shrink2(vec2(4.0, 2.0)), id, Sense::click());
     let hover = anim::toggle(ui.ctx(), id.with("hover"), resp.hovered(), Spring::SNAPPY);
     let open = anim::toggle(ui.ctx(), id.with("open"), !folded, Spring::SNAPPY);
@@ -384,7 +384,7 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
     let Some(friend) = state.data.friends.get(index).cloned() else { return };
     let ctx = ui.ctx().clone();
     let card = rect.shrink2(vec2(4.0, 2.0));
-    let id = Id::new(("launcher-person", group, &friend.id));
+    let id = Id::unique(("launcher-person", group, &friend.id));
     let resp = ui.interact(card, id, Sense::click());
     let inside = ui.rect_contains_pointer(card) && !super::modal::covers(&ctx);
     let hover = anim::toggle(&ctx, id.with("hover"), inside, Spring::SNAPPY);
@@ -501,7 +501,7 @@ pub(super) fn rail(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
     paint::stroke_squircle(&p, rect, theme::squircle(theme::CARD_RADIUS), theme::hairline());
     let (in_game, web, _) = list::counts(&state.data);
     let top = Rect::from_center_size(pos2(rect.center().x, rect.top() + 34.0), vec2(44.0, 44.0));
-    let id = Id::new("launcher-rail-open");
+    let id = Id::unique("launcher-rail-open");
     let resp = ui.interact(top, id, Sense::click());
     let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SNAPPY);
     p.circle_filled(top.center(), 22.0, theme::mix(theme::white(0.07), theme::white(0.14), hover));
@@ -526,7 +526,7 @@ pub(super) fn rail(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
         let friend = state.data.friends[i].clone();
         let c = pos2(rect.center().x, first + n as f32 * step);
         let r = Rect::from_center_size(c, vec2(40.0, 40.0));
-        let rid = Id::new(("launcher-rail", &friend.id));
+        let rid = Id::unique(("launcher-rail", &friend.id));
         let resp = ui.interact(r, rid, Sense::click());
         let h = anim::toggle(&ctx, rid.with("hover"), resp.hovered(), Spring::SNAPPY);
         let r = Rect::from_center_size(c, vec2(40.0, 40.0) * (1.0 + 0.08 * h));
@@ -540,7 +540,7 @@ pub(super) fn rail(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
     if more > 0 {
         let c = pos2(rect.center().x, first + shown as f32 * step);
         let r = Rect::from_center_size(c, vec2(40.0, 40.0));
-        let resp = ui.interact(r, Id::new("launcher-rail-more"), Sense::click());
+        let resp = ui.interact(r, Id::unique("launcher-rail-more"), Sense::click());
         p.circle_filled(c, 20.0, theme::white(if resp.hovered() { 0.12 } else { 0.06 }));
         widgets::text(&p, c, Align2::CENTER_CENTER, &Txt::new(format!("+{more}"), 12.0).weight(weight::SEMIBOLD).color(theme::FG_2));
         if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {

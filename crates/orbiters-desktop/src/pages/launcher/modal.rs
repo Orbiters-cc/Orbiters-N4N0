@@ -18,12 +18,12 @@ const BANNER_H: f32 = 156.0;
 const PICTURE: f32 = 104.0;
 
 fn layer() -> LayerId {
-    LayerId::new(Order::Foreground, Id::new("launcher-profile"))
+    LayerId::new(Order::Foreground, Id::unique("launcher-profile"))
 }
 
 /// Whether the modal is up (rows under it do not light up).
 pub(super) fn covers(ctx: &egui::Context) -> bool {
-    ctx.data(|d| d.get_temp::<bool>(Id::new("launcher-profile-up")).unwrap_or(false))
+    ctx.data(|d| d.get_temp::<bool>(Id::unique("launcher-profile-up")).unwrap_or(false))
 }
 
 /// The profile shown: the contract's, once it is this person's; their row's meanwhile.
@@ -37,7 +37,7 @@ fn profile(state: &State, id: &str) -> Option<Profile> {
 pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, clock: f64) {
     let ctx = ui.ctx().clone();
     let Some(modal) = state.modal.as_ref() else {
-        ctx.data_mut(|d| d.insert_temp(Id::new("launcher-profile-up"), false));
+        ctx.data_mut(|d| d.insert_temp(Id::unique("launcher-profile-up"), false));
         return;
     };
     let (id, from, opened, closing) = (modal.id.clone(), modal.from, modal.opened, modal.closing);
@@ -45,14 +45,14 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cloc
         state.modal = None;
         return;
     };
-    let key = Id::new(("launcher-profile-t", opened.to_bits()));
+    let key = Id::unique(("launcher-profile-t", opened.to_bits()));
     let t = anim::spring_from(&ctx, key, [0.0], [if closing.is_some() { 0.0 } else { 1.0 }], Spring::EXPAND)[0];
     if closing.is_some() && t < 0.03 {
         state.modal = None;
-        ctx.data_mut(|d| d.insert_temp(Id::new("launcher-profile-up"), false));
+        ctx.data_mut(|d| d.insert_temp(Id::unique("launcher-profile-up"), false));
         return;
     }
-    ctx.data_mut(|d| d.insert_temp(Id::new("launcher-profile-up"), closing.is_none()));
+    ctx.data_mut(|d| d.insert_temp(Id::unique("launcher-profile-up"), closing.is_none()));
     let area = Rect::from_min_max(pos2(page.left(), page.top() + cx.top), page.max);
     let w = W.min(area.width() - 40.0);
     let h = H.min(area.height() - 40.0);
@@ -64,9 +64,9 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cloc
 
     let mut over = ui.new_child(UiBuilder::new().max_rect(page).layer_id(layer()));
     over.set_clip_rect(page);
-    let scrim = over.interact(page, Id::new("launcher-profile-scrim"), Sense::click());
+    let scrim = over.interact(page, Id::unique("launcher-profile-scrim"), Sense::click());
     over.painter().rect_filled(page, 0.0, theme::black(0.55 * t.clamp(0.0, 1.0)));
-    let panel_resp = over.interact(rect, Id::new("launcher-profile-panel"), Sense::click());
+    let panel_resp = over.interact(rect, Id::unique("launcher-profile-panel"), Sense::click());
     paint::shadow(over.painter(), rect, 24.0, vec2(0.0, 24.0), 60.0, -10.0, theme::black(0.55 * t.clamp(0.0, 1.0)));
     widgets::frame(over.painter(), rect, 24.0, theme::surface_strong());
     paint::stroke_squircle(over.painter(), rect, theme::squircle(24.0), theme::hairline());
@@ -110,7 +110,7 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
     let p = ui.painter().clone();
 
     // The banner settles from a little larger, the picture rises into place.
-    let settle = anim::spring_from(&ctx, Id::new(("launcher-profile-settle", opened.to_bits())), [0.0], [1.0], Spring::SOFT)[0];
+    let settle = anim::spring_from(&ctx, Id::unique(("launcher-profile-settle", opened.to_bits())), [0.0], [1.0], Spring::SOFT)[0];
     let band = Rect::from_min_size(f.min, vec2(f.width(), BANNER_H));
     match state.picture(&friend.look.banner) {
         Some(texture) => {
@@ -182,7 +182,7 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
                 let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
                 let delay = 0.12 + n as f32 * 0.06;
                 n += 1;
-                let k = anim::spring_from(&ctx, Id::new(("launcher-profile-section", opened.to_bits(), n)), [0.0], [if since > delay { 1.0 } else { 0.0 }], Spring::SOFT)[0];
+                let k = anim::spring_from(&ctx, Id::unique(("launcher-profile-section", opened.to_bits(), n)), [0.0], [if since > delay { 1.0 } else { 0.0 }], Spring::SOFT)[0];
                 if since <= delay {
                     super::super::frame_in(&ctx, (delay - since) as f64);
                 }
@@ -343,7 +343,7 @@ fn boop_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Frien
                 break;
             }
             let er = Rect::from_center_size(pos2(x + 17.0, c.y), vec2(34.0, 34.0));
-            let id = Id::new(("launcher-emoji", &friend.id, &e.id));
+            let id = Id::unique(("launcher-emoji", &friend.id, &e.id));
             let resp = ui.interact(er, id, Sense::click());
             let h = anim::toggle(ui.ctx(), id.with("hover"), resp.hovered(), Spring::BOUNCY);
             let er2 = Rect::from_center_size(er.center() - vec2(0.0, 3.0 * h), er.size() * (1.0 + 0.12 * h));
@@ -388,7 +388,7 @@ fn links(ui: &mut Ui, r: Rect, links: &[String]) {
             break;
         }
         let chip = Rect::from_min_size(pos2(x, r.top() + 2.0), vec2(w, 30.0));
-        let id = Id::new(("launcher-link", link));
+        let id = Id::unique(("launcher-link", link));
         let resp = ui.interact(chip, id, Sense::click());
         let h = anim::toggle(ui.ctx(), id.with("hover"), resp.hovered(), Spring::SNAPPY);
         let p = ui.painter();
@@ -497,7 +497,7 @@ fn badges(ui: &mut Ui, state: &mut State, r: Rect, profile: &Profile) {
             None => widgets::icon_fill(p, c, icons::SEAL_CHECK, 15.0, theme::CYAN),
         }
         widgets::text(p, pos2(chip.left() + 30.0, chip.center().y), Align2::LEFT_CENTER, &txt);
-        ui.interact(chip, Id::new(("launcher-badge", &b.id)), Sense::hover()).on_hover_text(&b.description);
+        ui.interact(chip, Id::unique(("launcher-badge", &b.id)), Sense::hover()).on_hover_text(&b.description);
         x += w + 8.0;
     }
 }

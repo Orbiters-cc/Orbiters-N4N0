@@ -76,7 +76,7 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
     };
     let starting = play == PlayState::Starting(mode);
     let enabled = play == PlayState::Ready || (matches!(play, PlayState::Running(m) if m == mode));
-    let id = Id::new(("launcher-play", mode == LaunchMode::Vr, big));
+    let id = Id::unique(("launcher-play", mode == LaunchMode::Vr, big));
     let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
     widgets::note_control(&ctx, label, rect, enabled);
     let pressed = enabled && widgets::activated(&resp);

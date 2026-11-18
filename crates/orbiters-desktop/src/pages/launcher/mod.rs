@@ -22,7 +22,7 @@ use orbiters_core::launcher::{Action, Friend, InstanceAccess, LauncherState, Pre
 use orbiters_i18n::{tr, tr_ctx};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
-use orbiters_ui::theme::{self, weight, Txt};
+use orbiters_ui::theme::{self, Txt};
 use orbiters_ui::{paint, widgets};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -101,8 +101,6 @@ pub struct State {
     wanted: Vec<String>,
     /// A fixed clock (pictures of the page).
     now_fixed: Option<i64>,
-    /// What the page sent (tests and pictures read it; the controller has it through `Ctl`).
-    sent: Vec<Action>,
 }
 
 impl Default for State {
@@ -126,7 +124,6 @@ impl Default for State {
             pictures: HashMap::new(),
             wanted: Vec::new(),
             now_fixed: None,
-            sent: Vec::new(),
         }
     }
 }
@@ -137,23 +134,15 @@ impl State {
         self.data = data;
     }
 
-    pub fn data(&self) -> &LauncherState {
-        &self.data
-    }
-
     /// A picture by its URL, once loaded.
     pub fn provide_picture(&mut self, url: &str, texture: egui::TextureHandle) {
         self.pictures.insert(url.to_string(), texture);
     }
 
-    /// The pictures the last frame would have drawn and did not have.
+    /// The pictures the last frame would have drawn and did not have (the controller loads them).
+    #[allow(dead_code)]
     pub fn wanted_pictures(&self) -> &[String] {
         &self.wanted
-    }
-
-    /// What the page sent since the last call.
-    pub fn take_sent(&mut self) -> Vec<Action> {
-        std::mem::take(&mut self.sent)
     }
 
     /// Pictures of the page: a fixed clock, the search typed.
@@ -161,6 +150,19 @@ impl State {
         self.now_fixed = Some(now);
         self.query = query.to_string();
         self.folded_read = true;
+    }
+
+    /// Pictures of the page: a boop sent at `clock` (its animation), a request, something put away.
+    pub fn stand_in_boop(&mut self, to: &str, clock: f64, emoji: Option<String>) {
+        self.note(clock, &Action::Boop { to: to.into(), emoji });
+    }
+
+    pub fn stand_in_request(&mut self, to: &str, clock: f64) {
+        self.note(clock, &Action::RequestInvite { to: to.into() });
+    }
+
+    pub fn stand_in_dismiss(&mut self, id: &str) {
+        self.dismissed.insert(id.to_string());
     }
 
     /// Opens a person's profile as if their row was pressed at `from`.
@@ -171,10 +173,6 @@ impl State {
     /// Opens the list over the page (the rail's button).
     pub fn open_drawer(&mut self, ctx: &egui::Context) {
         self.drawer = Some(anim::time(ctx));
-    }
-
-    pub fn profile_open(&self) -> bool {
-        self.modal.as_ref().is_some_and(|m| m.closing.is_none())
     }
 
     fn now(&self) -> i64 {
@@ -193,8 +191,7 @@ impl State {
     /// Sends `action` and shows it at once.
     fn act(&mut self, cx: &Cx, clock: f64, action: Action) {
         self.note(clock, &action);
-        cx.ctl.launcher(action.clone());
-        self.sent.push(action);
+        cx.ctl.launcher(action);
     }
 
     /// What a press shows before the service answers.
@@ -416,10 +413,10 @@ pub fn over_page(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     let ctx = ui.ctx().clone();
     let clock = anim::time(&ctx);
     if let Some(since) = state.drawer {
-        let open = anim::spring_from(&ctx, Id::new(("launcher-drawer", since.to_bits())), [0.0], [1.0], Spring::EXPAND)[0];
-        let layer = LayerId::new(Order::Middle, Id::new("launcher-drawer-layer"));
+        let open = anim::spring_from(&ctx, Id::unique(("launcher-drawer", since.to_bits())), [0.0], [1.0], Spring::EXPAND)[0];
+        let layer = LayerId::new(Order::Middle, Id::unique("launcher-drawer-layer"));
         let mut over = ui.new_child(UiBuilder::new().max_rect(page).layer_id(layer));
-        let scrim = over.interact(page, Id::new("launcher-drawer-scrim"), Sense::click());
+        let scrim = over.interact(page, Id::unique("launcher-drawer-scrim"), Sense::click());
         over.painter().rect_filled(page, 0.0, theme::black(0.45 * open.clamp(0.0, 1.0)));
         let w = COLUMN_MAX.min(page.width() - 48.0);
         let at = Rect::from_min_size(pos2(page.right() - GAP - w + (1.0 - open) * (w + GAP), page.top() + cx.top + 8.0), vec2(w, page.height() - cx.top - 8.0 - GAP));

@@ -29,14 +29,6 @@ impl Reach {
     }
 }
 
-/// What this page sent and when (its clock, [`orbiters_ui::anim::time`]), so a press shows at once, before the
-/// service answers.
-#[derive(Clone, Debug, Default)]
-pub struct Sent {
-    pub at: f64,
-    pub kind: Option<SentKind>,
-}
-
 fn cooling(ready_at: Option<i64>, now: i64) -> Option<i64> {
     ready_at.filter(|&at| at > now).map(|at| at - now)
 }

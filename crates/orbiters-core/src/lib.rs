@@ -14,6 +14,7 @@ pub mod features;
 pub mod gallery_talk;
 pub mod keyframes;
 pub mod lan;
+pub mod launcher;
 pub mod maps;
 pub mod osc;
 pub mod panic_log;

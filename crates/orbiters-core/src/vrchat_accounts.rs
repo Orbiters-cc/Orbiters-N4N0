@@ -37,28 +37,28 @@ pub fn friend_hash(id: &str) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn open(path: &Path) -> Option<Connection> {
+pub(crate) fn open(path: &Path) -> Option<Connection> {
     if !path.is_file() {
         return None;
     }
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()
 }
 
-fn vrcx_db() -> Option<PathBuf> {
+pub(crate) fn vrcx_db() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("VRCX").join("VRCX.sqlite3"))
 }
 
-fn vrcnext_dir() -> Option<PathBuf> {
+pub(crate) fn vrcnext_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("VRCNext"))
 }
 
 /// The account VRCX last signed in with.
-fn vrcx_account(db: &Connection) -> Option<String> {
+pub(crate) fn vrcx_account(db: &Connection) -> Option<String> {
     db.query_row("SELECT value FROM configs WHERE key = 'config:lastuserloggedin'", [], |r| r.get::<_, String>(0)).ok().filter(|id| is_user_id(id)) // i18n: not shown (SQL)
 }
 
 /// VRCX names its per-account tables after the account: `usr1339e525d75d…_friend_log_current`.
-fn vrcx_table_prefix(id: &str) -> String {
+pub(crate) fn vrcx_table_prefix(id: &str) -> String {
     id.replace(['_', '-'], "")
 }
 

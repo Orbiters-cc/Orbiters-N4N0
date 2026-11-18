@@ -43,6 +43,8 @@ ring = "0.17"
 # mean OpenSSL. Crates that reach the web through this one take its TLS.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
+# VRChat's pipeline (`pipeline.rs`): the TLS ureq already brings in.
+native-tls = "0.2"
 
 [target.'cfg(target_os = "android")'.dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls"] }

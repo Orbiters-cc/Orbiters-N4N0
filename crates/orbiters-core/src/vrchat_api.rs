@@ -16,7 +16,7 @@ pub use social::boop_body;
 
 const BASE: &str = "https://api.vrchat.cloud/api/1";
 const UA_CONTACT: &str = concat!(" blackorbit.eclaire@gmail.com");
-fn user_agent() -> String {
+pub(crate) fn user_agent() -> String {
     format!("Orbiters-N4N0/{}{UA_CONTACT}", crate::app_version())
 }
 const ENTROPY: &[u8] = b"Orbiters.N4N0 VRChat session";

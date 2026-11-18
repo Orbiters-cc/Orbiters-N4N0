@@ -136,7 +136,9 @@ pub(super) fn received(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: Rect,
         }
         let what = if accent { tr("booped you") } else { tr("asks for an invite") };
         let x = pic.right() + 10.0;
-        let room = rect.right() - x - if accent { 142.0 } else { 40.0 };
+        // Boop back as wide as its words in the language.
+        let back_w = pill_width(ui, tr("Boop back")).max(92.0);
+        let room = rect.right() - x - if accent { back_w + 46.0 } else { 40.0 };
         widgets::text_truncated(&p, pos2(x, rect.center().y - 8.0), Align2::LEFT_CENTER, &Txt::new(&name, 13.0).weight(weight::SEMIBOLD), room);
         let when = super::super::ago(ui.ctx(), at.max(0) as u64, now.max(0) as u64);
         widgets::text_truncated(&p, pos2(x, rect.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(format!("{what} · {when}"), 11.5).color(theme::FG_3), room);
@@ -151,7 +153,7 @@ pub(super) fn received(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: Rect,
                 None if state.data.possible.boop => Reach::Ready,
                 None => Reach::SignIn,
             };
-            let at = Rect::from_min_size(pos2(close.left() - 4.0 - 96.0, rect.center().y - 15.0), vec2(96.0, 30.0));
+            let at = Rect::from_min_size(pos2(close.left() - 4.0 - back_w, rect.center().y - 15.0), vec2(back_w, 30.0));
             if reach_pill(ui, at, ("launcher-boop-back", from.as_str()), reach, icons::HAND_WAVING, tr("Boop back"), state.booped.get(from).map(|b| b.0), clock) {
                 state.act(cx, clock, Action::Boop { to: from.clone(), emoji: None });
                 state.act(cx, clock, Action::Dismiss { id: id.clone() });
@@ -424,7 +426,8 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
 
     let name_color = if offline { theme::mix(rank_color(friend.look.rank), theme::FG_3, 0.45) } else { rank_color(friend.look.rank) };
     widgets::text_truncated(&p, pos2(x, card.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(&friend.name, 13.5).weight(weight::SEMIBOLD).color(name_color), room);
-    second_line(&p, &friend, pos2(x, card.center().y + 10.0), room, booped.as_ref().filter(|b| clock - b.0 < states::SENT_FOR).is_some());
+    let seen = friend.last_seen.filter(|_| friend.presence == Presence::Offline).map(|at| super::super::ago(&ctx, at.max(0) as u64, now.max(0) as u64));
+    second_line(&p, &friend, pos2(x, card.center().y + 10.0), room, booped.as_ref().filter(|b| clock - b.0 < states::SENT_FOR).is_some(), seen);
 
     if reveal > 0.01 {
         let mut right = card.right() - 10.0 + 8.0 * (1.0 - reveal);
@@ -459,7 +462,7 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
 
 /// The row's second line: where they are (the world, its instance and region) or their status line; "Booped!" a
 /// moment after a boop.
-fn second_line(p: &egui::Painter, friend: &Friend, at: egui::Pos2, room: f32, booped: bool) {
+fn second_line(p: &egui::Painter, friend: &Friend, at: egui::Pos2, room: f32, booped: bool, seen: Option<String>) {
     if booped {
         widgets::icon(p, pos2(at.x + 6.0, at.y), icons::HAND_WAVING, 12.0, theme::ACCENT);
         widgets::text_truncated(p, pos2(at.x + 17.0, at.y), Align2::LEFT_CENTER, &Txt::new(tr("Booped!"), 12.0).weight(weight::SEMIBOLD).color(theme::ACCENT), room - 17.0);
@@ -493,7 +496,12 @@ fn second_line(p: &egui::Painter, friend: &Friend, at: egui::Pos2, room: f32, bo
             widgets::text_truncated(p, pos2(x + 16.0, at.y), Align2::LEFT_CENTER, &small(&line), room - 16.0);
         }
         None => {
-            let line = if friend.status_text.is_empty() { status_name(friend.status).to_string() } else { friend.status_text.clone() };
+            // Their status line; else when they were last seen; else their status.
+            let line = match (friend.status_text.is_empty(), seen) {
+                (false, _) => friend.status_text.clone(),
+                (true, Some(when)) => orbiters_i18n::tr!("Last seen {when}", when = when),
+                (true, None) => status_name(friend.status).to_string(),
+            };
             widgets::text_truncated(p, at, Align2::LEFT_CENTER, &small(&line).color(theme::FG_4), room);
         }
     }

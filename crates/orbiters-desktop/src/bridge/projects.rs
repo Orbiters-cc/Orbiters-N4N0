@@ -234,6 +234,14 @@ fn text<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args[key].as_str().map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// Whether `path` is a plain path on a drive of this computer (`C:\…`): never a network share (`\\host\share`, whose
+/// first look opens a connection to a host the text chose) nor a device path (`\\?\`, `\\.\`) (BRIDGE-7).
+pub(crate) fn on_a_local_drive(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    path.is_absolute() && matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_)))
+        || cfg!(not(windows)) && path.is_absolute()
+}
+
 fn bad(message: impl Into<String>, next: impl Into<String>) -> Failure {
     Failure::new("bad_arguments", message, next)
 }
@@ -514,8 +522,8 @@ impl Projects {
     fn project(&self, args: &Value) -> Result<Project, Failure> {
         let path = text(args, "path").ok_or_else(|| bad("path is needed: the project's folder.", "Take it from unity_list_projects."))?;
         let path = PathBuf::from(path);
-        if !path.is_absolute() {
-            return Err(bad(format!("{} is not an absolute path.", path.display()), "Pass the project's path as unity_list_projects gives it."));
+        if !on_a_local_drive(&path) {
+            return Err(bad(format!("{} is not an absolute path on a drive of this computer.", path.display()), "Pass the project's path as unity_list_projects gives it."));
         }
         let key = discovery::key(&path);
         if let Some(found) = self.scan().projects.into_iter().find(|p| discovery::key(&p.path) == key) {
@@ -1074,8 +1082,8 @@ impl Projects {
     fn remove_from_list(root: &Path, args: &Value) -> Result<Value, Failure> {
         let given = text(args, "path").ok_or_else(|| bad("remove_from_list needs path: the listed project's own folder.", "Take it from unity_list_projects."))?;
         let given = Path::new(given);
-        if !given.is_absolute() {
-            return Err(bad(format!("{} is not an absolute path.", given.display()), "Pass the listed project's path as unity_list_projects gives it."));
+        if !on_a_local_drive(given) {
+            return Err(bad(format!("{} is not an absolute path on a drive of this computer.", given.display()), "Pass the listed project's path as unity_list_projects gives it."));
         }
         let listed = block_on(vpm::registered(root)).map_err(|e| failed("vpm_failed", e, "Try again."))?;
         let Some(exact) = listed.iter().find(|p| discovery::key(p) == discovery::key(given)) else {
@@ -1122,8 +1130,8 @@ impl Projects {
             Some(l) => PathBuf::from(l),
             None => block_on(vpm::view(&root, None, false)).map(|v| v.default_path).map_err(|e| failed("vpm_failed", e, "Pass location."))?,
         };
-        if !location.is_absolute() {
-            return Err(bad("location must be an absolute folder.", "Pass where the project's folder goes."));
+        if !on_a_local_drive(&location) {
+            return Err(bad("location must be an absolute folder on a drive of this computer.", "Pass where the project's folder goes."));
         }
         if location.join(&name).exists() {
             return Err(Failure::new("exists", format!("{} has a folder named {name} already.", location.display()), "Choose another name."));
@@ -1160,8 +1168,8 @@ impl Projects {
         let name = text(args, "name").map(str::to_string).unwrap_or_else(|| format!("{} copy", project.name));
         templates::validate_name(&name).map_err(|e| bad(e.to_string(), "Choose another name."))?;
         let location = text(args, "location").map(PathBuf::from).or_else(|| project.path.parent().map(Path::to_path_buf)).unwrap_or_default();
-        if !location.is_absolute() {
-            return Err(bad("location must be an absolute folder.", "Pass where the copy goes."));
+        if !on_a_local_drive(&location) {
+            return Err(bad("location must be an absolute folder on a drive of this computer.", "Pass where the copy goes."));
         }
         let keep = templates::Keep { library: args["library"].as_bool().unwrap_or(false) };
         // What the tab's dialog checks before it lets Duplicate be pressed (the copy checks again before copying).
@@ -1344,8 +1352,17 @@ impl Projects {
                 if files.is_empty() {
                     return Err(bad("add_pictures needs files: pictures of this world on this computer.", "Pass their paths."));
                 }
-                if let Some(f) = files.iter().find(|f| !f.is_absolute() || !f.is_file()) {
-                    return Err(bad(format!("{} is not a file.", f.display()), "Pass the pictures' absolute paths."));
+                // Only pictures VRChat took in this world, as this computer lists them (BRIDGE-7): never any other file.
+                let theirs: Vec<PathBuf> = here["picture_files"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Value::as_str).filter_map(|p| std::fs::canonicalize(p).ok()).collect())
+                    .unwrap_or_default();
+                if let Some(f) = files.iter().find(|f| !on_a_local_drive(f) || std::fs::canonicalize(f).ok().is_none_or(|c| !theirs.contains(&c))) {
+                    return Err(Failure::new(
+                        "not_a_picture_of_it",
+                        format!("{} is not one of the pictures VRChat took in this world on this computer.", f.display()),
+                        "unity_world status lists them in here.picture_files.",
+                    ));
                 }
                 host.upload_pictures(id.to_string(), name, files.clone()).map_err(|e| Failure::new("upload_failed", e, "Tell the person: they may have to sign in to Orbiters."))?;
                 self.changed();
@@ -1534,7 +1551,7 @@ pub fn list() -> Vec<Value> {
         json!({
             "name": "unity_world",
             "title": "A world project's world on Orbiters",
-            "description": "For a world a world project was uploaded as: status (what this computer has of it: captures and VRChat pictures, and its uploads to Orbiters' Map explorer); add_pictures (files from this computer); set_preview (a reconstructed capture recorded there, by its session folder, becomes the world's 3D preview, in place of an earlier one). Needs the person signed in to Orbiters.",
+            "description": "For a world a world project was uploaded as: status (what this computer has of it: captures and VRChat pictures, and its uploads to Orbiters' Map explorer); add_pictures (pictures VRChat took in this world on this computer, as status lists them in here.picture_files); set_preview (a reconstructed capture recorded there, by its session folder, becomes the world's 3D preview, in place of an earlier one). Needs the person signed in to Orbiters.",
             "inputSchema": { "type": "object", "properties": {
                 "path": path,
                 "world_id": { "type": "string", "description": "wrld_… from unity_get_project's worlds." },
@@ -1567,6 +1584,17 @@ pub fn list() -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn only_paths_on_a_drive_of_this_computer_are_taken() {
+        // BRIDGE-7: a network path's first look opens a connection to a host the agent's text chose.
+        assert!(on_a_local_drive(Path::new(r"C:\Users\Enzo\Projects\World")));
+        assert!(on_a_local_drive(Path::new(r"D:\a")));
+        for path in [r"\\evil.example\share\x", r"\\?\C:\x", r"\\.\pipe\x", r"\\?\UNC\host\share", r"relative\x", r"C:relative"] {
+            assert!(!on_a_local_drive(Path::new(path)), "{path}");
+        }
+    }
 
     fn call() -> Call {
         Call { client_gone: Arc::new(AtomicBool::new(false)), stop_at_start: 0 }

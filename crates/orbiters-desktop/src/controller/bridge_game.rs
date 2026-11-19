@@ -379,6 +379,8 @@ impl crate::bridge::projects::Host for RealProjectsHost {
                 "splats": s.reconstruction.as_ref().map(|r| r.gaussians),
             })).collect::<Vec<_>>(),
             "pictures": world.shots.len(),
+            // The pictures add_pictures may share: these only.
+            "picture_files": world.shots.iter().take(500).map(|s| s.path.clone()).collect::<Vec<_>>(),
             "pictures_folder": world.shots.first().and_then(|s| s.path.parent().map(Path::to_path_buf)),
         })
     }

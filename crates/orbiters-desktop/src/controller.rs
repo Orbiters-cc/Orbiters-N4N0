@@ -225,6 +225,7 @@ pub struct Controller {
     rig: Mutex<rig::RigRuntime>,
     /// Calls with VRChat friends (controller/calls.rs).
     calls: Mutex<calls::CallsRuntime>,
+    shared_view: Mutex<shared_view::SharedRuntime>,
     /// Updates of an installed app (controller/update.rs).
     updates: Mutex<update::UpdateRuntime>,
     /// Space being freed in the library (controller/cleanup.rs).
@@ -504,6 +505,7 @@ pub mod vrchat_data;
 pub mod vrchat_login;
 pub mod camera_tools;
 pub mod vr_audio;
+mod shared_view;
 mod window_rest;
 mod world_captures;
 mod world_feedback;
@@ -581,6 +583,7 @@ impl Controller {
             scan: Mutex::new(scan::ScanRuntime::default()),
             rig: Mutex::new(rig::RigRuntime::default()),
             calls: Mutex::new(calls::CallsRuntime::default()),
+            shared_view: Mutex::new(shared_view::SharedRuntime::default()),
             updates: Mutex::new(update::UpdateRuntime::default()),
             cleanup: Mutex::new(cleanup::CleanupRuntime::default()),
             settings_writer: Mutex::new(SettingsWriter::Idle),
@@ -655,6 +658,7 @@ impl Controller {
         self.start_n4n0();
         self.start_perf();
         self.start_calls();
+        self.start_shared_view();
         self.start_updates();
     }
 

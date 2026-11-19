@@ -676,6 +676,36 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
+            // REQUEST14 stage 1: a friend here offers to look at a 3D picture together (Show, the cross for Not now).
+            name: "shared-view-offer",
+            page: Page::Home,
+            snapshot: with_share_offer(&home),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            // Both up: the offer stands over "Talk with N4N0?".
+            name: "shared-view-offer-with-talk",
+            page: Page::Home,
+            snapshot: with_share_offer(&with_wake_offer(&with_calls(&home, false))),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
             name: "home-ringing",
             page: Page::Home,
             snapshot: with_calls(&home, true),
@@ -3771,6 +3801,17 @@ fn with_wake_offer(snap: &Snapshot) -> Snapshot {
     s.n4n0.calls.call = Some(CallView { name: "Nova Fox".into(), phase: CallPhase::Connected, incoming: false, connected_at_ms: Some(crate::wake_offer::now_ms() - 192_000), muted: false, mic_level: 0.2, remote_level: 0.4 });
     // Long enough for the frames the harness paints.
     s.n4n0.voice.wake_offer = Some(orbiters_n4n0::status::WakeOffer { id: 1, until_ms: crate::wake_offer::now_ms() + 600_000, for_ms: 1_200_000 });
+    s
+}
+
+/// `snap` with a friend's offer to look at a 3D picture together up (most of its time left).
+fn with_share_offer(snap: &Snapshot) -> Snapshot {
+    let mut s = snap.clone();
+    let now = crate::wake_offer::now_ms();
+    s.shared_view.set(crate::state::SharedViewStatus {
+        offer: Some(crate::state::ShareOffer { id: 1, from: "Nova Fox".into(), title: "The Black Cat".into(), until_ms: now + 600_000, for_ms: 800_000 }),
+        ..Default::default()
+    });
     s
 }
 

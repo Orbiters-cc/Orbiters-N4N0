@@ -887,8 +887,11 @@ impl super::Controller {
         let Some((api, token)) = account else {
             let was = {
                 let mut rt = self.calls.lock().unwrap();
-                // No calls any more: the stream ends at its next line, a call under way ends.
-                rt.streaming = None;
+                // No calls any more: the stream ends at its next line (unless the shared 3D view keeps it,
+                // `controller/shared_view.rs`), a call under way ends.
+                if !self.shared_view_wants_stream() {
+                    rt.streaming = None;
+                }
                 let was = rt.available_sent.take().is_some();
                 if rt.call.is_some() {
                     let acts = rt.hang_up();
@@ -1014,7 +1017,7 @@ impl super::Controller {
 
     /// Keeps the event stream open on a thread of its own: opened again (for this credential) when it ended,
     /// failed or went silent, after a pause that grows while it keeps failing.
-    fn calls_stream(self: &Shared, api: &Api, token: &str) {
+    pub(super) fn calls_stream(self: &Shared, api: &Api, token: &str) {
         let number = {
             let mut rt = self.calls.lock().unwrap();
             if rt.streaming.as_ref().is_some_and(|(_, t)| t != token) {
@@ -1086,6 +1089,11 @@ impl super::Controller {
 
     /// One event of the server's stream.
     fn on_call_event(self: &Shared, event: &str, v: Value) {
+        // The shared 3D view's events come on the same stream.
+        if event.starts_with("share_") {
+            self.shared_view_event(event, &v);
+            return;
+        }
         let mut rt = self.calls.lock().unwrap();
         let acts = rt.server_event(event, &v, Instant::now());
         self.calls_act(rt, acts);

@@ -1197,7 +1197,9 @@ fn a_click_rests_on_its_place_before_it_presses() {
     client.tool("mouse", json!({ "action": "click", "x": 20, "y": 30 })).unwrap();
     let sent = game.injected();
     assert!(matches!(sent[0], Input::MoveTo { x: 20, y: 30 }), "{sent:?}");
-    assert!(matches!(sent[1], Input::Button { down: true, .. }), "{sent:?}");
+    // After the rest, the pointer is put back there with the press, in one batch (BRIDGE-2).
+    assert!(matches!(sent[1], Input::MoveTo { x: 20, y: 30 }), "{sent:?}");
+    assert!(matches!(sent[2], Input::Button { down: true, .. }), "{sent:?}");
 }
 
 #[test]

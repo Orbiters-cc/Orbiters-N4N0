@@ -197,8 +197,22 @@ impl Working {
 
 impl Drop for Working {
     fn drop(&mut self) {
-        WORKING.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        // The last work ended: the window looks again (its countdown to the tray waits for this, verify2 SWEEP-9; a
+        // writer that is not a `Job` wakes nothing by itself).
+        if WORKING.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            if let Some(ctx) = WAKE.get() {
+                ctx.request_repaint();
+            }
+        }
     }
+}
+
+/// The window, woken when the last of its work ends ([`Working`]).
+static WAKE: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
+
+/// Called once the window's context exists.
+pub fn wake_when_work_ends(ctx: &egui::Context) {
+    let _ = WAKE.set(ctx.clone());
 }
 
 /// How many pieces of work of the window run now ([`Working`]).

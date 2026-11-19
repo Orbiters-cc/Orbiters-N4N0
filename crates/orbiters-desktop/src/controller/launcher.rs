@@ -24,6 +24,8 @@ const FULL_EVERY: Duration = Duration::from_secs(30 * 60);
 const GAME_EVERY: Duration = Duration::from_secs(5);
 /// A start just asked for counts as "starting" this long (Steam, then Easy Anti-Cheat, then VRChat's process).
 const STARTING_FOR: Duration = Duration::from_secs(60);
+/// How long an action's outcome stays in the state (the page's "Sent", the error it took back).
+const NOTICE_FOR: Duration = Duration::from_secs(3);
 /// After a failed read of VRChat: the first try again, doubling up to the longest (with jitter), never every tick.
 const RETRY_FIRST: Duration = Duration::from_secs(30);
 const RETRY_LONGEST: Duration = Duration::from_secs(10 * 60);
@@ -540,6 +542,10 @@ impl Controller {
                     rt.retry_at = Some(Instant::now() + retry_wait(rt.failures, &e, random()));
                 }
                 let text = error_text(&e);
+                // Said once per run of failures (an expired session, VRChat unreachable), not at every try again.
+                if self.launcher.lock().unwrap().failures == 1 {
+                    self.notify(super::NoticeKind::Error, text.clone());
+                }
                 self.update(|s| {
                     s.launcher.loading = false;
                     s.launcher.notice = Some(Notice::Error(text));
@@ -672,14 +678,34 @@ impl Controller {
         });
     }
 
-    /// What Home sends. Runs on its own thread; the outcome shows in `launcher.notice`.
+    /// What Home sends. Runs on its own thread; the outcome shows in `launcher.notice` for a few seconds, and an action
+    /// that could not be done is said in the app's toast too.
     pub fn launcher_action(self: &Shared, action: Action) {
         let ctl = self.clone();
         let _ = std::thread::Builder::new().name("launcher-action".into()).spawn(move || {
-            let notice = ctl.launcher_do(action);
-            if let Some(notice) = notice {
-                ctl.update(|s| s.launcher.notice = Some(notice));
+            let Some(notice) = ctl.launcher_do(action) else { return };
+            ctl.launcher_notice(notice.clone());
+            std::thread::sleep(NOTICE_FOR);
+            ctl.launcher_notice_over(&notice);
+        });
+    }
+
+    /// An action's outcome: into the state, and when it failed, into the toast as well.
+    pub(super) fn launcher_notice(&self, notice: Notice) {
+        if let Notice::Error(text) | Notice::Failed { text, .. } = &notice {
+            self.notify(super::NoticeKind::Error, text.clone());
+        }
+        self.update(|s| s.launcher.notice = Some(notice));
+    }
+
+    /// The outcome's time is over: gone from the state, unless another action's replaced it.
+    pub(super) fn launcher_notice_over(&self, notice: &Notice) {
+        self.update_if(|s| {
+            let same = s.launcher.notice.as_ref() == Some(notice);
+            if same {
+                s.launcher.notice = None;
             }
+            same
         });
     }
 
@@ -872,7 +898,7 @@ impl Controller {
                 if !matches!(e, Error::OutcomeUnknown) {
                     self.launcher.lock().unwrap().cooldowns.release(boop, to);
                 }
-                Notice::Error(error_text(&e))
+                Notice::Failed { to: to.into(), action: if boop { SentKind::Boop } else { SentKind::RequestInvite }, text: error_text(&e) }
             }
         };
         let cooldowns = self.launcher.lock().unwrap().cooldowns.clone();

@@ -79,7 +79,7 @@ fn boops_and_requests_hold_a_cool_down_per_person() {
     assert_eq!(c.launcher_do(Action::Boop { to: A.into(), emoji: Some("default_heart".into()) }), Some(Notice::Sent { to: A.into(), action: SentKind::Boop }));
     assert!(matches!(c.launcher_do(Action::Boop { to: A.into(), emoji: None }), Some(Notice::CoolingDown { .. })), "a second boop waits");
     assert!(c.view().launcher.friend(A).unwrap().boop_ready_at.is_some(), "the row knows when");
-    assert!(matches!(c.launcher_do(Action::RequestInvite { to: B.into() }), Some(Notice::Error(_))));
+    assert!(matches!(c.launcher_do(Action::RequestInvite { to: B.into() }), Some(Notice::Failed { action: SentKind::RequestInvite, .. })), "the page takes its Sent back");
     assert_eq!(c.launcher_do(Action::RequestInvite { to: B.into() }), Some(Notice::Sent { to: B.into(), action: SentKind::RequestInvite }), "a refused one can be tried again");
     let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
     assert_eq!(calls, [format!("POST /users/{A}/boop"), format!("POST /requestInvite/{B}"), format!("POST /requestInvite/{B}")]);
@@ -367,4 +367,23 @@ fn a_replaced_pipeline_writes_nothing_into_the_list() {
     assert_eq!(c.view().launcher.friend(A).unwrap().presence, orbiters_core::launcher::Presence::InGame, "the old one's message is dropped");
     c.launcher_message_of(&new, &offline);
     assert_ne!(c.view().launcher.friend(A).unwrap().presence, orbiters_core::launcher::Presence::InGame);
+}
+
+#[test]
+fn a_failed_action_is_said_in_the_toast_and_every_outcome_goes_after_a_while() {
+    let c = controller(Arc::new(Pretend::default()));
+    let before = c.notices.lock().unwrap().len();
+    let failed = Notice::Failed { to: A.into(), action: SentKind::Boop, text: "VRChat refused the request (HTTP 400).".into() };
+    c.launcher_notice(failed.clone());
+    assert_eq!(c.notices.lock().unwrap().len(), before + 1, "a toast");
+    assert_eq!(c.view().launcher.notice, Some(failed.clone()));
+    c.launcher_notice_over(&failed);
+    assert_eq!(c.view().launcher.notice, None, "not kept for ever (the Request pill is pressable again)");
+    let sent = Notice::Sent { to: A.into(), action: SentKind::RequestInvite };
+    c.launcher_notice(sent.clone());
+    assert_eq!(c.notices.lock().unwrap().len(), before + 1, "a success is no toast");
+    let newer = Notice::Sent { to: B.into(), action: SentKind::Boop };
+    c.launcher_notice(newer.clone());
+    c.launcher_notice_over(&sent);
+    assert_eq!(c.view().launcher.notice, Some(newer), "a newer outcome stays its own time");
 }

@@ -152,6 +152,7 @@ impl State {
         let data = cx.snap.launcher.arc();
         if !self.staged && !Arc::ptr_eq(&data, &self.data) {
             self.data = data;
+            self.take_back_failed();
         }
         if self.loader.is_none() {
             self.loader = Some(crate::worlds::Pictures::with_backend(ctx, Some(cx.ctl.clone())));
@@ -212,6 +213,21 @@ impl State {
     pub fn shown(&self) -> bool {
         let d = &self.data;
         !matches!(d.source, orbiters_core::launcher::Source::Nothing) || d.possible.play || d.game != orbiters_core::launcher::Game::NotRunning
+    }
+
+    /// A boop or request the service could not send: its "Sent" (shown at the press) is taken back; the toast says why.
+    fn take_back_failed(&mut self) {
+        if let Some(orbiters_core::launcher::Notice::Failed { to, action, .. }) = &self.data.notice {
+            match action {
+                orbiters_core::launcher::SentKind::Boop => {
+                    self.booped.remove(to);
+                }
+                orbiters_core::launcher::SentKind::RequestInvite => {
+                    self.requested.remove(to);
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Sends `action` and shows it at once.

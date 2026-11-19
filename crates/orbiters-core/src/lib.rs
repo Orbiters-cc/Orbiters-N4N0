@@ -378,6 +378,34 @@ pub fn safe_file_name(name: &str) -> String {
 mod tests {
     use super::*;
 
+    /// CORE-7 / CORE-C4: what was found is saved at once, read positions alone every few minutes, and a failed save
+    /// stays to do, tried again later each time.
+    #[test]
+    fn history_saves_finds_at_once_positions_now_and_then_and_retries_failures() {
+        let t0 = std::time::Instant::now();
+        let mut c = Checkpoint::default();
+        assert!(c.due(true, t0), "never saved: the first move is saved");
+        c.saved(true, t0);
+        assert!(!c.due(true, t0 + std::time::Duration::from_secs(10)), "positions alone: not every beat");
+        assert!(c.due(true, t0 + Checkpoint::OFFSETS_EVERY), "but every few minutes");
+        assert!(!c.due(false, t0 + Checkpoint::OFFSETS_EVERY), "nothing moved: nothing to save");
+        c.unsaved = true;
+        assert!(c.due(false, t0 + std::time::Duration::from_secs(10)), "a find: at once");
+        let t1 = t0 + std::time::Duration::from_secs(20);
+        c.saved(false, t1);
+        assert!(c.unsaved, "a failed save keeps it to do");
+        assert!(!c.due(false, t1 + std::time::Duration::from_secs(5)));
+        assert!(c.due(false, t1 + std::time::Duration::from_secs(10)), "tried again 10 s later");
+        c.saved(false, t1 + std::time::Duration::from_secs(10));
+        assert!(!c.due(false, t1 + std::time::Duration::from_secs(25)) && c.due(false, t1 + std::time::Duration::from_secs(30)), "then 20 s");
+        for _ in 0..10 {
+            c.saved(false, t1);
+        }
+        assert!(c.due(false, t1 + Checkpoint::OFFSETS_EVERY), "never more than five minutes apart");
+        c.saved(true, t1);
+        assert!(!c.unsaved && !c.due(false, t1));
+    }
+
     /// A file another program held when it was read is kept aside before a write replaces it.
     #[cfg(windows)]
     #[test]

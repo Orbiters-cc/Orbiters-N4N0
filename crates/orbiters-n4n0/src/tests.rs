@@ -3094,6 +3094,30 @@ fn the_wake_word_comes_back_when_the_ask_page_closes() {
     t.shutdown(&n);
 }
 
+/// verify2: the panels open Ask, then the window takes the microphone with its Talk button; the page closing (or the panels'
+/// link going) ends what the page listened to, never the window's sentence.
+#[test]
+fn closing_ask_keeps_a_sentence_the_window_holds_now() {
+    use crate::runtime::Source;
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    let (base, _bodies) = orbiters(vec![]);
+    t.sign_in(base, "test");
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    n.app_talk(true, false);
+    assert!(matches!(n.n4n0.lock().unwrap().listening, Some((Source::Window, _))), "the window has the microphone");
+    let before = worker.commands().len();
+    n.ask_page(false);
+    assert!(matches!(n.n4n0.lock().unwrap().listening, Some((Source::Window, _))), "its sentence goes on");
+    assert!(!worker.commands()[before..].iter().any(|c| matches!(c, VoiceCommand::Cancel)), "{:?}", &worker.commands()[before..]);
+    // The overlay's link going (which closes the page) does not end it either.
+    n.link_closed(true);
+    assert!(matches!(n.n4n0.lock().unwrap().listening, Some((Source::Window, _))));
+    t.shutdown(&n);
+}
+
 #[test]
 fn ask_auto_final_stream_pause_rearm_manual_exit_and_stale_words() {
     let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));

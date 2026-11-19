@@ -1230,6 +1230,8 @@ pub(crate) mod tests {
         o.qr.note = "Turn the stream camera on".into();
         o.mirror.zoom = 3;
         o.calls.picked = 2;
+        // The window's offer to close to the tray (window_rest), what the VR band said of it.
+        s.window_rest = crate::state::WindowRest { offer: Some(crate::state::RestOffer { id: 3, until_ms: 1_762_800_008_000, for_ms: 8_000 }), shown: Some(3), kept: None };
         s
     }
 

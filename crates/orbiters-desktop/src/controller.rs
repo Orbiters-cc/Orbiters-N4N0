@@ -740,6 +740,12 @@ impl Controller {
         self.snapshot.lock().unwrap().is_capturing()
     }
 
+    /// How many Stops were asked for (tests of the service's links).
+    #[cfg(test)]
+    pub(crate) fn stop_generation(&self) -> u64 {
+        self.stop_generation.load(Ordering::Acquire)
+    }
+
     fn ensure_worker(self: &Shared) -> anyhow::Result<()> {
         // A late OSC echo or a queued start while the app quits starts no worker.
         anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "{}", tr("Orbiters - N4N0 is quitting."));

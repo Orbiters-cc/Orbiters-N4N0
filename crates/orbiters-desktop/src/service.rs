@@ -401,7 +401,13 @@ impl Service {
             // Deleting runs on a thread of its own; the job shows in the snapshot.
             ToService::CleanUp { trim, delete } => report(ctl.clean_up(trim, delete)),
             ToService::Reconstruct { dir } => report(ctl.reconstruct(dir)),
-            ToService::SendToMixer { dir, title } => report(ctl.send_to_mixer(dir, title)),
+            ToService::SendToMixer { dir, title } => {
+                #[cfg(test)]
+                if let Some(hold) = *tests::FILE_WORK_TAKES.lock().unwrap() {
+                    std::thread::sleep(hold);
+                }
+                report(ctl.send_to_mixer(dir, title))
+            }
             ToService::SignIn => {
                 // Asking Orbiters for the link is a network call: not on the link's reading thread.
                 let c = ctl.clone();
@@ -567,12 +573,36 @@ impl Service {
             Role::Overlay => self.ctl.set_overlay_connected(true),
             Role::Orbit => {}
         }
+        // The link's file work (Send to Mixer, Trash, a reconstruction...) is done on a thread of its own, in the order
+        // it came: a Stop, a Talk release or a settings change read after it is not held behind a PLY being written
+        // (CTL-7). Starts, pauses and the QR scan stay on this thread, in their order with Stop.
+        let work = {
+            let (tx, rx) = std::sync::mpsc::channel::<ToService>();
+            let svc = self.clone();
+            std::thread::Builder::new().name("link-work".into()).spawn(move || {
+                for msg in rx {
+                    svc.handle(id, role, msg);
+                }
+            }).ok().map(|_| tx)
+        };
         // Lines of a bounded length: a client cannot make the service hold an endless one.
         while let Ok(Some(line)) = ipc::read_line_capped(&mut reader, MAX_COMMAND) {
             if let Ok(msg) = serde_json::from_str::<ToService>(&line) {
-                self.handle(id, role, msg);
+                match (&work, msg) {
+                    (Some(work), msg) if is_file_work(&msg) => {
+                        let _ = work.send(msg);
+                    }
+                    // Quitting waits for a recording to be saved: the link goes on reading (and gets its Close).
+                    (_, ToService::Quit) => {
+                        let svc = self.clone();
+                        std::thread::spawn(move || svc.quit());
+                    }
+                    (_, msg) => self.handle(id, role, msg),
+                }
             }
         }
+        // What was asked before the link ended is still done, in its order.
+        drop(work);
         mailbox.close();
         self.usage.unlinked(id, self.ctl.view().settings.usage.enabled);
         self.links.lock().unwrap().retain(|l| l.id != id);
@@ -604,6 +634,24 @@ impl Service {
             self.quit();
         }
     }
+}
+
+/// What a window asks that works on files or folders, possibly for seconds: done in its order on the link's work thread,
+/// not on its reading thread ([`Service::serve`]). A reconstruction stopped or unqueued follows the one asked before it.
+fn is_file_work(msg: &ToService) -> bool {
+    matches!(
+        msg,
+        ToService::SendToMixer { .. }
+            | ToService::Trash { .. }
+            | ToService::CleanUp { .. }
+            | ToService::Reconstruct { .. }
+            | ToService::StopReconstruction
+            | ToService::Unqueue { .. }
+            | ToService::UploadPictures { .. }
+            | ToService::UploadPreview { .. }
+            | ToService::PrepareShare { .. }
+            | ToService::WorkerLog
+    )
 }
 
 /// Which link pressed the app's Talk button last and has not let it go. The window and the desktop panels talk to N4N0 as
@@ -862,6 +910,26 @@ pub(crate) mod tests {
         assert!(!steamvr_start_may_be_due(false, false), "no SteamVR");
         assert!(!steamvr_start_may_be_due(true, true), "the overlay looks itself");
         assert!(!steamvr_start_may_be_due(true, false));
+    }
+
+    /// How long a Send to Mixer takes in a test ([`Service::handle`]).
+    pub(crate) static FILE_WORK_TAKES: Mutex<Option<Duration>> = Mutex::new(None);
+
+    /// CTL-7: a Stop sent after a slow Send to Mixer on the same link is done at once, not after the export.
+    #[test]
+    fn a_stop_is_not_held_behind_a_slow_send_to_mixer() {
+        let service = service();
+        let window = linked(&service, Role::Window);
+        *FILE_WORK_TAKES.lock().unwrap() = Some(Duration::from_secs(3));
+        let before = service.ctl.stop_generation();
+        let sent = Instant::now();
+        window.send(&ToService::SendToMixer { dir: PathBuf::from("no such session"), title: "t".into() });
+        window.send(&ToService::StopCapture);
+        let stopped = until(|| service.ctl.stop_generation() > before);
+        let took = sent.elapsed();
+        *FILE_WORK_TAKES.lock().unwrap() = None;
+        assert!(stopped, "the stop arrived");
+        assert!(took < Duration::from_secs(2), "the stop waited {took:?} behind the export");
     }
 
     use crate::link_between::{Between, Line};

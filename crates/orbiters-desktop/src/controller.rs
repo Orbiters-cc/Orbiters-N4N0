@@ -144,6 +144,9 @@ pub struct Controller {
     stop_generation: AtomicU64,
     osc_generation: AtomicU64,
     capture_start_gate: Mutex<()>,
+    /// Bumped (under `capture_start_gate`) by every start of a new recording, a world split's next part excepted: what
+    /// belongs to one recording (a scan's flight) checks it is still the current one under the gate (C-2).
+    capture_serial: AtomicU64,
     kit_epoch: Mutex<(u64,Option<String>)>,
     /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
     /// the app drives them), and when the avatar last (re)loaded, which resets them.
@@ -491,6 +494,7 @@ impl Controller {
             stop_generation: AtomicU64::new(0),
             osc_generation: AtomicU64::new(0),
             capture_start_gate: Mutex::new(()),
+            capture_serial: AtomicU64::new(0),
             kit_epoch: Mutex::default(),
             avatar_before: Mutex::new(None),
             hide: Mutex::new(hide_self::HideRuntime::default()),
@@ -763,6 +767,12 @@ impl Controller {
             let ctl = self.clone();
             move || {
                 ctl.put_vrchat_back();
+                // What the recording was for ends with it, BEFORE Idle is published: a start after Idle may be a new
+                // 3D picture's or scan's, whose flag must stay (CTL-11 a).
+                if ctl.snapshot.lock().unwrap().capture.state != CaptureState::Idle {
+                    ctl.burst.lock().unwrap().recording = false;
+                    ctl.scan.lock().unwrap().recording = false;
+                }
                 let ended = ctl.update(|s| {
                     s.worker.ready = false;
                     // Whatever it was doing (recording, saving a session) ended with it.
@@ -774,10 +784,6 @@ impl Controller {
                     }
                     ended
                 });
-                if ended {
-                    // A 3D picture under way never comes: the next recording is an ordinary one.
-                    ctl.burst.lock().unwrap().recording = false;
-                }
                 ctl.capture_ended();
             }
         };
@@ -936,6 +942,13 @@ impl Controller {
                 if !restarting {
                     self.put_vrchat_back();
                 }
+                // Whether this recording was a scan, taken BEFORE Idle is published: a scan started after Idle sets
+                // the flag for its own recording, which this save must neither take nor clear (CTL-11 a, C-2).
+                let was_scan = if restarting {
+                    self.scan.lock().unwrap().recording
+                } else {
+                    std::mem::take(&mut self.scan.lock().unwrap().recording)
+                };
                 self.update(|s| {
                     if !restarting {
                         s.capture.state = CaptureState::Idle;
@@ -950,7 +963,6 @@ impl Controller {
                 let nothing = !restarting && manifest.stats.frames > 0 && manifest.stats.keyframes == 0;
                 if nothing {
                     self.burst.lock().unwrap().recording = false;
-                    self.scan.lock().unwrap().recording = false;
                     let why = self.no_strip_reason();
                     // Only on this recording: a capture started since (the state went Idle above) keeps its own.
                     self.update_if(|s| {
@@ -974,7 +986,7 @@ impl Controller {
                 if resized {
                     // A 3D picture's or a scan's part at the old size is reconstructed on its own (a reconstruction
                     // takes one frame size); the part after it when the recording ends.
-                    let part = self.burst.lock().unwrap().recording || self.scan.lock().unwrap().recording;
+                    let part = self.burst.lock().unwrap().recording || was_scan;
                     if let Some(dir) = session.clone().filter(|_| part) {
                         if let Err(e) = self.queue_reconstruction(dir) {
                             self.notify(NoticeKind::Warning, tr!("A part of the recording, at another resolution, is not reconstructed: {error}", error = e));
@@ -984,7 +996,7 @@ impl Controller {
                 if !restarting {
                     self.world_import_saved(session.clone());
                     self.burst_saved(session.clone());
-                    self.scan_saved(session);
+                    self.scan_saved(session.filter(|_| was_scan && !nothing));
                     self.capture_ended();
                 }
             }
@@ -1044,6 +1056,9 @@ impl Controller {
         anyhow::ensure!(self.stop_generation.load(Ordering::Acquire) == stop_generation, "{}", tr("Finish the current capture first."));
         if rollover { anyhow::ensure!(matches!(self.view().capture.state,CaptureState::Recording|CaptureState::Paused), "{}", tr("Finish the current capture first.")); }
         if !rollover && matches!(self.view().capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused) { return Ok(()); }
+        if !rollover {
+            self.capture_serial.fetch_add(1, Ordering::AcqRel);
+        }
         anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "{}", tr("Orbiters - N4N0 is quitting."));
         let settings = self.settings();
         let spout = matches!(source, SourceSpec::Spout { .. });

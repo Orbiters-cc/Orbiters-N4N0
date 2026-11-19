@@ -119,7 +119,7 @@ fn signed_in() -> serde_json::Value {
         let mut once = Some(token.0);
         let ended = crate::pipeline::run(
             &stop,
-            || once.take(),
+            || once.take().ok_or(crate::pipeline::NoToken::Refused),
             |m| {
                 let t = serde_json::from_str::<serde_json::Value>(m).ok().and_then(|v| v["type"].as_str().map(str::to_string)).unwrap_or_default();
                 *types.entry(t).or_default() += 1;

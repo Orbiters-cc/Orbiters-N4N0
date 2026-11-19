@@ -131,8 +131,10 @@ impl Controller {
     /// about a credential that was refused, which shows as refused until an answer says otherwise.
     fn read_account(self: &Shared, server: Server, modified: Option<SystemTime>, again_refused: bool) {
         let saved = account::read(server);
+        let previous_token;
         let (generation, refusals) = {
             let mut rt = self.account_runtime.lock().unwrap();
+            previous_token = rt.account.as_ref().map(|a| a.token.clone());
             rt.read = Some((server, modified));
             rt.account = saved.clone();
             rt.offline_since = None;
@@ -150,10 +152,16 @@ impl Controller {
             });
             return;
         };
+        // A refused credential asked about again shows as refused until an answer says otherwise.
         if !again_refused {
             self.update(|s| {
+                let same_server = s.account.development == development;
                 s.account.development = development;
-                s.account.state = AccountState::Checking { username: saved.username.clone() };
+                // The same account checked again (another Orbiters tool rewrote the shared file): it stays signed in while
+                // Orbiters answers, so that VRChat's sign-in, friends and invites are not switched off for the check.
+                if !rechecking_same(&s.account.state, previous_token.as_deref(), &saved.token, same_server) {
+                    s.account.state = AccountState::Checking { username: saved.username.clone() };
+                }
             });
         }
         let answer = Api::new(server).check(&saved.token);
@@ -583,5 +591,26 @@ impl Controller {
         self.account_runtime.lock().unwrap().read = Some((Server::current(), None));
         self.account_runtime.lock().unwrap().account = Some(Account { token: "fake".into(), user: None, username: Some("tester".into()), avatar_url: None });
         self.update(|s| { s.account.state = AccountState::SignedIn { username: "tester".into() }; s.account.development = Server::current() == Server::Development; });
+    }
+}
+
+/// Whether a read of the saved account is a re-check of the account already signed in on show (same token, same
+/// server): no "Checking" then. Another token, or any other state, is checked as before.
+fn rechecking_same(shown: &AccountState, previous_token: Option<&str>, saved_token: &str, same_server: bool) -> bool {
+    same_server && matches!(shown, AccountState::SignedIn { .. }) && previous_token == Some(saved_token)
+}
+
+#[cfg(test)]
+mod recheck_tests {
+    use super::*;
+
+    #[test]
+    fn a_recheck_of_the_same_account_keeps_it_signed_in() {
+        let signed_in = AccountState::SignedIn { username: "a".into() };
+        assert!(rechecking_same(&signed_in, Some("t"), "t", true));
+        assert!(!rechecking_same(&signed_in, Some("t"), "other", true), "another token is checked (VRChat suspended)");
+        assert!(!rechecking_same(&signed_in, Some("t"), "t", false), "another server too");
+        assert!(!rechecking_same(&signed_in, None, "t", true));
+        assert!(!rechecking_same(&AccountState::Expired { username: None }, Some("t"), "t", true));
     }
 }

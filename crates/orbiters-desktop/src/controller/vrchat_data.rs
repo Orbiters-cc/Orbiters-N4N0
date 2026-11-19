@@ -323,6 +323,7 @@ impl Controller {
                             Ok(went) => return Ok(Response::Went(went)),
                             Err(super::travel::GoFailure::BridgeBusy) => return Err(WorldError::BridgeBusy),
                             Err(super::travel::GoFailure::Start(words)) => return Err(WorldError::NotStarted(words)),
+                            Err(super::travel::GoFailure::BadDestination) => return Err(WorldError::InvalidWorld),
                             Err(super::travel::GoFailure::Invite(why)) => why,
                         }
                     } else {

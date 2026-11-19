@@ -70,6 +70,12 @@ const PICTURES_KEPT: std::time::Duration = std::time::Duration::from_secs(600);
 /// table (hundreds of thousands of rows, a third of a second), so what it found is kept while the database and its
 /// write-ahead log keep their length and time, for [`PICTURES_KEPT`] at most.
 pub(crate) fn vrcx_last_pictures(path: &Path, db: &Connection, account: &str) -> std::sync::Arc<std::collections::HashMap<String, String>> {
+    vrcx_last_pictures_now(path, db, account).unwrap_or_default()
+}
+
+/// [`vrcx_last_pictures`], `None` when the query fails now (SQLITE_BUSY while VRCX writes): nothing is kept then, so the
+/// next round reads again instead of keeping "no pictures" for ten minutes.
+pub(crate) fn vrcx_last_pictures_now(path: &Path, db: &Connection, account: &str) -> Option<std::sync::Arc<std::collections::HashMap<String, String>>> {
     type Kept = (PathBuf, String, Vec<Option<(u64, std::time::SystemTime)>>, std::time::Instant, std::sync::Arc<std::collections::HashMap<String, String>>);
     static KEPT: std::sync::Mutex<Option<Kept>> = std::sync::Mutex::new(None);
     let stamp = |p: &Path| std::fs::metadata(p).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
@@ -78,22 +84,21 @@ pub(crate) fn vrcx_last_pictures(path: &Path, db: &Connection, account: &str) ->
     let stamps = vec![stamp(path), stamp(Path::new(&wal))];
     if let Some((p, a, s, at, pictures)) = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
         if p == path && a == account && *s == stamps && at.elapsed() < PICTURES_KEPT {
-            return pictures.clone();
+            return Some(pictures.clone());
         }
     }
     let table = format!("{}_feed_avatar", vrcx_table_prefix(account));
     let mut pictures = std::collections::HashMap::new();
     let sql = format!("SELECT a.user_id, a.current_avatar_thumbnail_image_url FROM \"{table}\" a JOIN (SELECT user_id, MAX(id) AS latest FROM \"{table}\" GROUP BY user_id) b ON a.id = b.latest"); // i18n: not shown (SQL)
-    if let Ok(mut q) = db.prepare(&sql) {
-        if let Ok(rows) = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))) {
-            for (id, image) in rows.flatten() {
-                pictures.entry(id).or_insert_with(|| image.unwrap_or_default());
-            }
-        }
+    let mut q = db.prepare(&sql).ok()?;
+    let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))).ok()?;
+    for row in rows {
+        let (id, image) = row.ok()?;
+        pictures.entry(id).or_insert_with(|| image.unwrap_or_default());
     }
     let pictures = std::sync::Arc::new(pictures);
     *KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((path.to_path_buf(), account.to_string(), stamps, std::time::Instant::now(), pictures.clone()));
-    pictures
+    Some(pictures)
 }
 
 fn vrcx_friends(db: &Connection, account: &str) -> BTreeSet<String> {

@@ -305,6 +305,9 @@ pub enum Notice {
     CoolingDown { to: String, until: i64 },
     /// A text in the page's language, ready to show.
     Error(String),
+    /// A boop or an invite request to `to` that did not go (or may not have): the page takes back its "Sent" and shows
+    /// `text`, in the page's language.
+    Failed { to: String, action: SentKind, text: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

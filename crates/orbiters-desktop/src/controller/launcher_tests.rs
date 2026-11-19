@@ -730,6 +730,9 @@ fn an_unchanged_scheduled_full_read_publishes_nothing() {
 fn a_second_play_on_a_mac_keeps_the_first_destination_and_an_account_change_drops_it() {
     let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, ..Default::default() });
     let c = mac(machine.clone());
+    // The press is made on the signed-in account's own list.
+    let (_, _) = c.test_vrchat(vec![]);
+    signed_in_list(&c);
     c.launcher_game(machine.as_ref());
     c.launcher_do(mine(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) }));
     // A plain Play pressed again while the person is still to press Play in Obelisk.

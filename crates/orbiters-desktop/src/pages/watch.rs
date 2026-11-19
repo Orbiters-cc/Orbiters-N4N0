@@ -194,6 +194,12 @@ impl<K, T> Drop for Watch<K, T> {
 }
 
 impl<K, T> Watch<K, T> {
+    /// Whether its looks run now (tests).
+    #[cfg(test)]
+    pub fn is_running(&self) -> bool {
+        self.running.is_some()
+    }
+
     /// Ends the looks (the next [`Watch::keep`] starts them again, and gives the page its first look as a new one). A
     /// watch given up after its look kept panicking is tried again too: the page asks for a fresh start.
     pub fn stop(&mut self) {

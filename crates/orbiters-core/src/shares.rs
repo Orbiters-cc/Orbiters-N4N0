@@ -340,15 +340,54 @@ pub(crate) fn json<T: serde::de::DeserializeOwned>(response: ureq::http::Respons
 /// [`json`] for a request that changes something: Orbiters said it was done (2xx) but its answer does not read (a
 /// newer shape): done all the same, and what it is now is asked again with `again`, rather than reporting a failure
 /// that would be tried again.
-fn json_done<T: serde::de::DeserializeOwned>(response: ureq::http::Response<ureq::Body>, again: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+///
+/// `as_asked` says whether an answer shows what was asked (the item or request asked about, in the state asked for).
+/// The answer is taken only when it does; when it does not read, or names something else (an empty `{"item":{}}`
+/// reads as a default item), what is there now is read again with `again`, and taken only when it shows what was
+/// asked. Otherwise the outcome is not known: an error, and nothing is sent again by this call.
+fn json_done<T: serde::de::DeserializeOwned>(
+    response: ureq::http::Response<ureq::Body>,
+    as_asked: impl Fn(&T) -> bool,
+    again: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
     let done = response.status().is_success();
     match json::<T>(response) {
-        Err(e) if done && e.downcast_ref::<serde_json::Error>().is_some() => {
-            eprintln!("captures: done, its answer not read ({e}); reading it again"); // i18n: not shown (a log's line)
-            again()
+        Ok(answer) if as_asked(&answer) => Ok(answer),
+        Err(e) if !done || e.downcast_ref::<serde_json::Error>().is_none() => Err(e),
+        Ok(_) if !done => Err(anyhow::anyhow!("{}", tr("Orbiters could not complete the request"))),
+        _ => {
+            eprintln!("captures: done, its answer not what was asked or not read; reading it again"); // i18n: not shown (a log's line)
+            let now = again()?;
+            if as_asked(&now) {
+                Ok(now)
+            } else {
+                eprintln!("captures: what was asked is not there (yet): outcome unknown, not sent again"); // i18n: not shown (a log's line)
+                Err(anyhow::anyhow!("{}", tr("Orbiters could not complete the request")))
+            }
         }
-        other => other,
     }
+}
+
+/// Whether `item` is `kind` `id` as `share` asked: public when asked, every recipient asked among its grants. A share
+/// that became a request to the owner (another member's item) is a `Shared::Request` for that item.
+fn shared_as_asked(shared: &Shared, kind: Kind, id: u64, share: &Share) -> bool {
+    match shared {
+        Shared::Item { item } => {
+            item.kind == kind
+                && item.id == id
+                && (!share.public || item.public)
+                && share.recipients.iter().all(|r| item.grants.iter().any(|g| g.vrchat_user_id == r.vrchat_user_id))
+        }
+        Shared::Request { request } => request.id != 0 && request.kind == kind && request.item_id == id,
+    }
+}
+
+/// Whether `item` is `kind` `id` with what `unshare` withdrew gone.
+fn unshared_as_asked(item: &Item, kind: Kind, id: u64, unshare: &Unshare) -> bool {
+    item.kind == kind
+        && item.id == id
+        && (!(unshare.all || unshare.public) || !item.public)
+        && (if unshare.all { item.grants.is_empty() } else { unshare.recipients.iter().all(|r| item.grants.iter().all(|g| &g.vrchat_user_id != r)) })
 }
 /// Whether `address` is a 3D capture's picture on the server asked ([`Api::capture_picture`]): a path of its own API
 /// (`/captures/capture/<id>/file?part=picture`, with its revision), never another host's address.
@@ -435,7 +474,7 @@ impl Api {
             tr("Choose at most 50 people and a message of at most 280 characters.")
         );
         let r = self.agent().post(&self.url(&format!("{}/share", path(kind, id)))).header("Authorization", &format!("Bearer {token}")).send_json(share)?;
-        json_done(r, || Ok(Shared::Item { item: self.capture_item(token, kind, id)? }))
+        json_done(r, |s| shared_as_asked(s, kind, id, share), || Ok(Shared::Item { item: self.capture_item(token, kind, id)? }))
     }
     pub fn unshare_capture(&self, token: &str, kind: Kind, id: u64, unshare: &Unshare) -> anyhow::Result<Item> {
         #[derive(Deserialize)]
@@ -448,7 +487,7 @@ impl Api {
             .header("Authorization", &format!("Bearer {token}"))
             .force_send_body()
             .send_json(unshare)?;
-        Ok(json_done(r, || Ok(Answer { item: self.capture_item(token, kind, id)? }))?.item)
+        Ok(json_done(r, |a: &Answer| unshared_as_asked(&a.item, kind, id, unshare), || Ok(Answer { item: self.capture_item(token, kind, id)? }))?.item)
     }
     pub fn capture_file(&self, token: &str, kind: Kind, id: u64, out: &std::path::Path) -> anyhow::Result<()> {
         let r = self.get_transfer(&self.url(&format!("{}/file", path(kind, id)))).header("Authorization", &format!("Bearer {token}")).call()?;
@@ -475,10 +514,16 @@ impl Api {
             .post(&self.url(&format!("captures/requests/{id}/{}", if approve { "approve" } else { "deny" })))
             .header("Authorization", &format!("Bearer {token}"));
         let r = if approve { request.send_json(serde_json::json!({"acknowledgeExplicit":acknowledge_explicit}))? } else { request.send_empty()? };
-        json_done(r, || {
-            let request = self.capture_requests(token, true)?.requests.into_iter().find(|r| r.id == id);
-            request.map(|request| RequestAnswer { request }).ok_or_else(|| anyhow::anyhow!("{}", tr("Orbiters could not complete the request")))
-        })
+        // Answered as asked: approved, or denied; a request still pending is not.
+        let wanted = if approve { RequestStatus::Approved } else { RequestStatus::Denied };
+        json_done(
+            r,
+            |a: &RequestAnswer| a.request.id == id && a.request.status == wanted,
+            || {
+                let request = self.capture_requests(token, true)?.requests.into_iter().find(|r| r.id == id);
+                request.map(|request| RequestAnswer { request }).ok_or_else(|| anyhow::anyhow!("{}", tr("Orbiters could not complete the request")))
+            },
+        )
     }
     pub fn moderate_capture(&self, token: &str, kind: Kind, id: u64, reason: Option<&str>) -> anyhow::Result<serde_json::Value> {
         json(
@@ -501,6 +546,68 @@ impl Api {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in Orbiters answering each request in turn with (status, body).
+    fn answering(answers: Vec<(u16, String)>) -> Api {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (status, body) in answers {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                while let Ok(n) = stream.read(&mut buffer) {
+                    request.extend_from_slice(&buffer[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let _ = write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        Api::at(&base)
+    }
+
+    /// Verifier (CORE2-2): a share, unshare or answer whose answer does not show what was asked is taken only when what is
+    /// there now shows it; an empty `{"item":{}}`, an unchanged item or a request still pending is not a success.
+    #[test]
+    fn a_change_is_reported_done_only_when_it_shows() {
+        let grant = |user: &str| Grant { id: 1, vrchat_user_id: user.into(), ..Default::default() };
+        let item = |grants: Vec<Grant>| serde_json::json!({"item": Item { kind: Kind::Capture, id: 3, mine: true, grants, ..Default::default() }}).to_string();
+        let share = Share { recipients: vec![Recipient { vrchat_user_id: "usr_friend".into(), display_name: "Friend".into() }], ..Default::default() };
+        // An empty item, then the item unchanged: not done as far as anyone can tell.
+        let api = answering(vec![(200, r#"{"item":{}}"#.into()), (200, item(vec![]))]);
+        assert!(api.share_capture("t", Kind::Capture, 3, &share).is_err());
+        // Its answer does not read, but the item shows the grant: done.
+        let api = answering(vec![(200, "{}".into()), (200, item(vec![grant("usr_friend")]))]);
+        assert!(matches!(api.share_capture("t", Kind::Capture, 3, &share), Ok(Shared::Item { item }) if item.id == 3));
+        // The answer itself shows it: no second request (the stand-in has none).
+        let api = answering(vec![(200, item(vec![grant("usr_friend")]))]);
+        assert!(api.share_capture("t", Kind::Capture, 3, &share).is_ok());
+        // Withdrawn: the grant must be gone.
+        let unshare = Unshare { recipients: vec!["usr_friend".into()], ..Default::default() };
+        let api = answering(vec![(200, "{}".into()), (200, item(vec![grant("usr_friend")]))]);
+        assert!(api.unshare_capture("t", Kind::Capture, 3, &unshare).is_err(), "still shared");
+        let api = answering(vec![(200, "{}".into()), (200, item(vec![]))]);
+        assert!(api.unshare_capture("t", Kind::Capture, 3, &unshare).is_ok());
+        // A request answered: approved, not still pending.
+        let request = |status: &str| serde_json::json!({"requests": [{"id": 5, "type": "capture", "itemId": 3, "status": status}]}).to_string();
+        let api = answering(vec![(200, "{}".into()), (200, request("pending"))]);
+        assert!(api.answer_capture_request("t", 5, true, false).is_err());
+        let api = answering(vec![(200, "{}".into()), (200, request("approved"))]);
+        assert!(api.answer_capture_request("t", 5, true, false).is_ok());
+        // A refusal is a refusal, never read again.
+        let api = answering(vec![(409, r#"{"code":"explicit-acknowledgement","message":"explicit"}"#.into())]);
+        assert!(api.share_capture("t", Kind::Capture, 3, &share).unwrap_err().downcast_ref::<ExplicitAcknowledgement>().is_some());
+    }
     /// The account's credential goes only with a capture picture's address on the server it was given for.
     #[test]
     fn only_a_capture_pictures_own_address_is_asked_with_the_account() {

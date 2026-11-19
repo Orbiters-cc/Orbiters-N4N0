@@ -17,6 +17,14 @@ use std::sync::{Arc, OnceLock};
 #[cfg(any(windows, target_os = "macos"))]
 const ART_MAX_BYTES: u64 = 4 << 20;
 
+/// Whether a list of the processes (`list`) still says who makes each of the sounds (`sound_pids`; 0: a sound of no
+/// process): each one's process is in it, under the same number AND started at the same time as `started` reads now.
+/// A number Windows gave again to another program is another process (night3, verifier point 5).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn processes_still_hold(sound_pids: &[u32], list: &[orbiters_n4n0::media::app_sound::Process], started: impl Fn(u32) -> Option<u64>) -> bool {
+    sound_pids.iter().filter(|pid| **pid != 0).all(|pid| list.iter().find(|p| p.pid == *pid).is_some_and(|p| p.started == started(*pid)))
+}
+
 /// The process's watcher, reading this system's music (its thread starts at the first want or command).
 pub fn watcher() -> &'static Arc<Watcher> {
     static WATCHER: OnceLock<Arc<Watcher>> = OnceLock::new();
@@ -294,7 +302,9 @@ mod platform {
         fn processes(&mut self) -> Vec<Process> {
             if let Some((at, list)) = &self.processes {
                 let fresh = at.elapsed() < PROCESSES_FOR;
-                if fresh && self.sound_pids.iter().all(|pid| *pid == 0 || list.iter().any(|p| p.pid == *pid)) {
+                // Each sound's process the same one: its number AND when it started (Windows gives a number of an
+                // ended process to another, and the player's mute must never reach that one).
+                if fresh && super::processes_still_hold(&self.sound_pids, list, |pid| opened(pid).0) {
                     return list.clone();
                 }
             }
@@ -1056,6 +1066,19 @@ mod platform {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// Night3, verifier point 5: a sound whose process number was given again to another program (another start
+    /// time) is not the player's any more: the list is read again before a volume or a mute is sent.
+    #[test]
+    fn a_process_is_its_number_and_when_it_started() {
+        use orbiters_n4n0::media::app_sound::Process;
+        let player = Process { pid: 40, parent: 1, exe: "Spotify.exe".into(), started: Some(1_000), package: None };
+        let list = vec![player];
+        assert!(processes_still_hold(&[40, 0], &list, |_| Some(1_000)), "the same process");
+        assert!(!processes_still_hold(&[40], &list, |_| Some(2_000)), "its number given to another program");
+        assert!(!processes_still_hold(&[41], &list, |_| Some(1_000)), "a process not in the list");
+        assert!(processes_still_hold(&[], &list, |_| None), "no sound");
+    }
 
     /// What this computer plays now (`cargo test -p orbiters-desktop media -- --ignored --nocapture`).
     #[test]

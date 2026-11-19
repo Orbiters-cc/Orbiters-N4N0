@@ -133,6 +133,20 @@ impl TranslatorThread {
     }
 }
 
+/// A line the translator failed on is asked again after this long (seconds).
+const FAILED_RETRY_S: f64 = 8.0;
+/// Past this many failed lines, those whose wait is over are forgotten (they no longer hold anything back).
+const FAILED_KEPT: usize = 256;
+
+/// Notes that the translator failed on `key` at `now`. The list stays bounded while the provider keeps failing (no
+/// network, an expired key: every new text the OCR reads failed once): entries past their retry time go (SWEEP-15).
+fn note_failed(failed: &mut HashMap<(String, String), f64>, key: (String, String), now: f64) {
+    failed.insert(key, now);
+    if failed.len() > FAILED_KEPT {
+        failed.retain(|_, at| now - *at < FAILED_RETRY_S);
+    }
+}
+
 pub struct Core {
     pub engine: Option<Engine>,
     pub tracker: Tracker,
@@ -446,7 +460,7 @@ impl Core {
                 Err(f) => {
                     for k in &request.keys {
                         if self.cache.get(&request.target, k).is_none() {
-                            self.failed.insert((request.target.clone(), k.clone()), now);
+                            note_failed(&mut self.failed, (request.target.clone(), k.clone()), now);
                         }
                     }
                     self.last_failure = Some(f);
@@ -469,7 +483,7 @@ impl Core {
             .tracks
             .iter()
             .filter(|t| self.cache.get(&target, &t.key).is_none())
-            .filter(|t| !self.failed.get(&(target.clone(), t.key.clone())).is_some_and(|at| now - at < 8.0))
+            .filter(|t| !self.failed.get(&(target.clone(), t.key.clone())).is_some_and(|at| now - at < FAILED_RETRY_S))
             .map(|t| (self.gaze.map_or(0.0, |g| gaze_priority(t, g)) + if t.settled() { 0.0 } else { 0.1 }, t))
             .collect();
         todo.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -519,6 +533,21 @@ pub fn same_text(a: &str, b: &str) -> bool {
 fn colours_far(a: Colours, b: Colours) -> bool {
     let d = |x: [u8; 3], y: [u8; 3]| (0..3).map(|i| (x[i] as i32 - y[i] as i32).abs()).max().unwrap_or(0);
     d(a.background, b.background) > 24 || d(a.text, b.text) > 40
+}
+
+#[cfg(test)]
+mod failed_tests {
+    /// SWEEP-15: with the provider failing on every new text for hours, the list of failed lines stays bounded, and a
+    /// line that failed just now is still held back.
+    #[test]
+    fn the_failed_lines_stay_bounded() {
+        let mut failed = std::collections::HashMap::new();
+        for i in 0..100_000u32 {
+            super::note_failed(&mut failed, ("fr".into(), format!("line {i}")), i as f64 * 0.5);
+        }
+        assert!(failed.len() <= super::FAILED_KEPT + 1, "{}", failed.len());
+        assert!(failed.contains_key(&("fr".to_string(), "line 99999".to_string())));
+    }
 }
 
 #[cfg(test)]

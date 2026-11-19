@@ -494,6 +494,9 @@ pub struct ShotEntry {
     /// SHA-256 of the file (hex), once something needed it: Orbiters knows uploaded pictures by it.
     #[serde(default)]
     pub sha256: Option<String>,
+    /// SHA-256 of the copy without metadata that goes to Orbiters ([`crate::png_meta`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_sha256: Option<String>,
 }
 
 /// A screenshot on disk with what it says.
@@ -503,6 +506,9 @@ pub struct Shot {
     pub size: u64,
     pub info: ShotInfo,
     pub sha256: Option<String>,
+    /// SHA-256 of the copy that goes to Orbiters, without the picture's metadata ([`crate::png_meta`]): what Orbiters
+    /// knows a picture by once it was sent that way.
+    pub clean_sha256: Option<String>,
 }
 
 /// `screenshots.json` in the cache folder: what each screenshot said, by path, re-read when its size or date changes.
@@ -594,7 +600,7 @@ impl ShotIndex {
                     continue;
                 }
                 if let Some(info) = read_shot(&path) {
-                    self.files.insert(path, ShotEntry { size, modified, info, sha256: None });
+                    self.files.insert(path, ShotEntry { size, modified, info, sha256: None, clean_sha256: None });
                     changed = true;
                     if !published || last_publish.elapsed() >= std::time::Duration::from_millis(100) {
                         publish(self);
@@ -621,7 +627,7 @@ impl ShotIndex {
             .files
             .iter()
             .filter(|(_, e)| e.info.world_id.is_some())
-            .map(|(p, e)| Shot { path: p.clone(), size: e.size, info: e.info.clone(), sha256: e.sha256.clone() })
+            .map(|(p, e)| Shot { path: p.clone(), size: e.size, info: e.info.clone(), sha256: e.sha256.clone(), clean_sha256: e.clean_sha256.clone() })
             .collect();
         out.sort_by(|a, b| b.info.taken.cmp(&a.info.taken).then_with(|| b.path.cmp(&a.path)));
         out
@@ -631,7 +637,7 @@ impl ShotIndex {
     /// carry no world of their own (their picture does).
     pub fn every_shot(&self) -> Vec<Shot> {
         let mut out: Vec<Shot> =
-            self.files.iter().map(|(p, e)| Shot { path: p.clone(), size: e.size, info: e.info.clone(), sha256: e.sha256.clone() }).collect();
+            self.files.iter().map(|(p, e)| Shot { path: p.clone(), size: e.size, info: e.info.clone(), sha256: e.sha256.clone(), clean_sha256: e.clean_sha256.clone() }).collect();
         out.sort_by(|a, b| b.info.taken.cmp(&a.info.taken).then_with(|| b.path.cmp(&a.path)));
         out
     }
@@ -641,12 +647,17 @@ impl ShotIndex {
         let mut changed = false;
         for p in paths {
             let Some(e) = self.files.get_mut(p) else { continue };
-            if e.sha256.is_some() {
-                continue;
+            if e.sha256.is_none() {
+                if let Ok(h) = sha256_file(p) {
+                    e.sha256 = Some(h);
+                    changed = true;
+                }
             }
-            if let Ok(h) = sha256_file(p) {
-                e.sha256 = Some(h);
-                changed = true;
+            if e.clean_sha256.is_none() {
+                if let Ok(h) = crate::png_meta::clean_sha256(p) {
+                    e.clean_sha256 = Some(h);
+                    changed = true;
+                }
             }
         }
         changed
@@ -680,7 +691,7 @@ mod tests {
         use std::os::windows::ffi::OsStringExt;
         let dir = std::env::temp_dir().join(format!("orbiters-shots-{}", uuid::Uuid::new_v4()));
         let file = dir.join("screenshots.json");
-        let entry = ShotEntry { size: 1, modified: 2, info: ShotInfo::default(), sha256: None };
+        let entry = ShotEntry { size: 1, modified: 2, info: ShotInfo::default(), sha256: None, clean_sha256: None };
         let mut index = ShotIndex::default();
         index.files.insert(dir.join("good.png"), entry.clone());
         index.files.insert(dir.join(std::ffi::OsString::from_wide(&[0xD800, b'.' as u16, b'p' as u16])), entry.clone());

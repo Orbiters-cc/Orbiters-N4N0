@@ -100,6 +100,19 @@ pub struct State {
 }
 
 impl State {
+    /// The account changed: its galleries, pictures, what is on its way and any window open on one of them go.
+    pub fn forget_account(&mut self) {
+        self.galleries = None;
+        self.galleries_job = Job::default();
+        self.feed = community::Pictures::default();
+        self.feed_job = Job::default();
+        self.asked = None;
+        self.error = None;
+        self.window = None;
+        self.event = None;
+        self.changed = true;
+    }
+
     pub fn busy(&self) -> bool {
         self.galleries_job.running() || self.feed_job.running() || self.event.as_ref().is_some_and(events::Window::loading)
     }

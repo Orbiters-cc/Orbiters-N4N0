@@ -180,6 +180,32 @@ impl AccountFollow {
     }
 }
 
+/// Work the window process is doing on a thread of its own, counted: every [`Job`] for as long as it runs, and the few
+/// other threads that write something (they hold a [`Working`]). While any is counted the window does not close to the
+/// tray (`crate::window_rest`): a job added later blocks it by default, without anyone having to think of it.
+static WORKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One piece of work of the window counted in [`working_now`] while this lives.
+pub struct Working(());
+
+impl Working {
+    pub fn begin() -> Self {
+        WORKING.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(())
+    }
+}
+
+impl Drop for Working {
+    fn drop(&mut self) {
+        WORKING.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// How many pieces of work of the window run now ([`Working`]).
+pub fn working_now() -> usize {
+    WORKING.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Work done on a background thread; the interface polls it every frame and repaints when it lands.
 ///
 /// A job whose work panicked ends too (Night PAGES-UI-16): it is no longer `running`, brings no value, and says so
@@ -205,8 +231,13 @@ impl<T: Send + 'static> Job<T> {
         let ctx = ctx.clone();
         let panicked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = panicked.clone();
+        // Counted as work of the window from now until its work ended (`crate::window_rest`: the window never closes to
+        // the tray in the middle of it, whatever it is: a project copy, a Library move, a package update, a save).
+        let working = Working::begin();
         std::thread::spawn(move || {
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            drop(working);
+            match result {
                 Ok(v) => {
                     let _ = tx.send(v);
                 }

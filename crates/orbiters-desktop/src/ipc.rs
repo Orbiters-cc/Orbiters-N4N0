@@ -115,8 +115,8 @@ pub enum ToService {
     CameraQr { active: bool },
     /// The window's offer to close to the tray (`crate::window_rest`), or none any more.
     WindowRest { offer: Option<crate::state::RestOffer> },
-    /// The VR band shows this offer.
-    WindowRestShown { id: u64 },
+    /// The offer the VR band shows now (`None`: none: hidden by SteamVR's dashboard, replaced by "Talk with N4N0?").
+    WindowRestShown { id: Option<u64> },
     /// Keep open, pressed on this offer in VR.
     KeepWindowOpen { id: u64 },
     /// The shared 3D view (`controller/shared_view.rs`).
@@ -540,6 +540,23 @@ impl Held {
 }
 
 #[cfg(test)]
+mod closed_link_tests {
+    /// verify-controller (CTL-11 f): a translation asked once the link to the service has closed returns at once,
+    /// not after its 30 s.
+    #[test]
+    fn a_translation_asked_after_the_link_closed_returns_at_once() {
+        let service = crate::service::tests::service();
+        let (client, between) = crate::service::tests::linked_through(&service, crate::ipc::Role::Overlay);
+        between.hang_up();
+        assert!(crate::service::tests::until(|| client.state.lock().unwrap().closed), "the link closed");
+        let asked = std::time::Instant::now();
+        let answer = client.translate(orbiters_translate::provider::Batch { target: "fr".into(), lines: Vec::new() });
+        assert!(answer.is_err());
+        assert!(asked.elapsed() < std::time::Duration::from_secs(5), "it waited {:?}", asked.elapsed());
+    }
+}
+
+#[cfg(test)]
 mod smoothing_ack_tests {
     use super::*;
     /// CTL-12: with no slider shown ahead, what the interface reads is the service's snapshot, not a copy.
@@ -795,10 +812,16 @@ impl Client {
     }
 
     pub fn send(&self, msg: &ToService) {
+        let _ = self.try_send(msg);
+    }
+
+    /// [`Self::send`], saying whether the line was written (false: the link is closed or the write failed).
+    pub fn try_send(&self, msg: &ToService) -> bool {
         let mut writer = self.writer.lock().unwrap();
-        if !self.state.lock().unwrap().closed {
-            let _ = write_line(&mut *writer, msg);
+        if self.state.lock().unwrap().closed {
+            return false;
         }
+        write_line(&mut *writer, msg).is_ok()
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -912,6 +935,12 @@ impl Client {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         self.vrchat_data.lock().unwrap().insert(id.clone(), tx);
+        // Registered after the link closed (its close cleared the waiting ones before this one came): no answer can
+        // come, so none is waited for (verify-controller, CTL-11 f).
+        if self.state.lock().unwrap().closed {
+            self.vrchat_data.lock().unwrap().remove(&id);
+            return Err(orbiters_i18n::tr("VRChat data request timed out. Please try again.").into());
+        }
         self.send(&ToService::VrchatData { id: id.clone(), scope, request });
         let result = rx.recv_timeout(Duration::from_secs(120)).unwrap_or_else(|_| Err(orbiters_i18n::tr("VRChat data request timed out. Please try again.").into()));
         self.vrchat_data.lock().unwrap().remove(&id);
@@ -923,6 +952,11 @@ impl Client {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         self.translated.lock().unwrap().insert(id.clone(), tx);
+        // As for VRChat data: after the close, nothing answers.
+        if self.state.lock().unwrap().closed {
+            self.translated.lock().unwrap().remove(&id);
+            return Err(crate::controller::translate::Refused::Unreachable("the link to the service is closed".into())); // i18n: not shown (log detail)
+        }
         self.send(&ToService::Translate { id: id.clone(), batch });
         let result = rx.recv_timeout(Duration::from_secs(30)).unwrap_or(Err(crate::controller::translate::Refused::Unreachable("no answer".into()))); // i18n: not shown (log detail)
         self.translated.lock().unwrap().remove(&id);
@@ -1249,7 +1283,7 @@ pub(crate) mod tests {
         o.mirror.zoom = 3;
         o.calls.picked = 2;
         // The window's offer to close to the tray (window_rest), what the VR band said of it.
-        s.window_rest = crate::state::WindowRest { offer: Some(crate::state::RestOffer { id: 3, until_ms: 1_762_800_008_000, for_ms: 8_000 }), shown: Some(3), kept: None };
+        s.window_rest = crate::state::WindowRest { offer: Some(crate::state::RestOffer { id: 3, until_ms: 1_762_800_008_000, for_ms: 8_000, left_ms: 8_000 }), shown: Some(3), kept: None };
         // The shared 3D view: a friend here, an offer waiting, a friend's view followed.
         s.shared_view.set(crate::state::SharedViewStatus {
             targets: vec![crate::state::CallContact { id: "c_AAAAAAAAAAAAAAAAAAAAAA".into(), name: "Nova Fox".into() }],

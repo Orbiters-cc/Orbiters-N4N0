@@ -314,6 +314,8 @@ struct Reconstruction {
     integrated: bool,
     /// Asked to pause at this moment: it stays the first in line, and its job stays on show.
     pausing: Option<Instant>,
+    /// It said it saw the pause (orbiters_core::reconstruction::Event::PauseSeen), at this moment.
+    seen: Option<Instant>,
     /// Off the GPU since (orbiters_core::reconstruction::Event::Pausing): what is left is its file.
     freed: bool,
     /// Stopped by the person: what it could have gone on from goes with it.
@@ -323,6 +325,17 @@ struct Reconstruction {
 /// How long a worker asked to pause may stay on the GPU. A step and the read back of the set take under half a second on
 /// the largest sessions: past this it is stuck, and killing it costs what happened since its last checkpoint.
 const PAUSE_LIMIT: Duration = Duration::from_secs(15);
+/// How long a worker that said it saw the pause (it is reading back where it stands and giving the GPU back) may take
+/// to leave it: bounded, since a driver that hangs after that still holds the GPU (night2, the verifier).
+const SEEN_PAUSE_LIMIT: Duration = Duration::from_secs(60);
+
+/// Whether a worker asked to pause `asked` ago, that said it saw it `seen` ago, has stayed on the GPU too long.
+fn pause_overdue(asked: Duration, seen: Option<Duration>) -> bool {
+    match seen {
+        Some(seen) => seen > SEEN_PAUSE_LIMIT,
+        None => asked > PAUSE_LIMIT,
+    }
+}
 /// How long quitting waits for a running reconstruction's checkpoint.
 const QUIT_PAUSE_LIMIT: Duration = Duration::from_secs(10);
 
@@ -2506,8 +2519,8 @@ impl Controller {
     /// checkpoint. Called by the watchers every second.
     fn check_pausing(&self) {
         let mut guard = self.reconstruction.lock().unwrap();
-        if let Some(r) = guard.as_mut().filter(|r| !r.freed && r.pausing.is_some_and(|t| t.elapsed() > PAUSE_LIMIT)) {
-            eprintln!("the reconstruction did not leave the GPU {} s after it was asked to pause: it was stopped", PAUSE_LIMIT.as_secs());
+        if let Some(r) = guard.as_mut().filter(|r| !r.freed && r.pausing.is_some_and(|t| pause_overdue(t.elapsed(), r.seen.map(|s| s.elapsed())))) {
+            eprintln!("the reconstruction did not leave the GPU in time after it was asked to pause (seen: {}): it was stopped", r.seen.is_some());
             r.freed = true;
             r.handle.cancel();
         }
@@ -2602,7 +2615,7 @@ impl Controller {
         });
         match ReconstructHandle::spawn(&dir, integrated, on_event, on_log, on_exit) {
             Ok(handle) => {
-                *guard = Some(Reconstruction { handle, dir, told: false, integrated, pausing: None, freed: false, stopped: false });
+                *guard = Some(Reconstruction { handle, dir, told: false, integrated, pausing: None, seen: None, freed: false, stopped: false });
                 Ok(())
             }
             Err(e) => {
@@ -2741,6 +2754,12 @@ impl Controller {
                     j.resuming = true;
                 }
             }),
+            // It saw the pause: it has longer (bounded) to read back and give the GPU back.
+            ReconstructEvent::PauseSeen => {
+                if let Some(r) = self.reconstruction.lock().unwrap().as_mut() {
+                    r.seen = Some(Instant::now());
+                }
+            }
             // Off the GPU; only its file is left, however long the disk takes beside a capture's frames.
             ReconstructEvent::Pausing => {
                 if let Some(r) = self.reconstruction.lock().unwrap().as_mut() {

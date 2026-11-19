@@ -863,17 +863,14 @@ impl Settings {
                 // ([`Settings::save_to`]) rather than these defaults over it.
                 eprintln!("settings: {}: {e}", path.display());
                 crate::keep_aside(path);
-                loaded_unreadable(path, true);
+                loaded_unreadable(path);
                 return Self::unread();
             }
         };
-        loaded_unreadable(path, false);
+        // A later read that works does NOT end the unreadable state: what this process holds (the service's live
+        // settings) is still the defaults, and a save must go onto the person's file ([`Settings::save_to`]).
         let migrated = migrated(&text);
-        let (mut settings, dropped) = crate::json_lenient::<Self>(migrated.as_deref().unwrap_or(&text));
-        // A statistics switch that did not read is off, never on by default: the person may have turned it off (PRIV-12).
-        if dropped.iter().any(|d| d == "usage" || d == "usage.enabled" || d == "(not JSON)") {
-            settings.usage.enabled = false;
-        }
+        let (settings, dropped) = Self::parse(migrated.as_deref().unwrap_or(&text));
         if !dropped.is_empty() {
             let aside = crate::keep_aside(path);
             eprintln!("settings: {} left at their default ({}), the file kept as {:?}", dropped.join(", "), path.display(), aside);
@@ -889,6 +886,16 @@ impl Settings {
 
     pub fn load() -> Self {
         Self::load_from(&crate::paths::settings_file())
+    }
+
+    /// The settings in `text` as [`crate::json_lenient`] reads them, a statistics switch that did not read off, never on
+    /// by default (the person may have turned it off; PRIV-12); with the fields left out.
+    fn parse(text: &str) -> (Self, Vec<String>) {
+        let (mut settings, dropped) = crate::json_lenient::<Self>(text);
+        if dropped.iter().any(|d| d == "usage" || d == "usage.enabled" || d == "(not JSON)") {
+            settings.usage.enabled = false;
+        }
+        (settings, dropped)
     }
 
     /// The language a program of its own (the call, capture and speech workers) speaks: the one these settings hold (what the account gave
@@ -914,11 +921,21 @@ impl Settings {
             std::fs::create_dir_all(dir)?;
         }
         let rebased;
-        let settings = if was_loaded_unreadable(path) {
+        let settings = if let Some(kept) = was_loaded_unreadable(path) {
             match crate::read_text(path) {
                 Ok(Some(text)) => {
+                    // The person's file is kept beside, whole, before anything is written over it the first time;
+                    // without that copy nothing is written.
+                    if !kept {
+                        let Some(aside) = crate::keep_aside(path) else {
+                            let step = "keep_aside"; // i18n: not shown (the name of the step that failed, as night2/core wrote it)
+                            anyhow::bail!("{}", orbiters_i18n::tr!("{path} could not be read, and is not replaced by defaults: {error}", path = path.display(), error = step));
+                        };
+                        eprintln!("settings: {} kept as {} before the first save onto it", path.display(), aside.display());
+                        set_kept_aside(path);
+                    }
                     let migrated = migrated(&text);
-                    let (on_disk, _) = crate::json_lenient::<Self>(migrated.as_deref().unwrap_or(&text));
+                    let (on_disk, _) = Self::parse(migrated.as_deref().unwrap_or(&text));
                     rebased = self.changes_onto(on_disk);
                     &rebased
                 }
@@ -946,23 +963,27 @@ impl Settings {
         let (Ok(mine), Ok(defaults), Ok(mut out)) = (serde_json::to_value(self), serde_json::to_value(Self::unread()), serde_json::to_value(&base)) else {
             return base;
         };
-        let (Some(mine), Some(defaults)) = (mine.as_object(), defaults.as_object()) else { return base };
-        for (key, value) in mine {
-            let default = defaults.get(key);
-            if default == Some(value) {
-                continue;
+        /// Puts onto `out` each leaf of `mine` that differs from `start`, at any depth (one menu choice changed leaves
+        /// the menu's others as the file has them).
+        fn merge(mine: &serde_json::Value, start: Option<&serde_json::Value>, out: &mut serde_json::Value) {
+            if start == Some(mine) {
+                return;
             }
-            match (value.as_object(), default.and_then(|d| d.as_object()), out.get_mut(key).and_then(|o| o.as_object_mut())) {
-                (Some(inner), Some(inner_default), Some(target)) => {
-                    for (inner_key, inner_value) in inner {
-                        if inner_default.get(inner_key) != Some(inner_value) {
-                            target.insert(inner_key.clone(), inner_value.clone());
+            match (mine.as_object(), start.and_then(|s| s.as_object()), out.as_object_mut()) {
+                (Some(mine), Some(start), Some(target)) => {
+                    for (key, value) in mine {
+                        let slot = target.entry(key.clone()).or_insert(serde_json::Value::Null);
+                        if slot.is_null() && !start.contains_key(key) {
+                            *slot = value.clone();
+                        } else {
+                            merge(value, start.get(key), slot);
                         }
                     }
                 }
-                _ => out[key] = value.clone(),
+                _ => *out = mine.clone(),
             }
         }
+        merge(&mine, Some(&defaults), &mut out);
         serde_json::from_value(out).unwrap_or(base)
     }
 
@@ -1049,19 +1070,21 @@ const LEGACY_N4N0_KEY: &str = "orb";
 /// or `None` when the text has no earlier key (or is not a JSON object: [`crate::json_lenient`] deals with that).
 /// The settings files this process could not read when it loaded them ([`Settings::load_from`]): it holds defaults for
 /// them, which must never be saved over the real ones.
-static LOADED_UNREADABLE: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+/// For the life of the process (whatever is read afterwards): the settings it started from are not the file's. The
+/// value: the file has been kept beside since.
+static LOADED_UNREADABLE: std::sync::Mutex<std::collections::BTreeMap<PathBuf, bool>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-fn loaded_unreadable(path: &Path, unreadable: bool) {
-    let mut set = LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if unreadable {
-        set.insert(path.to_path_buf());
-    } else if !set.is_empty() {
-        set.remove(path);
-    }
+fn loaded_unreadable(path: &Path) {
+    LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(path.to_path_buf()).or_insert(false);
 }
 
-fn was_loaded_unreadable(path: &Path) -> bool {
-    LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(path)
+fn set_kept_aside(path: &Path) {
+    LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_path_buf(), true);
+}
+
+/// Whether this process loaded `path` unreadable, and if so whether the file was kept beside since.
+fn was_loaded_unreadable(path: &Path) -> Option<bool> {
+    LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path).copied()
 }
 
 fn migrated(text: &str) -> Option<String> {
@@ -1156,6 +1179,41 @@ mod tests {
         assert_eq!((after.picture_folders.clone(), after.storage_limit_gb), (real.picture_folders.clone(), 7.0), "the real settings kept");
         assert!(after.dolly_streams && after.n4n0.wake_word != N4n0Settings::default().wake_word, "and the change made meanwhile");
         assert!(after.usage.enabled, "the statistics off for that run only: the file's own choice kept");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Verifier (CORE-4): another reader of the same process reading the file once it is free does not end the
+    /// protection; the first save keeps the person's file beside; one menu choice changed leaves the file's other menu
+    /// choices; a statistics switch on the file that does not read stays off.
+    #[cfg(windows)]
+    #[test]
+    fn a_second_reader_does_not_let_defaults_over_the_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("orbiters-settings-reader-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let file = r#"{"storage_limit_gb": 7, "picture_folders": ["I:/VRChat pics"], "usage": {"enabled": "maybe"}, "n4n0": {"menu": {"keyboard": "azerty"}}}"#;
+        std::fs::write(&path, file).unwrap();
+        let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        let live = Settings::load_from(&path);
+        assert_eq!(live.storage_limit_gb, Settings::default().storage_limit_gb, "the defaults for now");
+        drop(lock);
+        // A worker of the service reads the file now (the picture folders): it reads it whole.
+        assert_eq!(Settings::load_from(&path).picture_folders, [PathBuf::from("I:/VRChat pics")]);
+        // The service then saves its live settings, one menu choice changed.
+        let mut changed = live.clone();
+        changed.n4n0.menu.touch = !live.n4n0.menu.touch;
+        changed.save_to(&path).unwrap();
+        let after = Settings::load_from(&path);
+        assert_eq!((after.storage_limit_gb, after.picture_folders.clone()), (7.0, vec![PathBuf::from("I:/VRChat pics")]), "the person's settings kept");
+        assert_eq!((after.n4n0.menu.keyboard, after.n4n0.menu.touch), (KeyboardLayout::Azerty, changed.n4n0.menu.touch), "the other menu choice kept");
+        assert!(!after.usage.enabled, "a switch that did not read is written off, not on");
+        let kept: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.bad-")).collect();
+        assert!(kept.iter().any(|e| std::fs::read_to_string(e.path()).unwrap() == file), "the person's file kept beside, as it was");
+        // Saved again: still onto the file.
+        changed.dolly_streams = true;
+        changed.save_to(&path).unwrap();
+        assert_eq!(Settings::load_from(&path).storage_limit_gb, 7.0);
         std::fs::remove_dir_all(dir).ok();
     }
 

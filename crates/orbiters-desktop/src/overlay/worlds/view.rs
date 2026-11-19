@@ -364,6 +364,7 @@ pub struct View {
     /// The cube that takes over once its six faces are drawn.
     switching: Option<usize>,
     /// Cube switches in a row that SteamVR refused a face of (a picture or a show): the cube showing stays ([`commit_switch`]).
+    #[cfg_attr(not(windows), allow(dead_code))]
     switch_refusals: u32,
     /// The texture slot each face shows on the active cube.
     shown_slot: [usize; 6],
@@ -1285,26 +1286,37 @@ impl View {
             self.wait = side.handed_over();
             if self.switching == Some(cube_index) {
                 // A cube taking over with a face SteamVR did not take would show a stale or blank sector where the cube
-                // showing now is whole: it stays, and the new one is planned again, a few times at most (light-vr A).
-                if !commit_switch(refused, &mut self.switch_refusals) {
-                    (self.shown_slot, self.drawn) = before;
-                    self.abandon(cube_index);
-                    return;
-                }
-                let mut shown = 0;
-                for f in 0..6 {
-                    self.published += 1;
-                    let _ = overlay.set_alpha(handles[cube_index][f], self.alpha);
-                    shown += usize::from(overlay.show(handles[cube_index][f]).is_ok());
-                }
-                if shown < 6 && !commit_switch(true, &mut self.switch_refusals) {
-                    // Shown in part: that part goes again, the cube showing stays.
-                    for f in 0..6 {
-                        let _ = overlay.hide(handles[cube_index][f]);
+                // showing now is whole: it stays, and the new one is planned again, three times in a row at most. One decision
+                // per attempt (verify-vr: a refused show reset the count first, so a refusing SteamVR redrew the cube for ever).
+                // With nothing showing yet there is nothing to keep: the first cube shows as it can.
+                let nothing_shown = self.phase == Phase::Loading;
+                if refused {
+                    if !switch_goes(true, nothing_shown, &mut self.switch_refusals) {
+                        (self.shown_slot, self.drawn) = before;
+                        self.abandon(cube_index);
+                        return;
                     }
-                    (self.shown_slot, self.drawn) = before;
-                    self.abandon(cube_index);
-                    return;
+                    for f in 0..6 {
+                        self.published += 1;
+                        let _ = overlay.set_alpha(handles[cube_index][f], self.alpha);
+                        let _ = overlay.show(handles[cube_index][f]);
+                    }
+                } else {
+                    let mut shown = 0;
+                    for f in 0..6 {
+                        self.published += 1;
+                        let _ = overlay.set_alpha(handles[cube_index][f], self.alpha);
+                        shown += usize::from(overlay.show(handles[cube_index][f]).is_ok());
+                    }
+                    if !switch_goes(shown < 6, nothing_shown, &mut self.switch_refusals) {
+                        // Shown in part: that part goes again, the cube showing stays.
+                        for f in 0..6 {
+                            let _ = overlay.hide(handles[cube_index][f]);
+                        }
+                        (self.shown_slot, self.drawn) = before;
+                        self.abandon(cube_index);
+                        return;
+                    }
                 }
                 if cube_index != self.active {
                     for f in 0..6 {
@@ -1327,10 +1339,22 @@ impl View {
 
 /// Cube switches in a row a refused face may hold back before one goes ahead as before (whole or not): a SteamVR that keeps
 /// refusing would otherwise have the whole cube drawn again every turn.
+#[cfg_attr(not(windows), allow(dead_code))]
 const SWITCH_REFUSALS_AT_MOST: u32 = 3;
+
+/// The one decision of a cube switch attempt ([`commit_switch`]), or at once when no cube shows yet.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn switch_goes(refused: bool, nothing_shown: bool, refusals: &mut u32) -> bool {
+    if nothing_shown {
+        *refusals = 0;
+        return true;
+    }
+    commit_switch(refused, refusals)
+}
 
 /// Whether a cube switch goes ahead: always when nothing was refused (the count starts again), else only once
 /// [`SWITCH_REFUSALS_AT_MOST`] switches in a row were held back.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn commit_switch(refused: bool, refusals: &mut u32) -> bool {
     if !refused {
         *refusals = 0;
@@ -1401,6 +1425,17 @@ mod tests {
         let held: Vec<bool> = (0..5).map(|_| super::commit_switch(true, &mut refusals)).collect();
         assert_eq!(held, [false, false, false, true, false], "held back three times, then as before, and the count starts again");
         assert!(super::commit_switch(false, &mut refusals));
+        assert_eq!(refusals, 0);
+    }
+
+    /// verify-vr: attempts whose shows keep failing are held three times, then go; each attempt decides once. The first cube is
+    /// never held (nothing would show).
+    #[test]
+    fn refused_shows_hold_a_switch_three_times_at_most_and_never_the_first() {
+        let mut refusals = 0;
+        let attempts: Vec<bool> = (0..4).map(|_| super::switch_goes(true, false, &mut refusals)).collect();
+        assert_eq!(attempts, [false, false, false, true]);
+        assert!(super::switch_goes(true, true, &mut refusals), "the first cube shows as it can");
         assert_eq!(refusals, 0);
     }
 

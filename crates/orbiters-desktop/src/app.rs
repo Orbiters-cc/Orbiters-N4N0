@@ -122,6 +122,9 @@ impl App {
         if self.page == Page::N4n0 && page != Page::N4n0 {
             self.n4n0.leave(&self.ctl);
         }
+        if self.page == Page::Home && page != Page::Home {
+            self.home.left(&self.ctl);
+        }
         // Home again while a feature's page shows: back to Home itself.
         if page == Page::Home && self.page == Page::Home {
             self.home.back_home();
@@ -818,25 +821,28 @@ impl eframe::App for App {
 }
 
 impl App {
-    /// Something in the window is at work or open, which closing it would end or lose (`crate::window_rest`): what the
-    /// service runs for it (an upload, a reconstruction, a recording, a clean-up, a share, a call), a page still
-    /// reading, a window, dialog, editor or viewer open on any page (kept while another page shows), a menu open,
-    /// Home's music page.
-    fn working(&self, ctx: &egui::Context, snap: &Snapshot) -> bool {
+    /// What must ALL hold for the window to close itself to the tray (`crate::window_rest`): safe by construction, the
+    /// window closes only on an explicit list of idle facts, and any work of the window counts (every page `Job` and
+    /// the few other threads that write: `pages::Working`), so a job added later blocks it without anyone listing it
+    /// (SWEEP-18: a project copy, a Library move, a package update, a Toolkit install were cut by a list of busy
+    /// things that did not name them).
+    fn idle_facts(&self, ctx: &egui::Context, snap: &Snapshot) -> [(&'static str, bool); 13] {
         use crate::state::UploadState;
-        snap.uploads.iter().any(|u| matches!(u.state, UploadState::Preparing | UploadState::Sending))
-            || snap.reconstruction.is_some()
-            || snap.is_capturing()
-            || snap.cleanup.is_some()
-            || snap.capture_shares.iter().any(|j| j.outcome.is_none())
-            || snap.n4n0.calls.call.is_some()
-            || self.page_busy()
-            || orbiters_ui::popup::any_open(ctx)
-            || self.home.holds()
-            || self.sessions.holds()
-            || self.worlds.holds()
-            || self.events.holds()
-            || self.projects.holds()
+        [
+            ("no work of the window runs (a job, a copy, a move, an install, a save, a scan)", pages::working_now() == 0),
+            ("no upload prepares or sends", !snap.uploads.iter().any(|u| matches!(u.state, UploadState::Preparing | UploadState::Sending))),
+            ("no reconstruction runs", snap.reconstruction.is_none()),
+            ("nothing records or imports", !snap.is_capturing()),
+            ("no clean-up runs", snap.cleanup.is_none()),
+            ("no share is under way", !snap.capture_shares.iter().any(|j| j.outcome.is_none())),
+            ("no call", snap.n4n0.calls.call.is_none()),
+            ("no menu is open", !orbiters_ui::popup::any_open(ctx)),
+            ("nothing is open on Home (a profile, the music page)", !self.home.holds()),
+            ("nothing is open in Photos & captures or the captures (a picture, an editor, a viewer, a dialog)", !self.sessions.holds()),
+            ("no world's page or Share window is open", !self.worlds.holds()),
+            ("no event's or picture's window is open", !self.events.holds()),
+            ("no dialog is open on Unity projects", !self.projects.holds()),
+        ]
     }
 
     /// One look at the countdown to closing to the tray: the offer up, taken down, or the window closing (as its
@@ -847,7 +853,6 @@ impl App {
             return;
         }
         let snap = self.ctl.view();
-        let in_vr = snap.steamvr.running && snap.steamvr.overlay && snap.steamvr.headset_in_use == Some(true);
         #[cfg(windows)]
         let desktop = crate::window_rest::card::can_show();
         #[cfg(not(windows))]
@@ -855,8 +860,8 @@ impl App {
         let facts = Facts {
             minimized: ctx.input(|i| i.viewport().minimized.unwrap_or(false)),
             vrchat: snap.vrchat.running && snap.vrchat.runs_here(),
-            seen_at: if in_vr { Some(Where::Vr) } else if desktop { Some(Where::Desktop) } else { None },
-            working: self.working(ctx, &snap),
+            seen_at: crate::window_rest::where_seen(snap.steamvr.running, snap.steamvr.overlay, snap.steamvr.headset_in_use, desktop),
+            working: !self.idle_facts(ctx, &snap).iter().all(|(_, idle)| *idle),
             on: snap.settings.close_minimized_window,
             shown_in_vr: snap.window_rest.shown,
             kept_in_vr: snap.window_rest.kept,
@@ -880,12 +885,16 @@ impl App {
                 return;
             }
         }
+        // The desktop card shows while its countdown runs; paused (a game in exclusive full screen), it is not drawn.
         #[cfg(windows)]
-        if let Some((offer, Where::Desktop)) = self.rest.offer(now, now_ms) {
-            if self.rest_card.show(ctx.pixels_per_point(), offer.left(now_ms), offer.seconds(now_ms)) {
-                self.rest.keep();
-                self.rest_card.hide();
+        match self.rest.offer(now, now_ms) {
+            Some((offer, Where::Desktop)) if self.rest.running() => {
+                if self.rest_card.show(ctx.pixels_per_point(), offer.left(now_ms), offer.seconds(now_ms)) {
+                    self.rest.keep();
+                    self.rest_card.hide();
+                }
             }
+            _ => self.rest_card.hide(),
         }
         if let Some(t) = self.rest.next_look(now) {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(t));

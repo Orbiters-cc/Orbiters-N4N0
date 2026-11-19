@@ -29,6 +29,24 @@ pub fn switched(head: &str) -> bool {
     status.starts_with("HTTP/1.1 101") && upgraded
 }
 
+/// Why the opening did not switch: the HTTP status when there was one, and the server's `Retry-After` (seconds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    pub status: Option<u16>,
+    pub retry_after: Option<Duration>,
+}
+
+impl From<Option<u16>> for Refusal {
+    fn from(status: Option<u16>) -> Self {
+        Self { status, retry_after: None }
+    }
+}
+
+/// The `Retry-After` of an answer head, in seconds (an HTTP date is not read: the minimum wait applies then).
+pub fn retry_after_of(head: &str) -> Option<Duration> {
+    head.split("\r\n").find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("retry-after")).and_then(|(_, v)| v.trim().parse::<u64>().ok())).map(Duration::from_secs)
+}
+
 /// The HTTP status of an answer head that did not switch (401: the token is no longer good).
 pub fn status_of(head: &str) -> Option<u16> {
     head.split(' ').nth(1)?.parse().ok()
@@ -158,20 +176,20 @@ const DEAD_AFTER: Duration = Duration::from_secs(95);
 
 impl<S: Read + Write> Connection<S> {
     /// Opens the websocket over `stream` (already connected, TLS done). `Err(Some(status))` when the server refused.
-    pub fn open(mut stream: S, host: &str, path: &str, user_agent: &str) -> Result<Self, Option<u16>> {
+    pub fn open(mut stream: S, host: &str, path: &str, user_agent: &str) -> Result<Self, Refusal> {
         let key = STANDARD.encode(uuid::Uuid::new_v4().as_bytes());
-        stream.write_all(handshake(host, path, &key, user_agent).as_bytes()).map_err(|_| None)?;
+        stream.write_all(handshake(host, path, &key, user_agent).as_bytes()).map_err(|_| Refusal::from(None))?;
         let mut head = Vec::new();
         let mut byte = [0u8; 1];
         while !head.ends_with(b"\r\n\r\n") {
-            if head.len() > 16 * 1024 || stream.read(&mut byte).map_err(|_| None)? == 0 {
-                return Err(None);
+            if head.len() > 16 * 1024 || stream.read(&mut byte).map_err(|_| Refusal::from(None))? == 0 {
+                return Err(None.into());
             }
             head.push(byte[0]);
         }
         let head = String::from_utf8_lossy(&head);
         if !switched(&head) {
-            return Err(status_of(&head));
+            return Err(Refusal { status: status_of(&head), retry_after: retry_after_of(&head) });
         }
         Ok(Self { stream, decoder: Decoder::default(), last_heard: Instant::now(), last_ping: Instant::now() })
     }
@@ -290,7 +308,7 @@ pub fn run(stop: &AtomicBool, token: impl FnMut() -> Result<String, NoToken>, me
 pub fn run_with<C: Messages>(
     stop: &AtomicBool,
     mut token: impl FnMut() -> Result<String, NoToken>,
-    mut connect: impl FnMut(&str) -> Result<C, Option<u16>>,
+    mut connect: impl FnMut(&str) -> Result<C, Refusal>,
     mut message: impl FnMut(&str),
     mut connected: impl FnMut(bool),
     mut pause: impl FnMut(Duration),
@@ -298,6 +316,8 @@ pub fn run_with<C: Messages>(
     mut random: impl FnMut() -> u16,
 ) -> Ended {
     let mut wait = FIRST_WAIT;
+    // What VRChat asked for after a 429: jitter only ever adds to it, never takes from it.
+    let mut at_least = Duration::ZERO;
     while !stop.load(Ordering::Acquire) {
         match token() {
             Err(NoToken::Refused) => return Ended::Refused,
@@ -319,27 +339,30 @@ pub fn run_with<C: Messages>(
                         wait = FIRST_WAIT;
                     }
                 }
-                Err(Some(401 | 403)) => return Ended::Refused,
-                Err(Some(429)) => wait = wait.max(RATE_LIMITED_WAIT),
+                Err(Refusal { status: Some(401 | 403), .. }) => return Ended::Refused,
+                Err(Refusal { status: Some(429), retry_after }) => {
+                    at_least = retry_after.unwrap_or(RATE_LIMITED_WAIT).max(RATE_LIMITED_WAIT).min(Duration::from_secs(3600));
+                    wait = wait.max(at_least);
+                }
                 Err(_) => {}
             },
         }
         if stop.load(Ordering::Acquire) {
             break;
         }
-        pause(jittered(wait, random()));
+        pause(jittered(wait, random()).max(std::mem::take(&mut at_least)));
         wait = (wait * 2).min(LONGEST_WAIT);
     }
     Ended::Stopped
 }
 
 #[cfg(not(target_os = "android"))]
-fn connect(token: &str) -> Result<Connection<native_tls::TlsStream<std::net::TcpStream>>, Option<u16>> {
+fn connect(token: &str) -> Result<Connection<native_tls::TlsStream<std::net::TcpStream>>, Refusal> {
     use std::net::ToSocketAddrs;
     // Every address the name gives (an IPv6 one first may have no route here), within one overall deadline.
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut tcp = None;
-    for address in (HOST, 443).to_socket_addrs().map_err(|_| None)? {
+    for address in (HOST, 443).to_socket_addrs().map_err(|_| Refusal::from(None))? {
         let left = deadline.saturating_duration_since(Instant::now());
         if left < Duration::from_secs(1) {
             break;
@@ -349,10 +372,10 @@ fn connect(token: &str) -> Result<Connection<native_tls::TlsStream<std::net::Tcp
             break;
         }
     }
-    let tcp = tcp.ok_or(None)?;
-    tcp.set_read_timeout(Some(Duration::from_secs(10))).map_err(|_| None)?;
-    tcp.set_write_timeout(Some(Duration::from_secs(10))).map_err(|_| None)?;
-    let tls = native_tls::TlsConnector::new().map_err(|_| None)?.connect(HOST, tcp).map_err(|_| None)?;
+    let tcp = tcp.ok_or(Refusal::from(None))?;
+    tcp.set_read_timeout(Some(Duration::from_secs(10))).map_err(|_| Refusal::from(None))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(10))).map_err(|_| Refusal::from(None))?;
+    let tls = native_tls::TlsConnector::new().map_err(|_| Refusal::from(None))?.connect(HOST, tcp).map_err(|_| Refusal::from(None))?;
     let path = format!("/?authToken={}", crate::vrchat_api::encode(token));
     Connection::open(tls, HOST, &path, &crate::vrchat_api::user_agent())
 }
@@ -457,7 +480,7 @@ mod tests {
         assert!(std::str::from_utf8(&written[..opening]).unwrap().starts_with("GET /?authToken=t HTTP/1.1"));
         assert_eq!(written[opening], 0x8A, "the ping is answered with a pong");
         let refused = Connection::open(Recorded { incoming: std::io::Cursor::new(b"HTTP/1.1 401 Unauthorized\r\n\r\n".to_vec()), written: vec![] }, HOST, "/", "N4N0");
-        assert_eq!(refused.err(), Some(Some(401)));
+        assert_eq!(refused.err().map(|r| r.status), Some(Some(401)));
     }
     /// A connection that gives its script, then closes.
     struct Script(Vec<&'static str>);
@@ -472,7 +495,11 @@ mod tests {
     }
 
     /// Runs the loop with a made-up clock: `connect` answers per attempt; it stops after `attempts` tries.
-    fn simulate(attempts: usize, mut token: impl FnMut(usize) -> Result<String, NoToken>, mut connect: impl FnMut(usize) -> Result<Script, Option<u16>>, lives: Duration) -> (Ended, Vec<Duration>, usize, usize) {
+    fn simulate(attempts: usize, token: impl FnMut(usize) -> Result<String, NoToken>, mut connect: impl FnMut(usize) -> Result<Script, Option<u16>>, lives: Duration) -> (Ended, Vec<Duration>, usize, usize) {
+        simulate_with(attempts, token, move |n| connect(n).map_err(Refusal::from), lives, 32768)
+    }
+
+    fn simulate_with(attempts: usize, mut token: impl FnMut(usize) -> Result<String, NoToken>, mut connect: impl FnMut(usize) -> Result<Script, Refusal>, lives: Duration, random: u16) -> (Ended, Vec<Duration>, usize, usize) {
         let stop = AtomicBool::new(false);
         let now = std::cell::Cell::new(Instant::now());
         let (mut tokens, mut tries, mut ups) = (0, 0, 0);
@@ -503,7 +530,7 @@ mod tests {
                 now.set(now.get() + d);
             },
             || now.get(),
-            || 32768,
+            || random,
         );
         (ended, pauses, tries, ups)
     }
@@ -539,6 +566,18 @@ mod tests {
     fn a_429_on_the_opening_waits_at_least_a_minute() {
         let (_, pauses, ..) = simulate(2, |_| Ok("t".into()), |_| Err(Some(429)), Duration::ZERO);
         assert_eq!(pauses[0].as_secs(), 60);
+    }
+
+    #[test]
+    fn jitter_never_shortens_what_vrchat_asked_after_a_429() {
+        for random in [0, 32768, u16::MAX] {
+            let (_, pauses, ..) = simulate_with(2, |_| Ok("t".into()), |_| Err(Refusal { status: Some(429), retry_after: None }), Duration::ZERO, random);
+            assert!(pauses[0] >= Duration::from_secs(60), "{random}: {:?}", pauses[0]);
+            let (_, pauses, ..) = simulate_with(2, |_| Ok("t".into()), |_| Err(Refusal { status: Some(429), retry_after: Some(Duration::from_secs(900)) }), Duration::ZERO, random);
+            assert!(pauses[0] >= Duration::from_secs(900), "the server's own wait, longer than the usual longest: {random}: {:?}", pauses[0]);
+        }
+        assert_eq!(retry_after_of("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 120\r\n\r\n"), Some(Duration::from_secs(120)));
+        assert_eq!(retry_after_of("HTTP/1.1 429 Too Many Requests\r\n\r\n"), None);
     }
 
     #[test]

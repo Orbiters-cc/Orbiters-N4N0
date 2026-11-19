@@ -41,6 +41,9 @@ pub fn vrcnext_now(dir: &Path) -> Result<Option<LauncherState>, Busy> {
     // Half written (VRCNext rewriting it): not "no friends".
     let friends: Value = serde_json::from_slice(&bytes).map_err(|_| Busy)?;
     let favourites: Value = std::fs::read(caches.join("fav_friends_cache.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+    // A friends list VRCNext wrote, even empty, is its account's list: a new account with no friends shows none, not
+    // VRCX's older list. A file without that list says nothing.
+    let listed = friends.get("friends").and_then(Value::as_array).is_some();
     let mut state = from_vrcnext(&friends, &favourites, modified(&file));
     // The friends VRCNext looked at closely keep VRChat's own addresses of their picture and banner, and the note.
     if let Some(db) = crate::vrchat_accounts::open(&dir.join("VRCNData.db")) {
@@ -54,7 +57,7 @@ pub fn vrcnext_now(dir: &Path) -> Result<Option<LauncherState>, Busy> {
             fill_from_tracking(&mut state, &rows);
         }
     }
-    Ok((!state.friends.is_empty()).then_some(state))
+    Ok((listed || !state.friends.is_empty()).then_some(state))
 }
 
 /// VRCNext's `user_tracking` rows (id, picture, banner, note) fill what its friends cache left empty.
@@ -295,6 +298,10 @@ mod tests {
         assert_eq!(choose(Err(Busy), other), Err(Busy), "VRCNext busy: not VRCX's list instead");
         assert!(matches!(choose(Ok(None), other).unwrap().source, Source::Database { app: DatabaseApp::Vrcx, .. }));
         assert_eq!(choose(Ok(None), || Err(Busy)), Err(Busy));
+        std::fs::write(caches.join("friends_cache.json"), b"{\"friends\": []}").unwrap();
+        let empty = vrcnext_now(&dir).unwrap().expect("a valid empty list is VRCNext's list");
+        assert!(empty.friends.is_empty());
+        assert!(matches!(choose(Ok(Some(empty)), other).unwrap().source, Source::Database { app: DatabaseApp::VrcNext, .. }), "not VRCX's older list");
         assert_eq!(vrcx_now(&dir.join("none.sqlite3")), Ok(None));
         let _ = std::fs::remove_dir_all(&dir);
     }

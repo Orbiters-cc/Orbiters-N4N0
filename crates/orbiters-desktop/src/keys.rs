@@ -25,7 +25,8 @@ static KEYS: Mutex<Owners> = Mutex::new(Owners::new());
 struct Owners {
     /// Keys whose down the menu took.
     taken: [u64; 4],
-    /// Keys that were down when the keyboard was taken: VRChat's until their up.
+    /// Keys that were down when the keyboard was taken, or whose down went on (to VRChat, or to another window): not the menu's
+    /// until their up.
     held: [u64; 4],
 }
 
@@ -61,6 +62,9 @@ impl Owners {
 
     /// Whether the menu takes this key event (`false`: it goes on to VRChat). `menu_key`: a key the menu would take (not a
     /// modifier, not a shortcut of Windows').
+    ///
+    /// A key's first down decides whose it is, and its repeats and its up follow it (verify-vr: a repeat re-decided, so a
+    /// shortcut's key repeating after its modifier was let go became the menu's and its up was swallowed).
     fn take(&mut self, vk: u32, down: bool, menu_key: bool) -> bool {
         if Self::bit(&self.held, vk) {
             if !down {
@@ -68,13 +72,31 @@ impl Owners {
             }
             return false;
         }
+        if Self::bit(&self.taken, vk) {
+            if !down {
+                Self::set(&mut self.taken, vk, false);
+            }
+            return true;
+        }
         if down {
-            Self::set(&mut self.taken, vk, menu_key);
+            Self::set(if menu_key { &mut self.taken } else { &mut self.held }, vk, true);
             return menu_key;
         }
-        let was = Self::bit(&self.taken, vk);
-        Self::set(&mut self.taken, vk, false);
-        was
+        false
+    }
+
+    /// A key event the menu does not look at (another window in front, a key that always goes on): only who holds it changes. A down
+    /// there is not the menu's; an up ends whatever held it (verify-vr: a W let go in another window stayed "held" and the next W
+    /// typed in the page walked).
+    fn elsewhere(&mut self, vk: u32, down: bool) {
+        if down {
+            if !Self::bit(&self.taken, vk) {
+                Self::set(&mut self.held, vk, true);
+            }
+        } else {
+            Self::set(&mut self.held, vk, false);
+            Self::set(&mut self.taken, vk, false);
+        }
     }
 }
 
@@ -192,8 +214,15 @@ unsafe extern "system" fn hook(
             let mut pid = 0u32;
             GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
             let vrchat = VRCHAT.load(Ordering::Relaxed);
+            let message = wparam.0 as u32;
+            if !injected && !(vrchat != 0 && pid == vrchat && !passes(info.vkCode)) {
+                // Not the menu's to look at: only who holds the key is kept.
+                let down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+                if let Ok(mut keys) = KEYS.lock() {
+                    keys.elsewhere(info.vkCode, down);
+                }
+            }
             if !injected && vrchat != 0 && pid == vrchat && !passes(info.vkCode) {
-                let message = wparam.0 as u32;
                 let down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
                 let key_down = |k: u16| (GetAsyncKeyState(k as i32) as u16 & 0x8000) != 0;
                 let (ctrl, alt) = (key_down(VK_CONTROL.0), key_down(VK_MENU.0));
@@ -233,15 +262,16 @@ fn windows_thread() {
             let wanted = WANTED.load(Ordering::Acquire);
             match (wanted, hooked) {
                 (true, None) => {
-                    // The keys down now stay VRChat's until they are let go.
+                    // The keys down now stay VRChat's until they are let go: read once the hook is in place (no event reaches
+                    // it before this thread pumps again), so a key pressed between a reading and the hook is not missed.
                     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-                    let down = (1u32..256).filter(|&vk| (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0);
-                    if let Ok(mut keys) = KEYS.lock() {
-                        *keys = Owners::taken_with(down);
-                    }
                     match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) {
                         Ok(h) => hooked = Some(h),
                         Err(e) => eprintln!("keyboard: {e}"),
+                    }
+                    let down = (1u32..256).filter(|&vk| (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0);
+                    if let Ok(mut keys) = KEYS.lock() {
+                        *keys = Owners::taken_with(down);
                     }
                 }
                 (false, Some(h)) => {
@@ -273,6 +303,29 @@ mod owner_tests {
         assert!(!keys.take(w, false, true), "and its up: the avatar stops walking");
         assert!(keys.take(w, true, true), "pressed again, the menu takes it");
         assert!(keys.take(w, false, true), "and its up");
+    }
+
+    /// verify-vr: a key's repeats follow its first down; a key let go in another window is no longer held for VRChat.
+    #[test]
+    fn repeats_follow_the_first_down_and_ups_elsewhere_end_a_hold() {
+        let tab = 0x09;
+        let mut keys = Owners::new();
+        assert!(!keys.take(tab, true, false), "Alt+Tab's Tab goes on");
+        assert!(!keys.take(tab, true, true), "its repeat after Alt was let go still goes on");
+        assert!(!keys.take(tab, false, true), "and so does its up");
+        assert_eq!(keys, Owners::new());
+        let a = 0x41;
+        assert!(keys.take(a, true, true));
+        assert!(keys.take(a, true, false), "a repeat of the menu's key stays the menu's");
+        assert!(keys.take(a, false, false));
+        let w = 0x57;
+        let mut keys = Owners::taken_with([w]);
+        keys.elsewhere(w, false);
+        assert!(keys.take(w, true, true), "W let go in another window: the next W is typed");
+        assert!(keys.take(w, false, true));
+        keys.elsewhere(w, true);
+        assert!(!keys.take(w, true, true), "pressed in another window: its repeats back in VRChat are not typed");
+        assert!(!keys.take(w, false, true));
     }
 
     #[test]

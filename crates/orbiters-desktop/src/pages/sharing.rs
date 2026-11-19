@@ -2030,7 +2030,11 @@ pub fn morph(ui: &mut Ui, id: Id, right: egui::Pos2, expanded_width: f32, enable
     let small_w = share.desired_width(ui);
     let small = Rect::from_min_size(pos2(right.x - small_w, right.y), vec2(small_w, 40.0));
     let full = Rect::from_min_size(pos2(right.x - expanded_width, right.y), vec2(expanded_width, 40.0));
-    if expanded && ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.pointer.primary_pressed() && i.pointer.interact_pos().is_some_and(|p| !full.contains(p)))
+    // Escape folds it and is taken (Night3, verifier point 4: the world's page under it closed on the same press);
+    // a press elsewhere folds it too.
+    if expanded
+        && (ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            || ctx.input(|i| i.pointer.primary_pressed() && i.pointer.interact_pos().is_some_and(|p| !full.contains(p))))
     {
         expanded = false;
     }
@@ -2105,6 +2109,25 @@ pub fn morph(ui: &mut Ui, id: Id, right: egui::Pos2, expanded_width: f32, enable
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifier (night3, point 4): Escape on a session's open Share chooser folds it and is taken, so the world's page
+    /// under it, which asks after it on the same frame, does not close too.
+    #[test]
+    fn escape_folds_the_share_chooser_and_nothing_else() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let id = Id::unique("test-share-morph");
+        ctx.data_mut(|d| d.insert_temp(id, true));
+        let escape = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let mut left = None;
+        let mut out = ctx.run_ui(egui::RawInput { events: vec![escape], ..Default::default() }, |ui| {
+            morph(ui, id, pos2(600.0, 100.0), 320.0, true);
+            left = Some(ui.input(|i| i.key_pressed(egui::Key::Escape)));
+        });
+        out.textures_delta.clear();
+        assert_eq!(ctx.data(|d| d.get_temp::<bool>(id)), Some(false), "folded");
+        assert_eq!(left, Some(false), "and the press is not seen again after it");
+    }
 
     /// Who a share goes to and how big a file is are said as whole sentences of the language, each in its own words.
     #[test]

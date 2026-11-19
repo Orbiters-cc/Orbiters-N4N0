@@ -312,8 +312,8 @@ pub(crate) fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)>
     home.heard = Some("put my hoodie on".into());
     out.push((ScreenPage::Home, home, Some(1), None));
     let mut search = base();
-    search.press(Target::YouTube);
-    search.type_text("lofi hi");
+    let _ = search.press(Target::YouTube);
+    let _ = search.type_text("lofi hi");
     search.suggestions_arrived(1, "lofi hi", sample_suggestions());
     out.push((ScreenPage::SearchQwerty, search.clone(), Some(14), None));
     let mut azerty = search.clone();
@@ -325,10 +325,10 @@ pub(crate) fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)>
     let mut results = base();
     results.pages = Pages::ALL;
     results.can_drop = true;
-    results.search_for("lofi hip hop");
-    results.results_arrived(1, Results { videos: sample_videos(), continuation: Some("next".into()) }, false);
+    let _ = results.search_for("lofi hip hop");
+    let _ = results.results_arrived(1, Results { videos: sample_videos(), continuation: Some("next".into()) }, false);
     // The second result's link copied: its row says so and offers Drop; a card is out (Take back).
-    results.press(Target::Copy(1));
+    let _ = results.press(Target::Copy(1));
     results.card_out = true;
     out.push((ScreenPage::Results, results, Some(9), None));
     let mut calls = base();
@@ -383,7 +383,7 @@ pub(crate) fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)>
     home.heard = Some("Done, hoodie on. Now go find your friends instead of talking to a floating ball.".into());
     out.push((ScreenPage::HomeSeven, home, Some(6), None));
     let mut states = seven();
-    states.press(Target::States);
+    let _ = states.press(Target::States);
     out.push((ScreenPage::States, states, Some(5), None));
     let mut card = seven();
     let video = &sample_videos()[3];
@@ -404,9 +404,9 @@ pub(crate) fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)>
     home.heard = Some("Done, hoodie on. Now go find your friends instead of talking to a floating ball.".into());
     out.push((ScreenPage::HomeTen, home, Some(8), None));
     let mut type_qwerty = ten();
-    type_qwerty.press(Target::Suggest);
-    type_qwerty.press(Target::SuggestType);
-    type_qwerty.type_text("A dance mode where N4N0 bounces to the music the world plays");
+    let _ = type_qwerty.press(Target::Suggest);
+    let _ = type_qwerty.press(Target::SuggestType);
+    let _ = type_qwerty.type_text("A dance mode where N4N0 bounces to the music the world plays");
     out.push((ScreenPage::TypeQwerty, type_qwerty.clone(), Some(14), None));
     let mut type_azerty = type_qwerty.clone();
     type_azerty.layout = KeyboardLayout::Azerty;
@@ -415,16 +415,16 @@ pub(crate) fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)>
     type_symbols.keys = Keys::Symbols;
     out.push((ScreenPage::TypeSymbols, type_symbols, None, None));
     let mut new_state = ten();
-    new_state.press(Target::States);
-    new_state.press(Target::StateSave);
+    let _ = new_state.press(Target::States);
+    let _ = new_state.press(Target::StateSave);
     new_state.draft.name = "Party outfit".into();
     new_state.draft.default = true;
     out.push((ScreenPage::NewState, new_state, Some(5), None));
     let mut tracking = ten();
-    tracking.press(Target::Tracking);
+    let _ = tracking.press(Target::Tracking);
     out.push((ScreenPage::Tracking, tracking, Some(7), None));
     let mut suggest = ten();
-    suggest.press(Target::Suggest);
+    let _ = suggest.press(Target::Suggest);
     suggest.suggestion = "A dance mode where N4N0 bounces to the music the world plays, with a switch on its card".into();
     out.push((ScreenPage::Suggest, suggest, Some(4), None));
     // The overlay's Home and screens from version 10: the simple Home with music playing and without, More, Previous
@@ -457,14 +457,14 @@ pub(crate) fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)>
     out.push((ScreenPage::HomeQuietStay, pinned, Some(0), None));
     out.push((ScreenPage::HomeQuiet, quiet, Some(0), None));
     let mut more = simple();
-    more.press(Target::More);
+    let _ = more.press(Target::More);
     out.push((ScreenPage::More, more, Some(2), None));
     let mut instances = simple();
     instances.page = Page::Instances;
     out.push((ScreenPage::Instances, instances, Some(7), None));
     let mut friend = simple();
     friend.page = Page::Instances;
-    friend.press(Target::InviteMe(0));
+    let _ = friend.press(Target::InviteMe(0));
     let account = InviteAccount { name: "Orbiters".into(), link: "https://vrchat.com/home/user/usr_0c5b8f2e-3a41-4d7c-9e2b-5f6a7b8c9d0e".into() };
     friend.invite_answered(InviteAnswer::NeedsFriend { account, message: "Add Orbiters' VRChat account as a friend on VRChat first, then try again.".into() });
     out.push((ScreenPage::AddFriend, friend, Some(3), None));
@@ -475,7 +475,7 @@ pub(crate) fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)>
         m
     };
     let mut more = qr();
-    more.press(Target::More);
+    let _ = more.press(Target::More);
     out.push((ScreenPage::MoreQr, more, Some(4), None));
     let mut scanner = qr();
     scanner.page = Page::Qr;
@@ -486,29 +486,29 @@ pub(crate) fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)>
     let share = || {
         let mut m = simple();
         m.pages = Pages::ALL;
-        m.set_captures(sample_captures());
+        let _ = m.set_captures(sample_captures());
         m
     };
     let hovered = |page: ScreenPage, target: Target| layout::cached(page).elements.iter().position(|e| e.target == target);
     let mut photo = share();
-    photo.press(Target::Photo);
+    let _ = photo.press(Target::Photo);
     // A screen of versions 12 to 14 keeps its one Take and the line that changes it.
     let mut older = photo.clone();
     older.pages = Pages::Mirror;
     out.push((ScreenPage::PhotoShare, older, hovered(ScreenPage::PhotoShare, Target::ShareLatest), None));
     out.push((ScreenPage::PhotoTwo, photo, hovered(ScreenPage::PhotoTwo, Target::TakeOf(PhotoMode::World)), None));
     let mut history = share();
-    history.press(Target::Photo);
-    history.press(Target::History);
+    let _ = history.press(Target::Photo);
+    let _ = history.press(Target::History);
     out.push((ScreenPage::History, history.clone(), hovered(ScreenPage::History, Target::ShareTo(0)), None));
     let mut friends = history.clone();
-    friends.press(Target::ShareTo(0));
+    let _ = friends.press(Target::ShareTo(0));
     friends.set_friends(orbiters_n4n0_core::captures::Friends::ready(sample_friends()));
-    friends.press(Target::Friend(1));
-    friends.press(Target::Friend(3));
+    let _ = friends.press(Target::Friend(1));
+    let _ = friends.press(Target::Friend(3));
     out.push((ScreenPage::ShareTo, friends, hovered(ScreenPage::ShareTo, Target::SendShare), None));
     let mut explicit = history;
-    explicit.press(Target::SharePublic(2));
+    let _ = explicit.press(Target::SharePublic(2));
     out.push((ScreenPage::Explicit, explicit, hovered(ScreenPage::Explicit, Target::CancelShare), None));
     // Screens from version 13 (and the overlay): a world's feedback with the player's like and labels, its labels page,
     // its comments, More with World feedback.
@@ -519,17 +519,17 @@ pub(crate) fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)>
         m
     };
     let mut more = feedback();
-    more.press(Target::More);
+    let _ = more.press(Target::More);
     out.push((ScreenPage::MoreFeedback, more, hovered(ScreenPage::MoreFeedback, Target::WorldFeedback), None));
     let mut world = feedback();
-    world.press(Target::More);
-    world.press(Target::WorldFeedback);
+    let _ = world.press(Target::More);
+    let _ = world.press(Target::WorldFeedback);
     out.push((ScreenPage::Feedback, world.clone(), hovered(ScreenPage::Feedback, Target::WriteComment), None));
     let mut labels = world.clone();
-    labels.press(Target::Labels);
+    let _ = labels.press(Target::Labels);
     out.push((ScreenPage::FeedbackLabels, labels, hovered(ScreenPage::FeedbackLabels, Target::LabelChip(7)), None));
     let mut comments = world;
-    comments.press(Target::Comments);
+    let _ = comments.press(Target::Comments);
     out.push((ScreenPage::Comments, comments, hovered(ScreenPage::Comments, Target::DeleteComment(0)), None));
     // Screens from version 14 (and the overlay): More with the screen mirror, and the mirror's page with a camera placed
     // at a zoom (its picture's place as everyone but its owner sees it).
@@ -541,11 +541,11 @@ pub(crate) fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)>
         m
     };
     let mut more = mirror();
-    more.press(Target::More);
+    let _ = more.press(Target::More);
     out.push((ScreenPage::MoreMirror, more, hovered(ScreenPage::MoreMirror, Target::Mirror), None));
     let mut page = mirror();
-    page.press(Target::More);
-    page.press(Target::Mirror);
+    let _ = page.press(Target::More);
+    let _ = page.press(Target::Mirror);
     out.push((ScreenPage::Mirror, page, hovered(ScreenPage::Mirror, Target::MirrorZoomIn), None));
     out
 }
@@ -910,6 +910,35 @@ mod tests {
     }
 
     const LANGUAGES: [&str; 5] = ["en", "fr", "es", "pt", "ja"];
+
+    /// MENU-6, to look at: the call page with Japanese, Chinese and Korean names, as the SteamVR menu drew them before
+    /// (through the avatar screen's atlas) and draws them now (its fonts). `MENU6_OUT=<dir> cargo test ... -- --ignored`.
+    #[test]
+    #[ignore]
+    fn renders_names_in_every_script() {
+        let Some(out) = std::env::var_os("MENU6_OUT").map(std::path::PathBuf::from) else { return };
+        std::fs::create_dir_all(&out).unwrap();
+        let names = ["たろう", "王小明", "김민지", "Lyra Nightfall", "さくら🌸ちゃん"];
+        let menu = |names: &[String]| {
+            let mut m = Menu::new(KeyboardLayout::Qwerty, 5, PhotoLength::Standard);
+            m.open();
+            m.calls_ready = true;
+            let _ = m.press(Target::Call);
+            m.set_contacts(names.iter().enumerate().map(|(i, n)| Contact { id: format!("u{i}"), name: n.clone() }).collect(), true, "");
+            m
+        };
+        let after: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        // What the atlas made of them, as before: the same page with those letters.
+        let before: Vec<String> = names.iter().map(|n| orbiters_contracts::n4n0::panel_text(&orbiters_n4n0_core::text::fold_more(n))).collect();
+        let skin = Skin::current();
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        for (names, file) in [(&before, "menu-call-cjk-before.png"), (&after, "menu-call-cjk-after.png")] {
+            let m = menu(names);
+            let picture = |_: &str| -> Option<TextureId> { None };
+            let rgba = paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &m, hover: None, pressed: None, picture: &picture, time: 0.4, skin }));
+            write_png(&out.join(file), WIDTH, HEIGHT, &unpremultiply(&rgba)).unwrap();
+        }
+    }
 
     #[test]
     fn the_base_themes_draw_with_todays_colours() {

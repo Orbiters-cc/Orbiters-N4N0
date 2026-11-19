@@ -357,7 +357,9 @@ impl Edits {
 
     /// Takes in what the picture's job came back with.
     pub(super) fn poll(&mut self) {
-        if let Some(r) = self.drawing.as_mut().and_then(|j| j.take()) {
+        // A drawing whose worker panicked ends as a failed one (it kept the view busy for ever).
+        let r = self.drawing.as_mut().and_then(|j| j.take().or_else(|| j.died().then(|| Err("it stopped unexpectedly".to_string())))); // i18n: not shown (kept as the picture's error, which only stops a redraw)
+        if let Some(r) = r {
             self.drawing = None;
             match r {
                 Ok(_) => self.picture_error = None,
@@ -436,7 +438,10 @@ impl Drop for Edits {
         // renderer at a time, as on a small graphics card.
         let running = self.drawing.take();
         let (session, window) = (self.session.clone(), self.window.clone());
+        // Work of the window (it writes the capture's picture): the window does not close to the tray meanwhile.
+        let working = super::super::Working::begin();
         let spawned = std::thread::Builder::new().name("splat edits' picture".into()).spawn(move || { // i18n: not shown
+            let _working = working;
             if let Some(mut job) = running {
                 while job.poll().is_none() && job.running() {
                     std::thread::sleep(std::time::Duration::from_millis(50));

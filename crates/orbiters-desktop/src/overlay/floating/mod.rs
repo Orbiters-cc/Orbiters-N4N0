@@ -151,6 +151,15 @@ const PICK_BIT: u64 = 1 << 61;
 /// Steps of a band's line of time left that are painted.
 const STEPS: f32 = 60.0;
 
+/// What the band has to tell the service of the window's offer it shows (`showing`: now), given what it last said:
+/// `Some(what)` when that changed, then remembered as said.
+fn band_says(said: &mut Option<u64>, showing: Option<u64>) -> Option<Option<u64>> {
+    (*said != showing).then(|| {
+        *said = showing;
+        showing
+    })
+}
+
 pub struct Floating {
     panel: Panel,
     watch: Watch,
@@ -158,7 +167,7 @@ pub struct Floating {
     strip: Option<strip::Strip>,
     /// "Talk with N4N0?", or the window's "will minimize to save memory" (none when SteamVR would not make its overlay).
     prompt: Option<prompt::Prompt>,
-    /// The window's offer to close the band last told the service it shows.
+    /// The window's offer to close the band last told the service it shows (`None`: it said it shows none).
     rest_said: Option<u64>,
     lasers: laser::Lasers,
     input: Interaction,
@@ -282,12 +291,11 @@ impl Floating {
         let strip = self.strip.as_mut().and_then(|s| s.place(cx.overlay, strip_at, head.as_ref()));
         // Before the eyes, unless SteamVR's dashboard has the controllers.
         let prompt = self.prompt.as_mut().and_then(|p| p.place(cx.overlay, band.filter(|_| !cx.dashboard), head.as_ref()));
-        // The window counts down only once the band is before the eyes.
-        if let (Some(o), Some(p)) = (rest, self.prompt.as_ref()) {
-            if p.showing(o.id | REST_BIT) && self.rest_said != Some(o.id) {
-                self.rest_said = Some(o.id);
-                cx.backend.window_rest_shown(o.id);
-            }
+        // The window counts down only while the band is before the eyes showing its offer: said each time that changes,
+        // both ways (hidden by SteamVR's dashboard, replaced by "Talk with N4N0?", gone), never once for good (SWEEP-7).
+        let showing = rest.filter(|o| self.prompt.as_ref().is_some_and(|p| p.showing(o.id | REST_BIT))).map(|o| o.id);
+        if let Some(said) = band_says(&mut self.rest_said, showing) {
+            cx.backend.window_rest_shown(said);
         }
 
         // Who points at what.
@@ -474,6 +482,9 @@ impl Floating {
         if self.input.reset() == Some(PANEL) {
             state.release(backend);
         }
+        if let Some(said) = band_says(&mut self.rest_said, None) {
+            backend.window_rest_shown(said);
+        }
         self.mouse.let_go_all(&mut |h, e| overlay.inject_event(h, e));
         self.watch.place(overlay, None, None, 0.0, false);
         if let Some(s) = self.strip.as_mut() {
@@ -492,6 +503,20 @@ impl Floating {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Night3, SWEEP-7 and -8: what the band says of the window's offer follows what it shows, both ways, every time:
+    /// shown, hidden (the dashboard, "Talk with N4N0?"), shown again; and an offer shown, gone, then one of the same
+    /// number (a later window) is said again (it was said once for good and never again).
+    #[test]
+    fn the_band_says_what_it_shows_each_time_it_changes() {
+        let mut said = None;
+        assert_eq!(band_says(&mut said, Some(1)), Some(Some(1)), "shown");
+        assert_eq!(band_says(&mut said, Some(1)), None, "nothing new");
+        assert_eq!(band_says(&mut said, None), Some(None), "hidden");
+        assert_eq!(band_says(&mut said, Some(1)), Some(Some(1)), "shown again");
+        assert_eq!(band_says(&mut said, None), Some(None), "gone");
+        assert_eq!(band_says(&mut said, Some(1)), Some(Some(1)), "the same number again: said again");
+    }
 
     #[test]
     fn the_menu_hears_the_lasers_as_steamvr_s_mouse() {

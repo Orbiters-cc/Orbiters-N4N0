@@ -331,14 +331,16 @@ impl Queue {
         let items = value.as_ref().and_then(|v| v.get("items")).and_then(serde_json::Value::as_array);
         let mut queue = Queue::default();
         let mut lost = items.is_none();
+    let mut unstamped = Vec::new();
         for item in items.into_iter().flatten() {
             match serde_json::from_value::<Pending>(item.clone()) {
                 Ok(mut p) => {
                     // The contract takes a world id in capitals too; the queue keeps VRChat's own lowercase.
                     p.world = p.world.to_ascii_lowercase();
                     if p.to.is_none() {
-                        // From before actions said where they go: never sent to a server it may not be for.
-                        eprintln!("world feedback queue: an action without its server dropped");
+                        // From before actions said where they go (nothing in the file tells which server or account):
+                        // never sent where it may not be for, and never deleted: kept beside, unsent (below).
+                        unstamped.push(p);
                     } else if crate::vrchat_log::is_world_id(&p.world) {
                         queue.items.push(p);
                     } else {
@@ -348,11 +350,19 @@ impl Queue {
                 Err(_) => lost = true,
             }
         }
-        if lost {
+        if lost || !unstamped.is_empty() {
             let aside = crate::keep_aside(path);
-            eprintln!("world feedback queue: {} partly unreadable, the file kept as {aside:?}", path.display());
+            eprintln!(
+                "world feedback queue: {} partly unreadable or from before actions said where they go ({} such), the file kept as {aside:?}",
+                path.display(),
+                unstamped.len()
+            );
+            // Not kept beside: they stay in the queue, unsent and kept (never handed out, never aged out).
+            if aside.is_none() {
+                queue.items.extend(unstamped);
+            }
         }
-        queue.items.retain(|p| now_ms.saturating_sub(p.since) < DROP_AFTER.as_millis() as u64);
+        queue.items.retain(|p| p.to.is_none() || now_ms.saturating_sub(p.since) < DROP_AFTER.as_millis() as u64);
         queue
     }
 
@@ -402,7 +412,12 @@ impl Queue {
 
     /// Drops the actions older than [`DROP_AFTER`], wherever they were for.
     pub fn expire(&mut self, now_ms: u64) {
-        self.items.retain(|p| now_ms.saturating_sub(p.since) < DROP_AFTER.as_millis() as u64);
+        self.items.retain(|p| p.to.is_none() || now_ms.saturating_sub(p.since) < DROP_AFTER.as_millis() as u64);
+    }
+
+    /// The actions that may go out as `now` ([`Stamp::sends_as`]): what this server and account show as waiting.
+    pub fn for_stamp(&self, now: &Stamp) -> Queue {
+        Queue { items: self.items.iter().filter(|p| p.to.as_ref().is_some_and(|to| to.sends_as(now))).cloned().collect() }
     }
 
     /// The action at `i` failed for now: tried again after 2, 4, 8 … seconds (at most a minute), dropped after a day.
@@ -658,13 +673,24 @@ mod tests {
         assert!(q.due_for(10_000, &other).is_some() && q.due_for(10_000, &prod).is_some());
         q.expire(DROP_AFTER.as_millis() as u64 + 1);
         assert!(q.items.is_empty(), "a day old: gone wherever it was for");
-        // An earlier version's file: its actions say nowhere, and go nowhere.
+        // An earlier version's file: its actions say nowhere, and go nowhere, but are never deleted: the file is kept
+        // beside as it was (verifier, CORE2-1).
         let dir = std::env::temp_dir().join(format!("orbiters-feedback-unstamped-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("q.json");
-        std::fs::write(&path, serde_json::json!({"items": [{"world": WORLD, "action": {"kind": "uncomment", "comment": 5}, "since": 1, "due": 1}]}).to_string()).unwrap();
-        assert!(Queue::load(&path, 2).items.is_empty());
+        let old = serde_json::json!({"items": [{"world": WORLD, "action": {"kind": "comment", "text": "hi", "client_id": "n4n0-1"}, "since": 1, "due": 1}]}).to_string();
+        std::fs::write(&path, &old).unwrap();
+        let loaded = Queue::load(&path, 2);
+        assert!(loaded.due_for(10, &prod).is_none() && loaded.due_for(10, &dev).is_none(), "sent nowhere");
+        let kept: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("q.json.bad-")).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(kept[0].path()).unwrap(), old, "kept beside, unsent");
         let _ = std::fs::remove_dir_all(&dir);
+        // What waits for another account is not shown as this one's.
+        let mut q = Queue::default();
+        q.push_to(WORLD, Action::Comment { text: "A's draft".into(), client_id: "n4n0-a".into() }, 0, prod.clone());
+        assert_eq!(q.for_stamp(&prod).items.len(), 1);
+        assert!(q.for_stamp(&other).items.is_empty(), "B never sees A's waiting comment");
     }
 
     #[test]

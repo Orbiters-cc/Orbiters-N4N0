@@ -131,6 +131,8 @@ struct Saving {
     job: Job<Result<PathBuf, String>>,
     /// Thousandths done.
     progress: Arc<AtomicU32>,
+    /// The edit being written: what the copy holds once it is done (the person may go on editing meanwhile).
+    doc: Edit,
 }
 
 /// The editor over a picture that is drawn live by its host instead of read from a file: the 3D view's, Edit in 3D
@@ -289,19 +291,10 @@ impl Editor {
         let fetch = source.clone();
         let loading = Job::spawn(ctx, move || {
             // A picture of Orbiters is downloaded first.
-            let download = |fetch: &Source| files::fetch(fetch).map_err(|e| tr!("The picture could not be downloaded: {error}", error = format!("{e:#}")));
-            download(&fetch)?;
-            match load(&files) {
-                // A download that cannot be read (cut short, say) is fetched once more: it was kept, and every later
-                // Edit failed the same way without asking again.
-                Err(_) if fetch.remote.is_some() => {
-                    let _ = std::fs::remove_file(&fetch.picture);
-                    download(&fetch)?;
-                    load(&files)
-                }
-                read => read,
-            }
-            .inspect(|_| c.request_repaint())
+            // (Never deletes the picture it was given, even unreadable: its path may come from a saved edit's file
+            // and name any file; the verifier of night 2026-11-19 had it reverted.)
+            files::fetch(&fetch).map_err(|e| tr!("The picture could not be downloaded: {error}", error = format!("{e:#}")))?;
+            load(&files).inspect(|_| c.request_repaint())
         });
         let mut e = Self::with(source, title.into(), doc, target, Some(loading));
         e.saved_view = view3d.clone();
@@ -365,8 +358,13 @@ impl Editor {
 
     /// Saving the host started for [`LiveAsk`]: its progress shows on Save, its result under the canvas.
     pub fn start_saving(&mut self, job: Job<Result<PathBuf, String>>, progress: Arc<AtomicU32>) {
-        self.saving = Some(Saving { job, progress });
+        self.saving = Some(Saving { job, progress, doc: self.doc.clone() });
         self.notice = None;
+    }
+
+    /// It edits a picture of Orbiters (downloaded with the account), not one of this computer.
+    pub fn is_remote(&self) -> bool {
+        self.source.remote.is_some()
     }
 
     pub fn saving(&self) -> bool {
@@ -438,7 +436,10 @@ impl Editor {
 
     fn poll(&mut self, ctx: &egui::Context) {
         if let Some(job) = self.loading.as_mut() {
-            if let Some(r) = job.take() {
+            // A reading whose worker ended without a word (it panicked) ends as an error, not as a picture for ever
+            // loading.
+            let r = job.take().or_else(|| job.died().then(|| Err(tr("The picture could not be read.").to_string())));
+            if let Some(r) = r {
                 self.loading = None;
                 match r {
                     Ok(l) => {
@@ -459,8 +460,10 @@ impl Editor {
             self.shown = Some(made.ask);
         }
         if let Some(s) = self.saving.as_mut() {
-            if let Some(r) = s.job.take() {
-                self.saving = None;
+            // A save whose worker ended without a word (it panicked) ends as a failed save: Save works again.
+            let r = s.job.take().or_else(|| s.job.died().then(|| Err(tr("it stopped unexpectedly").to_string())));
+            if let Some(r) = r {
+                let written = self.saving.take().map(|s| s.doc);
                 match r {
                     Ok(path) if self.live.is_some() => {
                         // Each save of a live picture is a picture of its own.
@@ -480,7 +483,11 @@ impl Editor {
                         };
                         self.notice = Some((text, Some(path.clone())));
                         self.target = Some(path);
-                        self.saved_doc = Some(self.doc.clone());
+                        // What the copy holds is the edit that was written, not what is on screen now (edited during
+                        // the save, it is not saved: Back asks again).
+                        self.saved_doc = written;
+                        // A close armed before the save asked about another edit.
+                        self.confirm_close = None;
                         self.error = None;
                     }
                     Err(e) => self.error = Some(tr!("The picture could not be saved: {error}", error = e)),
@@ -515,7 +522,7 @@ impl Editor {
         let progress = Arc::new(AtomicU32::new(0));
         let (p, edit, source, view) = (progress.clone(), self.doc.clone(), self.source.clone(), self.saved_view.clone());
         let job = Job::spawn(ctx, move || save(&source, &edit, &target, view.as_ref(), &p).map(|_| target).map_err(|e| format!("{e:#}")));
-        self.saving = Some(Saving { job, progress });
+        self.saving = Some(Saving { job, progress, doc: self.doc.clone() });
         self.notice = None;
     }
 
@@ -923,6 +930,73 @@ mod tests {
         assert_eq!(live.live_mut().and_then(|l| l.asked), Some(LiveAsk::Picture));
         assert!(live.saving.is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Verifier (night3, point 3): a picture of Orbiters whose file cannot be read is an error; the file is never
+    /// deleted (its path can come from a saved edit's file and name anything).
+    #[test]
+    fn an_unreadable_picture_is_never_deleted() {
+        use files::{Remote, RemoteKind};
+        let ctx = egui::Context::default();
+        let path = std::env::temp_dir().join(format!("orbiters-editor-unreadable-{}.img", std::process::id()));
+        std::fs::write(&path, b"not a picture").unwrap();
+        let mut source = Source::remote(Remote { kind: RemoteKind::Gallery, id: 12, ..Default::default() });
+        source.picture = path.clone();
+        let mut e = Editor::open(&ctx, source, "World");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while e.loading.is_some() {
+            assert!(std::time::Instant::now() < until, "the reading never ended");
+            e.poll(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(e.error.is_some(), "it says the picture could not be read");
+        assert!(path.is_file(), "the file it was given is still there");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Verifier (night3, points 2 and 4): a save marks as saved the edit it wrote, not the one on screen when it ends
+    /// (edited meanwhile, Back asks again); a save whose worker panicked ends as a failed save (Save works again); a
+    /// close armed before a save does not stand for the edit after it.
+    #[test]
+    fn a_save_marks_saved_what_it_wrote_and_a_panicked_save_ends() {
+        let ctx = egui::Context::default();
+        let path = std::env::temp_dir().join(format!("orbiters-editor-saving-{}.png", std::process::id()));
+        let mut e = Editor::open(&ctx, Source::picture(&path), "World");
+        let with = |exposure: f32| {
+            let mut doc = Edit::default();
+            let l = doc.layer(Effect::Light(Light { exposure, ..Default::default() }));
+            doc.layers.push(l);
+            doc
+        };
+        let finish = |e: &mut Editor| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while e.saving.is_some() {
+                assert!(std::time::Instant::now() < until, "the save never ended");
+                e.poll(&ctx);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        // A is being written; the person edits to B meanwhile.
+        e.doc = with(0.5);
+        let written = path.clone();
+        e.saving = Some(Saving { job: Job::spawn(&ctx, move || Ok(written)), progress: Arc::default(), doc: e.doc.clone() });
+        e.doc = with(0.2);
+        finish(&mut e);
+        assert_eq!(e.saved_doc, Some(with(0.5)), "what the copy holds");
+        assert!(e.dirty(), "B is not saved");
+        e.close(&ctx);
+        assert!(e.closing.is_none(), "Back asks first");
+        // A save of B, with the close armed for B: once saved, the old question does not stand.
+        let written = path.clone();
+        e.saving = Some(Saving { job: Job::spawn(&ctx, move || Ok(written)), progress: Arc::default(), doc: e.doc.clone() });
+        finish(&mut e);
+        assert!(!e.dirty() && e.confirm_close.is_none());
+        // A save whose worker panics.
+        e.doc = with(0.9);
+        e.saving = Some(Saving { job: Job::spawn(&ctx, || -> Result<PathBuf, String> { panic!("a writer's own unwrap") }), progress: Arc::default(), doc: e.doc.clone() });
+        finish(&mut e);
+        assert!(e.error.is_some(), "it says the save failed");
+        assert!(e.dirty(), "and the edit is still unsaved");
     }
 
     /// Night PG2-4: the "not saved" guard asks every time there is something new to lose, and its warning goes once

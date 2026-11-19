@@ -834,8 +834,9 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
             ring_pop(p, r, radius, t.as_secs_f32(), pal);
         }
     }
+    // Drawn with the app's fonts: every name in its own letters, the page in the app's language (MENU-6).
     for s in &layout.slots {
-        slot(p, s, &layout::slot_text(menu, s), origin, pal);
+        slot(p, s, &layout::slot_text_with(menu, s, false, layout::Glyphs::Fonts), origin, pal);
     }
     for pic in &layout.pictures {
         let r = rect(pic.rect, origin);

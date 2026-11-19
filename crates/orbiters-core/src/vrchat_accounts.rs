@@ -144,7 +144,17 @@ pub fn friends(log_account: Option<&str>) -> Vec<Friend> {
 /// Reconstruct the roster at the picture's timestamp from VRCX's recorded joins/leaves, when retained locally.
 pub fn instance_people(location: &str, taken: u64) -> Vec<String> {
     let Some(db) = vrcx_db().and_then(|p| open(&p)) else { return Vec::new() };
-    let Ok(mut q)=db.prepare("SELECT type,display_name,user_id FROM gamelog_join_leave WHERE location=?1 AND CAST(strftime('%s',created_at) AS INTEGER)<=?2 ORDER BY created_at,id LIMIT 20000") else {return Vec::new()};
+    instance_people_in(&db, location, taken)
+}
+
+/// [`instance_people`] in VRCX's database `db`: each person's last join or leave there before `taken` (however many
+/// events the instance had before it), those whose last one is a join.
+fn instance_people_in(db: &Connection, location: &str, taken: u64) -> Vec<String> {
+    let Ok(mut q) = db.prepare(
+        "SELECT type,display_name,user_id FROM (SELECT type,display_name,user_id,ROW_NUMBER() OVER (PARTITION BY COALESCE(user_id,display_name) ORDER BY created_at DESC,id DESC) AS latest FROM gamelog_join_leave WHERE location=?1 AND type IN ('OnPlayerJoined','OnPlayerLeft') AND CAST(strftime('%s',created_at) AS INTEGER)<=?2) WHERE latest=1 LIMIT 20000", // i18n: not shown (SQL)
+    ) else {
+        return Vec::new();
+    };
     let mut roster = std::collections::BTreeMap::new();
     if let Ok(rows) =
         q.query_map(rusqlite::params![location, taken as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))
@@ -246,6 +256,41 @@ mod tests {
         let me = vrcx_account(&db).unwrap();
         assert_eq!(me, "usr_11111111-1111-1111-1111-111111111111");
         assert_eq!(vrcx_friends(&db, &me), ["usr_22222222-2222-2222-2222-222222222222".to_string()].into());
+    }
+
+    #[test]
+    fn the_roster_counts_each_persons_last_event_however_busy_the_instance() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE gamelog_join_leave (id INTEGER PRIMARY KEY, created_at TEXT, type TEXT, display_name TEXT, location TEXT, user_id TEXT, time INTEGER);",
+        )
+        .unwrap();
+        let here = "wrld_00000000-0000-4000-8000-000000000001:1~region(eu)";
+        let event = |db: &Connection, at: u64, kind: &str, name: &str, id: Option<&str>, location: &str| {
+            let at = time::OffsetDateTime::from_unix_timestamp(at as i64).unwrap().format(&time::format_description::well_known::Rfc3339).unwrap();
+            db.execute("INSERT INTO gamelog_join_leave (created_at,type,display_name,location,user_id,time) VALUES (?1,?2,?3,?4,?5,0)", rusqlite::params![at, kind, name, location, id]).unwrap();
+        };
+        let base = 1_790_000_000;
+        // Kite joins first and leaves just before the picture, after 20 000 others came and went.
+        event(&db, base, "OnPlayerJoined", "Kite", Some("usr_k"), here);
+        let tx = db.unchecked_transaction().unwrap();
+        for i in 0..10_000u64 {
+            event(&tx, base + 1 + i, "OnPlayerJoined", "Crowd", Some(&format!("usr_c{i}")), here);
+            event(&tx, base + 1 + i, "OnPlayerLeft", "Crowd", Some(&format!("usr_c{i}")), here);
+        }
+        tx.commit().unwrap();
+        let late = base + 20_000;
+        event(&db, late, "OnPlayerLeft", "Kite", Some("usr_k"), here);
+        // Nova joins late and stays; a name without an id joins; Lark joins after the picture; Moss joins elsewhere.
+        event(&db, late, "OnPlayerJoined", "Nova", Some("usr_n"), here);
+        event(&db, late, "OnPlayerJoined", "Wren", None, here);
+        event(&db, late + 100, "OnPlayerJoined", "Lark", Some("usr_l"), here);
+        event(&db, late, "OnPlayerJoined", "Moss", Some("usr_m"), "wrld_other:2");
+        let mut people = instance_people_in(&db, here, late + 10);
+        people.sort();
+        assert_eq!(people, ["Nova", "Wren"]);
+        // Before Kite left, Kite was there.
+        assert!(instance_people_in(&db, here, late - 1).contains(&"Kite".to_string()));
     }
 
     #[test]

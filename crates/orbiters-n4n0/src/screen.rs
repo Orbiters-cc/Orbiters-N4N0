@@ -2244,6 +2244,8 @@ pub(crate) fn tick(
         // The screen shows this page whole now: a row pressed means what it holds (CORE2-10).
         if settled {
             s.menu.presented();
+        } else {
+            s.menu.unconfirmed();
         }
         if !settled || now >= s.idle_until {
             // A new page's clear, a changed block, else one in turn, in three steps (VRChat's frames apart).

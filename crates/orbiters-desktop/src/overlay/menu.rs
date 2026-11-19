@@ -485,6 +485,8 @@ impl MenuOverlay {
                 let _ = overlay.show(self.handle);
                 self.shown = true;
             }
+            // What a row pressed from now on means: what this picture, just handed to SteamVR, shows in it.
+            self.host.menu.presented();
         }
         clicked
     }

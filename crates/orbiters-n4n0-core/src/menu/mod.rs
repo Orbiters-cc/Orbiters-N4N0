@@ -2542,6 +2542,13 @@ impl Menu {
         self.shown = None;
     }
 
+    /// The screen that shows this menu is still catching up (its blocks not all sent): what its rows show is not known,
+    /// and a row's share, mark, call or delete does nothing until [`Menu::presented`] says what they show (night4,
+    /// verify2: never "any occupant after a while").
+    pub fn unconfirmed(&mut self) {
+        self.shown = Some(Shown::default());
+    }
+
     /// Whether row `i` (of History when `captures`, else of Share to …'s friends), holding `key` now, holds what the
     /// person saw there: the page as last presented whole when a screen says so ([`Menu::presented`]), else what it held
     /// before a change of the list still settling.
@@ -3812,6 +3819,13 @@ mod tests {
         assert_eq!(shared(menu.press(Target::SharePublic(0))), None, "C was never shown in that row");
         menu.presented();
         assert_eq!(shared(menu.press(Target::SharePublic(0))), Some("C".into()));
+        // Night4 (verify2): the screen catching up (its blocks not all sent): nothing it may or may not show is acted on,
+        // however long ago the list changed.
+        menu.unconfirmed();
+        menu.captures_moved = None;
+        assert_eq!(shared(menu.press(Target::SharePublic(0))), None, "unconfirmed: nothing");
+        menu.presented();
+        assert_eq!(shared(menu.press(Target::SharePublic(0))), Some("C".into()), "shown whole again: what it shows");
         // Closed: judged by the list's changes again.
         menu.not_presented();
         assert!(menu.shown.is_none());

@@ -2284,7 +2284,8 @@ pub(crate) mod tests {
         let (api, seen) = stand_in(vec![
             ("POST /captures/capture/3/share", 404, gone),
             ("POST /maps/worlds/", 200, added),
-            ("POST /captures/capture/9/share", 200, shared_item(Kind::Capture, 9)),
+            // The share's answer shows what was asked (public), or it is read again (CORE2-2).
+            ("POST /captures/capture/9/share", 200, serde_json::to_string(&shares::Shared::Item { item: Item { kind: Kind::Capture, id: 9, mine: true, can_share: true, public: true, ..Default::default() } }).unwrap()),
         ]);
         share_with(&api, "token", Ok(records.clone()), &entry, &public, &|_| {}, &mut Vec::new(), &prepared).unwrap();
         let asked = requests(&seen);

@@ -113,5 +113,7 @@
   "Not everything could be put back: {problems}. What the project had is kept in {path}; the next package change puts it back.": "Tout n’a pas pu être remis : {problems}. Ce que le projet avait est gardé dans {path} ; la prochaine modification de packages le remet.",
   "Could not keep a copy of the package list before changing it: nothing was changed": "Impossible de garder une copie de la liste des packages avant de la modifier : rien n’a été changé",
   "{name} could not be put back ({why}): its copy is kept at {path}": "{name} n’a pas pu être remis ({why}) : sa copie est gardée dans {path}",
-  "A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.": "Une modification de packages s’est arrêtée en cours et n’a pas pu être entièrement annulée : {problems}. Ce que le projet avait est gardé dans {path}."
+  "A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.": "Une modification de packages s’est arrêtée en cours et n’a pas pu être entièrement annulée : {problems}. Ce que le projet avait est gardé dans {path}.",
+  "its record cannot be used": "son journal est inutilisable",
+  "The packages were changed, but the record of the change at {path} could not be closed: remove it before the next package change": "Les packages ont été modifiés, mais le journal de la modification dans {path} n’a pas pu être fermé : supprime-le avant la prochaine modification de packages"
 }

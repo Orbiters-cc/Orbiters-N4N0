@@ -156,8 +156,10 @@ impl Thumbs {
     /// Thumbnails that arrived become textures; the next asked for are fetched, newest first.
     fn step(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
-        let (tx, rx) = self.channel.get_or_insert_with(mpsc::channel);
-        while let Ok((id, image)) = rx.try_recv() {
+        let channel = self.channel.get_or_insert_with(mpsc::channel);
+        let tx = channel.0.clone();
+        let arrived: Vec<Fetched> = channel.1.try_iter().collect();
+        for (id, image) in arrived {
             self.fetching.remove(&id);
             match image {
                 Some(image) => {

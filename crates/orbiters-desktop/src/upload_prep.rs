@@ -352,6 +352,9 @@ struct Running {
     done: Arc<(Mutex<bool>, Condvar)>,
     /// Stopped by [`pause`] or [`forget`]: not a failure.
     stopped: Arc<AtomicBool>,
+    /// Taken out of the line by [`forget`] or [`claim`] while it ran: a start that fails then never puts it back
+    /// (night2, the verifier). Set and read under the line's lock.
+    withdrawn: Arc<AtomicBool>,
 }
 
 static BACKGROUND: Mutex<Option<Background>> = Mutex::new(None);
@@ -382,6 +385,7 @@ pub fn forget(dir: &Path) {
         b.queue.retain(|d| d != dir);
         let r = b.running.as_ref().filter(|r| r.dir == dir)?;
         r.stopped.store(true, Ordering::SeqCst);
+        r.withdrawn.store(true, Ordering::SeqCst);
         Some(r.child.clone())
     });
     if let Some(child) = running {
@@ -444,17 +448,25 @@ pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on
     let child = Arc::new(Mutex::new(child));
     let done = Arc::new((Mutex::new(false), Condvar::new()));
     let stopped = Arc::new(AtomicBool::new(false));
-    b.running = Some(Running { dir: dir.clone(), child: child.clone(), done: done.clone(), stopped: stopped.clone() });
+    let withdrawn = Arc::new(AtomicBool::new(false));
+    b.running = Some(Running { dir: dir.clone(), child: child.clone(), done: done.clone(), stopped: stopped.clone(), withdrawn: withdrawn.clone() });
     drop(guard);
     // A helper thread that cannot start leaves no running child behind and no slot taken (CHALLENGER-C5): the child is
     // stopped and reaped, the slot freed, whoever waits on it woken, and the session goes back first in line.
     let abandon = |e: anyhow::Error, child: &Arc<Mutex<std::process::Child>>, done: &Arc<(Mutex<bool>, Condvar)>| {
+        #[cfg(test)]
+        if let Some(meanwhile) = *BEFORE_ABANDON.lock().unwrap_or_else(|e| e.into_inner()) {
+            meanwhile();
+        }
         stop(child);
         let _ = child.lock().unwrap_or_else(|e| e.into_inner()).wait();
         background(|b| {
             b.running = None;
-            b.queue.retain(|d| *d != dir);
-            b.queue.push_front(dir.clone());
+            // Back first in line, unless it was forgotten or claimed meanwhile (a pause put it there itself).
+            if !withdrawn.load(Ordering::SeqCst) {
+                b.queue.retain(|d| *d != dir);
+                b.queue.push_front(dir.clone());
+            }
         });
         let (flag, wake) = &**done;
         *flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
@@ -507,6 +519,20 @@ pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on
 }
 
 /// Tests make a start fail at a chosen point (0: before the child, 1: its log thread, 2: its waiter).
+/// [`claim`]'s first half: `dir` leaves the line, and its running preparation is told it was withdrawn.
+fn withdraw(dir: &Path) -> Option<(Arc<Mutex<Child>>, Arc<(Mutex<bool>, Condvar)>, Arc<AtomicBool>)> {
+    background(|b| {
+        b.queue.retain(|d| d != dir);
+        let r = b.running.as_ref().filter(|r| r.dir == dir)?;
+        r.withdrawn.store(true, Ordering::SeqCst);
+        Some((r.child.clone(), r.done.clone(), r.stopped.clone()))
+    })
+}
+
+/// Tests run this while a failed start is being undone (a forget or a claim coming in between).
+#[cfg(test)]
+static BEFORE_ABANDON: Mutex<Option<fn()>> = Mutex::new(None);
+
 #[cfg(test)]
 static FAIL_AT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
 
@@ -521,11 +547,7 @@ fn fail_point(_at: u8) -> anyhow::Result<()> {
 /// A share of `dir` is about to prepare it: it leaves the queue, and when its background preparation runs, the share
 /// waits for it (its cache then answers at once), at most [`CLAIM_WAIT`] before stopping it.
 pub fn claim(dir: &Path) {
-    let running = background(|b| {
-        b.queue.retain(|d| d != dir);
-        b.running.as_ref().filter(|r| r.dir == dir).map(|r| (r.child.clone(), r.done.clone(), r.stopped.clone()))
-    });
-    let Some((child, done, stopped)) = running else { return };
+    let Some((child, done, stopped)) = withdraw(dir) else { return };
     let (flag, wake) = &*done;
     let finished = flag.lock().unwrap_or_else(|e| e.into_inner());
     let (finished, _) = wake.wait_timeout_while(finished, CLAIM_WAIT, |finished| !*finished).unwrap_or_else(|e| e.into_inner());
@@ -640,6 +662,25 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(30)).expect("the process exits and says so");
         forget(&a);
         assert!(queued().is_empty());
+        // night2 (the verifier): a session forgotten, or claimed by a share, while its failed start is undone is not put
+        // back in line.
+        fn forget_c() {
+            forget(Path::new("session-c"));
+        }
+        fn claim_c() {
+            let _ = withdraw(Path::new("session-c"));
+        }
+        let c = PathBuf::from("session-c");
+        for (meanwhile, what) in [(forget_c as fn(), "forgotten"), (claim_c as fn(), "claimed")] {
+            queue(c.clone());
+            *BEFORE_ABANDON.lock().unwrap() = Some(meanwhile);
+            FAIL_AT.store(2, Ordering::SeqCst);
+            assert!(start_next(false, |_| {}, || {}).is_err());
+            FAIL_AT.store(u8::MAX, Ordering::SeqCst);
+            *BEFORE_ABANDON.lock().unwrap() = None;
+            assert!(queued().is_empty(), "{what} meanwhile: not put back");
+            assert!(background(|bg| bg.running.is_none()), "{what}: no slot left taken");
+        }
     }
 
     /// A stopped preparation goes on only on the very result it was made from, and its file goes once it is done.

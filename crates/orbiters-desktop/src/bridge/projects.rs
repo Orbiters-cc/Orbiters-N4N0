@@ -258,7 +258,8 @@ pub(crate) fn on_a_local_drive(path: &Path) -> bool {
             Some(here)
         })
         .find(|p| p.exists());
-        existing.and_then(|p| std::fs::canonicalize(p).ok()).is_some_and(|real| matches!(real.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::VerbatimDisk(_) | Prefix::Disk(_))))
+        // Nothing of it exists (a drive not there): nothing to resolve, nothing reached; what uses it fails by itself.
+        existing.is_none_or(|p| std::fs::canonicalize(p).ok().is_some_and(|real| matches!(real.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::VerbatimDisk(_) | Prefix::Disk(_)))))
     }
 }
 

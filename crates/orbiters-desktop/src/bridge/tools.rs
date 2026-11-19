@@ -1314,9 +1314,10 @@ impl Bridge {
                 going.since = Instant::now();
             }
             if !travelled {
-                // A new VRChat: its own age for close_session's rule, and the size it was asked for (BRIDGE-17 b, h).
+                // A new VRChat: its own age for close_session's rule (BRIDGE-17 h), and its size measured once, at its
+                // first arrival (BRIDGE-17 b: not again after every travel).
                 run.launched_at = Some(Instant::now());
-                run.size = Some((WINDOW_WIDTH, WINDOW_HEIGHT));
+                run.size = None;
             }
         }
         // A link VRChat takes travels within seconds, or shows the world's page and waits for its Join button.
@@ -1349,9 +1350,9 @@ impl Bridge {
             return Err(Self::start_failure(s, event, "Call close_vrchat and go on with the next world. If this is the first world, tell the person."));
         }
         Self::in_private_instance(&seen)?;
-        if let Some(window) = seen.pid.and_then(|pid| s.game.window(pid)) {
-            // The size the bridge asked for at its launch stays the reference; a VRChat it did not launch (adopted) is
-            // measured once.
+        // Only the bridge's own proven VRChat's window is looked at.
+        if let Some(window) = self.ours(s, &seen).ok().and_then(|pid| s.game.window(pid)) {
+            // Measured once, at the first arrival after its launch: the reference until the next launch.
             s.run.lock().unwrap().size.get_or_insert((window.width, window.height));
         }
         let foreground = self.forward_on_arrival(s, &seen);
@@ -2258,10 +2259,9 @@ impl Bridge {
         self.sides.lock().unwrap().push(s.clone());
         if let Err(mut failure) = self.launch_side(&s, LaunchPlan { world_id: String::new(), instance: String::new(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: Some(profile), osc: Some(osc), vr: rig.is_some() }, call) {
             if s.run.lock().unwrap().given_up.is_some() {
-                // The launch went out and its VRChat has not come up (yet): the session stays, to take it when it does
-                // (never someone else's) and so that nothing of it is forgotten; its id is said.
-                failure.message = format!("{} Session {id} stays open for the VRChat this launch may still bring up: call list_sessions, then close_session with it if you give up.", failure.message); // i18n: not shown (an AI client reads it)
-                return Err(failure);
+                // The launch went out and its VRChat has not come up (yet): said, so that it is not forgotten (its ports are
+                // freed; the next open_session of this profile takes that VRChat, by its own log, if it comes).
+                failure.message = format!("{} A VRChat of this launch may still come up: open_session with profile {profile} again takes it.", failure.message); // i18n: not shown (an AI client reads it)
             }
             self.sides.lock().unwrap().retain(|x| x.id != s.id);
             opener.forget(&id);
@@ -2391,7 +2391,7 @@ impl Bridge {
         run.pid = pid;
         run.given_up = None;
         run.launched_at = Some(Instant::now());
-        run.size = Some((WINDOW_WIDTH, WINDOW_HEIGHT));
+        run.size = None;
         Ok(())
     }
 

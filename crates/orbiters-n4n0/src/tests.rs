@@ -3111,8 +3111,9 @@ fn during_a_call_the_wake_word_only_offers_talk_with_n4n0() {
     n.n4n0.lock().unwrap().wake_offer_until = Some(Instant::now());
     n.command(Command::WakeOffer { accept: true, id: None });
     assert!(n.n4n0.lock().unwrap().listening.is_none(), "too late");
-    // After the call: the word works as always.
+    // After the call (a sentence begun once it was over): the word works as always.
     *t.in_call.lock().unwrap() = false;
+    std::thread::sleep(Duration::from_millis(700));
     worker.say(wake("testwake"));
     assert!(n.n4n0.lock().unwrap().listening.is_some());
     t.shutdown(&n);

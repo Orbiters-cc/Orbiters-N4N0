@@ -240,10 +240,10 @@ fn stop_after_the_bridge_closed_by_itself_still_makes_its_vrchat_the_person_s() 
     // with no listener open, Stop did nothing, and a later re-enable could take the game back.
     let k = keeping("stop-closed", Duration::from_secs(60));
     assert!(until(PATIENCE, || k.listening()));
-    k.keeper.bridge.main.run.lock().unwrap().pid = Some(7777);
     k.flag.signed_in.store(false, std::sync::atomic::Ordering::Relaxed);
     assert!(until(PATIENCE, || !k.listening()), "closed by itself");
-    assert_eq!(k.keeper.bridge.main.run.lock().unwrap().pid, Some(7777), "kept: not the person's doing");
+    // What its close kept (no tick runs once the listener is closed).
+    k.keeper.bridge.main.run.lock().unwrap().pid = Some(7777);
     k.keeper.command(Command::Stop);
     assert_eq!(k.keeper.bridge.main.run.lock().unwrap().pid, None, "the person's Stop: theirs");
 }

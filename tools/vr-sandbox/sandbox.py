@@ -753,11 +753,6 @@ class Session:
     def stop_installed_app(self):
         install=LOCAL/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
         appdir=ROAMING/'Orbiters/Desktop'
-        # Test programs share these files with the installed app; the journal restores their bytes at the end.
-        for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat']:
-            backup(self.j,path)
-        # Claude Code and Codex sessions keep writing these during a session: only the bridge's own entry is recorded.
-        client_backup(self.j,HOME/'.codex/config.toml','codex');client_backup(self.j,HOME/'.claude.json','claude')
         previous=[]
         for p in psutil.process_iter(['name']):
             try:
@@ -765,13 +760,22 @@ class Session:
             except psutil.Error:pass
         visible=any('--window' in p.cmdline() for p in previous if p.is_running())
         # Restarted at the end only if it was running now.
-        self.j.update(installed_app_stopped=True,app_restore_exe=str(install) if previous else None,app_was_visible=visible)
+        self.j.update(app_restore_exe=str(install) if previous else None,app_was_visible=visible)
         atomic_json(JOURNAL,self.j)
         # --quit only signals the service. Wait for its existing processes to exit before anything else, or
         # single-instance arbitration can silently discard a test program while the installed one shuts down.
         if previous:subprocess.run([str(install),'--quit'],timeout=20,creationflags=subprocess.CREATE_NO_WINDOW,check=True)
         _,alive=psutil.wait_procs(previous,timeout=20)
         if alive:raise RuntimeError('Installed Orbiters did not finish quitting')
+        # Test programs share these files with the installed app; the journal restores their bytes at the end. Taken
+        # after the app's quit (SBX-3): it saves pending settings at shutdown, and that save is the owner's.
+        for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat']:
+            backup(self.j,path)
+        # Claude Code and Codex sessions keep writing these during a session: only the bridge's own entry is recorded.
+        client_backup(self.j,HOME/'.codex/config.toml','codex');client_backup(self.j,HOME/'.claude.json','claude')
+        # Only now: a test program may start (the `app` action stops the installed app again while this is unset).
+        self.j['installed_app_stopped']=True
+        atomic_json(JOURNAL,self.j)
 
     def record(self):
         known = {(p['pid'],p['create_time']) for p in self.j['processes']}

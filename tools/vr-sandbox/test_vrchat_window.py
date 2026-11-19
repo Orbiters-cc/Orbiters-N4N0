@@ -54,3 +54,38 @@ class VRChatWindow(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class InstalledAppShutdownSave(unittest.TestCase):
+    """SBX-3: the installed app saves its pending settings when it quits; the backup holds that save."""
+    def test_settings_are_backed_up_after_the_apps_quit(self):
+        from pathlib import Path
+        from unittest.mock import Mock
+        shutil.rmtree(sandbox.BASE, ignore_errors=True); sandbox.ROOT.mkdir(parents=True)
+        install = sandbox.LOCAL / 'Programs/Orbiters - N4N0/orbiters-desktop.exe'
+        install.parent.mkdir(parents=True); install.write_bytes(b'')
+        settings = sandbox.ROAMING / 'Orbiters/Desktop/settings.json'
+        settings.parent.mkdir(parents=True); settings.write_text('A')
+        app = Mock(); app.info = {'name': install.name}; app.exe.return_value = str(install); app.cmdline.return_value = [str(install)]
+        def quit(args, **kwargs):
+            self.assertEqual(args, [str(install), '--quit'])
+            settings.write_text('B')     # its shutdown save
+        s = sandbox.Session()
+        s.j = {'session': 'q', 'files': [], 'processes': [], 'restored': False, 'shared': True}
+        with patch.object(sandbox.psutil, 'process_iter', return_value=[app]), patch.object(sandbox.subprocess, 'run', side_effect=quit), \
+                patch.object(sandbox.psutil, 'wait_procs', return_value=([app], [])):
+            s.stop_installed_app()
+        saved = next(e for e in s.j['files'] if e['path'] == str(settings))
+        self.assertEqual(Path(saved['backup']).read_text(), 'B')
+        self.assertTrue(s.j['installed_app_stopped'])
+
+    def test_an_app_that_does_not_quit_leaves_the_stop_to_be_done_again(self):
+        from unittest.mock import Mock
+        shutil.rmtree(sandbox.BASE, ignore_errors=True); sandbox.ROOT.mkdir(parents=True)
+        s = sandbox.Session()
+        s.j = {'session': 'q', 'files': [], 'processes': [], 'restored': False, 'shared': True}
+        with patch.object(sandbox.psutil, 'process_iter', return_value=[]), patch.object(sandbox.psutil, 'wait_procs', return_value=([], [Mock()])):
+            with self.assertRaisesRegex(RuntimeError, 'did not finish quitting'):
+                s.stop_installed_app()
+        self.assertFalse(s.j.get('installed_app_stopped'))
+        self.assertEqual(s.j['files'], [])

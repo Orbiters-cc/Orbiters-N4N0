@@ -710,6 +710,7 @@ impl Controller {
                 },
                 Err(super::travel::GoFailure::BridgeBusy) => Notice::Error(tr("Only the assistant's VRChat is running. Close it first.").into()),
                 Err(super::travel::GoFailure::Start(words)) => Notice::Error(tr!("VRChat could not be started: {reason}", reason = words)),
+                Err(super::travel::GoFailure::BadDestination) => Notice::Error(tr("VRChat does not know this world.").into()),
             };
         }
         if started.is_some_and(|t| t.elapsed() < STARTING_FOR) {

@@ -2881,7 +2881,7 @@ fn a_scan_stops_at_its_sixth_page_opened_and_refusals_spend_nothing() {
     // verify-n4n0 (10): refused opens spent the six-page quota, and the sixth page opened left the scanner looking.
     use orbiters_n4n0_core::qr::QrPhase;
     let (host, n) = n4n0(Settings::default());
-    n.command(Command::Qr { on: true });
+    n.command(Command::Qr { on: true, holder: crate::MenuHolder::Any });
     host.qr_sees(QrSeen::Camera(true));
     *host.watch_fails.lock().unwrap() = true;
     host.qr_sees(QrSeen::Code("https://example.com/refused".into()));

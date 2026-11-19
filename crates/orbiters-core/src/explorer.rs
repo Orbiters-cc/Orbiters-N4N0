@@ -232,12 +232,23 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = Vec::new();
                 let mut buf = [0u8; 4096];
-                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                // The head, then the body its length says (a POST's JSON): a reply before it is read can reset the connection.
+                loop {
                     let n = stream.read(&mut buf).unwrap();
                     if n == 0 {
                         break;
                     }
                     request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
                 }
                 asked.push(String::from_utf8_lossy(&request).into_owned());
                 let reply = format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());

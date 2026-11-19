@@ -387,7 +387,7 @@ impl Zone {
             // holds the camera, clear of VRChat's row of buttons and of the caption.
             Zone::CameraShare => r(CAMERA_COLUMN_OUT, CAMERA_SHARE[0], CAMERA_HALF[0], CAMERA_SHARE[1]),
             // On a screen: right of the picture with the column's gap, from its top, two buttons over each other.
-            Zone::CameraShareDesk => r(CAMERA_HALF[0] + CAMERA_GAP, -CAMERA_HALF[1], CAMERA_HALF[0] + CAMERA_GAP + 210.0, -CAMERA_HALF[1] + 268.0),
+            Zone::CameraShareDesk => r(CAMERA_HALF[0] + CAMERA_GAP, -CAMERA_HALF[1], CAMERA_HALF[0] + CAMERA_GAP + 190.0, -CAMERA_HALF[1] + 268.0),
             // Where a code's page goes, as tall as it and its bar: stood up on the camera's top edge in a headset.
             Zone::CameraChooser => r(-CAMERA_HALF[0], CAMERA_WEB_BAR[1] - CAMERA_CHOOSER_TALL, CAMERA_HALF[0], CAMERA_WEB_BAR[1]),
             // Right under the ring, whose foot is free in any window: in reach, and over nothing of VRChat's.
@@ -436,6 +436,8 @@ const CAMERA_WEB_TALL: f32 = 470.0;
 /// the rim's foot down, from its left edge in, from its right edge in. Its arrow to the next buttons hangs past the right edge. Measured on `p1-stream-camera` and
 /// `07-after-walk` (1280 x 720): the row is 383 to 895 across, 535 to 620 down, under a rim 332 to 948, 185 to 535.
 pub const DESK_CAMERA_BUTTONS: [f32; 3] = [86.0, 51.0, 53.0];
+/// How far VRChat's arrow to its next camera buttons hangs past the panel's right edge, at 720 tall.
+pub const DESK_CAMERA_ARROW: f32 = 25.0;
 /// How large Orbiters' tiles are beside it, in pixels a unit at 720 tall: a tile of 92 x 60 is 124 x 81, as tall as VRChat's own buttons (80), the column of four
 /// about the panel's height, as Enzo drew it (2026-11-15).
 pub const DESK_CAMERA_UNIT: f32 = 1.35;
@@ -463,7 +465,8 @@ pub fn camera_on_screen(panel: Rect, client: Vec2) -> Vec<Placed> {
     let caption = Rect::from_min_size(pos2(column_left, under), vec2(CAMERA_COLUMN_OUT.abs() + 64.0, CAMERA_UNDER[1] - CAMERA_UNDER[0]) * unit);
     let act = Rect::from_min_size(pos2(caption.right() + 8.0 * unit, under), vec2(224.0, 34.0) * unit);
     let scan = panel.expand(CAMERA_SCAN_OUT * k);
-    let share = Rect::from_min_size(pos2(panel.right() + CAMERA_GAP * unit, panel.top()), Zone::CameraShareDesk.units().size() * unit);
+    // Past VRChat's arrow to its next buttons, which hangs about 25 px (at 720) past the panel's right edge.
+    let share = Rect::from_min_size(pos2(panel.right() + DESK_CAMERA_ARROW * k + CAMERA_GAP * unit, panel.top()), Zone::CameraShareDesk.units().size() * unit);
     [
         (Zone::CameraPeople, tile(0)),
         (Zone::CameraWorld, tile(1)),
@@ -956,4 +959,17 @@ mod tests {
             assert!(place(Zone::WheelStop, vec2(w, h)).is_some(), "{w}x{h}: no room under the ring");
         }
     }
+
+    /// REQUEST13: the share column beside VRChat's camera on a screen is there at 1280 x 720 (the panel measured on
+    /// `p1-stream-camera`), past VRChat's arrow, under nothing of VRChat's row, inside the window.
+    #[test]
+    fn the_share_column_is_right_of_the_camera_at_720() {
+        let panel = Rect::from_min_max(pos2(332.0, 185.0), pos2(948.0, 535.0));
+        let placed = camera_on_screen(panel, vec2(1280.0, 720.0));
+        let share = placed.iter().find(|p| p.zone == Zone::CameraShareDesk).expect("placed at 720");
+        assert!(share.rect.left() >= panel.right() + DESK_CAMERA_ARROW + 10.0, "{:?}", share.rect);
+        assert!(share.rect.right() <= 1280.0 && share.rect.bottom() <= 720.0, "{:?}", share.rect);
+        assert!((share.logical() - Zone::CameraShareDesk.units().size()).length() < 2.5);
+    }
+
 }

@@ -1201,6 +1201,7 @@ pub(crate) mod tests {
         s.camera_tools.qr = crate::controller::camera_tools::Qr::Found { url: "https://orbiters.cc".into() };
         s.camera_tools.demo = crate::controller::camera_tools::Demo::Busy;
         s.camera_tools.qr_generation = 3;
+        s.explorer.points = Some(orbiters_core::explorer::Explorer { points: 12.5, half_points: Some(25), ..Default::default() });
         s.projects_changed = 5;
         s.translate.set(crate::state::TranslateStatus { lines: 3, ..Default::default() });
         s.perf.set(crate::perf::PerfView { hint: Some(crate::perf::Hint { key: "overlay_cpu".into(), part: None }), report: None });

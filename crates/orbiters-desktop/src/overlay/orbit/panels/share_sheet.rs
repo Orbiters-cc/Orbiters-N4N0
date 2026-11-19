@@ -92,7 +92,7 @@ const PUT_AWAY_W: f32 = 44.0;
 /// The share row's items, in a zone `w` x `h`.
 pub fn share_items(w: f32, _h: f32, view: &ShareView) -> Vec<Item> {
     let id = view.offer.id;
-    if view.confirming {
+    if view.confirming && w >= 300.0 {
         let yes = 206.0;
         let no = 108.0;
         return vec![
@@ -459,10 +459,10 @@ mod tests {
         v.confirming = true;
         assert_eq!(actions(&share_items(520.0, 84.0, &v)), [Action::Idle, Action::ShareCancelConfirm, Action::ShareConfirm(7)]);
         // On a screen, the column beside the panel: the same presses, over each other, none overlapping.
-        let column = share_items(210.0, 268.0, &v);
+        let column = share_items(190.0, 268.0, &v);
         assert_eq!(actions(&column), [Action::Idle, Action::ShareConfirm(7), Action::ShareCancelConfirm]);
         v.confirming = false;
-        let column = share_items(210.0, 268.0, &v);
+        let column = share_items(190.0, 268.0, &v);
         assert_eq!(actions(&column), [Action::Idle, Action::SharePublic(7), Action::ShareDismiss(7)]);
         for pair in column.windows(2) {
             assert!(pair[0].rect.bottom() <= pair[1].rect.top() && pair[1].rect.bottom() <= 268.0, "{pair:?}");

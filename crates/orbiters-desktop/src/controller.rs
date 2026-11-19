@@ -166,6 +166,9 @@ pub struct Controller {
     /// Bumped (under `capture_start_gate`) by every start of a new recording, a world split's next part excepted: what
     /// belongs to one recording (a scan's flight) checks it is still the current one under the gate (C-2).
     capture_serial: AtomicU64,
+    /// Bumped by every capture worker process started; and the one the recording under way was started on.
+    worker_incarnation: AtomicU64,
+    recording_worker: AtomicU64,
     kit_epoch: Mutex<(u64,Option<String>)>,
     /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
     /// the app drives them), and when the avatar last (re)loaded, which resets them.
@@ -530,6 +533,8 @@ impl Controller {
             camera_route: AtomicU64::new(0),
             capture_start_gate: Mutex::new(()),
             capture_serial: AtomicU64::new(0),
+            worker_incarnation: AtomicU64::new(0),
+            recording_worker: AtomicU64::new(0),
             kit_epoch: Mutex::default(),
             avatar_before: Mutex::new(None),
             hide: Mutex::new(hide_self::HideRuntime::with_journal((!cfg!(test)).then(hide_self::masks_journal))),
@@ -802,9 +807,16 @@ impl Controller {
                 return Ok(());
             }
         }
+        // This worker process: its events and its end count only while the recording under way is its own, or while no
+        // other worker started since (verify-controller: a dead worker's late end reset a new worker's recording).
+        let incarnation = self.worker_incarnation.fetch_add(1, Ordering::AcqRel) + 1;
         let on_event = {
             let ctl = self.clone();
-            move |e| ctl.on_worker_event(e)
+            move |e| {
+                if ctl.worker_counts(incarnation) {
+                    ctl.on_worker_event(e)
+                }
+            }
         };
         let on_log = {
             let ctl = self.clone();
@@ -818,7 +830,30 @@ impl Controller {
         };
         let on_exit = {
             let ctl = self.clone();
-            move || {
+            move || ctl.on_worker_exit(incarnation)
+        };
+        let handle = WorkerHandle::spawn(on_event, on_log, on_exit).inspect_err(|e| {
+            self.update(|s| s.worker.error = Some(e.to_string()));
+        })?;
+        *guard = Some(handle);
+        Ok(())
+    }
+
+    /// Whether what worker `incarnation` says still counts: it is the newest worker, or the recording under way was
+    /// started on it.
+    fn worker_counts(&self, incarnation: u64) -> bool {
+        self.worker_incarnation.load(Ordering::Acquire) == incarnation || self.recording_worker.load(Ordering::Acquire) == incarnation
+    }
+
+    /// Worker `incarnation` ended. Its recording, if one was under way, ended with it; a worker replaced since (a stuck
+    /// one restarted) whose end is heard late leaves the newer worker's recording alone.
+    fn on_worker_exit(self: &Shared, incarnation: u64) {
+        if !self.worker_counts(incarnation) {
+            return;
+        }
+        {
+            let ctl = self;
+            {
                 ctl.put_vrchat_back();
                 // What the recording was for ends with it, BEFORE Idle is published: a start after Idle may be a new
                 // 3D picture's or scan's, whose flag must stay (CTL-11 a).
@@ -837,12 +872,7 @@ impl Controller {
                 });
                 ctl.capture_ended();
             }
-        };
-        let handle = WorkerHandle::spawn(on_event, on_log, on_exit).inspect_err(|e| {
-            self.update(|s| s.worker.error = Some(e.to_string()));
-        })?;
-        *guard = Some(handle);
-        Ok(())
+        }
     }
 
     fn send(self: &Shared, cmd: &WorkerCommand) -> anyhow::Result<()> {
@@ -1241,6 +1271,8 @@ impl Controller {
                 self.flush_osc(&mut osc);
                 osc.forwarding = false;
                 let sent = self.send(&WorkerCommand::Start(Box::new(cmd)));
+                // The worker this recording runs on (the newest: `send` started one if none ran).
+                self.recording_worker.store(self.worker_incarnation.load(Ordering::Acquire), Ordering::Release);
                 if sent.is_ok() && record_parameters {
                     let samples = initial_samples(vrchat, &osc.latest, fetch_started);
                     osc.forwarding = true;
@@ -3475,6 +3507,22 @@ mod tests {
         assert_eq!(run(vec![(2, b.clone(), false), (1, a.clone(), false)]), vec![2.0], "reversed in one burst");
         assert_eq!(run(vec![(2, b.clone(), true), (1, a.clone(), false)]), vec![2.0], "the older after a write");
         assert_eq!(run(vec![(1, a.clone(), true), (2, b.clone(), false)]), vec![1.0, 2.0], "in order");
+    }
+
+    /// verify-controller: the late end of a worker replaced since (its recording not the one under way) leaves the newer
+    /// worker's recording running; the end of the worker the recording runs on still ends it.
+    #[test]
+    fn a_replaced_workers_late_end_leaves_the_new_recording_alone() {
+        use std::sync::atomic::Ordering;
+        let ctl = super::Controller::new(orbiters_core::settings::Settings::default());
+        // Worker 1 died, worker 2 was started and records.
+        ctl.worker_incarnation.store(2, Ordering::Release);
+        ctl.recording_worker.store(2, Ordering::Release);
+        ctl.update(|s| s.capture.state = super::CaptureState::Recording);
+        ctl.on_worker_exit(1);
+        assert_eq!(ctl.view().capture.state, super::CaptureState::Recording, "worker 1's late end");
+        ctl.on_worker_exit(2);
+        assert_eq!(ctl.view().capture.state, super::CaptureState::Idle, "its own worker ended");
     }
 
     /// verify-controller (CTL-1 at shutdown): a change queued after the last flush never starts a second writer that writes

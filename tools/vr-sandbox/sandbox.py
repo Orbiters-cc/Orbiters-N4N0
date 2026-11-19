@@ -30,7 +30,22 @@ sys.path.insert(0, str(Path(__file__).parent))
 import lease
 import vrchat_life
 
-ROOT = Path(os.environ['USERPROFILE']) / '.orbiters-build/vr-sandbox'
+def machine_base():
+    """Tests only: ORBITERS_VR_SANDBOX_TEST_BASE moves every machine path (home, AppData, Steam, the sandbox root) into one
+    folder, so that no test can reach the owner's real SteamVR files or state. Honoured only inside the temp directory."""
+    import tempfile
+    value=os.environ.get('ORBITERS_VR_SANDBOX_TEST_BASE')
+    if not value:return None
+    base=Path(value).resolve()
+    if not base.is_relative_to(Path(tempfile.gettempdir()).resolve()):
+        raise SystemExit('ORBITERS_VR_SANDBOX_TEST_BASE must be inside the temp directory: '+str(base))
+    return base
+
+BASE = machine_base()
+HOME = BASE/'home' if BASE else Path(os.environ['USERPROFILE'])
+LOCAL = BASE/'local' if BASE else Path(os.environ['LOCALAPPDATA'])
+ROAMING = BASE/'roaming' if BASE else Path(os.environ['APPDATA'])
+ROOT = HOME / '.orbiters-build/vr-sandbox'
 LOCK = ROOT / 'steamvr.lock'
 JOURNAL = ROOT / 'session.json'
 LEASES = ROOT / 'leases'          # <owner>.json: that agent's turn token (written by the controller on grant)
@@ -41,9 +56,9 @@ EAC_LOG = ROOT / 'eac-log.jsonl'
 DEFAULT_RENDER = [1080, 1200]
 HEADSET_HOLD_S = 10               # a Virtual Desktop headset connection must last this long before the session yields
 NEUTRAL_POSES = ([0, 1.65, 0], [-.25, 1.2, -.35], [.25, 1.2, -.35])
-STEAM = Path('C:/Program Files (x86)/Steam')
+STEAM = BASE/'steam' if BASE else Path('C:/Program Files (x86)/Steam')
 RUNTIME = STEAM / 'steamapps/common/SteamVR'
-PATHS = Path(os.environ['LOCALAPPDATA']) / 'openvr/openvrpaths.vrpath'
+PATHS = LOCAL / 'openvr/openvrpaths.vrpath'
 SETTINGS = STEAM / 'config/steamvr.vrsettings'
 NAMES = {'vrserver.exe', 'vrmonitor.exe', 'vrcompositor.exe', 'vrstartup.exe',
          'vrdashboard.exe', 'vrwebhelper.exe', 'vrprismhost.exe', 'vrchat.exe'}
@@ -386,7 +401,7 @@ class Session:
             old.rename(ROOT / ('backup-' + str(time.time_ns())))
         for path in [PATHS, SETTINGS, STEAM/'config/chaperone_info.vrchap', STEAM/'config/steamvr.vrappconfig', STEAM/'config/steamapps.vrmanifest']:
             backup(self.j, path)
-        for path in [STEAM/'config/vrappconfig', Path(os.environ['LOCALAPPDATA'])/'Orbiters/SteamVR']:
+        for path in [STEAM/'config/vrappconfig', LOCAL/'Orbiters/SteamVR']:
             backup(self.j, path, tree=True)
         atomic_json(JOURNAL, self.j)
         # Recovery outlives the control server, including an abrupt crash.
@@ -427,10 +442,10 @@ class Session:
         return proc
 
     def stop_installed_app(self):
-        install=Path(os.environ['LOCALAPPDATA'])/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
-        appdir=Path(os.environ['APPDATA'])/'Orbiters/Desktop'
+        install=LOCAL/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
+        appdir=ROAMING/'Orbiters/Desktop'
         # Test programs share these files with the installed app; the journal restores their bytes at the end.
-        for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat',Path(os.environ['USERPROFILE'])/'.codex/config.toml',Path(os.environ['USERPROFILE'])/'.claude.json']:
+        for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat',HOME/'.codex/config.toml',HOME/'.claude.json']:
             backup(self.j,path)
         previous=[]
         for p in psutil.process_iter(['name']):
@@ -695,9 +710,9 @@ class Session:
             holder=self.lease['holder']
             if holder.get('app') and same_process(holder['app']):raise RuntimeError('Your turn already runs '+holder['app']['exe']+'; app_stop it first')
             logs=Path(args.get('logs') or ROOT/'logs').resolve()
-            real=(Path(os.environ['LOCALAPPDATA'])/'Orbiters').resolve()
+            real=(LOCAL/'Orbiters').resolve()
             if logs==real or logs.is_relative_to(real):raise ValueError("logs must not be the owner's own Orbiters folder")
-            install=Path(os.environ['LOCALAPPDATA'])/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
+            install=LOCAL/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
             if not self.j.get('installed_app_stopped'):self.stop_installed_app()
             env=os.environ.copy();env['ORBITERS_VR_SANDBOX_ROOT']=str(Path(__file__).parent.resolve());env.pop('ORBITERS_NO_NETWORK_LISTENING',None)
             # The bridge inside the test program calls sandbox.py with these, so its requests count as this turn's.

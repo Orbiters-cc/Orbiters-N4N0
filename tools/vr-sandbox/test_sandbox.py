@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+import sandbox_testbase  # first: every machine path into a temp folder
 import sandbox
 
 class JournalTests(unittest.TestCase):
@@ -269,3 +270,17 @@ class PointingTheLaser(unittest.TestCase):
         self.assertAlmostEqual(position[0], 0.2 - 0.032, places=6)
         self.assertAlmostEqual(position[1], 1.65, places=6)
         self.assertAlmostEqual(position[2], -0.1 + 0.015 - 0.05, places=6)
+
+
+class TestBase(unittest.TestCase):
+    """No test reaches the owner's machine: every path sandbox.py changes lives under the temp test base."""
+    def test_every_machine_path_is_inside_the_test_base(self):
+        base = Path(sandbox_testbase.BASE).resolve()
+        for path in (sandbox.ROOT, sandbox.LOCK, sandbox.JOURNAL, sandbox.STEAM, sandbox.PATHS, sandbox.SETTINGS, sandbox.HOME,
+                     sandbox.LOCAL, sandbox.ROAMING):
+            self.assertTrue(Path(path).resolve().is_relative_to(base), path)
+
+    def test_a_test_base_outside_the_temp_directory_is_refused(self):
+        import os
+        with patch.dict(os.environ, {'ORBITERS_VR_SANDBOX_TEST_BASE': str(Path(sandbox.__file__).parent)}):
+            with self.assertRaises(SystemExit):sandbox.machine_base()

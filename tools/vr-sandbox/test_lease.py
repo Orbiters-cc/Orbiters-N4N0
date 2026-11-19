@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import lease
+import sandbox_testbase  # first: every machine path into a temp folder
 import sandbox
 import vrchat_life
 
@@ -263,7 +264,7 @@ class SessionTurns(unittest.TestCase):
         self.s.handle({'action': 'acquire', 'owner': 'a'})
         exe = sandbox.ROOT / 'test.exe'
         exe.write_bytes(b'')
-        real = Path(sandbox.os.environ['LOCALAPPDATA']) / 'Orbiters' / 'logs'
+        real = sandbox.LOCAL / 'Orbiters' / 'logs'
         with self.assertRaisesRegex(ValueError, "owner's own"):
             self.ask('a', 'app', app_exe=str(exe), logs=str(real))
 

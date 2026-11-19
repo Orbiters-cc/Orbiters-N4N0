@@ -3,7 +3,16 @@
 //! Orbiters takes them at `POST /n4n0/metrics`, a batch every minute. A server that cannot be reached keeps them waiting; one that
 //! refuses them (an older server without the route) has them dropped, without a word: nothing here is ever shown to the person.
 //!
-//! The install is a random id kept beside them, forgotten with them when the statistics are turned off. No account, no token is sent.
+//! The install is a random id kept beside them, forgotten with them when the statistics are turned off.
+//!
+//! **Who** (2026-11-19, Enzo: "identify the usages by user"): each step and performance window is stamped when it is counted with a
+//! [`Stamp`]: whether the notice saying "linked to your Orbiters account" had been shown (`settings.usage.told_account`) and, if so,
+//! the account signed in then. A batch holds only items of one stamp; one stamped with the account signed in now goes with that
+//! account's own Orbiters credential (`Authorization: Bearer`, as every authenticated call), so the server learns the account from
+//! its session, never from a field the app could make up. Nothing counted before that notice is ever sent with a credential, and it
+//! goes under the install id of before ([`INSTALL`]); what is counted after it goes under a new one ([`INSTALL_TOLD`]), and each
+//! session ends and starts again when the stamp changes: neither an install nor a session ties what was counted under the old
+//! notice ("never your account") to an account. The stamp itself stays on this computer.
 
 use super::{clean, now_ms, Kind, Step};
 use crate::ipc::Role;
@@ -24,7 +33,47 @@ pub const MAX_PERF_KEPT: usize = 1440;
 pub const PERF_BATCH: usize = 120;
 const WAITING: &str = "waiting.jsonl";
 const PERF_WAITING: &str = "perf-waiting.jsonl";
+/// The install's id for what was counted before the notice said it is linked to the account; deleted once none of it waits.
 const INSTALL: &str = "install-id";
+/// The install's id for what was counted since (a new random one: the server cannot join the two).
+const INSTALL_TOLD: &str = "install-id-2";
+
+/// Under which notice, and for whom, a step or window was counted (see the module's doc). Kept on disk with what waits, never sent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stamp {
+    /// Counted after the notice that says it is linked to the account was shown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub told: bool,
+    /// The Orbiters account signed in then (its id), only when `told`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
+impl Stamp {
+    pub fn is_none(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// What is counted now: `told` from the settings, `account` the account signed in (ignored unless told).
+    pub fn now(told: bool, account: Option<String>) -> Self {
+        Self { told, account: account.filter(|_| told) }
+    }
+}
+
+/// The signed-in account a batch stamped with it goes with: its id (as in [`Stamp::account`]), the API address its credential is for,
+/// and the credential. Held in memory only for the request.
+#[derive(Clone)]
+pub struct Signed {
+    pub account: String,
+    pub base: String,
+    pub token: String,
+}
+
+impl std::fmt::Debug for Signed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Signed").field("account", &self.account).field("base", &self.base).field("token", &"(hidden)").finish() // i18n: not shown
+    }
+}
 
 /// One step as Orbiters receives it (backend `routes/n4n0Metrics.js`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -52,6 +101,9 @@ pub struct Event {
     pub sandbox: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub agent: bool,
+    /// Who it was counted for: on disk only, taken off before it is sent.
+    #[serde(default, skip_serializing_if = "Stamp::is_none")]
+    pub who: Stamp,
 }
 
 pub fn surface(role: Role) -> &'static str {
@@ -72,16 +124,19 @@ struct Session {
 #[derive(Default)]
 struct Inner {
     dir: Option<PathBuf>,
+    /// The install's two ids (before and since the notice of the account), read or made when first needed.
     install: Option<String>,
+    install_told: Option<String>,
+    /// Who what is counted now is for; `None` until told once (`Spool::collecting`).
+    who: Option<Stamp>,
     sessions: HashMap<u64, Session>,
     waiting: VecDeque<Event>,
     loaded: bool,
     /// The performance windows waiting, and the one being summed.
     perf: VecDeque<super::perf::Window>,
     windows: super::perf::Windows,
-    /// The VRChat bridge drives now; the team account's code (`perf::team_code`).
+    /// The VRChat bridge drives now.
     agent: bool,
-    team: Option<String>,
 }
 
 /// What a request did with a batch.
@@ -126,6 +181,7 @@ impl Spool {
         load(&mut inner);
         let lang = orbiters_i18n::language().tag().to_string();
         let inner_agent = inner.agent;
+        let who = inner.who.clone().unwrap_or_default();
         let Some(session) = inner.sessions.get_mut(&link) else { return };
         let mut events = Vec::with_capacity(steps.len() + 1);
         let event = |session: &Session, at: u64, kind: &str| Event {
@@ -142,6 +198,7 @@ impl Spool {
             debug: super::perf::debug_build(),
             sandbox: super::perf::sandbox_run(),
             agent: inner_agent,
+            who: who.clone(),
         };
         for step in steps {
             // Checked again here: a client is not trusted with what leaves the computer.
@@ -188,6 +245,7 @@ impl Spool {
             debug: super::perf::debug_build(),
             sandbox: super::perf::sandbox_run(),
             agent: inner.agent,
+            who: inner.who.clone().unwrap_or_default(),
         };
         keep(&mut inner, vec![end]);
     }
@@ -199,6 +257,7 @@ impl Spool {
         inner.perf.clear();
         inner.windows = Default::default();
         inner.install = None;
+        inner.install_told = None;
         for session in inner.sessions.values_mut() {
             session.started = false;
             session.id = uuid::Uuid::new_v4().simple().to_string();
@@ -207,6 +266,7 @@ impl Spool {
             let _ = std::fs::remove_file(dir.join(WAITING));
             let _ = std::fs::remove_file(dir.join(PERF_WAITING));
             let _ = std::fs::remove_file(dir.join(INSTALL));
+            let _ = std::fs::remove_file(dir.join(INSTALL_TOLD));
         }
     }
 
@@ -228,11 +288,46 @@ impl Spool {
         (sessions, screens)
     }
 
-    /// Where what is noted from now on comes from: the VRChat bridge driving, the team account's code.
-    pub fn origin(&self, agent: bool, team: Option<String>) {
+    /// Where what is noted from now on comes from: the VRChat bridge driving.
+    pub fn origin(&self, agent: bool) {
+        self.lock().agent = agent;
+    }
+
+    /// Who what is counted from now on is for. When it changes, each session that started ends where it was, under the stamp it had,
+    /// and starts again under a new id at its next step: a session is never of two stamps (the server would join them by its id).
+    pub fn collecting(&self, who: Stamp) {
         let mut inner = self.lock();
-        inner.agent = agent;
-        inner.team = team;
+        let Some(before) = inner.who.replace(who.clone()) else { return };
+        if before == who {
+            return;
+        }
+        load(&mut inner);
+        let mut ends = Vec::new();
+        let lang = orbiters_i18n::language().tag().to_string();
+        let agent = inner.agent;
+        for session in inner.sessions.values_mut() {
+            if session.started {
+                ends.push(Event {
+                    session: session.id.clone(),
+                    surface: session.surface.into(),
+                    build: env!("ORBITERS_VERSION").into(),
+                    os: std::env::consts::OS.into(),
+                    lang: lang.clone(),
+                    at: now_ms(),
+                    kind: "end".into(),
+                    screen: session.last.clone(),
+                    from: None,
+                    control: None,
+                    debug: super::perf::debug_build(),
+                    sandbox: super::perf::sandbox_run(),
+                    agent,
+                    who: before.clone(),
+                });
+            }
+            session.started = false;
+            session.id = uuid::Uuid::new_v4().simple().to_string();
+        }
+        keep(&mut inner, ends);
     }
 
     /// A performance sample (`perf::sample`); a window it closes waits to be sent. Nothing is kept while the statistics are off.
@@ -244,58 +339,76 @@ impl Spool {
         }
         load(&mut inner);
         let agent = inner.agent;
+        let mut sample = sample;
+        sample.who = inner.who.clone().unwrap_or_default();
         if let Some(window) = inner.windows.push(sample, agent) {
             keep_perf(&mut inner, window);
         }
     }
 
-    /// The install's random id, made the first time it is needed.
-    fn install(&self) -> String {
+    /// The install's random id for what was counted before (`told` false) or since the notice of the account, made the first time
+    /// it is needed.
+    fn install(&self, told: bool) -> String {
         let mut inner = self.lock();
-        if let Some(id) = &inner.install {
+        let inner = &mut *inner;
+        let (slot, file) = if told { (&mut inner.install_told, INSTALL_TOLD) } else { (&mut inner.install, INSTALL) };
+        if let Some(id) = slot {
             return id.clone();
         }
-        let read = inner.dir.as_ref().and_then(|d| std::fs::read_to_string(d.join(INSTALL)).ok()).map(|s| s.trim().to_string()).filter(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+        let read = inner.dir.as_ref().and_then(|d| std::fs::read_to_string(d.join(file)).ok()).map(|s| s.trim().to_string()).filter(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()));
         let id = read.unwrap_or_else(|| {
             let id = uuid::Uuid::new_v4().simple().to_string();
             if let Some(dir) = &inner.dir {
                 let _ = std::fs::create_dir_all(dir);
-                let _ = std::fs::write(dir.join(INSTALL), &id);
+                let _ = std::fs::write(dir.join(file), &id);
             }
             id
         });
-        inner.install = Some(id.clone());
+        *slot = Some(id.clone());
         id
+    }
+
+    /// The install's id of before, once nothing counted before the notice of the account waits and that notice was shown: forgotten,
+    /// so that nothing on this computer still holds it.
+    fn drop_old_install(inner: &mut Inner) {
+        if !inner.who.as_ref().is_some_and(|w| w.told) || inner.waiting.iter().any(|e| !e.who.told) || inner.perf.iter().any(|w| !w.who.told) {
+            return;
+        }
+        inner.install = None;
+        if let Some(dir) = &inner.dir {
+            let _ = std::fs::remove_file(dir.join(INSTALL));
+        }
     }
 
     /// The longest the first send waits for the account to be known ([`Spool::run`]).
     pub const ORIGIN_WAIT: Duration = Duration::from_secs(60);
 
-    /// Sends the oldest batch to `api`: the request runs without the lock, so steps keep arriving meanwhile.
-    pub fn send(&self, api: &orbiters_core::account::Api) -> Sent {
-        let (batch, perf, team) = {
+    /// Sends the oldest batch to `api`: the request runs without the lock, so steps keep arriving meanwhile. A batch holds the oldest
+    /// items of one [`Stamp`]; it goes with `signed`'s credential only when it was stamped with that very account and the credential is
+    /// for this server, otherwise with none (never with another account's, never for what was counted before the notice of the account).
+    pub fn send(&self, api: &orbiters_core::account::Api, signed: Option<&Signed>) -> Sent {
+        let (batch, perf, who) = {
             let inner = self.lock();
-            (inner.waiting.iter().take(BATCH).cloned().collect::<Vec<Event>>(), inner.perf.iter().take(PERF_BATCH).cloned().collect::<Vec<_>>(), inner.team.clone())
+            let Some(who) = inner.waiting.front().map(|e| e.who.clone()).or_else(|| inner.perf.front().map(|w| w.who.clone())) else { return Sent::Nothing };
+            (
+                inner.waiting.iter().take_while(|e| e.who == who).take(BATCH).cloned().collect::<Vec<Event>>(),
+                inner.perf.iter().take_while(|w| w.who == who).take(PERF_BATCH).cloned().collect::<Vec<_>>(),
+                who,
+            )
         };
-        if batch.is_empty() && perf.is_empty() {
-            return Sent::Nothing;
-        }
-        // `perf` and `team` are new (2026-11-16): an older server reads `install` and `events` and leaves the rest.
-        let mut body = serde_json::json!({ "install": self.install(), "events": batch });
+        let token = who.account.as_deref().and_then(|account| signed.filter(|s| s.account == account && s.base == api.url("")).map(|s| s.token.clone()));
+        // `perf` is new (2026-11-16): an older server reads `install` and `events` and leaves the rest. The stamps stay here.
+        let events: Vec<Event> = batch.iter().cloned().map(|e| Event { who: Stamp::default(), ..e }).collect();
+        let mut body = serde_json::json!({ "install": self.install(who.told), "events": events });
         if !perf.is_empty() {
-            body["perf"] = serde_json::json!(perf);
+            let windows: Vec<_> = perf.iter().cloned().map(|w| super::perf::Window { who: Stamp::default(), ..w }).collect();
+            body["perf"] = serde_json::json!(windows);
         }
-        if let Some(team) = team {
-            body["team"] = serde_json::json!(team);
+        let mut request = api.agent().post(&api.url("n4n0/metrics")).config().timeout_global(Some(Duration::from_secs(20))).http_status_as_error(false).build();
+        if let Some(token) = &token {
+            request = request.header("Authorization", &format!("Bearer {token}"));
         }
-        let answer = api
-            .agent()
-            .post(&api.url("n4n0/metrics"))
-            .config()
-            .timeout_global(Some(Duration::from_secs(20)))
-            .http_status_as_error(false)
-            .build()
-            .send_json(&body);
+        let answer = request.send_json(&body);
         let status = match answer {
             Ok(response) => response.status().as_u16(),
             Err(e) => {
@@ -322,6 +435,7 @@ impl Spool {
                 inner.perf.drain(..perf.len());
                 rewrite_perf(&inner);
             }
+            Self::drop_old_install(&mut inner);
         }
         if let Sent::Dropped(n) = done {
             eprintln!("usage statistics: Orbiters refused {n} ({status}), dropped");
@@ -330,10 +444,10 @@ impl Spool {
     }
 
     /// Every minute while the app runs, the waiting steps go to Orbiters while `enabled` says so (the first a little after the start).
-    /// `origin` says who is using the app now (an agent driving it, the team's code), `None` while the account is still being
-    /// read: a send takes it just before it goes, and the first one waits for it (at most [`Spool::ORIGIN_WAIT`]), so that the start of
-    /// a run is not counted as a tester's for want of an answer yet (PRIV-4).
-    pub fn run(self: std::sync::Arc<Self>, enabled: impl Fn() -> bool + Send + 'static, origin: impl Fn() -> Option<(bool, Option<String>)> + Send + 'static) {
+    /// `origin` says who is using the app now (an agent driving it; the account signed in, with its credential, for the batches
+    /// stamped with it), `None` while the account is still being read: a send takes it just before it goes, and the first one waits
+    /// for it (at most [`Spool::ORIGIN_WAIT`]), so that the start of a run is not counted as a tester's for want of an answer (PRIV-4).
+    pub fn run(self: std::sync::Arc<Self>, enabled: impl Fn() -> bool + Send + 'static, origin: impl Fn() -> Option<(bool, Option<Signed>)> + Send + 'static) {
         let _ = std::thread::Builder::new().name("usage-upload".into()).spawn(move || {
             let started = std::time::Instant::now();
             std::thread::sleep(Duration::from_secs(20));
@@ -342,12 +456,13 @@ impl Spool {
             }
             loop {
                 if enabled() {
-                    if let Some((agent, team)) = origin() {
-                        self.origin(agent, team);
-                    }
+                    let signed = origin().and_then(|(agent, signed)| {
+                        self.origin(agent);
+                        signed
+                    });
                     let api = api();
                     // A backlog goes a batch after another; a failure waits for the next minute.
-                    while let Sent::Taken(_) | Sent::Dropped(_) = self.send(&api) {}
+                    while let Sent::Taken(_) | Sent::Dropped(_) = self.send(&api, signed.as_ref()) {}
                 } else {
                     self.forget();
                 }

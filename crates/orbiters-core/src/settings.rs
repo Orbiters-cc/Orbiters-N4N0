@@ -115,7 +115,8 @@ pub struct MismatchSettings {
     pub picture: bool,
 }
 
-/// The beta's usage statistics (`orbiters-desktop`'s `usage`): the names of the pages and controls used, never what is typed, said or seen.
+/// The beta's usage statistics (`orbiters-desktop`'s `usage`): the names of the pages and controls used and performance figures, never what
+/// is typed, said or seen; linked to the Orbiters account when one is signed in and the notice saying so was shown (`told_account`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UsageSettings {
@@ -125,11 +126,22 @@ pub struct UsageSettings {
     /// The notice was shown since it also says performance figures and the hardware class are sent (2026-11-16): shown again once to
     /// those who closed the first one.
     pub told_perf: bool,
+    /// The notice was shown since it says that, signed in, what is counted is linked to the Orbiters account (2026-11-19, Enzo:
+    /// "identify the usages by user"): shown again once to everyone who closed an earlier one. Only what is counted after this is
+    /// linked to an account; what was counted under the earlier notice never is (`orbiters-desktop`'s `usage::spool::Stamp`).
+    pub told_account: bool,
 }
 
 impl Default for UsageSettings {
     fn default() -> Self {
-        Self { enabled: true, told: false, told_perf: false }
+        Self { enabled: true, told: false, told_perf: false, told_account: false }
+    }
+}
+
+impl UsageSettings {
+    /// Every version of the notice was shown and closed: the card is not drawn any more.
+    pub fn told_all(&self) -> bool {
+        self.told && self.told_perf && self.told_account
     }
 }
 

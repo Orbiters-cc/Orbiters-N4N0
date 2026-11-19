@@ -1,5 +1,5 @@
 //! Sending the kept reports to Orbiters (Settings › Beta feedback › Send reports): `POST /n4n0/menu-reports`, one report a request,
-//! with its picture when it has one. Unauthenticated, as the beta's usage statistics are: a report carries no account. A report Orbiters
+//! with its picture when it has one. Unauthenticated: a report carries no account (unlike the beta's usage statistics, which go with the account once told, `usage::spool`). A report Orbiters
 //! took gets a `sent` file in its folder and stays on this computer until deleted.
 
 use super::{Kept, Report, PICTURE, REPORT, SENT};

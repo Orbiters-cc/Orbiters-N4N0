@@ -35,7 +35,7 @@ impl Controller {
                         None => (None, None),
                     }
                 };
-                usage_sample(&snap, line.as_ref(), &mut gpu, began);
+                usage_sample(&ctl, &snap, line.as_ref(), &mut gpu, began);
                 let Some(lines) = lines else { continue };
                 ctl.perf_follow(&lines);
             }
@@ -126,11 +126,12 @@ impl Controller {
 /// The beta's performance figures (`crate::usage::perf`): the self-check's sample with the GPU's counters and what N4N0 was doing, into
 /// the usage statistics' spool, while they are on. `began` is when the self-check's own sample started: the time to here is what the
 /// figures cost, the self-check's system call included.
-fn usage_sample(snap: &crate::state::Snapshot, line: Option<&perf::Line>, gpu: &mut Option<perf::gpu::Gpu>, began: Instant) {
+fn usage_sample(ctl: &Controller, snap: &crate::state::Snapshot, line: Option<&perf::Line>, gpu: &mut Option<perf::gpu::Gpu>, began: Instant) {
     use crate::usage::perf as up;
     let Some(spool) = crate::usage::spool::current() else { return };
     let enabled = snap.settings.usage.enabled;
-    spool.origin(up::agent_driving(snap), up::team_code(snap));
+    spool.origin(up::agent_driving(snap));
+    spool.collecting(ctl.usage_stamp());
     if !enabled {
         *gpu = None;
         spool.perf(Default::default(), false);

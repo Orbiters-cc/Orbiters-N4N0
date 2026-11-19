@@ -163,6 +163,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     // The usage statistics' notice was closed: it shows in its own scene ("usage-notice") alone.
     settings.usage.told = true;
     settings.usage.told_perf = true;
+    settings.usage.told_account = true;
     let mut scale = 1.0f32;
     let mut height = 820.0f32;
     let mut width = 1280.0f32;

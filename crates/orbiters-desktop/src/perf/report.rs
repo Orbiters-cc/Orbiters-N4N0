@@ -3,7 +3,7 @@
 //! the headset and the VR runtimes, Windows' build, power, other VR and overlay programs running, SteamVR's add-ons, the
 //! antivirus) and the settings that change what N4N0 costs. Made only when the person presses the button: it watches the
 //! graphics card's counters for a few seconds then. Saved in the logs' folder, shown, and sent to Orbiters only when the
-//! person presses Send (`POST /n4n0/perf-reports`, no account, as the beta's usage statistics are).
+//! person presses Send (`POST /n4n0/perf-reports`, no account).
 //!
 //! Nothing personal goes in: no paths (they hold the Windows user's name), no account, no world, no people; settings are
 //! taken field by field from a list, never the whole file.

@@ -18,7 +18,7 @@ use std::path::Path;
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
     // Settings' switch for closing the minimised window while playing (Interface), at three places of the page (its
     // cards' heights differ by language).
-    for (name, scroll) in [("settings-close-minimized", 3400.0), ("settings-close-minimized-2", 4200.0), ("settings-close-minimized-3", 5000.0)] {
+    for (name, scroll) in [("settings-close-minimized", 5800.0), ("settings-close-minimized-2", 6600.0), ("settings-close-minimized-3", 7400.0)] {
         scenarios.push(Scenario {
             name,
             page: Page::Settings,

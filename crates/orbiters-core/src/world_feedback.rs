@@ -735,7 +735,7 @@ mod tests {
         let empty = anyone.read(&world).unwrap();
         assert_eq!((empty.likes, empty.mine.clone()), (0, None));
         let set = Set { liked: Some(true), labels: [("meetup".to_string(), true), ("mirror".to_string(), true)].into_iter().collect(), justification: None };
-        let view = member.set(&world, &set).unwrap();
+        let view = member.set(&world, &set).unwrap().expect("its answer reads");
         assert_eq!(view.likes, 1);
         assert_eq!(view.mine.as_ref().map(|m| m.liked), Some(true));
         assert_eq!(view.labels.len(), 2);
@@ -745,11 +745,11 @@ mod tests {
         );
         assert!(matches!(refused, Err(Failure::Refused { code: Some(Refusal::JustificationTooShort), .. })), "{refused:?}");
         let id = client_id();
-        let first = member.comment(&world, "Great place for meetups!", &id).unwrap();
+        let first = member.comment(&world, "Great place for meetups!", &id).unwrap().expect("its answer reads");
         let again = member.comment(&world, "Great place for meetups!", &id);
         // A retry inside the server's 20 s window is held back (429, tried later) or answers the same comment.
         match again {
-            Ok(c) => assert_eq!(c.id, first.id),
+            Ok(c) => assert_eq!(c.map(|c| c.id), Some(first.id)),
             Err(e) => assert!(matches!(e, Failure::Later(_)), "{e:?}"),
         }
         let read = member.read(&world).unwrap();

@@ -23,7 +23,7 @@ pub enum Answer {
 }
 
 pub const TITLE: &str = mark("This beta counts which pages and buttons you use, and how the app performs");
-pub const BODY: &str = mark("Their names, in what order and when, with this version of the app; and every few seconds how much processor, graphics card and memory the app, VRChat and the whole computer use, VRChat's frame rate in VR, and the basic hardware (processor and graphics card models, memory size, headset and its refresh rate). When you are signed in, it is linked to your Orbiters account. Only the Orbiters team sees it, to make the app easier and lighter; it is never shared publicly. Never what you type or say, pictures, links, worlds or people.");
+pub const BODY: &str = mark("Their names, in what order and when, with this version of the app; and every few seconds how much processor, graphics card and memory the app, VRChat and the whole computer use, VRChat's frame rate in VR, and the basic hardware (processor and graphics card models, memory size, headset and its refresh rate). When you are signed in, it is linked to your Orbiters account and deleted with it. Only the Orbiters team sees it, to make the app easier and lighter; it is never shared publicly. Never what you type or say, pictures, links, worlds or people.");
 pub const OFF: &str = mark("You can turn it off at any time in Settings › Beta usage statistics.");
 
 /// Shows the card in `page` (the page's area, right of the sidebar) while `told` is false (any version of it not closed yet).

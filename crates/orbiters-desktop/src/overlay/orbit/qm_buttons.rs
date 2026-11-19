@@ -210,6 +210,20 @@ pub struct Sight {
     asks: std::sync::mpsc::Sender<Ask>,
     told: std::sync::mpsc::Receiver<Option<usize>>,
     pub busy: bool,
+    /// The looking thread, joined when the sight goes: its eye reader holds a mirror of SteamVR's and calls through SteamVR's
+    /// client as it lets it go, which must happen before the client is cleaned up (light-vr B: it was detached).
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Sight {
+    fn drop(&mut self) {
+        // No more asks: the thread leaves its loop after the look under way, if any.
+        let (none, _) = std::sync::mpsc::channel();
+        drop(std::mem::replace(&mut self.asks, none));
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl Sight {
@@ -217,7 +231,7 @@ impl Sight {
     pub fn start(source: orbiters_openvr::compositor::MirrorSource, adapter: Option<u32>) -> Self {
         let (asks, asked) = std::sync::mpsc::channel::<Ask>();
         let (tell, told) = std::sync::mpsc::channel();
-        let _ = std::thread::Builder::new().name("orbit-qm-sight".into()).spawn(move || {
+        let thread = std::thread::Builder::new().name("orbit-qm-sight".into()).spawn(move || {
             let reader = orbiters_openvr::mirror::EyeReader::new(adapter).ok();
             let mut whole: Option<[u32; 2]> = None;
             while let Ok(ask) = asked.recv() {
@@ -254,7 +268,7 @@ impl Sight {
                 }
             }
         });
-        Self { asks, told, busy: false }
+        Self { asks, told, busy: false, thread: thread.ok() }
     }
 
     /// Looks once, unless a look is under way.
@@ -375,6 +389,24 @@ impl QmCheck {
 
 #[cfg(test)]
 mod tests {
+    /// light-vr B: dropping the sight waits for its thread, which ends once it has no more asks (after the look under way).
+    #[test]
+    fn the_sight_s_thread_ends_before_the_sight_is_gone() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let (asks, asked) = std::sync::mpsc::channel::<super::Ask>();
+        let (_tell, told) = std::sync::mpsc::channel();
+        let ended = Arc::new(AtomicBool::new(false));
+        let flag = ended.clone();
+        let thread = std::thread::spawn(move || {
+            while asked.recv().is_ok() {}
+            std::thread::sleep(std::time::Duration::from_millis(50)); // a release that takes a moment
+            flag.store(true, Ordering::SeqCst);
+        });
+        drop(super::Sight { asks, told, busy: false, thread: Some(thread) });
+        assert!(ended.load(Ordering::SeqCst));
+    }
+
     use super::*;
 
     /// Enzo: VRChat's Avatars button takes its Quick Menu away and Orbiters' parts stayed. Seen there, clicked, then not seen twice: gone.

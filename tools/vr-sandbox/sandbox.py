@@ -645,7 +645,8 @@ class Session:
                                'nothing was changed. '+clean_backup_hint())
         identity = secrets.token_hex(16)
         # Same keys as before the shared session (older scripts read session/pid/stream/time); `shared` is new.
-        lock = {'session': identity, 'pid': os.getpid(), 'stream': stream, 'time': time.time(), 'shared': True}
+        lock = {'session': identity, 'pid': os.getpid(), 'owner_create_time': psutil.Process().create_time(), 'stream': stream,
+                'time': time.time(), 'shared': True}
         with LOCK.open('x') as f:
             json.dump(lock, f)
         self.j = {'session': identity, 'pid': os.getpid(), 'owner_create_time':psutil.Process().create_time(), 'created': time.time(), 'token': secrets.token_hex(32), 'files': [], 'processes': [], 'restored': False, 'shared': True, 'render': self.render}
@@ -1189,10 +1190,12 @@ def restore_orphan(by='restore-orphan'):
         if j is None:return {'nothing':'no journal'}
         session=j.get('session','?')
         if j.get('restored'):
-            note_restored(session,by);return {'nothing':'restored'}
+            note_restored(session,by)
+            return {'nothing':'restored','stale_lock_removed':True} if clear_stale_lock(by) else {'nothing':'restored'}
         if j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):return {'nothing':'live session'}
         result=restore_session(session)
         if result.get('restored'):note_restored(session,by)
+        clear_stale_lock(by)
         return result
     except Exception as error:
         why=f'{type(error).__name__}: {error}'
@@ -1227,6 +1230,43 @@ def remote(args,journal=None,owner=None,timeout=None):
         try:message=json.loads(body)['error']
         except Exception:message=body.decode(errors='replace')
         raise RuntimeError(message) from None
+
+def lock_holder_alive(lock):
+    """The lock's holder still runs: the same pid with the same creation time, or, for a lock without one (older
+    scripts), a process with that pid that already existed when the lock was written."""
+    try:p=psutil.Process(int(lock['pid']))
+    except (psutil.Error,KeyError,ValueError,TypeError):return False
+    try:
+        if process_dead(p):return False
+        if lock.get('owner_create_time') is not None:return p.create_time()==lock['owner_create_time']
+        return p.create_time()<=float(lock.get('time',0))+1
+    except psutil.Error:return False
+
+def clear_stale_lock(by, now=None):
+    """SBX-7: removes steamvr.lock when its holder is gone and nothing of its session is left to restore (its journal is
+    restored, belongs to another session, or was never written). A lock whose session's journal is unrestored stays:
+    the restore removes it. True when removed."""
+    now=time.time() if now is None else now
+    try:raw=LOCK.read_text(encoding='utf-8')
+    except FileNotFoundError:return False
+    try:
+        lock=json.loads(raw)
+        if not isinstance(lock,dict):raise ValueError('not an object')
+    except ValueError:
+        # Killed while writing it: no holder named. Only once it is old and no controller runs.
+        if now-LOCK.stat().st_mtime<120 or controller_alive():return False
+        lock={}
+    if lock and lock_holder_alive(lock):return False
+    try:j=read_journal()
+    except JournalUnreadable:return False
+    if j and j.get('session')==lock.get('session') and not j.get('restored'):return False
+    if not lock and j and not j.get('restored'):return False
+    LOCK.unlink(missing_ok=True)
+    line=time.strftime('%Y-%m-%d %H:%M:%S')+f" {by}: removed a stale steamvr.lock (holder gone, nothing to restore): {raw.strip()[:300]}\n"
+    ROOT.mkdir(parents=True,exist_ok=True)
+    with ORPHAN_LOG.open('a',encoding='utf-8') as log:log.write(line)
+    vrchat_life.Log(EAC_LOG).write('stale_lock_removed',by=by,lock=raw.strip()[:300])
+    return True
 
 def unrestored_session():
     """Why a new session may not start: a journal not restored whose controller is gone ('' when none)."""
@@ -1315,7 +1355,7 @@ def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say
                             'scheduled task keep trying). '+dead)
             elif foreign:reason='VR is in use outside the shared session (the owner, or an older sandbox script): '+', '.join(sorted({p['name'] for p in foreign}))
             elif wants:reason='Not starting: '+wants
-            elif LOCK.exists():reason='A sandbox lock exists without a live shared controller (an older script, or a restore in progress): '+LOCK.read_text()
+            elif LOCK.exists() and not clear_stale_lock('acquire'):reason='A sandbox lock exists without a live shared controller (an older script, or a restore in progress): '+LOCK.read_text()
             else:
                 if render:write_render(render)
                 try:

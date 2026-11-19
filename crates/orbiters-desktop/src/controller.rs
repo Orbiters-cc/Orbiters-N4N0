@@ -252,6 +252,8 @@ pub struct Controller {
     settings_written: Arc<AtomicU64>,
     #[cfg(test)]
     test_settings_writes: Arc<Mutex<Vec<Settings>>>,
+    #[cfg(test)]
+    test_settings_failing: Arc<AtomicU64>,
     /// How many times the settings were changed: taken under `snapshot` with the change, so the writer can tell the
     /// newer of two copies whatever order they reach it in.
     settings_revision: AtomicU64,
@@ -288,6 +290,9 @@ const STOP_LIMIT: Duration = Duration::from_secs(120);
 
 /// The settings are written once they stopped changing for this long (a slider dragged, the avatar's radial moving).
 const SAVE_QUIET: Duration = Duration::from_millis(250);
+/// The last flush tries this many times, this far apart, before it says the settings could not be written.
+const SAVE_TRIES: u32 = 3;
+const SAVE_RETRY: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Copy, Debug)]
 struct AvatarToggles {
@@ -602,6 +607,8 @@ impl Controller {
             settings_written: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             test_settings_writes: Arc::default(),
+            #[cfg(test)]
+            test_settings_failing: Arc::default(),
             instance_permits: Mutex::default(),
             lend_gate: Mutex::new(()),
             settings_revision: AtomicU64::new(0),
@@ -2247,8 +2254,13 @@ impl Controller {
     fn settings_sink(self: &Shared) -> impl FnMut(Settings) -> bool + Send + 'static {
         #[cfg(test)]
         {
-            let writes = self.test_settings_writes.clone();
+            let (writes, failing) = (self.test_settings_writes.clone(), self.test_settings_failing.clone());
             move |s: Settings| {
+                // A test can make the next writes fail.
+                if failing.load(Ordering::SeqCst) > 0 {
+                    failing.fetch_sub(1, Ordering::SeqCst);
+                    return false;
+                }
                 writes.lock().unwrap().push(s);
                 true
             }
@@ -2270,12 +2282,34 @@ impl Controller {
 
     /// Writes the settings still waiting, and stops the writing thread (the app quits). The slot stays closed, held
     /// through the join: nothing writes beside the last flush, and what comes after it is written by `queue_save`.
-    fn flush_settings(&self) {
+    fn flush_settings(self: &Shared) {
         let mut writer = self.settings_writer.lock().unwrap();
         if let SettingsWriter::Running(tx, thread) = std::mem::replace(&mut *writer, SettingsWriter::Closed) {
             drop(tx);
             let _ = thread.join();
         }
+        // What was applied may never have reached the writer (a change stalled between applying and queueing), or its
+        // write may have failed: the newest applied settings are written here, tried a few times, and a failure is
+        // said (verify2-controller). Revision and settings read together under the snapshot's lock, where both change.
+        let (revision, settings) = {
+            let s = self.snapshot.lock().unwrap();
+            (self.settings_revision.load(Ordering::SeqCst), (*s.settings).clone())
+        };
+        if revision <= self.settings_written.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut sink = self.settings_sink();
+        for attempt in 0..SAVE_TRIES {
+            if sink(settings.clone()) {
+                self.settings_written.store(revision, Ordering::SeqCst);
+                return;
+            }
+            if attempt + 1 < SAVE_TRIES {
+                std::thread::sleep(SAVE_RETRY);
+            }
+        }
+        // The sink told the person each time; the log keeps it too.
+        eprintln!("settings: revision {revision} could not be written before quitting");
     }
 
     /// How Fast walk carries the person now, for the windows.
@@ -3638,6 +3672,41 @@ mod tests {
         ctl.update(|s| s.capture.state = super::CaptureState::Recording);
         ctl.on_worker_exit(1);
         assert_eq!(ctl.view().capture.state, super::CaptureState::Recording);
+    }
+
+    /// verify2-controller: at Quit, a change applied but stalled before it was queued is written by the last flush; and
+    /// a write that failed in the debounce, with nothing newer after it, is tried again then (not dropped).
+    #[test]
+    fn quitting_writes_what_was_applied_even_if_never_queued_or_failed_once() {
+        use orbiters_core::settings::Settings;
+        use std::sync::atomic::Ordering;
+        let ctl = super::Controller::new(Settings::default());
+        let written = || ctl.test_settings_writes.lock().unwrap().iter().map(|s| s.storage_limit_gb).collect::<Vec<_>>();
+        // Applied (revision 1, under the snapshot's lock, as `apply_settings` does), stalled before `queue_save`.
+        {
+            let mut s = ctl.snapshot.lock().unwrap();
+            s.settings.storage_limit_gb = 7.0;
+            ctl.settings_revision.fetch_add(1, Ordering::SeqCst);
+        }
+        ctl.flush_settings();
+        assert_eq!(written(), vec![7.0], "the applied change is on disk");
+
+        let ctl = super::Controller::new(Settings::default());
+        let written = || ctl.test_settings_writes.lock().unwrap().iter().map(|s| s.storage_limit_gb).collect::<Vec<_>>();
+        ctl.test_settings_failing.store(1, Ordering::SeqCst);
+        let mut b = Settings::default();
+        b.storage_limit_gb = 8.0;
+        {
+            let mut s = ctl.snapshot.lock().unwrap();
+            s.settings.storage_limit_gb = 8.0;
+            ctl.settings_revision.fetch_add(1, Ordering::SeqCst);
+        }
+        ctl.queue_save(1, b);
+        // The debounced write fails; the writer is back waiting for a next change when the app quits.
+        std::thread::sleep(super::SAVE_QUIET * 4);
+        assert!(written().is_empty(), "the first write failed");
+        ctl.flush_settings();
+        assert_eq!(written(), vec![8.0], "tried again at the last flush");
     }
 
     /// verify-controller (CTL-1 at shutdown): a change queued after the last flush never starts a second writer that writes

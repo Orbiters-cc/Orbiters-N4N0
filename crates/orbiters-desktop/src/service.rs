@@ -594,9 +594,9 @@ impl Service {
             self.ctl.n4n0_link_closed(role == Role::Overlay);
         }
         if role == Role::Orbit {
-            // Its panels' Talk, should it have gone while held: the service never saw that let go.
-            self.ctl.n4n0_command(crate::ipc::N4n0Command::Talk { down: false });
-            self.ctl.n4n0_command(crate::ipc::N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
+            for command in orbit_gone(still_there) {
+                self.ctl.n4n0_command(command);
+            }
         }
         // Without a tray (Linux for now) nothing would bring the window back: closing it quits.
         if role == Role::Window && cfg!(not(any(windows, target_os = "macos"))) {
@@ -631,6 +631,18 @@ fn child_exited(waited: std::io::Result<Option<std::process::ExitStatus>>) -> Op
             None
         }
     }
+}
+
+/// What the desktop panels' process held ends with its link: its Talk, should it have gone while held (the service never saw
+/// that let go), its menu, and, when no other panels' link is left, its Ask N4N0 page: a process killed with that page open left
+/// N4N0 arming the microphone after every sentence with no page anywhere (OVL2-13).
+fn orbit_gone(still_there: bool) -> Vec<crate::ipc::N4n0Command> {
+    use crate::ipc::N4n0Command;
+    let mut out = vec![N4n0Command::Talk { down: false }, N4n0Command::MenuState { open: false, dictation: false, keyboard: false }];
+    if !still_there {
+        out.push(N4n0Command::AskPage { open: false });
+    }
+    out
 }
 
 /// After an overlay saw SteamVR quit (it ended with [`crate::overlay::EXIT_STEAMVR_GONE`]), SteamVR's server is still there for a
@@ -891,6 +903,15 @@ pub(crate) mod tests {
             }
         }
     }
+    /// OVL2-13: the panels' process gone, its Ask N4N0 page is closed (the microphone no longer armed for it).
+    #[test]
+    fn the_panels_gone_close_their_ask_page() {
+        let said: Vec<String> = orbit_gone(false).iter().map(|c| format!("{c:?}")).collect();
+        assert!(said.iter().any(|c| c.contains("AskPage") && c.contains("false")), "{said:?}");
+        assert!(said.iter().any(|c| c.starts_with("Talk")), "its Talk let go, as before");
+        assert!(!orbit_gone(true).iter().any(|c| format!("{c:?}").contains("AskPage")), "another panels' link keeps its page");
+    }
+
     /// OVERLAY-22: after an overlay saw SteamVR quit, starts for that SteamVR are spaced 2, 4, 8, 16, 30 s from the last end;
     /// another SteamVR, or an overlay that connects, ends that at once; a clean end alone is not a quit.
     #[test]

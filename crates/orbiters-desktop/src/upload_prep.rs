@@ -221,6 +221,62 @@ pub fn has_partial(session: &Path) -> bool {
     reconstruction::result_dir(session).join(PARTIAL_FILE).is_file()
 }
 
+/// What a share's parts are made from (CHALLENGER-C1): the result folder in place, its report (every reconstruction
+/// writes a new one), its splats' length and time, and its splat edits. Read when a preparation starts and again just
+/// before anything is sent: equal, the trees, the sky and the picture all came from that one result, even when two
+/// unedited reconstructions follow each other (their edit generations are the same).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResultIdentity {
+    result: PathBuf,
+    report: Option<String>,
+    splats: Option<(u64, Option<std::time::SystemTime>)>,
+    edits: Option<String>,
+}
+
+impl ResultIdentity {
+    pub fn read(session: &Path) -> Self {
+        let result = reconstruction::result_dir(session);
+        let report = sha256_file(&result.join(reconstruction::REPORT_FILE)).ok();
+        let splats = std::fs::metadata(result.join(reconstruction::PLY_FILE)).ok().map(|m| (m.len(), m.modified().ok()));
+        let edits = orbiters_reconstruct::edit::generation(&result).ok();
+        Self { result, report, splats, edits }
+    }
+}
+
+/// A copy of one of the result's files, taken while the result is the one prepared (the sky map), so that what is sent
+/// is that copy whatever replaces the result meanwhile; deleted with it.
+pub struct Pinned(PathBuf);
+
+impl Pinned {
+    /// `src` copied, under its own name, into a folder of its own in the temporary folder.
+    pub fn copy(src: &Path) -> anyhow::Result<Self> {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!("orbiters-share-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        std::fs::create_dir_all(&dir)?;
+        let file = dir.join(src.file_name().unwrap_or_default());
+        if let Err(e) = std::fs::copy(src, &file) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e.into());
+        }
+        Ok(Self(file))
+    }
+}
+
+impl std::ops::Deref for Pinned {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Pinned {
+    fn drop(&mut self) {
+        if let Some(dir) = self.0.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
 pub fn sky(result: &Path) -> Option<PathBuf> {
     Some(result.join(reconstruction::SKY_FILE)).filter(|p| p.is_file())
 }
@@ -444,6 +500,37 @@ mod tests {
 
     /// The queue, a share claiming a waiting session, a capture pausing the running one (back first in line) and the
     /// exit handing over. The child is this test executable, which exits at once on `--prepare-upload`.
+    /// CHALLENGER-C1: a new reconstruction swapped in is a new identity even when both are unedited and the splats the
+    /// same bytes; a pinned sky keeps the bytes it was taken with and goes with its copy.
+    #[test]
+    fn a_new_result_is_a_new_identity_and_a_pinned_sky_stays() {
+        let session = std::env::temp_dir().join(format!("orbiters-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&session);
+        let result = session.join(reconstruction::DIR);
+        std::fs::create_dir_all(&result).unwrap();
+        std::fs::write(result.join(reconstruction::PLY_FILE), b"same splats").unwrap();
+        std::fs::write(result.join(reconstruction::REPORT_FILE), br#"{"created_utc":"A"}"#).unwrap();
+        std::fs::write(result.join(reconstruction::SKY_FILE), b"sky A").unwrap();
+        let a = ResultIdentity::read(&session);
+        assert_eq!(a, ResultIdentity::read(&session), "read twice, the same");
+        let pinned = Pinned::copy(&sky(&result).unwrap()).unwrap();
+        assert_eq!(pinned.file_name().unwrap(), reconstruction::SKY_FILE);
+        // Reconstructed again (unedited both times): the folder is replaced as a whole.
+        let b_dir = session.join("b");
+        std::fs::create_dir_all(&b_dir).unwrap();
+        std::fs::write(b_dir.join(reconstruction::PLY_FILE), b"same splats").unwrap();
+        std::fs::write(b_dir.join(reconstruction::REPORT_FILE), br#"{"created_utc":"B"}"#).unwrap();
+        std::fs::write(b_dir.join(reconstruction::SKY_FILE), b"sky B").unwrap();
+        std::fs::remove_dir_all(&result).unwrap();
+        std::fs::rename(&b_dir, &result).unwrap();
+        assert_ne!(a, ResultIdentity::read(&session));
+        assert_eq!(std::fs::read(&*pinned).unwrap(), b"sky A", "the copy is the prepared result's");
+        let copy = pinned.to_path_buf();
+        drop(pinned);
+        assert!(!copy.exists() && !copy.parent().unwrap().exists());
+        std::fs::remove_dir_all(&session).ok();
+    }
+
     #[test]
     fn background_preparation_waits_its_turn_and_gives_way() {
         let (a, b) = (PathBuf::from("session-a"), PathBuf::from("session-b"));

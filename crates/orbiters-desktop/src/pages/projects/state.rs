@@ -300,6 +300,8 @@ pub struct State {
     pub(super) server_now: Option<Server>,
     /// The tray service's count of changes the VRChat bridge made to projects, as last seen: a new one looks again.
     pub(super) bridge_changes: Option<u64>,
+    /// Where each row of "Your projects" and of "Found on this computer" stands while a scan runs (PROJECTS-18).
+    pub(super) places: [std::collections::HashMap<PathBuf, usize>; 2],
 }
 impl Default for State {
     fn default() -> Self {
@@ -437,6 +439,7 @@ impl Default for State {
             conflict: None,
             server_now: None,
             bridge_changes: None,
+            places: Default::default(),
         }
     }
 }

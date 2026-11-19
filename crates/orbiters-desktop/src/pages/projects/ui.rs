@@ -204,6 +204,21 @@ fn hidden_filter(ui: &mut Ui, state: &mut State, row: Rect, n: usize) {
     }
 }
 
+/// The order of a list of projects: newest first, except while a scan runs (PROJECTS-18, Enzo 2026-11-19: "Yes please"):
+/// then every row keeps the place it had and what the scan finds goes at the end, so nothing moves under the pointer.
+/// The date order comes back when the scan ends.
+fn keep_places(list: &mut [Project], places: &mut std::collections::HashMap<std::path::PathBuf, usize>, scanning: bool) {
+    if !scanning {
+        list.sort_by_key(|p| std::cmp::Reverse(p.modified));
+        places.clear();
+    }
+    for p in list.iter() {
+        let next = places.len();
+        places.entry(p.path.clone()).or_insert(next);
+    }
+    list.sort_by_key(|p| places.get(&p.path).copied().unwrap_or(usize::MAX));
+}
+
 fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if state.selected.is_none() && state.modal.is_none() {
         errors(ui, state, "gallery");
@@ -218,12 +233,15 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     // Hidden projects only when asked for (dimmed and marked then).
     let hidden_n = state.scan.projects.iter().filter(|p| state.is_hidden(&p.path)).count();
     let shown = |p: &&Project| state.show_hidden || !state.is_hidden(&p.path);
+    let scanning = state.scanning();
+    let [mut registered_places, mut found_places] = std::mem::take(&mut state.places);
     let mut registered: Vec<Project> = state.scan.projects.iter().filter(|p| p.registered).filter(matches).filter(shown).cloned().collect();
-    registered.sort_by_key(|p| std::cmp::Reverse(p.modified));
+    keep_places(&mut registered, &mut registered_places, scanning);
     let mut proposals: Vec<Project> = state.scan.projects.iter().filter(|p| !p.registered).filter(matches).filter(shown).cloned().collect();
-    proposals.sort_by_key(|p| std::cmp::Reverse(p.modified));
+    keep_places(&mut proposals, &mut found_places, scanning);
     let counted = |list: &[Project]| list.iter().filter(|p| !state.is_hidden(&p.path)).count();
     let (registered_n, proposals_n) = (counted(&registered), counted(&proposals));
+    state.places = [registered_places, found_places];
 
     let title = section_title(ui, tr("Your projects"), (registered_n > 0).then_some(registered_n), None);
     if hidden_n > 0 || state.show_hidden {
@@ -672,5 +690,37 @@ pub fn capture_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
             state.preselected = worn.or_else(|| state.preselected.clone());
             state.open_modal(&ctx, if state.running() { Modal::Setup } else { Modal::Avatars }, rect);
         }
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    fn project(name: &str, modified: u64) -> Project {
+        Project { path: std::path::PathBuf::from(format!("C:/P/{name}")), name: name.into(), modified, ..Default::default() }
+    }
+    fn names(list: &[Project]) -> Vec<String> {
+        list.iter().map(|p| p.name.clone()).collect()
+    }
+
+    /// PROJECTS-18: while a scan runs, a newer project found later goes at the end and no row moves; once it ends, the
+    /// newest is first again.
+    #[test]
+    fn rows_stay_in_place_while_a_scan_runs() {
+        let mut places = std::collections::HashMap::new();
+        let mut list = vec![project("old", 1), project("mid", 5)];
+        keep_places(&mut list, &mut places, false);
+        assert_eq!(names(&list), ["mid", "old"]);
+        // The scan's next update: a newer one, given in date order as the scan sends them.
+        let mut list = vec![project("new", 9), project("mid", 5), project("old", 1)];
+        keep_places(&mut list, &mut places, true);
+        assert_eq!(names(&list), ["mid", "old", "new"]);
+        let mut list = vec![project("newer", 10), project("new", 9), project("mid", 5), project("old", 1)];
+        keep_places(&mut list, &mut places, true);
+        assert_eq!(names(&list), ["mid", "old", "new", "newer"]);
+        // The scan ended.
+        keep_places(&mut list, &mut places, false);
+        assert_eq!(names(&list), ["newer", "new", "mid", "old"]);
     }
 }

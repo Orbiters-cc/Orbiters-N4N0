@@ -430,22 +430,6 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     }
 }
 
-/// Whether the pictures of the left eye at a docked small view are kept: in a development build, or when the eye pictures are
-/// asked for (`ORBITERS_VR_PICTURES`); never otherwise.
-fn eye_frames_wanted(debug_build: bool, pictures_asked: bool) -> bool {
-    debug_build || pictures_asked
-}
-
-/// Those a release build kept before it stopped (PRIV-5) go, once, when they are not wanted.
-fn forget_kept_eye_frames() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        if !eye_frames_wanted(cfg!(debug_assertions), std::env::var_os("ORBITERS_VR_PICTURES").is_some()) {
-            let _ = std::fs::remove_dir_all(orbiters_core::paths::logs_dir().join("vr-test-frames"));
-        }
-    });
-}
-
 /// The panel alone, for the desktop's panels around VRChat's menus (`overlay::orbit`): no SteamVR, no pill, no bar, nothing shown around the person. Its lists, a world's page
     /// and its feedback work as ever; a capture opens in the Orbiters window instead ([`Worlds::mouse_alone`]).
     pub fn alone(ctx: egui::Context) -> Self {
@@ -2414,6 +2398,22 @@ fn short_error(e: &anyhow::Error) -> String {
 /// Whether two statuses differ in nothing but `stats`, the 3D view's figures, which no page draws.
 fn same_but_stats(a: &Status, b: &Status) -> bool {
     a.stats != b.stats && Status { stats: None, ..a.clone() } == Status { stats: None, ..b.clone() }
+}
+
+/// Whether the pictures of the left eye at a docked small view are kept: in a development build, or when the eye pictures are
+/// asked for (`ORBITERS_VR_PICTURES`); never otherwise.
+fn eye_frames_wanted(debug_build: bool, pictures_asked: bool) -> bool {
+    debug_build || pictures_asked
+}
+
+/// Those a release build kept before it stopped (PRIV-5) go, once, when they are not wanted.
+fn forget_kept_eye_frames() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if !eye_frames_wanted(cfg!(debug_assertions), std::env::var_os("ORBITERS_VR_PICTURES").is_some()) {
+            let _ = std::fs::remove_dir_all(orbiters_core::paths::logs_dir().join("vr-test-frames"));
+        }
+    });
 }
 
 #[cfg(test)]

@@ -805,16 +805,14 @@ impl Controller {
                     ctl.burst.lock().unwrap().recording = false;
                     ctl.scan.lock().unwrap().recording = false;
                 }
-                let ended = ctl.update(|s| {
+                ctl.update(|s| {
                     s.worker.ready = false;
                     // Whatever it was doing (recording, saving a session) ended with it.
-                    let ended = s.capture.state != CaptureState::Idle;
-                    if ended {
+                    if s.capture.state != CaptureState::Idle {
                         s.capture.state = CaptureState::Idle;
                         s.capture.from_osc = false;
                         s.capture.error = Some(tr("The capture worker stopped unexpectedly.").into());
                     }
-                    ended
                 });
                 ctl.capture_ended();
             }

@@ -430,6 +430,92 @@ struct Readback {
     cap: u32,
 }
 
+/// Graphics memory as a run saw it when it sized itself (RECONSTRUCT-17), bytes: [`Gpu::free_memory`]'s figure (what
+/// this process may still take, by the driver's budget), what every process together holds on the adapter (Windows'
+/// `\GPU Adapter Memory(*)\Dedicated Usage`, the adapter matched by its LUID), and the largest device-local heap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemorySeen {
+    pub headroom: Option<u64>,
+    pub adapter_used: Option<u64>,
+    pub heap: Option<u64>,
+}
+
+/// Windows' own count of an adapter's dedicated memory in use, every process's (what Task Manager shows).
+#[cfg(windows)]
+pub mod adapter_memory {
+    /// The instance of `\GPU Adapter Memory(*)` that is the adapter `luid` (Vulkan's `deviceLUID`: LowPart then HighPart,
+    /// little-endian), its first node: `luid_0x<high>_0x<low>_phys_0`, any case. None unless exactly one reading is it.
+    pub fn matching(readings: &[(String, i64)], luid: [u8; 8]) -> Option<u64> {
+        let low = u32::from_le_bytes([luid[0], luid[1], luid[2], luid[3]]);
+        let high = u32::from_le_bytes([luid[4], luid[5], luid[6], luid[7]]);
+        let name = format!("luid_0x{high:08x}_0x{low:08x}_phys_0");
+        let mut found = readings.iter().filter(|(n, _)| n.eq_ignore_ascii_case(&name)).map(|(_, v)| *v);
+        match (found.next(), found.next()) {
+            (Some(v), None) if v >= 0 => Some(v as u64),
+            _ => None,
+        }
+    }
+
+    /// The dedicated memory every process holds on adapter `luid` now, bytes; None where Windows has no such counter.
+    pub fn dedicated_used(luid: [u8; 8]) -> Option<u64> {
+        matching(&read(), luid)
+    }
+
+    fn read() -> Vec<(String, i64)> {
+        use windows::core::w;
+        use windows::Win32::System::Performance::*;
+        let mut query = PDH_HQUERY::default();
+        let mut counter = PDH_HCOUNTER::default();
+        // SAFETY: out-parameters on the stack, a static path; the first array call asks the size, the second fills a
+        // buffer of that size aligned for the items, whose names point into it; the query is closed once.
+        unsafe {
+            if PdhOpenQueryW(windows::core::PCWSTR::null(), 0, &mut query) != 0 {
+                return Vec::new();
+            }
+            let mut out = Vec::new();
+            if PdhAddEnglishCounterW(query, w!("\\GPU Adapter Memory(*)\\Dedicated Usage"), 0, &mut counter) == 0 && PdhCollectQueryData(query) == 0 {
+                let (mut bytes, mut count) = (0u32, 0u32);
+                if PdhGetFormattedCounterArrayW(counter, PDH_FMT_LARGE, &mut bytes, &mut count, None) == PDH_MORE_DATA && bytes > 0 {
+                    let mut buffer = vec![0u64; (bytes as usize).div_ceil(8)];
+                    let items = buffer.as_mut_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>();
+                    if PdhGetFormattedCounterArrayW(counter, PDH_FMT_LARGE, &mut bytes, &mut count, Some(items)) == 0 {
+                        out = std::slice::from_raw_parts(items, count as usize)
+                            .iter()
+                            .filter(|i| i.FmtValue.CStatus == 0 || i.FmtValue.CStatus == 1)
+                            .map(|i| (i.szName.to_string().unwrap_or_default(), i.FmtValue.Anonymous.largeValue))
+                            .collect();
+                    }
+                }
+            }
+            PdhCloseQuery(query);
+            out
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_adapter_is_found_by_its_luid_and_nothing_else() {
+            // LowPart 0x00010918, HighPart 0: as measured on the 4080 (RECONSTRUCT-17).
+            let luid = [0x18, 0x09, 0x01, 0x00, 0, 0, 0, 0];
+            let readings = vec![
+                ("luid_0x00000000_0x00010918_phys_0".to_string(), 9_451_000_000),
+                ("luid_0x00000000_0x0000F00D_phys_0".to_string(), 1_000),
+                ("luid_0x00000000_0x00010918_phys_1".to_string(), 5),
+            ];
+            assert_eq!(matching(&readings, luid), Some(9_451_000_000));
+            assert_eq!(matching(&readings, [0x0d, 0xf0, 0, 0, 0, 0, 0, 0]), Some(1_000), "any case");
+            assert_eq!(matching(&readings, [1, 2, 3, 4, 5, 6, 7, 8]), None);
+            let twice = vec![readings[0].clone(), readings[0].clone()];
+            assert_eq!(matching(&twice, luid), None, "ambiguous: unknown");
+            // Windows' counters answer on this machine without a device (no adapter matches a made-up LUID).
+            assert_eq!(dedicated_used([0xee; 8]), None);
+        }
+    }
+}
+
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -504,6 +590,8 @@ pub struct Gpu {
     /// its loss; the backward pass and Adam) goes to the GPU alone once VRChat's frames leave its time idle, and is
     /// waited for. `paced` holds each part's GPU time as last measured.
     pub governor: Option<crate::governor::Governor>,
+    /// The first reading of graphics memory ([`Gpu::memory_seen`]).
+    memory_seen: std::sync::OnceLock<MemorySeen>,
     /// What the governors that left (VRChat closed, SteamVR quit) cost the run ([`Gpu::pacing`]).
     paced_before: crate::governor::Tally,
     paced: [std::time::Duration; 3],
@@ -965,10 +1053,59 @@ impl Gpu {
         Some(crate::apple::available_memory().map_or(left, |system| system.min(left)))
     }
 
-    /// Graphics memory this device's adapter has free now, bytes (`VK_EXT_memory_budget`: the device-local heaps'
-    /// budget less their usage, which counts every process's): None on other APIs or without the extension.
+    /// Graphics memory this process can still take on this device's adapter, bytes (`VK_EXT_memory_budget`: the
+    /// device-local heaps' budget less their usage): None on other APIs or without the extension. The usage is this
+    /// process's alone, as the extension defines it, and whether the budget shrinks for what other programs hold is the
+    /// driver's business: on NVIDIA 616.92 it did not (RECONSTRUCT-17, 14.9 GB "free" on a card with 6.9 GB free). So
+    /// this is not the card's free memory; what the whole adapter holds is recorded beside it in the run's report
+    /// ([`Gpu::memory_seen`]), and decisions still take this figure until a run compares the two.
     #[cfg(not(target_vendor = "apple"))]
     pub fn free_memory(&self) -> Option<u64> {
+        let free = self.process_headroom();
+        let _ = self.memory_seen.get_or_init(|| self.memory_now(free));
+        free
+    }
+
+    /// What graphics memory looked like when the run first asked [`Gpu::free_memory`], `None` before it did.
+    pub fn memory_seen(&self) -> Option<MemorySeen> {
+        self.memory_seen.get().copied()
+    }
+
+    /// [`Gpu::free_memory`]'s figure, and what Windows says the whole adapter holds (every process).
+    #[cfg(not(target_vendor = "apple"))]
+    fn memory_now(&self, headroom: Option<u64>) -> MemorySeen {
+        let (heap, luid) = self.heap_and_luid().unwrap_or((None, None));
+        #[cfg(windows)]
+        let adapter_used = luid.and_then(adapter_memory::dedicated_used);
+        #[cfg(not(windows))]
+        let adapter_used = {
+            let _ = luid;
+            None
+        };
+        MemorySeen { headroom, adapter_used, heap }
+    }
+
+    /// The largest device-local heap's size, and the adapter's LUID (Windows), from Vulkan.
+    #[cfg(not(target_vendor = "apple"))]
+    fn heap_and_luid(&self) -> Option<(Option<u64>, Option<[u8; 8]>)> {
+        let adapter = self.wgpu_adapter.as_ref()?;
+        // SAFETY: read-only queries of the adapter's physical device.
+        unsafe {
+            let hal = adapter.as_hal::<wgpu::hal::api::Vulkan>()?;
+            let instance = hal.shared_instance().raw_instance();
+            let physical = hal.raw_physical_device();
+            let memory = instance.get_physical_device_memory_properties(physical);
+            let heap = memory.memory_heaps_as_slice().iter().filter(|h| h.flags.contains(ash::vk::MemoryHeapFlags::DEVICE_LOCAL)).map(|h| h.size).max();
+            let mut id = ash::vk::PhysicalDeviceIDProperties::default();
+            let mut properties = ash::vk::PhysicalDeviceProperties2::default().push_next(&mut id);
+            instance.get_physical_device_properties2(physical, &mut properties);
+            let luid = (id.device_luid_valid == ash::vk::TRUE).then_some(id.device_luid);
+            Some((heap, luid))
+        }
+    }
+
+    #[cfg(not(target_vendor = "apple"))]
+    fn process_headroom(&self) -> Option<u64> {
         let adapter = self.wgpu_adapter.as_ref()?;
         // SAFETY: read-only queries of the adapter's physical device.
         unsafe {
@@ -1206,6 +1343,7 @@ impl Gpu {
             profiler: None,
             governor: None,
             paced_before: Default::default(),
+            memory_seen: Default::default(),
             paced: [std::time::Duration::from_millis(2); 3],
             wgpu_adapter: None,
             integrated: false,

@@ -497,8 +497,13 @@ fn run(args: Args) -> anyhow::Result<Ended> {
         wearer: prepared.wearer.as_ref().map(|(_, s)| rec::WearerOut { pixel_share: s.pixel_share, views: s.views, views_total: s.views_total, depth_samples: s.depth_samples, depth_hits: s.depth_hits, gaussians_left: outcome.wearer_left, floor_patched: outcome.floor_patched }),
         wearer_not_found: prepared.wearer_not_found,
         depth_blind: prepared.depth.as_ref().is_some_and(|f| f.blind_world),
+        pacing: pacing_report(&gpu.pacing()),
+        memory: gpu.memory_seen().map(|m| rec::MemorySeen { headroom_mb: m.headroom.map(|b| b >> 20), adapter_used_mb: m.adapter_used.map(|b| b >> 20), heap_mb: m.heap.map(|b| b >> 20) }),
     };
     std::fs::write(partial.join(rec::REPORT_FILE), serde_json::to_string_pretty(&report)?)?;
+    // On the disk before the previous result goes (RECONSTRUCT-14a): a power cut after the swap leaves a result whose
+    // files hold what was written, not zeros. A file that cannot be flushed fails the run with the previous one whole.
+    timing::section("7 flush", None, || flush_all(&partial))?;
     timing::section("7 replace", None, || replace(dir, &partial))?;
     // The run is over: what it could have gone on from goes (a pause asked this late changes nothing).
     checkpoint::discard(dir);
@@ -541,6 +546,38 @@ fn retry(mut f: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
         wait *= 2;
     }
     f()
+}
+
+/// The report's account of a run's pacing (RECONSTRUCT-10), `None` when nothing paced it.
+fn pacing_report(t: &orbiters_reconstruct::governor::Tally) -> Option<rec::Pacing> {
+    let mode = match (t.vr, t.desktop) {
+        (false, false) => return None,
+        (true, false) => "vr",
+        (false, true) => "desktop",
+        (true, true) => "vr+desktop",
+    };
+    Some(rec::Pacing {
+        mode: mode.into(),
+        waited_s: t.waited.as_secs_f32(),
+        longest_wait_s: t.longest.as_secs_f32(),
+        waits: t.waits,
+        backoffs: t.backoffs,
+        cut_by_pause: t.cut_by_pause,
+    })
+}
+
+/// Flushes every file under `dir` to the disk (`sync_all`), folders included where the system allows it.
+fn flush_all(dir: &Path) -> anyhow::Result<()> {
+    for e in std::fs::read_dir(dir).with_context(|| tr!("writing {path}", path = dir.display()))? {
+        let e = e?;
+        let path = e.path();
+        if e.file_type()?.is_dir() {
+            flush_all(&path)?;
+        } else {
+            std::fs::OpenOptions::new().write(true).open(&path).and_then(|f| f.sync_all()).with_context(|| tr!("writing {path}", path = path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Puts back a previous result that a swap left in [`BACKUP_DIR`] (the run stopped between moving it out and moving
@@ -747,6 +784,41 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RECONSTRUCT-10: a paced run's report says how it was paced and what waiting cost; an unpaced one says nothing, and
+    /// a report without the field (older runs) still reads.
+    #[test]
+    fn a_paced_run_reports_its_waits() {
+        use orbiters_reconstruct::governor::Tally;
+        use std::time::Duration;
+        assert_eq!(pacing_report(&Tally::default()), None);
+        let t = Tally { waited: Duration::from_millis(9500), longest: Duration::from_secs(4), waits: 812, backoffs: 7, cut_by_pause: 1, vr: true, desktop: false };
+        let p = pacing_report(&t).unwrap();
+        assert_eq!((p.mode.as_str(), p.waits, p.backoffs, p.cut_by_pause), ("vr", 812, 7, 1));
+        assert!((p.waited_s - 9.5).abs() < 1e-3 && (p.longest_wait_s - 4.0).abs() < 1e-3);
+        assert_eq!(pacing_report(&Tally { desktop: true, ..t }).unwrap().mode, "vr+desktop");
+        let report = rec::Report { pacing: Some(p.clone()), ..Default::default() };
+        let back: rec::Report = serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        assert_eq!(back.pacing, Some(p));
+        let unpaced = serde_json::to_string(&rec::Report::default()).unwrap();
+        assert!(!unpaced.contains("pacing"), "{unpaced}");
+        assert_eq!(serde_json::from_str::<rec::Report>(r#"{"gaussians":3}"#).unwrap().pacing, None);
+    }
+
+    /// RECONSTRUCT-14a: every file of a finished result, held-out renders included, is flushed before the swap; a folder
+    /// that is not there fails (the swap then never runs, the previous result stays).
+    #[test]
+    fn a_result_is_flushed_before_it_replaces_the_previous_one() {
+        let dir = session("flush");
+        let partial = dir.join(rec::PARTIAL_DIR);
+        std::fs::create_dir_all(partial.join(rec::HELD_OUT_DIR)).unwrap();
+        std::fs::write(partial.join(rec::PLY_FILE), b"ply").unwrap();
+        std::fs::write(partial.join(rec::HELD_OUT_DIR).join("000004.qoi"), b"qoi").unwrap();
+        flush_all(&partial).unwrap();
+        assert_eq!(std::fs::read(partial.join(rec::PLY_FILE)).unwrap(), b"ply", "flushing changes nothing");
+        assert!(flush_all(&dir.join("not-there")).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn session(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("orbiters-reconstruct-swap-{name}-{}", std::process::id()));

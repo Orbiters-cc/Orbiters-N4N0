@@ -23,6 +23,28 @@ struct Person {
 
 pub(super) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// OVL2-17: a menu going away under a held press does nothing: the list press is not run later, the held booster level and
+/// smoothing are not saved.
+#[test]
+fn a_menu_going_away_under_a_held_press_does_nothing() {
+    let (mut person, heard) = Person::heard();
+    let snap = person.snap.clone();
+    let p = &mut person.panels;
+    p.open = Some(Around::QuickMenu);
+    p.drag = Some(super::Drag { from: Some(0.0), scroll: 0.0, action: Some(Action::DemoAvatar), moved: false, bar: false, speed: 0.0, last: None });
+    p.booster_held = Some(orbiters_booster::Level::default());
+    p.smoothing_held = Some((super::panels::Smoothed::QuickMenu, 40));
+    p.set_open(None, Vec::new(), &snap);
+    assert!(p.pressed_late.is_none(), "the press is not kept to be run later");
+    assert!(p.booster_held.is_none() && p.smoothing_held.is_none() && p.drag.is_none());
+    assert!(heard.boosters.lock().unwrap().is_empty(), "no booster level saved: {:?}", heard.boosters.lock().unwrap());
+    assert!(heard.patches.lock().unwrap().is_empty(), "nothing saved: {:?}", heard.patches.lock().unwrap());
+    // A real let-go still does what it did.
+    p.drag = Some(super::Drag { from: Some(0.0), scroll: 0.0, action: Some(Action::DemoAvatar), moved: false, bar: false, speed: 0.0, last: None });
+    p.release();
+    assert!(p.pressed_late.is_some(), "a let-go runs the press, as before");
+}
+
 impl Person {
     fn new() -> Self {
         let alone = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());

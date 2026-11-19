@@ -964,6 +964,18 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.panel.hover.is_some() || (self.panel.vr_dragging())
     }
 
+    /// The press of [`Worlds::press_alone`] ended without being let go (its menu went away under it): nothing is done, the
+    /// pressed card is not opened (OVL2-17).
+    pub fn cancel_alone(&mut self) {
+        if let (Some(panel::Target::Hero), Some((_, view))) = (self.panel.pressed, &self.live) {
+            view.hold(false);
+        }
+        self.panel.vr_cancel();
+        self.panel.pressed = None;
+        self.panel.dirty = true;
+        self.pressed_paint = None;
+    }
+
     /// The press of [`Worlds::press_alone`] let go.
     pub fn release_alone(&mut self) {
         if let (Some(panel::Target::Hero), Some((_, view))) = (self.panel.pressed, &self.live) {

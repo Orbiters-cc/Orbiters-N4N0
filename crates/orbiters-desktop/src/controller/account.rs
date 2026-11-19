@@ -318,23 +318,33 @@ impl Controller {
                     if let Err(e) = saved {
                         self.notify(NoticeKind::Warning, tr!("Signed in, but the Unity tools will not share it: {error}", error = e));
                     }
-                    self.update(|s| {
-                        s.account.state = AccountState::SignedIn { username: name.clone() };
-                        s.account.error = None;
-                    });
-                    self.notify(NoticeKind::Success, tr!("Signed in to Orbiters as {name}.", name = name));
+                    // Shown only if no sign-out or cancel came since the lock above (verify-controller): under the
+                    // snapshot's lock, against the generation those bump before they publish.
+                    if self.commit_account_check(generation, AccountState::SignedIn { username: name.clone() }) {
+                        self.notify(NoticeKind::Success, tr!("Signed in to Orbiters as {name}.", name = name));
+                    }
                 }
                 // The browser can bring another (Connect clicked again): the error shows meanwhile.
                 Exchange::Retry(message) => {
                     drop(rt);
-                    self.update(|s| s.account.error = Some(message));
+                    self.update_if(|s| {
+                        let current = self.account_generation.load(std::sync::atomic::Ordering::SeqCst) == generation;
+                        if current {
+                            s.account.error = Some(message);
+                        }
+                        current
+                    });
                 }
                 Exchange::Ended(message) => {
                     let before = rt.signing_in.take().map(|s| s.before.clone());
                     drop(rt);
-                    self.update(|s| {
-                        s.account.state = before.unwrap_or(AccountState::SignedOut);
-                        s.account.error = Some(message);
+                    self.update_if(|s| {
+                        let current = self.account_generation.load(std::sync::atomic::Ordering::SeqCst) == generation;
+                        if current {
+                            s.account.state = before.unwrap_or(AccountState::SignedOut);
+                            s.account.error = Some(message);
+                        }
+                        current
                     });
                 }
             }

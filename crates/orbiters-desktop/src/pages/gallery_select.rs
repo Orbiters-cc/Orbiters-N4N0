@@ -117,6 +117,40 @@ impl Selection {
         self.anchor = None;
     }
 
+    /// Another account (night4, verify2): nothing of the old one stays to be handed out. The selection, a drag lifted
+    /// but not yet handed to Windows (and a picture carried out of its window), a copy waiting, and every picture
+    /// fetched or on its way: the fetching threads write into the old store, which no one reads again. A drag Windows
+    /// already has is Windows' own.
+    pub fn forget_account(&mut self) {
+        self.clear();
+        self.band = None;
+        if !self.started {
+            self.carried.clear();
+        }
+        self.loose = None;
+        self.waiting = None;
+        self.copying = None;
+        self.fetches = Fetches::default();
+        self.prefetched.clear();
+        self.prefetching = 0;
+    }
+
+    /// Tests: whether anything of a drag, a copy or a fetch is kept.
+    #[cfg(test)]
+    pub fn keeps_anything(&self) -> bool {
+        self.any() || !self.carried.is_empty() || self.loose.is_some() || self.copying.is_some() || !self.fetches.lock().states.is_empty() || !self.prefetched.is_empty()
+    }
+
+    /// Tests: a picture carried out of its window (`e`), its file fetched to `path`.
+    #[cfg(test)]
+    pub fn stage_carried(&mut self, e: &Entry, path: PathBuf) {
+        self.fetches.stage(&e.key, path);
+        self.carried = vec![e.key.clone()];
+        self.loose = Some(e.clone());
+        self.from_window = true;
+        self.lifted_at = 0.0;
+    }
+
     /// Adds a card to the selection, or takes it out (a card's menu).
     pub fn toggle(&mut self, key: &str) {
         if !self.keys.remove(key) {
@@ -724,7 +758,7 @@ fn copied_what(order: &[Entry], handed: &[String]) -> String {
 /// The files to hand out: each picture as it is, each capture as the picture of its 3D view (made once, kept in the
 /// cache under the capture folder's name).
 fn files(entries: &[&Entry]) -> Vec<PathBuf> {
-    let dir = orbiters_core::paths::cache_dir().join("dragged");
+    let dir = crate::pages::cache_root().join("dragged");
     entries
         .iter()
         .filter_map(|e| match e.local.as_ref()? {
@@ -952,9 +986,25 @@ pub fn remote(e: &Entry, development: bool) -> Option<Remote> {
 /// The file a fetched picture is kept as, without its extension (the picture's own decides it):
 /// `<cache>/dragged/orbiters/Midnight Rooftop 2026-10-28 21-30-00 picture-12`, what the app it lands in shows.
 fn stem(e: &Entry) -> PathBuf {
+    crate::pages::cache_root().join("dragged").join("orbiters").join(stem_name(e))
+}
+
+/// [`stem`]'s file name. The picture's identity always whole at its end (night4, verify2: a long world name cut it at
+/// 120 characters, two pictures shared one file, and the editor was seeded from the wrong one): the world's name is
+/// what gets shortened, and a long identity is hashed.
+fn stem_name(e: &Entry) -> String {
     let when = crate::controller::shares::iso(e.taken).replace('T', " ").replace(':', "-").trim_end_matches('Z').to_string();
-    let name = format!("{} {} {}", e.world_name.trim(), when, e.key.replace(':', "-"));
-    orbiters_core::paths::cache_dir().join("dragged").join("orbiters").join(file_name(&name))
+    let key = e.key.replace(':', "-");
+    let key: String = if key.chars().count() <= 40 && file_name(&key) == key {
+        key
+    } else {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        e.key.hash(&mut h);
+        format!("k{:016x}", h.finish())
+    };
+    let world: String = file_name(e.world_name.trim()).chars().take(50).collect();
+    file_name(&format!("{} {when} {key}", world.trim_end()))
 }
 
 /// A name Windows takes for a file: no reserved characters, no trailing dots or spaces, at most 120 characters.
@@ -1068,6 +1118,10 @@ fn kept(stem: &Path) -> Option<PathBuf> {
 
 /// Fetches a picture into `stem` with the extension its bytes say (written whole, then renamed).
 fn fetch(from: &Remote, stem: &Path) -> anyhow::Result<PathBuf> {
+    // Tests never ask Orbiters (night4).
+    if cfg!(test) {
+        anyhow::bail!("tests never download"); // i18n: not shown (tests only)
+    }
     let dir = stem.parent().ok_or_else(|| anyhow::anyhow!("{}", tr("no folder")))?;
     std::fs::create_dir_all(dir)?;
     let part = with_ext(stem, "part");
@@ -1136,6 +1190,18 @@ fn with_ext(stem: &Path, ext: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    /// Night4, verify2: two pictures of a world with a very long name never share a fetched file.
+    #[test]
+    fn a_long_world_name_never_cuts_the_pictures_identity() {
+        let long = "A".repeat(200);
+        let mut a = crate::controller::shares::remote_entry(orbiters_core::shares::Item { kind: orbiters_core::shares::Kind::Picture, id: 1, ..Default::default() });
+        let mut b = crate::controller::shares::remote_entry(orbiters_core::shares::Item { kind: orbiters_core::shares::Kind::Picture, id: 2, ..Default::default() });
+        a.world_name = long.clone();
+        b.world_name = long;
+        assert_ne!(stem_name(&a), stem_name(&b));
+        assert!(stem_name(&a).chars().count() <= 120);
+    }
+
     use super::*;
 
     fn entry(key: &str, picture: bool) -> Entry {

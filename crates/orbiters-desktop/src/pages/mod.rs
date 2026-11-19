@@ -150,21 +150,60 @@ pub fn new_search(last: &mut Option<String>, query: &str) -> bool {
     fresh
 }
 
+/// The cache the pages keep what they fetch or make in (the editor's downloads, the drag's files): the app's own, or
+/// for tests a folder of this process under the system's temporary folder. Tests never read or write the person's own
+/// folders, by construction (night4: a test of the editor computed, and could have filled, the real cache).
+pub fn cache_root() -> std::path::PathBuf {
+    #[cfg(test)]
+    {
+        test_root().join("cache")
+    }
+    #[cfg(not(test))]
+    {
+        orbiters_core::paths::cache_dir()
+    }
+}
+
+/// Tests: this process's own folder for what they write.
+#[cfg(test)]
+pub fn test_root() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("orbiters-desktop-tests-{}", std::process::id()))
+}
+
+/// Who a page's work for Orbiters is for: the environment and the account's key ([`AccountFollow::see`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Owner {
+    pub development: bool,
+    pub account: String,
+}
+
+/// What [`AccountFollow::see`] saw this frame.
+#[derive(Clone, Debug, Default)]
+pub struct Seen {
+    /// Who the pages work for now.
+    pub owner: Owner,
+    /// Orbiters has just come to answer for this account again (after being unreachable, an expired sign-in renewed):
+    /// what failed may be asked again, nothing shown needs to go.
+    pub answered: bool,
+    /// Another owner than at the last frame: whatever the page keeps of the old one goes now. Followed on its own,
+    /// never through what a page asked last (night4, verify2: an answer under way left Requests without a last key,
+    /// and another account then kept the old one's list).
+    pub changed: bool,
+}
+
 /// Follows the account for what a page asked Orbiters for it: WHO it is, not how its check with Orbiters is going.
 /// `Checking`, `Offline` and `SignedIn` of the same name are the same person (the check runs again every minute while
 /// Orbiters cannot be reached, and whenever a tool rewrites the saved account): what was shown for them stays. Another
-/// name (or none), or a sign-in Orbiters refused (`Expired`), is another account.
+/// name (or none), another environment, or a sign-in Orbiters refused (`Expired`), is another owner.
 #[derive(Default)]
 pub struct AccountFollow {
     /// Orbiters answered for this account at its last answer (`SignedIn`); a check under way keeps the last answer.
     answered: bool,
+    last: Option<Owner>,
 }
 
 impl AccountFollow {
-    /// The account's key for what a page keeps (another key: another account), and whether Orbiters has just come to
-    /// answer for it (after being unreachable, an expired sign-in renewed): what failed may be asked again, nothing
-    /// shown needs to go.
-    pub fn see(&mut self, state: &crate::state::AccountState) -> (String, bool) {
+    pub fn see(&mut self, state: &crate::state::AccountState, development: bool) -> Seen {
         use crate::state::AccountState as A;
         let answered = match state {
             A::SignedIn { .. } => true,
@@ -175,9 +214,44 @@ impl AccountFollow {
         self.answered = answered;
         let name = state.username().unwrap_or_default();
         // A sign-in Orbiters refused is no longer that account's access: what was asked with it goes.
-        let key = if matches!(state, A::Expired { .. }) { format!("{name}\u{0}expired") } else { name.to_owned() };
-        (key, now)
+        let account = if matches!(state, A::Expired { .. }) { format!("{name}\u{0}expired") } else { name.to_owned() };
+        let owner = Owner { development, account };
+        let changed = self.last.as_ref().is_some_and(|l| *l != owner);
+        self.last = Some(owner.clone());
+        Seen { owner, answered: now, changed }
     }
+
+    /// Who the pages work for, as last seen.
+    pub fn owner(&self) -> Option<&Owner> {
+        self.last.as_ref()
+    }
+}
+
+/// A result of work done for an [`Owner`]: THE rule of every page that shows what Orbiters says for an account
+/// (night4, verify2 PAGES-UI-23): it is taken in only while that owner is still the one the page works for, and
+/// dropped otherwise, whenever it lands. Dropping a page's jobs when the account changes is not enough: work asked a
+/// moment before the change can land after it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForAccount<T> {
+    owner: Owner,
+    value: T,
+}
+
+impl<T> ForAccount<T> {
+    pub fn new(owner: &Owner, value: T) -> Self {
+        Self { owner: owner.clone(), value }
+    }
+
+    /// The result, when it was for `current`; `None` (dropped) when it was for another owner.
+    pub fn take_for(self, current: Option<&Owner>) -> Option<T> {
+        (current == Some(&self.owner)).then_some(self.value)
+    }
+}
+
+/// A [`Job`] for `owner`: its result says who it was for ([`ForAccount::take_for`]).
+pub fn job_for<T: Send + 'static>(ctx: &egui::Context, owner: &Owner, work: impl FnOnce() -> T + Send + 'static) -> Job<ForAccount<T>> {
+    let owner = owner.clone();
+    Job::spawn(ctx, move || ForAccount { owner, value: work() })
 }
 
 /// Work the window process is doing on a thread of its own, counted: every [`Job`] for as long as it runs, and the few
@@ -197,8 +271,22 @@ impl Working {
 
 impl Drop for Working {
     fn drop(&mut self) {
-        WORKING.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        // The last work ended: the window looks again (its countdown to the tray waits for this, verify2 SWEEP-9; a
+        // writer that is not a `Job` wakes nothing by itself).
+        if WORKING.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            if let Some(ctx) = WAKE.get() {
+                ctx.request_repaint();
+            }
+        }
     }
+}
+
+/// The window, woken when the last of its work ends ([`Working`]).
+static WAKE: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
+
+/// Called once the window's context exists.
+pub fn wake_when_work_ends(ctx: &egui::Context) {
+    let _ = WAKE.set(ctx.clone());
 }
 
 /// How many pieces of work of the window run now ([`Working`]).
@@ -635,16 +723,38 @@ mod tests {
         use crate::state::AccountState as A;
         let x = || Some("x".to_owned());
         let mut f = AccountFollow::default();
-        assert_eq!(f.see(&A::Unknown), (String::new(), false));
-        assert_eq!(f.see(&A::Checking { username: x() }), ("x".into(), false));
-        assert_eq!(f.see(&A::Offline { username: x() }), ("x".into(), false));
-        assert_eq!(f.see(&A::Checking { username: x() }), ("x".into(), false));
-        assert_eq!(f.see(&A::SignedIn { username: "x".into() }), ("x".into(), true));
-        assert_eq!(f.see(&A::Checking { username: x() }), ("x".into(), false), "a check under way keeps the last answer");
-        assert_eq!(f.see(&A::SignedIn { username: "x".into() }), ("x".into(), false));
-        assert_eq!(f.see(&A::Expired { username: x() }), ("x\u{0}expired".into(), false), "a refused sign-in is not the same access");
-        assert_eq!(f.see(&A::SignedIn { username: "x".into() }), ("x".into(), true), "a renewed sign-in asks again");
-        assert_eq!(f.see(&A::SignedOut), (String::new(), false));
+        let mut see = |s: &A| {
+            let seen = f.see(s, false);
+            (seen.owner.account, seen.answered)
+        };
+        assert_eq!(see(&A::Unknown), (String::new(), false));
+        assert_eq!(see(&A::Checking { username: x() }), ("x".into(), false));
+        assert_eq!(see(&A::Offline { username: x() }), ("x".into(), false));
+        assert_eq!(see(&A::Checking { username: x() }), ("x".into(), false));
+        assert_eq!(see(&A::SignedIn { username: "x".into() }), ("x".into(), true));
+        assert_eq!(see(&A::Checking { username: x() }), ("x".into(), false), "a check under way keeps the last answer");
+        assert_eq!(see(&A::SignedIn { username: "x".into() }), ("x".into(), false));
+        assert_eq!(see(&A::Expired { username: x() }), ("x\u{0}expired".into(), false), "a refused sign-in is not the same access");
+        assert_eq!(see(&A::SignedIn { username: "x".into() }), ("x".into(), true), "a renewed sign-in asks again");
+        assert_eq!(see(&A::SignedOut), (String::new(), false));
+    }
+
+    /// Night4, verify2 PAGES-UI-23: another owner is said the frame it comes, whatever a page asked; a result is taken
+    /// in only for the owner it was asked for.
+    #[test]
+    fn a_result_is_taken_only_for_the_owner_it_was_asked_for() {
+        use crate::state::AccountState as A;
+        let mut f = AccountFollow::default();
+        let a = f.see(&A::SignedIn { username: "a".into() }, false);
+        assert!(!a.changed, "the first look is no change");
+        let late = ForAccount::new(&a.owner, vec!["a's picture"]);
+        let b = f.see(&A::SignedIn { username: "b".into() }, false);
+        assert!(b.changed, "another account");
+        assert_eq!(late.take_for(f.owner()), None, "a's answer landing after b came is dropped");
+        assert_eq!(ForAccount::new(&b.owner, 1).take_for(f.owner()), Some(1));
+        assert!(f.see(&A::SignedIn { username: "b".into() }, true).changed, "another environment");
+        assert!(f.see(&A::Expired { username: Some("b".into()) }, true).changed, "a refused sign-in");
+        assert!(!f.see(&A::Expired { username: Some("b".into()) }, true).changed);
     }
 
     /// What is said by the day is worked out again at each wait [`local_day_in`] gives. Followed from wait to wait

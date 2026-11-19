@@ -34,6 +34,12 @@ pub const COUNTDOWN: f64 = 8.0;
 pub const SEEN_WITHIN: f64 = 4.0;
 /// An offer that went for a reason other than Keep open comes again no sooner than this.
 pub const AGAIN_AFTER: f64 = 120.0;
+/// The most one look credits to the countdown, seen or not: the window looks ten times a second while it runs, and a
+/// window stalled for longer (a busy machine, a frozen frame) never counts the gap as seen (verify2, SWEEP-7).
+pub const MAX_CREDIT: f64 = 0.5;
+/// While a desktop countdown is paused because the card cannot show (a game in exclusive full screen), nothing tells
+/// the window when it can again: it looks this often.
+pub const PAUSED_LOOK: f64 = 1.0;
 
 /// Where the person sees the offer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +78,11 @@ pub struct Facts {
     /// dashboard or by "Talk with N4N0?", it shows none), and the one Keep open was pressed on.
     pub shown_in_vr: Option<u64>,
     pub kept_in_vr: Option<u64>,
+    /// The desktop card confirms the offer up is on the screen now (made, its picture taken by Windows, visible): the
+    /// only ground for counting on the desktop; a card that fails or cannot be confirmed is no countdown (verify2).
+    pub card_shows: bool,
+    /// Keep open, pressed on the desktop card and read just before this look: it wins over a close of this same look.
+    pub kept_on_desktop: bool,
 }
 
 /// What to do after a look.
@@ -90,7 +101,7 @@ struct Up {
     id: u64,
     at: Where,
     offered: f64,
-    /// It was seen at least once (the VR band said so; the desktop card is the window's own).
+    /// It was seen at least once (the VR band or the desktop card confirmed it on show).
     seen: bool,
     /// Seconds of the countdown left, counted only while it is seen.
     left: f64,
@@ -135,7 +146,7 @@ impl Rest {
     pub fn offer(&self, now: f64, now_ms: u64) -> Option<(RestOffer, Where)> {
         let up = self.up.as_ref()?;
         let for_ms = (COUNTDOWN * 1000.0) as u64;
-        let left = (up.left - up.ticking.map_or(0.0, |t| (now - t).max(0.0))).max(0.0);
+        let left = (up.left - up.ticking.map_or(0.0, |t| (now - t).clamp(0.0, MAX_CREDIT))).max(0.0);
         let left_ms = (left * 1000.0) as u64;
         let until_ms = if up.ticking.is_some() { now_ms + left_ms } else { 0 };
         Some((RestOffer { id: up.id, until_ms, for_ms, left_ms }, up.at))
@@ -157,7 +168,10 @@ impl Rest {
             Some(up) if up.ticking.is_some() => 0.1,
             // Offered, the band not showing it yet: until it is too late for it.
             Some(up) if !up.seen => (up.offered + SEEN_WITHIN - now).max(0.1),
-            // Paused: whatever shows it again comes with a snapshot.
+            // Paused on the desktop (a game in exclusive full screen, a card Windows refused): nothing says when it
+            // can show again, so a look now and then.
+            Some(up) if up.at == Where::Desktop => PAUSED_LOOK,
+            // Paused in VR: whatever shows it again comes with a snapshot.
             Some(_) => return None,
             None => {
                 let at = (self.since? + MINIMIZED_FOR).max(self.wait_until) - now;
@@ -196,6 +210,10 @@ impl Rest {
                 self.kept = true;
             }
         }
+        // Read before anything below can close: a press arriving before the close happens wins (verify2).
+        if facts.kept_on_desktop && self.up.is_some() {
+            self.kept = true;
+        }
         if self.kept || !facts.on {
             return self.withdraw();
         }
@@ -206,9 +224,9 @@ impl Rest {
                 return Step::Nothing;
             }
             self.last_id += 1;
-            // On the desktop the card is the window's own: it is seen from the start. In VR, once the band says so.
-            let desktop = at == Where::Desktop;
-            self.up = Some(Up { id: self.base | (self.last_id & 0xff), at, offered: now, seen: desktop, left: COUNTDOWN, ticking: desktop.then_some(now) });
+            // Seen once what shows it says so: the VR band, or the desktop card confirmed on the screen (verify2: being
+            // able to draw a card is not having drawn it).
+            self.up = Some(Up { id: self.base | (self.last_id & 0xff), at, offered: now, seen: false, left: COUNTDOWN, ticking: None });
             return self.shown(now, now_ms);
         };
         if !eligible || facts.seen_at.is_some_and(|w| w != up.at) {
@@ -216,9 +234,9 @@ impl Rest {
             self.wait_until = now + AGAIN_AFTER;
             return self.withdraw();
         }
-        // Seen now? The desktop card wherever it can be drawn; the VR band only while it says it shows this offer.
+        // Seen now? Only while what shows it confirms it shows this offer.
         let seen_now = match up.at {
-            Where::Desktop => facts.seen_at == Some(Where::Desktop),
+            Where::Desktop => facts.seen_at == Some(Where::Desktop) && facts.card_shows,
             Where::Vr => facts.seen_at == Some(Where::Vr) && facts.shown_in_vr == Some(up.id),
         };
         if !up.seen && !seen_now {
@@ -232,7 +250,7 @@ impl Rest {
         match (seen_now, up.ticking) {
             // Seen and running: count.
             (true, Some(t)) => {
-                up.left -= (now - t).max(0.0);
+                up.left -= (now - t).clamp(0.0, MAX_CREDIT);
                 up.ticking = Some(now);
                 if up.left <= 0.0 {
                     self.up = None;
@@ -250,7 +268,7 @@ impl Rest {
             }
             // Hidden (SteamVR's dashboard, "Talk with N4N0?" on the band, a game in exclusive full screen): it pauses.
             (false, Some(t)) => {
-                up.left -= (now - t).max(0.0);
+                up.left -= (now - t).clamp(0.0, MAX_CREDIT);
                 up.ticking = None;
                 self.shown(now, now_ms)
             }
@@ -406,30 +424,55 @@ pub mod card {
     use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow};
 
     /// Whether a card over the screen can be seen now: not while a game holds it in exclusive full screen (VRChat runs
-    /// in a borderless window unless told otherwise).
+    /// in a borderless window unless told otherwise), and not when Windows cannot say (verify2: a failed query is no
+    /// proof it can be seen).
     pub fn can_show() -> bool {
         use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
         // SAFETY: a plain query.
-        !unsafe { SHQueryUserNotificationState() }.is_ok_and(|s| s == QUNS_RUNNING_D3D_FULL_SCREEN)
+        unsafe { SHQueryUserNotificationState() }.is_ok_and(|s| s != QUNS_RUNNING_D3D_FULL_SCREEN)
     }
 
     #[derive(Default)]
     pub struct Card {
         shown: Option<(PanelWindow, Canvas, f32, POINT)>,
         drawn: Option<(bool, u64, u32, orbiters_i18n::Language)>,
+        /// The offer whose picture Windows took on the card (`None`: none yet, or refused).
+        presented: Option<u64>,
+        /// Keep open's place on the screen, in pixels, while the card is up.
+        pill: Option<egui::Rect>,
     }
 
     impl Card {
-        /// Shows it (`scale`: pixels a point), its countdown at `left` with `seconds` to go; true when Keep open was
-        /// pressed since the last turn.
-        pub fn show(&mut self, scale: f32, left: f32, seconds: u64) -> bool {
+        /// The offer the card is confirmed to show this moment: its picture taken by Windows and the window visible
+        /// (verify2: the countdown runs on nothing less).
+        pub fn shows(&self) -> Option<u64> {
+            let (window, ..) = self.shown.as_ref()?;
+            self.presented.filter(|_| window.presented())
+        }
+
+        /// Keep open pressed (down and up on the card, released over the button) since the last call: read just before
+        /// the countdown's look, so that a press arriving before the close wins.
+        pub fn take_keep(&mut self) -> bool {
+            let presses = take_presses();
+            let (Some((window, ..)), Some(pill)) = (self.shown.as_ref(), self.pill) else { return false };
+            let mut cursor = POINT::default();
+            // SAFETY: the output is valid.
+            let _ = unsafe { GetCursorPos(&mut cursor) };
+            let over = pill.contains(egui::pos2(cursor.x as f32, cursor.y as f32));
+            let mine = window.id();
+            presses.into_iter().any(|(down, on)| on == mine && !down && over)
+        }
+
+        /// Puts the offer `id` on the screen (`scale`: pixels a point), its countdown at `left` with `seconds` to go.
+        /// Whether Windows took it is what [`Card::shows`] says next.
+        pub fn present(&mut self, id: u64, scale: f32, left: f32, seconds: u64) {
             let scale = scale.clamp(1.0, 3.0);
-            if self.shown.as_ref().is_some_and(|s| s.2 != scale) {
+            if self.shown.as_ref().is_some_and(|s| s.2 != scale) || self.presented.is_some_and(|p| p != id) {
                 self.hide();
             }
             if self.shown.is_none() {
                 let (w, h) = ((CARD.x * scale).round() as u32, (CARD.y * scale).round() as u32);
-                let Ok(window) = PanelWindow::new(w, h, true) else { return false };
+                let Ok(window) = PanelWindow::new(w, h, true) else { return };
                 // The corner of the screen the game is on (the one in front), above its task bar.
                 // SAFETY: plain queries.
                 let area = unsafe {
@@ -444,7 +487,7 @@ pub mod card {
                 self.drawn = None;
                 let _ = take_presses();
             }
-            let Some((window, canvas, scale, at)) = self.shown.as_mut() else { return false };
+            let Some((window, canvas, scale, at)) = self.shown.as_mut() else { return };
             let (scale, at) = (*scale, *at);
             let button = super::card_button();
             let pill = egui::Rect::from_min_size(egui::pos2(at.x as f32, at.y as f32) + (button.min.to_vec2() + egui::vec2(0.0, 0.0)) * scale, button.size() * scale);
@@ -452,6 +495,7 @@ pub mod card {
             // SAFETY: the output is valid.
             let _ = unsafe { GetCursorPos(&mut cursor) };
             let hover = pill.contains(egui::pos2(cursor.x as f32, cursor.y as f32));
+            self.pill = Some(pill);
             let look = (hover, seconds, (left.clamp(0.0, 1.0) * 120.0).ceil() as u32, orbiters_i18n::language());
             if self.drawn != Some(look) {
                 let first = self.drawn.is_none();
@@ -461,22 +505,22 @@ pub mod card {
                 let (w, h) = ((CARD.x * scale).round() as u32, (CARD.y * scale).round() as u32);
                 window.picture(canvas.pixels(), [0, 0, w, h]);
                 window.place(at, 255);
-                self.drawn = Some(look);
-            }
-            // A press that went down and came up on it, over Keep open.
-            let mine = window.id();
-            let mut kept = false;
-            for (down, on) in take_presses() {
-                if on == mine && !down && hover {
-                    kept = true;
+                if window.presented() {
+                    self.drawn = Some(look);
+                    self.presented = Some(id);
+                } else {
+                    // Refused: not on the screen; painted whole again next turn.
+                    self.drawn = None;
+                    self.presented = None;
                 }
             }
-            kept
         }
 
         pub fn hide(&mut self) {
             self.shown = None;
             self.drawn = None;
+            self.presented = None;
+            self.pill = None;
         }
     }
 }
@@ -486,7 +530,7 @@ mod tests {
     use super::*;
 
     fn facts() -> Facts {
-        Facts { minimized: true, vrchat: true, seen_at: Some(Where::Desktop), working: false, on: true, shown_in_vr: None, kept_in_vr: None }
+        Facts { minimized: true, vrchat: true, seen_at: Some(Where::Desktop), working: false, on: true, shown_in_vr: None, kept_in_vr: None, card_shows: true, kept_on_desktop: false }
     }
 
     /// Steps the countdown from `from` to `to` seconds, a look every 100 ms; what it did, in order (Nothing left out).
@@ -537,6 +581,47 @@ mod tests {
         let steps = run(&mut rest, back, back + 4.5, &shown);
         assert_eq!(kinds(&steps), ["show"], "running again, not closed yet");
         assert_eq!(kinds(&run(&mut rest, back + 4.6, back + 5.5, &shown)), ["close"], "about eight seconds seen in all");
+    }
+
+    /// verify2, SWEEP-7: on the desktop the countdown runs only on a card confirmed on the screen. A card Windows never
+    /// made or refused is no countdown and no close; refused mid-way, it pauses; it never closes unseen.
+    #[test]
+    fn the_desktop_countdown_runs_only_on_a_card_confirmed_on_screen() {
+        let mut rest = Rest::default();
+        let refused = Facts { card_shows: false, ..facts() };
+        let steps = run(&mut rest, 0.0, MINIMIZED_FOR + 30.0, &refused);
+        assert_eq!(kinds(&steps), ["show", "withdraw"], "offered, never confirmed, gone: never closed");
+        let later = MINIMIZED_FOR + 30.0 + AGAIN_AFTER + 1.0;
+        let steps = run(&mut rest, later, later + 3.0, &facts());
+        assert_eq!(kinds(&steps), ["show", "show"], "offered, then running once the card confirms");
+        let steps = run(&mut rest, later + 3.1, later + 60.0, &refused);
+        assert_eq!(kinds(&steps), ["show"], "refused mid-way: paused, not closed");
+        assert_eq!(rest.next_look(later + 60.0), Some(PAUSED_LOOK), "paused on the desktop: looked at again by itself");
+        assert_eq!(kinds(&run(&mut rest, later + 60.1, later + 64.0, &facts())), ["show"], "about five seconds left");
+        assert_eq!(kinds(&run(&mut rest, later + 64.1, later + 66.0, &facts())), ["close"]);
+    }
+
+    /// verify2: Keep open pressed just before the close happens wins: it is read before the look that would close.
+    #[test]
+    fn keep_open_pressed_at_the_last_moment_wins_over_the_close() {
+        let mut rest = Rest::default();
+        run(&mut rest, 0.0, MINIMIZED_FOR + COUNTDOWN - 0.05, &facts());
+        assert!(rest.running(), "a few hundredths of a second left");
+        let pressed = Facts { kept_on_desktop: true, ..facts() };
+        assert_eq!(rest.step(MINIMIZED_FOR + COUNTDOWN + 1.0, 0, &pressed), Step::Withdraw, "the press, not the close");
+        assert!(rest.kept());
+    }
+
+    /// verify2: a window stalled between two looks never counts the gap: neither as seen, nor taken off when hidden.
+    #[test]
+    fn a_stalled_window_never_counts_the_gap_as_seen() {
+        let mut rest = Rest::default();
+        run(&mut rest, 0.0, MINIMIZED_FOR + 1.0, &facts());
+        assert!(rest.running());
+        let t = MINIMIZED_FOR + 1.0;
+        assert_eq!(rest.step(t + 30.0, 0, &facts()), Step::Nothing, "thirty seconds without a look: not closed");
+        let Step::Show(paused, _) = rest.step(t + 60.0, 0, &Facts { card_shows: false, ..facts() }) else { panic!() };
+        assert!(paused.left_ms >= 6_000, "at most a look's credit each time: {}", paused.left_ms);
     }
 
     /// SWEEP-7 (desktop side): with SteamVR running, the desktop card is used only when the overlay says the headset is
@@ -665,12 +750,13 @@ mod tests {
         let f = facts();
         assert!(run(&mut rest, 0.0, MINIMIZED_FOR - 0.2, &f).is_empty(), "not before its time");
         let steps = run(&mut rest, MINIMIZED_FOR - 0.1, MINIMIZED_FOR + COUNTDOWN - 0.15, &f);
-        assert_eq!(kinds(&steps), ["show"], "offered once, at its time");
+        // Offered at its time, then running once the card confirms it on the screen (verify2).
+        assert_eq!(kinds(&steps), ["show", "show"], "offered once, at its time, then started");
         let Step::Show(offer, at) = steps[0] else { unreachable!() };
         assert_eq!(at, Where::Desktop);
         assert_eq!(offer.for_ms, 8_000);
         assert_eq!(offer.seconds((MINIMIZED_FOR * 1000.0) as u64), 8);
-        assert_eq!(kinds(&run(&mut rest, MINIMIZED_FOR + COUNTDOWN + 0.05, MINIMIZED_FOR + COUNTDOWN + 0.2, &f)), ["close"], "after eight seconds");
+        assert_eq!(kinds(&run(&mut rest, MINIMIZED_FOR + COUNTDOWN + 0.05, MINIMIZED_FOR + COUNTDOWN + 0.35, &f)), ["close"], "after eight seconds seen");
     }
 
     #[test]
@@ -694,7 +780,7 @@ mod tests {
         rest.step(MINIMIZED_FOR - 59.0, 0, &Facts { minimized: false, ..f });
         assert!(run(&mut rest, MINIMIZED_FOR - 58.0, 2.0 * MINIMIZED_FOR - 60.0, &f).is_empty(), "the time started again");
         let steps = run(&mut rest, 2.0 * MINIMIZED_FOR - 57.0, 2.0 * MINIMIZED_FOR - 55.0, &f);
-        assert_eq!(kinds(&steps), ["show"]);
+        assert_eq!(kinds(&steps), ["show", "show"], "offered, then started");
         assert_eq!(rest.step(2.0 * MINIMIZED_FOR - 54.0, 0, &Facts { minimized: false, ..f }), Step::Withdraw, "restored during the countdown");
     }
 
@@ -715,7 +801,7 @@ mod tests {
         run(&mut rest, 0.0, MINIMIZED_FOR + 2.0, &f);
         assert_eq!(rest.step(MINIMIZED_FOR + 3.0, 0, &Facts { working: true, ..f }), Step::Withdraw);
         assert!(run(&mut rest, MINIMIZED_FOR + 3.1, MINIMIZED_FOR + 3.0 + AGAIN_AFTER - 0.2, &f).is_empty(), "not again at once");
-        assert_eq!(kinds(&run(&mut rest, MINIMIZED_FOR + 3.0 + AGAIN_AFTER, MINIMIZED_FOR + 3.2 + AGAIN_AFTER, &f)), ["show"]);
+        assert_eq!(kinds(&run(&mut rest, MINIMIZED_FOR + 3.0 + AGAIN_AFTER, MINIMIZED_FOR + 3.2 + AGAIN_AFTER, &f)), ["show", "show"]);
     }
 
     #[test]

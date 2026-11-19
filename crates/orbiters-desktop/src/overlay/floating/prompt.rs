@@ -32,6 +32,23 @@ pub struct Prompt {
     drawn: Option<(Face, bool, orbiters_i18n::Language, u32)>,
     /// Or a face of the shared 3D view's ([`Self::paint_with`]): a digest of what it shows.
     drawn_with: Option<u64>,
+    /// What SteamVR confirmed of the offer placed: the only ground on which it says it shows it.
+    evidence: Evidence,
+}
+
+/// What SteamVR confirmed of the band for the offer placed (night4, verify2 SWEEP-7): put where it goes, made visible,
+/// its picture taken. A refused call means it does not show that offer, and the window's countdown does not run on it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Evidence {
+    placed: bool,
+    shown: bool,
+    pictured: bool,
+}
+
+impl Evidence {
+    fn confirms(&self) -> bool {
+        self.placed && self.shown && self.pictured
+    }
 }
 
 /// What the band asks: "Talk with N4N0?" (`crate::wake_offer`), or "Orbiters - N4N0 will minimize to save memory" with
@@ -48,7 +65,7 @@ impl Prompt {
         let _ = overlay.set_width_in_meters(handle, VR_WIDTH_M);
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, SORT_ORDER);
-        Ok(Self { handle, canvas: Canvas::new(VR_PX[0], VR_PX[1]), placed: None, pressed: None, visible: false, drawn: None, drawn_with: None })
+        Ok(Self { handle, canvas: Canvas::new(VR_PX[0], VR_PX[1]), placed: None, pressed: None, visible: false, drawn: None, drawn_with: None, evidence: Evidence::default() })
     }
 
     pub fn destroy(&self, overlay: &vr::Overlay) {
@@ -60,6 +77,7 @@ impl Prompt {
     pub fn place(&mut self, overlay: &vr::Overlay, offer: Option<u64>, head: Option<&Matrix34>) -> Option<Quad> {
         let Some(id) = offer.filter(|id| self.pressed != Some(*id)) else {
             self.placed = None;
+            self.evidence = Evidence::default();
             if self.visible {
                 let _ = overlay.hide(self.handle);
                 self.visible = false;
@@ -69,23 +87,28 @@ impl Prompt {
         if self.placed.is_none_or(|(placed, _)| placed != id) {
             // A new offer: where the eyes look now (a word heard again moves it there again).
             let at = space::before_eyes(head?, DISTANCE_M, BELOW_M);
-            let _ = overlay.set_transform_absolute(self.handle, &at);
+            self.evidence = Evidence { placed: overlay.set_transform_absolute(self.handle, &at).is_ok(), ..Evidence::default() };
             self.placed = Some((id, at));
             self.drawn = None;
             self.drawn_with = None;
+        } else if !self.evidence.placed {
+            // Refused before: asked again each turn.
+            let (_, at) = self.placed?;
+            self.evidence.placed = overlay.set_transform_absolute(self.handle, &at).is_ok();
         }
         let (_, at) = self.placed?;
         if !self.visible {
             let _ = overlay.set_alpha(self.handle, 1.0);
-            let _ = overlay.show(self.handle);
-            self.visible = true;
+            // Refused: not visible, tried again next turn.
+            self.visible = overlay.show(self.handle).is_ok();
+            self.evidence.shown = self.visible;
         }
         Some(Quad { transform: at, width: VR_WIDTH_M, height: height_m() })
     }
 
-    /// Whether it shows the offer `id` now.
+    /// Whether it shows the offer `id` now: only when SteamVR took its place, its visibility and its picture.
     pub fn showing(&self, id: u64) -> bool {
-        self.visible && self.placed.is_some_and(|(placed, _)| placed == id)
+        self.visible && self.placed.is_some_and(|(placed, _)| placed == id) && self.evidence.confirms()
     }
 
     /// Pressed: it goes now.
@@ -113,8 +136,15 @@ impl Prompt {
         }
         let changed = if first { Some([0, 0, VR_PX[0], VR_PX[1]]) } else { self.canvas.damage() };
         if let Some(changed) = changed {
-            presenter.show_part(overlay, self.handle, self.canvas.pixels(), VR_PX[0], VR_PX[1], changed);
+            if !presenter.show_part(overlay, self.handle, self.canvas.pixels(), VR_PX[0], VR_PX[1], changed) {
+                // Refused: the band does not show this picture; painted whole again next turn.
+                self.evidence.pictured = false;
+                self.drawn = None;
+                return;
+            }
         }
+        // Its first picture taken (a later one only changes it), the band shows its offer.
+        self.evidence.pictured |= first;
         self.drawn = Some(look);
     }
 
@@ -131,7 +161,12 @@ impl Prompt {
         }
         let changed = if first { Some([0, 0, VR_PX[0], VR_PX[1]]) } else { self.canvas.damage() };
         if let Some(changed) = changed {
-            presenter.show_part(overlay, self.handle, self.canvas.pixels(), VR_PX[0], VR_PX[1], changed);
+            // Refused: this face is not shown; painted whole again next turn (as the offers' own picture). It is never
+            // the countdown's evidence: that is only the countdown's own picture.
+            if !presenter.show_part(overlay, self.handle, self.canvas.pixels(), VR_PX[0], VR_PX[1], changed) {
+                self.drawn_with = None;
+                return;
+            }
         }
         self.drawn_with = Some(look);
     }
@@ -148,6 +183,17 @@ pub fn look_of(parts: impl std::hash::Hash) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// verify2, SWEEP-7: each of SteamVR's refusals (place, show, picture) means the band does not show its offer.
+    #[test]
+    fn the_band_shows_its_offer_only_with_every_call_taken() {
+        let all = Evidence { placed: true, shown: true, pictured: true };
+        assert!(all.confirms());
+        assert!(!Evidence { placed: false, ..all }.confirms(), "place refused");
+        assert!(!Evidence { shown: false, ..all }.confirms(), "show refused");
+        assert!(!Evidence { pictured: false, ..all }.confirms(), "picture refused");
+        assert!(!Evidence::default().confirms(), "a new offer: nothing confirmed yet");
+    }
 
     #[test]
     fn its_face_paints_in_every_language() {

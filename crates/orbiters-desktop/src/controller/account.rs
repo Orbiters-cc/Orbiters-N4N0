@@ -374,6 +374,23 @@ impl Controller {
         let (server, _) = rt.read?;
         rt.account.as_ref().map(|a| (Api::new(server), a.token.clone()))
     }
+
+    /// [`Self::account_api`] with whom it is for (read together, so the two agree): the server's API address and the
+    /// account's id (a digest of its credential when the account file names no id; none when nobody is signed in).
+    pub(super) fn account_api_for(&self) -> (Option<(Api, String)>, orbiters_core::world_feedback::Stamp) {
+        let rt = self.account_runtime.lock().unwrap();
+        let server = rt.read.map_or_else(Server::current, |(s, _)| s);
+        let api = Api::new(server);
+        let stamp = orbiters_core::world_feedback::Stamp {
+            server: api.url(""),
+            account: rt
+                .account
+                .as_ref()
+                .map(|a| a.user.clone().unwrap_or_else(|| format!("credential:{}", orbiters_core::vrchat_accounts::friend_hash(&a.token)))),
+        };
+        let with = rt.read.and(rt.account.as_ref()).map(|a| (api, a.token.clone()));
+        (with, stamp)
+    }
 }
 
 #[cfg(test)]

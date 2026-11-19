@@ -277,6 +277,27 @@ pub struct Pending {
     pub due: u64,
     #[serde(default)]
     pub tries: u32,
+    /// Where it goes: the server and the account it was made for. Comment ids and test comments mean something on one
+    /// server only, and an action is the member's own: it is sent there and nowhere else. One without (written by an
+    /// earlier version) is dropped at load.
+    #[serde(default)]
+    pub to: Option<Stamp>,
+}
+
+/// The server (its API address) and the Orbiters account (its id; none while nobody was signed in, then it goes with
+/// the account that signs in on that server) an action was made for.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stamp {
+    pub server: String,
+    #[serde(default)]
+    pub account: Option<String>,
+}
+
+impl Stamp {
+    /// Whether an action made for `self` may go out as `now`.
+    pub fn sends_as(&self, now: &Stamp) -> bool {
+        self.server == now.server && (self.account.is_none() || self.account == now.account)
+    }
 }
 
 /// The actions waiting, oldest first, kept in a file of their own.
@@ -313,7 +334,10 @@ impl Queue {
                 Ok(mut p) => {
                     // The contract takes a world id in capitals too; the queue keeps VRChat's own lowercase.
                     p.world = p.world.to_ascii_lowercase();
-                    if crate::vrchat_log::is_world_id(&p.world) {
+                    if p.to.is_none() {
+                        // From before actions said where they go: never sent to a server it may not be for.
+                        eprintln!("world feedback queue: an action without its server dropped");
+                    } else if crate::vrchat_log::is_world_id(&p.world) {
                         queue.items.push(p);
                     } else {
                         lost = true;
@@ -341,25 +365,42 @@ impl Queue {
     /// Adds an action: a world's likes and labels go into the one waiting for it (sent [`COALESCE`] after this
     /// change); a comment deleted before it went is never sent.
     pub fn push(&mut self, world: &str, action: Action, now_ms: u64) {
+        self.push_to(world, action, now_ms, Stamp::default());
+    }
+
+    /// [`Queue::push`] for the server and account `to`: a world's likes and labels go together only with those made
+    /// for the same.
+    pub fn push_to(&mut self, world: &str, action: Action, now_ms: u64, to: Stamp) {
         let due = now_ms + COALESCE.as_millis() as u64;
         match action {
             Action::Set(set) => {
-                if let Some(p) = self.items.iter_mut().find(|p| p.world == world && matches!(p.action, Action::Set(_))) {
+                if let Some(p) = self.items.iter_mut().find(|p| p.world == world && matches!(p.action, Action::Set(_)) && p.to.as_ref() == Some(&to)) {
                     if let Action::Set(waiting) = &mut p.action {
                         waiting.merge(&set);
                     }
                     p.due = p.due.max(due);
                     return;
                 }
-                self.items.push(Pending { world: world.into(), action: Action::Set(set), since: now_ms, due, tries: 0 });
+                self.items.push(Pending { world: world.into(), action: Action::Set(set), since: now_ms, due, tries: 0, to: Some(to) });
             }
-            other => self.items.push(Pending { world: world.into(), action: other, since: now_ms, due: now_ms, tries: 0 }),
+            other => self.items.push(Pending { world: world.into(), action: other, since: now_ms, due: now_ms, tries: 0, to: Some(to) }),
         }
     }
 
     /// The first action due at `now_ms`, if any (its index).
     pub fn due(&self, now_ms: u64) -> Option<usize> {
         self.items.iter().position(|p| p.due <= now_ms)
+    }
+
+    /// The first action due at `now_ms` that may go out as `now` ([`Stamp::sends_as`]); the others wait for their
+    /// server and account (and leave after [`DROP_AFTER`]).
+    pub fn due_for(&self, now_ms: u64, now: &Stamp) -> Option<usize> {
+        self.items.iter().position(|p| p.due <= now_ms && p.to.as_ref().is_some_and(|to| to.sends_as(now)))
+    }
+
+    /// Drops the actions older than [`DROP_AFTER`], wherever they were for.
+    pub fn expire(&mut self, now_ms: u64) {
+        self.items.retain(|p| now_ms.saturating_sub(p.since) < DROP_AFTER.as_millis() as u64);
     }
 
     /// The action at `i` failed for now: tried again after 2, 4, 8 … seconds (at most a minute), dropped after a day.
@@ -588,6 +629,40 @@ mod tests {
         let kept = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("q.json.bad-")).count();
         assert_eq!(kept, 1, "the file kept beside");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// CORE2-1: an action goes to the server and account it was made for, never to another; one from before actions
+    /// said where they go is dropped, not sent.
+    #[test]
+    fn an_action_goes_only_where_it_was_made() {
+        let dev = Stamp { server: "http://127.0.0.1:4100/".into(), account: Some("7".into()) };
+        let prod = Stamp { server: "https://api.orbiters.cc/".into(), account: Some("7".into()) };
+        let other = Stamp { account: Some("8".into()), ..prod.clone() };
+        let mut q = Queue::default();
+        q.push_to(WORLD, Action::Uncomment { comment: 5 }, 0, dev.clone());
+        q.push_to(WORLD, set(Some(true), &[]), 0, dev.clone());
+        q.push_to(WORLD, set(Some(false), &[]), 0, prod.clone());
+        assert_eq!(q.items.len(), 3, "a like of each server waits apart");
+        let due = |q: &Queue, s: &Stamp| (0..q.items.len()).filter(|&i| q.items[i].to.as_ref().unwrap().sends_as(s)).collect::<Vec<_>>();
+        assert_eq!(due(&q, &prod), [2]);
+        assert_eq!(q.due_for(10_000, &prod), Some(2));
+        assert_eq!(q.due_for(10_000, &other), None, "nor another account's");
+        q.items.remove(2);
+        assert_eq!(q.due_for(10_000, &prod), None, "Development's delete never goes to production");
+        assert_eq!(q.due_for(10_000, &dev), Some(0), "it goes back home");
+        // Made while nobody was signed in: goes with whoever signs in on that server.
+        let nobody = Stamp { account: None, ..prod.clone() };
+        q.push_to(WORLD, Action::Report { comment: 3, reason: None }, 0, nobody);
+        assert!(q.due_for(10_000, &other).is_some() && q.due_for(10_000, &prod).is_some());
+        q.expire(DROP_AFTER.as_millis() as u64 + 1);
+        assert!(q.items.is_empty(), "a day old: gone wherever it was for");
+        // An earlier version's file: its actions say nowhere, and go nowhere.
+        let dir = std::env::temp_dir().join(format!("orbiters-feedback-unstamped-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("q.json");
+        std::fs::write(&path, serde_json::json!({"items": [{"world": WORLD, "action": {"kind": "uncomment", "comment": 5}, "since": 1, "due": 1}]}).to_string()).unwrap();
+        assert!(Queue::load(&path, 2).items.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

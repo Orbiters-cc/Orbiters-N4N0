@@ -10,7 +10,7 @@ use orbiters_contracts::world_feedback::{self as contract, Action as Line, Refus
 use orbiters_core::account::Api;
 use orbiters_core::vrchat_log::{LogEvent, LogWatcher};
 use orbiters_i18n::{mark, tr, tr_latin};
-use orbiters_core::world_feedback::{client_id, Action, Client, Failure, Known, Queue, Seen, Set};
+use orbiters_core::world_feedback::{client_id, Action, Client, Failure, Known, Queue, Seen, Set, Stamp};
 use orbiters_n4n0_core::feedback::{CommentRow, FeedbackAsk, FeedbackView, LabelCount, Subject, Why, WorldFeedback, SUBJECTS_MAX};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -66,6 +66,8 @@ pub(super) struct WorldFeedbackRuntime {
     sent: Option<FeedbackView>,
     /// Bumped when the environment changes: an answer to a call made before is the other server's.
     scope: u64,
+    /// The server and account of the moment: what is queued is for them, and only what is for them is sent.
+    stamp: Stamp,
 }
 
 impl Default for WorldFeedbackRuntime {
@@ -86,6 +88,7 @@ impl Default for WorldFeedbackRuntime {
             port_note: None,
             sent: None,
             scope: 0,
+            stamp: Stamp::default(),
         }
     }
 }
@@ -169,7 +172,7 @@ impl WorldFeedbackRuntime {
                 return;
             }
         }
-        self.queue.push(world, action, now_ms());
+        self.queue.push_to(world, action, now_ms(), self.stamp.clone());
         self.wanted.insert(world.to_string(), Instant::now());
         self.save();
     }
@@ -291,7 +294,13 @@ impl WorldFeedbackRuntime {
     fn next_call(&mut self) -> Option<Call> {
         let now = now_ms();
         self.wanted.retain(|_, at| at.elapsed() < WANTED_FOR);
-        if let Some(i) = self.queue.due(now) {
+        // What waits for another server or account is never sent here; it leaves after a day.
+        let before = self.queue.items.len();
+        self.queue.expire(now);
+        if self.queue.items.len() != before {
+            self.save();
+        }
+        if let Some(i) = self.queue.due_for(now, &self.stamp) {
             let p = &self.queue.items[i];
             return Some(Call::Send { world: p.world.clone(), action: p.action.clone(), since: p.since });
         }
@@ -501,8 +510,10 @@ impl super::Controller {
 
     /// What one of N4N0's menus asked (controller/n4n0.rs: `Host::world_feedback`).
     pub(super) fn world_feedback_ask(self: &Shared, ask: FeedbackAsk) {
+        let (_, stamp) = self.account_api_for();
         {
             let mut rt = self.world_feedback.lock().unwrap();
+            rt.stamp = stamp;
             match menu_action(&ask) {
                 Some((world, action)) => {
                     let world = world.to_ascii_lowercase();
@@ -543,8 +554,10 @@ impl super::Controller {
 
     fn feedback_follow(self: &Shared) -> bool {
         let development = self.settings().development;
-        let signed_in = self.feedback_api().is_some();
-        self.world_feedback.lock().unwrap().follow(development, signed_in)
+        let (api, stamp) = self.account_api_for();
+        let mut rt = self.world_feedback.lock().unwrap();
+        rt.stamp = stamp;
+        rt.follow(development, api.is_some())
     }
 }
 
@@ -601,15 +614,17 @@ pub(super) fn spawn(ctl: Shared) {
     let c = ctl.clone();
     let _ = std::thread::Builder::new().name("world-feedback-send".into()).spawn(move || {
         while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
+            // The account and server read once: what is handed out is for them, and goes with them.
+            let (api, stamp) = c.account_api_for();
             let (call, scope) = {
                 let mut rt = c.world_feedback.lock().unwrap();
+                rt.stamp = stamp;
                 (rt.next_call(), rt.scope)
             };
             let Some(call) = call else {
                 std::thread::sleep(Duration::from_millis(300));
                 continue;
             };
-            let api = c.feedback_api();
             let result = perform(&call, api.as_ref());
             if matches!(result, Err(Failure::SignedOut)) && api.is_none() {
                 // Nothing to send with: kept until an account is signed in.

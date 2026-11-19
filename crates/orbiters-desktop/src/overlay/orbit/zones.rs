@@ -387,7 +387,7 @@ impl Zone {
             // holds the camera, clear of VRChat's row of buttons and of the caption.
             Zone::CameraShare => r(CAMERA_COLUMN_OUT, CAMERA_SHARE[0], CAMERA_HALF[0], CAMERA_SHARE[1]),
             // On a screen: right of the picture with the column's gap, from its top, two buttons over each other.
-            Zone::CameraShareDesk => r(CAMERA_HALF[0] + CAMERA_GAP, -CAMERA_HALF[1], CAMERA_HALF[0] + CAMERA_GAP + 190.0, -CAMERA_HALF[1] + 268.0),
+            Zone::CameraShareDesk => r(CAMERA_HALF[0] + CAMERA_GAP, -CAMERA_HALF[1], CAMERA_HALF[0] + CAMERA_GAP + 190.0, -CAMERA_HALF[1] + 308.0),
             // Where a code's page goes, as tall as it and its bar: stood up on the camera's top edge in a headset.
             Zone::CameraChooser => r(-CAMERA_HALF[0], CAMERA_WEB_BAR[1] - CAMERA_CHOOSER_TALL, CAMERA_HALF[0], CAMERA_WEB_BAR[1]),
             // Right under the ring, whose foot is free in any window: in reach, and over nothing of VRChat's.

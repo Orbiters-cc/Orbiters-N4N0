@@ -87,6 +87,8 @@ fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
 const BUTTON: f32 = 58.0;
 /// A slot that says how a share went: its reason may take two lines.
 const DONE: f32 = 104.0;
+/// The same in the desktop's narrow column, where words take more lines.
+const DONE_NARROW: f32 = 124.0;
 const PUT_AWAY_W: f32 = 44.0;
 
 /// The share row's items, in a zone `w` x `h`.
@@ -102,7 +104,8 @@ pub fn share_items(w: f32, _h: f32, view: &ShareView) -> Vec<Item> {
         ];
     }
     // What says something in words (an outcome, a refusal, a failure) has room for them whole.
-    let tall = |step: &Step| if matches!(step, Step::Done(_) | Step::Limited | Step::Failed(_) | Step::Explicit) { DONE } else { BUTTON };
+    let done = if w < 300.0 { DONE_NARROW } else { DONE };
+    let tall = |step: &Step| if matches!(step, Step::Done(_) | Step::Limited | Step::Failed(_) | Step::Explicit) { done } else { BUTTON };
     // A column (on a screen, beside the panel): the two over each other, the put-away under them.
     if w < 300.0 {
         let question = view.confirming;
@@ -272,11 +275,14 @@ fn card(p: &Painter, rect: Rect, icon: &str, tint: Color32, first: &str, second:
     // The third (where the member stands, "37.5 to Navigator") may take two lines too.
     let third = third.map(|w| p.layout(w.to_string(), small.clone(), look::MUTED, room));
     let third_h = third.as_ref().map_or(0.0, |g| g.size().y.min(32.0) + 3.0);
-    let tall = 18.0 + second_h + third_h;
-    let top = rect.center().y - tall / 2.0 + 9.0 - if line.is_some() { 2.0 } else { 0.0 };
-    widgets::icon(p, pos2(x + 9.0, top), icon, 18.0, tint);
-    p.text(pos2(x + 28.0, top), Align2::LEFT_CENTER, fit(p, first, &bold, room), bold, look::LABEL);
-    let mut y = top + 11.0;
+    // The title on two lines when even smaller it does not fit.
+    let title = p.layout(first.to_string(), bold, look::LABEL, room);
+    let title_h = title.size().y.min(34.0);
+    let tall = title_h + 2.0 + second_h + third_h;
+    let top = (rect.center().y - tall / 2.0 - if line.is_some() { 3.0 } else { 0.0 }).max(rect.top() + 8.0);
+    widgets::icon(p, pos2(x + 9.0, top + 9.0), icon, 18.0, tint);
+    p.with_clip_rect(Rect::from_min_size(pos2(x + 28.0, top), vec2(room, 34.0))).galley(pos2(x + 28.0, top), title, look::LABEL);
+    let mut y = top + title_h + 2.0;
     if let Some(g) = second {
         let clip = Rect::from_min_size(pos2(x + 28.0, y), vec2(room, second_max));
         p.with_clip_rect(clip).galley(pos2(x + 28.0, y), g, tinted);
@@ -499,13 +505,13 @@ mod tests {
         v.confirming = true;
         assert_eq!(actions(&share_items(520.0, 84.0, &v)), [Action::Idle, Action::ShareCancelConfirm, Action::ShareConfirm(7)]);
         // On a screen, the column beside the panel: the same presses, over each other, none overlapping.
-        let column = share_items(190.0, 268.0, &v);
+        let column = share_items(190.0, 308.0, &v);
         assert_eq!(actions(&column), [Action::Idle, Action::ShareConfirm(7), Action::ShareCancelConfirm]);
         v.confirming = false;
-        let column = share_items(190.0, 268.0, &v);
+        let column = share_items(190.0, 308.0, &v);
         assert_eq!(actions(&column), [Action::Idle, Action::SharePublic(7), Action::ShareDismiss(7)]);
         for pair in column.windows(2) {
-            assert!(pair[0].rect.bottom() <= pair[1].rect.top() && pair[1].rect.bottom() <= 268.0, "{pair:?}");
+            assert!(pair[0].rect.bottom() <= pair[1].rect.top() && pair[1].rect.bottom() <= 308.0, "{pair:?}");
         }
     }
 

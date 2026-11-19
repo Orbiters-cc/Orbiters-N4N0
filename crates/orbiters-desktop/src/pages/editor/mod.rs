@@ -99,7 +99,8 @@ pub fn gallery_source(p: &orbiters_core::community::Picture, event: Option<&orbi
 
 /// Whether the app is on the development environment (what a shared picture's id is of).
 fn development() -> bool {
-    orbiters_core::settings::Settings::load().development
+    // Tests never read the person's settings.
+    !cfg!(test) && orbiters_core::settings::Settings::load().development
 }
 
 const TOP_H: f32 = 64.0;

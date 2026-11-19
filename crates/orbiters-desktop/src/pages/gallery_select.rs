@@ -758,7 +758,7 @@ fn copied_what(order: &[Entry], handed: &[String]) -> String {
 /// The files to hand out: each picture as it is, each capture as the picture of its 3D view (made once, kept in the
 /// cache under the capture folder's name).
 fn files(entries: &[&Entry]) -> Vec<PathBuf> {
-    let dir = orbiters_core::paths::cache_dir().join("dragged");
+    let dir = crate::pages::cache_root().join("dragged");
     entries
         .iter()
         .filter_map(|e| match e.local.as_ref()? {
@@ -986,7 +986,7 @@ pub fn remote(e: &Entry, development: bool) -> Option<Remote> {
 /// The file a fetched picture is kept as, without its extension (the picture's own decides it):
 /// `<cache>/dragged/orbiters/Midnight Rooftop 2026-10-28 21-30-00 picture-12`, what the app it lands in shows.
 fn stem(e: &Entry) -> PathBuf {
-    orbiters_core::paths::cache_dir().join("dragged").join("orbiters").join(stem_name(e))
+    crate::pages::cache_root().join("dragged").join("orbiters").join(stem_name(e))
 }
 
 /// [`stem`]'s file name. The picture's identity always whole at its end (night4, verify2: a long world name cut it at
@@ -1118,6 +1118,10 @@ fn kept(stem: &Path) -> Option<PathBuf> {
 
 /// Fetches a picture into `stem` with the extension its bytes say (written whole, then renamed).
 fn fetch(from: &Remote, stem: &Path) -> anyhow::Result<PathBuf> {
+    // Tests never ask Orbiters (night4).
+    if cfg!(test) {
+        anyhow::bail!("tests never download");
+    }
     let dir = stem.parent().ok_or_else(|| anyhow::anyhow!("{}", tr("no folder")))?;
     std::fs::create_dir_all(dir)?;
     let part = with_ext(stem, "part");

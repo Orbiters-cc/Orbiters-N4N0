@@ -100,7 +100,7 @@ impl Remote {
         };
         // Its version: another version of the same picture is another file.
         let name = if self.revision.is_empty() || self.kind == RemoteKind::Link { name } else { format!("{name}-r{:016x}", hash(&self.revision)) };
-        orbiters_core::paths::cache_dir().join("editor-pictures").join(format!("{name}.img"))
+        crate::pages::cache_root().join("editor-pictures").join(format!("{name}.img"))
     }
 
     /// A version key for a picture's bytes: `key` when it has one (a shared picture's content key), else its link
@@ -283,6 +283,10 @@ pub fn fetch(source: &Source) -> anyhow::Result<()> {
     if source.picture.is_file() {
         return Ok(());
     }
+    // Tests never ask Orbiters, with the person's saved sign-in or without (night4).
+    if cfg!(test) {
+        anyhow::bail!("tests never download");
+    }
     use orbiters_core::account::{Api, Server};
     let server = if r.development { Server::Development } else { Server::Production };
     // A public link needs no account.
@@ -425,6 +429,19 @@ pub fn write_png(path: &Path, img: &Rgba8, xmp: Option<&[u8]>) -> anyhow::Result
 /// Where VRChat saves its pictures (its `picture_output_folder`, else `Pictures/VRChat`, made when missing): what
 /// Photos & captures lists.
 fn pictures_folder() -> PathBuf {
+    // Tests: never VRChat's own folder.
+    #[cfg(test)]
+    {
+        crate::pages::test_root().join("vrchat-pictures")
+    }
+    #[cfg(not(test))]
+    {
+        vrchat_pictures_folder()
+    }
+}
+
+#[cfg(not(test))]
+fn vrchat_pictures_folder() -> PathBuf {
     // Another folder for runs that must not write into VRChat's (screenshots).
     if let Some(d) = std::env::var_os("ORBITERS_EDITOR_PICTURES").map(PathBuf::from) {
         return d;
@@ -657,6 +674,21 @@ mod tests {
         let json = serde_json::to_string(&again).unwrap();
         assert!(json.contains("\"aspect\":\"7:5\""), "{json}");
         assert_eq!(serde_json::from_str::<Saved>(&json).unwrap(), again);
+    }
+
+    /// Night4: tests never resolve the person's own folders: the editor's downloads, VRChat's pictures and the pages'
+    /// cache are under this process's temporary folder, and nothing is downloaded (a test computed, and could have
+    /// filled, `%LOCALAPPDATA%/Orbiters/Desktop/cache/editor-pictures`).
+    #[test]
+    fn tests_never_resolve_the_persons_folders() {
+        let real = orbiters_core::paths::local_data_root();
+        let shared = Source::remote(Remote { kind: RemoteKind::Shared, id: 7, ..Default::default() });
+        let gallery = Remote { kind: RemoteKind::Gallery, id: 1, ..Default::default() }.file();
+        for p in [gallery, shared.picture.clone(), shared.copy_path(), pictures_folder(), crate::pages::cache_root()] {
+            assert!(p.starts_with(crate::pages::test_root()), "{}", p.display());
+            assert!(!p.starts_with(&real), "the person's own folder: {}", p.display());
+        }
+        assert!(fetch(&shared).is_err(), "nothing is downloaded");
     }
 
     /// Night4, verify2 PG2-7: an edit saved by an earlier version names the old unqualified cache file, which may hold

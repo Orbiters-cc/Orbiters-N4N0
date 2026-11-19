@@ -1,6 +1,8 @@
 //! The beta's one notice about its usage statistics (`crate::usage`): a card at the bottom of the window, over nothing that matters,
-//! until it is closed. Recording is on from the start (Enzo, 2026-11-15); the card says plainly what is and is not recorded, and where
-//! it is turned off. It never stops anything: the page under it works as it does.
+//! until it is closed. Recording is on from the start (Enzo, 2026-11-15); the card says plainly what is and is not recorded, that it is
+//! linked to the Orbiters account when one is signed in, who sees it (the team, never the public: Enzo, 2026-11-19), and where it is
+//! turned off. It never stops anything: the page under it works as it does. Each time what it says grows, it shows once more
+//! (`settings.usage.told_all`).
 
 use egui::{pos2, vec2, Id, Order, Rect, Sense, Ui};
 use orbiters_i18n::{mark, tr};
@@ -21,10 +23,10 @@ pub enum Answer {
 }
 
 pub const TITLE: &str = mark("This beta counts which pages and buttons you use, and how the app performs");
-pub const BODY: &str = mark("Only their names, in what order and when, with this version of the app; and every few seconds how much processor, graphics card and memory the app, VRChat and the whole computer use, VRChat's frame rate in VR, and the basic hardware (processor and graphics card models, memory size, headset and its refresh rate). To see what to make easier and lighter. Never what you type or say, translations, pictures, QR codes or links, worlds, instances, people, files, window titles, other programs, or your account.");
+pub const BODY: &str = mark("Their names, in what order and when, with this version of the app; and every few seconds how much processor, graphics card and memory the app, VRChat and the whole computer use, VRChat's frame rate in VR, and the basic hardware (processor and graphics card models, memory size, headset and its refresh rate). When you are signed in, it is linked to your Orbiters account. Only the Orbiters team sees it, to make the app easier and lighter; it is never shared publicly. Never what you type or say, pictures, links, worlds or people.");
 pub const OFF: &str = mark("You can turn it off at any time in Settings › Beta usage statistics.");
 
-/// Shows the card in `page` (the page's area, right of the sidebar) while `told` is false.
+/// Shows the card in `page` (the page's area, right of the sidebar) while `told` is false (any version of it not closed yet).
 pub fn show(ui: &mut Ui, page: Rect, told: bool) -> Option<Answer> {
     if told {
         return None;

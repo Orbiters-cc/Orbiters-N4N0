@@ -2926,7 +2926,7 @@ mod tests {
     fn the_volume_beside_what_plays_sets_the_app_playing_only() {
         let mut menu = Menu { pages: Pages::Six, ..Default::default() };
         menu.open();
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         menu.volume = Some(Volume { percent: 70, muted: false });
         assert_eq!(menu.playing_volume(), None, "nothing plays: no app to set");
         assert!(menu.press(Target::VolumeUp).is_empty() && menu.press(Target::Mute).is_empty());
@@ -2959,7 +2959,7 @@ mod tests {
     fn music_and_light_presses_show_at_once_and_ask_the_hosts() {
         let mut menu = Menu { pages: Pages::Six, ..Default::default() };
         menu.open();
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         assert!(menu.press(Target::MediaPlayPause).is_empty(), "nothing to play or pause");
         menu.media = Some(Media { title: "A song".into(), playing: true, can_play_pause: true, ..Default::default() });
         menu.volume = Some(Volume { percent: 98, muted: true });
@@ -2969,10 +2969,10 @@ mod tests {
         assert_eq!(menu.press(Target::VolumeUp), vec![Effect::Media(MediaCommand::Volume(100))]);
         assert_eq!(menu.volume, Some(Volume { percent: 100, muted: false }), "turning it up unmutes");
         assert_eq!(menu.press(Target::Mute), vec![Effect::Media(MediaCommand::Mute(true))]);
-        menu.press(Target::Back);
+        let _ = menu.press(Target::Back);
         assert_eq!(menu.page, Page::Home);
 
-        menu.press(Target::Light);
+        let _ = menu.press(Target::Light);
         assert!(menu.press(Target::LightSwitch).is_empty(), "no light on this avatar");
         menu.light = Some(Light { on: false, color: 0, level: 0.6 });
         let effects = menu.press(Target::LightColor(3));
@@ -2986,7 +2986,7 @@ mod tests {
     fn the_timeline_moves_the_music_where_it_is_tapped_or_dragged_to() {
         let mut menu = Menu { pages: Pages::Timeline, ..Default::default() };
         menu.open();
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         assert!(menu.press(Target::Seek(4)).is_empty(), "nothing plays");
         menu.media = Some(Media { title: "A song".into(), app: "Chrome".into(), can_seek: true, position: Some(10), duration: Some(160), ..Default::default() });
         // Segment 4 of 16 starts at a quarter: 40 s, shown there at once.
@@ -3006,7 +3006,7 @@ mod tests {
         assert!(menu.press(Target::Seek(2)).is_empty());
         // Elsewhere than the music page, a drag does nothing.
         menu.media = Some(Media { title: "A song".into(), can_seek: true, duration: Some(160), ..Default::default() });
-        menu.press(Target::Back);
+        let _ = menu.press(Target::Back);
         assert_eq!(menu.drag(1, Target::Seek(3)), (1, vec![]));
     }
 
@@ -3014,7 +3014,7 @@ mod tests {
     fn previous_goes_back_to_the_start_of_what_has_nothing_before() {
         let mut menu = Menu { pages: Pages::Timeline, ..Default::default() };
         menu.open();
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         menu.media = Some(Media { title: "A video".into(), can_seek: true, position: Some(95), duration: Some(300), ..Default::default() });
         assert_eq!(menu.press(Target::MediaPrevious), vec![Effect::Media(MediaCommand::Seek(0))]);
         assert_eq!(menu.media.as_ref().unwrap().position, Some(0));
@@ -3030,7 +3030,7 @@ mod tests {
     fn take_back_shows_while_the_card_is_out_on_screens_that_have_it() {
         let mut menu = Menu { pages: Pages::Timeline, ..Default::default() };
         menu.open();
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         assert!(layout::target_state(&menu, Target::TakeBack).hidden, "no card out");
         assert!(menu.press(Target::TakeBack).is_empty());
         menu.card_out = true;
@@ -3062,7 +3062,7 @@ mod tests {
         let mut menu = Menu::default();
         assert!(menu.press(Target::YouTube).is_empty(), "closed: presses do nothing");
         menu.open();
-        menu.press(Target::YouTube);
+        let _ = menu.press(Target::YouTube);
         assert_eq!(menu.page, Page::Search);
         assert!(menu.type_text(" ").is_empty(), "no leading space");
         assert_eq!(menu.press(Target::Key('l')), vec![suggest(1, "l")]);
@@ -3079,13 +3079,13 @@ mod tests {
         assert_eq!(menu.suggestions.len(), 3, "an older request's answer never replaces a newer one's");
         menu.suggestions_arrived(4, "lol", vec!["lol".into()]);
         assert_eq!(menu.suggestions.len(), 3, "an answer for another text is dropped");
-        menu.backspace();
+        let _ = menu.backspace();
         assert_eq!(menu.query, "lofi");
         let effects = menu.press(Target::Suggestion(1));
         assert_eq!(effects, vec![Effect::Search { id: 1, query: "lofi girl".into() }]);
         assert_eq!((menu.page, menu.searching, menu.query.as_str()), (Page::Results, true, "lofi girl"));
         for _ in 0..60 {
-            menu.type_text("x");
+            let _ = menu.type_text("x");
         }
         assert_eq!(menu.query, "lofi girl", "typing goes nowhere outside the search page");
     }
@@ -3119,9 +3119,9 @@ mod tests {
         assert_eq!(menu.page_results().len(), 5);
         assert!(matches!(&effects[..], [Effect::Thumbnails(ids)] if ids.len() == 10), "this page's and the next's: {effects:?}");
         assert!(!menu.has_previous() && menu.has_next());
-        menu.press(Target::Next);
+        let _ = menu.press(Target::Next);
         assert_eq!(menu.result_page, 1);
-        menu.press(Target::Next);
+        let _ = menu.press(Target::Next);
         // Page 3 has two results; there is no page after them yet, so more are fetched.
         assert_eq!(menu.result_page, 2);
         assert_eq!(menu.page_results().len(), 2);
@@ -3135,7 +3135,7 @@ mod tests {
         let copy = menu.press(Target::Copy(0));
         assert_eq!(copy, vec![Effect::Copy { link: "https://www.youtube.com/watch?v=00000000010".into(), title: "Title 10".into() }]);
         assert!(menu.notice.is_some());
-        menu.press(Target::Back);
+        let _ = menu.press(Target::Back);
         assert_eq!(menu.page, Page::Search, "back from results is the search");
         assert_eq!(menu.press(Target::Close), vec![Effect::Close]);
         assert!(!menu.open);
@@ -3145,9 +3145,9 @@ mod tests {
     fn a_failed_or_empty_next_page_leaves_the_page_where_it_was() {
         let mut menu = Menu::default();
         menu.open();
-        menu.search_for("cats");
-        menu.results_arrived(1, results(0..10, true), false);
-        menu.press(Target::Next);
+        let _ = menu.search_for("cats");
+        let _ = menu.results_arrived(1, results(0..10, true), false);
+        let _ = menu.press(Target::Next);
         assert_eq!(menu.result_page, 1);
         // The last full page: Next fetches, the page turns once results come.
         let effects = menu.press(Target::Next);
@@ -3158,17 +3158,17 @@ mod tests {
         assert_eq!(layout::text(&menu, layout::Content::PageLabel), "2/2+");
         // Next again: this time results come, and the next page shows them from its first.
         assert!(matches!(&menu.press(Target::Next)[..], [Effect::More { id: 1, .. }]));
-        menu.results_arrived(1, results(10..20, true), true);
+        let _ = menu.results_arrived(1, results(10..20, true), true);
         assert_eq!(menu.result_page, 2);
         assert_eq!(menu.page_results()[0].id, video("10").id, "nothing skipped");
         // An empty next page: the page stays, and there is no "+" any more.
-        menu.press(Target::Next);
-        menu.press(Target::Next);
-        menu.results_arrived(1, Results::default(), true);
+        let _ = menu.press(Target::Next);
+        let _ = menu.press(Target::Next);
+        let _ = menu.results_arrived(1, Results::default(), true);
         assert_eq!(menu.result_page, 3);
         assert_eq!(layout::text(&menu, layout::Content::PageLabel), "4/4");
         // An older search's next page, for the same words, lands nowhere.
-        menu.search_for("cats");
+        let _ = menu.search_for("cats");
         assert!(menu.results_arrived(1, results(40..45, true), true).is_empty());
         assert!(menu.results.is_empty() && menu.searching);
     }
@@ -3191,20 +3191,20 @@ mod tests {
         assert!(menu.press(Target::FastWalk).is_empty(), "no fast walk in desktop mode");
         menu.desktop_mode = false;
         menu.set_contacts((0..7).map(|i| Contact { id: format!("u{i}"), name: format!("Friend {i}") }).collect(), true, "");
-        menu.press(Target::Call);
-        menu.press(Target::Next);
+        let _ = menu.press(Target::Call);
+        let _ = menu.press(Target::Next);
         assert_eq!(menu.page_contacts().len(), 2);
         assert_eq!(menu.press(Target::Contact(1)), vec![Effect::CallContact { id: "u6".into() }]);
         menu.set_call(Some(Call::Calling { name: "Friend 6".into() }));
         assert!(menu.press(Target::Contact(0)).is_empty(), "one call at a time");
         assert_eq!(menu.press(Target::HangUp), vec![Effect::HangUp]);
         menu.set_call(None);
-        menu.press(Target::Back);
+        let _ = menu.press(Target::Back);
         menu.set_call(Some(Call::Ringing { name: "Ana".into() }));
         assert_eq!(menu.page, Page::Call, "a ringing call opens the call page");
         assert_eq!(menu.press(Target::Answer), vec![Effect::Answer]);
-        menu.press(Target::Back);
-        menu.press(Target::Photo);
+        let _ = menu.press(Target::Back);
+        let _ = menu.press(Target::Photo);
         assert_eq!(menu.press(Target::Timer(3)), vec![Effect::PhotoChoice { timer: 10, length: PhotoLength::Quick, mode: PhotoMode::People }]);
         assert_eq!(menu.press(Target::Length(2)), vec![Effect::PhotoChoice { timer: 10, length: PhotoLength::Full, mode: PhotoMode::People }]);
         assert_eq!(menu.press(Target::Take), vec![Effect::Photo3d { timer: 10, length: PhotoLength::Full, mode: PhotoMode::People }]);
@@ -3225,7 +3225,7 @@ mod tests {
         assert_eq!(menu.heard("what time is it?"), None, "on Home it is for N4N0");
         assert_eq!(menu.heard.as_deref(), Some("what time is it"));
         assert!(menu.heard_private, "the owner's own words");
-        menu.press(Target::YouTube);
+        let _ = menu.press(Target::YouTube);
         assert_eq!(menu.heard("Lofi hip hop."), Some(vec![Effect::Search { id: 1, query: "Lofi hip hop".into() }]));
         assert_eq!(clock(42), "0:42");
         assert_eq!(clock(3723), "1:02:03");
@@ -3235,11 +3235,11 @@ mod tests {
     fn a_display_with_its_own_field_and_list_drives_the_same_menu() {
         let mut menu = Menu::default();
         menu.open();
-        menu.press(Target::YouTube);
+        let _ = menu.press(Target::YouTube);
         // A text field: what it shows becomes the query, its start trimmed and cut as typing would.
         assert_eq!(menu.set_query("  lofi"), vec![suggest(1, "lofi")]);
         assert!(menu.set_query("lofi").is_empty(), "the same text asks nothing");
-        menu.set_query(&"x".repeat(60));
+        let _ = menu.set_query(&"x".repeat(60));
         assert_eq!(menu.query.chars().count(), QUERY_MAX);
         assert!(menu.set_query("").is_empty());
         assert!(menu.query.is_empty() && menu.suggestions.is_empty());
@@ -3254,10 +3254,10 @@ mod tests {
     fn a_copied_link_offers_drop_where_cards_can_be_dropped() {
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
-        menu.search_for("cats");
-        menu.results_arrived(1, results(0..5, false), false);
+        let _ = menu.search_for("cats");
+        let _ = menu.results_arrived(1, results(0..5, false), false);
         assert!(menu.press(Target::Drop(1)).is_empty(), "nothing copied yet");
-        menu.press(Target::Copy(1));
+        let _ = menu.press(Target::Copy(1));
         assert_eq!(menu.copied.as_deref(), Some(video("1").id.as_str()));
         assert!(layout::target_state(&menu, Target::Drop(1)).hidden, "an older screen, or none: no Drop");
         assert!(menu.press(Target::Drop(1)).is_empty());
@@ -3270,7 +3270,7 @@ mod tests {
         );
         assert_eq!(menu.page, Page::Results, "the hosts decide where the card goes (the screen shows it, the overlay closes)");
         // A new search forgets what was copied.
-        menu.search_for("dogs");
+        let _ = menu.search_for("dogs");
         assert!(menu.copied.is_none());
     }
 
@@ -3298,7 +3298,7 @@ mod tests {
     fn a_state_saved_here_shows_until_the_host_lists_it() {
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
-        menu.press(Target::States);
+        let _ = menu.press(Target::States);
         assert!(menu.press(Target::StateSave).is_empty(), "no avatar known: nothing to save");
         let row = |id: &str, name: &str| StateRow { id: id.into(), name: name.into(), ..Default::default() };
         menu.set_states(vec![row("s1", "State 1"), row("s2", "Hoodie on")], true, "");
@@ -3317,8 +3317,8 @@ mod tests {
         assert_eq!(next_state_name(&[row("a", "State 2"), row("b", "state 3")]), "State 4", "past a name taken, whatever its case");
         // Twelve states: three pages of five.
         menu.set_states((1..=12).map(|i| row(&format!("s{i}"), &format!("State {i}"))).collect(), true, "");
-        menu.press(Target::Next);
-        menu.press(Target::Next);
+        let _ = menu.press(Target::Next);
+        let _ = menu.press(Target::Next);
         assert_eq!((menu.state_page, menu.page_states().len(), menu.has_next()), (2, 2, false));
         menu.set_states(vec![row("s1", "State 1")], true, "");
         assert_eq!(menu.state_page, 0, "fewer states: back to a page that exists");
@@ -3329,29 +3329,29 @@ mod tests {
         let mut menu = Menu { pages: Pages::Ten, ..Default::default() };
         menu.open();
         menu.set_states(vec![StateRow { id: "s1".into(), name: "State 1".into(), ..Default::default() }], true, "");
-        menu.press(Target::States);
+        let _ = menu.press(Target::States);
         assert!(menu.press(Target::StateSave).is_empty(), "New state opens its page, saving nothing yet");
         assert_eq!(menu.page, Page::NewState);
         assert_eq!(menu.draft, Draft { name: "State 2".into(), size: true, pose: false, default: false }, "the size on by default");
         // The name typed on the keyboard page: Done brings it back, Back would not.
-        menu.press(Target::DraftName);
+        let _ = menu.press(Target::DraftName);
         assert_eq!((menu.page, menu.typing, menu.typed.as_str()), (Page::Type, Typing::StateName, "State 2"));
         for _ in 0..7 {
-            menu.backspace();
+            let _ = menu.backspace();
         }
-        menu.type_text("  Party  outfit");
+        let _ = menu.type_text("  Party  outfit");
         assert_eq!(menu.typed, "Party outfit", "no leading or double space");
         assert_eq!(layout::text(&menu, layout::Content::TypeLine(0)), "Party outfit|");
-        menu.press(Target::Back);
+        let _ = menu.press(Target::Back);
         assert_eq!((menu.page, menu.draft.name.as_str()), (Page::NewState, "State 2"));
-        menu.press(Target::DraftName);
+        let _ = menu.press(Target::DraftName);
         menu.set_states(menu.states.clone(), true, "");
         menu.typed = "Party outfit".into();
-        menu.press(Target::Done);
+        let _ = menu.press(Target::Done);
         assert_eq!((menu.page, menu.draft.name.as_str()), (Page::NewState, "Party outfit"));
-        menu.press(Target::DraftPose);
-        menu.press(Target::DraftDefault);
-        menu.press(Target::DraftSize);
+        let _ = menu.press(Target::DraftPose);
+        let _ = menu.press(Target::DraftDefault);
+        let _ = menu.press(Target::DraftSize);
         assert_eq!(layout::text(&menu, layout::Content::DraftNote), "Puts back its parameters and pose · also after each world join");
         assert_eq!(menu.press(Target::DraftSave), vec![Effect::SaveState { name: "Party outfit".into(), size: false, pose: true, default: true }]);
         assert_eq!(menu.page, Page::States);
@@ -3360,7 +3360,7 @@ mod tests {
         let mut old = Menu { pages: Pages::Seven, ..Default::default() };
         old.open();
         old.set_states(Vec::new(), true, "");
-        old.press(Target::States);
+        let _ = old.press(Target::States);
         assert_eq!(old.press(Target::StateSave), vec![Effect::SaveState { name: "State 1".into(), size: true, pose: false, default: false }]);
         assert_eq!(
             layout::ScreenPage::of(&Menu { pages: Pages::Seven, page: Page::NewState, open: true, ..Default::default() }),
@@ -3376,7 +3376,7 @@ mod tests {
         assert_eq!(watch_link(&video("https://example.com/stream.m3u8", Some(1000)), 1090), "https://example.com/stream.m3u8");
         let mut menu = Menu { pages: Pages::Ten, ..Default::default() };
         menu.open();
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         assert!(menu.press(Target::WatchVideo).is_empty() && layout::target_state(&menu, Target::SaveVideo).hidden, "no video in the world");
         menu.world_video = Some(video("https://youtu.be/36YnV9STBqc", None));
         assert_eq!(menu.press(Target::SaveVideo), vec![Effect::SaveVideo]);
@@ -3389,7 +3389,7 @@ mod tests {
     fn the_youtube_video_playing_is_copied_then_dropped_as_a_result() {
         let mut menu = Menu { pages: Pages::Ten, ..Default::default() };
         menu.open();
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         let shown = |menu: &Menu, target: Target| !layout::target_state(menu, target).hidden;
         menu.media = Some(Media { title: "Never Gonna Give You Up".into(), artist: "Rick Astley".into(), app: "Chrome".into(), ..Default::default() });
         assert!(!shown(&menu, Target::CopyPlaying) && menu.press(Target::CopyPlaying).is_empty(), "not found on YouTube (yet)");
@@ -3437,7 +3437,7 @@ mod tests {
     fn tracking_strengths_turn_smoothing_on() {
         let mut menu = Menu { pages: Pages::Ten, ..Default::default() };
         menu.open();
-        menu.press(Target::Tracking);
+        let _ = menu.press(Target::Tracking);
         assert_eq!(menu.page, Page::Tracking);
         assert!(menu.press(Target::Smoothing(5)).is_empty(), "nothing to set without the host's smoothing");
         assert!(layout::target_state(&menu, Target::Smoothing(5)).unavailable);
@@ -3460,7 +3460,7 @@ mod tests {
     fn a_suggestion_is_typed_or_said_then_sent() {
         let mut menu = Menu { pages: Pages::Ten, ..Default::default() };
         menu.open();
-        menu.press(Target::Suggest);
+        let _ = menu.press(Target::Suggest);
         assert!(menu.press(Target::SuggestSend).is_empty(), "nothing to send yet");
         assert!(layout::target_state(&menu, Target::SuggestSend).unavailable);
         assert_eq!(menu.press(Target::SuggestTalk), vec![Effect::Dictate]);
@@ -3468,9 +3468,9 @@ mod tests {
         assert_eq!(menu.heard("A dance mode for N4N0."), Some(Vec::new()), "said on the page: it is the suggestion's");
         assert_eq!(menu.suggestion, "A dance mode for N4N0");
         assert!(!menu.dictating && menu.suggestion_voice);
-        menu.press(Target::SuggestType);
-        menu.type_text(" with music");
-        menu.press(Target::Done);
+        let _ = menu.press(Target::SuggestType);
+        let _ = menu.type_text(" with music");
+        let _ = menu.press(Target::Done);
         assert_eq!((menu.page, menu.suggestion.as_str()), (Page::Suggest, "A dance mode for N4N0 with music"));
         assert_eq!(
             menu.press(Target::SuggestSend),
@@ -3479,7 +3479,7 @@ mod tests {
         assert!(menu.press(Target::SuggestSend).is_empty(), "once while it is on its way");
         menu.suggestion_sent(Err("offline".into()));
         assert_eq!(menu.suggestion, "A dance mode for N4N0 with music", "kept when it failed");
-        menu.press(Target::SuggestSend);
+        let _ = menu.press(Target::SuggestSend);
         menu.suggestion_sent(Ok(()));
         assert!(menu.suggestion.is_empty() && layout::text(&menu, layout::Content::SuggestNote).starts_with("Thank you"));
         // Everyone else's screen never shows what the owner writes.
@@ -3499,23 +3499,23 @@ mod tests {
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeQuiet, "nothing plays: the tiles take its place");
         menu.media = Some(Media { title: "Midnight City".into(), ..Default::default() });
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSimple);
-        menu.press(Target::More);
+        let _ = menu.press(Target::More);
         assert_eq!(ScreenPage::of(&menu), ScreenPage::More);
         for (target, page) in [(Target::Light, Page::Light), (Target::Tracking, Page::Tracking), (Target::Suggest, Page::Suggest)] {
-            menu.press(target);
+            let _ = menu.press(target);
             assert_eq!(menu.page, page);
-            menu.press(Target::Back);
+            let _ = menu.press(Target::Back);
             assert_eq!(menu.page, Page::More, "{page:?} goes back to More");
         }
-        menu.press(Target::Back);
+        let _ = menu.press(Target::Back);
         assert_eq!(menu.page, Page::Home);
         // A screen of version 9 keeps its ten-tile Home, and never shows More's pages.
         let mut old = Menu { pages: Pages::Timeline, ..Default::default() };
         old.open();
-        old.press(Target::More);
+        let _ = old.press(Target::More);
         assert_eq!(ScreenPage::of(&old), ScreenPage::HomeTen);
         old.page = Page::Light;
-        old.press(Target::Back);
+        let _ = old.press(Target::Back);
         assert_eq!(old.page, Page::Home, "its Light is on Home");
     }
 
@@ -3525,7 +3525,7 @@ mod tests {
         use layout::{cached, target_state, text, text_for, Content, Look, ScreenPage};
         let mut menu = Menu { pages: Pages::Qr, ..Default::default() };
         menu.open();
-        menu.press(Target::More);
+        let _ = menu.press(Target::More);
         assert_eq!(ScreenPage::of(&menu), ScreenPage::MoreQr);
         let cards = |page: ScreenPage| cached(page).elements.iter().filter(|e| e.look == Look::Tile).map(|e| e.target).collect::<Vec<_>>();
         assert_eq!(cards(ScreenPage::MoreQr), [Target::Light, Target::Instances, Target::Tracking, Target::Qr, Target::Suggest]);
@@ -3558,14 +3558,14 @@ mod tests {
         // Leaving the page stops it: back to More, or the menu closing.
         assert_eq!(menu.press(Target::Back), [Effect::QrScan(false)]);
         assert_eq!(menu.page, Page::More);
-        menu.press(Target::Qr);
+        let _ = menu.press(Target::Qr);
         assert_eq!(menu.press(Target::Close), [Effect::QrScan(false), Effect::Close]);
         menu.open();
         assert_eq!(menu.page, Page::Home);
         // A screen of version 10 has no scanner: its More is version 10's.
         let mut old = Menu { pages: Pages::Simple, ..Default::default() };
         old.open();
-        old.press(Target::More);
+        let _ = old.press(Target::More);
         assert_eq!(ScreenPage::of(&old), ScreenPage::More);
         old.page = Page::Qr;
         assert_eq!(ScreenPage::of(&old), ScreenPage::HomeQuiet);
@@ -3581,13 +3581,13 @@ mod tests {
         let row = |key: &str| CaptureRow { key: key.into(), world: "World".into(), phase: CapturePhase::Ready, ..Default::default() };
         let mut menu = Menu { pages: Pages::Share, ..Default::default() };
         menu.open();
-        menu.press(Target::History);
+        let _ = menu.press(Target::History);
         let listed = |keys: &[&str]| CapturesView { history: keys.iter().map(|k| row(k)).collect(), listed: true, ..Default::default() };
-        menu.set_captures(listed(&["C:/s/old-1", "C:/s/old-2"]));
+        let _ = menu.set_captures(listed(&["C:/s/old-1", "C:/s/old-2"]));
         // The list appeared: nothing shifted, a press acts at once.
         assert!(row_still(&menu.captures_moved, 0, "C:/s/old-1"));
         // A newer capture lands first: row 0 now holds it.
-        menu.set_captures(listed(&["C:/s/new", "C:/s/old-1", "C:/s/old-2"]));
+        let _ = menu.set_captures(listed(&["C:/s/new", "C:/s/old-1", "C:/s/old-2"]));
         assert!(menu.press(Target::SharePublic(0)).is_empty(), "the neighbour is not published");
         assert!(menu.press(Target::ShareTo(1)).is_empty());
         assert_eq!(menu.page, Page::History);
@@ -3598,10 +3598,10 @@ mod tests {
         let f = |id: &str| Friend { id: id.into(), name: id.into() };
         menu.set_friends(Friends::ready(vec![f("usr_b"), f("usr_c")]));
         menu.set_friends(Friends::ready(vec![f("usr_a"), f("usr_b"), f("usr_c")]));
-        menu.press(Target::Friend(0));
+        let _ = menu.press(Target::Friend(0));
         assert!(menu.chosen.is_empty(), "usr_a slid under the press: not marked");
         menu.friends_moved.as_mut().unwrap().1 -= ROWS_SETTLE;
-        menu.press(Target::Friend(0));
+        let _ = menu.press(Target::Friend(0));
         assert_eq!(menu.chosen, [f("usr_a")]);
     }
 
@@ -3615,18 +3615,18 @@ mod tests {
         let shared = |effects: Vec<Effect>| effects.iter().find_map(|e| if let Effect::ShareCapture(a) = e { Some(a.key.clone()) } else { None });
         let mut menu = Menu { pages: Pages::Share, ..Default::default() };
         menu.open();
-        menu.press(Target::History);
-        menu.set_captures(listed(&["A", "X"]));
+        let _ = menu.press(Target::History);
+        let _ = menu.set_captures(listed(&["A", "X"]));
         menu.captures_moved = None;
         // [A, X] on screen; two refreshes before it updates: [B, X] then [B, Y].
-        menu.set_captures(listed(&["B", "X"]));
-        menu.set_captures(listed(&["B", "Y"]));
+        let _ = menu.set_captures(listed(&["B", "X"]));
+        let _ = menu.set_captures(listed(&["B", "Y"]));
         assert_eq!(shared(menu.press(Target::SharePublic(0))), None, "B is not what was pressed");
         // The avatar's screen holds [B, Y] whole: then row 0 is B.
         menu.presented();
         assert_eq!(shared(menu.press(Target::SharePublic(0))), Some("B".into()));
         // The list changes again and the screen is slow: long after, row 0 still means B, which is not there any more.
-        menu.set_captures(listed(&["C", "B", "Y"]));
+        let _ = menu.set_captures(listed(&["C", "B", "Y"]));
         menu.captures_moved.as_mut().unwrap().1 -= ROWS_SETTLE * 10;
         assert_eq!(shared(menu.press(Target::SharePublic(0))), None, "C was never shown in that row");
         menu.presented();
@@ -3658,23 +3658,23 @@ mod tests {
         assert_eq!((text(&menu, Content::LastWorld), text(&menu, Content::LastState)), ("Rooftop".into(), "Recording…".into()));
         // Its 3D view being made: a share is asked at once and waits for it, one at a time.
         latest.phase = CapturePhase::Making { percent: 40 };
-        menu.set_captures(view(&latest));
+        let _ = menu.set_captures(view(&latest));
         assert!(target_state(&menu, Target::ShareLatest).pointable());
         let public = ShareAsk { key: latest.key.clone(), public: true, ..Default::default() };
         assert_eq!(menu.press(Target::ShareLatest), [Effect::ShareCapture(public.clone())]);
         latest.sharing = Sharing::Waiting { public: true, people: 0 };
-        menu.set_captures(view(&latest));
+        let _ = menu.set_captures(view(&latest));
         assert_eq!(text(&menu, Content::LastState), "Shares when ready");
         assert!(target_state(&menu, Target::ShareLatest).unavailable);
         // The server wants its explicit content acknowledged: the warning, then Share anyway asks again.
         latest.sharing = Sharing::Explicit;
-        menu.set_captures(view(&latest));
+        let _ = menu.set_captures(view(&latest));
         assert_eq!((menu.page, ScreenPage::of(&menu)), (Page::Explicit, ScreenPage::Explicit));
         assert_eq!(format!("{} {}", text(&menu, Content::ExplicitLine(0)), text(&menu, Content::ExplicitLine(1))), EXPLICIT_WARNING);
         assert_eq!(menu.press(Target::ShareAnyway), [Effect::ShareCapture(ShareAsk { acknowledge_explicit: true, ..public })]);
         assert_eq!(menu.page, Page::Photo);
         // The answer before, still in its row until the host takes the new share, opens no warning again.
-        menu.set_captures(CapturesView { note: "again".into(), ..view(&latest) });
+        let _ = menu.set_captures(CapturesView { note: "again".into(), ..view(&latest) });
         assert_eq!(menu.page, Page::Photo);
         latest.sharing = Sharing::Busy { public: true, people: 0 };
         // History: listed as it opens, five a page, both shares on each row.
@@ -3692,7 +3692,7 @@ mod tests {
         assert!(text(&menu, Content::CaptureMeta(1)).ends_with("· Ready to share"), "{}", text(&menu, Content::CaptureMeta(1)));
         assert_eq!(menu.press(Target::Next), [Effect::Thumbnails(keys(&history[5..]))]);
         assert!(target_state(&menu, Target::SharePublic(2)).pointable() && target_state(&menu, Target::ShareTo(3)).hidden);
-        menu.press(Target::Previous);
+        let _ = menu.press(Target::Previous);
         // A capture flagged explicit warns before it is shared publicly, and shows its picture to its owner only.
         assert_eq!(menu.press(Target::SharePublic(0)), [Effect::Thumbnails(vec!["capture:C:/s/b".into()])]);
         assert_eq!(menu.page, Page::Explicit);
@@ -3712,27 +3712,27 @@ mod tests {
         assert_eq!((text(&menu, Content::FriendsTitle), text(&menu, Content::ShareFriend(1))), ("7 friends".into(), "bob".into()));
         assert_eq!(text_for(&menu, Content::ShareFriend(1), true), "", "the owner's friends are never named to everyone");
         assert!(target_state(&menu, Target::SendShare).unavailable);
-        menu.press(Target::Friend(0));
-        menu.press(Target::Friend(1));
+        let _ = menu.press(Target::Friend(0));
+        let _ = menu.press(Target::Friend(1));
         assert!(target_state(&menu, Target::FriendMark(1)).on && target_state(&menu, Target::FriendMark(2)).hidden);
         assert_eq!(text(&menu, Content::FriendsNote), "2 friends chosen");
-        menu.press(Target::FriendMark(0));
+        let _ = menu.press(Target::FriendMark(0));
         assert_eq!(menu.chosen, [f("usr_1", "bob")], "its mark unchooses a friend");
         // Finding "bo": the keyboard, then only those, the chosen ones kept.
         assert!(menu.press(Target::FindFriend).is_empty(), "the friends stay while their keyboard shows");
         assert_eq!((menu.page, text(&menu, Content::TypeTitle)), (Page::Type, "Find a friend by name".into()));
-        menu.type_text("bo");
+        let _ = menu.type_text("bo");
         assert_eq!(text_for(&menu, Content::TypeLine(0), true), "");
-        menu.press(Target::Done);
+        let _ = menu.press(Target::Done);
         assert_eq!((menu.page, text(&menu, Content::FriendsTitle)), (Page::ShareTo, "\"bo\": 2".into()));
-        menu.press(Target::Friend(1));
+        let _ = menu.press(Target::Friend(1));
         let sent = ShareAsk { key: "C:/s/0".into(), public: false, recipients: vec![f("usr_1", "bob"), f("usr_5", "Bobby")], acknowledge_explicit: false };
         assert_eq!(menu.press(Target::SendShare), [Effect::ShareCapture(sent), Effect::Friends(false)]);
         assert_eq!((menu.page, text(&menu, Content::HistoryTitle)), (Page::History, "Sharing with 2 friends…".into()));
         // It failed: why, where the page says what was just done; its row says it in short.
         let mut failed = listed.clone();
         failed.history[1].sharing = Sharing::Failed { message: "Sign in to Orbiters first".into() };
-        menu.set_captures(failed);
+        let _ = menu.set_captures(failed);
         assert_eq!(text(&menu, Content::HistoryTitle), "Not shared: Sign in to Orbiters first");
         assert!(text(&menu, Content::CaptureMeta(1)).ends_with("· Not shared"));
         // A friend whose VRChat name is decorated is found by its plain letters, an exact match first.
@@ -3753,12 +3753,12 @@ mod tests {
         assert_eq!(found(&menu), ["usr_d0"]);
         menu.find.clear();
         // Closing the menu on Share to … forgets the friends too.
-        menu.press(Target::ShareTo(2));
+        let _ = menu.press(Target::ShareTo(2));
         assert_eq!(menu.press(Target::Close), [Effect::Friends(false), Effect::Close]);
         // A screen of version 11 keeps its 3D picture page, without History.
         let mut old = Menu { pages: Pages::Qr, captures: listed, ..Default::default() };
         old.open();
-        old.press(Target::Photo);
+        let _ = old.press(Target::Photo);
         assert_eq!(ScreenPage::of(&old), ScreenPage::Photo);
         assert!(old.press(Target::History).is_empty() && old.page == Page::Photo);
         old.page = Page::History;
@@ -3769,13 +3769,13 @@ mod tests {
     fn previous_instances_page_and_invite_through_orbiters() {
         let mut menu = Menu { pages: Pages::Simple, ..Default::default() };
         menu.open();
-        menu.press(Target::More);
+        let _ = menu.press(Target::More);
         assert_eq!(menu.press(Target::Instances), [Effect::Instances], "the host reads them");
         assert_eq!(menu.page, Page::Instances);
         menu.set_instances((0..7).rev().map(instance).collect(), true, "");
         assert_eq!(menu.page_instances().len(), INSTANCES_PER_PAGE);
         assert!(menu.has_next() && !menu.has_previous());
-        menu.press(Target::Next);
+        let _ = menu.press(Target::Next);
         assert_eq!(menu.page_instances().len(), 2);
         assert!(layout::target_state(&menu, Target::InviteMe(2)).hidden, "no third row on the last page");
         // Invite me: asked once at a time, Orbiters' account to befriend first.
@@ -3796,11 +3796,11 @@ mod tests {
         assert_eq!(menu.page, Page::Instances);
         assert!(!menu.invite_waiting);
         assert_eq!(layout::text(&menu, layout::Content::InstancesTitle), "Invite sent: open it in VRChat's notifications");
-        menu.press(Target::InviteMe(0));
+        let _ = menu.press(Target::InviteMe(0));
         menu.invite_answered(InviteAnswer::Failed { message: "Link your VRChat account on Orbiters first.".into() });
         assert_eq!(menu.page, Page::Instances);
         assert!(menu.notice.as_deref().is_some_and(|n| n.starts_with("Not invited: Link your VRChat account")));
-        menu.press(Target::Back);
+        let _ = menu.press(Target::Back);
         assert_eq!(menu.page, Page::More);
     }
 
@@ -3829,7 +3829,7 @@ mod tests {
         use layout::ScreenPage;
         let mut menu = Menu { pages: Pages::ALL, ..Default::default() };
         menu.open();
-        menu.press(Target::More);
+        let _ = menu.press(Target::More);
         assert_eq!(ScreenPage::of(&menu), ScreenPage::MoreMirror);
         // In the overlay, or on an avatar whose N4N0 has no mirror: greyed out, and pressing it does nothing.
         for reach in [Reach::Overlay, Reach::NoMirror] {
@@ -3848,16 +3848,16 @@ mod tests {
         menu.mirror.phase = Phase::Aiming { seconds: 2 };
         assert!(layout::target_state(&menu, Target::MirrorAim).on, "Aim ringed while the camera follows the eyes");
         assert_eq!(menu.press(Target::MirrorAim), [Effect::Mirror(MirrorAsk::Aim)]);
-        menu.press(Target::Back);
+        let _ = menu.press(Target::Back);
         assert_eq!(menu.page, Page::More, "back to More, the camera left where it is");
-        menu.press(Target::Mirror);
+        let _ = menu.press(Target::Mirror);
         assert_eq!(menu.press(Target::MirrorStop), [Effect::Mirror(MirrorAsk::Stop)]);
         assert_eq!(menu.page, Page::More);
         // A screen of version 13 has neither the card nor the page.
         let mut old = Menu { pages: Pages::Feedback, ..Default::default() };
         old.open();
         old.mirror.reach = Reach::Screen;
-        old.press(Target::More);
+        let _ = old.press(Target::More);
         assert_eq!(ScreenPage::of(&old), ScreenPage::MoreFeedback);
         assert!(old.press(Target::Mirror).is_empty());
         old.page = Page::Mirror;
@@ -3877,7 +3877,7 @@ mod tests {
             subjects: vec![Subject { world: w.into(), name: "Home".into(), why: Why::Here }, Subject { world: other.into(), name: "Shrine".into(), why: Why::Capture }],
             worlds: vec![WorldFeedback { world: w.into(), likes: 2, labels: vec![LabelCount { id: "mirror".into(), count: 3, mine: false }], ..Default::default() }],
         });
-        menu.press(Target::More);
+        let _ = menu.press(Target::More);
         assert_eq!(ScreenPage::of(&menu), ScreenPage::MoreFeedback);
         assert_eq!(menu.press(Target::WorldFeedback), [Effect::Feedback(FeedbackAsk::Show { world: w.into() })]);
         assert_eq!(ScreenPage::of(&menu), ScreenPage::Feedback);
@@ -3888,25 +3888,25 @@ mod tests {
         assert_eq!(menu.press(Target::TopLabel(0)), [Effect::Feedback(FeedbackAsk::Label { world: w.into(), label: "mirror".into(), on: true, text: None })]);
         assert!(target_state(&menu, Target::TopLabel(0)).on);
         // AI world: its reason first.
-        menu.press(Target::Labels);
+        let _ = menu.press(Target::Labels);
         let ai = orbiters_contracts::world_feedback::labels().iter().position(|l| l.id == "ai-world").unwrap() as u8;
         assert!(menu.press(Target::LabelChip(ai)).is_empty());
         assert_eq!((menu.page, menu.typing), (Page::Type, Typing::Justification));
-        menu.type_text("looks generated");
+        let _ = menu.type_text("looks generated");
         assert!(menu.press(Target::Done).is_empty(), "not enough words");
         assert_eq!(menu.page, Page::Type);
         assert!(layout::text(&menu, layout::Content::TypeTitle).contains("10 words"));
-        menu.type_text(" because the signs are unreadable and the textures melt everywhere");
+        let _ = menu.type_text(" because the signs are unreadable and the textures melt everywhere");
         let effects = menu.press(Target::Done);
         assert!(matches!(&effects[..], [Effect::Feedback(FeedbackAsk::Label { label, on: true, text: Some(t), .. })] if label == "ai-world" && t.starts_with("looks generated")));
         assert_eq!(menu.page, Page::FeedbackLabels);
         assert!(target_state(&menu, Target::LabelChip(ai)).on);
         assert_eq!(menu.press(Target::LabelChip(ai)), [Effect::Feedback(FeedbackAsk::Label { world: w.into(), label: "ai-world".into(), on: false, text: None })]);
         // A comment shows first, on its way; the player's own once Orbiters has it can be deleted.
-        menu.press(Target::Back);
-        menu.press(Target::WriteComment);
+        let _ = menu.press(Target::Back);
+        let _ = menu.press(Target::WriteComment);
         assert_eq!((menu.page, menu.typing), (Page::Type, Typing::Comment));
-        menu.type_text("Great mirror");
+        let _ = menu.type_text("Great mirror");
         assert_eq!(menu.press(Target::Done), [Effect::Feedback(FeedbackAsk::Comment { world: w.into(), text: "Great mirror".into() })]);
         assert_eq!(menu.page, Page::Comments);
         assert_eq!(menu.page_comments()[0].text, "Great mirror");
@@ -3918,7 +3918,7 @@ mod tests {
         assert_eq!(menu.press(Target::DeleteComment(0)), [Effect::Feedback(FeedbackAsk::Uncomment { world: w.into(), comment: 12 })]);
         assert!(menu.page_comments().is_empty());
         // The worlds to step through.
-        menu.press(Target::Back);
+        let _ = menu.press(Target::Back);
         assert_eq!(menu.press(Target::Next), [Effect::Feedback(FeedbackAsk::Show { world: other.into() })]);
         assert_eq!(layout::text(&menu, layout::Content::FeedbackWorld), "Shrine");
         assert_eq!(layout::text(&menu, layout::Content::PageLabel), "2/2");
@@ -3931,7 +3931,7 @@ mod tests {
         // A screen of version 12 has no World feedback.
         let mut old = Menu { pages: Pages::of_screen(Some(12)), ..Default::default() };
         old.open();
-        old.press(Target::More);
+        let _ = old.press(Target::More);
         assert_eq!(ScreenPage::of(&old), ScreenPage::MoreQr);
         assert!(old.press(Target::WorldFeedback).is_empty());
         assert_ne!(old.page, Page::Feedback);

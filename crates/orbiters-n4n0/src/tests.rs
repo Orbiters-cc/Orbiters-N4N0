@@ -2220,7 +2220,7 @@ fn a_screen_takes_what_its_own_page_shows() {
         n.menu_open(false);
         assert!(until(|| n.n4n0.lock().unwrap().screen.menu.open));
         let mut rt = n.n4n0.lock().unwrap();
-        rt.screen.menu.press(Target::Photo);
+        let _ = rt.screen.menu.press(Target::Photo);
         assert_eq!(rt.screen.menu.page, orbiters_n4n0_core::menu::Page::Photo);
         drop(rt);
         (t, n)

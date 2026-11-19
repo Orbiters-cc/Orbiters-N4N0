@@ -320,7 +320,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             Act::Query(text) => {
                 // Typing after a search: back to the suggestions.
                 if host.menu.page == Page::Results {
-                    host.press(Target::Back);
+                    effects.extend(host.press(Target::Back));
                 }
                 effects.extend(host.menu.set_query(&text));
             }

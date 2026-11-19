@@ -2795,11 +2795,11 @@ mod tests {
         // Where a result's Drop would be: the row copies while Drop is hidden, Drop drops once it shows.
         let mut menu = Menu { pages: super::super::Pages::Seven, can_drop: true, ..Default::default() };
         menu.open();
-        menu.search_for("cats");
+        let _ = menu.search_for("cats");
         let video = |i: usize| crate::youtube::Video { id: format!("video{i:06}"), title: format!("T{i}"), channel: "C".into(), duration: None, live: false };
-        menu.results_arrived(1, crate::youtube::Results { videos: (0..5).map(video).collect(), continuation: None }, false);
+        let _ = menu.results_arrived(1, crate::youtube::Results { videos: (0..5).map(video).collect(), continuation: None }, false);
         assert_eq!(hit_pointable(&l, &menu, 760.0, 140.0).map(|h| h.1), Some(Target::Copy(0)));
-        menu.press(Target::Copy(0));
+        let _ = menu.press(Target::Copy(0));
         assert_eq!(hit_pointable(&l, &menu, 760.0, 140.0).map(|h| h.1), Some(Target::Drop(0)));
         assert_eq!(hit_pointable(&l, &menu, 760.0, 232.0).map(|h| h.1), Some(Target::Copy(1)), "the next row has none");
     }
@@ -2808,8 +2808,8 @@ mod tests {
     fn texts_fit_their_slots() {
         let mut menu = Menu::default();
         menu.open();
-        menu.press(Target::YouTube);
-        menu.type_text("a really long query that will never fit in the field at all");
+        let _ = menu.press(Target::YouTube);
+        let _ = menu.type_text("a really long query that will never fit in the field at all");
         let l = layout(ScreenPage::of(&menu));
         let query = l.slots.iter().find(|s| s.content == Content::Query).unwrap();
         let shown = slot_text(&menu, query);
@@ -2818,8 +2818,8 @@ mod tests {
         assert!(shown.ends_with("fit |") && !shown.starts_with("a "), "the field shows the end being typed: {shown}");
         assert_eq!(ellipsis("Lofi Girl and friends", 8), "Lofi Gi…");
         assert_eq!(ellipsis("Lofi", 8), "Lofi");
-        menu.search_for("cats");
-        menu.results_arrived(
+        let _ = menu.search_for("cats");
+        let _ = menu.results_arrived(
             1,
             crate::youtube::Results {
                 videos: vec![crate::youtube::Video {
@@ -2854,7 +2854,7 @@ mod tests {
         let targets = |l: &Layout| l.elements.iter().map(|e| e.target).collect::<Vec<_>>();
         assert_eq!(targets(home)[..4], targets(four)[..4], "the first four tiles keep their order (and their element indices)");
         assert_eq!(hit(home, 900.0, 400.0).map(|h| h.1), Some(Target::Light));
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         assert_eq!(ScreenPage::of(&menu), ScreenPage::Music);
         menu.pages = Pages::Four;
         assert_eq!(ScreenPage::of(&menu), ScreenPage::Home, "a screen without the page shows Home");
@@ -2890,7 +2890,7 @@ mod tests {
         assert_eq!(seven.boxes.len(), 1);
         assert_eq!((seven.boxes[0].y, seven.boxes[0].w, seven.boxes[0].h), (states.rect.y, states.rect.w, states.rect.h));
         assert!(seven.boxes[0].x > states.rect.right());
-        menu.press(Target::States);
+        let _ = menu.press(Target::States);
         assert_eq!(ScreenPage::of(&menu), ScreenPage::States);
         // An older screen has no States page: it shows its Home; and the six-tile Home's layout is as it was.
         menu.pages = Pages::Six;
@@ -2925,7 +2925,7 @@ mod tests {
         assert_eq!(&shown[1..], ["Voilà ton", "sweat, va voir", "tes potes", "maintenant au…"].map(String::from).as_slice(), "{shown:?}");
         assert!(shown.iter().all(|line| line.chars().count() <= HEARD_COLUMNS));
         assert_eq!(texts(&menu, true), shown, "what N4N0 says is for everyone");
-        menu.heard("put my hoodie on");
+        let _ = menu.heard("put my hoodie on");
         assert_eq!(texts(&menu, false)[0], "You said");
         assert!(texts(&menu, true).iter().all(String::is_empty), "the owner's own words stay theirs");
     }
@@ -2934,7 +2934,7 @@ mod tests {
     fn states_list_marks_the_default_and_pages_like_the_others() {
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
-        menu.press(Target::States);
+        let _ = menu.press(Target::States);
         let l = cached(ScreenPage::States);
         let shown = |menu: &Menu| l.elements.iter().filter(|e| !state(menu, e).hidden).map(|e| e.target).collect::<Vec<_>>();
         menu.set_states(Vec::new(), false, "VRChat's avatar is not known yet");
@@ -2946,7 +2946,7 @@ mod tests {
         assert_eq!(text(&menu, Content::PageLabel), "1/2");
         assert_eq!(text(&menu, Content::StateMeta(1)), "Parameters and pose");
         assert!(!shown(&menu).contains(&Target::StateMark(0)), "no default on the first page");
-        menu.press(Target::Next);
+        let _ = menu.press(Target::Next);
         assert_eq!(menu.page_states().len(), 2);
         assert!(shown(&menu).contains(&Target::StateMark(0)), "the default's mark, on its row");
         assert!(!shown(&menu).contains(&Target::StateApply(2)) && !shown(&menu).contains(&Target::Next));
@@ -2980,7 +2980,7 @@ mod tests {
     fn music_shows_what_plays_and_hides_what_it_cannot_do() {
         let mut menu = Menu { pages: Pages::Six, ..Default::default() };
         menu.open();
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         let l = cached(ScreenPage::Music);
         let shown = |menu: &Menu| l.elements.iter().filter(|e| !state(menu, e).hidden).map(|e| e.target).collect::<Vec<_>>();
         assert_eq!(shown(&menu), vec![Target::Back], "nothing plays, no volume known");
@@ -3033,7 +3033,7 @@ mod tests {
         let place = l.elements[index(Target::Seek(3))].rect;
         let mut menu = Menu { pages: Pages::Timeline, ..Default::default() };
         menu.open();
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         let shown = |menu: &Menu| l.elements.iter().filter(|e| !state(menu, e).hidden).map(|e| e.target).collect::<Vec<_>>();
         assert!(!shown(&menu).contains(&Target::Seek(0)), "nothing plays: no timeline");
         menu.media = Some(super::super::Media { title: "Song".into(), app: "Spotify".into(), playing: true, position: Some(61), duration: Some(240), ..Default::default() });
@@ -3063,7 +3063,7 @@ mod tests {
     fn light_chips_show_the_light_as_the_avatar_holds_it() {
         let mut menu = Menu { pages: Pages::Six, ..Default::default() };
         menu.open();
-        menu.press(Target::Light);
+        let _ = menu.press(Target::Light);
         let l = cached(ScreenPage::Light);
         assert!(l.elements.iter().filter(|e| e.target != Target::Back).all(|e| state(&menu, e).hidden), "no light on this avatar");
         assert!(text(&menu, Content::LightNote).contains("My Avatar"));
@@ -3096,7 +3096,7 @@ mod tests {
         let mut menu = Menu::default();
         menu.open();
         menu.set_contacts(vec![super::super::Contact { id: "u1".into(), name: "Lyra Nightfall".into() }], true, "");
-        menu.press(Target::Call);
+        let _ = menu.press(Target::Call);
         let list = cached(ScreenPage::of(&menu));
         let texts = |public: bool| list.slots.iter().map(|s| slot_text_for(&menu, s, public)).collect::<Vec<_>>().join("|");
         assert!(texts(false).contains("Lyra Nightfall") && texts(false).contains("1 online"));
@@ -3108,7 +3108,7 @@ mod tests {
         assert_eq!(text_for(&menu, Content::TileNote(2), true), "Incoming call");
         assert_eq!(text_for(&menu, Content::TileNote(2), false), "Lyra Nightfall calls");
         // The owner's words to N4N0 stay theirs; what N4N0 says is for everyone.
-        menu.heard("put my hoodie on");
+        let _ = menu.heard("put my hoodie on");
         assert_eq!(text_for(&menu, Content::Heard, true), "");
         menu.heard = Some("Voilà ton sweat".into());
         menu.heard_private = false;

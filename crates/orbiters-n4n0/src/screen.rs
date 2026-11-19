@@ -2567,7 +2567,7 @@ mod tests {
     fn a_ray_just_beside_the_back_button_takes_it_and_shows_it() {
         let mut s = pointing();
         s.menu.pages = Pages::of_screen(Some(14));
-        s.menu.press(menu::Target::More);
+        let _ = s.menu.press(menu::Target::More);
         let back = Frame::layout(&s.menu).elements.iter().find(|e| e.target == menu::Target::Back).unwrap().rect;
         let t0 = Instant::now();
         let (x, y) = (back.x as f32 + back.w as f32 + 20.0, back.y as f32 + back.h as f32 / 2.0);
@@ -2753,7 +2753,7 @@ mod tests {
         s.point_and_touch(ms(100), &mut Vec::new());
         assert_eq!(s.menu.page, Page::Home, "the next pull works in the submenu");
         assert_eq!(s.presses, 2);
-        s.menu.close();
+        let _ = s.menu.close();
         s.point_and_touch(ms(120), &mut Vec::new());
         assert_eq!(s.holding, [false; 3], "closing during a press releases the input session");
         s.menu.open();
@@ -2773,7 +2773,7 @@ mod tests {
         let mut s = pointing();
         s.menu.pages = Pages::Timeline;
         s.menu.media = Some(menu::Media { title: "Song".into(), can_seek: true, position: Some(0), duration: Some(320), ..Default::default() });
-        s.menu.press(menu::Target::Music);
+        let _ = s.menu.press(menu::Target::Music);
         let place = |i: u8| {
             let r = layout::cached(ScreenPage::Music).elements.iter().find(|e| e.target == menu::Target::Seek(i)).unwrap().rect;
             on_screen(r.x as f32 + r.w as f32 / 2.0, r.y as f32 + r.h as f32 / 2.0)
@@ -2979,7 +2979,7 @@ mod tests {
         // Later, the same click presses the tile.
         assert!(step(&mut s, &mouse, start, 700, DOWN));
         // The menu opened again: half a second again.
-        s.menu.close();
+        let _ = s.menu.close();
         assert!(!step(&mut s, &mouse, start, 800, UP));
         s.menu.open();
         assert!(!step(&mut s, &mouse, start, 900, UP));
@@ -3038,10 +3038,10 @@ mod tests {
         // A copied result's Drop drops it (the card then goes out: its host's part).
         let menu = &mut rt.screen.menu;
         menu.open();
-        menu.search_for("cats");
+        let _ = menu.search_for("cats");
         let video = youtube::Video { id: "dQw4w9WgXcQ".into(), title: "Never".into(), channel: "R".into(), duration: None, live: false };
-        menu.results_arrived(1, youtube::Results { videos: vec![video], continuation: None }, false);
-        menu.press(Target::Copy(0));
+        let _ = menu.results_arrived(1, youtube::Results { videos: vec![video], continuation: None }, false);
+        let _ = menu.press(Target::Copy(0));
         assert!(matches!(&menu.press(Target::Drop(0))[..], [Effect::Drop { video: Some(v), .. }] if v == "dQw4w9WgXcQ"));
         // Without the screen (none, or one the text channel cannot reach), no card.
         rt.screen.avatar(false, false, None, 72);
@@ -3058,11 +3058,11 @@ mod tests {
         let media = Watcher::new(|| Box::new(crate::media::NoMedia));
         let menu = &mut rt.screen.menu;
         menu.open();
-        menu.search_for("cats");
+        let _ = menu.search_for("cats");
         let videos: Vec<youtube::Video> = (0..5)
             .map(|i| youtube::Video { id: format!("video{i:06}"), title: format!("Cats {i}"), channel: "C".into(), duration: None, live: false })
             .collect();
-        menu.results_arrived(1, youtube::Results { videos: videos.clone(), continuation: None }, false);
+        let _ = menu.results_arrived(1, youtube::Results { videos: videos.clone(), continuation: None }, false);
         assert_eq!(menu.page, Page::Results);
         for (i, v) in videos.iter().enumerate() {
             let rgb = orbiters_n4n0_core::picture::Rgb { width: 320, height: 180, pixels: (0..320 * 180 * 3).map(|p| ((p * (7 + i)) % 251) as u8).collect() };

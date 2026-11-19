@@ -931,7 +931,7 @@ mod tests {
         // A note from before this menu was opened is not its own.
         let mut n4n0 = N4n0Status { photo_note: Some((3, "Open the camera before".into())), ..Default::default() };
         h.follow(&n4n0, &settings);
-        h.press(Target::Photo);
+        let _ = h.press(Target::Photo);
         h.follow(&n4n0, &settings);
         assert_eq!(h.menu.notice, None);
         n4n0.photo_note = Some((4, "Open the camera before".into()));
@@ -941,8 +941,8 @@ mod tests {
         n4n0.card = Some(crate::status::CardView { title: "t".into(), link: "https://x.y/".into(), left: 500 });
         h.follow(&n4n0, &settings);
         assert!(h.menu.card_out);
-        h.press(Target::Back);
-        h.press(Target::Music);
+        let _ = h.press(Target::Back);
+        let _ = h.press(Target::Music);
         let effects = h.press(Target::TakeBack);
         assert!(!h.effects(effects, &settings, &service));
         assert!(matches!(service.commands.lock().unwrap().as_slice(), [Command::TakeBack]));

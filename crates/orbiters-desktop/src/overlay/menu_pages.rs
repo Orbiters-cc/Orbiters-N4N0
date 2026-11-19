@@ -911,6 +911,35 @@ mod tests {
 
     const LANGUAGES: [&str; 5] = ["en", "fr", "es", "pt", "ja"];
 
+    /// MENU-6, to look at: the call page with Japanese, Chinese and Korean names, as the SteamVR menu drew them before
+    /// (through the avatar screen's atlas) and draws them now (its fonts). `MENU6_OUT=<dir> cargo test ... -- --ignored`.
+    #[test]
+    #[ignore]
+    fn renders_names_in_every_script() {
+        let Some(out) = std::env::var_os("MENU6_OUT").map(std::path::PathBuf::from) else { return };
+        std::fs::create_dir_all(&out).unwrap();
+        let names = ["たろう", "王小明", "김민지", "Lyra Nightfall", "さくら🌸ちゃん"];
+        let menu = |names: &[String]| {
+            let mut m = Menu::new(KeyboardLayout::Qwerty, 5, PhotoLength::Standard);
+            m.open();
+            m.calls_ready = true;
+            let _ = m.press(Target::Call);
+            m.set_contacts(names.iter().enumerate().map(|(i, n)| Contact { id: format!("u{i}"), name: n.clone() }).collect(), true, "");
+            m
+        };
+        let after: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        // What the atlas made of them, as before: the same page with those letters.
+        let before: Vec<String> = names.iter().map(|n| orbiters_contracts::n4n0::panel_text(&orbiters_n4n0_core::text::fold_more(n))).collect();
+        let skin = Skin::current();
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        for (names, file) in [(&before, "menu-call-cjk-before.png"), (&after, "menu-call-cjk-after.png")] {
+            let m = menu(names);
+            let picture = |_: &str| -> Option<TextureId> { None };
+            let rgba = paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &m, hover: None, pressed: None, picture: &picture, time: 0.4, skin }));
+            write_png(&out.join(file), WIDTH, HEIGHT, &unpremultiply(&rgba)).unwrap();
+        }
+    }
+
     #[test]
     fn the_base_themes_draw_with_todays_colours() {
         let p = Palette::new(&Theme::MODERN.colors);

@@ -76,28 +76,59 @@ pub(crate) fn vrcx_last_pictures(path: &Path, db: &Connection, account: &str) ->
 /// [`vrcx_last_pictures`], `None` when the query fails now (SQLITE_BUSY while VRCX writes): nothing is kept then, so the
 /// next round reads again instead of keeping "no pictures" for ten minutes.
 pub(crate) fn vrcx_last_pictures_now(path: &Path, db: &Connection, account: &str) -> Option<std::sync::Arc<std::collections::HashMap<String, String>>> {
-    type Kept = (PathBuf, String, Vec<Option<(u64, std::time::SystemTime)>>, std::time::Instant, std::sync::Arc<std::collections::HashMap<String, String>>);
-    static KEPT: std::sync::Mutex<Option<Kept>> = std::sync::Mutex::new(None);
     let stamp = |p: &Path| std::fs::metadata(p).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
     let mut wal = path.as_os_str().to_owned();
     wal.push("-wal");
-    let stamps = vec![stamp(path), stamp(Path::new(&wal))];
-    if let Some((p, a, s, at, pictures)) = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
-        if p == path && a == account && *s == stamps && at.elapsed() < PICTURES_KEPT {
-            return Some(pictures.clone());
-        }
-    }
+    last_pictures_stamped(path, db, account, vec![stamp(path), stamp(Path::new(&wal))])
+}
+
+/// [`vrcx_last_pictures_now`] with the files' (length, time) `stamps`. What was kept is used only while the stamps AND the
+/// feed's newest row are unchanged: VRCX only adds rows to its feed, so a new one shows at once even when the files'
+/// length and time happen to read the same.
+fn last_pictures_stamped(
+    path: &Path,
+    db: &Connection,
+    account: &str,
+    stamps: Vec<Option<(u64, std::time::SystemTime)>>,
+) -> Option<std::sync::Arc<std::collections::HashMap<String, String>>> {
+    type Kept = (PathBuf, String, Vec<Option<(u64, std::time::SystemTime)>>, Option<i64>, std::time::Instant, std::sync::Arc<std::collections::HashMap<String, String>>);
+    // A few databases at most (one in the app; tests have their own each).
+    static KEPT: std::sync::Mutex<Vec<Kept>> = std::sync::Mutex::new(Vec::new());
     let table = format!("{}_feed_avatar", vrcx_table_prefix(account));
+    // The primary key's largest value: one look at the index's end, not a scan.
+    let newest: Option<i64> = db.query_row(&format!("SELECT MAX(id) FROM \"{table}\""), [], |r| r.get(0)).ok()?; // i18n: not shown (SQL)
+    if let Some((.., pictures)) = KEPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(p, a, s, n, at, _)| p == path && a == account && *s == stamps && *n == newest && at.elapsed() < PICTURES_KEPT)
+    {
+        return Some(pictures.clone());
+    }
     let mut pictures = std::collections::HashMap::new();
-    let sql = format!("SELECT a.user_id, a.current_avatar_thumbnail_image_url FROM \"{table}\" a JOIN (SELECT user_id, MAX(id) AS latest FROM \"{table}\" GROUP BY user_id) b ON a.id = b.latest"); // i18n: not shown (SQL)
+    let sql = format!("SELECT a.user_id, a.current_avatar_thumbnail_image_url FROM \"{table}\" a JOIN (SELECT user_id, MAX(id) AS latest FROM \"{table}\" WHERE user_id IS NOT NULL GROUP BY user_id) b ON a.id = b.latest"); // i18n: not shown (SQL)
     let mut q = db.prepare(&sql).ok()?;
-    let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))).ok()?;
+    // A row whose person or picture is not text (NULL, a number: VRCX's tables allow it) is that row's loss, never the
+    // whole list's: only a failing query or read (VRCX writing, a lock) fails the round.
+    let rows = q
+        .query_map([], |r| {
+            let text = |i: usize| r.get_ref(i).ok().and_then(|v| v.as_str().ok()).map(str::to_string);
+            Ok((text(0), text(1)))
+        })
+        .ok()?;
     for row in rows {
         let (id, image) = row.ok()?;
-        pictures.entry(id).or_insert_with(|| image.unwrap_or_default());
+        if let Some(id) = id.filter(|id| !id.is_empty()) {
+            pictures.entry(id).or_insert_with(|| image.unwrap_or_default());
+        }
     }
     let pictures = std::sync::Arc::new(pictures);
-    *KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((path.to_path_buf(), account.to_string(), stamps, std::time::Instant::now(), pictures.clone()));
+    let mut kept = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    kept.retain(|(p, a, ..)| !(p == path && a == account));
+    kept.push((path.to_path_buf(), account.to_string(), stamps, newest, std::time::Instant::now(), pictures.clone()));
+    if kept.len() > 4 {
+        kept.remove(0);
+    }
     Some(pictures)
 }
 
@@ -324,6 +355,54 @@ mod tests {
         db.execute_batch(&format!("INSERT INTO \"{table}\" (user_id, current_avatar_thumbnail_image_url) VALUES {} ('usr_a', 'https://newest');", rows)).unwrap();
         let again = vrcx_last_pictures(&path, &db, me);
         assert_eq!(again["usr_a"], "https://newest", "VRCX wrote: read again");
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Verifier (integration): one feed row without a person (NULL, as VRCX's schema allows) or with a number in place of
+    /// text costs that row, not the whole friends' pictures (which made the launcher retry for ever, "busy").
+    #[test]
+    fn a_feed_row_without_a_person_costs_only_itself() {
+        let dir = std::env::temp_dir().join(format!("orbiters-vrcx-null-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("VRCX.sqlite3");
+        let me = "usr_11111111-1111-1111-1111-111111111111";
+        let p = vrcx_table_prefix(me);
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(&format!(
+            "CREATE TABLE configs (key TEXT, value TEXT);
+             INSERT INTO configs VALUES ('config:lastuserloggedin', '{me}');
+             CREATE TABLE \"{p}_friend_log_current\" (user_id TEXT, display_name TEXT, trust_level TEXT);
+             INSERT INTO \"{p}_friend_log_current\" VALUES ('usr_22222222-2222-2222-2222-222222222222', 'Kite', 'User');
+             CREATE TABLE \"{p}_feed_online_offline\" (id INTEGER PRIMARY KEY, user_id TEXT, created_at TEXT);
+             CREATE TABLE \"{p}_feed_avatar\" (id INTEGER PRIMARY KEY, user_id TEXT, current_avatar_thumbnail_image_url TEXT);
+             INSERT INTO \"{p}_feed_avatar\" (user_id, current_avatar_thumbnail_image_url) VALUES
+               (NULL, 'https://nobody'), ('usr_22222222-2222-2222-2222-222222222222', 'https://api.vrchat.cloud/k'), (7, 'https://number'), ('usr_33333333-3333-3333-3333-333333333333', 5);"
+        ))
+        .unwrap();
+        let pictures = vrcx_last_pictures_now(&path, &db, me).expect("read, not busy");
+        assert_eq!(pictures.get("usr_22222222-2222-2222-2222-222222222222").map(String::as_str), Some("https://api.vrchat.cloud/k"));
+        assert_eq!(pictures.get("usr_33333333-3333-3333-3333-333333333333").map(String::as_str), Some(""), "a picture that is not text: none");
+        drop(db);
+        let state = crate::launcher_local::vrcx_now(&path).expect("the launcher's read is not busy").expect("friends");
+        assert_eq!(state.friends[0].look.icon, "https://api.vrchat.cloud/k");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Verifier (CORE-10): a new feed row is seen at once even when the files' length and time read the same.
+    #[test]
+    fn a_new_feed_row_is_seen_whatever_the_files_say() {
+        let dir = std::env::temp_dir().join(format!("orbiters-vrcx-newest-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("VRCX.sqlite3");
+        let me = "usr_11111111-1111-1111-1111-111111111111";
+        let table = format!("{}_feed_avatar", vrcx_table_prefix(me));
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(&format!("CREATE TABLE \"{table}\" (id INTEGER PRIMARY KEY, user_id TEXT, current_avatar_thumbnail_image_url TEXT); INSERT INTO \"{table}\" (user_id, current_avatar_thumbnail_image_url) VALUES ('usr_a', 'https://old');")).unwrap();
+        let same = vec![Some((1, std::time::UNIX_EPOCH)), None];
+        assert_eq!(last_pictures_stamped(&path, &db, me, same.clone()).unwrap()["usr_a"], "https://old");
+        db.execute_batch(&format!("INSERT INTO \"{table}\" (user_id, current_avatar_thumbnail_image_url) VALUES ('usr_a', 'https://new');")).unwrap();
+        assert_eq!(last_pictures_stamped(&path, &db, me, same).unwrap()["usr_a"], "https://new");
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }

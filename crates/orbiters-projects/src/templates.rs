@@ -433,6 +433,10 @@ async fn make(
         tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = required.saturating_sub(free))
     );
     copy_keeping(source, &destination, copy.unwrap_or_default(), cancel, progress)?;
+    #[cfg(test)]
+    if STOP_AFTER_COPY.with(|s| s.get()) {
+        cancel.store(true, Ordering::Relaxed);
+    }
     let version = destination.join("ProjectSettings/ProjectVersion.txt");
     if !version.is_file() {
         if vrc_get_vpm::version::UnityVersion::parse(unity).is_none() {
@@ -469,6 +473,12 @@ async fn make(
             .with_context(|| tr!("The copy is listed at {path}, but missing packages could not be restored", path = destination.display()))?;
     }
     Ok(destination)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's Stop pressed the moment the last file is in.
+    static STOP_AFTER_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Fresh copy estimate using the same exclusions and link traversal as the copier, including local packages.
@@ -916,6 +926,55 @@ mod tests {
         .unwrap();
         assert_eq!(packages_only_in_library(p), ["com.me.tool", "com.scoped.thing"]);
         assert!(packages_only_in_library(&p.join("nothing")).is_empty());
+    }
+
+    /// Verifier, point 7: Stop pressed once every file is in still lists the copy (a whole copy is never left unlisted).
+    #[test]
+    fn a_stop_after_the_last_file_still_lists_the_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        let root = temp.path().join("vcc");
+        let rt = crate::runtime().unwrap();
+        STOP_AFTER_COPY.with(|s| s.set(true));
+        let made = rt.block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())));
+        STOP_AFTER_COPY.with(|s| s.set(false));
+        let _ = made;
+        assert!(is_registered(&rt, &root, &temp.path().join("Copy")));
+    }
+
+    /// A package folder is copied whole (its own Logs or Library are part of it); an archive the project already holds
+    /// under the name the copy needs is never overwritten; a local package that is gone is named before anything is made.
+    #[test]
+    fn local_packages_are_copied_whole_and_never_over_another() {
+        let temp = tempfile::tempdir().unwrap();
+        let external = temp.path().join("External");
+        std::fs::create_dir_all(external.join("Logs")).unwrap();
+        std::fs::write(external.join("package.json"), "{}").unwrap();
+        std::fs::write(external.join("Logs/part-of-the-package.txt"), "kept").unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({ "my.tool": "file:../../External" }));
+        let dst = temp.path().join("Copy");
+        copy(&source, &dst, &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap();
+        copy_local_packages(&source, &dst, &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap();
+        assert!(dst.join("Packages/my.tool/Logs/part-of-the-package.txt").is_file());
+        // An archive: the source holds another file under the name the copy would give it.
+        std::fs::write(temp.path().join("tool.tgz"), "the archive").unwrap();
+        let source = temp.path().join("Source2");
+        project(&source, serde_json::json!({ "my.archive": "file:../../tool.tgz" }));
+        std::fs::write(source.join("Packages/my.archive.tgz"), "something else").unwrap();
+        let estimate = duplication_bytes(&source, Keep::default()).unwrap();
+        assert!(estimate >= ("the archive".len() + "something else".len()) as u64, "both counted: {estimate}");
+        let dst = temp.path().join("Copy2");
+        copy(&source, &dst, &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap();
+        let said = copy_local_packages(&source, &dst, &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap_err().to_string();
+        assert!(said.contains("my.archive.tgz"), "{said}");
+        assert_eq!(std::fs::read_to_string(dst.join("Packages/my.archive.tgz")).unwrap(), "something else");
+        // Gone: named with where it was looked for.
+        let source = temp.path().join("Source3");
+        project(&source, serde_json::json!({ "my.gone": "file:../../Gone" }));
+        let said = format!("{:#}", duplication_bytes(&source, Keep::default()).unwrap_err());
+        assert!(said.contains("my.gone") && said.contains("Gone"), "{said}");
     }
 
     #[test]

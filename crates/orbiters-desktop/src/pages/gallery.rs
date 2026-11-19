@@ -1015,7 +1015,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     state.layout_positions = positions;
     super::under_top(&gu, cx, "photos-captures", from, top);
     if let Some(background) = &background {
-        state.select.update(ui, &entries, background, modal);
+        // The keys (Escape, Ctrl+A, Ctrl+C) are not the grid's under a window opened from a card's menu (Export,
+        // Reconstruct again) or the requests' window: they belong to what is in front.
+        let covered = modal || state.export.is_some() || state.again.is_some() || state.requests.is_out();
+        state.select.update(ui, &entries, background, covered);
     }
 
     // Heading and the bar over the grid (drawn after it: what scrolls up goes under them).

@@ -2869,21 +2869,23 @@ mod tests {
         s.menu.open();
         s.menu.media = Some(menu::Media { title: "A song".into(), can_play_pause: true, can_seek: true, duration: Some(200), playing: true, ..Default::default() });
         let t0 = Instant::now();
-        let effects = others_touch(&mut s, menu::Target::Music, t0);
-        assert_eq!(s.menu.page, Page::Music, "the tile only opens a page: theirs to press");
-        assert!(effects.is_empty(), "{effects:?}");
-        assert_eq!(s.presses, 1);
-        let effects = others_touch(&mut s, menu::Target::MediaPlayPause, t0 + Duration::from_secs(2));
+        // The owner opened the music page.
+        let _ = s.menu.press(menu::Target::Music);
+        assert_eq!(s.menu.page, Page::Music);
+        let effects = others_touch(&mut s, menu::Target::MediaPlayPause, t0);
         assert!(!effects.iter().any(|e| matches!(e, Effect::Media(_))), "the owner's media keys: {effects:?}");
         assert!(s.menu.media.as_ref().is_some_and(|m| m.playing), "nothing shown as pressed");
-        assert_eq!(s.presses, 1, "no click for what the guest may not press");
-        let effects = others_touch(&mut s, menu::Target::Seek(3), t0 + Duration::from_secs(4));
+        assert_eq!(s.presses, 0, "no click for what the guest may not press");
+        let effects = others_touch(&mut s, menu::Target::Seek(3), t0 + Duration::from_secs(2));
         assert!(!effects.iter().any(|e| matches!(e, Effect::Media(_))), "the owner's timeline: {effects:?}");
         // Held there and dragged along: the press was refused, so nothing follows the drag either.
         assert_eq!(s.dragging[2], None);
-        let effects = others_touch(&mut s, menu::Target::Back, t0 + Duration::from_secs(6));
+        let effects = others_touch(&mut s, menu::Target::Back, t0 + Duration::from_secs(4));
         assert!(effects.is_empty(), "{effects:?}");
         assert_eq!(s.menu.page, Page::Home, "Back is theirs");
+        assert_eq!(s.presses, 1);
+        let _ = others_touch(&mut s, menu::Target::YouTube, t0 + Duration::from_secs(6));
+        assert_eq!(s.menu.page, Page::Search, "a tile that only opens a page is theirs too");
         // The owner's own presses are untouched: the same rule never applies to hands 0 and 1 (the YouTube test above).
     }
 

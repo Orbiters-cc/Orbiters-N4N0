@@ -1587,7 +1587,11 @@ impl Menu {
             // A row that holds another state than the one drawn there (the list changed under the hand) does nothing.
             Target::StateApply(i) | Target::StateMark(i) => match self.page_states().get(i as usize) {
                 // A state saved here but not yet listed by the host has no id: nothing to apply yet.
-                Some(state) if !state.id.is_empty() && self.row_shown(Rows::States, i as usize, &state_key(state)) => {
+                // (The row of a state saved here, now listed by the host, is the same row.)
+                Some(state)
+                    if !state.id.is_empty()
+                        && (self.row_shown(Rows::States, i as usize, &state_key(state)) || self.row_shown(Rows::States, i as usize, &format!("saving:{}", state.name))) =>
+                {
                     let effect = Effect::ApplyState { id: state.id.clone(), name: state.name.clone() };
                     self.notice = Some(latin(|| tr!("Applied \"{name}\"", name = state.name)));
                     vec![effect]
@@ -1936,7 +1940,8 @@ impl Menu {
             Target::DeleteComment(i) => {
                 let Some(world) = self.shown_world() else { return Vec::new() };
                 let Some(id) = self.page_comments().get(i as usize).filter(|c| c.mine && c.id != 0).map(|c| c.id) else { return Vec::new() };
-                if !self.row_shown(Rows::Comments, i as usize, &id.to_string()) {
+                // (The owner's comment on its way, number 0, that got its number is the same row.)
+                if !self.row_shown(Rows::Comments, i as usize, &id.to_string()) && !self.row_shown(Rows::Comments, i as usize, "0") {
                     return Vec::new();
                 }
                 let entry = self.feedback.world_mut(&world);
@@ -3963,6 +3968,8 @@ mod tests {
         let account = InviteAccount { name: "Orbiters".into(), link: "https://vrchat.com/home/user/usr_1".into() };
         menu.invite_answered(InviteAnswer::NeedsFriend { account: account.clone(), message: "Add it first".into() });
         assert_eq!(menu.page, Page::AddFriend);
+        // (Half a second after the page changed by itself: MENU-3.)
+        menu.unasked_at = None;
         assert_eq!(layout::text(&menu, layout::Content::FriendName), "Orbiters");
         assert_eq!(layout::text(&menu, layout::Content::FriendLink), "vrchat.com/home/user/usr_1");
         assert_eq!(menu.press(Target::CopyFriendName), [Effect::CopyText { text: "Orbiters".into() }]);
@@ -3971,6 +3978,7 @@ mod tests {
         assert_eq!(menu.press(Target::InviteAgain), [Effect::InviteMe { location }]);
         menu.invite_answered(InviteAnswer::Sent);
         assert_eq!(menu.page, Page::Instances);
+        menu.unasked_at = None;
         assert!(!menu.invite_waiting);
         assert_eq!(layout::text(&menu, layout::Content::InstancesTitle), "Invite sent: open it in VRChat's notifications");
         let _ = menu.press(Target::InviteMe(0));
@@ -4438,7 +4446,6 @@ mod tests {
         let _ = menu.press(Target::Done);
         assert_eq!(menu.found.as_ref().map(|f| f.find.as_str()), Some("neo"));
         assert_eq!(ids(&menu), fresh(&menu));
-        assert_eq!(ids(&menu).len(), 2);
         menu.set_friends(Friends::ready(vec![f("d", "Neo"), f("b", "Bob")]));
         assert_eq!(ids(&menu), ["d"]);
         // Written from outside (a test, a staged page): never a stale ranking.

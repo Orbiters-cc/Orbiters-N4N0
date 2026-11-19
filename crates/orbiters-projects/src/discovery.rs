@@ -877,7 +877,8 @@ mod retained_lists {
     /// Refresh; the same place registered by the person stays.
     #[test]
     fn cached_finds_in_dot_folders_are_dropped_but_registered_ones_stay() {
-        let temp = tempfile::tempdir().unwrap();
+        // A base whose own name has no dot (a default temporary folder's does: ".tmp…").
+        let temp = tempfile::Builder::new().prefix("dots").tempdir().unwrap();
         let make = |at: &str| {
             let p = temp.path().join(at);
             std::fs::create_dir_all(p.join("ProjectSettings")).unwrap();

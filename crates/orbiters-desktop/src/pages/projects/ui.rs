@@ -11,6 +11,7 @@ use super::state::{server, Modal, Outcome, State};
 use crate::pages::header::{Action, Header};
 use crate::pages::{self, Cx, PAD_X};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui, UiBuilder};
+use std::path::PathBuf;
 use orbiters_projects::{discovery::Project, vpm};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::layout::{self, PANE_GAP};

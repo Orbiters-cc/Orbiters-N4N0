@@ -109,5 +109,9 @@
   "it is not the folder this copy made": "não é a pasta que esta cópia criou",
   "Copy stopped. What it copied was removed; {path} keeps what was not the copy's: {files}": "Cópia interrompida. O que ela copiou foi removido; {path} mantém o que não era da cópia: {files}",
   "Required local package {name} is unavailable at {path}": "O pacote local necessário {name} não está disponível em {path}",
-  "{file} in the copy's Packages folder is another archive than the one {name} needs ({path})": "{file} na pasta Packages da cópia é outro arquivo, diferente do que {name} precisa ({path})"
+  "{file} in the copy's Packages folder is another archive than the one {name} needs ({path})": "{file} na pasta Packages da cópia é outro arquivo, diferente do que {name} precisa ({path})",
+  "Not everything could be put back: {problems}. What the project had is kept in {path}; the next package change puts it back.": "Nem tudo pôde ser restaurado: {problems}. O que o projeto tinha está guardado em {path}; a próxima alteração de pacotes o restaura.",
+  "Could not keep a copy of the package list before changing it: nothing was changed": "Não foi possível guardar uma cópia da lista de pacotes antes de alterá-la: nada foi alterado",
+  "{name} could not be put back ({why}): its copy is kept at {path}": "Não foi possível restaurar {name} ({why}): a cópia está guardada em {path}",
+  "A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.": "Uma alteração de pacotes parou no meio e não pôde ser totalmente restaurada: {problems}. O que o projeto tinha está guardado em {path}."
 }

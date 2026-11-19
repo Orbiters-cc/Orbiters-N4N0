@@ -32,10 +32,10 @@ pub const INSTANT_ENTRIES: usize = 256;
 /// stand-in project: with it set, repairs copy only there and orphan removal looks only there.
 pub const CACHE_DIR_VAR: &str = "ORBITERS_UNITY_CACHE_DIR";
 
-const BACKUP_PREFIX: &str = "Library.orbiters-relocation-";
+const BACKUP_PREFIX: &str = "Library.orbiters-relocation-"; // i18n: not shown (a folder name)
 /// The file a repair puts in its cache before the cache can become Library: such a cache is never removed on its
 /// record's word (verifier, point 3).
-const SWITCHED: &str = ".orbiters-switched"; // i18n: not shown (a folder name; an error text, English until errors are decided; a macOS path part)
+const SWITCHED: &str = ".orbiters-switched"; // i18n: not shown (a file name)
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Health {
@@ -1595,7 +1595,9 @@ mod tests {
             let library = project.join("Library");
             assert!(is_redirect(&library).unwrap());
             assert!(moved.starts_with(&cache));
-            assert_eq!(std::fs::read_dir(&library).unwrap().count() > 0, files > 0);
+            // The cache's own switch marker aside (`SWITCHED`, inside it since verifier point 3).
+            let entries = std::fs::read_dir(&library).unwrap().flatten().filter(|e| e.file_name() != SWITCHED).count();
+            assert_eq!(entries > 0, files > 0);
             remove_redirect(&library).unwrap();
         }
     }

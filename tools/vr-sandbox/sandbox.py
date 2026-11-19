@@ -54,6 +54,8 @@ STATE = ROOT / 'shared-session.json'  # public view of the shared session: holde
 YIELD = ROOT / 'YIELD'            # created by `sandbox.py yield` (or by hand): the owner wants SteamVR now
 RENDER = ROOT / 'render-target.txt'
 EAC_LOG = ROOT / 'eac-log.jsonl'
+ORPHAN_LOG = ROOT / 'orphan.log'          # one dated line whenever a dead session's restore is tried and refused or done
+MARKER = ROOT / 'RESTORE-NEEDED.txt'      # exists exactly while a session whose controller is gone is not restored
 DEFAULT_RENDER = [1080, 1200]
 HEADSET_HOLD_S = 10               # a Virtual Desktop headset connection must last this long before the session yields
 NEUTRAL_POSES = ([0, 1.65, 0], [-.25, 1.2, -.35], [.25, 1.2, -.35])
@@ -260,10 +262,17 @@ def restore_session(expected_session):
         if acquired:kernel.ReleaseMutex(mutex)
         kernel.CloseHandle(mutex)
 
+def blocking(foreign):
+    """The foreign VR processes that forbid a file restore: any SteamVR process (it rewrites its settings from memory).
+    A desktop VRChat alone (the owner playing without SteamVR) reads none of these files and does not block (SBX-1);
+    with SteamVR running, it is listed too."""
+    foreign=list(foreign)
+    return foreign if any(p['name'].lower()!='vrchat.exe' for p in foreign) else []
+
 def restore_contents(j):
     # Only stop exact process identities recorded by this session. Refuse a foreign VR session.
     owned = {(p['pid'], p['create_time']) for p in j['processes']}
-    foreign = [p for p in processes() if (p['pid'], p['create_time']) not in owned]
+    foreign = blocking(p for p in processes() if (p['pid'], p['create_time']) not in owned)
     if foreign:
         raise RuntimeError('Restore refused while unowned VR processes run: ' + json.dumps(foreign))
     if j.get('turn_app'):stop_app(j['turn_app'])
@@ -291,7 +300,9 @@ def restore_contents(j):
     remaining=[p for p in remaining if p.pid not in warnings]
     if remaining:
         raise RuntimeError('Owned processes did not exit after terminate: '+json.dumps([p.pid for p in remaining]))
-    if [p for p in processes() if p['pid'] not in warnings]:
+    if blocking(p for p in processes() if p['pid'] not in warnings and (p['pid'],p['create_time']) not in owned):
+        raise RuntimeError('VR processes remain; configuration retained for standalone restore')
+    if [p for p in processes() if (p['pid'],p['create_time']) in owned and p['pid'] not in warnings]:
         raise RuntimeError('VR processes remain; configuration retained for standalone restore')
     clients={}
     for entry in j['files']:
@@ -314,6 +325,7 @@ def restore_contents(j):
     j['restored'] = True
     j['dead_processes']=[info for info in j['processes'] if info['pid'] in warnings]
     atomic_json(JOURNAL, j)
+    note_restored(j['session'],'restore')
     if j.get('app_restore_exe'):
         args=[j['app_restore_exe']]+([] if j.get('app_was_visible') else ['--hidden'])
         subprocess.Popen(args,creationflags=subprocess.CREATE_NO_WINDOW)
@@ -321,6 +333,52 @@ def restore_contents(j):
     if LOCK.exists() and json.loads(LOCK.read_text())['session'] == j['session']:
         LOCK.unlink()
     return {'restored': True, 'verified_files': len(j['files']), 'leftover_dead_pids': warnings, 'client_files': clients}
+
+def note_unrestored(session, why, by):
+    """A dead session could not be restored: a dated line in orphan.log and RESTORE-NEEDED.txt saying why and what heals
+    it. The refusal itself stays (restoring while the owner's SteamVR runs does not work: it rewrites its settings from
+    memory); this makes it impossible to miss (SBX-1)."""
+    now=time.strftime('%Y-%m-%d %H:%M:%S')
+    ROOT.mkdir(parents=True,exist_ok=True)
+    with ORPHAN_LOG.open('a',encoding='utf-8') as log:log.write(f'{now} {by}: session {session} NOT restored: {why}\n')
+    first=now
+    try:
+        old=MARKER.read_text(encoding='utf-8')
+        if f'session {session},' in old:first=re.search(r'since (\S+ \S+)\)',old).group(1)
+    except (OSError,AttributeError):pass
+    text=(f'SteamVR may still be set to the Orbiters test headset (sandbox session {session}, not restored since {first}).\n'
+          f'Last attempt {now} by {by}: {why}\n\n'
+          'SteamVR then says "Headset Not Detected". To heal: close SteamVR (and a VRChat started in VR); the watcher or the\n'
+          'scheduled task "Orbiters VR sandbox restore" puts the files back within minutes (at the latest at the next logon), or run\n'
+          '  python tools/vr-sandbox/sandbox.py restore-orphan\n'
+          'Every attempt: '+str(ORPHAN_LOG)+'\n')
+    write_file_atomic(MARKER,text.encode('utf-8'))
+
+def note_restored(session, by):
+    if MARKER.exists():
+        ROOT.mkdir(parents=True,exist_ok=True)
+        with ORPHAN_LOG.open('a',encoding='utf-8') as log:log.write(time.strftime('%Y-%m-%d %H:%M:%S')+f' {by}: session {session} restored\n')
+        MARKER.unlink(missing_ok=True)
+
+def write_file_atomic(path, data):
+    client_configs.write_atomic(path, data)
+
+def watch(identity, session, sleep=time.sleep):
+    """Started with every session, outside its process tree: once the controller is gone, restores, and keeps retrying
+    with back-off (5 s up to 2 min) until restored, until another session's journal replaces this one, or until there is
+    no journal (SBX-1: it used to try once and give up)."""
+    while same_process(identity):sleep(.5)
+    delay=5
+    while True:
+        try:
+            result=restore(expected_session=session)
+            if result.get('restored'):
+                note_restored(session,'watcher');return result
+            if result.get('reason') in ('session changed','no recovery journal'):return result
+            why=result.get('reason','not restored')
+        except Exception as error:why=f'{type(error).__name__}: {error}'
+        note_unrestored(session,why,'watcher')
+        sleep(delay);delay=min(delay*2,120)
 
 def stop_app(app,timeout=20):
     """Stops one test program of a turn: its own --quit, then a kill if it stays. Never another program."""
@@ -957,6 +1015,26 @@ def serve(owner=None,stream='shared',keep_app=False):
             s.record();print(json.dumps(restore()),flush=True)
             s.lease['holder']=None;s.publish()
 
+def restore_orphan(by='restore-orphan'):
+    """The scheduled task's repair (every 5 minutes and at logon): restores a session whose controller is gone. A live
+    session is never touched. Never raises: a refusal or failure is written to orphan.log and RESTORE-NEEDED.txt."""
+    session='?'
+    try:
+        if not JOURNAL.exists():return {'nothing':'no journal'}
+        j=json.loads(JOURNAL.read_text())
+        session=j.get('session','?')
+        if j.get('restored'):
+            note_restored(session,by);return {'nothing':'restored'}
+        if j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):return {'nothing':'live session'}
+        result=restore_session(session)
+        if result.get('restored'):note_restored(session,by)
+        return result
+    except Exception as error:
+        why=f'{type(error).__name__}: {error}'
+        try:note_unrestored(session,why,by)
+        except OSError:pass
+        return {'restored':False,'error':why}
+
 def lease_args(owner=None):
     """(owner, token) for a request: the test program's environment, else that owner's saved token."""
     env_owner=os.environ.get('ORBITERS_VR_SANDBOX_OWNER')
@@ -983,6 +1061,17 @@ def remote(args,journal=None,owner=None,timeout=None):
         try:message=json.loads(body)['error']
         except Exception:message=body.decode(errors='replace')
         raise RuntimeError(message) from None
+
+def unrestored_session():
+    """Why a new session may not start: a journal not restored whose controller is gone ('' when none)."""
+    try:
+        if not JOURNAL.exists():return ''
+        j=json.loads(JOURNAL.read_text())
+    except (OSError,ValueError) as error:return f'Its journal cannot be read ({error}); see {MARKER}'
+    if j.get('restored'):return ''
+    if j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):return ''
+    detail=MARKER.read_text(encoding='utf-8',errors='replace').strip() if MARKER.exists() else f"session {j.get('session')}"
+    return detail
 
 def controller_alive():
     """The live controller's journal, or None."""
@@ -1054,7 +1143,10 @@ def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say
         if j is None:
             foreign=processes()
             wants=owner_wants_vr()
-            if foreign:reason='VR is in use outside the shared session (the owner, or an older sandbox script): '+', '.join(sorted({p['name'] for p in foreign}))
+            dead=unrestored_session()
+            if dead:reason=('A previous sandbox session was not restored; no new session starts until it is (the watcher and the '
+                            'scheduled task keep trying). '+dead)
+            elif foreign:reason='VR is in use outside the shared session (the owner, or an older sandbox script): '+', '.join(sorted({p['name'] for p in foreign}))
             elif wants:reason='Not starting: '+wants
             elif LOCK.exists():reason='A sandbox lock exists without a live shared controller (an older script, or a restore in progress): '+LOCK.read_text()
             else:
@@ -1089,10 +1181,7 @@ def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say
 def main(argv):
     if argv and argv[0]=='spawn':spawn(json.loads(argv[1]));return
     if argv and argv[0]=='watch':
-        identity={'pid':int(argv[1]),'create_time':float(argv[2])}
-        while same_process(identity):time.sleep(.5)
-        try:restore(expected_session=argv[3])
-        except Exception as e:(ROOT/'restore-error.txt').write_text(str(e))
+        watch({'pid':int(argv[1]),'create_time':float(argv[2])},argv[3])
         return
     import argparse
     parser=argparse.ArgumentParser(prog='sandbox.py')
@@ -1127,12 +1216,7 @@ def main(argv):
         # Run every few minutes by the scheduled task "Orbiters VR sandbox restore": the watcher started with a session
         # dies with it when every python is killed at once (2026-11-16: the owner's SteamVR stayed forced on the sandbox headset).
         # Acts only when the session's controller is gone; a live session is never touched.
-        if not JOURNAL.exists():return
-        j=json.loads(JOURNAL.read_text())
-        if j.get('restored') or (j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']})):return
-        try:print(json.dumps(restore_session(j['session'])))
-        except Exception as e:(ROOT/'restore-error.txt').write_text(time.strftime('%Y-%m-%d %H:%M:%S ')+str(e))
-        return
+        print(json.dumps(restore_orphan()));return
     if cmd=='restore':
         j=controller_alive()
         if j and not a.force:

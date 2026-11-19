@@ -128,7 +128,8 @@ class RecoveryTests(unittest.TestCase):
     def test_foreign_process_prevents_writes_and_keeps_recovery(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);journal=root/'journal';journal.write_text(json.dumps({'session':'x','files':[],'processes':[],'restored':False}))
-            with patch.multiple(sandbox,JOURNAL=journal),patch.object(sandbox,'processes',return_value=[{'pid':123,'create_time':1,'name':'VRChat.exe'}]):
+            with patch.multiple(sandbox,JOURNAL=journal),patch.object(sandbox,'processes',return_value=[{'pid':123,'create_time':1,'name':'VRChat.exe'},{'pid':124,'create_time':1,'name':'vrserver.exe'}]):
+                # A foreign SteamVR (with or without a VRChat in it) refuses; a desktop VRChat alone does not (test_orphan, SBX-1).
                 with self.assertRaisesRegex(RuntimeError,'unowned VR processes'):sandbox.restore()
                 self.assertFalse(json.loads(journal.read_text())['restored'])
 

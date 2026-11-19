@@ -807,12 +807,47 @@ fn account(ui: &mut Ui, cx: &Cx, confirm_sign_out: &mut bool) {
                 });
             }
         }
+        explorer(ui, cx);
         if let Some(error) = &status.error {
             ui.add_space(4.0);
             let g = ui.painter().layout_job(Txt::new(error, 12.0).color(theme::DANGER).job(ui.available_width()));
             let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
             ui.painter().galley(r.min, g, theme::DANGER);
             ui.add_space(8.0);
+        }
+    });
+}
+
+/// Explorer points (REQUEST13), small, under the account: where the member stands (points, title, what the next title
+/// takes, a thin line of the way to it), and the switch for the notice in worlds with no public 3D picture yet.
+fn explorer(ui: &mut Ui, cx: &Cx) {
+    use crate::controller::explorer as ex;
+    let signed_in = matches!(cx.snap.account.state, AccountState::SignedIn { .. } | AccountState::Offline { username: Some(_) });
+    if signed_in {
+        widgets::separator(ui);
+        let desc = match cx.snap.explorer.points.as_ref() {
+            Some(points) => ex::standing_words(points),
+            None => tr("Shown once Orbiters has said them").to_string(),
+        };
+        let title = cx.snap.explorer.points.as_ref().and_then(|p| p.title.as_ref()).map(ex::title_name);
+        widgets::field(ui, tr(ex::EXPLORER_POINTS), Some(&desc), 160.0, |ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(160.0, 24.0), Sense::hover());
+            let p = ui.painter();
+            if let Some(title) = title.as_ref() {
+                widgets::text(p, pos2(r.right(), r.top() + 4.0), Align2::RIGHT_CENTER, &Txt::new(title, 12.5).weight(weight::SEMIBOLD).color(theme::ACCENT));
+            }
+            if let Some(points) = cx.snap.explorer.points.as_ref() {
+                let track = Rect::from_min_max(pos2(r.left(), r.bottom() - 5.0), pos2(r.right(), r.bottom() - 1.0));
+                p.rect_filled(track, theme::radius(2.0), theme::white(0.10));
+                p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * points.progress(), track.height())), theme::radius(2.0), theme::ACCENT);
+            }
+        });
+    }
+    widgets::separator(ui);
+    let mut on = cx.snap.settings.explorer.world_notices;
+    widgets::field(ui, tr(ex::NOTICES_SWITCH), Some(tr(ex::NOTICES_SWITCH_WHY)), 48.0, |ui| {
+        if widgets::toggle(ui, "explorer-world-notices", &mut on) {
+            cx.ctl.patch_settings(serde_json::json!({ "explorer": { "world_notices": on } }));
         }
     });
 }

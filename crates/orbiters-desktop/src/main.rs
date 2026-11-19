@@ -53,6 +53,7 @@ mod upload_prep;
 mod usage;
 mod views;
 mod wake_offer;
+mod world_notice;
 mod worlds;
 mod window;
 mod words;

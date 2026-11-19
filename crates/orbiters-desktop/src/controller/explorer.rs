@@ -45,9 +45,12 @@ const REMEMBERED: usize = 4000;
 const POINTS_EVERY: Duration = Duration::from_secs(10 * 60);
 
 pub const NOTICE_TITLE: &str = mark("No 3D picture of this world yet");
-pub const NOTICE_WHY: &str = mark("Take one and share it publicly: everyone on Orbiters sees it");
-pub const NOTICE_EARNS: &str = mark("Take one and share it publicly: +1 Explorer point");
+pub const NOTICE_WHY: &str = mark("Be the first to share one publicly");
+pub const NOTICE_EARNS: &str = mark("Be the first to share one publicly: +1 Explorer point");
 pub const TAKE: &str = mark("Take a 3D picture");
+pub const EXPLORER_POINTS: &str = mark("Explorer points");
+pub const NOTICES_SWITCH: &str = mark("Worlds without a 3D picture");
+pub const NOTICES_SWITCH_WHY: &str = mark("When you arrive in a world that has no public 3D picture yet, N4N0 says so once, so you can take the first one.");
 pub const NOT_NOW: &str = mark("Not now");
 
 /// The time now, Unix ms.

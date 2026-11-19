@@ -255,6 +255,9 @@ impl App {
         self.toasts.show(&ctx);
         // "Talk with N4N0?": the wake word heard during a call.
         crate::wake_offer::window(&ctx, &self.ctl, snap.n4n0.voice.wake_offer);
+        // "No 3D picture of this world yet" (REQUEST13), over that card when both are up.
+        let talk_up = crate::wake_offer::up(snap.n4n0.voice.wake_offer, crate::wake_offer::now_ms()).is_some();
+        crate::world_notice::window(&ctx, &self.ctl, snap.explorer.notice.as_ref(), talk_up);
         if splash_on {
             splash(&ctx, full, splash_t);
         }

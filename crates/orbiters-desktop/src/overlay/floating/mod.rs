@@ -160,6 +160,8 @@ pub struct Floating {
     bar_pressed: Option<(BarButton, Instant)>,
     /// Nothing of it shows (the watch off, the panel closed): the last turn put everything away.
     resting: bool,
+    /// When the world notice was last said to be held back behind a menu (once a second at most).
+    notice_held: Option<Instant>,
 }
 
 impl Floating {
@@ -177,6 +179,7 @@ impl Floating {
             width_seen: None,
             bar_pressed: None,
             resting: false,
+            notice_held: None,
         })
     }
 
@@ -218,7 +221,18 @@ impl Floating {
         // "Talk with N4N0?", while the wake word heard during a call has it up.
         let now_ms = crate::wake_offer::now_ms();
         let offer = crate::wake_offer::up(cx.snap.n4n0.voice.wake_offer, now_ms).filter(|_| self.prompt.is_some());
-        if !settings.watch && !strip_on && offer.is_none() && !self.panel.is_shown() && !asked && cx.menu.is_empty() {
+        // Else "No 3D picture of this world yet" (REQUEST13), never over a menu: held back while one is up (its time waits,
+        // a little), and never over SteamVR's dashboard.
+        let notice = cx.snap.explorer.notice.clone().filter(|n| n.up(crate::controller::explorer::now_ms()) && self.prompt.is_some() && offer.is_none());
+        if let Some(n) = notice.as_ref().filter(|_| cx.menu_open || !cx.menu.is_empty() || cx.dashboard || self.panel.is_shown()) {
+            if self.notice_held.is_none_or(|at| now.duration_since(at).as_secs_f32() >= 1.0) {
+                self.notice_held = Some(now);
+                cx.backend.explorer(crate::controller::explorer::Command::NoticeHeld { id: n.id });
+            }
+        }
+        let notice = notice.filter(|_| !cx.menu_open && cx.menu.is_empty() && !cx.dashboard && !self.panel.is_shown());
+        let face = offer.map(prompt::Face::Talk).or(notice.map(prompt::Face::World));
+        if !settings.watch && !strip_on && face.is_none() && !self.panel.is_shown() && !asked && cx.menu.is_empty() {
             if !self.resting {
                 self.rest(cx.overlay, cx.presenter, state, cx.backend);
             }
@@ -259,7 +273,7 @@ impl Floating {
             .flatten();
         let strip = self.strip.as_mut().and_then(|s| s.place(cx.overlay, strip_at, head.as_ref()));
         // Before the eyes, unless SteamVR's dashboard has the controllers.
-        let prompt = self.prompt.as_mut().and_then(|p| p.place(cx.overlay, offer.filter(|_| !cx.dashboard), head.as_ref()));
+        let prompt = self.prompt.as_mut().and_then(|p| p.place(cx.overlay, face.as_ref().filter(|_| !cx.dashboard), head.as_ref()));
 
         // Who points at what.
         let panel_targets = self.panel.targets();
@@ -330,12 +344,15 @@ impl Floating {
                 s.pressed(kind, now);
             }
         }
-        // "Talk with N4N0?": N4N0 listens.
-        if let Some(offer) = offer.filter(|_| outcome.prompt_press) {
+        // "Talk with N4N0?": N4N0 listens. "Take a 3D picture": the picture waits for VRChat's camera (named by the notice's id).
+        if let Some(face) = face.as_ref().filter(|_| outcome.prompt_press) {
             clicked = true;
-            cx.backend.n4n0(crate::ipc::N4n0Command::WakeOffer { accept: true });
+            match face {
+                prompt::Face::Talk(_) => cx.backend.n4n0(crate::ipc::N4n0Command::WakeOffer { accept: true }),
+                prompt::Face::World(n) => cx.backend.explorer(crate::controller::explorer::Command::NoticeTake { id: n.id }),
+            }
             if let Some(p) = self.prompt.as_mut() {
-                p.pressed(cx.overlay, offer);
+                p.pressed(cx.overlay, face);
             }
         }
         // The bar's buttons.
@@ -372,8 +389,12 @@ impl Floating {
         if let Some(s) = self.strip.as_mut() {
             s.paint(cx.overlay, cx.presenter, outcome.strip_hover.and_then(|uv| strip::row_at(uv[1])), now);
         }
-        if let (Some(p), Some(offer)) = (self.prompt.as_mut(), offer) {
-            p.paint(cx.overlay, cx.presenter, outcome.prompt_hover, offer.left(now_ms));
+        if let (Some(p), Some(face)) = (self.prompt.as_mut(), face.as_ref()) {
+            let left = match face {
+                prompt::Face::Talk(o) => o.left(now_ms),
+                prompt::Face::World(n) => n.left(crate::controller::explorer::now_ms()),
+            };
+            p.paint(cx.overlay, cx.presenter, face, outcome.prompt_hover, left);
         }
         turn.clicked = clicked;
         turn

@@ -363,6 +363,8 @@ pub struct View {
     active: usize,
     /// The cube that takes over once its six faces are drawn.
     switching: Option<usize>,
+    /// Cube switches in a row that SteamVR refused a face of (a picture or a show): the cube showing stays ([`commit_switch`]).
+    switch_refusals: u32,
     /// The texture slot each face shows on the active cube.
     shown_slot: [usize; 6],
     drawn: [Drawn; 6],
@@ -440,6 +442,7 @@ impl View {
             cubes: [None; 2],
             active: 0,
             switching: None,
+            switch_refusals: 0,
             shown_slot: [0; 6],
             drawn: [Drawn::default(); 6],
             last_wide: None,
@@ -1257,21 +1260,44 @@ impl View {
                 return;
             }
             let mid = stereo::scale(stereo::add(eyes[0], eyes[1]), 0.5);
+            let before = (self.shown_slot, self.drawn);
+            let mut refused = false;
             for &(f, slot) in faces {
-                if let Some(raw) = side.raw(f * 2 + slot) {
-                    if let Err(code) = overlay.set_texture_d3d11(handles[cube_index][f], raw) {
-                        self.error = Some(tr!("SteamVR refused a 3D world picture (overlay error {code})", code = code));
+                match side.raw(f * 2 + slot) {
+                    Some(raw) => {
+                        if let Err(code) = overlay.set_texture_d3d11(handles[cube_index][f], raw) {
+                            self.error = Some(tr!("SteamVR refused a 3D world picture (overlay error {code})", code = code));
+                            refused = true;
+                        }
                     }
+                    None => refused = true,
                 }
                 self.shown_slot[f] = slot;
                 self.drawn[f] = Drawn { from: Some(mid), count };
             }
             self.wait = side.handed_over();
             if self.switching == Some(cube_index) {
+                // A cube taking over with a face SteamVR did not take would show a stale or blank sector where the cube
+                // showing now is whole: it stays, and the new one is planned again, a few times at most (light-vr A).
+                if !commit_switch(refused, &mut self.switch_refusals) {
+                    (self.shown_slot, self.drawn) = before;
+                    self.abandon(cube_index);
+                    return;
+                }
+                let mut shown = 0;
                 for f in 0..6 {
                     self.published += 1;
                     let _ = overlay.set_alpha(handles[cube_index][f], self.alpha);
-                    let _ = overlay.show(handles[cube_index][f]);
+                    shown += usize::from(overlay.show(handles[cube_index][f]).is_ok());
+                }
+                if shown < 6 && !commit_switch(true, &mut self.switch_refusals) {
+                    // Shown in part: that part goes again, the cube showing stays.
+                    for f in 0..6 {
+                        let _ = overlay.hide(handles[cube_index][f]);
+                    }
+                    (self.shown_slot, self.drawn) = before;
+                    self.abandon(cube_index);
+                    return;
                 }
                 if cube_index != self.active {
                     for f in 0..6 {
@@ -1290,6 +1316,25 @@ impl View {
             let _ = (overlay, cube_index, faces, eyes, count);
         }
     }
+}
+
+/// Cube switches in a row a refused face may hold back before one goes ahead as before (whole or not): a SteamVR that keeps
+/// refusing would otherwise have the whole cube drawn again every turn.
+const SWITCH_REFUSALS_AT_MOST: u32 = 3;
+
+/// Whether a cube switch goes ahead: always when nothing was refused (the count starts again), else only once
+/// [`SWITCH_REFUSALS_AT_MOST`] switches in a row were held back.
+fn commit_switch(refused: bool, refusals: &mut u32) -> bool {
+    if !refused {
+        *refusals = 0;
+        return true;
+    }
+    if *refusals >= SWITCH_REFUSALS_AT_MOST {
+        *refusals = 0;
+        return true;
+    }
+    *refusals += 1;
+    false
 }
 
 /// The overlays of the faces of a view keyed `key`: two cubes of six, made whole or not at all (a set left half made held SteamVR's slots and
@@ -1341,6 +1386,17 @@ fn tracked_head(steamvr: &vr::Client, seconds: f32) -> Pose {
 
 #[cfg(test)]
 mod tests {
+    /// light-vr A: a cube switch with a refused face keeps the cube showing, three times in a row at most; a whole one goes at once.
+    #[test]
+    fn a_refused_face_holds_a_cube_switch_back_a_few_times_at_most() {
+        let mut refusals = 0;
+        assert!(super::commit_switch(false, &mut refusals), "nothing refused: as before");
+        let held: Vec<bool> = (0..5).map(|_| super::commit_switch(true, &mut refusals)).collect();
+        assert_eq!(held, [false, false, false, true, false], "held back three times, then as before, and the count starts again");
+        assert!(super::commit_switch(false, &mut refusals));
+        assert_eq!(refusals, 0);
+    }
+
     use super::*;
     use crate::overlay::slots::fake::{Process, World, ALL};
     use crate::overlay::slots::Slots as _;

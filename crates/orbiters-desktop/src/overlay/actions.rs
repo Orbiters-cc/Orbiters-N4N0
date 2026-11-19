@@ -329,7 +329,7 @@ fn keep_saved_bindings_whole(steamvr: &vr::Client, dir: &Path) {
             // Only a file that is gone is let go (the default applies); one unreadable for now (a Workshop item not downloaded
             // yet, a drive not there, a file in use, an address of another kind) stays the person's choice (OVERLAY-3).
             let autosave = steamvr.setting_string(section, &key("AutosaveURL"));
-            match unreadable_binding(&url, autosave.as_deref(), |p| p.exists()) {
+            match unreadable_binding(&url, autosave.as_deref(), |p| std::fs::exists(p).ok()) {
                 Unreadable::Gone { autosave_too } => {
                     super::vr_log::line(&format!("bindings: SteamVR's saved binding for {controller} is a file that is gone: the default one applies")); // i18n: not shown (a log's line)
                     steamvr.remove_setting(section, &key("CurrentURL"));
@@ -364,20 +364,43 @@ enum Unreadable {
 }
 
 /// [`Unreadable`] for the saved binding at `url` (its `AutosaveURL` beside it), `exists` saying whether a path is there.
-fn unreadable_binding(url: &str, autosave: Option<&str>, exists: impl Fn(&Path) -> bool) -> Unreadable {
+/// `exists`: whether a path is there, `None` when that cannot be told (access denied on a folder on the way, verify2: read as "gone").
+fn unreadable_binding(url: &str, autosave: Option<&str>, exists: impl Fn(&Path) -> Option<bool>) -> Unreadable {
     if url.starts_with("vr-input-workshop://") {
         return Unreadable::Kept("a Workshop binding not downloaded or not readable"); // i18n: not shown (a log's line)
     }
-    let Some(path) = url.strip_prefix("file:///").or_else(|| url.strip_prefix("file://")) else { return Unreadable::Kept("an address of another kind") }; // i18n: not shown (a log's line)
-    let path = Path::new(path);
-    if exists(path) {
-        return Unreadable::Kept("a file that is there but could not be read"); // i18n: not shown (a log's line)
+    let Some(path) = local_file_path(url) else { return Unreadable::Kept("an address of another kind") }; // i18n: not shown (a log's line)
+    let path = Path::new(&path);
+    match exists(path) {
+        Some(false) => {}
+        Some(true) => return Unreadable::Kept("a file that is there but could not be read"), // i18n: not shown (a log's line)
+        None => return Unreadable::Kept("a file that could not be looked at"), // i18n: not shown (a log's line)
     }
     let drive = path.ancestors().last().filter(|root| !root.as_os_str().is_empty());
-    if !drive.is_some_and(|root| exists(root)) {
+    if !drive.is_some_and(|root| exists(root) == Some(true)) {
         return Unreadable::Kept("a file on a drive that is not there"); // i18n: not shown (a log's line)
     }
     Unreadable::Gone { autosave_too: autosave == Some(url) }
+}
+
+/// The path a `file://` address names, its `%XX` escapes decoded (a space is `%20` in SteamVR's addresses); `None` for another kind,
+/// or for an escape that does not decode.
+fn local_file_path(url: &str) -> Option<String> {
+    let raw = url.strip_prefix("file:///").or_else(|| url.strip_prefix("file://"))?;
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// The file a saved binding's address stands for: a Workshop item's (the one file in its folder, under SteamVR's own Steam library) or a file's.
@@ -387,8 +410,7 @@ pub(super) fn saved_binding_file(url: &str, runtime: Option<&Path>) -> Option<Pa
         let folder = library.join("workshop").join("content").join("250820").join(item);
         return std::fs::read_dir(folder).ok()?.filter_map(Result::ok).map(|e| e.path()).find(|p| p.is_file());
     }
-    let path = url.strip_prefix("file:///").or_else(|| url.strip_prefix("file://"))?;
-    Some(PathBuf::from(path))
+    local_file_path(url).map(PathBuf::from)
 }
 
 /// `saved` with the action sets of `ours` that it lacks, the rest as it is: `None` when it lacks none, or when either is not a binding.
@@ -440,6 +462,8 @@ pub struct Actions {
     /// Each hand's trigger (left, right) and how it was at the last read.
     presses: Option<[ActionHandle; 2]>,
     press_down: [bool; 2],
+    /// Each hand's blocked trigger as last read, and since when it could not be read ([`trigger_reading`]).
+    trigger_known: std::cell::Cell<[(bool, Option<std::time::Instant>); 2]>,
     /// Each hand's touchpad and stick for the avatar's input (left, right).
     pads: Option<[HandPads; 2]>,
     /// Each hand's laser (its tip's pose) and grip for the floating panel (left, right).
@@ -553,6 +577,7 @@ impl Actions {
                 taps: Taps::default(),
                 presses: Some(presses),
                 press_down: [false; 2],
+                trigger_known: Default::default(),
                 pads: Some(pads),
                 panel: Some((lasers, grabs)),
                 orbit: Some(orbit),
@@ -567,7 +592,7 @@ impl Actions {
             },
             Err(e) => {
                 eprintln!("SteamVR actions unavailable: {e}");
-                Self { walk: None, menu: None, taps: Taps::default(), presses: None, press_down: [false; 2], pads: None, panel: None, orbit: None, grip: None, blocked: [false; 2], small_view: None, sticks_taken: [false; 2], sets: Vec::new(), failed: Some(e), menu_down: false, laser_kinds: Default::default() }
+                Self { walk: None, menu: None, taps: Taps::default(), presses: None, press_down: [false; 2], trigger_known: Default::default(), pads: None, panel: None, orbit: None, grip: None, blocked: [false; 2], small_view: None, sticks_taken: [false; 2], sets: Vec::new(), failed: Some(e), menu_down: false, laser_kinds: Default::default() }
             }
         }
     }
@@ -615,7 +640,19 @@ impl Actions {
     /// Each hand's trigger held. A hand blocked reads it from the set that takes it (it takes it from this application's lower sets too).
     pub fn orbit_triggers(&self, steamvr: &vr::Client, blocked: [bool; 2]) -> [bool; 2] {
         let (Some(orbit), Ok(input)) = (self.orbit, steamvr.input()) else { return self.press_down };
-        std::array::from_fn(|hand| if blocked[hand] { input.digital(orbit.triggers[hand]).is_ok_and(|d| d.active && d.state) } else { self.press_down[hand] })
+        let mut known = self.trigger_known.get();
+        let now = std::time::Instant::now();
+        let out = std::array::from_fn(|hand| {
+            if !blocked[hand] {
+                return self.press_down[hand];
+            }
+            // A read that failed, or an action not active this frame, says nothing: not a let-go (verify2: a held slider was saved
+            // at a tracking blink, and the next good read looked like a new press).
+            let read = input.digital(orbit.triggers[hand]).ok().filter(|d| d.active).map(|d| d.state);
+            trigger_reading(read, &mut known[hand], now)
+        });
+        self.trigger_known.set(known);
+        out
     }
 
     /// What opens N4N0's menu was done since the last read: `open` pressed (its rising edge; `changed` also catches a
@@ -737,6 +774,24 @@ impl Actions {
     }
 }
 
+/// How long a trigger that cannot be read keeps its last state before it counts as let go (a read lost for good must not hold
+/// VRChat's trigger blocked).
+const TRIGGER_UNKNOWN_HOLDS: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// A blocked trigger now from this read (`None`: unknown) and the last known state, kept in `last`.
+fn trigger_reading(read: Option<bool>, last: &mut (bool, Option<std::time::Instant>), now: std::time::Instant) -> bool {
+    match read {
+        Some(state) => {
+            *last = (state, None);
+            state
+        }
+        None => {
+            let since = *last.1.get_or_insert(now);
+            last.0 && now.saturating_duration_since(since) < TRIGGER_UNKNOWN_HOLDS
+        }
+    }
+}
+
 /// Whether a controller of this SteamVR type points with VRChat's laser as measured on Touch controllers ([`space::VRCHAT_TOUCH_LASER_DOWN_DEG`]).
 /// Measured: `oculus_touch` (the type Quest, Quest Pro and Rift controllers have in SteamVR, through Virtual Desktop, Steam Link or Oculus
 /// Link alike). Not measured, so they keep SteamVR's tip: Index (`knuckles`), Vive wands (`vive_controller`), WMR, Cosmos, Focus 3 and the rest.
@@ -852,6 +907,23 @@ fn pad(position: Option<(f32, f32)>, touch: bool, click: bool, force: Option<f32
 
 #[cfg(test)]
 mod tests {
+    /// verify2 (OVERLAY-25): a held trigger that cannot be read for a moment stays held (no let-go, no new press after it), and counts
+    /// as let go only when it stays unreadable.
+    #[test]
+    fn an_unreadable_trigger_is_not_a_let_go() {
+        use std::time::{Duration, Instant};
+        let t = Instant::now();
+        let mut last = (false, None);
+        assert!(super::trigger_reading(Some(true), &mut last, t));
+        assert!(super::trigger_reading(None, &mut last, t + Duration::from_millis(10)), "a blink: still held");
+        assert!(super::trigger_reading(None, &mut last, t + Duration::from_millis(200)));
+        assert!(super::trigger_reading(Some(true), &mut last, t + Duration::from_millis(220)), "back: the same press, no new edge");
+        assert!(super::trigger_reading(None, &mut last, t + Duration::from_millis(300)));
+        assert!(!super::trigger_reading(None, &mut last, t + Duration::from_millis(560)), "unreadable for good: let go");
+        let mut up = (false, None);
+        assert!(!super::trigger_reading(None, &mut up, t), "unknown while up stays up");
+    }
+
     use super::*;
 
     /// Touch controllers point with VRChat's measured laser; the others keep SteamVR's tip (not measured).
@@ -910,7 +982,7 @@ mod tests {
     #[test]
     fn an_unreadable_saved_binding_is_let_go_only_when_its_file_is_gone() {
         use std::path::Path;
-        let there = |p: &Path| matches!(p.to_str(), Some("C:/") | Some("C:/in-use.json"));
+        let there = |p: &Path| Some(matches!(p.to_str(), Some("C:/") | Some("C:/in-use.json") | Some("C:/My Bindings/x.json")));
         let url = "file:///C:/gone.json";
         assert_eq!(unreadable_binding(url, Some(url), there), Unreadable::Gone { autosave_too: true });
         assert_eq!(unreadable_binding(url, Some("file:///C:/other.json"), there), Unreadable::Gone { autosave_too: false }, "another autosave stays");
@@ -919,6 +991,12 @@ mod tests {
         assert!(matches!(unreadable_binding("file:///E:/binding.json", None, there), Unreadable::Kept(_)), "a drive not there");
         assert!(matches!(unreadable_binding("vr-input-workshop://3830136132", None, there), Unreadable::Kept(_)));
         assert!(matches!(unreadable_binding("steam://something", None, there), Unreadable::Kept(_)));
+        // verify2: what cannot be looked at (access denied on a folder) is not "gone"; an escaped address is the file it names.
+        let denied = |p: &Path| if p.to_str() == Some("C:/") { Some(true) } else { None };
+        assert!(matches!(unreadable_binding(url, Some(url), denied), Unreadable::Kept(_)), "unknown: kept");
+        assert!(matches!(unreadable_binding("file:///C:/My%20Bindings/x.json", None, there), Unreadable::Kept(_)), "the escaped file is there");
+        assert_eq!(super::local_file_path("file:///C:/My%20Bindings/x.json").as_deref(), Some("C:/My Bindings/x.json"));
+        assert_eq!(super::local_file_path("file:///C:/bad%2"), None);
     }
 
     /// With this application's real bindings: the very case that hid the panels in VR.

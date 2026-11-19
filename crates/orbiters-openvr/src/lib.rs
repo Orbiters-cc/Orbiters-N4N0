@@ -335,20 +335,29 @@ pub fn server_running() -> bool {
         unsafe {
             let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return true };
             let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
-            let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+            let no_more = windows::Win32::Foundation::ERROR_NO_MORE_FILES.to_hresult();
+            let mut step = Process32FirstW(snapshot, &mut entry);
             let mut found = false;
-            while more && !found {
+            while step.is_ok() && !found {
                 found = is_server_exe(&entry.szExeFile);
-                more = Process32NextW(snapshot, &mut entry).is_ok();
+                step = Process32NextW(snapshot, &mut entry);
             }
             let _ = windows::Win32::Foundation::CloseHandle(snapshot);
-            found
+            // The list ending is not an error; any other failure says nothing of SteamVR: connect as before (verify2).
+            server_from_list(found, step.err().is_none_or(|e| e.code() == no_more))
         }
     }
     #[cfg(not(windows))]
     {
         true
     }
+}
+
+/// From a walk of the process list: the server seen, or the list read to its end without it (`ended`); a walk that failed on
+/// the way is not a "no" (`true`: connect as before).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn server_from_list(found: bool, ended: bool) -> bool {
+    found || !ended
 }
 
 /// Whether a NUL-terminated UTF-16 executable name is SteamVR's server's, in any case.
@@ -1164,6 +1173,10 @@ mod tests {
         assert!(!super::is_server_exe(&wide("vrserver.exe.bak")));
         assert!(!super::is_server_exe(&wide("vrmonitor.exe")));
         assert!(!super::is_server_exe(&[]));
+        // verify2 (REL-13): a list that could not be read to its end is not "no server".
+        assert!(!super::server_from_list(false, true));
+        assert!(super::server_from_list(false, false));
+        assert!(super::server_from_list(true, true));
         // This test process is not SteamVR's server; whether one runs here is not asked (it may).
         let _ = super::server_running();
     }

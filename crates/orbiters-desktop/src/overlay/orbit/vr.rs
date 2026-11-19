@@ -1244,6 +1244,19 @@ fn pointer_hand(active: Option<usize>, on: [bool; 2], triggers: [bool; 2], was: 
     ([1, 0].into_iter().find(|&i| on[i]), let_go)
 }
 
+/// After handing the sheet's picture over: whether it is still not shown, the damage `changed` kept in `pending` when it was not.
+fn sheet_unshown_after(shown: bool, changed: [u32; 4], pending: &mut Option<[u32; 4]>) -> bool {
+    if !shown {
+        *pending = Some(pending.map_or(changed, |c| [c[0].min(changed[0]), c[1].min(changed[1]), c[2].max(changed[2]), c[3].max(changed[3])]));
+    }
+    !shown
+}
+
+/// Whether a laser on `zone` may point at and press it: not the sheet while its picture is not shown.
+fn sheet_pressable(zone: Zone, sheet_unshown: bool) -> bool {
+    !(sheet_unshown && matches!(zone, Zone::SheetBack | Zone::Takeover | Zone::SheetPeek))
+}
+
 /// Where the `i`-th part of this turn's snapshot goes, and its quad; `None` past the snapshot (never an index out of bounds).
 fn placed_at<'a>(quads: &'a [(Quad, Placed)], placing: &[Placing], i: usize) -> Option<(Matrix34, &'a Quad)> {
     let quad = &quads.get(i)?.0;
@@ -1518,6 +1531,8 @@ pub struct OrbitVr {
     last_shown: bool,
     /// The sheet as one picture: its back with its head, its page on it.
     sheet: SheetPicture,
+    /// The sheet's last picture was not taken by SteamVR: its controls are not pressable until one is.
+    sheet_unshown: bool,
 }
 
 impl Drop for OrbitVr {
@@ -1600,6 +1615,7 @@ impl OrbitVr {
             active: None,
             last_shown: false,
             sheet: SheetPicture::default(),
+            sheet_unshown: false,
         })
     }
 
@@ -1697,6 +1713,11 @@ impl OrbitVr {
     }
 
     /// A turn of the overlay's loop.
+    /// The page painter panicked too often: the session is to end (verify2).
+    pub fn painter_failed(&self) -> bool {
+        self.panels.stage.painter.fatal()
+    }
+
     pub fn update(&mut self, cx: Cx<'_, '_>) -> Turn {
         let camera_opened=cx.snap.camera_open_said==Some(true) && self.camera_was!=Some(true);
         let held=cx.world_status.small_taken;
@@ -2041,6 +2062,7 @@ impl OrbitVr {
         // VRChat's camera panel, while our tools stand around it: a laser by its X is VRChat's alone (`camera_reckon::by_the_close`).
         let camera_panel = self.plane.filter(|_| menu == Some(Around::Camera));
         let mut by_the_x = [false; 2];
+        let sheet_unshown = self.sheet_unshown;
         let hits: [Option<(usize, [f32; 2], space::Hit)>; 2] = std::array::from_fn(|i| {
             // The hand that holds the menu points at nothing.
             if matches!(open, Open::Wheel(h) | Open::QuickMenu(h) if h == i) {
@@ -2049,6 +2071,9 @@ impl OrbitVr {
             lasers[i].and_then(|tip| {
                 let (o, d) = space::ray(&tip);
                 let hit = laser_on(&where_seen, o, d)?;
+                if !sheet_pressable(where_seen[hit.0].1.zone, sheet_unshown) {
+                    return None;
+                }
                 if camera_panel.is_some_and(|c| Zone::CAMERA.contains(&where_seen[hit.0].1.zone) && super::camera_reckon::by_the_close(&c.frame, c.unit, o, d)) {
                     by_the_x[i] = true;
                     return None;
@@ -2292,9 +2317,10 @@ impl OrbitVr {
         }
         if let Some(changed) = self.sheet.changed.take() {
             let handle = part_handle(&mut self.handles, &mut self.refused, overlay, &self.key, Zone::SheetBack);
-            if handle != 0 {
-                presenter.show_part(overlay, handle, self.sheet.pixels(), self.sheet.px[0], self.sheet.px[1], changed);
-            }
+            let shown = handle != 0 && presenter.show_part(overlay, handle, self.sheet.pixels(), self.sheet.px[0], self.sheet.px[1], changed);
+            // Not taken: what changed is kept and handed over again next turn, and until it shows the sheet takes no press (its
+            // controls are the new picture's, what shows is the old one: verify2).
+            self.sheet_unshown = sheet_unshown_after(shown, changed, &mut self.sheet.changed);
         }
         let shown: Vec<Zone> = self.panels.all().map(|p| p.zone).filter(|z| *z != Zone::Takeover).collect();
         for (((quad, _), panel), place) in quads.iter().zip(self.panels.all()).zip(placing) {
@@ -2458,6 +2484,24 @@ mod tests {
         assert_eq!(pointer_hand(Some(0), [true, true], [false, false], [false, false], [false; 2]), (Some(0), None));
         assert_eq!(pointer_hand(None, [true, true], [false, false], [false, false], [false; 2]), (Some(1), None));
         assert_eq!(pointer_hand(Some(0), [false, false], [false, false], [false, false], [false; 2]), (None, None), "no press, nothing to let go");
+    }
+
+    /// verify2: a sheet picture SteamVR did not take keeps its damage for the next turn, and the sheet takes no press until a picture
+    /// is shown; the tiles beside it stay pressable.
+    #[test]
+    fn an_unshown_sheet_keeps_its_damage_and_takes_no_press() {
+        use super::{sheet_pressable, sheet_unshown_after, Zone};
+        let mut pending = None;
+        assert!(sheet_unshown_after(false, [10, 10, 50, 50], &mut pending));
+        assert_eq!(pending, Some([10, 10, 50, 50]));
+        assert!(sheet_unshown_after(false, [0, 20, 30, 80], &mut pending));
+        assert_eq!(pending, Some([0, 10, 50, 80]), "both kept");
+        assert!(!sheet_pressable(Zone::Takeover, true) && !sheet_pressable(Zone::SheetBack, true));
+        assert!(sheet_pressable(Zone::WingWorlds, true), "the side tiles stay pressable");
+        let mut pending = None;
+        assert!(!sheet_unshown_after(true, [0, 0, 1, 1], &mut pending));
+        assert_eq!(pending, None);
+        assert!(sheet_pressable(Zone::Takeover, false));
     }
 
     /// REL-2: the panels as they were at the top of the turn (nine wing parts, the "len is 9" of the panic) and a press that

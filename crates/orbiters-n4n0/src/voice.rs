@@ -139,7 +139,12 @@ impl N4n0 {
 
     pub(crate) fn ask_page(self: &Shared, open: bool) {
         let _lifecycle = self.voice_lifecycle.lock();
-        self.voice_cancel();
+        // Closing the page ends what the page is listening to, never a sentence another holds now (the window's Talk, the
+        // avatar menu's): the microphone is whoever holds Talk now, not who opened the page first (verify2).
+        let someone_else = !open && self.n4n0.lock().unwrap().listening.is_some_and(|(s, _)| matches!(s, Source::Window | Source::Menu | Source::Touch | Source::WakeWord));
+        if !someone_else {
+            self.voice_cancel();
+        }
         {
             let wake = self.with_settings(|s| s.n4n0.wake_word);
             let mut voice = self.voice.lock().unwrap();
@@ -153,7 +158,9 @@ impl N4n0 {
         }
         {
             let mut rt = self.n4n0.lock().unwrap();
-            rt.listening = None;
+            if !someone_else {
+                rt.listening = None;
+            }
             rt.voice.ask_open = open;
             rt.voice.finalizing = false;
             rt.voice.automatic = open;

@@ -95,6 +95,24 @@ fn an_action_earned_by_a_let_go_runs_once_though_the_menu_closed() {
     assert_eq!(runs, 1, "{:?}", heard.said());
 }
 
+/// verify2: two rows let go before the turn that runs them (two clicks between two reads on the desktop, or the other hand's) are
+/// two actions, each once.
+#[test]
+fn two_let_goes_before_a_turn_are_two_actions() {
+    let (mut person, heard) = Person::heard();
+    let snap = person.snap.clone();
+    let p = &mut person.panels;
+    p.open = Some(Around::QuickMenu);
+    for _ in 0..2 {
+        p.drag = Some(super::Drag { from: Some(0.0), scroll: 0.0, action: Some(Action::NewConversation), moved: false, bar: false, speed: 0.0, last: None });
+        p.release();
+    }
+    p.run_pending(&snap);
+    p.run_pending(&snap);
+    let runs = heard.said().iter().filter(|c| c.contains("NewConversation")).count();
+    assert_eq!(runs, 2, "{:?}", heard.said());
+}
+
 impl Person {
     fn new() -> Self {
         let alone = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());

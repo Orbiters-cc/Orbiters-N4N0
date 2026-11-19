@@ -3553,7 +3553,7 @@ impl Panels {
                 // to SteamVR again (OVL2-20: every change of any fact re-uploaded every part's whole texture).
                 let unchanged = same_picture(panel.painted, panel.shown_pixels.as_ref(), &frame.pixels);
                 if !unchanged {
-                    panel.acknowledged = Some(Shown { pixels: panel.shown_pixels.clone(), items: panel.items.clone(), mask: panel.mask.clone(), painted: panel.painted });
+                    panel.acknowledged = Some(Shown { pixels: panel.shown_pixels.clone(), items: panel.items.clone(), mask: panel.mask.clone(), painted: panel.painted, displayed: panel.displayed.clone() });
                 }
                 panel.shown_pixels = Some(frame.pixels); panel.items = frame.items; panel.mask = frame.mask;
                 panel.hover = panel.pointer.and_then(|p| panels::hit(&panel.items, p));
@@ -4079,6 +4079,8 @@ struct Shown {
     items: Vec<Item>,
     mask: Option<std::sync::Arc<Vec<u8>>>,
     painted: bool,
+    /// The facts its controls act on (indexed actions name what they press from these).
+    displayed: Option<Facts>,
 }
 
 /// How long a part whose picture SteamVR did not take waits before it is handed over again.
@@ -4093,6 +4095,7 @@ impl Panel {
             self.items = shown.items;
             self.mask = shown.mask;
             self.painted = shown.painted;
+            self.displayed = shown.displayed;
             self.hover = self.pointer.and_then(|p| panels::hit(&self.items, p));
         }
         self.retry_at = Some(now + PRESENT_RETRY);

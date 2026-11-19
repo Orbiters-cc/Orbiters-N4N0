@@ -478,13 +478,17 @@ mod tests {
         panel.painted = true;
         panel.items = Vec::new();
         // The hand-over, as `paint_async` makes it.
-        panel.acknowledged = Some(super::super::Shown { pixels: panel.shown_pixels.clone(), items: panel.items.clone(), mask: None, painted: true });
+        let facts_shown = Facts { gallery_scroll: 1.0, ..Default::default() };
+        panel.displayed = Some(facts_shown.clone());
+        panel.acknowledged = Some(super::super::Shown { pixels: panel.shown_pixels.clone(), items: panel.items.clone(), mask: None, painted: true, displayed: panel.displayed.clone() });
+        panel.displayed = Some(Facts { gallery_scroll: 2.0, ..Default::default() });
         panel.shown_pixels = Some(new.clone());
         panel.items = panels::items(Zone::WingWorlds, panel.logical, &Facts::default());
         assert!(!panel.items.is_empty());
         panel.not_presented(Instant::now());
         assert!(Arc::ptr_eq(panel.shown_pixels.as_ref().unwrap(), &old), "the picture that shows");
         assert!(panel.items.is_empty(), "and its controls");
+        assert_eq!(panel.displayed.as_ref().map(|f| f.gallery_scroll), Some(1.0), "and the facts they act on");
         assert!(panel.retry_at.is_some(), "the new one is handed over again");
         assert!(!super::super::same_picture(panel.painted, panel.shown_pixels.as_ref(), &new), "and then not taken for shown already");
     }

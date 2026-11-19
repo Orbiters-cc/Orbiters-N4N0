@@ -588,10 +588,11 @@ mod tests {
         let mut frame = |state: &mut State, account: A| {
             snap.account.state = account;
             let mut toasts = orbiters_ui::toast::Toasts::default();
-            let _ = ctx.run_ui(egui::RawInput::default(), |_| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |_| {
                 let cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
                 state.poll(&ctx, &cx);
             });
+            output.textures_delta.clear();
         };
         frame(&mut state, A::SignedIn { username: "x".into() });
         let x = state.account.owner().cloned().expect("x seen");

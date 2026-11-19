@@ -750,12 +750,13 @@ mod tests {
         let f = facts();
         assert!(run(&mut rest, 0.0, MINIMIZED_FOR - 0.2, &f).is_empty(), "not before its time");
         let steps = run(&mut rest, MINIMIZED_FOR - 0.1, MINIMIZED_FOR + COUNTDOWN - 0.15, &f);
-        assert_eq!(kinds(&steps), ["show"], "offered once, at its time");
+        // Offered at its time, then running once the card confirms it on the screen (verify2).
+        assert_eq!(kinds(&steps), ["show", "show"], "offered once, at its time, then started");
         let Step::Show(offer, at) = steps[0] else { unreachable!() };
         assert_eq!(at, Where::Desktop);
         assert_eq!(offer.for_ms, 8_000);
         assert_eq!(offer.seconds((MINIMIZED_FOR * 1000.0) as u64), 8);
-        assert_eq!(kinds(&run(&mut rest, MINIMIZED_FOR + COUNTDOWN + 0.05, MINIMIZED_FOR + COUNTDOWN + 0.2, &f)), ["close"], "after eight seconds");
+        assert_eq!(kinds(&run(&mut rest, MINIMIZED_FOR + COUNTDOWN + 0.05, MINIMIZED_FOR + COUNTDOWN + 0.35, &f)), ["close"], "after eight seconds seen");
     }
 
     #[test]
@@ -779,7 +780,7 @@ mod tests {
         rest.step(MINIMIZED_FOR - 59.0, 0, &Facts { minimized: false, ..f });
         assert!(run(&mut rest, MINIMIZED_FOR - 58.0, 2.0 * MINIMIZED_FOR - 60.0, &f).is_empty(), "the time started again");
         let steps = run(&mut rest, 2.0 * MINIMIZED_FOR - 57.0, 2.0 * MINIMIZED_FOR - 55.0, &f);
-        assert_eq!(kinds(&steps), ["show"]);
+        assert_eq!(kinds(&steps), ["show", "show"], "offered, then started");
         assert_eq!(rest.step(2.0 * MINIMIZED_FOR - 54.0, 0, &Facts { minimized: false, ..f }), Step::Withdraw, "restored during the countdown");
     }
 
@@ -800,7 +801,7 @@ mod tests {
         run(&mut rest, 0.0, MINIMIZED_FOR + 2.0, &f);
         assert_eq!(rest.step(MINIMIZED_FOR + 3.0, 0, &Facts { working: true, ..f }), Step::Withdraw);
         assert!(run(&mut rest, MINIMIZED_FOR + 3.1, MINIMIZED_FOR + 3.0 + AGAIN_AFTER - 0.2, &f).is_empty(), "not again at once");
-        assert_eq!(kinds(&run(&mut rest, MINIMIZED_FOR + 3.0 + AGAIN_AFTER, MINIMIZED_FOR + 3.2 + AGAIN_AFTER, &f)), ["show"]);
+        assert_eq!(kinds(&run(&mut rest, MINIMIZED_FOR + 3.0 + AGAIN_AFTER, MINIMIZED_FOR + 3.2 + AGAIN_AFTER, &f)), ["show", "show"]);
     }
 
     #[test]

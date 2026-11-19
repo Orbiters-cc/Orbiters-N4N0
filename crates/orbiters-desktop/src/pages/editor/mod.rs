@@ -1213,8 +1213,10 @@ mod tests {
         save(&source, &edit, &target, None, &AtomicU32::new(0)).unwrap();
         let info = orbiters_core::visited::read_shot(&target).unwrap();
         assert_eq!((info.world_id.as_deref(), info.world_name.as_deref(), info.taken), (Some("wrld_9"), Some("Lobby"), 1_792_000_000));
-        // Opened again, the copy edits again from the download.
-        assert_eq!(files::reopen(&target).map(|s| (s.source, s.edit)), Some((source, edit)));
+        // Opened again, the copy edits again from the picture its descriptor names (night4, verify2: never the path the
+        // edit kept, which an earlier version may have shared between two pictures).
+        let named = Source { picture: source.remote.as_ref().unwrap().file(), ..source.clone() };
+        assert_eq!(files::reopen(&target).map(|s| (s.source, s.edit)), Some((named, edit)));
         let _ = std::fs::remove_dir_all(dir);
     }
 

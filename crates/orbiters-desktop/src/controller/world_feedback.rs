@@ -321,7 +321,7 @@ impl WorldFeedbackRuntime {
         let parked = self.parked.iter().any(|(stamp, until)| stamp.sends_as(&self.stamp) && now < *until);
         if let Some(i) = self.queue.due_for(now, &self.stamp).filter(|_| !parked) {
             let p = &self.queue.items[i];
-            return Some(Call::Send { world: p.world.clone(), action: p.action.clone(), since: p.since, op: p.op, to: self.stamp.clone() });
+            return Some(Call::Send { world: p.world.clone(), action: p.action.clone(), op: p.op, to: self.stamp.clone() });
         }
         let stale = |k: Option<&Known>| k.is_none_or(|k| now.saturating_sub(k.read_at) > READ_AGAIN.as_millis() as u64);
         let world = self.wanted.keys().find(|w| stale(self.known.get(*w))).cloned()?;
@@ -460,7 +460,7 @@ fn menu_action(ask: &FeedbackAsk) -> Option<(String, Action)> {
 enum Call {
     Read { world: String },
     /// An action waiting: its own number, and the server and account it was made for and goes as.
-    Send { world: String, action: Action, since: u64, op: u64, to: Stamp },
+    Send { world: String, action: Action, op: u64, to: Stamp },
 }
 
 fn perform(call: &Call, api: Option<&(Api, String)>) -> Result<Option<orbiters_core::world_feedback::ServerView>, Failure> {
@@ -952,8 +952,9 @@ mod tests {
         // Two identical actions for two accounts: the answer to B's leaves A's.
         let mut q = Queue::default();
         let b = Stamp { account: Some("2".into()), ..a.clone() };
-        q.push_to(WORLD, Action::Uncomment { comment: 5 }, 7, a.clone());
-        q.push_to(WORLD, Action::Uncomment { comment: 5 }, 7, b.clone());
+        let at = now_ms();
+        q.push_to(WORLD, Action::Uncomment { comment: 5 }, at, a.clone());
+        q.push_to(WORLD, Action::Uncomment { comment: 5 }, at, b.clone());
         rt.queue = q;
         rt.parked.clear();
         rt.set_stamp(b.clone());
@@ -1009,7 +1010,7 @@ mod tests {
         rt.push(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }));
         let read = Call::Read { world: WORLD.into() };
         let p = rt.queue.items[0].clone();
-        let send = Call::Send { world: p.world.clone(), action: p.action.clone(), since: p.since, op: p.op, to: Stamp::default() };
+        let send = Call::Send { world: p.world.clone(), action: p.action.clone(), op: p.op, to: Stamp::default() };
         let before = rt.scope;
         rt.environment_changed();
         let theirs = orbiters_core::world_feedback::ServerView { world_id: WORLD.into(), likes: 41, ..Default::default() };

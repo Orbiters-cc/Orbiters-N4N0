@@ -1199,7 +1199,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orbiters-settings-locked-{}", uuid::Uuid::new_v4()));
         let path = dir.join("settings.json");
         let real = Settings { picture_folders: vec![PathBuf::from("I:/VRChat pics")], storage_limit_gb: 7.0, ..Default::default() };
-        real.save_to(&path).unwrap();
+        // The person's file from an earlier run (written by another process, not this one: a save of this process is
+        // what it knows the file to hold).
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, serde_json::to_string_pretty(&real).unwrap()).unwrap();
         let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
         let loaded = Settings::load_from(&path);
         assert_eq!(loaded, Settings { usage: UsageSettings { enabled: false, ..Default::default() }, ..Default::default() }, "unreadable: the defaults for now, statistics off");

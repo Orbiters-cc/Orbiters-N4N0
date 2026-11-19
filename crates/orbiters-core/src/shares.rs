@@ -814,7 +814,9 @@ mod tests {
     fn a_grantee_gets_a_request_and_never_an_owned_item() {
         let requests: Requests = serde_json::from_str(include_str!("../tests/fixtures/capture-requests.json")).unwrap();
         let (api, request) = server(202, serde_json::json!({"request":requests.requests[0]}).to_string());
-        let result = api.share_capture("fixture", Kind::Capture, 123, &Share { public: true, ..Default::default() }).unwrap();
+        // The share asked is the one the fixture's request names (Robin, not public): its answer is taken as it is.
+        let asked = Share { recipients: requests.requests[0].recipients.clone(), ..Default::default() };
+        let result = api.share_capture("fixture", Kind::Capture, 123, &asked).unwrap();
         assert!(matches!(result, Shared::Request { .. }));
         request.join().unwrap();
     }

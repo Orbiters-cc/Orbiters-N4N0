@@ -317,6 +317,12 @@ impl Stamp {
         self.server == now.server
             && ((self.account.is_some() && self.account == now.account) || (self.credential.is_some() && self.credential == now.credential))
     }
+
+    /// Whether an action made for `self` shows as waiting to `now`: one that may go as `now`, or one made for exactly
+    /// `now` (a press while nobody is signed in shows as waiting there, and is still never sent as anybody).
+    pub fn shows_as(&self, now: &Stamp) -> bool {
+        self == now || self.sends_as(now)
+    }
 }
 
 /// The actions waiting, oldest first, kept in a file of their own.
@@ -439,7 +445,7 @@ impl Queue {
 
     /// The actions that may go out as `now` ([`Stamp::sends_as`]): what this server and account show as waiting.
     pub fn for_stamp(&self, now: &Stamp) -> Queue {
-        Queue { items: self.items.iter().filter(|p| p.to.as_ref().is_some_and(|to| to.sends_as(now))).cloned().collect() }
+        Queue { items: self.items.iter().filter(|p| p.to.as_ref().is_some_and(|to| to.shows_as(now))).cloned().collect() }
     }
 
     /// The action at `i` failed for now: tried again after 2, 4, 8 … seconds (at most a minute), dropped after a day.

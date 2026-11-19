@@ -353,6 +353,43 @@ def blocking(foreign):
     foreign=list(foreign)
     return foreign if any(p['name'].lower()!='vrchat.exe' for p in foreign) else []
 
+def restore_policy(entry):
+    """'always' (the sandbox changes it), 'test_app' (only a test program of the session can have changed it: the installed
+    app's own SteamVR driver folder) or 'keep' (journalled, never put back: Steam's app manifest, which the Steam client
+    rewrites, SBX-9). Older journals have no policy: it follows from the path."""
+    if entry.get('policy'):return entry['policy']
+    path=Path(entry['path'])
+    if path.name=='steamapps.vrmanifest':return 'keep'
+    if entry['tree'] and path.name=='SteamVR' and path.parent.name=='Orbiters':return 'test_app'
+    return 'always'
+
+def kept_reason(entry,j):
+    policy=restore_policy(entry)
+    if policy=='keep':return 'never put back (written by the Steam client, not the sandbox)'
+    if policy=='test_app' and not j.get('app_test_exe'):
+        return "no test program ran in this session: the installed app's own version is kept"
+    return ''
+
+def restore_tree(entry,path,saved):
+    """Puts a folder back as it was, only when it changed, and never half: the backup is copied beside it and verified,
+    then the current folder is renamed away and the copy renamed in (SBX-9). 'unchanged' when nothing differed."""
+    if entry['exists'] and path.is_dir() and (entry.get('tree_sha256') or tree_sha256(saved))==tree_sha256(path):return 'unchanged'
+    if not entry['exists'] and not path.exists():return 'unchanged'
+    new,old=path.with_name(path.name+'.sandbox-restore'),path.with_name(path.name+'.sandbox-old')
+    for leftover in (new,old):
+        if leftover.exists():shutil.rmtree(leftover)
+    if entry['exists']:
+        shutil.copytree(saved,new)
+        if tree_sha256(new)!=(entry.get('tree_sha256') or tree_sha256(saved)):
+            shutil.rmtree(new,ignore_errors=True);raise RuntimeError('Restore tree hash mismatch: '+str(path))
+    try:
+        if path.exists():os.replace(path,old)
+    except OSError:
+        shutil.rmtree(new,ignore_errors=True);raise
+    if entry['exists']:os.replace(new,path)
+    shutil.rmtree(old,ignore_errors=True)
+    return 'restored'
+
 def restore_contents(j):
     # Only stop exact process identities recorded by this session. Refuse a foreign VR session.
     owned = {(p['pid'], p['create_time']) for p in j['processes']}
@@ -391,20 +428,17 @@ def restore_contents(j):
     # Every backup is checked before anything is overwritten (SBX-5): a damaged one is never copied over a real file. The
     # sound ones are still put back; the journal stays unrestored and says which one needs a person.
     damaged={entry['path']:problem for entry in j['files'] if (problem:=backup_problem(entry))}
-    clients={}
+    clients={};kept={}
     for entry in j['files']:
         path, saved = Path(entry['path']), Path(entry['backup'])
         if entry['path'] in damaged:
             continue
         if client_kind(entry):
             clients[entry['path']]=restore_client(entry,j)
+        elif (why:=kept_reason(entry,j)):
+            kept[entry['path']]=why
         elif entry['tree']:
-            expected=tree_hashes(saved) if entry['exists'] else {}
-            if path.exists():
-                shutil.rmtree(path)
-            if entry['exists']:
-                shutil.copytree(saved, path)
-                if tree_hashes(path)!=expected:raise RuntimeError('Restore tree hash mismatch: '+str(path))
+            if restore_tree(entry,path,saved)=='unchanged':kept[entry['path']]='unchanged since the backup'
         elif entry['exists']:
             # Beside the target, flushed and verified, then renamed over it: the real file is never half written.
             tmp=path.with_name(path.name+'.sandbox-restore')
@@ -427,7 +461,7 @@ def restore_contents(j):
     # Do not release somebody else's lock.
     if LOCK.exists() and json.loads(LOCK.read_text())['session'] == j['session']:
         LOCK.unlink()
-    return {'restored': True, 'verified_files': len(j['files']), 'leftover_dead_pids': warnings, 'client_files': clients}
+    return {'restored': True, 'verified_files': len(j['files']), 'leftover_dead_pids': warnings, 'client_files': clients, 'kept': kept}
 
 def note_unrestored(session, why, by):
     """A dead session could not be restored: a dated line in orphan.log and RESTORE-NEEDED.txt saying why and what heals
@@ -623,6 +657,7 @@ class Session:
             backup(self.j, path)
         for path in [STEAM/'config/vrappconfig', LOCAL/'Orbiters/SteamVR']:
             backup(self.j, path, tree=True)
+        for entry in self.j['files']:entry['policy']=restore_policy(entry)
         atomic_json(JOURNAL, self.j)
         # Each backup folder describes itself: what it holds survives a lost journal (SBX-15).
         atomic_json(ROOT/'backup'/'journal.json', {k:v for k,v in self.j.items() if k!='token'})

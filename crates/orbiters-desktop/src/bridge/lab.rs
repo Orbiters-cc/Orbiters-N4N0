@@ -105,6 +105,8 @@ struct State {
     joining: Option<(Instant, String, String)>,
     /// A VRChat somebody else started: no window of ours.
     foreign: bool,
+    /// The running VRChat's command line, as its log lists it.
+    args: Option<Vec<String>>,
     foreground: bool,
     /// When the player exists in the world it is loading.
     player_from: Option<Instant>,
@@ -222,6 +224,8 @@ impl LabGame {
         let mut state = self.state.lock().unwrap();
         state.foreign = instance.is_some();
         state.pid = instance.map(|_| 4242);
+        // Started by the person: their own arguments, no launch link of the bridge's.
+        state.args = instance.map(|_| vec!["VRChat.exe".to_string(), "--no-vr".to_string()]);
         drop(state);
         if let Some(instance) = instance {
             self.new_log();
@@ -352,6 +356,7 @@ impl LabGame {
         let mut state = self.state.lock().unwrap();
         state.window = Some(window);
         state.pid = Some(std::process::id());
+        state.args = Some(plan.args());
         state.player_from = Some(Instant::now() + state.behaviour.load + state.behaviour.player_after);
         state.joining = (!state.behaviour.never_arrives).then(|| (Instant::now() + state.behaviour.load, plan.world_id.clone(), plan.instance.clone()));
         drop(state);
@@ -532,6 +537,11 @@ impl Game for LabGame {
             state.player_from = Some(Instant::now() + load + state.behaviour.player_after);
         }
         Ok(())
+    }
+
+    fn launch_args(&self) -> Option<Vec<String>> {
+        let state = self.state.lock().unwrap();
+        state.args.clone().filter(|_| state.pid.is_some())
     }
 
     fn window(&self, pid: u32) -> Option<GameWindow> {

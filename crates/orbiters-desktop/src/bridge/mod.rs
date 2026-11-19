@@ -154,6 +154,11 @@ pub(crate) struct Going {
 pub(crate) struct Run {
     /// The VRChat the bridge started: only that one is ever acted on. A VRChat somebody else started is theirs.
     pub pid: Option<u32>,
+    /// `pid` is only the main session's candidate: the first VRChat seen after its launch, which may be the person's
+    /// own started at the same moment (a new process proves nothing). It becomes the bridge's once it arrives in the
+    /// private instance made for this start (nobody else knows that instance); until then nothing is sent to it, and
+    /// it is never closed: a candidate that turns up elsewhere, or not at all, is let go, left alone.
+    pub candidate: bool,
     pub going: Option<Going>,
     /// The bridge itself is closing the game: its going away is no news.
     pub closing: bool,
@@ -531,6 +536,9 @@ impl Bridge {
                 let mut run = session.run.lock().unwrap();
                 // A side session's VRChat stays the bridge's, to be closed by close_session: only what runs ends.
                 let pid = if session.is_main() { run.pid.take() } else { run.pid };
+                if session.is_main() {
+                    run.candidate = false;
+                }
                 (pid.is_some(), run.going.take().is_some())
             };
             if was_going {

@@ -115,6 +115,12 @@ impl RealGame {
 }
 
 impl Game for RealGame {
+    fn launch_args(&self) -> Option<Vec<String>> {
+        let ctl = self.ctl().ok()?;
+        let log = ctl.view().vrchat.world.log_file.clone()?;
+        crate::bridge::sessions::complete_args(&read_head(&log, LOG_HEAD))
+    }
+
     fn seen(&self) -> Seen {
         let Ok(ctl) = self.ctl() else { return Seen::default() };
         let snap = ctl.view();

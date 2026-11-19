@@ -786,6 +786,39 @@ fn a_vrchat_the_person_started_is_left_alone() {
 }
 
 #[test]
+fn a_vrchat_the_person_starts_while_the_bridge_s_start_hangs_is_never_taken_nor_closed() {
+    // N4N0-8: the bridge's launch does not come up, and the person starts their own VRChat meanwhile: a new process
+    // proves nothing. Theirs lands at their home, not in the instance made for the start: it is let go, never closed.
+    let (game, _bridge, _server, client) = lab("person-starts");
+    game.set_behaviour(|b| b.launch_hangs = true);
+    let person = game.clone();
+    let theirs = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        person.set_foreign_game(Some("77777~region(eu)"));
+    });
+    let failure = client.fails("go_to_world", json!({ "world_id": LAB_WORLD_A }), "start_timeout");
+    theirs.join().unwrap();
+    assert!(failure["message"].as_str().unwrap().contains("left it alone"), "{failure}");
+    assert_eq!(game.closes(), 0);
+    let state = client.state();
+    assert_eq!(state["vrchat"]["started_by_bridge"], false, "{state}");
+    for (tool, args) in [("close_vrchat", json!({})), ("walk", json!({ "direction": "forward", "seconds": 1 })), ("screenshot", json!({}))] {
+        client.fails(tool, args, "not_started_by_bridge");
+    }
+    assert!(!game.heard().iter().any(|(h, _)| h.address.starts_with("/input/")), "not one input went to it");
+}
+
+#[test]
+fn the_bridge_s_own_start_that_lands_elsewhere_is_still_closed() {
+    // N4N0-8: its own VRChat is told by its command line (the start's launch link), so leaving a public instance at once
+    // stays as it was.
+    let (game, _bridge, _server, client) = lab("own-elsewhere");
+    game.set_behaviour(|b| b.land_in = Some("12345~region(eu)".to_string()));
+    client.fails("go_to_world", json!({ "world_id": LAB_WORLD_A }), "landed_elsewhere");
+    assert!(game.closes() >= 1);
+}
+
+#[test]
 fn failures_say_what_happened_and_what_to_do() {
     let (game, _bridge, _server, client) = lab_giving_up("failures");
     client.fails("walk", json!({ "direction": "forward", "seconds": 1 }), "vrchat_not_running");

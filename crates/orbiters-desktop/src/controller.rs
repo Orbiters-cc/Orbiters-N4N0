@@ -1493,19 +1493,11 @@ impl Controller {
     /// Current values from VRChat's OSCQuery service (empty when it is not running or not found). The request runs
     /// without the OSC lock: camera and kit messages, and the watchers, never wait for VRChat's answer.
     fn vrchat_values(&self) -> Vec<(String, OscValue)> {
-        let query = self.with_osc(|o| o.vrchat_query());
-        let result = match query {
-            None => return Vec::new(),
-            Some(None) => Err(anyhow::anyhow!("VRChat's OSCQuery service was not found")), // i18n: not shown (logged as "current OSC values")
-            Some(Some(addr)) => orbiters_core::osc::vrchat_values(addr, Duration::from_secs(1)),
-        };
-        let mut values = result.unwrap_or_else(|e| {
-            eprintln!("current OSC values: {e:#}");
-            Vec::new()
-        });
+        let (query, mut values) = self.vrchat_avatar_values();
+        let Some(query) = query else { return values };
         // The camera's state, which recording changes and puts back: from VRChat's tree, else from what VRChat
         // sent when it last changed.
-        let camera = query.flatten().map(|addr| orbiters_core::osc::vrchat_camera_values(addr, Duration::from_millis(500))).unwrap_or_default();
+        let camera = query.map(|addr| orbiters_core::osc::vrchat_camera_values(addr, Duration::from_millis(500))).unwrap_or_default();
         if camera.iter().any(|(p, _)| p == CAMERA_MODE) {
             values.extend(camera);
         } else {
@@ -1517,6 +1509,22 @@ impl Controller {
             }
         }
         values
+    }
+
+    /// VRChat's `/avatar` tree alone, and where its OSCQuery answers (`None` outside: no OSC; `Some(None)`: not found).
+    /// The kit probe asks only this: the camera's tree beside it was a second request every 2 s for nothing (CTL-10).
+    pub(super) fn vrchat_avatar_values(&self) -> (Option<Option<std::net::SocketAddr>>, Vec<(String, OscValue)>) {
+        let query = self.with_osc(|o| o.vrchat_query());
+        let result = match query {
+            None => return (None, Vec::new()),
+            Some(None) => Err(anyhow::anyhow!("VRChat's OSCQuery service was not found")), // i18n: not shown (logged as "current OSC values")
+            Some(Some(addr)) => orbiters_core::osc::vrchat_values(addr, Duration::from_secs(1)),
+        };
+        let values = result.unwrap_or_else(|e| {
+            eprintln!("current OSC values: {e:#}");
+            Vec::new()
+        });
+        (query, values)
     }
 
     /// Sends the waiting OSC samples to the worker. Callers hold the values lock, which keeps batches in order.
@@ -3926,6 +3934,38 @@ mod tests {
             }
         });
         addr
+    }
+
+    /// CTL-10: the kit probe (every keeper turn while VRChat runs) asks VRChat for its avatar's tree only, not for its
+    /// camera's as well.
+    #[test]
+    fn the_kit_probe_asks_for_the_avatar_tree_only() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = asked.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let line = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or_default().to_string();
+                log.lock().unwrap().push(line);
+                let body = r#"{"FULL_PATH":"/avatar","CONTENTS":{"parameters":{"FULL_PATH":"/avatar/parameters","CONTENTS":{"VRCEmote":{"FULL_PATH":"/avatar/parameters/VRCEmote","TYPE":"i","VALUE":[0]}}}}}"#;
+                let _ = write!(stream, "HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+{}", body.len(), body);
+            }
+        });
+        let ctl = Controller::new(Settings::default());
+        ctl.start_osc_with(false);
+        ctl.with_osc(|o| o.set_vrchat_query(Some(addr)));
+        let _ = ctl.worn_avatar_has_kit();
+        let asked = asked.lock().unwrap().clone();
+        assert!(!asked.is_empty(), "the avatar's tree was asked for");
+        assert!(asked.iter().all(|l| !l.contains("/usercamera")), "{asked:?}");
     }
 
     fn vrchat_tree(record: Arc<AtomicBool>) -> std::net::SocketAddr {

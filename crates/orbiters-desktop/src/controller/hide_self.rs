@@ -223,7 +223,8 @@ pub(crate) fn kit_in(vrchat: &[(String, OscValue)]) -> Option<bool> {
 impl super::Controller {
     /// Whether the avatar worn has N4N0's capture kit, as VRChat's tree says: `None` when it does not say.
     pub(crate) fn worn_avatar_has_kit(&self) -> Option<bool> {
-        avatar_support(&self.vrchat_values()).0
+        // The avatar's tree is all it reads: not the camera's (CTL-10).
+        avatar_support(&self.vrchat_avatar_values().1).0
     }
 
     /// The mask as VRChat last said it: what it sent since, else what its tree said at the start.

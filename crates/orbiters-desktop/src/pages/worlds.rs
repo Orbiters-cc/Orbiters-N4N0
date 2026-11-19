@@ -53,6 +53,8 @@ struct Open {
 
 #[derive(Default)]
 pub struct State {
+    /// The text searched for at the last frame ([`super::new_search`]).
+    searched: Option<String>,
     sharing: Option<super::sharing::Dialog>,
     share_prepare: Job<Vec<crate::controller::shares::Entry>>,
     share_public: bool,
@@ -361,7 +363,11 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
     let from = orbiters_ui::blur::next_shape(ui);
     let mut gu = ui.new_child(UiBuilder::new().max_rect(page).id_salt("worlds-grid"));
     gu.multiply_opacity(shown);
-    egui::ScrollArea::vertical().id_salt("worlds").auto_shrink([false, false]).scroll_bar_rect(below_head).show(&mut gu, |ui| {
+    let mut scroll = egui::ScrollArea::vertical().id_salt("worlds");
+    if super::new_search(&mut state.searched, &q) {
+        scroll = scroll.vertical_scroll_offset(0.0);
+    }
+    scroll.auto_shrink([false, false]).scroll_bar_rect(below_head).show(&mut gu, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 32 }).show(ui, |ui| {
             ui.add_space(grid_top - page.top());
             let w = ui.available_width();

@@ -137,6 +137,19 @@ pub fn under_top(ui: &Ui, cx: &Cx, name: &'static str, from: egui::layers::Shape
     }
 }
 
+/// Whether the text searched for differs from the last frame's (`last`, kept by the page): a new search starts at the
+/// top of its results (Night PAGES-UI-24: scrolled down, a page kept its place and showed the end of the results).
+/// The first frame is no new search; results arriving for the same search are none either.
+pub fn new_search(last: &mut Option<String>, query: &str) -> bool {
+    let query = query.trim();
+    if last.as_deref() == Some(query) {
+        return false;
+    }
+    let fresh = last.is_some();
+    *last = Some(query.to_owned());
+    fresh
+}
+
 /// Follows the account for what a page asked Orbiters for it: WHO it is, not how its check with Orbiters is going.
 /// `Checking`, `Offline` and `SignedIn` of the same name are the same person (the check runs again every minute while
 /// Orbiters cannot be reached, and whenever a tool rewrites the saved account): what was shown for them stays. Another
@@ -539,6 +552,18 @@ pub(crate) mod rest {
 mod tests {
     use super::*;
     use orbiters_i18n::{in_language, Language};
+
+    /// Night PAGES-UI-24: only a change of the text is a new search.
+    #[test]
+    fn a_new_search_is_a_change_of_its_text() {
+        let mut last = None;
+        assert!(!new_search(&mut last, ""), "the first frame");
+        assert!(!new_search(&mut last, " "), "the same, trimmed");
+        assert!(new_search(&mut last, "w"));
+        assert!(!new_search(&mut last, "w"), "results coming for it");
+        assert!(new_search(&mut last, "wo"));
+        assert!(new_search(&mut last, ""), "cleared");
+    }
 
     /// Night PAGES-UI-16: a job whose work panics ends (not "running" for ever), wakes its page and says so once.
     #[test]

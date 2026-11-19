@@ -198,6 +198,8 @@ struct Picker {
 
 #[derive(Default)]
 pub struct State {
+    /// The text searched for at the last frame ([`super::new_search`]).
+    searched: Option<String>,
     history: Option<Arc<History>>,
     loading: Job<(History, Option<SystemTime>)>,
     /// The file's time when it was read.
@@ -498,7 +500,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         Shown::History => "history".to_string(),
         Shown::List(id) => id.clone(),
     };
-    egui::ScrollArea::vertical().id_salt(("videos", salt)).auto_shrink([false, false]).scroll_bar_rect(below).show(ui, |ui| {
+    let mut scroll = egui::ScrollArea::vertical().id_salt(("videos", salt));
+    if super::new_search(&mut state.searched, &state.query.to_lowercase()) {
+        scroll = scroll.vertical_scroll_offset(0.0);
+    }
+    scroll.auto_shrink([false, false]).scroll_bar_rect(below).show(ui, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 40 }).show(ui, |ui| {
             ui.add_space(content_top - page.top());
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);

@@ -82,6 +82,8 @@ struct Instance {
 
 #[derive(Default)]
 pub struct State {
+    /// The text searched for at the last frame ([`super::new_search`]).
+    searched: Option<String>,
     folders: folders::State,
     requests: super::requests::State,
     hash_job: Job<std::collections::HashMap<std::path::PathBuf, String>>,
@@ -802,7 +804,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         }
     }
     let mut scroll = egui::ScrollArea::vertical().id_salt("photos-captures");
-    if let Some(offset) = anchored_scroll_offset(state.scroll_offset, state.scroll_anchor.as_ref().map(|(key, _)| key.as_str()), &state.layout_positions, &positions) {
+    // A new search starts at the top of its results (not held at the picture that was in view).
+    if super::new_search(&mut state.searched, &q) {
+        scroll = scroll.vertical_scroll_offset(0.0);
+    } else if let Some(offset) = anchored_scroll_offset(state.scroll_offset, state.scroll_anchor.as_ref().map(|(key, _)| key.as_str()), &state.layout_positions, &positions) {
         scroll = scroll.vertical_scroll_offset(offset);
     }
     let output = scroll

@@ -88,6 +88,8 @@ struct Import {
 
 #[derive(Default)]
 pub struct State {
+    /// The text searched for at the last frame ([`super::new_search`]).
+    searched: Option<String>,
     gallery: super::gallery::State,
     manage: bool,
     loaded: Option<(u64, PathBuf, u64)>,
@@ -322,7 +324,11 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let filtered: &[usize] = state.shown.as_ref().map(|(_, v)| v.as_slice()).unwrap_or_default();
     let sessions = state.sessions.as_deref().unwrap_or_default();
     let mut clicked: Option<(PathBuf, Rect)> = None;
-    egui::ScrollArea::vertical().id_salt("sessions").auto_shrink([false, false]).scroll_bar_rect(below_head).show(&mut gu, |ui| {
+    let mut scroll = egui::ScrollArea::vertical().id_salt("sessions");
+    if super::new_search(&mut state.searched, &q) {
+        scroll = scroll.vertical_scroll_offset(0.0);
+    }
+    scroll.auto_shrink([false, false]).scroll_bar_rect(below_head).show(&mut gu, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 32 }).show(ui, |ui| {
             ui.add_space(grid_top - grid_rect.top());
             let w = ui.available_width();

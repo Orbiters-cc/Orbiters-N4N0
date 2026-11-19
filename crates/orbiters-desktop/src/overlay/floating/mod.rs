@@ -153,6 +153,35 @@ const STEPS: f32 = 60.0;
 /// And the world notices' ([`crate::world_notice`], REQUEST13), which count from 1 too.
 const NOTICE_BIT: u64 = 1 << 60;
 
+/// What has the band, one at a time, in this order when several are up: "Talk with N4N0?", a friend's offer to look at a
+/// 3D picture together, the share chip's friend picker, Keep open (the window's countdown), then the world notice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BandOffer {
+    Talk(u64),
+    Share(u64),
+    Pick(u64),
+    Rest(u64),
+    Notice(u64),
+}
+
+impl BandOffer {
+    /// The first of those up.
+    fn first(talk: Option<u64>, share: Option<u64>, pick: Option<u64>, rest: Option<u64>, notice: Option<u64>) -> Option<Self> {
+        talk.map(Self::Talk).or(share.map(Self::Share)).or(pick.map(Self::Pick)).or(rest.map(Self::Rest)).or(notice.map(Self::Notice))
+    }
+
+    /// Its id on the band: each kind counts from 1 under a top bit of its own, so two kinds never share an id.
+    fn id(self) -> u64 {
+        match self {
+            Self::Talk(id) => id,
+            Self::Share(id) => id | SHARE_BIT,
+            Self::Pick(id) => id | PICK_BIT,
+            Self::Rest(id) => id | REST_BIT,
+            Self::Notice(id) => id | NOTICE_BIT,
+        }
+    }
+}
+
 /// What the band has to tell the service of the window's offer it shows (`showing`: now), given what it last said:
 /// `Some(what)` when that changed, then remembered as said.
 fn band_says(said: &mut Option<u64>, showing: Option<u64>) -> Option<Option<u64>> {
@@ -256,7 +285,7 @@ impl Floating {
         // Or, the band free, "Orbiters - N4N0 will minimize to save memory" with Keep open (`crate::window_rest`).
         let rest = cx.snap.window_rest.offer.filter(|o| offer.is_none() && share_offer.is_none() && pick.is_none() && self.prompt.is_some() && cx.snap.window_rest.kept != Some(o.id));
         // The band's ids: a wake offer's, a share offer's, a picker's, or a rest offer's, each kind with its top bit (all count from 1).
-        let band = offer.map(|o| o.id).or(share_offer.as_ref().map(|o| o.id | SHARE_BIT)).or(pick.map(|p| p.id | PICK_BIT)).or(rest.map(|o| o.id | REST_BIT));
+        let band = BandOffer::first(offer.map(|o| o.id), share_offer.as_ref().map(|o| o.id), pick.map(|p| p.id), rest.map(|o| o.id), None).map(BandOffer::id);
         // Or, the band still free, "No 3D picture of this world yet" (REQUEST13), never over a menu, our panel or SteamVR's
         // dashboard: held back while one is up (its time waits, a little).
         let notice = cx.snap.explorer.notice.clone().filter(|n| n.up(crate::controller::explorer::now_ms()) && band.is_none() && self.prompt.is_some());
@@ -268,7 +297,7 @@ impl Floating {
             }
         }
         let notice = notice.filter(|_| !in_the_way);
-        let band = band.or(notice.as_ref().map(|n| n.id | NOTICE_BIT));
+        let band = band.or(notice.as_ref().map(|n| BandOffer::Notice(n.id).id()));
         // The band at the size of what it shows: the world notice is taller; every other face is "Talk with N4N0?"'s size.
         if let (Some(p), Some(n)) = (self.prompt.as_mut(), notice.as_ref()) {
             p.fit(cx.overlay, prompt::Face::World { earns_one: n.earns == Some(1.0) });
@@ -319,7 +348,7 @@ impl Floating {
         let prompt = self.prompt.as_mut().and_then(|p| p.place(cx.overlay, band.filter(|_| !cx.dashboard), head.as_ref()));
         // The window counts down only while the band is before the eyes showing its offer: said each time that changes,
         // both ways (hidden by SteamVR's dashboard, replaced by "Talk with N4N0?", gone), never once for good (SWEEP-7).
-        let showing = rest.filter(|o| self.prompt.as_ref().is_some_and(|p| p.showing(o.id | REST_BIT))).map(|o| o.id);
+        let showing = rest.filter(|o| self.prompt.as_ref().is_some_and(|p| p.showing(BandOffer::Rest(o.id).id()))).map(|o| o.id);
         if let Some(said) = band_says(&mut self.rest_said, showing) {
             cx.backend.window_rest_shown(said);
         }
@@ -407,7 +436,7 @@ impl Floating {
                 clicked = true;
                 cx.backend.shared_view(crate::ipc::SharedViewCommand::Answer { id: o.id, accept });
                 if let Some(p) = self.prompt.as_mut() {
-                    p.pressed(cx.overlay, o.id | SHARE_BIT);
+                    p.pressed(cx.overlay, BandOffer::Share(o.id).id());
                 }
             }
         }
@@ -418,7 +447,7 @@ impl Floating {
                 cx.backend.shared_view(crate::ipc::SharedViewCommand::Share { contact: friend.id.clone(), capture: pk.capture, revision: pk.revision, reach: pk.reach, moved: pk.moved });
                 crate::shared_view_ui::clear_pick();
                 if let Some(p) = self.prompt.as_mut() {
-                    p.pressed(cx.overlay, pk.id | PICK_BIT);
+                    p.pressed(cx.overlay, BandOffer::Pick(pk.id).id());
                 }
             }
         }
@@ -430,7 +459,7 @@ impl Floating {
             clicked = true;
             cx.backend.explorer(crate::controller::explorer::Command::NoticeTake { id });
             if let Some(p) = self.prompt.as_mut() {
-                p.pressed(cx.overlay, id | NOTICE_BIT);
+                p.pressed(cx.overlay, BandOffer::Notice(id).id());
             }
         }
         clicked |= outcome.prompt_press && shown.is_some();
@@ -439,7 +468,7 @@ impl Floating {
             clicked = true;
             cx.backend.keep_window_open(o.id);
             if let Some(p) = self.prompt.as_mut() {
-                p.pressed(cx.overlay, o.id | REST_BIT);
+                p.pressed(cx.overlay, BandOffer::Rest(o.id).id());
             }
         }
         // The bar's buttons.
@@ -563,6 +592,45 @@ pub fn notice_release(down: &mut Option<u64>, shown: Option<u64>, pulled: bool, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every kind of offer on the band in turn (night4/window and explorer-app together): one at a time in the band's
+    /// order, each under an id of its own, Keep open counted only while it shows, the world notice only when the band is
+    /// free of the four before it and acting on the let-go on it, and each one withdrawn leaving the band to the next.
+    /// (The pulls and releases of Talk, Keep open, the friend's offer and the picker, and SteamVR's own confirmation of
+    /// the picture, are in `Floating::update` and `prompt.rs`'s own test.)
+    #[test]
+    fn every_offer_on_the_band_keeps_its_own_rules() {
+        use BandOffer::*;
+        // One number for all five kinds: their ids never meet.
+        let all = [Talk(7), Share(7), Pick(7), Rest(7), Notice(7)];
+        let ids: std::collections::BTreeSet<u64> = all.iter().map(|o| o.id()).collect();
+        assert_eq!(ids.len(), all.len(), "{ids:?}");
+        // In turn: with a kind and those after it up, that kind has the band; all withdrawn, the band is free.
+        for (i, kind) in all.iter().enumerate() {
+            let up = |k: usize| (k >= i).then_some(7u64);
+            assert_eq!(BandOffer::first(up(0), up(1), up(2), up(3), up(4)), Some(*kind), "with {kind:?} and those after it up");
+        }
+        assert_eq!(BandOffer::first(None, None, None, None, None), None, "all withdrawn: the band is free");
+        // Keep open: the window counts down only while the band shows it; any kind before it replaces it, and it says so.
+        let rest_showing = |band: Option<BandOffer>| band.and_then(|b| matches!(b, Rest(_)).then_some(7));
+        let mut said = None;
+        assert_eq!(band_says(&mut said, rest_showing(BandOffer::first(None, None, None, Some(7), Some(3)))), Some(Some(7)), "Keep open shows, before the notice");
+        for (talk, share, pick) in [(Some(1), None, None), (None, Some(2), None), (None, None, Some(4))] {
+            assert_eq!(band_says(&mut said, rest_showing(BandOffer::first(talk, share, pick, Some(7), None))), Some(None), "replaced: not counting");
+            assert_eq!(band_says(&mut said, rest_showing(BandOffer::first(None, None, None, Some(7), None))), Some(Some(7)), "back: counting again");
+        }
+        assert_eq!(band_says(&mut said, rest_showing(BandOffer::first(None, None, None, None, Some(3)))), Some(None), "withdrawn: not counting");
+        // The world notice: not on the band under another kind; on it, nothing on the pull, the picture on the let-go on it,
+        // and nothing when another kind took the band under the held trigger.
+        let notice_shown = |band: Option<BandOffer>| band.and_then(|b| if let Notice(n) = b { Some(n) } else { None });
+        let mut down = None;
+        assert_eq!(notice_release(&mut down, notice_shown(BandOffer::first(Some(1), None, None, None, Some(3))), true, true, true, true), None, "under Talk it is not on the band");
+        let shown = notice_shown(BandOffer::first(None, None, None, None, Some(3)));
+        assert_eq!(notice_release(&mut down, shown, true, true, true, true), None, "the pull does nothing");
+        assert_eq!(notice_release(&mut down, shown, false, false, true, true), Some(3), "the let-go on it takes the picture");
+        assert_eq!(notice_release(&mut down, shown, true, true, true, true), None);
+        assert_eq!(notice_release(&mut down, notice_shown(BandOffer::first(None, None, None, Some(7), Some(3))), false, false, true, true), None, "Keep open came under the held trigger: nothing");
+    }
 
     /// The notice's "Take a 3D picture": nothing on the pull, done on the let-go on it; let go off it, or the band gone or
     /// showing another notice under the held trigger, nothing.

@@ -418,10 +418,10 @@ mod tests {
 
     #[test]
     fn the_wire_form_is_the_contract_s() {
-        let state = ViewState::before_viewer(7, 12.5, [0.8, -2.0]);
+        let state = ViewState::before_viewer(7, 12.5, [0.75, -2.0]);
         assert_eq!(
             serde_json::to_value(&state).unwrap(),
-            json!({ "rev": 7, "term": 1, "holder": "sharer", "lease": null, "placement": { "mode": "before_viewer", "anchor_rev": 0 }, "pose": null, "reach": 12.5, "moved": [0.8, -2.0] })
+            json!({ "rev": 7, "term": 1, "holder": "sharer", "lease": null, "placement": { "mode": "before_viewer", "anchor_rev": 0 }, "pose": null, "reach": 12.5, "moved": [0.75, -2.0] })
         );
         // A later version's fields that this one does not know are read past; its own come through.
         let later: ViewState = serde_json::from_value(json!({

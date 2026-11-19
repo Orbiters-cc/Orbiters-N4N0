@@ -111,8 +111,9 @@ struct SharedSide {
     shown: bool,
     /// The friend's zoom and pan last applied.
     applied: Option<(f32, [f32; 2])>,
-    /// The small mode before a friend's view made it small.
+    /// The small mode before a friend's view made it small, and this player's own capture that showed then.
     small_was: Option<bool>,
+    before: Option<Entry>,
     /// This player's view last sent: when, its zoom and pan; a stop sent.
     sent: Option<(Instant, f32, [f32; 2])>,
     stop_sent: bool,
@@ -1329,6 +1330,10 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                             self.view.set_small(true, overlay, steamvr);
                         }
                         let id = entry.id;
+                        // This player's own capture, if one showed: back once the friend's goes.
+                        if self.shared.before.is_none() {
+                            self.shared.before = self.current.clone().filter(|e| !e.is_shared());
+                        }
                         self.picked = Some(entry);
                         self.deferred.push(Action::Show(id));
                         self.shared.opened = Some(w.id);
@@ -1340,9 +1345,13 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                     if showing {
                         self.shared.shown = true;
                     } else if self.shared.shown {
-                        // Its X (or another capture opened): this player stops looking.
+                        // Its X (or another capture opened): this player stops looking; their own capture comes back
+                        // when its X closed the friend's.
                         self.shared.shown = false;
                         backend.shared_view(crate::ipc::SharedViewCommand::Leave);
+                        if self.current.is_none() {
+                            self.restore_own();
+                        }
                     }
                     if showing && self.view.small_now().is_some() && w.view.is_some() && self.shared.applied != w.view {
                         let (reach, moved) = w.view.expect("just looked");
@@ -1353,14 +1362,22 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             }
             None => {
                 if self.shared.opened.take().is_some() {
-                    // The friend stopped, or this player left: the view goes, the 3D worlds show as before.
-                    if self.current.as_ref().is_some_and(|e| e.is_shared()) {
-                        self.deferred.push(Action::Hide);
-                    }
-                    if let Some(was) = self.shared.small_was.take() {
-                        self.deferred.push(Action::Small(was));
+                    let showing = self.current.as_ref().is_some_and(|e| e.is_shared());
+                    if showing && self.view.small_now().is_some_and(|s| s.held()) {
+                        // Held in a hand: it stays (Enzo's rule for a held view); it only stops following. Its X closes it.
+                        self.shared.before = None;
+                        self.shared.small_was = None;
+                    } else if showing {
+                        // The friend stopped, or this player left: the view goes, and the 3D worlds show as before.
+                        self.restore_own();
                     }
                 }
+            }
+        }
+        // The small mode as it was, once nothing shows any more (set while a capture shows, it would show it again).
+        if self.shared.opened.is_none() && !self.view.active() {
+            if let Some(was) = self.shared.small_was.take() {
+                self.deferred.push(Action::Small(was));
             }
         }
         // This player's own small view of an Orbiters capture (not a session of this computer, not a friend's).
@@ -1428,6 +1445,22 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             } else {
                 crate::shared_view_ui::ask_pick(capture, key, s.reach(), s.moved(), ms);
             }
+        }
+    }
+
+    /// The friend's view goes: this player's own capture, when one showed before it, shows again in its place, in the mode it
+    /// had; otherwise nothing shows.
+    fn restore_own(&mut self) {
+        match self.shared.before.take() {
+            Some(own) => {
+                let id = own.id;
+                self.picked = Some(own);
+                self.deferred.push(Action::Show(id));
+                if let Some(was) = self.shared.small_was.take() {
+                    self.deferred.push(Action::Small(was));
+                }
+            }
+            None => self.deferred.push(Action::Hide),
         }
     }
 

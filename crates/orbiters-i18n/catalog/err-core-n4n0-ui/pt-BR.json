@@ -13,6 +13,7 @@
   "The capture's details are not an object": "Os detalhes da captura não são um objeto JSON",
   "This session has no 3D view to keep: reconstruct it first.": "Esta sessão não tem uma visualização 3D para manter: reconstrua-a primeiro.",
   "Nothing was deleted: {path} is part of the 3D view.": "Nada foi apagado: {path} faz parte da visualização 3D.",
+  "Its last reconstruction was only partly saved (a file was open in another program): reconstruct it again before deleting its capture.": "A última reconstrução dela foi salva só em parte (um arquivo estava aberto em outro programa): reconstrua de novo antes de apagar a captura.",
   "VRChat session storage requires Windows DPAPI": "Guardar a sessão do VRChat exige o Windows DPAPI",
   "VRChat was not found on the network yet": "O VRChat ainda não foi encontrado na rede",
   "VRChat's {path} has no value": "{path} não tem valor no VRChat",

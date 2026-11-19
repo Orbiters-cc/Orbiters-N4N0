@@ -260,9 +260,120 @@ impl Event {
     }
 }
 
+/// What a result folder replaced file by file must hold once every part has moved: the content of [`REPLACING_FILE`]
+/// (night4). Each part named relative to the result folder (`/` between folders), with its length and SHA-256, or
+/// `None` for one that must be gone. Written before the first file changes; the mark goes only once every part verifies
+/// ([`settle_replacing`]), also later (a crash between the last move and the unmarking).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Replacing {
+    pub parts: Vec<ReplacedPart>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacedPart {
+    pub path: String,
+    /// `(length, sha256)`, or `None`: the part must not be there.
+    pub file: Option<(u64, String)>,
+}
+
+/// Whether `result` is marked as being replaced file by file. `None`: the mark could not be looked at (an access
+/// error is not the mark's absence).
+pub fn marked(result: &Path) -> Option<bool> {
+    match std::fs::symlink_metadata(result.join(REPLACING_FILE)) {
+        Ok(_) => Some(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
+/// What `out` must hold once the files of `partial` replaced its own: every file of `partial` as it is now, and gone
+/// the parts that go with the previous splats (`gone`: names relative to `out`).
+pub fn replacing_plan(partial: &Path, gone: &[String]) -> std::io::Result<Replacing> {
+    fn walk(dir: &Path, rel: &str, parts: &mut Vec<ReplacedPart>) -> std::io::Result<()> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let path = if rel.is_empty() { name } else { format!("{rel}/{name}") };
+            if e.file_type()?.is_dir() {
+                walk(&e.path(), &path, parts)?;
+            } else {
+                parts.push(ReplacedPart { path, file: Some((e.metadata()?.len(), crate::visited::sha256_file(&e.path())?)) });
+            }
+        }
+        Ok(())
+    }
+    let mut parts = Vec::new();
+    walk(partial, "", &mut parts)?;
+    let absent: Vec<ReplacedPart> = gone.iter().filter(|g| !parts.iter().any(|p| &p.path == *g)).map(|g| ReplacedPart { path: g.clone(), file: None }).collect();
+    parts.extend(absent);
+    Ok(Replacing { parts })
+}
+
+/// Unmarks `result` when every part its mark lists verifies (the result is then one run's, whatever stopped the
+/// replacement before it unmarked it); true when it is not marked afterwards. A mark that lists nothing (written by
+/// 0.3.6-dev.25), cannot be read, or whose parts differ stays: the result is not shared until it is reconstructed again.
+pub fn settle_replacing(result: &Path) -> bool {
+    match marked(result) {
+        Some(false) => return true,
+        None => return false,
+        Some(true) => {}
+    }
+    let marker = result.join(REPLACING_FILE);
+    let Some(plan) = std::fs::read(&marker).ok().and_then(|b| serde_json::from_slice::<Replacing>(&b).ok()) else { return false };
+    if plan.parts.is_empty() {
+        return false;
+    }
+    let verified = plan.parts.iter().all(|p| {
+        let path = result.join(&p.path);
+        match &p.file {
+            None => std::fs::symlink_metadata(&path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+            Some((len, hash)) => std::fs::metadata(&path).is_ok_and(|m| m.len() == *len) && crate::visited::sha256_file(&path).is_ok_and(|h| h == *hash),
+        }
+    });
+    verified && std::fs::remove_file(&marker).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// night4 (the second verifier): a result marked as being replaced is unmarked once its parts verify as the run that
+    /// marked it (a crash after the last move); one whose parts differ, or whose mark lists nothing (older), stays marked.
+    #[test]
+    fn a_marked_result_is_unmarked_only_when_its_parts_verify() {
+        let root = std::env::temp_dir().join(format!("orbiters-settle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (partial, out) = (root.join(PARTIAL_DIR), root.join(DIR));
+        for d in [&partial, &out] {
+            std::fs::create_dir_all(d.join(HELD_OUT_DIR)).unwrap();
+            std::fs::write(d.join(PLY_FILE), b"splats B").unwrap();
+            std::fs::write(d.join(PREVIEW_FILE), b"preview B").unwrap();
+            std::fs::write(d.join(HELD_OUT_DIR).join("000004.qoi"), b"render B").unwrap();
+        }
+        let plan = replacing_plan(&partial, &[EDIT_FILE.to_string()]).unwrap();
+        assert_eq!(plan.parts.len(), 4, "{plan:?}");
+        assert!(plan.parts.iter().any(|p| p.path == "held-out/000004.qoi") && plan.parts.iter().any(|p| p.path == EDIT_FILE && p.file.is_none()));
+        let mark = |plan: &Replacing| std::fs::write(out.join(REPLACING_FILE), serde_json::to_vec(plan).unwrap()).unwrap();
+        // Not marked: nothing to settle.
+        assert_eq!(marked(&out), Some(false));
+        assert!(settle_replacing(&out));
+        // The previous preview stayed (it was held): still mixed, still marked.
+        std::fs::write(out.join(PREVIEW_FILE), b"preview A").unwrap();
+        mark(&plan);
+        assert!(!settle_replacing(&out) && marked(&out) == Some(true));
+        // An edit file of the previous splats left: still marked.
+        std::fs::write(out.join(PREVIEW_FILE), b"preview B").unwrap();
+        std::fs::write(out.join(EDIT_FILE), b"edits of A").unwrap();
+        assert!(!settle_replacing(&out));
+        // Every part as the run left it (it stopped before unmarking): unmarked.
+        std::fs::remove_file(out.join(EDIT_FILE)).unwrap();
+        assert!(settle_replacing(&out) && marked(&out) == Some(false));
+        // A mark that lists nothing never verifies.
+        std::fs::write(out.join(REPLACING_FILE), b"").unwrap();
+        assert!(!settle_replacing(&out));
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn events_round_trip_as_tagged_lines() {

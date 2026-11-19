@@ -586,6 +586,8 @@ fn flush_all(dir: &Path) -> anyhow::Result<()> {
 /// Puts back a previous result that a swap left in [`BACKUP_DIR`] (the run stopped between moving it out and moving
 /// the new one in), and clears a backup whose swap finished.
 fn recover(dir: &Path) {
+    // A replacement that finished but stopped before unmarking the result is unmarked now if its parts verify (night4).
+    let _ = rec::settle_replacing(&rec::dir(dir));
     let (out, backup) = (rec::dir(dir), dir.join(BACKUP_DIR));
     if !backup.exists() {
         return;
@@ -624,16 +626,44 @@ fn replace(dir: &Path, partial: &Path) -> anyhow::Result<()> {
 /// keeps open) and the report last (it says what the folder holds). Held-out renders that cannot be replaced keep the
 /// previous ones; renders of keyframes the new run did not hold out are deleted where possible.
 fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
-    // Marked before the first file moves, unmarked only once every part did (rec::REPLACING_FILE): a folder left half
-    // replaced (a file still held, the worker killed) is never shared as one result (night2, the verifier).
+    // Marked before the first file moves with what the folder must hold once every part did (rec::Replacing), unmarked
+    // only once that verifies (rec::settle_replacing): a folder left half replaced (a file still held, the worker
+    // killed) is never shared as one result, and one whose replacement did finish is unmarked later (night2, night4).
     let marker = out.join(rec::REPLACING_FILE);
-    std::fs::write(&marker, b"").with_context(|| tr!("writing {path}", path = marker.display()))?;
+    // A mark of an earlier attempt that never finished: the folder may already be mixed. This attempt puts it back if
+    // nothing of its own moves (night4, the second verifier: a retry failing at the splats unmarked a mixed folder).
+    let earlier = match std::fs::read(&marker) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| tr!("writing {path}", path = marker.display())),
+    };
+    let mut gone = vec![rec::EDIT_FILE.to_string()];
+    for e in std::fs::read_dir(out).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if rec::is_trained_preview_file(&name) {
+            gone.push(name);
+        }
+    }
+    if !partial.join(rec::SKY_FILE).exists() {
+        gone.push(rec::SKY_FILE.to_string());
+    }
+    let fresh_names: Vec<String> = std::fs::read_dir(partial.join(rec::HELD_OUT_DIR)).map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+    for e in std::fs::read_dir(out.join(rec::HELD_OUT_DIR)).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !fresh_names.contains(&name) {
+            gone.push(format!("{}/{name}", rec::HELD_OUT_DIR));
+        }
+    }
+    let plan = rec::replacing_plan(partial, &gone).with_context(|| tr!("writing {path}", path = marker.display()))?;
+    orbiters_core::write_atomic(&marker, &serde_json::to_vec(&plan)?).with_context(|| tr!("writing {path}", path = marker.display()))?;
     if let Err(e) = retry(|| std::fs::rename(partial.join(rec::PLY_FILE), out.join(rec::PLY_FILE))) {
-        // Nothing moved: the previous result is whole.
-        let _ = std::fs::remove_file(&marker);
+        // Nothing of this attempt moved: the folder is as it was, marked as it was.
+        let _ = match &earlier {
+            Some(bytes) => orbiters_core::write_atomic(&marker, bytes),
+            None => std::fs::remove_file(&marker),
+        };
         return Err(e).with_context(|| tr!("{path} is open in another program: close it and reconstruct again", path = out.join(rec::PLY_FILE).display()));
     }
-    let mut whole = true;
     // The previous splats' edits and the worker's pictures kept aside for them go with them (a folder moved as a whole
     // takes them along): edits name splats of the PLY they were made on, and a picture kept aside belongs to its PLY.
     retry(|| match std::fs::remove_file(out.join(rec::EDIT_FILE)) {
@@ -653,12 +683,14 @@ fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
     } else if sky.exists() {
         retry(|| std::fs::remove_file(&sky)).with_context(|| tr!("{path} is open in another program: close it and reconstruct again", path = sky.display()))?;
     }
-    whole &= !partial.join(rec::PREVIEW_FILE).exists() || retry(|| std::fs::rename(partial.join(rec::PREVIEW_FILE), out.join(rec::PREVIEW_FILE))).is_ok();
+    if partial.join(rec::PREVIEW_FILE).exists() {
+        let _ = retry(|| std::fs::rename(partial.join(rec::PREVIEW_FILE), out.join(rec::PREVIEW_FILE)));
+    }
     let (from, to) = (partial.join(rec::HELD_OUT_DIR), out.join(rec::HELD_OUT_DIR));
     std::fs::create_dir_all(&to)?;
     let fresh: Vec<std::ffi::OsString> = std::fs::read_dir(&from).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
     for name in &fresh {
-        whole &= retry(|| std::fs::rename(from.join(name), to.join(name))).is_ok();
+        let _ = retry(|| std::fs::rename(from.join(name), to.join(name)));
     }
     if let Ok(old) = std::fs::read_dir(&to) {
         for e in old.flatten().filter(|e| !fresh.contains(&e.file_name())) {
@@ -667,9 +699,8 @@ fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
     }
     retry(|| std::fs::rename(partial.join(rec::REPORT_FILE), out.join(rec::REPORT_FILE)))?;
     let _ = std::fs::remove_dir_all(partial);
-    if whole {
-        std::fs::remove_file(&marker).with_context(|| tr!("writing {path}", path = marker.display()))?;
-    } else {
+    // Unmarked only when every part verifies as this run's (a part still held keeps it marked).
+    if !rec::settle_replacing(out) {
         eprintln!("the result was replaced file by file and some parts were held: it is not shared until it is reconstructed again");
     }
     Ok(())
@@ -919,6 +950,16 @@ mod tests {
         assert_eq!((read(&dir, rec::PLY_FILE), read(&dir, rec::REPORT_FILE)), ("newer".into(), "r2".into()));
         // night2 (the verifier): the new splats beside the previous preview: marked, so that nothing shares them as one.
         assert!(rec::dir(&dir).join(rec::REPLACING_FILE).exists(), "a half-replaced folder is marked");
+        // night4 (the second verifier): a retry that cannot move even the splats leaves the mixed folder marked.
+        result(&dir, rec::PARTIAL_DIR, "retry", "r9");
+        let held = std::fs::OpenOptions::new().read(true).share_mode(SHARE_READ).open(rec::dir(&dir).join(rec::PLY_FILE)).unwrap();
+        let held_preview = std::fs::OpenOptions::new().read(true).share_mode(SHARE_READ).open(rec::dir(&dir).join(rec::PREVIEW_FILE)).unwrap();
+        assert!(replace(&dir, &dir.join(rec::PARTIAL_DIR)).is_err());
+        drop((held, held_preview));
+        assert_eq!(read(&dir, rec::PLY_FILE), "newer");
+        assert!(rec::dir(&dir).join(rec::REPLACING_FILE).exists(), "still mixed: still marked");
+        assert!(!rec::settle_replacing(&rec::dir(&dir)), "the previous preview does not verify as the marked run's");
+        std::fs::remove_dir_all(dir.join(rec::PARTIAL_DIR)).ok();
         // Replaced whole the next time (nothing held): the folder moves as one and the mark goes with the old one.
         result(&dir, rec::PARTIAL_DIR, "newest", "r3");
         replace(&dir, &dir.join(rec::PARTIAL_DIR)).expect("replaced");

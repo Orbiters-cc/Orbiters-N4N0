@@ -44,6 +44,20 @@ fn is_launcher(name: &str) -> bool {
     matches!(name, "start_protected_game.exe" | "launch.exe")
 }
 
+/// VRChat process `pid` as the system's list has it now: running since when, gone, or unknown (the list could not be read:
+/// that proves no exit).
+pub(super) fn vrchat_identity(pid: u32) -> crate::bridge::game::Identity {
+    use crate::bridge::game::Identity;
+    let all = processes();
+    if all.is_empty() {
+        return Identity::Unknown;
+    }
+    match all.into_iter().find(|(p, name, _)| *p == pid && is_vrchat(name)) {
+        Some((_, _, start)) => Identity::Running(start),
+        None => Identity::Gone,
+    }
+}
+
 /// The VRChats running now, by process id.
 pub(super) fn vrchat_pids() -> Vec<u32> {
     processes().into_iter().filter(|(_, name, _)| is_vrchat(name)).map(|(pid, _, _)| pid).collect()

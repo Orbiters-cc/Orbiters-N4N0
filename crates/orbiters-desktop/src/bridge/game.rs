@@ -215,6 +215,15 @@ impl LaunchPlan {
     }
 }
 
+/// A VRChat process as the system's list has it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Identity {
+    /// Running, started at this time (Unix seconds; 0 when the system did not say).
+    Running(u64),
+    Gone,
+    Unknown,
+}
+
 /// The launch link of an instance, as the bridge passes it to VRChat (and as VRChat's log lists it among its arguments).
 pub fn launch_link(world_id: &str, instance: &str) -> String {
     format!("vrchat://launch?ref=orbiters.cc&id={world_id}:{instance}")
@@ -388,16 +397,18 @@ pub trait Game: Send + Sync {
     fn adopt(&self, _since: Option<std::time::SystemTime>) -> Option<u32> {
         None
     }
-    /// The command line of the VRChat followed now, as the start of its own log lists it (`Arg: …`), once all of it is
-    /// written: what tells the main session's own start (its launch link names the instance made for it) from a VRChat the
-    /// person started meanwhile. `None` while unknown.
-    fn launch_args(&self) -> Option<Vec<String>> {
+    /// The command line of VRChat process `pid`, as the start of its own log lists it (`Arg: …`), once all of it is written:
+    /// what tells the main session's own start (its launch link names the instance made for it) from a VRChat the person
+    /// started meanwhile. Only when the app follows that very process now (its pid and its log read together); `None`
+    /// otherwise, or while unknown: evidence of one process is never applied to another.
+    fn launch_args(&self, _pid: u32) -> Option<Vec<String>> {
         None
     }
-    /// Whether the VRChat process `pid` still runs, whichever VRChat the app follows now (`None`: cannot tell). Read from the
-    /// system's process list: no process is opened.
-    fn runs(&self, _pid: u32) -> Option<bool> {
-        None
+    /// The VRChat process `pid` as the system's process list has it now, whichever VRChat the app follows: running since when
+    /// (its identity with its id: a pid alone can be another process later), gone, or unknown (the list could not be read).
+    /// No process is opened.
+    fn identity(&self, _pid: u32) -> Identity {
+        Identity::Unknown
     }
     /// The bridge closes: the app, lent to this session's VRChat for a picture, is given back to the person's at once (its
     /// usual giving back runs on the bridge's ticks, which stop with it).

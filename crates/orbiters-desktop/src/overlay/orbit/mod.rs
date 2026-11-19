@@ -3533,12 +3533,17 @@ impl Panels {
             if let Some(panel) = self.list.iter_mut().find(|p| p.zone == frame.zone && p.token == frame.token) {
                 if panel.px[0] as usize * panel.px[1] as usize * 4 != frame.pixels.len() { continue; }
                 let first = !panel.painted;
+                // The same picture as the one shown (the worker found no damage and handed back what it had): not uploaded
+                // to SteamVR again (OVL2-20: every change of any fact re-uploaded every part's whole texture).
+                let unchanged = same_picture(panel.painted, panel.shown_pixels.as_ref(), &frame.pixels);
                 panel.shown_pixels = Some(frame.pixels); panel.items = frame.items; panel.mask = frame.mask;
                 panel.hover = panel.pointer.and_then(|p| panels::hit(&panel.items, p));
                 panel.dirty |= first || panel.hover != frame.hover || panel.pressed != frame.pressed;
                 panel.canvas.ran = true;
                 panel.painted = true; panel.again = false; panel.displayed = Some(frame.facts);
-                show(panel, [0, 0, panel.px[0], panel.px[1]]);
+                if !unchanged {
+                    show(panel, [0, 0, panel.px[0], panel.px[1]]);
+                }
             }
         }
         for panel in &mut self.list {
@@ -4038,6 +4043,11 @@ fn type_hint(p: &egui::Painter, playing: Option<&str>) {
         }
         p.text(pos2(row.left() + 56.0, row.center().y + 11.0), egui::Align2::LEFT_CENTER, shown, font, panels::look::LABEL);
     }
+}
+
+/// Whether a part's new picture is the very one already shown on it (the same pixels, handed back unchanged).
+fn same_picture(painted: bool, shown: Option<&page_painter::Pixels>, new: &page_painter::Pixels) -> bool {
+    painted && shown.is_some_and(|p| std::sync::Arc::ptr_eq(p, new))
 }
 
 impl Drop for Panels {

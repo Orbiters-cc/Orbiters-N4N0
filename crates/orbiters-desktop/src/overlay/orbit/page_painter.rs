@@ -466,6 +466,18 @@ mod tests {
         }
     }
 
+    /// OVL2-20: a part handed back with the very pixels it showed is not shown (uploaded) again; new pixels, or a first picture, are.
+    #[test]
+    fn an_unchanged_part_is_not_uploaded_again() {
+        let shared = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
+        let a = PixelBuffer::new(vec![1; 16], Arc::downgrade(&shared));
+        let b = PixelBuffer::new(vec![1; 16], Arc::downgrade(&shared));
+        assert!(super::super::same_picture(true, Some(&a), &a.clone()));
+        assert!(!super::super::same_picture(true, Some(&a), &b), "a new picture, even with the same bytes");
+        assert!(!super::super::same_picture(false, Some(&a), &a), "a part not painted yet (woken, or new)");
+        assert!(!super::super::same_picture(true, None, &a));
+    }
+
     /// OVL2-11: a panic while a page is painted costs that page once: the next one comes, and the painter is not busy for ever.
     #[test]
     fn a_panic_in_a_page_job_is_contained() {

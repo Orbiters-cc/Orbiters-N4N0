@@ -26,6 +26,8 @@ anyhow = { workspace = true }
 png = { workspace = true }
 time = { workspace = true }
 dirs = { workspace = true }
+# Telling a file of the payload already in the install folder from one of the person's (install.rs).
+sha2 = "0.10"
 rfd = "0.17"
 
 [target.'cfg(windows)'.dependencies]

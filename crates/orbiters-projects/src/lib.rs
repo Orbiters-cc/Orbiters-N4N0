@@ -176,11 +176,21 @@ pub fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 pub fn write_json(path: &Path, value: &impl serde::Serialize) -> anyhow::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(path.parent().ok_or_else(|| anyhow::anyhow!("Missing parent folder"))?)?;
-    let tmp = path.with_extension("json.tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&serde_json::to_vec_pretty(value)?)?;
-    f.sync_all()?;
-    drop(f);
+    // A file of this write's own (PROJECTS-36): the window and the service write the same files, and a shared temporary
+    // name let one publish, truncate or take the other's half-written bytes.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
+    let written = (|| -> anyhow::Result<()> {
+        let mut f = std::fs::File::options().write(true).create_new(true).open(&tmp)?;
+        f.write_all(&serde_json::to_vec_pretty(value)?)?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     // Windows rename does not replace existing files. MoveFileEx provides replacement without a gap.
     #[cfg(windows)]
     {
@@ -189,12 +199,22 @@ pub fn write_json(path: &Path, value: &impl serde::Serialize) -> anyhow::Result<
         use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
         let src: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
         let dst: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        unsafe {
-            MoveFileExW(PCWSTR(src.as_ptr()), PCWSTR(dst.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)?;
+        // Another writer replacing the same file at this instant (or a reader holding it) refuses the move for a moment.
+        let mut tries = 0;
+        while let Err(e) = unsafe { MoveFileExW(PCWSTR(src.as_ptr()), PCWSTR(dst.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } {
+            tries += 1;
+            if tries >= 20 {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e.into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5 * tries));
         }
     }
     #[cfg(not(windows))]
-    std::fs::rename(tmp, path)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -593,5 +613,33 @@ mod open_tests {
         let error = open_now(&project).unwrap_err();
         assert!(format!("{error:#}").contains("is not at"), "{error:#}");
         assert!(!temp.path().join("gone").exists());
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    /// PROJECTS-36: writers of the same file at the same time each publish whole bytes, and none fails on another's
+    /// temporary file.
+    #[test]
+    fn writers_of_one_file_never_share_a_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unity-projects.json");
+        let writers: Vec<_> = (0..4)
+            .map(|w| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..40 {
+                        super::write_json(&path, &serde_json::json!({ "writer": w, "i": i, "pad": "x".repeat(4096) })).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["i"], 39);
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 }

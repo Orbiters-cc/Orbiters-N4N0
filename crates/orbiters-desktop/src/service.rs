@@ -52,6 +52,8 @@ pub struct Service {
     overlay: Mutex<Option<(Child, Instant, Option<crate::steamvr_start::Session>, u32, u32)>>,
     /// Starts against a SteamVR whose overlay saw it quit, spaced out until another SteamVR runs ([`AfterQuit`], OVERLAY-22).
     overlay_after_quit: Mutex<AfterQuit>,
+    /// How long the overlay child that ended had lived, measured when its end was first seen ([`lived_at_exit`]).
+    overlay_lived: Mutex<Option<Duration>>,
     /// The process of the panels around VRChat's menus in desktop mode, and when it started.
     orbit: Mutex<Option<(Child, Instant)>>,
     /// The SteamVR (its `vrserver` PID and creation time) whose start of the app was looked at ([`Service::keep_steamvr_start`]).
@@ -87,6 +89,7 @@ impl Service {
             page_for_window: Mutex::new(None),
             overlay: Mutex::new(None),
             overlay_after_quit: Mutex::new(AfterQuit::default()),
+            overlay_lived: Mutex::new(None),
             orbit: Mutex::new(None),
             steamvr_start_seen: Mutex::new(None),
             smoothing: Mutex::new(Default::default()),
@@ -271,7 +274,8 @@ impl Service {
         let mut errors = 0;
         if let Some((child, started, steamvr, failures, prior_errors)) = overlay.as_mut() {
             let exited = child_exited(child.try_wait());
-            errors = if *steamvr == Some(session) { short_errors(*prior_errors, exited, started.elapsed()) } else { 0 };
+            let lived = lived_at_exit(&mut self.overlay_lived.lock().unwrap(), exited.is_some(), started.elapsed());
+            errors = if *steamvr == Some(session) { short_errors(*prior_errors, exited, lived) } else { 0 };
             let after_quit = {
                 let mut after_quit = self.overlay_after_quit.lock().unwrap();
                 if let Some(code) = exited {
@@ -905,6 +909,16 @@ const OVERLAY_LIVED: Duration = Duration::from_secs(60);
 /// The longest wait between starts of an overlay that keeps failing.
 const OVERLAY_ERRORS_WAIT_AT_MOST: Duration = Duration::from_secs(120);
 
+/// How long a child lived: while it runs, since its start; once its end is seen, what it was then, on every later look (verify2:
+/// a child that failed at once and was looked at again 60 s later was taken for one that had lived a minute).
+fn lived_at_exit(seen: &mut Option<Duration>, exited: bool, elapsed: Duration) -> Duration {
+    if !exited {
+        *seen = None;
+        return elapsed;
+    }
+    *seen.get_or_insert(elapsed)
+}
+
 /// Consecutive starts that ended with an error (not a clean end, not SteamVR going) before living [`OVERLAY_LIVED`],
 /// counting the child that `exited` now. A required start step SteamVR refuses (its overlay slots full) failed every
 /// 2 to 4 s for as long as SteamVR ran (OVERLAY-17): that, and only that, is backed off.
@@ -1123,6 +1137,17 @@ pub(crate) mod tests {
             }
         }
     }
+    /// verify2 (OVERLAY-17): consecutive looks at the same child that ended after 1 s keep its 1 s of life, so it stays a quick failure.
+    #[test]
+    fn a_child_s_life_is_taken_at_its_end() {
+        let mut seen = None;
+        assert_eq!(lived_at_exit(&mut seen, false, Duration::from_millis(500)), Duration::from_millis(500));
+        assert_eq!(lived_at_exit(&mut seen, true, Duration::from_secs(1)), Duration::from_secs(1));
+        assert_eq!(lived_at_exit(&mut seen, true, Duration::from_secs(70)), Duration::from_secs(1), "still the 1 s it lived");
+        assert_eq!(short_errors(5, Some(Some(1)), lived_at_exit(&mut seen, true, Duration::from_secs(90))), 6, "a quick failure");
+        assert_eq!(lived_at_exit(&mut seen, false, Duration::from_millis(10)), Duration::from_millis(10), "a new child");
+    }
+
     /// OVL2-13 and verify-vr: the panels' process gone closes the Ask N4N0 page only if it was that link that opened it; with the
     /// window talking and the panels' Ask never opened, neither the window's Talk nor its sentence (an AskPage close cancels the
     /// listening) is touched.

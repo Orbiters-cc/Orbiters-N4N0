@@ -50,6 +50,7 @@ impl Kept {
         self.images.get(name)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn names(&self) -> impl Iterator<Item = &String> {
         self.order.iter()
     }
@@ -170,8 +171,9 @@ impl MenuHost {
 
 impl MenuHost {
     pub(crate) fn paint_pictures(&self, retro: bool) -> std::collections::HashMap<String, egui::TextureId> {
-        let names: Vec<_> = self.0.pictures().images.lock().unwrap_or_else(|e| e.into_inner()).names().cloned().collect();
-        names.into_iter().filter_map(|key| self.picture(&key, retro).map(|id| (key, id))).collect()
+        // Every loaded picture, from the host: the CPU copies are at most 64, and the textures of those let go are still there
+        // (verify2: a revisited first result showed no thumbnail).
+        self.0.picture_keys().into_iter().filter_map(|key| self.picture(&key, retro).map(|id| (key, id))).collect()
     }
 }
 

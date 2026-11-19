@@ -42,6 +42,7 @@ mod projects_panel;
 mod editor;
 mod splat_export;
 mod splats_select;
+mod splats_bar;
 mod capture_actions;
 mod pause_resume;
 mod language_live;
@@ -260,6 +261,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     }
     if let Some(refs) = only.as_deref().and_then(|o| o.strip_prefix("orbit-vr=")) {
         return orbit::vr_shots(&out, std::path::Path::new(refs));
+    }
+    if only.as_deref() == Some("splats-bar") {
+        return splats_bar::shots(&out);
     }
     if only.as_deref() == Some("floating") {
         return floating::shots(&out, &settings);

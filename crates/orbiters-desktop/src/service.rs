@@ -669,6 +669,8 @@ impl Service {
             self.ctl.window_rest(None);
         }
         if role == Role::Overlay && !still_there {
+            // Its band shows nothing any more: the window's countdown pauses.
+            self.ctl.window_rest_shown(None);
             self.ctl.set_overlay_connected(false);
             self.ctl.booster_overlay_gone();
         }

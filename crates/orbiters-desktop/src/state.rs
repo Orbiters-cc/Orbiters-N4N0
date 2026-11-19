@@ -749,16 +749,22 @@ pub struct Snapshot {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestOffer {
     pub id: u64,
-    /// When the window goes (Unix ms); 0 while no surface said it shows it yet.
+    /// When the window goes (Unix ms); 0 while the countdown is paused (not seen yet, or hidden).
     pub until_ms: u64,
     pub for_ms: u64,
+    /// What is left of the countdown while it is paused (ms).
+    #[serde(default)]
+    pub left_ms: u64,
 }
 
 impl RestOffer {
-    /// The share of its countdown left at `now_ms` (1 before it started).
+    /// The share of its countdown left at `now_ms` (while paused, what was left when it paused).
     pub fn left(&self, now_ms: u64) -> f32 {
-        if self.until_ms == 0 || self.for_ms == 0 {
+        if self.for_ms == 0 {
             return 1.0;
+        }
+        if self.until_ms == 0 {
+            return (self.left_ms as f32 / self.for_ms as f32).clamp(0.0, 1.0);
         }
         (self.until_ms.saturating_sub(now_ms) as f32 / self.for_ms as f32).clamp(0.0, 1.0)
     }
@@ -766,7 +772,7 @@ impl RestOffer {
     /// Whole seconds left at `now_ms`, as said on it ("in 8 s").
     pub fn seconds(&self, now_ms: u64) -> u64 {
         if self.until_ms == 0 {
-            return self.for_ms.div_ceil(1000);
+            return self.left_ms.div_ceil(1000);
         }
         self.until_ms.saturating_sub(now_ms).div_ceil(1000)
     }

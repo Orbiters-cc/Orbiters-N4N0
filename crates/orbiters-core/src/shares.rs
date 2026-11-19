@@ -332,7 +332,7 @@ pub(crate) fn json<T: serde::de::DeserializeOwned>(response: ureq::http::Respons
         if status == 429 {
             return Err(RateLimited { retry_after_s: retry_after_seconds(retry_after.as_deref()), message }.into());
         }
-        return Err(ApiError { status, message }.into());
+        return Err(ApiError { status, message, code: value["code"].as_str().map(str::to_string) }.into());
     }
     Ok(serde_json::from_str(&text)?)
 }
@@ -402,7 +402,7 @@ impl Api {
         let response = request.call()?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            return Err(ApiError { status, message: String::new() }.into());
+            return Err(ApiError { status, message: String::new(), code: None }.into());
         }
         Ok(response.into_body().with_config().limit(16 << 20).read_to_vec()?)
     }

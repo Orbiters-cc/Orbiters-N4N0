@@ -453,6 +453,9 @@ pub struct Api {
 pub struct ApiError {
     pub status: u16,
     pub message: String,
+    /// The contract's machine-readable reason (`{"code": "not_linked"}`), when the answer gave one: what tells
+    /// Orbiters' own refusal from a 403 or a 409 of something in front of it.
+    pub code: Option<String>,
 }
 
 impl std::fmt::Display for ApiError {
@@ -745,9 +748,9 @@ fn respond(stream: &mut TcpStream, location: Option<&str>) {
 }
 
 fn error(status: u16, body: &str) -> ApiError {
-    let message =
-        serde_json::from_str::<serde_json::Value>(body).ok().and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string)).unwrap_or_default();
-    ApiError { status, message }
+    let value = serde_json::from_str::<serde_json::Value>(body).ok();
+    let text = |key: &str| value.as_ref().and_then(|v| v.get(key)).and_then(|e| e.as_str()).map(str::to_string);
+    ApiError { status, message: text("error").unwrap_or_default(), code: text("code") }
 }
 
 #[cfg(test)]

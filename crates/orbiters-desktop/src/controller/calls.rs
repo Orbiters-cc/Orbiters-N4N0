@@ -550,9 +550,16 @@ fn friends_digest(hashes: &[String]) -> u64 {
     h.finish()
 }
 
-/// Orbiters refused: this VRChat account is not the member's verified link (403 on calls).
+/// Orbiters refused: this VRChat account is not the member's verified link (403 `{"code": "not_linked"}` on calls; a
+/// 403 without a code, as a server from before codes answered, counts too). Another 403 (a firewall page, a feature
+/// refused) is not "link your VRChat account".
 fn not_linked(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<ApiError>().is_some_and(|a| a.status == 403)
+    refused_as(e, 403, "not_linked")
+}
+
+/// Whether `e` is Orbiters' answer `status` with the contract's `code` (or with no code at all).
+fn refused_as(e: &anyhow::Error, status: u16, code: &str) -> bool {
+    e.downcast_ref::<ApiError>().is_some_and(|a| a.status == status && a.code.as_deref().is_none_or(|c| c == code))
 }
 
 /// The panel's text for the call menu: four contacts around the chosen one, `>` before it.
@@ -1148,7 +1155,7 @@ impl super::Controller {
                 Signal::Create { number, contact, offer } => {
                     let answer = match post(&api, &token, "n4n0/calls", &json!({ "contact": contact, "offer": offer })) {
                         Ok(v) => v["call"].as_str().filter(|id| !id.is_empty()).map(str::to_string).ok_or(Ending::Failed),
-                        Err(e) if e.downcast_ref::<ApiError>().is_some_and(|a| a.status == 409) => Err(Ending::Busy),
+                        Err(e) if refused_as(&e, 409, "busy") => Err(Ending::Busy),
                         Err(e) => {
                             eprintln!("calls n4n0/calls: {e:#}");
                             self.notify(NoticeKind::Warning, tr!("Call: {message}", message = e));
@@ -1348,6 +1355,18 @@ impl super::Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CORE2-11: "link your VRChat account" and "busy" are Orbiters' own refusals (their code), not any 403 or 409 of
+    /// something in front of it; a server from before codes still reads as before.
+    #[test]
+    fn refusals_are_read_by_their_code() {
+        let e = |status: u16, code: Option<&str>| anyhow::Error::from(ApiError { status, message: String::new(), code: code.map(str::to_string) });
+        assert!(not_linked(&e(403, Some("not_linked"))) && not_linked(&e(403, None)));
+        assert!(!not_linked(&e(403, Some("feature_disabled"))), "another 403 is not about the link");
+        assert!(!not_linked(&e(401, None)) && !not_linked(&anyhow::anyhow!("offline")));
+        assert!(refused_as(&e(409, Some("busy")), 409, "busy") && refused_as(&e(409, None), 409, "busy"));
+        assert!(!refused_as(&e(409, Some("conflict")), 409, "busy"));
+    }
 
     fn contacts(n: usize) -> Vec<CallContact> {
         (0..n).map(|i| CallContact { id: format!("c_{i}"), name: format!("Friend {i}") }).collect()

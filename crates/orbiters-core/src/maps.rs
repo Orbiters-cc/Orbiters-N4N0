@@ -419,7 +419,7 @@ impl Api {
         let text = response.into_body().with_config().limit(4 << 20).read_to_string()?;
         if !(200..300).contains(&status) {
             let message = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v.get("error")?.as_str().map(str::to_string));
-            return Err(ApiError { status, message: message.unwrap_or_default() }.into());
+            return Err(ApiError { status, message: message.unwrap_or_default(), code: None }.into());
         }
         parse_found(&text)
     }
@@ -603,7 +603,7 @@ impl Api {
         let response = self.agent().get(url).config().https_only(true).build().call()?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            return Err(ApiError { status, message: String::new() }.into());
+            return Err(ApiError { status, message: String::new(), code: None }.into());
         }
         Ok(response.into_body().with_config().limit(16 << 20).read_to_vec()?)
     }

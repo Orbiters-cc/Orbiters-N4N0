@@ -913,11 +913,12 @@ mod tests {
             hide.mask_turn += 1;
             hide.mask_turn
         };
+        ctl.update(|s| s.capture.left_out.wearer = Left::Out);
         ctl.restore_hide_self();
         let _ = ctl.take_notices();
         ctl.mask_not_taken(turn);
         assert!(!toast_with(ctl, NoticeKind::Error, &tr(NOT_TAKEN)), "no false error");
-        assert_ne!(ctl.view().capture.left_out.wearer, Left::NotAsked);
+        assert_eq!(ctl.view().capture.left_out.wearer, Left::Out, "what the recording said of the wearer stays");
         // Remote User the same way.
         let turn = {
             let mut hide = ctl.hide.lock().unwrap();

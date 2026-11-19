@@ -22,6 +22,8 @@ const REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 /// The requests as Orbiters gave them when asked again (received, sent), or why it could not be asked; `None` for the
 /// look a watch starts with, which asks nothing (the page has just asked).
 type Again = Option<Result<(Vec<ShareRequest>, Vec<ShareRequest>), String>>;
+/// What the minute's asking brings, with the owner it asked for.
+type AgainFor = Option<super::ForAccount<Result<(Vec<ShareRequest>, Vec<ShareRequest>), String>>>;
 
 #[derive(Default)]
 pub struct State {
@@ -31,10 +33,10 @@ pub struct State {
     outgoing_box: bool,
     loaded: Option<(bool, String, u64)>,
     account: crate::pages::AccountFollow,
-    list: Job<anyhow::Result<(shares::Requests, shares::Requests)>>,
+    list: Job<super::ForAccount<anyhow::Result<(shares::Requests, shares::Requests)>>>,
     /// The requests asked for again every [`REFRESH_EVERY`] on a thread while the page shows (for an environment and
     /// an account), and what it brought that could not be taken in yet. The page is drawn when the answer differs.
-    again: super::Watch<(bool, String), Again>,
+    again: super::Watch<(bool, String), AgainFor>,
     fresh: Again,
     error: Option<String>,
     row_error: Option<(u64, String)>,
@@ -109,22 +111,27 @@ impl State {
     fn refresh(&mut self, ctx: &egui::Context, server: Server) {
         self.fresh = None;
         self.error = None;
-        self.list = Job::spawn(ctx, move || {
+        let owner = self.account.owner().cloned().unwrap_or_default();
+        self.list = super::job_for(ctx, &owner, move || {
             let (api, token) = controller::api(server)?;
             Ok((api.capture_requests(&token, true)?, api.capture_requests(&token, false)?))
         });
     }
     pub fn poll(&mut self, ctx: &egui::Context, cx: &Cx) {
         // Who the account is, not how its check goes: offline, the check comes and goes every minute.
-        let (account, answered) = self.account.see(&cx.snap.account.state);
-        let key = (cx.snap.settings.development, account, cx.visit);
-        if answered && self.loaded.as_ref().is_some_and(|old| old.0 == key.0 && old.1 == key.1) {
+        let seen = self.account.see(&cx.snap.account.state, cx.snap.settings.development);
+        let key = (seen.owner.development, seen.owner.account.clone(), cx.visit);
+        if seen.answered && self.loaded.as_ref().is_some_and(|old| old.0 == key.0 && old.1 == key.1) {
             // Orbiters answers again: asked again, nothing that shows is put away.
             self.loaded = None;
         }
-        if self.loaded.as_ref().is_some_and(|old| old.0 != key.0 || old.1 != key.1) {
+        // Another owner: followed on its own, not through what was asked last (night4, verify2: an answer under way
+        // left no last key, and the old account's list stayed, its answers taken in after the change).
+        if seen.changed {
             self.list = Job::default();
             self.loaded = None;
+            self.fresh = None;
+            self.error = None;
             self.pictures = None;
             self.incoming.clear();
             self.outgoing.clear();
@@ -139,9 +146,10 @@ impl State {
         // differs. (The page asked itself, on the ten frames a second Photos & captures drew whatever happened.)
         if !self.fixture {
             let asked = (key.0, key.1.clone());
+            let owner = seen.owner.clone();
             let brought = self.again.keep(ctx, &asked, REFRESH_EVERY, || {
                 let mut first = true;
-                move || -> Again {
+                move || -> AgainFor {
                     if std::mem::take(&mut first) {
                         return None;
                     }
@@ -149,11 +157,13 @@ impl State {
                         let (api, token) = controller::api(server)?;
                         Ok((api.capture_requests(&token, true)?.requests, api.capture_requests(&token, false)?.requests))
                     };
-                    Some(ask().map_err(|e| e.to_string()))
+                    Some(super::ForAccount::new(&owner, ask().map_err(|e| e.to_string())))
                 }
             });
-            if let Some(brought @ Some(_)) = brought {
-                self.fresh = brought;
+            if let Some(Some(brought)) = brought {
+                if let Some(r) = brought.take_for(self.account.owner()) {
+                    self.fresh = Some(r);
+                }
             }
         }
         if !self.fixture && self.active.is_none() && !self.list.running() && self.loaded.as_ref() != Some(&key) {
@@ -172,7 +182,7 @@ impl State {
                 None => {}
             }
         }
-        if let Some(result) = self.list.take() {
+        if let Some(result) = self.list.take().and_then(|r| r.take_for(self.account.owner())) {
             match result {
                 Ok((incoming, outgoing)) => {
                     self.incoming = incoming.requests;
@@ -558,4 +568,52 @@ fn empty(ui: &mut Ui, outgoing: bool) {
         job
     });
     p.galley(pos2(r.center().x, tile.bottom() + 42.0), g, theme::FG_3);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Night4, verify2 PAGES-UI-23: x's requests, read while x's sign-in came back (which forgot what was asked) and
+    /// landing after y signed in, are never shown to y.
+    #[test]
+    fn another_accounts_requests_never_land() {
+        use crate::state::AccountState as A;
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl =
+            std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let mut snap = (*ctl.view()).clone();
+        let mut state = State { fixture: true, ..Default::default() };
+        let mut frame = |state: &mut State, account: A| {
+            snap.account.state = account;
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let _ = ctx.run_ui(egui::RawInput::default(), |_| {
+                let cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                state.poll(&ctx, &cx);
+            });
+        };
+        frame(&mut state, A::SignedIn { username: "x".into() });
+        let x = state.account.owner().cloned().expect("x seen");
+        let fixture: shares::Requests = serde_json::from_str(include_str!("../../../orbiters-core/tests/fixtures/capture-requests.json")).unwrap();
+        assert!(!fixture.requests.is_empty());
+        // x's list being read; x's sign-in comes back meanwhile (what was asked is forgotten).
+        let (hold, held) = std::sync::mpsc::channel::<()>();
+        let read = fixture.clone();
+        state.list = Job::spawn(&ctx, move || {
+            let _ = held.recv();
+            super::super::ForAccount::new(&x, Ok((read.clone(), read)))
+        });
+        state.loaded = None;
+        frame(&mut state, A::SignedIn { username: "y".into() });
+        drop(hold);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while state.list.running() {
+            frame(&mut state, A::SignedIn { username: "y".into() });
+            assert!(std::time::Instant::now() < until);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        frame(&mut state, A::SignedIn { username: "y".into() });
+        assert!(state.incoming.is_empty() && state.outgoing.is_empty(), "x's requests shown to y");
+    }
 }

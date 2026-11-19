@@ -73,6 +73,7 @@ pub fn source_of(entry: &crate::controller::shares::Entry) -> Option<Source> {
                 world_name: world,
                 taken: entry.taken as i64,
                 name,
+                revision: files::Remote::revision_of(entry.remote.as_ref().and_then(|i| i.source_key.as_deref()), &url),
                 url,
             }))
         }
@@ -92,7 +93,8 @@ pub fn gallery_source(p: &orbiters_core::community::Picture, event: Option<&orbi
     // An asset's picture (no gallery id) by its link alone.
     let url = p.full_url.clone().or(p.src.clone()).filter(|u| u.starts_with("https://")).unwrap_or_default();
     let kind = if p.id == 0 { files::RemoteKind::Link } else { files::RemoteKind::Gallery };
-    Source::remote(files::Remote { kind, asset: p.asset_id, id: p.id, development, world_id: world.id, world_name: world.name, taken, name, url })
+    let revision = files::Remote::revision_of(None, &url);
+    Source::remote(files::Remote { kind, asset: p.asset_id, id: p.id, development, world_id: world.id, world_name: world.name, taken, name, url, revision })
 }
 
 /// Whether the app is on the development environment (what a shared picture's id is of).
@@ -133,6 +135,8 @@ struct Saving {
     progress: Arc<AtomicU32>,
     /// The edit being written: what the copy holds once it is done (the person may go on editing meanwhile).
     doc: Edit,
+    /// Its revision ([`Editor::revision`]): the one confirmed written once it is done.
+    revision: u64,
 }
 
 /// The editor over a picture that is drawn live by its host instead of read from a file: the 3D view's, Edit in 3D
@@ -236,8 +240,16 @@ pub struct Editor {
     /// The copy saving writes (the one saved before, or the edited copy opened).
     target: Option<PathBuf>,
     doc: Edit,
-    /// What the copy on disk has (nothing to save while the edit is the same).
+    /// What the copy on disk has.
     saved_doc: Option<Edit>,
+    /// The edit's revision: one more at each change of it, undo and redo included (night4, verify2: an edit compared
+    /// by value could come back equal to what was saved or armed, and lose what was between).
+    revision: u64,
+    /// The edit as it was at `revision` (a change is seen against it).
+    tracked: Edit,
+    /// The last revision confirmed written to the copy (`None`: none yet). Unsaved is the current revision differing
+    /// from this one, and nothing else: a save under way is not written yet.
+    written: Option<u64>,
     history: History,
     selected: Selected,
     channel: Channel,
@@ -262,7 +274,7 @@ pub struct Editor {
     closing: Option<f64>,
     /// Close was asked with changes not saved (the edit as it was then): asked again with the same edit, they are
     /// dropped. Edited or saved since, the next close asks again (it was armed once per editor, and the warning stayed).
-    confirm_close: Option<Edit>,
+    confirm_close: Option<u64>,
     /// Drawn live by its host (Edit in 3D).
     live: Option<Live>,
     /// The 3D view the copy opened was made of, and whether editing it there again was asked.
@@ -317,6 +329,9 @@ impl Editor {
             title,
             target: target.clone(),
             saved_doc: target.is_some().then(|| doc.clone()),
+            revision: 0,
+            tracked: doc.clone(),
+            written: target.is_some().then_some(0),
             history: History::new(&doc),
             selected: Selected::Nothing,
             channel: Channel::Rgb,
@@ -358,7 +373,8 @@ impl Editor {
 
     /// Saving the host started for [`LiveAsk`]: its progress shows on Save, its result under the canvas.
     pub fn start_saving(&mut self, job: Job<Result<PathBuf, String>>, progress: Arc<AtomicU32>) {
-        self.saving = Some(Saving { job, progress, doc: self.doc.clone() });
+        let revision = self.track();
+        self.saving = Some(Saving { job, progress, doc: self.doc.clone(), revision });
         self.notice = None;
     }
 
@@ -414,24 +430,45 @@ impl Editor {
         }
     }
 
+    /// The edit's revision now: a change since the last look makes a new one.
+    fn track(&mut self) -> u64 {
+        if self.tracked != self.doc {
+            self.revision += 1;
+            self.tracked = self.doc.clone();
+        }
+        self.revision
+    }
+
     fn dirty(&self) -> bool {
         // A live picture's edit stays with its host when the editor closes.
         if self.live.is_some() {
             return false;
         }
-        match &self.saved_doc {
-            Some(s) => *s != self.doc,
+        // Changed since the last look: a revision of its own, not written.
+        let revision = if self.tracked != self.doc { self.revision + 1 } else { self.revision };
+        match self.written {
+            Some(written) => written != revision,
+            // Never written: only an edit that does something is lost.
             None => !self.doc.is_identity(),
         }
     }
 
-    /// Starts closing; false while changes are not saved and this is the first time asked.
+    /// Starts closing; asks first while the edit on screen is not confirmed written (a save under way included: it
+    /// writes what it was given, and may fail), once for each revision.
     fn close(&mut self, ctx: &egui::Context) {
-        if self.dirty() && self.confirm_close.as_ref() != Some(&self.doc) && self.saving.is_none() {
-            self.confirm_close = Some(self.doc.clone());
+        let revision = self.track();
+        if self.dirty() && self.confirm_close != Some(revision) {
+            self.confirm_close = Some(revision);
             return;
         }
         self.closing = Some(anim::time(ctx));
+    }
+
+    /// Tests: the edit on screen as if written to the copy.
+    #[cfg(test)]
+    fn written_now(&mut self) {
+        self.written = Some(self.track());
+        self.saved_doc = Some(self.doc.clone());
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
@@ -463,7 +500,7 @@ impl Editor {
             // A save whose worker ended without a word (it panicked) ends as a failed save: Save works again.
             let r = s.job.take().or_else(|| s.job.died().then(|| Err(tr("it stopped unexpectedly").to_string())));
             if let Some(r) = r {
-                let written = self.saving.take().map(|s| s.doc);
+                let written = self.saving.take().map(|s| (s.doc, s.revision));
                 match r {
                     Ok(path) if self.live.is_some() => {
                         // Each save of a live picture is a picture of its own.
@@ -485,8 +522,11 @@ impl Editor {
                         self.target = Some(path);
                         // What the copy holds is the edit that was written, not what is on screen now (edited during
                         // the save, it is not saved: Back asks again).
-                        self.saved_doc = written;
-                        // A close armed before the save asked about another edit.
+                        if let Some((doc, revision)) = written {
+                            self.saved_doc = Some(doc);
+                            self.written = Some(revision);
+                        }
+                        // A close armed before the save asked about what was not written then.
                         self.confirm_close = None;
                         self.error = None;
                     }
@@ -522,13 +562,15 @@ impl Editor {
         let progress = Arc::new(AtomicU32::new(0));
         let (p, edit, source, view) = (progress.clone(), self.doc.clone(), self.source.clone(), self.saved_view.clone());
         let job = Job::spawn(ctx, move || save(&source, &edit, &target, view.as_ref(), &p).map(|_| target).map_err(|e| format!("{e:#}")));
-        self.saving = Some(Saving { job, progress, doc: self.doc.clone() });
+        let revision = self.track();
+        self.saving = Some(Saving { job, progress, doc: self.doc.clone(), revision });
         self.notice = None;
     }
 
     /// Draws the editor over `rect`; false once it closed.
     pub fn show(&mut self, ui: &mut Ui, rect: Rect) -> bool {
         let ctx = ui.ctx().clone();
+        self.track();
         self.poll(&ctx);
         let now = anim::time(&ctx);
         let enter = anim::spring_from(&ctx, self.id.with("in"), [0.0], [1.0], Spring::SOFT)[0].clamp(0.0, 1.0);
@@ -704,7 +746,7 @@ impl Editor {
         }
         // Looks, Save this view (live) or Edit in 3D (a copy made there), left of it.
         let msg_right = self.more_buttons(ui, r) - 12.0;
-        let msg = if self.confirm_close.as_ref() == Some(&self.doc) && self.dirty() && self.closing.is_none() {
+        let msg = if self.confirm_close == Some(self.revision) && self.tracked == self.doc && self.dirty() && self.closing.is_none() {
             Some((tr("Not saved: close again to leave without saving"), theme::WARN))
         } else if self.error.is_some() {
             Some((tr("Something went wrong (see the canvas)"), theme::DANGER))
@@ -979,7 +1021,7 @@ mod tests {
         // A is being written; the person edits to B meanwhile.
         e.doc = with(0.5);
         let written = path.clone();
-        e.saving = Some(Saving { job: Job::spawn(&ctx, move || Ok(written)), progress: Arc::default(), doc: e.doc.clone() });
+        e.saving = Some(Saving { job: Job::spawn(&ctx, move || Ok(written)), progress: Arc::default(), doc: e.doc.clone(), revision: e.track() });
         e.doc = with(0.2);
         finish(&mut e);
         assert_eq!(e.saved_doc, Some(with(0.5)), "what the copy holds");
@@ -988,15 +1030,83 @@ mod tests {
         assert!(e.closing.is_none(), "Back asks first");
         // A save of B, with the close armed for B: once saved, the old question does not stand.
         let written = path.clone();
-        e.saving = Some(Saving { job: Job::spawn(&ctx, move || Ok(written)), progress: Arc::default(), doc: e.doc.clone() });
+        e.saving = Some(Saving { job: Job::spawn(&ctx, move || Ok(written)), progress: Arc::default(), doc: e.doc.clone(), revision: e.track() });
         finish(&mut e);
         assert!(!e.dirty() && e.confirm_close.is_none());
         // A save whose worker panics.
         e.doc = with(0.9);
-        e.saving = Some(Saving { job: Job::spawn(&ctx, || -> Result<PathBuf, String> { panic!("a writer's own unwrap") }), progress: Arc::default(), doc: e.doc.clone() });
+        e.saving = Some(Saving { job: Job::spawn(&ctx, || -> Result<PathBuf, String> { panic!("a writer's own unwrap") }), progress: Arc::default(), doc: e.doc.clone(), revision: e.track() });
         finish(&mut e);
         assert!(e.error.is_some(), "it says the save failed");
         assert!(e.dirty(), "and the edit is still unsaved");
+    }
+
+    /// Night4, verify2 PG2-4: Back pressed while a save writes A, with B on screen, asks (B closed silently: the guard
+    /// stood aside for any save under way); and a close armed for an edit does not stand for the same edit come back by
+    /// undo after another change. Unsaved is the revision on screen differing from the last one confirmed written.
+    #[test]
+    fn back_during_a_save_asks_and_an_armed_close_is_for_one_revision() {
+        let ctx = egui::Context::default();
+        let path = std::env::temp_dir().join(format!("orbiters-editor-back-{}.png", std::process::id()));
+        let mut e = Editor::open(&ctx, Source::picture(&path), "World");
+        let with = |exposure: f32| {
+            let mut doc = Edit::default();
+            let l = doc.layer(Effect::Light(Light { exposure, ..Default::default() }));
+            doc.layers.push(l);
+            doc
+        };
+        // A is being written (held); the person edits to B and presses Back before it ends.
+        e.doc = with(0.5);
+        let (finish, held) = std::sync::mpsc::channel::<()>();
+        let written = path.clone();
+        e.saving = Some(Saving {
+            job: Job::spawn(&ctx, move || {
+                let _ = held.recv();
+                Ok(written)
+            }),
+            progress: Arc::default(),
+            doc: e.doc.clone(),
+            revision: e.track(),
+        });
+        e.doc = with(0.2);
+        e.close(&ctx);
+        assert!(e.closing.is_none(), "B is not written: Back asks, even with a save under way");
+        // With A on screen alone, Back during its save asks too: A is not confirmed written yet.
+        let mut a = Editor::open(&ctx, Source::picture(&path), "World");
+        a.doc = with(0.5);
+        let r = a.track();
+        a.saving = Some(Saving { job: Job::spawn(&ctx, || -> Result<PathBuf, String> { Err("held".into()) }), progress: Arc::default(), doc: a.doc.clone(), revision: r });
+        a.close(&ctx);
+        assert!(a.closing.is_none(), "a save under way is not a save");
+        drop(finish);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while e.saving.is_some() {
+            assert!(std::time::Instant::now() < until);
+            e.poll(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(e.dirty(), "A written, B not");
+        // Armed on B; then C, then undo back to B's value: a new revision, asked again.
+        e.close(&ctx);
+        assert!(e.closing.is_none());
+        e.close(&ctx);
+        assert!(e.closing.is_some(), "asked twice for the same revision: it closes");
+        let mut e = Editor::open(&ctx, Source::picture(&path), "World");
+        e.doc = with(0.2);
+        e.close(&ctx);
+        e.doc = with(0.7);
+        e.track();
+        e.doc = with(0.2);
+        e.close(&ctx);
+        assert!(e.closing.is_none(), "the same value again after another change: asked again");
+        // A written, then edited and undone back to A: the revision on screen is not the one written.
+        let mut e = Editor::open(&ctx, Source::picture(&path), "World");
+        e.doc = with(0.5);
+        e.written_now();
+        e.doc = with(0.6);
+        e.track();
+        e.doc = with(0.5);
+        assert!(e.dirty(), "unsaved is a revision, not a value");
     }
 
     /// Night PG2-4: the "not saved" guard asks every time there is something new to lose, and its warning goes once
@@ -1020,7 +1130,7 @@ mod tests {
         let mut e = Editor::open(&ctx, Source::picture(std::path::Path::new("Z:/orbiters-test/none.png")), "World");
         change(&mut e, 0.5);
         e.close(&ctx);
-        e.saved_doc = Some(e.doc.clone());
+        e.written_now();
         assert!(!e.dirty());
         change(&mut e, 0.3);
         e.close(&ctx);

@@ -61,10 +61,22 @@ pub struct Remote {
     /// Its link: a [`RemoteKind::Link`]'s picture, a gallery picture's link as listed (tried when Orbiters renews none).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub url: String,
+    /// Which bytes of it ([`Remote::revision_of`]): a shared picture's content key, a gallery picture's link without
+    /// its expiring part. Part of its cache name, so that another version of the same picture is another file (night4,
+    /// verify2). Empty in edits saved before: their picture is fetched again under a qualified name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub revision: String,
 }
 
 fn is_zero(n: &u64) -> bool {
     *n == 0
+}
+
+fn hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
 }
 
 impl Remote {
@@ -86,7 +98,18 @@ impl Remote {
                 format!("link-{:016x}", h.finish())
             }
         };
+        // Its version: another version of the same picture is another file.
+        let name = if self.revision.is_empty() || self.kind == RemoteKind::Link { name } else { format!("{name}-r{:016x}", hash(&self.revision)) };
         orbiters_core::paths::cache_dir().join("editor-pictures").join(format!("{name}.img"))
+    }
+
+    /// A version key for a picture's bytes: `key` when it has one (a shared picture's content key), else its link
+    /// without the part that expires (a gallery picture's link is renewed with new query parameters).
+    pub fn revision_of(key: Option<&str>, url: &str) -> String {
+        match key.filter(|k| !k.is_empty()) {
+            Some(k) => k.to_owned(),
+            None => url.split(['?', '#']).next().unwrap_or_default().to_owned(),
+        }
     }
 
     fn taken(&self) -> time::OffsetDateTime {
@@ -225,10 +248,21 @@ pub fn sidecar(png: &Path) -> PathBuf {
 }
 
 /// The edit of `png` when it is an edited copy whose original is still there: its source and edit.
+///
+/// A picture of Orbiters is where its descriptor says now, never where the saved edit kept it: an edit saved by an
+/// earlier version names a cache file that may hold another picture of the same number (night4, verify2 PG2-7). It
+/// needs not be downloaded yet ([`fetch`] does it); the old file is left where it is.
 pub fn reopen(png: &Path) -> Option<Saved> {
     let text = std::fs::read_to_string(sidecar(png)).ok()?;
-    let saved: Saved = serde_json::from_str(&text).ok()?;
-    (saved.format == FORMAT && saved.source.files().iter().all(|f| f.is_file())).then_some(saved)
+    let mut saved: Saved = serde_json::from_str(&text).ok()?;
+    if saved.format != FORMAT {
+        return None;
+    }
+    if let Some(remote) = &saved.source.remote {
+        saved.source.picture = remote.file();
+        return saved.source.layers.iter().all(|l| l.path.is_file()).then_some(saved);
+    }
+    saved.source.files().iter().all(|f| f.is_file()).then_some(saved)
 }
 
 /// A new copy's name beside `original`: `<name> (edited).png`, `(edited 2)` and on when taken.
@@ -625,6 +659,26 @@ mod tests {
         assert_eq!(serde_json::from_str::<Saved>(&json).unwrap(), again);
     }
 
+    /// Night4, verify2 PG2-7: an edit saved by an earlier version names the old unqualified cache file, which may hold
+    /// the other kind's picture of the same number: reopened, the picture is where its descriptor says now (never that
+    /// file, which stays where it is), and it reopens even before that is downloaded.
+    #[test]
+    fn an_old_saved_edit_never_reopens_the_old_cache_file() {
+        let dir = temp("reopen-remote");
+        let old = dir.join("gallery-prod-12.img");
+        write_png(&old, &Rgba8::new(1, 1, vec![9, 9, 9, 255]), None).unwrap();
+        let remote = Remote { kind: RemoteKind::Gallery, id: 12, ..Default::default() };
+        let saved = Saved::new(Source { picture: old.clone(), layers: Vec::new(), remote: Some(remote.clone()) }, Edit::default());
+        let copy = dir.join("Lobby (edited).png");
+        write_png(&copy, &Rgba8::new(1, 1, vec![1, 1, 1, 255]), None).unwrap();
+        write_sidecar(&copy, &saved).unwrap();
+        let reopened = reopen(&copy).expect("an edited copy of a picture of Orbiters");
+        assert_eq!(reopened.source.picture, remote.file(), "where its descriptor says");
+        assert_ne!(reopened.source.picture, old);
+        assert!(old.is_file(), "the old file is not deleted");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_picture_of_orbiters_is_downloaded_once_and_its_copy_goes_among_vrchat_s() {
         let r = Remote {
@@ -637,9 +691,10 @@ mod tests {
             taken: 1_792_348_661,
             name: "Saturday night: by Alex/<x>".into(),
             url: String::new(),
+            revision: String::new(),
         };
         let s = Source::remote(r.clone());
-        assert!(s.picture.ends_with("editor-pictures/gallery-dev-42.img"), "{}", s.picture.display());
+        assert!(s.picture.ends_with("editor-pictures/gallery-dev-community-42.img"), "{}", s.picture.display());
         assert_eq!(s.files(), [s.picture.clone()]);
         // In VRChat's pictures, the month it was taken, named after it (what a file name cannot hold left out).
         let copy = s.copy_path();
@@ -675,6 +730,10 @@ mod tests {
         }
         assert!(link("https://orbiters.cc/a.webp").file_name().unwrap().to_string_lossy().starts_with("link-"));
                 // A shared picture with no name nor world is named by its id.
+        // Night4, verify2: another version of the same picture is another file.
+        let version = |rev: &str| Remote { kind: RemoteKind::Shared, id: 7, revision: rev.into(), ..Default::default() }.file();
+        assert_ne!(version("a1"), version("b2"));
+        assert_eq!(Remote::revision_of(None, "https://cdn.x/p/1.png?ex=1&hm=2"), Remote::revision_of(None, "https://cdn.x/p/1.png?ex=3"));
         let plain = Source::remote(Remote { kind: RemoteKind::Shared, id: 7, ..Default::default() });
         assert!(plain.copy_path().file_name().unwrap().to_string_lossy().starts_with("Orbiters picture 7 (edited"));
         let _ = std::fs::remove_dir_all(dir);

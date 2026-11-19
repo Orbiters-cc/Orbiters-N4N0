@@ -701,6 +701,8 @@ pub struct Window {
     pub covered: bool,
     /// Screenshots: this computer's VRChat pictures stand in for the gallery's.
     stand_ins: Vec<Picture>,
+    /// Who its sign-ups, invites and pictures are for: another owner starts it over ([`Window::forget_account`]).
+    account: super::AccountFollow,
 }
 
 /// Space between the window and the page's edges.
@@ -736,6 +738,7 @@ impl Window {
             progress: 0.0,
             covered: false,
             stand_ins: Vec::new(),
+            account: Default::default(),
         };
         w.load(ctx);
         w
@@ -800,6 +803,21 @@ impl Window {
 
     pub fn ask_of(&self, step: &str) -> Ask {
         self.asks.get(step).cloned().unwrap_or(if self.invites_job.running() { Ask::Unknown } else { Ask::Idle })
+    }
+
+    /// Another account (night4, verify2): its sign-ups, invites, an answer on its way and its gallery's pictures go, and
+    /// the event is read again for who is signed in now. What was on its way is dropped with its job: its answer is
+    /// never taken in.
+    fn forget_account(&mut self, ctx: &egui::Context) {
+        self.page = None;
+        self.invites_job = Job::default();
+        self.action = Job::default();
+        self.gallery_job = Job::default();
+        self.asks.clear();
+        self.focus = None;
+        self.pictures.clear();
+        self.pictures_asked = false;
+        self.load(ctx);
     }
 
     /// Whether the member signed up for any of the event's steps.
@@ -944,6 +962,9 @@ impl Window {
     /// Draws the window over the page (`page`: the page's rect); true once it closed back into its card.
     pub fn show(&mut self, ui: &mut Ui, cx: &mut Cx, pictures: &mut Pictures, covers: &Covers) -> bool {
         let ctx = ui.ctx().clone();
+        if self.account.see(&cx.snap.account.state, cx.snap.settings.development).changed && !self.fixture {
+            self.forget_account(&ctx);
+        }
         self.poll(&ctx);
         let page = ui.max_rect();
         let area = Rect::from_min_max(pos2(page.left() + GUTTER, page.top() + cx.top + 14.0), pos2(page.right() - GUTTER, page.bottom() - GUTTER));

@@ -369,6 +369,11 @@ impl Editor {
         self.notice = None;
     }
 
+    /// It edits a picture of Orbiters (downloaded with the account), not one of this computer.
+    pub fn is_remote(&self) -> bool {
+        self.source.remote.is_some()
+    }
+
     pub fn saving(&self) -> bool {
         self.saving.is_some()
     }

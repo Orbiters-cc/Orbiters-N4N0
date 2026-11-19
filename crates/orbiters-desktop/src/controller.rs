@@ -2843,13 +2843,7 @@ fn refresh_storage(ctl: &Shared) {
     let used: u64 = sessions.iter().map(|s| s.size_bytes).sum();
     // What keeping only their 3D views would free.
     let trimmable: Vec<u64> = sessions.iter().filter(|s| s.reconstruction.is_some() && s.capture_bytes > 0).map(|s| s.capture_bytes).collect();
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    let free = disks
-        .list()
-        .iter()
-        .filter(|d| dir.starts_with(d.mount_point()) || dir.to_string_lossy().to_lowercase().starts_with(&d.mount_point().to_string_lossy().to_lowercase()))
-        .max_by_key(|d| d.mount_point().as_os_str().len())
-        .map(|d| d.available_space());
+    let free = free_space(&dir);
     ctl.update(|s| {
         s.storage.sessions_dir = dir.clone();
         s.storage.used_bytes = used;
@@ -2859,6 +2853,65 @@ fn refresh_storage(ctl: &Shared) {
         s.storage.capture_bytes = trimmable.iter().sum();
         s.storage.capture_sessions = trimmable.len();
     });
+}
+
+/// Free bytes on the disk that holds `dir`: one question to Windows for that folder, not a list of every volume
+/// (LIGHT-DESKTOP-9); sysinfo's list where that cannot answer (the folder does not exist yet, another system).
+fn free_space(dir: &Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetDiskFreeSpaceExW(dir: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
+        }
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+        let mut available = 0u64;
+        // SAFETY: a NUL-terminated path and one out-parameter; the totals are not asked for.
+        if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) } != 0 {
+            return Some(available);
+        }
+    }
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter(|d| dir.starts_with(d.mount_point()) || dir.to_string_lossy().to_lowercase().starts_with(&d.mount_point().to_string_lossy().to_lowercase()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(|d| d.available_space())
+}
+
+/// Only the free space, for the 30 s turns when no session changed ([`StorageSweep`]).
+fn refresh_free_space(ctl: &Shared) {
+    let dir = ctl.with_settings(|s| s.sessions_dir.clone());
+    let free = free_space(&dir);
+    ctl.update_if(|s| {
+        let changed = s.storage.free_bytes != free;
+        s.storage.free_bytes = free;
+        changed
+    });
+}
+
+/// When the watchers' 30 s turn walks the whole library again (every manifest, report and picture file read and parsed:
+/// ~13 file calls a session) rather than only asking for the free space: the app changed a session (`bump_library`),
+/// the folder or the library's own folder changed (a session added or removed by hand), a recording runs (the storage
+/// limit), or ten minutes passed (LIGHT-DESKTOP-9).
+#[derive(Default)]
+struct StorageSweep {
+    last: Option<(u64, PathBuf, Option<std::time::SystemTime>, Instant)>,
+}
+
+impl StorageSweep {
+    const AT_MOST: Duration = Duration::from_secs(600);
+
+    fn due(&mut self, library: u64, dir: &Path, modified: Option<std::time::SystemTime>, recording: bool, now: Instant) -> bool {
+        let due = recording
+            || self.last.as_ref().is_none_or(|(v, d, m, at)| *v != library || d != dir || *m != modified || now.duration_since(*at) >= Self::AT_MOST);
+        if due {
+            self.last = Some((library, dir.to_path_buf(), modified, now));
+        }
+        due
+    }
 }
 
 fn spawn_watchers(ctl: Shared) {
@@ -2885,6 +2938,7 @@ fn spawn_watchers(ctl: Shared) {
             let mut videos = videos::Videos::load();
             let mut system = sysinfo::System::new();
             let mut tick = 0u64;
+            let mut storage_sweep = StorageSweep::default();
             let mut rate = PublishRate::default();
             let mut running = false;
             // Since when VRChat runs, and when VRChat was last asked to find the OSC service.
@@ -3100,9 +3154,15 @@ fn spawn_watchers(ctl: Shared) {
                     }
                 }
 
-                // Storage, every 30 s (it walks the session folders).
+                // Storage, every 30 s: the whole library when something may have changed, else the free space.
                 if tick.is_multiple_of(30) {
-                    refresh_storage(&ctl);
+                    let dir = ctl.with_settings(|s| s.sessions_dir.clone());
+                    let modified = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+                    if storage_sweep.due(ctl.library_version(), &dir, modified, ctl.is_capturing(), Instant::now()) {
+                        refresh_storage(&ctl);
+                    } else {
+                        refresh_free_space(&ctl);
+                    }
                 }
                 // How often the state was published, once a minute (this loop turns once a second, and a little more).
                 let readers = ctl.subscribers.lock().unwrap().len();
@@ -3185,6 +3245,25 @@ mod tests {
         assert_eq!(run(vec![(2, b.clone(), none), (1, a.clone(), none)]), vec![2.0], "reversed in one burst");
         assert_eq!(run(vec![(2, b.clone(), after_write), (1, a.clone(), none)]), vec![2.0], "the older after a write");
         assert_eq!(run(vec![(1, a.clone(), after_write), (2, b.clone(), none)]), vec![1.0, 2.0], "in order");
+    }
+
+    /// LIGHT-DESKTOP-9: the library is walked again when something changed, while recording, and every ten minutes;
+    /// the other 30 s turns ask only for the free space.
+    #[test]
+    fn the_library_is_walked_again_only_when_it_may_have_changed() {
+        use std::time::{Duration, Instant, SystemTime};
+        let mut sweep = super::StorageSweep::default();
+        let dir = std::path::PathBuf::from("lib");
+        let t0 = Instant::now();
+        let m = Some(SystemTime::UNIX_EPOCH);
+        assert!(sweep.due(1, &dir, m, false, t0), "the first turn");
+        assert!(!sweep.due(1, &dir, m, false, t0 + Duration::from_secs(30)), "nothing changed");
+        assert!(sweep.due(2, &dir, m, false, t0 + Duration::from_secs(60)), "a session saved, trashed...");
+        assert!(sweep.due(2, &dir, Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(90)), "a folder added by hand");
+        assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(120)));
+        assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), true, t0 + Duration::from_secs(150)), "recording");
+        assert!(!sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(180)));
+        assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(800)), "ten minutes");
     }
 
     /// C-8: the keeper's answer about VRChat A's camera, arriving after the app followed VRChat B, is not shown for B;

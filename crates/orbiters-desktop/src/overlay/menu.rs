@@ -66,6 +66,8 @@ pub struct MenuOverlay {
     kept: Option<Matrix34>,
     /// The menu is drawn in the retro look (Orbiters - N4N0 › N4N0 › N4N0's menu › Look).
     retro: bool,
+    /// What the last picture of the menu showed ([`MenuOverlay::shows`]); `None`: something else is on the canvas.
+    painted: Option<u64>,
     /// 3D worlds: its pill under the menu, its panel in the menu's place, the capture shown around the person.
     pub worlds: super::worlds::Worlds,
 }
@@ -161,6 +163,7 @@ impl MenuOverlay {
             behind: false,
             kept: None,
             retro: false,
+            painted: None,
             worlds,
         })
     }
@@ -223,6 +226,19 @@ impl MenuOverlay {
         self.canvas.invalidate();
         self.host.dirty = true;
         self.last_activity = Instant::now();
+    }
+
+    /// What the menu's picture shows now: the page's fingerprint, what the overlay draws over it, and how.
+    fn shows(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let menu = &self.host.menu;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        layout::fingerprint(menu, layout::Glyphs::Fonts).hash(&mut h);
+        (self.hover, self.pressed, self.behind, self.retro, orbiters_i18n::language() as u8).hash(&mut h);
+        for pic in &layout::cached(ScreenPage::of(menu)).pictures {
+            layout::picture_key(menu, pic).is_some_and(|key| self.host.picture(&key, self.retro).is_some()).hash(&mut h);
+        }
+        h.finish()
     }
 
     fn close(&mut self, overlay: &vr::Overlay, snap: &Snapshot, backend: &Ctl) {
@@ -419,6 +435,8 @@ impl MenuOverlay {
                     self.canvas.invalidate();
                 }
                 self.worlds.paint(&mut self.canvas);
+                // The canvas holds the worlds panel now: the menu paints whole when it comes back.
+                self.painted = None;
                 if let Some(changed) = self.canvas.damage() {
                     presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, changed);
                 }
@@ -433,8 +451,15 @@ impl MenuOverlay {
         // A like or a label switched on pops for a moment too.
         let animating = self.host.menu.listening || self.host.menu.popping().is_some();
         let due = self.last_paint.is_none_or(|t| t.elapsed() >= if animating { Duration::from_millis(50) } else { super::booster::panel_pace() });
+        // A change of the service's state that this page does not show paints nothing (MENU-12): the page's
+        // fingerprint and what is drawn over it, as when it was last painted.
+        let shows = (self.host.dirty && !animating && self.shown).then(|| self.shows());
+        if shows.is_some() && shows == self.painted {
+            self.host.dirty = false;
+        }
         if (self.host.dirty || animating) && due {
             self.host.dirty = false;
+            self.painted = if animating { None } else { shows.or_else(|| Some(self.shows())) };
             self.last_paint = Some(Instant::now());
             let time = self.last_activity.elapsed().as_secs_f64();
             if !self.shown {

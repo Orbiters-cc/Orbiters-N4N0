@@ -2573,8 +2573,33 @@ pub fn slot_text_with(menu: &Menu, slot: &Slot, public: bool, glyphs: Glyphs) ->
     }
 }
 
+/// What the page shows, as a number (MENU-12): the page, every element's state, every slot's text as `glyphs` draws
+/// it, the pictures it asks for. Two menus with the same fingerprint draw the same picture (the hosts add what they
+/// draw over it: hover, press, look, loaded pictures); a change of the menu that its page does not show (a 3D view's
+/// percent on Home, a call's seconds on YouTube) leaves it as it was.
+pub fn fingerprint(menu: &Menu, glyphs: Glyphs) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let page = ScreenPage::of(menu);
+    let layout = cached(page);
+    page.hash(&mut h);
+    menu.page.hash(&mut h);
+    (menu.pages.share(), menu.mismatch_buttons.is_some(), menu.listening).hash(&mut h);
+    for e in &layout.elements {
+        state(menu, e).hash(&mut h);
+    }
+    for s in &layout.slots {
+        slot_text_with(menu, s, false, glyphs).hash(&mut h);
+    }
+    for p in &layout.pictures {
+        picture_key(menu, p).hash(&mut h);
+    }
+    menu.popping().map(|(t, _)| t).hash(&mut h);
+    h.finish()
+}
+
 /// How an element shows now.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct State {
     /// Chosen or switched on: a green ring.
     pub on: bool,
@@ -2726,6 +2751,34 @@ pub fn timeline_lit(media: &super::Media, i: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MENU-12: what the page does not show leaves its fingerprint as it was; what it shows changes it.
+    #[test]
+    fn a_page_s_fingerprint_follows_what_it_shows_only() {
+        use crate::captures::{CapturePhase, CaptureRow, CapturesView};
+        let mut menu = crate::menu::Menu { pages: crate::menu::Pages::Mirror, ..Default::default() };
+        menu.open();
+        let making = |percent| CapturesView { latest: Some(CaptureRow { key: "C:/s/a".into(), world: "Club".into(), phase: CapturePhase::Making { percent }, ..Default::default() }), ..Default::default() };
+        let _ = menu.set_captures(making(41));
+        menu.page = crate::menu::Page::Music;
+        let music = fingerprint(&menu, Glyphs::Fonts);
+        let _ = menu.set_captures(making(42));
+        assert_eq!(fingerprint(&menu, Glyphs::Fonts), music, "Music does not show the 3D view's percent");
+        menu.page = crate::menu::Page::Photo;
+        let photo = fingerprint(&menu, Glyphs::Fonts);
+        let _ = menu.set_captures(making(43));
+        assert_ne!(fingerprint(&menu, Glyphs::Fonts), photo, "the 3D picture page does");
+        // A call's seconds: on the call page only.
+        menu.page = crate::menu::Page::Search;
+        menu.call = Some(crate::menu::Call::Connected { name: "Ada".into(), seconds: 5, muted: false });
+        let search = fingerprint(&menu, Glyphs::Fonts);
+        menu.call = Some(crate::menu::Call::Connected { name: "Ada".into(), seconds: 6, muted: false });
+        assert_eq!(fingerprint(&menu, Glyphs::Fonts), search);
+        menu.page = crate::menu::Page::Call;
+        let call = fingerprint(&menu, Glyphs::Fonts);
+        menu.call = Some(crate::menu::Call::Connected { name: "Ada".into(), seconds: 7, muted: false });
+        assert_ne!(fingerprint(&menu, Glyphs::Fonts), call);
+    }
 
     /// MENU-6: the SteamVR menu draws names with the app's fonts, whatever their script; the avatar's screen keeps its
     /// atlas' letters. Both cut a Latin name at the same place.

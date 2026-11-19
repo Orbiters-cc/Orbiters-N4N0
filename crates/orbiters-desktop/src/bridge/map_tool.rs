@@ -20,6 +20,41 @@ pub const NAMES: [&str; 2] = ["map_plan", "map_check"];
 const WALK_SPEED: f32 = 4.0;
 /// Moves kept per session.
 const MOVES_KEPT: usize = 400;
+/// Pictures' shares kept in memory (SWEEP-19 a: all of them stayed, a long tour's hundreds of MB): the last ones read; any
+/// other comes back from its file in `bridge-maps/` (or its session folder) when a map needs it.
+const CAPTURES_KEPT: usize = 64;
+
+/// The shares kept in memory, the oldest read first out.
+#[derive(Default)]
+struct Kept {
+    by_session: HashMap<String, Arc<Capture>>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl Kept {
+    fn get(&mut self, session: &str) -> Option<Arc<Capture>> {
+        let c = self.by_session.get(session)?.clone();
+        self.order.retain(|s| s != session);
+        self.order.push_back(session.to_string());
+        Some(c)
+    }
+
+    fn insert(&mut self, session: &str, c: Arc<Capture>) {
+        self.order.retain(|s| s != session);
+        self.order.push_back(session.to_string());
+        self.by_session.insert(session.to_string(), c);
+        while self.order.len() > CAPTURES_KEPT {
+            if let Some(old) = self.order.pop_front() {
+                self.by_session.remove(&old);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.by_session.len()
+    }
+}
 /// How far a picture of the plan is, at most, pixels.
 const PICTURE_PX: u32 = 360;
 
@@ -41,7 +76,7 @@ type Moves = (String, Vec<(u64, Move)>);
 pub struct Maps {
     /// Where each picture's share of its world's map is kept (`None`: in memory only).
     dir: Mutex<Option<PathBuf>>,
-    captures: Mutex<HashMap<String, Arc<Capture>>>,
+    captures: Mutex<Kept>,
     /// The last map built: its world, the pictures it was built of, and it.
     built: Mutex<Option<Built>>,
     /// Each session's world and its moves there: (unix seconds, move).
@@ -63,11 +98,13 @@ impl Maps {
     /// A picture's share: kept, or read from its folder (and kept).
     fn capture(&self, sessions_dir: &std::path::Path, session: &str) -> Result<Arc<Capture>, String> {
         if let Some(c) = self.captures.lock().unwrap().get(session) {
-            return Ok(c.clone());
+            return Ok(c);
         }
+        // A file that cannot be read as it was mapped (an older version's, clamped beyond ±8 km) is read again from the
+        // picture when its folder is still there.
         if let Some(c) = self.file(session).and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice::<Capture>(&b).ok()) {
             let c = Arc::new(c);
-            self.captures.lock().unwrap().insert(session.to_string(), c.clone());
+            self.captures.lock().unwrap().insert(session, c.clone());
             return Ok(c);
         }
         let dir = sessions_dir.join(session);
@@ -79,13 +116,17 @@ impl Maps {
             if let Some(parent) = file.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            if let Ok(bytes) = serde_json::to_vec(&*c) {
-                if let Err(e) = orbiters_core::write_atomic(&file, &bytes) {
-                    eprintln!("bridge map: a picture's map could not be kept: {e}");
+            match serde_json::to_vec(&*c) {
+                Ok(bytes) => {
+                    if let Err(e) = orbiters_core::write_atomic(&file, &bytes) {
+                        eprintln!("bridge map: a picture's map could not be kept: {e}");
+                    }
                 }
+                // Never written clamped: kept for as long as its folder is there to read it again.
+                Err(e) => eprintln!("bridge map: {session}'s map is not saved: {e}"),
             }
         }
-        self.captures.lock().unwrap().insert(session.to_string(), c.clone());
+        self.captures.lock().unwrap().insert(session, c.clone());
         Ok(c)
     }
 
@@ -362,6 +403,9 @@ impl Bridge {
         if !left_out.is_empty() {
             answer["left_out"] = json!(left_out);
         }
+        if let Some(cut) = &map.cut {
+            answer["map_cut"] = json!(cut);
+        }
         answer["next"] = json!(if verdict.simple && !map.captures.is_empty() {
             "The rule: a very simple world needs one picture, and it has one. Go on to the next world.".to_string()
         } else if map.captures.len() >= verdict.pictures as usize {
@@ -528,5 +572,33 @@ impl Bridge {
     /// Keeps the maps' pictures in `dir` from now on.
     pub fn keep_maps(&self, dir: PathBuf) {
         self.maps.keep_in(dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SWEEP-19 a: every picture's share stayed in the service's memory for the whole session (a long tour: hundreds of MB).
+    /// Only the last ones stay; any other comes back from its file when a map needs it.
+    #[test]
+    fn the_pictures_kept_in_memory_are_bounded_and_the_others_come_back_from_their_files() {
+        let dir = std::env::temp_dir().join(format!("orbiters-map-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let maps = Maps::default();
+        maps.keep_in(dir.clone());
+        for k in 0..200 {
+            let c = Capture { session: format!("s{k}"), centre: [k as f32, 0.0, 0.0], path: vec![[k as f32, 0.0, 0.0]], voxels: vec![[k, 0, 0, 2]; 50], ..Default::default() };
+            std::fs::write(dir.join(format!("s{k}.json")), serde_json::to_vec(&c).unwrap()).unwrap();
+        }
+        for k in 0..200 {
+            assert_eq!(maps.capture(&dir, &format!("s{k}")).unwrap().centre[0], k as f32);
+        }
+        let kept = maps.captures.lock().unwrap().len();
+        assert!(kept <= 64, "{kept} pictures kept in memory");
+        // The first, long gone from memory, is read again from its file.
+        assert_eq!(maps.capture(&dir, "s0").unwrap().voxels.len(), 50);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

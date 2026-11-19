@@ -444,5 +444,6 @@
   "No sound from {app} to set yet.": "{app} にはまだ調整できる音がありません。",
   "Beta feedback": "ベータのフィードバック",
   "Menu mismatch buttons": "メニューずれ報告ボタン",
-  "Three buttons, on your wrist in VR and in a corner of VRChat's window on the desktop, to press when N4N0's menus do not match VRChat's; each press keeps a report on this computer, never what you type or say.": "VRでは手首に、デスクトップではVRChatのウィンドウの隅に出る3つのボタン。N4N0のメニューがVRChatと合わないときに押すと、レポートをこのコンピューターに保存します（入力や発話の内容は含みません）。"
+  "Three buttons, on your wrist in VR and in a corner of VRChat's window on the desktop, to press when N4N0's menus do not match VRChat's; each press keeps a report on this computer, never what you type or say.": "VRでは手首に、デスクトップではVRChatのウィンドウの隅に出る3つのボタン。N4N0のメニューがVRChatと合わないときに押すと、レポートをこのコンピューターに保存します（入力や発話の内容は含みません）。",
+  "no answer": "応答がありません"
 }

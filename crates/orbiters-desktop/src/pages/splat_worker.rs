@@ -277,7 +277,7 @@ impl Readback {
         });
         // Bounded (night5): a GPU that never answers is an error naming the wait, not a worker stuck for ever.
         orbiters_reconstruct::gpu::wait_for_gpu(device, "the integrated GPU's frame read-back")?; // i18n: not shown (a detail of a GPU error)
-        let answer = rx.recv_timeout(std::time::Duration::from_secs(5)).map_err(|_| anyhow::anyhow!("{}", orbiters_i18n::tr!("reading the frame back: {error}", error = "no answer")))?; // i18n: not shown
+        let answer = rx.recv_timeout(std::time::Duration::from_secs(5)).map_err(|_| anyhow::anyhow!("{}", orbiters_i18n::tr!("reading the frame back: {error}", error = orbiters_i18n::tr("no answer"))))?;
         answer.map_err(|e| anyhow::anyhow!("{}", orbiters_i18n::tr!("reading the frame back: {error}", error = e)))?;
         let mut pixels = Vec::with_capacity((w * h * 4) as usize);
         {

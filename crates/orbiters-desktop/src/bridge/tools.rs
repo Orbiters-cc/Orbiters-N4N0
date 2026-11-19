@@ -790,7 +790,6 @@ impl Bridge {
             }
             run.event = Some(why.into());
             run.left = false;
-            run.leaving = true;
             drop(run);
             self.release_session(s);
             if let Some(window) = s.game.window(pid) {

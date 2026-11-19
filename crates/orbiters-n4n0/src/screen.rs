@@ -938,7 +938,8 @@ impl ScreenRuntime {
                         self.presses = self.presses.wrapping_add(1);
                         self.dragging[hand] = menu::timeline_segment(target);
                         self.hand_hover[hand] = Some(index);
-                        effects.extend(self.menu.press(target));
+                        // Someone else's press never leads to a page of the owner's own (verify2 on MENU-2).
+                        effects.extend(if hand == 2 { self.menu.guest_press(target) } else { self.menu.press(target) });
                     } else {
                         self.pointer_log.press(who, x, y, &format!("nothing there on {}", ScreenPage::of(&self.menu).name())); // i18n: not shown
                     }

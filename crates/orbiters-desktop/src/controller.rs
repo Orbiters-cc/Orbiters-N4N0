@@ -4114,6 +4114,10 @@ mod tests {
         });
         let ctl = Controller::new(Settings::default());
         ctl.start_osc_with(false);
+        // The OSC start's own camera seed asks `/usercamera` until the camera is known: known here, and that thread let
+        // go (it looks every 100 ms) before the tree answers, so only the probe asks it.
+        ctl.update(|s| s.camera_open_said = Some(true));
+        std::thread::sleep(std::time::Duration::from_millis(400));
         ctl.with_osc(|o| o.set_vrchat_query(Some(addr)));
         let _ = ctl.worn_avatar_has_kit();
         let asked = asked.lock().unwrap().clone();

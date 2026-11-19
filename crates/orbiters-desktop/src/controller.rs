@@ -2881,7 +2881,13 @@ impl Controller {
     /// Moves a session folder to the recycle bin (only folders inside the sessions folder with a manifest).
     pub fn trash_session(self: &Shared, dir: &Path) -> anyhow::Result<()> {
         let root = self.settings().sessions_dir;
-        if !inside(&root, dir) || !dir.join("manifest.json").is_file() {
+        self.trash_session_in(&root, dir)
+    }
+
+    /// [`Controller::trash_session`] of a session of the library `root` (the one it was asked for: a Trash waiting behind
+    /// a link's other file work is judged against the library it was sent for, not one switched to since).
+    pub fn trash_session_in(self: &Shared, root: &Path, dir: &Path) -> anyhow::Result<()> {
+        if !inside(root, dir) || !dir.join("manifest.json").is_file() {
             anyhow::bail!("{}", tr("Only session folders inside the sessions folder can be removed."));
         }
         anyhow::ensure!(!self.cleaning(dir), "{}", tr("This session is being cleaned up: try again once that is done."));

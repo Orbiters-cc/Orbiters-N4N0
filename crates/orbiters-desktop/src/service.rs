@@ -380,6 +380,12 @@ impl Service {
     }
 
     fn handle(&self, link: u64, role: Role, msg: ToService) {
+        self.handle_in(link, role, msg, None);
+    }
+
+    /// [`Service::handle`]; `library`: the sessions folder when the command was read (file work done later on the link's
+    /// work thread is judged against it, not against a folder the settings switched to meanwhile).
+    fn handle_in(&self, link: u64, role: Role, msg: ToService, library: Option<&std::path::Path>) {
         let ctl = &self.ctl;
         let report = |r: anyhow::Result<()>| {
             if let Err(e) = r {
@@ -415,7 +421,10 @@ impl Service {
                 }
             }
             ToService::Trash { dir } => {
-                let r = ctl.trash_session(&dir);
+                let r = match library {
+                    Some(root) => ctl.trash_session_in(root, &dir),
+                    None => ctl.trash_session(&dir),
+                };
                 if r.is_ok() {
                     ctl.notify(NoticeKind::Success, tr!("Session moved to the {bin}.", bin = tr(crate::words::BIN)));
                 }
@@ -608,7 +617,7 @@ impl Service {
         let work = {
             // Bounded: a client sending file work faster than it is done waits for room (its Stop and Talk are read on
             // this thread all the same once the line moves), never a queue that grows without end (verify-controller).
-            let (tx, rx) = std::sync::mpsc::sync_channel::<ToService>(LINK_WORK);
+            let (tx, rx) = std::sync::mpsc::sync_channel::<(ToService, PathBuf)>(LINK_WORK);
             let svc = self.clone();
             std::thread::Builder::new().name("link-work".into()).spawn(move || {
                 for msg in rx {
@@ -616,7 +625,8 @@ impl Service {
                     if svc.quitting.load(Ordering::Relaxed) {
                         continue;
                     }
-                    svc.handle(id, role, msg);
+                    let (msg, library) = msg;
+                    svc.handle_in(id, role, msg, Some(&library));
                 }
             }).ok().map(|_| tx)
         };
@@ -627,7 +637,8 @@ impl Service {
                     // Quitting: no new file work is taken.
                     (_, msg) if is_file_work(&msg) && self.quitting.load(Ordering::Relaxed) => {}
                     (Some(work), msg) if is_file_work(&msg) => {
-                        let _ = work.send(msg);
+                        let library = self.ctl.with_settings(|s| s.sessions_dir.clone());
+                        let _ = work.send((msg, library));
                     }
                     // Quitting waits for a recording to be saved: the link goes on reading (and gets its Close).
                     (_, ToService::Quit) => {

@@ -171,7 +171,13 @@ pub struct Projects {
     /// By project (`discovery::key`): packages no enabled repository lists, from the last package change that failed for
     /// them, and that change (run again by `unity_missing_packages` add).
     missing: Arc<Mutex<HashMap<String, (vpm::Change, Vec<missing::Missing>)>>>,
+    /// The person's pause as it is at this moment (the bridge's), looked at again right before what ends an editor or changes
+    /// a project it has open: they may come back after the call was dispatched (verify-n4n0 6).
+    presence: OnceLock<Live>,
 }
+
+/// The person's pause now.
+pub type Live = Arc<dyn Fn() -> Option<Paused> + Send + Sync>;
 
 /// The tools' names, in the order `tools/list` gives them.
 pub const NAMES: [&str; 16] = [
@@ -238,8 +244,36 @@ fn text<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 /// first look opens a connection to a host the text chose) nor a device path (`\\?\`, `\\.\`) (BRIDGE-7).
 pub(crate) fn on_a_local_drive(path: &Path) -> bool {
     use std::path::{Component, Prefix};
-    path.is_absolute() && matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_)))
-        || cfg!(not(windows)) && path.is_absolute()
+    let lexical = path.is_absolute() && matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_)));
+    if cfg!(not(windows)) {
+        return path.is_absolute();
+    }
+    // A drive letter can be a mapped network share, and a folder a link to one (verify-n4n0 6): what the nearest existing
+    // folder resolves to must be a disk of this computer.
+    lexical && {
+        let mut at = Some(path);
+        let existing = std::iter::from_fn(|| {
+            let here = at?;
+            at = here.parent();
+            Some(here)
+        })
+        .find(|p| p.exists());
+        existing.and_then(|p| std::fs::canonicalize(p).ok()).is_some_and(|real| matches!(real.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::VerbatimDisk(_) | Prefix::Disk(_))))
+    }
+}
+
+/// `path` as the disk has it (links and aliases followed), in its plain `C:\…` spelling; as given when it cannot be read.
+fn real_path(path: &Path) -> PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(real) => {
+            let text = real.to_string_lossy();
+            match text.strip_prefix(r"\\?\") {
+                Some(plain) if plain.as_bytes().get(1) == Some(&b':') => PathBuf::from(plain),
+                _ => real,
+            }
+        }
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 fn bad(message: impl Into<String>, next: impl Into<String>) -> Failure {
@@ -275,12 +309,22 @@ struct Editors {
 
 impl Editors {
     fn look() -> Self {
-        let running = editor::running();
+        // Each editor's project as the disk has it: an alias of a path (another spelling, a link) never hides an open one.
+        let running: Vec<editor::Editor> = editor::running()
+            .into_iter()
+            .map(|mut e| {
+                if !e.project.as_os_str().is_empty() {
+                    e.project = real_path(&e.project);
+                }
+                e
+            })
+            .collect();
         let unread = running.iter().any(|e| e.project.as_os_str().is_empty());
         Self { running, unread }
     }
 
     fn of(&self, path: &Path) -> Option<&editor::Editor> {
+        let path = &real_path(path);
         // The lock file is read only for an editor whose command line could not be.
         let locked = self.unread && orbiters_projects::unity_open(path);
         editor::of(&self.running, path, locked)
@@ -347,6 +391,15 @@ impl Projects {
         self.host.get().ok_or_else(|| Failure::new("not_available", "This needs the tray service of Orbiters - N4N0, which is not here.", "Tell the person."))
     }
 
+    /// How to ask for the person's pause at any moment (set once, by the bridge).
+    pub fn set_presence(&self, live: Live) {
+        let _ = self.presence.set(live);
+    }
+
+    fn live(&self) -> Live {
+        self.presence.get().cloned().unwrap_or_else(|| Arc::new(|| None))
+    }
+
     /// The person took control back: what can be stopped stops.
     pub fn stop_all(&self) {
         for job in &self.jobs.lock().unwrap().list {
@@ -383,8 +436,11 @@ impl Projects {
                 "unity_storage" => text(args, "action") == Some("repair"),
                 _ => false,
             };
-            let open_here = || text(args, "path").is_some_and(|p| Editors::look().of(Path::new(p)).is_some());
-            if ends_an_editor || (changes_a_project && (args["open_unity"].as_bool() == Some(true) || open_here())) {
+            // Unity opens after add_orbiters unless asked not to, for the Toolkit (its own default, below).
+            let opens_unity = name == "unity_add_orbiters" && args["open_unity"].as_bool().unwrap_or(text(args, "what") == Some("toolkit"));
+            // A path is looked at only once it is a local one (no probe of a network or device path).
+            let open_here = || text(args, "path").map(Path::new).filter(|p| on_a_local_drive(p)).is_some_and(|p| Editors::look().of(p).is_some());
+            if ends_an_editor || (changes_a_project && (opens_unity || open_here())) {
                 return Err(paused_failure(paused));
             }
         }
@@ -698,7 +754,13 @@ impl Projects {
         let path = project.path.clone();
         let missing = self.missing.clone();
         let key = discovery::key(&path);
+        let live = self.live();
         self.spawn(Lane::Action, label, Some(path.clone()), false, Progress::None, Arc::default(), None, args, call, move || {
+            // The person may be in Unity now, though nobody was when the call came: a project an editor has open is not
+            // changed under their hands.
+            if let Some(paused) = live().filter(|_| Editors::look().of(&path).is_some()) {
+                return Err(paused_failure(&paused));
+            }
             let root = root();
             let done = block_on(vpm::change(&root, &path, change.clone()));
             Self::package_outcome(done, &root, &path, &key, change, &missing)
@@ -1016,6 +1078,9 @@ impl Projects {
                 Ok(json!({ "shown": true, "pid": e.pid }))
             }
             "save_and_exit" => {
+                if let Some(paused) = (self.live())() {
+                    return Err(paused_failure(&paused));
+                }
                 let e = open.ok_or_else(not_open)?;
                 editor::close(e.pid, &project.path).map_err(|e| failed("close_failed", e, "Try again, or tell the person."))?;
                 Ok(json!({
@@ -1025,6 +1090,9 @@ impl Projects {
                 }))
             }
             "kill" => {
+                if let Some(paused) = (self.live())() {
+                    return Err(paused_failure(&paused));
+                }
                 let e = open.ok_or_else(not_open)?;
                 if args["confirm"].as_bool() != Some(true) {
                     return Err(Failure::new(
@@ -1281,6 +1349,7 @@ impl Projects {
         let key = discovery::key(&path);
         let missing = self.missing.clone();
         let server = Server::current();
+        let live = self.live();
         let open_unity = args["open_unity"].as_bool().unwrap_or(what == "toolkit");
         let (label, avatar) = match what.as_str() {
             "mixer" => (format!("Adding Mixer to {name}"), None),
@@ -1338,7 +1407,10 @@ impl Projects {
                 outcome["next"] = json!("The Toolkit in Unity adds N4N0 to the avatar and saves the scene: open the project (unity_editor open), then unity_get_job shows the setup's result under result.now.");
                 *request.lock().unwrap() = Some(r.id);
             }
-            if open_unity {
+            if open_unity && live().is_some() {
+                // The person came back meanwhile: Unity is not opened in front of them.
+                outcome["unity"] = json!({ "opened": false, "error": "the person is using the computer: open it later with unity_editor open" });
+            } else if open_unity {
                 match orbiters_projects::open_project(&project_now) {
                     Ok(opened) => outcome["unity"] = json!({ "opened": true, "already_open": opened.already_open }),
                     Err(e) => outcome["unity"] = json!({ "opened": false, "error": format!("{e:#}") }),
@@ -1380,6 +1452,8 @@ impl Projects {
                         "unity_world status lists them in here.picture_files.",
                     ));
                 }
+                // The verified files as the disk has them (the gallery's own paths), never the spelling given.
+                let files: Vec<PathBuf> = files.iter().map(|f| real_path(f)).collect();
                 host.upload_pictures(id.to_string(), name, files.clone()).map_err(|e| Failure::new("upload_failed", e, "Tell the person: they may have to sign in to Orbiters."))?;
                 self.changed();
                 Ok(json!({ "sending": files.len(), "next": "unity_world status shows how the upload goes." }))
@@ -1606,7 +1680,7 @@ mod tests {
     fn only_paths_on_a_drive_of_this_computer_are_taken() {
         // BRIDGE-7: a network path's first look opens a connection to a host the agent's text chose.
         assert!(on_a_local_drive(Path::new(r"C:\Users\Enzo\Projects\World")));
-        assert!(on_a_local_drive(Path::new(r"D:\a")));
+        assert!(on_a_local_drive(Path::new(r"C:\no\such\folder\yet")), "a folder to make, on a local disk");
         for path in [r"\\evil.example\share\x", r"\\?\C:\x", r"\\.\pipe\x", r"\\?\UNC\host\share", r"relative\x", r"C:relative"] {
             assert!(!on_a_local_drive(Path::new(path)), "{path}");
         }
@@ -1647,6 +1721,21 @@ mod tests {
         assert_eq!(reading.err().unwrap().code, "not_a_project");
         let jobs = projects.call("unity_get_job", &json!({}), &call(), Some(Paused::Held));
         assert!(jobs.is_ok());
+        // verify-n4n0 (6): nobody at the computer when the call came, the person back before it acts: still refused.
+        let dir = std::env::temp_dir().join(format!("orbiters-unity-live-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("ProjectSettings")).unwrap();
+        std::fs::write(dir.join("ProjectSettings").join("ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
+        let live = Projects::default();
+        live.set_presence(Arc::new(|| Some(Paused::Person { resumes_in_s: 10 })));
+        let path = dir.to_string_lossy().to_string();
+        for action in ["kill", "save_and_exit"] {
+            let ending = live.call("unity_editor", &json!({ "path": path, "action": action, "confirm": true }), &call(), None);
+            assert_eq!(ending.err().unwrap().code, "paused_by_person", "{action}: looked at again when it acts");
+        }
+        // The Toolkit opens Unity unless asked not to: the person's input stops that too, without open_unity said.
+        let toolkit = projects.call("unity_add_orbiters", &json!({ "path": "C:/x", "what": "toolkit" }), &call(), busy.clone());
+        assert_eq!(toolkit.err().unwrap().code, "paused_by_person");
+        let _ = std::fs::remove_dir_all(&dir);
         // BRIDGE-8: the person at the computer may be in Unity: what ends an editor waits for them too, and so does a change
         // that would open Unity.
         for action in ["kill", "save_and_exit"] {

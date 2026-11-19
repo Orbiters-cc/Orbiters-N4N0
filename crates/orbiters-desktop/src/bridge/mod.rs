@@ -395,7 +395,7 @@ impl Bridge {
     }
 
     pub fn with_timing(game: Arc<dyn Game>, guard_exe: Option<PathBuf>, timing: Timing) -> Arc<Self> {
-        Arc::new(Self {
+        let bridge = Arc::new(Self {
             main: Session::new(sessions::MAIN, None, None, game.clone()),
             game,
             timing,
@@ -418,7 +418,11 @@ impl Bridge {
             last_close: Mutex::new(None),
             projects: projects::Projects::default(),
             maps: map_tool::Maps::default(),
-        })
+        });
+        // The Unity tools look at the person again at the moment they act (verify-n4n0 6).
+        let weak = Arc::downgrade(&bridge);
+        bridge.projects.set_presence(Arc::new(move || weak.upgrade().and_then(|b| b.paused())));
+        bridge
     }
 
     /// Fills in what the bridge itself knows.

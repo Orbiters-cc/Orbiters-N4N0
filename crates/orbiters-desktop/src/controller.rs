@@ -3267,25 +3267,32 @@ mod tests {
             (a, b)
         };
         let quiet = Duration::from_millis(40);
-        let run = |sends: Vec<(u64, Settings, Duration)>| {
+        // Each send, then (`true`) a wait until the writer has written: not a sleep, which a loaded machine (the
+        // release gate's full parallel run) can outlast before the writer thread even runs, turning "after a write"
+        // into "in one burst" (it failed so once: the code was right, the test's timing was not).
+        let run = |sends: Vec<(u64, Settings, bool)>| {
             let (tx, rx) = mpsc::channel();
+            let (wrote_tx, wrote) = mpsc::channel();
             let writer = std::thread::spawn(move || {
                 let mut written = Vec::new();
-                super::write_settings_in_order(rx, quiet, |s| written.push(s.storage_limit_gb));
+                super::write_settings_in_order(rx, quiet, |s| {
+                    written.push(s.storage_limit_gb);
+                    let _ = wrote_tx.send(());
+                });
                 written
             });
-            for (r, s, pause) in sends {
+            for (r, s, wait) in sends {
                 tx.send((r, s)).unwrap();
-                std::thread::sleep(pause);
+                if wait {
+                    wrote.recv_timeout(Duration::from_secs(30)).expect("the writer wrote");
+                }
             }
             drop(tx);
             writer.join().unwrap()
         };
-        let none = Duration::ZERO;
-        let after_write = Duration::from_millis(200);
-        assert_eq!(run(vec![(2, b.clone(), none), (1, a.clone(), none)]), vec![2.0], "reversed in one burst");
-        assert_eq!(run(vec![(2, b.clone(), after_write), (1, a.clone(), none)]), vec![2.0], "the older after a write");
-        assert_eq!(run(vec![(1, a.clone(), after_write), (2, b.clone(), none)]), vec![1.0, 2.0], "in order");
+        assert_eq!(run(vec![(2, b.clone(), false), (1, a.clone(), false)]), vec![2.0], "reversed in one burst");
+        assert_eq!(run(vec![(2, b.clone(), true), (1, a.clone(), false)]), vec![2.0], "the older after a write");
+        assert_eq!(run(vec![(1, a.clone(), true), (2, b.clone(), false)]), vec![1.0, 2.0], "in order");
     }
 
     /// LIGHT-DESKTOP-9: the library is walked again when something changed, while recording, and every ten minutes;

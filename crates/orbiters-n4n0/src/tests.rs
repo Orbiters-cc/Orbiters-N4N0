@@ -65,6 +65,10 @@ pub(crate) struct TestHost {
     qr_started: AtomicUsize,
     qr_dropped: Arc<AtomicUsize>,
     watched: Mutex<Vec<String>>,
+    /// The browser does not open (`watch` fails).
+    watch_fails: Mutex<bool>,
+    /// The stand-in scanner fails at once, before its handle is handed back.
+    qr_fails_at_start: Mutex<Option<String>>,
     /// The 3D captures: how often they were listed, the shares asked, the friends the stand-in app reads and the pictures
     /// asked for.
     listed: AtomicUsize,
@@ -255,11 +259,17 @@ impl Host for TestHost {
 
     fn qr_scan(&self, events: QrEvents) -> Result<Box<dyn QrScan>, String> {
         self.qr_started.fetch_add(1, Ordering::Relaxed);
+        if let Some(why) = self.qr_fails_at_start.lock().unwrap().clone() {
+            events(QrSeen::Failed(why));
+        }
         *self.qr.lock().unwrap() = Some(events);
         Ok(Box::new(FakeScan(self.qr_dropped.clone())))
     }
 
     fn watch(&self, link: &str) -> Result<(), String> {
+        if *self.watch_fails.lock().unwrap() {
+            return Err("The browser did not open.".into()); // i18n: not shown
+        }
         self.watched.lock().unwrap().push(link.to_string());
         Ok(())
     }
@@ -2733,6 +2743,54 @@ fn the_qr_code_scanner_opens_web_links_once_and_stops_with_its_page() {
     n.command(Command::Qr { on: true });
     host.qr_sees(QrSeen::Failed("The stream camera cannot be read".into()));
     assert_eq!((phase(&host), host.view().qr.note), (QrPhase::Stopped, "The stream camera cannot be read".to_string()));
+    n.shutdown();
+}
+
+#[test]
+fn a_slideshow_of_qr_codes_opens_two_pages_not_one_per_code() {
+    // N4N0-13: every different code in view opened a tab at once, three a second.
+    let (host, n) = n4n0(Settings::default());
+    n.command(Command::Qr { on: true });
+    host.qr_sees(QrSeen::Camera(true));
+    for i in 0..10 {
+        host.qr_sees(QrSeen::Code(format!("https://example.com/{i}")));
+    }
+    assert_eq!(host.watched.lock().unwrap().len(), orbiters_n4n0_core::qr::OPEN_BURST as usize, "{:?}", host.watched.lock().unwrap());
+    // Local links stay links like any other (Enzo, 2026-11-19).
+    assert_eq!(orbiters_n4n0_core::qr::web_link("http://192.168.1.1/"), Ok("http://192.168.1.1/".into()));
+    n.shutdown();
+}
+
+#[test]
+fn a_qr_link_the_browser_did_not_open_is_not_counted_as_opened() {
+    // N4N0-18: the menu said "opened" while the toast said it failed.
+    let (host, n) = n4n0(Settings::default());
+    n.command(Command::Qr { on: true });
+    host.qr_sees(QrSeen::Camera(true));
+    *host.watch_fails.lock().unwrap() = true;
+    host.qr_sees(QrSeen::Code("https://example.com/a".into()));
+    host.qr_sees(QrSeen::Code("https://example.com/a".into()));
+    let view = host.view().qr;
+    assert_eq!((view.link, view.opened), (None, 0));
+    assert_eq!(host.notices().iter().filter(|(k, _)| *k == NoticeKind::Warning).count(), 1, "one warning, not one a look");
+    *host.watch_fails.lock().unwrap() = false;
+    host.qr_sees(QrSeen::Code("https://example.com/b".into()));
+    let view = host.view().qr;
+    assert_eq!((view.link.as_deref(), view.opened), (Some("https://example.com/b"), 1));
+    n.shutdown();
+}
+
+#[test]
+fn a_qr_scanner_that_fails_as_it_starts_says_why() {
+    // N4N0-17: a failure said before the app had the scan's handle was lost, and the menu said Starting until its time ran out.
+    use orbiters_n4n0_core::qr::QrPhase;
+    let (host, n) = n4n0(Settings::default());
+    *host.qr_fails_at_start.lock().unwrap() = Some("The stream camera cannot be read".into());
+    n.command(Command::Qr { on: true });
+    let view = host.view().qr;
+    assert_eq!((view.phase, view.note.as_str()), (QrPhase::Stopped, "The stream camera cannot be read"));
+    assert_eq!(host.qr_dropped.load(Ordering::Relaxed), 1, "its handle, come late, is let go");
+    assert!(n.n4n0.lock().unwrap().qr.next_due().is_none());
     n.shutdown();
 }
 

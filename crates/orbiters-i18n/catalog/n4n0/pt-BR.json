@@ -351,5 +351,6 @@
   "{puts} · also after each world join": "{puts} · e ao entrar em um mundo",
   "{reason}: a QR code here opens only http or https pages": "{reason}: aqui um QR code só abre páginas http ou https",
   "{time} · muted": "{time} · silenciado",
-  "✓ Link copied": "✓ Link copiado"
+  "✓ Link copied": "✓ Link copiado",
+  "Stopped after six pages opened: press Scan again to read the camera": "Parou após abrir seis páginas: toque em Escanear de novo para ler a câmera"
 }

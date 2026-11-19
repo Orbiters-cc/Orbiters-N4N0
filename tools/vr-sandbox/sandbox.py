@@ -354,6 +354,54 @@ def blocking(foreign):
     foreign=list(foreign)
     return foreign if any(p['name'].lower()!='vrchat.exe' for p in foreign) else []
 
+VRCHAT_KEY = r'Software\VRChat\VRChat'
+
+class FakeRegistryKey(dict):
+    """Under the test base the registry is this in-memory key: no test reads or writes the owner's registry."""
+
+TEST_REGISTRY = FakeRegistryKey() if BASE else None
+
+def read_vrchat_window():
+    """VRChat's saved window values (Unity's `Screenmanager ...` under HKCU/Software/VRChat/VRChat): [[name, type, value]],
+    binary values as hex. The sandbox launches it windowed at 1280x720 and Unity saves that at quit (SBX-4)."""
+    if TEST_REGISTRY is not None:
+        return sorted([name,kind,value] for name,(kind,value) in TEST_REGISTRY.items() if name.startswith('Screenmanager'))
+    import winreg
+    values=[]
+    try:key=winreg.OpenKey(winreg.HKEY_CURRENT_USER,VRCHAT_KEY)
+    except FileNotFoundError:return values
+    with key:
+        i=0
+        while True:
+            try:name,value,kind=winreg.EnumValue(key,i)
+            except OSError:break
+            i+=1
+            if name.startswith('Screenmanager'):
+                values.append([name,kind,value.hex() if isinstance(value,bytes) else value])
+    return sorted(values)
+
+def write_vrchat_window(saved):
+    """Puts the saved values back and deletes the `Screenmanager` values that did not exist then."""
+    if TEST_REGISTRY is not None:
+        for name in [n for n in TEST_REGISTRY if n.startswith('Screenmanager')]:del TEST_REGISTRY[name]
+        TEST_REGISTRY.update({name:(kind,value) for name,kind,value in saved})
+        return
+    import winreg
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER,VRCHAT_KEY) as key:
+        keep={name for name,_,_ in saved}
+        for name,_,_ in read_vrchat_window():
+            if name not in keep:winreg.DeleteValue(key,name)
+        for name,kind,value in saved:
+            winreg.SetValueEx(key,name,0,kind,bytes.fromhex(value) if kind==winreg.REG_BINARY else value)
+
+def restore_vrchat_window(j):
+    """After the session's VRChat is gone: its saved window values back as they were before the session's first launch."""
+    if 'vrchat_window' not in j:return 'no VRChat launched by the session'
+    try:
+        if read_vrchat_window()==j['vrchat_window']:return 'unchanged'
+        write_vrchat_window(j['vrchat_window']);return 'put back'
+    except OSError as error:return 'not put back: '+str(error)   # never blocks SteamVR's files
+
 def restore_policy(entry):
     """'always' (the sandbox changes it), 'test_app' (only a test program of the session can have changed it: the installed
     app's own SteamVR driver folder) or 'keep' (journalled, never put back: Steam's app manifest, which the Steam client
@@ -430,6 +478,7 @@ def restore_contents(j):
     # sound ones are still put back; the journal stays unrestored and says which one needs a person.
     damaged={entry['path']:problem for entry in j['files'] if (problem:=backup_problem(entry))}
     clients={};kept={}
+    window=restore_vrchat_window(j)
     for entry in j['files']:
         path, saved = Path(entry['path']), Path(entry['backup'])
         if entry['path'] in damaged:
@@ -462,7 +511,7 @@ def restore_contents(j):
     # Do not release somebody else's lock.
     if LOCK.exists() and json.loads(LOCK.read_text())['session'] == j['session']:
         LOCK.unlink()
-    return {'restored': True, 'verified_files': len(j['files']), 'leftover_dead_pids': warnings, 'client_files': clients, 'kept': kept}
+    return {'restored': True, 'verified_files': len(j['files']), 'leftover_dead_pids': warnings, 'client_files': clients, 'kept': kept, 'vrchat_window': window}
 
 def note_unrestored(session, why, by):
     """A dead session could not be restored: a dated line in orphan.log and RESTORE-NEEDED.txt saying why and what heals
@@ -1128,6 +1177,10 @@ class Session:
             # A profile of its own (a bridge session's account) gets that profile's OSC ports, as the bridge gives them.
             osc=[f'--osc={9000+10*profile}:127.0.0.1:{9001+10*profile}'] if profile else []
             self.j['osc_in']=9000+10*profile;self.j['profile']=profile;atomic_json(JOURNAL,self.j)
+            if 'vrchat_window' not in self.j:
+                # Before the first launch of the session: what VRChat's own window settings were (restore puts them back).
+                try:self.j['vrchat_window']=read_vrchat_window();atomic_json(JOURNAL,self.j)
+                except OSError as error:self.eac.write('vrchat_window_not_saved',error=str(error))
             proc=subprocess.Popen([str(launcher),url,f'--profile={profile}',*osc,'-screen-fullscreen','0','-screen-width','1280','-screen-height','720'],creationflags=subprocess.CREATE_NO_WINDOW)
             error=None
             try:

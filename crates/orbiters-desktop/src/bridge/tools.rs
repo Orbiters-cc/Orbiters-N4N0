@@ -1313,6 +1313,11 @@ impl Bridge {
                 going.started = true;
                 going.since = Instant::now();
             }
+            if !travelled {
+                // A new VRChat: its own age for close_session's rule, and the size it was asked for (BRIDGE-17 b, h).
+                run.launched_at = Some(Instant::now());
+                run.size = Some((WINDOW_WIDTH, WINDOW_HEIGHT));
+            }
         }
         // A link VRChat takes travels within seconds, or shows the world's page and waits for its Join button.
         let arrived = self.wait_until(Duration::from_secs(if travelled { 8 } else { 40 }), call, || !self.is_going(s))?;
@@ -1345,7 +1350,9 @@ impl Bridge {
         }
         Self::in_private_instance(&seen)?;
         if let Some(window) = seen.pid.and_then(|pid| s.game.window(pid)) {
-            s.run.lock().unwrap().size = Some((window.width, window.height));
+            // The size the bridge asked for at its launch stays the reference; a VRChat it did not launch (adopted) is
+            // measured once.
+            s.run.lock().unwrap().size.get_or_insert((window.width, window.height));
         }
         let foreground = self.forward_on_arrival(s, &seen);
         let capture_kit = s.game.capture_kit();
@@ -2375,6 +2382,8 @@ impl Bridge {
         let mut run = s.run.lock().unwrap();
         run.pid = pid;
         run.given_up = None;
+        run.launched_at = Some(Instant::now());
+        run.size = Some((WINDOW_WIDTH, WINDOW_HEIGHT));
         Ok(())
     }
 
@@ -2462,9 +2471,12 @@ impl Bridge {
         }
         // Easy Anti-Cheat: a VRChat closed before its anti-cheat session began leaves the driver loaded for a minute
         // (2026-11-13). Signed in, it began two seconds after; never signed in, it is given 90 s.
-        let young = s.opened.elapsed() < Duration::from_secs(90) && seen.session_account.is_none();
+        // The age of its VRChat (its launch), not of the session (BRIDGE-17 h): a session taken over has an old VRChat, and
+        // a relaunch a young one.
+        let age = s.run.lock().unwrap().launched_at.map(|t| t.elapsed());
+        let young = age.is_some_and(|a| a < Duration::from_secs(90)) && seen.session_account.is_none();
         if young {
-            let wait = 90 - s.opened.elapsed().as_secs();
+            let wait = 90 - age.unwrap_or_default().as_secs();
             return Err(Failure::new(
                 "too_young_to_close",
                 "This VRChat started moments ago and never signed in: closing it now would leave Easy Anti-Cheat loaded and fail the next launch on this computer.",

@@ -174,6 +174,8 @@ pub(crate) struct Run {
     pub recording: Option<std::path::PathBuf>,
     /// A recording this session asked for is starting (its folder not known yet).
     pub starting_picture: bool,
+    /// When the bridge last launched this session's VRChat (`None`: one it did not launch, adopted or taken over).
+    pub launched_at: Option<Instant>,
     pub going: Option<Going>,
     /// The bridge itself is closing the game: its going away is no news.
     pub closing: bool,

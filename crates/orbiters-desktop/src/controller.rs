@@ -301,12 +301,14 @@ fn calibration_file() -> PathBuf {
 /// Talks to Orbiters' development environment (the server on this computer, its account and update feed) or to
 /// orbiters.cc, as the settings' Development environment switch says, whatever the Unity tools are set to.
 pub fn use_environment(development: bool) {
-    orbiters_core::account::choose_server(Some(if development {
-        orbiters_core::account::Server::Development
-    } else {
-        orbiters_core::account::Server::Production
-    }));
+    follow_environment(development);
+}
+
+/// [`use_environment`] for any process of the app, each time it learns the settings (orbiters_core's
+/// `follow_environment`): returns whether the environment changed for this process (true the first time).
+pub fn follow_environment(development: bool) -> bool {
     orbiters_update::set_development(development);
+    orbiters_core::account::follow_environment(development)
 }
 
 /// The calibration kept; one that cannot be read is kept beside (`calibration.json.bad-<time>`) before the next

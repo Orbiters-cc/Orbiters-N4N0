@@ -53,7 +53,28 @@ pub fn choose_server(server: Option<Server>) {
     CHOSEN.store(value, Ordering::Relaxed);
 }
 
+/// "Which Orbiters environment" for every process of the app (the service, the window, the SteamVR overlay, the
+/// desktop panels, the workers): the app's own Development setting, never Unity's switch, from the first call on, a
+/// production setting included. Returns whether this process used another environment until now (true at the first
+/// call): what it read and kept of the other one is not this one's.
+pub fn follow_environment(development: bool) -> bool {
+    follow_in(&CHOSEN, development)
+}
+
+fn follow_in(chosen: &std::sync::atomic::AtomicU8, development: bool) -> bool {
+    let value = if development { 2 } else { 1 };
+    chosen.swap(value, Ordering::Relaxed) != value
+}
+
 impl Server {
+    /// A folder or key name for what is kept of this environment apart from the other's (a cache).
+    pub fn cache_name(self) -> &'static str {
+        match self {
+            Server::Development => "development",
+            Server::Production => "production",
+        }
+    }
+
     pub fn n4n0_gallery_asset_id(self) -> Option<u64> {
         match self {
             Server::Development => Some(30),
@@ -757,6 +778,17 @@ mod tests {
         let body = transfer(agent.get(&url)).call().unwrap().into_body().read_to_vec().unwrap();
         assert_eq!(body, b"1234567890");
         server.join().unwrap();
+    }
+
+    /// CORE2-13: the app's setting decides from the first call on, production too; a change is told once.
+    #[test]
+    fn every_process_follows_the_apps_environment() {
+        let chosen = std::sync::atomic::AtomicU8::new(0);
+        assert!(follow_in(&chosen, false), "the first call chooses, production included (not Unity's switch)");
+        assert!(!follow_in(&chosen, false));
+        assert!(follow_in(&chosen, true), "switched");
+        assert!(!follow_in(&chosen, true));
+        assert_eq!((Server::Development.cache_name(), Server::Production.cache_name()), ("development", "production"));
     }
 
     /// One answer each from a server on this computer, and what was asked of it.

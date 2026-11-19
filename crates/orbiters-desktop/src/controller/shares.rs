@@ -2225,8 +2225,8 @@ pub(crate) mod tests {
         let bodies = bodies.lock().unwrap().clone();
         assert_eq!(bodies.iter().map(|(line, _)| line.clone()).collect::<Vec<_>>(), [format!("POST /maps/worlds/{world}/pictures"), "POST /captures/picture/9/share".to_string()]);
         // What actually went (verifier): the picture part of the request holds the clean copy, never the taker.
-        let sent = String::from_utf8_lossy(&bodies[0].1);
-        assert!(!sent.contains("usr_00000000") && !sent.contains("XML:com.adobe.xmp"), "the metadata never leaves");
+        let request_text = String::from_utf8_lossy(&bodies[0].1);
+        assert!(!request_text.contains("usr_00000000") && !request_text.contains("XML:com.adobe.xmp"), "the metadata never leaves");
         assert!(bodies[0].1.windows(clean.len()).any(|w| w == clean.as_slice()), "the clean copy is what was sent");
         assert_eq!(*stages.lock().unwrap(), [Stage::Sending { sent: 0, total: sent }, Stage::Sharing]);
         let saved = read_records(&records);

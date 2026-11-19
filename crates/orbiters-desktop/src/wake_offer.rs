@@ -61,10 +61,10 @@ pub fn window(ctx: &Context, ctl: &Ctl, offer: Option<WakeOffer>) {
         widgets::text_truncated(&p, pos2(words, rect.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(tr(TITLE), 15.5).weight(weight::SEMIBOLD), room);
         widgets::text_truncated(&p, pos2(words, rect.center().y + 12.0), Align2::LEFT_CENTER, &Txt::new(tr(WHY), 12.5).color(theme::FG_3), room);
         if talk.width(w).show_at(ui, at).clicked() {
-            ctl.n4n0(N4n0Command::WakeOffer { accept: true });
+            ctl.n4n0(N4n0Command::WakeOffer { accept: true, id: Some(offer.id) });
         }
         if Button::new("").icon(icons::X).variant(Variant::Ghost).hint(tr(NOT_NOW)).width(32.0).show_at(ui, close).clicked() {
-            ctl.n4n0(N4n0Command::WakeOffer { accept: false });
+            ctl.n4n0(N4n0Command::WakeOffer { accept: false, id: Some(offer.id) });
         }
         // What is left of its time, as the toasts' line: shrinking towards the left inside the rounded corners.
         let k = offer.left(now);

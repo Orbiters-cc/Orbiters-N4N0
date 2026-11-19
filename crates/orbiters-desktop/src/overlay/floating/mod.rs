@@ -333,7 +333,7 @@ impl Floating {
         // "Talk with N4N0?": N4N0 listens.
         if let Some(offer) = offer.filter(|_| outcome.prompt_press) {
             clicked = true;
-            cx.backend.n4n0(crate::ipc::N4n0Command::WakeOffer { accept: true });
+            cx.backend.n4n0(crate::ipc::N4n0Command::WakeOffer { accept: true, id: Some(offer.id) });
             if let Some(p) = self.prompt.as_mut() {
                 p.pressed(cx.overlay, offer);
             }

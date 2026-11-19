@@ -3058,7 +3058,7 @@ fn during_a_call_the_wake_word_only_offers_talk_with_n4n0() {
     let again = t.view().voice.wake_offer.expect("still up");
     assert!(again.id > offer.id, "a new offer each time the word is heard");
     // Pressed: N4N0 listens.
-    n.command(Command::WakeOffer { accept: true });
+    n.command(Command::WakeOffer { accept: true, id: None });
     assert!(matches!(n.n4n0.lock().unwrap().listening, Some((crate::runtime::Source::WakeWord, _))));
     assert!(t.view().voice.wake_offer.is_none(), "it goes once pressed");
     // Not pressed: it goes by itself, and a late press does nothing.
@@ -3067,7 +3067,7 @@ fn during_a_call_the_wake_word_only_offers_talk_with_n4n0() {
     worker.say(wake("testwake"));
     assert!(t.view().voice.wake_offer.is_some());
     n.n4n0.lock().unwrap().wake_offer_until = Some(Instant::now());
-    n.command(Command::WakeOffer { accept: true });
+    n.command(Command::WakeOffer { accept: true, id: None });
     assert!(n.n4n0.lock().unwrap().listening.is_none(), "too late");
     // After the call: the word works as always.
     *t.in_call.lock().unwrap() = false;
@@ -3077,8 +3077,46 @@ fn during_a_call_the_wake_word_only_offers_talk_with_n4n0() {
 }
 
 #[test]
-fn the_wake_word_comes_back_when_the_ask_page_closes() {
-    // N4N0-10: once the Ask page had been opened and closed, the wake word stayed off for the rest of the session.
+fn a_wake_heard_during_a_call_and_decoded_after_it_still_only_offers() {
+    // verify-n4n0 (9): recognition ended after hang-up, and the call's last "Nano" started a listen without a press.
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    { let mut settings = t.settings.lock().unwrap();
+      settings.n4n0.wake_word = true;
+      settings.n4n0.wake_words = vec!["testwake".into()];
+      settings.n4n0.menu.wake_word = true;
+    }
+    n.n4n0.lock().unwrap().voice.installed = true;
+    t.scene(|s| s.vrchat = true);
+    n.voice_follow();
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    // A call, seen; it ends; then the sentence said during it is decoded.
+    n.n4n0.lock().unwrap().call_seen_at = Some(Instant::now());
+    std::thread::sleep(Duration::from_millis(100));
+    worker.say(VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 1.0, decode_ms: 50 });
+    assert!(n.n4n0.lock().unwrap().listening.is_none(), "no listen without a press");
+    let first = t.view().voice.wake_offer.expect("offered");
+    // Heard again: a new offer. A late press of the first answers nothing; the shown one starts the listen, even with the
+    // menu set to open on the wake word.
+    worker.say(VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 1.0, decode_ms: 50 });
+    let second = t.view().voice.wake_offer.expect("offered again");
+    assert!(second.id > first.id);
+    n.command(Command::WakeOffer { accept: true, id: Some(first.id) });
+    assert!(n.n4n0.lock().unwrap().listening.is_none() && t.view().voice.wake_offer.is_some(), "the older card answers nothing");
+    n.command(Command::WakeOffer { accept: true, id: Some(second.id) });
+    assert!(n.n4n0.lock().unwrap().listening.is_some(), "pressed: N4N0 listens");
+    // Switched off: the offer goes with it.
+    worker.say(VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 1.0, decode_ms: 50 });
+    n.command(Command::Assistant { on: false });
+    assert!(t.view().voice.wake_offer.is_none());
+    t.shutdown(&n);
+}
+
+#[test]
+fn the_ask_page_leaves_the_wake_word_off_after_it_closes() {
+    // The documented behaviour (verify-n4n0 9: reopening it needs the owner's word): closing the Ask page keeps the microphone
+    // released until an explicit listen or a change of the wake word's setting; a wake sentence from before stays dropped.
     let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
     *d.ears.allowed.lock().unwrap() = true;
     t.sign_in("http://127.0.0.1:1/".into(), "test");
@@ -3091,22 +3129,17 @@ fn the_wake_word_comes_back_when_the_ask_page_closes() {
     t.scene(|s| s.vrchat = true);
     n.voice_follow();
     let worker = d.ears.workers.lock().unwrap()[0].clone();
-    assert!(matches!(&worker.commands()[..], [VoiceCommand::Start { wake_word: true, .. }]));
     let before = worker.commands().len();
     n.ask_page(true);
     n.voice_follow();
     assert!(worker.commands()[before..].iter().any(|c| matches!(c, VoiceCommand::WakeWord { on: false, .. })), "the page has the microphone");
     n.ask_page(false);
     n.voice_cancel();
+    let after = worker.commands().len();
     n.voice_follow();
-    assert!(matches!(worker.commands().last(), Some(VoiceCommand::WakeWord { on: true, .. })), "{:?}", worker.commands());
-    // A wake sentence whose sound began before the page closed is the visit's: never said after it.
+    assert!(!worker.commands()[after..].iter().any(|c| matches!(c, VoiceCommand::WakeWord { on: true, .. })), "still released: {:?}", worker.commands());
     worker.say(VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 1.0, decode_ms: 1 });
     assert!(n.n4n0.lock().unwrap().listening.is_none());
-    // One said after it is heard.
-    std::thread::sleep(Duration::from_millis(400));
-    worker.say(VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 0.2, decode_ms: 1 });
-    assert!(n.n4n0.lock().unwrap().listening.is_some(), "the wake word works again");
     t.shutdown(&n);
 }
 

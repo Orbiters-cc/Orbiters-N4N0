@@ -420,12 +420,18 @@ impl super::Controller {
             self.burst.lock().unwrap().recording = false;
             return Err(e);
         }
+        // The recording this picture started: its flight flies, puts back and stops that one only (audit F06, CTL2-7).
+        let owner = self.recording_number();
         let ctl = self.clone();
-        std::thread::Builder::new().name("3d-picture".into()).spawn(move || {
+        let flight = std::thread::Builder::new().name("3d-picture".into()).spawn(move || {
             let started = Instant::now();
             while ctl.snapshot.lock().unwrap().capture.state != CaptureState::Recording {
-                if started.elapsed() > Duration::from_secs(8) || !ctl.is_capturing() {
-                    ctl.burst.lock().unwrap().recording = false;
+                if started.elapsed() > Duration::from_secs(8) || !ctl.owns_recording(owner) {
+                    if ctl.no_recording_since(owner) {
+                        ctl.burst.lock().unwrap().recording = false;
+                        // A start still under way after 8 s would become a recording nobody flies or stops.
+                        ctl.stop_recording_of(owner);
+                    }
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -446,7 +452,7 @@ impl super::Controller {
                 .then(|| session.as_deref().and_then(|dir| first_p11(dir, Duration::from_millis(400))))
                 .flatten()
                 .and_then(|p11| zoom_for_flight(p11).map(|z| (p11, z)));
-            if let Some((p11, (to, back))) = zoom {
+            if let Some((p11, (to, back))) = zoom.filter(|_| ctl.owns_recording(owner)) {
                 send(ZOOM, vec![rosc::OscType::Float(to)]);
                 told.push(format!("zoomed in (P11 {p11:.2}): flies at zoom {to}, back to {back} after")); // i18n: not shown
                 std::thread::sleep(ZOOM_FREEZE);
@@ -454,21 +460,27 @@ impl super::Controller {
                 std::thread::sleep(SETTLE);
             }
             // Smoothing would trail the swing behind.
-            send(SMOOTH, vec![rosc::OscType::Bool(false)]);
+            if ctl.owns_recording(owner) {
+                send(SMOOTH, vec![rosc::OscType::Bool(false)]);
+            }
             let camera = |p: &[f32; 6]| (POSE.to_string(), p.iter().map(|v| rosc::OscType::Float(*v)).collect::<Vec<_>>());
             // Sends poses at the flight's rate; `true` when they were all sent (the recording may stop under them).
             let fly = |poses: &[[f32; 6]], rig: bool| -> bool {
                 let tick = Duration::from_secs_f32(1.0 / RATE_HZ as f32);
                 let begin = Instant::now();
                 for (i, p) in poses.iter().enumerate() {
-                    if !ctl.is_capturing() {
-                        return false;
-                    }
-                    if rig {
-                        // The camera and the rig in one bundle: VRChat applies them together.
-                        ctl.place_rig(Some(camera(p)), p);
-                    } else {
-                        send(POSE, p.iter().map(|v| rosc::OscType::Float(*v)).collect());
+                    {
+                        // Checked and sent under the start gate: no other recording can begin in between.
+                        let _gate = ctl.capture_start_gate.lock().unwrap();
+                        if !ctl.owns_recording(owner) {
+                            return false;
+                        }
+                        if rig {
+                            // The camera and the rig in one bundle: VRChat applies them together.
+                            ctl.place_rig(Some(camera(p)), p);
+                        } else {
+                            send(POSE, p.iter().map(|v| rosc::OscType::Float(*v)).collect());
+                        }
                     }
                     if let Some(wait) = (tick * (i as u32 + 1)).checked_sub(begin.elapsed()) {
                         std::thread::sleep(wait);
@@ -543,7 +555,8 @@ impl super::Controller {
             } else {
                 frame = reading.and_then(|r| r.join().ok()).flatten();
             }
-            if !around {
+            // Stopped during the opening turn (too few depth frames: "blind"), the blind flight does not fly.
+            if !around && ctl.owns_recording(owner) {
                 // The rig on for the blind flight; put back off when VRChat is, whatever ends the recording.
                 ctl.hold_rig(room_rig);
                 let flight = path(pose, length, focus, RATE_HZ);
@@ -552,9 +565,15 @@ impl super::Controller {
                 let begin = Instant::now();
                 let tick = Duration::from_secs_f32(1.0 / RATE_HZ as f32);
                 for (i, p) in flight.into_iter().enumerate() {
-                    // The dolly moves the camera itself: the rig only follows.
-                    let camera = (!dolly).then(|| camera(&p));
-                    ctl.place_rig(camera, &p);
+                    {
+                        let _gate = ctl.capture_start_gate.lock().unwrap();
+                        if !ctl.owns_recording(owner) {
+                            break;
+                        }
+                        // The dolly moves the camera itself: the rig only follows.
+                        let camera = (!dolly).then(|| camera(&p));
+                        ctl.place_rig(camera, &p);
+                    }
                     if let Some(wait) = (tick * (i as u32 + 1)).checked_sub(begin.elapsed()) {
                         std::thread::sleep(wait);
                     }
@@ -563,10 +582,17 @@ impl super::Controller {
                     ctl.stop_dolly();
                 }
             }
-            send(POSE, pose.iter().map(|v| rosc::OscType::Float(*v)).collect());
-            if let Some((_, (_, back))) = zoom {
-                send(ZOOM, vec![rosc::OscType::Float(back)]);
+            // What the flight changed of the camera goes back, once, unless another recording began since: that one's camera
+            // is not this picture's to move. Under the start gate, so none can begin in between.
+            let gate = ctl.capture_start_gate.lock().unwrap();
+            let restore = ctl.no_recording_since(owner);
+            if restore {
+                send(POSE, pose.iter().map(|v| rosc::OscType::Float(*v)).collect());
+                if let Some((_, (_, back))) = zoom {
+                    send(ZOOM, vec![rosc::OscType::Float(back)]);
+                }
             }
+            drop(gate);
             if !around {
                 told.push("the older flight: blind, or the 1 s sweep".into()); // i18n: not shown
             }
@@ -576,15 +602,25 @@ impl super::Controller {
             if let Some(dir) = &session {
                 let _ = std::fs::write(dir.join(FLIGHT_FILE), told.join("\n") + "\n");
             }
-            ctl.hold_rig(false);
-            if let Some(smooth) = smooth.filter(|s| *s) {
-                send(SMOOTH, vec![rosc::OscType::Bool(smooth)]);
+            if restore {
+                let _gate = ctl.capture_start_gate.lock().unwrap();
+                if ctl.no_recording_since(owner) {
+                    ctl.hold_rig(false);
+                    if let Some(smooth) = smooth.filter(|s| *s) {
+                        send(SMOOTH, vec![rosc::OscType::Bool(smooth)]);
+                    }
+                }
             }
             std::thread::sleep(Duration::from_millis(250));
-            if let Err(e) = ctl.stop_capture() {
-                ctl.notify(NoticeKind::Error, e.to_string());
-            }
-        })?;
+            // Its own recording only: a start asked since, or a recording begun since, is left alone.
+            ctl.stop_recording_of(owner);
+        });
+        if let Err(e) = flight {
+            // Accepted, but nothing would fly it or end it: it ends here, as an ordinary recording.
+            self.burst.lock().unwrap().recording = false;
+            self.stop_recording_of(owner);
+            return Err(e.into());
+        }
         Ok(())
     }
 

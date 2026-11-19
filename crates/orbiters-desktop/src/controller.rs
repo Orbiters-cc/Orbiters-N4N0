@@ -1207,6 +1207,34 @@ impl Controller {
 
     /// The recording ended or never started: no more values to the worker, and VRChat's camera and the capture
     /// kit's toggles back as they were.
+    /// The recording under way now (`Controller::capture_serial`), for a flight that must act on its own only.
+    pub(super) fn recording_number(&self) -> u64 {
+        self.capture_serial.load(Ordering::Acquire)
+    }
+
+    /// Whether the recording a flight started (`owner`, [`Controller::recording_number`] after its start) is still the
+    /// one under way. Asked under `capture_start_gate` by whoever acts on the answer (C-2, CTL2-7).
+    pub(super) fn owns_recording(&self, owner: u64) -> bool {
+        self.capture_serial.load(Ordering::Acquire) == owner && self.is_capturing()
+    }
+
+    /// Whether no other recording began since `owner`'s (it may have ended): what a flight changed of the camera is
+    /// still its own to put back.
+    pub(super) fn no_recording_since(&self, owner: u64) -> bool {
+        self.capture_serial.load(Ordering::Acquire) == owner
+    }
+
+    /// Stops `owner`'s own recording, never one started after it, and calls off no start asked since.
+    pub(super) fn stop_recording_of(self: &Shared, owner: u64) {
+        let _gate = self.capture_start_gate.lock().unwrap();
+        if !self.owns_recording(owner) {
+            return;
+        }
+        if let Err(e) = self.stop_capture() {
+            self.notify(NoticeKind::Error, e.to_string());
+        }
+    }
+
     /// Why a saved recording had no keyframe: what was said while it ran, or else what is known now. The said reason
     /// is copied out and the snapshot let go BEFORE the fallback: `why_no_strip_now` takes `osc_values`, and a start
     /// meanwhile holds `osc_values` and waits for `snapshot` (`start_segment`): the two would wait for each other (C-1).

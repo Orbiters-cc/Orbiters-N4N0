@@ -210,7 +210,7 @@ impl super::Controller {
         let flight = std::thread::Builder::new().name("scan".into()).spawn(move || {
             let started = Instant::now();
             while ctl.snapshot.lock().unwrap().capture.state != CaptureState::Recording {
-                if started.elapsed() > Duration::from_secs(8) || !ctl.scan_owns(owner) {
+                if started.elapsed() > Duration::from_secs(8) || !ctl.owns_recording(owner) {
                     // Its flag only while no other recording began (that one may be a scan of its own).
                     if ctl.capture_serial.load(std::sync::atomic::Ordering::Acquire) == owner {
                         ctl.scan.lock().unwrap().recording = false;
@@ -230,7 +230,7 @@ impl super::Controller {
                     {
                         // Checked and sent under the start gate: no other recording can begin in between.
                         let _gate = ctl.capture_start_gate.lock().unwrap();
-                        if !ctl.scan_owns(owner) {
+                        if !ctl.owns_recording(owner) {
                             return false;
                         }
                         // N4N0's camera rig follows in the same bundle (controller/rig.rs).
@@ -245,7 +245,7 @@ impl super::Controller {
             // Smoothing would trail the path behind.
             {
                 let _gate = ctl.capture_start_gate.lock().unwrap();
-                if !ctl.scan_owns(owner) {
+                if !ctl.owns_recording(owner) {
                     return;
                 }
                 send(super::burst::SMOOTH, vec![rosc::OscType::Bool(false)]);
@@ -270,34 +270,17 @@ impl super::Controller {
             }
             if done {
                 std::thread::sleep(Duration::from_millis(250));
-                ctl.scan_stop(owner);
+                ctl.stop_recording_of(owner);
             }
         });
         if let Err(e) = flight {
             // The recording was accepted, but nothing would fly it or end it: it ends here, as an ordinary one (no
             // flight: nothing of it is a scan to reconstruct).
             self.scan.lock().unwrap().recording = false;
-            self.scan_stop(owner);
+            self.stop_recording_of(owner);
             return Err(e.into());
         }
         Ok(())
-    }
-
-    /// Whether the recording a scan started (`owner`, `Controller::capture_serial`) is still the one under way.
-    /// Asked under `capture_start_gate` by whoever acts on the answer.
-    pub(super) fn scan_owns(&self, owner: u64) -> bool {
-        self.capture_serial.load(std::sync::atomic::Ordering::Acquire) == owner && self.is_capturing()
-    }
-
-    /// Stops the scan's own recording, never one started after it.
-    pub(super) fn scan_stop(self: &Shared, owner: u64) {
-        let _gate = self.capture_start_gate.lock().unwrap();
-        if !self.scan_owns(owner) {
-            return;
-        }
-        if let Err(e) = self.stop_capture() {
-            self.notify(NoticeKind::Error, e.to_string());
-        }
     }
 
     /// A scan's recording was saved (the caller took its flag before the state went Idle): it goes on to its
@@ -407,20 +390,20 @@ mod tests {
         ctl.capture_serial.store(4, Ordering::Release);
         ctl.update(|s| s.capture.state = CaptureState::Recording);
         let old = ctl.capture_serial.load(Ordering::Acquire);
-        assert!(ctl.scan_owns(old));
+        assert!(ctl.owns_recording(old));
         // Stopped by the person, then another recording starts before the scan's thread wakes.
         ctl.update(|s| s.capture.state = CaptureState::Idle);
-        assert!(!ctl.scan_owns(old), "an ended recording is no scan's");
+        assert!(!ctl.owns_recording(old), "an ended recording is no scan's");
         ctl.capture_serial.fetch_add(1, Ordering::AcqRel);
         ctl.update(|s| s.capture.state = CaptureState::Recording);
         let generation = ctl.stop_generation.load(Ordering::Acquire);
-        ctl.scan_stop(old);
+        ctl.stop_recording_of(old);
         assert_eq!(stops(&ctl), 0, "the old scan sent no Stop");
         assert_eq!(ctl.stop_generation.load(Ordering::Acquire), generation, "nor ended the new recording's generation");
-        assert!(!ctl.scan_owns(old), "nor may it fly that recording's camera");
+        assert!(!ctl.owns_recording(old), "nor may it fly that recording's camera");
         // A scan stops its own recording.
         let new = ctl.capture_serial.load(Ordering::Acquire);
-        ctl.scan_stop(new);
+        ctl.stop_recording_of(new);
         assert_eq!(stops(&ctl), 1);
     }
 }

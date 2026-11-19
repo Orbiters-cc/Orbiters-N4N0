@@ -696,6 +696,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         std::mem::take(&mut state.shown)
     } else {
         state.shown_key = Some(shown_key);
+        state.select.list_changed();
         let mut entries: Vec<Entry> = state
             .locals
             .iter()

@@ -1183,10 +1183,7 @@ impl Bridge {
                 self.close_and_wait(s, pid, call)?;
             }
             if self.paused_in(s).is_some() || self.stopped_since(call) {
-                return Err(self.paused_in(s).map_or_else(
-                    || Failure::new("stopped", "The person took control back in Orbiters - N4N0.", "Stop here: the person has to turn the bridge on again."),
-                    |p| paused_failure(&p),
-                ));
+                return Err(self.paused_in(s).map_or_else(|| self.stopped_failure(), |p| paused_failure(&p)));
             }
             if !s.is_main() {
                 let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: s.profile, osc: s.osc, vr: s.vr().is_some() };
@@ -1305,11 +1302,7 @@ impl Bridge {
                 return Err(Failure::new("client_gone", "The client disconnected.", "Call get_state when back."));
             }
             if self.stopped_since(call) {
-                return Err(Failure::new(
-                    "stopped",
-                    "The person took control back in Orbiters - N4N0.",
-                    "Stop here: the person has to turn the bridge on again.",
-                ));
+                return Err(self.stopped_failure());
             }
             if begin.elapsed() >= limit {
                 return Ok(false);

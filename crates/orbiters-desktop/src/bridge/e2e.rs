@@ -553,6 +553,26 @@ fn keyboard_and_mouse_go_only_into_the_foreground_game_window() {
 }
 
 #[test]
+fn only_the_person_s_stop_disowns_the_main_vrchat() {
+    // BRIDGE-5: a lapse of Orbiters' grant, a new token or a server change closed the bridge as the person's Stop did: the
+    // VRChat it started became "the person's" and nothing could close it.
+    let (game, bridge, _server, client) = lab("wind-down");
+    arrive(&client);
+    let port = client.port;
+    let walking = std::thread::spawn(move || Client { port }.tool("walk", json!({ "direction": "forward", "seconds": 8 })));
+    assert!(until(Duration::from_secs(3), || game.last_value("/input/MoveForward") == Some(1.0)));
+    bridge.wind_down("Orbiters no longer says this account has the bridge: it closed.");
+    let ended = walking.join().unwrap().unwrap_err();
+    assert_eq!(ended["code"], "bridge_closed", "{ended}");
+    assert_eq!(game.last_value("/input/MoveForward"), Some(0.0), "released");
+    // Still the bridge's: it can go on with it.
+    client.tool("walk", json!({ "direction": "forward", "seconds": 0.2 })).expect("its own VRChat still");
+    // The person's Stop: theirs from then on.
+    bridge.take_over("Stopped from Settings: control is back with the person.");
+    client.fails("walk", json!({ "direction": "forward", "seconds": 0.2 }), "not_started_by_bridge");
+}
+
+#[test]
 fn stop_gives_the_app_back_from_a_side_picture_at_once() {
     // BRIDGE-4: the lend was given back only by the bridge's ticks, which stop with it.
     let (game, bridge, _server, _client) = lab("give-back");

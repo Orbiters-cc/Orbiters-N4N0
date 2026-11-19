@@ -704,7 +704,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     // The filters on one line, the layout, Requests and the search on the right; narrower, the layout and the search
     // go under them.
     // (Also when the row does not fit in this language: the filters ran under the layout picker in Portuguese.)
-    let row_needs = widgets::segmented_width(ui, &filter_options(), false) + 12.0 + arrangement::PICKER_W + 12.0 + requests_button().desired_width(ui) + 12.0 + 260.0;
+    // (The filters may touch the picker, as English does at ~1225 wide: only an overlap stacks it.)
+    let row_needs = widgets::segmented_width(ui, &filter_options(), false) + arrangement::PICKER_W + 12.0 + requests_button().desired_width(ui) + 12.0 + 260.0;
     let stacked = head.width() < 920.0 || head.width() < row_needs;
     // Communities: the galleries as chips under the filters.
     let chips_h = if state.filter == Filter::Communities { 46.0 } else { 0.0 };

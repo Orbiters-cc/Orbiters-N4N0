@@ -47,8 +47,11 @@ pub struct Service {
     window: Mutex<Option<(Child, Instant)>>,
     /// A page asked for while no window was there: the window starting now gets it once it is linked.
     page_for_window: Mutex<Option<String>>,
-    /// The overlay process we started, when, and for which SteamVR (PID and creation time), and consecutive failures.
-    overlay: Mutex<Option<(Child, Instant, Option<crate::steamvr_start::Session>, u32)>>,
+    /// The overlay process we started, when, and for which SteamVR (PID and creation time), consecutive failures, and
+    /// consecutive starts that ended with an error soon after starting ([`short_errors`], OVERLAY-17).
+    overlay: Mutex<Option<(Child, Instant, Option<crate::steamvr_start::Session>, u32, u32)>>,
+    /// Starts against a SteamVR whose overlay saw it quit, spaced out until another SteamVR runs ([`AfterQuit`], OVERLAY-22).
+    overlay_after_quit: Mutex<AfterQuit>,
     /// The process of the panels around VRChat's menus in desktop mode, and when it started.
     orbit: Mutex<Option<(Child, Instant)>>,
     /// The SteamVR (its `vrserver` PID and creation time) whose start of the app was looked at ([`Service::keep_steamvr_start`]).
@@ -78,6 +81,7 @@ impl Service {
             window: Mutex::new(None),
             page_for_window: Mutex::new(None),
             overlay: Mutex::new(None),
+            overlay_after_quit: Mutex::new(AfterQuit::default()),
             orbit: Mutex::new(None),
             steamvr_start_seen: Mutex::new(None),
             smoothing: Mutex::new(Default::default()),
@@ -148,6 +152,7 @@ impl Service {
             Ok(child) => {
                 crate::worker::keep_with_service(&child);
                 allow_foreground(child.id());
+                crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).role(child.id(), "window");
                 *window = Some((child, Instant::now()));
             }
             Err(e) => eprintln!("could not start the window: {e}"),
@@ -168,7 +173,7 @@ impl Service {
         }
         // Closing an overlay is asynchronous: do not overlap its connection.
         if self.links.lock().unwrap().iter().any(|l| l.role == Role::Overlay)
-            || self.overlay.lock().unwrap().as_mut().is_some_and(|(child, _, _, _)| matches!(child.try_wait(), Ok(None))) { return; }
+            || self.overlay.lock().unwrap().as_mut().is_some_and(|(child, _, _, _, _)| child_exited(child.try_wait()).is_none()) { return; }
         // Not yet answering (it is starting, or going): asked again next turn.
         let Ok(client) = orbiters_openvr::Client::connect(orbiters_openvr::AppType::Background) else { return };
         if crate::steamvr_start::current_session() != Some(session) { return; }
@@ -237,24 +242,39 @@ impl Service {
             return;
         }
         if connected.is_some() {
-            if let Some((_, _, _, failures)) = self.overlay.lock().unwrap().as_mut() { *failures = 0; }
+            if let Some((_, started, _, failures, errors)) = self.overlay.lock().unwrap().as_mut() {
+                *failures = 0;
+                self.overlay_after_quit.lock().unwrap().reset();
+                // Connected is not started: one that ends with an error after connecting counts until it lived a while.
+                if started.elapsed() >= OVERLAY_LIVED {
+                    *errors = 0;
+                }
+            }
             return;
         }
         let Some(session) = crate::steamvr_start::ready_session().filter(|s| Some(s.0) == snap.steamvr.pid) else { return };
         drop(links);
         let mut overlay = self.overlay.lock().unwrap();
-        if let Some((child, started, steamvr, failures)) = overlay.as_mut() {
-            let exited = match child.try_wait() {
-                Ok(None) => None,
-                Ok(Some(status)) => Some(status.code()),
-                Err(_) => Some(None),
+        let mut errors = 0;
+        if let Some((child, started, steamvr, failures, prior_errors)) = overlay.as_mut() {
+            let exited = child_exited(child.try_wait());
+            errors = if *steamvr == Some(session) { short_errors(*prior_errors, exited, started.elapsed()) } else { 0 };
+            let after_quit = {
+                let mut after_quit = self.overlay_after_quit.lock().unwrap();
+                if let Some(code) = exited {
+                    after_quit.exited(code, *steamvr, Instant::now());
+                }
+                after_quit.due(Some(session), Instant::now())
             };
-            if !overlay_due(exited, started.elapsed(), *steamvr, Some(session), *failures) {
+            if !overlay_due(exited, started.elapsed(), *steamvr, Some(session), *failures) || !errors_waited(errors, started.elapsed()) || !after_quit {
                 return;
             }
             crate::overlay::vr_log::line(&format!("service: the SteamVR overlay ended (exit code {exited:?}) after {} s; starting it again", started.elapsed().as_secs())); // i18n: not shown (a log's line)
+            if errors >= 2 {
+                crate::overlay::vr_log::line(&format!("service: the SteamVR overlay failed {errors} times in a row soon after starting; it was started again after {} s", started.elapsed().as_secs())); // i18n: not shown (a log's line)
+            }
         }
-        let failures = overlay.as_ref().filter(|(_, _, prior, _)| *prior == Some(session)).map_or(1, |(_, _, _, n)| n.saturating_add(1));
+        let failures = overlay.as_ref().filter(|(_, _, prior, _, _)| *prior == Some(session)).map_or(1, |(_, _, _, n, _)| n.saturating_add(1));
         let mut cmd = Command::new(&self.exe);
         cmd.arg("--overlay").args(self.endpoint.args()).stdin(Stdio::null());
         #[cfg(windows)]
@@ -265,7 +285,9 @@ impl Service {
         match cmd.spawn() {
             Ok(child) => {
                 crate::worker::keep_with_service(&child);
-                *overlay = Some((child, Instant::now(), Some(session), failures));
+                crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).role(child.id(), "overlay");
+                self.overlay_after_quit.lock().unwrap().started(Some(session));
+                *overlay = Some((child, Instant::now(), Some(session), failures, errors));
             }
             Err(e) => eprintln!("could not start the SteamVR overlay: {e}"),
         }
@@ -301,6 +323,7 @@ impl Service {
         match cmd.spawn() {
             Ok(child) => {
                 crate::worker::keep_with_service(&child);
+                crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).role(child.id(), "orbit-desktop");
                 *orbit = Some((child, Instant::now()));
             }
             Err(e) => eprintln!("could not start the panels around VRChat's menus: {e}"),
@@ -571,9 +594,9 @@ impl Service {
             self.ctl.n4n0_link_closed(role == Role::Overlay);
         }
         if role == Role::Orbit {
-            // Its panels' Talk, should it have gone while held: the service never saw that let go.
-            self.ctl.n4n0_command(crate::ipc::N4n0Command::Talk { down: false });
-            self.ctl.n4n0_command(crate::ipc::N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
+            for command in orbit_gone(still_there) {
+                self.ctl.n4n0_command(command);
+            }
         }
         // Without a tray (Linux for now) nothing would bring the window back: closing it quits.
         if role == Role::Window && cfg!(not(any(windows, target_os = "macos"))) {
@@ -592,6 +615,109 @@ fn overlay_due(exited: Option<Option<i32>>, since: Duration, started_for: Option
     if exited.is_none() { return false; }
     if steamvr != started_for { return true; }
     since >= OVERLAY_RETRY * if failures <= 1 { 1 } else { 2 }
+}
+
+/// A child's exit code once it has exited; `None` while it runs, and also when Windows could not say (a failed wait is no
+/// proof of an exit: starting another then would overlap two overlays, OVERLAY-27; it is asked again next turn).
+fn child_exited(waited: std::io::Result<Option<std::process::ExitStatus>>) -> Option<Option<i32>> {
+    match waited {
+        Ok(Some(status)) => Some(status.code()),
+        Ok(None) => None,
+        Err(e) => {
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, Ordering::Relaxed) {
+                crate::overlay::vr_log::line(&format!("service: could not ask whether the SteamVR overlay still runs ({e}); taken as running")); // i18n: not shown (a log's line)
+            }
+            None
+        }
+    }
+}
+
+/// What the desktop panels' process held ends with its link: its Talk, should it have gone while held (the service never saw
+/// that let go), its menu, and, when no other panels' link is left, its Ask N4N0 page: a process killed with that page open left
+/// N4N0 arming the microphone after every sentence with no page anywhere (OVL2-13).
+fn orbit_gone(still_there: bool) -> Vec<crate::ipc::N4n0Command> {
+    use crate::ipc::N4n0Command;
+    let mut out = vec![N4n0Command::Talk { down: false }, N4n0Command::MenuState { open: false, dictation: false, keyboard: false }];
+    if !still_there {
+        out.push(N4n0Command::AskPage { open: false });
+    }
+    out
+}
+
+/// After an overlay saw SteamVR quit (it ended with [`crate::overlay::EXIT_STEAMVR_GONE`]), SteamVR's server is still there for a
+/// while as it shuts down, and every overlay started against it was refused (three starts in seven seconds, 2026-11-16). Starts
+/// for that same SteamVR wait 2, 4, 8, 16, then 30 s from the last one's end; another SteamVR is started for at once, and an
+/// overlay that connects ends it. A clean end (0) alone is never taken for a quit.
+#[derive(Debug, Default)]
+struct AfterQuit {
+    /// The SteamVR that quit, starts made for it since, and when the last child was seen ended.
+    quit: Option<(Option<crate::steamvr_start::Session>, u32)>,
+    ended_at: Option<Instant>,
+}
+
+impl AfterQuit {
+    const FIRST: Duration = Duration::from_secs(2);
+    const AT_MOST: Duration = Duration::from_secs(30);
+
+    /// A child started for `steamvr` was seen ended with `code`.
+    fn exited(&mut self, code: Option<i32>, steamvr: Option<crate::steamvr_start::Session>, now: Instant) {
+        self.ended_at.get_or_insert(now);
+        if code == Some(crate::overlay::EXIT_STEAMVR_GONE) && self.quit.is_none_or(|(s, _)| s != steamvr) {
+            self.quit = Some((steamvr, 0));
+        }
+    }
+
+    /// Whether a start for `steamvr` may be made now.
+    fn due(&self, steamvr: Option<crate::steamvr_start::Session>, now: Instant) -> bool {
+        let Some((quit, starts)) = self.quit else { return true };
+        if quit != steamvr {
+            return true;
+        }
+        let wait = (Self::FIRST * 2u32.saturating_pow(starts.min(5))).min(Self::AT_MOST);
+        self.ended_at.is_none_or(|at| now.saturating_duration_since(at) >= wait)
+    }
+
+    /// A child was started for `steamvr`.
+    fn started(&mut self, steamvr: Option<crate::steamvr_start::Session>) {
+        self.ended_at = None;
+        match &mut self.quit {
+            Some((quit, starts)) if *quit == steamvr => *starts += 1,
+            Some(_) => self.quit = None,
+            None => {}
+        }
+    }
+
+    /// An overlay connected: SteamVR answers again.
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// A child that lived this long is a working start: the errors' back-off starts again from nothing.
+const OVERLAY_LIVED: Duration = Duration::from_secs(60);
+/// The longest wait between starts of an overlay that keeps failing.
+const OVERLAY_ERRORS_WAIT_AT_MOST: Duration = Duration::from_secs(120);
+
+/// Consecutive starts that ended with an error (not a clean end, not SteamVR going) before living [`OVERLAY_LIVED`],
+/// counting the child that `exited` now. A required start step SteamVR refuses (its overlay slots full) failed every
+/// 2 to 4 s for as long as SteamVR ran (OVERLAY-17): that, and only that, is backed off.
+fn short_errors(prior: u32, exited: Option<Option<i32>>, lived: Duration) -> u32 {
+    match exited {
+        None => prior,
+        Some(Some(0)) | Some(Some(crate::overlay::EXIT_STEAMVR_GONE)) => 0,
+        Some(_) if lived >= OVERLAY_LIVED => 0,
+        Some(_) => prior.saturating_add(1),
+    }
+}
+
+/// Whether a child that ended after `errors` short errors in a row may be started again `since` its start: as before for
+/// the first two (2 and 4 s, [`overlay_due`]), then 8, 16, 32 ... up to two minutes.
+fn errors_waited(errors: u32, since: Duration) -> bool {
+    if errors <= 2 {
+        return true;
+    }
+    since >= (OVERLAY_RETRY * 2u32.saturating_pow(errors - 1).min(64)).min(OVERLAY_ERRORS_WAIT_AT_MOST)
 }
 
 /// Lets a process we start or signal take the foreground (Windows keeps background processes from stealing it).
@@ -785,6 +911,74 @@ pub(crate) mod tests {
             }
         }
     }
+    /// OVL2-13: the panels' process gone, its Ask N4N0 page is closed (the microphone no longer armed for it).
+    #[test]
+    fn the_panels_gone_close_their_ask_page() {
+        let said: Vec<String> = orbit_gone(false).iter().map(|c| format!("{c:?}")).collect();
+        assert!(said.iter().any(|c| c.contains("AskPage") && c.contains("false")), "{said:?}");
+        assert!(said.iter().any(|c| c.starts_with("Talk")), "its Talk let go, as before");
+        assert!(!orbit_gone(true).iter().any(|c| format!("{c:?}").contains("AskPage")), "another panels' link keeps its page");
+    }
+
+    /// OVERLAY-22: after an overlay saw SteamVR quit, starts for that SteamVR are spaced 2, 4, 8, 16, 30 s from the last end;
+    /// another SteamVR, or an overlay that connects, ends that at once; a clean end alone is not a quit.
+    #[test]
+    fn starts_against_a_quitting_steamvr_are_spaced_out() {
+        let (old, new) = (Some((7, 100)), Some((8, 200)));
+        let t = Instant::now();
+        let s = |n: u64| t + Duration::from_secs(n);
+        let mut q = AfterQuit::default();
+        q.exited(Some(0), old, t);
+        assert!(q.due(old, t), "a clean end is no quit: as before");
+        q.started(old);
+        q.exited(Some(crate::overlay::EXIT_STEAMVR_GONE), old, s(100));
+        assert!(!q.due(old, s(101)) && q.due(old, s(102)), "2 s after the quit");
+        assert!(q.due(new, s(100)), "another SteamVR: at once");
+        let mut at = 102;
+        let mut waits = Vec::new();
+        for _ in 0..6 {
+            q.started(old);
+            q.exited(Some(0), old, s(at)); // refused: "Retry"
+            let wait = (0..=40).find(|w| q.due(old, s(at + w))).unwrap();
+            waits.push(wait);
+            at += wait;
+        }
+        assert_eq!(waits, [4, 8, 16, 30, 30, 30]);
+        q.started(new);
+        assert!(q.due(new, s(at)), "a start for another SteamVR ends the spacing");
+        assert!(q.quit.is_none());
+        q.exited(Some(crate::overlay::EXIT_STEAMVR_GONE), new, s(at));
+        q.reset();
+        assert!(q.due(new, s(at)), "an overlay that connected ends it");
+    }
+
+    /// OVERLAY-27: a wait that failed keeps the child as running; only a real exit lets another start.
+    #[test]
+    fn a_failed_wait_is_not_an_exit() {
+        assert_eq!(child_exited(Err(std::io::Error::other("access denied"))), None);
+        assert_eq!(child_exited(Ok(None)), None);
+        let done = if cfg!(windows) { std::process::Command::new("cmd").args(["/C", "exit 3"]).status() } else { std::process::Command::new("sh").args(["-c", "exit 3"]).status() };
+        assert_eq!(child_exited(Ok(Some(done.unwrap()))), Some(Some(3)));
+    }
+
+    /// OVERLAY-17: an overlay that keeps failing soon after it starts is started again 2 s, 4 s, then 8, 16 ... 120 s apart;
+    /// a clean end, SteamVR going, or a child that lived a minute start the count again, and one error waits as before.
+    #[test]
+    fn an_overlay_that_keeps_failing_at_start_is_backed_off() {
+        let soon = Duration::from_secs(1);
+        assert_eq!(short_errors(0, None, soon), 0, "still running: nothing counted");
+        assert_eq!(short_errors(0, Some(Some(1)), soon), 1);
+        assert_eq!(short_errors(4, Some(None), soon), 5, "killed or unreadable counts as an error");
+        assert_eq!(short_errors(4, Some(Some(0)), soon), 0, "a clean end (a retry) is not an error");
+        assert_eq!(short_errors(4, Some(Some(crate::overlay::EXIT_STEAMVR_GONE)), soon), 0);
+        assert_eq!(short_errors(4, Some(Some(1)), OVERLAY_LIVED), 0, "a child that lived a minute was a working start");
+        // The first two errors wait as before: overlay_due's 2 s and 4 s alone decide.
+        assert!(errors_waited(1, Duration::ZERO) && errors_waited(2, Duration::ZERO));
+        let waits: Vec<u64> = (3..=12).map(|n| (0..=200).find(|s| errors_waited(n, Duration::from_secs(*s))).unwrap()).collect();
+        assert_eq!(waits, [8, 16, 32, 64, 120, 120, 120, 120, 120, 120]);
+        assert!(errors_waited(u32::MAX, OVERLAY_ERRORS_WAIT_AT_MOST));
+    }
+
     #[test]
     fn steamvr_exit_restart_and_pid_reuse_allow_immediate_retry() {
         for next in [Some((8, 200)), Some((7, 200))] {

@@ -14,6 +14,69 @@ static VRCHAT: AtomicU32 = AtomicU32::new(0);
 /// The hook's thread, and whether the hook should be in place.
 static THREAD: AtomicU32 = AtomicU32::new(0);
 static WANTED: AtomicBool = AtomicBool::new(false);
+/// Which key's down and up is whose while the hook is in place (only the hook's thread touches it).
+#[cfg_attr(not(windows), allow(dead_code))]
+static KEYS: Mutex<Owners> = Mutex::new(Owners::new());
+
+/// Whose each key is (OVERLAY-12): a key already down when the keyboard was taken stays VRChat's until it is let go (its repeats
+/// and its up reach VRChat: a W held to walk is not stuck walking), and an up is swallowed only for a down that was swallowed.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Owners {
+    /// Keys whose down the menu took.
+    taken: [u64; 4],
+    /// Keys that were down when the keyboard was taken: VRChat's until their up.
+    held: [u64; 4],
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Owners {
+    const fn new() -> Self {
+        Self { taken: [0; 4], held: [0; 4] }
+    }
+
+    fn bit(set: &[u64; 4], vk: u32) -> bool {
+        vk < 256 && set[(vk / 64) as usize] & (1 << (vk % 64)) != 0
+    }
+
+    fn set(set: &mut [u64; 4], vk: u32, on: bool) {
+        if vk < 256 {
+            let mask = 1u64 << (vk % 64);
+            if on {
+                set[(vk / 64) as usize] |= mask;
+            } else {
+                set[(vk / 64) as usize] &= !mask;
+            }
+        }
+    }
+
+    /// The keyboard is taken now, with these keys down.
+    fn taken_with(down: impl IntoIterator<Item = u32>) -> Self {
+        let mut owners = Self::new();
+        for vk in down {
+            Self::set(&mut owners.held, vk, true);
+        }
+        owners
+    }
+
+    /// Whether the menu takes this key event (`false`: it goes on to VRChat). `menu_key`: a key the menu would take (not a
+    /// modifier, not a shortcut of Windows').
+    fn take(&mut self, vk: u32, down: bool, menu_key: bool) -> bool {
+        if Self::bit(&self.held, vk) {
+            if !down {
+                Self::set(&mut self.held, vk, false);
+            }
+            return false;
+        }
+        if down {
+            Self::set(&mut self.taken, vk, menu_key);
+            return menu_key;
+        }
+        let was = Self::bit(&self.taken, vk);
+        Self::set(&mut self.taken, vk, false);
+        was
+    }
+}
 
 #[cfg(windows)]
 const WM_APP_HOOK: u32 = 0x8000 + 1;
@@ -102,13 +165,22 @@ fn passes(vk: u32) -> bool {
     matches!(vk, 0x10..=0x12 | 0x14 | 0x5B | 0x5C | 0x5D | 0x90 | 0x91 | 0xA0..=0xA5 | 0x70..=0x87 | 0x2C)
 }
 
+/// Windows' own shortcuts, which go on while the menu has the keyboard: anything with a Windows key down, Alt+Tab and Alt+Esc
+/// (Alt without Ctrl: Ctrl+Alt is AltGr, which types), and Ctrl+Shift+Esc (OVERLAY-12: Alt+Tab reached Windows as Alt alone).
+#[cfg(windows)]
+fn windows_shortcut(vk: u32, ctrl: bool, alt: bool, shift: bool, windows_key: bool) -> bool {
+    const TAB: u32 = 0x09;
+    const ESCAPE: u32 = 0x1B;
+    windows_key || (alt && !ctrl && matches!(vk, TAB | ESCAPE)) || (vk == ESCAPE && ctrl && shift)
+}
+
 #[cfg(windows)]
 unsafe extern "system" fn hook(
     code: i32,
     wparam: windows::Win32::Foundation::WPARAM,
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT};
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, GetForegroundWindow, GetWindowThreadProcessId, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, WM_KEYDOWN, WM_SYSKEYDOWN,
     };
@@ -122,17 +194,23 @@ unsafe extern "system" fn hook(
             let vrchat = VRCHAT.load(Ordering::Relaxed);
             if !injected && vrchat != 0 && pid == vrchat && !passes(info.vkCode) {
                 let message = wparam.0 as u32;
-                if message == WM_KEYDOWN || message == WM_SYSKEYDOWN {
-                    let ctrl = (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
-                    let alt = (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0;
-                    if let Some(input) = input_of(info.vkCode, info.scanCode, ctrl, alt) {
-                        if let Some(sink) = SINK.get() {
-                            let _ = sink.lock().map(|s| s.send(input));
+                let down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+                let key_down = |k: u16| (GetAsyncKeyState(k as i32) as u16 & 0x8000) != 0;
+                let (ctrl, alt) = (key_down(VK_CONTROL.0), key_down(VK_MENU.0));
+                let shortcut = windows_shortcut(info.vkCode, ctrl, alt, key_down(VK_SHIFT.0), key_down(VK_LWIN.0) || key_down(VK_RWIN.0));
+                // A down the menu takes, and that down's up: VRChat sees none of it (a W walks nobody). Any other up, a
+                // key held before the menu took the keyboard, and Windows' shortcuts go on.
+                let taken = KEYS.lock().map(|mut k| k.take(info.vkCode, down, !shortcut)).unwrap_or(!shortcut);
+                if taken {
+                    if down {
+                        if let Some(input) = input_of(info.vkCode, info.scanCode, ctrl, alt) {
+                            if let Some(sink) = SINK.get() {
+                                let _ = sink.lock().map(|s| s.send(input));
+                            }
                         }
                     }
+                    return windows::Win32::Foundation::LRESULT(1);
                 }
-                // Down and up alike: VRChat sees none of it (a W walks nobody).
-                return windows::Win32::Foundation::LRESULT(1);
             }
         }
         CallNextHookEx(Some(HHOOK::default()), code, wparam, lparam)
@@ -154,10 +232,18 @@ fn windows_thread() {
         loop {
             let wanted = WANTED.load(Ordering::Acquire);
             match (wanted, hooked) {
-                (true, None) => match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) {
-                    Ok(h) => hooked = Some(h),
-                    Err(e) => eprintln!("keyboard: {e}"),
-                },
+                (true, None) => {
+                    // The keys down now stay VRChat's until they are let go.
+                    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+                    let down = (1u32..256).filter(|&vk| (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0);
+                    if let Ok(mut keys) = KEYS.lock() {
+                        *keys = Owners::taken_with(down);
+                    }
+                    match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) {
+                        Ok(h) => hooked = Some(h),
+                        Err(e) => eprintln!("keyboard: {e}"),
+                    }
+                }
                 (false, Some(h)) => {
                     let _ = UnhookWindowsHookEx(h);
                     hooked = None;
@@ -171,6 +257,49 @@ fn windows_thread() {
         if let Some(h) = hooked {
             let _ = UnhookWindowsHookEx(h);
         }
+    }
+}
+
+/// OVERLAY-12: whose key events are whose. Pure, on every platform.
+#[cfg(test)]
+mod owner_tests {
+    use super::Owners;
+
+    #[test]
+    fn a_key_held_when_the_keyboard_is_taken_stays_vrchats_until_its_up() {
+        let w = 0x57;
+        let mut keys = Owners::taken_with([w]);
+        assert!(!keys.take(w, true, true), "its repeats go on to VRChat");
+        assert!(!keys.take(w, false, true), "and its up: the avatar stops walking");
+        assert!(keys.take(w, true, true), "pressed again, the menu takes it");
+        assert!(keys.take(w, false, true), "and its up");
+    }
+
+    #[test]
+    fn an_up_is_swallowed_only_for_a_down_that_was() {
+        let mut keys = Owners::new();
+        assert!(!keys.take(0x41, false, true), "an up whose down VRChat had");
+        assert!(keys.take(0x41, true, true));
+        assert!(keys.take(0x41, false, true));
+        assert!(!keys.take(0x41, false, true), "once");
+        // A shortcut of Windows' (Alt+Tab): its down goes on, so does its up.
+        assert!(!keys.take(0x09, true, false));
+        assert!(!keys.take(0x09, false, true));
+        assert_eq!(keys, Owners::new());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shortcuts_go_on_and_altgr_still_types() {
+        use super::windows_shortcut;
+        assert!(windows_shortcut(0x09, false, true, false, false), "Alt+Tab");
+        assert!(windows_shortcut(0x1B, true, false, true, false), "Ctrl+Shift+Esc");
+        assert!(windows_shortcut(0x44, false, false, false, true), "Windows+D");
+        assert!(windows_shortcut(0x1B, false, true, false, false), "Alt+Esc");
+        assert!(!windows_shortcut(0x45, true, true, false, false), "AltGr+E types");
+        assert!(!windows_shortcut(0x45, false, true, false, false), "Alt+E is the menu's, as before");
+        assert!(!windows_shortcut(0x1B, false, false, false, false), "Escape is the menu's");
+        assert!(!windows_shortcut(0x56, true, false, false, false), "Ctrl+V is the menu's");
     }
 }
 

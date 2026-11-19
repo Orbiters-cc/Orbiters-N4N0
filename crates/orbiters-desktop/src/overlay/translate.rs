@@ -100,6 +100,9 @@ pub struct TranslateHost {
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Reading threads turned off that may still be in a look or releasing a mirror: joined at teardown, before SteamVR's
+    /// client goes (OVERLAY-13: they were detached).
+    retired: Retired,
     slots: Vec<Slot>,
     last_turn: Option<Instant>,
     status_sent: Option<(Instant, TranslateStatus)>,
@@ -132,6 +135,7 @@ impl Default for TranslateHost {
             shared: Arc::default(),
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
+            retired: Retired::default(),
             slots: Vec::new(),
             last_turn: None,
             status_sent: None,
@@ -387,12 +391,10 @@ impl TranslateHost {
 
     fn start(&mut self, steamvr: &vr::Client) {
         self.stop = Arc::new(AtomicBool::new(false));
+        // Each reading thread its own shared state: one turned off a moment ago, still in a look, publishes where nobody
+        // reads (OVERLAY-28), and SteamVR's eyes are read again for this activation (OVERLAY-15).
+        self.shared = Arc::new(Mutex::new(fresh_shared(&self.shared)));
         let (shared, stop) = (self.shared.clone(), self.stop.clone());
-        {
-            let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
-            s.status = TranslateStatus { state: TranslateState::Starting, ..Default::default() };
-            s.scene = None;
-        }
         #[cfg(windows)]
         let from = (steamvr.compositor().ok().map(|c| c.mirror_source()), steamvr.dxgi_adapter_index());
         #[cfg(not(windows))]
@@ -405,16 +407,11 @@ impl TranslateHost {
     fn stop_thread(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         stop_downloads();
-        // Never waits on the turn: a thread in the middle of a look ends by itself; `finish` joins at teardown.
-        if self.thread.as_ref().is_some_and(|t| t.is_finished()) {
-            if let Some(t) = self.thread.take() {
-                let _ = t.join();
-            }
-        } else if let Some(t) = self.thread.take() {
-            std::thread::spawn(move || {
-                let _ = t.join();
-            });
+        // Never waits on the turn: a thread in the middle of a look ends by itself, and is joined at teardown.
+        if let Some(t) = self.thread.take() {
+            self.retired.push(t);
         }
+        self.retired.reap();
         let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         s.scene = None;
         s.shown.clear();
@@ -532,6 +529,7 @@ impl TranslateHost {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+        self.retired.join_all();
         for slot in self.slots.drain(..) {
             let _ = overlay.destroy(slot.handle);
         }
@@ -550,13 +548,39 @@ impl TranslateHost {
 
 /// A line in `translate.log` beside the app's other logs: how reading goes (never what was read).
 fn note(line: &str) {
-    use std::io::Write;
-    let path = orbiters_core::paths::logs_dir().join("translate.log");
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
-        let _ = std::fs::rename(&path, path.with_extension("old.log"));
+    super::vr_log::append("translate.log", Some(super::vr_log::ROTATE_AT), format!("{} {line}\n", orbiters_core::now_utc_iso()));
+}
+
+/// The shared state a new reading thread starts with: nothing of the last one's but VRChat's frame load (the turn
+/// measures it every two seconds and the thread paces itself by it).
+fn fresh_shared(last: &Mutex<Shared>) -> Shared {
+    let load = last.lock().unwrap_or_else(|e| e.into_inner()).load;
+    Shared { load, status: TranslateStatus { state: TranslateState::Starting, ..Default::default() }, ..Default::default() }
+}
+
+/// Reading threads turned off and not yet joined.
+#[derive(Default)]
+struct Retired(Vec<std::thread::JoinHandle<()>>);
+
+impl Retired {
+    fn push(&mut self, thread: std::thread::JoinHandle<()>) {
+        self.0.push(thread);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{} {line}", orbiters_core::now_utc_iso());
+
+    /// Joins those that ended (never waits).
+    fn reap(&mut self) {
+        let (done, running): (Vec<_>, Vec<_>) = std::mem::take(&mut self.0).into_iter().partition(|t| t.is_finished());
+        for t in done {
+            let _ = t.join();
+        }
+        self.0 = running;
+    }
+
+    /// Waits for every one of them (teardown).
+    fn join_all(&mut self) {
+        for t in self.0.drain(..) {
+            let _ = t.join();
+        }
     }
 }
 
@@ -1134,6 +1158,43 @@ fn turn_speed(heads: &VecDeque<(Instant, M34)>) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// OVERLAY-13: a reading thread turned off while still in a look is kept, not detached, and teardown waits for it.
+    #[test]
+    fn retired_readers_are_joined_at_teardown() {
+        use std::sync::atomic::AtomicBool;
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let ended = Arc::new(AtomicBool::new(false));
+        let flag = ended.clone();
+        let mut retired = super::Retired::default();
+        retired.push(std::thread::spawn(move || {
+            let _ = wait.recv();
+            flag.store(true, Ordering::SeqCst);
+        }));
+        retired.reap();
+        assert_eq!(retired.0.len(), 1, "one in a look is kept");
+        release.send(()).unwrap();
+        retired.join_all();
+        assert!(ended.load(Ordering::SeqCst), "teardown returned only once it ended");
+        assert!(retired.0.is_empty());
+    }
+
+    /// OVERLAY-28 and OVERLAY-15: a new reading thread gets state of its own (a retired one's scene and eyes are not in it);
+    /// VRChat's frame load is carried over.
+    #[test]
+    fn a_new_reader_starts_from_its_own_state() {
+        let old = Mutex::new(super::Shared::default());
+        {
+            let mut s = old.lock().unwrap();
+            s.load = super::FrameLoad { throttled: 0.5, ..Default::default() };
+            s.eyes = Some(([[[0.0; 4]; 3]; 2], [[0.0; 4]; 2]));
+            s.corrections.push(([1.0, 0.0, 0.0], None));
+        }
+        let fresh = super::fresh_shared(&old);
+        assert_eq!(fresh.load, old.lock().unwrap().load);
+        assert!(fresh.eyes.is_none() && fresh.scene.is_none() && fresh.corrections.is_empty());
+        assert!(matches!(fresh.status.state, super::TranslateState::Starting));
+    }
+
     use super::*;
     use orbiters_translate::geometry::{rotation, IDENTITY};
 

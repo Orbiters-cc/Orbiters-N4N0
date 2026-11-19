@@ -730,6 +730,38 @@ pub struct Turn {
 /// How much of the eye VRChat's window shows, as worked back from Enzo's two pictures: its tiles were 1.4 times the panel's scale, and how far they were off grows with the place on the picture by that.
 const WINDOW_SHARE: f32 = 0.716;
 const WINDOW_MOVED: [f32; 2] = [0.0, 0.0];
+/// How long VRChat's Quick Menu toggle stays at 1, and at 0 before it may go to 1 again.
+const OSC_PRESS: Duration = Duration::from_millis(60);
+
+/// The edges of VRChat's Quick Menu toggle buttons still to send: each toggle is a 1 and, [`OSC_PRESS`] later, a 0; a toggle asked
+/// while one is under way for that hand comes after its 0 (OVL2-19: a second toggle within 60 ms overwrote the first, its 1 sent
+/// while the button was still at 1, and VRChat saw no edge).
+#[derive(Debug, Default)]
+struct OscButton {
+    queue: std::collections::VecDeque<(usize, i32, Instant)>,
+}
+
+impl OscButton {
+    fn toggle(&mut self, hand: usize, now: Instant) {
+        let at = self.queue.iter().rev().find(|(h, _, _)| *h == hand).map_or(now, |(_, _, last)| (*last + OSC_PRESS).max(now));
+        self.queue.push_back((hand, 1, at));
+        self.queue.push_back((hand, 0, at + OSC_PRESS));
+    }
+
+    /// What is due now, in order: (hand, value).
+    fn due(&mut self, now: Instant) -> Vec<(usize, i32)> {
+        let mut out = Vec::new();
+        self.queue.retain(|(hand, value, at)| {
+            let due = *at <= now;
+            if due {
+                out.push((*hand, *value));
+            }
+            !due
+        });
+        out
+    }
+}
+
 /// VRChat's `/input/QuickMenuToggle*`, as a button going to `value`, sent straight to it on this computer.
 fn send_quick_menu_toggle(hand: usize, value: i32, port: u16) {
     let Ok(socket) = std::net::UdpSocket::bind(("127.0.0.1", 0)) else { return };
@@ -1167,6 +1199,100 @@ fn hidden_parts(handles: &mut HashMap<Zone, vr::OverlayHandle>, up: &[Zone], vis
     zones.iter().filter_map(|zone| handles.remove(zone)).collect()
 }
 
+/// The pointer's hand this turn from last turn's (`active`), which hands' lasers meet a part (`on`), their triggers now and
+/// last turn; and the hand that was the pointer and lets go now off every part, whose up is delivered before another hand
+/// takes the pointer (else its release was never seen, OVERLAY-25).
+///
+/// The other hand pulling its trigger on a part while the pointer's hand holds nothing takes the pointer, and its press is the
+/// one delivered (OVL2-1: it was blocked from VRChat and given to nobody). `blocked`: the hands blocked before this turn, as a
+/// press must have begun blocked. A hand mid-press is never left.
+fn pointer_hand(active: Option<usize>, on: [bool; 2], triggers: [bool; 2], was: [bool; 2], blocked: [bool; 2]) -> (Option<usize>, Option<usize>) {
+    if let Some(a) = active.filter(|&a| !triggers[a]) {
+        let b = 1 - a;
+        if on[b] && triggers[b] && !was[b] && blocked[b] {
+            return (Some(b), Some(a).filter(|&a| was[a]));
+        }
+    }
+    if active.is_some_and(|h| on[h] || triggers[h]) {
+        return (active, None);
+    }
+    let let_go = active.filter(|&h| was[h] && !triggers[h]);
+    ([1, 0].into_iter().find(|&i| on[i]), let_go)
+}
+
+/// Where the `i`-th part of this turn's snapshot goes, and its quad; `None` past the snapshot (never an index out of bounds).
+fn placed_at<'a>(quads: &'a [(Quad, Placed)], placing: &[Placing], i: usize) -> Option<(Matrix34, &'a Quad)> {
+    let quad = &quads.get(i)?.0;
+    let frame = match placing.get(i)? {
+        Placing::At(m) => *m,
+        Placing::Room => quad.transform,
+    };
+    Some((frame, quad))
+}
+
+/// Where the 3D capture shows small on the Worlds sheet's `hole`, from the parts as they were when `quads` and `placing` were
+/// made (`zones`): `None` for a turn whose snapshot has no sheet page yet. A press that opened the sheet later in the same turn
+/// made the page one part more than the snapshot, and indexing by the parts of now crashed the overlay (REL-2, 2026-11-13);
+/// the next turn has the page.
+fn small_place_in(zones: &[Zone], quads: &[(Quad, Placed)], placing: &[Placing], hole: egui::Rect) -> Option<(Matrix34, f32)> {
+    let i = zones.iter().position(|z| *z == Zone::Takeover)?;
+    let (frame, quad) = placed_at(quads, placing, i)?;
+    let (x, y) = ((hole.center().x / 1024.0 - 0.5) * quad.width, (0.5 - hole.center().y / 576.0) * quad.height);
+    let there = Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
+    Some((space::compose(&frame, &there), hole.width() / 1024.0 * quad.width / 2.0 * super::super::worlds::SMALL_FILLS_HOLE))
+}
+
+/// The last value told to SteamVR for one property of one overlay, compared bit for bit: telling it the same again changes
+/// nothing SteamVR shows, so it is not told (LIGHT-VR-5). A call SteamVR refused is told again next turn, as before.
+#[derive(Clone, Copy, Debug)]
+struct Told<T>(Option<T>);
+
+impl<T> Default for Told<T> {
+    fn default() -> Self {
+        Told(None)
+    }
+}
+
+impl Told<f32> {
+    /// Calls `tell` with `value` unless it is what was last told successfully (bit for bit: 0.0 and -0.0 differ, as two
+    /// calls would); returns whether it called.
+    fn send<E>(&mut self, value: f32, tell: impl FnOnce(f32) -> Result<(), E>) -> bool {
+        if self.0.is_some_and(|last| last.to_bits() == value.to_bits()) {
+            return false;
+        }
+        self.0 = tell(value).is_ok().then_some(value);
+        true
+    }
+}
+
+/// What one part's overlay was last told.
+#[derive(Clone, Copy, Debug, Default)]
+struct Sent1 {
+    handle: vr::OverlayHandle,
+    width: Told<f32>,
+    alpha: Told<f32>,
+}
+
+/// What each part's overlay was last told, by part. An overlay made anew (a new handle for the part, or one given back and made
+/// again, `forget`) starts with nothing told, so everything is told to it.
+#[derive(Default)]
+struct Sent(HashMap<Zone, Sent1>);
+
+impl Sent {
+    fn to(&mut self, zone: Zone, handle: vr::OverlayHandle) -> &mut Sent1 {
+        let told = self.0.entry(zone).or_default();
+        if told.handle != handle {
+            *told = Sent1 { handle, ..Sent1::default() };
+        }
+        told
+    }
+
+    /// `handle` was let go: whatever overlay is made next (whatever handle SteamVR gives it) is told everything.
+    fn forget(&mut self, handle: vr::OverlayHandle) {
+        self.0.retain(|_, told| told.handle != handle);
+    }
+}
+
 /// Whether a part's SteamVR overlay is up: it has a picture and is to be seen. A sheet keeps the page it showed until the next page's first picture comes (I-pageflash).
 pub(super) fn part_shows(panel: &super::Panel) -> bool {
     panel.painted && panel.shown
@@ -1307,6 +1433,8 @@ pub struct OrbitVr {
     stuck: Stuck,
     lasers: Lasers,
     handles: HashMap<Zone, vr::OverlayHandle>,
+    /// What each part's overlay was last told (width, alpha), so an unchanged value is not told again (LIGHT-VR-5).
+    sent: Sent,
     /// Parts SteamVR refused an overlay, and when.
     refused: HashMap<Zone, Instant>,
     /// Where the Quick Menu opened; where a page opened from the wheel goes.
@@ -1335,7 +1463,7 @@ pub struct OrbitVr {
     hole_logged: super::super::vr_log::Every,
     /// What the headset shows, kept when asked (`ORBITERS_VR_PICTURES`).
     moments: super::super::eye_picture::Moments,
-    osc_toggle: Option<(usize, Instant)>,
+    osc_toggle: OscButton,
     /// VRChat's Quick Menu taken away by one of its own buttons (I-qm-leave): the clicks VRChat gets (no overlay, no trigger taken), and looks at its tabs in the eye's
     /// picture after one ([`super::qm_buttons`]).
     qm_clicks: super::qm_buttons::ClickWatch,
@@ -1399,6 +1527,7 @@ impl OrbitVr {
             stuck: Stuck::start(),
             lasers: Lasers::new(overlay, &format!("{key}.orbit"))?,
             handles: HashMap::new(),
+            sent: Sent::default(),
             refused: HashMap::new(),
             plane: None,
             takeover_plane: None,
@@ -1421,7 +1550,7 @@ impl OrbitVr {
             camera_side: Default::default(),
             hole_logged: Default::default(),
             moments: Default::default(),
-            osc_toggle: None,
+            osc_toggle: OscButton::default(),
             qm_clicks: Default::default(),
             qm_check: Default::default(),
             qm_sight: None,
@@ -1461,6 +1590,7 @@ impl OrbitVr {
         for h in &gone {
             let _ = overlay.destroy(*h);
             presenter.forget(*h);
+            self.sent.forget(*h);
         }
         gone.len()
     }
@@ -1549,6 +1679,10 @@ impl OrbitVr {
 
     fn update_inner(&mut self, mut cx: Cx<'_, '_>) -> Turn {
         let now = Instant::now();
+        // The Quick Menu toggle's edges due, before any early return (OVL2-19: a turn that returned early held its 0 back).
+        for (hand, value) in self.osc_toggle.due(now) {
+            send_quick_menu_toggle(hand, value, cx.snap.settings.osc.vrchat_port);
+        }
         let dt = now.duration_since(self.last_turn).as_secs_f32();
         self.last_turn = now;
         if self.camera_reopen.context(cx.snap.vrchat.world.world_id.as_deref(),cx.snap.vrchat.world.instance.as_deref(),cx.snap.vrchat.world.in_world && cx.snap.vrchat.running,cx.snap.vrchat.pid) {
@@ -1593,8 +1727,10 @@ impl OrbitVr {
             self.buttons.step(down, now);
             if let Some(hand) = self.buttons.quick_menu_to_toggle() {
                 super::super::vr_log::line(&format!("buttons: toggling VRChat's Quick Menu on hand {hand}, open {:?}", self.buttons.open())); // i18n: not shown (a log's line)
-                self.osc_toggle = Some((hand, now));
-                send_quick_menu_toggle(hand, 1, cx.snap.settings.osc.vrchat_port);
+                self.osc_toggle.toggle(hand, now);
+                for (hand, value) in self.osc_toggle.due(now) {
+                    send_quick_menu_toggle(hand, value, cx.snap.settings.osc.vrchat_port);
+                }
             }
             // Walking closes VRChat's Quick Menu. A moment's touch of the stick does not; laying the parts on it is not walking.
             // A left stick taken from VRChat (moving in a 3D capture) walks nowhere.
@@ -1804,6 +1940,9 @@ impl OrbitVr {
                 (quad, p.placed)
             })
             .collect();
+        // Which part each of `quads` (and `placing`) is: the parts as they are now, before a press later in this turn can open a
+        // sheet and add one (REL-2).
+        let turn_zones: Vec<Zone> = self.panels.all().map(|p| p.zone).collect();
 
         // How the parts on the hand follow it (Enzo: "both options"). The pose asked for lies ahead of now by what placing an overlay in the room takes to show, so that with no smoothing nothing
         // trails, and every move of the slider is then that much softer, with no jitter: what is told to SteamVR is where it lies, and it goes there at the next frame.
@@ -1905,10 +2044,13 @@ impl OrbitVr {
         if now.duration_since(self.pointing_since) >= IDLE_OPEN {
             self.buttons.reset_because("no press and no laser on our parts for IDLE_OPEN (300 s)"); // i18n: not shown (a menu mismatch report's line)
         }
-        // The pointer: the hand that pressed stays; else the right, else the left.
-        if self.active.is_none_or(|h| hits[h].is_none() && !triggers[h]) {
-            self.active = [1, 0].into_iter().find(|&i| hits[i].is_some());
+        // The pointer: the hand that pressed stays; else the right, else the left. A hand that lets go off every part is
+        // the pointer until its up is delivered, where it last was (OVERLAY-25: a slider stayed held).
+        let (active, let_go) = pointer_hand(self.active, hits.map(|h| h.is_some()), triggers, self.trigger_was, blocked_before);
+        if let_go.is_some() {
+            self.panels.release();
         }
+        self.active = active;
         let pointer = self.active.and_then(|h| hits[h]).map(|(panel, uv, _)| {
             let logical: Pos2 = self.panels.all().nth(panel).map_or(Pos2::ZERO, |p| p.to_logical(uv));
             (panel, logical)
@@ -1936,7 +2078,7 @@ impl OrbitVr {
             if down && !was && blocked_before[h] {
                 let pressed = self.panels.press(cx.snap);
                 turn.clicked |= pressed.clicked;
-            } else if !down && was {
+            } else if !down && was && let_go.is_none() {
                 self.panels.release();
             }
         }
@@ -1975,28 +2117,16 @@ impl OrbitVr {
             };
             turn.menus_up.push(super::super::worlds::stereo::MenuBox { place: plane.frame, width: width * plane.unit, height: height * plane.unit });
         }
-        turn.small_place = self.panels.small_place_on_sheet().and_then(|hole| {
-            let i = self.panels.all().position(|p| p.zone == Zone::Takeover)?;
-            let quad = &quads[i].0;
-            let frame = match &placing[i] {
-                Placing::At(m) => *m,
-                Placing::Room => quad.transform,
-            };
-            let (x, y) = ((hole.center().x / 1024.0 - 0.5) * quad.width, (0.5 - hole.center().y / 576.0) * quad.height);
-            let there = Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
-            Some((space::compose(&frame, &there), hole.width() / 1024.0 * quad.width / 2.0 * super::super::worlds::SMALL_FILLS_HOLE))
-        });
+        turn.small_place = self.panels.small_place_on_sheet().and_then(|hole| small_place_in(&turn_zones, &quads, &placing, hole));
         // Our layer between the capture and VRChat's menu (G1): drawn behind the capture in its own pictures, through the hole and under the sheet round it.
         turn.small_opening = turn.small_place.zip(self.panels.small_place_on_sheet()).and_then(|((at, radius), hole)| {
             use super::super::worlds::opening::{self, Look, Opening};
-            let frame_of = |i: usize| match &placing[i] {
-                Placing::At(m) => *m,
-                Placing::Room => quads[i].0.transform,
-            };
-            let page = self.panels.all().position(|p| p.zone == Zone::Takeover)?;
-            let half = [hole.width() / 1024.0 * quads[page].0.width / 2.0, hole.height() / 576.0 * quads[page].0.height / 2.0];
-            let sheet = self.panels.all().position(|p| p.zone == Zone::SheetBack).unwrap_or(page);
-            let sheet = opening::rect_from(&at, &frame_of(sheet), quads[sheet].0.width, quads[sheet].0.height);
+            let page = turn_zones.iter().position(|z| *z == Zone::Takeover)?;
+            let (_, page_quad) = placed_at(&quads, &placing, page)?;
+            let half = [hole.width() / 1024.0 * page_quad.width / 2.0, hole.height() / 576.0 * page_quad.height / 2.0];
+            let sheet = turn_zones.iter().position(|z| *z == Zone::SheetBack).unwrap_or(page);
+            let (sheet_frame, sheet_quad) = placed_at(&quads, &placing, sheet)?;
+            let sheet = opening::rect_from(&at, &sheet_frame, sheet_quad.width, sheet_quad.height);
             let accent = super::panels::look::accent();
             Some(Opening::in_sheet(at, half, sheet, radius, Look::ours([accent.r(), accent.g(), accent.b()], super::panels::look::retro())))
         });
@@ -2010,10 +2140,8 @@ impl OrbitVr {
             }
         }
         // The toggle's button lets go a moment later, as a finger does.
-        if let Some((hand, at)) = self.osc_toggle.filter(|(_, at)| now.duration_since(*at) >= Duration::from_millis(60)) {
-            let _ = at;
-            send_quick_menu_toggle(hand, 0, cx.snap.settings.osc.vrchat_port);
-            self.osc_toggle = None;
+        for (hand, value) in self.osc_toggle.due(now) {
+            send_quick_menu_toggle(hand, value, cx.snap.settings.osc.vrchat_port);
         }
         turn.menu_hand = match open {
             Open::Wheel(hand) | Open::QuickMenu(hand) => Some(hand),
@@ -2147,12 +2275,15 @@ impl OrbitVr {
                     let _ = cx.overlay.hide(*handle);
                     continue;
                 }
-                let _ = cx.overlay.set_width_in_meters(*handle, quad.width);
+                // Width and alpha told only when they differ from what this overlay was last told (SteamVR keeps them, hidden or
+                // not); the place is told every turn, as before.
+                let told = self.sent.to(panel.zone, *handle);
+                told.width.send(quad.width, |w| cx.overlay.set_width_in_meters(*handle, w));
                 let _ = match place {
                     Placing::At(transform) => cx.overlay.set_transform_absolute(*handle, transform),
                     Placing::Room => cx.overlay.set_transform_absolute(*handle, &quad.transform),
                 };
-                let _ = cx.overlay.set_alpha(*handle, panel.appear.alpha());
+                told.alpha.send(panel.appear.alpha(), |a| cx.overlay.set_alpha(*handle, a));
                 if !cx.overlay.is_visible(*handle) {
                     let _ = cx.overlay.show(*handle);
                     if matches!(panel.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraQr) {
@@ -2194,6 +2325,174 @@ impl OrbitVr {
 
 #[cfg(test)]
 mod tests {
+    /// OVL2-19: two toggles 20 ms apart give 1, 0, 1, 0, each state held 60 ms; a 0 due during turns that did not run is sent first.
+    #[test]
+    fn quick_menu_toggles_never_lose_an_edge() {
+        use super::OscButton;
+        use std::time::{Duration, Instant};
+        let t = Instant::now();
+        let ms = |n: u64| t + Duration::from_millis(n);
+        let mut button = OscButton::default();
+        button.toggle(1, t);
+        assert_eq!(button.due(t), [(1, 1)], "the first at once, as before");
+        button.toggle(1, ms(20));
+        assert!(button.due(ms(20)).is_empty(), "not while the button is still at 1");
+        assert_eq!(button.due(ms(60)), [(1, 0)]);
+        assert!(button.due(ms(100)).is_empty());
+        assert_eq!(button.due(ms(120)), [(1, 1)]);
+        assert_eq!(button.due(ms(700)), [(1, 0)], "after a gap with no turns, the pending 0");
+        assert!(button.queue.is_empty());
+        button.toggle(0, ms(800));
+        button.toggle(1, ms(800));
+        assert_eq!(button.due(ms(800)), [(0, 1), (1, 1)], "each hand its own button");
+    }
+
+    /// OVL2-1: both lasers on our parts, the right the pointer with nothing held: the left's pull takes the pointer and is the
+    /// press delivered; with the right's trigger held, the left takes nothing.
+    #[test]
+    fn the_other_hand_s_press_is_not_lost() {
+        use super::pointer_hand;
+        let both = [true, true];
+        assert_eq!(pointer_hand(Some(1), both, [true, false], [false, false], [true, true]), (Some(0), None), "the left's pull: its press");
+        assert_eq!(pointer_hand(Some(1), both, [true, true], [false, true], [true, true]), (Some(1), None), "the right mid-press keeps it");
+        assert_eq!(pointer_hand(Some(1), both, [true, false], [false, true], [true, true]), (Some(0), Some(1)), "the right let go the same turn: its up first");
+        assert_eq!(pointer_hand(Some(1), both, [true, false], [false, false], [false, true]), (Some(1), None), "a pull not begun blocked is VRChat's");
+        assert_eq!(pointer_hand(Some(1), [false, true], [true, false], [false, false], [true, true]), (Some(1), None), "the left off our parts");
+    }
+
+    /// OVERLAY-25: right presses on a slider, both lasers leave every part while it is held, the right lets go there while
+    /// the left points at a part: exactly one release, delivered before the left takes the pointer; coming back without a
+    /// press releases nothing more.
+    #[test]
+    fn a_release_off_every_part_is_delivered_once_before_the_other_hand_points() {
+        use super::pointer_hand;
+        // (laser on a part [left, right], triggers [left, right])
+        let turns = [
+            ([false, true], [false, false]),
+            ([false, true], [false, true]),  // the right presses on the slider
+            ([false, false], [false, true]), // both off every part, the right still held
+            ([true, false], [false, false]), // the right lets go off every part, the left points
+            ([true, true], [false, false]),  // back, no press
+            ([true, true], [false, false]),
+        ];
+        let (mut active, mut was, mut releases, mut pointers) = (None, [false; 2], 0, Vec::new());
+        for (on, triggers) in turns {
+            let (now, let_go) = pointer_hand(active, on, triggers, was, [false; 2]);
+            if let_go.is_some() {
+                releases += 1;
+            }
+            active = now;
+            // As the turn does after it: the pointer's own up, unless delivered above.
+            if let Some(h) = active {
+                if !triggers[h] && was[h] && let_go.is_none() {
+                    releases += 1;
+                }
+            }
+            pointers.push(active);
+            was = triggers;
+        }
+        assert_eq!(releases, 1);
+        assert_eq!(pointers, [Some(1), Some(1), Some(1), Some(0), Some(0), Some(0)], "the left keeps the pointer it took");
+        // A hand still held off every part stays the pointer; one that points keeps it as before.
+        assert_eq!(pointer_hand(Some(1), [true, false], [false, true], [false, true], [false; 2]), (Some(1), None));
+        assert_eq!(pointer_hand(Some(0), [true, true], [false, false], [false, false], [false; 2]), (Some(0), None));
+        assert_eq!(pointer_hand(None, [true, true], [false, false], [false, false], [false; 2]), (Some(1), None));
+        assert_eq!(pointer_hand(Some(0), [false, false], [false, false], [false, false], [false; 2]), (None, None), "no press, nothing to let go");
+    }
+
+    /// REL-2: the panels as they were at the top of the turn (nine wing parts, the "len is 9" of the panic) and a press that
+    /// opened the Worlds sheet since: no small place this turn, no panic; with the page in the snapshot, the place as before.
+    #[test]
+    fn a_sheet_opened_by_a_press_this_turn_is_not_indexed_past_the_snapshot() {
+        use super::{placed_at, small_place_in, Placing, Quad, Zone};
+        use crate::overlay::orbit::zones::Placed;
+        let part = |zone| {
+            let quad = Quad { transform: super::Matrix34::IDENTITY, width: 1.0, height: 0.5625 };
+            (quad, Placed { zone, rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)), center: egui::pos2(0.0, 0.0), unit: 1.0 })
+        };
+        let wing = [
+            Zone::WingYouTube, Zone::WingWorlds, Zone::WingInstances, Zone::WingName, Zone::WingAll, Zone::QmCaption, Zone::WingTalk, Zone::WingPictures,
+            Zone::WingPlaying,
+        ];
+        let quads: Vec<_> = wing.iter().map(|z| part(*z)).collect();
+        let placing = vec![Placing::Room; quads.len()];
+        let hole = egui::Rect::from_min_size(egui::pos2(312.0, 88.0), egui::vec2(400.0, 400.0));
+        // The parts of now: the sheet's back and page added by the press.
+        let now: Vec<Zone> = wing.iter().copied().chain([Zone::SheetBack, Zone::Takeover]).collect();
+        assert_eq!(now.iter().position(|z| *z == Zone::Takeover), Some(10), "what the old code indexed `quads` with");
+        assert_eq!(small_place_in(&wing, &quads, &placing, hole), None);
+        assert!(placed_at(&quads, &placing, 9).is_none() && placed_at(&quads, &placing, usize::MAX).is_none());
+        // Next turn: the snapshot has the page.
+        let quads: Vec<_> = now.iter().map(|z| part(*z)).collect();
+        let mut placing = vec![Placing::Room; quads.len()];
+        let (at, radius) = small_place_in(&now, &quads, &placing, hole).expect("the page is in the snapshot");
+        assert_eq!(at.m[0][3], 0.0, "the hole's centre is the page's");
+        assert!(radius > 0.0);
+        let mut moved = super::Matrix34::IDENTITY;
+        moved.m[1][3] = 2.0;
+        placing[10] = Placing::At(moved);
+        assert_eq!(small_place_in(&now, &quads, &placing, hole).unwrap().0.m[1][3], 2.0, "where the page is placed");
+    }
+
+    /// LIGHT-VR-5: a part's width and alpha are told to SteamVR when they change, and only then; an overlay made anew
+    /// (even under a handle SteamVR used before) and a call SteamVR refused are told again.
+    #[test]
+    fn unchanged_overlay_properties_are_not_told_again() {
+        use super::{Sent, Zone};
+        let mut sent = Sent::default();
+        let mut calls = Vec::new();
+        let turn = |sent: &mut Sent, zone: Zone, handle: u64, width: f32, alpha: f32, calls: &mut Vec<&'static str>| {
+            let told = sent.to(zone, handle);
+            told.width.send(width, |_| {
+                calls.push("width");
+                Ok::<(), i32>(())
+            });
+            told.alpha.send(alpha, |_| {
+                calls.push("alpha");
+                Ok::<(), i32>(())
+            });
+        };
+        turn(&mut sent, Zone::WingWorlds, 7, 0.2, 1.0, &mut calls);
+        assert_eq!(calls, ["width", "alpha"], "a new overlay is told everything");
+        calls.clear();
+        for _ in 0..10 {
+            turn(&mut sent, Zone::WingWorlds, 7, 0.2, 1.0, &mut calls);
+        }
+        assert!(calls.is_empty(), "nothing changed, nothing told: {calls:?}");
+        turn(&mut sent, Zone::WingWorlds, 7, 0.2, 1.000_001, &mut calls);
+        assert_eq!(calls, ["alpha"], "the smallest change is told");
+        calls.clear();
+        turn(&mut sent, Zone::WingWorlds, 7, 0.2, -0.0, &mut calls);
+        turn(&mut sent, Zone::WingWorlds, 7, 0.2, 0.0, &mut calls);
+        assert_eq!(calls, ["alpha", "alpha"], "compared bit for bit");
+        calls.clear();
+        // Given back and made again under the same handle value: told everything again.
+        sent.forget(7);
+        turn(&mut sent, Zone::WingWorlds, 7, 0.2, 0.0, &mut calls);
+        assert_eq!(calls, ["width", "alpha"]);
+        calls.clear();
+        // Another handle for the part: told everything.
+        turn(&mut sent, Zone::WingWorlds, 8, 0.2, 0.0, &mut calls);
+        assert_eq!(calls, ["width", "alpha"]);
+        calls.clear();
+        // Another part keeps its own.
+        turn(&mut sent, Zone::SheetBack, 9, 0.2, 0.0, &mut calls);
+        assert_eq!(calls, ["width", "alpha"]);
+        // A refused call is told again next turn.
+        let mut tries = 0;
+        let told = sent.to(Zone::SheetBack, 9);
+        assert!(told.alpha.send(0.5, |_| {
+            tries += 1;
+            Err(1)
+        }));
+        assert!(told.alpha.send(0.5, |_| {
+            tries += 1;
+            Ok::<(), i32>(())
+        }));
+        assert!(!told.alpha.send(0.5, |_| Ok::<(), i32>(())));
+        assert_eq!(tries, 2);
+    }
+
     #[test]
     fn camera_takeover_preserves_held_and_independent_views() {
         let mut turn=super::Turn::default();

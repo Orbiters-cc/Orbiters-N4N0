@@ -115,6 +115,12 @@ struct Setup {
     walk_said: bool,
     /// Patched vtable entries to restore: (entry address, the detour we wrote).
     patched: Vec<(usize, usize)>,
+    /// The last hook attempt's result said in SteamVR's log, so a retry a second that changes nothing says nothing (OVERLAY-5).
+    hooks_said: Said,
+    /// Said that a host's pose successor is ambiguous, per host (until a hook is installed again).
+    ambiguous_said: [bool; MAX_HOOKS],
+    /// The control block's owner, kept open so each frame's look is one wait, not open + wait + close.
+    owner: OwnerWatch,
 }
 
 /// The filter bank: a filter per device, each guarded by a try-lock so the pose hook never waits (two updates for
@@ -187,6 +193,9 @@ impl State {
                 last_walk_check_ms: 0,
                 walk_said: false,
                 patched: Vec::new(),
+                hooks_said: Said::new(),
+                ambiguous_said: [false; MAX_HOOKS],
+                owner: OwnerWatch::new(),
             }),
             clock: OnceLock::new(),
         }
@@ -270,10 +279,13 @@ extern "system" fn detour<const INDEX: usize>(this: *mut c_void, device: u32, po
         // SAFETY: a function pointer this crate stored before it patched the table; never null once set.
         (bits != 0).then(|| unsafe { std::mem::transmute::<usize, PoseUpdatedFn>(bits) })
     };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    // Only our own struct layout is touched; any other size passes straight through.
+    let sized = !pose.is_null() && pose_size as usize == std::mem::size_of::<DriverPose>();
+    // Our own processing, guarded by itself: should it ever panic, the pose still reaches SteamVR, once, as it came, so a
+    // mistake in smoothing or the walk costs smoothing, never tracking (REL-15).
+    let processed = catch_unwind(AssertUnwindSafe(|| {
+        processing_fault();
         let mut smoothed = None;
-        // Only our own struct layout is touched; any other size passes straight through.
-        let sized = !pose.is_null() && pose_size as usize == std::mem::size_of::<DriverPose>();
         let ours = sized && STATE.attached_mask.load(Ordering::Acquire) & (1 << INDEX) != 0 && !forwarded_pose(device, pose);
         if ours && STATE.active.load(Ordering::Relaxed) {
             STATE.poses.fetch_add(1, Ordering::Relaxed);
@@ -299,6 +311,15 @@ extern "system" fn detour<const INDEX: usize>(this: *mut c_void, device: u32, po
                 smoothed = Some(moved);
             }
         }
+        smoothed
+    }));
+    let smoothed = processed.unwrap_or_else(|_| {
+        if !PROCESSING_PANICKED.swap(true, Ordering::Relaxed) {
+            log_line("Orbiters smoothing: processing a pose failed; poses go on to SteamVR as they came");
+        }
+        None
+    });
+    let _ = catch_unwind(AssertUnwindSafe(|| {
         if let Some(call) = original {
             let outgoing = smoothed.as_ref().map_or(pose, |p| p as *const DriverPose);
             let scope = PoseScope { previous: IN_POSE.with(Cell::get), device, pose: if sized { outgoing } else { ptr::null() } };
@@ -311,6 +332,21 @@ extern "system" fn detour<const INDEX: usize>(this: *mut c_void, device: u32, po
         }
     }));
 }
+
+/// Tests: a panic in the detour's processing, when asked for.
+#[cfg(test)]
+fn processing_fault() {
+    if hook_tests::PANIC_IN_PROCESSING.load(Ordering::Relaxed) {
+        panic!("test: processing panics");
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn processing_fault() {}
+
+/// Said once in SteamVR's log that processing a pose failed.
+static PROCESSING_PANICKED: AtomicBool = AtomicBool::new(false);
 
 /// `this` is a host object; patch slot [`HOST_POSE_UPDATED_SLOT`] of its table to `detour::<INDEX>`, keeping the
 /// original in `STATE.pose_originals[INDEX]` (stored first: poses flow on other threads while this runs). Does
@@ -333,7 +369,10 @@ unsafe fn hook_host(setup: &mut Setup, host: *mut c_void, index: usize, detour_p
     // Even successful restoration cannot revoke a pointer already fetched by another driver.
     // Reserve the successor forever, including when the installation CAS loses.
     if !reserve_successor(&STATE.pose_originals[index], current) {
-        log_line("Orbiters smoothing: ambiguous pose hook successor; restart SteamVR to reconnect");
+        // Once per host, not at every retry a second.
+        if !std::mem::replace(&mut setup.ambiguous_said[index], true) {
+            log_line("Orbiters smoothing: ambiguous pose hook successor; restart SteamVR to reconnect");
+        }
         return false;
     }
     // A chained callback can outlive Cleanup: pin this small DLL until vrserver exits.
@@ -422,6 +461,42 @@ unsafe fn exchange_protected(
 mod hook_tests {
     use super::*;
     static EMIT_OTHER_DEVICE: AtomicBool = AtomicBool::new(false);
+    /// Makes the detour's own processing panic.
+    pub(super) static PANIC_IN_PROCESSING: AtomicBool = AtomicBool::new(false);
+    static RECEIVED: AtomicU32 = AtomicU32::new(0);
+    static RECEIVED_X: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "system" fn receiver(_this: *mut c_void, _device: u32, pose: *const DriverPose, _size: u32) {
+        RECEIVED.fetch_add(1, Ordering::Relaxed);
+        RECEIVED_X.store(((*pose).vec_position[0] as f32).to_bits(), Ordering::Relaxed);
+    }
+
+    /// REL-15: processing that panics still hands SteamVR the pose, exactly once and as it came.
+    #[test]
+    fn a_panic_in_processing_still_forwards_the_raw_pose_once() {
+        let _one = TEST_STATE.lock().unwrap();
+        let previous = STATE.pose_originals[0].swap(receiver as *const () as usize, Ordering::AcqRel);
+        STATE.attached_mask.store(1, Ordering::Release);
+        STATE.clock.get_or_init(Instant::now);
+        STATE.active.store(true, Ordering::Release);
+        let pose = DriverPose::at([1.5, 2.0, 3.0], openvr::Quaternion::IDENTITY);
+        RECEIVED.store(0, Ordering::Relaxed);
+        PANIC_IN_PROCESSING.store(true, Ordering::Relaxed);
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        detour::<0>(ptr::null_mut(), 3, &pose, std::mem::size_of::<DriverPose>() as u32);
+        std::panic::set_hook(hook);
+        PANIC_IN_PROCESSING.store(false, Ordering::Relaxed);
+        assert_eq!(RECEIVED.load(Ordering::Relaxed), 1, "the successor ran once");
+        assert_eq!(f32::from_bits(RECEIVED_X.load(Ordering::Relaxed)), 1.5, "with the pose as it came");
+        assert!(IN_POSE.with(Cell::get).is_null(), "scope resets after forwarding");
+        // And without a panic, once too.
+        detour::<0>(ptr::null_mut(), 3, &pose, std::mem::size_of::<DriverPose>() as u32);
+        assert_eq!(RECEIVED.load(Ordering::Relaxed), 2);
+        STATE.active.store(false, Ordering::Release);
+        STATE.attached_mask.store(0, Ordering::Release);
+        STATE.pose_originals[0].store(previous, Ordering::Release);
+    }
     static TEST_STATE: Mutex<()> = Mutex::new(());
 
     unsafe extern "system" fn forward(this: *mut c_void, device: u32, pose: *const DriverPose, size: u32) {
@@ -454,6 +529,49 @@ mod hook_tests {
         let pose = DriverPose::at([0.0; 3], openvr::Quaternion::IDENTITY);
         unsafe { call((&mut host_a as *mut *mut usize).cast(), 0, &pose, std::mem::size_of::<DriverPose>() as u32) };
         STATE.pose_originals[0].store(previous, Ordering::Release);
+    }
+
+    /// OVERLAY-5: a hook attempt a second with no host to hook says so once, not once a second; a change is said, with the count.
+    #[test]
+    fn repeated_hook_attempts_with_the_same_result_are_said_once() {
+        let mut said = Said::new();
+        assert_eq!(said.note(0), Some(0), "the first attempt is said");
+        for _ in 0..3600 {
+            assert_eq!(said.note(0), None);
+        }
+        assert_eq!(said.note(1), Some(3600), "a change is said, with the attempts not said");
+        assert_eq!(said.note(1), None);
+        assert_eq!(said.note(0), Some(1));
+    }
+
+    #[test]
+    fn the_owner_is_opened_once_and_its_exit_still_reads_as_gone() {
+        let mut watch = OwnerWatch::new();
+        assert!(watch.alive(0), "no owner yet counts as alive");
+        assert_eq!(watch.opens, 0);
+        let me = std::process::id();
+        for _ in 0..100 {
+            assert!(watch.alive(me));
+        }
+        assert_eq!(watch.opens, 1, "one OpenProcess for a hundred frames");
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd starts");
+        let pid = child.id();
+        assert!(watch.alive(pid), "a running owner is alive");
+        assert!(watch.alive(pid));
+        assert_eq!(watch.opens, 2, "a new owner pid opens its own handle once");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!watch.alive(pid), "an owner that exited reads as gone on the next frame");
+        assert!(!watch.alive(pid));
+        assert_eq!(watch.opens, 2);
+        assert!(!watch.alive(u32::MAX - 3), "a pid that cannot be opened is gone");
+        assert!(watch.held.is_none());
+        assert!(watch.alive(0));
     }
 
     #[test]
@@ -596,7 +714,37 @@ unsafe fn install_host_hooks(setup: &mut Setup) {
     }
     STATE.hooks_installed.store(hooked, Ordering::Relaxed);
     STATE.attached_mask.store(mask, Ordering::Release);
-    log_line(&format!("Orbiters smoothing driver {DRIVER_VERSION}: smoothing or Fast walk turned on, {hooked} host hook(s) installed"));
+    if hooked > 0 {
+        setup.ambiguous_said = [false; MAX_HOOKS];
+    }
+    // The first attempt, and then only an attempt whose result differs from the last said (with how many were the same).
+    if let Some(same) = setup.hooks_said.note(mask) {
+        let again = if same > 0 { format!(" ({same} attempt(s) since with the same result)") } else { String::new() };
+        log_line(&format!("Orbiters smoothing driver {DRIVER_VERSION}: smoothing or Fast walk turned on, {hooked} host hook(s) installed{again}"));
+    }
+}
+
+/// A value said in a log only when it differs from the last said, counting the repeats not said.
+#[derive(Default)]
+struct Said {
+    last: Option<u32>,
+    repeats: u32,
+}
+
+impl Said {
+    const fn new() -> Self {
+        Self { last: None, repeats: 0 }
+    }
+
+    /// `Some(repeats not said since the last line)` when `value` is to be said now.
+    fn note(&mut self, value: u32) -> Option<u32> {
+        if self.last == Some(value) {
+            self.repeats = self.repeats.saturating_add(1);
+            return None;
+        }
+        self.last = Some(value);
+        Some(std::mem::take(&mut self.repeats))
+    }
 }
 
 /// A line in SteamVR's `vrserver.txt`, prefixed with the driver name, when the host gave us a log. Best effort.
@@ -661,6 +809,9 @@ extern "system" fn provider_cleanup(_this: *mut c_void) {
                 true
             });
             setup.control = None;
+            setup.owner.forget();
+            setup.hooks_said = Said::new();
+            setup.ambiguous_said = [false; MAX_HOOKS];
             setup.last_hook_attempt_ms = 0;
         }
         STATE.context.store(ptr::null_mut(), Ordering::Release);
@@ -781,7 +932,7 @@ fn refresh_from_control(setup: &mut Setup) {
             cell.store(s.to_bits(), Ordering::Relaxed);
         }
     }
-    let alive = owner_alive(block);
+    let alive = setup.owner.alive(block.owner_pid.load(Ordering::Acquire));
     let wanted = block.is_valid() && alive && settings.map(|s| s.enabled).unwrap_or(false);
     // Fast walk has its own writer, the overlay: when that process goes, whatever it left is no longer added.
     if now.saturating_sub(setup.last_walk_check_ms) >= WALK_WRITER_CHECK_MS {
@@ -825,11 +976,75 @@ fn refresh_from_control(setup: &mut Setup) {
     mapping.block().report_driver(&report, now);
 }
 
-/// Whether the process that owns the control block is still running (so a crashed app stops smoothing). An owner of
-/// 0 (not yet set) counts as alive.
-fn owner_alive(block: &ControlBlock) -> bool {
-    let pid = block.owner_pid.load(Ordering::Acquire);
-    pid == 0 || process_alive(pid)
+/// `WaitForSingleObject`'s "not signalled" (winerror.h).
+const WAIT_TIMEOUT: u32 = 0x102;
+
+/// Whether the process that owns the control block is still running (so a crashed app stops smoothing), asked every
+/// SteamVR frame. The owner's handle is opened once per owner pid and kept: a frame's look is then one
+/// `WaitForSingleObject(h, 0)` instead of `OpenProcess` + wait + `CloseHandle` (audit O10, LIGHT-VR-6). The answer is the
+/// same on every frame as opening anew would give, and a pid reused after the owner died can no longer read as alive (the
+/// held handle stays signalled). An owner of 0 (not yet set) counts as alive.
+#[derive(Default)]
+struct OwnerWatch {
+    /// The pid the handle is for, and the handle (`SYNCHRONIZE` only).
+    held: Option<(u32, orbiters_smooth::win::HANDLE)>,
+    /// How many times a handle was opened (tests).
+    opens: u32,
+}
+
+// SAFETY: a process handle is a kernel object reference, usable from any thread; it is only touched under `STATE.setup`.
+unsafe impl Send for OwnerWatch {}
+
+impl OwnerWatch {
+    const fn new() -> Self {
+        Self { held: None, opens: 0 }
+    }
+
+    fn alive(&mut self, pid: u32) -> bool {
+        use orbiters_smooth::win::*;
+        if pid == 0 {
+            self.forget();
+            return true;
+        }
+        if let Some((held, handle)) = self.held {
+            if held == pid {
+                // SAFETY: a handle this watch opened and has not closed.
+                match unsafe { WaitForSingleObject(handle, 0) } {
+                    WAIT_OBJECT_0 => return false,
+                    WAIT_TIMEOUT => return true,
+                    // A wait that failed says nothing: the handle goes and the owner is looked at anew, as every frame did.
+                    _ => {}
+                }
+            }
+        }
+        self.forget();
+        // SAFETY: OpenProcess with a pid and SYNCHRONIZE; the handle is closed in `forget`.
+        let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+        if handle == 0 {
+            return false; // Gone, or not ours to open: treat as gone (and try again next frame, as before).
+        }
+        self.opens += 1;
+        // SAFETY: the handle just opened. Any answer but "signalled" was "alive" before, and still is.
+        let alive = unsafe { WaitForSingleObject(handle, 0) } != WAIT_OBJECT_0;
+        // While it is held the owner's pid cannot be given to another process, so a later owner with the same number is
+        // the same process.
+        self.held = Some((pid, handle));
+        alive
+    }
+
+    /// Closes the held handle, if any.
+    fn forget(&mut self) {
+        if let Some((_, handle)) = self.held.take() {
+            // SAFETY: a handle this watch opened, closed once.
+            unsafe { orbiters_smooth::win::CloseHandle(handle) };
+        }
+    }
+}
+
+impl Drop for OwnerWatch {
+    fn drop(&mut self) {
+        self.forget();
+    }
 }
 
 /// Whether process `pid` runs.

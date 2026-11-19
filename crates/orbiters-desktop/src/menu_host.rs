@@ -19,16 +19,46 @@ use std::sync::Arc;
 pub struct Textures {
     textures: crate::overlay::PaintTextures,
     /// A copy of what was fetched, by name: other canvases (a panel's own context) make their textures from it.
-    images: Arc<std::sync::Mutex<std::collections::HashMap<String, ColorImage>>>,
+    images: Arc<std::sync::Mutex<Kept>>,
+}
+
+/// The copies of fetched pictures, by name, at most [`Kept::MOST`]: past it the oldest goes, one at a time (all of them went at
+/// the 65th before, the page's newest thumbnails with them, OVERLAY-16).
+#[derive(Default)]
+struct Kept {
+    images: std::collections::HashMap<String, ColorImage>,
+    /// Names, oldest first.
+    order: std::collections::VecDeque<String>,
+}
+
+impl Kept {
+    const MOST: usize = 64;
+
+    fn insert(&mut self, name: &str, image: ColorImage) {
+        if self.images.insert(name.to_string(), image).is_some() {
+            self.order.retain(|n| n != name);
+        }
+        self.order.push_back(name.to_string());
+        while self.order.len() > Self::MOST {
+            if let Some(oldest) = self.order.pop_front() {
+                self.images.remove(&oldest);
+            }
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&ColorImage> {
+        self.images.get(name)
+    }
+
+    fn names(&self) -> impl Iterator<Item = &String> {
+        self.order.iter()
+    }
 }
 
 impl Textures {
     fn of(&self, name: &str, image: ColorImage) -> (TextureHandle, TextureHandle) {
         if let Ok(mut images) = self.images.lock() {
-            if images.len() > 64 {
-                images.clear();
-            }
-            images.insert(name.to_string(), image.clone());
+            images.insert(name, image.clone());
         }
         let green = menu_retro::phosphor(&image);
         (self.textures.load_texture(name, image, TextureOptions::LINEAR), self.textures.load_texture(format!("{name}-dots"), green, TextureOptions::LINEAR))
@@ -129,7 +159,28 @@ impl MenuHost {
 
 impl MenuHost {
     pub(crate) fn paint_pictures(&self, retro: bool) -> std::collections::HashMap<String, egui::TextureId> {
-        let names: Vec<_> = self.0.pictures().images.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+        let names: Vec<_> = self.0.pictures().images.lock().unwrap_or_else(|e| e.into_inner()).names().cloned().collect();
         names.into_iter().filter_map(|key| self.picture(&key, retro).map(|id| (key, id))).collect()
+    }
+}
+
+#[cfg(test)]
+mod kept_tests {
+    use super::Kept;
+    use egui::ColorImage;
+
+    /// OVERLAY-16: past 64 pictures the oldest goes, one at a time; the newest (and one asked again) stay.
+    #[test]
+    fn the_oldest_picture_goes_first() {
+        let mut kept = Kept::default();
+        for n in 0..64 {
+            kept.insert(&format!("p{n}"), ColorImage::filled([1, 1], egui::Color32::BLACK));
+        }
+        kept.insert("p0", ColorImage::filled([1, 1], egui::Color32::WHITE));
+        kept.insert("p64", ColorImage::filled([1, 1], egui::Color32::BLACK));
+        assert!(kept.get("p1").is_none(), "the oldest went");
+        assert!(kept.get("p0").is_some() && kept.get("p2").is_some() && kept.get("p64").is_some());
+        assert_eq!(kept.names().count(), 64);
+        assert_eq!(kept.names().last().map(String::as_str), Some("p64"));
     }
 }

@@ -245,6 +245,11 @@ impl CameraWeb {
     }
 
     /// Let go: a click where it was pressed, unless it became a drag.
+    /// The page's hold ends with no let-go (its menu went): no click.
+    pub fn cancel(&mut self) {
+        self.held = None;
+    }
+
     pub fn release(&mut self) {
         if let Some((from, _, dragging)) = self.held.take() {
             if !dragging {

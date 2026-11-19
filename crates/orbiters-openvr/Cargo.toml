@@ -11,4 +11,4 @@ orbiters-contracts = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_System_LibraryLoader"] }
+windows = { workspace = true, features = ["Win32_System_LibraryLoader", "Win32_System_Diagnostics_ToolHelp"] }

@@ -1,5 +1,38 @@
 use super::*;
 
+/// REL-4: the memory of our processes in VR, by role, a line a minute in its own file; nothing at idle.
+#[test]
+fn vr_memory_is_kept_by_role_apart_from_the_idle_lines() {
+    let use_of = |name: &str, pid: u32, private_mb: f32| ProcUse { name: name.into(), pid, private_mb, working_mb: private_mb + 10.0, threads: 40, ..Default::default() };
+    let line = Line {
+        at: "2026-11-19T03:00:00Z".into(),
+        mode: "vr".into(),
+        ram_free_mb: 9000.0,
+        ours: vec![use_of("orbiters-desktop.exe", 10, 31.0), use_of("orbiters-desktop.exe", 20, 512.0), use_of("orbiters-desktop.exe", 30, 300.0), use_of("orbiters-capture.exe", 40, 2.3)],
+        ..Default::default()
+    };
+    let memory = MemoryLine::of(&line, 10, &[(20, "overlay"), (30, "window")]);
+    let roles: Vec<(&str, f32)> = memory.ours.iter().map(|u| (u.role.as_str(), u.private_mb)).collect();
+    assert_eq!(roles, [("service", 31.0), ("overlay", 512.0), ("window", 300.0), ("orbiters-capture.exe", 2.3)]);
+
+    let dir = std::env::temp_dir().join(format!("orbiters-perf-memory-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(MEMORY_LOG);
+    for _ in 0..3 {
+        append_to(&path, &memory, 600);
+    }
+    let kept = std::fs::read_to_string(&path).unwrap();
+    let back: MemoryLine = serde_json::from_str(kept.lines().next().unwrap()).unwrap();
+    assert_eq!(back, memory);
+    assert!(dir.join(format!("{MEMORY_LOG}.1")).exists(), "past its size it starts again, the older one kept");
+    let mut keeper = Keeper::new(dir.join("perf.jsonl"));
+    keeper.role(20, "overlay");
+    keeper.role(21, "overlay");
+    assert_eq!(keeper.roles, [(21, "overlay")], "a new overlay replaces the old one's role");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn line(mode: &str, cores: u32, overlay_busy: f32, part: (&str, f32)) -> Line {
     Line {
         mode: mode.into(),

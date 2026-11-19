@@ -694,6 +694,16 @@ impl Gpu {
     }
 }
 
+/// The box (left, top, right, bottom) of a part at `[x0, y0, width, height]` of the client area, which lies at `offset` in the frame,
+/// when the whole of it is inside a frame of `frame` pixels; `None` otherwise (and on an overflow).
+fn source_box([x0, y0, width, height]: [u32; 4], offset: (u32, u32), frame: (u32, u32)) -> Option<[u32; 4]> {
+    let left = x0.checked_add(offset.0)?;
+    let top = y0.checked_add(offset.1)?;
+    let right = left.checked_add(width)?;
+    let bottom = top.checked_add(height)?;
+    (width > 0 && height > 0 && right <= frame.0 && bottom <= frame.1).then_some([left, top, right, bottom])
+}
+
 impl Capture {
     fn new(window: HWND, gpu: &Gpu) -> Result<Self, String> {
         let text = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
@@ -731,6 +741,11 @@ impl Capture {
         let access: IDirect3DDxgiInterfaceAccess = surface.cast().ok()?;
         // SAFETY: the surface is a Direct3D 11 texture, as the pool was made for.
         let texture: ID3D11Texture2D = unsafe { access.GetInterface() }.ok()?;
+        // What the copies may read: the frame's texture, and of it what this frame holds (REL-3).
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: a plain read of the texture's description into a local.
+        unsafe { texture.GetDesc(&mut desc) };
+        let frame_size = (desc.Width.min(content.Width.max(0) as u32), desc.Height.min(content.Height.max(0) as u32));
         let (dx, dy) = client_in_frame(window);
         // Each part keeps its slot, and so its staging texture, whichever of them a look reads: the menus' two first, the camera's lines after them.
         let menu_parts = detect::parts(client);
@@ -749,10 +764,14 @@ impl Capture {
             if width == 0 || height == 0 {
                 return None;
             }
+            // The client's size was measured a moment ago, the frame may still be of the window's older, smaller size: a box
+            // outside the frame is undefined in Direct3D 11 (an access violation in d3d11.dll was seen, REL-3). Then no look
+            // this frame; the next frame is of the new size.
+            let [left, top, right, bottom] = source_box([x0, y0, width, height], (dx, dy), frame_size)?;
             let staging = self.staging_for(i, width, height)?;
-            let region = D3D11_BOX { left: x0 + dx, top: y0 + dy, front: 0, right: x0 + dx + width, bottom: y0 + dy + height, back: 1 };
+            let region = D3D11_BOX { left, top, front: 0, right, bottom, back: 1 };
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            // SAFETY: both textures are this device's and of one format; the box is inside the frame (the parts are inside the client area), and the mapping is read
+            // SAFETY: both textures are this device's and of one format; the box is inside the frame (`source_box`), and the mapping is read
             // within its pitch and height, and unmapped before anything else happens to it.
             unsafe {
                 self.context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &texture, 0, Some(&region));
@@ -1742,6 +1761,27 @@ pub mod scroll {
 }
 
 pub mod pointer {
+    /// The left button's changes from the counts of downs and ups the hook saw (`downs`, `ups`) and those already read (`seen`),
+    /// in order (true: down). Total: an up whose down came before the hook (the button held as it started) is a plain up. It
+    /// looped for ever on one, with the hook swallowing every mouse move of the computer (OVL2-6).
+    pub(super) fn changes(seen: &mut (u32, u32), downs: u32, ups: u32) -> Vec<bool> {
+        let mut out = Vec::new();
+        while seen.0 < downs || seen.1 < ups {
+            if seen.0 < downs {
+                out.push(true);
+                seen.0 += 1;
+            }
+            if seen.1 < seen.0 && seen.1 < ups {
+                out.push(false);
+                seen.1 += 1;
+            } else if seen.1 < ups && seen.0 >= downs {
+                out.push(false);
+                seen.1 += 1;
+            }
+        }
+        out
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, Ordering};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -1895,6 +1935,8 @@ pub mod pointer {
 
         /// Alt let go, the wheel gone, anything: the mouse is VRChat's again at once.
         pub fn stop(&mut self) {
+            // First, as the scroll's `stop` does: the hook passes everything on from now, whatever its thread does.
+            SET.store(false, Ordering::Relaxed);
             if let Some((id, handle)) = self.thread.take() {
                 // SAFETY: a message to the hook's own thread.
                 unsafe {
@@ -1911,17 +1953,9 @@ pub mod pointer {
         /// The left button's changes since the last read (true: down), in order.
         pub fn take_buttons(&mut self) -> Vec<bool> {
             let (downs, ups) = (DOWNS.load(Ordering::Relaxed), UPS.load(Ordering::Relaxed));
-            let mut out = Vec::new();
-            while self.downs < downs || self.ups < ups {
-                if self.downs < downs {
-                    out.push(true);
-                    self.downs += 1;
-                }
-                if self.ups < self.downs && self.ups < ups {
-                    out.push(false);
-                    self.ups += 1;
-                }
-            }
+            let mut seen = (self.downs, self.ups);
+            let out = changes(&mut seen, downs, ups);
+            (self.downs, self.ups) = seen;
             out
         }
     }
@@ -1945,6 +1979,36 @@ pub mod pointer {
 
 #[cfg(test)]
 mod tests {
+    /// OVL2-6: the button's changes always come to an end, an up without its down included.
+    #[test]
+    fn an_up_without_its_down_ends_the_count() {
+        use super::pointer::changes;
+        assert_eq!(changes(&mut (0, 0), 0, 1), [false], "the button was held as the hook started");
+        assert_eq!(changes(&mut (0, 0), 2, 2), [true, false, true, false]);
+        let mut seen = (0, 0);
+        assert_eq!(changes(&mut seen, 1, 0), [true]);
+        assert_eq!(changes(&mut seen, 1, 1), [false]);
+        assert_eq!(seen, (1, 1));
+        assert_eq!(changes(&mut (0, 0), 1, 3), [true, false, false, false]);
+        assert!(changes(&mut (2, 2), 2, 2).is_empty());
+    }
+
+    /// REL-3: a part's copy box is used only when it lies wholly inside the frame (a frame of the window's older size read with the
+    /// new client's parts was a box outside the texture).
+    #[test]
+    fn a_copy_box_outside_the_frame_is_never_used() {
+        use super::source_box;
+        let frame = (1936, 1119);
+        assert_eq!(source_box([10, 20, 100, 50], (8, 31), frame), Some([18, 51, 118, 101]));
+        assert_eq!(source_box([1828, 0, 100, 50], (8, 31), frame), Some([1836, 31, 1936, 81]), "exactly fitting");
+        assert_eq!(source_box([1829, 0, 100, 50], (8, 31), frame), None, "beyond the right edge");
+        assert_eq!(source_box([0, 1039, 100, 50], (8, 31), frame), None, "beyond the bottom");
+        assert_eq!(source_box([0, 0, 0, 50], (8, 31), frame), None, "nothing to copy");
+        assert_eq!(source_box([u32::MAX - 4, 0, 10, 10], (8, 31), (u32::MAX, u32::MAX)), None, "an overflow");
+        // The old window's frame, the new window's part: what happened while VRChat's window grew.
+        assert_eq!(source_box([1200, 600, 300, 200], (8, 31), (1296, 759)), None);
+    }
+
     use super::*;
 
     /// Those of ours that show, as they lie, top first.

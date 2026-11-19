@@ -419,7 +419,9 @@ impl<P: Pictures> MenuHost<P> {
                 Done::Results { id, result: Err(e), .. } => self.menu.results_failed(id, &e.to_string()),
                 Done::Thumbnail { id, tries, image } => {
                     let thumb = match image {
-                        Some(image) => Thumb::Ready(self.pictures.make(&format!("yt-{id}"), &image)),
+                        // Made under the picture's own key, the one the pages ask for: under "yt-{id}" its pixels were
+                        // kept where no page looked (OVERLAY-26: the first fetched thumbnail did not show on another canvas).
+                        Some(image) => Thumb::Ready(self.pictures.make(&id, &image)),
                         None => Thumb::Failed { at: Instant::now(), tries: tries + 1 },
                     };
                     self.thumbs.insert(id, thumb);
@@ -693,6 +695,16 @@ mod tests {
 
     fn host() -> MenuHost<Sizes> {
         MenuHost::new(Sizes, Arc::new(English), Arc::new(Watcher::new(|| Box::new(crate::media::NoMedia))))
+    }
+
+    /// OVERLAY-26: a fetched thumbnail is made, and found, under the key the pages ask for.
+    #[test]
+    fn a_fetched_thumbnail_is_kept_under_the_key_it_is_asked_by() {
+        let mut host = host();
+        let image = Rgb { width: 2, height: 1, pixels: vec![0; 6] };
+        host.done_tx.send(Done::Thumbnail { id: "dQw4w9WgXcQ".into(), tries: 0, image: Some(image) }).unwrap();
+        host.poll();
+        assert_eq!(host.picture("dQw4w9WgXcQ"), Some(&("dQw4w9WgXcQ".to_string(), 2, 1)), "made under the same key it is found by");
     }
 
     /// The window's Home drew itself two to ten times a second to look whether a thread had fetched something. A host

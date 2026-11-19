@@ -111,6 +111,16 @@ impl Failure {
     }
 }
 
+/// A world id as it may go into the API's path (VRChat's `wrld_` and a UUID; capitals read as VRChat's lowercase).
+fn world_path(world: &str) -> Result<String, Failure> {
+    let world = world.to_ascii_lowercase();
+    if crate::vrchat_log::is_world_id(&world) {
+        Ok(world)
+    } else {
+        Err(Failure::Refused { code: None, message: tr!("Not a VRChat world: {world}", world = format!("{world:?}")) })
+    }
+}
+
 fn failure(status: u16, body: &str) -> Failure {
     let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let message = json.get("error").and_then(|e| e.as_str()).unwrap_or("").to_string();
@@ -173,18 +183,21 @@ impl Client<'_> {
 
     /// A world's feedback (the member's own too when signed in).
     pub fn read(&self, world: &str) -> Result<ServerView, Failure> {
+        let world = world_path(world)?;
         let (_, text) = self.call("GET", &format!("maps/worlds/{world}/feedback"), None)?;
         Self::json(&text)
     }
 
     /// Sets the member's like and labels as `set` says.
     pub fn set(&self, world: &str, set: &Set) -> Result<ServerView, Failure> {
+        let world = world_path(world)?;
         let (_, text) = self.call("PUT", &format!("maps/worlds/{world}/feedback"), Some(set.body()))?;
         Self::json(&text)
     }
 
     /// Writes a comment (`client_id`: its own id, so a retry answers the one made).
     pub fn comment(&self, world: &str, text: &str, client_id: &str) -> Result<Comment, Failure> {
+        let world = world_path(world)?;
         let body = serde_json::json!({ "text": text, "clientId": client_id });
         let (_, answer) = self.call("POST", &format!("maps/worlds/{world}/comments"), Some(body))?;
         #[derive(Deserialize)]
@@ -279,20 +292,50 @@ impl Queue {
     }
 
     /// The queue kept in `path` (none when there is no readable one), its actions older than [`DROP_AFTER`] left out.
+    /// Each action is read on its own: one that does not read (a file cut short, a newer version's) or names no world
+    /// is left out and the others kept, the file first kept beside as `world-feedback-queue.json.bad-<time>`. A file
+    /// that cannot be read at all is not saved over unseen ([`crate::write_atomic`]).
     pub fn load(path: &Path, now_ms: u64) -> Self {
-        let mut queue: Queue = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let text = match crate::read_text(path) {
+            Ok(Some(text)) => text,
+            Ok(None) => return Self::default(),
+            Err(e) => {
+                eprintln!("world feedback queue: {}: {e}", path.display());
+                return Self::default();
+            }
+        };
+        let value: Option<serde_json::Value> = serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).ok();
+        let items = value.as_ref().and_then(|v| v.get("items")).and_then(serde_json::Value::as_array);
+        let mut queue = Queue::default();
+        let mut lost = items.is_none();
+        for item in items.into_iter().flatten() {
+            match serde_json::from_value::<Pending>(item.clone()) {
+                Ok(mut p) => {
+                    // The contract takes a world id in capitals too; the queue keeps VRChat's own lowercase.
+                    p.world = p.world.to_ascii_lowercase();
+                    if crate::vrchat_log::is_world_id(&p.world) {
+                        queue.items.push(p);
+                    } else {
+                        lost = true;
+                    }
+                }
+                Err(_) => lost = true,
+            }
+        }
+        if lost {
+            let aside = crate::keep_aside(path);
+            eprintln!("world feedback queue: {} partly unreadable, the file kept as {aside:?}", path.display());
+        }
         queue.items.retain(|p| now_ms.saturating_sub(p.since) < DROP_AFTER.as_millis() as u64);
         queue
     }
 
-    /// Writes it whole (a new file moved over the old one).
+    /// Writes it whole ([`crate::write_atomic`]: a crash or a power cut leaves the old queue or the new one).
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(self).unwrap_or_default())?;
-        std::fs::rename(&tmp, path)
+        crate::write_atomic(path, &serde_json::to_vec(self)?)
     }
 
     /// Adds an action: a world's likes and labels go into the one waiting for it (sent [`COALESCE`] after this
@@ -516,11 +559,43 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orbiters-feedback-queue-{}", std::process::id()));
         let path = dir.join("q.json");
         let mut q = Queue::default();
-        q.push("w", set(Some(true), &[]), 5);
+        q.push(WORLD, set(Some(true), &[]), 5);
         q.save(&path).unwrap();
         assert_eq!(Queue::load(&path, 10).items.len(), 1);
         assert!(Queue::load(&path, DROP_AFTER.as_millis() as u64 + 10).items.is_empty(), "a day old: dropped");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    const WORLD: &str = "wrld_99a5eb21-1d58-4f13-b66a-73d327c42705";
+
+    /// One action that does not read, or that names no world, costs only itself: the others are kept as they were, and
+    /// the file is kept beside before the next save replaces it.
+    #[test]
+    fn a_damaged_queue_keeps_what_reads_and_the_file() {
+        let dir = std::env::temp_dir().join(format!("orbiters-feedback-damaged-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("q.json");
+        let mut q = Queue::default();
+        q.push(WORLD, set(Some(true), &[("mirror", true)]), 5);
+        q.push(&WORLD.to_uppercase().replace("WRLD", "wrld"), Action::Comment { text: "hi".into(), client_id: "n4n0-1".into() }, 6);
+        q.push("wrld_../../maps/comments/1", Action::Uncomment { comment: 1 }, 7);
+        let mut value = serde_json::to_value(&q).unwrap();
+        value["items"].as_array_mut().unwrap().push(serde_json::json!({"world": WORLD, "action": {"kind": "from_a_newer_version"}, "since": 8, "due": 8}));
+        std::fs::write(&path, value.to_string()).unwrap();
+        let loaded = Queue::load(&path, 10);
+        assert_eq!(loaded.items.len(), 2, "{:?}", loaded.items);
+        assert_eq!((loaded.items[0].clone(), loaded.items[1].world.as_str(), loaded.items[1].due), (q.items[0].clone(), WORLD, 6));
+        let kept = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("q.json.bad-")).count();
+        assert_eq!(kept, 1, "the file kept beside");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_world_ids_go_into_the_apis_paths() {
+        assert_eq!(world_path(&WORLD.to_uppercase().replace("WRLD", "wrld")).unwrap(), WORLD);
+        for bad in ["", "w", "wrld_../../maps/comments/1", "wrld_99a5eb21-1d58-4f13-b66a-73d327c42705/x"] {
+            assert!(matches!(world_path(bad), Err(Failure::Refused { code: None, .. })), "{bad}");
+        }
     }
 
     #[test]

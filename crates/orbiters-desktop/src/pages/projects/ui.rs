@@ -115,7 +115,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     });
     // While a scan adds rows (and when it ends and sorts), the first project in view stays where it is on screen: what
     // grows above it scrolls the gallery by as much (AGENTS.md: progressive galleries keep the visible item).
-    let (offset, top) = (out.state.offset.y, out.inner_rect.top());
+    let (offset, top) = (out.state.clamped_offset().y, out.inner_rect.top());
     let places: Vec<(PathBuf, f32)> = state.row_places.iter().map(|(p, r)| (p.clone(), r.top() - top + offset)).collect();
     let scanning = state.scanning();
     if scanning || state.was_scanning {

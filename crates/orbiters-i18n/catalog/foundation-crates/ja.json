@@ -283,8 +283,8 @@
   "unsupported Spout texture format (DXGI {format})": "対応していないSpoutテクスチャ形式です（DXGI {format}）",
   "The request expired before it could be sent. Please try again.": "送信前にリクエストの有効期限が切れました。もう一度お試しください。",
   "VRChat may have received the request. Check VRChat before trying again.": "VRChatがリクエストを受信した可能性があります。再試行する前にVRChatで確認してください。",
-  "{path} could not be read, and is not replaced unseen: {error}": "{path} を読み込めなかったため、読まずに置き換えることはしません: {error}",
-  "{path} could not be read, and is not replaced by defaults: {error}": "{path} を読み込めなかったため、既定値で置き換えることはしません: {error}",
+  "{path} could not be read, and is not replaced unseen: {error}": "{path} を読み込めなかったため、読まずに置き換えることはしません：{error}",
+  "{path} could not be read, and is not replaced by defaults: {error}": "{path} を読み込めなかったため、既定値で置き換えることはしません：{error}",
   "not a PNG": "PNG ではありません",
   "a damaged PNG chunk": "破損した PNG チャンク",
   "a PNG chunk this copy cannot keep": "このコピーに残せない PNG チャンク"

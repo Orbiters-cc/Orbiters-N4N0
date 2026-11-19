@@ -202,6 +202,8 @@ pub struct Controller {
     updates: Mutex<update::UpdateRuntime>,
     /// Space being freed in the library (controller/cleanup.rs).
     cleanup: Mutex<cleanup::CleanupRuntime>,
+    /// The instances Go and Invite may send the person to (controller/vrchat_data.rs).
+    instance_permits: Mutex<vrchat_data::InstancePermits>,
     /// The thread that writes the settings, the newest only ([`Controller::queue_save`]).
     settings_writer: Mutex<Option<(mpsc::Sender<(u64, Settings)>, std::thread::JoinHandle<()>)>>,
     /// How many times the settings were changed: taken under `snapshot` with the change, so the writer can tell the
@@ -528,6 +530,7 @@ impl Controller {
             updates: Mutex::new(update::UpdateRuntime::default()),
             cleanup: Mutex::new(cleanup::CleanupRuntime::default()),
             settings_writer: Mutex::new(None),
+            instance_permits: Mutex::default(),
             settings_revision: AtomicU64::new(0),
             pending_start: Mutex::new(None),
             #[cfg(test)]

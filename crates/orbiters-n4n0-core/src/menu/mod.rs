@@ -63,6 +63,15 @@ fn moved(slot: &mut Option<(Vec<String>, Instant, u32)>, before: Vec<String>) {
     }
 }
 
+/// What tells a saved state apart: its id, or the name of one saved here that the host has not listed yet.
+fn state_key(state: &StateRow) -> String {
+    if state.id.is_empty() {
+        format!("saving:{}", state.name)
+    } else {
+        state.id.clone()
+    }
+}
+
 fn row_still(moved: &Option<(Vec<String>, Instant, u32)>, i: usize, now: &str) -> bool {
     match moved {
         // A row empty before one single change (a list that just appeared) shifted nothing; after two, who knows.
@@ -1098,9 +1107,14 @@ pub struct Menu {
     captures_moved: Option<(Vec<String>, Instant, u32)>,
     /// The same for Share to …'s friends (their ids).
     friends_moved: Option<(Vec<String>, Instant, u32)>,
-    /// History's capture keys and Share to …'s friend ids on the page as the avatar's screen last showed it whole
-    /// ([`Menu::presented`]): a row's share or mark acts on the one it showed, or not at all.
-    shown: Option<(Vec<String>, Vec<String>)>,
+    /// The same for the friends to call, the saved states, the previous instances and the world's comments (MENU-9).
+    contacts_moved: Option<(Vec<String>, Instant, u32)>,
+    states_moved: Option<(Vec<String>, Instant, u32)>,
+    instances_moved: Option<(Vec<String>, Instant, u32)>,
+    comments_moved: Option<(Vec<String>, Instant, u32)>,
+    /// Every list's rows on the page as the avatar's screen last showed it whole ([`Menu::presented`]): a row acts on
+    /// the one it showed, or not at all.
+    shown: Option<Shown>,
     /// The result whose link was copied last (its video id): its row offers Drop.
     pub copied: Option<String>,
     /// A copied link can be dropped as a card: the avatar's screen is of version 5 or later.
@@ -1158,6 +1172,8 @@ pub struct Menu {
     /// The share whose answer the menu waits for, and its capture's share state when it was asked (or last changed):
     /// the explicit warning shows when the server asks for it, a state left from an earlier share counting for nothing.
     asked: Option<(String, crate::captures::Sharing)>,
+    /// When that share was pressed: the server's "explicit" takes the page only for [`EXPLICIT_JUMP`] after it (MENU-14).
+    asked_at: Option<Instant>,
     /// World feedback as the host knows it, the world shown (an index of its subjects), the page of Comments shown (from
     /// 0), and the label waiting for its justification on the keyboard.
     pub feedback: FeedbackView,
@@ -1168,11 +1184,41 @@ pub struct Menu {
     pub justifying: Option<String>,
     /// What was just switched on (Like, a label) and when: the overlay makes it pop for [`POP`].
     pub popped: Option<(Target, Instant)>,
+    /// When the page last changed by itself ([`Menu::go_unasked`]).
+    unasked_at: Option<Instant>,
     /// What leaving a page asks of the host however the page was left (a press, a call ringing, an answer that takes
     /// the page): the scanner stopped, the friends forgotten (MENU-8). [`Menu::press`] and [`Menu::close`] hand it
     /// over with their own; a host takes the rest with [`Menu::drain`] at each turn.
     outbox: Vec<Effect>,
 }
+
+/// Which list a row is of, for what it showed ([`Menu::row_shown`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rows {
+    Captures,
+    Friends,
+    Contacts,
+    States,
+    Instances,
+    Comments,
+}
+
+/// Each list's rows (their keys) on the page a screen last showed whole.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Shown {
+    captures: Vec<String>,
+    friends: Vec<String>,
+    contacts: Vec<String>,
+    states: Vec<String>,
+    instances: Vec<String>,
+    comments: Vec<String>,
+}
+
+/// How long after the page changed by itself a press acts on nothing (MENU-3): it was on its way to the page before.
+pub const UNASKED: Duration = Duration::from_millis(500);
+
+/// How long after Share publicly the server's "explicit" answer still opens the warning by itself (MENU-14).
+pub const EXPLICIT_JUMP: Duration = Duration::from_secs(5);
 
 /// How long the overlay shows a like or a label switched on popping.
 pub const POP: Duration = Duration::from_millis(700);
@@ -1207,6 +1253,8 @@ impl Menu {
         }
         self.open = false;
         self.notice = None;
+        // A share's answer that comes after the menu closed never takes the page it opens on next (MENU-14).
+        self.asked_at = None;
         if self.page == Page::Card {
             self.card = None;
             self.page = Page::Home;
@@ -1298,6 +1346,13 @@ impl Menu {
         if friends && !self.choosing_friends() {
             self.outbox.push(Effect::Friends(false));
         }
+    }
+
+    /// The page changes by itself (a call rings, an answer takes the page): for [`UNASKED`] a press meant for the page
+    /// that was there acts on nothing here (MENU-3); Close still closes.
+    fn go_unasked(&mut self, page: Page) {
+        self.go(page);
+        self.unasked_at = Some(Instant::now());
     }
 
     /// Opens the keyboard page for `typing`, holding `text`.
@@ -1409,6 +1464,10 @@ impl Menu {
     /// The person pressed `target`. Leaving the QR code scanner's page stops it.
     #[must_use = "a host runs what the menu asks"]
     pub fn press(&mut self, target: Target) -> Vec<Effect> {
+        // A press on its way when the page changed by itself was meant for the page that was there.
+        if target != Target::Close && self.unasked_at.is_some_and(|at| at.elapsed() < UNASKED) {
+            return Vec::new();
+        }
         let mut effects = self.press_on(target);
         effects.append(&mut self.outbox);
         effects
@@ -1513,9 +1572,10 @@ impl Menu {
                 self.go(Page::States);
                 Vec::new()
             }
+            // A row that holds another state than the one drawn there (the list changed under the hand) does nothing.
             Target::StateApply(i) | Target::StateMark(i) => match self.page_states().get(i as usize) {
                 // A state saved here but not yet listed by the host has no id: nothing to apply yet.
-                Some(state) if !state.id.is_empty() => {
+                Some(state) if !state.id.is_empty() && self.row_shown(Rows::States, i as usize, &state_key(state)) => {
                     let effect = Effect::ApplyState { id: state.id.clone(), name: state.name.clone() };
                     self.notice = Some(latin(|| tr!("Applied \"{name}\"", name = state.name)));
                     vec![effect]
@@ -1673,7 +1733,7 @@ impl Menu {
                 vec![Effect::Instances]
             }
             Target::InviteMe(i) => match self.page_instances().get(i as usize) {
-                Some(row) if !self.invite_waiting => {
+                Some(row) if !self.invite_waiting && self.row_shown(Rows::Instances, i as usize, &row.location) => {
                     let location = row.location.clone();
                     let world = if row.world.is_empty() { tr_latin("this instance") } else { row.world.as_str() };
                     self.notice = Some(latin(|| tr!("Asking Orbiters to invite you to {world}…", world = world)));
@@ -1741,7 +1801,7 @@ impl Menu {
             // A row that holds another capture than a moment ago (the list changed under the hand) does nothing: the
             // person pressed what they saw, which may be the neighbour now.
             Target::SharePublic(i) => match self.page_captures().get(i as usize).map(|c| c.key.clone()) {
-                Some(key) if self.row_shown(true, i as usize, &key) => self.share_public(key),
+                Some(key) if self.row_shown(Rows::Captures, i as usize, &key) => self.share_public(key),
                 _ => Vec::new(),
             },
             Target::ShareLatestTo => match self.captures.latest.as_ref().map(|c| c.key.clone()) {
@@ -1749,12 +1809,12 @@ impl Menu {
                 _ => Vec::new(),
             },
             Target::ShareTo(i) => match self.page_captures().get(i as usize).map(|c| c.key.clone()) {
-                Some(key) if self.row_shown(true, i as usize, &key) => self.share_to(key),
+                Some(key) if self.row_shown(Rows::Captures, i as usize, &key) => self.share_to(key),
                 _ => Vec::new(),
             },
             Target::Friend(i) | Target::FriendMark(i) => {
                 let Some(friend) = self.page_friends().get(i as usize).map(|f| (*f).clone()) else { return Vec::new() };
-                if !self.row_shown(false, i as usize, &friend.id) {
+                if !self.row_shown(Rows::Friends, i as usize, &friend.id) {
                     return Vec::new();
                 }
                 if let Some(at) = self.chosen.iter().position(|f| f.id == friend.id) {
@@ -1777,6 +1837,7 @@ impl Menu {
                 let recipients = std::mem::take(&mut self.chosen);
                 let n = recipients.len();
                 self.asked = Some((key.clone(), self.sharing_of(&key)));
+                self.asked_at = Some(Instant::now());
                 self.go(self.share_from);
                 self.notice = Some(latin(|| tr_n("Sharing with {count} friend…", "Sharing with {count} friends…", n as u64)));
                 vec![Effect::ShareCapture(ShareAsk { key, public: false, recipients, acknowledge_explicit: false })]
@@ -1784,6 +1845,7 @@ impl Menu {
             Target::ShareAnyway if self.page == Page::Explicit => {
                 let Some(key) = self.sharing.clone() else { return Vec::new() };
                 self.asked = Some((key.clone(), self.sharing_of(&key)));
+                self.asked_at = Some(Instant::now());
                 self.go(self.share_from);
                 self.notice = Some(mark("Sharing publicly…").into());
                 vec![Effect::ShareCapture(ShareAsk { key, public: true, recipients: Vec::new(), acknowledge_explicit: true })]
@@ -1861,6 +1923,9 @@ impl Menu {
             Target::DeleteComment(i) => {
                 let Some(world) = self.shown_world() else { return Vec::new() };
                 let Some(id) = self.page_comments().get(i as usize).filter(|c| c.mine && c.id != 0).map(|c| c.id) else { return Vec::new() };
+                if !self.row_shown(Rows::Comments, i as usize, &id.to_string()) {
+                    return Vec::new();
+                }
                 let entry = self.feedback.world_mut(&world);
                 entry.comments.retain(|c| c.id != id);
                 entry.comment_count = entry.comment_count.saturating_sub(1);
@@ -1869,7 +1934,10 @@ impl Menu {
             }
             Target::WorldFeedback | Target::Labels | Target::Comments | Target::CommentCard(_) => Vec::new(),
             Target::Contact(i) => match self.page_contacts().get(i as usize) {
-                Some(contact) if self.call.is_none() => vec![Effect::CallContact { id: contact.id.clone() }],
+                // The friends to call are taken again every 30 s: the press calls the one drawn there, or nobody.
+                Some(contact) if self.call.is_none() && self.row_shown(Rows::Contacts, i as usize, &contact.id) => {
+                    vec![Effect::CallContact { id: contact.id.clone() }]
+                }
                 _ => Vec::new(),
             },
             Target::Answer => match self.call {
@@ -2362,11 +2430,13 @@ impl Menu {
 
     /// The friends who can be called changed.
     pub fn set_contacts(&mut self, contacts: Vec<Contact>, ready: bool, note: &str) {
+        let before = self.keys(Rows::Contacts);
         self.contacts = contacts;
         self.calls_ready = ready;
         self.call_note = note.to_string();
         let pages = self.contacts.len().div_ceil(CONTACTS_PER_PAGE).max(1);
         self.contact_page = self.contact_page.min(pages - 1);
+        self.rows_changed(Rows::Contacts, before);
     }
 
     /// The saved states of the page shown.
@@ -2378,6 +2448,7 @@ impl Menu {
     /// The avatar worn's saved states changed, as the host keeps them (`ready`: the avatar is known; else `note` says
     /// why there are none). A state saved here stays in the list until the host's has it, or a few seconds.
     pub fn set_states(&mut self, mut states: Vec<StateRow>, ready: bool, note: &str) {
+        let before = self.keys(Rows::States);
         if let Some((name, at)) = &self.pending_save {
             if !ready || states.iter().any(|s| s.name == *name) || at.elapsed() >= SAVE_SHOWN {
                 self.pending_save = None;
@@ -2390,6 +2461,7 @@ impl Menu {
         self.states_note = note.to_string();
         let pages = self.states.len().div_ceil(STATES_PER_PAGE).max(1);
         self.state_page = self.state_page.min(pages - 1);
+        self.rows_changed(Rows::States, before);
     }
 
     /// Whether a state saved here waits for the host's list.
@@ -2406,9 +2478,45 @@ impl Menu {
     /// The screen that shows this menu now holds the page whole (the avatar's screen once its blocks settled): what a
     /// row's share or mark acts on is what it shows now.
     pub fn presented(&mut self) {
-        let captures = self.page_captures().iter().map(|c| c.key.clone()).collect();
-        let friends = self.page_friends().iter().map(|f| f.id.clone()).collect();
-        self.shown = Some((captures, friends));
+        self.shown = Some(Shown {
+            captures: self.keys(Rows::Captures),
+            friends: self.keys(Rows::Friends),
+            contacts: self.keys(Rows::Contacts),
+            states: self.keys(Rows::States),
+            instances: self.keys(Rows::Instances),
+            comments: self.keys(Rows::Comments),
+        });
+    }
+
+    /// What tells the rows of `list` on the page shown apart: a capture's key, a friend's or contact's id, a state's id
+    /// (a state saved here and not yet listed: its name), an instance's location, a comment's number.
+    fn keys(&self, list: Rows) -> Vec<String> {
+        match list {
+            Rows::Captures => self.page_captures().iter().map(|c| c.key.clone()).collect(),
+            Rows::Friends => self.page_friends().iter().map(|f| f.id.clone()).collect(),
+            Rows::Contacts => self.page_contacts().iter().map(|c| c.id.clone()).collect(),
+            Rows::States => self.page_states().iter().map(state_key).collect(),
+            Rows::Instances => self.page_instances().iter().map(|r| r.location.clone()).collect(),
+            Rows::Comments => self.page_comments().iter().map(|c| c.id.to_string()).collect(),
+        }
+    }
+
+    fn moved_slot(&mut self, list: Rows) -> &mut Option<(Vec<String>, Instant, u32)> {
+        match list {
+            Rows::Captures => &mut self.captures_moved,
+            Rows::Friends => &mut self.friends_moved,
+            Rows::Contacts => &mut self.contacts_moved,
+            Rows::States => &mut self.states_moved,
+            Rows::Instances => &mut self.instances_moved,
+            Rows::Comments => &mut self.comments_moved,
+        }
+    }
+
+    /// A host's new list of `list` replaced the rows `before` on the page shown: noted when they differ.
+    fn rows_changed(&mut self, list: Rows, before: Vec<String>) {
+        if self.keys(list) != before {
+            moved(self.moved_slot(list), before);
+        }
     }
 
     /// No screen holds this menu's page any more (closed): rows are judged by the list's changes alone again.
@@ -2419,10 +2527,31 @@ impl Menu {
     /// Whether row `i` (of History when `captures`, else of Share to …'s friends), holding `key` now, holds what the
     /// person saw there: the page as last presented whole when a screen says so ([`Menu::presented`]), else what it held
     /// before a change of the list still settling.
-    fn row_shown(&self, captures: bool, i: usize, key: &str) -> bool {
+    fn row_shown(&self, list: Rows, i: usize, key: &str) -> bool {
         match &self.shown {
-            Some((c, f)) => (if captures { c } else { f }).get(i).is_some_and(|k| k == key),
-            None => row_still(if captures { &self.captures_moved } else { &self.friends_moved }, i, key),
+            Some(shown) => {
+                let keys = match list {
+                    Rows::Captures => &shown.captures,
+                    Rows::Friends => &shown.friends,
+                    Rows::Contacts => &shown.contacts,
+                    Rows::States => &shown.states,
+                    Rows::Instances => &shown.instances,
+                    Rows::Comments => &shown.comments,
+                };
+                keys.get(i).is_some_and(|k| k == key)
+            }
+            None => row_still(
+                match list {
+                    Rows::Captures => &self.captures_moved,
+                    Rows::Friends => &self.friends_moved,
+                    Rows::Contacts => &self.contacts_moved,
+                    Rows::States => &self.states_moved,
+                    Rows::Instances => &self.instances_moved,
+                    Rows::Comments => &self.comments_moved,
+                },
+                i,
+                key,
+            ),
         }
     }
 
@@ -2496,10 +2625,14 @@ impl Menu {
                 Some(now) if now == was => {}
                 Some(Sharing::Explicit) => {
                     self.asked = None;
-                    if self.open && matches!(self.page, Page::Photo | Page::History) {
+                    // Only while the share just pressed is what the person is doing: an answer that comes later (a
+                    // share waiting for its 3D view) never takes the page with Share anyway under the hand; the row
+                    // says to press Share publicly to see why.
+                    let fresh = self.asked_at.take().is_some_and(|at| at.elapsed() < EXPLICIT_JUMP);
+                    if fresh && self.open && matches!(self.page, Page::Photo | Page::History) {
                         self.sharing = Some(key);
                         self.share_from = self.page;
-                        self.go(Page::Explicit);
+                        self.go_unasked(Page::Explicit);
                     }
                 }
                 Some(now @ (Sharing::Waiting { .. } | Sharing::Busy { .. })) => self.asked = Some((key, now)),
@@ -2544,6 +2677,7 @@ impl Menu {
             return self.capture_thumbnails();
         }
         self.asked = Some((key.clone(), self.sharing_of(&key)));
+        self.asked_at = Some(Instant::now());
         self.notice = Some(mark("Sharing publicly…").into());
         vec![Effect::ShareCapture(ShareAsk { key, public: true, recipients: Vec::new(), acknowledge_explicit: false })]
     }
@@ -2695,19 +2829,23 @@ impl Menu {
     /// The host's world feedback: the worlds and what it read and sent. The world shown stays the same world when it
     /// is still among them.
     pub fn set_feedback(&mut self, view: FeedbackView) {
+        let before = self.keys(Rows::Comments);
         let shown = self.shown_world();
         self.feedback = view;
         self.subject = shown.and_then(|w| self.feedback.subjects.iter().position(|s| s.world == w)).unwrap_or(0);
         let pages = self.shown_feedback().map_or(0, |f| f.comments.len()).div_ceil(COMMENTS_PER_PAGE).max(1);
         self.comment_page = self.comment_page.min(pages - 1);
+        self.rows_changed(Rows::Comments, before);
     }
 
     pub fn set_instances(&mut self, instances: Vec<InstanceRow>, ready: bool, note: &str) {
+        let before = self.keys(Rows::Instances);
         self.instances = instances;
         self.instances_ready = ready;
         self.instances_note = note.to_string();
         let pages = self.instances.len().div_ceil(INSTANCES_PER_PAGE).max(1);
         self.instance_page = self.instance_page.min(pages - 1);
+        self.rows_changed(Rows::Instances, before);
     }
 
     /// Invite me, to a given instance, from what lists them otherwise than this menu's page.
@@ -2735,14 +2873,16 @@ impl Menu {
         match answer {
             InviteAnswer::Sent => {
                 if self.page == Page::AddFriend {
-                    self.go(Page::Instances);
+                    self.go_unasked(Page::Instances);
                 }
                 self.invite_account = None;
                 self.notice = Some(mark("Invite sent: open it in VRChat's notifications").into());
             }
             InviteAnswer::NeedsFriend { account, message } => {
                 self.invite_account = Some(account);
-                if self.open && matches!(self.page, Page::Instances | Page::AddFriend) {
+                if self.open && matches!(self.page, Page::Instances | Page::AddFriend) && self.page != Page::AddFriend {
+                    self.go_unasked(Page::AddFriend);
+                } else if self.open && self.page == Page::AddFriend {
                     self.go(Page::AddFriend);
                 }
                 self.notice = Some(cut(&message, 80));
@@ -2754,7 +2894,7 @@ impl Menu {
     /// A call started, changed or ended. A ringing call opens the call page.
     pub fn set_call(&mut self, call: Option<Call>) {
         if matches!(call, Some(Call::Ringing { .. })) && self.open && !matches!(self.call, Some(Call::Ringing { .. })) {
-            self.go(Page::Call);
+            self.go_unasked(Page::Call);
         }
         self.call = call;
     }
@@ -3671,6 +3811,9 @@ mod tests {
         let _ = menu.set_captures(view(&latest));
         assert_eq!((menu.page, ScreenPage::of(&menu)), (Page::Explicit, ScreenPage::Explicit));
         assert_eq!(format!("{} {}", text(&menu, Content::ExplicitLine(0)), text(&menu, Content::ExplicitLine(1))), EXPLICIT_WARNING);
+        // (A press within half a second of the warning appearing by itself was on its way elsewhere: MENU-3.)
+        assert!(menu.press(Target::ShareAnyway).is_empty());
+        menu.unasked_at = None;
         assert_eq!(menu.press(Target::ShareAnyway), [Effect::ShareCapture(ShareAsk { acknowledge_explicit: true, ..public })]);
         assert_eq!(menu.page, Page::Photo);
         // The answer before, still in its row until the host takes the new share, opens no warning again.
@@ -4131,4 +4274,112 @@ mod tests {
         menu.open();
         assert!(menu.drain().is_empty());
     }
+
+    /// MENU-9: a call, a state applied, an invite, an own comment deleted act on the row as it was drawn: a list that
+    /// changed under the hand acts on nobody until it stands still (or the screen showed it whole again).
+    #[test]
+    fn every_row_acts_on_what_it_was_drawn_for() {
+        use crate::feedback::{CommentRow, Subject, WorldFeedback};
+        let contact = |id: &str| Contact { id: id.into(), name: id.into() };
+        let state = |id: &str| StateRow { id: id.into(), name: id.into(), ..Default::default() };
+        let comment = |id: u64| CommentRow { id, by: "me".into(), text: "hi".into(), at: 1, mine: true };
+        let world = "wrld_99123966-6b37-4b5b-9f3c-0a1b2c3d4e5f";
+        let feedback = |ids: &[u64]| FeedbackView {
+            signed_in: true,
+            subjects: vec![Subject { world: world.into(), ..Default::default() }],
+            worlds: vec![WorldFeedback { world: world.into(), comments: ids.iter().map(|i| comment(*i)).collect(), ..Default::default() }],
+        };
+        let mut menu = Menu { pages: Pages::Mirror, ..Default::default() };
+        menu.open();
+        // Calls: Ada and Ben shown, then Cyd comes first.
+        menu.set_contacts(vec![contact("ada"), contact("ben")], true, "");
+        menu.contacts_moved = None;
+        menu.page = Page::Call;
+        menu.set_contacts(vec![contact("cyd"), contact("ada"), contact("ben")], true, "");
+        assert!(menu.press(Target::Contact(0)).is_empty(), "the row drawn was Ada's, Cyd is there now");
+        menu.contacts_moved.as_mut().unwrap().1 -= ROWS_SETTLE;
+        assert_eq!(menu.press(Target::Contact(0)), vec![Effect::CallContact { id: "cyd".into() }], "once it stood still");
+        // States.
+        menu.set_states(vec![state("s1"), state("s2")], true, "");
+        menu.states_moved = None;
+        menu.page = Page::States;
+        menu.set_states(vec![state("s0"), state("s1"), state("s2")], true, "");
+        assert!(menu.press(Target::StateApply(0)).is_empty());
+        menu.states_moved.as_mut().unwrap().1 -= ROWS_SETTLE;
+        assert_eq!(menu.press(Target::StateApply(0)), vec![Effect::ApplyState { id: "s0".into(), name: "s0".into() }]);
+        // Previous instances: the page shows the last list, then the new visit comes first.
+        menu.set_instances(vec![instance(1), instance(2)], true, "");
+        menu.instances_moved = None;
+        menu.page = Page::Instances;
+        menu.set_instances(vec![instance(3), instance(1), instance(2)], true, "");
+        assert!(menu.press(Target::InviteMe(0)).is_empty());
+        menu.instances_moved.as_mut().unwrap().1 -= ROWS_SETTLE;
+        assert!(menu.press(Target::InviteMe(0)).iter().any(|e| matches!(e, Effect::InviteMe { location } if *location == instance(3).location)));
+        // Comments: the one just written comes on top, the owner's others move down a row.
+        menu.set_feedback(feedback(&[7, 8]));
+        menu.comments_moved = None;
+        menu.page = Page::Comments;
+        menu.set_feedback(feedback(&[9, 7, 8]));
+        assert!(menu.press(Target::DeleteComment(1)).is_empty(), "row 1 was 8, it is 7 now");
+        // The avatar's screen showed the new page whole: its rows are what they show.
+        menu.presented();
+        assert_eq!(menu.press(Target::DeleteComment(1)), vec![Effect::Feedback(FeedbackAsk::Uncomment { world: world.into(), comment: 7 })]);
+        // And a row the screen has not shown yet acts on nothing, whatever time passed.
+        menu.page = Page::Call;
+        menu.set_contacts(vec![contact("dan"), contact("cyd")], true, "");
+        menu.contacts_moved = None;
+        assert!(menu.press(Target::Contact(0)).is_empty(), "the screen still shows Cyd there");
+    }
+
+    /// MENU-3 and MENU-14: a page that changes by itself takes no press that was on its way, and a late "explicit" never
+    /// takes the page at all.
+    #[test]
+    fn a_page_that_changes_by_itself_takes_no_press_on_its_way() {
+        use crate::captures::{CapturePhase, CaptureRow, CapturesView, Sharing};
+        let mut menu = Menu { pages: Pages::Mirror, ..Default::default() };
+        menu.open();
+        let _ = menu.press(Target::Suggest);
+        let _ = menu.press(Target::SuggestType);
+        assert_eq!(menu.page, Page::Type);
+        // A friend calls while a key is on its way: the key answers nothing.
+        menu.set_call(Some(Call::Ringing { name: "Ada".into() }));
+        assert_eq!(menu.page, Page::Call);
+        assert!(menu.press(Target::Answer).is_empty() && menu.press(Target::HangUp).is_empty());
+        assert!(menu.press(Target::Key('a')).is_empty());
+        // Half a second later the page is the person's: Answer answers.
+        menu.unasked_at = menu.unasked_at.map(|at| at - UNASKED);
+        assert_eq!(menu.press(Target::Answer), vec![Effect::Answer]);
+        // Close always closes.
+        menu.set_call(None);
+        menu.set_call(Some(Call::Ringing { name: "Ben".into() }));
+        assert!(menu.press(Target::Close).contains(&Effect::Close));
+        // The warning for a share just pressed opens by itself; one answered later than EXPLICIT_JUMP does not, the row
+        // tells (Press Share publicly to see why).
+        let row = CaptureRow { key: "C:/s/a".into(), world: "Club".into(), phase: CapturePhase::Ready, ..Default::default() };
+        let view = |sharing: Sharing| CapturesView { latest: Some(CaptureRow { sharing, ..row.clone() }), history: vec![CaptureRow { ..row.clone() }], ..Default::default() };
+        for (late, page) in [(false, Page::Explicit), (true, Page::Photo)] {
+            menu.open();
+            menu.unasked_at = None;
+            let _ = menu.press(Target::Photo);
+            let _ = menu.set_captures(view(Sharing::Idle));
+            assert!(!menu.press(Target::ShareLatest).is_empty());
+            if late {
+                menu.asked_at = menu.asked_at.map(|at| at - EXPLICIT_JUMP);
+            }
+            let _ = menu.set_captures(view(Sharing::Explicit));
+            assert_eq!(menu.page, page, "late: {late}");
+            let _ = menu.close();
+        }
+        // Asked, then the menu closed and opened again: the answer takes no page either.
+        menu.open();
+        let _ = menu.press(Target::Photo);
+        let _ = menu.set_captures(view(Sharing::Idle));
+        let _ = menu.press(Target::ShareLatest);
+        let _ = menu.close();
+        menu.open();
+        let _ = menu.press(Target::Photo);
+        let _ = menu.set_captures(view(Sharing::Explicit));
+        assert_eq!(menu.page, Page::Photo);
+    }
 }
+

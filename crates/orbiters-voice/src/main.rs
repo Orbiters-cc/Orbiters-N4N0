@@ -243,6 +243,9 @@ struct Worker {
     taken: u64,
     decoder: Decoder,
     decode_generation: Arc<AtomicU64>,
+    /// Bumped when the wake word is turned off (the Ask page took the microphone): a wake sentence heard before is not
+    /// said after.
+    wake_generation: Arc<AtomicU64>,
     live: Arc<Mutex<LiveText>>,
     models: Option<PathBuf>,
     vad: Option<VoiceActivityDetector>,
@@ -283,6 +286,7 @@ impl Worker {
             drops_said: (0, Instant::now()),
             taken: 0,
             decode_generation: Arc::new(AtomicU64::new(0)),
+            wake_generation: Arc::new(AtomicU64::new(0)),
             live: Arc::new(Mutex::new(LiveText::default())),
             models: None,
             vad: None,
@@ -463,6 +467,11 @@ impl Worker {
                 self.held.clear();
             }
             VoiceCommand::WakeWord { on, words } => {
+                if self.wake_word && !on {
+                    // What the wake word heard so far is nobody's now.
+                    self.wake_generation.fetch_add(1, Ordering::SeqCst);
+                    self.waiting.retain(|s| s.for_n4n0);
+                }
                 self.wake_word = on;
                 self.wake_words = words;
             }
@@ -632,8 +641,11 @@ impl Worker {
         // Final decode also runs away from the audio/VAD loop. The single recognizer serializes inference.
         let generation = self.decode_generation.clone();
         let expected = generation.load(Ordering::SeqCst);
+        let wake_generation = self.wake_generation.clone();
+        let wake_expected = wake_generation.load(Ordering::SeqCst);
+        let stale = move || generation.load(Ordering::SeqCst) != expected || (!s.for_n4n0 && wake_generation.load(Ordering::SeqCst) != wake_expected);
         self.decoder.submit(s.for_n4n0, Box::new(move || {
-            if generation.load(Ordering::SeqCst) != expected { return; }
+            if stale() { return; }
             let recognizer = recognizer.lock().unwrap();
             let seconds = s.samples.len() as f32 / RATE as f32;
             if !s.for_n4n0 && !wake_words.is_empty() && s.samples.len() > PREFIX {
@@ -641,7 +653,7 @@ impl Worker {
                 if orbiters_n4n0_core::wake::command(&start, &wake_words).is_none() { return; }
             }
             let (text, decode_ms) = transcribe(&recognizer, &s.samples);
-            if generation.load(Ordering::SeqCst) == expected {
+            if !stale() {
                 emit(&VoiceEvent::Heard { text, for_n4n0: s.for_n4n0, seconds, decode_ms, listen: s.listen });
             }
         }));

@@ -47,8 +47,12 @@ struct Worker {
 #[derive(Default)]
 pub(crate) struct VoiceRuntime {
     handle: Option<Worker>,
+    /// The Ask page has the microphone (open): the wake word waits.
     ask_owned: bool,
     wake_requested: bool,
+    /// When the Ask page last closed: a wake sentence whose sound began before it was heard for the page's visit, never
+    /// for after it.
+    wake_from: Option<Instant>,
     installer: Option<Worker>,
     /// The last worker's number.
     workers: u64,
@@ -139,8 +143,12 @@ impl N4n0 {
         {
             let wake = self.with_settings(|s| s.n4n0.wake_word);
             let mut voice = self.voice.lock().unwrap();
-            voice.ask_owned = true;
+            // Open, the page has the microphone; closed, the wake word has it back (as its setting says).
+            voice.ask_owned = open;
             voice.wake_requested = wake;
+            if !open {
+                voice.wake_from = Some(Instant::now());
+            }
         }
         {
             let mut rt = self.n4n0.lock().unwrap();
@@ -152,8 +160,10 @@ impl N4n0 {
             rt.voice.speech = false;
             rt.voice.level = 0.0;
         }
-        // Even wake-word capture must release the microphone when this page leaves.
+        // Even wake-word capture must release the microphone when this page leaves. What the worker was told is kept,
+        // so that the wake word's next look gives it back.
         if let Some(h) = self.voice.lock().unwrap().handle.as_mut() {
+            h.wake_word = false;
             let _ = h.inner.send(&VoiceCommand::WakeWord { on: false, words: vec![] });
         }
         self.ask_follow();
@@ -466,8 +476,13 @@ impl N4n0 {
                 }
             }
             VoiceEvent::Heard { text, for_n4n0, seconds, decode_ms, listen } => {
-                // Wake sentences decoded before Ask took ownership must not interrupt this visit or its answer.
-                if !for_n4n0 && self.voice.lock().unwrap().ask_owned { return; }
+                // Wake sentences decoded before Ask took ownership must not interrupt this visit or its answer, nor one
+                // whose sound began before the page closed come after it.
+                if !for_n4n0 {
+                    let rt = self.voice.lock().unwrap();
+                    let began = Instant::now().checked_sub(Duration::from_secs_f32(if seconds.is_finite() { seconds.clamp(0.0, 600.0) } else { 0.0 }) + Duration::from_millis(decode_ms as u64));
+                    if rt.ask_owned || rt.wake_from.is_some_and(|closed| began.is_none_or(|b| b < closed)) { return; }
+                }
                 if self.voice_readiness() != crate::status::VoiceReadiness::Ready {
                     self.ask_follow(); self.publish(); return;
                 }

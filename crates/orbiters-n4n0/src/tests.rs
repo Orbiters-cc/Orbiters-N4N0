@@ -2874,6 +2874,39 @@ fn review_wake_followup_is_admitted_only_outside_pause_gates() {
 }
 
 #[test]
+fn the_wake_word_comes_back_when_the_ask_page_closes() {
+    // N4N0-10: once the Ask page had been opened and closed, the wake word stayed off for the rest of the session.
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    { let mut settings = t.settings.lock().unwrap();
+      settings.n4n0.wake_word = true;
+      settings.n4n0.wake_words = vec!["testwake".into()];
+      settings.n4n0.menu.wake_word = false;
+    }
+    n.n4n0.lock().unwrap().voice.installed = true;
+    t.scene(|s| s.vrchat = true);
+    n.voice_follow();
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    assert!(matches!(&worker.commands()[..], [VoiceCommand::Start { wake_word: true, .. }]));
+    n.ask_page(true);
+    n.voice_follow();
+    assert!(matches!(worker.commands().last(), Some(VoiceCommand::WakeWord { on: false, .. })), "the page has the microphone");
+    n.ask_page(false);
+    n.voice_cancel();
+    n.voice_follow();
+    assert!(matches!(worker.commands().last(), Some(VoiceCommand::WakeWord { on: true, .. })), "{:?}", worker.commands());
+    // A wake sentence whose sound began before the page closed is the visit's: never said after it.
+    worker.say(VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 1.0, decode_ms: 1 });
+    assert!(n.n4n0.lock().unwrap().listening.is_none());
+    // One said after it is heard.
+    std::thread::sleep(Duration::from_millis(400));
+    worker.say(VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 0.2, decode_ms: 1 });
+    assert!(n.n4n0.lock().unwrap().listening.is_some(), "the wake word works again");
+    t.shutdown(&n);
+}
+
+#[test]
 fn ask_auto_final_stream_pause_rearm_manual_exit_and_stale_words() {
     let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
     *d.ears.allowed.lock().unwrap() = true;

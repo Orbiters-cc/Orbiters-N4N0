@@ -21,6 +21,8 @@ use orbiters_core::settings::{MenuLook, OrbitLayout, OrbitSettings, VrMotion};
 use std::path::PathBuf;
 
 mod booster_sheet;
+pub mod share_sheet;
+pub use share_sheet::{ChooserRow, ChooserView, ShareView};
 pub use booster_sheet::{booster_level_at, BoosterFacts, BoosterPick};
 use booster_sheet::{booster_caption, booster_items, draw_booster, draw_booster_cell};
 mod settings_sheet;
@@ -273,6 +275,20 @@ pub enum Action {
     CloseSheet,
     /// The parts go for this opening of VRChat's menu.
     Hide,
+    /// Right after a 3D picture, beside VRChat's camera (REQUEST13): "Share to …" and "Share publicly" for the picture
+    /// whose id they name, the first time's question answered or put away, the buttons put away.
+    ShareTo(u64),
+    SharePublic(u64),
+    ShareConfirm(u64),
+    ShareCancelConfirm,
+    ShareDismiss(u64),
+    /// The friends' chooser: a friend (by their identity, `share_sheet::person_key`), a page on, Send for the picture, its
+    /// close, its loading again.
+    ChooserPerson(u64),
+    ChooserPage(bool),
+    ChooserSend(u64),
+    ChooserClose,
+    ChooserRetry,
     /// Nothing: a place the pointer can be on.
     Idle,
 }
@@ -749,6 +765,8 @@ pub struct CameraNow {
     pub web: Option<WebPage>,
     /// The tiles are on the camera's right: what they say lines up on that side.
     pub on_the_right: bool,
+    /// Right after a 3D picture: its share buttons and how its shares go, and the friends' chooser (REQUEST13).
+    pub share: Option<ShareView>,
 }
 
 /// The demo avatar, asked for from beside the camera.
@@ -807,6 +825,9 @@ pub fn needed(zone: Zone, facts: &Facts) -> bool {
         Zone::CameraAct => facts.no_kit && matches!(camera.demo, Some(DemoSwitch::Offered | DemoSwitch::Busy | DemoSwitch::Failed(_))),
         Zone::CameraScan => camera.qr != CameraQr::Off,
         Zone::CameraWebBar | Zone::CameraWeb => camera.web.is_some(),
+        Zone::CameraShare => camera.share.is_some(),
+        // Never with a code's page: they take the same place.
+        Zone::CameraChooser => camera.web.is_none() && camera.share.as_ref().is_some_and(|s| s.chooser.is_some()),
         _ => true,
     }
 }
@@ -933,6 +954,16 @@ pub enum Look {
     Scan,
     /// The page's bar over the camera: its name and how it is going, its buttons; and the page.
     WebTitle,
+    /// The share row's and the chooser's ([`share_sheet`]).
+    ShareSlot(bool),
+    ShareDismiss,
+    ShareQuestion,
+    ShareCancel,
+    ShareYes,
+    ChooserBack,
+    ChooserRow(usize),
+    ChooserArrow(bool),
+    ChooserSend,
     WebButton { icon: &'static str, label: &'static str },
     Web,
     /// No capture kit: one line saying where to add it, and a button there.
@@ -1003,6 +1034,8 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
             _ => Vec::new(),
         },
         Zone::CameraScan => vec![Item { action: Action::Idle, rect: whole, look: Look::Scan }],
+        Zone::CameraShare => facts.camera.share.as_ref().map_or_else(Vec::new, |s| share_sheet::share_items(w, h, s)),
+        Zone::CameraChooser => facts.camera.share.as_ref().map_or_else(Vec::new, |s| share_sheet::chooser_items(w, h, s)),
         Zone::CameraWebBar => web_bar(w, h, facts),
         Zone::CameraWeb => {
             let state = facts.camera.web.as_ref().map(|web| &web.state);
@@ -2403,6 +2436,9 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
     let (a, b): (String, String) = match action {
         // Said above.
         Action::Settings => return None,
+        Action::ShareTo(_) => (tr(share_sheet::SHARE_TO).into(), tr(share_sheet::SHARE_TO_WHY).into()),
+        Action::SharePublic(_) | Action::ShareConfirm(_) => (tr(share_sheet::SHARE_PUBLICLY).into(), tr(share_sheet::SHARE_PUBLICLY_WHY).into()),
+        Action::ShareCancelConfirm | Action::ShareDismiss(_) | Action::ChooserPerson(_) | Action::ChooserPage(_) | Action::ChooserSend(_) | Action::ChooserClose | Action::ChooserRetry => return None,
         Action::Peek => (tr("Hide Orbiters").into(), tr("Reach VRChat's own menus. Nothing here closes.").into()),
         Action::Worlds => (tr("Worlds in 3D").into(), tr("Search any world. See the ones captured in 3D.").into()),
         Action::Picture(mode) if facts.no_kit => (
@@ -3179,9 +3215,19 @@ fn is_selected(item: &Item, facts: &Facts) -> bool {
 
 fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pressed: bool) {
     let rect = item.rect;
+    if matches!(zone, Zone::CameraShare | Zone::CameraChooser) {
+        if let Some(view) = facts.camera.share.as_ref() {
+            share_sheet::draw(p, item, view, hovered, pressed);
+        }
+        if item.look != Look::Close {
+            return;
+        }
+    }
     let shape = shaped(zone, rect);
     match item.look {
         Look::Blank => {}
+        // Drawn above ([`share_sheet::draw`]).
+        Look::ShareSlot(_) | Look::ShareDismiss | Look::ShareQuestion | Look::ShareCancel | Look::ShareYes | Look::ChooserBack | Look::ChooserRow(_) | Look::ChooserArrow(_) | Look::ChooserSend => {}
         Look::Cell { icon, label, badge: has_badge } => {
             let (ring, center) = shape.ring.expect("a cell is on a ring");
             let waiting = zone == Zone::WheelPictures && facts.picture_wait.is_some();

@@ -172,6 +172,11 @@ pub enum Zone {
     CameraScan,
     CameraWebBar,
     CameraWeb,
+    /// Right after a 3D picture, under what the tiles say (REQUEST13): "Share to …" and "Share publicly", then how each share
+    /// goes and what it earned. Never on the camera's picture or its buttons.
+    CameraShare,
+    /// "Share to …" in a headset: the friends to choose, over the camera's top edge where a code's page goes (never both).
+    CameraChooser,
     /// While a recording runs: its clock and Stop, under the wheel and under the wing (Enzo, F13). Nothing here starts one.
     WheelStop,
     QmStop,
@@ -239,8 +244,19 @@ impl Zone {
         [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying, Zone::QmCaption, Zone::QmStop];
 
     /// The zones around a menu.
-    pub const CAMERA: [Zone; 9] =
-        [Zone::CameraScan, Zone::CameraPeople, Zone::CameraWorld, Zone::CameraRecord, Zone::CameraQr, Zone::CameraCaption, Zone::CameraAct, Zone::CameraWebBar, Zone::CameraWeb];
+    pub const CAMERA: [Zone; 11] = [
+        Zone::CameraScan,
+        Zone::CameraPeople,
+        Zone::CameraWorld,
+        Zone::CameraRecord,
+        Zone::CameraQr,
+        Zone::CameraCaption,
+        Zone::CameraAct,
+        Zone::CameraWebBar,
+        Zone::CameraWeb,
+        Zone::CameraShare,
+        Zone::CameraChooser,
+    ];
 
     pub fn around(around: Around) -> &'static [Zone] {
         match around {
@@ -305,7 +321,7 @@ impl Zone {
     /// A part that shows only while it has something to do (a recording to stop, a code being looked for, a page opened, a button to offer): it joins the menu's
     /// parts and leaves them as that changes ([`super::Panels::set_open`]).
     pub fn only_while_needed(self) -> bool {
-        matches!(self, Zone::WheelStop | Zone::QmStop | Zone::CameraAct | Zone::CameraScan | Zone::CameraWebBar | Zone::CameraWeb)
+        matches!(self, Zone::WheelStop | Zone::QmStop | Zone::CameraAct | Zone::CameraScan | Zone::CameraWebBar | Zone::CameraWeb | Zone::CameraShare | Zone::CameraChooser)
     }
 
     /// Its place in the menu's units from the menu's centre, y down: around the wheel in hundredths of its radius (a 1280 x 720 window's pixels, nearly), around the Quick
@@ -363,6 +379,11 @@ impl Zone {
             // Over the camera's top edge, never in front of it: its bar nearest the camera, the page above. Stood up on that edge in a headset ([`super::vr`]).
             Zone::CameraWebBar => r(-CAMERA_HALF[0], CAMERA_WEB_BAR[0], CAMERA_HALF[0], CAMERA_WEB_BAR[1]),
             Zone::CameraWeb => r(-CAMERA_HALF[0], CAMERA_WEB_BAR[0] - 6.0 - CAMERA_WEB_TALL, CAMERA_HALF[0], CAMERA_WEB_BAR[0] - 6.0),
+            // Under what the tiles say, from the column's outer edge to the picture's right edge: in reach of the hand that
+            // holds the camera, clear of VRChat's row of buttons and of the caption.
+            Zone::CameraShare => r(CAMERA_COLUMN_OUT, CAMERA_SHARE[0], CAMERA_HALF[0], CAMERA_SHARE[1]),
+            // Where a code's page goes, as tall as it and its bar: stood up on the camera's top edge in a headset.
+            Zone::CameraChooser => r(-CAMERA_HALF[0], CAMERA_WEB_BAR[1] - CAMERA_CHOOSER_TALL, CAMERA_HALF[0], CAMERA_WEB_BAR[1]),
             // Right under the ring, whose foot is free in any window: in reach, and over nothing of VRChat's.
             Zone::WheelStop => r(-78.0, 188.0, 78.0, 228.0),
             // Under the wing's foot, as wide as it.
@@ -395,6 +416,10 @@ const CAMERA_TILE: [f32; 2] = [92.0, 60.0];
 pub const CAMERA_COLUMN_OUT: f32 = -CAMERA_HALF[0] - CAMERA_GAP - CAMERA_TILE[0];
 /// The line under VRChat's row of buttons (from, to).
 const CAMERA_UNDER: [f32; 2] = [166.0, 226.0];
+/// The share row's line under the caption (from, to).
+pub const CAMERA_SHARE: [f32; 2] = [CAMERA_UNDER[1] + 8.0, CAMERA_UNDER[1] + 8.0 + 84.0];
+/// How tall the friends' chooser over the camera is.
+pub const CAMERA_CHOOSER_TALL: f32 = 516.0;
 /// How far the scanning corners stand off the picture.
 const CAMERA_SCAN_OUT: f32 = 8.0;
 /// The page's bar over the camera's top edge (from, to), and how tall the page over it is: a phone's page, about 30 cm wide.
@@ -432,6 +457,7 @@ pub fn camera_on_screen(panel: Rect, client: Vec2) -> Vec<Placed> {
     let caption = Rect::from_min_size(pos2(column_left, under), vec2(CAMERA_COLUMN_OUT.abs() + 64.0, CAMERA_UNDER[1] - CAMERA_UNDER[0]) * unit);
     let act = Rect::from_min_size(pos2(caption.right() + 8.0 * unit, under), vec2(224.0, 34.0) * unit);
     let scan = panel.expand(CAMERA_SCAN_OUT * k);
+    let share = Rect::from_min_size(pos2(column_left, caption.bottom() + 8.0 * unit), vec2(CAMERA_HALF[0] - CAMERA_COLUMN_OUT, CAMERA_SHARE[1] - CAMERA_SHARE[0]) * unit);
     [
         (Zone::CameraPeople, tile(0)),
         (Zone::CameraWorld, tile(1)),
@@ -440,6 +466,7 @@ pub fn camera_on_screen(panel: Rect, client: Vec2) -> Vec<Placed> {
         (Zone::CameraCaption, caption),
         (Zone::CameraAct, act),
         (Zone::CameraScan, scan),
+        (Zone::CameraShare, share),
     ]
     .into_iter()
     .map(|(zone, rect)| Placed { zone, rect: Rect::from_min_max(rect.min.round(), rect.max.round()), center, unit })

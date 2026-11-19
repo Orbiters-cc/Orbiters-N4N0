@@ -631,7 +631,7 @@ const CAMERA_PAGE_STANDS: f32 = 1.4;
 /// (camera-core's clearance is measured from that older gap). The scanning corners and the page stay on the camera.
 pub fn camera_column_out(places: &mut [Placed], clearance: f32, right: bool) {
     let out = (clearance + 10.0 - zones::CAMERA_GAP).max(0.0) * if right { 1.0 } else { -1.0 };
-    for placed in places.iter_mut().filter(|p| matches!(p.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraRecord | Zone::CameraQr | Zone::CameraCaption | Zone::CameraAct)) {
+    for placed in places.iter_mut().filter(|p| matches!(p.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraRecord | Zone::CameraQr | Zone::CameraCaption | Zone::CameraAct | Zone::CameraShare)) {
         placed.rect = placed.rect.translate(egui::vec2(out, 0.0));
     }
 }
@@ -1929,7 +1929,7 @@ impl OrbitVr {
             .map(|p| {
                 let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack | Zone::SheetPeek);
                 // The page a code opened, and its bar: stood up on the camera's top edge.
-                if matches!(p.zone, Zone::CameraWeb | Zone::CameraWebBar) {
+                if matches!(p.zone, Zone::CameraWeb | Zone::CameraWebBar | Zone::CameraChooser) {
                     return (camera_top_plane(&plane).camera_quad_facing(&on_camera_top(p.placed), &head), p.placed);
                 }
                 let on = if sheet { self.takeover_plane.unwrap_or(plane) } else { plane };

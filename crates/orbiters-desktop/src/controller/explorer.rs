@@ -384,7 +384,9 @@ impl super::Controller {
         let status = self.explorer_status();
         if let Some(offer) = status.offer.as_ref() {
             let recording = snap.is_capturing();
-            if (now_ms() >= offer.until_ms && !offer.busy()) || recording {
+            // VRChat's camera closed: the buttons go with it (the picture is still in Photos & captures).
+            let closed = snap.camera_open_said == Some(false) && offer.until_ms.saturating_sub(OFFER_MS) + 5_000 < now_ms();
+            if ((now_ms() >= offer.until_ms || closed) && !offer.busy()) || recording {
                 self.update(|st| st.explorer.offer = None);
                 s.public = None;
                 s.people = None;

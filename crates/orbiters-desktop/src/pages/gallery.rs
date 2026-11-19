@@ -420,6 +420,12 @@ impl State {
         }
     }
 
+    /// Opens `entry`'s window on its friends to choose ("Share to …" beside VRChat's camera, REQUEST13).
+    pub fn open_share_to(&mut self, ctx: &egui::Context, entry: Entry) {
+        self.dialog = Some(Dialog::new(ctx, entry, true));
+        self.from_card = false;
+    }
+
     /// Starts closing the open window (screenshots).
     pub fn close_window(&mut self) {
         if let Some(d) = self.dialog.as_mut() {

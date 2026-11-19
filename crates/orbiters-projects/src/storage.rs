@@ -919,8 +919,11 @@ fn relocate_on(
     let library = project.join("Library");
     let bytes: u64 = files.iter().map(|(_, n)| *n).sum();
     anyhow::ensure!(!target.exists(), "{}", tr("Cache destination already exists"));
-    // The record first: a kill at any moment after this leaves a cache that says which project it was for.
-    crate::write_json(&target.with_extension("json"), &serde_json::json!({"project":project,"library":target}))?;
+    // The record first: a kill at any moment after this leaves a cache that says which project it was for, and the exact
+    // name the old Library will have while it is moved aside: the only folder a later sweep may put back or remove
+    // (PROJECTS-33: a folder merely named like one is the person's).
+    let backup = project.join(format!("{BACKUP_PREFIX}{}", uuid::Uuid::new_v4().simple()));
+    crate::write_json(&target.with_extension("json"), &serde_json::json!({"project":project,"library":target,"backup":backup}))?;
     std::fs::create_dir_all(target)?;
     update(work.progress, |p| {
         p.phase = Phase::Copying;
@@ -961,7 +964,6 @@ fn relocate_on(
         return Ok(RepairEnd::Cancelled { left: discard_copy(target, work) });
     }
     update(work.progress, |p| p.phase = Phase::Switching);
-    let backup = project.join(format!("{BACKUP_PREFIX}{}", uuid::Uuid::new_v4().simple()));
     let had_library = library.is_dir();
     if had_library {
         if let Err(error) = std::fs::rename(&library, &backup) {
@@ -1230,10 +1232,24 @@ fn is_cache_id(name: &str) -> bool {
     name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// The old Libraries a move left beside its project's Library.
-fn backups(project: &Path) -> Vec<PathBuf> {
+/// The folders beside `project`'s Library named like an old Library a move leaves: proof of nothing, a person can name a
+/// folder so.
+fn named_like_backups(project: &Path) -> Vec<PathBuf> {
     let Ok(dir) = std::fs::read_dir(project) else { return vec![] };
     dir.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(BACKUP_PREFIX) && e.path().is_dir()).map(|e| e.path()).collect()
+}
+
+/// The old Library the move that made a cache set aside, when it is there: the folder its record names, directly in
+/// `project`, named as a move names it, and a real folder (not a link). A record without one (an older version's) proves
+/// nothing.
+fn recorded_backup(record: Option<&serde_json::Value>, project: &Path) -> Option<PathBuf> {
+    use crate::discovery::key;
+    let backup = PathBuf::from(record?["backup"].as_str()?);
+    let name = backup.file_name()?.to_string_lossy().into_owned();
+    let id = name.strip_prefix(BACKUP_PREFIX)?;
+    let beside = backup.parent().is_some_and(|parent| key(parent) == key(project));
+    let real = std::fs::symlink_metadata(&backup).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
+    (is_cache_id(id) && beside && real && !is_redirect(&backup).unwrap_or(true)).then_some(backup)
 }
 
 /// What to do with one cache.
@@ -1262,7 +1278,7 @@ fn judge(cache: &Path, known: &[PathBuf]) -> Judgement {
     match points_at(&own, cache) {
         None => return Keep(Kept::Unknown),
         Some(true) => {
-            let old = backups(&project);
+            let old: Vec<PathBuf> = recorded_backup(record.as_ref(), &project).into_iter().collect();
             return if old.is_empty() { Keep(Kept::InUse) } else { KeepAndClean { project, old } };
         }
         Some(false) => {}
@@ -1274,13 +1290,13 @@ fn judge(cache: &Path, known: &[PathBuf]) -> Judgement {
             None => return Keep(Kept::Unknown),
         }
     }
-    // A Library renamed away, with the junction not yet made: it goes back. More than one such folder cannot be told apart.
+    // A Library renamed away, with the junction not yet made: it goes back, when it is the one the record names. A folder
+    // only named like one may be the old Library of an older version's move, or the person's: the cache stays with it.
     let restore = if std::fs::symlink_metadata(&own).is_err() {
-        let mut old = backups(&project);
-        match old.len() {
-            0 => None,
-            1 => old.pop(),
-            _ => return Keep(Kept::Unknown),
+        match recorded_backup(record.as_ref(), &project) {
+            Some(old) => Some(old),
+            None if named_like_backups(&project).is_empty() => None,
+            None => return Keep(Kept::Unknown),
         }
     } else {
         None
@@ -1597,7 +1613,7 @@ mod tests {
         assert!(is_redirect(&library).unwrap());
         assert_eq!(std::fs::read(&file).unwrap(), original);
         assert_eq!(std::fs::read(target.join("Artifacts/ab/0.bin")).unwrap(), original);
-        assert_eq!(backups(&project), Vec::<PathBuf>::new());
+        assert_eq!(named_like_backups(&project), Vec::<PathBuf>::new());
         remove_redirect(&library).unwrap();
     }
 
@@ -1821,7 +1837,7 @@ mod tests {
             for i in 0..3 {
                 assert_eq!(std::fs::read(library.join(format!("Artifacts/ab/{i}.bin"))).unwrap(), bytes_of(i, 5000));
             }
-            assert_eq!(backups(&project), Vec::<PathBuf>::new());
+            assert_eq!(named_like_backups(&project), Vec::<PathBuf>::new());
         };
         let never = |_: &Path, _: &Path| -> std::io::Result<()> { panic!("Library switched after a flush that failed") };
 
@@ -1886,7 +1902,7 @@ mod tests {
         assert!(copied.permissions().readonly());
         let delta = copied.modified().unwrap().duration_since(old).unwrap_or_default();
         assert!(delta.as_secs() < 3, "kept its modification time");
-        assert_eq!(backups(&project), Vec::<PathBuf>::new());
+        assert_eq!(named_like_backups(&project), Vec::<PathBuf>::new());
         remove_redirect(project.join("Library")).unwrap();
         remove_tree(&target, &mut || {}).unwrap();
         assert!(!target.exists());
@@ -1930,7 +1946,7 @@ mod tests {
             assert_eq!(std::fs::read(&path).unwrap(), bytes, "{}", path.display());
         }
         assert!(folder_is_empty(&cache), "no partial copy or record left");
-        assert_eq!(backups(&project), Vec::<PathBuf>::new());
+        assert_eq!(named_like_backups(&project), Vec::<PathBuf>::new());
         // The lock went with it: Unity can open the project, a repair can run again.
         assert!(!crate::unity_open(&project));
         let RepairEnd::Moved(moved) = repair_with(&project, &SharedProgress::default(), &AtomicBool::new(false), |_, _| Ok(cache.clone())).unwrap() else { panic!("not moved") };
@@ -2033,7 +2049,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777, 0o755);
         // Reached through the project, as Unity does.
         assert_eq!(std::fs::metadata(project.join("Library/PackageCache/com.unity.burst/hostmac/bcl")).unwrap().permissions().mode() & 0o111, 0o111);
-        assert_eq!(backups(&project), Vec::<PathBuf>::new());
+        assert_eq!(named_like_backups(&project), Vec::<PathBuf>::new());
     }
 
     #[test]
@@ -2078,6 +2094,40 @@ mod tests {
         std::fs::write(cache.join("Artifacts/data.bin"), b"cache data").unwrap();
         crate::write_json(&cache.with_extension("json"), &serde_json::json!({"project": project, "library": cache})).unwrap();
         cache
+    }
+
+    /// The backup name a repair records for `cache` before it moves `project`'s Library aside.
+    fn with_backup(cache: &Path, project: &Path) -> PathBuf {
+        let old = project.join(format!("{BACKUP_PREFIX}{}", "b".repeat(32)));
+        crate::write_json(&cache.with_extension("json"), &serde_json::json!({"project": project, "library": cache, "backup": old})).unwrap();
+        old
+    }
+
+    /// PROJECTS-33: a folder only named like an old Library (the person's archive, or one an older version left) is never
+    /// removed nor put back as Library; the cache it may belong to stays.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn a_folder_only_named_like_an_old_library_is_left_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("UnityCache");
+        let project = project(temp.path(), "project", 2, 64);
+        let mine = project.join(format!("{BACKUP_PREFIX}my archive"));
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(mine.join("keep.txt"), "mine").unwrap();
+        // In use, with the person's folder beside it.
+        let cache = cache_for(&root, '8', &project);
+        let recorded = with_backup(&cache, &project);
+        std::fs::rename(project.join("Library"), &recorded).unwrap();
+        redirect(&cache, project.join("Library")).unwrap();
+        let swept = run_sweep(&root, &[]);
+        assert_eq!(swept.old_removed, vec![recorded.clone()], "only the recorded one");
+        assert!(mine.join("keep.txt").is_file());
+        remove_redirect(project.join("Library")).unwrap();
+        // Library missing, only the person's folder there: it is not made the Library, and the cache stays.
+        let swept = run_sweep(&root, &[]);
+        assert!(swept.restored.is_empty() && swept.removed.is_empty(), "{swept:?}");
+        assert!(mine.join("keep.txt").is_file() && !project.join("Library").exists());
+        assert!(cache.join("Artifacts/data.bin").is_file());
     }
 
     #[cfg(any(windows, unix))]
@@ -2210,7 +2260,7 @@ mod tests {
         let root = temp.path().join("UnityCache");
         let project = project(temp.path(), "project", 2, 64);
         let cache = cache_for(&root, 'f', &project);
-        let old = project.join(format!("{BACKUP_PREFIX}abc"));
+        let old = with_backup(&cache, &project);
         std::fs::rename(project.join("Library"), &old).unwrap();
         let swept = run_sweep(&root, &[]);
         assert_eq!(swept.restored, vec![project.clone()]);
@@ -2227,7 +2277,7 @@ mod tests {
         let root = temp.path().join("UnityCache");
         let project = project(temp.path(), "project", 2, 64);
         let cache = cache_for(&root, '9', &project);
-        let old = project.join(format!("{BACKUP_PREFIX}abc"));
+        let old = with_backup(&cache, &project);
         std::fs::rename(project.join("Library"), &old).unwrap();
         redirect(&cache, project.join("Library")).unwrap();
         let swept = run_sweep(&root, &[]);

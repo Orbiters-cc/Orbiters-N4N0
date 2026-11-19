@@ -216,6 +216,11 @@ impl State {
         !matches!(d.source, orbiters_core::launcher::Source::Nothing) || d.possible.play || d.game != orbiters_core::launcher::Game::NotRunning
     }
 
+    /// A friend's profile (or another of its windows) is open (`crate::window_rest`).
+    pub fn holds(&self) -> bool {
+        self.modal.is_some()
+    }
+
     /// A boop or request the service could not send: its "Sent" (shown at the press) is taken back; the toast says why.
     fn take_back_failed(&mut self) {
         if let Some(orbiters_core::launcher::Notice::Failed { to, action, .. }) = &self.data.notice {

@@ -6,7 +6,6 @@
 use super::space::{self, Quad};
 use crate::overlay::{Canvas, Presenter};
 use crate::wake_offer::{paint_vr, VR_PX, VR_WIDTH_M};
-use orbiters_n4n0::status::WakeOffer;
 use orbiters_openvr::{self as vr, overlay_flag, Matrix34};
 
 /// How far before the eyes, and how far under their line, it comes.
@@ -29,8 +28,16 @@ pub struct Prompt {
     /// The offer pressed here: it goes at once, before the app's word that it was taken.
     pressed: Option<u64>,
     visible: bool,
-    /// What its picture shows: hovered, the language, the step of time left.
-    drawn: Option<(bool, orbiters_i18n::Language, u32)>,
+    /// What its picture shows: which face, hovered, the language, the step of time left.
+    drawn: Option<(Face, bool, orbiters_i18n::Language, u32)>,
+}
+
+/// What the band asks: "Talk with N4N0?" (`crate::wake_offer`), or "Orbiters - N4N0 will minimize to save memory" with
+/// Keep open and its seconds left (`crate::window_rest`). One band, one at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Face {
+    Talk,
+    KeepOpen { seconds: u64 },
 }
 
 impl Prompt {
@@ -47,8 +54,9 @@ impl Prompt {
     }
 
     /// Where it is this turn: for `offer` (none hides it), before the eyes at `head` when the offer came. Returns it as a target.
-    pub fn place(&mut self, overlay: &vr::Overlay, offer: Option<WakeOffer>, head: Option<&Matrix34>) -> Option<Quad> {
-        let Some(offer) = offer.filter(|o| self.pressed != Some(o.id)) else {
+    /// `offer`: the id of what it asks (ids of both kinds kept apart by the caller).
+    pub fn place(&mut self, overlay: &vr::Overlay, offer: Option<u64>, head: Option<&Matrix34>) -> Option<Quad> {
+        let Some(id) = offer.filter(|id| self.pressed != Some(*id)) else {
             self.placed = None;
             if self.visible {
                 let _ = overlay.hide(self.handle);
@@ -56,11 +64,11 @@ impl Prompt {
             }
             return None;
         };
-        if self.placed.is_none_or(|(id, _)| id != offer.id) {
+        if self.placed.is_none_or(|(placed, _)| placed != id) {
             // A new offer: where the eyes look now (a word heard again moves it there again).
             let at = space::before_eyes(head?, DISTANCE_M, BELOW_M);
             let _ = overlay.set_transform_absolute(self.handle, &at);
-            self.placed = Some((offer.id, at));
+            self.placed = Some((id, at));
             self.drawn = None;
         }
         let (_, at) = self.placed?;
@@ -72,24 +80,32 @@ impl Prompt {
         Some(Quad { transform: at, width: VR_WIDTH_M, height: height_m() })
     }
 
+    /// Whether it shows the offer `id` now.
+    pub fn showing(&self, id: u64) -> bool {
+        self.visible && self.placed.is_some_and(|(placed, _)| placed == id)
+    }
+
     /// Pressed: it goes now.
-    pub fn pressed(&mut self, overlay: &vr::Overlay, offer: WakeOffer) {
-        self.pressed = Some(offer.id);
+    pub fn pressed(&mut self, overlay: &vr::Overlay, id: u64) {
+        self.pressed = Some(id);
         self.place(overlay, None, None);
     }
 
     /// Its picture, painted when what it shows changed: lit under a laser (`hover`), `left` of its time.
-    pub(in crate::overlay) fn paint(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, hover: bool, left: f32) {
+    pub(in crate::overlay) fn paint(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, face: Face, hover: bool, left: f32) {
         if !self.visible {
             return;
         }
-        let look = (hover, orbiters_i18n::language(), (left.clamp(0.0, 1.0) * STEPS).ceil() as u32);
+        let look = (face, hover, orbiters_i18n::language(), (left.clamp(0.0, 1.0) * STEPS).ceil() as u32);
         if self.drawn == Some(look) {
             return;
         }
         let first = self.drawn.is_none();
         for _ in 0..if first { 2 } else { 1 } {
-            self.canvas.paint(0.0, |p| paint_vr(p, hover, left));
+            self.canvas.paint(0.0, |p| match face {
+                Face::Talk => paint_vr(p, hover, left),
+                Face::KeepOpen { seconds } => crate::window_rest::paint_band(p, hover, left, seconds),
+            });
         }
         let changed = if first { Some([0, 0, VR_PX[0], VR_PX[1]]) } else { self.canvas.damage() };
         if let Some(changed) = changed {
@@ -110,6 +126,10 @@ mod tests {
             orbiters_i18n::in_language(language, || {
                 for _ in 0..2 {
                     canvas.paint(0.0, |p| paint_vr(p, true, 0.5));
+                }
+                assert!(canvas.pixels().iter().any(|&b| b != 0), "{language:?}: something was painted");
+                for _ in 0..2 {
+                    canvas.paint(0.0, |p| crate::window_rest::paint_band(p, false, 0.5, 4));
                 }
             });
             assert!(canvas.pixels().iter().any(|&b| b != 0), "{language:?}: something was painted");

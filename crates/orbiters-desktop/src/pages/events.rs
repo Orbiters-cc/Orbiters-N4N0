@@ -1639,6 +1639,15 @@ const CARD_BODY: f32 = 124.0;
 
 impl State {
     pub fn busy(&self) -> bool {
+        self.busy_now()
+    }
+
+    /// An event's or a picture's window is open (`crate::window_rest`).
+    pub fn holds(&self) -> bool {
+        self.window.is_some() || self.picture.is_some()
+    }
+
+    fn busy_now(&self) -> bool {
         self.list.running() || self.pictures.as_ref().is_some_and(|p| p.loading()) || self.window.as_ref().is_some_and(Window::loading)
     }
 

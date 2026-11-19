@@ -33,6 +33,9 @@ pub struct Settings {
     pub consent_acknowledged: bool,
     /// Reduce motion in the interface.
     pub reduce_motion: bool,
+    /// The window minimised for long while VRChat runs closes to the tray to give its memory back, after a countdown
+    /// with Keep open (Enzo's decision of 2026-11-19): on unless turned off in Settings.
+    pub close_minimized_window: bool,
     /// Show Orbiters in SteamVR's dashboard while SteamVR runs.
     pub steamvr_overlay: bool,
     /// N4N0, the Orbiters companion on the avatar.
@@ -801,6 +804,7 @@ impl Default for Settings {
             split_on_world_change: true,
             consent_acknowledged: false,
             reduce_motion: false,
+            close_minimized_window: true,
             steamvr_overlay: true,
             n4n0: N4n0Settings::default(),
             world_performance: false,

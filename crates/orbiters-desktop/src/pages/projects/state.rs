@@ -468,6 +468,15 @@ pub(super) fn server(cx: &Cx) -> Server {
 }
 impl State {
     pub fn busy(&self) -> bool {
+        self.busy_now()
+    }
+
+    /// A dialog of the page is open (`crate::window_rest`).
+    pub fn holds(&self) -> bool {
+        self.modal.is_some()
+    }
+
+    fn busy_now(&self) -> bool {
         self.scan_rx.is_some() || self.view_job.running() || self.thumb_job.running()
     }
     /// Looking for projects on the computer.

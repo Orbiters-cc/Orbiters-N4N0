@@ -141,13 +141,19 @@ impl MouseSurfaces {
     }
 }
 
+/// The top bit of the band's id for the window's offers ([`crate::window_rest`]): they and "Talk with N4N0?" both count
+/// from 1.
+const REST_BIT: u64 = 1 << 63;
+
 pub struct Floating {
     panel: Panel,
     watch: Watch,
     /// The menu mismatch strip (none when SteamVR would not make its overlay).
     strip: Option<strip::Strip>,
-    /// "Talk with N4N0?" (none when SteamVR would not make its overlay).
+    /// "Talk with N4N0?", or the window's "will minimize to save memory" (none when SteamVR would not make its overlay).
     prompt: Option<prompt::Prompt>,
+    /// The window's offer to close the band last told the service it shows.
+    rest_said: Option<u64>,
     lasers: laser::Lasers,
     input: Interaction,
     mouse: MouseSurfaces,
@@ -169,6 +175,7 @@ impl Floating {
             watch: Watch::new(overlay, key)?,
             strip: strip::Strip::new(overlay, key).map_err(|e| eprintln!("{e}")).ok(),
             prompt: prompt::Prompt::new(overlay, key).map_err(|e| eprintln!("{e}")).ok(),
+            rest_said: None,
             lasers: laser::Lasers::new(overlay, key)?,
             input: Interaction::default(),
             mouse: MouseSurfaces::default(),
@@ -218,7 +225,11 @@ impl Floating {
         // "Talk with N4N0?", while the wake word heard during a call has it up.
         let now_ms = crate::wake_offer::now_ms();
         let offer = crate::wake_offer::up(cx.snap.n4n0.voice.wake_offer, now_ms).filter(|_| self.prompt.is_some());
-        if !settings.watch && !strip_on && offer.is_none() && !self.panel.is_shown() && !asked && cx.menu.is_empty() {
+        // Or, the band free, "Orbiters - N4N0 will minimize to save memory" with Keep open (`crate::window_rest`).
+        let rest = cx.snap.window_rest.offer.filter(|o| offer.is_none() && self.prompt.is_some() && cx.snap.window_rest.kept != Some(o.id));
+        // The band's ids: a wake offer's, or a rest offer's with the top bit (both count from 1).
+        let band = offer.map(|o| o.id).or(rest.map(|o| o.id | REST_BIT));
+        if !settings.watch && !strip_on && band.is_none() && !self.panel.is_shown() && !asked && cx.menu.is_empty() {
             if !self.resting {
                 self.rest(cx.overlay, cx.presenter, state, cx.backend);
             }
@@ -259,7 +270,14 @@ impl Floating {
             .flatten();
         let strip = self.strip.as_mut().and_then(|s| s.place(cx.overlay, strip_at, head.as_ref()));
         // Before the eyes, unless SteamVR's dashboard has the controllers.
-        let prompt = self.prompt.as_mut().and_then(|p| p.place(cx.overlay, offer.filter(|_| !cx.dashboard), head.as_ref()));
+        let prompt = self.prompt.as_mut().and_then(|p| p.place(cx.overlay, band.filter(|_| !cx.dashboard), head.as_ref()));
+        // The window counts down only once the band is before the eyes.
+        if let (Some(o), Some(p)) = (rest, self.prompt.as_ref()) {
+            if p.showing(o.id | REST_BIT) && self.rest_said != Some(o.id) {
+                self.rest_said = Some(o.id);
+                cx.backend.window_rest_shown(o.id);
+            }
+        }
 
         // Who points at what.
         let panel_targets = self.panel.targets();
@@ -335,7 +353,15 @@ impl Floating {
             clicked = true;
             cx.backend.n4n0(crate::ipc::N4n0Command::WakeOffer { accept: true });
             if let Some(p) = self.prompt.as_mut() {
-                p.pressed(cx.overlay, offer);
+                p.pressed(cx.overlay, offer.id);
+            }
+        }
+        // Keep open: the window stays.
+        if let Some(o) = rest.filter(|_| outcome.prompt_press) {
+            clicked = true;
+            cx.backend.keep_window_open(o.id);
+            if let Some(p) = self.prompt.as_mut() {
+                p.pressed(cx.overlay, o.id | REST_BIT);
             }
         }
         // The bar's buttons.
@@ -373,7 +399,9 @@ impl Floating {
             s.paint(cx.overlay, cx.presenter, outcome.strip_hover.and_then(|uv| strip::row_at(uv[1])), now);
         }
         if let (Some(p), Some(offer)) = (self.prompt.as_mut(), offer) {
-            p.paint(cx.overlay, cx.presenter, outcome.prompt_hover, offer.left(now_ms));
+            p.paint(cx.overlay, cx.presenter, prompt::Face::Talk, outcome.prompt_hover, offer.left(now_ms));
+        } else if let (Some(p), Some(o)) = (self.prompt.as_mut(), rest) {
+            p.paint(cx.overlay, cx.presenter, prompt::Face::KeepOpen { seconds: o.seconds(now_ms) }, outcome.prompt_hover, o.left(now_ms));
         }
         turn.clicked = clicked;
         turn

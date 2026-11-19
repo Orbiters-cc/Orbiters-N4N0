@@ -91,6 +91,10 @@ pub fn route(remote: bool, running: &[u32], bridge: &Bridge, mut side_by_args: i
 
 /// Takes the person to `world`'s `instance`: the way taken, or why there is none (words for the page).
 pub fn go(travel: &dyn Travel, remote: bool, bridge: &Bridge, world: &str, instance: &str) -> Result<Went, GoFailure> {
+    // Ids come from the network: only VRChat's own grammar reaches the pipe, the link or `launch.exe`.
+    if !orbiters_core::vrchat_launch::is_destination(world, instance) {
+        return Err(GoFailure::BadDestination);
+    }
     let running = travel.running();
     let link = link(world, instance);
     match route(remote, &running, bridge, |p| travel.own_osc_ports(p)) {
@@ -116,6 +120,8 @@ pub enum GoFailure {
     BridgeBusy,
     /// VRChat could not be started, in the launcher's words.
     Start(String),
+    /// The world or instance id is not one of VRChat's: nothing was done.
+    BadDestination,
 }
 
 /// This computer.
@@ -298,6 +304,18 @@ pub(crate) mod tests {
         assert_eq!(go(&pc, false, &none(), W, I), Err(GoFailure::Invite(Detour::LinkRefused)));
         let pc = Fake { running: vec![10], server: Some(10), pipe_breaks: true, ..Default::default() };
         assert_eq!(go(&pc, false, &none(), W, I), Err(GoFailure::Invite(Detour::LinkRefused)));
+    }
+
+    #[test]
+    fn an_id_outside_vrchats_grammar_never_reaches_the_pipe_or_launch_exe() {
+        for (world, instance) in [(W, "1&shortName=x"), (W, "1 --profile=3"), (W, "1~region(\"eu\")"), ("wrld_x", "1")] {
+            let pc = Fake { running: vec![10], server: Some(10), ..Default::default() };
+            assert_eq!(go(&pc, false, &none(), world, instance), Err(GoFailure::BadDestination));
+            assert!(pc.written.lock().unwrap().is_empty());
+            let pc = Fake::default();
+            assert_eq!(go(&pc, false, &none(), world, instance), Err(GoFailure::BadDestination), "nothing started");
+            assert!(pc.started.lock().unwrap().is_empty());
+        }
     }
 
     #[test]

@@ -13,6 +13,7 @@ struct Pretend {
     running: Mutex<Vec<(u32, bool)>>,
     installed: bool,
     started: Mutex<Vec<Vec<String>>>,
+    window: Mutex<Option<SavedWindow>>,
 }
 impl Machine for Pretend {
     fn running(&self) -> Vec<(u32, bool)> {
@@ -24,6 +25,9 @@ impl Machine for Pretend {
     fn start(&self, args: &[String]) -> Result<(), String> {
         self.started.lock().unwrap().push(args.to_vec());
         Ok(())
+    }
+    fn saved_window(&self) -> Option<SavedWindow> {
+        *self.window.lock().unwrap()
     }
 }
 
@@ -206,4 +210,62 @@ fn failed_reads_wait_longer_and_longer_and_respect_vrchats_own_wait() {
     assert_eq!(secs, [30, 60, 120, 240, 480, 600, 600], "neither every tick nor half an hour");
     assert!(retry_wait(1, &e, 0) >= Duration::from_millis(22_500) && retry_wait(1, &e, u16::MAX) < Duration::from_millis(37_500));
     assert_eq!(retry_wait(1, &Error::RateLimited(Duration::from_secs(90)), 32768), Duration::from_secs(90));
+}
+
+#[test]
+fn a_second_play_while_vrchat_starts_starts_nothing() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    assert_eq!(c.launcher_do(Action::Play { mode: LaunchMode::Vr, destination: None }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    // Steam and Easy Anti-Cheat take their time: no VRChat process yet.
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Vr, destination: None }), Some(Notice::Error(_))));
+    let place = launcher_feed::place(&format!("{W}:1~region(eu)"), "").unwrap();
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place) }), Some(Notice::Error(_))));
+    assert_eq!(machine.started.lock().unwrap().len(), 1, "one start");
+    // Two at the same moment, on their own threads: still one.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    let threads: Vec<_> = (0..4).map(|_| { let c = c.clone(); std::thread::spawn(move || c.launcher_do(Action::Play { mode: LaunchMode::Vr, destination: None })) }).collect();
+    threads.into_iter().for_each(|t| { t.join().unwrap(); });
+    assert_eq!(machine.started.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_destination_outside_vrchats_grammar_starts_nothing() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    for instance in ["1&shortName=x", "1 --profile=3", "1~region(\"eu\")"] {
+        let place = Place { world_id: W.into(), world_name: String::new(), world_picture: String::new(), instance_id: instance.into(), access: orbiters_core::launcher::InstanceAccess::Public, region: "eu".into() };
+        assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Vr, destination: Some(place) }), Some(Notice::Error(_))), "{instance}");
+    }
+    assert!(machine.started.lock().unwrap().is_empty());
+}
+
+#[test]
+fn desktop_after_vr_gets_the_window_vrchat_had_before() {
+    let normal = SavedWindow { width: 1920, height: 1080, mode: 1 };
+    let machine = Arc::new(Pretend { installed: true, window: Mutex::new(Some(normal)), ..Default::default() });
+    let c = controller(machine.clone());
+    c.launcher_do(Action::Play { mode: LaunchMode::Vr, destination: None });
+    assert_eq!(c.view().settings.launch.desktop_window, Some(normal), "kept before the tiny window replaces it");
+    // VRChat quit; its saved window is now the tiny one.
+    *c.launcher_started.lock().unwrap() = None;
+    *machine.window.lock().unwrap() = Some(SavedWindow { width: 100, height: 100, mode: 3 });
+    c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None });
+    let args = machine.started.lock().unwrap()[1].clone();
+    let at = args.iter().position(|a| a == "-screen-width").expect("a size is asked for");
+    assert_eq!(args[at..at + 6], ["-screen-width", "1920", "-screen-height", "1080", "-screen-fullscreen", "1"]);
+    // A normal saved window: Desktop passes nothing.
+    *c.launcher_started.lock().unwrap() = None;
+    *machine.window.lock().unwrap() = Some(normal);
+    c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None });
+    assert!(!machine.started.lock().unwrap()[2].contains(&"-screen-width".to_string()));
+}
+
+#[test]
+fn play_goes_through_steam_only_when_steam_has_vrchat() {
+    assert_eq!(route(true, true), Route::Steam);
+    assert_eq!(route(true, false), Route::Steam);
+    assert_eq!(route(false, true), Route::Launcher, "the Meta store's VRChat beside a Steam without it");
+    assert_eq!(route(false, false), Route::NotInstalled);
 }

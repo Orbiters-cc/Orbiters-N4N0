@@ -12,6 +12,7 @@ use super::{Controller, Shared};
 use orbiters_core::launcher::{Action, Game, LaunchMode, LauncherState, Notice, Place, Possible, Profile, SentKind, Source};
 use orbiters_core::launcher_feed::{self, Cooldowns, Decorations};
 use orbiters_core::vrchat_api::{Client, Error};
+use orbiters_core::vrchat_launch::{desktop_window, SavedWindow};
 use orbiters_i18n::tr;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +22,8 @@ use std::time::{Duration, Instant};
 const LOCAL_EVERY: Duration = Duration::from_secs(120);
 const FULL_EVERY: Duration = Duration::from_secs(30 * 60);
 const GAME_EVERY: Duration = Duration::from_secs(5);
+/// A start just asked for counts as "starting" this long (Steam, then Easy Anti-Cheat, then VRChat's process).
+const STARTING_FOR: Duration = Duration::from_secs(60);
 /// After a failed read of VRChat: the first try again, doubling up to the longest (with jitter), never every tick.
 const RETRY_FIRST: Duration = Duration::from_secs(30);
 const RETRY_LONGEST: Duration = Duration::from_secs(10 * 60);
@@ -34,36 +37,120 @@ pub trait Machine: Send + Sync {
     fn installed(&self) -> bool;
     /// Starts VRChat with these arguments (after `-applaunch 438100`).
     fn start(&self, args: &[String]) -> Result<(), String>;
+    /// The desktop window VRChat saved for its next start (Unity's `Screenmanager` values): width, height, fullscreen mode.
+    fn saved_window(&self) -> Option<SavedWindow> {
+        None
+    }
 }
 
-pub struct RealMachine;
+/// How VRChat is started on this computer: through Steam only when Steam's library really holds it; else through the
+/// launcher VRChat registers for its links (the Meta store's VRChat, or one installed outside Steam).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    Steam,
+    Launcher,
+    NotInstalled,
+}
+
+pub fn route(steam_has_vrchat: bool, launcher_registered: bool) -> Route {
+    if steam_has_vrchat {
+        Route::Steam
+    } else if launcher_registered {
+        Route::Launcher
+    } else {
+        Route::NotInstalled
+    }
+}
+
+#[derive(Default)]
+pub struct RealMachine {
+    /// Each VRChat's Desktop mode, read once from its command line.
+    desktop: Mutex<HashMap<u32, bool>>,
+    /// The route, kept ten minutes (it reads the registry and Steam's library file).
+    route: Mutex<Option<(Instant, Route)>>,
+}
+
+const ROUTE_FOR: Duration = Duration::from_secs(10 * 60);
+
+impl RealMachine {
+    fn route_now() -> Route {
+        let steam_has_vrchat = crate::bridge::win::steam_exe().and_then(|exe| exe.parent().map(|d| d.to_path_buf())).and_then(|steam| orbiters_core::vrchat_launch::vrchat_dir(&steam)).is_some();
+        route(steam_has_vrchat, crate::bridge::win::vrchat_launcher().is_some())
+    }
+
+    fn route(&self, fresh: bool) -> Route {
+        let mut kept = self.route.lock().unwrap();
+        match *kept {
+            Some((at, r)) if !fresh && at.elapsed() < ROUTE_FOR => r,
+            _ => {
+                let r = Self::route_now();
+                *kept = Some((Instant::now(), r));
+                r
+            }
+        }
+    }
+}
 
 impl Machine for RealMachine {
     fn running(&self) -> Vec<(u32, bool)> {
+        // Names only (no process is opened for them); the command line is read for VRChat's processes alone, once each.
         let mut system = sysinfo::System::new();
-        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::OnlyIfNotSet));
-        system
-            .processes()
-            .values()
-            .filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat"))
-            .map(|p| (p.pid().as_u32(), p.cmd().iter().any(|a| a.to_string_lossy() == "--no-vr")))
-            .collect()
+        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
+        let pids: Vec<sysinfo::Pid> = system.processes().values().filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat")).map(|p| p.pid()).collect();
+        let mut desktop = self.desktop.lock().unwrap();
+        desktop.retain(|pid, _| pids.iter().any(|p| p.as_u32() == *pid));
+        let unknown: Vec<sysinfo::Pid> = pids.iter().copied().filter(|p| !desktop.contains_key(&p.as_u32())).collect();
+        if !unknown.is_empty() {
+            system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&unknown), true, sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always));
+            for pid in unknown {
+                let no_vr = system.process(pid).is_some_and(|p| p.cmd().iter().any(|a| a.to_string_lossy() == "--no-vr"));
+                desktop.insert(pid.as_u32(), no_vr);
+            }
+        }
+        pids.iter().map(|p| (p.as_u32(), desktop.get(&p.as_u32()).copied().unwrap_or(false))).collect()
     }
 
     fn installed(&self) -> bool {
-        crate::bridge::win::steam_exe().and_then(|exe| exe.parent().map(|d| d.to_path_buf())).and_then(|steam| orbiters_core::vrchat_launch::vrchat_dir(&steam)).is_some()
-            || crate::bridge::win::vrchat_launcher().is_some()
+        self.route(false) != Route::NotInstalled
     }
 
     fn start(&self, args: &[String]) -> Result<(), String> {
-        // Through Steam as a person does; without Steam, VRChat's own launcher with the link first (as it registers
-        // itself), the options after: never reordered, `-screen-fullscreen 0` stays a pair.
-        if crate::bridge::win::steam_exe().is_some() {
-            crate::bridge::win::start_vrchat(args).map_err(|f| f.message)
-        } else {
-            crate::bridge::win::start_vrchat_beside(args).map_err(|f| f.message)
+        // Through Steam as a person does when Steam has VRChat; else VRChat's own launcher with the link first (as it
+        // registers itself), the options after: never reordered, `-screen-fullscreen 0` stays a pair.
+        match self.route(true) {
+            Route::Steam => crate::bridge::win::start_vrchat(args).map_err(|f| f.message),
+            Route::Launcher => crate::bridge::win::start_vrchat_beside(args).map_err(|f| f.message),
+            Route::NotInstalled => Err(tr("VRChat was not found on this computer. Install it from Steam, or start it once.").into()),
         }
     }
+
+    fn saved_window(&self) -> Option<SavedWindow> {
+        saved_window()
+    }
+}
+
+/// VRChat's saved window, read from its registry key (read only; only looked at while no VRChat runs).
+#[cfg(windows)]
+fn saved_window() -> Option<SavedWindow> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let dword = |name: &str| {
+        let mut value = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        // SAFETY: a u32 and its size are passed; the names live for the call.
+        let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, &HSTRING::from(r"Software\VRChat\VRChat"), &HSTRING::from(name), RRF_RT_REG_DWORD, None, Some(&mut value as *mut u32 as *mut _), Some(&mut size)) };
+        status.is_ok().then_some(value)
+    };
+    Some(SavedWindow {
+        width: dword("Screenmanager Resolution Width_h182942802")?,
+        height: dword("Screenmanager Resolution Height_h2627697771")?,
+        mode: dword("Screenmanager Fullscreen mode_h3630240806").unwrap_or(3),
+    })
+}
+
+#[cfg(not(windows))]
+fn saved_window() -> Option<SavedWindow> {
+    None
 }
 
 /// What the launcher keeps besides the published state.
@@ -104,7 +191,7 @@ impl Default for Runtime {
             pipeline: None,
             resync: Arc::new(AtomicBool::new(false)),
             game_checked: None,
-            machine: Arc::new(RealMachine),
+            machine: Arc::new(RealMachine::default()),
         }
     }
 }
@@ -310,30 +397,37 @@ impl Controller {
     }
 
     fn launcher_game(&self, machine: &dyn Machine) {
-        let here = orbiters_core::osc::VRCHAT_RUNS_HERE && !self.view().vrchat.remote;
-        let running = if here { machine.running() } else { Vec::new() };
+        let view = self.view();
+        let here = orbiters_core::osc::VRCHAT_RUNS_HERE && !view.vrchat.remote;
+        // The watchers list every VRChat every 3 s already: the processes are looked at here only when they see one, or
+        // while a start is under way.
+        let look = here && (!view.vrchat.runs.is_empty() || view.vrchat.running || matches!(view.launcher.game, Game::Starting(_) | Game::Running(_)));
+        let running = if look { machine.running() } else { Vec::new() };
         let game = match running.first() {
             Some((_, desktop)) => Game::Running(if *desktop { LaunchMode::Desktop } else { LaunchMode::Vr }),
             None if !here => Game::NotRunning,
-            None => match self.view().launcher.game {
+            None => match view.launcher.game {
                 // A start just asked for is "starting" until VRChat shows up (or a minute passes).
                 Game::Starting(mode) if self.launcher_started_recently() => Game::Starting(mode),
                 _ if !machine.installed() => Game::NotInstalled,
                 _ => Game::NotRunning,
             },
         };
-        self.update(|s| {
+        // Published only when something changed (this runs every few seconds).
+        self.update_if(|s| {
+            let changed = s.launcher.game != game || s.launcher.possible.play != here;
             if s.launcher.game != game {
                 s.launcher.game = game;
             }
             if s.launcher.possible.play != here {
                 s.launcher.possible.play = here;
             }
+            changed
         });
     }
 
     fn launcher_started_recently(&self) -> bool {
-        self.launcher_started.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_secs(60))
+        self.launcher_started.lock().unwrap().is_some_and(|t| t.elapsed() < STARTING_FOR)
     }
 
     fn launcher_read_local(&self) {
@@ -549,10 +643,18 @@ impl Controller {
         if !self.view().launcher.possible.play {
             return Notice::Error(tr("VRChat runs on another device: Play works on the computer that runs it.").into());
         }
+        // Ids come from the network (a friend's location, an invite) or over IPC: only VRChat's own grammar goes on.
+        if destination.as_ref().is_some_and(|p| !orbiters_core::vrchat_launch::is_destination(&p.world_id, &p.instance_id)) {
+            return Notice::Error(tr("VRChat does not know this world.").into());
+        }
         let machine = self.launcher.lock().unwrap().machine.clone();
+        // One start at a time: held from the look at the running VRChats to the start, so that two presses (or a press
+        // and an invite's Accept, on their own threads) never start two; and none while one is starting.
+        let mut started = self.launcher_started.lock().unwrap();
         let running = machine.running();
         let settings = self.view().settings.launch.clone();
         if !running.is_empty() {
+            drop(started);
             // Never a second VRChat: the running one goes there.
             let Some(place) = destination else { return Notice::Error(tr("VRChat is already running.").into()) };
             let travel: Arc<dyn super::travel::Travel> = self.travel.lock().unwrap().clone().unwrap_or_else(|| Arc::new(super::travel::Real));
@@ -570,16 +672,37 @@ impl Controller {
                 Err(super::travel::GoFailure::Start(words)) => Notice::Error(tr!("VRChat could not be started: {reason}", reason = words)),
             };
         }
+        if started.is_some_and(|t| t.elapsed() < STARTING_FOR) {
+            return Notice::Error(tr("Starting VRChat…").into());
+        }
         if !machine.installed() {
             return Notice::Error(tr("VRChat was not found on this computer. Install it from Steam, or start it once.").into());
         }
-        let args = orbiters_core::vrchat_launch::arguments(mode, &settings, destination.as_ref().map(|p| (p.world_id.as_str(), p.instance_id.as_str())));
+        let mut args = orbiters_core::vrchat_launch::arguments(mode, &settings, destination.as_ref().map(|p| (p.world_id.as_str(), p.instance_id.as_str())));
+        // The window VRChat saved (read while none runs): kept before a VR start shrinks it, given back to Desktop.
+        let saved = machine.saved_window();
+        let mut keep_window = None;
+        match mode {
+            LaunchMode::Desktop => {
+                let extra = desktop_window(saved, settings.desktop_window);
+                let link = args.iter().position(|a| a.starts_with("vrchat://")).unwrap_or(args.len());
+                args.splice(link..link, extra);
+            }
+            LaunchMode::Vr if settings.performance && settings.small_window_in_vr => keep_window = saved.filter(SavedWindow::normal).filter(|w| settings.desktop_window != Some(*w)),
+            LaunchMode::Vr => {}
+        }
         match machine.start(&args) {
             Ok(()) => {
-                *self.launcher_started.lock().unwrap() = Some(Instant::now());
+                *started = Some(Instant::now());
+                drop(started);
                 self.update(|s| s.launcher.game = Game::Starting(mode));
-                if settings.last_mode != mode {
-                    self.update_settings(|s| s.launch.last_mode = mode);
+                if settings.last_mode != mode || keep_window.is_some() {
+                    self.update_settings(|s| {
+                        s.launch.last_mode = mode;
+                        if keep_window.is_some() {
+                            s.launch.desktop_window = keep_window;
+                        }
+                    });
                 }
                 Notice::Sent { to: destination.map(|p| p.world_id).unwrap_or_default(), action: SentKind::Launch }
             }

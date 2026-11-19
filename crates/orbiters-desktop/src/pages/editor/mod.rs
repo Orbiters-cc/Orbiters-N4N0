@@ -932,6 +932,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Verifier (night3, point 3): a picture of Orbiters whose file cannot be read is an error; the file is never
+    /// deleted (its path can come from a saved edit's file and name anything).
+    #[test]
+    fn an_unreadable_picture_is_never_deleted() {
+        use files::{Remote, RemoteKind};
+        let ctx = egui::Context::default();
+        let path = std::env::temp_dir().join(format!("orbiters-editor-unreadable-{}.img", std::process::id()));
+        std::fs::write(&path, b"not a picture").unwrap();
+        let mut source = Source::remote(Remote { kind: RemoteKind::Gallery, id: 12, ..Default::default() });
+        source.picture = path.clone();
+        let mut e = Editor::open(&ctx, source, "World");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while e.loading.is_some() {
+            assert!(std::time::Instant::now() < until, "the reading never ended");
+            e.poll(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(e.error.is_some(), "it says the picture could not be read");
+        assert!(path.is_file(), "the file it was given is still there");
+        let _ = std::fs::remove_file(path);
+    }
+
     /// Verifier (night3, points 2 and 4): a save marks as saved the edit it wrote, not the one on screen when it ends
     /// (edited meanwhile, Back asks again); a save whose worker panicked ends as a failed save (Save works again); a
     /// close armed before a save does not stand for the edit after it.

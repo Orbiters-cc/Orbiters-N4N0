@@ -2453,6 +2453,50 @@ fn shown(text: &str) -> String {
 }
 
 /// `text` cut to `cols` characters, ending in "…" when cut.
+/// The cells a character takes where a cell is a Latin letter's width: two for full-width ones (CJK, Hangul, full-width
+/// forms, emoji).
+pub fn cell_width(c: char) -> usize {
+    match c as u32 {
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F
+        | 0x1F900..=0x1F9FF
+        | 0x20000..=0x3FFFD => 2,
+        _ => 1,
+    }
+}
+
+/// [`ellipsis`] by cells ([`cell_width`]): the same cut as it for Latin text.
+pub fn ellipsis_cells(text: &str, cols: usize) -> String {
+    let width: usize = text.chars().map(cell_width).sum();
+    if width <= cols {
+        return text.to_string();
+    }
+    if cols == 0 {
+        return String::new();
+    }
+    let mut used = 0;
+    let mut cut: String = text
+        .chars()
+        .take_while(|c| {
+            used += cell_width(*c);
+            used < cols
+        })
+        .collect();
+    cut = cut.trim_end().to_string();
+    cut.push('…');
+    cut
+}
+
 pub fn ellipsis(text: &str, cols: usize) -> String {
     let count = text.chars().count();
     if count <= cols {
@@ -2473,16 +2517,51 @@ pub fn slot_text(menu: &Menu, slot: &Slot) -> String {
     slot_text_for(menu, slot, false)
 }
 
+/// What draws a slot's text: the avatar's screen and its review picture, from the shader's atlas of 256 glyphs (Latin
+/// and Cyrillic letters, in English where the app is in Japanese), or the SteamVR menu, with the app's fonts, which
+/// have every script (MENU-6: names in Japanese, Chinese, Korean… were `?????` there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glyphs {
+    Atlas,
+    Fonts,
+}
+
 /// What a slot shows, cut to its cells, to the owner or to everyone else (`public`, see [`text_for`]).
 pub fn slot_text_for(menu: &Menu, slot: &Slot, public: bool) -> String {
-    // The avatar's atlas has no Japanese: what a slot shows is in Latin letters (`latin`).
-    let text = orbiters_contracts::n4n0::panel_text(&crate::text::fold_more(&crate::text::latin(|| text_for(menu, slot.content, public)))).replace('\n', " ");
+    slot_text_with(menu, slot, public, Glyphs::Atlas)
+}
+
+/// The same, drawn with `glyphs`: with the fonts, in the app's language and every letter kept, cut where its cells are
+/// (a full-width character takes two).
+pub fn slot_text_with(menu: &Menu, slot: &Slot, public: bool, glyphs: Glyphs) -> String {
+    let text = match glyphs {
+        // The avatar's atlas has no Japanese: what a slot shows is in Latin letters (`latin`).
+        Glyphs::Atlas => orbiters_contracts::n4n0::panel_text(&crate::text::fold_more(&crate::text::latin(|| text_for(menu, slot.content, public)))).replace('\n', " "),
+        Glyphs::Fonts => text_for(menu, slot.content, public).replace('\n', " "),
+    };
+    let ellipsis = |text: &str, cols: usize| match glyphs {
+        Glyphs::Atlas => ellipsis(text, cols),
+        Glyphs::Fonts => ellipsis_cells(text, cols),
+    };
     match slot.content {
         // The field keeps the end in view, with the caret.
         Content::Query => {
             let shown: Vec<char> = text.chars().collect();
             let room = slot.cols as usize - 1;
-            let start = shown.len().saturating_sub(room);
+            let start = match glyphs {
+                Glyphs::Atlas => shown.len().saturating_sub(room),
+                // The end that fits its cells.
+                Glyphs::Fonts => {
+                    let mut used = 0;
+                    shown
+                        .iter()
+                        .rposition(|c| {
+                            used += cell_width(*c);
+                            used > room
+                        })
+                        .map_or(0, |i| i + 1)
+                }
+            };
             shown[start..].iter().collect::<String>() + "|"
         }
         // The text being typed keeps its spaces (its lines are cut where the caret falls).
@@ -2647,6 +2726,27 @@ pub fn timeline_lit(media: &super::Media, i: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MENU-6: the SteamVR menu draws names with the app's fonts, whatever their script; the avatar's screen keeps its
+    /// atlas' letters. Both cut a Latin name at the same place.
+    #[test]
+    fn the_overlay_draws_every_script_and_the_screen_its_atlas() {
+        let mut menu = crate::menu::Menu { pages: crate::menu::Pages::Mirror, ..Default::default() };
+        menu.open();
+        menu.page = crate::menu::Page::Call;
+        menu.calls_ready = true;
+        let long = "Bartholomew Featherstonehaugh the Third of Many".to_string();
+        menu.set_contacts(vec![crate::menu::Contact { id: "a".into(), name: "たろう".into() }, crate::menu::Contact { id: "b".into(), name: long.clone() }], true, "");
+        let layout = cached(ScreenPage::of(&menu));
+        let slot = |i: u8| layout.slots.iter().find(|s| s.content == Content::ContactName(i)).expect("a contact's name");
+        assert!(!slot_text(&menu, slot(0)).contains('た'), "the atlas has no kana: {}", slot_text(&menu, slot(0)));
+        assert_eq!(slot_text_with(&menu, slot(0), false, Glyphs::Fonts), "たろう");
+        assert_eq!(slot_text_with(&menu, slot(1), false, Glyphs::Fonts), slot_text(&menu, slot(1)), "Latin text is cut the same");
+        // Full-width letters take two cells each.
+        assert_eq!(ellipsis_cells("日本語のタイトル", 9), "日本語の…");
+        assert_eq!(ellipsis_cells("abc", 3), "abc");
+        assert_eq!(cell_width('a') + cell_width('日'), 3);
+    }
 
     /// From screen version 15 the page has the two pictures as buttons, a press taking that picture, and no line to press:
     /// a press anywhere on the line's old place is nothing. Older screens keep the picture that they have.

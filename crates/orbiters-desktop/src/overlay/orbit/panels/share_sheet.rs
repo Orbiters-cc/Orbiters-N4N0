@@ -213,11 +213,24 @@ fn button_back(p: &Painter, rect: Rect, hovered: bool, pressed: bool, primary: b
 fn face(p: &Painter, rect: Rect, icon: &str, label: &str, under: Option<&str>, ink: Color32, under_ink: Color32) {
     // Smaller before it is cut: in the desktop's narrow column a long label ("Oui, partager publiquement") stays whole.
     let room = rect.width() - 48.0;
-    let font = [15.0, 13.5, 12.5]
-        .into_iter()
-        .map(|size| look::font(size, weight::BOLD))
-        .find(|f| p.layout_no_wrap(label.to_string(), f.clone(), ink).size().x <= room)
-        .unwrap_or_else(|| look::font(12.5, weight::BOLD));
+    let fits = |size: f32| p.layout_no_wrap(label.to_string(), look::font(size, weight::BOLD), ink).size().x <= room;
+    let Some(size) = [15.0, 13.5].into_iter().find(|s| fits(*s)) else {
+        // Still too long: on two lines, whole (the icon before the first), the smaller line under them.
+        let font = look::font(13.0, weight::BOLD);
+        let galley = p.layout(label.to_string(), font, ink, room);
+        let lines = galley.size().y.min(34.0);
+        let under_h = if under.is_some() { 15.0 } else { 0.0 };
+        let top = rect.center().y - (lines + under_h) / 2.0;
+        let left = rect.center().x - (galley.size().x + 26.0) / 2.0;
+        widgets::icon(p, pos2(left + 9.0, top + 9.0), icon, 18.0, ink);
+        p.with_clip_rect(Rect::from_min_size(pos2(left + 26.0, top), vec2(room, 34.0))).galley(pos2(left + 26.0, top), galley, ink);
+        if let Some(under) = under {
+            let small = look::font(12.0, weight::SEMIBOLD);
+            p.text(pos2(rect.center().x, top + lines + 9.0), Align2::CENTER_CENTER, fit(p, under, &small, rect.width() - 20.0), small, under_ink);
+        }
+        return;
+    };
+    let font = look::font(size, weight::BOLD);
     let words = fit(p, label, &font, room);
     let wide = p.layout_no_wrap(words.clone(), font.clone(), ink).size().x + 26.0;
     let from = rect.center().x - wide / 2.0;
@@ -477,6 +490,19 @@ mod tests {
         for pair in column.windows(2) {
             assert!(pair[0].rect.bottom() <= pair[1].rect.top() && pair[1].rect.bottom() <= 268.0, "{pair:?}");
         }
+    }
+
+    /// The row is up only beside the camera in a headset, and not while the demo avatar's button takes its line.
+    #[test]
+    fn the_row_is_away_while_the_demo_avatar_s_button_is_up() {
+        use super::super::{needed, CameraNow, DemoSwitch, Facts};
+        use crate::overlay::orbit::zones::Zone;
+        let up = Facts { camera: CameraNow { share: Some(view()), ..Default::default() }, ..Default::default() };
+        assert!(needed(Zone::CameraShare, &up) && !needed(Zone::CameraShareDesk, &up));
+        let desk = Facts { desktop: true, ..up.clone() };
+        assert!(!needed(Zone::CameraShare, &desk) && needed(Zone::CameraShareDesk, &desk));
+        let no_kit = Facts { no_kit: true, camera: CameraNow { demo: Some(DemoSwitch::Offered), ..up.camera.clone() }, ..up.clone() };
+        assert!(needed(Zone::CameraAct, &no_kit) && !needed(Zone::CameraShare, &no_kit));
     }
 
     /// A row presses its friend, by who they are; Send is off until someone is chosen; arrows only where there is a page.

@@ -1137,7 +1137,11 @@ fn camera_state(name: &str, out: &Path, facts: &Facts, right: bool) -> anyhow::R
         if zone.only_while_needed() && !panels::needed(zone, facts) {
             continue;
         }
-        let units = if right { zones::in_units(zone).mirrored().rect } else { zone.units() };
+        let mut units = if right { zones::in_units(zone).mirrored().rect } else { zone.units() };
+        // As a headset lays them: the caption under the share row while it is up.
+        if zone == Zone::CameraCaption && panels::needed(Zone::CameraShare, facts) {
+            units = units.translate(vec2(0.0, zones::CAPTION_UNDER_SHARE));
+        }
         let rect = egui::Rect::from_min_max(at(units.min.x, units.min.y), at(units.max.x, units.max.y));
         let placed = Placed { zone, rect, center: at(0.0, 0.0), unit: PX };
         let hovered = facts.pointed.and_then(|a| panels::items(zone, units.size(), facts).iter().position(|i| i.action == a));
@@ -1652,7 +1656,7 @@ pub(super) fn explorer_shots(out: &Path) -> anyhow::Result<()> {
         let bgra: Vec<u8> = frame.pixels().flat_map(|p| [p[2], p[1], p[0], 255]).collect();
         let panel = detect::camera_panel_in(&bgra, w, h).ok_or_else(|| anyhow::anyhow!("no camera panel found"))?;
         let desk = Facts { desktop: true, vr_close: false, ..idle.clone() };
-        for (state, view, pointed) in states.iter().filter(|(s, _, _)| ["idle", "confirm", "sending", "done-half", "done-zero-negative", "failed", "limited"].contains(s)) {
+        for (state, view, pointed) in states.iter().filter(|(s, _, _)| !s.starts_with("chooser")) {
             let facts = Facts { camera: CameraNow { share: Some(view.clone()), ..desk.camera.clone() }, pointed: *pointed, ..desk.clone() };
             let mut image = frame.as_raw().clone();
             for placed in zones::camera_on_screen(panel, vec2(w as f32, h as f32)) {

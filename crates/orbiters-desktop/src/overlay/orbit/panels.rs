@@ -826,7 +826,9 @@ pub fn needed(zone: Zone, facts: &Facts) -> bool {
         Zone::CameraScan => camera.qr != CameraQr::Off,
         Zone::CameraWebBar | Zone::CameraWeb => camera.web.is_some(),
         // One of the two places, by where the camera is.
-        Zone::CameraShare => camera.share.is_some() && !facts.desktop,
+        // Not while the demo avatar's button takes the line under VRChat's buttons (an avatar without the kit: no new
+        // picture then; the last one is still in Photos & captures).
+        Zone::CameraShare => camera.share.is_some() && !facts.desktop && !needed(Zone::CameraAct, facts),
         Zone::CameraShareDesk => camera.share.is_some() && facts.desktop,
         // Never with a code's page: they take the same place.
         Zone::CameraChooser => camera.web.is_none() && camera.share.as_ref().is_some_and(|s| s.chooser.is_some()),

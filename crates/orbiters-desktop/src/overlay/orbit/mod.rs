@@ -1942,6 +1942,11 @@ impl Panels {
         away_words(snap, &self.facts.note, self.facts.picture_mode)
     }
 
+    /// The share row is up beside VRChat's camera in a headset: the caption goes under it ([`zones::caption_under_share`]).
+    pub(super) fn share_row_up(&self) -> bool {
+        self.needed(Zone::CameraShare)
+    }
+
     /// Whether a part that shows only while it has something to do has it now ([`Zone::only_while_needed`]).
     fn needed(&self, zone: Zone) -> bool {
         panels::needed(zone, &self.facts)

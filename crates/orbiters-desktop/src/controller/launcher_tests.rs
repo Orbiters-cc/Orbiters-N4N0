@@ -596,7 +596,7 @@ fn a_destination_that_waited_too_long_is_forgotten() {
     let c = mac(machine.clone());
     let (_, calls) = c.test_vrchat(vec![(200, json!({}))]);
     let long_ago = Instant::now().checked_sub(PENDING_FOR + Duration::from_secs(1)).expect("a clock that started more than ten minutes ago");
-    c.launcher.lock().unwrap().pending = Some((place(), long_ago));
+    c.launcher.lock().unwrap().pending = Some((place(), long_ago, Some("usr_test".into())));
     machine.running.lock().unwrap().push((42, true));
     c.launcher_game(machine.as_ref());
     std::thread::sleep(Duration::from_millis(150));

@@ -144,7 +144,9 @@ impl MicMonitor {
     pub fn start(device: Option<String>) -> anyhow::Result<Self> {
         let running = Running::start("mic-monitor", move |shared| {
             let queue = Mutex::new(VecDeque::new());
-            imp::run(device.as_deref(), shared, &mut |samples| queue.lock().unwrap().extend(samples.iter().copied()), &queue, MONITOR_BUFFERING, false);
+            // Bounded here: with the output gone nothing plays it out (and trims it), and the microphone goes on.
+            let most = MONITOR_BUFFERING.keep * 2;
+            imp::run(device.as_deref(), shared, &mut |samples| push_newest(&mut queue.lock().unwrap(), samples, most), &queue, MONITOR_BUFFERING, false);
         })?;
         Ok(Self { running })
     }
@@ -198,6 +200,14 @@ struct Buffering {
 }
 
 const CALL_BUFFERING: Buffering = Buffering { start: RATE as usize * 6 / 100, most: RATE as usize / 5, keep: RATE as usize * 3 / 10 };
+/// Adds `samples` to `queue`, keeping at most `most` of the newest (a slice longer than that adds only its end).
+fn push_newest(queue: &mut VecDeque<f32>, samples: &[f32], most: usize) {
+    let samples = &samples[samples.len().saturating_sub(most)..];
+    let over = (queue.len() + samples.len()).saturating_sub(most);
+    queue.drain(..over.min(queue.len()));
+    queue.extend(samples.iter().copied());
+}
+
 const MONITOR_BUFFERING: Buffering = Buffering { start: RATE as usize / 50, most: RATE as usize * 6 / 100, keep: RATE as usize * 8 / 100 };
 /// What each run dry adds to the target, and what a calm while takes back.
 const GROW: usize = RATE as usize / 50;
@@ -942,6 +952,23 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_monitor_s_queue_stays_bounded_without_an_output_and_keeps_the_newest_sound() {
+        // N4N0-12: the output lost, the microphone went on filling the queue (about 11 MB a minute).
+        let most = MONITOR_BUFFERING.keep * 2;
+        let mut queue = VecDeque::new();
+        for i in 0..60_000 {
+            push_newest(&mut queue, &[i as f32; 480], most);
+            assert!(queue.len() <= most);
+        }
+        assert_eq!(queue.len(), most);
+        assert_eq!(queue.back(), Some(&59_999.0), "the newest kept");
+        // A slice larger than the bound adds only its end.
+        let big: Vec<f32> = (0..most * 3).map(|i| i as f32).collect();
+        push_newest(&mut queue, &big, most);
+        assert_eq!((queue.len(), queue.front().copied(), queue.back().copied()), (most, Some((most * 2) as f32), Some((most * 3 - 1) as f32)));
+    }
 
     #[test]
     fn voices_mix_and_finish() {

@@ -116,7 +116,7 @@ pub fn access(instance: &str) -> (InstanceAccess, String) {
 /// `wrld_…:instance` as a [`Place`]; anything else (`private`, `offline`, `traveling`, empty) is not one.
 pub fn place(location: &str, world_name: &str) -> Option<Place> {
     let (world, instance) = location.split_once(':')?;
-    if !crate::vrchat_log::is_world_id(world) || instance.is_empty() || instance.len() > 512 {
+    if !crate::vrchat_launch::is_destination(world, instance) {
         return None;
     }
     let (access, region) = access(instance);

@@ -19,24 +19,42 @@ fn modified(path: &Path) -> i64 {
     std::fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64)
 }
 
+/// A copy that exists but could not be read now (caught while its app rewrites it, its database busy): the list on
+/// show stays, and the read is tried again soon, instead of the list emptying or switching to the other app's copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Busy;
+
 /// The state from VRCNext's caches in `dir` (`…\VRCNext`), when there are friends in them.
 pub fn vrcnext(dir: &Path) -> Option<LauncherState> {
+    vrcnext_now(dir).ok().flatten()
+}
+
+/// [`vrcnext`], telling "no copy" (`Ok(None)`) from "a copy, not readable now" (`Err(Busy)`).
+pub fn vrcnext_now(dir: &Path) -> Result<Option<LauncherState>, Busy> {
     let caches = dir.join("Caches");
     let file = caches.join("friends_cache.json");
-    let friends: Value = serde_json::from_slice(&std::fs::read(&file).ok()?).ok()?;
+    let bytes = match std::fs::read(&file) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(Busy),
+    };
+    // Half written (VRCNext rewriting it): not "no friends".
+    let friends: Value = serde_json::from_slice(&bytes).map_err(|_| Busy)?;
     let favourites: Value = std::fs::read(caches.join("fav_friends_cache.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
     let mut state = from_vrcnext(&friends, &favourites, modified(&file));
     // The friends VRCNext looked at closely keep VRChat's own addresses of their picture and banner, and the note.
     if let Some(db) = crate::vrchat_accounts::open(&dir.join("VRCNData.db")) {
         if let Ok(mut q) = db.prepare("SELECT user_id, image, profile_banner_url, profile_note FROM user_tracking WHERE profile_is_friend = 1") { // i18n: not shown (SQL)
+            // A NULL column (no banner) leaves that field empty, not the whole row out.
+            let text = |r: &rusqlite::Row, i: usize| r.get::<_, Option<String>>(i).map(Option::unwrap_or_default);
             let rows: Vec<[String; 4]> = q
-                .query_map([], |r| Ok([r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?]))
+                .query_map([], |r| Ok([text(r, 0)?, text(r, 1)?, text(r, 2)?, text(r, 3)?]))
                 .map(|rows| rows.flatten().collect())
                 .unwrap_or_default();
             fill_from_tracking(&mut state, &rows);
         }
     }
-    (!state.friends.is_empty()).then_some(state)
+    Ok((!state.friends.is_empty()).then_some(state))
 }
 
 /// VRCNext's `user_tracking` rows (id, picture, banner, note) fill what its friends cache left empty.
@@ -100,23 +118,32 @@ pub fn from_vrcnext(friends: &Value, favourites: &Value, read_at: i64) -> Launch
 
 /// The state from VRCX's database at `db` for the account it last signed in with.
 pub fn vrcx(db: &Path) -> Option<LauncherState> {
-    let connection = crate::vrchat_accounts::open(db)?;
-    let account = crate::vrchat_accounts::vrcx_account(&connection)?;
+    vrcx_now(db).ok().flatten()
+}
+
+/// [`vrcx`], telling "no database" (`Ok(None)`) from "a database, busy or failing now" (`Err(Busy)`): a query that fails
+/// (SQLITE_BUSY while VRCX writes) no longer drops the notes, pictures or last seen of that round.
+pub fn vrcx_now(db: &Path) -> Result<Option<LauncherState>, Busy> {
+    if !db.is_file() {
+        return Ok(None);
+    }
+    let connection = crate::vrchat_accounts::open(db).ok_or(Busy)?;
+    let _ = connection.busy_timeout(std::time::Duration::from_millis(500));
+    let Some(account) = crate::vrchat_accounts::vrcx_account(&connection) else { return Ok(None) };
     let prefix = crate::vrchat_accounts::vrcx_table_prefix(&account);
-    let rows = |sql: String| -> Vec<Vec<String>> {
-        let Ok(mut q) = connection.prepare(&sql) else { return Vec::new() };
+    let rows = |sql: String| -> Result<Vec<Vec<String>>, Busy> {
+        let mut q = connection.prepare(&sql).map_err(|_| Busy)?;
         let n = q.column_count();
-        q.query_map([], |r| (0..n).map(|i| r.get::<_, Option<String>>(i).map(Option::unwrap_or_default)).collect::<Result<Vec<_>, _>>())
-            .map(|rows| rows.flatten().collect())
-            .unwrap_or_default()
+        let rows = q.query_map([], |r| (0..n).map(|i| r.get::<_, Option<String>>(i).map(Option::unwrap_or_default)).collect::<Result<Vec<_>, _>>()).map_err(|_| Busy)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|_| Busy)
     };
-    let friends = rows(format!("SELECT user_id, display_name, trust_level FROM \"{prefix}_friend_log_current\"")); // i18n: not shown (SQL)
-    let notes = rows(format!("SELECT user_id, note FROM \"{prefix}_notes\"")); // i18n: not shown (SQL)
-    let pictures = rows(format!("SELECT a.user_id, a.current_avatar_thumbnail_image_url FROM \"{prefix}_feed_avatar\" a JOIN (SELECT user_id, MAX(id) AS latest FROM \"{prefix}_feed_avatar\" GROUP BY user_id) b ON a.id = b.latest")); // i18n: not shown (SQL)
-    let seen = rows(format!("SELECT user_id, MAX(created_at) FROM \"{prefix}_feed_online_offline\" GROUP BY user_id")); // i18n: not shown (SQL)
-    let favourites = rows("SELECT user_id, group_name FROM favorite_friend".into()); // i18n: not shown (SQL)
+    let friends = rows(format!("SELECT user_id, display_name, trust_level FROM \"{prefix}_friend_log_current\""))?; // i18n: not shown (SQL)
+    let notes = rows(format!("SELECT user_id, note FROM \"{prefix}_notes\"")).unwrap_or_default(); // i18n: not shown (SQL)
+    let pictures = rows(format!("SELECT a.user_id, a.current_avatar_thumbnail_image_url FROM \"{prefix}_feed_avatar\" a JOIN (SELECT user_id, MAX(id) AS latest FROM \"{prefix}_feed_avatar\" GROUP BY user_id) b ON a.id = b.latest"))?; // i18n: not shown (SQL)
+    let seen = rows(format!("SELECT user_id, MAX(created_at) FROM \"{prefix}_feed_online_offline\" GROUP BY user_id"))?; // i18n: not shown (SQL)
+    let favourites = rows("SELECT user_id, group_name FROM favorite_friend".into()).unwrap_or_default(); // i18n: not shown (SQL)
     let state = from_vrcx(&friends, &notes, &pictures, &seen, &favourites, modified(db));
-    (!state.friends.is_empty()).then_some(state)
+    Ok((!state.friends.is_empty()).then_some(state))
 }
 
 /// [`vrcx`] on the rows read.
@@ -162,10 +189,25 @@ pub fn from_vrcx(friends: &[Vec<String>], notes: &[Vec<String>], pictures: &[Vec
 
 /// What there is without a sign-in: VRCNext's copy when it has friends, else VRCX's, else nothing.
 pub fn read() -> LauncherState {
-    crate::vrchat_accounts::vrcnext_dir()
-        .and_then(|d| vrcnext(&d))
-        .or_else(|| crate::vrchat_accounts::vrcx_db().and_then(|d| vrcx(&d)))
-        .unwrap_or_else(|| LauncherState { possible: Possible { play: true, ..Possible::default() }, ..LauncherState::default() })
+    read_now().unwrap_or_else(|Busy| nothing())
+}
+
+fn nothing() -> LauncherState {
+    LauncherState { possible: Possible { play: true, ..Possible::default() }, ..LauncherState::default() }
+}
+
+/// [`read`], or `Err(Busy)` when the copy to show could not be read now: VRCNext's copy that is there but unreadable
+/// does not fall to VRCX's (another list, other groups).
+pub fn read_now() -> Result<LauncherState, Busy> {
+    choose(crate::vrchat_accounts::vrcnext_dir().map_or(Ok(None), |d| vrcnext_now(&d)), || crate::vrchat_accounts::vrcx_db().map_or(Ok(None), |d| vrcx_now(&d)))
+}
+
+/// VRCNext first; VRCX only when VRCNext has no copy (not when it was caught busy).
+pub fn choose(vrcnext: Result<Option<LauncherState>, Busy>, vrcx: impl FnOnce() -> Result<Option<LauncherState>, Busy>) -> Result<LauncherState, Busy> {
+    match vrcnext? {
+        Some(state) => Ok(state),
+        None => Ok(vrcx()?.unwrap_or_else(nothing)),
+    }
 }
 
 #[cfg(test)]
@@ -214,5 +256,21 @@ mod tests {
         assert_eq!((a.note.as_str(), a.look.rank, a.whereabouts.clone(), a.favourite_groups.clone()), ("met at a meetup", Rank::TrustedUser, Whereabouts::Unknown, vec!["Close".to_string()]));
         assert_eq!(s.groups[0].name, "Close");
         assert_eq!(s.friend(B).unwrap().last_seen, launcher_feed::seconds("2026-11-10T08:00:00Z"));
+    }
+
+    #[test]
+    fn a_copy_caught_while_it_is_written_keeps_the_list_and_never_switches_app() {
+        let dir = std::env::temp_dir().join(format!("n4n0-local-{}", std::process::id()));
+        let caches = dir.join("Caches");
+        std::fs::create_dir_all(&caches).unwrap();
+        assert_eq!(vrcnext_now(&dir), Ok(None), "no copy: none");
+        std::fs::write(caches.join("friends_cache.json"), b"{\"friends\": [{\"id\": \"usr_").unwrap();
+        assert_eq!(vrcnext_now(&dir), Err(Busy), "half written: busy, not empty");
+        let other = || Ok(Some(LauncherState { source: Source::Database { app: DatabaseApp::Vrcx, read_at: 1 }, ..LauncherState::default() }));
+        assert_eq!(choose(Err(Busy), other), Err(Busy), "VRCNext busy: not VRCX's list instead");
+        assert!(matches!(choose(Ok(None), other).unwrap().source, Source::Database { app: DatabaseApp::Vrcx, .. }));
+        assert_eq!(choose(Ok(None), || Err(Busy)), Err(Busy));
+        assert_eq!(vrcx_now(&dir.join("none.sqlite3")), Ok(None));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

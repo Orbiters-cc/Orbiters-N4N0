@@ -85,7 +85,8 @@ pub struct State {
     rows: Vec<Row>,
     keys: Vec<String>,
     tops: Vec<f32>,
-    made_for: Option<(usize, String, u64)>,
+    /// The data the rows were made for (held, so that its address is never handed to a newer state), the search, the folds.
+    made_for: Option<(Arc<LauncherState>, String, u64)>,
     folds: u64,
     /// The row at the list's top and how far into it, kept across refreshes.
     anchor: Option<(String, f32)>,
@@ -152,6 +153,7 @@ impl State {
         let data = cx.snap.launcher.arc();
         if !self.staged && !Arc::ptr_eq(&data, &self.data) {
             self.data = data;
+            self.take_back_failed();
         }
         if self.loader.is_none() {
             self.loader = Some(crate::worlds::Pictures::with_backend(ctx, Some(cx.ctl.clone())));
@@ -214,6 +216,21 @@ impl State {
         !matches!(d.source, orbiters_core::launcher::Source::Nothing) || d.possible.play || d.game != orbiters_core::launcher::Game::NotRunning
     }
 
+    /// A boop or request the service could not send: its "Sent" (shown at the press) is taken back; the toast says why.
+    fn take_back_failed(&mut self) {
+        if let Some(orbiters_core::launcher::Notice::Failed { to, action, .. }) = &self.data.notice {
+            match action {
+                orbiters_core::launcher::SentKind::Boop => {
+                    self.booped.remove(to);
+                }
+                orbiters_core::launcher::SentKind::RequestInvite => {
+                    self.requested.remove(to);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Sends `action` and shows it at once.
     fn act(&mut self, cx: &Cx, clock: f64, action: Action) {
         self.note(clock, &action);
@@ -271,12 +288,11 @@ impl State {
             self.folded_read = true;
             self.folded = load_folded();
         }
-        let key = (Arc::as_ptr(&self.data) as usize, self.query.clone(), self.folds);
-        if self.made_for.as_ref() == Some(&key) {
+        if self.made_for.as_ref().is_some_and(|(data, query, folds)| Arc::ptr_eq(data, &self.data) && *query == self.query && *folds == self.folds) {
             return None;
         }
-        let same_search = self.made_for.as_ref().is_some_and(|m| m.1 == key.1);
-        self.made_for = Some(key);
+        let same_search = self.made_for.as_ref().is_some_and(|m| m.1 == self.query);
+        self.made_for = Some((self.data.clone(), self.query.clone(), self.folds));
         self.rows = list::rows(&self.data, &self.query, &self.folded);
         self.keys = self.rows.iter().map(|r| r.key(&self.data)).collect();
         self.tops = list::tops(&self.rows);

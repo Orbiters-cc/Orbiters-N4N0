@@ -207,3 +207,12 @@ fn cooldowns_hold_per_person() {
     c.mark(&mut friends, 70);
     assert_eq!(friends[0].boop_ready_at, Some(2 * Cooldowns::BOOP));
 }
+
+#[test]
+fn a_place_with_anything_outside_vrchats_id_grammar_is_no_place() {
+    assert!(place(&format!("{W}:12345~region(eu)"), "").is_some());
+    for bad in ["12345&shortName=x", "1 --profile=3", "1~region(\"eu\")", "1%26"] {
+        assert!(place(&format!("{W}:{bad}"), "").is_none(), "{bad}");
+        assert_eq!(whereabouts(&format!("{W}:{bad}")), Whereabouts::Unknown);
+    }
+}

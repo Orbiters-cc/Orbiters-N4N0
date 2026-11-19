@@ -823,9 +823,17 @@ impl Client {
             404 | 403 => Err(Error::NotFound),
             500..=599 if method == "POST" && matches!(family, "instances" | "invites") => Err(Error::OutcomeUnknown),
             500..=599 => Err(Error::Unavailable),
+            // Redirects are not followed: for a social send it is no proof that VRChat did it.
+            300..=399 if method == "POST" && matches!(family, "instances" | "invites") => Err(Error::OutcomeUnknown),
             200..=399 => {
                 if self.cookies != before && self.user.is_some() {
-                    self.save()?;
+                    // A social send that VRChat took stays sent even when the session could not be saved here: an
+                    // error now would let the person send it again.
+                    if let Err(e) = self.save() {
+                        if !(method == "POST" && matches!(family, "instances" | "invites")) {
+                            return Err(e);
+                        }
+                    }
                 }
                 Ok(response)
             }

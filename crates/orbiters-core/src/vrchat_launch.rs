@@ -40,6 +40,9 @@ pub struct LaunchSettings {
     pub window_height: u32,
     /// The mode last played (what the page lights first).
     pub last_mode: LaunchMode,
+    /// VRChat's own saved desktop window, as it was before the last Play in VR left the tiny one as VRChat's saved size:
+    /// what Play in Desktop asks for then (not a setting; written by Play).
+    pub desktop_window: Option<SavedWindow>,
 }
 
 impl Default for LaunchSettings {
@@ -54,6 +57,7 @@ impl Default for LaunchSettings {
             window_width: 100,
             window_height: 100,
             last_mode: LaunchMode::Vr,
+            desktop_window: None,
         }
     }
 }
@@ -86,6 +90,57 @@ impl LaunchSettings {
     }
 }
 
+/// Unity's saved window: its size and `Fullscreen mode` (0 exclusive, 1 full-screen window, 2 maximised, 3 windowed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedWindow {
+    pub width: u32,
+    pub height: u32,
+    pub mode: u32,
+}
+
+impl SavedWindow {
+    /// A window someone plays in, not the tiny one Play in VR asks for.
+    pub fn normal(&self) -> bool {
+        self.width >= 640 && self.height >= 480
+    }
+}
+
+/// What a Desktop start adds so that it never opens in the tiny window a VR start left as VRChat's saved size: nothing
+/// while the saved window is a normal one; else the window kept before the VR start, or 1280 x 720 in a window.
+pub fn desktop_window(saved: Option<SavedWindow>, kept: Option<SavedWindow>) -> Vec<String> {
+    if saved.is_none_or(|w| w.normal()) {
+        return Vec::new();
+    }
+    let w = kept.filter(SavedWindow::normal).unwrap_or(SavedWindow { width: 1280, height: 720, mode: 3 });
+    let fullscreen = if w.mode == 3 { "0" } else { "1" };
+    ["-screen-width".to_string(), w.width.to_string(), "-screen-height".into(), w.height.to_string(), "-screen-fullscreen".into(), fullscreen.into()].into()
+}
+
+/// An instance id as VRChat writes it after the world's id: a name of letters and digits, then `~tag` or `~tag(value)`
+/// parts (`77505~group(grp_…)~groupAccessType(public)~region(eu)`, `1~private(usr_…)~canRequestInvite~nonce(…)`). Nothing
+/// else: no space, quote, `&`, `%`, `:` or `?` can reach VRChat's link pipe, its launch link or `launch.exe`'s command line.
+pub fn is_instance_id(instance: &str) -> bool {
+    if instance.is_empty() || instance.len() > 512 {
+        return false;
+    }
+    let mut parts = instance.split('~');
+    let name = parts.next().unwrap_or_default();
+    let tag = |t: &str| !t.is_empty() && t.len() <= 32 && t.bytes().all(|b| b.is_ascii_alphabetic());
+    let value = |v: &str| !v.is_empty() && v.len() <= 128 && v.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b));
+    !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().all(|b| b.is_ascii_alphanumeric())
+        && parts.all(|p| match p.split_once('(') {
+            None => tag(p),
+            Some((t, rest)) => tag(t) && rest.strip_suffix(')').is_some_and(value),
+        })
+}
+
+/// A world and instance that may be handed to VRChat: both of VRChat's own grammar.
+pub fn is_destination(world: &str, instance: &str) -> bool {
+    crate::vrchat_log::is_world_id(world) && is_instance_id(instance)
+}
+
 /// VRChat's launch link of an instance, as its website writes it.
 pub fn link(world: &str, instance: &str) -> String {
     format!("vrchat://launch?ref=orbiters.cc&id={world}:{instance}")
@@ -100,7 +155,7 @@ pub fn arguments(mode: LaunchMode, settings: &LaunchSettings, destination: Optio
     }
     out.extend(settings.options(mode));
     if let Some((world, instance)) = destination {
-        if crate::vrchat_log::is_world_id(world) && !instance.is_empty() && !instance.contains(char::is_whitespace) && instance.len() <= 512 {
+        if is_destination(world, instance) {
             out.push(link(world, instance));
         }
     }
@@ -212,6 +267,31 @@ mod tests {
         let bad = arguments(LaunchMode::Desktop, &LaunchSettings { performance: false, ..Default::default() }, Some((w, "1 --evil")));
         assert_eq!(bad, ["--no-vr"], "nothing that would split into another option");
         assert_eq!(arguments(LaunchMode::Vr, &LaunchSettings { performance: false, ..Default::default() }, Some(("wrld_bad", "1"))), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_desktop_start_after_the_tiny_vr_window_gets_a_normal_window() {
+        let tiny = SavedWindow { width: 100, height: 100, mode: 3 };
+        let full = SavedWindow { width: 2560, height: 1440, mode: 1 };
+        assert!(desktop_window(Some(full), None).is_empty(), "VRChat's own saved size is kept");
+        assert!(desktop_window(None, None).is_empty(), "nothing known: nothing passed");
+        assert_eq!(desktop_window(Some(tiny), Some(full)), ["-screen-width", "2560", "-screen-height", "1440", "-screen-fullscreen", "1"]);
+        assert_eq!(desktop_window(Some(tiny), None), ["-screen-width", "1280", "-screen-height", "720", "-screen-fullscreen", "0"]);
+        assert_eq!(desktop_window(Some(tiny), Some(tiny)), ["-screen-width", "1280", "-screen-height", "720", "-screen-fullscreen", "0"]);
+    }
+
+    #[test]
+    fn only_vrchats_own_instance_ids_pass() {
+        for good in ["1", "77505~region(eu)", "12345~private(usr_00000000-0000-4000-8000-000000000001)~canRequestInvite~region(use)~nonce(0a1b2c3d-0000-4000-8000-000000000000)", "8~group(grp_00000000-0000-4000-8000-000000000001)~groupAccessType(plus)~region(jp)", "MyRoom~hidden(usr_x)"] {
+            assert!(is_instance_id(good), "{good}");
+        }
+        for bad in ["", "1 --profile=3", "1&shortName=x", "1~region(eu)&id=wrld_x", "1~region(\"eu\")", "1~region(e u)", "1%20", "1:2", "1~", "~region(eu)", "1~region(eu", "1~region()", "1~re-gion(eu)", "1?x", "1
+"] {
+            assert!(!is_instance_id(bad), "{bad:?}");
+        }
+        assert!(!is_instance_id(&"1".repeat(65)));
+        let w = "wrld_00000000-0000-4000-8000-0000000000aa";
+        assert!(is_destination(w, "1~region(eu)") && !is_destination("wrld_bad", "1") && !is_destination(w, "1\"&"));
     }
 
     #[test]

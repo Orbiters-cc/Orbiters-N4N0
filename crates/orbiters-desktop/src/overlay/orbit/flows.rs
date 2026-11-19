@@ -2256,7 +2256,7 @@ fn usage_reaches_a_server_under_test() {
     crate::usage::set_enabled(false);
     let waiting = spool.waiting().len();
     assert!(waiting > 10, "{waiting}");
-    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base)), crate::usage::spool::Sent::Taken(waiting));
+    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base), None), crate::usage::spool::Sent::Taken(waiting));
 }
 
 /// A person at VRChat's desktop camera (L-desk-camera): the app sees no headset, VRChat says its camera is open, the column is up beside its panel.

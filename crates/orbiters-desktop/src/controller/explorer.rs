@@ -443,15 +443,8 @@ impl super::Controller {
             let Some(offer) = then else { return };
             let mut s = ctl.explorer.lock().unwrap();
             let Some(asked) = s.public.take() else { return };
-            let mut done = Done { people: 0, earned: None, nothing: None, after: points.clone(), reached: None };
-            if let Some(after) = points.as_ref() {
-                done.earned = ex::earned(asked.before.as_ref(), after);
-                done.reached = ex::title_reached(asked.before.as_ref(), after);
-            }
             let would = ctl.view().explorer.offer.as_ref().and_then(|o| o.would_earn);
-            if done.earned == Some(0.0) || (done.earned.is_none() && asked.public_before) {
-                done.nothing = Some(why_nothing(would, asked.public_before));
-            }
+            let done = done_from(asked.before.as_ref(), points, would, asked.public_before);
             drop(s);
             let words = result_words(&done);
             ctl.update(|st| {
@@ -666,6 +659,22 @@ pub fn verified(outcome: &Outcome, public: bool, people: &[String]) -> Step {
     }
 }
 
+/// A public share Orbiters confirmed, with the member's points read `before` it and `after` it (either may be missing:
+/// the share is done all the same, said without points), what the world's lookup said it `would` earn, and whether the
+/// picture was public `before`.
+pub fn done_from(before: Option<&Explorer>, after: Option<Explorer>, would: Option<f64>, public_before: bool) -> Done {
+    let mut done = Done { people: 0, earned: None, nothing: None, after: None, reached: None };
+    if let Some(after) = after.as_ref() {
+        done.earned = ex::earned(before, after);
+        done.reached = ex::title_reached(before, after);
+    }
+    if done.earned == Some(0.0) || (done.earned.is_none() && public_before) {
+        done.nothing = Some(why_nothing(would, public_before));
+    }
+    done.after = after;
+    done
+}
+
 /// Who is signed in, as the told worlds are kept by: empty when nobody.
 fn account_key(snap: &crate::state::Snapshot) -> String {
     match &snap.account.state {
@@ -743,4 +752,180 @@ pub fn result_words(done: &Done) -> String {
         words.push(standing_words(after));
     }
     words.join(" · ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orbiters_core::shares::{Grant, Item, ShareRequest, Shared};
+
+    const S: Duration = Duration::from_secs(1);
+    const NOTHING: InTheWay = InTheWay { recording: false, call: false, camera_open: false, menu_open: false };
+
+    /// Once per world, after the settling time, never within the quiet time of the last, never with something in the
+    /// way (it waits, then lets go), never with the switch off.
+    #[test]
+    fn the_notice_comes_once_per_world_and_keeps_its_quiet() {
+        let settled = SETTLE + S;
+        assert_eq!(decide(true, false, settled, None, NOTHING, Duration::ZERO), Decision::Show);
+        assert_eq!(decide(true, false, SETTLE - S, None, NOTHING, Duration::ZERO), Decision::Wait, "just arrived");
+        assert_eq!(decide(true, true, settled, None, NOTHING, Duration::ZERO), Decision::Drop, "told about this world already");
+        assert_eq!(decide(false, false, settled, None, NOTHING, Duration::ZERO), Decision::Drop, "switched off");
+        assert_eq!(decide(true, false, settled, Some(QUIET - S), NOTHING, Duration::ZERO), Decision::Wait, "too soon after the last");
+        assert_eq!(decide(true, false, settled, Some(QUIET + S), NOTHING, Duration::ZERO), Decision::Show);
+        for way in [
+            InTheWay { recording: true, ..NOTHING },
+            InTheWay { call: true, ..NOTHING },
+            InTheWay { camera_open: true, ..NOTHING },
+            InTheWay { menu_open: true, ..NOTHING },
+        ] {
+            assert_eq!(decide(true, false, settled, None, way, Duration::ZERO), Decision::Wait, "{way:?}");
+            assert_eq!(decide(true, false, settled, None, way, HOLD_MAX + S), Decision::Drop, "{way:?}: not on this visit");
+        }
+    }
+
+    /// The worlds told about are kept on disk per account, and one account's are not another's.
+    #[test]
+    fn worlds_told_are_remembered_per_account() {
+        let dir = std::env::temp_dir().join(format!("orbiters-explorer-{}", uuid::Uuid::new_v4().simple()));
+        let path = dir.join("explorer-worlds.json");
+        let mut told = Told::read(&path);
+        assert!(!told.has("ada", "wrld_a"));
+        told.add("ada", "wrld_a");
+        told.add("ada", "wrld_a");
+        told.write(&path);
+        let again = Told::read(&path);
+        assert!(again.has("ada", "wrld_a") && !again.has("bram", "wrld_a") && !again.has("ada", "wrld_b"));
+        assert_eq!(again.accounts["ada"].len(), 1);
+        let mut many = Told::default();
+        for i in 0..REMEMBERED + 3 {
+            many.add("ada", &format!("wrld_{i}"));
+        }
+        assert!(!many.has("ada", "wrld_0") && many.has("ada", &format!("wrld_{}", REMEMBERED + 2)), "the oldest go first");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn item(id: u64, public: bool, grants: &[&str]) -> Item {
+        Item {
+            id,
+            public,
+            mine: true,
+            grants: grants.iter().map(|g| Grant { vrchat_user_id: (*g).into(), ..Default::default() }).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// A share is done only when Orbiters' answer shows it (verify-core 4): an empty 2xx, a public share answered
+    /// private, a grant missing, a request instead are no success.
+    #[test]
+    fn a_share_is_done_only_when_the_answer_shows_it() {
+        let done = |o: Outcome, public, people: &[&str]| verified(&o, public, &people.iter().map(|p| p.to_string()).collect::<Vec<_>>());
+        assert!(matches!(done(Outcome::Shared(Shared::Item { item: item(5, true, &[]) }), true, &[]), Step::Done(_)));
+        assert!(matches!(done(Outcome::Shared(Shared::Item { item: item(0, true, &[]) }), true, &[]), Step::Failed(_)), "{{\"item\":{{}}}}");
+        assert!(matches!(done(Outcome::Shared(Shared::Item { item: item(5, false, &[]) }), true, &[]), Step::Failed(_)), "not public");
+        assert!(matches!(done(Outcome::Shared(Shared::Item { item: item(5, false, &["usr_a", "usr_b"]) }), false, &["usr_a", "usr_b"]), Step::Done(Done { people: 2, .. })));
+        assert!(matches!(done(Outcome::Shared(Shared::Item { item: item(5, false, &["usr_a"]) }), false, &["usr_a", "usr_b"]), Step::Failed(_)), "a grant missing");
+        assert!(matches!(done(Outcome::Shared(Shared::Request { request: ShareRequest::default() }), true, &[]), Step::Failed(_)));
+        assert_eq!(done(Outcome::Failed { message: "Sign in".into(), explicit: false }, true, &[]), Step::Failed("Sign in".into()));
+        assert_eq!(done(Outcome::Failed { message: String::new(), explicit: true }, true, &[]), Step::Explicit);
+    }
+
+    /// One answer each from a server on this computer.
+    fn serve(answers: Vec<(u16, &'static str)>) -> orbiters_core::account::Api {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = orbiters_core::account::Api::at(&format!("http://{}", listener.local_addr().unwrap()));
+        std::thread::spawn(move || {
+            for (status, body) in answers {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let mut got = Vec::new();
+                while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    got.extend_from_slice(&buf[..n]);
+                }
+                let reply = format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        api
+    }
+
+    const TITLES: &str = r#"[{"key":"explorer","points":10,"name":"Explorer"},{"key":"navigator","points":50,"name":"Navigator"},{"key":"discoverer","points":100,"name":"Discoverer"},{"key":"marcoPolo","points":500,"name":"Marco polo"},{"key":"multiverseTraveler","points":1000,"name":"Multiverse traveler"}]"#;
+
+    fn answer(half: i64, title: Option<(&str, u32)>, next: Option<(&str, u32)>) -> &'static str {
+        let points = half as f64 / 2.0;
+        let title = title.map_or("null".to_string(), |(k, p)| format!(r#"{{"key":"{k}","points":{p},"name":"{k}"}}"#));
+        let next = next.map_or("null".to_string(), |(k, p)| format!(r#"{{"key":"{k}","points":{p},"name":"{k}","remaining":{}}}"#, p as f64 - points));
+        Box::leak(format!(r#"{{"points":{points},"halfPoints":{half},"title":{title},"next":{next},"titles":{TITLES}}}"#).into_boxed_str())
+    }
+
+    /// A public share's result from the points before and after it, read from a server: a first picture of a world
+    /// reaching Explorer, a second one's half point, a world with three, a total below zero, the points not readable
+    /// after (the share stands, said without points).
+    #[test]
+    fn what_a_public_share_earned_is_read_from_the_points_before_and_after() {
+        let api = serve(vec![
+            (200, answer(19, None, Some(("explorer", 10)))),
+            (200, answer(21, Some(("explorer", 10)), Some(("navigator", 50)))),
+            (200, answer(24, Some(("explorer", 10)), Some(("navigator", 50)))),
+            (200, answer(25, Some(("explorer", 10)), Some(("navigator", 50)))),
+            (200, answer(-2, None, Some(("explorer", 10)))),
+            (200, answer(-2, None, Some(("explorer", 10)))),
+            (500, r#"{"error":"down"}"#),
+        ]);
+        let read = || api.explorer("t").ok();
+        // 9.5 -> 10.5: +1 and the first title.
+        let (before, after) = (read(), read());
+        let first = done_from(before.as_ref(), after, Some(1.0), false);
+        assert_eq!((first.earned, first.reached.as_ref().map(|t| t.key.as_str()), first.nothing), (Some(1.0), Some("explorer"), None));
+        // 12 -> 12.5: half a point, no new title.
+        let (before, after) = (read(), read());
+        let second = done_from(before.as_ref(), after, Some(0.5), false);
+        assert_eq!((second.earned, second.reached.is_none()), (Some(0.5), true));
+        // -1 -> -1 in a world with three: nothing, and why.
+        let (before, after) = (read(), read());
+        let full = done_from(before.as_ref(), after, Some(0.0), false);
+        assert_eq!((full.earned, full.nothing), (Some(0.0), Some(Nothing::WorldHasThree)));
+        assert_eq!(full.after.as_ref().map(|a| a.points), Some(-1.0));
+        // The points after could not be read: done, without points.
+        let gone = done_from(full.after.as_ref(), read(), Some(1.0), false);
+        assert_eq!((gone.earned, gone.after.is_none(), gone.nothing), (None, true, None));
+        // A picture public before earns nothing again, said so.
+        let again = done_from(None, None, Some(1.0), true);
+        assert_eq!(again.nothing, Some(Nothing::SharedBefore));
+        assert_eq!(why_nothing(Some(1.0), false), Nothing::Unknown, "nothing earned without a known reason: said plainly");
+        orbiters_i18n::in_language(orbiters_i18n::Language::En, || {
+            assert_eq!(result_words(&first), "Shared publicly · +1 Explorer point · New title: Explorer");
+            assert_eq!(result_words(&second), "Shared publicly · +0.5 Explorer points · 12.5 points · 37.5 to Navigator");
+            assert_eq!(result_words(&full), "Shared publicly · No points: this world already has three public 3D pictures · -1 points · 11 to Explorer");
+            assert_eq!(result_words(&gone), "Shared publicly");
+        });
+    }
+
+    #[test]
+    fn a_picture_s_identity_is_its_folder_s_name() {
+        assert_eq!(offer_id("C:/Sessions/2026-11-19_10-00-00"), offer_id(r"D:\elsewhere\2026-11-19_10-00-00"));
+        assert_ne!(offer_id("C:/Sessions/2026-11-19_10-00-00"), offer_id("C:/Sessions/2026-11-19_10-00-01"));
+    }
+
+    #[test]
+    fn titles_and_points_are_in_every_language() {
+        for language in orbiters_i18n::Language::TRANSLATED {
+            orbiters_i18n::in_language(language, || {
+                for key in ["explorer", "navigator", "discoverer", "multiverseTraveler"] {
+                    let t = Title { key: key.into(), points: 0.0, name: "server".into() };
+                    assert!(title_name(&t) != "server" && !title_name(&t).is_empty());
+                }
+                assert_eq!(title_name(&Title { key: "marcoPolo".into(), points: 0.0, name: String::new() }), "Marco polo", "kept as Enzo wrote it");
+                assert_eq!(title_name(&Title { key: "newOne".into(), points: 0.0, name: "From the server".into() }), "From the server");
+                for words in [NOTICE_TITLE, TAKE, EARNED_ONE, NONE_WORLD_FULL, EXPLORER_POINTS, NOTICES_SWITCH] {
+                    assert_ne!(tr(words), words, "{language:?}");
+                }
+            });
+        }
+    }
 }

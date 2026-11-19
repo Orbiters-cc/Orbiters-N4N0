@@ -413,6 +413,10 @@ pub trait Game: Send + Sync {
     /// The bridge closes: the app, lent to this session's VRChat for a picture, is given back to the person's at once (its
     /// usual giving back runs on the bridge's ticks, which stop with it).
     fn give_back(&self) {}
+    /// A start of this session's whose VRChat could not be told apart from others: what to say of it (it is never closed).
+    fn unresolved(&self) -> Option<String> {
+        None
+    }
     /// The window of the process `pid`, while it has one.
     fn window(&self, pid: u32) -> Option<GameWindow>;
     /// Whether `window` is the foreground window at this moment.

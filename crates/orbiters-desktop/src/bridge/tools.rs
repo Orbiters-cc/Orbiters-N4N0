@@ -703,6 +703,15 @@ impl Bridge {
             return;
         }
         let seen = s.game.seen();
+        // A side start that could not be resolved: said to the agent (get_state) and the person (the bridge's log), once.
+        if let Some(said) = s.game.unresolved() {
+            let mut run = s.run.lock().unwrap();
+            if run.unproven.as_ref() != Some(&said) {
+                run.unproven = Some(said.clone());
+                drop(run);
+                self.log(false, said);
+            }
+        }
         // The account a side session's VRChat is signed in with: its private instances are a bridge session's own.
         if let Some((account, _)) = seen.session_account.as_ref().filter(|_| !s.is_main()) {
             self.journal.lock().unwrap().account(account);

@@ -84,6 +84,25 @@ pub fn integer(n: f64) -> String {
     }
 }
 
+/// Explorer points, which come in halves and can be below zero: "12", "12.5", "0.5", "-1", with this language's
+/// decimal mark and thousands ("1,000.5", "1 000,5"). Never "-0".
+pub fn points(n: f64) -> String {
+    if !n.is_finite() {
+        return "0".into();
+    }
+    let halves = (n * 2.0).round();
+    if halves == 0.0 {
+        return "0".into();
+    }
+    let whole = integer((halves / 2.0).trunc());
+    let whole = if halves < 0.0 && whole == "0" { "-0".to_string() } else { whole };
+    if halves as i64 % 2 == 0 {
+        whole
+    } else {
+        format!("{whole}{}", decimal(".5".into()))
+    }
+}
+
 /// "92.5%", "100%" once complete: what is not complete never rounds up to it ("99.9%"). As this language writes them: "92,5 %".
 pub fn percent(part: f64, total: f64) -> String {
     if total.is_nan() || total <= 0.0 || !part.is_finite() {
@@ -151,6 +170,17 @@ pub fn folder_name(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Explorer points: halves, below zero, the language's decimal mark and thousands, never "-0".
+    #[test]
+    fn points_are_written_in_halves_as_the_language_writes_numbers() {
+        use orbiters_i18n::{in_language, Language};
+        let en = in_language(Language::En, || [0.0, 0.5, 1.0, 12.5, -1.0, -0.5, -1.5, 1000.5, -0.0, 0.24].map(super::points));
+        assert_eq!(en, ["0", "0.5", "1", "12.5", "-1", "-0.5", "-1.5", "1,000.5", "0", "0"]);
+        assert_eq!(in_language(Language::Fr, || [12.5, 1000.5, -0.5].map(super::points)), ["12,5", "1\u{a0}000,5", "-0,5"]);
+        assert_eq!(in_language(Language::PtBr, || super::points(37.5)), "37,5");
+        assert_eq!(in_language(Language::Ja, || super::points(37.5)), "37.5");
+    }
+
     /// The moment a relative time is said to change is the first second at which it reads otherwise, and not before.
     #[test]
     fn a_relative_time_changes_when_it_is_said_to() {

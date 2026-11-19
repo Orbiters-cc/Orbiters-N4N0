@@ -44,6 +44,20 @@ fn is_launcher(name: &str) -> bool {
     matches!(name, "start_protected_game.exe" | "launch.exe")
 }
 
+/// VRChat process `pid` as the system's list has it now: running since when, gone, or unknown (the list could not be read:
+/// that proves no exit).
+pub(super) fn vrchat_identity(pid: u32) -> crate::bridge::game::Identity {
+    use crate::bridge::game::Identity;
+    let all = processes();
+    if all.is_empty() {
+        return Identity::Unknown;
+    }
+    match all.into_iter().find(|(p, name, _)| *p == pid && is_vrchat(name)) {
+        Some((_, _, start)) => Identity::Running(start),
+        None => Identity::Gone,
+    }
+}
+
 /// The VRChats running now, by process id.
 pub(super) fn vrchat_pids() -> Vec<u32> {
     processes().into_iter().filter(|(_, name, _)| is_vrchat(name)).map(|(pid, _, _)| pid).collect()
@@ -323,6 +337,10 @@ struct SideState {
     last_picture: Option<PathBuf>,
     /// The logs of its earlier VRChats: never this start's.
     followed: Vec<PathBuf>,
+    /// When `pid`'s process started: its identity with the pid, checked at every look.
+    started: Option<u64>,
+    /// Its VRChat could not be told apart from others: said to the agent and the person, never closed.
+    unresolved: Option<String>,
 }
 
 pub(crate) struct SideGame {
@@ -431,20 +449,50 @@ impl SideGame {
             }
         }
         match st.pid {
-            Some(pid) if !vrchat_pids().contains(&pid) => st.pid = None,
-            Some(_) => {}
+            Some(pid) => {
+                use crate::bridge::game::Identity;
+                // The same process as the one paired with its log: its id and its start. Gone, or another process now: its
+                // log is never paired again (with whatever VRChat survives it).
+                let same = match vrchat_identity(pid) {
+                    Identity::Running(start) => st.started.is_none_or(|s| s == start),
+                    Identity::Unknown => true,
+                    Identity::Gone => false,
+                };
+                if !same {
+                    if let Some(log) = st.log.take() {
+                        st.followed.push(log);
+                    }
+                    st.watcher = None;
+                    st.read_to = 0;
+                    st.pid = None;
+                    st.started = None;
+                }
+            }
             None if launched.elapsed() < Duration::from_secs(90) => {
                 // Never a process by its id alone (a VRChat the person starts meanwhile is new too, BRIDGE-1): only once this
                 // session's own log is there (its command line has this profile and these OSC ports, which only the bridge
-                // passes), the one VRChat that started in the minute before that log, after the launch, and is nobody else's.
+                // passes), the one VRChat that started in the minute before that log, after the launch, nobody else's, and
+                // only when no other VRChat's log was made then (one started at the same moment would make it a guess).
                 let created = st.log.as_ref().and_then(|l| std::fs::metadata(l).ok()).and_then(|m| m.created().or_else(|_| m.modified()).ok());
                 if let Some(created) = created {
                     let since = launched_at.duration_since(SystemTime::UNIX_EPOCH).ok().map(|d| d.as_secs());
                     let created = created.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-                    st.pid = self.process_of_log(created, since, &st.before);
+                    let near = orbiters_core::paths::vrchat_log_dir().map_or(usize::MAX, |dir| logs_made_near(&dir, created));
+                    if let Some((pid, start)) = self.process_of_log(created, since, &st.before, near) {
+                        st.pid = Some(pid);
+                        st.started = Some(start);
+                        st.unresolved = None;
+                    }
                 }
             }
-            None => {}
+            None => {
+                if st.unresolved.is_none() {
+                    st.unresolved = Some(format!(
+                        "This session's VRChat (profile {}) could not be told apart from other VRChats on this computer: the bridge leaves them all alone. If it started, it may still be running on that profile's account until someone closes it.",
+                        self.profile
+                    )); // i18n: not shown (an AI client reads it; the bridge's log)
+                }
+            }
         }
         if let Some(watcher) = st.watcher.as_mut() {
             watcher.poll();
@@ -490,14 +538,11 @@ impl SideGame {
     /// The process of this session's log made at `created_s` (Unix seconds): the one VRChat that no other session, not the
     /// main one and none running before the launch (`before`) has, started in the minute before its log was made (12:25:
     /// process 12:25:13, log 12:25:15) and not before the launch (`since_s`). Two such, or none: nothing is taken.
-    fn process_of_log(&self, created_s: u64, since_s: Option<u64>, before: &[u32]) -> Option<u32> {
+    fn process_of_log(&self, created_s: u64, since_s: Option<u64>, before: &[u32], logs_near: usize) -> Option<(u32, u64)> {
         let me = self.id();
         let others: Vec<u32> = self.sides.marks().into_iter().filter(|m| m.session != me).filter_map(|m| m.pid).collect();
-        let main = self.sides.main_pid();
-        let candidates: Vec<u32> =
-            vrchat_starts().into_iter().filter(|(pid, start)| !before.contains(pid) && fits_log(*pid, *start, created_s, since_s, &others, main)).map(|(pid, _)| pid).collect();
-        let [pid] = candidates[..] else { return None };
-        Some(pid)
+        let now_s = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        pair(created_s, since_s, now_s, before, &others, self.sides.main_pid(), &vrchat_starts(), logs_near)
     }
 
     /// Gives the app back (after a picture, or when it failed).
@@ -538,6 +583,37 @@ fn fits_log(pid: u32, start: u64, created_s: u64, since_s: Option<u64>, others: 
     !others.contains(&pid) && main != Some(pid) && start > 0 && start <= created_s + 5 && start + 60 >= created_s && since_s.is_none_or(|s| start + 1 >= s)
 }
 
+/// How long a log must have been there before its process is chosen: a VRChat started at the same moment writes its own log
+/// within seconds.
+const LOG_SETTLED_S: u64 = 10;
+
+/// The process of a session's log made at `created_s`, from the VRChats running (`starts`: pid, start): the one fitting it
+/// ([`fits_log`]) and not running before the launch, once the log has been there [`LOG_SETTLED_S`] and when it is the only
+/// VRChat log made then (`logs_near`). Anything less certain: none (the start stays unresolved, said, never closed).
+#[allow(clippy::too_many_arguments)]
+fn pair(created_s: u64, since_s: Option<u64>, now_s: u64, before: &[u32], others: &[u32], main: Option<u32>, starts: &[(u32, u64)], logs_near: usize) -> Option<(u32, u64)> {
+    if now_s < created_s + LOG_SETTLED_S || logs_near != 1 {
+        return None;
+    }
+    let candidates: Vec<(u32, u64)> = starts.iter().copied().filter(|(pid, start)| !before.contains(pid) && fits_log(*pid, *start, created_s, since_s, others, main)).collect();
+    let [one] = candidates[..] else { return None };
+    Some(one)
+}
+
+/// How many VRChat logs in `dir` were made in the minute before `created_s` or the 5 s after (the window [`fits_log`] uses).
+fn logs_made_near(dir: &Path, created_s: u64) -> usize {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("output_log_"))
+                .filter_map(|e| e.metadata().ok()?.created().ok()?.duration_since(SystemTime::UNIX_EPOCH).ok().map(|d| d.as_secs()))
+                .filter(|t| *t + 60 >= created_s && *t <= created_s + 5)
+                .count()
+        })
+        .unwrap_or(usize::MAX)
+}
+
 /// A side session's own log: made since its launch, whose command line is this session's start (its profile and OSC ports).
 fn own_log(dir: &Path, since: SystemTime, profile: u32, osc: (u16, u16), followed: &[PathBuf]) -> Option<PathBuf> {
     std::fs::read_dir(dir)
@@ -553,6 +629,10 @@ fn own_log(dir: &Path, since: SystemTime, profile: u32, osc: (u16, u16), followe
 
 
 impl Game for SideGame {
+    fn unresolved(&self) -> Option<String> {
+        self.state.lock().unwrap().unresolved.clone()
+    }
+
     fn give_back(&self) {
         if self.lent_to_me() {
             self.unlend();
@@ -695,9 +775,19 @@ impl Game for SideGame {
             .max_by_key(|(path, _)| path.file_name().map(|n| n.to_os_string()))?;
         let created_s = created.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs();
         let since_s = since.and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs());
-        let pid = self.process_of_log(created_s, since_s, &[])?;
+        // Never a log whose process went before (its survivor would be a guess), nor a process running before the launch.
+        let (followed, before) = {
+            let st = self.state.lock().unwrap();
+            (st.followed.clone(), st.before.clone())
+        };
+        if followed.contains(&log) {
+            return None;
+        }
+        let (pid, start) = self.process_of_log(created_s, since_s, &before, logs_made_near(&dir, created_s))?;
         {
             let mut st = self.state.lock().unwrap();
+            st.started = Some(start);
+            st.unresolved = None;
             if st.log.as_ref() != Some(&log) {
                 st.watcher = Some(LogWatcher::of_file(log.clone()));
                 st.log = Some(log.clone());
@@ -1072,6 +1162,19 @@ mod tests {
         let me = processes().into_iter().find(|(pid, _, _)| *pid == std::process::id()).expect("this process is listed");
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
         assert!(me.1.ends_with(".exe") && me.2 > 0 && me.2 <= now && now - me.2 < 3600, "{me:?}");
+    }
+
+    #[test]
+    fn a_log_is_paired_with_its_process_only_when_nothing_else_could_have_written_it() {
+        // verify-n4n0 (2): the timing alone paired the session's log with a surviving VRChat of the person's.
+        let (log, launch) = (1_000_000, 999_980);
+        let starts = [(7, 999_990), (8, 999_000)];
+        assert_eq!(pair(log, Some(launch), log + 12, &[], &[], None, &starts, 1), Some((7, 999_990)), "settled, alone: paired");
+        assert_eq!(pair(log, Some(launch), log + 3, &[], &[], None, &starts, 1), None, "a log just made: another VRChat's may come");
+        assert_eq!(pair(log, Some(launch), log + 12, &[], &[], None, &starts, 2), None, "another VRChat's log made then: a guess");
+        let two = [(7, 999_990), (9, 999_995)];
+        assert_eq!(pair(log, Some(launch), log + 12, &[], &[], None, &two, 1), None, "two processes fit: a guess");
+        assert_eq!(pair(log, Some(launch), log + 12, &[7], &[], None, &starts, 1), None, "running before the launch");
     }
 
     #[test]

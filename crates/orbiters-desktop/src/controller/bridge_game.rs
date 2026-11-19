@@ -115,13 +115,18 @@ impl RealGame {
 }
 
 impl Game for RealGame {
-    fn runs(&self, pid: u32) -> Option<bool> {
-        Some(super::bridge_side::vrchat_pids().contains(&pid))
+    fn identity(&self, pid: u32) -> crate::bridge::game::Identity {
+        super::bridge_side::vrchat_identity(pid)
     }
 
-    fn launch_args(&self) -> Option<Vec<String>> {
+    fn launch_args(&self, pid: u32) -> Option<Vec<String>> {
         let ctl = self.ctl().ok()?;
-        let log = ctl.view().vrchat.world.log_file.clone()?;
+        // The pid and the log from one view of the app's: the log of that process, never another's.
+        let view = ctl.view();
+        if view.vrchat.pid != Some(pid) {
+            return None;
+        }
+        let log = view.vrchat.world.log_file.clone()?;
         crate::bridge::sessions::complete_args(&read_head(&log, LOG_HEAD))
     }
 

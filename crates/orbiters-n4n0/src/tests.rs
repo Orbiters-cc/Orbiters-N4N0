@@ -1236,6 +1236,56 @@ fn a_quick_talk_tap_never_leaves_the_owner_muted() {
 }
 
 #[test]
+fn a_toggle_back_never_starts_before_the_press_s_own_release_left() {
+    use crate::runtime::Source;
+    // verify-n4n0 (8): the press's first edge had left, its release had not, and VRChat said muted: the toggle back's press
+    // was queued at once, two presses with no release between.
+    let (_t, n) = n4n0_ready_to_listen();
+    n.talk(true, Source::Menu);
+    // Only the press's first edge left.
+    n.n4n0.lock().unwrap().outbox.retain(|(_, (a, v))| !(a == "/input/Voice" && *v == OscType::Int(1)));
+    n.talk(false, Source::Menu);
+    n.on_parameter("MuteSelf", &OscValue::Bool(true));
+    n.n4n0.lock().unwrap().unmute_step(Instant::now());
+    assert_eq!(voice_pulses(&n), vec![0], "only the press's own release waits");
+    dispatched(&n);
+    n.n4n0.lock().unwrap().unmute_step(Instant::now());
+    assert_eq!(voice_pulses(&n), vec![1, 0], "then the toggle back, whole");
+}
+
+#[test]
+fn switching_off_in_settings_puts_back_a_mute_talk_made() {
+    use crate::runtime::Source;
+    // verify-n4n0 (8): with only a menu mute owned (the listen over), turning the assistant off in Settings never restored it.
+    let (t, n) = n4n0_ready_to_listen();
+    n.talk(true, Source::Menu);
+    dispatched(&n);
+    n.on_parameter("MuteSelf", &OscValue::Bool(true));
+    n.voice_cancel();
+    n.n4n0.lock().unwrap().listening = None;
+    t.settings.lock().unwrap().n4n0.assistant = false;
+    n.voice_follow();
+    assert_eq!(voice_pulses(&n), vec![1, 0], "toggled back");
+}
+
+#[test]
+fn a_late_step_never_sends_a_voice_press_and_its_release_together() {
+    // N4N0-12: both edges overdue in one step went in one bundle; VRChat may read them in one frame and not toggle.
+    let now = Instant::now();
+    let past = now - Duration::from_millis(300);
+    let outbox = vec![
+        (past, ("/input/Voice".to_string(), OscType::Int(1))),
+        (past + Duration::from_millis(80), ("/input/Voice".to_string(), OscType::Int(0))),
+        (past, (parameter("Hoodie"), OscType::Bool(true))),
+    ];
+    let (sent, waiting) = crate::runtime::due_now(outbox, now);
+    assert_eq!(sent.iter().filter(|(a, _)| a == "/input/Voice").count(), 1, "{sent:?}");
+    assert_eq!(sent[0], ("/input/Voice".to_string(), OscType::Int(1)), "the press first");
+    assert_eq!(waiting.len(), 1);
+    assert!(waiting[0].0 > now && waiting[0].1 == ("/input/Voice".to_string(), OscType::Int(0)), "its release a step later");
+}
+
+#[test]
 fn switching_the_assistant_off_during_talk_puts_the_owner_s_microphone_back() {
     use crate::runtime::Source;
     // N4N0-15: off during a held Talk, the release no longer reached N4N0 and the owner stayed muted.
@@ -1320,6 +1370,22 @@ fn a_website_approval_opened_in_the_browser_no_longer_keeps_n4n0_from_listening(
     assert!(!n.n4n0.lock().unwrap().ask_busy(), "handed to the website: N4N0 listens again");
     assert!(t.view().confirmations.iter().any(|c| c.approve_url == url), "still listed with its link");
     assert!(n.n4n0.lock().unwrap().conversation.len() == 1, "the conversation stays");
+    t.shutdown(&n);
+}
+
+#[test]
+fn an_approved_hold_never_pins_the_next_avatar() {
+    // verify-n4n0 (7): the avatar changed between a Hold's write and its pin: the pin was saved for the new avatar.
+    let (t, n, _vrchat) = n4n0_with_vrchat();
+    let bound = {
+        let rt = n.n4n0.lock().unwrap();
+        crate::runtime::Bound::for_test(rt.avatar_epoch, Some("Hoodie"))
+    };
+    let other = n.clone();
+    *crate::runtime::HOLD_BETWEEN.lock().unwrap() = Some(Box::new(move || other.on_avatar("avtr_other".into())));
+    let hold = orbiters_n4n0_core::tools::Action::Hold { control: "hoodie".into(), on: Some(true), value: None, release: false };
+    assert_eq!(n.run_action_for_test(hold, &bound), Err("the avatar changed".to_string()));
+    assert!(t.settings().n4n0.pins.is_empty(), "no pin for the next avatar: {:?}", t.settings().n4n0.pins);
     t.shutdown(&n);
 }
 
@@ -2811,6 +2877,31 @@ fn a_slideshow_of_qr_codes_opens_two_pages_not_one_per_code() {
 }
 
 #[test]
+fn a_scan_stops_at_its_sixth_page_opened_and_refusals_spend_nothing() {
+    // verify-n4n0 (10): refused opens spent the six-page quota, and the sixth page opened left the scanner looking.
+    use orbiters_n4n0_core::qr::QrPhase;
+    let (host, n) = n4n0(Settings::default());
+    n.command(Command::Qr { on: true });
+    host.qr_sees(QrSeen::Camera(true));
+    *host.watch_fails.lock().unwrap() = true;
+    host.qr_sees(QrSeen::Code("https://example.com/refused".into()));
+    *host.watch_fails.lock().unwrap() = false;
+    // Six pages, paced as a scan opens them (two at once, then one every five seconds: the pace is made up here).
+    for i in 0..6 {
+        if let Some(run) = n.n4n0.lock().unwrap().qr.run.as_mut() {
+            run.opening = orbiters_n4n0_core::qr::Opening::with_opened(i);
+        }
+        host.qr_sees(QrSeen::Code(format!("https://example.com/{i}")));
+    }
+    let view = host.view().qr;
+    assert_eq!(view.opened, 6, "{view:?}");
+    assert_eq!(view.phase, QrPhase::Stopped, "stopped at the sixth page itself");
+    assert_eq!(view.note, orbiters_n4n0_core::qr::ENOUGH_NOTE);
+    assert_eq!(host.qr_dropped.load(Ordering::Relaxed), 1, "its scan let go");
+    n.shutdown();
+}
+
+#[test]
 fn a_qr_link_the_browser_did_not_open_is_not_counted_as_opened() {
     // N4N0-18: the menu said "opened" while the toast said it failed.
     let (host, n) = n4n0(Settings::default());
@@ -3042,7 +3133,7 @@ fn during_a_call_the_wake_word_only_offers_talk_with_n4n0() {
     let again = t.view().voice.wake_offer.expect("still up");
     assert!(again.id > offer.id, "a new offer each time the word is heard");
     // Pressed: N4N0 listens.
-    n.command(Command::WakeOffer { accept: true });
+    n.command(Command::WakeOffer { accept: true, id: None });
     assert!(matches!(n.n4n0.lock().unwrap().listening, Some((crate::runtime::Source::WakeWord, _))));
     assert!(t.view().voice.wake_offer.is_none(), "it goes once pressed");
     // Not pressed: it goes by itself, and a late press does nothing.
@@ -3051,18 +3142,57 @@ fn during_a_call_the_wake_word_only_offers_talk_with_n4n0() {
     worker.say(wake("testwake"));
     assert!(t.view().voice.wake_offer.is_some());
     n.n4n0.lock().unwrap().wake_offer_until = Some(Instant::now());
-    n.command(Command::WakeOffer { accept: true });
+    n.command(Command::WakeOffer { accept: true, id: None });
     assert!(n.n4n0.lock().unwrap().listening.is_none(), "too late");
-    // After the call: the word works as always.
+    // After the call (a sentence begun once it was over): the word works as always.
     *t.in_call.lock().unwrap() = false;
+    std::thread::sleep(Duration::from_millis(700));
     worker.say(wake("testwake"));
     assert!(n.n4n0.lock().unwrap().listening.is_some());
     t.shutdown(&n);
 }
 
 #[test]
-fn the_wake_word_comes_back_when_the_ask_page_closes() {
-    // N4N0-10: once the Ask page had been opened and closed, the wake word stayed off for the rest of the session.
+fn a_wake_heard_during_a_call_and_decoded_after_it_still_only_offers() {
+    // verify-n4n0 (9): recognition ended after hang-up, and the call's last "Nano" started a listen without a press.
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    { let mut settings = t.settings.lock().unwrap();
+      settings.n4n0.wake_word = true;
+      settings.n4n0.wake_words = vec!["testwake".into()];
+      settings.n4n0.menu.wake_word = true;
+    }
+    n.n4n0.lock().unwrap().voice.installed = true;
+    t.scene(|s| s.vrchat = true);
+    n.voice_follow();
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    // A call, seen; it ends; then the sentence said during it is decoded.
+    n.n4n0.lock().unwrap().call_seen_at = Some(Instant::now());
+    std::thread::sleep(Duration::from_millis(100));
+    worker.say(VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 1.0, decode_ms: 50 });
+    assert!(n.n4n0.lock().unwrap().listening.is_none(), "no listen without a press");
+    let first = t.view().voice.wake_offer.expect("offered");
+    // Heard again: a new offer. A late press of the first answers nothing; the shown one starts the listen, even with the
+    // menu set to open on the wake word.
+    worker.say(VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 1.0, decode_ms: 50 });
+    let second = t.view().voice.wake_offer.expect("offered again");
+    assert!(second.id > first.id);
+    n.command(Command::WakeOffer { accept: true, id: Some(first.id) });
+    assert!(n.n4n0.lock().unwrap().listening.is_none() && t.view().voice.wake_offer.is_some(), "the older card answers nothing");
+    n.command(Command::WakeOffer { accept: true, id: Some(second.id) });
+    assert!(n.n4n0.lock().unwrap().listening.is_some(), "pressed: N4N0 listens");
+    // Switched off: the offer goes with it.
+    worker.say(VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 1.0, decode_ms: 50 });
+    n.command(Command::Assistant { on: false });
+    assert!(t.view().voice.wake_offer.is_none());
+    t.shutdown(&n);
+}
+
+#[test]
+fn the_ask_page_leaves_the_wake_word_off_after_it_closes() {
+    // The documented behaviour (verify-n4n0 9: reopening it needs the owner's word): closing the Ask page keeps the microphone
+    // released until an explicit listen or a change of the wake word's setting; a wake sentence from before stays dropped.
     let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
     *d.ears.allowed.lock().unwrap() = true;
     t.sign_in("http://127.0.0.1:1/".into(), "test");
@@ -3075,22 +3205,17 @@ fn the_wake_word_comes_back_when_the_ask_page_closes() {
     t.scene(|s| s.vrchat = true);
     n.voice_follow();
     let worker = d.ears.workers.lock().unwrap()[0].clone();
-    assert!(matches!(&worker.commands()[..], [VoiceCommand::Start { wake_word: true, .. }]));
     let before = worker.commands().len();
     n.ask_page(true);
     n.voice_follow();
     assert!(worker.commands()[before..].iter().any(|c| matches!(c, VoiceCommand::WakeWord { on: false, .. })), "the page has the microphone");
     n.ask_page(false);
     n.voice_cancel();
+    let after = worker.commands().len();
     n.voice_follow();
-    assert!(matches!(worker.commands().last(), Some(VoiceCommand::WakeWord { on: true, .. })), "{:?}", worker.commands());
-    // A wake sentence whose sound began before the page closed is the visit's: never said after it.
+    assert!(!worker.commands()[after..].iter().any(|c| matches!(c, VoiceCommand::WakeWord { on: true, .. })), "still released: {:?}", worker.commands());
     worker.say(VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 1.0, decode_ms: 1 });
     assert!(n.n4n0.lock().unwrap().listening.is_none());
-    // One said after it is heard.
-    std::thread::sleep(Duration::from_millis(400));
-    worker.say(VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 0.2, decode_ms: 1 });
-    assert!(n.n4n0.lock().unwrap().listening.is_some(), "the wake word works again");
     t.shutdown(&n);
 }
 

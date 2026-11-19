@@ -347,11 +347,12 @@ pub(crate) fn json<T: serde::de::DeserializeOwned>(response: ureq::http::Respons
 /// asked. Otherwise the outcome is not known: an error, and nothing is sent again by this call.
 fn json_done<T: serde::de::DeserializeOwned>(
     response: ureq::http::Response<ureq::Body>,
+    required: &[&str],
     as_asked: impl Fn(&T) -> bool,
     again: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     let done = response.status().is_success();
-    match json::<T>(response) {
+    match json::<serde_json::Value>(response).and_then(|v| with_fields::<T>(v, required)) {
         Ok(answer) if as_asked(&answer) => Ok(answer),
         Err(e) if !done || e.downcast_ref::<serde_json::Error>().is_none() => Err(e),
         Ok(_) if !done => Err(anyhow::anyhow!("{}", tr("Orbiters could not complete the request"))),
@@ -368,8 +369,19 @@ fn json_done<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// `value` as `T`, when it holds every field at `required` (JSON pointers, `/item/grants`): a field a lenient read would
+/// make up (no grants, not public) is no evidence of what was done.
+fn with_fields<T: serde::de::DeserializeOwned>(value: serde_json::Value, required: &[&str]) -> anyhow::Result<T> {
+    if let Some(missing) = required.iter().find(|p| value.pointer(p).is_none()) {
+        // A shape that does not say it: read again, as an answer that does not read.
+        return Err(serde_json::from_str::<serde_json::Value>(&format!("missing {missing}")).unwrap_err().into());
+    }
+    Ok(serde_json::from_value(value)?)
+}
+
 /// Whether `item` is `kind` `id` as `share` asked: public when asked, every recipient asked among its grants. A share
-/// that became a request to the owner (another member's item) is a `Shared::Request` for that item.
+/// that became a request to the owner (another member's item) is a `Shared::Request` for that item, still pending, for
+/// exactly the visibility and the people asked (night4, verify2: never another request's or another set of people).
 fn shared_as_asked(shared: &Shared, kind: Kind, id: u64, share: &Share) -> bool {
     match shared {
         Shared::Item { item } => {
@@ -378,7 +390,16 @@ fn shared_as_asked(shared: &Shared, kind: Kind, id: u64, share: &Share) -> bool 
                 && (!share.public || item.public)
                 && share.recipients.iter().all(|r| item.grants.iter().any(|g| g.vrchat_user_id == r.vrchat_user_id))
         }
-        Shared::Request { request } => request.id != 0 && request.kind == kind && request.item_id == id,
+        Shared::Request { request } => {
+            let asked: std::collections::BTreeSet<&str> = share.recipients.iter().map(|r| r.vrchat_user_id.as_str()).collect();
+            let answered: std::collections::BTreeSet<&str> = request.recipients.iter().map(|r| r.vrchat_user_id.as_str()).collect();
+            request.id != 0
+                && request.kind == kind
+                && request.item_id == id
+                && request.status == RequestStatus::Pending
+                && request.public == share.public
+                && answered == asked
+        }
     }
 }
 
@@ -445,6 +466,11 @@ impl Api {
         }
         Ok(response.into_body().with_config().limit(16 << 20).read_to_vec()?)
     }
+    /// [`Api::capture_item`] holding the fields at `required` (JSON pointers in the answer), else an error.
+    fn capture_item_with(&self, token: &str, kind: Kind, id: u64, required: &[&str]) -> anyhow::Result<Item> {
+        let value = json::<serde_json::Value>(self.agent().get(&self.url(&path(kind, id))).header("Authorization", &format!("Bearer {token}")).call()?)?;
+        Ok(with_fields::<ItemAnswer>(value, required)?.item)
+    }
     pub fn capture_item(&self, token: &str, kind: Kind, id: u64) -> anyhow::Result<Item> {
         Ok(json::<ItemAnswer>(self.agent().get(&self.url(&path(kind, id))).header("Authorization", &format!("Bearer {token}")).call()?)?.item)
     }
@@ -474,7 +500,16 @@ impl Api {
             tr("Choose at most 50 people and a message of at most 280 characters.")
         );
         let r = self.agent().post(&self.url(&format!("{}/share", path(kind, id)))).header("Authorization", &format!("Bearer {token}")).send_json(share)?;
-        json_done(r, |s| shared_as_asked(s, kind, id, share), || Ok(Shared::Item { item: self.capture_item(token, kind, id)? }))
+        json_done(r, &[], |s| shared_as_asked(s, kind, id, share), || {
+            // What is there now: the item as asked, or (another member's item) the request made for it.
+            let item = self.capture_item_with(token, kind, id, &["/item/grants", "/item/public"])?;
+            let shared = Shared::Item { item };
+            if shared_as_asked(&shared, kind, id, share) {
+                return Ok(shared);
+            }
+            let request = self.capture_requests(token, false)?.requests.into_iter().map(|request| Shared::Request { request }).find(|r| shared_as_asked(r, kind, id, share));
+            Ok(request.unwrap_or(shared))
+        })
     }
     pub fn unshare_capture(&self, token: &str, kind: Kind, id: u64, unshare: &Unshare) -> anyhow::Result<Item> {
         #[derive(Deserialize)]
@@ -487,7 +522,9 @@ impl Api {
             .header("Authorization", &format!("Bearer {token}"))
             .force_send_body()
             .send_json(unshare)?;
-        Ok(json_done(r, |a: &Answer| unshared_as_asked(&a.item, kind, id, unshare), || Ok(Answer { item: self.capture_item(token, kind, id)? }))?.item)
+        // Withdrawn only on evidence: an answer (or a read) that holds the grants and the visibility.
+        let required = ["/item/grants", "/item/public"];
+        Ok(json_done(r, &required, |a: &Answer| unshared_as_asked(&a.item, kind, id, unshare), || Ok(Answer { item: self.capture_item_with(token, kind, id, &required)? }))?.item)
     }
     pub fn capture_file(&self, token: &str, kind: Kind, id: u64, out: &std::path::Path) -> anyhow::Result<()> {
         let r = self.get_transfer(&self.url(&format!("{}/file", path(kind, id)))).header("Authorization", &format!("Bearer {token}")).call()?;
@@ -518,6 +555,7 @@ impl Api {
         let wanted = if approve { RequestStatus::Approved } else { RequestStatus::Denied };
         json_done(
             r,
+            &[],
             |a: &RequestAnswer| a.request.id == id && a.request.status == wanted,
             || {
                 let request = self.capture_requests(token, true)?.requests.into_iter().find(|r| r.id == id);
@@ -604,6 +642,31 @@ mod tests {
         assert!(api.answer_capture_request("t", 5, true, false).is_err());
         let api = answering(vec![(200, "{}".into()), (200, request("approved"))]);
         assert!(api.answer_capture_request("t", 5, true, false).is_ok());
+        // Night4 (verify2): a request answer must be pending, for the visibility and EXACTLY the people asked.
+        let request = |people: &[&str], status: &str| {
+            serde_json::json!({"request": {"id": 8, "type": "capture", "itemId": 3, "status": status, "public": false,
+                "recipients": people.iter().map(|p| serde_json::json!({"vrchatUserId": p, "displayName": p})).collect::<Vec<_>>()}})
+            .to_string()
+        };
+        let not_owned = || (200, serde_json::json!({"item": {"type": "capture", "id": 3, "grants": [], "public": false}}).to_string());
+        let api = answering(vec![(200, request(&["usr_someone_else"], "pending")), not_owned(), (200, r#"{"requests":[]}"#.into())]);
+        assert!(api.share_capture("t", Kind::Capture, 3, &share).is_err(), "another person's request is not this one");
+        let api = answering(vec![(200, request(&["usr_friend", "usr_extra"], "pending")), not_owned(), (200, r#"{"requests":[]}"#.into())]);
+        assert!(api.share_capture("t", Kind::Capture, 3, &share).is_err(), "more people than asked");
+        let api = answering(vec![(200, request(&["usr_friend"], "denied")), not_owned(), (200, r#"{"requests":[]}"#.into())]);
+        assert!(api.share_capture("t", Kind::Capture, 3, &share).is_err(), "a request already denied");
+        let api = answering(vec![(200, request(&["usr_friend"], "pending"))]);
+        assert!(matches!(api.share_capture("t", Kind::Capture, 3, &share), Ok(Shared::Request { .. })));
+        // Its answer unreadable, the item not shared, but the request made is among the outgoing ones: done.
+        let outgoing = serde_json::json!({"requests": [{"id": 8, "type": "capture", "itemId": 3, "status": "pending", "public": false,
+            "recipients": [{"vrchatUserId": "usr_friend", "displayName": "Friend"}]}]})
+        .to_string();
+        let api = answering(vec![(200, "{}".into()), not_owned(), (200, outgoing)]);
+        assert!(matches!(api.share_capture("t", Kind::Capture, 3, &share), Ok(Shared::Request { .. })));
+        // A withdrawal answered with an item that says nothing of its grants, read again the same: not known withdrawn.
+        let sparse = || (200, r#"{"item":{"type":"capture","id":3}}"#.to_string());
+        let api = answering(vec![sparse(), sparse()]);
+        assert!(api.unshare_capture("t", Kind::Capture, 3, &unshare).is_err(), "no grants in the answer is no evidence");
         // A refusal is a refusal, never read again.
         let api = answering(vec![(409, r#"{"code":"explicit-acknowledgement","message":"explicit"}"#.into())]);
         assert!(api.share_capture("t", Kind::Capture, 3, &share).unwrap_err().downcast_ref::<ExplicitAcknowledgement>().is_some());

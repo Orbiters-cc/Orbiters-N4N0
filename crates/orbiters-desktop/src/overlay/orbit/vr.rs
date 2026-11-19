@@ -730,6 +730,38 @@ pub struct Turn {
 /// How much of the eye VRChat's window shows, as worked back from Enzo's two pictures: its tiles were 1.4 times the panel's scale, and how far they were off grows with the place on the picture by that.
 const WINDOW_SHARE: f32 = 0.716;
 const WINDOW_MOVED: [f32; 2] = [0.0, 0.0];
+/// How long VRChat's Quick Menu toggle stays at 1, and at 0 before it may go to 1 again.
+const OSC_PRESS: Duration = Duration::from_millis(60);
+
+/// The edges of VRChat's Quick Menu toggle buttons still to send: each toggle is a 1 and, [`OSC_PRESS`] later, a 0; a toggle asked
+/// while one is under way for that hand comes after its 0 (OVL2-19: a second toggle within 60 ms overwrote the first, its 1 sent
+/// while the button was still at 1, and VRChat saw no edge).
+#[derive(Debug, Default)]
+struct OscButton {
+    queue: std::collections::VecDeque<(usize, i32, Instant)>,
+}
+
+impl OscButton {
+    fn toggle(&mut self, hand: usize, now: Instant) {
+        let at = self.queue.iter().rev().find(|(h, _, _)| *h == hand).map_or(now, |(_, _, last)| (*last + OSC_PRESS).max(now));
+        self.queue.push_back((hand, 1, at));
+        self.queue.push_back((hand, 0, at + OSC_PRESS));
+    }
+
+    /// What is due now, in order: (hand, value).
+    fn due(&mut self, now: Instant) -> Vec<(usize, i32)> {
+        let mut out = Vec::new();
+        self.queue.retain(|(hand, value, at)| {
+            let due = *at <= now;
+            if due {
+                out.push((*hand, *value));
+            }
+            !due
+        });
+        out
+    }
+}
+
 /// VRChat's `/input/QuickMenuToggle*`, as a button going to `value`, sent straight to it on this computer.
 fn send_quick_menu_toggle(hand: usize, value: i32, port: u16) {
     let Ok(socket) = std::net::UdpSocket::bind(("127.0.0.1", 0)) else { return };
@@ -1170,7 +1202,17 @@ fn hidden_parts(handles: &mut HashMap<Zone, vr::OverlayHandle>, up: &[Zone], vis
 /// The pointer's hand this turn from last turn's (`active`), which hands' lasers meet a part (`on`), their triggers now and
 /// last turn; and the hand that was the pointer and lets go now off every part, whose up is delivered before another hand
 /// takes the pointer (else its release was never seen, OVERLAY-25).
-fn pointer_hand(active: Option<usize>, on: [bool; 2], triggers: [bool; 2], was: [bool; 2]) -> (Option<usize>, Option<usize>) {
+///
+/// The other hand pulling its trigger on a part while the pointer's hand holds nothing takes the pointer, and its press is the
+/// one delivered (OVL2-1: it was blocked from VRChat and given to nobody). `blocked`: the hands blocked before this turn, as a
+/// press must have begun blocked. A hand mid-press is never left.
+fn pointer_hand(active: Option<usize>, on: [bool; 2], triggers: [bool; 2], was: [bool; 2], blocked: [bool; 2]) -> (Option<usize>, Option<usize>) {
+    if let Some(a) = active.filter(|&a| !triggers[a]) {
+        let b = 1 - a;
+        if on[b] && triggers[b] && !was[b] && blocked[b] {
+            return (Some(b), Some(a).filter(|&a| was[a]));
+        }
+    }
     if active.is_some_and(|h| on[h] || triggers[h]) {
         return (active, None);
     }
@@ -1421,7 +1463,7 @@ pub struct OrbitVr {
     hole_logged: super::super::vr_log::Every,
     /// What the headset shows, kept when asked (`ORBITERS_VR_PICTURES`).
     moments: super::super::eye_picture::Moments,
-    osc_toggle: Option<(usize, Instant)>,
+    osc_toggle: OscButton,
     /// VRChat's Quick Menu taken away by one of its own buttons (I-qm-leave): the clicks VRChat gets (no overlay, no trigger taken), and looks at its tabs in the eye's
     /// picture after one ([`super::qm_buttons`]).
     qm_clicks: super::qm_buttons::ClickWatch,
@@ -1508,7 +1550,7 @@ impl OrbitVr {
             camera_side: Default::default(),
             hole_logged: Default::default(),
             moments: Default::default(),
-            osc_toggle: None,
+            osc_toggle: OscButton::default(),
             qm_clicks: Default::default(),
             qm_check: Default::default(),
             qm_sight: None,
@@ -1637,6 +1679,10 @@ impl OrbitVr {
 
     fn update_inner(&mut self, mut cx: Cx<'_, '_>) -> Turn {
         let now = Instant::now();
+        // The Quick Menu toggle's edges due, before any early return (OVL2-19: a turn that returned early held its 0 back).
+        for (hand, value) in self.osc_toggle.due(now) {
+            send_quick_menu_toggle(hand, value, cx.snap.settings.osc.vrchat_port);
+        }
         let dt = now.duration_since(self.last_turn).as_secs_f32();
         self.last_turn = now;
         if self.camera_reopen.context(cx.snap.vrchat.world.world_id.as_deref(),cx.snap.vrchat.world.instance.as_deref(),cx.snap.vrchat.world.in_world && cx.snap.vrchat.running,cx.snap.vrchat.pid) {
@@ -1681,8 +1727,10 @@ impl OrbitVr {
             self.buttons.step(down, now);
             if let Some(hand) = self.buttons.quick_menu_to_toggle() {
                 super::super::vr_log::line(&format!("buttons: toggling VRChat's Quick Menu on hand {hand}, open {:?}", self.buttons.open())); // i18n: not shown (a log's line)
-                self.osc_toggle = Some((hand, now));
-                send_quick_menu_toggle(hand, 1, cx.snap.settings.osc.vrchat_port);
+                self.osc_toggle.toggle(hand, now);
+                for (hand, value) in self.osc_toggle.due(now) {
+                    send_quick_menu_toggle(hand, value, cx.snap.settings.osc.vrchat_port);
+                }
             }
             // Walking closes VRChat's Quick Menu. A moment's touch of the stick does not; laying the parts on it is not walking.
             // A left stick taken from VRChat (moving in a 3D capture) walks nowhere.
@@ -1998,7 +2046,7 @@ impl OrbitVr {
         }
         // The pointer: the hand that pressed stays; else the right, else the left. A hand that lets go off every part is
         // the pointer until its up is delivered, where it last was (OVERLAY-25: a slider stayed held).
-        let (active, let_go) = pointer_hand(self.active, hits.map(|h| h.is_some()), triggers, self.trigger_was);
+        let (active, let_go) = pointer_hand(self.active, hits.map(|h| h.is_some()), triggers, self.trigger_was, blocked_before);
         if let_go.is_some() {
             self.panels.release();
         }
@@ -2092,10 +2140,8 @@ impl OrbitVr {
             }
         }
         // The toggle's button lets go a moment later, as a finger does.
-        if let Some((hand, at)) = self.osc_toggle.filter(|(_, at)| now.duration_since(*at) >= Duration::from_millis(60)) {
-            let _ = at;
-            send_quick_menu_toggle(hand, 0, cx.snap.settings.osc.vrchat_port);
-            self.osc_toggle = None;
+        for (hand, value) in self.osc_toggle.due(now) {
+            send_quick_menu_toggle(hand, value, cx.snap.settings.osc.vrchat_port);
         }
         turn.menu_hand = match open {
             Open::Wheel(hand) | Open::QuickMenu(hand) => Some(hand),
@@ -2279,6 +2325,41 @@ impl OrbitVr {
 
 #[cfg(test)]
 mod tests {
+    /// OVL2-19: two toggles 20 ms apart give 1, 0, 1, 0, each state held 60 ms; a 0 due during turns that did not run is sent first.
+    #[test]
+    fn quick_menu_toggles_never_lose_an_edge() {
+        use super::OscButton;
+        use std::time::{Duration, Instant};
+        let t = Instant::now();
+        let ms = |n: u64| t + Duration::from_millis(n);
+        let mut button = OscButton::default();
+        button.toggle(1, t);
+        assert_eq!(button.due(t), [(1, 1)], "the first at once, as before");
+        button.toggle(1, ms(20));
+        assert!(button.due(ms(20)).is_empty(), "not while the button is still at 1");
+        assert_eq!(button.due(ms(60)), [(1, 0)]);
+        assert!(button.due(ms(100)).is_empty());
+        assert_eq!(button.due(ms(120)), [(1, 1)]);
+        assert_eq!(button.due(ms(700)), [(1, 0)], "after a gap with no turns, the pending 0");
+        assert!(button.queue.is_empty());
+        button.toggle(0, ms(800));
+        button.toggle(1, ms(800));
+        assert_eq!(button.due(ms(800)), [(0, 1), (1, 1)], "each hand its own button");
+    }
+
+    /// OVL2-1: both lasers on our parts, the right the pointer with nothing held: the left's pull takes the pointer and is the
+    /// press delivered; with the right's trigger held, the left takes nothing.
+    #[test]
+    fn the_other_hand_s_press_is_not_lost() {
+        use super::pointer_hand;
+        let both = [true, true];
+        assert_eq!(pointer_hand(Some(1), both, [true, false], [false, false], [true, true]), (Some(0), None), "the left's pull: its press");
+        assert_eq!(pointer_hand(Some(1), both, [true, true], [false, true], [true, true]), (Some(1), None), "the right mid-press keeps it");
+        assert_eq!(pointer_hand(Some(1), both, [true, false], [false, true], [true, true]), (Some(0), Some(1)), "the right let go the same turn: its up first");
+        assert_eq!(pointer_hand(Some(1), both, [true, false], [false, false], [false, true]), (Some(1), None), "a pull not begun blocked is VRChat's");
+        assert_eq!(pointer_hand(Some(1), [false, true], [true, false], [false, false], [true, true]), (Some(1), None), "the left off our parts");
+    }
+
     /// OVERLAY-25: right presses on a slider, both lasers leave every part while it is held, the right lets go there while
     /// the left points at a part: exactly one release, delivered before the left takes the pointer; coming back without a
     /// press releases nothing more.
@@ -2296,7 +2377,7 @@ mod tests {
         ];
         let (mut active, mut was, mut releases, mut pointers) = (None, [false; 2], 0, Vec::new());
         for (on, triggers) in turns {
-            let (now, let_go) = pointer_hand(active, on, triggers, was);
+            let (now, let_go) = pointer_hand(active, on, triggers, was, [false; 2]);
             if let_go.is_some() {
                 releases += 1;
             }
@@ -2313,10 +2394,10 @@ mod tests {
         assert_eq!(releases, 1);
         assert_eq!(pointers, [Some(1), Some(1), Some(1), Some(0), Some(0), Some(0)], "the left keeps the pointer it took");
         // A hand still held off every part stays the pointer; one that points keeps it as before.
-        assert_eq!(pointer_hand(Some(1), [true, false], [false, true], [false, true]), (Some(1), None));
-        assert_eq!(pointer_hand(Some(0), [true, true], [false, false], [false, false]), (Some(0), None));
-        assert_eq!(pointer_hand(None, [true, true], [false, false], [false, false]), (Some(1), None));
-        assert_eq!(pointer_hand(Some(0), [false, false], [false, false], [false, false]), (None, None), "no press, nothing to let go");
+        assert_eq!(pointer_hand(Some(1), [true, false], [false, true], [false, true], [false; 2]), (Some(1), None));
+        assert_eq!(pointer_hand(Some(0), [true, true], [false, false], [false, false], [false; 2]), (Some(0), None));
+        assert_eq!(pointer_hand(None, [true, true], [false, false], [false, false], [false; 2]), (Some(1), None));
+        assert_eq!(pointer_hand(Some(0), [false, false], [false, false], [false, false], [false; 2]), (None, None), "no press, nothing to let go");
     }
 
     /// REL-2: the panels as they were at the top of the turn (nine wing parts, the "len is 9" of the panic) and a press that

@@ -1194,7 +1194,10 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     /// Makes this panel, on a sheet in VR, one that asks for what only the overlay's own 3D worlds can do, `view` being what those say. Returns what it asked since last time.
     pub fn relay_to(&mut self, view: Status) -> Vec<Relayed> {
         // Only when it says something new. Called every turn, this painted the whole page 45 times a second for nothing: 41 ms turns in a headset, with hover waiting behind them.
-        if self.relay.as_ref() != Some(&view) {
+        if self.relay.as_ref().is_some_and(|was| same_but_stats(was, &view)) {
+            // Only the 3D view's figures moved (its mean batch time, at every batch): nothing draws them, nothing to paint (OVL2-21).
+            self.relay = Some(view);
+        } else if self.relay.as_ref() != Some(&view) {
             let hole = self.small_hole();
             self.relay = Some(view);
             self.panel.dirty = true;
@@ -2388,8 +2391,24 @@ fn short_error(e: &anyhow::Error) -> String {
 }
 
 
+/// Whether two statuses differ in nothing but `stats`, the 3D view's figures, which no page draws.
+fn same_but_stats(a: &Status, b: &Status) -> bool {
+    a.stats != b.stats && Status { stats: None, ..a.clone() } == Status { stats: None, ..b.clone() }
+}
+
 #[cfg(test)]
 mod go_tests {
+    /// OVL2-21: a relayed status whose only change is the undrawn figures does not repaint the page; any other change does.
+    #[test]
+    fn undrawn_figures_do_not_repaint_the_page() {
+        use super::panel::Status;
+        let a = Status { current: Some(10), shown: true, stats: Some("1 ms".into()), ..Default::default() };
+        let b = Status { stats: Some("1.1 ms".into()), ..a.clone() };
+        assert!(super::same_but_stats(&a, &b));
+        assert!(!super::same_but_stats(&a, &a), "the same is not 'only the figures'");
+        assert!(!super::same_but_stats(&a, &Status { shown: false, ..b.clone() }));
+    }
+
     use super::*;
     use orbiters_core::vrchat_api::{InstanceAccess, WorldInstance, WorldInstances};
 

@@ -1914,8 +1914,8 @@ impl OrbitVr {
         self.panels.camera_tracking(self.camera_side == camera_track::Side::Right,self.camera_watch.is_some() && self.camera_panel_seen_ns.is_none());
         if menu == Some(Around::Camera) {
             camera_column_out(&mut places, self.camera_clearance, self.camera_side == camera_track::Side::Right);
-            if self.panels.share_row_up() {
-                zones::caption_under_share(&mut places);
+            if let Some(row) = self.panels.share_row_up() {
+                zones::caption_under_share(&mut places, row);
             }
         }
         // Hidden: only the way back, and nothing else, whatever VRChat's menu does.

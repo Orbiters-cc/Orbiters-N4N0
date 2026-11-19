@@ -101,7 +101,8 @@ pub fn share_items(w: f32, _h: f32, view: &ShareView) -> Vec<Item> {
             Item { action: Action::ShareConfirm(id), rect: r(w - yes, 0.0, yes, BUTTON), look: Look::ShareYes },
         ];
     }
-    let tall = |step: &Step| if matches!(step, Step::Done(_) | Step::Limited) { DONE } else { BUTTON };
+    // What says something in words (an outcome, a refusal, a failure) has room for them whole.
+    let tall = |step: &Step| if matches!(step, Step::Done(_) | Step::Limited | Step::Failed(_) | Step::Explicit) { DONE } else { BUTTON };
     // A column (on a screen, beside the panel): the two over each other, the put-away under them.
     if w < 300.0 {
         let question = view.confirming;
@@ -143,6 +144,11 @@ fn slot_action(step: &Step, press: Action) -> Action {
     } else {
         Action::Idle
     }
+}
+
+/// How tall the row is drawn now (in a headset): its buttons, or a share's outcome (two lines may need it).
+pub fn row_height(view: &ShareView) -> f32 {
+    share_items(520.0, DONE, view).iter().map(|i| i.rect.bottom()).fold(0.0, f32::max)
 }
 
 /// The chooser's items, in a zone `w` x `h`: its head with the close, a page of friends, the page's arrows and Send.
@@ -251,11 +257,18 @@ fn card(p: &Painter, rect: Rect, icon: &str, tint: Color32, first: &str, second:
     p.rect_stroke(rect.shrink(0.5), round, Stroke::new(1.0, theme::alpha(tint, 0.45)), egui::StrokeKind::Middle);
     let x = rect.left() + 14.0;
     let room = rect.width() - 14.0 - 30.0 - 12.0;
-    let bold = look::font(14.0, weight::BOLD);
+    // The title smaller before it is cut ("Límite diario alcanzado" in the desktop's narrow column).
+    let bold = [14.0, 12.5]
+        .into_iter()
+        .map(|size| look::font(size, weight::BOLD))
+        .find(|f| p.layout_no_wrap(first.to_string(), f.clone(), look::LABEL).size().x <= room)
+        .unwrap_or_else(|| look::font(12.5, weight::BOLD));
     let small = look::font(12.0, weight::SEMIBOLD);
     let tinted = theme::mix(tint, Color32::WHITE, 0.35);
+    // The reason whole: three lines when nothing follows it, two otherwise.
+    let second_max = 48.0;
     let second = second.map(|w| p.layout(w.to_string(), small.clone(), tinted, room));
-    let second_h = second.as_ref().map_or(0.0, |g| g.size().y.min(32.0) + 3.0);
+    let second_h = second.as_ref().map_or(0.0, |g| g.size().y.min(second_max) + 3.0);
     // The third (where the member stands, "37.5 to Navigator") may take two lines too.
     let third = third.map(|w| p.layout(w.to_string(), small.clone(), look::MUTED, room));
     let third_h = third.as_ref().map_or(0.0, |g| g.size().y.min(32.0) + 3.0);
@@ -265,7 +278,7 @@ fn card(p: &Painter, rect: Rect, icon: &str, tint: Color32, first: &str, second:
     p.text(pos2(x + 28.0, top), Align2::LEFT_CENTER, fit(p, first, &bold, room), bold, look::LABEL);
     let mut y = top + 11.0;
     if let Some(g) = second {
-        let clip = Rect::from_min_size(pos2(x + 28.0, y), vec2(room, 32.0));
+        let clip = Rect::from_min_size(pos2(x + 28.0, y), vec2(room, second_max));
         p.with_clip_rect(clip).galley(pos2(x + 28.0, y), g, tinted);
         y += second_h;
     }
@@ -317,7 +330,7 @@ fn slot(p: &Painter, rect: Rect, view: &ShareView, public: bool, hovered: bool, 
             let words = if done.people == 1 { tr(SHARED_ONE).to_string() } else { orbiters_i18n::tr!("Shared with {count} friends", count = done.people) };
             card(p, rect, icons::CHECK_CIRCLE, good, &words, None, None, None);
         }
-        Step::Explicit => card(p, rect, icons::WARNING, theme::WARN, tr(EXPLICIT), None, None, None),
+        Step::Explicit => card(p, rect, icons::WARNING, theme::WARN, tr(SHARE_PUBLICLY), Some(tr(EXPLICIT)), None, None),
         // Said plainly; "Share to …" beside it still works.
         Step::Limited => card(p, rect, icons::CLOCK, theme::WARN, tr(ex::LIMIT_TITLE), Some(tr(ex::LIMIT_WHY)), None, None),
         Step::Failed(message) => {
@@ -325,12 +338,16 @@ fn slot(p: &Painter, rect: Rect, view: &ShareView, public: bool, hovered: bool, 
             let round = look::radius(14.0);
             p.rect_filled(rect, round, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::PANEL });
             p.rect_stroke(rect.shrink(0.5), round, Stroke::new(if hovered { 1.5 } else { 1.0 }, theme::alpha(theme::DANGER, 0.7)), egui::StrokeKind::Middle);
+            // Why, whole (up to three lines), then "Try again".
             let x = rect.left() + 14.0;
-            widgets::icon(p, pos2(x + 9.0, rect.center().y - 9.0), icons::WARNING, 18.0, theme::DANGER);
             let small = look::font(12.0, weight::SEMIBOLD);
             let room = rect.width() - 52.0;
-            p.text(pos2(x + 28.0, rect.center().y - 9.0), Align2::LEFT_CENTER, fit(p, message, &small, room), small.clone(), look::LABEL);
-            p.text(pos2(x + 28.0, rect.center().y + 11.0), Align2::LEFT_CENTER, fit(p, tr(TRY_AGAIN), &small, room), small, theme::mix(theme::DANGER, Color32::WHITE, 0.4));
+            let why = p.layout(message.to_string(), small.clone(), look::LABEL, room);
+            let why_h = why.size().y.min(48.0);
+            let top = rect.center().y - (why_h + 4.0 + 16.0) / 2.0;
+            widgets::icon(p, pos2(x + 9.0, top + 8.0), icons::WARNING, 18.0, theme::DANGER);
+            p.with_clip_rect(Rect::from_min_size(pos2(x + 28.0, top), vec2(room, 48.0))).galley(pos2(x + 28.0, top), why, look::LABEL);
+            p.text(pos2(x + 28.0, top + why_h + 4.0 + 8.0), Align2::LEFT_CENTER, fit(p, tr(TRY_AGAIN), &small, room), small, theme::mix(theme::DANGER, Color32::WHITE, 0.4));
         }
     }
 }

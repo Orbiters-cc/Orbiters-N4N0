@@ -1964,8 +1964,8 @@ impl Panels {
     }
 
     /// The share row is up beside VRChat's camera in a headset: the caption goes under it ([`zones::caption_under_share`]).
-    pub(super) fn share_row_up(&self) -> bool {
-        self.needed(Zone::CameraShare)
+    pub(super) fn share_row_up(&self) -> Option<f32> {
+        self.needed(Zone::CameraShare).then(|| self.facts.camera.share.as_ref().map_or(0.0, panels::share_sheet::row_height))
     }
 
     /// Whether a part that shows only while it has something to do has it now ([`Zone::only_while_needed`]).

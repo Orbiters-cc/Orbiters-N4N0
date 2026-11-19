@@ -428,14 +428,17 @@ pub const CAMERA_SHARE: [f32; 2] = [CAMERA_UNDER[0], CAMERA_UNDER[0] + 104.0];
 
 /// While the share row is up, the camera's caption (what the tiles say: a pointed tile, a QR code's state, a recording's
 /// clock…) lies under the row instead of where the row is: in a headset's places (in units), moved down by the row's height.
-pub fn caption_under_share(places: &mut [Placed]) {
+/// `row`: how tall the row is drawn now (its buttons, or a share's outcome).
+pub fn caption_under_share(places: &mut [Placed], row: f32) {
     for placed in places.iter_mut().filter(|p| p.zone == Zone::CameraCaption) {
-        placed.rect = placed.rect.translate(egui::vec2(0.0, CAPTION_UNDER_SHARE));
+        placed.rect = placed.rect.translate(egui::vec2(0.0, caption_under_share_by(row)));
     }
 }
 
-/// How far down the caption goes while the share row is up.
-pub const CAPTION_UNDER_SHARE: f32 = CAMERA_SHARE[1] - CAMERA_UNDER[0] + 8.0;
+/// How far down the caption goes while the share row is up, `row` tall: right under it, with the gap it has otherwise.
+pub fn caption_under_share_by(row: f32) -> f32 {
+    row.min(CAMERA_SHARE[1] - CAMERA_SHARE[0]) + 8.0
+}
 /// How tall the friends' chooser over the camera is.
 pub const CAMERA_CHOOSER_TALL: f32 = 516.0;
 /// How far the scanning corners stand off the picture.
@@ -986,7 +989,7 @@ mod tests {
         let buttons = Rect::from_min_max(pos2(-165.0, 113.0), pos2(150.0, 158.0));
         assert!(!share.intersects(picture) && !share.intersects(buttons) && share.top() - buttons.bottom() <= 10.0, "{share:?}");
         let mut places = vec![in_units(Zone::CameraCaption), in_units(Zone::CameraShare)];
-        caption_under_share(&mut places);
+        caption_under_share(&mut places, CAMERA_SHARE[1] - CAMERA_SHARE[0]);
         let moved = places[0].rect;
         assert!(moved.top() >= share.bottom() && moved.top() - share.bottom() <= 10.0, "the caption right under the row: {moved:?}");
         assert_eq!(places[1].rect, share, "the row stays");

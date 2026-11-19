@@ -1140,7 +1140,8 @@ fn camera_state(name: &str, out: &Path, facts: &Facts, right: bool) -> anyhow::R
         let mut units = if right { zones::in_units(zone).mirrored().rect } else { zone.units() };
         // As a headset lays them: the caption under the share row while it is up.
         if zone == Zone::CameraCaption && panels::needed(Zone::CameraShare, facts) {
-            units = units.translate(vec2(0.0, zones::CAPTION_UNDER_SHARE));
+            let row = facts.camera.share.as_ref().map_or(0.0, panels::share_sheet::row_height);
+            units = units.translate(vec2(0.0, zones::caption_under_share_by(row)));
         }
         let rect = egui::Rect::from_min_max(at(units.min.x, units.min.y), at(units.max.x, units.max.y));
         let placed = Placed { zone, rect, center: at(0.0, 0.0), unit: PX };

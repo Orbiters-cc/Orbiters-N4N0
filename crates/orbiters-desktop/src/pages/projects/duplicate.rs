@@ -197,6 +197,9 @@ pub(super) fn footer(ui: &mut Ui, state: &mut State, path: &Path) {
         *state.copy_progress.lock().unwrap() = Default::default();
         let cancel = state.copy_cancel.clone();
         let progress = state.copy_progress.clone();
+        // A failure restoring the copy's packages is the copy's: its card's retry must change the copy, never the project
+        // open in the panel (PROJECTS-39).
+        state.last_change = Some((parent.join(&name), orbiters_projects::vpm::Change::Resolve));
         state.task(&ctx, &tr!("Duplicating {name}…", name = project.name), move || {
             let root = orbiters_projects::vcc_dir();
             let path = orbiters_projects::runtime()?.block_on(templates::duplicate(&root, &source, &parent, &name, keep, &cancel, &progress))?;

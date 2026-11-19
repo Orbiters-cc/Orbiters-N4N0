@@ -513,6 +513,8 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
         let cancel = state.copy_cancel.clone();
         let progress = state.copy_progress.clone();
         let id = state.dialog_id();
+        // A failure restoring the new project's packages is the new project's (PROJECTS-39).
+        state.last_change = Some((location.join(&name), vpm::Change::Resolve));
         state.task(&ctx, if duplicate { tr("Copying the project…") } else { tr("Creating the project…") }, move || {
             let path = orbiters_projects::runtime()?.block_on(templates::create(
                 &orbiters_projects::vcc_dir(),

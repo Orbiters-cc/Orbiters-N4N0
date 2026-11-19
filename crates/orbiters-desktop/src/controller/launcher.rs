@@ -173,6 +173,8 @@ pub(super) struct Runtime {
     /// World id → its name and picture (`None` once asked and not given).
     worlds: HashMap<String, Option<(String, String)>>,
     pipeline: Option<Arc<AtomicBool>>,
+    /// The client (one sign-in, one grant) the pipeline was opened with.
+    pipeline_client: Option<Arc<Mutex<Client>>>,
     /// Invites accepted here, waiting for the account to arrive in their instance before VRChat is told to hide them.
     accepted: Vec<(Invite, Instant)>,
     /// The pipeline came back after a cut: read everything again (what came meanwhile was missed).
@@ -194,6 +196,7 @@ impl Default for Runtime {
             worn: BTreeMap::new(),
             worlds: HashMap::new(),
             pipeline: None,
+            pipeline_client: None,
             accepted: Vec::new(),
             resync: Arc::new(AtomicBool::new(false)),
             game_checked: None,
@@ -333,13 +336,20 @@ impl Controller {
     fn launcher_tick(self: &Shared) {
         let client = self.launcher_client();
         let account = client.as_ref().and_then(|c| c.lock().unwrap().signed_in_user_id().map(str::to_owned));
+        let mut reopen = false;
         let (due, machine, check_game) = {
             let mut rt = self.launcher.lock().unwrap();
             let changed = rt.loaded_for.as_ref() != Some(&account);
-            if changed {
+            // The same account signed in again (a new grant, a new client): its old connection stops, a new one opens.
+            let regranted = !changed && rt.pipeline.is_some() && !matches!((&rt.pipeline_client, &client), (Some(a), Some(b)) if Arc::ptr_eq(a, b));
+            if changed || regranted {
                 if let Some(stop) = rt.pipeline.take() {
                     stop.store(true, Ordering::Release);
                 }
+                rt.pipeline_client = None;
+            }
+            reopen = regranted && client.is_some();
+            if changed {
                 rt.pictures.clear();
                 rt.worn.clear();
             }
@@ -368,9 +378,12 @@ impl Controller {
         if check_game {
             self.launcher_game(machine.as_ref());
         }
+        if let (true, Some(client)) = (reopen, &client) {
+            self.launcher_pipeline(client.clone());
+        }
         if due {
             if self.view().launcher.friends.is_empty() {
-                self.update(|s| s.launcher.loading = true);
+                self.update_if(|s| !std::mem::replace(&mut s.launcher.loading, true));
             }
             match &client {
                 Some(client) => self.launcher_read_signed_in(client, account.clone()),
@@ -405,14 +418,21 @@ impl Controller {
         let worlds = {
             let mut rt = self.launcher.lock().unwrap();
             rt.worlds.extend(found);
+            // Nothing known to write in (every unnamed world still unknown or not given): no copy, no publish. A world
+            // already known is still written into a friend who just moved there.
+            if !unnamed_worlds(&self.view().launcher).iter().any(|id| matches!(rt.worlds.get(id), Some(Some(_)))) {
+                return;
+            }
             rt.worlds.clone()
         };
-        self.update(|s| {
+        self.update_if(|s| {
             let mut state = (*s.launcher).clone();
             fill_worlds(&mut state, &worlds);
-            if state != *s.launcher {
+            let changed = state != *s.launcher;
+            if changed {
                 *s.launcher = state;
             }
+            changed
         });
     }
 
@@ -459,12 +479,16 @@ impl Controller {
             rt.loaded_at = Some(Instant::now());
             rt.favourite_groups = groups;
         }
-        self.update(|s| {
+        self.update_if(|s| {
             state.game = s.launcher.game.clone();
             state.possible.play = s.launcher.possible.play;
-            state.profile = s.launcher.profile.take().filter(|p| state.friends.iter().any(|f| f.id == p.friend.id));
-            state.notice = s.launcher.notice.take();
-            *s.launcher = state;
+            state.profile = s.launcher.profile.clone().filter(|p| state.friends.iter().any(|f| f.id == p.friend.id));
+            state.notice = s.launcher.notice.clone();
+            let changed = state != *s.launcher;
+            if changed {
+                *s.launcher = state;
+            }
+            changed
         });
     }
 
@@ -530,21 +554,24 @@ impl Controller {
         let resync = {
             let mut rt = self.launcher.lock().unwrap();
             rt.pipeline = Some(stop.clone());
+            rt.pipeline_client = Some(client.clone());
             rt.resync.clone()
         };
+        // Tests never open a websocket to VRChat.
+        if cfg!(test) {
+            return;
+        }
         let weak = Arc::downgrade(self);
-        let _ = std::thread::Builder::new().name("vrchat-pipeline".into()).spawn(move || {
+        let mine = stop.clone();
+        let spawned = std::thread::Builder::new().name("vrchat-pipeline".into()).spawn(move || {
             let mut first = true;
             let ended = orbiters_core::pipeline::run(
                 &stop,
                 || pipeline_token(&client),
                 |message| {
-                    // A message of an account that is no longer the one shown is not applied.
-                    if stop.load(Ordering::Acquire) {
-                        return;
-                    }
+                    // A message of an account (or a sign-in) that is no longer the one shown is not applied.
                     if let Some(ctl) = weak.upgrade() {
-                        ctl.launcher_message(message);
+                        ctl.launcher_message_of(&stop, message);
                     }
                 },
                 |up| {
@@ -558,23 +585,44 @@ impl Controller {
                     let mut rt = ctl.launcher.lock().unwrap();
                     if rt.pipeline.as_ref().is_some_and(|p| Arc::ptr_eq(p, &stop)) {
                         rt.pipeline = None;
+                        rt.pipeline_client = None;
                     }
                 }
             }
         });
+        if spawned.is_err() {
+            let mut rt = self.launcher.lock().unwrap();
+            if rt.pipeline.as_ref().is_some_and(|p| Arc::ptr_eq(p, &mine)) {
+                rt.pipeline = None;
+                rt.pipeline_client = None;
+            }
+        }
+    }
+
+    /// One message of the pipeline `from`: applied only while it is still the launcher's pipeline (an old connection
+    /// of an account, or of a sign-in, that was replaced never writes into the list on show).
+    fn launcher_message_of(&self, from: &Arc<AtomicBool>, message: &str) {
+        let current = self.launcher.lock().unwrap().pipeline.as_ref().is_some_and(|p| Arc::ptr_eq(p, from)) && !from.load(Ordering::Acquire);
+        if current {
+            self.launcher_message(message);
+        }
     }
 
     /// One pipeline message applied to the list.
     pub(super) fn launcher_message(&self, message: &str) {
         let groups = self.launcher.lock().unwrap().favourite_groups.clone();
-        let applied = self.update(|s| {
+        let mut applied = None;
+        self.update_if(|s| {
             let mut state = (*s.launcher).clone();
-            let applied = launcher_feed::apply(&mut state, &groups, message, now());
-            if applied.changed || applied.arrived || applied.me || state != *s.launcher {
+            let a = launcher_feed::apply(&mut state, &groups, message, now());
+            let changed = state != *s.launcher;
+            if changed {
                 *s.launcher = state;
             }
-            applied
+            applied = Some(a);
+            changed
         });
+        let applied = applied.unwrap_or_default();
         if !applied.decorations.is_empty() {
             let mut rt = self.launcher.lock().unwrap();
             for (id, d) in applied.decorations {
@@ -609,16 +657,18 @@ impl Controller {
             rt.pictures.extend(found);
             (rt.pictures.clone(), rt.worn.clone())
         };
-        self.update(|s| {
+        self.update_if(|s| {
             let mut state = (*s.launcher).clone();
             for f in &mut state.friends {
                 if let Some(d) = worn.get(&f.id) {
                     apply_pictures(&pictures, d, &mut f.look);
                 }
             }
-            if state != *s.launcher {
+            let changed = state != *s.launcher;
+            if changed {
                 *s.launcher = state;
             }
+            changed
         });
     }
 
@@ -855,11 +905,12 @@ impl Controller {
 /// The worlds named by a place whose name is not known yet, friends in the list's order first.
 pub fn unnamed_worlds(state: &LauncherState) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
+    let by_id: HashMap<&str, &orbiters_core::launcher::Friend> = state.friends.iter().map(|f| (f.id.as_str(), f)).collect();
     let places = state
         .invites
         .iter()
         .filter_map(|i| i.place.as_ref())
-        .chain(state.groups.iter().flat_map(|g| g.members.iter()).filter_map(|id| state.friend(id)).filter_map(|f| match &f.whereabouts {
+        .chain(state.groups.iter().flat_map(|g| g.members.iter()).filter_map(|id| by_id.get(id.as_str()).copied()).filter_map(|f| match &f.whereabouts {
             orbiters_core::launcher::Whereabouts::World(p) => Some(p),
             _ => None,
         }));

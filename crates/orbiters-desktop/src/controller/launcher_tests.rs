@@ -315,3 +315,56 @@ fn a_press_on_another_accounts_list_sends_nothing() {
     c.launcher_do(Action::Dismiss { id: "not_1".into() });
     assert!(calls.lock().unwrap().is_empty(), "nothing sent from the account that is not the list's");
 }
+
+/// A signed-in launcher with its list read, a friend in a world already named, the game looked at once.
+fn loaded_and_idle() -> (Shared, Arc<Mutex<Vec<(String, String)>>>) {
+    let c = controller(Arc::new(Pretend { installed: true, ..Default::default() }));
+    let (client, calls) = c.test_vrchat(vec![]);
+    let mut state = LauncherState { source: Source::SignedIn { user_id: "usr_test".into(), name: String::new() }, ..Default::default() };
+    state.friends = vec![launcher_feed::friend(&json!({"id": A, "displayName": "Nova", "location": format!("{W}:1~region(eu)"), "state": "online"}), true).unwrap()];
+    launcher_feed::regroup(&mut state, &[]);
+    c.update(|s| *s.launcher = state);
+    {
+        let mut rt = c.launcher.lock().unwrap();
+        rt.loaded_for = Some(Some("usr_test".into()));
+        rt.loaded_at = Some(Instant::now());
+        rt.worlds.insert(W.into(), Some(("Lounge".into(), String::new())));
+        rt.pipeline = Some(Arc::new(AtomicBool::new(false)));
+        rt.pipeline_client = Some(client);
+    }
+    c.launcher_tick();
+    (c, calls)
+}
+
+#[test]
+fn an_idle_launcher_publishes_nothing() {
+    let (c, calls) = loaded_and_idle();
+    let before = c.publishes.load(Ordering::Relaxed);
+    for _ in 0..10 {
+        c.launcher.lock().unwrap().game_checked = None;
+        c.launcher_tick();
+    }
+    assert_eq!(c.publishes.load(Ordering::Relaxed), before, "nothing changed: nothing published");
+    assert!(calls.lock().unwrap().is_empty());
+    // A pipeline message that changes nothing publishes nothing either.
+    let same = json!({"type": "friend-location", "content": json!({"userId": "usr_nobody", "location": "private"}).to_string()}).to_string();
+    c.launcher_message(&same);
+    assert_eq!(c.publishes.load(Ordering::Relaxed), before);
+}
+
+#[test]
+fn a_replaced_pipeline_writes_nothing_into_the_list() {
+    let (c, _) = loaded_and_idle();
+    let old = c.launcher.lock().unwrap().pipeline.clone().unwrap();
+    // The same account signed in again: a new client, so the old connection is stopped and its messages dropped.
+    c.test_vrchat(vec![]);
+    c.launcher_tick();
+    assert!(old.load(Ordering::Acquire), "the old connection is told to stop");
+    let new = c.launcher.lock().unwrap().pipeline.clone().unwrap();
+    assert!(!Arc::ptr_eq(&old, &new), "a new one for the new sign-in");
+    let offline = json!({"type": "friend-offline", "content": json!({"userId": A, "platform": ""}).to_string()}).to_string();
+    c.launcher_message_of(&old, &offline);
+    assert_eq!(c.view().launcher.friend(A).unwrap().presence, orbiters_core::launcher::Presence::InGame, "the old one's message is dropped");
+    c.launcher_message_of(&new, &offline);
+    assert_ne!(c.view().launcher.friend(A).unwrap().presence, orbiters_core::launcher::Presence::InGame);
+}

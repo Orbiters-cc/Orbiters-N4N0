@@ -618,7 +618,9 @@ fn arrival_of_the_bridge_s_vrchat_never_makes_the_person_s_the_bridge_s() {
     game.set_behaviour(|b| b.comes_up_after = Some(Duration::from_millis(1500)));
     let person = game.clone();
     let story = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
+        // During the start: once its launch went out (a fixed 300 ms came before go_to_world's first look on a loaded
+        // machine, which then rightly refused the person's VRChat as not the bridge's).
+        assert!(until(PATIENCE, || !person.launches().is_empty()), "the start launched");
         person.person_starts_beside();
         // The bridge's own comes up meanwhile; later the app follows it, the person's runs on.
         std::thread::sleep(Duration::from_millis(2500));

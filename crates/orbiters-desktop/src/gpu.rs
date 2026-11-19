@@ -199,6 +199,7 @@ fn primary_display_adapter() -> Option<(u32, u32)> {
 /// test process for ever 4 times in 10 rounds; the app itself never makes an OpenGL device on Windows.)
 #[cfg(test)]
 pub mod testing {
+    use eframe::wgpu;
     use std::sync::{Mutex, MutexGuard};
     use std::time::Duration;
 

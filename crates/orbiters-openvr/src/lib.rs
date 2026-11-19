@@ -320,6 +320,40 @@ pub fn installed() -> bool {
     runtime_dir().is_some()
 }
 
+/// Whether SteamVR's server (`vrserver.exe`) runs on this computer, from the process list, without loading SteamVR's client.
+/// A connection that does not launch SteamVR (Background) can only succeed while it runs: a worker that waits for SteamVR asks
+/// this first, instead of loading `vrclient_x64.dll`, failing `Init` and unloading it every few seconds (REL-13). When the list
+/// cannot be read: `true`, so the caller connects as it always did.
+pub fn server_running() -> bool {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+        // SAFETY: a snapshot closed below, read with an entry of the size it says.
+        unsafe {
+            let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return true };
+            let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+            let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+            let mut found = false;
+            while more && !found {
+                found = is_server_exe(&entry.szExeFile);
+                more = Process32NextW(snapshot, &mut entry).is_ok();
+            }
+            let _ = windows::Win32::Foundation::CloseHandle(snapshot);
+            found
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}
+
+/// Whether a NUL-terminated UTF-16 executable name is SteamVR's server's, in any case.
+fn is_server_exe(name: &[u16]) -> bool {
+    let length = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+    String::from_utf16_lossy(&name[..length]).eq_ignore_ascii_case("vrserver.exe")
+}
+
 #[cfg(windows)]
 mod platform {
     use std::path::Path;
@@ -1118,6 +1152,18 @@ pub fn role_name(class: DeviceClass, role: ControllerRole, controller_type: Opti
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_server_is_known_by_its_executable_name_in_any_case() {
+        let wide = |s: &str| s.encode_utf16().chain([0, b'x' as u16]).collect::<Vec<u16>>();
+        assert!(super::is_server_exe(&wide("vrserver.exe")));
+        assert!(super::is_server_exe(&wide("VRServer.EXE")));
+        assert!(!super::is_server_exe(&wide("vrserver.exe.bak")));
+        assert!(!super::is_server_exe(&wide("vrmonitor.exe")));
+        assert!(!super::is_server_exe(&[]));
+        // This test process is not SteamVR's server; whether one runs here is not asked (it may).
+        let _ = super::server_running();
+    }
+
     use super::*;
 
     #[test]

@@ -279,10 +279,13 @@ extern "system" fn detour<const INDEX: usize>(this: *mut c_void, device: u32, po
         // SAFETY: a function pointer this crate stored before it patched the table; never null once set.
         (bits != 0).then(|| unsafe { std::mem::transmute::<usize, PoseUpdatedFn>(bits) })
     };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    // Only our own struct layout is touched; any other size passes straight through.
+    let sized = !pose.is_null() && pose_size as usize == std::mem::size_of::<DriverPose>();
+    // Our own processing, guarded by itself: should it ever panic, the pose still reaches SteamVR, once, as it came, so a
+    // mistake in smoothing or the walk costs smoothing, never tracking (REL-15).
+    let processed = catch_unwind(AssertUnwindSafe(|| {
+        processing_fault();
         let mut smoothed = None;
-        // Only our own struct layout is touched; any other size passes straight through.
-        let sized = !pose.is_null() && pose_size as usize == std::mem::size_of::<DriverPose>();
         let ours = sized && STATE.attached_mask.load(Ordering::Acquire) & (1 << INDEX) != 0 && !forwarded_pose(device, pose);
         if ours && STATE.active.load(Ordering::Relaxed) {
             STATE.poses.fetch_add(1, Ordering::Relaxed);
@@ -308,6 +311,15 @@ extern "system" fn detour<const INDEX: usize>(this: *mut c_void, device: u32, po
                 smoothed = Some(moved);
             }
         }
+        smoothed
+    }));
+    let smoothed = processed.unwrap_or_else(|_| {
+        if !PROCESSING_PANICKED.swap(true, Ordering::Relaxed) {
+            log_line("Orbiters smoothing: processing a pose failed; poses go on to SteamVR as they came");
+        }
+        None
+    });
+    let _ = catch_unwind(AssertUnwindSafe(|| {
         if let Some(call) = original {
             let outgoing = smoothed.as_ref().map_or(pose, |p| p as *const DriverPose);
             let scope = PoseScope { previous: IN_POSE.with(Cell::get), device, pose: if sized { outgoing } else { ptr::null() } };
@@ -320,6 +332,21 @@ extern "system" fn detour<const INDEX: usize>(this: *mut c_void, device: u32, po
         }
     }));
 }
+
+/// Tests: a panic in the detour's processing, when asked for.
+#[cfg(test)]
+fn processing_fault() {
+    if hook_tests::PANIC_IN_PROCESSING.load(Ordering::Relaxed) {
+        panic!("test: processing panics");
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn processing_fault() {}
+
+/// Said once in SteamVR's log that processing a pose failed.
+static PROCESSING_PANICKED: AtomicBool = AtomicBool::new(false);
 
 /// `this` is a host object; patch slot [`HOST_POSE_UPDATED_SLOT`] of its table to `detour::<INDEX>`, keeping the
 /// original in `STATE.pose_originals[INDEX]` (stored first: poses flow on other threads while this runs). Does
@@ -434,6 +461,42 @@ unsafe fn exchange_protected(
 mod hook_tests {
     use super::*;
     static EMIT_OTHER_DEVICE: AtomicBool = AtomicBool::new(false);
+    /// Makes the detour's own processing panic.
+    pub(super) static PANIC_IN_PROCESSING: AtomicBool = AtomicBool::new(false);
+    static RECEIVED: AtomicU32 = AtomicU32::new(0);
+    static RECEIVED_X: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "system" fn receiver(_this: *mut c_void, _device: u32, pose: *const DriverPose, _size: u32) {
+        RECEIVED.fetch_add(1, Ordering::Relaxed);
+        RECEIVED_X.store(((*pose).vec_position[0] as f32).to_bits(), Ordering::Relaxed);
+    }
+
+    /// REL-15: processing that panics still hands SteamVR the pose, exactly once and as it came.
+    #[test]
+    fn a_panic_in_processing_still_forwards_the_raw_pose_once() {
+        let _one = TEST_STATE.lock().unwrap();
+        let previous = STATE.pose_originals[0].swap(receiver as *const () as usize, Ordering::AcqRel);
+        STATE.attached_mask.store(1, Ordering::Release);
+        STATE.clock.get_or_init(Instant::now);
+        STATE.active.store(true, Ordering::Release);
+        let pose = DriverPose::at([1.5, 2.0, 3.0], openvr::Quaternion::IDENTITY);
+        RECEIVED.store(0, Ordering::Relaxed);
+        PANIC_IN_PROCESSING.store(true, Ordering::Relaxed);
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        detour::<0>(ptr::null_mut(), 3, &pose, std::mem::size_of::<DriverPose>() as u32);
+        std::panic::set_hook(hook);
+        PANIC_IN_PROCESSING.store(false, Ordering::Relaxed);
+        assert_eq!(RECEIVED.load(Ordering::Relaxed), 1, "the successor ran once");
+        assert_eq!(f32::from_bits(RECEIVED_X.load(Ordering::Relaxed)), 1.5, "with the pose as it came");
+        assert!(IN_POSE.with(Cell::get).is_null(), "scope resets after forwarding");
+        // And without a panic, once too.
+        detour::<0>(ptr::null_mut(), 3, &pose, std::mem::size_of::<DriverPose>() as u32);
+        assert_eq!(RECEIVED.load(Ordering::Relaxed), 2);
+        STATE.active.store(false, Ordering::Release);
+        STATE.attached_mask.store(0, Ordering::Release);
+        STATE.pose_originals[0].store(previous, Ordering::Release);
+    }
     static TEST_STATE: Mutex<()> = Mutex::new(());
 
     unsafe extern "system" fn forward(this: *mut c_void, device: u32, pose: *const DriverPose, size: u32) {

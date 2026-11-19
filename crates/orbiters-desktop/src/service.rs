@@ -170,7 +170,7 @@ impl Service {
         }
         // Closing an overlay is asynchronous: do not overlap its connection.
         if self.links.lock().unwrap().iter().any(|l| l.role == Role::Overlay)
-            || self.overlay.lock().unwrap().as_mut().is_some_and(|(child, _, _, _, _)| matches!(child.try_wait(), Ok(None))) { return; }
+            || self.overlay.lock().unwrap().as_mut().is_some_and(|(child, _, _, _, _)| child_exited(child.try_wait()).is_none()) { return; }
         // Not yet answering (it is starting, or going): asked again next turn.
         let Ok(client) = orbiters_openvr::Client::connect(orbiters_openvr::AppType::Background) else { return };
         if crate::steamvr_start::current_session() != Some(session) { return; }
@@ -253,11 +253,7 @@ impl Service {
         let mut overlay = self.overlay.lock().unwrap();
         let mut errors = 0;
         if let Some((child, started, steamvr, failures, prior_errors)) = overlay.as_mut() {
-            let exited = match child.try_wait() {
-                Ok(None) => None,
-                Ok(Some(status)) => Some(status.code()),
-                Err(_) => Some(None),
-            };
+            let exited = child_exited(child.try_wait());
             errors = if *steamvr == Some(session) { short_errors(*prior_errors, exited, started.elapsed()) } else { 0 };
             if !overlay_due(exited, started.elapsed(), *steamvr, Some(session), *failures) || !errors_waited(errors, started.elapsed()) {
                 return;
@@ -609,6 +605,22 @@ fn overlay_due(exited: Option<Option<i32>>, since: Duration, started_for: Option
     since >= OVERLAY_RETRY * if failures <= 1 { 1 } else { 2 }
 }
 
+/// A child's exit code once it has exited; `None` while it runs, and also when Windows could not say (a failed wait is no
+/// proof of an exit: starting another then would overlap two overlays, OVERLAY-27; it is asked again next turn).
+fn child_exited(waited: std::io::Result<Option<std::process::ExitStatus>>) -> Option<Option<i32>> {
+    match waited {
+        Ok(Some(status)) => Some(status.code()),
+        Ok(None) => None,
+        Err(e) => {
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, Ordering::Relaxed) {
+                crate::overlay::vr_log::line(&format!("service: could not ask whether the SteamVR overlay still runs ({e}); taken as running")); // i18n: not shown (a log's line)
+            }
+            None
+        }
+    }
+}
+
 /// A child that lived this long is a working start: the errors' back-off starts again from nothing.
 const OVERLAY_LIVED: Duration = Duration::from_secs(60);
 /// The longest wait between starts of an overlay that keeps failing.
@@ -818,6 +830,15 @@ pub(crate) mod tests {
             }
         }
     }
+    /// OVERLAY-27: a wait that failed keeps the child as running; only a real exit lets another start.
+    #[test]
+    fn a_failed_wait_is_not_an_exit() {
+        assert_eq!(child_exited(Err(std::io::Error::other("access denied"))), None);
+        assert_eq!(child_exited(Ok(None)), None);
+        let done = if cfg!(windows) { std::process::Command::new("cmd").args(["/C", "exit 3"]).status() } else { std::process::Command::new("sh").args(["-c", "exit 3"]).status() };
+        assert_eq!(child_exited(Ok(Some(done.unwrap()))), Some(Some(3)));
+    }
+
     /// OVERLAY-17: an overlay that keeps failing soon after it starts is started again 2 s, 4 s, then 8, 16 ... 120 s apart;
     /// a clean end, SteamVR going, or a child that lived a minute start the count again, and one error waits as before.
     #[test]

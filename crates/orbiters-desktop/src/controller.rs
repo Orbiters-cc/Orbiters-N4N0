@@ -103,6 +103,22 @@ fn initial_samples(vrchat: Vec<(String, OscValue)>, latest: &HashMap<String, (Ve
 #[derive(Clone, Copy, PartialEq)]
 enum CapturePurpose { CameraOverlay, Short, Avatar }
 
+/// Lock order (read 2026-11-19, night review CTL-14 with the challenge's corrections; nothing checks it but reading): a
+/// lock on the left may be held while one on its right is taken, never the reverse.
+///
+/// - `publishing` -> `snapshot` -> {`vrchat_login` (in `publish`), `trail`, `burst` (inside `update` closures)}.
+///   `update` lets `snapshot` go before it publishes.
+/// - `capture_start_gate` -> `osc_values` -> `snapshot` (`start_segment`), and -> `worker`. The gate is held across
+///   VRChat's HTTP answers while a start reads them; a scan's flight takes it around each pose it sends (C-2).
+/// - `osc_values` -> `snapshot`, `osc_values` -> `worker`. Never `snapshot` -> `osc_values`: the no-keyframe save
+///   did, and deadlocked a start (C-1, fixed).
+/// - `camera_stream_owners` -> `osc_values` -> `camera_before` (acquire) and `camera_before` -> `osc` -> `osc_values`
+///   (release): opposite orders, safe only because both run under `camera_stream_owners`.
+/// - `kit_epoch` -> `publishing`, `kit_epoch` -> `osc_values`.
+/// - `reconstruction` -> `reconstruct_queue` -> `publishing`; a reconstruction worker is spawned under `reconstruction`.
+/// - `cleanup` -> `publishing`; `camera_scan` -> `publishing`, with VRChat's HTTP under `camera_scan`.
+/// - `account_runtime` is let go before the account is published; its generation is read under `snapshot` through
+///   `account_generation` (C-7).
 pub struct Controller {
     snapshot: Mutex<Snapshot>,
     /// What the interface reads: the snapshot as it was last handed out, swapped on every change. A copy shares every

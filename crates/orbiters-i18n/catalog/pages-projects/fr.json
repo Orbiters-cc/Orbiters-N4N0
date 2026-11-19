@@ -94,7 +94,7 @@
   "Creating the project…": "Création du projet…",
   "Creating…": "Création…",
   "Deleting the partial copy…": "Suppression de la copie partielle…",
-  "Detached": "Detached",
+  "Detached": "HEAD détachée",
   "Done": "Terminé",
   "Downloads the packages the project lists but does not have (VCC's Resolve)": "Télécharge les packages que le projet liste mais qu’il n’a pas (le Resolve de VCC)",
   "Drag to resize, double-click for the usual width": "Fais glisser pour redimensionner, double-clique pour revenir à la largeur habituelle",

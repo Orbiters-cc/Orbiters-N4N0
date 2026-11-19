@@ -55,6 +55,9 @@ pub struct Service {
     steamvr_start_seen: Mutex<Option<crate::steamvr_start::Session>>,
     /// Tracking smoothing's driver, kept in step with the settings ([`Service::keep_tracking`]).
     smoothing: Mutex<crate::tracking::Smoothing>,
+    /// Which link holds the app's Talk button down (the window's and the desktop panels' are one Talk to N4N0): only
+    /// that link going away lets it go (AD-1).
+    talk: Mutex<TalkHolder>,
     quitting: AtomicBool,
     /// The beta's usage statistics, a session per link, waiting for Orbiters (`usage::spool`).
     usage: Arc<crate::usage::spool::Spool>,
@@ -81,6 +84,7 @@ impl Service {
             orbit: Mutex::new(None),
             steamvr_start_seen: Mutex::new(None),
             smoothing: Mutex::new(Default::default()),
+            talk: Mutex::new(TalkHolder::default()),
             quitting: AtomicBool::new(false),
             usage: Arc::default(),
             #[cfg(windows)]
@@ -475,7 +479,12 @@ impl Service {
             ToService::Booster { command } => ctl.booster_command(command),
             ToService::WalkPath { path } => ctl.set_walk_path(crate::tracking::walk_path_said(path)),
             // Which Talk button is held matters: the service lets it go when that window or overlay goes away.
-            ToService::N4n0 { command: N4n0Command::Talk { down } } => ctl.n4n0_app_talk(down, role == Role::Overlay),
+            ToService::N4n0 { command: N4n0Command::Talk { down } } => {
+                if role != Role::Overlay {
+                    self.talk.lock().unwrap().talk(link, down);
+                }
+                ctl.n4n0_app_talk(down, role == Role::Overlay)
+            }
             ToService::N4n0 { command } => ctl.n4n0_command(command),
             ToService::OscReconnect => ctl.osc_rediscover(),
             ToService::Updates { action } => ctl.update_action(action),
@@ -566,19 +575,49 @@ impl Service {
             self.ctl.set_overlay_connected(false);
             self.ctl.booster_overlay_gone();
         }
-        if !still_there && role != Role::Orbit {
-            // What it held (a Talk button, the overlay's open menu) ends with it.
-            self.ctl.n4n0_link_closed(role == Role::Overlay);
+        // The app's Talk (the window's or the panels') is let go only by the link that holds it down: the panels
+        // closing must not end, nor send, a sentence the window is saying (AD-1).
+        let held_talk = role != Role::Overlay && self.talk.lock().unwrap().closed(id);
+        if role == Role::Overlay && !still_there {
+            // What it held (its Talk button, its open menu) ends with it.
+            self.ctl.n4n0_link_closed(true);
+        }
+        if role == Role::Window && held_talk {
+            // A window gone with Talk held: its sentence is dropped (it may have crashed with the button down).
+            self.ctl.n4n0_link_closed(false);
         }
         if role == Role::Orbit {
-            // Its panels' Talk, should it have gone while held: the service never saw that let go.
-            self.ctl.n4n0_command(crate::ipc::N4n0Command::Talk { down: false });
+            // Its panels' Talk, should they have gone while held: the service never saw that let go.
+            if held_talk {
+                self.ctl.n4n0_command(crate::ipc::N4n0Command::Talk { down: false });
+            }
             self.ctl.n4n0_command(crate::ipc::N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
         }
         // Without a tray (Linux for now) nothing would bring the window back: closing it quits.
         if role == Role::Window && cfg!(not(any(windows, target_os = "macos"))) {
             self.quit();
         }
+    }
+}
+
+/// Which link pressed the app's Talk button last and has not let it go. The window and the desktop panels talk to N4N0 as
+/// one source: what one of them holds is let go when THAT link closes, not when another one does.
+#[derive(Default)]
+struct TalkHolder(Option<u64>);
+
+impl TalkHolder {
+    /// `link` pressed (`down`) or let go the app's Talk. Any link's release lets it go, as the runtime does.
+    fn talk(&mut self, link: u64, down: bool) {
+        self.0 = down.then_some(link);
+    }
+
+    /// `link` went away: whether it held the Talk button (which is then let go).
+    fn closed(&mut self, link: u64) -> bool {
+        let held = self.0 == Some(link);
+        if held {
+            self.0 = None;
+        }
+        held
     }
 }
 
@@ -783,6 +822,24 @@ pub(crate) mod tests {
             assert!(overlay_due(Some(Some(crate::overlay::EXIT_STEAMVR_GONE)), Duration::ZERO, Some((7, 100)), next, 100));
             assert!(!overlay_due(None, Duration::ZERO, Some((7, 100)), next, 100));
         }
+    }
+
+    /// AD-1: the panels closing do not let go the Talk the window holds, and the reverse; the link that holds it does.
+    #[test]
+    fn only_the_link_that_holds_talk_lets_it_go_when_it_closes() {
+        let (window, panels) = (1, 2);
+        let mut talk = TalkHolder::default();
+        talk.talk(window, true);
+        assert!(!talk.closed(panels), "the panels never pressed Talk");
+        assert!(talk.closed(window), "the window held it");
+        assert!(!talk.closed(window), "let go once");
+        talk.talk(panels, true);
+        assert!(!talk.closed(window));
+        assert!(talk.closed(panels));
+        // A release from either lets it go: nothing left for a later close.
+        talk.talk(window, true);
+        talk.talk(panels, false);
+        assert!(!talk.closed(window));
     }
 
     use crate::link_between::{Between, Line};

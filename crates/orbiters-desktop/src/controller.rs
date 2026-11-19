@@ -100,6 +100,15 @@ fn initial_samples(vrchat: Vec<(String, OscValue)>, latest: &HashMap<String, (Ve
     merged.iter().flat_map(|(address, values)| osc_samples(address, values, 0, true).collect::<Vec<_>>()).collect()
 }
 
+/// Which recording a stop is for ([`Controller::stop_capture`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StopOf {
+    /// The person's own Stop: what records now, and a start waiting.
+    Person,
+    /// The recording of this number only ([`Controller::recording_number`] when it started).
+    Recording(u64),
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum CapturePurpose { CameraOverlay, Short, Avatar }
 
@@ -1025,7 +1034,7 @@ impl Controller {
                 self.publish();
                 if over_limit {
                     self.notify(NoticeKind::Warning, tr("Storage limit reached: recording stopped. Raise the limit in Settings or free space."));
-                    let _ = self.stop_capture();
+                    let _ = self.stop_capture(StopOf::Recording(self.recording_number()));
                 }
             }
             WorkerEvent::Stopped { manifest, reason, .. } => {
@@ -1361,7 +1370,7 @@ impl Controller {
         if !self.owns_recording(owner) {
             return;
         }
-        if let Err(e) = self.stop_capture() {
+        if let Err(e) = self.stop_capture_now() {
             self.notify(NoticeKind::Error, e.to_string());
         }
     }
@@ -1387,7 +1396,7 @@ impl Controller {
         }
         flag();
         if self.is_capturing() {
-            if let Err(e) = self.stop_capture() {
+            if let Err(e) = self.stop_capture_now() {
                 self.notify(NoticeKind::Error, e.to_string());
             }
         }
@@ -1498,7 +1507,7 @@ impl Controller {
             self.switch_kit_on(&[]);
             return;
         }
-        let r = if on { self.start_capture(CapturePurpose::Avatar) } else { self.stop_capture() };
+        let r = if on { self.start_capture(CapturePurpose::Avatar) } else { self.stop_capture(StopOf::Person) };
         if let Err(err) = r {
             self.notify(NoticeKind::Error, err.to_string());
         }
@@ -2038,7 +2047,25 @@ impl Controller {
         self.start_with(SourceSpec::RawSequence { path: dir, realtime: false }, true, false)
     }
 
-    pub fn stop_capture(self: &Shared) -> anyhow::Result<()> {
+    /// Stops a recording. A stop must say which: the person's own Stop (the button, the tray, the avatar's record toggle)
+    /// stops what records now and calls off a start waiting; anything automatic (a picture's flight, the bridge's
+    /// clean-up, the storage limit) names the recording it is about, and a recording begun since is left alone
+    /// (verify2-controller: no caller can stop "whatever is recording").
+    pub fn stop_capture(self: &Shared, of: StopOf) -> anyhow::Result<()> {
+        match of {
+            StopOf::Person => self.stop_capture_now(),
+            StopOf::Recording(number) => {
+                let _gate = self.capture_start_gate.lock().unwrap();
+                if !self.owns_recording(number) {
+                    return Ok(());
+                }
+                self.stop_capture_now()
+            }
+        }
+    }
+
+    /// The stop itself; callers hold the start gate when they checked ownership (or stop for the person, or quit).
+    fn stop_capture_now(self: &Shared) -> anyhow::Result<()> {
         self.stop_generation.fetch_add(1, Ordering::AcqRel);
         // A start waiting for the last session to be saved is called off too.
         self.pending_start.lock().unwrap().take();
@@ -2363,7 +2390,7 @@ impl Controller {
         self.stop_bridge();
         self.pending_start.lock().unwrap().take();
         self.change_queue(VecDeque::clear);
-        if let Err(e) = self.stop_capture() {
+        if let Err(e) = self.stop_capture_now() {
             eprintln!("stopping the capture: {e:#}");
         }
         self.quitting.store(true, Ordering::Relaxed);
@@ -3859,7 +3886,7 @@ mod tests {
         let b=barrier.clone(); let c=ctl.clone();
         let thread=std::thread::spawn(move || {b.wait(); c.resume_pending(pending)});
         ctl.update(|s|s.capture.state=CaptureState::Idle);
-        ctl.stop_capture().unwrap();
+        ctl.stop_capture(StopOf::Person).unwrap();
         barrier.wait();
         assert!(thread.join().unwrap().is_err());
         assert!(ctl.test_commands.lock().unwrap().as_ref().unwrap().is_empty());
@@ -4142,14 +4169,14 @@ mod tests {
         assert!(ctl.require_live_camera().is_err(), "cached received Mode without a fresh query cannot authorize recording");
         ctl.on_osc(vec![(CAMERA_MODE.into(),vec![OscValue::Int(0)])],clock::now_ns());
         assert_eq!(ctl.view().camera_open_said,Some(false));
-        assert!(ctl.stop_capture().is_ok());
+        assert!(ctl.stop_capture(StopOf::Person).is_ok());
         assert!(!ctl.view().live_recording_running());
     }
     #[test]
     fn a_stop_cancels_a_start_that_has_not_passed_preflight() {
         let ctl=Controller::new(Settings::default());
         let generation=ctl.stop_generation.load(Ordering::Acquire);
-        ctl.stop_capture().unwrap();
+        ctl.stop_capture(StopOf::Person).unwrap();
         assert!(ctl.start_capture_generation(CapturePurpose::CameraOverlay,generation).is_err());
         assert_eq!(ctl.view().capture.state,CaptureState::Idle);
     }

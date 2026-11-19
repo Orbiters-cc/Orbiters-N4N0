@@ -405,7 +405,7 @@ impl Service {
             ToService::WindowRestShown { id } => ctl.window_rest_shown(id),
             ToService::KeepWindowOpen { id } => ctl.keep_window_open(id),
             ToService::SwitchDemoAvatar => ctl.switch_demo_avatar(),
-            ToService::StopCapture => report(ctl.stop_capture()),
+            ToService::StopCapture => report(ctl.stop_capture(controller::StopOf::Person)),
             ToService::Pause { paused } => report(ctl.pause_capture(paused)),
             ToService::ChooseVrchat { pid } => report(ctl.choose_vrchat(pid)),
             ToService::TestPattern => report(ctl.start_test_capture()),

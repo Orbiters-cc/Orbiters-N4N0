@@ -24,11 +24,14 @@ pub(super) struct RealGame {
     pub(super) exe: PathBuf,
     /// The log last looked at for its command line, and what it said.
     desktop_mode: Mutex<(Option<PathBuf>, Option<bool>)>,
+    /// The recording the bridge's last picture started: its automatic stop stops that one, never the person's own
+    /// recording begun since (verify2-controller).
+    picture: Mutex<Option<u64>>,
 }
 
 impl RealGame {
     pub(super) fn new(ctl: Weak<Controller>, exe: PathBuf) -> Self {
-        Self { ctl, exe, desktop_mode: Mutex::new((None, None)) }
+        Self { ctl, exe, desktop_mode: Mutex::new((None, None)), picture: Mutex::new(None) }
     }
 
     pub(super) fn ctl(&self) -> Result<Shared, Failure> {
@@ -281,7 +284,11 @@ impl Game for RealGame {
     }
 
     fn take_picture(&self, length: Photo3dLength, mode: PictureMode) -> Result<(), Failure> {
-        self.ctl()?.take_3d_picture_of(length, mode).map_err(|e| {
+        let started = self.ctl()?.take_3d_picture_of(length, mode);
+        if let Ok(number) = &started {
+            *self.picture.lock().unwrap() = Some(*number);
+        }
+        started.map(|_| ()).map_err(|e| {
             let said = e.to_string();
             if said.contains(orbiters_n4n0::platform::CAMERA_CLOSED) {
                 Failure::new("camera_closed", "VRChat's camera is not open.", "press esc, screenshot, click the camera icon in the menu's bottom row, screenshot, click Stream Camera.") // i18n: not shown
@@ -292,8 +299,10 @@ impl Game for RealGame {
     }
 
     fn stop_picture(&self) {
+        // Its own picture's recording only: nothing when it started none, or that one ended and another began.
+        let Some(number) = *self.picture.lock().unwrap() else { return };
         if let Ok(ctl) = self.ctl() {
-            if let Err(e) = ctl.stop_capture() {
+            if let Err(e) = ctl.stop_capture(super::StopOf::Recording(number)) {
                 eprintln!("the bridge stopped a recording: {e:#}");
             }
         }
@@ -496,6 +505,28 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// verify2-controller: closing a bridge session stops the bridge's own picture's recording, never the person's
+    /// recording begun after that picture ended.
+    #[test]
+    fn the_bridges_stop_leaves_the_persons_own_recording() {
+        use orbiters_core::protocol::WorkerCommand;
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        *ctl.test_commands.lock().unwrap() = Some(Vec::new());
+        let stops = || ctl.test_commands.lock().unwrap().as_ref().unwrap().iter().filter(|c| matches!(c, WorkerCommand::Stop)).count();
+        let game = RealGame::new(std::sync::Arc::downgrade(&ctl), PathBuf::new());
+        game.stop_picture();
+        assert_eq!(stops(), 0, "it started no picture: it stops nothing");
+        // Its picture was recording 1; the person's own recording is 2.
+        *game.picture.lock().unwrap() = Some(1);
+        ctl.capture_serial.store(2, Ordering::Release);
+        ctl.update(|s| s.capture.state = crate::state::CaptureState::Recording);
+        game.stop_picture();
+        assert_eq!(stops(), 0, "the person's recording goes on");
+        *game.picture.lock().unwrap() = Some(2);
+        game.stop_picture();
+        assert_eq!(stops(), 1, "its own recording stops");
+    }
 
     #[test]
     fn the_logs_own_arguments_say_whether_it_runs_without_vr() {

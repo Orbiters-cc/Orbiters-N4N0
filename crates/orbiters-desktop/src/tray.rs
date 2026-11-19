@@ -58,7 +58,7 @@ mod win {
                         if !ctl.is_capturing() {
                             return;
                         }
-                        if let Err(err) = ctl.stop_capture() {
+                        if let Err(err) = ctl.stop_capture(crate::controller::StopOf::Person) {
                             ctl.notify(NoticeKind::Error, err.to_string());
                             svc.show_window(false);
                         }

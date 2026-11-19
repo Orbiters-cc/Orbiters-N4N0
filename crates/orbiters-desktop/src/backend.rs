@@ -476,7 +476,7 @@ impl Backend for Local {
     }
 
     fn stop_capture(&self) {
-        self.report(self.ctl.stop_capture());
+        self.report(self.ctl.stop_capture(crate::controller::StopOf::Person));
     }
 
     fn pause_capture(&self, paused: bool) {

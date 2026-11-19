@@ -372,14 +372,15 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
     // Serialize mutations across this app's windows. VCC's database has its own upstream shared LiteDB mutex.
     let io = DefaultEnvironmentIo::new(root.into());
     let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Packages").await?;
+    // A plan an earlier run stopped halfway is put back first, from its journal (kept outside the project), before any
+    // repository is reached: a network failure must not hold that up.
+    recover_plans(path, &plan_journals(root))?;
     let (settings, packages) = collection(root, true).await?;
     // A private repository's headers go to its own origin only, not to wherever its listing puts an archive (AS-11).
     let client = crate::vpm_http::Client::new(http()?, &settings)?;
-    // A plan an earlier run stopped halfway is put back first.
-    recover_plans(path)?;
     let mut project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
     if let Change::Plan { install, remove, prerelease } = &action {
-        return apply_plan(&io, &client, &packages, path, project, install, remove, *prerelease).await;
+        return apply_plan(&io, &client, &packages, path, project, install, remove, *prerelease, &plan_journals(root)).await;
     }
     let mut asked: Vec<(String, String)> = vec![];
     let changes = match &action {
@@ -432,6 +433,7 @@ async fn apply_plan(
     install: &[(String, String)],
     remove: &[String],
     prerelease: bool,
+    journals: &Path,
 ) -> anyhow::Result<()> {
     // Every version asked for is looked up before anything changes: one gone from the repositories changes nothing.
     let mut requested = vec![];
@@ -447,7 +449,7 @@ async fn apply_plan(
     // through (PROJECTS-35): the manifest, then before each phase the folders and old assets VPM is about to remove or
     // replace there (packages removed only because nothing else needed them any more included). A journal beside them
     // lets the next package action finish putting them back if the app stops halfway.
-    let mut kept = Kept::begin(path)?;
+    let mut kept = Kept::begin(path, journals)?;
     let installer = PackageInstaller::new(io, Some(client));
     let result: anyhow::Result<()> = async {
         let mut project = project;
@@ -476,8 +478,7 @@ async fn apply_plan(
     }
     .await;
     let Err(e) = result else {
-        kept.commit();
-        return Ok(());
+        return kept.commit();
     };
     // Rolled back: the manifest as it was, whatever else is missing restored by VPM, then the kept entries over what
     // the resolver put there (the exact bytes the project had win). Each step is tried whatever the others did.
@@ -497,13 +498,14 @@ async fn apply_plan(
     if problems.is_empty() {
         kept.finish();
     }
+    let dir = kept.dir.clone();
     Err(match (restored, problems.is_empty()) {
         (Ok(()), true) => e.context(tr("Nothing was changed: the project's packages are as they were")),
         (Err(r), true) => e.context(tr!("The package list was put back, but restoring its packages failed ({why}): use Restore", why = format!("{r:#}"))),
         (_, false) => e.context(tr!(
             "Not everything could be put back: {problems}. What the project had is kept in {path}; the next package change puts it back.",
             problems = problems.join("; "),
-            path = kept.dir.display()
+            path = dir.display()
         )),
     })
 }
@@ -538,64 +540,116 @@ fn replace_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     written
 }
 
-/// The journal of a plan, in its folder of kept entries.
-const JOURNAL: &str = "plan.json";
-/// The manifest as it was, in that folder.
+/// Where the journals of package plans are: beside the settings of the Creator Companion folder `root` this app
+/// changes packages with, outside every project (verifier round 2). A journal found anywhere else (in a project copied
+/// or imported from elsewhere) is never acted on.
+fn plan_journals(root: &Path) -> PathBuf {
+    root.join("Orbiters").join("package-plans")
+}
+/// The manifest as it was, in the plan's folder of copies.
 const MANIFEST_KEPT: &str = "vpm-manifest.json";
 
-/// What a plan changes, kept as it was, in a folder of the project this plan made (`.orbiters-plan-<id>`): the
-/// manifest, and each entry (`Packages/<name>`, an old asset) at its place relative to the project under `entries/`.
+/// One thing a plan may change, as it was before.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum Before {
+    /// There, copied under `entries/`.
+    Kept,
+    /// Not there: what the plan puts there goes on a rollback.
+    Absent,
+    /// A link (a package folder linked from elsewhere) to this target: made again on a rollback.
+    Link(PathBuf),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Item {
+    path: PathBuf,
+    before: Before,
+    /// Put back already (a rollback that stopped halfway is finished from here, never redone).
+    #[serde(default)]
+    restored: bool,
+}
+
+/// A plan's journal: the project it was written for (by place and folder identity), its folder of copies (the same),
+/// its state and items.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Journal {
+    project: PathBuf,
+    project_id: crate::owned::FileId,
+    staging: PathBuf,
+    staging_id: crate::owned::FileId,
+    state: String,
+    items: Vec<Item>,
+}
+
+/// What a plan changes, kept as it was: the manifest and each entry in a folder of the project this plan made
+/// (`.orbiters-plan-<id>`, same disk for the moves back), described by a journal outside the project.
 struct Kept {
     project: PathBuf,
     dir: PathBuf,
-    /// Entries kept, relative to the project.
-    items: Vec<PathBuf>,
+    journal_path: PathBuf,
+    journal: Journal,
 }
+
+/// Whether `rel` is a place a plan may change: under the project's Packages or Assets, plain names only.
+fn allowed(rel: &Path) -> bool {
+    rel.components().all(|c| matches!(c, std::path::Component::Normal(_)))
+        && rel.components().next().is_some_and(|c| c.as_os_str() == "Packages" || c.as_os_str() == "Assets") // i18n: not shown (folder names)
+        && rel.components().count() >= 2
+}
+
 impl Kept {
     /// The folder, the manifest kept and the journal ("pending"): before anything changes.
-    fn begin(project: &Path) -> anyhow::Result<Kept> {
-        let dir = project.join(format!(".orbiters-plan-{}", uuid::Uuid::new_v4().simple()));
-        std::fs::create_dir(&dir)?;
-        let kept = Kept { project: project.to_path_buf(), dir, items: vec![] };
-        let saved = std::fs::copy(project.join("Packages/vpm-manifest.json"), kept.dir.join(MANIFEST_KEPT)).map(drop).and_then(|()| kept.journal("pending"));
-        if let Err(e) = saved {
-            let _ = std::fs::remove_dir_all(&kept.dir);
-            return Err(anyhow::Error::from(e).context(tr("Could not keep a copy of the package list before changing it: nothing was changed")));
-        }
-        Ok(kept)
+    fn begin(project: &Path, journals: &Path) -> anyhow::Result<Kept> {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let dir = project.join(format!(".orbiters-plan-{id}"));
+        let started = (|| -> anyhow::Result<Kept> {
+            std::fs::create_dir_all(journals)?;
+            std::fs::create_dir(&dir)?;
+            std::fs::copy(project.join("Packages/vpm-manifest.json"), dir.join(MANIFEST_KEPT))?;
+            let journal = Journal {
+                project: project.to_path_buf(),
+                project_id: crate::owned::id_of(project)?,
+                staging: dir.clone(),
+                staging_id: crate::owned::id_of(&dir)?,
+                state: "pending".into(),
+                items: vec![],
+            };
+            let kept = Kept { project: project.to_path_buf(), dir: dir.clone(), journal_path: journals.join(format!("{id}.json")), journal };
+            kept.write()?;
+            Ok(kept)
+        })();
+        started.map_err(|e| {
+            let _ = std::fs::remove_dir_all(&dir);
+            e.context(tr("Could not keep a copy of the package list before changing it: nothing was changed"))
+        })
     }
-    fn journal(&self, state: &str) -> std::io::Result<()> {
-        let body = serde_json::json!({ "state": state, "items": self.items });
-        replace_bytes(&self.dir.join(JOURNAL), &serde_json::to_vec_pretty(&body).unwrap_or_default())
+    fn write(&self) -> std::io::Result<()> {
+        replace_bytes(&self.journal_path, &serde_json::to_vec_pretty(&self.journal).unwrap_or_default())
     }
-    /// Copies of `paths` (relative to the project) not kept yet, before the phase that changes them. Fails, changing
-    /// nothing more, when one cannot be read or copied.
+    /// What `paths` (relative to the project) are now, before the phase that changes them, for those not kept yet: a
+    /// copy, a link's target, or that nothing is there. Fails, changing nothing more, when one cannot be read or copied.
     fn take(&mut self, paths: &[PathBuf]) -> anyhow::Result<()> {
         for rel in paths {
-            if self.items.contains(rel) || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            if self.journal.items.iter().any(|i| &i.path == rel) || !allowed(rel) {
                 continue;
             }
             let from = self.project.join(rel);
-            let meta = match std::fs::symlink_metadata(&from) {
-                Ok(m) => m,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(anyhow::Error::from(e).context(tr!("Could not keep a copy of {name} before changing it: nothing was changed", name = rel.display()))),
-            };
-            // A link is no content of the project's: VPM removes the link only.
-            if meta.file_type().is_symlink() || is_link(&from) {
-                continue;
-            }
-            let to = self.dir.join("entries").join(rel);
-            let copied = std::fs::create_dir_all(to.parent().unwrap_or(&self.dir)).map_err(anyhow::Error::from).and_then(|()| {
-                if meta.is_dir() {
-                    copy_tree(&from, &to)
-                } else {
-                    std::fs::copy(&from, &to).map(drop).map_err(anyhow::Error::from)
+            let failed = |e: anyhow::Error| e.context(tr!("Could not keep a copy of {name} before changing it: nothing was changed", name = rel.display()));
+            let before = match std::fs::symlink_metadata(&from) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Before::Absent,
+                Err(e) => return Err(failed(e.into())),
+                Ok(m) if m.file_type().is_symlink() || is_link(&from) => Before::Link(link_target(&from).map_err(|e| failed(e.into()))?),
+                Ok(m) => {
+                    let to = self.dir.join("entries").join(rel);
+                    std::fs::create_dir_all(to.parent().unwrap_or(&self.dir))
+                        .map_err(anyhow::Error::from)
+                        .and_then(|()| if m.is_dir() { copy_tree(&from, &to) } else { std::fs::copy(&from, &to).map(drop).map_err(anyhow::Error::from) })
+                        .map_err(failed)?;
+                    Before::Kept
                 }
-            });
-            copied.with_context(|| tr!("Could not keep a copy of {name} before changing it: nothing was changed", name = rel.display()))?;
-            self.items.push(rel.clone());
-            self.journal("pending")?;
+            };
+            self.journal.items.push(Item { path: rel.clone(), before, restored: false });
+            self.write()?;
         }
         Ok(())
     }
@@ -604,70 +658,127 @@ impl Kept {
         replace_bytes(&self.project.join("Packages/vpm-manifest.json"), &bytes)
             .map_err(|r| anyhow::anyhow!("{}", tr!("The package list could not be put back ({why}): use Restore", why = r)))
     }
-    /// Every kept entry back at its place, in place of what the plan left there; each tried whatever the others did.
-    /// What could not be put back, named (its copy stays).
-    fn put_back(&self) -> Vec<String> {
+    /// Every item back as it was, in place of what the plan left there; each tried whatever the others did and marked
+    /// done in the journal. What could not be put back, named (its copy stays).
+    fn put_back(&mut self) -> Vec<String> {
         let mut problems = vec![];
-        for rel in &self.items {
-            let at = self.project.join(rel);
-            let from = self.dir.join("entries").join(rel);
-            if std::fs::symlink_metadata(&from).is_err() {
-                continue; // put back already (a recovery after a stop)
+        for i in 0..self.journal.items.len() {
+            let item = self.journal.items[i].clone();
+            if item.restored {
+                continue;
             }
+            let at = self.project.join(&item.path);
+            let from = self.dir.join("entries").join(&item.path);
             let put = (|| -> std::io::Result<()> {
+                // A copy that cannot be read is not taken as put back: the rollback stops there, the journal stays.
+                if item.before == Before::Kept {
+                    std::fs::symlink_metadata(&from)?;
+                }
                 match std::fs::symlink_metadata(&at) {
                     Ok(m) if m.file_type().is_symlink() || is_link(&at) => std::fs::remove_dir(&at).or_else(|_| std::fs::remove_file(&at))?,
                     Ok(m) if m.is_dir() => std::fs::remove_dir_all(&at)?,
                     Ok(_) => std::fs::remove_file(&at)?,
-                    Err(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
                 }
-                if let Some(parent) = at.parent() {
-                    std::fs::create_dir_all(parent)?;
+                match &item.before {
+                    Before::Absent => Ok(()),
+                    Before::Kept => {
+                        if let Some(parent) = at.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::rename(&from, &at)
+                    }
+                    Before::Link(target) => make_link(target, &at),
                 }
-                std::fs::rename(&from, &at)
             })();
-            if let Err(e) = put {
-                problems.push(tr!("{name} could not be put back ({why}): its copy is kept at {path}", name = rel.display(), why = e, path = from.display()));
+            match put {
+                Ok(()) => {
+                    self.journal.items[i].restored = true;
+                    let _ = self.write();
+                }
+                Err(e) => problems.push(tr!("{name} could not be put back ({why}): its copy is kept at {path}", name = item.path.display(), why = e, path = from.display())),
             }
         }
         problems
     }
-    /// The plan went through: the copies are not needed.
-    fn commit(&self) {
-        let _ = self.journal("committed");
+    /// The plan went through: its journal says so (or goes), then the copies go. Should neither be possible, the next
+    /// change could take the finished plan for a stopped one: that is an error, never ignored.
+    fn commit(mut self) -> anyhow::Result<()> {
+        self.journal.state = "committed".into();
+        if self.write().is_err() && std::fs::remove_file(&self.journal_path).is_err() {
+            bail!("{}", tr!("The packages were changed, but the record of the change at {path} could not be closed: remove it before the next package change", path = self.journal_path.display()));
+        }
         self.finish();
+        Ok(())
     }
-    /// The folder of copies goes (nothing is waiting in it any more).
+    /// The copies and the journal go (nothing is waiting in them any more).
     fn finish(&self) {
         if let Err(e) = std::fs::remove_dir_all(&self.dir) {
             eprintln!("the copies kept for a package plan could not be removed from {}: {e}", self.dir.display()); // i18n: not shown (a log line)
         }
+        let _ = std::fs::remove_file(&self.journal_path);
+    }
+}
+
+fn link_target(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        junction::get_target(path).or_else(|_| std::fs::read_link(path))
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::read_link(path)
+    }
+}
+
+fn make_link(target: &Path, at: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        junction::create(target, at)
+    }
+    #[cfg(not(windows))]
+    {
+        std::os::unix::fs::symlink(target, at)
     }
 }
 
 /// Finishes putting back what a plan stopped halfway had kept (the app closed or crashed during it): run before the next
-/// change to the project, under the packages' lock. A plan whose journal says it went through is only tidied away.
-fn recover_plans(project: &Path) -> anyhow::Result<()> {
-    let Ok(entries) = std::fs::read_dir(project) else { return Ok(()) };
+/// change to `project`, under the packages' lock. Only a journal of this app's (in `journals`) written for this very
+/// project folder, whose folder of copies is the very one it made and whose every item is a place a plan may change,
+/// is acted on; anything else (a plan folder that came with a copied or imported project) is left alone. A plan whose
+/// journal says it went through is only tidied away.
+fn recover_plans(project: &Path, journals: &Path) -> anyhow::Result<()> {
+    let Ok(entries) = std::fs::read_dir(journals) else { return Ok(()) };
     for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if !name.starts_with(".orbiters-plan-") || !e.path().join(JOURNAL).is_file() {
+        let path = e.path();
+        let Some(journal) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Journal>(&b).ok()) else { continue };
+        if crate::discovery::key(&journal.project) != crate::discovery::key(project) {
             continue;
         }
-        let dir = e.path();
-        let journal: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(JOURNAL))?)?;
-        if journal["state"] == "committed" {
-            let _ = std::fs::remove_dir_all(&dir);
+        // The same folder it was written for, and its own folder of copies inside it: by identity, not by name.
+        let staging_inside = journal.staging.parent().is_some_and(|p| crate::discovery::key(p) == crate::discovery::key(project))
+            && journal.staging.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".orbiters-plan-"));
+        if !crate::owned::is_same(project, journal.project_id) || !staging_inside || !crate::owned::is_same(&journal.staging, journal.staging_id) {
             continue;
         }
-        let items: Vec<PathBuf> = serde_json::from_value(journal["items"].clone()).unwrap_or_default();
-        let kept = Kept { project: project.to_path_buf(), dir: dir.clone(), items };
+        let kept = Kept { project: project.to_path_buf(), dir: journal.staging.clone(), journal_path: path.clone(), journal };
+        if kept.journal.state == "committed" {
+            kept.finish();
+            continue;
+        }
+        anyhow::ensure!(
+            kept.journal.state == "pending" && kept.journal.items.iter().all(|i| allowed(&i.path)),
+            "{}",
+            tr!("A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.", problems = tr("its record cannot be used"), path = kept.dir.display())
+        );
+        let mut kept = kept;
         let mut problems: Vec<String> = kept.put_back_manifest().err().map(|e| e.to_string()).into_iter().collect();
         problems.extend(kept.put_back());
         anyhow::ensure!(
             problems.is_empty(),
             "{}",
-            tr!("A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.", problems = problems.join("; "), path = dir.display())
+            tr!("A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.", problems = problems.join("; "), path = kept.dir.display())
         );
         kept.finish();
     }
@@ -727,31 +838,77 @@ pub async fn install_my_avatar(root: &Path, path: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// Verifier, point 4: a plan stopped halfway (the app closed after a removal) is put back at the next change, from
-    /// its journal; one whose journal says it went through is only tidied away.
+    fn plan_project(p: &Path) {
+        std::fs::create_dir_all(p.join("Packages/com.a")).unwrap();
+        std::fs::write(p.join("Packages/com.a/Mine.cs"), "mine").unwrap();
+        std::fs::write(p.join("Packages/vpm-manifest.json"), r#"{"locked":{"com.a":{}}}"#).unwrap();
+    }
+
+    /// A plan stopped halfway (the app closed after a removal and an install) is put back at the next change, from its
+    /// journal kept outside the project; one whose journal says it went through is only tidied away.
     #[test]
     fn a_plan_stopped_halfway_is_put_back_next_time() {
         let temp = tempfile::tempdir().unwrap();
-        let p = temp.path();
-        std::fs::create_dir_all(p.join("Packages/com.a")).unwrap();
-        std::fs::write(p.join("Packages/com.a/Mine.cs"), "mine").unwrap();
-        std::fs::write(p.join("Packages/vpm-manifest.json"), "{\"locked\":{\"com.a\":{}}}").unwrap();
-        let mut kept = Kept::begin(p).unwrap();
-        kept.take(&[PathBuf::from("Packages/com.a")]).unwrap();
-        // The removal happened, then the app stopped.
+        let (p, journals) = (temp.path().join("Project"), temp.path().join("journals"));
+        plan_project(&p);
+        let mut kept = Kept::begin(&p, &journals).unwrap();
+        kept.take(&[PathBuf::from("Packages/com.a"), PathBuf::from("Packages/com.new")]).unwrap();
+        // The removal happened, a new package came, then the app stopped.
         std::fs::remove_dir_all(p.join("Packages/com.a")).unwrap();
+        std::fs::create_dir_all(p.join("Packages/com.new")).unwrap();
         std::fs::write(p.join("Packages/vpm-manifest.json"), "{}").unwrap();
-        recover_plans(p).unwrap();
+        recover_plans(&p, &journals).unwrap();
         assert_eq!(std::fs::read_to_string(p.join("Packages/com.a/Mine.cs")).unwrap(), "mine");
+        assert!(!p.join("Packages/com.new").exists(), "what the plan added goes");
         assert!(std::fs::read_to_string(p.join("Packages/vpm-manifest.json")).unwrap().contains("com.a"));
+        assert!(!kept.dir.exists() && std::fs::read_dir(&journals).unwrap().next().is_none());
+        // A plan that went through, its copies left by a failed tidy-up: nothing is put back.
+        let kept = Kept::begin(&p, &journals).unwrap();
+        let mut done = kept.journal.clone();
+        done.state = "committed".into();
+        replace_bytes(&kept.journal_path, &serde_json::to_vec(&done).unwrap()).unwrap();
+        std::fs::write(p.join("Packages/vpm-manifest.json"), r#"{"new":1}"#).unwrap();
+        recover_plans(&p, &journals).unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("Packages/vpm-manifest.json")).unwrap(), r#"{"new":1}"#);
         assert!(!kept.dir.exists());
-        // A plan that went through, its folder left by a failed tidy-up: nothing is put back.
-        let kept = Kept::begin(p).unwrap();
-        kept.journal("committed").unwrap();
-        std::fs::write(p.join("Packages/vpm-manifest.json"), "{\"new\":1}").unwrap();
-        recover_plans(p).unwrap();
-        assert_eq!(std::fs::read_to_string(p.join("Packages/vpm-manifest.json")).unwrap(), "{\"new\":1}");
-        assert!(!kept.dir.exists());
+    }
+
+    /// Verifier round 2: a plan folder that came with a copied or imported project (its old in-project journal, or a
+    /// journal of this app's naming the same place but written for another folder) is never acted on; a journal whose
+    /// items leave the places a plan may change is refused before anything changes.
+    #[test]
+    fn a_journal_not_written_for_this_very_folder_is_never_acted_on() {
+        let temp = tempfile::tempdir().unwrap();
+        let (p, journals) = (temp.path().join("Project"), temp.path().join("journals"));
+        plan_project(&p);
+        // An older version's journal inside the project, with a destructive item.
+        let foreign = p.join(".orbiters-plan-0000");
+        std::fs::create_dir_all(foreign.join("entries/Assets")).unwrap();
+        std::fs::write(foreign.join("plan.json"), r#"{"state":"pending","items":["Assets"]}"#).unwrap();
+        std::fs::write(foreign.join("vpm-manifest.json"), "{}").unwrap();
+        std::fs::create_dir_all(p.join("Assets")).unwrap();
+        std::fs::write(p.join("Assets/work.txt"), "work").unwrap();
+        recover_plans(&p, &journals).unwrap();
+        assert!(p.join("Assets/work.txt").is_file());
+        // A journal of ours for a project that was at this place before, its folder since replaced by a copy.
+        let mut kept = Kept::begin(&p, &journals).unwrap();
+        kept.take(&[PathBuf::from("Packages/com.a")]).unwrap();
+        let journal = kept.journal_path.clone();
+        let moved = temp.path().join("Original");
+        std::fs::rename(&p, &moved).unwrap();
+        plan_project(&p);
+        std::fs::write(p.join("Packages/com.a/Mine.cs"), "newer work").unwrap();
+        recover_plans(&p, &journals).unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("Packages/com.a/Mine.cs")).unwrap(), "newer work");
+        assert!(journal.is_file(), "left for its own folder");
+        // Its own folder again, but an item outside Packages and Assets: refused, nothing changed.
+        std::fs::remove_dir_all(&p).unwrap();
+        std::fs::rename(&moved, &p).unwrap();
+        let mut bad = kept.journal.clone();
+        bad.items.push(Item { path: PathBuf::from("ProjectSettings"), before: Before::Absent, restored: false });
+        replace_bytes(&journal, &serde_json::to_vec(&bad).unwrap()).unwrap();
+        assert!(recover_plans(&p, &journals).is_err());
+        assert!(p.join("Packages/com.a/Mine.cs").is_file());
     }
 
     /// A VCC folder with VRChat's caches and one remote repository of the person's, its cache holding `cache`.

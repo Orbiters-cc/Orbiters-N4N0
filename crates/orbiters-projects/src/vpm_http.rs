@@ -67,13 +67,15 @@ fn allowed<'a>(scoped: &[Scoped], url: &Url, headers: impl IntoIterator<Item = (
 
 /// The answer to `url` with the headers each hop may have, redirects followed one at a time ([`allowed`] again at each).
 async fn fetch(client: &reqwest::Client, scoped: &[Scoped], url: &Url, headers: &[(&str, &str)], etag: Option<&str>) -> io::Result<reqwest::Response> {
+    let first = url.origin();
     let mut url = url.clone();
     for _ in 0..=REDIRECTS {
         let mut request = client.get(url.clone());
         for (name, value) in allowed(scoped, &url, headers.iter().copied()) {
             request = request.header(name, value);
         }
-        if let Some(etag) = etag {
+        // A listing's validator is that host's: never sent to another one a redirect leads to.
+        if let Some(etag) = etag.filter(|_| url.origin() == first) {
             request = request.header("If-None-Match", etag);
         }
         let response = request.send().await.map_err(io::Error::other)?;

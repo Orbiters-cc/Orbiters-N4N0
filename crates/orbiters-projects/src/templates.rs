@@ -192,6 +192,9 @@ pub struct Marker {
     pub copy: String,
     pub destination: PathBuf,
     pub started: u64,
+    /// The identity of the folder the copy made: a folder restored or moved to that place later is not it.
+    #[serde(default)]
+    pub folder: Option<crate::owned::FileId>,
 }
 impl Marker {
     /// The marker at the top of `folder`, if it is one.
@@ -213,33 +216,41 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
 /// What a running copy made, so that a Stop removes exactly that (PROJECTS-4, Enzo 2026-11-19: "Yes").
 struct Made {
     marker: Marker,
-    /// The folder it created, by identity: a folder put in its place is never touched.
-    folder: crate::owned::FileId,
-    /// Each folder (`None`) and file (its identity) it created, in the order made, relative to the folder.
-    entries: Vec<(PathBuf, Option<crate::owned::FileId>)>,
+    /// The folder it created, held from the moment it was made: on Windows it cannot be renamed, moved or replaced
+    /// while the copy runs, nor any folder above it, so every name below it stays this very folder's.
+    root: crate::owned::Pinned,
+    /// The marker file, by identity.
+    marker_id: crate::owned::FileId,
+    /// Each folder it created, held the same way, in the order made (parents first), relative to the root.
+    folders: Vec<(PathBuf, crate::owned::Pinned)>,
+    /// Each file it created and its identity.
+    files: Vec<(PathBuf, crate::owned::FileId)>,
 }
 
-/// Removes what `made` created at `destination`, each entry checked to be the very one it made; anything else found
-/// there stays. The paths that stayed (none: the folder is gone).
-fn discard_partial(destination: &Path, made: &Made) -> std::io::Result<Vec<PathBuf>> {
-    use crate::owned::is_same;
-    if !is_same(destination, made.folder) || Marker::read(destination).as_ref() != Some(&made.marker) {
+/// Removes what `made` created at `destination`, each entry through a handle whose identity is the one it made (a
+/// folder through the handle held since it was made, a file through one opened once and checked); anything else
+/// found there stays. The paths that stayed (none: the folder is gone).
+fn discard_partial(destination: &Path, made: Made) -> std::io::Result<Vec<PathBuf>> {
+    use crate::owned::{delete_file_if, is_same};
+    let Made { marker, root, marker_id, mut folders, files } = made;
+    if !is_same(destination, root.id) || Marker::read(destination).as_ref() != Some(&marker) {
         return Err(std::io::Error::other(tr("it is not the folder this copy made")));
     }
     let mut left = vec![];
-    for (rel, id) in made.entries.iter().rev() {
+    for (rel, id) in files.iter().rev() {
         let path = destination.join(rel);
-        let gone = match id {
-            Some(id) => is_same(&path, *id) && std::fs::remove_file(&path).is_ok(),
-            // A folder of the copy's: removed once empty; one that holds what is not the copy's stays.
-            None => std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir() && !crate::owned::is_link(&m)) && std::fs::remove_dir(&path).is_ok(),
-        };
-        if !gone && std::fs::symlink_metadata(&path).is_ok() {
+        if !delete_file_if(&path, *id).unwrap_or(false) && std::fs::symlink_metadata(&path).is_ok() {
             left.push(path);
         }
     }
-    std::fs::remove_file(destination.join(INCOMPLETE))?;
-    if std::fs::remove_dir(destination).is_err() {
+    // Deepest first; a folder that holds what is not the copy's is not empty and stays.
+    while let Some((rel, folder)) = folders.pop() {
+        if folder.delete().is_err() {
+            left.push(destination.join(rel));
+        }
+    }
+    delete_file_if(&destination.join(INCOMPLETE), marker_id)?;
+    if root.delete().is_err() || destination.exists() {
         // What is still there is not the copy's: named, never removed.
         let mut extra: Vec<PathBuf> = walkdir::WalkDir::new(destination).min_depth(1).follow_links(false).into_iter().flatten().map(|e| e.into_path()).collect();
         extra.retain(|p| !left.contains(p));
@@ -254,7 +265,7 @@ fn discard_partial(destination: &Path, made: &Made) -> std::io::Result<Vec<PathB
 }
 
 /// A Stop during the copy into `destination`: what it made goes, or says what stayed and why.
-fn stopped(destination: &Path, made: &Made) -> anyhow::Error {
+fn stopped(destination: &Path, made: Made) -> anyhow::Error {
     match discard_partial(destination, made) {
         Ok(left) if left.is_empty() => anyhow::anyhow!("{}", tr("Copy stopped. The incomplete copy was removed.")),
         Ok(left) => anyhow::anyhow!(
@@ -310,18 +321,23 @@ fn copy_keeping_then(
         }
     }
     std::fs::create_dir(destination).with_context(|| tr("The destination already exists or cannot be created; choose a new project name."))?;
-    let marker = Marker { copy: uuid::Uuid::new_v4().simple().to_string(), destination: destination.to_path_buf(), started: crate::discovery::now() };
-    let mut made = Made { folder: crate::owned::id_of(destination)?, marker, entries: vec![] };
-    {
+    // Held at once: its identity is the held folder's, and nothing can take its place until the copy is done.
+    let root = crate::owned::Pinned::open(destination)?;
+    let marker = Marker { copy: uuid::Uuid::new_v4().simple().to_string(), destination: destination.to_path_buf(), started: crate::discovery::now(), folder: Some(root.id) };
+    let marker_id = {
         let mut file = std::fs::File::options().write(true).create_new(true).open(destination.join(INCOMPLETE))?;
-        file.write_all(&serde_json::to_vec(&made.marker)?)?;
-    }
+        file.write_all(&serde_json::to_vec(&marker)?)?;
+        crate::owned::id_of_file(&file)?
+    };
+    let mut made = Made { marker, root, marker_id, folders: vec![], files: vec![] };
     for folder in &folders {
         let rel = folder.strip_prefix(&source)?.to_path_buf();
         let at = destination.join(&rel);
-        if !at.exists() {
-            std::fs::create_dir(&at)?;
-            made.entries.push((rel, None));
+        // Made here, and held: one already there is not the copy's (and is never removed by it).
+        match std::fs::create_dir(&at) {
+            Ok(()) => made.folders.push((rel, crate::owned::Pinned::open(&at)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
         }
     }
     on_made(destination);
@@ -330,8 +346,11 @@ fn copy_keeping_then(
     let mut buffer = vec![0u8; 1024 * 1024];
     for (i, p) in files.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
-            return Err(stopped(destination, &made));
+            return Err(stopped(destination, made));
         }
+        // Elsewhere than Windows nothing holds the folder: it must still be the one made.
+        #[cfg(not(windows))]
+        anyhow::ensure!(crate::owned::is_same(destination, made.root.id), "{}", tr("it is not the folder this copy made"));
         let rel = p.strip_prefix(&source)?;
         let dst = destination.join(rel);
         let mut input = std::fs::File::open(p)?;
@@ -341,12 +360,12 @@ fn copy_keeping_then(
             .create_new(true)
             .open(&dst)
             .with_context(|| tr!("Could not copy {path}", path = rel.display()))?;
-        made.entries.push((rel.to_path_buf(), Some(crate::owned::id_of_file(&output)?)));
+        made.files.push((rel.to_path_buf(), crate::owned::id_of_file(&output)?));
         loop {
             if cancel.load(Ordering::Relaxed) {
                 // The file being written is let go first: Windows removes no file still open.
                 drop(output);
-                return Err(stopped(destination, &made));
+                return Err(stopped(destination, made));
             }
             let n = input.read(&mut buffer)?;
             if n == 0 {
@@ -372,7 +391,9 @@ fn copy_keeping_then(
         }
         *progress.lock().unwrap() = Progress { copied: i + 1, total: files.len(), file: rel.display().to_string(), phase: String::from(mark("Copying project")) };
     }
-    std::fs::remove_file(destination.join(INCOMPLETE))?;
+    // Its own marker only, through the held folder.
+    crate::owned::delete_file_if(&destination.join(INCOMPLETE), made.marker_id)?;
+    drop(made);
     Ok(())
 }
 /// A new project in `parent`/`name` from the template (or, with `duplicate`, the project) in `source`, its packages
@@ -858,35 +879,33 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("Source");
         project(&source, serde_json::json!({}));
-        // A folder of the same name with the same marker in it (copied from the copy itself).
+        std::fs::create_dir_all(source.join("Assets/Deep")).unwrap();
+        std::fs::write(source.join("Assets/Deep/x.txt"), "x").unwrap();
         let copy = temp.path().join("Copy");
         let moved = temp.path().join("Moved");
-        let said = stopped_after(&source, &copy, |dest| {
-            std::fs::rename(dest, &moved).unwrap();
-            std::fs::create_dir_all(dest.join("Assets")).unwrap();
-            std::fs::copy(moved.join(INCOMPLETE), dest.join(INCOMPLETE)).unwrap();
-            std::fs::write(dest.join("Assets/a.txt"), "theirs").unwrap();
-        });
-        assert!(said.contains("could not be removed"), "{said}");
-        assert_eq!(std::fs::read_to_string(copy.join("Assets/a.txt")).unwrap(), "theirs");
-        assert!(moved.join(INCOMPLETE).is_file(), "the moved copy is left as it is");
-        // A junction swapped in, to a folder holding someone's files.
         #[cfg(windows)]
         {
-            let elsewhere = temp.path().join("Elsewhere");
-            std::fs::create_dir_all(elsewhere.join("Assets")).unwrap();
-            std::fs::write(elsewhere.join("Assets/a.txt"), "precious").unwrap();
-            let copy = temp.path().join("Copy2");
-            let moved = temp.path().join("Moved2");
+            // Verifier round 2: the copy's root, and every folder it made, are held while it runs: renaming either (to
+            // put another in its place, or to have later writes land in a second copy) is refused.
+            let said = stopped_after(&source, &copy, |dest| {
+                assert!(std::fs::rename(dest, &moved).is_err(), "the root cannot be renamed while the copy runs");
+                assert!(std::fs::rename(dest.join("Assets/Deep"), temp.path().join("Away")).is_err(), "nor a folder it made");
+                assert!(std::fs::remove_dir(dest.join("Assets/Deep")).is_err());
+            });
+            assert!(said.contains("removed"), "{said}");
+            assert!(!copy.exists() && !moved.exists() && !temp.path().join("Away").exists());
+        }
+        #[cfg(not(windows))]
+        {
+            // Without holding: the name is checked against the identity, and a substitute is never touched.
             let said = stopped_after(&source, &copy, |dest| {
                 std::fs::rename(dest, &moved).unwrap();
-                std::fs::copy(moved.join(INCOMPLETE), elsewhere.join(INCOMPLETE)).unwrap();
-                let ok = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(dest).arg(&elsewhere).output().unwrap().status.success();
-                assert!(ok, "mklink /J");
+                std::fs::create_dir_all(dest.join("Assets")).unwrap();
+                std::fs::copy(moved.join(INCOMPLETE), dest.join(INCOMPLETE)).unwrap();
+                std::fs::write(dest.join("Assets/a.txt"), "theirs").unwrap();
             });
             assert!(said.contains("could not be removed"), "{said}");
-            assert_eq!(std::fs::read_to_string(elsewhere.join("Assets/a.txt")).unwrap(), "precious");
-            let _ = std::fs::remove_dir(&copy);
+            assert_eq!(std::fs::read_to_string(copy.join("Assets/a.txt")).unwrap(), "theirs");
         }
     }
 
@@ -897,12 +916,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("Source");
         project(&source, serde_json::json!({}));
-        let other = Marker { copy: "x".into(), destination: temp.path().join("Elsewhere"), started: 1 };
+        let other = Marker { copy: "x".into(), destination: temp.path().join("Elsewhere"), started: 1, folder: None };
         std::fs::write(source.join(INCOMPLETE), serde_json::to_vec(&other).unwrap()).unwrap();
         assert!(crate::discovery::is_project(&source), "a marker naming another folder");
-        let here = Marker { copy: "x".into(), destination: source.clone(), started: 1 };
+        let here = Marker { copy: "x".into(), destination: source.clone(), started: 1, folder: None };
         std::fs::write(source.join(INCOMPLETE), serde_json::to_vec(&here).unwrap()).unwrap();
         assert!(!crate::discovery::is_project(&source), "its own marker: an unfinished copy");
+        // A marker naming this place but another folder (a project restored here with it): not hidden.
+        let restored = Marker { copy: "x".into(), destination: source.clone(), started: 1, folder: Some(crate::owned::id_of(&temp.path().join("Source/Assets")).unwrap()) };
+        std::fs::write(source.join(INCOMPLETE), serde_json::to_vec(&restored).unwrap()).unwrap();
+        assert!(crate::discovery::is_project(&source), "the marker's folder identity is another folder's");
         let copy = temp.path().join("Copy");
         copy_keeping(&source, &copy, Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap();
         assert!(!copy.join(INCOMPLETE).exists() && crate::discovery::is_project(&copy));

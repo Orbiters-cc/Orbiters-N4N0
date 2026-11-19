@@ -400,6 +400,14 @@ pub enum Check {
 /// Calls to the Orbiters API of one server.
 /// How long the language may take: nothing waits on it, and it is tried again.
 const LANGUAGE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A large file's download in all ([`Api::get_transfer`]): 41 MB at 0.2 Mbit/s.
+pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// What the server has to start answering a download.
+pub const TRANSFER_ANSWER: Duration = Duration::from_secs(60);
+
+fn transfer(request: ureq::RequestBuilder<ureq::typestate::WithoutBody>) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+    request.config().timeout_global(Some(TRANSFER_TIMEOUT)).timeout_recv_response(Some(TRANSFER_ANSWER)).build()
+}
 
 #[derive(serde::Deserialize)]
 struct LanguageAnswer {
@@ -467,6 +475,12 @@ impl Api {
 
     pub fn agent(&self) -> &ureq::Agent {
         &self.agent
+    }
+
+    /// `GET url` for a large file (a 3D world, a shared capture): the 90 s every call has would cut it on a slow line
+    /// however well it goes, so it has [`TRANSFER_TIMEOUT`] in all, the server still [`TRANSFER_ANSWER`] to start answering.
+    pub fn get_transfer(&self, url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+        transfer(self.agent.get(url))
     }
 
     /// The answer as JSON, or the server's error.
@@ -718,6 +732,32 @@ fn error(status: u16, body: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CORE-19: a file that arrives slowly but steadily is not cut by the time every API call has (here 1 s for the
+    /// 90 s), while a call is.
+    #[test]
+    fn a_slow_download_outlasts_the_api_calls_time() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request);
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n12345").unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(1600));
+                let _ = stream.write_all(b"67890");
+            }
+        });
+        let agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(1))).build().new_agent();
+        let call = agent.get(&url).call().and_then(|r| r.into_body().read_to_vec());
+        assert!(call.is_err(), "an API call has its time: {call:?}");
+        let body = transfer(agent.get(&url)).call().unwrap().into_body().read_to_vec().unwrap();
+        assert_eq!(body, b"1234567890");
+        server.join().unwrap();
+    }
 
     /// One answer each from a server on this computer, and what was asked of it.
     fn serve(answers: Vec<(&'static str, &'static str)>) -> (Api, std::thread::JoinHandle<Vec<String>>) {

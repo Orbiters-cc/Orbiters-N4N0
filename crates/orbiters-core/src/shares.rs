@@ -345,7 +345,8 @@ impl Api {
             address.push(if address.contains('?') { '&' } else { '?' });
             address.push_str("thumbnail=true");
         }
-        let mut request = self.agent().get(&self.url(&address));
+        // The picture itself can be large: a download's time; its thumbnail an API call's.
+        let mut request = if thumbnail { self.agent().get(&self.url(&address)) } else { self.get_transfer(&self.url(&address)) };
         if let Some(token) = token {
             request = request.header("Authorization", &format!("Bearer {token}"));
         }
@@ -400,7 +401,7 @@ impl Api {
         Ok(json::<Answer>(r)?.item)
     }
     pub fn capture_file(&self, token: &str, kind: Kind, id: u64, out: &std::path::Path) -> anyhow::Result<()> {
-        let r = self.agent().get(&self.url(&format!("{}/file", path(kind, id)))).header("Authorization", &format!("Bearer {token}")).call()?;
+        let r = self.get_transfer(&self.url(&format!("{}/file", path(kind, id)))).header("Authorization", &format!("Bearer {token}")).call()?;
         if !r.status().is_success() {
             json::<serde_json::Value>(r)?;
             unreachable!();

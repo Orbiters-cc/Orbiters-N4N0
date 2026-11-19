@@ -175,6 +175,9 @@ pub enum Zone {
     /// Right after a 3D picture, under what the tiles say (REQUEST13): "Share to …" and "Share publicly", then how each share
     /// goes and what it earned. Never on the camera's picture or its buttons.
     CameraShare,
+    /// The same on a screen, as a column at the panel's right: under the panel is VRChat's row of buttons, the caption
+    /// and the window's foot (no room at 720 tall), and where the bridge clicks.
+    CameraShareDesk,
     /// "Share to …" in a headset: the friends to choose, over the camera's top edge where a code's page goes (never both).
     CameraChooser,
     /// While a recording runs: its clock and Stop, under the wheel and under the wing (Enzo, F13). Nothing here starts one.
@@ -244,7 +247,7 @@ impl Zone {
         [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying, Zone::QmCaption, Zone::QmStop];
 
     /// The zones around a menu.
-    pub const CAMERA: [Zone; 11] = [
+    pub const CAMERA: [Zone; 12] = [
         Zone::CameraScan,
         Zone::CameraPeople,
         Zone::CameraWorld,
@@ -255,6 +258,7 @@ impl Zone {
         Zone::CameraWebBar,
         Zone::CameraWeb,
         Zone::CameraShare,
+        Zone::CameraShareDesk,
         Zone::CameraChooser,
     ];
 
@@ -321,7 +325,7 @@ impl Zone {
     /// A part that shows only while it has something to do (a recording to stop, a code being looked for, a page opened, a button to offer): it joins the menu's
     /// parts and leaves them as that changes ([`super::Panels::set_open`]).
     pub fn only_while_needed(self) -> bool {
-        matches!(self, Zone::WheelStop | Zone::QmStop | Zone::CameraAct | Zone::CameraScan | Zone::CameraWebBar | Zone::CameraWeb | Zone::CameraShare | Zone::CameraChooser)
+        matches!(self, Zone::WheelStop | Zone::QmStop | Zone::CameraAct | Zone::CameraScan | Zone::CameraWebBar | Zone::CameraWeb | Zone::CameraShare | Zone::CameraShareDesk | Zone::CameraChooser)
     }
 
     /// Its place in the menu's units from the menu's centre, y down: around the wheel in hundredths of its radius (a 1280 x 720 window's pixels, nearly), around the Quick
@@ -382,6 +386,8 @@ impl Zone {
             // Under what the tiles say, from the column's outer edge to the picture's right edge: in reach of the hand that
             // holds the camera, clear of VRChat's row of buttons and of the caption.
             Zone::CameraShare => r(CAMERA_COLUMN_OUT, CAMERA_SHARE[0], CAMERA_HALF[0], CAMERA_SHARE[1]),
+            // On a screen: right of the picture with the column's gap, from its top, two buttons over each other.
+            Zone::CameraShareDesk => r(CAMERA_HALF[0] + CAMERA_GAP, -CAMERA_HALF[1], CAMERA_HALF[0] + CAMERA_GAP + 210.0, -CAMERA_HALF[1] + 228.0),
             // Where a code's page goes, as tall as it and its bar: stood up on the camera's top edge in a headset.
             Zone::CameraChooser => r(-CAMERA_HALF[0], CAMERA_WEB_BAR[1] - CAMERA_CHOOSER_TALL, CAMERA_HALF[0], CAMERA_WEB_BAR[1]),
             // Right under the ring, whose foot is free in any window: in reach, and over nothing of VRChat's.
@@ -457,7 +463,7 @@ pub fn camera_on_screen(panel: Rect, client: Vec2) -> Vec<Placed> {
     let caption = Rect::from_min_size(pos2(column_left, under), vec2(CAMERA_COLUMN_OUT.abs() + 64.0, CAMERA_UNDER[1] - CAMERA_UNDER[0]) * unit);
     let act = Rect::from_min_size(pos2(caption.right() + 8.0 * unit, under), vec2(224.0, 34.0) * unit);
     let scan = panel.expand(CAMERA_SCAN_OUT * k);
-    let share = Rect::from_min_size(pos2(column_left, caption.bottom() + 8.0 * unit), vec2(CAMERA_HALF[0] - CAMERA_COLUMN_OUT, CAMERA_SHARE[1] - CAMERA_SHARE[0]) * unit);
+    let share = Rect::from_min_size(pos2(panel.right() + CAMERA_GAP * unit, panel.top()), Zone::CameraShareDesk.units().size() * unit);
     [
         (Zone::CameraPeople, tile(0)),
         (Zone::CameraWorld, tile(1)),
@@ -466,7 +472,7 @@ pub fn camera_on_screen(panel: Rect, client: Vec2) -> Vec<Placed> {
         (Zone::CameraCaption, caption),
         (Zone::CameraAct, act),
         (Zone::CameraScan, scan),
-        (Zone::CameraShare, share),
+        (Zone::CameraShareDesk, share),
     ]
     .into_iter()
     .map(|(zone, rect)| Placed { zone, rect: Rect::from_min_max(rect.min.round(), rect.max.round()), center, unit })

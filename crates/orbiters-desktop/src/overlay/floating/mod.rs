@@ -162,6 +162,8 @@ pub struct Floating {
     resting: bool,
     /// When the world notice was last said to be held back behind a menu (once a second at most).
     notice_held: Option<Instant>,
+    /// The world notice whose "Take a 3D picture" a trigger pulled: it acts when let go on it ([`notice_release`]).
+    notice_down: Option<u64>,
 }
 
 impl Floating {
@@ -180,6 +182,7 @@ impl Floating {
             bar_pressed: None,
             resting: false,
             notice_held: None,
+            notice_down: None,
         })
     }
 
@@ -345,15 +348,29 @@ impl Floating {
             }
         }
         // "Talk with N4N0?": N4N0 listens. "Take a 3D picture": the picture waits for VRChat's camera (named by the notice's id).
-        if let Some(face) = face.as_ref().filter(|_| outcome.prompt_press) {
+        // "Talk with N4N0?" acts on the pull, as it always did. The world notice acts when let go on it, and a band gone or
+        // changed under the held trigger does nothing (verify-vr: presses on release, cancelled when their surface goes).
+        if let Some(face @ prompt::Face::Talk(_)) = face.as_ref().filter(|_| outcome.prompt_press) {
             clicked = true;
-            match face {
-                prompt::Face::Talk(_) => cx.backend.n4n0(crate::ipc::N4n0Command::WakeOffer { accept: true }),
-                prompt::Face::World(n) => cx.backend.explorer(crate::controller::explorer::Command::NoticeTake { id: n.id }),
-            }
+            cx.backend.n4n0(crate::ipc::N4n0Command::WakeOffer { accept: true });
             if let Some(p) = self.prompt.as_mut() {
                 p.pressed(cx.overlay, face);
             }
+        }
+        let world = match face.as_ref() {
+            Some(prompt::Face::World(n)) => Some(n.id),
+            _ => None,
+        };
+        let held = cx.actions.triggers().iter().any(|t| *t);
+        match notice_release(&mut self.notice_down, world, outcome.prompt_press, held, outcome.prompt_hover, cx.input_read) {
+            Some(id) => {
+                clicked = true;
+                cx.backend.explorer(crate::controller::explorer::Command::NoticeTake { id });
+                if let (Some(p), Some(face)) = (self.prompt.as_mut(), face.as_ref()) {
+                    p.pressed(cx.overlay, face);
+                }
+            }
+            None => clicked |= outcome.prompt_press && world.is_some(),
         }
         // The bar's buttons.
         if let Some(button) = outcome.bar_press.map(|uv| self.panel.picture_uv(uv)).and_then(BarButton::at) {
@@ -435,13 +452,56 @@ impl Floating {
         for hand in 0..2 {
             self.lasers.update(overlay, presenter, hand, None);
         }
+        self.notice_down = None;
         self.resting = true;
     }
+}
+
+/// The world notice's press, acted on when let go: `down` the notice a pull began on; `shown` the notice the band shows
+/// now; `pulled` a trigger was pulled on the band this turn; `held` a trigger is still down; `on` a laser is on the band;
+/// `read` this turn's input was read. Returns the notice to take now. A band showing another notice, or none, cancels.
+pub fn notice_release(down: &mut Option<u64>, shown: Option<u64>, pulled: bool, held: bool, on: bool, read: bool) -> Option<u64> {
+    if shown.is_none() || (down.is_some() && *down != shown) {
+        *down = None;
+        return None;
+    }
+    if pulled {
+        *down = shown;
+        return None;
+    }
+    if !read || held {
+        return None;
+    }
+    let id = down.take()?;
+    on.then_some(id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The notice's "Take a 3D picture": nothing on the pull, done on the let-go on it; let go off it, or the band gone or
+    /// showing another notice under the held trigger, nothing.
+    #[test]
+    fn the_world_notice_acts_when_let_go_on_it_and_never_after_it_went() {
+        let mut down = None;
+        assert_eq!(notice_release(&mut down, Some(4), true, true, true, true), None, "the pull does nothing yet");
+        assert_eq!(notice_release(&mut down, Some(4), false, true, true, true), None, "held");
+        assert_eq!(notice_release(&mut down, Some(4), false, false, true, false), None, "input not read: nothing decided");
+        assert_eq!(notice_release(&mut down, Some(4), false, false, true, true), Some(4), "let go on it");
+        assert_eq!(notice_release(&mut down, Some(4), false, false, true, true), None, "once");
+        // Let go off it.
+        notice_release(&mut down, Some(4), true, true, true, true);
+        assert_eq!(notice_release(&mut down, Some(4), false, false, false, true), None);
+        assert_eq!(down, None);
+        // The band went under the held trigger (a menu came up, its time ended), then came back: nothing.
+        notice_release(&mut down, Some(4), true, true, true, true);
+        assert_eq!(notice_release(&mut down, None, false, true, false, true), None);
+        assert_eq!(notice_release(&mut down, Some(4), false, false, true, true), None);
+        // Another notice under the held trigger: nothing.
+        notice_release(&mut down, Some(4), true, true, true, true);
+        assert_eq!(notice_release(&mut down, Some(5), false, false, true, true), None);
+    }
 
     #[test]
     fn the_menu_hears_the_lasers_as_steamvr_s_mouse() {

@@ -99,17 +99,31 @@ pub fn share_items(w: f32, _h: f32, view: &ShareView) -> Vec<Item> {
             Item { action: Action::ShareConfirm(id), rect: r(w - yes, 0.0, yes, BUTTON), look: Look::ShareYes },
         ];
     }
-    let half = (w - PUT_AWAY_W - 16.0) / 2.0;
-    let people = match &view.offer.people {
-        Step::Idle => Action::ShareTo(id),
-        Step::Failed(_) => Action::ShareTo(id),
-        _ => Action::Idle,
-    };
-    let public = match &view.offer.public {
-        Step::Idle | Step::Failed(_) => Action::SharePublic(id),
-        _ => Action::Idle,
-    };
     let tall = |step: &Step| if matches!(step, Step::Done(_)) { 84.0 } else { BUTTON };
+    // A column (on a screen, beside the panel): the two over each other, the put-away under them.
+    if w < 300.0 {
+        let question = view.confirming;
+        if question {
+            return vec![
+                Item { action: Action::Idle, rect: r(0.0, 0.0, w, 84.0), look: Look::ShareQuestion },
+                Item { action: Action::ShareConfirm(id), rect: r(0.0, 92.0, w, BUTTON), look: Look::ShareYes },
+                Item { action: Action::ShareCancelConfirm, rect: r(0.0, 92.0 + BUTTON + 8.0, w, 44.0), look: Look::ShareCancel },
+            ];
+        }
+        let first = tall(&view.offer.people);
+        let mut out = vec![
+            Item { action: slot_action(&view.offer.people, Action::ShareTo(id)), rect: r(0.0, 0.0, w, first), look: Look::ShareSlot(false) },
+            Item { action: slot_action(&view.offer.public, Action::SharePublic(id)), rect: r(0.0, first + 8.0, w, tall(&view.offer.public)), look: Look::ShareSlot(true) },
+        ];
+        if !view.offer.busy() {
+            let y = first + 8.0 + tall(&view.offer.public) + 8.0;
+            out.push(Item { action: Action::ShareDismiss(id), rect: r(w - PUT_AWAY_W, y, PUT_AWAY_W, PUT_AWAY_W), look: Look::ShareDismiss });
+        }
+        return out;
+    }
+    let half = (w - PUT_AWAY_W - 16.0) / 2.0;
+    let people = slot_action(&view.offer.people, Action::ShareTo(id));
+    let public = slot_action(&view.offer.public, Action::SharePublic(id));
     let mut out = vec![
         Item { action: people, rect: r(0.0, 0.0, half, tall(&view.offer.people)), look: Look::ShareSlot(false) },
         Item { action: public, rect: r(half + 8.0, 0.0, half, tall(&view.offer.public)), look: Look::ShareSlot(true) },
@@ -118,6 +132,15 @@ pub fn share_items(w: f32, _h: f32, view: &ShareView) -> Vec<Item> {
         out.push(Item { action: Action::ShareDismiss(id), rect: r(w - PUT_AWAY_W, (BUTTON - PUT_AWAY_W) / 2.0, PUT_AWAY_W, PUT_AWAY_W), look: Look::ShareDismiss });
     }
     out
+}
+
+/// What a slot presses: its button while nothing runs or after a failure (it tries again), nothing otherwise.
+fn slot_action(step: &Step, press: Action) -> Action {
+    if matches!(step, Step::Idle | Step::Failed(_)) {
+        press
+    } else {
+        Action::Idle
+    }
 }
 
 /// The chooser's items, in a zone `w` x `h`: its head with the close, a page of friends, the page's arrows and Send.
@@ -418,6 +441,15 @@ mod tests {
         assert_eq!(actions(&share_items(520.0, 84.0, &v)), [Action::Idle, Action::SharePublic(7), Action::ShareDismiss(7)]);
         v.confirming = true;
         assert_eq!(actions(&share_items(520.0, 84.0, &v)), [Action::Idle, Action::ShareCancelConfirm, Action::ShareConfirm(7)]);
+        // On a screen, the column beside the panel: the same presses, over each other, none overlapping.
+        let column = share_items(210.0, 228.0, &v);
+        assert_eq!(actions(&column), [Action::Idle, Action::ShareConfirm(7), Action::ShareCancelConfirm]);
+        v.confirming = false;
+        let column = share_items(210.0, 228.0, &v);
+        assert_eq!(actions(&column), [Action::Idle, Action::SharePublic(7), Action::ShareDismiss(7)]);
+        for pair in column.windows(2) {
+            assert!(pair[0].rect.bottom() <= pair[1].rect.top() && pair[1].rect.bottom() <= 228.0, "{pair:?}");
+        }
     }
 
     /// A row presses its friend, by who they are; Send is off until someone is chosen; arrows only where there is a page.

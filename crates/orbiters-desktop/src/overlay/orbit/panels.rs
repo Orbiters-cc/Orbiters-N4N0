@@ -825,7 +825,9 @@ pub fn needed(zone: Zone, facts: &Facts) -> bool {
         Zone::CameraAct => facts.no_kit && matches!(camera.demo, Some(DemoSwitch::Offered | DemoSwitch::Busy | DemoSwitch::Failed(_))),
         Zone::CameraScan => camera.qr != CameraQr::Off,
         Zone::CameraWebBar | Zone::CameraWeb => camera.web.is_some(),
-        Zone::CameraShare => camera.share.is_some(),
+        // One of the two places, by where the camera is.
+        Zone::CameraShare => camera.share.is_some() && !facts.desktop,
+        Zone::CameraShareDesk => camera.share.is_some() && facts.desktop,
         // Never with a code's page: they take the same place.
         Zone::CameraChooser => camera.web.is_none() && camera.share.as_ref().is_some_and(|s| s.chooser.is_some()),
         _ => true,
@@ -1034,7 +1036,7 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
             _ => Vec::new(),
         },
         Zone::CameraScan => vec![Item { action: Action::Idle, rect: whole, look: Look::Scan }],
-        Zone::CameraShare => facts.camera.share.as_ref().map_or_else(Vec::new, |s| share_sheet::share_items(w, h, s)),
+        Zone::CameraShare | Zone::CameraShareDesk => facts.camera.share.as_ref().map_or_else(Vec::new, |s| share_sheet::share_items(w, h, s)),
         Zone::CameraChooser => facts.camera.share.as_ref().map_or_else(Vec::new, |s| share_sheet::chooser_items(w, h, s)),
         Zone::CameraWebBar => web_bar(w, h, facts),
         Zone::CameraWeb => {
@@ -3215,7 +3217,7 @@ fn is_selected(item: &Item, facts: &Facts) -> bool {
 
 fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pressed: bool) {
     let rect = item.rect;
-    if matches!(zone, Zone::CameraShare | Zone::CameraChooser) {
+    if matches!(zone, Zone::CameraShare | Zone::CameraShareDesk | Zone::CameraChooser) {
         if let Some(view) = facts.camera.share.as_ref() {
             share_sheet::draw(p, item, view, hovered, pressed);
         }

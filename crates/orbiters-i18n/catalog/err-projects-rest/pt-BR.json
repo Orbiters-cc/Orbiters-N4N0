@@ -104,5 +104,10 @@
   "{name} could not be put back: its folder as it was is kept at {path}": "Não foi possível restaurar {name}: a pasta como estava está guardada em {path}",
   "Copy stopped. The incomplete copy was removed.": "Cópia interrompida. A cópia incompleta foi removida.",
   "Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.": "Cópia interrompida. Não foi possível remover a cópia incompleta em {path} ({why}); ela não aparece como projeto.",
-  "it is not a copy this one made": "não é uma cópia feita por esta"
+  "it is not a copy this one made": "não é uma cópia feita por esta",
+  "Copy stopped before anything was copied to {path}.": "Cópia interrompida antes de copiar qualquer coisa para {path}.",
+  "it is not the folder this copy made": "não é a pasta que esta cópia criou",
+  "Copy stopped. What it copied was removed; {path} keeps what was not the copy's: {files}": "Cópia interrompida. O que ela copiou foi removido; {path} mantém o que não era da cópia: {files}",
+  "Required local package {name} is unavailable at {path}": "O pacote local necessário {name} não está disponível em {path}",
+  "{file} in the copy's Packages folder is another archive than the one {name} needs ({path})": "{file} na pasta Packages da cópia é outro arquivo, diferente do que {name} precisa ({path})"
 }

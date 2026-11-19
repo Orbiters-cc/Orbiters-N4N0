@@ -178,9 +178,12 @@ fn contained(dir: &Path, relative: &str) -> Option<PathBuf> {
     use std::os::windows::fs::MetadataExt;
     const REPARSE_POINT: u32 = 0x400;
     let path = inside(dir, relative)?;
-    // The base itself too: a backup or staging folder that is a junction leads elsewhere.
-    if !real_dir(dir) {
-        return None;
+    // The base itself too: a backup or staging folder that is a junction leads elsewhere. One not made yet is made by
+    // setup, a real folder.
+    match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        _ if real_dir(dir) => {}
+        _ => return None,
     }
     let mut at = dir.to_path_buf();
     for part in Path::new(relative).components() {

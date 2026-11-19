@@ -1184,12 +1184,24 @@ pub struct Menu {
     pub justifying: Option<String>,
     /// What was just switched on (Like, a label) and when: the overlay makes it pop for [`POP`].
     pub popped: Option<(Target, Instant)>,
+    /// Share to …'s friends as last ranked ([`Menu::found_friends`]), and the number of the friends list's last change.
+    found: Option<Found>,
+    friends_revision: u64,
     /// When the page last changed by itself ([`Menu::go_unasked`]).
     unasked_at: Option<Instant>,
     /// What leaving a page asks of the host however the page was left (a press, a call ringing, an answer that takes
     /// the page): the scanner stopped, the friends forgotten (MENU-8). [`Menu::press`] and [`Menu::close`] hand it
     /// over with their own; a host takes the rest with [`Menu::drain`] at each turn.
     outbox: Vec<Effect>,
+}
+
+/// Share to …'s friends ranked for `find` over the list of revision `revision` (`of` friends): their indices, best first.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Found {
+    find: String,
+    revision: u64,
+    of: usize,
+    rows: Vec<usize>,
 }
 
 /// Which list a row is of, for what it showed ([`Menu::row_shown`]).
@@ -1616,6 +1628,7 @@ impl Menu {
                     Typing::Suggestion => self.suggestion = cut(&text, SUGGESTION_MAX),
                     Typing::Friend => {
                         self.find = text;
+                        self.refind();
                         self.friend_page = 0;
                     }
                     Typing::Comment => return self.send_comment(&text),
@@ -2570,8 +2583,25 @@ impl Menu {
     /// The friends Share to … lists: those whose name [`Menu::find`] finds however the name is written (full-width,
     /// spaced, decorated: [`orbiters_core::search`]), best matches first; every one without it.
     pub fn found_friends(&self) -> Vec<&Friend> {
+        let list = self.friends.list();
+        match &self.found {
+            // Ranked once per list and search (MENU-5): pages, rows, hits and texts all ask, many times a frame.
+            Some(found) if found.find == self.find && found.revision == self.friends_revision && found.of == list.len() => found.rows.iter().map(|&i| &list[i]).collect(),
+            _ => self.rank_friends().into_iter().map(|i| &list[i]).collect(),
+        }
+    }
+
+    /// The friends [`Menu::find`] finds, best first, as indices into the list.
+    fn rank_friends(&self) -> Vec<usize> {
         let find = orbiters_core::search::Query::new(&self.find);
-        orbiters_core::search::filter_ranked(&find, self.friends.list().iter(), |f| vec![f.name.as_str()])
+        orbiters_core::search::filter_ranked(&find, self.friends.list().iter().enumerate(), |(_, f)| vec![f.name.as_str()]).into_iter().map(|(i, _)| i).collect()
+    }
+
+    /// The friends list or the search changed: ranked again, once.
+    fn refind(&mut self) {
+        self.friends_revision = self.friends_revision.wrapping_add(1);
+        let rows = self.rank_friends();
+        self.found = Some(Found { find: self.find.clone(), revision: self.friends_revision, of: self.friends.list().len(), rows });
     }
 
     /// Share to …'s friends on the page shown.
@@ -2657,6 +2687,7 @@ impl Menu {
         }
         let before: Vec<String> = self.page_friends().iter().map(|f| f.id.clone()).collect();
         self.friends = friends;
+        self.refind();
         let pages = self.found_friends().len().div_ceil(FRIENDS_PER_PAGE).max(1);
         self.friend_page = self.friend_page.min(pages - 1);
         if self.page_friends().iter().map(|f| &f.id).ne(before.iter()) {
@@ -2701,6 +2732,7 @@ impl Menu {
         if !matches!(self.friends, Friends::Ready { .. }) {
             self.friends = Friends::Loading;
         }
+        self.refind();
         vec![Effect::Friends(true)]
     }
 
@@ -4380,6 +4412,34 @@ mod tests {
         let _ = menu.press(Target::Photo);
         let _ = menu.set_captures(view(Sharing::Explicit));
         assert_eq!(menu.page, Page::Photo);
+    }
+
+    /// MENU-5: Share to …'s friends are ranked once per list or search, and the rows are what ranking them now gives.
+    #[test]
+    fn share_to_ranks_its_friends_once_per_change() {
+        use crate::captures::{Friend, Friends};
+        let f = |id: &str, name: &str| Friend { id: id.into(), name: name.into() };
+        let fresh = |menu: &Menu| -> Vec<String> { menu.rank_friends().into_iter().map(|i| menu.friends.list()[i].id.clone()).collect() };
+        let ids = |menu: &Menu| -> Vec<String> { menu.found_friends().iter().map(|f| f.id.clone()).collect() };
+        let mut menu = Menu { pages: Pages::Mirror, ..Default::default() };
+        menu.open();
+        menu.set_friends(Friends::ready(vec![f("a", "Neon Fox"), f("b", "Bob"), f("c", "neonix")]));
+        let cached = menu.found.clone().expect("ranked when the list came");
+        assert_eq!(ids(&menu), fresh(&menu));
+        assert_eq!(menu.found, Some(cached), "asking again ranks nothing again");
+        // A search typed on its keyboard, then a new list.
+        menu.page = Page::ShareTo;
+        let _ = menu.press(Target::FindFriend);
+        menu.typed = "neo".into();
+        let _ = menu.press(Target::Done);
+        assert_eq!(menu.found.as_ref().map(|f| f.find.as_str()), Some("neo"));
+        assert_eq!(ids(&menu), fresh(&menu));
+        assert_eq!(ids(&menu).len(), 2);
+        menu.set_friends(Friends::ready(vec![f("d", "Neo"), f("b", "Bob")]));
+        assert_eq!(ids(&menu), ["d"]);
+        // Written from outside (a test, a staged page): never a stale ranking.
+        menu.find = "bob".into();
+        assert_eq!(ids(&menu), ["b"]);
     }
 }
 

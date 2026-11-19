@@ -301,9 +301,12 @@ pub fn low_priority() {
 pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl FnMut(&Scan)) -> anyhow::Result<Scan> {
     low_priority();
     let mut notify = publish;
+    let mut checkpoint = Checkpoint::new(CHECKPOINT_EVERY);
     let mut publish = |scan: &Scan| {
-        // Keep useful results across a window close while a large disk is still being enumerated.
-        if !cancel.load(Ordering::Relaxed) {
+        // Keep useful results across a window close while a large disk is still being enumerated: written now and then
+        // (PROJECTS-7: it was the whole file, flushed to disk, at every step: ~740 times a scan with 400 projects), and
+        // in full at the end.
+        if !cancel.load(Ordering::Relaxed) && checkpoint.due(Instant::now()) {
             let _ = crate::write_json(&crate::data_dir().join("unity-projects.json"), scan);
         }
         notify(scan);
@@ -377,6 +380,27 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
     }
     Ok(scan)
 }
+/// How often a scan writes what it found so far.
+const CHECKPOINT_EVERY: Duration = Duration::from_secs(5);
+
+/// Whether a scan's results are due to be written: the first time, then once per period.
+struct Checkpoint {
+    every: Duration,
+    last: Option<Instant>,
+}
+impl Checkpoint {
+    fn new(every: Duration) -> Self {
+        Self { every, last: None }
+    }
+    fn due(&mut self, now: Instant) -> bool {
+        let due = self.last.is_none_or(|last| now.saturating_duration_since(last) >= self.every);
+        if due {
+            self.last = Some(now);
+        }
+        due
+    }
+}
+
 fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, registered: &HashSet<String>) {
     let old: HashMap<_, _> = scan.projects.iter().map(|p| (key(&p.path), (p.avatars.clone(), p.worlds.clone()))).collect();
     scan.projects = found
@@ -811,6 +835,16 @@ mod mac_tests {
 #[cfg(test)]
 mod retained_lists {
     use super::*;
+
+    /// PROJECTS-7: 740 publishes over a scan of a minute write the cache a dozen times, not 740.
+    #[test]
+    fn a_scan_writes_its_cache_now_and_then() {
+        let mut checkpoint = Checkpoint::new(CHECKPOINT_EVERY);
+        let start = Instant::now();
+        let writes = (0..740).filter(|i| checkpoint.due(start + Duration::from_millis(i * 60_000 / 740))).count();
+        assert!((12..=13).contains(&writes), "{writes}");
+        assert!(Checkpoint::new(CHECKPOINT_EVERY).due(start), "the first one at once");
+    }
 
     const AVATAR: &str = "avtr_11111111-2222-3333-4444-555555555555";
     const OTHER_AVATAR: &str = "avtr_77777777-2222-3333-4444-555555555555";

@@ -32,8 +32,10 @@ fn where_(offer: &ShareOffer) -> String {
     orbiters_i18n::fill(tr(WHERE), &[("world", &world)])
 }
 
-const WIDTH: f32 = 400.0;
-const HEIGHT: f32 = 92.0;
+/// As wide as "Talk with N4N0?"'s card, a line taller: its buttons on the name's row, the question and where under them
+/// across the card, whole in every language.
+const WIDTH: f32 = 380.0;
+const HEIGHT: f32 = 104.0;
 const MARGIN: f32 = 20.0;
 
 /// The window's card while an offer is up: Show takes it, the cross says not now. Above the "Talk with N4N0?" card's
@@ -54,16 +56,21 @@ pub fn window(ctx: &Context, ctl: &Ctl, offer: Option<&ShareOffer>, below: bool)
         widgets::panel(&p, rect, 16.0);
         let mark = Rect::from_center_size(pos2(rect.left() + 16.0 + 14.0, rect.center().y - 1.0), n4n0_logo::size_for_width(28.0));
         n4n0_logo::paint(&p, mark, theme::MARK);
-        let close = Rect::from_min_size(pos2(rect.right() - 12.0 - 32.0, rect.center().y - 16.0), vec2(32.0, 32.0));
+        let row = rect.top() + 30.0;
+        let close = Rect::from_min_size(pos2(rect.right() - 12.0 - 32.0, row - 16.0), vec2(32.0, 32.0));
         let show = Button::new(tr(SHOW)).icon(icons::EYE).variant(Variant::Primary);
         let w = show.desired_width(ui).max(96.0);
-        let at = Rect::from_min_size(pos2(close.left() - 8.0 - w, rect.center().y - 19.0), vec2(w, 38.0));
+        let at = Rect::from_min_size(pos2(close.left() - 8.0 - w, row - 17.0), vec2(w, 34.0));
         let words = mark.right() + 12.0;
-        let room = at.left() - 10.0 - words;
-        // Who first, whole: the question and where under it.
-        widgets::text_truncated(&p, pos2(words, rect.center().y - 22.0), Align2::LEFT_CENTER, &Txt::new(&offer.from, 15.5).weight(weight::SEMIBOLD), room);
-        widgets::text_truncated(&p, pos2(words, rect.center().y), Align2::LEFT_CENTER, &Txt::new(tr(ASK), 13.5), room);
-        widgets::text_truncated(&p, pos2(words, rect.center().y + 20.0), Align2::LEFT_CENTER, &Txt::new(where_(offer), 12.5).color(theme::FG_3), room);
+        // Who first, beside the buttons; the question and where under them, across the card.
+        widgets::text_truncated(&p, pos2(words, row), Align2::LEFT_CENTER, &Txt::new(&offer.from, 15.5).weight(weight::SEMIBOLD), at.left() - 10.0 - words);
+        let room = rect.right() - 16.0 - words;
+        let question = tr(ASK);
+        let size = crate::mismatch::fitting(&p, question, &[13.5, 12.5, 11.5], room);
+        widgets::text_truncated(&p, pos2(words, rect.top() + 60.0), Align2::LEFT_CENTER, &Txt::new(question, size), room);
+        let place = where_(offer);
+        let size = crate::mismatch::fitting(&p, &place, &[12.5, 11.5, 10.5], room);
+        widgets::text_truncated(&p, pos2(words, rect.top() + 80.0), Align2::LEFT_CENTER, &Txt::new(&place, size).color(theme::FG_3), room);
         if show.width(w).show_at(ui, at).clicked() {
             ctl.shared_view(SharedViewCommand::Answer { id: offer.id, accept: true });
         }

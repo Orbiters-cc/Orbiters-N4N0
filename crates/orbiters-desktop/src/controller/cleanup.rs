@@ -22,6 +22,9 @@ pub struct CleanupRuntime {
     failed: Vec<String>,
 }
 
+/// Why a session asked to be deleted whole (as one without a 3D view) was left alone.
+const HAS_VIEW_NOW: &str = mark("it has a 3D view now");
+
 /// The job's progress goes out this often while it deletes (every file freed counts).
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
@@ -36,7 +39,10 @@ impl Controller {
             trim.into_iter().filter(|d| session_folder(&root, d) && cleanup::has_view(d)).collect(),
             delete.into_iter().filter(|d| session_folder(&root, d)).collect(),
         );
-        let busy: Vec<String> = trim.iter().chain(&delete).filter_map(|d| self.cleanup_blocked(d).map(|why| format!("{} ({})", name(d), tr(why)))).collect();
+        // Whole deletions are of the captures without a 3D view: one that got one since the list was shown stays (SWEEP-12).
+        let (delete, viewed): (Vec<_>, Vec<_>) = delete.into_iter().partition(|d| !cleanup::has_view(d));
+        let mut busy: Vec<String> = trim.iter().chain(&delete).filter_map(|d| self.cleanup_blocked(d).map(|why| format!("{} ({})", name(d), tr(why)))).collect();
+        busy.extend(viewed.iter().map(|d| format!("{} ({})", name(d), tr(HAS_VIEW_NOW))));
         let (trim, delete): (Vec<_>, Vec<_>) = (
             trim.into_iter().filter(|d| self.cleanup_blocked(d).is_none()).collect(),
             delete.into_iter().filter(|d| self.cleanup_blocked(d).is_none()).collect(),
@@ -134,6 +140,12 @@ impl Controller {
             };
             if let Some(why) = self.cleanup_blocked(&dir) {
                 self.cleanup.lock().unwrap().skipped.push(format!("{} ({})", name(&dir), tr(why)));
+                continue;
+            }
+            // Asked as a capture without a 3D view: one made since (a reconstruction that ended while the job deleted
+            // others) is not deleted with the folder (SWEEP-12).
+            if whole && cleanup::has_view(&dir) {
+                self.cleanup.lock().unwrap().skipped.push(format!("{} ({})", name(&dir), tr(HAS_VIEW_NOW)));
                 continue;
             }
             let mut published = Instant::now();
@@ -290,6 +302,30 @@ mod tests {
         assert!(viewed.trimmed && viewed.capture_bytes == 0 && viewed.size_bytes < 4000);
         let storage = ctl.view().storage.clone();
         assert_eq!((storage.sessions, storage.capture_sessions, storage.capture_bytes), (2, 1, 4500));
+        ctl.shutdown();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// SWEEP-12: deleting "the captures without a 3D view" never deletes one that has a 3D view: not when asked, and not
+    /// one that got its view after the click, before its turn.
+    #[test]
+    fn a_session_that_got_a_3d_view_is_not_deleted_whole() {
+        let (root, dirs) = library("viewed-since");
+        let ctl = Controller::new(Settings { sessions_dir: root.clone(), ..Default::default() });
+        // Asked for a session that has a view already.
+        let refused = ctl.clean_up(vec![], vec![dirs[0].clone()]).unwrap_err();
+        assert!(refused.to_string().contains("it has a 3D view now"), "{refused}");
+        assert!(dirs[0].join("reconstruction/splats.ply").is_file());
+        // Asked while it had none ("Raw"), its view made before its turn comes.
+        ctl.update(|s| s.cleanup.get_or_insert_with(Default::default).add(&Vec::new(), &[dirs[2].clone()]));
+        ctl.cleanup.lock().unwrap().running = true;
+        fs::create_dir_all(dirs[2].join("reconstruction")).unwrap();
+        fs::write(dirs[2].join("reconstruction").join("splats.ply"), vec![1u8; 2000]).unwrap();
+        fs::write(dirs[2].join("reconstruction").join("report.json"), "{}").unwrap();
+        ctl.run_cleanup();
+        assert!(dirs[2].join("reconstruction/splats.ply").is_file(), "its new 3D view stays");
+        let notices: Vec<String> = ctl.take_notices().into_iter().map(|n| format!("{n:?}")).collect();
+        assert!(notices.iter().any(|n| n.contains("Raw (it has a 3D view now)")), "{notices:?}");
         ctl.shutdown();
         fs::remove_dir_all(&root).ok();
     }

@@ -3587,6 +3587,16 @@ impl Panels {
                 }
             }
         }
+        // What the painter could not paint is asked for again (verify2: a settled part stayed blank after a contained panic).
+        let (failed, page_failed) = self.stage.painter.take_failed();
+        for panel in self.list.iter_mut().filter(|p| failed.contains(&p.zone)) {
+            panel.dirty = true;
+        }
+        if page_failed {
+            if let Some(page) = self.takeover.as_mut() {
+                page.dirty = true;
+            }
+        }
         let now = Instant::now();
         for panel in &mut self.list {
             if panel.retry_at.is_some_and(|at| now >= at) {

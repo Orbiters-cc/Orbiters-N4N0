@@ -1713,6 +1713,11 @@ impl OrbitVr {
     }
 
     /// A turn of the overlay's loop.
+    /// The page painter panicked too often: the session is to end (verify2).
+    pub fn painter_failed(&self) -> bool {
+        self.panels.stage.painter.fatal()
+    }
+
     pub fn update(&mut self, cx: Cx<'_, '_>) -> Turn {
         let camera_opened=cx.snap.camera_open_said==Some(true) && self.camera_was!=Some(true);
         let held=cx.world_status.small_taken;

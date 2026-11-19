@@ -149,6 +149,7 @@ impl Service {
             Ok(child) => {
                 crate::worker::keep_with_service(&child);
                 allow_foreground(child.id());
+                crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).role(child.id(), "window");
                 *window = Some((child, Instant::now()));
             }
             Err(e) => eprintln!("could not start the window: {e}"),
@@ -277,6 +278,7 @@ impl Service {
         match cmd.spawn() {
             Ok(child) => {
                 crate::worker::keep_with_service(&child);
+                crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).role(child.id(), "overlay");
                 *overlay = Some((child, Instant::now(), Some(session), failures, errors));
             }
             Err(e) => eprintln!("could not start the SteamVR overlay: {e}"),
@@ -313,6 +315,7 @@ impl Service {
         match cmd.spawn() {
             Ok(child) => {
                 crate::worker::keep_with_service(&child);
+                crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).role(child.id(), "orbit-desktop");
                 *orbit = Some((child, Instant::now()));
             }
             Err(e) => eprintln!("could not start the panels around VRChat's menus: {e}"),

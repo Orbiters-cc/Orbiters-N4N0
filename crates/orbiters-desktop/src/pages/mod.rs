@@ -168,14 +168,21 @@ impl AccountFollow {
 }
 
 /// Work done on a background thread; the interface polls it every frame and repaints when it lands.
+///
+/// A job whose work panicked ends too (Night PAGES-UI-16): it is no longer `running`, brings no value, and says so
+/// once through [`Job::died`]; its page woke for it. (It stayed "running" for ever: a spinner and buttons off until
+/// the window was closed.) The panic itself goes to the panic log as before; nothing of it is shown.
 pub struct Job<T> {
     rx: Option<mpsc::Receiver<T>>,
     value: Option<T>,
+    /// Set by the worker when its work panicked (no value will come).
+    panicked: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    died: bool,
 }
 
 impl<T> Default for Job<T> {
     fn default() -> Self {
-        Self { rx: None, value: None }
+        Self { rx: None, value: None, panicked: None, died: false }
     }
 }
 
@@ -183,31 +190,55 @@ impl<T: Send + 'static> Job<T> {
     pub fn spawn(ctx: &egui::Context, f: impl FnOnce() -> T + Send + 'static) -> Self {
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
+        let panicked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = panicked.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(f());
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+                Ok(v) => {
+                    let _ = tx.send(v);
+                }
+                Err(_) => flag.store(true, std::sync::atomic::Ordering::Release),
+            }
             ctx.request_repaint();
         });
-        Self { rx: Some(rx), value: None }
+        Self { rx: Some(rx), value: None, panicked: Some(panicked), died: false }
     }
 
     /// The result once it arrived.
     pub fn poll(&mut self) -> Option<&mut T> {
         if let Some(rx) = &self.rx {
-            if let Ok(v) = rx.try_recv() {
-                self.value = Some(v);
-                self.rx = None;
+            match rx.try_recv() {
+                Ok(v) => {
+                    self.value = Some(v);
+                    self.rx = None;
+                    self.panicked = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // The work ended without a value: it panicked.
+                    self.rx = None;
+                    self.panicked = None;
+                    self.died = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
             }
         }
         self.value.as_mut()
     }
 
+    /// Still working: not once its value came, nor once its work panicked (even before a poll saw it).
     pub fn running(&self) -> bool {
-        self.rx.is_some()
+        self.rx.is_some() && !self.panicked.as_ref().is_some_and(|p| p.load(std::sync::atomic::Ordering::Acquire))
     }
 
     pub fn take(&mut self) -> Option<T> {
         self.poll();
         self.value.take()
+    }
+
+    /// Whether the work panicked, told once.
+    pub fn died(&mut self) -> bool {
+        self.poll();
+        std::mem::take(&mut self.died)
     }
 }
 
@@ -508,6 +539,34 @@ pub(crate) mod rest {
 mod tests {
     use super::*;
     use orbiters_i18n::{in_language, Language};
+
+    /// Night PAGES-UI-16: a job whose work panics ends (not "running" for ever), wakes its page and says so once.
+    #[test]
+    fn a_job_that_panics_ends_and_says_so_once() {
+        let ctx = egui::Context::default();
+        let woke = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let w = woke.clone();
+        ctx.set_request_repaint_callback(move |_| {
+            w.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let mut job: Job<u32> = Job::spawn(&ctx, || panic!("a worker's own unwrap"));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while job.running() {
+            assert!(std::time::Instant::now() < until, "still running after its work panicked");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(job.take().is_none());
+        assert!(job.died(), "said once");
+        assert!(!job.died(), "and only once");
+        assert!(woke.load(std::sync::atomic::Ordering::SeqCst) > 0, "its page woke for it");
+        // A job that works still brings its value.
+        let mut ok = Job::spawn(&ctx, || 7u32);
+        while ok.running() && ok.poll().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(ok.take(), Some(7));
+        assert!(!ok.died());
+    }
 
     /// Night PAGES-UI-23: the account's key is who it is; "answered" rises once when Orbiters comes to answer.
     #[test]

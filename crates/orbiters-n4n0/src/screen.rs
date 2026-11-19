@@ -2865,8 +2865,8 @@ mod tests {
     #[test]
     fn someone_else_s_touch_presses_nothing_that_acts_for_the_owner() {
         let mut s = pointing();
-        s.avatar(true, true, Some(9), 72);
-        s.menu.open();
+        // A screen of version 9: Music with its timeline.
+        s.menu.pages = menu::Pages::of_screen(Some(9));
         s.menu.media = Some(menu::Media { title: "A song".into(), can_play_pause: true, can_seek: true, duration: Some(200), playing: true, ..Default::default() });
         let t0 = Instant::now();
         // The owner opened the music page.

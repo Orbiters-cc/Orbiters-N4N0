@@ -3481,6 +3481,8 @@ mod tests {
         assert!(menu.press(Target::StateSave).is_empty(), "no avatar known: nothing to save");
         let row = |id: &str, name: &str| StateRow { id: id.into(), name: name.into(), ..Default::default() };
         menu.set_states(vec![row("s1", "State 1"), row("s2", "Hoodie on")], true, "");
+        // (The list has stood still a while: MENU-9 judges rows only right after a change.)
+        menu.states_moved = None;
         assert_eq!(menu.press(Target::StateSave), vec![Effect::SaveState { name: "State 3".into(), size: true, pose: false, default: false }]);
         assert!(menu.saving());
         assert_eq!(layout::text(&menu, layout::Content::StatesTitle), "Saved as \"State 3\"");
@@ -4435,7 +4437,7 @@ mod tests {
         let ids = |menu: &Menu| -> Vec<String> { menu.found_friends().iter().map(|f| f.id.clone()).collect() };
         let mut menu = Menu { pages: Pages::Mirror, ..Default::default() };
         menu.open();
-        menu.set_friends(Friends::ready(vec![f("a", "Neon Fox"), f("b", "Bob"), f("c", "neonix")]));
+        menu.set_friends(Friends::ready(vec![f("usr_a", "Neon Fox"), f("usr_b", "Bob"), f("usr_c", "neonix")]));
         let cached = menu.found.clone().expect("ranked when the list came");
         assert_eq!(ids(&menu), fresh(&menu));
         assert_eq!(menu.found, Some(cached), "asking again ranks nothing again");
@@ -4446,11 +4448,12 @@ mod tests {
         let _ = menu.press(Target::Done);
         assert_eq!(menu.found.as_ref().map(|f| f.find.as_str()), Some("neo"));
         assert_eq!(ids(&menu), fresh(&menu));
-        menu.set_friends(Friends::ready(vec![f("d", "Neo"), f("b", "Bob")]));
-        assert_eq!(ids(&menu), ["d"]);
+        assert_eq!(ids(&menu).len(), 2);
+        menu.set_friends(Friends::ready(vec![f("usr_d", "Neo"), f("usr_b", "Bob")]));
+        assert_eq!(ids(&menu), ["usr_d"]);
         // Written from outside (a test, a staged page): never a stale ranking.
         menu.find = "bob".into();
-        assert_eq!(ids(&menu), ["b"]);
+        assert_eq!(ids(&menu), ["usr_b"]);
     }
 }
 

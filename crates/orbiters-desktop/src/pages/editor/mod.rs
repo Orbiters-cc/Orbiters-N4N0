@@ -258,13 +258,17 @@ pub struct Editor {
     /// The pressed eye: the original shown while it is held.
     comparing: bool,
     closing: Option<f64>,
-    /// Close was asked with changes not saved: asked again, they are dropped.
-    confirm_close: bool,
+    /// Close was asked with changes not saved (the edit as it was then): asked again with the same edit, they are
+    /// dropped. Edited or saved since, the next close asks again (it was armed once per editor, and the warning stayed).
+    confirm_close: Option<Edit>,
     /// Drawn live by its host (Edit in 3D).
     live: Option<Live>,
     /// The 3D view the copy opened was made of, and whether editing it there again was asked.
     view3d: Option<files::View3d>,
     to_3d: bool,
+    /// The 3D view the copy's edit names, as read (its capture there or not): written back on each save, so a copy
+    /// made in Edit in 3D keeps its way back there (a save from here dropped it).
+    saved_view: Option<files::View3d>,
 }
 
 impl Editor {
@@ -289,6 +293,7 @@ impl Editor {
             load(&files).inspect(|_| c.request_repaint())
         });
         let mut e = Self::with(source, title.into(), doc, target, Some(loading));
+        e.saved_view = view3d.clone();
         e.view3d = view3d.filter(|v| v.capture.exists());
         e
     }
@@ -327,9 +332,10 @@ impl Editor {
             rows: layers::State::default(),
             comparing: false,
             closing: None,
-            confirm_close: false,
+            confirm_close: None,
             live: None,
             view3d: None,
+            saved_view: None,
             to_3d: false,
             source,
             doc,
@@ -412,8 +418,8 @@ impl Editor {
 
     /// Starts closing; false while changes are not saved and this is the first time asked.
     fn close(&mut self, ctx: &egui::Context) {
-        if self.dirty() && !self.confirm_close && self.saving.is_none() {
-            self.confirm_close = true;
+        if self.dirty() && self.confirm_close.as_ref() != Some(&self.doc) && self.saving.is_none() {
+            self.confirm_close = Some(self.doc.clone());
             return;
         }
         self.closing = Some(anim::time(ctx));
@@ -496,8 +502,8 @@ impl Editor {
         }
         let target = self.target.clone().unwrap_or_else(|| self.source.copy_path());
         let progress = Arc::new(AtomicU32::new(0));
-        let (p, edit, source) = (progress.clone(), self.doc.clone(), self.source.clone());
-        let job = Job::spawn(ctx, move || save(&source, &edit, &target, &p).map(|_| target).map_err(|e| format!("{e:#}")));
+        let (p, edit, source, view) = (progress.clone(), self.doc.clone(), self.source.clone(), self.saved_view.clone());
+        let job = Job::spawn(ctx, move || save(&source, &edit, &target, view.as_ref(), &p).map(|_| target).map_err(|e| format!("{e:#}")));
         self.saving = Some(Saving { job, progress });
         self.notice = None;
     }
@@ -577,12 +583,14 @@ impl Editor {
 
     fn keys(&mut self, ctx: &egui::Context) {
         let typing = ctx.memory(|m| m.focused().is_some());
+        // An open menu (Looks, Crop's More) takes Escape: it closes itself and nothing behind it.
+        let menu = orbiters_ui::popup::any_open(ctx);
         let (undo, redo, delete, escape) = ctx.input_mut(|i| {
             let redo = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
             let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
             // A Mac keyboard's delete key sends Backspace.
             let delete = !typing && (i.key_pressed(egui::Key::Delete) || (cfg!(target_os = "macos") && i.key_pressed(egui::Key::Backspace)));
-            let escape = i.key_pressed(egui::Key::Escape);
+            let escape = !menu && i.key_pressed(egui::Key::Escape);
             (undo, redo, delete, escape)
         });
         if undo && !typing {
@@ -678,7 +686,7 @@ impl Editor {
         }
         // Looks, Save this view (live) or Edit in 3D (a copy made there), left of it.
         let msg_right = self.more_buttons(ui, r) - 12.0;
-        let msg = if self.confirm_close && self.closing.is_none() {
+        let msg = if self.confirm_close.as_ref() == Some(&self.doc) && self.dirty() && self.closing.is_none() {
             Some((tr("Not saved: close again to leave without saving"), theme::WARN))
         } else if self.error.is_some() {
             Some((tr("Something went wrong (see the canvas)"), theme::DANGER))
@@ -771,7 +779,7 @@ fn load(files: &[PathBuf]) -> Result<Loaded, String> {
 }
 
 /// Makes the full picture and writes the copy and its edit.
-fn save(source: &Source, edit: &Edit, target: &std::path::Path, progress: &AtomicU32) -> anyhow::Result<()> {
+fn save(source: &Source, edit: &Edit, target: &std::path::Path, view: Option<&files::View3d>, progress: &AtomicU32) -> anyhow::Result<()> {
     let files = source.files();
     let mut inputs = Vec::new();
     for f in &files {
@@ -797,7 +805,7 @@ fn save(source: &Source, edit: &Edit, target: &std::path::Path, progress: &Atomi
         std::fs::create_dir_all(dir)?;
     }
     files::write_png(target, &rgba, xmp.as_deref())?;
-    files::write_sidecar(target, &files::Saved::new(source.clone(), edit.clone()))?;
+    files::write_sidecar(target, &files::Saved { view: view.cloned(), ..files::Saved::new(source.clone(), edit.clone()) })?;
     progress.store(1000, Ordering::Relaxed);
     Ok(())
 }
@@ -855,7 +863,7 @@ mod tests {
         }
         let target = files::copy_path(&original);
         let progress = AtomicU32::new(0);
-        save(&source, &edit, &target, &progress).unwrap();
+        save(&source, &edit, &target, None, &progress).unwrap();
         assert_eq!(progress.load(Ordering::Relaxed), 1000);
         let copy = files::load(&target).unwrap();
         assert_eq!((copy.width, copy.height), (32, 32), "the crop at full size");
@@ -893,6 +901,10 @@ mod tests {
         let mut e = Editor::open(&ctx, Source::picture(&copy), "Silent Dawn");
         e.to_3d = true;
         assert!(e.take_3d().is_none());
+        // Night PG2-6: saved again from here (its capture gone or not), the copy keeps its way back to 3D.
+        let target = files::copy_path(&original);
+        save(&Source::picture(&original), &edit, &target, e.saved_view.as_ref(), &AtomicU32::new(0)).unwrap();
+        assert_eq!(files::reopen(&target).and_then(|s| s.view).map(|v| v.capture), Some(capture.clone()), "the view is kept");
         // Live, saving is asked of the host, and closing keeps nothing to confirm (the host keeps the layers).
         let mut live = Editor::live("Silent Dawn", (2560, 1440), edit);
         assert!(!live.dirty());
@@ -900,6 +912,34 @@ mod tests {
         assert_eq!(live.live_mut().and_then(|l| l.asked), Some(LiveAsk::Picture));
         assert!(live.saving.is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Night PG2-4: the "not saved" guard asks every time there is something new to lose, and its warning goes once
+    /// the edit changed or was saved.
+    #[test]
+    fn closing_asks_again_after_more_changes() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::open(&ctx, Source::picture(std::path::Path::new("Z:/orbiters-test/none.png")), "World");
+        let change = |e: &mut Editor, exposure: f32| {
+            let l = e.doc.layer(Effect::Light(Light { exposure, ..Default::default() }));
+            e.doc.layers.push(l);
+        };
+        change(&mut e, 0.5);
+        e.close(&ctx);
+        assert!(e.closing.is_none(), "asked first");
+        change(&mut e, 0.2);
+        e.close(&ctx);
+        assert!(e.closing.is_none(), "changed since: asked again, not dropped");
+        e.close(&ctx);
+        assert!(e.closing.is_some(), "asked twice for the same edit: closes");
+        let mut e = Editor::open(&ctx, Source::picture(std::path::Path::new("Z:/orbiters-test/none.png")), "World");
+        change(&mut e, 0.5);
+        e.close(&ctx);
+        e.saved_doc = Some(e.doc.clone());
+        assert!(!e.dirty());
+        change(&mut e, 0.3);
+        e.close(&ctx);
+        assert!(e.closing.is_none(), "saved, then changed: asked again");
     }
 
     #[test]
@@ -975,7 +1015,7 @@ mod tests {
         let mut edit = source.new_edit();
         edit.geometry.vertical = 10.0;
         let target = dir.join("2026-10").join("Lobby (edited).png");
-        save(&source, &edit, &target, &AtomicU32::new(0)).unwrap();
+        save(&source, &edit, &target, None, &AtomicU32::new(0)).unwrap();
         let info = orbiters_core::visited::read_shot(&target).unwrap();
         assert_eq!((info.world_id.as_deref(), info.world_name.as_deref(), info.taken), (Some("wrld_9"), Some("Lobby"), 1_792_000_000));
         // Opened again, the copy edits again from the download.

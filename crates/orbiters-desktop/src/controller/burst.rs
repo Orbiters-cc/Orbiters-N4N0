@@ -427,11 +427,7 @@ impl super::Controller {
             let started = Instant::now();
             while ctl.snapshot.lock().unwrap().capture.state != CaptureState::Recording {
                 if started.elapsed() > Duration::from_secs(8) || !ctl.owns_recording(owner) {
-                    if ctl.no_recording_since(owner) {
-                        ctl.burst.lock().unwrap().recording = false;
-                        // A start still under way after 8 s would become a recording nobody flies or stops.
-                        ctl.stop_recording_of(owner);
-                    }
+                    ctl.give_up_picture_start(owner);
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -624,6 +620,16 @@ impl super::Controller {
         Ok(())
     }
 
+    /// A 3D picture whose recording did not reach Recording in time (or ended first): its flag goes, and a start still
+    /// under way is stopped, or it would become a recording nobody flies or stops (CTL2-7). Neither when another recording
+    /// began since: that one's flag and recording are not this picture's.
+    pub(super) fn give_up_picture_start(self: &Shared, owner: u64) {
+        if self.no_recording_since(owner) {
+            self.burst.lock().unwrap().recording = false;
+            self.stop_recording_of(owner);
+        }
+    }
+
     /// Hands the flight to VRChat's camera dolly as four paths and plays them (`/dolly/Import`, `/dolly/Play`): false
     /// when that could not be done (the flight then moves the camera alone).
     fn start_dolly(&self, flight: &[[f32; 6]], zoom: f32, focus: f32) -> bool {
@@ -686,6 +692,64 @@ impl super::Controller {
 mod tests {
     use super::*;
     use orbiters_i18n::{in_language, Language};
+
+    fn stops(ctl: &Shared) -> usize {
+        ctl.test_commands.lock().unwrap().as_ref().unwrap().iter().filter(|c| matches!(c, orbiters_core::protocol::WorkerCommand::Stop)).count()
+    }
+
+    fn recording_controller() -> Shared {
+        let ctl = super::super::Controller::new(orbiters_core::settings::Settings::default());
+        *ctl.test_commands.lock().unwrap() = Some(Vec::new());
+        ctl
+    }
+
+    /// CTL2-7 (audit F06): a picture stopped during its opening turn, then a recording started: the old flight owns
+    /// nothing of it (no pose, no camera put back over it) and its final Stop leaves it running.
+    #[test]
+    fn a_stopped_picture_neither_flies_nor_stops_the_next_recording() {
+        use std::sync::atomic::Ordering;
+        let ctl = recording_controller();
+        ctl.capture_serial.store(7, Ordering::Release);
+        ctl.update(|s| s.capture.state = CaptureState::Recording);
+        let picture = ctl.recording_number();
+        assert!(ctl.owns_recording(picture));
+        // Stop pressed during the opening turn, then another recording.
+        ctl.update(|s| s.capture.state = CaptureState::Idle);
+        assert!(!ctl.owns_recording(picture), "no pose after the stop");
+        assert!(ctl.no_recording_since(picture), "its camera is still its own to put back");
+        ctl.capture_serial.fetch_add(1, Ordering::AcqRel);
+        ctl.update(|s| s.capture.state = CaptureState::Recording);
+        assert!(!ctl.owns_recording(picture), "no pose over the new recording");
+        assert!(!ctl.no_recording_since(picture), "nor its camera put back over the new one");
+        let generation = ctl.stop_generation();
+        ctl.stop_recording_of(picture);
+        assert_eq!(stops(&ctl), 0, "the old picture's last Stop");
+        assert_eq!(ctl.stop_generation(), generation, "calls off no start either");
+        assert_eq!(ctl.view().capture.state, CaptureState::Recording, "the new recording still runs");
+    }
+
+    /// CTL2-7 (3): a start still under way when the picture's wait gives up is stopped (no recording nobody flies or
+    /// stops) and its flag goes; a recording begun since keeps both.
+    #[test]
+    fn a_picture_start_given_up_is_stopped_unless_another_recording_began() {
+        use std::sync::atomic::Ordering;
+        let ctl = recording_controller();
+        ctl.update(|s| s.capture.state = CaptureState::Starting);
+        ctl.burst.lock().unwrap().recording = true;
+        let picture = ctl.recording_number();
+        ctl.give_up_picture_start(picture);
+        assert_eq!(stops(&ctl), 1, "its slow start is stopped");
+        assert!(!ctl.burst.lock().unwrap().recording);
+        // Another picture began before the old wait gave up.
+        let ctl = recording_controller();
+        let old = ctl.recording_number();
+        ctl.capture_serial.fetch_add(1, Ordering::AcqRel);
+        ctl.update(|s| s.capture.state = CaptureState::Starting);
+        ctl.burst.lock().unwrap().recording = true;
+        ctl.give_up_picture_start(old);
+        assert_eq!(stops(&ctl), 0);
+        assert!(ctl.burst.lock().unwrap().recording, "the new picture's flag stays");
+    }
 
     /// A camera zoomed in flies at VRChat's default zoom and gets its own back; one at (or near) the default, or wider, is left alone.
     #[test]

@@ -320,7 +320,21 @@ impl Controller {
                     let detour = if direct {
                         let travel: std::sync::Arc<dyn super::travel::Travel> = self.travel.lock().unwrap().clone().unwrap_or_else(|| std::sync::Arc::new(super::travel::Real));
                         let bridge = super::travel::Bridge { main: self.sides.main_pid(), sides: self.sides.side_pids() };
-                        match super::travel::go(travel.as_ref(), self.view().vrchat.remote, &bridge, &world, &instance) {
+                        // The person's VRChat is started under Home's one start lock: never two at once, and while one
+                        // is starting the invite to oneself goes instead (that VRChat shows it once up).
+                        let remote = self.view().vrchat.remote;
+                        let mut started = self.launcher_started.lock().unwrap();
+                        let starts = super::travel::route(remote, &travel.running(), &bridge, |p| travel.own_osc_ports(p)) == super::travel::Route::Start;
+                        let went = if starts && started.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60)) {
+                            Err(super::travel::GoFailure::Invite(super::travel::Detour::Asked))
+                        } else {
+                            super::travel::go(travel.as_ref(), remote, &bridge, &world, &instance)
+                        };
+                        if went == Ok(super::travel::Went::Started) {
+                            *started = Some(std::time::Instant::now());
+                        }
+                        drop(started);
+                        match went {
                             Ok(went) => return Ok(Response::Went(went)),
                             Err(super::travel::GoFailure::BridgeBusy) => return Err(WorldError::BridgeBusy),
                             Err(super::travel::GoFailure::Start(words)) => return Err(WorldError::NotStarted(words)),

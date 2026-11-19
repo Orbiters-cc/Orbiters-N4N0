@@ -295,6 +295,10 @@ pub enum Action {
     CloseProfile,
     /// Read everything again now (the pipeline keeps it live otherwise).
     Refresh,
+    /// `action`, pressed on the list of the VRChat account `account` (the user id of [`Source::SignedIn`] on show at the
+    /// press). Whatever reaches a person or VRChat (a boop, a request, an accepted invite, a hide, an invite to
+    /// oneself) goes out only with that same account's session, checked again right before it is sent.
+    As { account: String, action: Box<Action> },
 }
 
 /// The outcome of the last action, shown briefly by the page.

@@ -80,6 +80,8 @@ enum Input {
     Command(VoiceCommand),
     MicOpened(u64, String),
     MicClosed(u64, Option<String>),
+    /// The system's default microphone changed while capture `n` (of the default one) ran: it ended.
+    MicDefaultChanged(u64),
     /// The recogniser of load `n` loaded (or not), in this long.
     Loaded(u64, Result<OfflineRecognizer, String>, Duration),
     Installed(Result<(), String>),
@@ -332,20 +334,31 @@ impl Worker {
             let (audio_tx, drops) = (self.audio_tx.clone(), self.drops.clone());
             let _ = std::thread::Builder::new().name("mic".into()).spawn(move || {
                 let (ready, audio) = (tx.clone(), audio_tx);
-                let result = orbiters_audio::capture(
+                // The default microphone is followed: a headset put on (Virtual Desktop, SteamVR, the app's own "When
+                // SteamVR starts") is heard from then on. A microphone chosen by name stays that one.
+                let options = orbiters_audio::Options { rate: Some(voice::SAMPLE_RATE), follow_default: true, ..Default::default() };
+                let result = orbiters_audio::capture_packets(
                     &AudioSource::Mic(id),
-                    Some(voice::SAMPLE_RATE),
+                    &options,
                     &s,
                     |name, _| {
                         let _ = ready.send(Input::MicOpened(generation, name.to_string()));
                         Ok(())
                     },
-                    |_, frames, samples| {
-                        let chunk = samples.map(<[f32]>::to_vec).unwrap_or_else(|| vec![0.0; frames as usize]);
+                    |p| {
+                        let chunk = p.samples.map(<[f32]>::to_vec).unwrap_or_else(|| vec![0.0; p.frames as usize]);
                         offer(&audio, &drops, generation, chunk)
                     },
                 );
-                let _ = tx.send(Input::MicClosed(generation, result.err().map(|e| format!("{e:#}"))));
+                let _ = tx.send(match result {
+                    Ok((_, orbiters_audio::Ended::DefaultChanged)) => Input::MicDefaultChanged(generation),
+                    Ok((name, orbiters_audio::Ended::Lost(e) | orbiters_audio::Ended::Refused(e))) => {
+                        eprintln!("{name}: capture ended early: {e}");
+                        Input::MicClosed(generation, None)
+                    }
+                    Ok((_, orbiters_audio::Ended::Stopped)) => Input::MicClosed(generation, None),
+                    Err(e) => Input::MicClosed(generation, Some(format!("{e:#}"))),
+                });
             });
             self.mic = Some(Mic { stop, generation });
         } else if !self.wants_mic() && self.mic.is_some() {
@@ -397,6 +410,27 @@ impl Worker {
                 emit(&VoiceEvent::Heard { text: String::new(), for_n4n0: true, seconds: 0.0, decode_ms: 0, listen: listen.id });
             }
         }
+    }
+
+    /// The system's default microphone changed under the current capture (of the default one): the new one opens at
+    /// once, without the pause of a failure. A sentence under way ends with what the last microphone heard, so no
+    /// sentence is made of two microphones' sound; one that heard nothing yet goes on with the new one.
+    fn mic_default_changed(&mut self, generation: u64) {
+        if !self.mic.as_ref().is_some_and(|m| m.generation == generation) {
+            return;
+        }
+        self.mic = None;
+        if self.listen.as_ref().is_some_and(|l| l.hold || self.speaking) && !self.held.is_empty() {
+            let listen = self.listen.take().expect("checked above");
+            let held = std::mem::take(&mut self.held);
+            self.sentence(held, true, listen.id);
+        } else {
+            self.held.clear();
+        }
+        self.forget_sound();
+        emit(&VoiceEvent::Mic { name: None });
+        self.reopen_at = None;
+        self.follow_mic();
     }
 
     /// Runs `command`; false when the worker should quit.
@@ -716,6 +750,7 @@ impl Worker {
             }
             Ok(Input::MicOpened(generation, name)) => self.mic_opened(generation, name),
             Ok(Input::MicClosed(generation, error)) => self.mic_closed(generation, error),
+            Ok(Input::MicDefaultChanged(generation)) => self.mic_default_changed(generation),
             Ok(Input::Loaded(load, result, took)) => self.loaded(load, result, took),
             Ok(Input::Installed(result)) => {
                 match result {

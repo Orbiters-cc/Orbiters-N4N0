@@ -1761,6 +1761,27 @@ pub mod scroll {
 }
 
 pub mod pointer {
+    /// The left button's changes from the counts of downs and ups the hook saw (`downs`, `ups`) and those already read (`seen`),
+    /// in order (true: down). Total: an up whose down came before the hook (the button held as it started) is a plain up. It
+    /// looped for ever on one, with the hook swallowing every mouse move of the computer (OVL2-6).
+    pub(super) fn changes(seen: &mut (u32, u32), downs: u32, ups: u32) -> Vec<bool> {
+        let mut out = Vec::new();
+        while seen.0 < downs || seen.1 < ups {
+            if seen.0 < downs {
+                out.push(true);
+                seen.0 += 1;
+            }
+            if seen.1 < seen.0 && seen.1 < ups {
+                out.push(false);
+                seen.1 += 1;
+            } else if seen.1 < ups && seen.0 >= downs {
+                out.push(false);
+                seen.1 += 1;
+            }
+        }
+        out
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, Ordering};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -1914,6 +1935,8 @@ pub mod pointer {
 
         /// Alt let go, the wheel gone, anything: the mouse is VRChat's again at once.
         pub fn stop(&mut self) {
+            // First, as the scroll's `stop` does: the hook passes everything on from now, whatever its thread does.
+            SET.store(false, Ordering::Relaxed);
             if let Some((id, handle)) = self.thread.take() {
                 // SAFETY: a message to the hook's own thread.
                 unsafe {
@@ -1930,17 +1953,9 @@ pub mod pointer {
         /// The left button's changes since the last read (true: down), in order.
         pub fn take_buttons(&mut self) -> Vec<bool> {
             let (downs, ups) = (DOWNS.load(Ordering::Relaxed), UPS.load(Ordering::Relaxed));
-            let mut out = Vec::new();
-            while self.downs < downs || self.ups < ups {
-                if self.downs < downs {
-                    out.push(true);
-                    self.downs += 1;
-                }
-                if self.ups < self.downs && self.ups < ups {
-                    out.push(false);
-                    self.ups += 1;
-                }
-            }
+            let mut seen = (self.downs, self.ups);
+            let out = changes(&mut seen, downs, ups);
+            (self.downs, self.ups) = seen;
             out
         }
     }
@@ -1964,6 +1979,20 @@ pub mod pointer {
 
 #[cfg(test)]
 mod tests {
+    /// OVL2-6: the button's changes always come to an end, an up without its down included.
+    #[test]
+    fn an_up_without_its_down_ends_the_count() {
+        use super::pointer::changes;
+        assert_eq!(changes(&mut (0, 0), 0, 1), [false], "the button was held as the hook started");
+        assert_eq!(changes(&mut (0, 0), 2, 2), [true, false, true, false]);
+        let mut seen = (0, 0);
+        assert_eq!(changes(&mut seen, 1, 0), [true]);
+        assert_eq!(changes(&mut seen, 1, 1), [false]);
+        assert_eq!(seen, (1, 1));
+        assert_eq!(changes(&mut (0, 0), 1, 3), [true, false, false, false]);
+        assert!(changes(&mut (2, 2), 2, 2).is_empty());
+    }
+
     /// REL-3: a part's copy box is used only when it lies wholly inside the frame (a frame of the window's older size read with the
     /// new client's parts was a box outside the texture).
     #[test]

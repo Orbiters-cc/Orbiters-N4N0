@@ -377,7 +377,7 @@ mod tests {
              CREATE TABLE \"{p}_feed_online_offline\" (id INTEGER PRIMARY KEY, user_id TEXT, created_at TEXT);
              CREATE TABLE \"{p}_feed_avatar\" (id INTEGER PRIMARY KEY, user_id TEXT, current_avatar_thumbnail_image_url TEXT);
              INSERT INTO \"{p}_feed_avatar\" (user_id, current_avatar_thumbnail_image_url) VALUES
-               (NULL, 'https://nobody'), ('usr_22222222-2222-2222-2222-222222222222', 'https://api.vrchat.cloud/k'), (7, 'https://number'), ('usr_33333333-3333-3333-3333-333333333333', 5);"
+               (NULL, 'https://nobody'), ('usr_22222222-2222-2222-2222-222222222222', 'https://api.vrchat.cloud/k'), (X'07', 'https://number'), ('usr_33333333-3333-3333-3333-333333333333', X'05');"
         ))
         .unwrap();
         let pictures = vrcx_last_pictures_now(&path, &db, me).expect("read, not busy");

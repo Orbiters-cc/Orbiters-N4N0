@@ -1068,7 +1068,7 @@ pub(crate) mod tests {
             width: 1920,
             height: 1080,
         };
-        Shot { path: PathBuf::from(path), size: 100, info, sha256: None }
+        Shot { path: PathBuf::from(path), size: 100, info, sha256: None, clean_sha256: None }
     }
 
     fn names(grouped: &[(Shot, Vec<Layer>)]) -> Vec<(String, Vec<String>)> {

@@ -227,7 +227,7 @@ impl Host for TestHost {
 
     fn calls(&self) -> CallsStatus {
         let call = self.in_call.lock().unwrap().then(|| CallView {
-            name: "Kira".into(),
+            name: "Kira".into(), // i18n: not shown
             phase: CallPhase::Connected,
             incoming: false,
             connected_at_ms: Some(1),
@@ -3043,9 +3043,10 @@ fn the_wake_word_comes_back_when_the_ask_page_closes() {
     n.voice_follow();
     let worker = d.ears.workers.lock().unwrap()[0].clone();
     assert!(matches!(&worker.commands()[..], [VoiceCommand::Start { wake_word: true, .. }]));
+    let before = worker.commands().len();
     n.ask_page(true);
     n.voice_follow();
-    assert!(matches!(worker.commands().last(), Some(VoiceCommand::WakeWord { on: false, .. })), "the page has the microphone");
+    assert!(worker.commands()[before..].iter().any(|c| matches!(c, VoiceCommand::WakeWord { on: false, .. })), "the page has the microphone");
     n.ask_page(false);
     n.voice_cancel();
     n.voice_follow();

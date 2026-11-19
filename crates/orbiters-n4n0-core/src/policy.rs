@@ -263,7 +263,7 @@ mod tests {
         let Verdict::Confirm { what } = policy.review(&hoodie(true), Some(&nsfw)) else { panic!("an nsfw control waits") };
         assert_eq!(what, "turn on \"Outfits / Lingerie\", which the avatar's menu tags nsfw");
         let raw = Action::SetParameter { name: "Lingerie".into(), value: 1.0 };
-        let Verdict::Confirm { what } = policy.review(&raw, Some(&nsfw)) else { panic!("a raw write to an nsfw control waits too") };
+        let Verdict::Confirm { what } = TurnPolicy::default().review(&raw, Some(&nsfw)) else { panic!("a raw write to an nsfw control waits too") };
         assert_eq!(what, "set \"Outfits / Lingerie\" to 1.00, which the avatar's menu tags nsfw");
         let hold = Action::Hold { control: "hoodie".into(), on: Some(true), value: None, release: false };
         assert!(matches!(policy.review(&hold, None), Verdict::Confirm { .. }), "a pin lasts");

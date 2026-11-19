@@ -225,6 +225,21 @@ pub struct Session {
     /// A side session's OSC ports, in and out (`None`: main, on VRChat's defaults).
     pub osc: Option<(u16, u16)>,
     pub game: Arc<dyn Game>,
+    /// Lock order in the bridge (read 2026-11-19 for the night2 hang question; nothing checks it but reading): a lock on the
+    /// left may be held while one on its right is taken, never the reverse.
+    ///
+    /// - `Session::action` and `Bridge::opening` are only ever tried (`try_lock`, "busy"): they never wait, so they cannot
+    ///   close a cycle; whatever runs under them takes the locks below in this order.
+    /// - `Bridge::opening` -> `Bridge::launching` -> `Session::run` (`open_session` -> `launch_side`); `launching` is held
+    ///   across a launch (its Easy Anti-Cheat wait), never under `run`.
+    /// - `Bridge::sides` -> `Session::run` (`heard`, through `Session::pid`), `Bridge::sides` -> `Session::lease`
+    ///   (`session_of`). Never `run` -> `sides`.
+    /// - `Session::run` -> leaves only: `Bridge::journal`, `Bridge::log`, and the game's own locks (the lab's `state`). Two
+    ///   sessions' `run` at once only in `open_session`'s rename, whose new session nobody else holds yet.
+    /// - Nothing that waits is called under `run`: a session's held input coming up (`release_session`: OSC, `SendInput`,
+    ///   the guard's pipe), a window looked for (`GetWindowTextW` sends to the window's thread) or asked to close. Those
+    ///   run after `run` is let go, with what must hold meanwhile marked first (`Run::closing_out`).
+    /// - Game calls never take a bridge lock (`Game`'s methods and the lab's are leaves).
     pub(crate) run: Mutex<Run>,
     /// One action at a time in this session: a second one is told so rather than waiting behind it.
     pub(crate) action: Mutex<()>,

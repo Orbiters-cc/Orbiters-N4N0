@@ -861,18 +861,26 @@ impl Bridge {
             }
         }
         if let Some((why, left)) = leave {
-            // Private instances only: nothing acts on it from now (`ours` refuses), what it holds comes up, its window is asked
-            // to close, and the leaving is told only once that process is seen gone (above, at the next looks).
+            // Private instances only: marked closing first, under the lock, so nothing acts on it from now (`ours` refuses)
+            // and nothing is told until that process is seen gone (above, at the next looks). What it holds comes up and its
+            // window is asked to close after the lock is let go: those calls wait on the game and on Windows, and nothing
+            // that waits is done under a session's `run` (the lock order, on `Session::run`).
+            let pid = run.pid;
+            run.closing_out = Some(super::Closing { since: Instant::now(), why, left, told: false });
+            drop(run);
             self.release_session(s);
-            let posted = match run.pid.and_then(|pid| s.game.window(pid)) {
+            let posted = match pid.and_then(|pid| s.game.window(pid)) {
                 Some(window) => s.game.close(&window).map_err(|f| f.message),
                 None => Err("its window was not found".to_string()), // i18n: not shown (an AI client reads it)
             };
-            let why = match posted {
-                Ok(()) => why,
-                Err(e) => format!("{why} (asking it to close failed: {e})"), // i18n: not shown (an AI client reads it)
-            };
-            run.closing_out = Some(super::Closing { since: Instant::now(), why, left, told: false });
+            let mut run = s.run.lock().unwrap();
+            if let Some(closing) = run.closing_out.as_mut().filter(|c| !c.told) {
+                // The time to close counts from the close asked, as before.
+                closing.since = Instant::now();
+                if let Err(e) = posted {
+                    closing.why = format!("{} (asking it to close failed: {e})", closing.why); // i18n: not shown (an AI client reads it)
+                }
+            }
             return;
         }
         if !run.closing && run.going.as_ref().is_none_or(|g| g.started) && run.pid.is_some() && run.pid != seen.pid {

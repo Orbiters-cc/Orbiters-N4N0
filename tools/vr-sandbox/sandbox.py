@@ -27,6 +27,7 @@ import urllib.request
 import psutil
 import queue
 sys.path.insert(0, str(Path(__file__).parent))
+import client_configs
 import lease
 import vrchat_life
 
@@ -185,6 +186,36 @@ def backup(journal, path, tree=False):
     entry['backup'] = str(saved)
     journal['files'].append(entry)
 
+def client_kind(entry):
+    """'claude' / 'codex' for the two agent-client files (SBX-2), else None. Older journals list them as plain files."""
+    if entry.get('client'):return entry['client']
+    path=Path(entry['path'])
+    if path.name=='.claude.json':return 'claude'
+    if path.name=='config.toml' and path.parent.name=='.codex':return 'codex'
+    return None
+
+def client_backup(journal, path, kind):
+    """Records only the bridge's own entry in an agent client's file, never the file (SBX-2: other sessions write it)."""
+    saved = ROOT / 'backup' / str(len(journal['files']))
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    snapshot = client_configs.snapshot(kind, path, HOME)
+    data = json.dumps(snapshot).encode()
+    saved.write_bytes(data)
+    journal['files'].append({'path': str(path), 'tree': False, 'exists': snapshot['exists'], 'client': kind, 'backup': str(saved),
+                             'sha256': hashlib.sha256(data).hexdigest()})
+
+def restore_client(entry, j):
+    """Puts back the bridge's entry in one agent-client file; every other byte's meaning stays as other programs left it."""
+    kind=client_kind(entry)
+    if not j.get('app_test_exe'):return 'no test program ran: left as it is'
+    raw=Path(entry['backup']).read_bytes() if entry['exists'] or entry.get('client') else b''
+    if entry.get('client'):saved=json.loads(raw)
+    else:   # an older journal: the backup is the whole file; only the bridge's entry is taken from it
+        text=raw.decode('utf-8-sig')
+        saved={'exists':entry['exists'],'entry':(client_configs.claude_snapshot(text,HOME) if kind=='claude' else client_configs.codex_snapshot(text)) if entry['exists']
+               else ({'user':None,'local':{}} if kind=='claude' else None)}
+    return client_configs.restore(kind,entry['path'],saved,HOME)
+
 def tree_hashes(path):
     return {str(p.relative_to(path)):hashlib.sha256(p.read_bytes()).hexdigest() for p in path.rglob('*') if p.is_file()}
 
@@ -262,9 +293,12 @@ def restore_contents(j):
         raise RuntimeError('Owned processes did not exit after terminate: '+json.dumps([p.pid for p in remaining]))
     if [p for p in processes() if p['pid'] not in warnings]:
         raise RuntimeError('VR processes remain; configuration retained for standalone restore')
+    clients={}
     for entry in j['files']:
         path, saved = Path(entry['path']), Path(entry['backup'])
-        if entry['tree']:
+        if client_kind(entry):
+            clients[entry['path']]=restore_client(entry,j)
+        elif entry['tree']:
             expected=tree_hashes(saved) if entry['exists'] else {}
             if path.exists():
                 shutil.rmtree(path)
@@ -286,7 +320,7 @@ def restore_contents(j):
     # Do not release somebody else's lock.
     if LOCK.exists() and json.loads(LOCK.read_text())['session'] == j['session']:
         LOCK.unlink()
-    return {'restored': True, 'verified_files': len(j['files']), 'leftover_dead_pids': warnings}
+    return {'restored': True, 'verified_files': len(j['files']), 'leftover_dead_pids': warnings, 'client_files': clients}
 
 def stop_app(app,timeout=20):
     """Stops one test program of a turn: its own --quit, then a kill if it stays. Never another program."""
@@ -445,8 +479,10 @@ class Session:
         install=LOCAL/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
         appdir=ROAMING/'Orbiters/Desktop'
         # Test programs share these files with the installed app; the journal restores their bytes at the end.
-        for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat',HOME/'.codex/config.toml',HOME/'.claude.json']:
+        for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat']:
             backup(self.j,path)
+        # Claude Code and Codex sessions keep writing these during a session: only the bridge's own entry is recorded.
+        client_backup(self.j,HOME/'.codex/config.toml','codex');client_backup(self.j,HOME/'.claude.json','claude')
         previous=[]
         for p in psutil.process_iter(['name']):
             try:

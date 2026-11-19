@@ -17,7 +17,7 @@ use std::path::Path;
 
 pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     for language in [orbiters_i18n::Language::En, orbiters_i18n::Language::Fr] {
-        for (width, actions) in [(808.0f32, 4usize), (808.0, 2), (1008.0, 4), (1208.0, 4)] {
+        for (width, actions) in [(808.0f32, 4usize), (808.0, 2), (912.0, 4), (1008.0, 4)] {
             for (name, title) in [("short", "VRChat Home"), ("long", "Beginner's Unity Workshop: your first world")] {
                 let image = orbiters_i18n::in_language(language, || paint(width, actions, title));
                 let (w, h) = (width as u32, 76u32);
@@ -34,11 +34,13 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
 fn paint(width: f32, actions: usize, title: &str) -> Vec<u8> {
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
-    let size = vec2(width, 76.0);
+    // The software painter draws the overlay's whole size: the bar is drawn in its top left corner and cut out.
+    let full_size = crate::overlay::ui::SIZE;
+    let size = vec2(width.min(full_size.x), 76.0);
     let mut sw = crate::overlay::painter();
     let mut image = Vec::new();
     for f in 0..3 {
-        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(f as f64 / 60.0), ..Default::default() };
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, full_size)), time: Some(f as f64 / 60.0), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(true), ..Default::default() });
         let mut full = ctx.run_ui(input, |ui| {
             let rect = Rect::from_min_size(Pos2::ZERO, size);
@@ -90,5 +92,6 @@ fn paint(width: f32, actions: usize, title: &str) -> Vec<u8> {
         image = sw.paint(&prims, full.pixels_per_point, theme::INK_950).to_vec();
         sw.free_textures(&mut full.textures_delta);
     }
-    image
+    let (fw, w, h) = (full_size.x as usize, size.x as usize, size.y as usize);
+    (0..h).flat_map(|y| image[y * fw * 4..(y * fw + w) * 4].to_vec()).collect()
 }

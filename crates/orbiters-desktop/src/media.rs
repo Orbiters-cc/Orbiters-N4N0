@@ -50,7 +50,14 @@ mod platform {
         /// often give a new song's art a moment after its title).
         art_for: Option<(String, String, String)>,
         art_tries: u8,
+        /// The default speakers' volume as last found, and when (Night PG2-8: found again at every reading, a device
+        /// enumerator made each second): found again after [`SPEAKERS_FOR`] (the default device may have changed) or
+        /// when reading it fails.
+        speakers: Option<(std::time::Instant, IAudioEndpointVolume)>,
     }
+
+    /// How long the default speakers found are read before they are looked for again.
+    const SPEAKERS_FOR: std::time::Duration = std::time::Duration::from_secs(5);
 
     /// Times a song's art is asked for before it goes without.
     const ART_TRIES: u8 = 3;
@@ -59,7 +66,7 @@ mod platform {
         pub fn new() -> Self {
             // SAFETY: this thread's own COM apartment, multithreaded, for the media controls and the speakers.
             let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-            Self { manager: None, apps: AppVolume::new(Sessions::default()), art_for: None, art_tries: 0 }
+            Self { manager: None, apps: AppVolume::new(Sessions::default()), art_for: None, art_tries: 0, speakers: None }
         }
 
         fn session(&mut self) -> Option<Session> {
@@ -118,11 +125,18 @@ mod platform {
 
         /// What plays now, the volume and the art (read again only for another song).
         fn read_now(&mut self, previous: &Reading) -> Reading {
-            let volume = speakers().ok().and_then(|s| {
+            if self.speakers.as_ref().is_none_or(|(at, _)| at.elapsed() >= SPEAKERS_FOR) {
+                self.speakers = speakers().ok().map(|s| (std::time::Instant::now(), s));
+            }
+            let volume = self.speakers.as_ref().and_then(|(_, s)| {
                 // SAFETY: reads of the default speakers' volume.
                 let (level, muted) = unsafe { (s.GetMasterVolumeLevelScalar().ok()?, s.GetMute().ok()?.as_bool()) };
                 Some(Volume { percent: (level * 100.0).round().clamp(0.0, 100.0) as u8, muted })
             });
+            if volume.is_none() {
+                // Unplugged, say: looked for again at the next reading.
+                self.speakers = None;
+            }
             let Some(session) = self.session() else {
                 self.art_for = None;
                 return Reading { media: None, volume, art: None };

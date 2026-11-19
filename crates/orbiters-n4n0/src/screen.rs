@@ -2890,6 +2890,17 @@ mod tests {
         // The owner's own presses are untouched: the same rule never applies to hands 0 and 1 (the YouTube test above).
     }
 
+    /// verify2 on MENU-2: someone else's Back on a page the owner opened leads to Home, never to the owner's list behind it
+    /// (Add Orbiters as a friend's Back is Previous instances: where the owner has been).
+    #[test]
+    fn someone_else_s_back_never_opens_the_owner_s_lists() {
+        let mut s = pointing();
+        s.menu.pages = menu::Pages::of_screen(Some(16));
+        s.menu.page = Page::AddFriend;
+        let _ = others_touch(&mut s, menu::Target::Back, Instant::now());
+        assert_eq!(s.menu.page, Page::Home);
+    }
+
     #[test]
     fn what_waits_never_wakes_the_n4n0_thread_at_once() {
         let mut s = ScreenRuntime::default();

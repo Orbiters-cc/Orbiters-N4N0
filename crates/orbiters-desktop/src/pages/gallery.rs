@@ -1071,11 +1071,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             if assets > 0 {
                 parts.push(tr!("{count} of your assets", count = assets));
             }
-            let grouped = tr("grouped by where they were taken").to_string();
-            // The last part goes when the line would not fit its room with it (not only under 690 points).
-            let with_it = format!("{} · {grouped}", parts.join(" · "));
-            if !narrow && widgets::text_size(&hu, &Txt::new(&with_it, 13.0)).x <= sub_room {
-                parts.push(grouped);
+            if !narrow {
+                parts.push(tr("grouped by where they were taken").to_string());
             }
             parts.join(" · ")
         };

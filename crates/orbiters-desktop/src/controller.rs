@@ -1848,6 +1848,9 @@ impl Controller {
         if previous.language != settings.language {
             crate::language::follow(&settings);
         }
+        if previous.world_performance && !settings.world_performance {
+            self.performance_forget();
+        }
         if previous.reconstruct_while_playing != settings.reconstruct_while_playing {
             // One running where the setting no longer has it pauses; those held while VRChat runs may start now.
             self.follow_while_playing();

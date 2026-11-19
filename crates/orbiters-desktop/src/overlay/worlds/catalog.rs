@@ -351,18 +351,27 @@ pub struct Source {
     api: Api,
     files: Option<String>,
     disk: Option<Arc<Disk>>,
+    /// The environment it reads (none for a server named by `ORBITERS_PUBLIC_API`): another one chosen since, and
+    /// what it listed is the other's ([`Source::is_current`]).
+    server: Option<Server>,
 }
 
 impl Source {
     pub fn current() -> Self {
         let disk = Some(Arc::new(Disk::in_cache()));
         match std::env::var("ORBITERS_PUBLIC_API") {
-            Ok(base) if !base.is_empty() => Self { api: Api::at(&base), files: None, disk },
+            Ok(base) if !base.is_empty() => Self { api: Api::at(&base), files: None, disk, server: None },
             _ => {
                 let server = Server::current();
-                Self { api: Api::new(server), files: (server == Server::Production).then(|| PUBLIC_FILES.to_string()), disk }
+                Self { api: Api::new(server), files: (server == Server::Production).then(|| PUBLIC_FILES.to_string()), disk, server: Some(server) }
             }
         }
+    }
+
+    /// Whether it reads the environment chosen now (CORE2-13: after a switch, the listing and its downloads are made
+    /// again from the other server, never one server's listing with the other's files).
+    pub fn is_current(&self) -> bool {
+        self.server.is_none_or(|s| s == Server::current())
     }
 
     /// An address the API gave, relative to it or whole.

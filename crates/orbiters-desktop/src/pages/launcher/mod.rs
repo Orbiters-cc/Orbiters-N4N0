@@ -238,8 +238,41 @@ impl State {
 
     /// Sends `action` and shows it at once.
     fn act(&mut self, cx: &Cx, clock: f64, action: Action) {
+        self.press(clock, action, |a| cx.ctl.launcher(a));
+    }
+
+    /// [`Self::act`] with the sending given: shows the press, sends it bound to the account on show, and takes the
+    /// press back when it never reached the service.
+    fn press(&mut self, clock: f64, action: Action, send: impl FnOnce(Action) -> bool) {
         self.note(clock, &action);
-        cx.ctl.launcher(action);
+        if !send(self.as_shown(action.clone())) {
+            // Never reached the service: nothing went, so nothing says it did.
+            self.unnote(&action);
+        }
+    }
+
+    /// The action bound to the VRChat account whose list is on show: the service sends nothing with another one.
+    fn as_shown(&self, action: Action) -> Action {
+        match &self.data.source {
+            orbiters_core::launcher::Source::SignedIn { user_id, .. } if !user_id.is_empty() => Action::As { account: user_id.clone(), action: Box::new(action) },
+            _ => action,
+        }
+    }
+
+    /// Takes back what [`Self::note`] showed for `action`.
+    fn unnote(&mut self, action: &Action) {
+        match action {
+            Action::RequestInvite { to } => {
+                self.requested.remove(to);
+            }
+            Action::Boop { to, .. } => {
+                self.booped.remove(to);
+            }
+            Action::Dismiss { id } => {
+                self.dismissed.remove(id);
+            }
+            _ => {}
+        }
     }
 
     /// What a press shows before the service answers.
@@ -602,6 +635,23 @@ mod tests {
         assert_eq!(states::request(&state.data, &friend, state.requested.get(&to).copied(), 4.0, 0), states::Reach::Sent);
         assert_eq!(states::boop(&state.data, &friend, state.booped.get(&to).map(|b| b.0), 4.0, 0), states::Reach::Sent);
         assert!(state.dismissed.contains("not_1"));
+    }
+
+    #[test]
+    fn a_press_that_never_reached_the_service_does_not_say_sent_and_one_that_did_names_its_account() {
+        let mut data = orbiters_core::launcher::sample();
+        data.source = orbiters_core::launcher::Source::SignedIn { user_id: "usr_a".into(), name: String::new() };
+        let mut state = State { data: Arc::new(data), ..Default::default() };
+        let to = state.data.friends[0].id.clone();
+        state.press(3.0, Action::Boop { to: to.clone(), emoji: None }, |_| false);
+        assert!(!state.booped.contains_key(&to), "the link was closed: no Sent");
+        let mut sent = None;
+        state.press(3.0, Action::RequestInvite { to: to.clone() }, |a| {
+            sent = Some(a);
+            true
+        });
+        assert!(state.requested.contains_key(&to));
+        assert_eq!(sent, Some(Action::As { account: "usr_a".into(), action: Box::new(Action::RequestInvite { to }) }), "bound to the list's account");
     }
 
     #[test]

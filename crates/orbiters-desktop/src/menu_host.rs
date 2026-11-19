@@ -125,6 +125,17 @@ impl MenuHost {
         Self(host.with_waker(Arc::new(move || orbiters_ui::anim::request_frame(&woken))))
     }
 
+    /// The same menu as `holder`'s: the QR code scanner and the friends it asks for are its own (MENU-13).
+    pub fn holding(self, holder: orbiters_n4n0::MenuHolder) -> Self {
+        Self(self.0.with_holder(holder))
+    }
+
+    /// Its page is no longer seen (a sheet closed, the window's Home left): the scanner and the friends it holds are
+    /// let go at once.
+    pub fn let_go(&mut self, backend: &Ctl) {
+        self.0.let_go(&Service(backend));
+    }
+
     /// Opens the menu on Home with the settings it starts from (keyboard, the 3D picture's timer and length).
     pub fn open(&mut self, snap: &Snapshot) {
         self.0.open(&snap.settings);

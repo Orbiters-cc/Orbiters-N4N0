@@ -268,6 +268,11 @@ impl super::Controller {
         // Gathered signed out: sent as nobody's, so kept for nobody (it was sent later as whoever signed in, CTL2-9).
         let Some(path) = self.performance_file() else { return };
         let mut rt = self.performance.lock().unwrap();
+        // Turned off while this minute was being finished: it is not kept (the switch is read under the lock that
+        // forgetting takes, so it is either forgotten after this or never kept).
+        if !self.with_settings(|s| s.world_performance) {
+            return;
+        }
         let pending = pending_for(&mut rt, &path);
         pending.push(sample);
         if pending.len() > MAX_PENDING {
@@ -286,6 +291,9 @@ impl super::Controller {
             pending_for(&mut rt, &path);
             // Asked with every chunk of frames: nothing is copied until it is time.
             let due = now || rt.last_sent.is_none_or(|t| t.elapsed() >= SEND_EVERY);
+            if !self.with_settings(|s| s.world_performance) {
+                return;
+            }
             // Orbiters refuses summaries without the headset's refresh rate: they wait until the overlay reported it.
             if !due || rt.pending.as_ref().is_none_or(|(_, p)| p.is_empty()) || rt.hardware.refresh_hz.is_none() {
                 return;
@@ -376,6 +384,28 @@ mod tests {
         assert_eq!(p95, 11.1);
         assert!((p05 - 90.1).abs() < 0.1);
         assert!(summarize(&vec![11.1; 1000]).is_none(), "11 s measured is too little");
+    }
+
+    /// Verifier (PRIV-12c): a minute finished while the share was being turned off is never kept nor sent.
+    #[test]
+    fn a_minute_finished_after_off_is_not_kept() {
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings { world_performance: false, ..Default::default() });
+        // Signed in with a numeric id, so the minute reaches the switch check (signed out it is never kept anyway, CTL2-9).
+        ctl.test_account_with_user("424242");
+        assert!(ctl.performance_file().is_some(), "an account the waiting list is kept for");
+        let m = Minute {
+            start: 1_761_073_440,
+            place: "wrld_a:1".into(),
+            world_id: "wrld_a".into(),
+            mixed: false,
+            intervals: vec![11.1; 3000],
+            worn: Default::default(),
+            players: 1,
+            avatar: None,
+        };
+        ctl.performance_keep(m.finish().expect("a minute measured"));
+        let rt = ctl.performance.lock().unwrap();
+        assert!(rt.pending.as_ref().is_none_or(|(_, p)| p.is_empty()), "not kept after Off");
     }
 
     #[test]

@@ -35,7 +35,7 @@ struct Open {
     closing: bool,
     /// The flight's progress (0 the card, 1 the page), as the last frame drew it.
     progress: f32,
-    hashes: Job<HashMap<PathBuf, String>>,
+    hashes: Job<HashMap<PathBuf, Vec<String>>>,
     selected: BTreeSet<PathBuf>,
     /// Pictures just handed to the tray service (shown as sending until its upload shows up).
     handed: Option<(f64, BTreeSet<PathBuf>)>,
@@ -203,7 +203,7 @@ impl State {
             serial: self.serial,
             closing: false,
             progress: 0.0,
-            hashes: Job::spawn(ctx, move || worlds::hashes(paths)),
+            hashes: Job::spawn(ctx, move || worlds::map_hashes(paths)),
             selected: BTreeSet::new(),
             handed: None,
             viewer: None,
@@ -710,14 +710,14 @@ struct Sharing<'a> {
     /// Why nothing can be shared, when nothing can.
     blocked: Option<&'static str>,
     mine: Option<&'a MineWorld>,
-    hashes: Option<&'a HashMap<PathBuf, String>>,
+    hashes: Option<&'a HashMap<PathBuf, Vec<String>>>,
     uploads: Vec<&'a UploadStatus>,
 }
 
 impl Sharing<'_> {
     fn shared(&self, shot: &Shot) -> bool {
         let (Some(mine), Some(hashes)) = (self.mine, self.hashes) else { return false };
-        hashes.get(&shot.path).is_some_and(|h| mine.pictures.iter().any(|p| &p.source_hash == h))
+        hashes.get(&shot.path).is_some_and(|h| mine.pictures.iter().any(|p| h.contains(&p.source_hash)))
     }
 
     fn sending(&self, path: &PathBuf) -> Option<&UploadStatus> {

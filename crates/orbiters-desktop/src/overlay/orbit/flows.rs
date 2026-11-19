@@ -28,6 +28,34 @@ const AT_REST_HANG: Duration = Duration::from_secs(120);
 
 pub(super) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// MENU-8: the QR code sheet closed (its head, VRChat's menu closing), or left for another of N4N0's pages, lets the
+/// panels' scan go at once; nothing waits for some later page to say so.
+#[test]
+fn the_qr_code_sheet_closed_or_left_stops_its_scan() {
+    use crate::ipc::N4n0Command;
+    use orbiters_n4n0::MenuHolder;
+    use orbiters_n4n0_core::menu::Target;
+    let (mut person, heard) = Person::heard();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    heard.n4n0.lock().unwrap().clear();
+    let snap = person.snap.clone();
+    let p = &mut person.panels;
+    let qr = |heard: &Heard| heard.n4n0.lock().unwrap().iter().filter_map(|c| match c { N4n0Command::Qr { on, holder } => Some((*on, *holder)), _ => None }).collect::<Vec<_>>();
+    p.open_page(Target::Qr, &snap);
+    assert_eq!(qr(&heard), [(true, MenuHolder::Panels)]);
+    assert_eq!(p.facts.sheet, Some(Sheet::Menu));
+    p.close_sheet();
+    assert_eq!(qr(&heard), [(true, MenuHolder::Panels), (false, MenuHolder::Panels)], "closed, the scan is let go");
+    heard.n4n0.lock().unwrap().clear();
+    p.open_page(Target::Qr, &snap);
+    p.open_page(Target::Music, &snap);
+    // (The panels' menu still stood on the scanner's page after the close: opening it again says stop once more, for
+    // nothing it holds.)
+    assert_eq!(qr(&heard).last(), Some(&(false, MenuHolder::Panels)), "left for another page");
+    assert!(qr(&heard).ends_with(&[(true, MenuHolder::Panels), (false, MenuHolder::Panels)]), "{:?}", qr(&heard));
+}
+
 /// OVL2-17: a menu going away under a held press does nothing: the list press is not run later, the held booster level and
 /// smoothing are not saved.
 #[test]
@@ -48,6 +76,23 @@ fn a_menu_going_away_under_a_held_press_does_nothing() {
     p.drag = Some(super::Drag { from: Some(0.0), scroll: 0.0, action: Some(Action::DemoAvatar), moved: false, bar: false, speed: 0.0, last: None });
     p.release();
     assert!(p.pressed_late.is_some(), "a let-go runs the press, as before");
+}
+
+/// verify-vr on OVL2-17: a tap let go on a list row earns its action; the menu closing before the next turn does not erase it, and
+/// it runs exactly once.
+#[test]
+fn an_action_earned_by_a_let_go_runs_once_though_the_menu_closed() {
+    let (mut person, heard) = Person::heard();
+    let snap = person.snap.clone();
+    let p = &mut person.panels;
+    p.open = Some(Around::QuickMenu);
+    p.drag = Some(super::Drag { from: Some(0.0), scroll: 0.0, action: Some(Action::NewConversation), moved: false, bar: false, speed: 0.0, last: None });
+    p.release();
+    p.set_open(None, Vec::new(), &snap);
+    p.run_pending(&snap);
+    p.run_pending(&snap);
+    let runs = heard.said().iter().filter(|c| c.contains("NewConversation")).count();
+    assert_eq!(runs, 1, "{:?}", heard.said());
 }
 
 impl Person {

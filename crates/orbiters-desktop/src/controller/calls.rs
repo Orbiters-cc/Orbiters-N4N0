@@ -537,6 +537,25 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+/// What an account that calls leave tells its own server (`api`, with its credential), in the background: the call it
+/// had ends there (declined when it was ringing here), and this computer leaves its callable list when it was on it.
+fn old_server_leaves(api: Api, token: String, closing: Option<(String, bool)>, available: bool) {
+    if closing.is_none() && !available {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("calls-leave-old".into()).spawn(move || {
+        let agent = orbiters_core::http_agent(Some(Duration::from_secs(5)), Some(Duration::from_secs(10)));
+        let auth = format!("Bearer {token}"); // i18n: not shown
+        if let Some((id, decline)) = closing {
+            let path = format!("n4n0/calls/{id}/{}", if decline { "decline" } else { "end" });
+            let _ = agent.post(&api.url(&path)).header("Authorization", &auth).send_json(json!({}));
+        }
+        if available {
+            let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call();
+        }
+    });
+}
+
 /// A level in twentieths.
 fn quantize(level: f32) -> f32 {
     (level.clamp(0.0, 1.0) * 20.0).round() / 20.0
@@ -817,17 +836,18 @@ impl super::Controller {
             }
         };
         let Some(((base, old_token), available)) = old else { return };
-        if available {
-            let agent = orbiters_core::http_agent(Some(Duration::from_secs(5)), Some(Duration::from_secs(10)));
-            let _ = agent.delete(&Api::at(&base).url("n4n0/calls/presence")).header("Authorization", &format!("Bearer {old_token}")).call();
-        }
-        {
+        // The call under way ends here at once, and on the server it was made on, with the credential it was made with:
+        // never as a hang-up of the new account on the new server (verifier, PRIV-7/CORE2-3).
+        let closing = {
             let mut rt = self.calls.lock().unwrap();
-            if rt.call.is_some() {
-                let acts = rt.hang_up();
+            let closing = rt.call.as_ref().and_then(|c| c.id.clone().map(|id| (id, c.ringing_in())));
+            if let Some(ending) = rt.call.as_ref().map(|c| if c.ringing_in() { Ending::DeclinedHere } else { Ending::Ended }) {
+                let acts = rt.finish(ending, false);
                 self.calls_act(rt, acts);
             }
-        }
+            closing
+        };
+        old_server_leaves(Api::at(&base), old_token, closing, available);
         self.calls_publish(|rt| {
             rt.contacts.clear();
             rt.contacts_read = None;
@@ -1423,6 +1443,26 @@ impl super::Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifier (PRIV-7/CORE2-3): switching accounts during a call ends it here at once and sends nothing for it through
+    /// the new account's signals (its hang-up goes to the old server, with the old credential).
+    #[test]
+    fn an_account_switch_ends_the_call_without_the_new_accounts_signals() {
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut rt = ctl.calls.lock().unwrap();
+            rt.signals = Some(tx);
+            rt.identity = Some(("http://127.0.0.1:1/".into(), "old-credential".into()));
+            let number = rt.dial("c_1", "Kite", Instant::now()).unwrap();
+            let _ = rt.created(number, Ok("call-1".into()));
+            while rx.try_recv().is_ok() {}
+        }
+        ctl.calls_follow_identity(&Api::at("http://127.0.0.1:2/"), "new-credential");
+        assert!(ctl.calls.lock().unwrap().call.is_none(), "ended here");
+        assert!(rx.try_recv().is_err(), "nothing for the old call goes through the new account's signals");
+        assert_eq!(ctl.calls.lock().unwrap().identity.as_ref().map(|i| i.1.as_str()), Some("new-credential"));
+    }
 
     /// CORE2-11: "link your VRChat account" and "busy" are Orbiters' own refusals (their code), not any 403 or 409 of
     /// something in front of it; a server from before codes still reads as before.

@@ -794,10 +794,16 @@ impl Client {
     }
 
     pub fn send(&self, msg: &ToService) {
+        let _ = self.try_send(msg);
+    }
+
+    /// [`Self::send`], saying whether the line was written (false: the link is closed or the write failed).
+    pub fn try_send(&self, msg: &ToService) -> bool {
         let mut writer = self.writer.lock().unwrap();
-        if !self.state.lock().unwrap().closed {
-            let _ = write_line(&mut *writer, msg);
+        if self.state.lock().unwrap().closed {
+            return false;
         }
+        write_line(&mut *writer, msg).is_ok()
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {

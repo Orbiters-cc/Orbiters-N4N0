@@ -522,7 +522,7 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
     if widgets::activated(&b.show(ui)) {
         let (source, unity) = source.unwrap();
         let name = state.new_name.clone();
-        let location = PathBuf::from(&state.new_location);
+        let location = PathBuf::from(state.new_location.trim());
         let duplicate = state.duplicate;
         state.copy_cancel = Arc::new(AtomicBool::new(false));
         *state.copy_progress.lock().unwrap() = Default::default();

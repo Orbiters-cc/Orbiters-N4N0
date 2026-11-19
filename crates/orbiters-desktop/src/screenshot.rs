@@ -2777,8 +2777,8 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
             ..Default::default()
         });
         if page == MenuPage::Music {
-            host.press(Target::Music);
-            host.press(Target::CopyPlaying);
+            let _ = host.press(Target::Music);
+            let _ = host.press(Target::CopyPlaying);
             return;
         }
     }
@@ -2798,7 +2798,7 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
         MenuPage::Feedback | MenuPage::FeedbackLabels | MenuPage::Comments => Target::WorldFeedback,
         MenuPage::Card | MenuPage::More | MenuPage::Mirror => return,
     };
-    host.press(open);
+    let _ = host.press(open);
     if !samples {
         return;
     }
@@ -2808,7 +2808,7 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
             use orbiters_n4n0_core::menu::{InviteAccount, InviteAnswer};
             host.menu.set_instances(crate::overlay::menu_pages::sample_instances(), true, "");
             if page == MenuPage::AddFriend {
-                host.press(Target::InviteMe(0));
+                let _ = host.press(Target::InviteMe(0));
                 let account = InviteAccount { name: "Orbiters".into(), link: "https://vrchat.com/home/user/usr_0c5b8f2e-3a41-4d7c-9e2b-5f6a7b8c9d0e".into() };
                 host.menu.invite_answered(InviteAnswer::NeedsFriend {
                     account,
@@ -2828,10 +2828,10 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
                     let (w, h, rgba) = sample_rgba(i);
                     host.put_picture(&video.id, egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba));
                 }
-                host.menu.results_arrived(id, orbiters_n4n0_core::youtube::Results { videos, continuation: Some("next".into()) }, false);
+                let _ = host.menu.results_arrived(id, orbiters_n4n0_core::youtube::Results { videos, continuation: Some("next".into()) }, false);
                 // Where a card can be dropped: the second result's link copied, its row offering Drop.
                 if host.menu.can_drop {
-                    host.press(Target::Copy(1));
+                    let _ = host.press(Target::Copy(1));
                 }
             }
         }

@@ -71,6 +71,13 @@ fn write_ready(ready: &Ready) -> std::io::Result<()> {
     written
 }
 
+/// The note kept for the release `ready` describes, when it is that note (version, digest AND size): it is kept as it is
+/// (with whether it was started). One of the same version that differs (a note left from a damaged download) is not:
+/// it is written again, never trusted for a Ready the restart would then call damaged (verifier, CORE-C6).
+fn same_note(noted: Option<Ready>, ready: &Ready) -> Option<Ready> {
+    noted.filter(|r| r.version == ready.version && r.sha256 == ready.sha256 && r.size == ready.size)
+}
+
 /// Whether `setup` is the whole file `ready` names.
 fn verified(setup: &Path, ready: &Ready) -> bool {
     std::fs::metadata(setup).is_ok_and(|m| m.len() == ready.size) && orbiters_update::sha256_file(setup).is_ok_and(|h| h == ready.sha256)
@@ -262,7 +269,7 @@ impl Controller {
             notes: release.notes.clone(),
             started: false,
         };
-        let noted = read_ready().filter(|r| r.version == ready.version && r.sha256 == ready.sha256);
+        let noted = same_note(read_ready(), &ready);
         if !verified(&setup, &ready) {
             self.update(|s| s.update.state = UpdateState::Downloading { version: version.clone(), fraction: 0.0 });
             let mut shown = 0.0f32;
@@ -360,6 +367,16 @@ mod tests {
         s.capture.state = CaptureState::Idle;
         s.n4n0.voice.downloading = Some(0.3);
         assert_eq!(s.busy_with(), Some("the speech models' download"));
+    }
+
+    /// Verifier (CORE-C6): a note of the same version whose size differs is not the note of this download.
+    #[test]
+    fn a_stale_note_of_the_same_version_is_not_reused() {
+        let ready = Ready { version: "0.3.6-dev.20".into(), sha256: "ab".repeat(32), size: 1000, notes: String::new(), started: false };
+        assert_eq!(same_note(Some(Ready { started: true, ..ready.clone() }), &ready).map(|r| r.started), Some(true), "the same: kept, started too");
+        assert!(same_note(Some(Ready { size: 999, ..ready.clone() }), &ready).is_none(), "another size: written again");
+        assert!(same_note(Some(Ready { sha256: "cd".repeat(32), ..ready.clone() }), &ready).is_none());
+        assert!(same_note(None, &ready).is_none());
     }
 
     #[test]

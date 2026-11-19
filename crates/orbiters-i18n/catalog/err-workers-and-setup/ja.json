@@ -104,5 +104,8 @@
   "These files are already in {folder} and are not Orbiters - N4N0's: {files}. Nothing was changed: choose another folder.": "次のファイルはすでに{folder}にあり、Orbiters - N4N0のものではありません：{files}。何も変更されていません。別のフォルダーを選んでください。",
   "These files of {folder} are reached through a link to another folder: {files}. Nothing was changed.": "{folder}の次のファイルは別のフォルダーへのリンクを経由しています：{files}。何も変更されていません。",
   "{path} is reached through a link to another folder": "{path}は別のフォルダーへのリンクを経由しています",
-  "The previous version could not be fully put back: {files}. Its files are kept in {folder}.": "以前のバージョンを完全には戻せませんでした：{files}。そのファイルは{folder}に保存されています。"
+  "The previous version could not be fully put back: {files}. Its files are kept in {folder}.": "以前のバージョンを完全には戻せませんでした：{files}。そのファイルは{folder}に保存されています。",
+  "{folder} is left from an earlier install and could not be set aside: nothing was changed.": "{folder}は以前のインストールの残りで、退避できませんでした。何も変更されていません。",
+  "{path} is a link to another folder: nothing in it was removed": "{path}は別のフォルダーへのリンクです。その中のものは何も削除していません",
+  "not what N4N0 keeps under this name: left as it is": "N4N0がこの名前で保存しているものではないため、そのままにしました"
 }

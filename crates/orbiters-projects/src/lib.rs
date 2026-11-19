@@ -12,6 +12,7 @@ pub mod icons;
 mod mac;
 pub mod missing;
 pub mod network;
+pub mod owned;
 pub mod preview;
 pub mod scene;
 pub mod setup;

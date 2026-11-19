@@ -171,7 +171,7 @@ impl WorldFeedbackRuntime {
     /// Queues an action (kept on disk at once).
     fn push(&mut self, world: &str, action: Action) {
         if let Action::Comment { client_id, .. } = &action {
-            if self.queue.items.iter().any(|p| matches!(&p.action, Action::Comment { client_id: c, .. } if c == client_id)) {
+            if self.queue.for_stamp(&self.stamp).items.iter().any(|p| matches!(&p.action, Action::Comment { client_id: c, .. } if c == client_id)) {
                 return;
             }
         }
@@ -186,8 +186,19 @@ impl WorldFeedbackRuntime {
         }
     }
 
+    /// What the member sees: Orbiters' answer with what waits FOR THIS server and account (another account's waiting
+    /// comment on this computer is never shown as this one's).
     fn seen(&self, world: &str) -> Seen {
-        self.known.get(world).cloned().unwrap_or_default().seen(world, &self.queue, tr_latin(ME))
+        self.known.get(world).cloned().unwrap_or_default().seen(world, &self.queue.for_stamp(&self.stamp), tr_latin(ME))
+    }
+
+    /// The server and account of the moment: another than before (an environment switch, another account) and what
+    /// was read and every answer still coming are the other's ([`Self::environment_changed`]).
+    fn set_stamp(&mut self, stamp: Stamp) {
+        if stamp != self.stamp {
+            self.environment_changed();
+            self.stamp = stamp;
+        }
     }
 
     /// The local address's answer (contracts `Docs/world-feedback.md`, The probe and the state).
@@ -380,14 +391,15 @@ impl WorldFeedbackRuntime {
                 self.menu_errors.insert(world.clone(), message);
             }
             (Call::Send { .. }, Err(Failure::SignedOut)) => {
-                // The credential is refused: nothing of this account goes for a while (the account is asked about again
-                // meanwhile), rather than each action again every minute for a day.
+                // The credential is refused: nothing of the account that action was for goes for a while (the account is
+                // asked about again meanwhile), rather than each action again every minute for a day.
                 let parked = now + SIGNED_OUT_PAUSE.as_millis() as u64;
-                let stamp = self.stamp.clone();
-                for p in self.queue.items.iter_mut().filter(|p| p.to.as_ref().is_some_and(|to| to.sends_as(&stamp))) {
-                    p.due = p.due.max(parked);
+                if let Some(to) = index(&self.queue).and_then(|i| self.queue.items[i].to.clone()) {
+                    for p in self.queue.items.iter_mut().filter(|p| p.to.as_ref() == Some(&to)) {
+                        p.due = p.due.max(parked);
+                    }
+                    self.save();
                 }
-                self.save();
             }
             (Call::Send { .. }, Err(_)) => {
                 if let Some(i) = index(&self.queue) {
@@ -526,7 +538,7 @@ impl super::Controller {
         let (_, stamp) = self.account_api_for();
         {
             let mut rt = self.world_feedback.lock().unwrap();
-            rt.stamp = stamp;
+            rt.set_stamp(stamp);
             match menu_action(&ask) {
                 Some((world, action)) => {
                     let world = world.to_ascii_lowercase();
@@ -557,7 +569,8 @@ impl super::Controller {
 
     /// World label changes and comments waiting to be sent (to whichever environment is active when they go).
     pub(super) fn feedback_pending(&self) -> u32 {
-        self.world_feedback.lock().unwrap().queue.items.len() as u32
+        let rt = self.world_feedback.lock().unwrap();
+        rt.queue.for_stamp(&rt.stamp).items.len() as u32
     }
 
     /// The Development environment was switched: what Orbiters answered for worlds is the other server's, so it is read again.
@@ -569,7 +582,7 @@ impl super::Controller {
         let development = self.settings().development;
         let (api, stamp) = self.account_api_for();
         let mut rt = self.world_feedback.lock().unwrap();
-        rt.stamp = stamp;
+        rt.set_stamp(stamp);
         rt.follow(development, api.is_some())
     }
 }
@@ -631,7 +644,13 @@ pub(super) fn spawn(ctl: Shared) {
             let (api, stamp) = c.account_api_for();
             let (call, scope) = {
                 let mut rt = c.world_feedback.lock().unwrap();
-                rt.stamp = stamp;
+                // Switched between reading the account and here: read it again, never a call for the other server.
+                if stamp.server != Api::new(orbiters_core::account::Server::current()).url("") {
+                    drop(rt);
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                rt.set_stamp(stamp);
                 (rt.next_call(), rt.scope)
             };
             let Some(call) = call else {
@@ -892,6 +911,33 @@ mod tests {
         let view = rt.view(None, true);
         assert_eq!(view.worlds.len(), ASKED_MAX);
         assert_eq!(view.worlds[0].world, format!("wrld_4432ea9b-729c-46e3-8eaf-{:012x}", ASKED_MAX + 1));
+        let _ = std::fs::remove_file(&rt.queue_path);
+    }
+
+    /// Verifier (CORE2-1): another account on the same server (or another server) is another scope: A's late answer is
+    /// not shown to B, A's waiting comment is not B's, and it is never sent as B.
+    #[test]
+    fn another_account_is_another_scope() {
+        let mut rt = WorldFeedbackRuntime {
+            queue: Queue::default(),
+            queue_path: std::env::temp_dir().join(format!("orbiters-feedback-accounts-{}.json", uuid::Uuid::new_v4())),
+            instances: (Vec::new(), Some(Instant::now())),
+            ..Default::default()
+        };
+        let a = Stamp { server: "https://api.orbiters.cc/".into(), account: Some("1".into()) };
+        let b = Stamp { account: Some("2".into()), ..a.clone() };
+        rt.set_stamp(a);
+        rt.asked(WORLD);
+        rt.push(WORLD, Action::Comment { text: "A's draft".into(), client_id: "n4n0-a".into() });
+        let read = Call::Read { world: WORLD.into() };
+        let asked_as_a = rt.scope;
+        rt.set_stamp(b);
+        assert_ne!(rt.scope, asked_as_a, "a new account is a new scope");
+        let answer = orbiters_core::world_feedback::ServerView { world_id: WORLD.into(), likes: 3, ..Default::default() };
+        rt.answered_in(&read, Ok(Some(answer)), asked_as_a);
+        assert!(rt.known.get(WORLD).is_none_or(|k| k.view.is_none()), "A's answer is not B's view");
+        assert!(rt.seen(WORLD).comments.iter().all(|c| c.2 != "A's draft") && rt.seen(WORLD).pending == 0, "A's waiting comment is not shown to B");
+        assert!(rt.next_call().is_none_or(|c| !matches!(c, Call::Send { .. })), "nor sent as B");
         let _ = std::fs::remove_file(&rt.queue_path);
     }
 

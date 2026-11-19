@@ -61,6 +61,8 @@ pub struct Service {
     /// Which link holds the app's Talk button down (the window's and the desktop panels' are one Talk to N4N0): only
     /// that link going away lets it go (AD-1).
     talk: Mutex<TalkHolder>,
+    /// Which link opened the Ask N4N0 page and has not closed it.
+    ask: Mutex<TalkHolder>,
     quitting: AtomicBool,
     /// The beta's usage statistics, a session per link, waiting for Orbiters (`usage::spool`).
     usage: Arc<crate::usage::spool::Spool>,
@@ -89,6 +91,7 @@ impl Service {
             steamvr_start_seen: Mutex::new(None),
             smoothing: Mutex::new(Default::default()),
             talk: Mutex::new(TalkHolder::default()),
+            ask: Mutex::new(TalkHolder::default()),
             quitting: AtomicBool::new(false),
             usage: Arc::default(),
             #[cfg(windows)]
@@ -543,6 +546,12 @@ impl Service {
                     }
                 }
             }
+            ToService::N4n0 { command: N4n0Command::AskPage { open } } => {
+                // Whose Ask N4N0 page is open: only that link's going away closes it (verify-vr: the panels closing ended a
+                // sentence the window was saying, though they never opened Ask).
+                self.ask.lock().unwrap().ask(link, open);
+                ctl.n4n0_command(N4n0Command::AskPage { open })
+            }
             ToService::N4n0 { command } => ctl.n4n0_command(command),
             ToService::OscReconnect => ctl.osc_rediscover(),
             ToService::Updates { action } => ctl.update_action(action),
@@ -676,6 +685,8 @@ impl Service {
         }
         // The app's Talk (the window's or the panels') is let go only by the link that holds it down: the panels
         // closing must not end, nor send, a sentence the window is saying (AD-1).
+        // The Ask N4N0 page this link opened (taken before Talk's lock, never inside it).
+        let held_ask = self.ask.lock().unwrap().closed(id);
         // Held until what the closed link let go is done: a press of another link waits for it (verify-controller).
         let mut talk = self.talk.lock().unwrap();
         let held_talk = role != Role::Overlay && talk.closed(id);
@@ -690,7 +701,7 @@ impl Service {
         if role == Role::Orbit {
             // Its panels' Talk only when they held it down (AD-1: the window's sentence is not theirs to end); its menu; its
             // Ask N4N0 page when no other panels' link is left (OVL2-13).
-            for command in orbit_gone(still_there, held_talk) {
+            for command in orbit_gone(held_talk, held_ask) {
                 self.ctl.n4n0_command(command);
             }
         }
@@ -774,6 +785,11 @@ impl TalkHolder {
         }
     }
 
+    /// `link` opened (`open`) or closed the Ask N4N0 page: the same bookkeeping as the Talk button's.
+    fn ask(&mut self, link: u64, open: bool) {
+        self.talk(link, open);
+    }
+
     /// `link` went away: whether it held the Talk button (which is then let go).
     fn closed(&mut self, link: u64) -> bool {
         let held = self.0 == Some(link);
@@ -819,17 +835,17 @@ fn child_exited(waited: std::io::Result<Option<std::process::ExitStatus>>) -> Op
 }
 
 /// What the desktop panels' process held ends with its link: its Talk, when it went while holding it down (`held_talk`: the
-/// service never saw that let go; a Talk the window holds is not the panels' to end, AD-1), its menu, and, when no other panels'
-/// link is left, its Ask N4N0 page: a process killed with that page open left N4N0 arming the microphone after every sentence
-/// with no page anywhere (OVL2-13).
-fn orbit_gone(still_there: bool, held_talk: bool) -> Vec<crate::ipc::N4n0Command> {
+/// service never saw that let go; a Talk the window holds is not the panels' to end, AD-1), its menu, and its Ask N4N0 page when
+/// it was this link that opened it (`held_ask`): a process killed with that page open left N4N0 arming the microphone after every
+/// sentence with no page anywhere (OVL2-13), and closing a page another opened cancelled the window's sentence (verify-vr).
+fn orbit_gone(held_talk: bool, held_ask: bool) -> Vec<crate::ipc::N4n0Command> {
     use crate::ipc::N4n0Command;
     let mut out = Vec::new();
     if held_talk {
         out.push(N4n0Command::Talk { down: false });
     }
     out.push(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
-    if !still_there {
+    if held_ask {
         out.push(N4n0Command::AskPage { open: false });
     }
     out
@@ -1107,17 +1123,25 @@ pub(crate) mod tests {
             }
         }
     }
-    /// OVL2-13: the panels' process gone, its Ask N4N0 page is closed (the microphone no longer armed for it).
+    /// OVL2-13 and verify-vr: the panels' process gone closes the Ask N4N0 page only if it was that link that opened it; with the
+    /// window talking and the panels' Ask never opened, neither the window's Talk nor its sentence (an AskPage close cancels the
+    /// listening) is touched.
     #[test]
-    fn the_panels_gone_close_their_ask_page() {
-        let said: Vec<String> = orbit_gone(false, true).iter().map(|c| format!("{c:?}")).collect();
-        assert!(said.iter().any(|c| c.contains("AskPage") && c.contains("false")), "{said:?}");
-        assert!(said.iter().any(|c| c.starts_with("Talk")), "its Talk let go, as before");
-        assert!(!orbit_gone(true, true).iter().any(|c| format!("{c:?}").contains("AskPage")), "another panels' link keeps its page");
-        // AD-1: a Talk the panels did not hold (the window's) is not let go by their going.
-        let said: Vec<String> = orbit_gone(false, false).iter().map(|c| format!("{c:?}")).collect();
-        assert!(!said.iter().any(|c| c.starts_with("Talk")), "{said:?}");
-        assert!(said.iter().any(|c| c.starts_with("MenuState")), "{said:?}");
+    fn the_panels_gone_close_only_their_own_ask_page() {
+        let said = |talk: bool, ask: bool| orbit_gone(talk, ask).iter().map(|c| format!("{c:?}")).collect::<Vec<String>>();
+        let theirs = said(true, true);
+        assert!(theirs.iter().any(|c| c.contains("AskPage") && c.contains("false")), "{theirs:?}");
+        assert!(theirs.iter().any(|c| c.starts_with("Talk")), "their Talk let go");
+        let window_talking = said(false, false);
+        assert!(!window_talking.iter().any(|c| c.contains("AskPage") || c.starts_with("Talk")), "nothing of the window's: {window_talking:?}");
+        assert!(window_talking.iter().any(|c| c.starts_with("MenuState")));
+        let mut ask = TalkHolder::default();
+        ask.ask(7, true);
+        assert!(!ask.closed(9), "another link going away did not open it");
+        assert!(ask.closed(7), "the link that opened it");
+        ask.ask(7, true);
+        ask.ask(7, false);
+        assert!(!ask.closed(7), "closed already: nothing to close");
     }
 
     /// OVERLAY-22: after an overlay saw SteamVR quit, starts for that SteamVR are spaced 2, 4, 8, 16, 30 s from the last end;

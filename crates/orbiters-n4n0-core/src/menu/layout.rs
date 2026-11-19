@@ -2453,6 +2453,50 @@ fn shown(text: &str) -> String {
 }
 
 /// `text` cut to `cols` characters, ending in "…" when cut.
+/// The cells a character takes where a cell is a Latin letter's width: two for full-width ones (CJK, Hangul, full-width
+/// forms, emoji).
+pub fn cell_width(c: char) -> usize {
+    match c as u32 {
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F
+        | 0x1F900..=0x1F9FF
+        | 0x20000..=0x3FFFD => 2,
+        _ => 1,
+    }
+}
+
+/// [`ellipsis`] by cells ([`cell_width`]): the same cut as it for Latin text.
+pub fn ellipsis_cells(text: &str, cols: usize) -> String {
+    let width: usize = text.chars().map(cell_width).sum();
+    if width <= cols {
+        return text.to_string();
+    }
+    if cols == 0 {
+        return String::new();
+    }
+    let mut used = 0;
+    let mut cut: String = text
+        .chars()
+        .take_while(|c| {
+            used += cell_width(*c);
+            used < cols
+        })
+        .collect();
+    cut = cut.trim_end().to_string();
+    cut.push('…');
+    cut
+}
+
 pub fn ellipsis(text: &str, cols: usize) -> String {
     let count = text.chars().count();
     if count <= cols {
@@ -2473,16 +2517,51 @@ pub fn slot_text(menu: &Menu, slot: &Slot) -> String {
     slot_text_for(menu, slot, false)
 }
 
+/// What draws a slot's text: the avatar's screen and its review picture, from the shader's atlas of 256 glyphs (Latin
+/// and Cyrillic letters, in English where the app is in Japanese), or the SteamVR menu, with the app's fonts, which
+/// have every script (MENU-6: names in Japanese, Chinese, Korean… were `?????` there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glyphs {
+    Atlas,
+    Fonts,
+}
+
 /// What a slot shows, cut to its cells, to the owner or to everyone else (`public`, see [`text_for`]).
 pub fn slot_text_for(menu: &Menu, slot: &Slot, public: bool) -> String {
-    // The avatar's atlas has no Japanese: what a slot shows is in Latin letters (`latin`).
-    let text = orbiters_contracts::n4n0::panel_text(&crate::text::fold_more(&crate::text::latin(|| text_for(menu, slot.content, public)))).replace('\n', " ");
+    slot_text_with(menu, slot, public, Glyphs::Atlas)
+}
+
+/// The same, drawn with `glyphs`: with the fonts, in the app's language and every letter kept, cut where its cells are
+/// (a full-width character takes two).
+pub fn slot_text_with(menu: &Menu, slot: &Slot, public: bool, glyphs: Glyphs) -> String {
+    let text = match glyphs {
+        // The avatar's atlas has no Japanese: what a slot shows is in Latin letters (`latin`).
+        Glyphs::Atlas => orbiters_contracts::n4n0::panel_text(&crate::text::fold_more(&crate::text::latin(|| text_for(menu, slot.content, public)))).replace('\n', " "),
+        Glyphs::Fonts => text_for(menu, slot.content, public).replace('\n', " "),
+    };
+    let ellipsis = |text: &str, cols: usize| match glyphs {
+        Glyphs::Atlas => ellipsis(text, cols),
+        Glyphs::Fonts => ellipsis_cells(text, cols),
+    };
     match slot.content {
         // The field keeps the end in view, with the caret.
         Content::Query => {
             let shown: Vec<char> = text.chars().collect();
             let room = slot.cols as usize - 1;
-            let start = shown.len().saturating_sub(room);
+            let start = match glyphs {
+                Glyphs::Atlas => shown.len().saturating_sub(room),
+                // The end that fits its cells.
+                Glyphs::Fonts => {
+                    let mut used = 0;
+                    shown
+                        .iter()
+                        .rposition(|c| {
+                            used += cell_width(*c);
+                            used > room
+                        })
+                        .map_or(0, |i| i + 1)
+                }
+            };
             shown[start..].iter().collect::<String>() + "|"
         }
         // The text being typed keeps its spaces (its lines are cut where the caret falls).
@@ -2494,8 +2573,33 @@ pub fn slot_text_for(menu: &Menu, slot: &Slot, public: bool) -> String {
     }
 }
 
+/// What the page shows, as a number (MENU-12): the page, every element's state, every slot's text as `glyphs` draws
+/// it, the pictures it asks for. Two menus with the same fingerprint draw the same picture (the hosts add what they
+/// draw over it: hover, press, look, loaded pictures); a change of the menu that its page does not show (a 3D view's
+/// percent on Home, a call's seconds on YouTube) leaves it as it was.
+pub fn fingerprint(menu: &Menu, glyphs: Glyphs) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let page = ScreenPage::of(menu);
+    let layout = cached(page);
+    page.hash(&mut h);
+    menu.page.hash(&mut h);
+    (menu.pages.share(), menu.mismatch_buttons.is_some(), menu.listening).hash(&mut h);
+    for e in &layout.elements {
+        state(menu, e).hash(&mut h);
+    }
+    for s in &layout.slots {
+        slot_text_with(menu, s, false, glyphs).hash(&mut h);
+    }
+    for p in &layout.pictures {
+        picture_key(menu, p).hash(&mut h);
+    }
+    menu.popping().map(|(t, _)| t).hash(&mut h);
+    h.finish()
+}
+
 /// How an element shows now.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct State {
     /// Chosen or switched on: a green ring.
     pub on: bool,
@@ -2648,6 +2752,55 @@ pub fn timeline_lit(media: &super::Media, i: u8) -> bool {
 mod tests {
     use super::*;
 
+    /// MENU-12: what the page does not show leaves its fingerprint as it was; what it shows changes it.
+    #[test]
+    fn a_page_s_fingerprint_follows_what_it_shows_only() {
+        use crate::captures::{CapturePhase, CaptureRow, CapturesView};
+        let mut menu = crate::menu::Menu { pages: crate::menu::Pages::Mirror, ..Default::default() };
+        menu.open();
+        let making = |percent| CapturesView { latest: Some(CaptureRow { key: "C:/s/a".into(), world: "Club".into(), phase: CapturePhase::Making { percent }, ..Default::default() }), ..Default::default() };
+        let _ = menu.set_captures(making(41));
+        menu.page = crate::menu::Page::Music;
+        let music = fingerprint(&menu, Glyphs::Fonts);
+        let _ = menu.set_captures(making(42));
+        assert_eq!(fingerprint(&menu, Glyphs::Fonts), music, "Music does not show the 3D view's percent");
+        menu.page = crate::menu::Page::Photo;
+        let photo = fingerprint(&menu, Glyphs::Fonts);
+        let _ = menu.set_captures(making(43));
+        assert_ne!(fingerprint(&menu, Glyphs::Fonts), photo, "the 3D picture page does");
+        // A call's seconds: on the call page only.
+        menu.page = crate::menu::Page::Search;
+        menu.call = Some(crate::menu::Call::Connected { name: "Ada".into(), seconds: 5, muted: false });
+        let search = fingerprint(&menu, Glyphs::Fonts);
+        menu.call = Some(crate::menu::Call::Connected { name: "Ada".into(), seconds: 6, muted: false });
+        assert_eq!(fingerprint(&menu, Glyphs::Fonts), search);
+        menu.page = crate::menu::Page::Call;
+        let call = fingerprint(&menu, Glyphs::Fonts);
+        menu.call = Some(crate::menu::Call::Connected { name: "Ada".into(), seconds: 7, muted: false });
+        assert_ne!(fingerprint(&menu, Glyphs::Fonts), call);
+    }
+
+    /// MENU-6: the SteamVR menu draws names with the app's fonts, whatever their script; the avatar's screen keeps its
+    /// atlas' letters. Both cut a Latin name at the same place.
+    #[test]
+    fn the_overlay_draws_every_script_and_the_screen_its_atlas() {
+        let mut menu = crate::menu::Menu { pages: crate::menu::Pages::Mirror, ..Default::default() };
+        menu.open();
+        menu.page = crate::menu::Page::Call;
+        menu.calls_ready = true;
+        let long = "Bartholomew Featherstonehaugh the Third of Many".to_string();
+        menu.set_contacts(vec![crate::menu::Contact { id: "a".into(), name: "たろう".into() }, crate::menu::Contact { id: "b".into(), name: long.clone() }], true, "");
+        let layout = cached(ScreenPage::of(&menu));
+        let slot = |i: u8| layout.slots.iter().find(|s| s.content == Content::ContactName(i)).expect("a contact's name");
+        assert!(!slot_text(&menu, slot(0)).contains('た'), "the atlas has no kana: {}", slot_text(&menu, slot(0)));
+        assert_eq!(slot_text_with(&menu, slot(0), false, Glyphs::Fonts), "たろう");
+        assert_eq!(slot_text_with(&menu, slot(1), false, Glyphs::Fonts), slot_text(&menu, slot(1)), "Latin text is cut the same");
+        // Full-width letters take two cells each.
+        assert_eq!(ellipsis_cells("日本語のタイトル", 9), "日本語の…");
+        assert_eq!(ellipsis_cells("abc", 3), "abc");
+        assert_eq!(cell_width('a') + cell_width('日'), 3);
+    }
+
     /// From screen version 15 the page has the two pictures as buttons, a press taking that picture, and no line to press:
     /// a press anywhere on the line's old place is nothing. Older screens keep the picture that they have.
     #[test]
@@ -2795,11 +2948,11 @@ mod tests {
         // Where a result's Drop would be: the row copies while Drop is hidden, Drop drops once it shows.
         let mut menu = Menu { pages: super::super::Pages::Seven, can_drop: true, ..Default::default() };
         menu.open();
-        menu.search_for("cats");
+        let _ = menu.search_for("cats");
         let video = |i: usize| crate::youtube::Video { id: format!("video{i:06}"), title: format!("T{i}"), channel: "C".into(), duration: None, live: false };
-        menu.results_arrived(1, crate::youtube::Results { videos: (0..5).map(video).collect(), continuation: None }, false);
+        let _ = menu.results_arrived(1, crate::youtube::Results { videos: (0..5).map(video).collect(), continuation: None }, false);
         assert_eq!(hit_pointable(&l, &menu, 760.0, 140.0).map(|h| h.1), Some(Target::Copy(0)));
-        menu.press(Target::Copy(0));
+        let _ = menu.press(Target::Copy(0));
         assert_eq!(hit_pointable(&l, &menu, 760.0, 140.0).map(|h| h.1), Some(Target::Drop(0)));
         assert_eq!(hit_pointable(&l, &menu, 760.0, 232.0).map(|h| h.1), Some(Target::Copy(1)), "the next row has none");
     }
@@ -2808,8 +2961,8 @@ mod tests {
     fn texts_fit_their_slots() {
         let mut menu = Menu::default();
         menu.open();
-        menu.press(Target::YouTube);
-        menu.type_text("a really long query that will never fit in the field at all");
+        let _ = menu.press(Target::YouTube);
+        let _ = menu.type_text("a really long query that will never fit in the field at all");
         let l = layout(ScreenPage::of(&menu));
         let query = l.slots.iter().find(|s| s.content == Content::Query).unwrap();
         let shown = slot_text(&menu, query);
@@ -2818,8 +2971,8 @@ mod tests {
         assert!(shown.ends_with("fit |") && !shown.starts_with("a "), "the field shows the end being typed: {shown}");
         assert_eq!(ellipsis("Lofi Girl and friends", 8), "Lofi Gi…");
         assert_eq!(ellipsis("Lofi", 8), "Lofi");
-        menu.search_for("cats");
-        menu.results_arrived(
+        let _ = menu.search_for("cats");
+        let _ = menu.results_arrived(
             1,
             crate::youtube::Results {
                 videos: vec![crate::youtube::Video {
@@ -2854,7 +3007,7 @@ mod tests {
         let targets = |l: &Layout| l.elements.iter().map(|e| e.target).collect::<Vec<_>>();
         assert_eq!(targets(home)[..4], targets(four)[..4], "the first four tiles keep their order (and their element indices)");
         assert_eq!(hit(home, 900.0, 400.0).map(|h| h.1), Some(Target::Light));
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         assert_eq!(ScreenPage::of(&menu), ScreenPage::Music);
         menu.pages = Pages::Four;
         assert_eq!(ScreenPage::of(&menu), ScreenPage::Home, "a screen without the page shows Home");
@@ -2890,7 +3043,7 @@ mod tests {
         assert_eq!(seven.boxes.len(), 1);
         assert_eq!((seven.boxes[0].y, seven.boxes[0].w, seven.boxes[0].h), (states.rect.y, states.rect.w, states.rect.h));
         assert!(seven.boxes[0].x > states.rect.right());
-        menu.press(Target::States);
+        let _ = menu.press(Target::States);
         assert_eq!(ScreenPage::of(&menu), ScreenPage::States);
         // An older screen has no States page: it shows its Home; and the six-tile Home's layout is as it was.
         menu.pages = Pages::Six;
@@ -2925,7 +3078,7 @@ mod tests {
         assert_eq!(&shown[1..], ["Voilà ton", "sweat, va voir", "tes potes", "maintenant au…"].map(String::from).as_slice(), "{shown:?}");
         assert!(shown.iter().all(|line| line.chars().count() <= HEARD_COLUMNS));
         assert_eq!(texts(&menu, true), shown, "what N4N0 says is for everyone");
-        menu.heard("put my hoodie on");
+        let _ = menu.heard("put my hoodie on");
         assert_eq!(texts(&menu, false)[0], "You said");
         assert!(texts(&menu, true).iter().all(String::is_empty), "the owner's own words stay theirs");
     }
@@ -2934,7 +3087,7 @@ mod tests {
     fn states_list_marks_the_default_and_pages_like_the_others() {
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
-        menu.press(Target::States);
+        let _ = menu.press(Target::States);
         let l = cached(ScreenPage::States);
         let shown = |menu: &Menu| l.elements.iter().filter(|e| !state(menu, e).hidden).map(|e| e.target).collect::<Vec<_>>();
         menu.set_states(Vec::new(), false, "VRChat's avatar is not known yet");
@@ -2946,7 +3099,7 @@ mod tests {
         assert_eq!(text(&menu, Content::PageLabel), "1/2");
         assert_eq!(text(&menu, Content::StateMeta(1)), "Parameters and pose");
         assert!(!shown(&menu).contains(&Target::StateMark(0)), "no default on the first page");
-        menu.press(Target::Next);
+        let _ = menu.press(Target::Next);
         assert_eq!(menu.page_states().len(), 2);
         assert!(shown(&menu).contains(&Target::StateMark(0)), "the default's mark, on its row");
         assert!(!shown(&menu).contains(&Target::StateApply(2)) && !shown(&menu).contains(&Target::Next));
@@ -2980,7 +3133,7 @@ mod tests {
     fn music_shows_what_plays_and_hides_what_it_cannot_do() {
         let mut menu = Menu { pages: Pages::Six, ..Default::default() };
         menu.open();
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         let l = cached(ScreenPage::Music);
         let shown = |menu: &Menu| l.elements.iter().filter(|e| !state(menu, e).hidden).map(|e| e.target).collect::<Vec<_>>();
         assert_eq!(shown(&menu), vec![Target::Back], "nothing plays, no volume known");
@@ -3033,7 +3186,7 @@ mod tests {
         let place = l.elements[index(Target::Seek(3))].rect;
         let mut menu = Menu { pages: Pages::Timeline, ..Default::default() };
         menu.open();
-        menu.press(Target::Music);
+        let _ = menu.press(Target::Music);
         let shown = |menu: &Menu| l.elements.iter().filter(|e| !state(menu, e).hidden).map(|e| e.target).collect::<Vec<_>>();
         assert!(!shown(&menu).contains(&Target::Seek(0)), "nothing plays: no timeline");
         menu.media = Some(super::super::Media { title: "Song".into(), app: "Spotify".into(), playing: true, position: Some(61), duration: Some(240), ..Default::default() });
@@ -3063,7 +3216,7 @@ mod tests {
     fn light_chips_show_the_light_as_the_avatar_holds_it() {
         let mut menu = Menu { pages: Pages::Six, ..Default::default() };
         menu.open();
-        menu.press(Target::Light);
+        let _ = menu.press(Target::Light);
         let l = cached(ScreenPage::Light);
         assert!(l.elements.iter().filter(|e| e.target != Target::Back).all(|e| state(&menu, e).hidden), "no light on this avatar");
         assert!(text(&menu, Content::LightNote).contains("My Avatar"));
@@ -3096,7 +3249,7 @@ mod tests {
         let mut menu = Menu::default();
         menu.open();
         menu.set_contacts(vec![super::super::Contact { id: "u1".into(), name: "Lyra Nightfall".into() }], true, "");
-        menu.press(Target::Call);
+        let _ = menu.press(Target::Call);
         let list = cached(ScreenPage::of(&menu));
         let texts = |public: bool| list.slots.iter().map(|s| slot_text_for(&menu, s, public)).collect::<Vec<_>>().join("|");
         assert!(texts(false).contains("Lyra Nightfall") && texts(false).contains("1 online"));
@@ -3108,7 +3261,7 @@ mod tests {
         assert_eq!(text_for(&menu, Content::TileNote(2), true), "Incoming call");
         assert_eq!(text_for(&menu, Content::TileNote(2), false), "Lyra Nightfall calls");
         // The owner's words to N4N0 stay theirs; what N4N0 says is for everyone.
-        menu.heard("put my hoodie on");
+        let _ = menu.heard("put my hoodie on");
         assert_eq!(text_for(&menu, Content::Heard, true), "");
         menu.heard = Some("Voilà ton sweat".into());
         menu.heard_private = false;

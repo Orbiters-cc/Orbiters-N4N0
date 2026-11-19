@@ -232,7 +232,8 @@ pub(crate) async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Se
     // downloads every remote repository and writes its cache (its `update_cache`).
     if refresh || missing_cache(root, &settings) {
         let before = usable_caches(root, &settings);
-        packages = PackageCollection::load(&settings, &io, Some(&http()?)).await?;
+        // Listings through the same rule as archives: a repository's headers to its own origin only, redirects included.
+        packages = PackageCollection::load(&settings, &io, Some(&crate::vpm_http::Client::new(http()?, &settings)?)).await?;
         restore_usable(&before);
     }
     Ok((settings, EnabledCollection { inner: packages, hidden }))
@@ -331,7 +332,8 @@ pub async fn add_repo(root: &Path, url: &str, headers: BTreeMap<String, String>)
     if settings.get_user_repos().iter().any(|r| r.url() == Some(&url)) {
         return Ok(());
     }
-    environment::add_remote_repo(&mut settings, url, None, headers.into_iter().map(|(k, v)| (k.into(), v.into())).collect(), &io, &http()?).await?;
+    let client = crate::vpm_http::Client::new(http()?, &settings)?.with_new_repository(&url, &headers);
+    environment::add_remote_repo(&mut settings, url, None, headers.into_iter().map(|(k, v)| (k.into(), v.into())).collect(), &io, &client).await?;
     settings.save(&io).await?;
     Ok(())
 }
@@ -373,6 +375,8 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
     let (settings, packages) = collection(root, true).await?;
     // A private repository's headers go to its own origin only, not to wherever its listing puts an archive (AS-11).
     let client = crate::vpm_http::Client::new(http()?, &settings)?;
+    // A plan an earlier run stopped halfway is put back first.
+    recover_plans(path)?;
     let mut project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
     if let Change::Plan { install, remove, prerelease } = &action {
         return apply_plan(&io, &client, &packages, path, project, install, remove, *prerelease).await;
@@ -429,8 +433,6 @@ async fn apply_plan(
     remove: &[String],
     prerelease: bool,
 ) -> anyhow::Result<()> {
-    let manifest = path.join("Packages/vpm-manifest.json");
-    let backup = std::fs::read(&manifest)?;
     // Every version asked for is looked up before anything changes: one gone from the repositories changes nothing.
     let mut requested = vec![];
     for (name, version) in install {
@@ -441,15 +443,18 @@ async fn apply_plan(
                 .with_context(|| tr!("{name} {version} is no longer in the enabled repositories.", name = name, version = version))?,
         );
     }
-    // The folders the plan removes or replaces, kept as they are (local edits, bytes no repository has) until the whole
-    // plan has gone through (PROJECTS-35): a failure puts these exact folders back.
-    let kept = Kept::take(path, remove.iter().chain(install.iter().map(|(n, _)| n)))?;
+    // Everything the plan changes is kept as it is (local edits, bytes no repository has) until the whole plan has gone
+    // through (PROJECTS-35): the manifest, then before each phase the folders and old assets VPM is about to remove or
+    // replace there (packages removed only because nothing else needed them any more included). A journal beside them
+    // lets the next package action finish putting them back if the app stops halfway.
+    let mut kept = Kept::begin(path)?;
     let installer = PackageInstaller::new(io, Some(client));
     let result: anyhow::Result<()> = async {
         let mut project = project;
         if !remove.is_empty() {
             let names: Vec<&str> = remove.iter().map(String::as_str).collect();
             let changes = project.remove_request(&names).await?;
+            kept.take(&affected(&changes))?;
             project.apply_pending_changes(&installer, changes).await?;
             project.save().await?;
             project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
@@ -464,20 +469,21 @@ async fn apply_plan(
                 )
             );
         }
+        kept.take(&affected(&changes))?;
         project.apply_pending_changes(&installer, changes).await?;
         project.save().await?;
         Ok(())
     }
     .await;
     let Err(e) = result else {
-        kept.discard();
+        kept.commit();
         return Ok(());
     };
-    // Rolled back: the manifest as it was (through a file beside it: a full disk, the likely cause of the failure, must
-    // not leave it empty), whatever is missing restored, then the kept folders over what the resolver put there: the
-    // exact bytes the project had win.
-    if let Err(r) = replace_bytes(&manifest, &backup) {
-        return Err(e.context(tr!("The package list could not be put back ({why}): use Restore", why = r)));
+    // Rolled back: the manifest as it was, whatever else is missing restored by VPM, then the kept entries over what
+    // the resolver put there (the exact bytes the project had win). Each step is tried whatever the others did.
+    let mut problems: Vec<String> = vec![];
+    if let Err(r) = kept.put_back_manifest() {
+        problems.push(r.to_string());
     }
     let restored: anyhow::Result<()> = async {
         let mut project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
@@ -487,13 +493,32 @@ async fn apply_plan(
         Ok(())
     }
     .await;
-    if let Err(r) = kept.put_back() {
-        return Err(e.context(r));
+    problems.extend(kept.put_back());
+    if problems.is_empty() {
+        kept.finish();
     }
-    Err(match restored {
-        Ok(()) => e.context(tr("Nothing was changed: the project's packages are as they were")),
-        Err(r) => e.context(tr!("The package list was put back, but restoring its packages failed ({why}): use Restore", why = format!("{r:#}"))),
+    Err(match (restored, problems.is_empty()) {
+        (Ok(()), true) => e.context(tr("Nothing was changed: the project's packages are as they were")),
+        (Err(r), true) => e.context(tr!("The package list was put back, but restoring its packages failed ({why}): use Restore", why = format!("{r:#}"))),
+        (_, false) => e.context(tr!(
+            "Not everything could be put back: {problems}. What the project had is kept in {path}; the next package change puts it back.",
+            problems = problems.join("; "),
+            path = kept.dir.display()
+        )),
     })
+}
+
+/// What `changes` removes or replaces in the project, relative to it: each package's folder and each old asset (with
+/// its `.meta`).
+fn affected(changes: &vrc_get_vpm::unity_project::PendingProjectChanges<'_>) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = changes.package_changes().keys().map(|name| Path::new("Packages").join(name.as_ref())).collect();
+    for (p, _) in changes.remove_legacy_files().iter().chain(changes.remove_legacy_folders()) {
+        paths.push(p.to_path_buf());
+        let mut meta = p.as_os_str().to_owned();
+        meta.push(".meta");
+        paths.push(PathBuf::from(meta));
+    }
+    paths
 }
 
 /// `bytes` written over `path` through a file beside it, renamed over it: never a half-written file.
@@ -501,7 +526,7 @@ fn replace_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("json.orbiters-{}", uuid::Uuid::new_v4().simple()));
     let written = (|| {
         use std::io::Write as _;
-        let mut file = std::fs::File::create(&tmp)?;
+        let mut file = std::fs::File::options().write(true).create_new(true).open(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
@@ -513,44 +538,82 @@ fn replace_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     written
 }
 
-/// Exact copies of a project's package folders, in a folder of the project this plan made for them.
+/// The journal of a plan, in its folder of kept entries.
+const JOURNAL: &str = "plan.json";
+/// The manifest as it was, in that folder.
+const MANIFEST_KEPT: &str = "vpm-manifest.json";
+
+/// What a plan changes, kept as it was, in a folder of the project this plan made (`.orbiters-plan-<id>`): the
+/// manifest, and each entry (`Packages/<name>`, an old asset) at its place relative to the project under `entries/`.
 struct Kept {
+    project: PathBuf,
     dir: PathBuf,
-    packages: PathBuf,
-    names: Vec<String>,
+    /// Entries kept, relative to the project.
+    items: Vec<PathBuf>,
 }
 impl Kept {
-    /// Copies of `names`' folders in `project`'s Packages (those that are there, as real folders). Fails, changing
-    /// nothing in Packages, when one cannot be copied.
-    fn take<'a>(project: &Path, names: impl Iterator<Item = &'a String>) -> anyhow::Result<Kept> {
-        let packages = project.join("Packages");
+    /// The folder, the manifest kept and the journal ("pending"): before anything changes.
+    fn begin(project: &Path) -> anyhow::Result<Kept> {
         let dir = project.join(format!(".orbiters-plan-{}", uuid::Uuid::new_v4().simple()));
-        let mut kept = Kept { dir, packages, names: vec![] };
-        let mut wanted: Vec<&String> = names.collect();
-        wanted.sort();
-        wanted.dedup();
-        for name in wanted {
-            anyhow::ensure!(!name.contains(['/', '\\']) && name != ".." && name != ".", "{}", tr!("Invalid package name: {name}", name = name));
-            let from = kept.packages.join(name);
-            let Ok(meta) = std::fs::symlink_metadata(&from) else { continue };
-            if !meta.is_dir() || meta.file_type().is_symlink() || is_link(&from) {
-                continue;
-            }
-            if kept.names.is_empty() {
-                std::fs::create_dir(&kept.dir)?;
-            }
-            if let Err(e) = copy_tree(&from, &kept.dir.join(name)) {
-                kept.discard();
-                return Err(e.context(tr!("Could not keep a copy of {name} before changing it: nothing was changed", name = name)));
-            }
-            kept.names.push(name.clone());
+        std::fs::create_dir(&dir)?;
+        let kept = Kept { project: project.to_path_buf(), dir, items: vec![] };
+        let saved = std::fs::copy(project.join("Packages/vpm-manifest.json"), kept.dir.join(MANIFEST_KEPT)).map(drop).and_then(|()| kept.journal("pending"));
+        if let Err(e) = saved {
+            let _ = std::fs::remove_dir_all(&kept.dir);
+            return Err(anyhow::Error::from(e).context(tr("Could not keep a copy of the package list before changing it: nothing was changed")));
         }
         Ok(kept)
     }
-    /// The kept folders back in Packages, in place of what the plan left there. On a failure the copies stay, named.
-    fn put_back(&self) -> anyhow::Result<()> {
-        for name in &self.names {
-            let at = self.packages.join(name);
+    fn journal(&self, state: &str) -> std::io::Result<()> {
+        let body = serde_json::json!({ "state": state, "items": self.items });
+        replace_bytes(&self.dir.join(JOURNAL), &serde_json::to_vec_pretty(&body).unwrap_or_default())
+    }
+    /// Copies of `paths` (relative to the project) not kept yet, before the phase that changes them. Fails, changing
+    /// nothing more, when one cannot be read or copied.
+    fn take(&mut self, paths: &[PathBuf]) -> anyhow::Result<()> {
+        for rel in paths {
+            if self.items.contains(rel) || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+                continue;
+            }
+            let from = self.project.join(rel);
+            let meta = match std::fs::symlink_metadata(&from) {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(anyhow::Error::from(e).context(tr!("Could not keep a copy of {name} before changing it: nothing was changed", name = rel.display()))),
+            };
+            // A link is no content of the project's: VPM removes the link only.
+            if meta.file_type().is_symlink() || is_link(&from) {
+                continue;
+            }
+            let to = self.dir.join("entries").join(rel);
+            let copied = std::fs::create_dir_all(to.parent().unwrap_or(&self.dir)).map_err(anyhow::Error::from).and_then(|()| {
+                if meta.is_dir() {
+                    copy_tree(&from, &to)
+                } else {
+                    std::fs::copy(&from, &to).map(drop).map_err(anyhow::Error::from)
+                }
+            });
+            copied.with_context(|| tr!("Could not keep a copy of {name} before changing it: nothing was changed", name = rel.display()))?;
+            self.items.push(rel.clone());
+            self.journal("pending")?;
+        }
+        Ok(())
+    }
+    fn put_back_manifest(&self) -> anyhow::Result<()> {
+        let bytes = std::fs::read(self.dir.join(MANIFEST_KEPT))?;
+        replace_bytes(&self.project.join("Packages/vpm-manifest.json"), &bytes)
+            .map_err(|r| anyhow::anyhow!("{}", tr!("The package list could not be put back ({why}): use Restore", why = r)))
+    }
+    /// Every kept entry back at its place, in place of what the plan left there; each tried whatever the others did.
+    /// What could not be put back, named (its copy stays).
+    fn put_back(&self) -> Vec<String> {
+        let mut problems = vec![];
+        for rel in &self.items {
+            let at = self.project.join(rel);
+            let from = self.dir.join("entries").join(rel);
+            if std::fs::symlink_metadata(&from).is_err() {
+                continue; // put back already (a recovery after a stop)
+            }
             let put = (|| -> std::io::Result<()> {
                 match std::fs::symlink_metadata(&at) {
                     Ok(m) if m.file_type().is_symlink() || is_link(&at) => std::fs::remove_dir(&at).or_else(|_| std::fs::remove_file(&at))?,
@@ -558,27 +621,57 @@ impl Kept {
                     Ok(_) => std::fs::remove_file(&at)?,
                     Err(_) => {}
                 }
-                std::fs::rename(self.dir.join(name), &at)
+                if let Some(parent) = at.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::rename(&from, &at)
             })();
             if let Err(e) = put {
-                return Err(anyhow::anyhow!("{e}").context(tr!(
-                    "{name} could not be put back: its folder as it was is kept at {path}",
-                    name = name,
-                    path = self.dir.join(name).display()
-                )));
+                problems.push(tr!("{name} could not be put back ({why}): its copy is kept at {path}", name = rel.display(), why = e, path = from.display()));
             }
         }
-        let _ = std::fs::remove_dir(&self.dir);
-        Ok(())
+        problems
     }
     /// The plan went through: the copies are not needed.
-    fn discard(&self) {
-        if self.dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&self.dir) {
-                eprintln!("the copies kept for a package plan could not be removed from {}: {e}", self.dir.display()); // i18n: not shown (a log line)
-            }
+    fn commit(&self) {
+        let _ = self.journal("committed");
+        self.finish();
+    }
+    /// The folder of copies goes (nothing is waiting in it any more).
+    fn finish(&self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.dir) {
+            eprintln!("the copies kept for a package plan could not be removed from {}: {e}", self.dir.display()); // i18n: not shown (a log line)
         }
     }
+}
+
+/// Finishes putting back what a plan stopped halfway had kept (the app closed or crashed during it): run before the next
+/// change to the project, under the packages' lock. A plan whose journal says it went through is only tidied away.
+fn recover_plans(project: &Path) -> anyhow::Result<()> {
+    let Ok(entries) = std::fs::read_dir(project) else { return Ok(()) };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(".orbiters-plan-") || !e.path().join(JOURNAL).is_file() {
+            continue;
+        }
+        let dir = e.path();
+        let journal: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(JOURNAL))?)?;
+        if journal["state"] == "committed" {
+            let _ = std::fs::remove_dir_all(&dir);
+            continue;
+        }
+        let items: Vec<PathBuf> = serde_json::from_value(journal["items"].clone()).unwrap_or_default();
+        let kept = Kept { project: project.to_path_buf(), dir: dir.clone(), items };
+        let mut problems: Vec<String> = kept.put_back_manifest().err().map(|e| e.to_string()).into_iter().collect();
+        problems.extend(kept.put_back());
+        anyhow::ensure!(
+            problems.is_empty(),
+            "{}",
+            tr!("A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.", problems = problems.join("; "), path = dir.display())
+        );
+        kept.finish();
+    }
+    Ok(())
 }
 
 /// Whether `path` is a junction or another reparse point (Windows), which `symlink_metadata` does not always call a link.
@@ -633,6 +726,33 @@ pub async fn install_my_avatar(root: &Path, path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifier, point 4: a plan stopped halfway (the app closed after a removal) is put back at the next change, from
+    /// its journal; one whose journal says it went through is only tidied away.
+    #[test]
+    fn a_plan_stopped_halfway_is_put_back_next_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let p = temp.path();
+        std::fs::create_dir_all(p.join("Packages/com.a")).unwrap();
+        std::fs::write(p.join("Packages/com.a/Mine.cs"), "mine").unwrap();
+        std::fs::write(p.join("Packages/vpm-manifest.json"), "{\"locked\":{\"com.a\":{}}}").unwrap();
+        let mut kept = Kept::begin(p).unwrap();
+        kept.take(&[PathBuf::from("Packages/com.a")]).unwrap();
+        // The removal happened, then the app stopped.
+        std::fs::remove_dir_all(p.join("Packages/com.a")).unwrap();
+        std::fs::write(p.join("Packages/vpm-manifest.json"), "{}").unwrap();
+        recover_plans(p).unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("Packages/com.a/Mine.cs")).unwrap(), "mine");
+        assert!(std::fs::read_to_string(p.join("Packages/vpm-manifest.json")).unwrap().contains("com.a"));
+        assert!(!kept.dir.exists());
+        // A plan that went through, its folder left by a failed tidy-up: nothing is put back.
+        let kept = Kept::begin(p).unwrap();
+        kept.journal("committed").unwrap();
+        std::fs::write(p.join("Packages/vpm-manifest.json"), "{\"new\":1}").unwrap();
+        recover_plans(p).unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("Packages/vpm-manifest.json")).unwrap(), "{\"new\":1}");
+        assert!(!kept.dir.exists());
+    }
 
     /// A VCC folder with VRChat's caches and one remote repository of the person's, its cache holding `cache`.
     fn environment(cache: &[u8]) -> (tempfile::TempDir, PathBuf) {

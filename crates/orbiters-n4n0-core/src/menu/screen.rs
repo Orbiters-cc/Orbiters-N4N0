@@ -790,7 +790,7 @@ mod tests {
     fn results_menu() -> Menu {
         let mut menu = Menu::default();
         menu.open();
-        menu.search_for("lofi");
+        let _ = menu.search_for("lofi");
         let videos = (0..7).map(|i| Video {
             id: format!("video{i:06}"),
             title: format!("Song {i}"),
@@ -798,7 +798,7 @@ mod tests {
             duration: Some("1:00".into()),
             live: false,
         });
-        menu.results_arrived(1, Results { videos: videos.collect(), continuation: None }, false);
+        let _ = menu.results_arrived(1, Results { videos: videos.collect(), continuation: None }, false);
         menu
     }
 
@@ -891,8 +891,8 @@ mod tests {
         let thumb = picture(3);
         let results = Frame::public(&menu, Flags::default(), 72, &|_| Some(thumb.clone())).bank;
         while everyone.next(&results).is_some() {}
-        menu.press(Target::Back);
-        menu.press(Target::Back);
+        let _ = menu.press(Target::Back);
+        let _ = menu.press(Target::Back);
         let home = Frame::public(&menu, Flags::default(), 72, &|_| None).bank;
         assert_eq!(home[PAGE], ScreenPage::Home as u8);
         assert_eq!(everyone.step(&home), Send::Clear, "a new page clears first");
@@ -915,7 +915,7 @@ mod tests {
         let mut menu = Menu::default();
         menu.open();
         menu.set_contacts(vec![crate::menu::Contact { id: "u1".into(), name: "Lyra".into() }], true, "");
-        menu.press(Target::Call);
+        let _ = menu.press(Target::Call);
         let owner = Frame::new(&menu, Some(3), Some(4), Flags::default(), 72, &|_| None).bank;
         let public = Frame::public(&menu, Flags::default(), 72, &|_| None).bank;
         assert_eq!((owner[HOVER], owner[PRESSED]), (4, 5));
@@ -1092,7 +1092,7 @@ mod tests {
             while !audience.settled(&home) {
                 audience.step(&home);
             }
-            menu.press(target);
+            let _ = menu.press(target);
             let want = Frame::new(&menu, None, None, Flags::default(), 128, &|_| None).bank;
             let (mut memory, mut pointer, mut values) = ([0u8; BANK], None, Vec::new());
             let (mut header, mut steps) = (None, 0);

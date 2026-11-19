@@ -27,9 +27,21 @@ impl crate::N4n0 {
 
     /// The VRChat friends a capture can go to, read again (a menu's Share to … opened: `on`), or forgotten (it closed).
     /// The friends known stay shown while they are read again.
-    pub(crate) fn friends(self: &Shared, on: bool) {
+    /// Forgotten only once no menu (`holder`: the one asking) still shows Share to … (MENU-13).
+    pub(crate) fn friends(self: &Shared, on: bool, holder: crate::MenuHolder) {
         let number = {
             let mut rt = self.n4n0.lock().unwrap();
+            if on {
+                rt.friends_holders.insert(holder);
+            } else if holder == crate::MenuHolder::Any {
+                rt.friends_holders.clear();
+            } else {
+                rt.friends_holders.remove(&holder);
+            }
+            if !on && !rt.friends_holders.is_empty() {
+                // Another menu's Share to … still lists them.
+                return;
+            }
             rt.friends_asked = rt.friends_asked.wrapping_add(1);
             if !on {
                 rt.friends = Friends::None.into();

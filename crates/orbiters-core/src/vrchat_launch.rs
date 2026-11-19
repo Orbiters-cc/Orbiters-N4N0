@@ -112,7 +112,9 @@ pub fn desktop_window(saved: Option<SavedWindow>, kept: Option<SavedWindow>) -> 
         return Vec::new();
     }
     let w = kept.filter(SavedWindow::normal).unwrap_or(SavedWindow { width: 1280, height: 720, mode: 3 });
-    let fullscreen = if w.mode == 3 { "0" } else { "1" };
+    // Unity's modes: 0 exclusive and 1 full-screen window are full screen; 2 maximised and 3 windowed are windows (a
+    // maximised one comes back as a window of its size, never as full screen).
+    let fullscreen = if matches!(w.mode, 2 | 3) { "0" } else { "1" };
     ["-screen-width".to_string(), w.width.to_string(), "-screen-height".into(), w.height.to_string(), "-screen-fullscreen".into(), fullscreen.into()].into()
 }
 
@@ -285,6 +287,8 @@ mod tests {
         assert_eq!(desktop_window(Some(tiny), Some(full)), ["-screen-width", "2560", "-screen-height", "1440", "-screen-fullscreen", "1"]);
         assert_eq!(desktop_window(Some(tiny), None), ["-screen-width", "1280", "-screen-height", "720", "-screen-fullscreen", "0"]);
         assert_eq!(desktop_window(Some(tiny), Some(tiny)), ["-screen-width", "1280", "-screen-height", "720", "-screen-fullscreen", "0"]);
+        let maximised = SavedWindow { width: 2560, height: 1369, mode: 2 };
+        assert_eq!(desktop_window(Some(tiny), Some(maximised)), ["-screen-width", "2560", "-screen-height", "1369", "-screen-fullscreen", "0"], "a window, not full screen");
     }
 
     #[test]

@@ -104,5 +104,8 @@
   "These files are already in {folder} and are not Orbiters - N4N0's: {files}. Nothing was changed: choose another folder.": "Ces fichiers sont déjà dans {folder} et n’appartiennent pas à Orbiters - N4N0 : {files}. Rien n’a été changé : choisis un autre dossier.",
   "These files of {folder} are reached through a link to another folder: {files}. Nothing was changed.": "Ces fichiers de {folder} passent par un lien vers un autre dossier : {files}. Rien n’a été changé.",
   "{path} is reached through a link to another folder": "{path} passe par un lien vers un autre dossier",
-  "The previous version could not be fully put back: {files}. Its files are kept in {folder}.": "La version précédente n’a pas pu être entièrement remise : {files}. Ses fichiers sont gardés dans {folder}."
+  "The previous version could not be fully put back: {files}. Its files are kept in {folder}.": "La version précédente n’a pas pu être entièrement remise : {files}. Ses fichiers sont gardés dans {folder}.",
+  "{folder} is left from an earlier install and could not be set aside: nothing was changed.": "{folder} reste d’une installation précédente et n’a pas pu être mis de côté : rien n’a été changé.",
+  "{path} is a link to another folder: nothing in it was removed": "{path} est un lien vers un autre dossier : rien n’y a été supprimé",
+  "not what N4N0 keeps under this name: left as it is": "ce n’est pas ce que N4N0 garde sous ce nom : laissé tel quel"
 }

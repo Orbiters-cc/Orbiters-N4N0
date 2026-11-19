@@ -232,7 +232,7 @@ impl Sight {
     pub fn start(_source: orbiters_openvr::compositor::MirrorSource, _adapter: Option<u32>) -> Self {
         let (asks, _) = std::sync::mpsc::channel::<Ask>();
         let (_, told) = std::sync::mpsc::channel();
-        Self { asks, told, busy: false }
+        Self { asks, told, busy: false, thread: None }
     }
 
     #[cfg(windows)]

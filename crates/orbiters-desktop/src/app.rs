@@ -122,6 +122,9 @@ impl App {
         if self.page == Page::N4n0 && page != Page::N4n0 {
             self.n4n0.leave(&self.ctl);
         }
+        if self.page == Page::Home && page != Page::Home {
+            self.home.left(&self.ctl);
+        }
         // Home again while a feature's page shows: back to Home itself.
         if page == Page::Home && self.page == Page::Home {
             self.home.back_home();

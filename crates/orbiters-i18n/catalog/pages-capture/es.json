@@ -425,8 +425,8 @@
   "Nothing yet: VRChat's camera, Stream mode": "Nada aún: cámara de VRChat, modo Stream",
   "An agent drives this VRChat through the bridge. While you take a picture here, it waits, and its own pictures wait for you.": "Un agente maneja este VRChat a través del puente. Mientras tomas una foto aquí, espera, y sus propias fotos esperan a que termines.",
   "An agent started this VRChat and is gone: nobody drives it.": "Un agente abrió este VRChat y ya no está: nadie lo maneja.",
-  "{count} VRChat on this computer": "{count} VRChat en este ordenador",
-  "{count} VRChats on this computer": "{count} VRChats en este ordenador",
+  "{count} VRChat on this computer": "{count} VRChat en esta computadora",
+  "{count} VRChats on this computer": "{count} VRChats en esta computadora",
   "Pictures are taken in the one you pick": "Las fotos se toman en el que elijas",
   "Pictures here": "Fotos aquí",
   "Take pictures here": "Tomar las fotos aquí",
@@ -444,5 +444,5 @@
   "No sound from {app} to set yet.": "{app} aún no tiene sonido que ajustar.",
   "Beta feedback": "Comentarios de la beta",
   "Menu mismatch buttons": "Botones de desajuste de menús",
-  "Three buttons, on your wrist in VR and in a corner of VRChat's window on the desktop, to press when N4N0's menus do not match VRChat's; each press keeps a report on this computer, never what you type or say.": "Tres botones, en tu muñeca en VR y en una esquina de la ventana de VRChat en el escritorio, para pulsar cuando los menús de N4N0 no coinciden con los de VRChat; cada pulsación guarda un informe en este ordenador, nunca lo que escribes o dices."
+  "Three buttons, on your wrist in VR and in a corner of VRChat's window on the desktop, to press when N4N0's menus do not match VRChat's; each press keeps a report on this computer, never what you type or say.": "Tres botones, en tu muñeca en VR y en una esquina de la ventana de VRChat en el escritorio, para pulsar cuando los menús de N4N0 no coinciden con los de VRChat; cada pulsación guarda un informe en esta computadora, nunca lo que escribes o dices."
 }

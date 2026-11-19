@@ -284,7 +284,7 @@ impl Game for RealGame {
         self.ctl()?.take_3d_picture_of(length, mode).map_err(|e| {
             let said = e.to_string();
             if said.contains(orbiters_n4n0::platform::CAMERA_CLOSED) {
-                Failure::new("camera_closed", "VRChat's camera is not open.", "press esc, screenshot, click the camera's icon with mouse, press esc.") // i18n: not shown
+                Failure::new("camera_closed", "VRChat's camera is not open.", "press esc, screenshot, click the camera icon in the menu's bottom row, screenshot, click Stream Camera.") // i18n: not shown
             } else {
                 Failure::new("picture_did_not_start", said, "Call get_state and try again; if it stays, tell the person.") // i18n: not shown
             }

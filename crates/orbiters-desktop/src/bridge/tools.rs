@@ -172,7 +172,7 @@ pub fn list() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "world_id": { "type": "string", "description": "wrld_… from find_worlds." },
                 "region": { "type": "string", "enum": ["eu", "us", "use", "jp"], "description": "Where the instance runs. Default eu." },
-                "profile": { "type": "integer", "minimum": 0, "description": "VRChat's --profile, when the signed-in account is on another profile than the default." },
+                "profile": { "type": "integer", "minimum": 0, "description": "VRChat's --profile for the main session, when the signed-in account is on another profile than the default; never a side session's profile (open_session is the way to use another profile beside it)." },
                 "relaunch": { "type": "boolean", "description": "Side session: start its VRChat again in the instance instead of travelling in the running game. Only when travelling did not work: every start of VRChat starts Easy Anti-Cheat again, and long runs of starts have left its driver stuck until Windows restarted." },
             }, "required": ["world_id"], "additionalProperties": false },
             "annotations": acts,
@@ -189,7 +189,7 @@ pub fn list() -> Value {
             "title": "Wait for something",
             "description": "Waits, up to timeout_s, for something that takes long, and returns `done` with the state. Call it again when `done` is false and it still makes sense.",
             "inputSchema": { "type": "object", "properties": {
-                "until": { "type": "string", "enum": ["in_world", "closed", "picture_saved", "reconstructions_done", "not_paused"], "description": "in_world: go_to_world arrived, or its failure. closed: VRChat is gone. picture_saved: the last recording is saved. reconstructions_done: none running or waiting (with the app set to wait for VRChat, only true once it is closed). not_paused: the person left the computer alone." },
+                "until": { "type": "string", "enum": ["in_world", "closed", "picture_saved", "reconstructions_done", "not_paused", "signed_in"], "description": "in_world: go_to_world arrived, or its failure. closed: VRChat is gone. signed_in: a session's VRChat is signed in (or asks for a sign-in). picture_saved: the last recording is saved. reconstructions_done: none running or waiting (with the app set to wait for VRChat, only true once it is closed). not_paused: the person left the computer alone." },
                 "timeout_s": { "type": "number", "minimum": 1, "maximum": 50, "description": "Default 45." },
             }, "required": ["until"], "additionalProperties": false },
             "annotations": read_only,
@@ -1190,6 +1190,10 @@ impl Bridge {
                 return self.launch_side(s, plan, call);
             }
             let profile = args["profile"].as_u64().map(|p| p as u32);
+            // Another profile for the main session must not be a side session's (two VRChats of one account) (BRIDGE-17 g).
+            if let Some(p) = profile.filter(|p| *p > 0 && self.sides.lock().unwrap().iter().any(|x| x.profile == Some(*p))) {
+                return Err(Failure::new("profile_in_use", format!("Profile {p} is a side session's."), "Use that session (pass its id), or another profile."));
+            }
             let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile, osc: None, vr: false };
             // Beside side sessions, one launch at a time: a new VRChat is told apart by appearing after its launch.
             let _one = self.launching.lock().unwrap();
@@ -2000,7 +2004,8 @@ impl Bridge {
                 "Use profile 1 or more. Tools without session drive the main session (profile 0) as before.",
             ));
         };
-        if let Some(paused) = self.paused() {
+        // A VR session goes on while the person works (the guide says so): only a held pause stops it opening.
+        if let Some(paused) = self.paused().filter(|p| !(args["vr"].as_bool() == Some(true) && matches!(p, super::person::Paused::Person { .. }))) {
             return Err(paused_failure(&paused));
         }
         let Some(opener) = self.opener.lock().unwrap().clone() else {
@@ -2339,6 +2344,10 @@ impl Bridge {
         self.release_session(s);
         if let Some(pid) = s.pid().filter(|p| seen.pid == Some(*p)) {
             self.close_and_wait(s, pid, call)?;
+        }
+        // A start still under way held the reconstructions: given back with the session, which nobody follows any more (BRIDGE-11).
+        if s.run.lock().unwrap().going.take().is_some() {
+            s.game.hold_reconstructions(false);
         }
         self.sides.lock().unwrap().retain(|x| x.id != s.id);
         self.focus.lock().unwrap().leave(&s.id);

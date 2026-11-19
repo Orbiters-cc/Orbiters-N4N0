@@ -372,6 +372,22 @@ impl Projects {
         if let Some(paused) = paused.as_ref().filter(|_| shows_a_window) {
             return Err(paused_failure(paused));
         }
+        // The person at the computer may be working in Unity (BRIDGE-8): their input also stops what ends an editor, and what
+        // changes a project an editor has open (Unity takes the change at once: a reload under their hands).
+        if let Some(paused) = paused.as_ref() {
+            let ends_an_editor = name == "unity_editor" && matches!(text(args, "action"), Some("save_and_exit" | "kill"));
+            let changes_a_project = match name {
+                "unity_change_packages" => text(args, "action") != Some("solve"),
+                "unity_missing_packages" => text(args, "action") == Some("add"),
+                "unity_add_orbiters" => true,
+                "unity_storage" => text(args, "action") == Some("repair"),
+                _ => false,
+            };
+            let open_here = || text(args, "path").is_some_and(|p| Editors::look().of(Path::new(p)).is_some());
+            if ends_an_editor || (changes_a_project && (args["open_unity"].as_bool() == Some(true) || open_here())) {
+                return Err(paused_failure(paused));
+            }
+        }
         let data = match name {
             "unity_list_projects" => self.list_projects(args, call)?,
             "unity_get_project" => self.get_project(args)?,
@@ -1631,6 +1647,14 @@ mod tests {
         assert_eq!(reading.err().unwrap().code, "not_a_project");
         let jobs = projects.call("unity_get_job", &json!({}), &call(), Some(Paused::Held));
         assert!(jobs.is_ok());
+        // BRIDGE-8: the person at the computer may be in Unity: what ends an editor waits for them too, and so does a change
+        // that would open Unity.
+        for action in ["kill", "save_and_exit"] {
+            let ending = projects.call("unity_editor", &json!({ "path": "C:/x", "action": action, "confirm": true }), &call(), busy.clone());
+            assert_eq!(ending.err().unwrap().code, "paused_by_person", "{action}");
+        }
+        let opening_unity = projects.call("unity_add_orbiters", &json!({ "path": "C:/x", "open_unity": true }), &call(), busy.clone());
+        assert_eq!(opening_unity.err().unwrap().code, "paused_by_person");
     }
 
     #[test]

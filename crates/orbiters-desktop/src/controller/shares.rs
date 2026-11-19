@@ -929,10 +929,15 @@ pub(crate) fn keep_picture_with(api: &Api, token: &str, records: &Path, dir: &Pa
 }
 /// Its upload is not on Orbiters any more (removed there): its record goes, so that a share uploads it again.
 fn forget_record(path: &Path, dir: &Path, id: u64) {
+    forget_record_of(path, dir, Kind::Capture, id);
+}
+
+/// [`forget_record`] for an upload of either kind (a capture or a picture).
+fn forget_record_of(path: &Path, dir: &Path, kind: Kind, id: u64) {
     let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
     let mut records = read_records(path);
     let before = records.len();
-    records.retain(|r| !(r.path == dir && r.uploaded.kind == Kind::Capture && r.uploaded.id == id));
+    records.retain(|r| !(r.path == dir && r.uploaded.kind == kind && r.uploaded.id == id));
     if records.len() != before {
         if let Ok(bytes) = serde_json::to_vec(&records) {
             let _ = orbiters_core::write_atomic(path, &bytes);
@@ -995,10 +1000,47 @@ fn step(steps: &mut Vec<String>, what: &str, at: &mut Instant) {
     steps.push(format!("{what} {:.2} s", at.elapsed().as_secs_f64()));
     *at = Instant::now();
 }
+/// Orbiters' own "not found" for an item (its JSON error, not a proxy's page): the item was removed there.
+fn removed_on_orbiters(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<orbiters_core::account::ApiError>().is_some_and(|a| a.status == 404 && !a.message.is_empty())
+}
+
 /// [`share`] through `api` as `token`, this account's upload records in `records`, a capture's files made by `prepare`;
-/// what took how long in `steps`.
+/// what took how long in `steps`. One try ([`share_with_once`]); an item this computer's record says it uploaded, and that Orbiters answers it no longer has
+/// (removed on the website, another computer, moderation), loses that record and is uploaded again, once, as the person
+/// asked to share it. It stayed unshareable for good before: every share asked the dead id again (CTL2-4).
 #[allow(clippy::too_many_arguments)]
 fn share_with(
+    api: &Api,
+    token: &str,
+    records: anyhow::Result<PathBuf>,
+    entry: &Entry,
+    request: &shares::Share,
+    report: Report,
+    steps: &mut Vec<String>,
+    prepare: Prepare,
+) -> anyhow::Result<shares::Shared> {
+    let records = records.map_err(|e| e.to_string());
+    let again = || records.clone().map_err(anyhow::Error::msg);
+    let recorded = entry.local.as_ref().and_then(|l| records.as_ref().ok().and_then(|p| read_records(p).into_iter().find(|r| r.path == l.path())));
+    let result = share_with_once(api, token, again(), entry, request, report, steps, prepare);
+    let (Err(e), Some(record), Ok(file)) = (&result, recorded, records.as_ref()) else { return result };
+    // Only the id this computer's record named, and only when the entry had no other (a listed item is Orbiters' word).
+    let named = entry.remote.as_ref().is_none_or(|i| (i.kind, i.id) == (record.uploaded.kind, record.uploaded.id));
+    if !removed_on_orbiters(e) || !named {
+        return result;
+    }
+    let mut at = Instant::now();
+    step(steps, &format!("{:?} {} is not on Orbiters any more: its record goes and it is uploaded again", record.uploaded.kind, record.uploaded.id), &mut at); // i18n: not shown
+    forget_record_of(file, &record.path, record.uploaded.kind, record.uploaded.id);
+    let mut fresh = entry.clone();
+    fresh.remote = None;
+    share_with_once(api, token, again(), &fresh, request, report, steps, prepare)
+}
+
+/// One try of [`share_with`].
+#[allow(clippy::too_many_arguments)]
+fn share_with_once(
     api: &Api,
     token: &str,
     records: anyhow::Result<PathBuf>,
@@ -2173,6 +2215,40 @@ pub(crate) mod tests {
         let (api, seen) = stand_in(vec![("POST /captures/capture/6/share", 200, capture_at(6, 1))]);
         share_with(&api, "token", Ok(records.clone()), &entry, &public, &|_| {}, &mut Vec::new(), &prepared).unwrap();
         assert_eq!(requests(&seen), ["POST /captures/capture/6/share"], "its upload is not sent again");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// CTL2-4: an item this computer uploaded and that was removed on Orbiters (its share answers Orbiters' own 404)
+    /// loses its record and is uploaded again, once; the record then names the new item. A 404 that is not Orbiters'
+    /// (no JSON error) changes nothing.
+    #[test]
+    fn a_share_of_an_upload_removed_on_orbiters_uploads_it_again_once() {
+        let public = shares::Share { public: true, recipients: Vec::new(), ..Default::default() };
+        let gone = r#"{"error":"Capture not found"}"#.to_string();
+        let added = r#"{"type":"capture","id":9,"visibility":"public"}"#.to_string();
+        let (dir, _session, records, mut entry) = uploaded_session("removed", None);
+        entry.world_id = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd".into();
+        let (api, seen) = stand_in(vec![
+            ("POST /captures/capture/3/share", 404, gone),
+            ("POST /maps/worlds/", 200, added),
+            ("POST /captures/capture/9/share", 200, shared_item(Kind::Capture, 9)),
+        ]);
+        share_with(&api, "token", Ok(records.clone()), &entry, &public, &|_| {}, &mut Vec::new(), &prepared).unwrap();
+        let asked = requests(&seen);
+        assert_eq!(asked.len(), 3, "{asked:?}");
+        assert_eq!(asked[0], "POST /captures/capture/3/share");
+        assert!(asked[1].starts_with("POST /maps/worlds/"), "uploaded again: {asked:?}");
+        assert_eq!(asked[2], "POST /captures/capture/9/share");
+        assert_eq!(record_of(&records).map(|r| r.uploaded.id), Some(9), "the record names the new upload");
+        std::fs::remove_dir_all(dir).ok();
+
+        // A 404 from something in front of Orbiters (no JSON error): the record stays, nothing is uploaded.
+        let (dir, _session, records, mut entry) = uploaded_session("proxy", None);
+        entry.world_id = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd".into();
+        let (api, seen) = stand_in(vec![("POST /captures/capture/3/share", 404, "<html>Not Found</html>".into())]);
+        assert!(share_with(&api, "token", Ok(records.clone()), &entry, &public, &|_| {}, &mut Vec::new(), &prepared).is_err());
+        assert_eq!(requests(&seen), ["POST /captures/capture/3/share"]);
+        assert_eq!(record_of(&records).map(|r| r.uploaded.id), Some(3));
         std::fs::remove_dir_all(dir).ok();
     }
 

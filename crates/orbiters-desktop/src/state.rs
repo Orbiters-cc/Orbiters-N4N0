@@ -728,6 +728,10 @@ pub struct Snapshot {
     #[serde(default)]
     pub vrchat_wrists_ns: [u64; 2],
     pub camera_tools: crate::controller::camera_tools::Status,
+    /// Explorer points: the notice on arriving in a world with no public 3D picture, the share buttons after a 3D
+    /// picture, the member's points (controller/explorer.rs).
+    #[serde(default)]
+    pub explorer: crate::controller::explorer::Status,
     /// Bumped each time the VRChat bridge's Unity projects tools change something the Unity projects tab shows: the tab
     /// looks again.
     #[serde(default)]
@@ -741,7 +745,7 @@ pub struct Snapshot {
 }
 
 orbiters_core::parts!(Snapshot {
-    plain: [smoothing_revision, version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, vrchat_wrists, vrchat_wrists_ns, camera_tools, projects_changed],
+    plain: [smoothing_revision, version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, vrchat_wrists, vrchat_wrists_ns, camera_tools, explorer, projects_changed],
     slices: [sources, mics, osc, lan, capture, settings, storage, worker, steamvr, reconstruct_queue, account, uploads, update, vr_audio, orbit, booster, translate, perf, launcher],
     identity: [capture_shares],
     nested: [vrchat, n4n0],
@@ -785,6 +789,7 @@ impl Snapshot {
             vrchat_wrists: [None; 2],
             vrchat_wrists_ns: [0; 2],
             camera_tools: Default::default(),
+            explorer: Default::default(),
             projects_changed: 0,
             perf: Default::default(),
             launcher: Default::default(),

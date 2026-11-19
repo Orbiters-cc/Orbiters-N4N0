@@ -19,6 +19,14 @@ const WAIT_UNQUEUED: Duration = Duration::from_secs(15);
 /// A job just started shows as on its way until the snapshots have it.
 const JOB_SHOWS: Duration = Duration::from_secs(10);
 
+/// Where an ask stands, for [`super::explorer`].
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum AskState {
+    Waiting,
+    Job(String),
+    Failed(String),
+}
+
 /// What a menu asked for a capture.
 #[derive(Clone, Debug)]
 enum Asked {
@@ -301,6 +309,17 @@ impl super::Controller {
         }
         self.menu_captures_tick();
         Ok(())
+    }
+
+    /// Where the share a menu (or the camera's buttons, [`super::explorer`]) asked for capture `key` stands: its 3D view
+    /// awaited, its Photos & captures job, or why it could not go. None when nothing was asked.
+    pub(super) fn menu_share_state(&self, key: &str) -> Option<AskState> {
+        let m = self.menu_shares.lock().unwrap();
+        Some(match m.asked.get(&folder_of(key))? {
+            Asked::Waiting { .. } => AskState::Waiting,
+            Asked::Job { id, .. } => AskState::Job(id.clone()),
+            Asked::Failed(message) => AskState::Failed(message.clone()),
+        })
     }
 
     /// Starts the Photos & captures job sharing `entry` as `ask` says.

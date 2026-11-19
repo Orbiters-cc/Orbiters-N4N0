@@ -37,6 +37,8 @@ pub struct Next {
 #[serde(rename_all = "camelCase", default)]
 pub struct Explorer {
     pub points: f64,
+    /// The points times two (the server's exact integer): preferred over `points` when present ([`Explorer::exact`]).
+    pub half_points: Option<i64>,
     /// The highest title reached, none below the first one (or below zero).
     pub title: Option<Title>,
     /// The next title, none past the last one.
@@ -106,16 +108,21 @@ struct WorldAnswer {
     has_public_capture: Option<bool>,
     /// How many public 3D pictures it has (the server says 0, 1, 2, or 3 for three and more). Read leniently under the
     /// names the contract may use.
-    #[serde(alias = "publicCaptures", alias = "count", alias = "publicCaptureCount")]
+    #[serde(rename = "publicCaptures")]
     public_count: Option<u64>,
+    /// What a new public 3D picture of this world would earn now: 1, 0.5 or 0 (from the ranks already used).
+    next_earns: Option<f64>,
 }
 
 /// What a world lookup says.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldLookup {
     pub has_public: bool,
     /// None when the server does not say how many.
     pub pictures: Option<WorldPictures>,
+    /// What a new public 3D picture here would earn, when the server says (it knows ranks used by pictures unshared
+    /// since, which the count does not show).
+    pub next_earns: Option<f64>,
 }
 
 /// Whether `id` is a VRChat world id (`wrld_` and a UUID), the only thing ever sent about a world.
@@ -144,13 +151,17 @@ impl Api {
         };
         // A count that contradicts the yes or no is not believed.
         let pictures = pictures.filter(|p| (*p != WorldPictures::None) == has_public);
-        Ok(Some(WorldLookup { has_public, pictures }))
+        let next_earns = answer.next_earns.filter(|e| [0.0, 0.5, 1.0].contains(e)).or_else(|| pictures.map(WorldPictures::would_earn));
+        Ok(Some(WorldLookup { has_public, pictures, next_earns }))
     }
 
     /// The member's Explorer points and title.
     pub fn explorer(&self, token: &str) -> anyhow::Result<Explorer> {
         let response = self.agent().get(&self.url("captures/explorer")).header("Authorization", &format!("Bearer {token}")).call()?;
-        let explorer: Explorer = crate::shares::json(response)?;
+        let mut explorer: Explorer = crate::shares::json(response)?;
+        if let Some(halves) = explorer.half_points {
+            explorer.points = halves as f64 / 2.0;
+        }
         anyhow::ensure!(explorer.points.is_finite(), "{}", orbiters_i18n::tr("unexpected answer from Orbiters"));
         Ok(explorer)
     }
@@ -210,16 +221,16 @@ mod tests {
     fn a_world_is_asked_by_its_id_alone_and_without_signing_in() {
         let (api, server) = serve(vec![
             (200, r#"{"worldId":"wrld_x","hasPublicCapture":false}"#),
-            (200, r#"{"worldId":"wrld_x","hasPublicCapture":true,"publicCaptures":2}"#),
+            (200, r#"{"worldId":"wrld_x","hasPublicCapture":true,"publicCaptures":2,"nextEarns":0.5}"#),
             (429, r#"{"error":"Too many"}"#),
             (503, "Bad gateway"),
             (200, r#"{"hasPublicCapture":false,"publicCaptures":3}"#),
         ]);
-        assert_eq!(api.world_public_capture(WORLD).unwrap(), Some(WorldLookup { has_public: false, pictures: None }));
-        assert_eq!(api.world_public_capture(WORLD).unwrap(), Some(WorldLookup { has_public: true, pictures: Some(WorldPictures::Two) }));
+        assert_eq!(api.world_public_capture(WORLD).unwrap(), Some(WorldLookup { has_public: false, pictures: None, next_earns: None }));
+        assert_eq!(api.world_public_capture(WORLD).unwrap(), Some(WorldLookup { has_public: true, pictures: Some(WorldPictures::Two), next_earns: Some(0.5) }));
         assert_eq!(api.world_public_capture(WORLD).unwrap(), None, "a rate limit says nothing");
         assert_eq!(api.world_public_capture(WORLD).unwrap(), None, "a server error says nothing");
-        assert_eq!(api.world_public_capture(WORLD).unwrap(), Some(WorldLookup { has_public: false, pictures: None }), "a contradicting count is not believed");
+        assert_eq!(api.world_public_capture(WORLD).unwrap(), Some(WorldLookup { has_public: false, pictures: None, next_earns: None }), "a contradicting count is not believed");
         let asked = server.join().unwrap();
         for request in &asked {
             assert!(request.starts_with(&format!("GET /maps/worlds/{WORLD}/public-capture ")), "{request}");
@@ -239,7 +250,7 @@ mod tests {
         let below = api.explorer("t").unwrap();
         assert_eq!((below.points, below.title.is_none(), below.progress()), (-1.0, true, 0.0));
         assert!(api.explorer("t").is_err());
-        assert!(server.join().unwrap()[0].contains("Authorization: Bearer t"));
+        assert!(server.join().unwrap()[0].to_ascii_lowercase().contains("authorization: bearer t"));
     }
 
     fn at(points: f64, title: Option<f64>) -> Explorer {

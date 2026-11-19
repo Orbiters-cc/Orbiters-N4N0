@@ -220,6 +220,10 @@ pub enum ToService {
     N4n0 {
         command: N4n0Command,
     },
+    /// Explorer points: a press on the world notice or the camera's share buttons.
+    Explorer {
+        command: crate::controller::explorer::Command,
+    },
     /// Make VRChat find the OSC service again (it sends avatar parameters only to services it found).
     OscReconnect,
     /// A loop's last ten seconds, for the performance self-check (`perf`).

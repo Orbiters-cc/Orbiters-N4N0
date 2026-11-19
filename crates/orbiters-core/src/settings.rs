@@ -71,6 +71,9 @@ pub struct Settings {
     /// The floating Orbiters panel in the play space (the SteamVR tab's interface without SteamVR's dashboard, so
     /// VRChat keeps the controllers) and the watch on a wrist that opens N4N0's menu.
     pub floating: FloatingSettings,
+    /// Explorer points (REQUEST13): the notice in a world with no public 3D picture yet, and whether sharing publicly
+    /// from beside the camera was confirmed once.
+    pub explorer: ExplorerSettings,
     /// The language: the last the account gave or the person picked (a website tag: `ja`, `pt-BR`); `None`, this computer's.
     pub language: Option<String>,
     /// That pick has yet to reach the account.
@@ -335,6 +338,22 @@ impl Default for OrbitSettings {
 /// with the controllers' own lasers instead of SteamVR's dashboard, so VRChat keeps its controls meanwhile; moved by
 /// its handle as N4N0's screen is; opened by the tab's Float button. The watch, a round Orbiters mark on a wrist, opens
 /// and closes N4N0's menu with one press of the other hand's trigger.
+/// Explorer points' settings (REQUEST13).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExplorerSettings {
+    /// "No 3D picture of this world yet" on arriving in such a world (on by default).
+    pub world_notices: bool,
+    /// "Share publicly" beside VRChat's camera was confirmed once: it asks no more.
+    pub public_confirmed: bool,
+}
+
+impl Default for ExplorerSettings {
+    fn default() -> Self {
+        Self { world_notices: true, public_confirmed: false }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FloatingSettings {
@@ -818,6 +837,7 @@ impl Default for Settings {
             rig_views: RigViews::default(),
             coverage_overlay: CoverageOverlay::default(),
             floating: FloatingSettings::default(),
+            explorer: ExplorerSettings::default(),
             language: None,
             language_unsent: false,
             orbit: OrbitSettings::default(),

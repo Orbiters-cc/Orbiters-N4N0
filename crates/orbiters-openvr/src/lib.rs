@@ -352,6 +352,7 @@ pub fn server_running() -> bool {
 }
 
 /// Whether a NUL-terminated UTF-16 executable name is SteamVR's server's, in any case.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_server_exe(name: &[u16]) -> bool {
     let length = name.iter().position(|c| *c == 0).unwrap_or(name.len());
     String::from_utf16_lossy(&name[..length]).eq_ignore_ascii_case("vrserver.exe")

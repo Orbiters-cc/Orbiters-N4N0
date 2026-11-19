@@ -244,9 +244,9 @@ fn saved_window() -> Option<SavedWindow> {
         status.is_ok().then_some(value)
     };
     Some(SavedWindow {
-        width: dword("Screenmanager Resolution Width_h182942802")?,
-        height: dword("Screenmanager Resolution Height_h2627697771")?,
-        mode: dword("Screenmanager Fullscreen mode_h3630240806").unwrap_or(3),
+        width: dword("Screenmanager Resolution Width_h182942802")?, // i18n: not shown (a registry value name)
+        height: dword("Screenmanager Resolution Height_h2627697771")?, // i18n: not shown (a registry value name)
+        mode: dword("Screenmanager Fullscreen mode_h3630240806").unwrap_or(3), // i18n: not shown (a registry value name)
     })
 }
 

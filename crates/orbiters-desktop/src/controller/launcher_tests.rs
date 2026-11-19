@@ -553,6 +553,8 @@ fn a_destination_on_a_mac_is_an_invite_to_oneself_now_or_once_the_game_is_up() {
     let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, ..Default::default() });
     let c = mac(machine.clone());
     let (_, calls) = c.test_vrchat(vec![(200, json!({})), (200, json!({}))]);
+    // The list on show is the signed-in account's (an invite to oneself is sent only for it).
+    c.update(|s| s.launcher.source = Source::SignedIn { user_id: "usr_test".into(), name: String::new() });
     c.launcher_game(machine.as_ref());
     // Not running: Obelisk opens, the destination waits, nothing is sent yet.
     assert_eq!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) }), Some(Notice::Sent { to: W.into(), action: SentKind::Launch }));

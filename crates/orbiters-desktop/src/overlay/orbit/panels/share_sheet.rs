@@ -211,8 +211,14 @@ fn button_back(p: &Painter, rect: Rect, hovered: bool, pressed: bool, primary: b
 
 /// An icon and a label (and a smaller line under it), centred in `rect`.
 fn face(p: &Painter, rect: Rect, icon: &str, label: &str, under: Option<&str>, ink: Color32, under_ink: Color32) {
-    let font = look::font(15.0, weight::BOLD);
-    let words = fit(p, label, &font, rect.width() - 48.0);
+    // Smaller before it is cut: in the desktop's narrow column a long label ("Oui, partager publiquement") stays whole.
+    let room = rect.width() - 48.0;
+    let font = [15.0, 13.5, 12.5]
+        .into_iter()
+        .map(|size| look::font(size, weight::BOLD))
+        .find(|f| p.layout_no_wrap(label.to_string(), f.clone(), ink).size().x <= room)
+        .unwrap_or_else(|| look::font(12.5, weight::BOLD));
+    let words = fit(p, label, &font, room);
     let wide = p.layout_no_wrap(words.clone(), font.clone(), ink).size().x + 26.0;
     let from = rect.center().x - wide / 2.0;
     let y = if under.is_some() { rect.center().y - 9.0 } else { rect.center().y };
@@ -237,7 +243,10 @@ fn card(p: &Painter, rect: Rect, icon: &str, tint: Color32, first: &str, second:
     let tinted = theme::mix(tint, Color32::WHITE, 0.35);
     let second = second.map(|w| p.layout(w.to_string(), small.clone(), tinted, room));
     let second_h = second.as_ref().map_or(0.0, |g| g.size().y.min(32.0) + 3.0);
-    let tall = 18.0 + second_h + if third.is_some() { 19.0 } else { 0.0 };
+    // The third (where the member stands, "37.5 to Navigator") may take two lines too.
+    let third = third.map(|w| p.layout(w.to_string(), small.clone(), look::MUTED, room));
+    let third_h = third.as_ref().map_or(0.0, |g| g.size().y.min(32.0) + 3.0);
+    let tall = 18.0 + second_h + third_h;
     let top = rect.center().y - tall / 2.0 + 9.0 - if line.is_some() { 2.0 } else { 0.0 };
     widgets::icon(p, pos2(x + 9.0, top), icon, 18.0, tint);
     p.text(pos2(x + 28.0, top), Align2::LEFT_CENTER, fit(p, first, &bold, room), bold, look::LABEL);
@@ -247,8 +256,9 @@ fn card(p: &Painter, rect: Rect, icon: &str, tint: Color32, first: &str, second:
         p.with_clip_rect(clip).galley(pos2(x + 28.0, y), g, tinted);
         y += second_h;
     }
-    if let Some(words) = third {
-        p.text(pos2(x + 28.0, y + 8.0), Align2::LEFT_CENTER, fit(p, words, &small, room), small.clone(), look::MUTED);
+    if let Some(g) = third {
+        let clip = Rect::from_min_size(pos2(x + 28.0, y), vec2(room, 32.0));
+        p.with_clip_rect(clip).galley(pos2(x + 28.0, y), g, look::MUTED);
     }
     if let Some(k) = line {
         let track = Rect::from_min_max(pos2(rect.left() + 14.0, rect.bottom() - 7.0), pos2(rect.right() - 14.0, rect.bottom() - 4.0));

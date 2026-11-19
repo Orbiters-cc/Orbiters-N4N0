@@ -1167,6 +1167,77 @@ fn hidden_parts(handles: &mut HashMap<Zone, vr::OverlayHandle>, up: &[Zone], vis
     zones.iter().filter_map(|zone| handles.remove(zone)).collect()
 }
 
+/// The last value told to SteamVR for one property of one overlay, compared bit for bit: telling it the same again changes
+/// nothing SteamVR shows, so it is not told (LIGHT-VR-5). A call SteamVR refused is told again next turn, as before.
+#[derive(Clone, Copy, Debug)]
+struct Told<T>(Option<T>);
+
+impl<T> Default for Told<T> {
+    fn default() -> Self {
+        Told(None)
+    }
+}
+
+/// A value's exact bits, so that 0.0 and -0.0 (or two NaNs) count as different, as two calls would be.
+trait Bits: Copy {
+    type B: PartialEq + Copy;
+    fn bits(self) -> Self::B;
+}
+
+impl Bits for f32 {
+    type B = u32;
+    fn bits(self) -> u32 {
+        self.to_bits()
+    }
+}
+
+impl Bits for vr::Matrix34 {
+    type B = [[u32; 4]; 3];
+    fn bits(self) -> [[u32; 4]; 3] {
+        self.m.map(|row| row.map(f32::to_bits))
+    }
+}
+
+impl<T: Bits> Told<T> {
+    /// Calls `tell` with `value` unless it is what was last told successfully; returns whether it called.
+    fn send<E>(&mut self, value: T, tell: impl FnOnce(T) -> Result<(), E>) -> bool {
+        if self.0.is_some_and(|last| last.bits() == value.bits()) {
+            return false;
+        }
+        self.0 = tell(value).is_ok().then_some(value);
+        true
+    }
+}
+
+/// What one part's overlay was last told.
+#[derive(Clone, Copy, Debug, Default)]
+struct Sent1 {
+    handle: vr::OverlayHandle,
+    width: Told<f32>,
+    alpha: Told<f32>,
+    transform: Told<vr::Matrix34>,
+}
+
+/// What each part's overlay was last told, by part. An overlay made anew (a new handle for the part, or one given back and made
+/// again, `forget`) starts with nothing told, so everything is told to it.
+#[derive(Default)]
+struct Sent(HashMap<Zone, Sent1>);
+
+impl Sent {
+    fn to(&mut self, zone: Zone, handle: vr::OverlayHandle) -> &mut Sent1 {
+        let told = self.0.entry(zone).or_default();
+        if told.handle != handle {
+            *told = Sent1 { handle, ..Sent1::default() };
+        }
+        told
+    }
+
+    /// `handle` was let go: whatever overlay is made next (whatever handle SteamVR gives it) is told everything.
+    fn forget(&mut self, handle: vr::OverlayHandle) {
+        self.0.retain(|_, told| told.handle != handle);
+    }
+}
+
 /// Whether a part's SteamVR overlay is up: it has a picture and is to be seen. A sheet keeps the page it showed until the next page's first picture comes (I-pageflash).
 pub(super) fn part_shows(panel: &super::Panel) -> bool {
     panel.painted && panel.shown
@@ -1307,6 +1378,8 @@ pub struct OrbitVr {
     stuck: Stuck,
     lasers: Lasers,
     handles: HashMap<Zone, vr::OverlayHandle>,
+    /// What each part's overlay was last told (width, place, alpha), so an unchanged value is not told again (LIGHT-VR-5).
+    sent: Sent,
     /// Parts SteamVR refused an overlay, and when.
     refused: HashMap<Zone, Instant>,
     /// Where the Quick Menu opened; where a page opened from the wheel goes.
@@ -1399,6 +1472,7 @@ impl OrbitVr {
             stuck: Stuck::start(),
             lasers: Lasers::new(overlay, &format!("{key}.orbit"))?,
             handles: HashMap::new(),
+            sent: Sent::default(),
             refused: HashMap::new(),
             plane: None,
             takeover_plane: None,
@@ -1461,6 +1535,7 @@ impl OrbitVr {
         for h in &gone {
             let _ = overlay.destroy(*h);
             presenter.forget(*h);
+            self.sent.forget(*h);
         }
         gone.len()
     }
@@ -2147,12 +2222,15 @@ impl OrbitVr {
                     let _ = cx.overlay.hide(*handle);
                     continue;
                 }
-                let _ = cx.overlay.set_width_in_meters(*handle, quad.width);
-                let _ = match place {
-                    Placing::At(transform) => cx.overlay.set_transform_absolute(*handle, transform),
-                    Placing::Room => cx.overlay.set_transform_absolute(*handle, &quad.transform),
+                // Each told only when it differs from what this overlay was last told (SteamVR keeps them, hidden or not).
+                let told = self.sent.to(panel.zone, *handle);
+                told.width.send(quad.width, |w| cx.overlay.set_width_in_meters(*handle, w));
+                let transform = match place {
+                    Placing::At(transform) => *transform,
+                    Placing::Room => quad.transform,
                 };
-                let _ = cx.overlay.set_alpha(*handle, panel.appear.alpha());
+                told.transform.send(transform, |t| cx.overlay.set_transform_absolute(*handle, &t));
+                told.alpha.send(panel.appear.alpha(), |a| cx.overlay.set_alpha(*handle, a));
                 if !cx.overlay.is_visible(*handle) {
                     let _ = cx.overlay.show(*handle);
                     if matches!(panel.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraQr) {
@@ -2194,6 +2272,67 @@ impl OrbitVr {
 
 #[cfg(test)]
 mod tests {
+    /// LIGHT-VR-5: a part's width, place and alpha are told to SteamVR when they change, and only then; an overlay made anew
+    /// (even under a handle SteamVR used before) and a call SteamVR refused are told again.
+    #[test]
+    fn unchanged_overlay_properties_are_not_told_again() {
+        use super::{vr, Sent, Zone};
+        let mut sent = Sent::default();
+        let mut calls = Vec::new();
+        let turn = |sent: &mut Sent, zone: Zone, handle: u64, width: f32, x: f32, calls: &mut Vec<&'static str>| {
+            let told = sent.to(zone, handle);
+            told.width.send(width, |_| {
+                calls.push("width");
+                Ok::<(), i32>(())
+            });
+            let mut transform = vr::Matrix34::IDENTITY;
+            transform.m[0][3] = x;
+            told.transform.send(transform, |_| {
+                calls.push("transform");
+                Ok::<(), i32>(())
+            });
+        };
+        turn(&mut sent, Zone::WingWorlds, 7, 0.2, 1.0, &mut calls);
+        assert_eq!(calls, ["width", "transform"], "a new overlay is told everything");
+        calls.clear();
+        for _ in 0..10 {
+            turn(&mut sent, Zone::WingWorlds, 7, 0.2, 1.0, &mut calls);
+        }
+        assert!(calls.is_empty(), "nothing changed, nothing told: {calls:?}");
+        turn(&mut sent, Zone::WingWorlds, 7, 0.2, 1.000_001, &mut calls);
+        assert_eq!(calls, ["transform"], "the smallest move is told");
+        calls.clear();
+        turn(&mut sent, Zone::WingWorlds, 7, 0.2, -0.0, &mut calls);
+        turn(&mut sent, Zone::WingWorlds, 7, 0.2, 0.0, &mut calls);
+        assert_eq!(calls, ["transform", "transform"], "compared bit for bit");
+        calls.clear();
+        // Given back and made again under the same handle value: told everything again.
+        sent.forget(7);
+        turn(&mut sent, Zone::WingWorlds, 7, 0.2, 0.0, &mut calls);
+        assert_eq!(calls, ["width", "transform"]);
+        calls.clear();
+        // Another handle for the part: told everything.
+        turn(&mut sent, Zone::WingWorlds, 8, 0.2, 0.0, &mut calls);
+        assert_eq!(calls, ["width", "transform"]);
+        calls.clear();
+        // Another part keeps its own.
+        turn(&mut sent, Zone::SheetBack, 9, 0.2, 0.0, &mut calls);
+        assert_eq!(calls, ["width", "transform"]);
+        // A refused call is told again next turn.
+        let mut tries = 0;
+        let told = sent.to(Zone::SheetBack, 9);
+        assert!(told.alpha.send(0.5, |_| {
+            tries += 1;
+            Err(1)
+        }));
+        assert!(told.alpha.send(0.5, |_| {
+            tries += 1;
+            Ok::<(), i32>(())
+        }));
+        assert!(!told.alpha.send(0.5, |_| Ok::<(), i32>(())));
+        assert_eq!(tries, 2);
+    }
+
     #[test]
     fn camera_takeover_preserves_held_and_independent_views() {
         let mut turn=super::Turn::default();

@@ -208,14 +208,47 @@ pub struct Viewer {
 const STILL_LONG: f32 = 2560.0;
 
 /// The top bar's controls on the right: Recorded view, and the steps through the recorded views (‹, "View n of m", ›).
-const RESET_W: f32 = 132.0;
-const STEP_W: f32 = 40.0;
-const STEP_LABEL_W: f32 = 112.0;
+pub(crate) const RESET_W: f32 = 132.0;
+pub(crate) const STEP_W: f32 = 40.0;
+pub(crate) const STEP_LABEL_W: f32 = 112.0;
 
 /// Where the view's controls on the right of its top bar start (Recorded view, the views' steps when there are several,
 /// Close), for a bar ending at `right`.
-fn view_controls_left(right: f32, views: usize) -> f32 {
+pub(crate) fn view_controls_left(right: f32, views: usize) -> f32 {
     right - 44.0 - 10.0 - RESET_W - if views > 1 { 10.0 + 2.0 * STEP_W + STEP_LABEL_W } else { 0.0 }
+}
+
+/// The widest the title chip of a bar (`bar`) may be: half the bar at most, and room left before the view's controls
+/// on the right (with `views` recorded views) for `actions` buttons as icons. At least 120.
+pub(crate) fn title_room(bar: Rect, views: usize, actions: usize) -> f32 {
+    let leave = if actions == 0 { 0.0 } else { actions as f32 * 50.0 + 10.0 };
+    (bar.width() * 0.5).min((view_controls_left(bar.right(), views) - bar.left() - leave).max(120.0))
+}
+
+/// The row's buttons after the title chip (`title_r`), before the view's controls (`controls`: where they start): the
+/// first `shown` of Save this view, Edit in 3D, Select splats, Export… at their `natural` widths, each becoming its
+/// 40-point icon from the right while the row would reach the controls. Their rectangles, and which are icons.
+pub(crate) fn action_row(title_r: Rect, controls: f32, natural: [f32; 4], shown: usize) -> ([Rect; 4], [bool; 4]) {
+    let mut widths = natural;
+    let mut icon = [false; 4];
+    let end = |widths: &[f32; 4]| title_r.right() + widths[..shown].iter().map(|w| 10.0 + w).sum::<f32>();
+    for i in (0..shown).rev() {
+        if end(&widths) + 10.0 <= controls {
+            break;
+        }
+        icon[i] = true;
+        widths[i] = 40.0;
+    }
+    let mut x = title_r.right() + 10.0;
+    let rects = std::array::from_fn(|i| {
+        if i >= shown {
+            return Rect::NOTHING;
+        }
+        let r = Rect::from_min_size(pos2(x, title_r.top() + 2.0), vec2(widths[i], 40.0));
+        x = r.right() + 10.0;
+        r
+    });
+    (rects, icon)
 }
 
 impl Viewer {
@@ -444,9 +477,10 @@ impl Viewer {
         let sub_t = Txt::new(sub, 11.0).color(theme::FG_3);
         let title_t = Txt::new(&self.title, 14.0).weight(weight::SEMIBOLD);
         let views = self.loaded.as_ref().map_or(0, |l| l.views.len());
-        // Half the bar at most, and (outside Select splats) room left for the row's buttons as icons at least.
-        let leave = if self.select.on() { 0.0 } else { 4.0 * 50.0 + 10.0 };
-        let title_max = (bar.width() * 0.5).min((view_controls_left(bar.right(), views) - bar.left() - leave).max(120.0));
+        // The row's buttons: Save this view and Edit in 3D, and Select splats and Export… for a capture of this
+        // computer (a downloaded `.splat` has no edits).
+        let actions = if self.loaded.as_ref().is_some_and(|l| l.edits.is_some()) { 4 } else { 2 };
+        let title_max = title_room(bar, views, if self.select.on() { 0 } else { actions });
         let title_w = (widgets::text_size(ui, &title_t).x.max(widgets::text_size(ui, &sub_t).x) + 40.0).min(title_max);
         let title_r = Rect::from_min_size(bar.min, vec2(title_w, 44.0));
         chip(&p, title_r);
@@ -756,22 +790,8 @@ impl Viewer {
         // their icons (the label their tooltip), from the right.
         let controls = view_controls_left(rect.right() - 16.0, views);
         let shown = if selectable.is_some() { 4 } else { 2 };
-        let mut widths = [save_b.desired_width(ui), edit_b.desired_width(ui), select_b.desired_width(ui), export_b.desired_width(ui)];
-        let mut icon = [false; 4];
-        let end = |widths: &[f32; 4]| title_r.right() + widths[..shown].iter().map(|w| 10.0 + w).sum::<f32>();
-        for i in (0..shown).rev() {
-            if end(&widths) + 10.0 <= controls {
-                break;
-            }
-            icon[i] = true;
-            widths[i] = 40.0;
-        }
-        let mut x = title_r.right() + 10.0;
-        let mut place = |w: f32| {
-            let r = Rect::from_min_size(pos2(x, title_r.top() + 2.0), vec2(w, 40.0));
-            x = r.right() + 10.0;
-            r
-        };
+        let natural = [save_b.desired_width(ui), edit_b.desired_width(ui), select_b.desired_width(ui), export_b.desired_width(ui)];
+        let (rects, icon) = action_row(title_r, controls, natural, shown);
         // Its icon alone, dimmed and deaf while it waits as the whole button is.
         let icon_button = |ui: &mut Ui, r: Rect, glyph: &str, label: &'static str, enabled: bool, salt: &str| {
             let mut iu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(salt));
@@ -780,7 +800,7 @@ impl Viewer {
             }
             IconButton::new(glyph, label).size(40.0, 17.0).backdrop(theme::black(0.55)).id_salt(salt).show_at(&mut iu, r).clicked()
         };
-        let save_r = place(widths[0]);
+        let save_r = rects[0];
         let save_clicked = if icon[0] { icon_button(ui, save_r, icons::CAMERA, mark("Save this view"), !saving, "splat-save-view-icon") } else { save_b.show_at(ui, save_r).clicked() };
         if save_clicked && !saving {
             if let Some(orbit) = self.orbit {
@@ -804,19 +824,19 @@ impl Viewer {
             }
         }
         // Edit in 3D beside it.
-        let edit_r = place(widths[1]);
+        let edit_r = rects[1];
         let edit_clicked = if icon[1] { icon_button(ui, edit_r, icons::SLIDERS_HORIZONTAL, mark("Edit in 3D"), true, "splat-edit-3d-icon") } else { edit_b.show_at(ui, edit_r).clicked() };
         if edit_clicked {
             self.enter_edit(&ctx, rect);
         }
         // Select splats beside it, for a capture of this computer (a downloaded `.splat` has no edits), and Export….
         if selectable.is_some() {
-            let select_r = place(widths[2]);
+            let select_r = rects[2];
             let select_clicked = if icon[2] { icon_button(ui, select_r, icons::CROSSHAIR, mark("Select splats"), can, "splat-select-icon") } else { select_b.show_at(ui, select_r).clicked() };
             if select_clicked && can {
                 self.enter_select(&ctx);
             }
-            let export_r = place(widths[3]);
+            let export_r = rects[3];
             let clicked = if icon[3] { icon_button(ui, export_r, icons::UPLOAD_SIMPLE, mark("Export…"), ok, "splat-export-icon") } else { export_b.show_at(ui, export_r).clicked() };
             if clicked && ok {
                 self.export = Some(super::splat_export::Export::open(&ctx, &self.session, &self.title, export_r).order(egui::Order::Tooltip));
@@ -1221,6 +1241,42 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
 #[cfg(test)]
 mod tests {
     use super::{gestures, vec2, Gestures};
+
+    /// Night3, verifier point 7 (PG2-1): the 3D view's top row never runs into the view's controls on the right (with
+    /// several recorded views too), whatever the width, the title and the language's labels, as long as its buttons fit
+    /// as icons; and a download (two buttons) keeps room for two, not four (a 776-point bar: half of it, 388, where it
+    /// had 380).
+    #[test]
+    fn the_top_row_keeps_clear_of_the_views_controls() {
+        use super::{action_row, title_room, view_controls_left};
+        use egui::{pos2, Rect};
+        let bar_of = |w: f32| Rect::from_min_size(pos2(16.0, 16.0), vec2(w, 44.0));
+        assert_eq!(title_room(bar_of(776.0), 1, 2), 388.0, "a download: room for its two buttons only");
+        let labels = [[143.0, 118.0, 133.0, 109.0], [196.0, 152.0, 205.0, 121.0]];
+        for w in (600..=1700).step_by(25).map(|w| w as f32) {
+            for views in [1, 3] {
+                for actions in [2, 4] {
+                    for title in [80.0, 200.0, 400.0, 700.0] {
+                        for natural in labels {
+                            let bar = bar_of(w);
+                            let controls = view_controls_left(bar.right(), views);
+                            let title_r = Rect::from_min_size(bar.min, vec2(title.min(title_room(bar, views, actions)), 44.0));
+                            let (rects, icon) = action_row(title_r, controls, natural, actions);
+                            let fits_as_icons = title_r.right() + actions as f32 * 50.0 + 10.0 <= controls;
+                            let last = rects[actions - 1];
+                            if fits_as_icons {
+                                assert!(last.right() + 10.0 <= controls + 0.01, "{w} {views} {actions} {title}: {last:?} reaches {controls}");
+                            }
+                            for i in 1..actions {
+                                assert!(rects[i].left() >= rects[i - 1].right() + 9.99, "{w}: buttons {i} and {} overlap", i - 1);
+                                assert!(!icon[i - 1] || icon[i], "icons come from the right");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn two_fingers_orbit_and_with_shift_pan_while_a_wheel_zooms() {

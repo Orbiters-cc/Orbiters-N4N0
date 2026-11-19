@@ -352,5 +352,22 @@
   "{reason}: a QR code here opens only http or https pages": "{reason}: aqui um QR code só abre páginas http ou https",
   "{time} · muted": "{time} · silenciado",
   "✓ Link copied": "✓ Link copiado",
-  "Stopped after six pages opened: press Scan again to read the camera": "Parou após abrir seis páginas: toque em Escanear de novo para ler a câmera"
+  "Stopped after six pages opened: press Scan again to read the camera": "Parou após abrir seis páginas: toque em Escanear de novo para ler a câmera",
+  "N4N0 asks to set {control} to {value}.": "O N4N0 pede para ajustar {control} para {value}.",
+  "N4N0 asks to turn off {control}.": "O N4N0 pede para desativar {control}.",
+  "N4N0 asks to turn on {control}.": "O N4N0 pede para ativar {control}.",
+  "N4N0 asks to keep {control} at {value}, put back after every reset and avatar change until released.": "O N4N0 pede para manter {control} em {value}, reposto após cada redefinição e troca de avatar até você liberar.",
+  "N4N0 asks to keep {control} off, put back after every reset and avatar change until released.": "O N4N0 pede para manter {control} desativado, reposto após cada redefinição e troca de avatar até você liberar.",
+  "N4N0 asks to keep {control} on, put back after every reset and avatar change until released.": "O N4N0 pede para manter {control} ativado, reposto após cada redefinição e troca de avatar até você liberar.",
+  "N4N0 asks to copy to your clipboard: {text}": "O N4N0 pede para copiar para sua área de transferência: {text}",
+  "N4N0 asks to show {text} to people while you are away, and to turn it on.": "O N4N0 pede para mostrar {text} às pessoas enquanto você está ausente, e para ativá-la.",
+  "N4N0 asks to show {text} to people while you are away, and to keep it off.": "O N4N0 pede para mostrar {text} às pessoas enquanto você está ausente, e para mantê-la desativada.",
+  "N4N0 asks to show {text} to people while you are away.": "O N4N0 pede para mostrar {text} às pessoas enquanto você está ausente.",
+  "The avatar's menu tags {control} as nsfw.": "O menu do avatar marca {control} como nsfw.",
+  "Say yes to do it.": "Diga sim para fazer.",
+  "Say yes to do them.": "Diga sim para fazer tudo.",
+  "(or say yes or no)": "(ou diga sim ou não)",
+  "Sign in to Orbiters again to talk to N4N0.": "Entre de novo no Orbiters para falar com o N4N0.",
+  "N4N0 needs a break: try again in a moment.": "O N4N0 precisa de uma pausa: tente de novo em instantes.",
+  "N4N0's assistant is not available right now ({status}).": "O assistente do N4N0 não está disponível agora ({status})."
 }

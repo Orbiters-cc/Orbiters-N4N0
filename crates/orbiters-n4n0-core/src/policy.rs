@@ -191,12 +191,72 @@ pub fn changes(action: &Action) -> bool {
     !matches!(action, Action::FindControls { .. } | Action::ListSavedVideos | Action::Mood { .. } | Action::Media { command: None, volume_change: None })
 }
 
-/// The question the desktop puts to the owner for actions waiting for their yes.
-pub fn question(whats: &[String]) -> String {
-    match whats {
-        [] => String::new(),
-        [one] => format!("N4N0 asks to {one}. Say yes to do it."), // i18n: not shown
-        [first @ .., last] => format!("N4N0 asks to {}, and to {last}. Say yes to do them.", first.join(", to ")), // i18n: not shown
+/// What the owner is asked, in their language: one whole sentence for an action that waits for their yes (TXT-22). The
+/// assistant keeps [`what`]'s English. The texts it quotes are cut short and quoted, as in [`what`].
+pub fn ask(action: &Action, control: Option<&Control>) -> String {
+    use orbiters_i18n::tr;
+    let named = |fallback: &str| match control {
+        Some(c) => quoted(&c.path, NAME_CHARS),
+        None => quoted(fallback, NAME_CHARS),
+    };
+    let value = |v: f32| format!("{v:.2}");
+    let asked = match action {
+        Action::SetControl { control: name, on, value: v } | Action::Hold { control: name, on, value: v, release: false } => {
+            let held = matches!(action, Action::Hold { .. });
+            match (held, on, v) {
+                (false, _, Some(v)) => tr!("N4N0 asks to set {control} to {value}.", control = named(name), value = value(*v)),
+                (false, Some(false), None) => tr!("N4N0 asks to turn off {control}.", control = named(name)),
+                (false, _, None) => tr!("N4N0 asks to turn on {control}.", control = named(name)),
+                (true, _, Some(v)) => {
+                    tr!("N4N0 asks to keep {control} at {value}, put back after every reset and avatar change until released.", control = named(name), value = value(*v))
+                }
+                (true, Some(false), None) => tr!("N4N0 asks to keep {control} off, put back after every reset and avatar change until released.", control = named(name)),
+                (true, _, None) => tr!("N4N0 asks to keep {control} on, put back after every reset and avatar change until released.", control = named(name)),
+            }
+        }
+        Action::SetParameter { name, value: v } => tr!("N4N0 asks to set {control} to {value}.", control = named(name), value = value(*v)),
+        Action::CopyToClipboard { text } => tr!("N4N0 asks to copy to your clipboard: {text}", text = quoted(text, ASKED_CHARS)),
+        Action::SetAfkMessage { text, enabled } => {
+            let text = quoted(text.as_deref().unwrap_or_default(), ASKED_CHARS);
+            match enabled {
+                Some(true) => tr!("N4N0 asks to show {text} to people while you are away, and to turn it on.", text = text),
+                Some(false) => tr!("N4N0 asks to show {text} to people while you are away, and to keep it off.", text = text),
+                None => tr!("N4N0 asks to show {text} to people while you are away.", text = text),
+            }
+        }
+        // Nothing else waits for a yes ([`TurnPolicy::review`]).
+        other => what(other, control), // i18n: not shown
+    };
+    match control.filter(|c| c.nsfw) {
+        Some(c) => format!("{asked} {}", tr!("The avatar's menu tags {control} as nsfw.", control = quoted(&c.path, NAME_CHARS))),
+        None => asked,
+    }
+}
+
+/// The owner's question: the sentences of [`ask`], then what to say, in their language.
+pub fn asking(asks: &[String]) -> String {
+    let close = match asks.len() {
+        0 => return String::new(),
+        1 => orbiters_i18n::tr("Say yes to do it."),
+        _ => orbiters_i18n::tr("Say yes to do them."),
+    };
+    format!("{} {close}", asks.join(" "))
+}
+
+/// Yes and no in Japanese: a sentence of it has no spaces, so the whole text is matched, a word and what may follow it.
+const YES_JA: &[&str] = &["はい", "うん", "ええ", "いいよ", "いいです", "どうぞ", "お願い", "おねがい", "オッケー", "わかった"]; // i18n: not shown
+const NO_JA: &[&str] = &["いいえ", "いや", "だめ", "ダメ", "やめて", "やめる", "中止", "キャンセル"]; // i18n: not shown
+/// What may follow a Japanese yes or no without changing it.
+const WITH_JA: &[&str] = &["", "どうぞ", "します", "してください", "お願いします", "おねがいします", "ください", "です", "よ", "ね", "だよ"]; // i18n: not shown
+
+fn reply_ja(text: &str) -> Option<bool> {
+    let t: String = text.chars().filter(|c| !c.is_whitespace() && !matches!(c, '、' | '。' | '！' | '？' | '!' | '?' | '.' | ',' | '〜' | 'ー')).collect();
+    let t = t.strip_prefix("ナノ").or_else(|| t.strip_prefix("N4N0")).unwrap_or(&t);
+    let said = |words: &[&str]| words.iter().any(|w| t.strip_prefix(w).is_some_and(|rest| WITH_JA.contains(&rest)));
+    match (said(YES_JA), said(NO_JA)) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
     }
 }
 
@@ -221,6 +281,9 @@ fn among(words: &str, word: &str) -> bool {
 /// The owner's answer to a question: `Some(true)` for a yes ("yes", "oui vas-y", "ok, do it please"), `Some(false)` for
 /// a no ("no thanks", "laisse tomber"), `None` for anything else (a new request, which leaves the question unanswered).
 pub fn reply(text: &str) -> Option<bool> {
+    if text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30ff}' | '\u{4e00}'..='\u{9fff}')) {
+        return reply_ja(text);
+    }
     let words: Vec<String> = text
         .chars()
         .map(|c| match orbiters_contracts::n4n0::unaccented(c) {
@@ -279,8 +342,8 @@ mod tests {
             Verdict::Refuse { why: "No more AFK message changes in this request (at most 1).".into() }
         );
         assert_eq!(policy.review(&Action::Mood { mood: Mood::Happy }, None), Verdict::Run);
-        assert_eq!(question(&["copy x".into()]), "N4N0 asks to copy x. Say yes to do it.");
-        assert_eq!(question(&["a".into(), "b".into(), "c".into()]), "N4N0 asks to a, to b, and to c. Say yes to do them.");
+        assert_eq!(asking(&[ask(&copy, None)]), "N4N0 asks to copy to your clipboard: \"https://youtu.be/36YnV9STBqc\" Say yes to do it.");
+        assert_eq!(asking(&["A.".into(), "B.".into()]), "A. B. Say yes to do them.");
     }
 
     #[test]
@@ -302,6 +365,36 @@ mod tests {
             assert!(run <= (round + 1) * CALLS_PER_ROUND);
         }
         assert!(run <= 12 + 3, "avatar changes and moods within their limits: {run}");
+    }
+
+    #[test]
+    fn the_owner_is_asked_in_whole_sentences_of_their_language() {
+        // TXT-22: the question was English pieces glued with commas in every language.
+        let nsfw = Control { path: "Outfits / Lingerie".into(), nsfw: true };
+        let hoodie = Action::SetControl { control: "lingerie".into(), on: Some(true), value: None };
+        assert_eq!(ask(&hoodie, Some(&nsfw)), "N4N0 asks to turn on \"Outfits / Lingerie\". The avatar's menu tags \"Outfits / Lingerie\" as nsfw.");
+        let hold = Action::Hold { control: "hoodie".into(), on: Some(true), value: None, release: false };
+        assert!(ask(&hold, None).starts_with("N4N0 asks to keep \"hoodie\" on"));
+        let afk = Action::SetAfkMessage { text: Some("brb".into()), enabled: Some(true) };
+        for language in orbiters_i18n::Language::TRANSLATED {
+            let (asked, close) = orbiters_i18n::in_language(language, || (ask(&afk, None), asking(&[ask(&hold, None)])));
+            assert!(!asked.starts_with("N4N0 asks") && asked.contains("\"brb\""), "{language:?}: {asked}");
+            assert!(!close.contains("Say yes"), "{language:?}: {close}");
+        }
+    }
+
+    #[test]
+    fn hears_yes_and_no_in_japanese_too() {
+        for yes in ["はい", "はい、お願いします", "うん", "ええ、どうぞ", "はい！", "ナノ、はい"] {
+            assert_eq!(reply(yes), Some(true), "{yes}");
+        }
+        for no in ["いいえ", "だめ", "やめて", "いいえ、やめてください" ] {
+            assert!(reply(no) != Some(true), "{no}");
+        }
+        assert_eq!(reply("いいえ"), Some(false));
+        assert_eq!(reply("はい、帽子もかぶせて"), None, "a new request");
+        assert_eq!(reply("sí, por favor"), Some(true));
+        assert_eq!(reply("não"), Some(false));
     }
 
     #[test]

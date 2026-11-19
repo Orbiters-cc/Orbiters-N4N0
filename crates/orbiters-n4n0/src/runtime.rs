@@ -116,6 +116,8 @@ pub(crate) struct Pending {
     what: String,
     /// The avatar and the control it was reviewed on: it runs on those or not at all.
     bound: Bound,
+    /// The control as the policy saw it (its path, its nsfw tag): what the owner is asked about.
+    control: Option<policy::Control>,
 }
 
 /// What an avatar action was reviewed on: the avatar (its number, [`N4n0Runtime::avatar_epoch`]) and the control its
@@ -130,6 +132,23 @@ pub(crate) struct Bound {
 impl Bound {
     pub(crate) fn for_test(epoch: u64, path: Option<&str>) -> Self {
         Self { epoch, path: path.map(str::to_string) }
+    }
+}
+
+/// The question the owner reads for what waits for their yes, in their language (TXT-22), and the same for the avatar's
+/// panel, which has Latin letters only.
+fn questions(pending: &[Pending]) -> (String, String) {
+    let ask = || policy::asking(&pending.iter().map(|p| policy::ask(&p.action, p.control.as_ref())).collect::<Vec<_>>());
+    (ask(), latin(ask))
+}
+
+/// The confirmation the windows show for question number `n`.
+fn local_confirmation(n: u64, question: &str) -> N4n0Confirmation {
+    N4n0Confirmation {
+        id: format!("n4n0-{n}"),
+        title: tr("N4N0 asks").into(),
+        summary: format!("{question} {}", tr("(or say yes or no)")),
+        approve_url: format!("{LOCAL_APPROVAL}{n}"),
     }
 }
 
@@ -375,18 +394,12 @@ impl N4n0Runtime {
             self.pending_at = None;
             return;
         }
-        let whats: Vec<String> = kept.iter().map(|p| p.what.clone()).collect();
-        let question = policy::question(&whats);
+        let (question, _) = questions(&kept);
         self.pending = kept;
         self.pending_id += 1;
         let n = self.pending_id;
         self.line(N4n0Who::Note, question.clone());
-        self.confirmations.push(N4n0Confirmation {
-            id: format!("n4n0-{n}"),
-            title: tr("N4N0 asks").into(),
-            summary: format!("{question} (or say yes or no)"), // i18n: not shown
-            approve_url: format!("{LOCAL_APPROVAL}{n}"),
-        });
+        self.confirmations.push(local_confirmation(n, &question));
     }
 
     /// The mute N4N0 made for Talk ends (Talk let go, the assistant switched off): VRChat's microphone is toggled back
@@ -2274,8 +2287,7 @@ impl N4n0 {
                     rt.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
                     rt.notes.push(format!("The owner's avatar changed before they answered: Orbiters - N4N0 did not {}.", what.join(", nor "))); // i18n: not shown
                 }
-                let whats: Vec<String> = tools_run.waiting.iter().map(|p| p.what.clone()).collect();
-                let question = policy::question(&whats);
+                let (question, on_panel) = questions(&tools_run.waiting);
                 if !shown.is_empty() {
                     rt.line(N4n0Who::N4n0, shown.clone());
                 }
@@ -2286,15 +2298,9 @@ impl N4n0 {
                     rt.pending = tools_run.waiting;
                     rt.pending_at = Some(Instant::now());
                     rt.line(N4n0Who::Note, question.clone());
-                    let title = tr("N4N0 asks");
-                    rt.confirmations.push(N4n0Confirmation {
-                        id: format!("n4n0-{n}"),
-                        title: title.into(),
-                        summary: format!("{question} (or say yes or no)"), // i18n: not shown
-                        approve_url: format!("{LOCAL_APPROVAL}{n}"),
-                    });
+                    rt.confirmations.push(local_confirmation(n, &question));
                 }
-                let panel = [shown.as_str(), question.as_str()].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n");
+                let panel = [shown.as_str(), on_panel.as_str()].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n");
                 rt.stream_panel_end(&panel);
             }
             Err(e) => {
@@ -2303,12 +2309,12 @@ impl N4n0 {
                 if !tools_run.done.is_empty() {
                     rt.notes.push(format!("Your last answer did not arrive; before that, Orbiters - N4N0 did: {}.", tools_run.done.join(", "))); // i18n: not shown
                 }
-                let from_server = e.downcast_ref::<AssistantError>().map(|a| a.message.clone());
+                let from_server = e.downcast_ref::<AssistantError>().map(|a| (a.message.clone(), a.on_panel.clone()));
                 if from_server.is_none() {
                     eprintln!("N4N0: the turn failed: {e:#}");
                 }
                 let (message, panel) = match from_server {
-                    Some(words) => (words.clone(), words),
+                    Some(words) => words,
                     // The panel on the avatar has no Japanese.
                     None => (turn_failure(&e), latin(|| turn_failure(&e))),
                 };
@@ -2436,7 +2442,7 @@ impl N4n0 {
                     "asked": what,
                     "note": "Orbiters - N4N0 asked the owner, and does it only if they say yes: say so in a few words, without asking again."
                 });
-                turn.waiting.push(Pending { action, what, bound });
+                turn.waiting.push(Pending { action, what, bound, control });
                 result(&content.to_string(), false)
             }
             Verdict::Run => {

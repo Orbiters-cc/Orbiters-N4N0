@@ -124,6 +124,9 @@ pub enum Event {
 pub struct AssistantError {
     pub code: String,
     pub message: String,
+    /// The same for the avatar's panel, which has Latin letters only: the server's own words as they came, the app's own in
+    /// a Latin language.
+    pub on_panel: String,
 }
 
 impl std::fmt::Display for AssistantError {
@@ -146,12 +149,16 @@ fn error_from(status: u16, body: &str) -> AssistantError {
         }
         .to_string()
     });
-    let message = text("message").or_else(|| text("error")).unwrap_or_else(|| match code.as_str() {
-        "unauthorized" => "Sign in to Orbiters again to talk to N4N0.".to_string(), // i18n: not shown
-        "rate_limited" | "quota_exhausted" => "N4N0 needs a break: try again in a moment.".to_string(), // i18n: not shown
-        _ => format!("N4N0's assistant is not available right now ({status})."), // i18n: not shown
-    });
-    AssistantError { code, message }
+    // The app's own words when the server sent none, in the person's language (TXT-22).
+    let own = |code: &str| match code {
+        "unauthorized" => orbiters_i18n::tr("Sign in to Orbiters again to talk to N4N0.").to_string(),
+        "rate_limited" | "quota_exhausted" => orbiters_i18n::tr("N4N0 needs a break: try again in a moment.").to_string(),
+        _ => orbiters_i18n::tr!("N4N0's assistant is not available right now ({status}).", status = status),
+    };
+    match text("message").or_else(|| text("error")) {
+        Some(message) => AssistantError { code, on_panel: message.clone(), message },
+        None => AssistantError { message: own(&code), on_panel: crate::text::latin(|| own(&code)), code },
+    }
 }
 
 /// What a person reads when Orbiters cannot be reached at all (no connection, refused, no name, timed out): one plain

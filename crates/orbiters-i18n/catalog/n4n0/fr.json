@@ -353,5 +353,22 @@
   "A QR code is cut by the camera's edge: bring all of it into the picture": "Un QR code est coupé par le bord de la caméra : fais-le entrer en entier dans l’image",
   "A QR code is in view: hold the camera still, a little closer": "Un QR code est en vue : tiens la caméra immobile, un peu plus près",
   "No sound found": "Aucun son trouvé",
-  "Stopped after six pages opened: press Scan again to read the camera": "Arrêté après six pages ouvertes : appuie sur Scanner encore pour lire la caméra"
+  "Stopped after six pages opened: press Scan again to read the camera": "Arrêté après six pages ouvertes : appuie sur Scanner encore pour lire la caméra",
+  "N4N0 asks to set {control} to {value}.": "N4N0 demande à régler {control} sur {value}.",
+  "N4N0 asks to turn off {control}.": "N4N0 demande à désactiver {control}.",
+  "N4N0 asks to turn on {control}.": "N4N0 demande à activer {control}.",
+  "N4N0 asks to keep {control} at {value}, put back after every reset and avatar change until released.": "N4N0 demande à garder {control} sur {value}, remis après chaque réinitialisation et changement d’avatar jusqu’à ce que tu le relâches.",
+  "N4N0 asks to keep {control} off, put back after every reset and avatar change until released.": "N4N0 demande à garder {control} désactivé, remis après chaque réinitialisation et changement d’avatar jusqu’à ce que tu le relâches.",
+  "N4N0 asks to keep {control} on, put back after every reset and avatar change until released.": "N4N0 demande à garder {control} activé, remis après chaque réinitialisation et changement d’avatar jusqu’à ce que tu le relâches.",
+  "N4N0 asks to copy to your clipboard: {text}": "N4N0 demande à copier dans ton presse-papiers : {text}",
+  "N4N0 asks to show {text} to people while you are away, and to turn it on.": "N4N0 demande à montrer {text} aux autres pendant ton absence, et à l’activer.",
+  "N4N0 asks to show {text} to people while you are away, and to keep it off.": "N4N0 demande à montrer {text} aux autres pendant ton absence, et à le laisser désactivé.",
+  "N4N0 asks to show {text} to people while you are away.": "N4N0 demande à montrer {text} aux autres pendant ton absence.",
+  "The avatar's menu tags {control} as nsfw.": "Le menu de l’avatar marque {control} comme nsfw.",
+  "Say yes to do it.": "Dis oui pour le faire.",
+  "Say yes to do them.": "Dis oui pour les faire.",
+  "(or say yes or no)": "(ou dis oui ou non)",
+  "Sign in to Orbiters again to talk to N4N0.": "Reconnecte-toi à Orbiters pour parler à N4N0.",
+  "N4N0 needs a break: try again in a moment.": "N4N0 a besoin d’une pause : réessaie dans un instant.",
+  "N4N0's assistant is not available right now ({status}).": "L’assistant de N4N0 n’est pas disponible pour le moment ({status})."
 }

@@ -553,6 +553,18 @@ fn keyboard_and_mouse_go_only_into_the_foreground_game_window() {
 }
 
 #[test]
+fn the_person_starting_their_own_vrchat_closes_the_bridge_s_not_theirs() {
+    // BRIDGE-15: the app follows the person's new VRChat; the bridge's own stayed open on their account, "crashed" and nobody's.
+    let (game, _bridge, _server, client) = lab("person-beside");
+    arrive(&client);
+    game.person_starts_beside();
+    assert!(until(PATIENCE, || game.closes() >= 1), "the bridge's own window is asked to close");
+    let event = client.state()["bridge"]["last_event"].as_str().unwrap_or_default().to_string();
+    assert!(event.contains("started their own VRChat") && !event.contains("crashed"), "{event}");
+    client.fails("walk", json!({ "direction": "forward", "seconds": 1 }), "not_started_by_bridge");
+}
+
+#[test]
 fn a_click_is_called_off_when_the_person_comes_back_during_its_hover() {
     // BRIDGE-2: the press came 500 ms after the pointer was placed, without looking at the person again.
     let (game, bridge, _server, client) = lab("click-hover");

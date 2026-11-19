@@ -45,7 +45,7 @@ fn is_launcher(name: &str) -> bool {
 }
 
 /// The VRChats running now, by process id.
-fn vrchat_pids() -> Vec<u32> {
+pub(super) fn vrchat_pids() -> Vec<u32> {
     processes().into_iter().filter(|(_, name, _)| is_vrchat(name)).map(|(pid, _, _)| pid).collect()
 }
 

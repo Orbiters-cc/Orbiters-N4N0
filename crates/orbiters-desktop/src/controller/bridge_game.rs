@@ -115,6 +115,10 @@ impl RealGame {
 }
 
 impl Game for RealGame {
+    fn runs(&self, pid: u32) -> Option<bool> {
+        Some(super::bridge_side::vrchat_pids().contains(&pid))
+    }
+
     fn launch_args(&self) -> Option<Vec<String>> {
         let ctl = self.ctl().ok()?;
         let log = ctl.view().vrchat.world.log_file.clone()?;

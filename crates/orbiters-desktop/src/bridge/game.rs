@@ -394,6 +394,11 @@ pub trait Game: Send + Sync {
     fn launch_args(&self) -> Option<Vec<String>> {
         None
     }
+    /// Whether the VRChat process `pid` still runs, whichever VRChat the app follows now (`None`: cannot tell). Read from the
+    /// system's process list: no process is opened.
+    fn runs(&self, _pid: u32) -> Option<bool> {
+        None
+    }
     /// The window of the process `pid`, while it has one.
     fn window(&self, pid: u32) -> Option<GameWindow>;
     /// Whether `window` is the foreground window at this moment.

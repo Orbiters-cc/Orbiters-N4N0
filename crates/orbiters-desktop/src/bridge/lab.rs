@@ -107,6 +107,8 @@ struct State {
     foreign: bool,
     /// The running VRChat's command line, as its log lists it.
     args: Option<Vec<String>>,
+    /// The person's own VRChat, started beside the lab's (the app follows it then).
+    beside: Option<u32>,
     foreground: bool,
     /// When the player exists in the world it is loading.
     player_from: Option<Instant>,
@@ -231,6 +233,12 @@ impl LabGame {
             self.new_log();
             self.write_join(LAB_WORLD_A, instance, "Someone's World");
         }
+    }
+
+    /// The person starts their own VRChat beside the lab's: the app follows theirs from then on.
+    #[cfg(test)]
+    pub fn person_starts_beside(&self) {
+        self.state.lock().unwrap().beside = Some(4343);
     }
 
     /// What the stand-in OSC listener heard, oldest first, with when.
@@ -447,7 +455,7 @@ impl Game for LabGame {
         let walking = ["/input/MoveForward", "/input/MoveBackward", "/input/MoveLeft", "/input/MoveRight"].iter().any(|a| self.last_value(a) == Some(1.0));
         Seen {
             running,
-            pid: state.pid,
+            pid: state.beside.or(state.pid),
             log_found: true,
             world_id: world.world_id.clone().filter(|_| running),
             world_name: world.world_name.clone().filter(|_| running),
@@ -537,6 +545,11 @@ impl Game for LabGame {
             state.player_from = Some(Instant::now() + load + state.behaviour.player_after);
         }
         Ok(())
+    }
+
+    fn runs(&self, pid: u32) -> Option<bool> {
+        let state = self.state.lock().unwrap();
+        Some(state.pid == Some(pid) || state.beside == Some(pid))
     }
 
     fn launch_args(&self) -> Option<Vec<String>> {

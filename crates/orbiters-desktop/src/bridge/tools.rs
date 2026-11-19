@@ -778,6 +778,30 @@ impl Bridge {
             return;
         }
         // The game this bridge started went away by itself (or as the bridge left a place it must not be in).
+        // The main session's own VRChat still runs, but the app follows another: the person started theirs (BRIDGE-15). Two
+        // clients of their account must not stay: the bridge closes its own (never theirs) and says so.
+        let mine = run.pid.filter(|_| s.is_main() && !run.candidate && !run.closing && run.pid != seen.pid);
+        if let Some(pid) = mine.filter(|pid| seen.pid.is_some() && s.game.runs(*pid) == Some(true)) {
+            let why = "The person started their own VRChat: the bridge closed its own, so that only theirs runs on their account. Open a session of your own (open_session with a profile) or stop."; // i18n: not shown (an AI client reads it)
+            run.pid = None;
+            run.placed = None;
+            if run.going.take().is_some() {
+                settled = true;
+            }
+            run.event = Some(why.into());
+            run.left = false;
+            run.leaving = true;
+            drop(run);
+            self.release_session(s);
+            if let Some(window) = s.game.window(pid) {
+                let _ = s.game.close(&window);
+            }
+            self.log(false, why);
+            if settled {
+                s.game.hold_reconstructions(false);
+            }
+            return;
+        }
         if !run.closing && run.going.as_ref().is_none_or(|g| g.started) && run.pid.is_some() && run.pid != seen.pid {
             let running = run.going.is_some();
             run.pid = None;

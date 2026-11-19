@@ -178,6 +178,10 @@ pub struct Controller {
     /// Bumped by every capture worker process started; and the one the recording under way was started on.
     worker_incarnation: AtomicU64,
     recording_worker: AtomicU64,
+    /// The worker installed now (set under `worker` when it is), and the number of the recording `recording_worker`
+    /// was started for (verify2-controller: an end is judged by both, in the same update that acts on it).
+    worker_installed: AtomicU64,
+    recording_worker_number: AtomicU64,
     kit_epoch: Mutex<(u64,Option<String>)>,
     /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
     /// the app drives them), and when the avatar last (re)loaded, which resets them.
@@ -558,6 +562,8 @@ impl Controller {
             capture_serial: AtomicU64::new(0),
             worker_incarnation: AtomicU64::new(0),
             recording_worker: AtomicU64::new(0),
+            worker_installed: AtomicU64::new(0),
+            recording_worker_number: AtomicU64::new(0),
             kit_epoch: Mutex::default(),
             avatar_before: Mutex::new(None),
             hide: Mutex::new(hide_self::HideRuntime::with_journal((!cfg!(test)).then(hide_self::masks_journal))),
@@ -833,6 +839,8 @@ impl Controller {
         // This worker process: its events and its end count only while the recording under way is its own, or while no
         // other worker started since (verify-controller: a dead worker's late end reset a new worker's recording).
         let incarnation = self.worker_incarnation.fetch_add(1, Ordering::AcqRel) + 1;
+        // Installed from now (under `worker`): its first events (Ready) may come before the spawn returns.
+        self.worker_installed.store(incarnation, Ordering::Release);
         let on_event = {
             let ctl = self.clone();
             move |e| {
@@ -865,36 +873,41 @@ impl Controller {
     /// Whether what worker `incarnation` says still counts: it is the newest worker, or the recording under way was
     /// started on it.
     fn worker_counts(&self, incarnation: u64) -> bool {
-        self.worker_incarnation.load(Ordering::Acquire) == incarnation || self.recording_worker.load(Ordering::Acquire) == incarnation
+        self.worker_installed.load(Ordering::Acquire) == incarnation || self.worker_runs_recording(incarnation)
+    }
+
+    /// Whether the recording under way now was started on worker `incarnation`.
+    fn worker_runs_recording(&self, incarnation: u64) -> bool {
+        self.recording_worker.load(Ordering::Acquire) == incarnation && self.recording_worker_number.load(Ordering::Acquire) == self.capture_serial.load(Ordering::Acquire)
     }
 
     /// Worker `incarnation` ended. Its recording, if one was under way, ended with it; a worker replaced since (a stuck
     /// one restarted) whose end is heard late leaves the newer worker's recording alone.
     fn on_worker_exit(self: &Shared, incarnation: u64) {
-        if !self.worker_counts(incarnation) {
-            return;
+        // Its recording is the one under way only if it was started on this worker, for this number: a recording
+        // being started on a replacement (already numbered, its Start not sent yet) is not its to end (verify2).
+        if self.worker_runs_recording(incarnation) {
+            self.put_vrchat_back();
         }
-        {
-            let ctl = self;
-            {
-                ctl.put_vrchat_back();
-                // What the recording was for ends with it, BEFORE Idle is published: a start after Idle may be a new
-                // 3D picture's or scan's, whose flag must stay (CTL-11 a).
-                if ctl.snapshot.lock().unwrap().capture.state != CaptureState::Idle {
-                    ctl.burst.lock().unwrap().recording = false;
-                    ctl.scan.lock().unwrap().recording = false;
-                }
-                ctl.update(|s| {
-                    s.worker.ready = false;
-                    // Whatever it was doing (recording, saving a session) ended with it.
-                    if s.capture.state != CaptureState::Idle {
-                        s.capture.state = CaptureState::Idle;
-                        s.capture.from_osc = false;
-                        s.capture.error = Some(tr("The capture worker stopped unexpectedly.").into());
-                    }
-                });
-                ctl.capture_ended();
+        let mut ended = false;
+        self.update(|s| {
+            // Judged again here, in the update that acts on it: a replacement installed meanwhile wins.
+            let mine = self.worker_runs_recording(incarnation);
+            if self.worker_installed.load(Ordering::Acquire) == incarnation {
+                s.worker.ready = false;
             }
+            if mine && s.capture.state != CaptureState::Idle {
+                // What the recording was for ends with it, before Idle shows (CTL-11 a).
+                self.burst.lock().unwrap().recording = false;
+                self.scan.lock().unwrap().recording = false;
+                s.capture.state = CaptureState::Idle;
+                s.capture.from_osc = false;
+                s.capture.error = Some(tr("The capture worker stopped unexpectedly.").into());
+                ended = true;
+            }
+        });
+        if ended {
+            self.capture_ended();
         }
     }
 
@@ -1037,12 +1050,13 @@ impl Controller {
                     let _ = self.stop_capture(StopOf::Recording(self.recording_number()));
                 }
             }
-            WorkerEvent::Stopped { manifest, reason, .. } => {
+            WorkerEvent::Stopped { session_dir, manifest, reason } => {
                 // A new Start came (a world split), or the worker started over by itself at a new frame size
                 // ("resized": a session holds one size): the recording goes on in the next session.
                 let resized = reason == "resized";
                 let restarting = reason == "restarted" || resized;
-                let session = self.snapshot.lock().unwrap().capture.session_dir.clone();
+                // The session the worker says it saved, not whatever the snapshot names by now (verify2).
+                let session = Some(session_dir).filter(|d| !d.as_os_str().is_empty()).or_else(|| self.snapshot.lock().unwrap().capture.session_dir.clone());
                 if !restarting {
                     self.put_vrchat_back();
                 }
@@ -1307,8 +1321,12 @@ impl Controller {
                 self.flush_osc(&mut osc);
                 osc.forwarding = false;
                 let sent = self.send(&WorkerCommand::Start(Box::new(cmd)));
-                // The worker this recording runs on (the newest: `send` started one if none ran).
-                self.recording_worker.store(self.worker_incarnation.load(Ordering::Acquire), Ordering::Release);
+                // The worker this recording runs on, once its Start went: the one installed (`send` started one if
+                // none ran), with the recording's number. A Start that failed leaves the last one's (verify2).
+                if sent.is_ok() {
+                    self.recording_worker_number.store(number, Ordering::Release);
+                    self.recording_worker.store(self.worker_installed.load(Ordering::Acquire), Ordering::Release);
+                }
                 if sent.is_ok() && record_parameters {
                     let samples = initial_samples(vrchat, &osc.latest, fetch_started);
                     osc.forwarding = true;
@@ -3584,14 +3602,42 @@ mod tests {
     fn a_replaced_workers_late_end_leaves_the_new_recording_alone() {
         use std::sync::atomic::Ordering;
         let ctl = super::Controller::new(orbiters_core::settings::Settings::default());
-        // Worker 1 died, worker 2 was started and records.
-        ctl.worker_incarnation.store(2, Ordering::Release);
+        // Worker 1 died, worker 2 was started and records (recording 5).
+        ctl.worker_installed.store(2, Ordering::Release);
         ctl.recording_worker.store(2, Ordering::Release);
+        ctl.capture_serial.store(5, Ordering::Release);
+        ctl.recording_worker_number.store(5, Ordering::Release);
         ctl.update(|s| s.capture.state = super::CaptureState::Recording);
         ctl.on_worker_exit(1);
         assert_eq!(ctl.view().capture.state, super::CaptureState::Recording, "worker 1's late end");
         ctl.on_worker_exit(2);
         assert_eq!(ctl.view().capture.state, super::CaptureState::Idle, "its own worker ended");
+    }
+
+    /// verify2-controller: a worker whose end was heard while it was still the one installed (nothing recording), and
+    /// is acted on only after the next recording was numbered on a replacement, does not end that recording; the old
+    /// recording number of a worker is not taken for the new one either.
+    #[test]
+    fn a_workers_late_end_never_ends_a_recording_started_since() {
+        use std::sync::atomic::Ordering;
+        let ctl = super::Controller::new(orbiters_core::settings::Settings::default());
+        // Worker 1 ran recording 3 earlier; it is still installed and idle when it dies.
+        ctl.worker_installed.store(1, Ordering::Release);
+        ctl.recording_worker.store(1, Ordering::Release);
+        ctl.recording_worker_number.store(3, Ordering::Release);
+        ctl.capture_serial.store(3, Ordering::Release);
+        // Before its end is acted on: recording 4 is numbered and Starting (its Start not sent yet).
+        ctl.capture_serial.store(4, Ordering::Release);
+        ctl.update(|s| s.capture.state = super::CaptureState::Starting);
+        ctl.on_worker_exit(1);
+        assert_eq!(ctl.view().capture.state, super::CaptureState::Starting, "recording 4 is not worker 1's");
+        // Recording 4 starts on worker 2; worker 1's end, heard again, leaves it.
+        ctl.worker_installed.store(2, Ordering::Release);
+        ctl.recording_worker.store(2, Ordering::Release);
+        ctl.recording_worker_number.store(4, Ordering::Release);
+        ctl.update(|s| s.capture.state = super::CaptureState::Recording);
+        ctl.on_worker_exit(1);
+        assert_eq!(ctl.view().capture.state, super::CaptureState::Recording);
     }
 
     /// verify-controller (CTL-1 at shutdown): a change queued after the last flush never starts a second writer that writes

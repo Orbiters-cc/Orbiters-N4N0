@@ -530,3 +530,31 @@ impl Bridge {
         self.maps.keep_in(dir);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SWEEP-19 a: every picture's share stayed in the service's memory for the whole session (a long tour: hundreds of MB).
+    /// Only the last ones stay; any other comes back from its file when a map needs it.
+    #[test]
+    fn the_pictures_kept_in_memory_are_bounded_and_the_others_come_back_from_their_files() {
+        let dir = std::env::temp_dir().join(format!("orbiters-map-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let maps = Maps::default();
+        maps.keep_in(dir.clone());
+        for k in 0..200 {
+            let c = Capture { session: format!("s{k}"), centre: [k as f32, 0.0, 0.0], path: vec![[k as f32, 0.0, 0.0]], voxels: vec![[k, 0, 0, 2]; 50], ..Default::default() };
+            std::fs::write(dir.join(format!("s{k}.json")), serde_json::to_vec(&c).unwrap()).unwrap();
+        }
+        for k in 0..200 {
+            assert_eq!(maps.capture(&dir, &format!("s{k}")).unwrap().centre[0], k as f32);
+        }
+        let kept = maps.captures.lock().unwrap().len();
+        assert!(kept <= 64, "{kept} pictures kept in memory");
+        // The first, long gone from memory, is read again from its file.
+        assert_eq!(maps.capture(&dir, "s0").unwrap().voxels.len(), 50);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

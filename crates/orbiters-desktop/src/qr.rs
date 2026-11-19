@@ -178,6 +178,8 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
                     last_frame = Some(Instant::now());
                     framed = true;
                     let at = Instant::now();
+                    #[cfg(test)]
+                    tests::maybe_panic(wanted);
                     let reading = looks.read(&copy);
                     note.looked(copy.look, size, at.elapsed(), &reading);
                     found = reading.codes;
@@ -284,6 +286,76 @@ impl Note {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Scans (by their sender's name) whose decoder panics on its next pictures, and how many times.
+    static PANICS_FOR: std::sync::Mutex<Vec<(String, u32)>> = std::sync::Mutex::new(Vec::new());
+
+    /// The decoder of the scan reading `wanted` panics here when a test asked for it (SWEEP-14: as a crafted grid could).
+    pub(super) fn maybe_panic(wanted: &str) {
+        let mut all = PANICS_FOR.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(left) = all.iter_mut().find(|(w, n)| w == wanted && *n > 0) {
+            left.1 -= 1;
+            drop(all);
+            panic!("index out of bounds: a crafted grid (test)");
+        }
+    }
+
+    /// SWEEP-14: a picture that makes the decoder panic costs that picture: the scan goes on and reads the code it shows next,
+    /// and the counter says what was skipped. Without the guard the scanner's thread ended there and the code was never read.
+    #[cfg(windows)]
+    #[test]
+    fn a_picture_that_makes_the_decoder_panic_costs_that_picture_not_the_scan() {
+        let name = format!("OrbitersQrPanic{}", std::process::id());
+        PANICS_FOR.lock().unwrap().push((name.clone(), 3));
+        let seen = scan_a_code(&name, "https://orbiters.cc/after-a-panic");
+        assert!(seen.contains(&QrSeen::Code("https://orbiters.cc/after-a-panic".into())), "{seen:?}");
+        assert!(!seen.iter().any(|s| matches!(s, QrSeen::Failed(_))), "{seen:?}");
+        assert_eq!(PANICS_FOR.lock().unwrap().iter().find(|(w, _)| *w == name).map(|p| p.1), Some(0), "the decoder panicked three times");
+    }
+
+    /// A test's own Spout sender showing `link`'s code, scanned until the code is read (60 s at most): what was said.
+    #[cfg(windows)]
+    fn scan_a_code(name: &str, link: &str) -> Vec<QrSeen> {
+        use std::sync::mpsc;
+        let (w, h) = (1280usize, 720usize);
+        let (bgra, stride) = frame_with_code(link, w, h, 500, 200, 8);
+        let rgba: Vec<u8> = (0..h).flat_map(|y| bgra[y * stride..y * stride + w * 4].to_vec()).collect();
+        let stop_sending = Arc::new(AtomicBool::new(false));
+        let sending = {
+            let (name, stop) = (name.to_string(), stop_sending.clone());
+            std::thread::spawn(move || {
+                let mut sender = orbiters_spout::Sender::new(&name, w as u32, h as u32).unwrap();
+                let mut frame = rgba;
+                let mut k = 0u8;
+                while !stop.load(Ordering::Relaxed) {
+                    k = k.wrapping_add(1);
+                    frame[(h / 5 * w) * 4] = k;
+                    sender.send_rgba(&frame).unwrap();
+                    std::thread::sleep(Duration::from_millis(16));
+                }
+            })
+        };
+        let patience = Duration::from_secs(60);
+        let deadline = std::time::Instant::now() + patience;
+        while !orbiters_spout::list_senders().contains(&name.to_string()) {
+            assert!(std::time::Instant::now() < deadline, "the test's Spout sender never showed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (tx, rx) = mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        let scan = start(name.to_string(), Box::new(move |seen| tx.lock().unwrap().send(seen).unwrap())).unwrap();
+        let mut seen = Vec::new();
+        let deadline = std::time::Instant::now() + patience;
+        while !seen.contains(&QrSeen::Code(link.into())) && std::time::Instant::now() < deadline {
+            if let Ok(s) = rx.recv_timeout(Duration::from_millis(200)) {
+                seen.push(s);
+            }
+        }
+        drop(scan);
+        stop_sending.store(true, Ordering::Relaxed);
+        sending.join().unwrap();
+        seen
+    }
 
     /// A frame `width` × `height` (BGRA, rows padded as a mapped texture's) of a grey world with `text`'s QR code drawn
     /// `module` pixels a module with its top left at (`x`, `y`), and the stride.

@@ -328,51 +328,57 @@ pub struct Map {
     pub captures: Vec<std::sync::Arc<Capture>>,
 }
 
+/// The box a map of `captures` covers: its corner, its voxels along each axis, and their side.
+pub(crate) fn extent(captures: &[std::sync::Arc<Capture>]) -> ([f32; 3], [usize; 3], f32) {
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    for c in captures {
+        let (l, h) = around(&c.path);
+        for k in 0..3 {
+            lo[k] = lo[k].min(l[k]);
+            hi[k] = hi[k].max(h[k]);
+        }
+    }
+    // Not beyond what was seen.
+    let mut seen_lo = [i32::MAX; 3];
+    let mut seen_hi = [i32::MIN; 3];
+    for v in captures.iter().flat_map(|c| &c.voxels) {
+        for k in 0..3 {
+            seen_lo[k] = seen_lo[k].min(v[k]);
+            seen_hi[k] = seen_hi[k].max(v[k]);
+        }
+    }
+    if seen_lo[0] <= seen_hi[0] {
+        for k in 0..3 {
+            lo[k] = lo[k].max(seen_lo[k] as f32 * VOXEL - 1.0);
+            hi[k] = hi[k].min((seen_hi[k] + 1) as f32 * VOXEL + 1.0);
+        }
+    }
+    for c in captures {
+        for p in &c.path {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k] - 1.0);
+                hi[k] = hi[k].max(p[k] + 1.0);
+            }
+        }
+    }
+    let mut scale = 1;
+    let dims = loop {
+        let v = VOXEL * scale as f32;
+        let d = [0, 1, 2].map(|k| ((hi[k] - lo[k]) / v).ceil().max(1.0) as usize + 1);
+        if d[0] * d[1] * d[2] <= MOST_VOXELS || scale >= 8 {
+            break d;
+        }
+        scale *= 2;
+    };
+    let voxel = VOXEL * scale as f32;
+    let lo = lo.map(|v| (v / voxel).floor() * voxel);
+    (lo, dims, voxel)
+}
+
 impl Map {
     pub fn build(captures: Vec<std::sync::Arc<Capture>>) -> Map {
-        let mut lo = [f32::MAX; 3];
-        let mut hi = [f32::MIN; 3];
-        for c in &captures {
-            let (l, h) = around(&c.path);
-            for k in 0..3 {
-                lo[k] = lo[k].min(l[k]);
-                hi[k] = hi[k].max(h[k]);
-            }
-        }
-        // Not beyond what was seen.
-        let mut seen_lo = [i32::MAX; 3];
-        let mut seen_hi = [i32::MIN; 3];
-        for v in captures.iter().flat_map(|c| &c.voxels) {
-            for k in 0..3 {
-                seen_lo[k] = seen_lo[k].min(v[k]);
-                seen_hi[k] = seen_hi[k].max(v[k]);
-            }
-        }
-        if seen_lo[0] <= seen_hi[0] {
-            for k in 0..3 {
-                lo[k] = lo[k].max(seen_lo[k] as f32 * VOXEL - 1.0);
-                hi[k] = hi[k].min((seen_hi[k] + 1) as f32 * VOXEL + 1.0);
-            }
-        }
-        for c in &captures {
-            for p in &c.path {
-                for k in 0..3 {
-                    lo[k] = lo[k].min(p[k] - 1.0);
-                    hi[k] = hi[k].max(p[k] + 1.0);
-                }
-            }
-        }
-        let mut scale = 1;
-        let dims = loop {
-            let v = VOXEL * scale as f32;
-            let d = [0, 1, 2].map(|k| ((hi[k] - lo[k]) / v).ceil().max(1.0) as usize + 1);
-            if d[0] * d[1] * d[2] <= MOST_VOXELS || scale >= 8 {
-                break d;
-            }
-            scale *= 2;
-        };
-        let voxel = VOXEL * scale as f32;
-        let lo = lo.map(|v| (v / voxel).floor() * voxel);
+        let (lo, dims, voxel) = extent(&captures);
         let mut map = Map {
             voxel,
             lo,

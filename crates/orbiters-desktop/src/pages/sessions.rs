@@ -157,6 +157,15 @@ impl State {
     /// Whether something is still being read (the list, pictures, what a clean-up would delete): the screenshots
     /// wait for it.
     pub fn busy(&self) -> bool {
+        self.busy_now()
+    }
+
+    /// A window, dialog, viewer or editor of the page is open (`crate::window_rest`).
+    pub fn holds(&self) -> bool {
+        self.gallery.holds() || self.detail.is_some() || self.viewer.is_some() || self.storage.is_some() || self.export.is_some() || self.again.is_some()
+    }
+
+    fn busy_now(&self) -> bool {
         self.gallery.busy()
             || self.list.running()
             || self.thumbs.values().any(|k| matches!(k.thumb, Thumb::Loading(_)))

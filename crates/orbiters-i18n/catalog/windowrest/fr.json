@@ -1,0 +1,7 @@
+{
+  "Orbiters - N4N0 will minimize to save memory": "Orbiters - N4N0 va se réduire pour libérer de la mémoire",
+  "In {seconds} s, to the tray: everything keeps running there.": "Dans {seconds} s, dans la zone de notification : tout continue d’y tourner.",
+  "Keep open": "Garder ouvert",
+  "Close the minimized window while playing": "Fermer la fenêtre réduite pendant que tu joues",
+  "After 15 minutes minimized while VRChat runs, Orbiters - N4N0 asks for 8 seconds, then closes its window to the tray to give its memory back. Open it again from the tray: it comes back on its page.": "Après 15 minutes réduite pendant que VRChat tourne, Orbiters - N4N0 te prévient pendant 8 secondes, puis range sa fenêtre dans la zone de notification pour libérer sa mémoire. Rouvre-la depuis la zone de notification : elle revient sur sa page."
+}

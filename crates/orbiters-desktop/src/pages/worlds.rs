@@ -142,6 +142,15 @@ impl State {
 
     /// Whether something is still being read (the worlds, pictures): the screenshots wait for it.
     pub fn busy(&self) -> bool {
+        self.busy_now()
+    }
+
+    /// A world's page, its Share window or a question is open (`crate::window_rest`).
+    pub fn holds(&self) -> bool {
+        self.open.is_some() || self.sharing.is_some() || self.again.is_some()
+    }
+
+    fn busy_now(&self) -> bool {
         self.list.running() || self.pictures.as_ref().is_some_and(|p| p.loading()) || self.share_prepare.running()
     }
 

@@ -16,6 +16,21 @@ use orbiters_ui::offscreen::save_png;
 use std::path::Path;
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
+    // Settings' switch for closing the minimised window while playing (Interface).
+    scenarios.push(Scenario {
+        name: "settings-close-minimized",
+        page: Page::Settings,
+        snapshot: scenarios[0].snapshot.clone(),
+        frames: 120,
+        splash: false,
+        open_detail: false,
+        toasts: vec![],
+        pointer: None,
+        scroll: 2600.0,
+        world: None,
+        home: None,
+        library: None,
+    });
     let mut snapshot = scenarios[0].snapshot.clone();
     snapshot.steamvr.running = true;
     snapshot.steamvr.overlay = true;
@@ -81,6 +96,34 @@ pub(super) fn shots(out: &Path, settings: &Settings) -> anyhow::Result<()> {
             });
             let path = out.join(format!("wake-offer-vr-{}-{state}.png", language.tag()));
             save_png(&path, &over_ground(canvas.pixels(), w, h))?;
+            println!("{}", path.display());
+        }
+    }
+    // "Orbiters - N4N0 will minimize to save memory" (LIGHT-DESKTOP-8): the VR band in every language, at rest and under
+    // a laser, 4 of its 8 seconds left; the desktop card at 100 % and 150 %, at rest and under the pointer.
+    for language in orbiters_i18n::Language::ALL {
+        for (state, hover) in [("rest", false), ("laser", true)] {
+            let mut canvas = Canvas::new(w, h);
+            orbiters_i18n::in_language(language, || {
+                for _ in 0..2 {
+                    canvas.paint(0.0, |p| crate::window_rest::paint_band(p, hover, 0.5, 4));
+                }
+            });
+            let path = out.join(format!("window-rest-vr-{}-{state}.png", language.tag()));
+            save_png(&path, &over_ground(canvas.pixels(), w, h))?;
+            println!("{}", path.display());
+        }
+        for (scale, hover) in [(1.0f32, false), (1.5, true)] {
+            let (cw, ch) = ((crate::window_rest::CARD.x * scale).round() as u32, (crate::window_rest::CARD.y * scale).round() as u32);
+            let mut canvas = Canvas::new(cw, ch);
+            orbiters_i18n::in_language(language, || {
+                for _ in 0..2 {
+                    canvas.paint(0.0, |p| crate::window_rest::paint_card(p, scale, hover, 0.62, 5));
+                }
+            });
+            let state = if hover { "hover" } else { "rest" };
+            let path = out.join(format!("window-rest-card-{}-{}x-{state}.png", language.tag(), scale));
+            save_png(&path, &over_ground(canvas.pixels(), cw, ch))?;
             println!("{}", path.display());
         }
     }

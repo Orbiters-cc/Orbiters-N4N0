@@ -479,6 +479,7 @@ pub mod vrchat_data;
 pub mod vrchat_login;
 pub mod camera_tools;
 pub mod vr_audio;
+mod window_rest;
 mod world_captures;
 mod world_feedback;
 pub use account::open_url;

@@ -140,6 +140,7 @@ fn server(status: u16) -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>
             let mut length = 0;
             let mut line = String::new();
             let mut path = String::new();
+            let mut auth = None;
             loop {
                 line.clear();
                 if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
@@ -151,11 +152,17 @@ fn server(status: u16) -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>
                 if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                     length = v.trim().parse().unwrap_or(0);
                 }
+                if line.to_ascii_lowercase().starts_with("authorization:") {
+                    auth = Some(line["authorization:".len()..].trim().to_string());
+                }
             }
             let mut body = vec![0; length];
             let _ = reader.read_exact(&mut body);
             let mut value: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             value["path"] = path.into();
+            if let Some(auth) = auth {
+                value["authorization"] = auth.into();
+            }
             keep.lock().unwrap().push(value);
             let mut out = stream;
             let _ = write!(out, "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}");
@@ -178,7 +185,7 @@ fn orbiters_takes_them_refuses_them_or_is_not_there() {
     let dir = temp_dir("taken");
     let spool = filled(&dir);
     let (base, got) = server(200);
-    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base)), Sent::Taken(3));
+    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base), None), Sent::Taken(3));
     assert!(spool.waiting().is_empty());
     let sent = got.lock().unwrap()[0].clone();
     assert_eq!(sent["path"], "/n4n0/metrics");
@@ -199,7 +206,7 @@ fn orbiters_takes_them_refuses_them_or_is_not_there() {
     let dir = temp_dir("refused");
     let spool = filled(&dir);
     let (base, _) = server(404);
-    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base)), Sent::Dropped(3));
+    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base), None), Sent::Dropped(3));
     assert!(spool.waiting().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -207,13 +214,13 @@ fn orbiters_takes_them_refuses_them_or_is_not_there() {
     let dir = temp_dir("kept");
     let spool = filled(&dir);
     let (base, _) = server(503);
-    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base)), Sent::Kept);
-    assert_eq!(spool.send(&orbiters_core::account::Api::at("http://127.0.0.1:9/")), Sent::Kept);
+    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base), None), Sent::Kept);
+    assert_eq!(spool.send(&orbiters_core::account::Api::at("http://127.0.0.1:9/"), None), Sent::Kept);
     assert_eq!(spool.waiting().len(), 3);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The performance figures (`usage::perf`): windows wait beside the events, on disk, go in the same request with the team's code, and
+/// The performance figures (`usage::perf`): windows wait beside the events, on disk, go in the same request, and
 /// are forgotten with them; while the statistics are off nothing is summed.
 #[test]
 fn performance_windows_go_with_the_events_and_are_forgotten_with_them() {
@@ -235,7 +242,7 @@ fn performance_windows_go_with_the_events_and_are_forgotten_with_them() {
     spool.perf(sample(1_010_000, "wheel"), false);
     spool.perf(sample(1_020_000, "wheel/Pictures"), false);
     assert!(spool.perf_waiting().is_empty(), "off: nothing summed");
-    spool.origin(true, Some("0123456789abcdef".into()));
+    spool.origin(true);
     spool.perf(sample(1_000_000, "wheel"), true);
     spool.perf(sample(1_010_000, "wheel"), true);
     spool.perf(sample(1_020_000, "wheel/Pictures"), true);
@@ -246,12 +253,12 @@ fn performance_windows_go_with_the_events_and_are_forgotten_with_them() {
     let again = Spool::default();
     again.open(dir.clone());
     assert_eq!(again.perf_waiting(), waiting);
-    // One request: the events, the window, the team's code.
+    // One request: the events and the window.
     let (base, got) = server(200);
-    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base)), Sent::Taken(4));
+    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base), None), Sent::Taken(4));
     assert!(spool.perf_waiting().is_empty() && spool.waiting().is_empty());
     let sent = got.lock().unwrap()[0].clone();
-    assert_eq!(sent["team"], "0123456789abcdef");
+    assert!(sent.get("team").is_none() && sent.get("authorization").is_none(), "no account code, no credential: {sent}");
     assert_eq!(sent["perf"].as_array().unwrap().len(), 1);
     assert_eq!(sent["perf"][0]["screens"]["vrchat-desktop"], "wheel");
     assert_eq!(sent["perf"][0]["cpu_system"]["mean"], 20.0);
@@ -261,6 +268,110 @@ fn performance_windows_go_with_the_events_and_are_forgotten_with_them() {
     assert_eq!(spool.perf_waiting().len(), 2, "the Pictures window, then a minute of the wheel");
     spool.forget();
     assert!(spool.perf_waiting().is_empty() && !dir.join("perf-waiting.jsonl").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 2026-11-19 (Enzo: "identify the usages by user"): what was counted before the notice that says it is linked to the account goes
+/// without a credential and under the install id of before; what was counted after it, signed in, goes with that account's own
+/// credential (the server learns the account from it) under a new install id; a session never spans two stamps; signed out, or for
+/// another account or another server, no credential goes; the stamps never leave the computer.
+#[test]
+fn only_what_was_counted_after_the_new_notice_goes_with_the_account() {
+    use super::spool::{Signed, Stamp};
+    let dir = temp_dir("who");
+    let spool = Spool::default();
+    spool.open(dir.clone());
+    spool.linked(7, Role::Window);
+    // Signed in all along, the old notice only: the account is not even kept.
+    spool.collecting(Stamp::now(false, Some("42".into())));
+    spool.steps(7, vec![step(Kind::Enter, "Home", None, None)], true);
+    assert!(spool.waiting().iter().all(|e| e.who.is_none()), "{:?}", spool.waiting());
+    // The new notice closed: the session ends under the old stamp and starts again under a new id.
+    spool.collecting(Stamp::now(true, Some("42".into())));
+    spool.steps(7, vec![step(Kind::Enter, "Settings", Some("Home"), None), step(Kind::Press, "Settings", None, Some("Beta usage statistics"))], true);
+    // Signed out: again a new session, linked to nobody.
+    spool.collecting(Stamp::now(true, None));
+    spool.steps(7, vec![step(Kind::Enter, "Home", Some("Settings"), None)], true);
+    let kinds: Vec<String> = spool.waiting().iter().map(|e| format!("{} {}", e.kind, e.who.account.as_deref().unwrap_or(if e.who.told { "told" } else { "old" }))).collect();
+    assert_eq!(kinds, ["start old", "enter old", "end old", "start 42", "enter 42", "press 42", "end 42", "start told", "enter told"]);
+    // What waits on disk keeps its stamp.
+    let again = Spool::default();
+    again.open(dir.clone());
+    assert_eq!(again.waiting(), spool.waiting());
+
+    let (base, got) = server(200);
+    let api = orbiters_core::account::Api::at(&base);
+    let signed = Signed { account: "42".into(), base: api.url(""), token: "orbit-secret".into() };
+    while let Sent::Taken(_) = spool.send(&api, Some(&signed)) {}
+    assert!(spool.waiting().is_empty());
+    let sent = got.lock().unwrap().clone();
+    assert_eq!(sent.len(), 3, "one request per stamp: {sent:?}");
+    let sessions = |v: &serde_json::Value| v["events"].as_array().unwrap().iter().map(|e| e["session"].as_str().unwrap().to_string()).collect::<std::collections::BTreeSet<_>>();
+    let (old, linked, nobody) = (&sent[0], &sent[1], &sent[2]);
+    assert_eq!(old["events"].as_array().unwrap().len(), 3);
+    assert!(old.get("authorization").is_none(), "counted under the old notice: no credential, ever");
+    assert_eq!(linked["authorization"], "Bearer orbit-secret");
+    assert_eq!(linked["events"].as_array().unwrap().len(), 4);
+    assert!(nobody.get("authorization").is_none(), "signed out: nobody");
+    assert_ne!(old["install"], linked["install"], "a new install id after the notice: the old rows are not joined to the account");
+    assert_eq!(linked["install"], nobody["install"]);
+    assert!(sessions(old).is_disjoint(&sessions(linked)) && sessions(linked).is_disjoint(&sessions(nobody)), "no session spans two stamps");
+    for request in &sent {
+        let text = request.to_string();
+        let mut body = request.clone();
+        body.as_object_mut().unwrap().remove("authorization");
+        assert!(!body.to_string().contains("orbit-secret") && !body.to_string().contains("\"42\""), "neither credential nor account id in the body: {text}");
+        assert!(request["events"].as_array().unwrap().iter().all(|e| e.get("who").is_none()), "the stamp stays here: {text}");
+    }
+    // Nothing counted before the notice waits any more: the old install id is gone from the computer.
+    assert!(!dir.join("install-id").exists() && dir.join("install-id-2").exists());
+
+    // Stamped for 42, but now another account is signed in, or the credential is for another server: no credential goes.
+    spool.collecting(Stamp::now(true, Some("42".into())));
+    spool.steps(7, vec![step(Kind::Enter, "Worlds", None, None)], true);
+    let other = Signed { account: "43".into(), ..signed.clone() };
+    while let Sent::Taken(_) = spool.send(&api, Some(&other)) {}
+    spool.steps(7, vec![step(Kind::Enter, "Home", Some("Worlds"), None)], true);
+    let elsewhere = Signed { base: "https://orbiters.cc/api/".into(), ..signed.clone() };
+    while let Sent::Taken(_) = spool.send(&api, Some(&elsewhere)) {}
+    assert!(spool.waiting().is_empty());
+    let sent = got.lock().unwrap().clone();
+    let later: usize = sent[3..].iter().map(|r| r["events"].as_array().unwrap().len()).sum();
+    assert_eq!(later, 4, "the signed-out session's end, then Worlds' start and enter, then Home: {:?}", &sent[3..]);
+    assert!(sent[3..].iter().all(|r| r.get("authorization").is_none()), "{:?}", &sent[3..]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The performance windows follow the same rule: a window sums samples of one stamp, and goes in the batch of its stamp.
+#[test]
+fn performance_windows_are_split_by_whom_they_were_counted_for() {
+    use super::perf::{Context, Sample};
+    use super::spool::{Signed, Stamp};
+    let dir = temp_dir("who-perf");
+    let spool = Spool::default();
+    spool.open(dir.clone());
+    let sample = |at: u64| Sample { at, seconds: 10.0, context: Context { mode: "idle".into(), ..Default::default() }, cpu_system: 5.0, cores: 8, ..Default::default() };
+    spool.collecting(Stamp::now(false, Some("42".into())));
+    spool.perf(sample(1_000_000), true);
+    spool.perf(sample(1_010_000), true);
+    spool.collecting(Stamp::now(true, Some("42".into())));
+    spool.perf(sample(1_020_000), true);
+    spool.perf(sample(1_030_000), true);
+    spool.collecting(Stamp::now(true, None));
+    spool.perf(sample(1_040_000), true);
+    let waiting = spool.perf_waiting();
+    assert_eq!(waiting.len(), 2, "closed at each change of stamp");
+    assert_eq!((waiting[0].samples, waiting[0].who.clone()), (2, Stamp::default()));
+    assert_eq!((waiting[1].samples, waiting[1].who.account.as_deref()), (2, Some("42")));
+    let (base, got) = server(200);
+    let api = orbiters_core::account::Api::at(&base);
+    let signed = Signed { account: "42".into(), base: api.url(""), token: "orbit-secret".into() };
+    while let Sent::Taken(_) = spool.send(&api, Some(&signed)) {}
+    let sent = got.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2);
+    assert!(sent[0].get("authorization").is_none());
+    assert_eq!(sent[1]["authorization"], "Bearer orbit-secret");
+    assert!(sent.iter().all(|r| r["perf"][0].get("who").is_none()), "{sent:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -315,6 +426,6 @@ fn performance_reaches_a_server_under_test() {
         eprintln!("{}", serde_json::to_string(&w).unwrap());
     }
     assert!(!spool.perf_waiting().is_empty());
-    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base)), Sent::Taken(waiting));
+    assert_eq!(spool.send(&orbiters_core::account::Api::at(&base), None), Sent::Taken(waiting));
     let _ = std::fs::remove_dir_all(&dir);
 }

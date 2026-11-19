@@ -7,7 +7,9 @@
 //! the VR overlay, the panels beside VRChat in desktop mode) and the language. Names are the app's own: an enum's name in code
 //! ([`stable_name`]: numbers, characters and texts in it are dropped) or a control's English label when it is a text of the catalogs
 //! ([`orbiters_i18n::control_name`]). **Never**: anything typed or said, translations, pictures, codes or web addresses, worlds,
-//! instances, people, file paths, the Orbiters or VRChat account. An install is a random id ([`spool`]), not a person.
+//! instances, people, file paths, the VRChat account. An install is a random id ([`spool`]). Signed in to Orbiters, and once the notice
+//! saying so was shown (`settings.usage.told_account`), what is counted is linked to the Orbiters account: the batch goes with the
+//! account's credential and the server notes whose it is ([`spool::Stamp`]); what was counted before that notice never is.
 //!
 //! Each process (window, overlay, desktop panels) notes steps here, into a bounded list behind a mutex: no allocation beyond the
 //! step itself, nothing on the frame's path but that. A thread of the process sends them to the service every few seconds

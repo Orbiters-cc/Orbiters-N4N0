@@ -364,6 +364,8 @@ impl Service {
 
     /// The usage statistics turned off: what waits is forgotten at once, not at the next upload.
     fn follow_usage_switch(&self) {
+        // The notice of the account just closed, or the account changed: what is counted from now on is stamped anew.
+        self.usage.collecting(self.ctl.usage_stamp());
         if !self.ctl.view().settings.usage.enabled {
             self.usage.forget();
         }
@@ -414,7 +416,10 @@ impl Service {
                 ctl.patch_settings(&patch);
                 self.follow_usage_switch();
             }
-            ToService::Usage { steps } => self.usage.steps(link, steps, ctl.view().settings.usage.enabled),
+            ToService::Usage { steps } => {
+                self.usage.collecting(ctl.usage_stamp());
+                self.usage.steps(link, steps, ctl.view().settings.usage.enabled);
+            }
             ToService::PatchSmoothing { id, patch } => {
                 ctl.patch_settings(&patch);
                 ctl.update(|s| s.smoothing_revision += 1);
@@ -655,6 +660,7 @@ impl Service {
         // What was asked before the link ended is still done, in its order.
         drop(work);
         mailbox.close();
+        self.usage.collecting(self.ctl.usage_stamp());
         self.usage.unlinked(id, self.ctl.view().settings.usage.enabled);
         self.links.lock().unwrap().retain(|l| l.id != id);
         let still_there = self.links.lock().unwrap().iter().any(|l| l.role == role);
@@ -982,7 +988,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         move || {
             let snap = who.view();
             let known = !matches!(snap.account.state, crate::state::AccountState::Unknown | crate::state::AccountState::Checking { .. });
-            known.then(|| (crate::usage::perf::agent_driving(&snap), crate::usage::perf::team_code(&snap)))
+            known.then(|| (crate::usage::perf::agent_driving(&snap), who.usage_account()))
         },
     );
     service.accept(listener)?;

@@ -140,6 +140,16 @@ impl State {
         }
     }
 
+    /// The window leaves Home for another page (the sidebar): the QR code scanner its page holds stops, the friends its
+    /// Share to … holds are forgotten, now (MENU-13: nothing reads the camera for a page nobody sees); shown again, its
+    /// page takes them up again.
+    pub fn left(&mut self, backend: &crate::backend::Ctl) {
+        if let Some(host) = self.host.as_mut() {
+            host.let_go(backend);
+            self.pending.extend(host.menu.take_up());
+        }
+    }
+
     /// The menu Home runs, once shown (the screenshot review opens its pages).
     pub fn menu_host(&mut self) -> Option<&mut MenuHost> {
         self.host.as_mut()
@@ -183,7 +193,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     launcher.wire(&ctx, cx);
     let host = host.get_or_insert_with(|| {
         // What it fetches (YouTube's answers, thumbnails) asks for a frame when it arrives.
-        let mut host = MenuHost::waking(ctx.clone());
+        let mut host = MenuHost::waking(ctx.clone()).holding(orbiters_n4n0::MenuHolder::Window);
         host.open(snap);
         host
     });
@@ -1648,14 +1658,29 @@ mod tests {
         h.press(qr);
         h.release(qr);
         assert_eq!(h.page(), Page::Qr);
-        assert!(matches!(h.recorder.n4n0.lock().unwrap().as_slice(), [N4n0Command::Qr { on: true }]));
+        assert!(matches!(h.recorder.n4n0.lock().unwrap().as_slice(), [N4n0Command::Qr { on: true, .. }]));
         h.settle();
         // Back home: the scanner stops.
         let back = pos2(60.0, 64.0);
         h.press(back);
         h.release(back);
         assert_ne!(h.page(), Page::Qr);
-        assert!(matches!(h.recorder.n4n0.lock().unwrap().as_slice(), [N4n0Command::Qr { on: true }, N4n0Command::Qr { on: false }]));
+        assert!(matches!(h.recorder.n4n0.lock().unwrap().as_slice(), [N4n0Command::Qr { on: true, .. }, N4n0Command::Qr { on: false, .. }]));
+        h.settle();
+        // MENU-13: the window leaves Home for another page on the scanner's page: the camera is let go at once (the
+        // window's own), and read again once Home shows again, on the same page.
+        h.press(qr);
+        h.release(qr);
+        assert_eq!(h.page(), Page::Qr);
+        h.recorder.n4n0.lock().unwrap().clear();
+        let ctl = h.ctl.clone();
+        h.state.left(&ctl);
+        assert!(matches!(h.recorder.n4n0.lock().unwrap().as_slice(), [N4n0Command::Qr { on: false, holder: orbiters_n4n0::MenuHolder::Window }]));
+        h.frame(Vec::new());
+        assert_eq!(h.page(), Page::Qr);
+        assert!(matches!(h.recorder.n4n0.lock().unwrap().as_slice(), [_, N4n0Command::Qr { on: true, holder: orbiters_n4n0::MenuHolder::Window }]));
+        h.press(back);
+        h.release(back);
         h.settle();
         // Previous instances, beside it, opens its own page.
         h.press(pos2(397.0, 490.0));

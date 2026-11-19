@@ -2664,14 +2664,14 @@ fn n4n0_hands_its_menus_the_3d_captures_shares_them_and_reads_friends_while_shar
     // Friends: read while Share to … shows (by name), forgotten when it closes; why they could not be read.
     let f = |id: &str, name: &str| Friend { id: id.into(), name: name.into() };
     *host.friends.lock().unwrap() = Some(Ok(vec![f("usr_b", "bob"), f("usr_a", "Alice")]));
-    n.command(Command::Friends { on: true });
+    n.command(Command::Friends { on: true, holder: crate::MenuHolder::Any });
     assert!(until(|| matches!(*host.view().friends, Friends::Ready { .. })));
     assert_eq!(host.view().friends.list(), [f("usr_a", "Alice"), f("usr_b", "bob")]);
     assert_eq!(n.n4n0.lock().unwrap().screen.menu.friends, *host.view().friends);
-    n.command(Command::Friends { on: false });
+    n.command(Command::Friends { on: false, holder: crate::MenuHolder::Any });
     assert_eq!(host.view().friends, Friends::None);
     *host.friends.lock().unwrap() = Some(Err("VRCX and VRCNext were not found".into()));
-    n.command(Command::Friends { on: true });
+    n.command(Command::Friends { on: true, holder: crate::MenuHolder::Any });
     assert!(until(|| host.view().friends == Friends::Failed { message: "VRCX and VRCNext were not found".into() }));
     // The screen's menu fetches a capture's picture from the app, by its key.
     {
@@ -2689,15 +2689,48 @@ fn n4n0_hands_its_menus_the_3d_captures_shares_them_and_reads_friends_while_shar
     n.shutdown();
 }
 
+/// MENU-13: four menus share one scanner and one friends list; each stops only what it holds.
+#[test]
+fn a_menu_stops_only_the_scan_and_friends_it_holds() {
+    use crate::MenuHolder::{Overlay, Panels, Window};
+    use orbiters_n4n0_core::captures::{Friend, Friends};
+    use orbiters_n4n0_core::qr::QrPhase;
+    let (host, n) = n4n0(Settings::default());
+    n.command(Command::Qr { on: true, holder: Window });
+    n.command(Command::Qr { on: true, holder: Panels });
+    assert_eq!(host.qr_started.load(Ordering::Relaxed), 1, "one scan for both");
+    n.command(Command::Qr { on: false, holder: Panels });
+    assert!(host.view().qr.scanning(), "the window's page still shows the scanner");
+    assert_eq!(host.qr_dropped.load(Ordering::Relaxed), 0);
+    // A stop from a menu that held nothing changes nothing either.
+    n.command(Command::Qr { on: false, holder: Overlay });
+    assert!(host.view().qr.scanning());
+    n.command(Command::Qr { on: false, holder: Window });
+    assert_eq!(host.view().qr.phase, QrPhase::Off, "the last one let go");
+    assert_eq!(host.qr_dropped.load(Ordering::Relaxed), 1);
+    // The friends: kept while any menu's Share to … lists them.
+    let f = |id: &str, name: &str| Friend { id: id.into(), name: name.into() };
+    *host.friends.lock().unwrap() = Some(Ok(vec![f("usr_a", "Alice")]));
+    n.command(Command::Friends { on: true, holder: Window });
+    assert!(until(|| matches!(*host.view().friends, Friends::Ready { .. })));
+    n.command(Command::Friends { on: true, holder: Overlay });
+    n.command(Command::Friends { on: false, holder: Overlay });
+    assert!(until(|| matches!(*host.view().friends, Friends::Ready { .. })), "the window still lists them");
+    assert!(matches!(n.n4n0.lock().unwrap().screen.menu.friends, Friends::Ready { .. }));
+    n.command(Command::Friends { on: false, holder: Window });
+    assert_eq!(host.view().friends, Friends::None);
+    n.shutdown();
+}
+
 #[test]
 fn the_qr_code_scanner_opens_web_links_once_and_stops_with_its_page() {
     use orbiters_n4n0_core::qr::QrPhase;
     let (host, n) = n4n0(Settings::default());
     let phase = |host: &TestHost| host.view().qr.phase;
-    n.command(Command::Qr { on: true });
+    n.command(Command::Qr { on: true, holder: crate::MenuHolder::Any });
     assert_eq!(host.qr_started.load(Ordering::Relaxed), 1);
     assert_eq!(phase(&host), QrPhase::Starting);
-    n.command(Command::Qr { on: true });
+    n.command(Command::Qr { on: true, holder: crate::MenuHolder::Any });
     assert_eq!(host.qr_started.load(Ordering::Relaxed), 1, "asked again while it runs: the same scan");
     // No picture from VRChat's camera: what to do, by whether the camera is open.
     *host.camera.lock().unwrap() = Some(false);
@@ -2723,13 +2756,13 @@ fn the_qr_code_scanner_opens_web_links_once_and_stops_with_its_page() {
     // The screen's menu shows the same scanner.
     assert_eq!(n.n4n0.lock().unwrap().screen.menu.qr, view);
     // Its page closed: it stops, and what that scan still says is not heard.
-    n.command(Command::Qr { on: false });
+    n.command(Command::Qr { on: false, holder: crate::MenuHolder::Any });
     assert_eq!(host.qr_dropped.load(Ordering::Relaxed), 1);
     assert_eq!(phase(&host), QrPhase::Off);
     host.qr_sees(QrSeen::Code("https://late.example/".into()));
     assert_eq!(host.watched.lock().unwrap().len(), 2, "a stopped scan opens nothing");
     // Started again, it stops on its own after its time without a link.
-    n.command(Command::Qr { on: true });
+    n.command(Command::Qr { on: true, holder: crate::MenuHolder::Any });
     assert_eq!(host.qr_started.load(Ordering::Relaxed), 2);
     {
         let mut rt = n.n4n0.lock().unwrap();
@@ -2740,7 +2773,7 @@ fn the_qr_code_scanner_opens_web_links_once_and_stops_with_its_page() {
     }
     assert_eq!(host.qr_dropped.load(Ordering::Relaxed), 2);
     // A scanner that cannot run says why.
-    n.command(Command::Qr { on: true });
+    n.command(Command::Qr { on: true, holder: crate::MenuHolder::Any });
     host.qr_sees(QrSeen::Failed("The stream camera cannot be read".into()));
     assert_eq!((phase(&host), host.view().qr.note), (QrPhase::Stopped, "The stream camera cannot be read".to_string()));
     n.shutdown();
@@ -2766,7 +2799,7 @@ fn the_world_videos_titles_are_asked_once_a_video_and_only_the_last_ones_kept() 
 fn a_slideshow_of_qr_codes_opens_two_pages_not_one_per_code() {
     // N4N0-13: every different code in view opened a tab at once, three a second.
     let (host, n) = n4n0(Settings::default());
-    n.command(Command::Qr { on: true });
+    n.command(Command::Qr { on: true, holder: crate::MenuHolder::Any });
     host.qr_sees(QrSeen::Camera(true));
     for i in 0..10 {
         host.qr_sees(QrSeen::Code(format!("https://example.com/{i}")));
@@ -2781,7 +2814,7 @@ fn a_slideshow_of_qr_codes_opens_two_pages_not_one_per_code() {
 fn a_qr_link_the_browser_did_not_open_is_not_counted_as_opened() {
     // N4N0-18: the menu said "opened" while the toast said it failed.
     let (host, n) = n4n0(Settings::default());
-    n.command(Command::Qr { on: true });
+    n.command(Command::Qr { on: true, holder: crate::MenuHolder::Any });
     host.qr_sees(QrSeen::Camera(true));
     *host.watch_fails.lock().unwrap() = true;
     host.qr_sees(QrSeen::Code("https://example.com/a".into()));
@@ -2802,7 +2835,7 @@ fn a_qr_scanner_that_fails_as_it_starts_says_why() {
     use orbiters_n4n0_core::qr::QrPhase;
     let (host, n) = n4n0(Settings::default());
     *host.qr_fails_at_start.lock().unwrap() = Some("The stream camera cannot be read".into());
-    n.command(Command::Qr { on: true });
+    n.command(Command::Qr { on: true, holder: crate::MenuHolder::Any });
     let view = host.view().qr;
     assert_eq!((view.phase, view.note.as_str()), (QrPhase::Stopped, "The stream camera cannot be read"));
     assert_eq!(host.qr_dropped.load(Ordering::Relaxed), 1, "its handle, come late, is let go");

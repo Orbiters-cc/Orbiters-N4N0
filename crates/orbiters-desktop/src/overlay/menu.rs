@@ -139,7 +139,7 @@ impl MenuOverlay {
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, 10);
         let canvas = Canvas::new(WIDTH, HEIGHT);
-        let host = MenuHost::new(canvas.ctx().clone());
+        let host = MenuHost::new(canvas.ctx().clone()).holding(orbiters_n4n0::MenuHolder::Overlay);
         let worlds = super::worlds::Worlds::new(overlay, key, canvas.ctx().clone()).inspect_err(|_| {
             let _ = overlay.destroy(handle);
         })?;
@@ -225,10 +225,12 @@ impl MenuOverlay {
         self.last_activity = Instant::now();
     }
 
-    fn close(&mut self, overlay: &vr::Overlay) {
-        // (The menu's own close, idle or its button, closed `menu` already: this hides the overlay.)
+    fn close(&mut self, overlay: &vr::Overlay, snap: &Snapshot, backend: &Ctl) {
+        // (The menu's own close, idle or its button, closed `menu` already: this hides the overlay.) Closed here (the
+        // button, the watch, the wake word, the avatar's screen), what its page held is let go (MENU-1).
         self.closed_at = Some(Instant::now());
-        self.host.menu.close();
+        let effects = self.host.menu.close();
+        self.host.effects(effects, snap, backend);
         self.worlds.open = false;
         if self.shown {
             let _ = overlay.hide(self.handle);
@@ -250,21 +252,21 @@ impl MenuOverlay {
             if on_avatar_screen(snap) {
                 backend.n4n0(N4n0Command::ToggleScreen);
             } else if self.host.menu.open {
-                self.close(overlay);
+                self.close(overlay, snap, backend);
             } else {
                 self.open(overlay, steamvr, snap);
             }
         } else if asked && !on_avatar_screen(snap) {
             let just_closed = self.closed_at.is_some_and(|t| t.elapsed() < TOGGLE_AFTER_CLOSE);
             if self.host.menu.open && snap.n4n0.menu_toggle {
-                self.close(overlay);
+                self.close(overlay, snap, backend);
             } else if !self.host.menu.open && !(snap.n4n0.menu_toggle && just_closed) {
                 self.open(overlay, steamvr, snap);
             }
         }
         if on_avatar_screen(snap) && self.host.menu.open {
             // The avatar now has N4N0's screen: the menu lives there.
-            self.close(overlay);
+            self.close(overlay, snap, backend);
         }
         // 3D worlds: the capture around the person and its download whether the menu shows or not, the pill under the
         // menu while it shows its front (not over its keyboard).
@@ -398,7 +400,7 @@ impl MenuOverlay {
         }
         // A close, or a link dropped as a card (it is in the world now, on the avatar's screen).
         if self.host.effects(effects, snap, backend) || std::mem::take(&mut self.host.dropped) {
-            self.close(overlay);
+            self.close(overlay, snap, backend);
         }
         if !self.host.menu.open {
             return clicked;

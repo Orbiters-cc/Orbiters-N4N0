@@ -1168,6 +1168,10 @@ pub struct Menu {
     pub justifying: Option<String>,
     /// What was just switched on (Like, a label) and when: the overlay makes it pop for [`POP`].
     pub popped: Option<(Target, Instant)>,
+    /// What leaving a page asks of the host however the page was left (a press, a call ringing, an answer that takes
+    /// the page): the scanner stopped, the friends forgotten (MENU-8). [`Menu::press`] and [`Menu::close`] hand it
+    /// over with their own; a host takes the rest with [`Menu::drain`] at each turn.
+    outbox: Vec<Effect>,
 }
 
 /// How long the overlay shows a like or a label switched on popping.
@@ -1189,14 +1193,17 @@ impl Menu {
             self.open = false;
         }
         if !self.open {
-            self.open = true;
+            // (Closed, it held nothing: its close said so.)
             self.go(Page::Home);
+            self.open = true;
         }
     }
 
+    /// Closes the menu: what its page held is let go (the scanner, the friends), then [`Effect::Close`].
+    #[must_use = "a host runs what the menu asks: a scan to stop, friends to forget"]
     pub fn close(&mut self) -> Vec<Effect> {
         if !self.open {
-            return Vec::new();
+            return std::mem::take(&mut self.outbox);
         }
         self.open = false;
         self.notice = None;
@@ -1205,13 +1212,47 @@ impl Menu {
             self.page = Page::Home;
         }
         // The scanner reads VRChat's camera only while its page shows; the friends are kept only while Share to … is up.
+        let mut effects = std::mem::take(&mut self.outbox);
         if self.page == Page::Qr {
-            return vec![Effect::QrScan(false), Effect::Close];
+            effects.push(Effect::QrScan(false));
+        } else if self.choosing_friends() {
+            effects.push(Effect::Friends(false));
         }
-        if self.choosing_friends() {
-            return vec![Effect::Friends(false), Effect::Close];
+        effects.push(Effect::Close);
+        effects
+    }
+
+    /// What leaving pages asked that no press or close handed over yet (a call that rang on the scanner's page): the
+    /// host runs it at each turn.
+    #[must_use = "a host runs what the menu asks: a scan to stop, friends to forget"]
+    pub fn drain(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.outbox)
+    }
+
+    /// Effects a host cannot run now (it holds N4N0's lock): handed over with the next [`Menu::drain`].
+    pub fn defer(&mut self, effects: Vec<Effect>) {
+        self.outbox.extend(effects);
+    }
+
+    /// The page stays the menu's but is no longer seen (a sheet closed, the window's Home left for another page): what
+    /// it holds is let go (the scanner stops, the friends are forgotten); [`Menu::take_up`] holds it again.
+    #[must_use = "a host runs what the menu asks: a scan to stop, friends to forget"]
+    pub fn let_go(&self) -> Vec<Effect> {
+        match () {
+            _ if self.open && self.page == Page::Qr => vec![Effect::QrScan(false)],
+            _ if self.open && self.choosing_friends() => vec![Effect::Friends(false)],
+            _ => Vec::new(),
         }
-        vec![Effect::Close]
+    }
+
+    /// The page let go of is seen again: the scanner reads again, the friends are read again.
+    #[must_use = "a host runs what the menu asks: a scan to start, friends to read"]
+    pub fn take_up(&self) -> Vec<Effect> {
+        match () {
+            _ if self.open && self.page == Page::Qr => vec![Effect::QrScan(true)],
+            _ if self.open && self.choosing_friends() => vec![Effect::Friends(true)],
+            _ => Vec::new(),
+        }
     }
 
     /// Share to … shows, or the keyboard finding a friend for it.
@@ -1223,9 +1264,8 @@ impl Menu {
     /// on it can be pressed).
     pub fn show_card(&mut self, card: Card) {
         self.card = Some(card);
+        self.go(Page::Card);
         self.open = true;
-        self.page = Page::Card;
-        self.notice = None;
     }
 
     /// Whether the screen shows a dropped card.
@@ -1244,10 +1284,19 @@ impl Menu {
     }
 
     fn go(&mut self, page: Page) {
+        let scanner = self.open && self.page == Page::Qr;
+        let friends = self.open && self.choosing_friends();
         self.page = page;
         self.notice = None;
         if page == Page::Search || page == Page::Type {
             self.keys = Keys::Letters;
+        }
+        // Leaving the QR code scanner's page stops it; leaving Share to … (but for its keyboard) forgets the friends.
+        if scanner && page != Page::Qr {
+            self.outbox.push(Effect::QrScan(false));
+        }
+        if friends && !self.choosing_friends() {
+            self.outbox.push(Effect::Friends(false));
         }
     }
 
@@ -1312,6 +1361,7 @@ impl Menu {
     }
 
     /// A key of the computer's keyboard while the menu's keyboard shows (`paste`: the clipboard's text, for Ctrl+V).
+    #[must_use = "a host runs what the menu asks"]
     pub fn key(&mut self, input: KeyInput, paste: impl FnOnce() -> Option<String>) -> Vec<Effect> {
         if !self.shows_keyboard() {
             return Vec::new();
@@ -1340,6 +1390,7 @@ impl Menu {
 
     /// Sets the volume beside what plays to `percent` (unmuted), shown at once: what to ask the computer, or nothing
     /// when there is no volume to set.
+    #[must_use = "a host runs what the menu asks"]
     pub fn set_playing_volume(&mut self, percent: u8) -> Option<Effect> {
         let level = Volume { percent: percent.min(100), muted: false };
         match self.playing_volume()? {
@@ -1356,17 +1407,10 @@ impl Menu {
     }
 
     /// The person pressed `target`. Leaving the QR code scanner's page stops it.
+    #[must_use = "a host runs what the menu asks"]
     pub fn press(&mut self, target: Target) -> Vec<Effect> {
-        let scanner = self.page == Page::Qr && self.open;
-        let friends = self.choosing_friends() && self.open;
         let mut effects = self.press_on(target);
-        if scanner && self.open && self.page != Page::Qr {
-            effects.push(Effect::QrScan(false));
-        }
-        // Leaving Share to … (but for its keyboard) forgets the friends.
-        if friends && self.open && !self.choosing_friends() {
-            effects.push(Effect::Friends(false));
-        }
+        effects.append(&mut self.outbox);
         effects
     }
 
@@ -1957,6 +2001,7 @@ impl Menu {
 
     /// A press held and moved along the music's timeline (a drag) from segment `from` onto `target`: the music moves to
     /// that segment when it is another. Returns the segment the drag is on now, and what follows.
+    #[must_use = "a host runs what the menu asks"]
     pub fn drag(&mut self, from: u8, target: Target) -> (u8, Vec<Effect>) {
         match timeline_segment(target) {
             Some(to) if to != from && self.open && self.page == Page::Music => (to, self.seek(to)),
@@ -1965,6 +2010,7 @@ impl Menu {
     }
 
     /// Text typed into the search field, or the keyboard page's text (a key, or several characters at once).
+    #[must_use = "a host runs what the menu asks"]
     pub fn type_text(&mut self, text: &str) -> Vec<Effect> {
         if self.page == Page::Type {
             let max = self.typing.max();
@@ -2001,6 +2047,7 @@ impl Menu {
 
     /// A kind's time constant from a slider (the window, the Quick Menu's sheet), which turns smoothing on as a choice
     /// on the fixed pages does.
+    #[must_use = "a host runs what the menu asks"]
     pub fn set_smoothing_ms(&mut self, kind: usize, ms: u16) -> Vec<Effect> {
         let Some(tracking) = self.tracking.as_mut().filter(|_| kind < TRACKING_KINDS.len()) else { return Vec::new() };
         tracking.ms[kind] = ms.min(120);
@@ -2010,6 +2057,7 @@ impl Menu {
 
     /// What a text field shows becomes the search field's text (a display with a keyboard of its own: the window's
     /// Home), with the same limit and the same suggestions as typing.
+    #[must_use = "a host runs what the menu asks"]
     pub fn set_query(&mut self, text: &str) -> Vec<Effect> {
         let text = cut(text.trim_start(), QUERY_MAX);
         if text == self.query {
@@ -2019,6 +2067,7 @@ impl Menu {
         self.suggest()
     }
 
+    #[must_use = "a host runs what the menu asks"]
     pub fn backspace(&mut self) -> Vec<Effect> {
         if self.page == Page::Type {
             self.typed.pop();
@@ -2092,6 +2141,7 @@ impl Menu {
     }
 
     /// Search for `query` straight away (said aloud, or asked of N4N0).
+    #[must_use = "a host runs what the menu asks"]
     pub fn search_for(&mut self, query: &str) -> Vec<Effect> {
         self.open = true;
         self.query = cut(query.trim(), QUERY_MAX);
@@ -2099,6 +2149,7 @@ impl Menu {
     }
 
     /// Results arrived for search `id`: its first page, or the next one (`more`).
+    #[must_use = "a host runs what the menu asks"]
     pub fn results_arrived(&mut self, id: u64, results: Results, more: bool) -> Vec<Effect> {
         // Another search's (an older one for the same words included) is dropped.
         if id != self.search_id {
@@ -2272,11 +2323,13 @@ impl Menu {
     }
 
     /// More results, for what shows them all in one list rather than page by page.
+    #[must_use = "a host runs what the menu asks"]
     pub fn want_more_results(&mut self) -> Vec<Effect> {
         self.fetch_more()
     }
 
     /// Thumbnails of the results page shown, then of the next page (fetched ahead, so they show as it turns).
+    #[must_use = "a host runs what the menu asks"]
     pub fn thumbnails(&self) -> Vec<Effect> {
         let start = (self.result_page * RESULTS_PER_PAGE).min(self.results.len());
         let ids: Vec<String> = self.results[start..].iter().take(2 * RESULTS_PER_PAGE).map(|v| v.id.clone()).collect();
@@ -2293,6 +2346,7 @@ impl Menu {
     }
 
     /// Calls the friend at `index` of the whole list (a display that shows them all): as pressing them on their page.
+    #[must_use = "a host runs what the menu asks"]
     pub fn call_contact(&mut self, index: usize) -> Vec<Effect> {
         if index >= self.contacts.len() {
             return Vec::new();
@@ -2403,6 +2457,7 @@ impl Menu {
 
     /// The pictures of the captures the page shows (the last capture, History's page, the warning's capture), which
     /// the host fetches when it has not got them.
+    #[must_use = "a host runs what the menu asks"]
     pub fn capture_thumbnails(&self) -> Vec<Effect> {
         if !self.pages.share() {
             return Vec::new();
@@ -2422,6 +2477,7 @@ impl Menu {
 
     /// The 3D captures as the host lists them now. A share asked here that the server wants acknowledged (explicit)
     /// opens the warning, from the page it was asked on. Returns the pictures to fetch.
+    #[must_use = "a host runs what the menu asks"]
     pub fn set_captures(&mut self, captures: CapturesView) -> Vec<Effect> {
         if self.captures == captures {
             return Vec::new();
@@ -2655,6 +2711,7 @@ impl Menu {
     }
 
     /// Invite me, to a given instance, from what lists them otherwise than this menu's page.
+    #[must_use = "a host runs what the menu asks"]
     pub fn invite_to(&mut self, location: String, world: &str) -> Vec<Effect> {
         if self.invite_waiting {
             return Vec::new();
@@ -2704,6 +2761,7 @@ impl Menu {
 
     /// The sentence N4N0 heard while the menu is open: on the search page it is what to search for, and the menu takes
     /// it (`Some`); elsewhere it is for N4N0's assistant (`None`).
+    #[must_use = "a host runs what the menu asks"]
     pub fn heard(&mut self, text: &str) -> Option<Vec<Effect>> {
         let text = text.trim().trim_end_matches(['.', '!', '?']).trim();
         if !self.open || text.is_empty() {
@@ -4026,5 +4084,51 @@ mod tests {
         ] {
             assert!(guest_may_press(target, page), "{target:?} on {page:?} only shows");
         }
+    }
+
+    /// MENU-8: however the scanner's page or Share to … is left (a press, a call ringing, a close), the host is told once.
+    #[test]
+    fn leaving_the_scanner_or_share_to_however_it_happens_lets_them_go_once() {
+        let ringing = || Some(Call::Ringing { name: "Ada".into() });
+        let mut menu = Menu { pages: Pages::Mirror, ..Default::default() };
+        menu.open();
+        assert!(!menu.press(Target::More).contains(&Effect::QrScan(false)));
+        assert_eq!(menu.press(Target::Qr), vec![Effect::QrScan(true)]);
+        // A call rings on the scanner's page: the page goes, and so does the scan.
+        menu.set_call(ringing());
+        assert_eq!(menu.page, Page::Call);
+        assert_eq!(menu.drain(), vec![Effect::QrScan(false)]);
+        assert!(menu.drain().is_empty(), "once");
+        // Back from the scanner by a press: once, in the press' effects.
+        menu.set_call(None);
+        menu.page = Page::More;
+        let _ = menu.press(Target::Qr);
+        assert_eq!(menu.press(Target::Back), vec![Effect::QrScan(false)]);
+        assert!(menu.drain().is_empty());
+        // Share to … and its keyboard are one: a call ringing on either forgets the friends.
+        for (page, typing) in [(Page::ShareTo, Typing::StateName), (Page::Type, Typing::Friend)] {
+            menu.set_call(None);
+            menu.page = page;
+            menu.typing = typing;
+            menu.set_call(ringing());
+            assert_eq!(menu.drain(), vec![Effect::Friends(false)], "{page:?}");
+        }
+        // Its own keyboard is still Share to …: nothing to forget going there and back.
+        menu.set_call(None);
+        menu.page = Page::ShareTo;
+        menu.typing = Typing::StateName;
+        assert!(menu.press(Target::FindFriend).is_empty());
+        assert_eq!(menu.typing, Typing::Friend);
+        assert!(menu.press(Target::Back).is_empty());
+        // A close says it with its own, once; a page let go of and taken up again says stop, then start.
+        menu.page = Page::Qr;
+        assert_eq!(menu.let_go(), vec![Effect::QrScan(false)]);
+        assert_eq!(menu.take_up(), vec![Effect::QrScan(true)]);
+        assert_eq!(menu.close(), vec![Effect::QrScan(false), Effect::Close]);
+        assert!(menu.drain().is_empty());
+        assert!(menu.let_go().is_empty(), "closed, it holds nothing");
+        // Opened again on Home: nothing to stop.
+        menu.open();
+        assert!(menu.drain().is_empty());
     }
 }

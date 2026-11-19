@@ -466,7 +466,9 @@ impl ScreenRuntime {
             card.out_sent = false;
         }
         if !self.available {
-            self.menu.close();
+            // Run at the next step (MENU-8: the scanner and the friends its page held are let go).
+            let effects = self.menu.close();
+            self.menu.defer(effects);
         }
     }
 
@@ -553,6 +555,7 @@ impl ScreenRuntime {
     /// The app quits: the menu closes, and the owner's screen counts as told so (the quit's last message tells it), so
     /// a step still under way sends nothing more.
     pub(crate) fn quit(&mut self) {
+        // The app ends: its scanner and the friends it read end with it.
         let _ = self.menu.close();
         self.open_sent = Some(false);
     }
@@ -1983,10 +1986,10 @@ impl N4n0 {
                 Effect::InviteMe { location } => self.invite_send(location, true),
                 Effect::QrScan(on) => {
                     let n = self.clone();
-                    std::thread::spawn(move || n.qr_scan(on));
+                    std::thread::spawn(move || n.qr_scan(on, crate::MenuHolder::Screen));
                 }
                 Effect::Captures => self.captures_list(),
-                Effect::Friends(on) => self.friends(on),
+                Effect::Friends(on) => self.friends(on, crate::MenuHolder::Screen),
                 Effect::ShareCapture(ask) => self.share_capture(ask),
                 Effect::Feedback(ask) => self.feedback_ask(ask),
                 Effect::Mirror(ask) => {
@@ -2184,6 +2187,8 @@ pub(crate) fn tick(
     if s.menu.call != call {
         s.menu.set_call(call);
     }
+    // What leaving a page asked though no press left it (a call ringing on the scanner's page, the avatar changed).
+    followups.effects.extend(s.menu.drain());
     // The card, wherever the menu shows; then the full pictures (the card's too).
     s.card_step(now, &mut out);
     s.picture_owner_step(now, &mut out);

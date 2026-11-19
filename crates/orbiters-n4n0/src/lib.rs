@@ -28,7 +28,7 @@ mod voice;
 #[cfg(test)]
 mod tests;
 
-pub use command::Command;
+pub use command::{Command, MenuHolder};
 pub use platform::{
     language_of, Actions, Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Mouse, MouseState, NoMouse, Osc, Platform, QrEvents, QrGlimpse, QrScan, QrSeen,
     Scene, Sounds, VoiceEnded, VoiceEvents, VoiceWorker,

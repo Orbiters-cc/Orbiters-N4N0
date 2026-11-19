@@ -10,7 +10,7 @@ use crate::media::Watcher;
 use crate::platform::Locale;
 use crate::screen::{keyboard, mode_setting, photo_length, photo_mode, photo_setting};
 use crate::status::{N4n0Status, StateAction};
-use crate::Command;
+use crate::{Command, MenuHolder};
 use orbiters_core::settings::Settings;
 use orbiters_n4n0_core::menu::{Effect, Light, Menu, Page, Pages, StateRow, SuggestQueue, Target};
 use orbiters_n4n0_core::picture::{self, Rgb};
@@ -112,6 +112,8 @@ pub struct MenuHost<P: Pictures> {
     feedback_seen: orbiters_n4n0_core::feedback::FeedbackView,
     /// Told when something fetched arrived (none: the interface draws all the time, as the overlay does).
     waker: Option<Waker>,
+    /// Which menu this is, for the scanner and the friends it holds (MENU-13).
+    holder: MenuHolder,
 }
 
 impl<P: Pictures> MenuHost<P> {
@@ -143,6 +145,25 @@ impl<P: Pictures> MenuHost<P> {
             capture_pictures: None,
             feedback_seen: Default::default(),
             waker: None,
+            holder: MenuHolder::Any,
+        }
+    }
+
+    /// The same, as `holder` (the SteamVR menu, the panels, the window's Home): its scanner and friends are its own.
+    pub fn with_holder(mut self, holder: MenuHolder) -> Self {
+        self.holder = holder;
+        self
+    }
+
+    /// The page stays this menu's but is no longer seen (a sheet closed, the window's Home left): the scanner and the
+    /// friends it holds are let go now ([`Menu::let_go`]).
+    pub fn let_go(&mut self, service: &dyn MenuService) {
+        for effect in self.menu.let_go() {
+            match effect {
+                Effect::QrScan(on) => service.command(Command::Qr { on, holder: self.holder }),
+                Effect::Friends(on) => service.command(Command::Friends { on, holder: self.holder }),
+                _ => {}
+            }
         }
     }
 
@@ -173,6 +194,7 @@ impl<P: Pictures> MenuHost<P> {
     }
 
     /// A press on `target`: what it does follows from the effects it returns.
+    #[must_use = "a host runs what the menu asks"]
     pub fn press(&mut self, target: Target) -> Vec<Effect> {
         self.dirty = true;
         let effects = self.menu.press(target);
@@ -405,7 +427,8 @@ impl<P: Pictures> MenuHost<P> {
     /// What came back from YouTube, the suggestions once typing paused (one request at a time), and the thumbnails of
     /// the results shown that failed, once their wait is over. Returns what follows from them.
     pub fn poll(&mut self) -> Vec<Effect> {
-        let mut effects = Vec::new();
+        // What a page left by itself asked (a call that rang on the scanner's page: MENU-8).
+        let mut effects = self.menu.drain();
         while let Ok(done) = self.done_rx.try_recv() {
             match done {
                 Done::Suggestions { id, text, result } => {
@@ -586,9 +609,9 @@ impl<P: Pictures> MenuHost<P> {
                 Effect::InviteMe { location } => service.command(Command::InviteMe { location }),
                 Effect::CopyText { text } => service.command(Command::CopyText { text }),
                 Effect::OpenLink { link } => service.command(Command::Watch { link }),
-                Effect::QrScan(on) => service.command(Command::Qr { on }),
+                Effect::QrScan(on) => service.command(Command::Qr { on, holder: self.holder }),
                 Effect::Captures => service.command(Command::Captures),
-                Effect::Friends(on) => service.command(Command::Friends { on }),
+                Effect::Friends(on) => service.command(Command::Friends { on, holder: self.holder }),
                 Effect::ShareCapture(share) => service.command(Command::ShareCapture { share }),
                 Effect::Feedback(ask) => service.command(Command::Feedback { ask }),
                 // The overlay never shows the camera's picture: its card is greyed out there.

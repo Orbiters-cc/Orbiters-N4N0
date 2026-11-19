@@ -49,6 +49,8 @@ pub(crate) struct TestHost {
     n4n0: Mutex<Weak<N4n0>>,
     calls: Mutex<Vec<CallRequest>>,
     ringing: Mutex<bool>,
+    /// A call under way, as the stand-in app has it.
+    in_call: Mutex<bool>,
     photos: AtomicUsize,
     /// What each 3D picture was of, as the settings said when it started.
     taken: Mutex<Vec<orbiters_core::settings::PictureMode>>,
@@ -217,6 +219,19 @@ impl Host for TestHost {
 
     fn ringing_in(&self) -> bool {
         *self.ringing.lock().unwrap()
+    }
+
+    fn calls(&self) -> CallsStatus {
+        let call = self.in_call.lock().unwrap().then(|| CallView {
+            name: "Kira".into(),
+            phase: CallPhase::Connected,
+            incoming: false,
+            connected_at_ms: Some(1),
+            muted: false,
+            mic_level: 0.0,
+            remote_level: 0.0,
+        });
+        CallsStatus { call, ..Default::default() }
     }
 
     fn call(&self, request: CallRequest) {
@@ -2888,6 +2903,53 @@ fn only_the_ask_page_s_listens_ask_for_the_sentence_as_it_is_spoken() {
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: false, live: true, .. })), "the Ask page: {:?}", worker.commands());
     n.ask_talk(true);
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: true, live: true, .. })), "Talk on the Ask page");
+    t.shutdown(&n);
+}
+
+#[test]
+fn during_a_call_the_wake_word_only_offers_talk_with_n4n0() {
+    // N4N0-11 (owner's decision): a caller's voice reaches the microphone; the word starts nothing by itself during a
+    // call, it puts up "Talk with N4N0?" for a few seconds, and pressing it starts the listen.
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    { let mut settings = t.settings.lock().unwrap();
+      settings.n4n0.wake_word = true;
+      settings.n4n0.wake_words = vec!["testwake".into()];
+      settings.n4n0.menu.wake_word = false;
+    }
+    n.n4n0.lock().unwrap().voice.installed = true;
+    t.scene(|s| s.vrchat = true);
+    n.voice_follow();
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    *t.in_call.lock().unwrap() = true;
+    let wake = |text: &str| VoiceEvent::Heard { listen: 0, text: text.into(), for_n4n0: false, seconds: 0.5, decode_ms: 1 };
+    worker.say(wake("testwake"));
+    assert!(n.n4n0.lock().unwrap().listening.is_none(), "no listen by the word alone");
+    let offer = t.view().voice.wake_offer.expect("the offer is up");
+    assert_eq!(offer.for_ms, 6000);
+    assert!(offer.left(offer.until_ms - 3000) > 0.49 && offer.left(offer.until_ms) == 0.0);
+    // A command after the word does not run either.
+    worker.say(wake("testwake, copy my status"));
+    assert!(n.n4n0.lock().unwrap().listening.is_none() && !n.n4n0.lock().unwrap().thinking());
+    let again = t.view().voice.wake_offer.expect("still up");
+    assert!(again.id > offer.id, "a new offer each time the word is heard");
+    // Pressed: N4N0 listens.
+    n.command(Command::WakeOffer { accept: true });
+    assert!(matches!(n.n4n0.lock().unwrap().listening, Some((crate::runtime::Source::WakeWord, _))));
+    assert!(t.view().voice.wake_offer.is_none(), "it goes once pressed");
+    // Not pressed: it goes by itself, and a late press does nothing.
+    n.voice_cancel();
+    n.n4n0.lock().unwrap().listening = None;
+    worker.say(wake("testwake"));
+    assert!(t.view().voice.wake_offer.is_some());
+    n.n4n0.lock().unwrap().wake_offer_until = Some(Instant::now());
+    n.command(Command::WakeOffer { accept: true });
+    assert!(n.n4n0.lock().unwrap().listening.is_none(), "too late");
+    // After the call: the word works as always.
+    *t.in_call.lock().unwrap() = false;
+    worker.say(wake("testwake"));
+    assert!(n.n4n0.lock().unwrap().listening.is_some());
     t.shutdown(&n);
 }
 

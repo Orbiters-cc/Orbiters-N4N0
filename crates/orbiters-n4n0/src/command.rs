@@ -13,6 +13,8 @@ pub enum Command {
     AskTalk { down: bool },
     /// Audio output owns this gate until playback drains, so the answer cannot become input.
     AskPlayback { active: bool },
+    /// The "Talk with N4N0?" button the wake word put up during a call: pressed (`accept`), N4N0 listens; else it goes.
+    WakeOffer { accept: bool },
     /// N4N0's assistant switched on or off from a menu (Settings' switch, the overlay's tiles, Home's microphone): off, it stops
     /// at once whatever it was doing (listening, the microphone, an answer under way).
     Assistant { on: bool },

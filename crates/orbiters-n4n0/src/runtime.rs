@@ -77,6 +77,8 @@ const AVATAR_SETTLE: Duration = Duration::from_millis(1500);
 const PIN_DEBOUNCE: Duration = Duration::from_millis(400);
 /// What VRChat's `/input/Voice` needs between press and release.
 const VOICE_PRESS: Duration = Duration::from_millis(80);
+/// How long "Talk with N4N0?" shows after the wake word was heard during a call.
+pub(crate) const WAKE_OFFER_FOR: Duration = Duration::from_secs(6);
 /// How long after Talk was let go N4N0 waits for VRChat to say it muted, to toggle it back.
 const UNMUTE_WAIT: Duration = Duration::from_millis(1500);
 /// How much of the conversation the assistant gets back each turn (the server trims too).
@@ -183,6 +185,9 @@ pub(crate) struct N4n0Runtime {
     /// Talk was let go before VRChat said it muted: when it says so (until this deadline), N4N0 toggles it back. Never
     /// a blind toggle: without the echo by then, nothing is sent.
     pub(crate) unmute_when_muted: Option<Instant>,
+    /// When "Talk with N4N0?" goes by itself (its status is `voice.wake_offer`), and the last one's number.
+    pub(crate) wake_offer_until: Option<Instant>,
+    wake_offers: u64,
     /// The turn under way (N4N0 thinks), and the last turn's number.
     turn: Option<Turn>,
     turns: u64,
@@ -462,6 +467,7 @@ impl N4n0Runtime {
         at(self.outbox.iter().map(|(t, _)| *t).min());
         at(self.pins_due);
         at(self.unmute_when_muted);
+        at(self.wake_offer_until);
         at(self.listening.map(|(_, since)| since + crate::voice::LISTEN_LIMIT));
         at(self.test_cycle.map(|start| {
             let steps = now.duration_since(start).as_millis() / TEST_CYCLE_STEP.as_millis() + 1;
@@ -990,6 +996,11 @@ impl N4n0 {
                 }
             }
             rt.unmute_step(now);
+            if rt.wake_offer_until.is_some_and(|t| t <= now) {
+                // Nobody pressed it: it goes.
+                rt.wake_offer_until = None;
+                rt.voice.wake_offer = None;
+            }
             let ready: Vec<(Instant, Message)>;
             (ready, rt.outbox) = std::mem::take(&mut rt.outbox).into_iter().partition(|(t, _)| *t <= now);
             out.extend(ready.into_iter().map(|(_, m)| m));
@@ -1781,6 +1792,12 @@ impl N4n0 {
             }
             return;
         }
+        if wake_word && orbiters_n4n0_core::wake::command(&text, &wake_words).is_some() && self.host.calls().call.is_some() {
+            // During a call the voices of the call reach the microphone too: the word starts nothing by itself, it
+            // offers "Talk with N4N0?" where the owner looks, for a few seconds.
+            self.wake_offer();
+            return;
+        }
         if wake_word {
             match orbiters_n4n0_core::wake::command(&text, &wake_words) {
                 Some(command) if command.is_empty() && menu_wake => {
@@ -1795,6 +1812,40 @@ impl N4n0 {
                 Some(command) if !self.answer(&command) && !self.menu_heard(&command) => self.ask(command, "voice"),
                 Some(_) | None => {}
             }
+        }
+    }
+
+    /// The wake word was heard during a call: "Talk with N4N0?" shows for [`WAKE_OFFER_FOR`] (again from the start when
+    /// heard again).
+    fn wake_offer(self: &Shared) {
+        {
+            let mut rt = self.n4n0.lock().unwrap();
+            rt.wake_offers += 1;
+            let unix_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+            rt.wake_offer_until = Some(Instant::now() + WAKE_OFFER_FOR);
+            rt.voice.wake_offer = Some(crate::status::WakeOffer {
+                id: rt.wake_offers,
+                until_ms: unix_ms + WAKE_OFFER_FOR.as_millis() as u64,
+                for_ms: WAKE_OFFER_FOR.as_millis() as u32,
+            });
+        }
+        self.publish();
+    }
+
+    /// "Talk with N4N0?" pressed (`accept`: N4N0 listens, as for the word alone outside a call) or put away.
+    fn wake_offer_answer(self: &Shared, accept: bool) {
+        let up = {
+            let mut rt = self.n4n0.lock().unwrap();
+            let up = rt.voice.wake_offer.take().is_some() && rt.wake_offer_until.take().is_some_and(|t| Instant::now() < t);
+            up
+        };
+        if !up || !accept {
+            return;
+        }
+        if self.with_settings(|s| s.n4n0.menu.wake_word) {
+            self.menu_open(false);
+        } else {
+            self.voice_listen(Source::WakeWord);
         }
     }
 
@@ -1874,6 +1925,7 @@ impl N4n0 {
             Command::AskRetry => self.ask_retry(),
             Command::Assistant { on } => self.assistant_switch(on),
             Command::AskTalk { down } => self.ask_talk(down),
+            Command::WakeOffer { accept } => self.wake_offer_answer(accept),
             Command::AskPlayback { active } => {
                 self.n4n0.lock().unwrap().voice.output_playing = active;
                 self.ask_follow();

@@ -1046,6 +1046,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
 
     // Heading and the bar over the grid (drawn after it: what scrolls up goes under them).
     let (head_r, head_a) = super::entering(ui, cx, 0, head);
+    let mb = Button::new(tr("Manage captures")).icon(icons::FOLDER_OPEN).hint(tr("Reconstruct, free up space and import raw captures"));
+    let mw = mb.desired_width(ui);
+    let fw = Button::new(folders::LABEL).icon(icons::FOLDER_OPEN).desired_width(ui);
+    // The line under the title stops before the two buttons on the head's right (Night PG2-12: cut at 60 % of the
+    // head whatever stood there, it ran under "Manage folders" in French and Portuguese at the minimum width).
+    let sub_room = (head.width() - mw - 10.0 - fw - 12.0).min(head.width() * 0.6).max(0.0);
     {
         let mut hu = ui.new_child(UiBuilder::new().max_rect(head_r).id_salt("gallery-head"));
         hu.multiply_opacity(head_a);
@@ -1064,21 +1070,21 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             if assets > 0 {
                 parts.push(tr!("{count} of your assets", count = assets));
             }
-            if !narrow {
-                parts.push(tr("grouped by where they were taken").to_string());
+            let grouped = tr("grouped by where they were taken").to_string();
+            // The last part goes when the line would not fit its room with it (not only under 690 points).
+            let with_it = format!("{} · {grouped}", parts.join(" · "));
+            if !narrow && widgets::text_size(&hu, &Txt::new(&with_it, 13.0)).x <= sub_room {
+                parts.push(grouped);
             }
             parts.join(" · ")
         };
-        super::heading(&hu, head_r, tr("Library"), tr("Photos & captures"), Some(&sub));
+        super::heading_in(&hu, head_r, tr("Library"), tr("Photos & captures"), Some(&sub), sub_room);
     }
     let mut manage = false;
-    let mb = Button::new(tr("Manage captures")).icon(icons::FOLDER_OPEN).hint(tr("Reconstruct, free up space and import raw captures"));
-    let mw = mb.desired_width(ui);
     let b = Rect::from_min_size(pos2(head.right() - mw, head.bottom() - 40.0), vec2(mw, 40.0));
     if sharing::pressed(mb.show_at(ui, b)) {
         manage = true;
     }
-    let fw = Button::new(folders::LABEL).icon(icons::FOLDER_OPEN).desired_width(ui);
     state.folders.show(ui, cx, Rect::from_min_size(pos2(b.left() - 10.0 - fw, b.top()), vec2(fw, 40.0)));
     let mut cu = ui.new_child(UiBuilder::new().max_rect(controls).id_salt("gallery-controls"));
     let before_filter = state.filter;

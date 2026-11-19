@@ -276,11 +276,16 @@ pub fn entering(ui: &Ui, cx: &Cx, index: usize, rect: Rect) -> (Rect, f32) {
 
 /// Page heading: caption, title, and a sub line; returns the space to its right for actions.
 pub fn heading(ui: &Ui, rect: Rect, caption: &str, title: &str, sub: Option<&str>) {
+    heading_in(ui, rect, caption, title, sub, rect.width() * 0.6);
+}
+
+/// [`heading`] whose line under the title stops at `room` points (what stands on the head's right leaves it).
+pub fn heading_in(ui: &Ui, rect: Rect, caption: &str, title: &str, sub: Option<&str>, room: f32) {
     let p = ui.painter();
     widgets::text(p, pos2(rect.left(), rect.top() + 7.0), Align2::LEFT_CENTER, &Txt::caps(caption));
     widgets::text(p, pos2(rect.left(), rect.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(title, 30.0).weight(weight::SEMIBOLD).tracking(-0.015));
     if let Some(sub) = sub {
-        widgets::text_truncated(p, pos2(rect.left(), rect.top() + 62.0), Align2::LEFT_CENTER, &Txt::new(sub, 13.0).color(theme::FG_3), rect.width() * 0.6);
+        widgets::text_truncated(p, pos2(rect.left(), rect.top() + 62.0), Align2::LEFT_CENTER, &Txt::new(sub, 13.0).color(theme::FG_3), room);
     }
 }
 

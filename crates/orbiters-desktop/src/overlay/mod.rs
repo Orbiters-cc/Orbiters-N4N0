@@ -17,7 +17,6 @@ pub mod slots;
 mod booster;
 pub mod calibration;
 pub mod coverage;
-#[cfg(windows)]
 pub mod eye_picture;
 pub mod floating;
 mod frames;

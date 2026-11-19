@@ -20,6 +20,7 @@ pub mod launcher_local;
 #[cfg(test)]
 mod launcher_live;
 pub mod maps;
+pub mod obelisk;
 pub mod osc;
 pub mod pipeline;
 pub mod panic_log;

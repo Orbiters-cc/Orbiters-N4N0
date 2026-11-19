@@ -263,6 +263,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("floating") {
         return floating::shots(&out, &settings);
     }
+    #[cfg(windows)]
     if only.as_deref() == Some("mismatch") {
         return orbit::mismatch_shots(&out);
     }

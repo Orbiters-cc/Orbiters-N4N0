@@ -24,5 +24,9 @@
   "Video decoding on the graphics card": "グラフィックボードで動画をデコード",
   "Videos in worlds cost the processor less.": "ワールド内の動画がCPUを使わなくなります。",
   "Tiny desktop window in VR": "VR中はデスクトップのウィンドウを極小に",
-  "A 100 × 100 window on the monitor while you play in VR, so it costs almost nothing. Turn it off to show or record the game on the monitor. Desktop mode keeps its window.": "VRでプレイ中はモニターに100×100のウィンドウだけを出し、ほとんど負荷をかけません。モニターでゲームを見せたり録画したりするならオフに。デスクトップモードはウィンドウのままです。"
+  "A 100 × 100 window on the monitor while you play in VR, so it costs almost nothing. Turn it off to show or record the game on the monitor. Desktop mode keeps its window.": "VRでプレイ中はモニターに100×100のウィンドウだけを出し、ほとんど負荷をかけません。モニターでゲームを見せたり録画したりするならオフに。デスクトップモードはウィンドウのままです。",
+  "Obelisk could not be opened.": "Obelisk を開けませんでした。",
+  "Sign in to VRChat in Settings so an invite to this instance can be sent to you.": "このインスタンスへの招待を自分に送るには、設定で VRChat にサインインしてください。",
+  "VRChat runs on a Mac through Obelisk, a free app. Get it, turn on Beta versions in its settings, then download VRChat in it.": "Mac では、無料アプリ Obelisk で VRChat が動きます。入手して、その設定でベータ版をオンにし、そこで VRChat をダウンロードしてください。",
+  "Download VRChat in Obelisk (with Beta versions on in its settings), then come back.": "Obelisk で VRChat をダウンロードして（設定でベータ版をオンに）、戻ってきてください。"
 }

@@ -814,6 +814,7 @@ fn wheel_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Optio
 /// `--only mismatch`: the beta's menu mismatch buttons ([`crate::mismatch`]). On the desktop, the corner over a stand-in of VRChat's window with N4N0's parts:
 /// the Quick Menu with the wing, with the strip in a squarish window (the corner is lifted over it), with a page open, and the wheel, one row saying Noted.
 /// In VR, the strip as SteamVR gets it: at rest, under a laser, saying Noted.
+#[cfg(windows)]
 pub(super) fn mismatch_shots(out: &Path) -> anyhow::Result<()> {
     use crate::mismatch::Kind;
     use crate::overlay::floating::strip;

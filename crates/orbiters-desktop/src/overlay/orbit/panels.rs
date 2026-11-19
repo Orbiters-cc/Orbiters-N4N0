@@ -2688,6 +2688,7 @@ fn cell_edge(p: &Painter, ring: Ring, center: Pos2, width: f32, color: Color32) 
 
 /// Draws a part (in units, its corner at the painter's origin): its fill and everything on it.
 pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) {
+    #[cfg(windows)]
     if zone == Zone::SheetBack && super::paint_bench::take_font_fixture(p.ctx()) {
         // Untimed benchmark pictures only. Latest-only jobs skip transient headings, so
         // uncontrolled atlas histories are different inputs to an exact pixel comparison.
@@ -2856,6 +2857,7 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
 
 /// Draws a sheet's page (in N4N0's page's units): native to these menus, in VRChat's manner.
 pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) {
+    #[cfg(windows)]
     if let Some(corpus) = super::paint_bench::take_page_fonts(p.ctx()) {
         for title in &corpus.0 { let _ = p.layout_no_wrap(title.clone(), look::font(19.0, weight::BOLD), Color32::WHITE); }
         for date in &corpus.1 { let _ = p.layout_no_wrap(date.clone(), look::font(15.0, weight::MEDIUM), Color32::WHITE); }

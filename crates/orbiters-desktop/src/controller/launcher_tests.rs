@@ -173,3 +173,165 @@ fn worlds_get_their_names_once_known() {
     assert_eq!((p.world_name.as_str(), p.world_picture.as_str()), ("Lounge", "https://api.vrchat.cloud/w"));
     assert!(unnamed_worlds(&state).is_empty());
 }
+
+/// A Mac: Obelisk runs VRChat and the person presses Play in it.
+#[derive(Default)]
+struct PretendMac {
+    running: Mutex<Vec<(u32, bool)>>,
+    obelisk: bool,
+    vrchat: bool,
+    opened: Mutex<u32>,
+    cannot_open: bool,
+}
+impl Machine for PretendMac {
+    fn running(&self) -> Vec<(u32, bool)> {
+        self.running.lock().unwrap().clone()
+    }
+    fn installed(&self) -> bool {
+        self.obelisk && self.vrchat
+    }
+    fn engine_missing(&self) -> bool {
+        !self.obelisk
+    }
+    fn by_hand(&self) -> bool {
+        true
+    }
+    fn start(&self, args: &[String]) -> Result<(), String> {
+        assert!(args.is_empty(), "nothing can be given to a game the person starts in Obelisk");
+        self.open_engine()
+    }
+    fn open_engine(&self) -> Result<(), String> {
+        if self.cannot_open {
+            return Err("no".into());
+        }
+        *self.opened.lock().unwrap() += 1;
+        Ok(())
+    }
+}
+
+fn mac(machine: Arc<PretendMac>) -> Shared {
+    let c = Controller::new(Settings::default());
+    c.launcher_machine(machine);
+    c
+}
+
+fn place() -> Place {
+    Place { world_id: W.into(), world_name: String::new(), world_picture: String::new(), instance_id: "7~friends(usr_x)".into(), access: orbiters_core::launcher::InstanceAccess::Friends, region: String::new() }
+}
+
+#[test]
+fn a_mac_says_what_is_missing_then_offers_play() {
+    let machine = Arc::new(PretendMac::default());
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::NoEngine);
+    assert!(c.view().launcher.possible.play, "Home shows the line that says to get Obelisk");
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None }), Some(Notice::Error(_))));
+    assert_eq!(*machine.opened.lock().unwrap(), 1, "where Obelisk is got was opened");
+    assert_eq!(c.view().launcher.game, Game::NoEngine, "nothing is said to be starting");
+
+    let machine = Arc::new(PretendMac { obelisk: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::NotInstalled, "Obelisk without VRChat");
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None }), Some(Notice::Error(_))));
+    assert_eq!(c.launcher_do(Action::OpenEngine), None);
+    assert_eq!(*machine.opened.lock().unwrap(), 2);
+
+    let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::NotRunning);
+    assert!(c.view().launcher.possible.play);
+}
+
+#[test]
+fn a_mac_that_follows_a_vrchat_elsewhere_is_not_told_to_get_obelisk() {
+    let machine = Arc::new(PretendMac::default());
+    let c = mac(machine.clone());
+    c.update(|s| s.vrchat.remote = true);
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::NotRunning);
+    assert!(!c.view().launcher.possible.play);
+    // With Obelisk and VRChat here, this Mac can still start its own.
+    let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.update(|s| s.vrchat.remote = true);
+    c.launcher_game(machine.as_ref());
+    assert!(c.view().launcher.possible.play);
+}
+
+#[test]
+fn play_on_a_mac_opens_obelisk_and_the_game_is_seen_once_it_runs() {
+    let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    // The VR button does not exist on a Mac; whatever mode is asked, it is the desktop game.
+    assert_eq!(c.launcher_do(Action::Play { mode: LaunchMode::Vr, destination: None }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    assert_eq!(*machine.opened.lock().unwrap(), 1);
+    assert_eq!(c.view().launcher.game, Game::Starting(LaunchMode::Desktop));
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::Starting(LaunchMode::Desktop), "while the person presses Play in Obelisk");
+    machine.running.lock().unwrap().push((42, true));
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::Running(LaunchMode::Desktop));
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None }), Some(Notice::Error(_))));
+    assert_eq!(*machine.opened.lock().unwrap(), 1, "never a second VRChat");
+    machine.running.lock().unwrap().clear();
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::NotRunning, "closed: Play again");
+}
+
+#[test]
+fn obelisk_that_does_not_open_is_said_and_nothing_starts() {
+    let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, cannot_open: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) }), Some(Notice::Error(_))));
+    assert_eq!(c.view().launcher.game, Game::NotRunning);
+    assert!(c.launcher.lock().unwrap().pending.is_none(), "no destination waits for a game that was not started");
+    assert!(matches!(c.launcher_do(Action::OpenEngine), Some(Notice::Error(_))));
+}
+
+#[test]
+fn a_destination_on_a_mac_is_an_invite_to_oneself_now_or_once_the_game_is_up() {
+    let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, ..Default::default() });
+    let c = mac(machine.clone());
+    let (_, calls) = c.test_vrchat(vec![(200, json!({})), (200, json!({}))]);
+    c.launcher_game(machine.as_ref());
+    // Not running: Obelisk opens, the destination waits, nothing is sent yet.
+    assert_eq!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) }), Some(Notice::Sent { to: W.into(), action: SentKind::Launch }));
+    assert!(calls.lock().unwrap().is_empty());
+    machine.running.lock().unwrap().push((42, true));
+    c.launcher_game(machine.as_ref());
+    let sent = |n: usize| {
+        for _ in 0..200 {
+            if calls.lock().unwrap().len() >= n {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect::<Vec<_>>()
+    };
+    assert_eq!(sent(1), [format!("POST /invite/myself/to/{W}:7~friends(usr_x)")], "sent when the game came up");
+    c.launcher_game(machine.as_ref());
+    assert_eq!(sent(1).len(), 1, "once");
+    // Running: at once, never through Windows' link pipe.
+    assert_eq!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) }), Some(Notice::Sent { to: W.into(), action: SentKind::Join }));
+    assert_eq!(sent(2).len(), 2);
+    assert_eq!(*machine.opened.lock().unwrap(), 1);
+}
+
+#[test]
+fn a_destination_that_waited_too_long_is_forgotten() {
+    let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, ..Default::default() });
+    let c = mac(machine.clone());
+    let (_, calls) = c.test_vrchat(vec![(200, json!({}))]);
+    let long_ago = Instant::now().checked_sub(PENDING_FOR + Duration::from_secs(1)).expect("a clock that started more than ten minutes ago");
+    c.launcher.lock().unwrap().pending = Some((place(), long_ago));
+    machine.running.lock().unwrap().push((42, true));
+    c.launcher_game(machine.as_ref());
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(calls.lock().unwrap().is_empty(), "the game of another evening does not get yesterday's invite");
+    assert!(c.launcher.lock().unwrap().pending.is_none());
+}

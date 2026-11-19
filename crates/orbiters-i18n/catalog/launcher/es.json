@@ -24,5 +24,9 @@
   "Video decoding on the graphics card": "Decodificación de vídeo en la tarjeta gráfica",
   "Videos in worlds cost the processor less.": "Los vídeos de los mundos cuestan menos al procesador.",
   "Tiny desktop window in VR": "Ventana diminuta en VR",
-  "A 100 × 100 window on the monitor while you play in VR, so it costs almost nothing. Turn it off to show or record the game on the monitor. Desktop mode keeps its window.": "Una ventana de 100 × 100 en el monitor mientras juegas en VR, así casi no cuesta nada. Desactívala para mostrar o grabar el juego en el monitor. El modo escritorio conserva su ventana."
+  "A 100 × 100 window on the monitor while you play in VR, so it costs almost nothing. Turn it off to show or record the game on the monitor. Desktop mode keeps its window.": "Una ventana de 100 × 100 en el monitor mientras juegas en VR, así casi no cuesta nada. Desactívala para mostrar o grabar el juego en el monitor. El modo escritorio conserva su ventana.",
+  "Obelisk could not be opened.": "No se pudo abrir Obelisk.",
+  "Sign in to VRChat in Settings so an invite to this instance can be sent to you.": "Inicia sesión en VRChat en Ajustes para que se te envíe una invitación a esta instancia.",
+  "VRChat runs on a Mac through Obelisk, a free app. Get it, turn on Beta versions in its settings, then download VRChat in it.": "VRChat funciona en un Mac con Obelisk, una app gratuita. Consíguela, activa las versiones beta en sus ajustes y descarga VRChat en ella.",
+  "Download VRChat in Obelisk (with Beta versions on in its settings), then come back.": "Descarga VRChat en Obelisk (con las versiones beta activadas en sus ajustes) y vuelve."
 }

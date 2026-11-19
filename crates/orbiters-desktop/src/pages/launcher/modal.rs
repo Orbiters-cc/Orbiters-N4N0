@@ -304,7 +304,7 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
     let join = match &friend.whereabouts {
         Whereabouts::World(place)
             if state.data.possible.play
-                && state.data.game != orbiters_core::launcher::Game::NotInstalled
+                && !matches!(state.data.game, orbiters_core::launcher::Game::NotInstalled | orbiters_core::launcher::Game::NoEngine)
                 && matches!(place.access, InstanceAccess::Public | InstanceAccess::FriendsPlus | InstanceAccess::Friends | InstanceAccess::GroupPublic | InstanceAccess::GroupPlus) =>
         {
             Some(place.clone())

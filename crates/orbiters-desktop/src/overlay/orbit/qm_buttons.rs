@@ -213,6 +213,14 @@ pub struct Sight {
 }
 
 impl Sight {
+    /// Where the eye's picture cannot be read: a sight that is never told anything.
+    #[cfg(not(windows))]
+    pub fn start(_source: orbiters_openvr::compositor::MirrorSource, _adapter: Option<u32>) -> Self {
+        let (asks, _) = std::sync::mpsc::channel::<Ask>();
+        let (_, told) = std::sync::mpsc::channel();
+        Self { asks, told, busy: false }
+    }
+
     #[cfg(windows)]
     pub fn start(source: orbiters_openvr::compositor::MirrorSource, adapter: Option<u32>) -> Self {
         let (asks, asked) = std::sync::mpsc::channel::<Ask>();

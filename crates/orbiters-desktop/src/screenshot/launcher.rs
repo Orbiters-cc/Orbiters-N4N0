@@ -8,8 +8,8 @@ use orbiters_core::launcher::*;
 
 const NOW: i64 = 1_795_000_000;
 
-pub(super) const NAMES: [&str; 9] =
-    ["launcher-list", "launcher-invite", "launcher-hover", "launcher-modal", "launcher-database", "launcher-starting", "launcher-small", "launcher-small-drawer", "launcher-small-modal"];
+pub(super) const NAMES: [&str; 11] =
+    ["launcher-list", "launcher-invite", "launcher-hover", "launcher-modal", "launcher-database", "launcher-starting", "launcher-no-engine", "launcher-not-installed", "launcher-small", "launcher-small-drawer", "launcher-small-modal"];
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
     let base = scenarios[0].snapshot.clone();
@@ -156,7 +156,16 @@ fn data(name: &str) -> LauncherState {
     let mut s = sample();
     more_people(&mut s);
     if name == "launcher-starting" {
-        s.game = Game::Starting(LaunchMode::Vr);
+        // A Mac has the desktop game alone (its one button says that Obelisk is open).
+        s.game = Game::Starting(if orbiters_core::vrchat_launch::VR_HERE { LaunchMode::Vr } else { LaunchMode::Desktop });
+        s.invites.clear();
+    }
+    // What a Mac says while Obelisk, or VRChat in it, is missing (the line of a PC without VRChat elsewhere).
+    if name == "launcher-no-engine" {
+        s.game = Game::NoEngine;
+    }
+    if name == "launcher-not-installed" {
+        s.game = Game::NotInstalled;
     }
     if name == "launcher-database" {
         // A VRCX copy: who and what was last known, nothing live.

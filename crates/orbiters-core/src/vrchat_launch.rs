@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 
 pub use crate::launcher::LaunchMode;
 
+/// Whether this computer can play in VR. A Mac has no SteamVR: VRChat there (through Obelisk, [`crate::obelisk`]) is
+/// the desktop game, and the Play buttons are one.
+pub const VR_HERE: bool = !cfg!(target_os = "macos");
+
 /// Steam's id of VRChat.
 pub const STEAM_APP: &str = "438100";
 

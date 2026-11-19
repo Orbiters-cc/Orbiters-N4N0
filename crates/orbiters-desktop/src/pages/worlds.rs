@@ -147,7 +147,7 @@ impl State {
 
     /// A world's page, its Share window or a question is open (`crate::window_rest`).
     pub fn holds(&self) -> bool {
-        self.open.is_some() || self.sharing.is_some() || self.again.is_some()
+        self.open.is_some() || self.sharing.is_some()
     }
 
     fn busy_now(&self) -> bool {

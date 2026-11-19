@@ -162,7 +162,7 @@ impl State {
 
     /// A window, dialog, viewer or editor of the page is open (`crate::window_rest`).
     pub fn holds(&self) -> bool {
-        self.gallery.holds() || self.detail.is_some() || self.viewer.is_some() || self.storage.is_some() || self.export.is_some() || self.again.is_some()
+        self.gallery.holds() || self.detail.is_some() || self.viewer.is_some() || self.storage.is_some() || self.export.is_some()
     }
 
     fn busy_now(&self) -> bool {

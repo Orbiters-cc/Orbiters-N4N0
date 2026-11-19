@@ -309,7 +309,7 @@ impl Keeper {
     /// Ends it all when the app quits.
     pub fn shutdown(&self) {
         let mut inner = self.inner.lock().unwrap();
-        self.close(&mut inner, tr("The app is closing."));
+        self.close(&mut inner, tr("The app is closing."), true);
     }
 
     /// The address clients use, when open.

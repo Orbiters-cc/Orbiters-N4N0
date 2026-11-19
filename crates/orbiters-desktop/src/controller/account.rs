@@ -463,7 +463,8 @@ impl Controller {
         let account = rt.account.as_ref().filter(|_| rt.read.is_some_and(|(s, _)| s == server));
         let stamp = orbiters_core::world_feedback::Stamp {
             server: api.url(""),
-            account: account.map(|a| a.user.clone().unwrap_or_else(|| format!("credential:{}", orbiters_core::vrchat_accounts::friend_hash(&a.token)))),
+            account: account.and_then(|a| a.user.clone()).filter(|u| !u.trim().is_empty()),
+            credential: account.map(|a| format!("credential:{}", orbiters_core::vrchat_accounts::friend_hash(&a.token))),
         };
         let with = account.map(|a| (api, a.token.clone()));
         (with, stamp)

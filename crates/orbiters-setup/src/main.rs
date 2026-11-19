@@ -41,11 +41,13 @@ pub struct Args {
     pub hidden: bool,
     /// This is the copy an uninstall made of itself outside the install folder.
     pub relocated: bool,
+    /// This is an automatic update tried again at sign-in: it runs only when it is still newer than what is installed.
+    pub retry: bool,
 }
 
 impl Args {
     fn parse(args: impl IntoIterator<Item = String>) -> Self {
-        let mut parsed = Args { mode: Mode::Install, silent: false, dir: None, relaunch: false, hidden: false, relocated: false };
+        let mut parsed = Args { mode: Mode::Install, silent: false, dir: None, relaunch: false, hidden: false, relocated: false, retry: false };
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -55,6 +57,7 @@ impl Args {
                 "--relaunch" => parsed.relaunch = true,
                 "--hidden" => parsed.hidden = true,
                 "--relocated" => parsed.relocated = true,
+                "--retry" => parsed.retry = true,
                 "--dir" => parsed.dir = args.next().map(PathBuf::from),
                 _ => {}
             }
@@ -243,32 +246,55 @@ fn relocate(args: &Args) -> i32 {
 /// Without a window: the default choices, a running app closed, errors on stderr.
 #[cfg(windows)]
 fn silent(args: &Args, payload: Option<&'static [u8]>) -> i32 {
-    let progress = install::Progress::default();
-    let result = run_task(args, payload, &progress, true, false);
-    if args.mode == Mode::Update {
-        match &result {
-            // The app kept running: nothing changed, and the same update is tried again at the next sign-in.
-            Err(e) if e.downcast_ref::<install::StillRunning>().is_some() => {
-                if let (Ok(me), Some(dir)) = (std::env::current_exe(), install_dir(args)) {
-                    if let Err(e) = system::schedule_update_retry(&retry_command(&me, &dir, args)) {
-                        eprintln!("the update could not be scheduled again: {e:#}"); // i18n: not shown (a log line)
-                    }
-                }
-            }
-            Ok(()) => system::cancel_update_retry(),
-            Err(_) => {}
+    // A retry at sign-in (verifier round 2): only while what it holds is still newer than what is installed; an older
+    // or the same version (the app updated meanwhile) is never installed again, and the retry is dropped.
+    if args.retry && args.mode == Mode::Update {
+        let holds = payload.and_then(|p| orbiters_update::payload::read_index(p).ok()).map(|i| i.version);
+        let installed = install_dir(args).and_then(|d| orbiters_update::InstallRecord::read(&d)).map(|r| r.version);
+        if !retry_is_due(holds.as_deref(), installed.as_deref()) {
+            system::cancel_update_retry();
+            return 0;
         }
     }
+    let progress = install::Progress::default();
+    let result = run_task(args, payload, &progress, true, false);
+    after_update(args, &result);
     if let Err(e) = &result {
         eprintln!("{e:#}");
     }
     result.is_err() as i32
 }
 
+/// Whether a retried update holding `holds` should run over the install of `installed`: only for a newer version.
+fn retry_is_due(holds: Option<&str>, installed: Option<&str>) -> bool {
+    matches!((holds, installed), (Some(h), Some(i)) if orbiters_update::is_newer(h, i))
+}
+
+/// After an update without a window (silent, or Windows' message boxes): one the app kept from finishing is tried again
+/// at the next sign-in; one that went through drops any retry left.
+#[cfg(windows)]
+fn after_update(args: &Args, result: &anyhow::Result<()>) {
+    if args.mode != Mode::Update {
+        return;
+    }
+    match result {
+        // The app kept running: nothing changed, and the same update is tried again at the next sign-in.
+        Err(e) if e.downcast_ref::<install::StillRunning>().is_some() => {
+            if let (Ok(me), Some(dir)) = (std::env::current_exe(), install_dir(args)) {
+                if let Err(e) = system::schedule_update_retry(&retry_command(&me, &dir, args)) {
+                    eprintln!("the update could not be scheduled again: {e:#}"); // i18n: not shown (a log line)
+                }
+            }
+        }
+        Ok(()) => system::cancel_update_retry(),
+        Err(_) => {}
+    }
+}
+
 /// The command line that tries the update of `dir` again, silently, as `args` asked for it.
 #[cfg(windows)]
 fn retry_command(setup: &std::path::Path, dir: &std::path::Path, args: &Args) -> String {
-    let mut line = format!("\"{}\" --update --silent --dir \"{}\"", setup.display(), dir.display());
+    let mut line = format!("\"{}\" --update --silent --retry --dir \"{}\"", setup.display(), dir.display());
     if args.relaunch {
         line.push_str(" --relaunch");
     }
@@ -349,7 +375,10 @@ fn fallback(args: &Args, payload: Option<&'static [u8]>) -> i32 {
         }
     }
     let progress = install::Progress::default();
-    match run_task(args, payload, &progress, true, false) {
+    let result = run_task(args, payload, &progress, true, false);
+    // The same retry rule as the silent update (verifier round 2: the message boxes skipped it).
+    after_update(args, &result);
+    match result {
         Ok(()) => {
             match args.mode {
                 Mode::Install => {
@@ -380,7 +409,19 @@ mod tests {
     fn a_waiting_update_is_tried_again_the_same_way() {
         let args = Args::parse(["--update", "--silent", "--relaunch", "--hidden"].map(String::from));
         let line = retry_command(std::path::Path::new(r"C:\U\setup.exe"), std::path::Path::new(r"C:\P\Orbiters - N4N0"), &args);
-        assert_eq!(line, r#""C:\U\setup.exe" --update --silent --dir "C:\P\Orbiters - N4N0" --relaunch --hidden"#);
+        assert_eq!(line, r#""C:\U\setup.exe" --update --silent --retry --dir "C:\P\Orbiters - N4N0" --relaunch --hidden"#);
+        assert!(Args::parse(["--update", "--silent", "--retry"].map(String::from)).retry);
+    }
+
+    /// Verifier round 2: a retry left from an older update never puts that older (or the same) version back over a
+    /// newer install; it runs only while still newer.
+    #[test]
+    fn a_retry_never_installs_an_older_or_the_same_version() {
+        assert!(retry_is_due(Some("0.3.6-dev.26"), Some("0.3.6-dev.25")));
+        assert!(!retry_is_due(Some("0.3.6-dev.25"), Some("0.3.6-dev.25")));
+        assert!(!retry_is_due(Some("0.3.6-dev.24"), Some("0.3.6-dev.30")));
+        assert!(!retry_is_due(Some("0.3.6-dev.26"), None), "nothing installed: no retry");
+        assert!(!retry_is_due(None, Some("0.3.6")));
     }
 
     #[test]

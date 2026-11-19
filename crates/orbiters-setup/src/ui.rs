@@ -194,7 +194,8 @@ impl Setup {
                         None => Err(anyhow::anyhow!("{}", tr("This setup holds no programs to install."))),
                     },
                     Job::Update(dir) => match payload {
-                        Some(bytes) => install::update(bytes, &dir, &task, false).map(drop),
+                        // Done by hand: a retry an earlier automatic attempt left is not needed any more.
+                        Some(bytes) => install::update(bytes, &dir, &task, false).map(|_| crate::system::cancel_update_retry()),
                         None => Err(anyhow::anyhow!("{}", tr("This setup holds no programs to install."))),
                     },
                     Job::Uninstall(dir, remove_data) => install::uninstall(&dir, remove_data, &task, false),
@@ -1028,7 +1029,7 @@ pub fn screenshots(dir: &std::path::Path, payload: Option<&'static [u8]>) -> any
             }),
         ),
     ];
-    let args = Args { mode: Mode::Install, silent: false, dir: Some(orbiters_update::default_install_dir()), relaunch: true, hidden: false, relocated: false };
+    let args = Args { mode: Mode::Install, silent: false, dir: Some(orbiters_update::default_install_dir()), relaunch: true, hidden: false, relocated: false, retry: false };
     for (name, prepare) in shots {
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);

@@ -166,6 +166,9 @@ pub struct Controller {
     /// Bumped (under `capture_start_gate`) by every start of a new recording, a world split's next part excepted: what
     /// belongs to one recording (a scan's flight) checks it is still the current one under the gate (C-2).
     capture_serial: AtomicU64,
+    /// Bumped by every capture worker process started; and the one the recording under way was started on.
+    worker_incarnation: AtomicU64,
+    recording_worker: AtomicU64,
     kit_epoch: Mutex<(u64,Option<String>)>,
     /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
     /// the app drives them), and when the avatar last (re)loaded, which resets them.
@@ -199,7 +202,10 @@ pub struct Controller {
     /// Why a session's last reconstruction failed, for the VRChat bridge: a toast reaches no agent.
     reconstruction_failures: Mutex<std::collections::HashMap<PathBuf, String>>,
     /// What this member added to the Map explorer, and the uploads' numbering (controller/maps.rs).
-    maps_mine: Mutex<Option<MapsMine>>,
+    /// The list with whose it is (server and credential), so another account's is never shown as mine.
+    maps_mine: Mutex<Option<(Option<String>, MapsMine)>>,
+    /// Bumped by each fetch of "My maps" (and by a sign-out): only the newest answer is kept (CTL2-8).
+    maps_turn: AtomicU64,
     upload_serial: AtomicU64,
     /// N4N0, the companion on the avatar (`orbiters_n4n0`; the service's side in controller/n4n0.rs).
     n4n0: orbiters_n4n0::Shared,
@@ -223,10 +229,16 @@ pub struct Controller {
     updates: Mutex<update::UpdateRuntime>,
     /// Space being freed in the library (controller/cleanup.rs).
     cleanup: Mutex<cleanup::CleanupRuntime>,
+    /// Held for the whole of a lend to a side session's VRChat, or a give-back ([`Controller::lend_vrchat`]).
+    lend_gate: Mutex<()>,
     /// The instances Go and Invite may send the person to (controller/vrchat_data.rs).
     instance_permits: Mutex<vrchat_data::InstancePermits>,
     /// The thread that writes the settings, the newest only ([`Controller::queue_save`]).
-    settings_writer: Mutex<Option<(mpsc::Sender<(u64, Settings)>, std::thread::JoinHandle<()>)>>,
+    settings_writer: Mutex<SettingsWriter>,
+    /// The highest settings revision written to disk, by the writing thread or after it closed (CTL-1).
+    settings_written: Arc<AtomicU64>,
+    #[cfg(test)]
+    test_settings_writes: Arc<Mutex<Vec<Settings>>>,
     /// How many times the settings were changed: taken under `snapshot` with the change, so the writer can tell the
     /// newer of two copies whatever order they reach it in.
     settings_revision: AtomicU64,
@@ -521,9 +533,11 @@ impl Controller {
             camera_route: AtomicU64::new(0),
             capture_start_gate: Mutex::new(()),
             capture_serial: AtomicU64::new(0),
+            worker_incarnation: AtomicU64::new(0),
+            recording_worker: AtomicU64::new(0),
             kit_epoch: Mutex::default(),
             avatar_before: Mutex::new(None),
-            hide: Mutex::new(hide_self::HideRuntime::default()),
+            hide: Mutex::new(hide_self::HideRuntime::with_journal((!cfg!(test)).then(hide_self::masks_journal))),
             avatar_changed_at: Mutex::new(None),
             account_runtime: Mutex::new(account::AccountRuntime::default()),
             account_generation: AtomicU64::new(0),
@@ -539,6 +553,7 @@ impl Controller {
             booster: Default::default(),
             reconstruction_failures: Mutex::default(),
             maps_mine: Mutex::new(None),
+            maps_turn: AtomicU64::new(0),
             upload_serial: AtomicU64::new(0),
             n4n0: {
                 let link = Arc::new(n4n0::Link(me.clone()));
@@ -554,8 +569,12 @@ impl Controller {
             calls: Mutex::new(calls::CallsRuntime::default()),
             updates: Mutex::new(update::UpdateRuntime::default()),
             cleanup: Mutex::new(cleanup::CleanupRuntime::default()),
-            settings_writer: Mutex::new(None),
+            settings_writer: Mutex::new(SettingsWriter::Idle),
+            settings_written: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            test_settings_writes: Arc::default(),
             instance_permits: Mutex::default(),
+            lend_gate: Mutex::new(()),
             settings_revision: AtomicU64::new(0),
             pending_start: Mutex::new(None),
             #[cfg(test)]
@@ -585,6 +604,11 @@ impl Controller {
     pub fn start(self: &Shared) {
         self.start_osc();
         self.start_lan();
+        {
+            // VRChat's camera masks a run killed during a recording left changed (CTL2-2): once VRChat is known.
+            let ctl = self.clone();
+            let _ = std::thread::Builder::new().name("masks-left".into()).spawn(move || ctl.put_back_masks_left(Duration::from_secs(20)));
+        }
         {
             let ctl = self.clone();
             let _ = std::thread::Builder::new().name("paused-reconstructions".into()).spawn(move || ctl.go_on_with_paused());
@@ -783,9 +807,16 @@ impl Controller {
                 return Ok(());
             }
         }
+        // This worker process: its events and its end count only while the recording under way is its own, or while no
+        // other worker started since (verify-controller: a dead worker's late end reset a new worker's recording).
+        let incarnation = self.worker_incarnation.fetch_add(1, Ordering::AcqRel) + 1;
         let on_event = {
             let ctl = self.clone();
-            move |e| ctl.on_worker_event(e)
+            move |e| {
+                if ctl.worker_counts(incarnation) {
+                    ctl.on_worker_event(e)
+                }
+            }
         };
         let on_log = {
             let ctl = self.clone();
@@ -799,7 +830,30 @@ impl Controller {
         };
         let on_exit = {
             let ctl = self.clone();
-            move || {
+            move || ctl.on_worker_exit(incarnation)
+        };
+        let handle = WorkerHandle::spawn(on_event, on_log, on_exit).inspect_err(|e| {
+            self.update(|s| s.worker.error = Some(e.to_string()));
+        })?;
+        *guard = Some(handle);
+        Ok(())
+    }
+
+    /// Whether what worker `incarnation` says still counts: it is the newest worker, or the recording under way was
+    /// started on it.
+    fn worker_counts(&self, incarnation: u64) -> bool {
+        self.worker_incarnation.load(Ordering::Acquire) == incarnation || self.recording_worker.load(Ordering::Acquire) == incarnation
+    }
+
+    /// Worker `incarnation` ended. Its recording, if one was under way, ended with it; a worker replaced since (a stuck
+    /// one restarted) whose end is heard late leaves the newer worker's recording alone.
+    fn on_worker_exit(self: &Shared, incarnation: u64) {
+        if !self.worker_counts(incarnation) {
+            return;
+        }
+        {
+            let ctl = self;
+            {
                 ctl.put_vrchat_back();
                 // What the recording was for ends with it, BEFORE Idle is published: a start after Idle may be a new
                 // 3D picture's or scan's, whose flag must stay (CTL-11 a).
@@ -818,12 +872,7 @@ impl Controller {
                 });
                 ctl.capture_ended();
             }
-        };
-        let handle = WorkerHandle::spawn(on_event, on_log, on_exit).inspect_err(|e| {
-            self.update(|s| s.worker.error = Some(e.to_string()));
-        })?;
-        *guard = Some(handle);
-        Ok(())
+        }
     }
 
     fn send(self: &Shared, cmd: &WorkerCommand) -> anyhow::Result<()> {
@@ -981,6 +1030,12 @@ impl Controller {
                 } else {
                     std::mem::take(&mut self.scan.lock().unwrap().recording)
                 };
+                // The same for a 3D picture (its flag, what it is of, who it left out), and the reason it has no
+                // keyframe, all before Idle: after it, the next picture's own are there (verify-controller).
+                let ended = self.capture_serial.load(Ordering::Acquire);
+                let picture = if restarting { None } else { self.take_picture_ended() };
+                let nothing = !restarting && manifest.stats.frames > 0 && manifest.stats.keyframes == 0;
+                let why = nothing.then(|| self.no_strip_reason());
                 self.update(|s| {
                     if !restarting {
                         s.capture.state = CaptureState::Idle;
@@ -992,13 +1047,10 @@ impl Controller {
                 });
                 self.bump_library();
                 // Frames, but not one with a pose: no capture, whatever a green "saved" would say, and nothing to reconstruct.
-                let nothing = !restarting && manifest.stats.frames > 0 && manifest.stats.keyframes == 0;
-                if nothing {
-                    self.burst.lock().unwrap().recording = false;
-                    let why = self.no_strip_reason();
-                    // Only on this recording: a capture started since (the state went Idle above) keeps its own.
+                if let Some(why) = why {
+                    // Only on this recording: one started since (it took the next number) keeps its own.
                     self.update_if(|s| {
-                        let ours = s.capture.session_dir == session && !s.is_capturing();
+                        let ours = self.no_recording_since(ended) && !s.is_capturing();
                         if ours {
                             s.capture.no_strip = Some(why);
                         }
@@ -1027,7 +1079,7 @@ impl Controller {
                 }
                 if !restarting {
                     self.world_import_saved(session.clone());
-                    self.burst_saved(session.clone());
+                    self.burst_saved(session.clone(), picture.filter(|_| !nothing));
                     self.scan_saved(session.filter(|_| was_scan && !nothing));
                     self.capture_ended();
                 }
@@ -1074,6 +1126,22 @@ impl Controller {
         })
     }
 
+    /// A start that is a picture's or a scan's own: it fails when anything records or is being saved (it would adopt
+    /// that recording), `claim` runs under the start gate the moment it is accepted (the flag that says what it is
+    /// for), and the number of the recording it started is handed back (verify-controller, C-2, CTL2-7).
+    fn start_capture_owned(self: &Shared, purpose: CapturePurpose, claim: impl FnOnce()) -> anyhow::Result<u64> {
+        let (name, dolly) = self.with_settings(|s| (s.spout_sender.clone(), s.dolly_streams));
+        let (name, extra) = if dolly {
+            (if name.is_empty() { dolly::MAIN_SENDER.to_string() } else { name }, dolly::EXTRA_SENDERS.map(String::from).to_vec())
+        } else {
+            (name, Vec::new())
+        };
+        let _ = purpose;
+        let generation = self.stop_generation.load(Ordering::Acquire);
+        let started = self.start_segment_claimed(SourceSpec::Spout { name, extra }, false, false, generation, false, Some(claim))?;
+        started.ok_or_else(|| anyhow::anyhow!("{}", tr("A recording is under way: stop it first.")))
+    }
+
     fn start_with(self: &Shared, source: SourceSpec, importing: bool, from_osc: bool) -> anyhow::Result<()> {
         let stop_generation = self.stop_generation.load(Ordering::Acquire);
         self.start_with_generation(source, importing, from_osc, stop_generation)
@@ -1084,12 +1152,31 @@ impl Controller {
     }
 
     fn start_segment(self: &Shared, source: SourceSpec, importing: bool, from_osc: bool, stop_generation: u64, rollover: bool) -> anyhow::Result<()> {
+        self.start_segment_claimed(source, importing, from_osc, stop_generation, rollover, None::<fn()>).map(|_| ())
+    }
+
+    /// [`Controller::start_segment`]; with `claim` (a picture's or a scan's own start), refused while anything records
+    /// or is being saved, `claim` run under the gate once accepted. `Some(number)`: the recording this call started (or,
+    /// for a world split, the one it goes on with); `None`: nothing started (one records already, or a stop came).
+    fn start_segment_claimed(
+        self: &Shared,
+        source: SourceSpec,
+        importing: bool,
+        from_osc: bool,
+        stop_generation: u64,
+        rollover: bool,
+        claim: Option<impl FnOnce()>,
+    ) -> anyhow::Result<Option<u64>> {
         let _start = self.capture_start_gate.lock().unwrap();
+        let exclusive = claim.is_some();
         anyhow::ensure!(self.stop_generation.load(Ordering::Acquire) == stop_generation, "{}", tr("Finish the current capture first."));
         if rollover { anyhow::ensure!(matches!(self.view().capture.state,CaptureState::Recording|CaptureState::Paused), "{}", tr("Finish the current capture first.")); }
-        if !rollover && matches!(self.view().capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused) { return Ok(()); }
-        if !rollover {
-            self.capture_serial.fetch_add(1, Ordering::AcqRel);
+        if !rollover && matches!(self.view().capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused) {
+            anyhow::ensure!(!exclusive, "{}", tr("A recording is under way: stop it first."));
+            return Ok(None);
+        }
+        if exclusive {
+            self.ensure_capture_idle()?;
         }
         anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "{}", tr("Orbiters - N4N0 is quitting."));
         let settings = self.settings();
@@ -1103,10 +1190,20 @@ impl Controller {
         }
         if self.snapshot.lock().unwrap().capture.state == CaptureState::Stopping {
             anyhow::ensure!(!rollover, "{}", tr("Finish the current capture first."));
-            // The last session is still being saved: this one starts once it is (`capture_ended`).
+            // The last session is still being saved: this one starts once it is (`capture_ended`), and gets its number
+            // then (a start refused or queued takes none: it would end what the last flight still owes).
             *self.pending_start.lock().unwrap() = Some((source, importing, from_osc, stop_generation));
-            return Ok(());
+            return Ok(None);
         }
+        // Accepted: what it is for, then its number, under the gate (nothing else starts in between).
+        if let Some(claim) = claim {
+            claim();
+        }
+        let number = if rollover {
+            self.capture_serial.load(Ordering::Acquire)
+        } else {
+            self.capture_serial.fetch_add(1, Ordering::AcqRel) + 1
+        };
         let cmd = StartCapture {
             source: source.clone(),
             sessions_dir: settings.sessions_dir.clone(),
@@ -1174,6 +1271,8 @@ impl Controller {
                 self.flush_osc(&mut osc);
                 osc.forwarding = false;
                 let sent = self.send(&WorkerCommand::Start(Box::new(cmd)));
+                // The worker this recording runs on (the newest: `send` started one if none ran).
+                self.recording_worker.store(self.worker_incarnation.load(Ordering::Acquire), Ordering::Release);
                 if sent.is_ok() && record_parameters {
                     let samples = initial_samples(vrchat, &osc.latest, fetch_started);
                     osc.forwarding = true;
@@ -1192,7 +1291,7 @@ impl Controller {
                 s.capture.from_osc = false;
             });
             self.capture_ended();
-            return Ok(());
+            return Ok(None);
         };
         if let Err(e) = sent {
             self.put_vrchat_back();
@@ -1204,7 +1303,7 @@ impl Controller {
             self.capture_ended();
             return Err(e);
         }
-        Ok(())
+        Ok(Some(number))
     }
 
     /// The recording ended or never started: no more values to the worker, and VRChat's camera and the capture
@@ -1234,6 +1333,33 @@ impl Controller {
         }
         if let Err(e) = self.stop_capture() {
             self.notify(NoticeKind::Error, e.to_string());
+        }
+    }
+
+    /// Does `effect` (an OSC message, the rig, a mask) for `owner`'s recording only: checked and done under the start
+    /// gate, so no other recording can begin between the check and the effect. Whether it was done.
+    pub(super) fn for_recording(&self, owner: u64, effect: impl FnOnce()) -> bool {
+        let _gate = self.capture_start_gate.lock().unwrap();
+        let ours = self.owns_recording(owner);
+        if ours {
+            effect();
+        }
+        ours
+    }
+
+    /// A flight that gives its start up (it never reached Recording, or its thread could not start): `flag` (what said
+    /// the recording was a picture's or a scan's) goes, and the start is stopped when it is still under way, all under
+    /// the gate; nothing when another recording began since (its flag and recording are its own).
+    pub(super) fn give_up_start_of(self: &Shared, owner: u64, flag: impl FnOnce()) {
+        let _gate = self.capture_start_gate.lock().unwrap();
+        if !self.no_recording_since(owner) {
+            return;
+        }
+        flag();
+        if self.is_capturing() {
+            if let Err(e) = self.stop_capture() {
+                self.notify(NoticeKind::Error, e.to_string());
+            }
         }
     }
 
@@ -1623,6 +1749,8 @@ impl Controller {
     fn on_osc_events(self: &Shared, events: &mut Vec<OscEvent>, at_ns: u64, record_parameter: &str) {
         let mut messages = Vec::with_capacity(events.len());
         let mut went_off = false;
+        // The avatar this batch's events already invalidated the kit for: `on_osc` does not do it a second time.
+        let mut invalidated: Option<String> = None;
         // How the player moves, for live translation in VR (the overlay keeps translations on the world as the person
         // walks with the stick): forwarded only while it is on.
         let mut locomotion: Vec<(String, f32)> = Vec::new();
@@ -1657,6 +1785,7 @@ impl Controller {
                 }
                 OscEvent::AvatarChanged { id } => {
                     self.invalidate_kit(Some(id.clone()));
+                    invalidated = Some(id.clone());
                     self.on_avatar_changed();
                     // N4N0 reads the parameters the last avatar held before they go (`on_osc`).
                     self.n4n0.on_avatar(id.clone());
@@ -1695,7 +1824,7 @@ impl Controller {
             // Only the readers that show things (the overlay, a window): the tray's mailbox would only keep them.
             subs.retain(|m| !m.shows_notices() || m.post(ToClient::Locomotion { values: locomotion.clone() }));
         }
-        self.on_osc(messages, at_ns);
+        self.on_osc_after(messages, at_ns, invalidated);
         if went_off {
             let _ = self.osc_action(|c| c.local_user_went_off());
         }
@@ -1704,11 +1833,19 @@ impl Controller {
     /// Keeps what VRChat said (and passes it to a session recording it). An avatar change forgets the last avatar's
     /// parameters: a session started now lists the avatar worn, not every avatar worn before.
     fn on_osc(&self, messages: Vec<(String, Vec<OscValue>)>, at_ns: u64) {
+        self.on_osc_after(messages, at_ns, None);
+    }
+
+    /// [`Controller::on_osc`], for a batch whose events already invalidated the kit for the avatar `invalidated`
+    /// ([`Controller::on_osc_events`]): one invalidation (an epoch, a publish) per avatar change, not two (CTL-11 c).
+    fn on_osc_after(&self, messages: Vec<(String, Vec<OscValue>)>, at_ns: u64, invalidated: Option<String>) {
         let avatar_changed = messages.iter().any(|(p,_)| p == AVATAR_CHANGE);
         if avatar_changed {
             let avatar=messages.iter().rev().find(|(p,_)| p==AVATAR_CHANGE).and_then(|(_,v)| match v.first() { Some(OscValue::Text(id))=>Some(id.clone()), _=>None });
             // Invalidate before the new id becomes observable to the demo completion watcher.
-            self.invalidate_kit(avatar);
+            if avatar.is_none() || avatar != invalidated {
+                self.invalidate_kit(avatar);
+            }
         }
         let camera = messages.iter().rev().find(|(p, _)| p == CAMERA_MODE).and_then(|(_, v)| match v.first() {
             Some(OscValue::Int(mode)) => Some(*mode != 0),
@@ -1989,6 +2126,8 @@ impl Controller {
                     ctl.start_osc();
                 }
                 if sessions_changed {
+                    // Upload records of the captures that moved with the library (CTL2-11 k).
+                    shares::follow_moved_library(orbiters_core::account::Server::current(), &ctl.with_settings(|s| s.sessions_dir.clone()));
                     refresh_storage(&ctl);
                     ctl.bump_library();
                 }
@@ -2000,40 +2139,65 @@ impl Controller {
     /// the newest of a burst (by `revision`, not by arrival) and writes it once nothing changed for [`SAVE_QUIET`].
     fn queue_save(self: &Shared, revision: u64, settings: Settings) {
         let mut writer = self.settings_writer.lock().unwrap();
-        if writer.is_none() {
-            let (tx, rx) = mpsc::channel::<(u64, Settings)>();
-            let ctl = Arc::downgrade(self);
-            let write = move |s: Settings| {
-                // Tests never touch the person's settings file.
-                if cfg!(test) {
-                    return;
-                }
-                if let Err(e) = s.save() {
-                    if let Some(ctl) = ctl.upgrade() {
-                        ctl.notify(NoticeKind::Error, tr!("Could not save the settings: {error}", error = e));
+        match &*writer {
+            SettingsWriter::Idle => {
+                let (tx, rx) = mpsc::channel::<(u64, Settings)>();
+                let (mut write, written) = (self.settings_sink(), self.settings_written.clone());
+                let thread = std::thread::Builder::new()
+                    .name("settings-writer".into())
+                    .spawn(move || write_settings_in_order(rx, SAVE_QUIET, &written, &mut write));
+                match thread {
+                    Ok(thread) => {
+                        let _ = tx.send((revision, settings));
+                        *writer = SettingsWriter::Running(tx, thread);
                     }
+                    Err(e) => eprintln!("settings writer: {e}"),
                 }
-            };
-            let thread = std::thread::Builder::new()
-                .name("settings-writer".into())
-                .spawn(move || write_settings_in_order(rx, SAVE_QUIET, write));
-            match thread {
-                Ok(thread) => *writer = Some((tx, thread)),
-                Err(e) => {
-                    eprintln!("settings writer: {e}");
-                    return;
+            }
+            SettingsWriter::Running(tx, _) => {
+                let _ = tx.send((revision, settings));
+            }
+            // A change applied after the last flush (a link still talking while the app quits): written here and now,
+            // under this lock, and only when it is newer than what is on disk. A second writer started then began from
+            // nothing and could write an older copy over the flushed one (verify-controller, CTL-1).
+            SettingsWriter::Closed => {
+                if revision > self.settings_written.load(Ordering::SeqCst) && (self.settings_sink())(settings) {
+                    self.settings_written.store(revision, Ordering::SeqCst);
                 }
             }
         }
-        if let Some((tx, _)) = writer.as_ref() {
-            let _ = tx.send((revision, settings));
+    }
+
+    /// Where settings are written: the settings file, a notice when that fails (`false`). Tests keep them in memory.
+    fn settings_sink(self: &Shared) -> impl FnMut(Settings) -> bool + Send + 'static {
+        #[cfg(test)]
+        {
+            let writes = self.test_settings_writes.clone();
+            move |s: Settings| {
+                writes.lock().unwrap().push(s);
+                true
+            }
+        }
+        #[cfg(not(test))]
+        {
+            let ctl = Arc::downgrade(self);
+            move |s: Settings| match s.save() {
+                Ok(()) => true,
+                Err(e) => {
+                    if let Some(ctl) = ctl.upgrade() {
+                        ctl.notify(NoticeKind::Error, tr!("Could not save the settings: {error}", error = e));
+                    }
+                    false
+                }
+            }
         }
     }
 
-    /// Writes the settings still waiting, and stops the writing thread (the app quits).
+    /// Writes the settings still waiting, and stops the writing thread (the app quits). The slot stays closed, held
+    /// through the join: nothing writes beside the last flush, and what comes after it is written by `queue_save`.
     fn flush_settings(&self) {
-        let writer = self.settings_writer.lock().unwrap().take();
-        if let Some((tx, thread)) = writer {
+        let mut writer = self.settings_writer.lock().unwrap();
+        if let SettingsWriter::Running(tx, thread) = std::mem::replace(&mut *writer, SettingsWriter::Closed) {
             drop(tx);
             let _ = thread.join();
         }
@@ -2079,6 +2243,8 @@ impl Controller {
         // The service before goes outside the lock: stopping it waits for its receiving thread, which may be calling in.
         let before = self.osc.lock().unwrap().take();
         drop(before);
+        // No VRChat is asked any more over the service that went: a camera answer of it is no one's now.
+        self.camera_route_changed();
         let (enabled, vrchat_port) = self.with_settings(|s| (s.osc.enabled, s.osc.vrchat_port));
         if !enabled {
             self.update(|s| *s.osc = state::OscStatus { enabled: false, ..Default::default() });
@@ -2096,9 +2262,11 @@ impl Controller {
     }
 
     /// Starts OSC for the VRChat `network` says, replacing any that runs.
-    fn apply_camera_seed(&self, generation:u64, open:bool) -> bool {
+    fn apply_camera_seed(&self, generation:u64, route: u64, open:bool) -> bool {
         self.update_if(|s| {
-            if self.osc_generation.load(Ordering::Acquire)!=generation || s.camera_open_said.is_some() { return false; }
+            // The OSC start's seed: for its connection, and for the VRChat it asked (a followed VRChat may change
+            // within one connection: verify-controller, C-8).
+            if self.osc_generation.load(Ordering::Acquire)!=generation || self.camera_route.load(Ordering::Acquire) != route || s.camera_open_said.is_some() { return false; }
             s.camera_open_said=Some(open);
             true
         })
@@ -2134,13 +2302,15 @@ impl Controller {
                 std::thread::spawn(move || {
                     for _ in 0..100 {
                         if ctl.osc_generation.load(Ordering::Acquire)!=generation || ctl.view().camera_open_said.is_some() { break; }
+                        let route = ctl.camera_route.load(Ordering::Acquire);
                         let camera = ctl.camera_values().into_iter().find_map(|(p,v)| match v {
                             OscValue::Int(mode) if p == CAMERA_MODE => Some(mode != 0),
                             _ => None,
                         });
                         if let Some(open) = camera {
-                            ctl.apply_camera_seed(generation,open);
-                            break;
+                            if ctl.apply_camera_seed(generation, route, open) {
+                                break;
+                            }
                         }
                         std::thread::sleep(Duration::from_millis(100));
                     }
@@ -2711,7 +2881,13 @@ impl Controller {
     /// Moves a session folder to the recycle bin (only folders inside the sessions folder with a manifest).
     pub fn trash_session(self: &Shared, dir: &Path) -> anyhow::Result<()> {
         let root = self.settings().sessions_dir;
-        if !inside(&root, dir) || !dir.join("manifest.json").is_file() {
+        self.trash_session_in(&root, dir)
+    }
+
+    /// [`Controller::trash_session`] of a session of the library `root` (the one it was asked for: a Trash waiting behind
+    /// a link's other file work is judged against the library it was sent for, not one switched to since).
+    pub fn trash_session_in(self: &Shared, root: &Path, dir: &Path) -> anyhow::Result<()> {
+        if !inside(root, dir) || !dir.join("manifest.json").is_file() {
             anyhow::bail!("{}", tr("Only session folders inside the sessions folder can be removed."));
         }
         anyhow::ensure!(!self.cleaning(dir), "{}", tr("This session is being cleaned up: try again once that is done."));
@@ -2929,13 +3105,35 @@ fn refresh_free_space(ctl: &Shared) {
 /// limit), or ten minutes passed (LIGHT-DESKTOP-9).
 #[derive(Default)]
 struct StorageSweep {
-    last: Option<(u64, PathBuf, Option<std::time::SystemTime>, Instant)>,
+    last: Option<(u64, PathBuf, u64, Instant)>,
+}
+
+/// What every session folder's size and summary depend on, in one number: the library's own time and, for each session,
+/// the five times the size cache keys on (orbiters_core::bundle `stamp`: its manifest, its folder, its reconstruction
+/// report, its keyframes and depth folders). One `metadata` each, no file opened or parsed: a turn with an unchanged
+/// fingerprint has nothing a full walk would find, also for a session changed by hand (verify-controller).
+fn library_fingerprint(dir: &Path) -> u64 {
+    use orbiters_core::contracts::manifest::{DEPTH_DIR, KEYFRAMES_DIR, MANIFEST_FILE};
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    let time = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    time(dir).hash(&mut hash);
+    let mut sessions: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    sessions.sort();
+    for session in &sessions {
+        session.hash(&mut hash);
+        let report = orbiters_core::reconstruction::result_dir(session).join(orbiters_core::reconstruction::REPORT_FILE);
+        for part in [session.join(MANIFEST_FILE), session.clone(), report, session.join(KEYFRAMES_DIR), session.join(DEPTH_DIR)] {
+            time(&part).hash(&mut hash);
+        }
+    }
+    hash.finish()
 }
 
 impl StorageSweep {
     const AT_MOST: Duration = Duration::from_secs(600);
 
-    fn due(&mut self, library: u64, dir: &Path, modified: Option<std::time::SystemTime>, recording: bool, now: Instant) -> bool {
+    fn due(&mut self, library: u64, dir: &Path, modified: u64, recording: bool, now: Instant) -> bool {
         let due = recording
             || self.last.as_ref().is_none_or(|(v, d, m, at)| *v != library || d != dir || *m != modified || now.duration_since(*at) >= Self::AT_MOST);
         if due {
@@ -3198,7 +3396,7 @@ fn spawn_watchers(ctl: Shared) {
                 // Storage, every 30 s: the whole library when something may have changed, else the free space.
                 if tick.is_multiple_of(30) {
                     let dir = ctl.with_settings(|s| s.sessions_dir.clone());
-                    let modified = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+                    let modified = library_fingerprint(&dir);
                     if storage_sweep.due(ctl.library_version(), &dir, modified, ctl.is_capturing(), Instant::now()) {
                         refresh_storage(&ctl);
                     } else {
@@ -3220,15 +3418,25 @@ fn spawn_watchers(ctl: Shared) {
 /// The settings writer's loop: waits for [`SAVE_QUIET`] of quiet after a change, then writes the newest copy it was
 /// given. Newest is the highest revision, kept across writes too: a copy numbered lower than one already written (a
 /// thread that applied first and queued last) is never written over it.
-fn write_settings_in_order(rx: mpsc::Receiver<(u64, Settings)>, quiet: Duration, mut write: impl FnMut(Settings)) {
-    let mut written = 0u64;
+/// The settings writer's state: not started, running, or closed by the last flush (the app quits).
+enum SettingsWriter {
+    Idle,
+    Running(mpsc::Sender<(u64, Settings)>, std::thread::JoinHandle<()>),
+    Closed,
+}
+
+fn write_settings_in_order(rx: mpsc::Receiver<(u64, Settings)>, quiet: Duration, watermark: &AtomicU64, write: &mut impl FnMut(Settings) -> bool) {
+    let mut written = watermark.load(Ordering::SeqCst);
+    // A copy whose write failed waits for the next burst, unless a newer one comes (it holds the same changes).
+    let mut carried: Option<(u64, Settings)> = None;
     while let Ok(first) = rx.recv() {
-        let mut latest = Some(first).filter(|(r, _)| *r > written);
+        let mut latest = carried.take().filter(|(r, _)| *r > written);
         let keep = |latest: &mut Option<(u64, Settings)>, (r, s): (u64, Settings)| {
             if r > latest.as_ref().map_or(written, |(l, _)| *l) {
                 *latest = Some((r, s));
             }
         };
+        keep(&mut latest, first);
         let mut done = false;
         loop {
             match rx.recv_timeout(quiet) {
@@ -3241,10 +3449,20 @@ fn write_settings_in_order(rx: mpsc::Receiver<(u64, Settings)>, quiet: Duration,
             }
         }
         if let Some((r, s)) = latest {
-            written = r;
-            write(s);
+            if write(s.clone()) {
+                written = r;
+                watermark.store(r, Ordering::SeqCst);
+            } else {
+                carried = Some((r, s));
+            }
         }
         if done {
+            // The last flush: one more try for a copy that failed.
+            if let Some((r, s)) = carried.take() {
+                if write(s) {
+                    watermark.store(r, Ordering::SeqCst);
+                }
+            }
             return;
         }
     }
@@ -3267,44 +3485,131 @@ mod tests {
             (a, b)
         };
         let quiet = Duration::from_millis(40);
-        let run = |sends: Vec<(u64, Settings, Duration)>| {
+        // Each send, then (`true`) a wait until the writer has written: not a sleep, which a loaded machine (the
+        // release gate's full parallel run) can outlast before the writer thread even runs, turning "after a write"
+        // into "in one burst" (it failed so once: the code was right, the test's timing was not).
+        let run = |sends: Vec<(u64, Settings, bool)>| {
             let (tx, rx) = mpsc::channel();
+            let (wrote_tx, wrote) = mpsc::channel();
             let writer = std::thread::spawn(move || {
                 let mut written = Vec::new();
-                super::write_settings_in_order(rx, quiet, |s| written.push(s.storage_limit_gb));
+                let watermark = std::sync::atomic::AtomicU64::new(0);
+                super::write_settings_in_order(rx, quiet, &watermark, &mut |s: Settings| {
+                    written.push(s.storage_limit_gb);
+                    let _ = wrote_tx.send(());
+                    true
+                });
                 written
             });
-            for (r, s, pause) in sends {
+            for (r, s, wait) in sends {
                 tx.send((r, s)).unwrap();
-                std::thread::sleep(pause);
+                if wait {
+                    wrote.recv_timeout(Duration::from_secs(30)).expect("the writer wrote");
+                }
             }
             drop(tx);
             writer.join().unwrap()
         };
-        let none = Duration::ZERO;
-        let after_write = Duration::from_millis(200);
-        assert_eq!(run(vec![(2, b.clone(), none), (1, a.clone(), none)]), vec![2.0], "reversed in one burst");
-        assert_eq!(run(vec![(2, b.clone(), after_write), (1, a.clone(), none)]), vec![2.0], "the older after a write");
-        assert_eq!(run(vec![(1, a.clone(), after_write), (2, b.clone(), none)]), vec![1.0, 2.0], "in order");
+        assert_eq!(run(vec![(2, b.clone(), false), (1, a.clone(), false)]), vec![2.0], "reversed in one burst");
+        assert_eq!(run(vec![(2, b.clone(), true), (1, a.clone(), false)]), vec![2.0], "the older after a write");
+        assert_eq!(run(vec![(1, a.clone(), true), (2, b.clone(), false)]), vec![1.0, 2.0], "in order");
+    }
+
+    /// verify-controller: the late end of a worker replaced since (its recording not the one under way) leaves the newer
+    /// worker's recording running; the end of the worker the recording runs on still ends it.
+    #[test]
+    fn a_replaced_workers_late_end_leaves_the_new_recording_alone() {
+        use std::sync::atomic::Ordering;
+        let ctl = super::Controller::new(orbiters_core::settings::Settings::default());
+        // Worker 1 died, worker 2 was started and records.
+        ctl.worker_incarnation.store(2, Ordering::Release);
+        ctl.recording_worker.store(2, Ordering::Release);
+        ctl.update(|s| s.capture.state = super::CaptureState::Recording);
+        ctl.on_worker_exit(1);
+        assert_eq!(ctl.view().capture.state, super::CaptureState::Recording, "worker 1's late end");
+        ctl.on_worker_exit(2);
+        assert_eq!(ctl.view().capture.state, super::CaptureState::Idle, "its own worker ended");
+    }
+
+    /// verify-controller (CTL-1 at shutdown): a change queued after the last flush never starts a second writer that writes
+    /// an older copy over the flushed one; a newer one is still written.
+    #[test]
+    fn a_change_after_the_last_flush_never_writes_an_older_copy() {
+        use orbiters_core::settings::Settings;
+        let ctl = super::Controller::new(Settings::default());
+        let with = |gb: f64| {
+            let mut s = Settings::default();
+            s.storage_limit_gb = gb;
+            s
+        };
+        let written = || ctl.test_settings_writes.lock().unwrap().iter().map(|s| s.storage_limit_gb).collect::<Vec<_>>();
+        ctl.queue_save(2, with(2.0));
+        ctl.flush_settings();
+        assert_eq!(written(), vec![2.0], "the flush wrote B");
+        // A applied first (revision 1) and queued late, after the flush.
+        ctl.queue_save(1, with(1.0));
+        ctl.flush_settings();
+        assert_eq!(written(), vec![2.0], "A is older than what is on disk");
+        ctl.queue_save(3, with(3.0));
+        assert_eq!(written(), vec![2.0, 3.0], "a newer change after the flush is written at once");
     }
 
     /// LIGHT-DESKTOP-9: the library is walked again when something changed, while recording, and every ten minutes;
     /// the other 30 s turns ask only for the free space.
     #[test]
     fn the_library_is_walked_again_only_when_it_may_have_changed() {
-        use std::time::{Duration, Instant, SystemTime};
+        use std::time::{Duration, Instant};
         let mut sweep = super::StorageSweep::default();
         let dir = std::path::PathBuf::from("lib");
         let t0 = Instant::now();
-        let m = Some(SystemTime::UNIX_EPOCH);
+        let m = 1u64;
         assert!(sweep.due(1, &dir, m, false, t0), "the first turn");
         assert!(!sweep.due(1, &dir, m, false, t0 + Duration::from_secs(30)), "nothing changed");
         assert!(sweep.due(2, &dir, m, false, t0 + Duration::from_secs(60)), "a session saved, trashed...");
-        assert!(sweep.due(2, &dir, Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(90)), "a folder added by hand");
-        assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(120)));
-        assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), true, t0 + Duration::from_secs(150)), "recording");
-        assert!(!sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(180)));
-        assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(800)), "ten minutes");
+        assert!(sweep.due(2, &dir, 2u64, false, t0 + Duration::from_secs(90)), "a folder added by hand");
+        assert!(sweep.due(2, std::path::Path::new("other"), 2u64, false, t0 + Duration::from_secs(120)));
+        assert!(sweep.due(2, std::path::Path::new("other"), 2u64, true, t0 + Duration::from_secs(150)), "recording");
+        assert!(!sweep.due(2, std::path::Path::new("other"), 2u64, false, t0 + Duration::from_secs(180)));
+        assert!(sweep.due(2, std::path::Path::new("other"), 2u64, false, t0 + Duration::from_secs(800)), "ten minutes");
+    }
+
+    /// verify-controller (LIGHT-DESKTOP-9): a session changed inside (its manifest rewritten, keyframes added), with the
+    /// library's own folder untouched, changes the fingerprint: the next 30 s turn walks the library, as before.
+    #[test]
+    fn a_change_inside_a_session_is_seen_on_the_next_turn() {
+        use std::time::{Duration, SystemTime};
+        let root = std::env::temp_dir().join(format!("orbiters-fingerprint-{}", uuid::Uuid::new_v4()));
+        let session = root.join("Home 1");
+        std::fs::create_dir_all(session.join("keyframes")).unwrap();
+        std::fs::write(session.join("manifest.json"), b"{}").unwrap();
+        let at = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + s);
+        let touch = |p: &std::path::Path, s: u64| std::fs::File::options().write(true).open(p).unwrap().set_modified(at(s)).unwrap();
+        touch(&session.join("manifest.json"), 0);
+        let before = super::library_fingerprint(&root);
+        assert_eq!(super::library_fingerprint(&root), before, "nothing changed");
+        touch(&session.join("manifest.json"), 60);
+        let after = super::library_fingerprint(&root);
+        assert_ne!(after, before, "its manifest rewritten");
+        let mut sweep = super::StorageSweep::default();
+        let t0 = std::time::Instant::now();
+        assert!(sweep.due(1, &root, before, false, t0));
+        assert!(sweep.due(1, &root, after, false, t0 + Duration::from_secs(30)), "walked on the next turn");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// CTL-11 c: an avatar change heard as an event invalidates the kit once (one epoch, the last avatar's), also with
+    /// two changes in one batch; a message given straight to `on_osc` still invalidates by itself.
+    #[test]
+    fn an_avatar_change_invalidates_the_kit_once() {
+        let ctl = super::Controller::new(orbiters_core::settings::Settings::default());
+        let epoch = || ctl.kit_epoch.lock().unwrap().clone();
+        let start = epoch().0;
+        ctl.on_osc_events(&mut vec![OscEvent::AvatarChanged { id: "avtr_a".into() }], clock::now_ns(), RECORD_PARAMETER);
+        assert_eq!(epoch(), (start + 1, Some("avtr_a".into())));
+        ctl.on_osc_events(&mut vec![OscEvent::AvatarChanged { id: "avtr_b".into() }, OscEvent::AvatarChanged { id: "avtr_c".into() }], clock::now_ns(), RECORD_PARAMETER);
+        assert_eq!(epoch(), (start + 3, Some("avtr_c".into())), "one per change, the last avatar's");
+        ctl.on_osc(vec![(AVATAR_CHANGE.to_string(), vec![OscValue::Text("avtr_d".into())])], clock::now_ns());
+        assert_eq!(epoch(), (start + 4, Some("avtr_d".into())));
     }
 
     /// C-8: the keeper's answer about VRChat A's camera, arriving after the app followed VRChat B, is not shown for B;
@@ -3616,15 +3921,31 @@ mod tests {
     fn review_camera_bootstrap_cannot_publish_across_reconnection() {
         let (ctl,_socket)=review_controller();
         let old=ctl.osc_generation.load(Ordering::Acquire);
+        let route=ctl.camera_route.load(Ordering::Acquire);
         let release=Arc::new(std::sync::Barrier::new(2));
         let b=release.clone(); let c=ctl.clone();
-        let response=std::thread::spawn(move || {b.wait(); c.apply_camera_seed(old,true)});
+        let response=std::thread::spawn(move || {b.wait(); c.apply_camera_seed(old,route,true)});
         ctl.start_osc_with(false);
         release.wait();
         response.join().unwrap();
         assert_eq!(ctl.view().camera_open_said,None);
-        ctl.apply_camera_seed(ctl.osc_generation.load(Ordering::Acquire),false);
+        ctl.apply_camera_seed(ctl.osc_generation.load(Ordering::Acquire),ctl.camera_route.load(Ordering::Acquire),false);
         assert_eq!(ctl.view().camera_open_said,Some(false));
+        ctl.shutdown();
+    }
+
+    /// verify-controller (C-8): the OSC start's camera seed asked of VRChat A, answering after the app followed VRChat B
+    /// within the same OSC connection, is not shown for B.
+    #[test]
+    fn the_start_seed_of_one_vrchat_is_not_shown_for_the_next() {
+        let (ctl,_socket)=review_controller();
+        let generation=ctl.osc_generation.load(Ordering::Acquire);
+        let asked_a=ctl.camera_route.load(Ordering::Acquire);
+        // The app follows another VRChat: same connection, a new route.
+        ctl.camera_route_changed();
+        ctl.update(|s| s.camera_open_said=None);
+        assert!(!ctl.apply_camera_seed(generation,asked_a,true));
+        assert_eq!(ctl.view().camera_open_said,None);
         ctl.shutdown();
     }
 

@@ -27,26 +27,55 @@ fn iso(unix: u64) -> String {
 impl Controller {
     /// What this member added to the Map explorer, as last fetched.
     pub fn maps(&self) -> Option<MapsMine> {
-        self.maps_mine.lock().unwrap().clone()
+        let identity = self.maps_identity();
+        self.maps_mine.lock().unwrap().as_ref().filter(|(of, _)| *of == identity).map(|(_, mine)| mine.clone())
     }
 
     /// Replaces what this member added (screenshots).
     pub fn set_maps(&self, mine: MapsMine) {
-        *self.maps_mine.lock().unwrap() = Some(mine);
+        *self.maps_mine.lock().unwrap() = Some((self.maps_identity(), mine));
+    }
+
+    /// Whose "My maps" a list is: the server and credential signed in now (`None` signed out).
+    fn maps_identity(&self) -> Option<String> {
+        self.account_api().map(|(api, token)| format!("{}|{token}", api.url("")))
+    }
+
+    /// Keeps a fetched list when it is the answer of the newest fetch (`turn`) and of the account still signed in: an
+    /// older, slower answer, or one asked as another account, is dropped (CTL2-8).
+    fn store_maps(&self, turn: u64, identity: Option<String>, mine: &MapsMine) -> bool {
+        let mut stored = self.maps_mine.lock().unwrap();
+        if self.maps_turn.load(Ordering::Acquire) != turn || self.maps_identity() != identity {
+            return false;
+        }
+        *stored = Some((identity, mine.clone()));
+        true
+    }
+
+    /// Signed out: the last account's list is no longer anyone's to show.
+    pub(super) fn forget_maps(&self) {
+        self.maps_turn.fetch_add(1, Ordering::AcqRel);
+        *self.maps_mine.lock().unwrap() = None;
+        self.broadcast(|| ToClient::Maps { mine: MapsMine::default() });
     }
 
     /// Fetches what this member added (signed out: nothing), then tells every interface.
     pub fn refresh_maps(self: &Shared) {
         let c = self.clone();
+        let turn = self.maps_turn.fetch_add(1, Ordering::AcqRel) + 1;
         std::thread::spawn(move || {
+            let identity = c.maps_identity();
             let mine = match c.account_api() {
                 None => MapsMine::default(),
                 Some((api, token)) => match api.mine(&token) {
                     Ok(m) => MapsMine { worlds: m.worlds, error: None },
+                    // What was shown stays beside the error, when it is this account's.
                     Err(e) => MapsMine { worlds: c.maps().map(|m| m.worlds).unwrap_or_default(), error: Some(e.to_string()) },
                 },
             };
-            *c.maps_mine.lock().unwrap() = Some(mine.clone());
+            if !c.store_maps(turn, identity, &mine) {
+                return;
+            }
             c.broadcast(|| ToClient::Maps { mine: mine.clone() });
             if let Some(ctx) = c.repaint.lock().unwrap().as_ref() {
                 ctx.request_repaint();
@@ -368,6 +397,24 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CTL2-8: of two fetches, the older answer arriving last is dropped; one asked as another account is dropped; a
+    /// sign-out forgets the list.
+    #[test]
+    fn only_the_newest_answer_of_the_account_signed_in_is_kept() {
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        let list = |n: usize| MapsMine { worlds: vec![Default::default(); n], error: None };
+        let first = ctl.maps_turn.fetch_add(1, Ordering::AcqRel) + 1;
+        let second = ctl.maps_turn.fetch_add(1, Ordering::AcqRel) + 1;
+        assert!(ctl.store_maps(second, None, &list(2)));
+        assert!(!ctl.store_maps(first, None, &list(1)), "the older answer, arriving last");
+        assert_eq!(ctl.maps().map(|m| m.worlds.len()), Some(2));
+        assert!(!ctl.store_maps(second, Some("another account".into()), &list(5)), "asked as another account");
+        assert_eq!(ctl.maps().map(|m| m.worlds.len()), Some(2));
+        ctl.forget_maps();
+        assert!(ctl.maps().is_none());
+        assert!(!ctl.store_maps(second, None, &list(3)), "a fetch from before the sign-out");
+    }
 
     /// Local preparation only; never contacts a server. Run in release mode, one GPU test at a time.
     #[test]

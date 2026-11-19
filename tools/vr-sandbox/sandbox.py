@@ -28,6 +28,7 @@ import psutil
 import queue
 sys.path.insert(0, str(Path(__file__).parent))
 import client_configs
+import restore_task
 import lease
 import vrchat_life
 
@@ -662,6 +663,7 @@ class Session:
         atomic_json(JOURNAL, self.j)
         # Each backup folder describes itself: what it holds survives a lost journal (SBX-15).
         atomic_json(ROOT/'backup'/'journal.json', {k:v for k,v in self.j.items() if k!='token'})
+        self.j['restorer']=refresh_restorer()
         # Recovery outlives the control server, including an abrupt crash.
         detached([sys.executable, __file__, 'watch', str(os.getpid()), str(psutil.Process().create_time()), self.j['session']])
         self.devices()
@@ -1385,14 +1387,26 @@ def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say
         if time.monotonic()>deadline:raise RuntimeError('No turn within %d s: %s'%(wait_s,reason))
         time.sleep(5)
 
+COMMANDS=('start','acquire','yield','restore-orphan','install-restore-task','restore','status','release','renew','shutdown',
+          'neutral','app_stop','call','request','stop')
+
+def refresh_restorer():
+    """At each session start the scheduled task's restorer becomes this session's code, the one that reads its journal
+    (SBX-8). A copy that does not start is never installed; a failure here never stops the session."""
+    if Path(__file__).resolve().parent==(ROOT/'restorer').resolve():return 'running from the restorer'
+    try:restore_task.install_restorer(Path(__file__).parent,ROOT/'restorer');return 'refreshed'
+    except Exception as error:
+        vrchat_life.Log(EAC_LOG).write('restorer_not_refreshed',error=str(error)[:500]);return 'kept: '+str(error)[:200]
+
 def main(argv):
     if argv and argv[0]=='spawn':spawn(json.loads(argv[1]));return
+    if argv and argv[0]=='selftest':print('selftest ok');return     # the restorer copy imports (restore_task.install_restorer)
     if argv and argv[0]=='watch':
         watch({'pid':int(argv[1]),'create_time':float(argv[2])},argv[3])
         return
     import argparse
     parser=argparse.ArgumentParser(prog='sandbox.py')
-    parser.add_argument('command')
+    parser.add_argument('command',choices=COMMANDS,metavar='command')
     parser.add_argument('json',nargs='?')
     parser.add_argument('--owner')
     parser.add_argument('--wait',type=float,default=3600)
@@ -1401,6 +1415,7 @@ def main(argv):
     parser.add_argument('--app')
     parser.add_argument('--logs')
     parser.add_argument('--force',action='store_true')
+    parser.add_argument('--task-log',action='store_true',help='restore-orphan from the scheduled task: one line per run in restore-task.log')
     parser.add_argument('--keep-app',action='store_true',help="leave the person's installed Orbiters running (its bridge drives a VR session)")
     a=parser.parse_intermixed_args(argv)
     cmd=a.command
@@ -1423,7 +1438,18 @@ def main(argv):
         # Run every few minutes by the scheduled task "Orbiters VR sandbox restore": the watcher started with a session
         # dies with it when every python is killed at once (2026-11-16: the owner's SteamVR stayed forced on the sandbox headset).
         # Acts only when the session's controller is gone; a live session is never touched.
+        if a.task_log:
+            try:result=restore_orphan('task')
+            except BaseException as error:result={'error':f'{type(error).__name__}: {error}'}
+            restore_task.log_run(ROOT/'restore-task.log',time.strftime('%Y-%m-%d %H:%M:%S ')+f'{Path(__file__).resolve()} '+json.dumps(result))
+            return
         print(json.dumps(restore_orphan()));return
+    if cmd=='install-restore-task':
+        # Does not create the task: copies the restorer, writes the XML and prints the command for a person (SBX-8).
+        restorer=restore_task.install_restorer(Path(__file__).parent,ROOT/'restorer')
+        user=os.environ.get('USERDOMAIN','.')+'\\'+os.environ.get('USERNAME','')
+        command=restore_task.write_task(ROOT/'restore-task.xml',sys.executable,restorer,user)
+        print(json.dumps({'restorer':str(restorer),'xml':str(ROOT/'restore-task.xml'),'run':command}));return
     if cmd=='restore':
         j=controller_alive()
         if j and not a.force:
@@ -1449,6 +1475,6 @@ def main(argv):
         elif action=='start':answer=acquire_turn(lease_args()[0] or a.owner or 'mcp',wait_s=30)
         else:answer=remote(args)
         print(json.dumps(answer));return
-    print(json.dumps(remote({'action':cmd},owner=a.owner)))
+    if cmd=='stop':print(json.dumps(remote({'action':cmd},owner=a.owner)));return   # older callers' end of a turn
 
 if __name__=='__main__':main(sys.argv[1:])

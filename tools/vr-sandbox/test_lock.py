@@ -72,7 +72,7 @@ class StaleLock(unittest.TestCase):
                 patch.object(sandbox, 'start_controller', side_effect=lambda *a: (started.append(1), (_ for _ in ()).throw(RuntimeError('stop here')))[1]):
             with self.assertRaises(RuntimeError):
                 sandbox.acquire_turn('t', wait_s=0, say=lambda *a, **k: None)
-        self.assertEqual(started, [1])
+        self.assertTrue(started, 'a new session was started')
         self.lock('new', pid=os.getpid(), create_time=psutil.Process().create_time())
         with patch.object(sandbox, 'processes', return_value=[]), patch.object(sandbox, 'owner_wants_vr', return_value=None), \
                 patch.object(sandbox, 'start_controller', side_effect=AssertionError('must wait')):

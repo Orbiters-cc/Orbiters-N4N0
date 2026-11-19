@@ -27,10 +27,27 @@ import urllib.request
 import psutil
 import queue
 sys.path.insert(0, str(Path(__file__).parent))
+import client_configs
+import restore_task
 import lease
 import vrchat_life
 
-ROOT = Path(os.environ['USERPROFILE']) / '.orbiters-build/vr-sandbox'
+def machine_base():
+    """Tests only: ORBITERS_VR_SANDBOX_TEST_BASE moves every machine path (home, AppData, Steam, the sandbox root) into one
+    folder, so that no test can reach the owner's real SteamVR files or state. Honoured only inside the temp directory."""
+    import tempfile
+    value=os.environ.get('ORBITERS_VR_SANDBOX_TEST_BASE')
+    if not value:return None
+    base=Path(value).resolve()
+    if not base.is_relative_to(Path(tempfile.gettempdir()).resolve()):
+        raise SystemExit('ORBITERS_VR_SANDBOX_TEST_BASE must be inside the temp directory: '+str(base))
+    return base
+
+BASE = machine_base()
+HOME = BASE/'home' if BASE else Path(os.environ['USERPROFILE'])
+LOCAL = BASE/'local' if BASE else Path(os.environ['LOCALAPPDATA'])
+ROAMING = BASE/'roaming' if BASE else Path(os.environ['APPDATA'])
+ROOT = HOME / '.orbiters-build/vr-sandbox'
 LOCK = ROOT / 'steamvr.lock'
 JOURNAL = ROOT / 'session.json'
 LEASES = ROOT / 'leases'          # <owner>.json: that agent's turn token (written by the controller on grant)
@@ -38,12 +55,14 @@ STATE = ROOT / 'shared-session.json'  # public view of the shared session: holde
 YIELD = ROOT / 'YIELD'            # created by `sandbox.py yield` (or by hand): the owner wants SteamVR now
 RENDER = ROOT / 'render-target.txt'
 EAC_LOG = ROOT / 'eac-log.jsonl'
+ORPHAN_LOG = ROOT / 'orphan.log'          # one dated line whenever a dead session's restore is tried and refused or done
+MARKER = ROOT / 'RESTORE-NEEDED.txt'      # exists exactly while a session whose controller is gone is not restored
 DEFAULT_RENDER = [1080, 1200]
 HEADSET_HOLD_S = 10               # a Virtual Desktop headset connection must last this long before the session yields
 NEUTRAL_POSES = ([0, 1.65, 0], [-.25, 1.2, -.35], [.25, 1.2, -.35])
-STEAM = Path('C:/Program Files (x86)/Steam')
+STEAM = BASE/'steam' if BASE else Path('C:/Program Files (x86)/Steam')
 RUNTIME = STEAM / 'steamapps/common/SteamVR'
-PATHS = Path(os.environ['LOCALAPPDATA']) / 'openvr/openvrpaths.vrpath'
+PATHS = LOCAL / 'openvr/openvrpaths.vrpath'
 SETTINGS = STEAM / 'config/steamvr.vrsettings'
 NAMES = {'vrserver.exe', 'vrmonitor.exe', 'vrcompositor.exe', 'vrstartup.exe',
          'vrdashboard.exe', 'vrwebhelper.exe', 'vrprismhost.exe', 'vrchat.exe'}
@@ -119,9 +138,8 @@ def process_dead(p):
 def processes():
     result=[]
     dead=[]
-    if JOURNAL.exists():
-        saved=json.loads(JOURNAL.read_text())
-        dead=saved.get('dead_processes',[])
+    try:dead=(read_journal() or {}).get('dead_processes',[])
+    except JournalUnreadable:pass
     for pid,name in process_names():
         if name.lower() in NAMES:
             try:
@@ -140,43 +158,157 @@ def same_process(info):
     except psutil.NoSuchProcess:
         return None
 
+def fsync_write(path, data):
+    with open(path, 'wb') as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+def replace_retrying(tmp, path):
+    for attempt in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as error:
+            # A concurrent journal reader can briefly deny DELETE sharing
+            # on Windows. Keep the previous recovery intact while retrying.
+            if getattr(error, 'winerror', None) not in (5, 32, 33) or attempt == 19:
+                raise
+            time.sleep(.05)
+
 def atomic_json(path, value):
+    """Temp file, flushed to disk (SBX-5: a power cut must not leave a renamed but empty file), then renamed over `path`.
+    The journal also keeps session.prev.json, the same content written the same way, read when session.json is not."""
+    path = Path(path)
     tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps(value, indent=2), encoding='utf-8')
     try:
-        for attempt in range(20):
-            try:
-                os.replace(tmp, path)
-                return
-            except PermissionError as error:
-                # A concurrent journal reader can briefly deny DELETE sharing
-                # on Windows. Keep the previous recovery intact while retrying.
-                if getattr(error, 'winerror', None) not in (5, 32, 33) or attempt == 19:
-                    raise
-                time.sleep(.05)
+        fsync_write(tmp, json.dumps(value, indent=2).encode('utf-8'))
+        replace_retrying(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+    if path == JOURNAL:
+        prev = journal_prev().with_suffix('.tmp')
+        try:
+            fsync_write(prev, json.dumps(value, indent=2).encode('utf-8'))
+            replace_retrying(prev, journal_prev())
+        except OSError:
+            pass   # the copy is a fallback only
+        finally:
+            prev.unlink(missing_ok=True)
+
+def journal_prev():
+    """session.prev.json: the same journal, written right after it, read when session.json is damaged."""
+    return JOURNAL.with_name(JOURNAL.stem + '.prev.json')
+
+class JournalUnreadable(RuntimeError):
+    pass
+
+def read_journal():
+    """The recovery journal, or None when there is none. Falls back to session.prev.json when session.json is empty or
+    corrupt; raises JournalUnreadable (with a message, never a bare JSON error) when neither can be read."""
+    if not JOURNAL.exists() and not journal_prev().exists():
+        return None
+    errors = []
+    for path in (JOURNAL, journal_prev()):
+        try:
+            j = json.loads(path.read_text(encoding='utf-8'))
+            if isinstance(j, dict) and j.get('session'):
+                return j
+            errors.append(f'{path.name}: not a sandbox journal')
+        except FileNotFoundError:
+            errors.append(f'{path.name}: missing')
+        except (OSError, ValueError) as error:
+            errors.append(f'{path.name}: {error}')
+    raise JournalUnreadable('The sandbox recovery journal cannot be read (' + '; '.join(errors) + '). Nothing was changed. '
+                            'The backups are in ' + str(ROOT / 'backup') + ' (journal copy: backup/journal.json).')
+
+def sha256_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+def tree_sha256(path):
+    return hashlib.sha256(json.dumps(sorted(tree_hashes(path).items())).encode()).hexdigest()
+
+def fsync_tree(path):
+    for p in Path(path).rglob('*'):
+        if p.is_file():
+            with open(p, 'rb+') as f:os.fsync(f.fileno())
 
 def backup(journal, path, tree=False):
+    """Copies `path` into this session's backup folder, flushed to disk and verified against the original by hash before
+    it is journalled (SBX-5)."""
     entry = {'path': str(path), 'tree': tree, 'exists': path.exists()}
     saved = ROOT / 'backup' / str(len(journal['files']))
     if path.exists():
         if tree:
             shutil.copytree(path, saved)
+            fsync_tree(saved)
+            entry['tree_sha256'] = tree_sha256(path)
+            if tree_sha256(saved) != entry['tree_sha256']:
+                raise RuntimeError('Backup copy differs from its original (changed while copied?): ' + str(path))
         else:
             saved.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, saved)
-            entry['sha256'] = hashlib.sha256(saved.read_bytes()).hexdigest()
+            data = path.read_bytes()
+            fsync_write(saved, data)
+            entry['sha256'] = hashlib.sha256(data).hexdigest()
+            if sha256_file(saved) != entry['sha256']:
+                raise RuntimeError('Backup copy differs from its original: ' + str(path))
     entry['backup'] = str(saved)
     journal['files'].append(entry)
+
+def backup_problem(entry):
+    """Why this entry's backup must not be copied back ('' when it is sound): checked BEFORE any file is overwritten."""
+    if client_kind(entry) or not entry['exists']:
+        return ''
+    saved = Path(entry['backup'])
+    if not saved.exists():
+        return 'backup missing: ' + str(saved)
+    if entry['tree']:
+        if not saved.is_dir():
+            return 'backup is not a folder: ' + str(saved)
+        if entry.get('tree_sha256') and tree_sha256(saved) != entry['tree_sha256']:
+            return 'backup folder damaged (hash differs from the journal): ' + str(saved)
+        return ''
+    if sha256_file(saved) != entry.get('sha256'):
+        return 'backup damaged (hash differs from the journal): ' + str(saved)
+    return ''
+
+def client_kind(entry):
+    """'claude' / 'codex' for the two agent-client files (SBX-2), else None. Older journals list them as plain files."""
+    if entry.get('client'):return entry['client']
+    path=Path(entry['path'])
+    if path.name=='.claude.json':return 'claude'
+    if path.name=='config.toml' and path.parent.name=='.codex':return 'codex'
+    return None
+
+def client_backup(journal, path, kind):
+    """Records only the bridge's own entry in an agent client's file, never the file (SBX-2: other sessions write it)."""
+    saved = ROOT / 'backup' / str(len(journal['files']))
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    snapshot = client_configs.snapshot(kind, path, HOME)
+    data = json.dumps(snapshot).encode()
+    saved.write_bytes(data)
+    journal['files'].append({'path': str(path), 'tree': False, 'exists': snapshot['exists'], 'client': kind, 'backup': str(saved),
+                             'sha256': hashlib.sha256(data).hexdigest()})
+
+def restore_client(entry, j):
+    """Puts back the bridge's entry in one agent-client file; every other byte's meaning stays as other programs left it."""
+    kind=client_kind(entry)
+    if not j.get('app_test_exe'):return 'no test program ran: left as it is'
+    raw=Path(entry['backup']).read_bytes() if entry['exists'] or entry.get('client') else b''
+    if entry.get('client'):saved=json.loads(raw)
+    else:   # an older journal: the backup is the whole file; only the bridge's entry is taken from it
+        text=raw.decode('utf-8-sig')
+        saved={'exists':entry['exists'],'entry':(client_configs.claude_snapshot(text,HOME) if kind=='claude' else client_configs.codex_snapshot(text)) if entry['exists']
+               else ({'user':None,'local':{}} if kind=='claude' else None)}
+    return client_configs.restore(kind,entry['path'],saved,HOME)
 
 def tree_hashes(path):
     return {str(p.relative_to(path)):hashlib.sha256(p.read_bytes()).hexdigest() for p in path.rglob('*') if p.is_file()}
 
 def restore(expected_session=None):
-    if not JOURNAL.exists():
+    j = read_journal()
+    if j is None:
         return {'restored': False, 'reason': 'no recovery journal'}
-    j = json.loads(JOURNAL.read_text())
     if expected_session is not None and j['session']!=expected_session:
         return {'restored':False,'reason':'session changed'}
     if j.get('restored'):
@@ -187,7 +319,7 @@ def restore(expected_session=None):
         # A clean VRChat close waits for its anti-cheat session and for EAC to unload (vrchat_life.close_vrchat).
         deadline=time.monotonic()+420
         while time.monotonic()<deadline:
-            latest=json.loads(JOURNAL.read_text())
+            latest=read_journal()
             if latest['session']!=j['session']:return {'restored':False,'reason':'session changed'}
             if latest.get('restored'):return {'restored':True,'verified_files':len(latest['files'])}
             if not same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):return restore_session(j['session'])
@@ -206,7 +338,8 @@ def restore_session(expected_session):
         result=kernel.WaitForSingleObject(mutex,30000)
         if result not in (0,128):raise RuntimeError('Another restore did not finish within 30 seconds')
         acquired=True
-        j=json.loads(JOURNAL.read_text())
+        j=read_journal()
+        if j is None:return {'restored':False,'reason':'no recovery journal'}
         if j['session']!=expected_session:return {'restored':False,'reason':'session changed'}
         if j.get('restored'):return {'restored':True,'already_restored':True}
         return restore_contents(j)
@@ -214,10 +347,102 @@ def restore_session(expected_session):
         if acquired:kernel.ReleaseMutex(mutex)
         kernel.CloseHandle(mutex)
 
+def blocking(foreign):
+    """The foreign VR processes that forbid a file restore: any SteamVR process (it rewrites its settings from memory).
+    A desktop VRChat alone (the owner playing without SteamVR) reads none of these files and does not block (SBX-1);
+    with SteamVR running, it is listed too."""
+    foreign=list(foreign)
+    return foreign if any(p['name'].lower()!='vrchat.exe' for p in foreign) else []
+
+VRCHAT_KEY = r'Software\VRChat\VRChat'
+
+class FakeRegistryKey(dict):
+    """Under the test base the registry is this in-memory key: no test reads or writes the owner's registry."""
+
+TEST_REGISTRY = FakeRegistryKey() if BASE else None
+
+def read_vrchat_window():
+    """VRChat's saved window values (Unity's `Screenmanager ...` under HKCU/Software/VRChat/VRChat): [[name, type, value]],
+    binary values as hex. The sandbox launches it windowed at 1280x720 and Unity saves that at quit (SBX-4)."""
+    if TEST_REGISTRY is not None:
+        return sorted([name,kind,value] for name,(kind,value) in TEST_REGISTRY.items() if name.startswith('Screenmanager'))
+    import winreg
+    values=[]
+    try:key=winreg.OpenKey(winreg.HKEY_CURRENT_USER,VRCHAT_KEY)
+    except FileNotFoundError:return values
+    with key:
+        i=0
+        while True:
+            try:name,value,kind=winreg.EnumValue(key,i)
+            except OSError:break
+            i+=1
+            if name.startswith('Screenmanager'):
+                values.append([name,kind,value.hex() if isinstance(value,bytes) else value])
+    return sorted(values)
+
+def write_vrchat_window(saved):
+    """Puts the saved values back and deletes the `Screenmanager` values that did not exist then."""
+    if TEST_REGISTRY is not None:
+        for name in [n for n in TEST_REGISTRY if n.startswith('Screenmanager')]:del TEST_REGISTRY[name]
+        TEST_REGISTRY.update({name:(kind,value) for name,kind,value in saved})
+        return
+    import winreg
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER,VRCHAT_KEY) as key:
+        keep={name for name,_,_ in saved}
+        for name,_,_ in read_vrchat_window():
+            if name not in keep:winreg.DeleteValue(key,name)
+        for name,kind,value in saved:
+            winreg.SetValueEx(key,name,0,kind,bytes.fromhex(value) if kind==winreg.REG_BINARY else value)
+
+def restore_vrchat_window(j):
+    """After the session's VRChat is gone: its saved window values back as they were before the session's first launch."""
+    if 'vrchat_window' not in j:return 'no VRChat launched by the session'
+    try:
+        if read_vrchat_window()==j['vrchat_window']:return 'unchanged'
+        write_vrchat_window(j['vrchat_window']);return 'put back'
+    except OSError as error:return 'not put back: '+str(error)   # never blocks SteamVR's files
+
+def restore_policy(entry):
+    """'always' (the sandbox changes it), 'test_app' (only a test program of the session can have changed it: the installed
+    app's own SteamVR driver folder) or 'keep' (journalled, never put back: Steam's app manifest, which the Steam client
+    rewrites, SBX-9). Older journals have no policy: it follows from the path."""
+    if entry.get('policy'):return entry['policy']
+    path=Path(entry['path'])
+    if path.name=='steamapps.vrmanifest':return 'keep'
+    if entry['tree'] and path.name=='SteamVR' and path.parent.name=='Orbiters':return 'test_app'
+    return 'always'
+
+def kept_reason(entry,j):
+    policy=restore_policy(entry)
+    if policy=='keep':return 'never put back (written by the Steam client, not the sandbox)'
+    if policy=='test_app' and not j.get('app_test_exe'):
+        return "no test program ran in this session: the installed app's own version is kept"
+    return ''
+
+def restore_tree(entry,path,saved):
+    """Puts a folder back as it was, only when it changed, and never half: the backup is copied beside it and verified,
+    then the current folder is renamed away and the copy renamed in (SBX-9). 'unchanged' when nothing differed."""
+    if entry['exists'] and path.is_dir() and (entry.get('tree_sha256') or tree_sha256(saved))==tree_sha256(path):return 'unchanged'
+    if not entry['exists'] and not path.exists():return 'unchanged'
+    new,old=path.with_name(path.name+'.sandbox-restore'),path.with_name(path.name+'.sandbox-old')
+    for leftover in (new,old):
+        if leftover.exists():shutil.rmtree(leftover)
+    if entry['exists']:
+        shutil.copytree(saved,new)
+        if tree_sha256(new)!=(entry.get('tree_sha256') or tree_sha256(saved)):
+            shutil.rmtree(new,ignore_errors=True);raise RuntimeError('Restore tree hash mismatch: '+str(path))
+    try:
+        if path.exists():os.replace(path,old)
+    except OSError:
+        shutil.rmtree(new,ignore_errors=True);raise
+    if entry['exists']:os.replace(new,path)
+    shutil.rmtree(old,ignore_errors=True)
+    return 'restored'
+
 def restore_contents(j):
     # Only stop exact process identities recorded by this session. Refuse a foreign VR session.
     owned = {(p['pid'], p['create_time']) for p in j['processes']}
-    foreign = [p for p in processes() if (p['pid'], p['create_time']) not in owned]
+    foreign = blocking(p for p in processes() if (p['pid'], p['create_time']) not in owned)
     if foreign:
         raise RuntimeError('Restore refused while unowned VR processes run: ' + json.dumps(foreign))
     if j.get('turn_app'):stop_app(j['turn_app'])
@@ -245,33 +470,100 @@ def restore_contents(j):
     remaining=[p for p in remaining if p.pid not in warnings]
     if remaining:
         raise RuntimeError('Owned processes did not exit after terminate: '+json.dumps([p.pid for p in remaining]))
-    if [p for p in processes() if p['pid'] not in warnings]:
+    if blocking(p for p in processes() if p['pid'] not in warnings and (p['pid'],p['create_time']) not in owned):
         raise RuntimeError('VR processes remain; configuration retained for standalone restore')
+    if [p for p in processes() if (p['pid'],p['create_time']) in owned and p['pid'] not in warnings]:
+        raise RuntimeError('VR processes remain; configuration retained for standalone restore')
+    # Every backup is checked before anything is overwritten (SBX-5): a damaged one is never copied over a real file. The
+    # sound ones are still put back; the journal stays unrestored and says which one needs a person.
+    damaged={entry['path']:problem for entry in j['files'] if not kept_reason(entry,j) and (problem:=backup_problem(entry))}
+    clients={};kept={}
+    window=restore_vrchat_window(j)
     for entry in j['files']:
         path, saved = Path(entry['path']), Path(entry['backup'])
-        if entry['tree']:
-            expected=tree_hashes(saved) if entry['exists'] else {}
-            if path.exists():
-                shutil.rmtree(path)
-            if entry['exists']:
-                shutil.copytree(saved, path)
-                if tree_hashes(path)!=expected:raise RuntimeError('Restore tree hash mismatch: '+str(path))
+        if entry['path'] in damaged:
+            continue
+        if client_kind(entry):
+            clients[entry['path']]=restore_client(entry,j)
+        elif (why:=kept_reason(entry,j)):
+            kept[entry['path']]=why
+        elif entry['tree']:
+            if restore_tree(entry,path,saved)=='unchanged':kept[entry['path']]='unchanged since the backup'
         elif entry['exists']:
-            shutil.copy2(saved, path)
-            if hashlib.sha256(path.read_bytes()).hexdigest() != entry['sha256']:
-                raise RuntimeError('Restore hash mismatch: ' + str(path))
+            # Beside the target, flushed and verified, then renamed over it: the real file is never half written.
+            tmp=path.with_name(path.name+'.sandbox-restore')
+            try:
+                fsync_write(tmp,saved.read_bytes())
+                if sha256_file(tmp)!=entry['sha256']:raise RuntimeError('Restore hash mismatch: ' + str(path))
+                replace_retrying(tmp,path)
+            finally:tmp.unlink(missing_ok=True)
         else:
             path.unlink(missing_ok=True)
+    if damaged:
+        raise RuntimeError('Not restored, damaged backup (the other files were put back): '+json.dumps(damaged))
     j['restored'] = True
     j['dead_processes']=[info for info in j['processes'] if info['pid'] in warnings]
     atomic_json(JOURNAL, j)
+    note_restored(j['session'],'restore')
+    copy=Path(j['files'][0]['backup']).parent/'journal.json' if j['files'] else None
+    if copy and copy.exists():
+        try:atomic_json(copy,{k:v for k,v in j.items() if k!='token'})   # the folder says it was restored (prune_backups)
+        except OSError:pass
     if j.get('app_restore_exe'):
         args=[j['app_restore_exe']]+([] if j.get('app_was_visible') else ['--hidden'])
         subprocess.Popen(args,creationflags=subprocess.CREATE_NO_WINDOW)
     # Do not release somebody else's lock.
     if LOCK.exists() and json.loads(LOCK.read_text())['session'] == j['session']:
         LOCK.unlink()
-    return {'restored': True, 'verified_files': len(j['files']), 'leftover_dead_pids': warnings}
+    return {'restored': True, 'verified_files': len(j['files']), 'leftover_dead_pids': warnings, 'client_files': clients, 'kept': kept, 'vrchat_window': window}
+
+def note_unrestored(session, why, by):
+    """A dead session could not be restored: a dated line in orphan.log and RESTORE-NEEDED.txt saying why and what heals
+    it. The refusal itself stays (restoring while the owner's SteamVR runs does not work: it rewrites its settings from
+    memory); this makes it impossible to miss (SBX-1)."""
+    now=time.strftime('%Y-%m-%d %H:%M:%S')
+    ROOT.mkdir(parents=True,exist_ok=True)
+    with ORPHAN_LOG.open('a',encoding='utf-8') as log:log.write(f'{now} {by}: session {session} NOT restored: {why}\n')
+    first=now
+    try:
+        old=MARKER.read_text(encoding='utf-8')
+        if f'session {session},' in old:first=re.search(r'since (\S+ \S+)\)',old).group(1)
+    except (OSError,AttributeError):pass
+    text=(f'SteamVR may still be set to the Orbiters test headset (sandbox session {session}, not restored since {first}).\n'
+          f'Last attempt {now} by {by}: {why}\n\n'
+          'SteamVR then says "Headset Not Detected". To heal: close SteamVR (and a VRChat started in VR); the watcher or the\n'
+          'scheduled task "Orbiters VR sandbox restore" puts the files back within minutes (at the latest at the next logon), or run\n'
+          '  python tools/vr-sandbox/sandbox.py restore-orphan\n'
+          'Every attempt: '+str(ORPHAN_LOG)+'\n')
+    write_file_atomic(MARKER,text.encode('utf-8'))
+
+def note_restored(session, by):
+    if MARKER.exists():
+        ROOT.mkdir(parents=True,exist_ok=True)
+        with ORPHAN_LOG.open('a',encoding='utf-8') as log:log.write(time.strftime('%Y-%m-%d %H:%M:%S')+f' {by}: session {session} restored\n')
+        MARKER.unlink(missing_ok=True)
+
+def write_file_atomic(path, data):
+    client_configs.write_atomic(path, data)
+
+def watch(identity, session, sleep=time.sleep, clock=time.monotonic):
+    """Started with every session, outside its process tree: once the controller is gone, restores, and keeps retrying
+    with back-off (5 s up to 2 min) until restored, until another session's journal replaces this one, or until there is
+    no journal (SBX-1: it used to try once and give up)."""
+    while same_process(identity):sleep(.5)
+    delay=5;last=(None,0.0)
+    while True:
+        try:
+            result=restore(expected_session=session)
+            if result.get('restored'):
+                note_restored(session,'watcher');return result
+            if result.get('reason') in ('session changed','no recovery journal'):return result
+            why=result.get('reason','not restored')
+        except Exception as error:why=f'{type(error).__name__}: {error}'
+        # A line when the reason changes, else every 30 minutes: a long refusal must not grow the log by 720 lines a day.
+        if why!=last[0] or clock()-last[1]>=1800:
+            note_unrestored(session,why,'watcher');last=(why,clock())
+        sleep(delay);delay=min(delay*2,120)
 
 def stop_app(app,timeout=20):
     """Stops one test program of a turn: its own --quit, then a kill if it stays. Never another program."""
@@ -341,6 +633,51 @@ def disable_autolaunch(folder):
             changed.append(path.stem)
     return changed
 
+def sandbox_leftovers(settings=None, paths=None):
+    """What in SteamVR's live files only a sandbox session puts there ([] when they are clean)."""
+    found=[]
+    try:
+        config=json.loads(Path(settings or SETTINGS).read_text(encoding='utf-8-sig'))
+        if (config.get('steamvr') or {}).get('forcedDriver')=='orbiters_sandbox':found.append('steamvr.forcedDriver is orbiters_sandbox')
+        if 'driver_orbiters_sandbox' in config:found.append('steamvr.vrsettings has driver_orbiters_sandbox')
+    except FileNotFoundError:pass
+    except (OSError,ValueError) as error:found.append(f'steamvr.vrsettings unreadable ({error})')
+    try:
+        drivers=json.loads(Path(paths or PATHS).read_text(encoding='utf-8-sig')).get('external_drivers') or []
+        ours=os.path.normcase(str(ROOT/'driver'))
+        if any(os.path.normcase(str(d))==ours or 'vr-sandbox' in str(d).lower() for d in drivers):
+            found.append('openvrpaths.vrpath lists the sandbox driver')
+    except FileNotFoundError:pass
+    except (OSError,ValueError) as error:found.append(f'openvrpaths.vrpath unreadable ({error})')
+    return found
+
+def prune_backups(keep=5):
+    """SBX-16a: earlier backup-<ns> folders pile up (110 seen, each with a copy of the bridge's token). Keeps the `keep`
+    newest, the newest whose SteamVR files are clean (SBX-15's way back) and any whose own journal.json is unrestored;
+    deletes the others. Returns the names deleted."""
+    folders=sorted(ROOT.glob('backup-*'),key=lambda p:p.name,reverse=True)
+    keep_names={p.name for p in folders[:keep]}
+    for folder in folders:
+        if not sandbox_leftovers(folder/'1',folder/'0') and (folder/'0').is_file():keep_names.add(folder.name);break
+    deleted=[]
+    for folder in folders:
+        if folder.name in keep_names:continue
+        try:
+            if not json.loads((folder/'journal.json').read_text()).get('restored'):continue
+        except FileNotFoundError:pass        # older folders describe nothing: only their age counts
+        except (OSError,ValueError):continue
+        shutil.rmtree(folder,ignore_errors=True);deleted.append(folder.name)
+    return deleted
+
+def clean_backup_hint():
+    """The newest earlier backup folder whose SteamVR files are clean, for a person to restore from."""
+    for folder in sorted(ROOT.glob('backup*'),key=lambda p:p.stat().st_mtime,reverse=True):
+        settings,paths=folder/'1',folder/'0'
+        if settings.is_file() and paths.is_file() and not sandbox_leftovers(settings,paths):
+            return (f'The newest clean originals are in {folder} (0 = {PATHS}, 1 = {SETTINGS}); put them back by hand once '
+                    'SteamVR is closed, or run `sandbox.py restore-orphan` if the journal is only unreadable.')
+    return 'No clean earlier backup was found in '+str(ROOT)+'.'
+
 def owner_file(owner):
     return LEASES/(re.sub(r'[^A-Za-z0-9._-]','_',owner)+'.json')
 
@@ -370,13 +707,20 @@ class Session:
         running = processes()
         if running:
             raise RuntimeError('Person is using VR; no changes made: ' + json.dumps(running))
-        if JOURNAL.exists() and not json.loads(JOURNAL.read_text()).get('restored'):
+        previous=read_journal()   # an unreadable journal refuses here too (JournalUnreadable), before any change
+        if previous and not previous.get('restored'):
             raise RuntimeError('Unrestored session exists; run restore first')
         wants=owner_wants_vr()
         if wants:raise RuntimeError('Not starting: '+wants)
+        left=sandbox_leftovers()
+        if left:
+            # SBX-15: backing these up would make the sandbox state the "original" that this session's restore puts back.
+            raise RuntimeError('SteamVR still holds a sandbox state from a session that was not restored ('+'; '.join(left)+'); '
+                               'nothing was changed. '+clean_backup_hint())
         identity = secrets.token_hex(16)
         # Same keys as before the shared session (older scripts read session/pid/stream/time); `shared` is new.
-        lock = {'session': identity, 'pid': os.getpid(), 'stream': stream, 'time': time.time(), 'shared': True}
+        lock = {'session': identity, 'pid': os.getpid(), 'owner_create_time': psutil.Process().create_time(), 'stream': stream,
+                'time': time.time(), 'shared': True}
         with LOCK.open('x') as f:
             json.dump(lock, f)
         self.j = {'session': identity, 'pid': os.getpid(), 'owner_create_time':psutil.Process().create_time(), 'created': time.time(), 'token': secrets.token_hex(32), 'files': [], 'processes': [], 'restored': False, 'shared': True, 'render': self.render}
@@ -384,11 +728,16 @@ class Session:
         old = ROOT / 'backup'
         if old.exists():
             old.rename(ROOT / ('backup-' + str(time.time_ns())))
+        self.j['pruned_backups']=len(prune_backups())
         for path in [PATHS, SETTINGS, STEAM/'config/chaperone_info.vrchap', STEAM/'config/steamvr.vrappconfig', STEAM/'config/steamapps.vrmanifest']:
             backup(self.j, path)
-        for path in [STEAM/'config/vrappconfig', Path(os.environ['LOCALAPPDATA'])/'Orbiters/SteamVR']:
+        for path in [STEAM/'config/vrappconfig', LOCAL/'Orbiters/SteamVR']:
             backup(self.j, path, tree=True)
+        for entry in self.j['files']:entry['policy']=restore_policy(entry)
         atomic_json(JOURNAL, self.j)
+        # Each backup folder describes itself: what it holds survives a lost journal (SBX-15).
+        atomic_json(ROOT/'backup'/'journal.json', {k:v for k,v in self.j.items() if k!='token'})
+        self.j['restorer']=refresh_restorer()
         # Recovery outlives the control server, including an abrupt crash.
         detached([sys.executable, __file__, 'watch', str(os.getpid()), str(psutil.Process().create_time()), self.j['session']])
         self.devices()
@@ -427,11 +776,8 @@ class Session:
         return proc
 
     def stop_installed_app(self):
-        install=Path(os.environ['LOCALAPPDATA'])/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
-        appdir=Path(os.environ['APPDATA'])/'Orbiters/Desktop'
-        # Test programs share these files with the installed app; the journal restores their bytes at the end.
-        for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat',Path(os.environ['USERPROFILE'])/'.codex/config.toml',Path(os.environ['USERPROFILE'])/'.claude.json']:
-            backup(self.j,path)
+        install=LOCAL/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
+        appdir=ROAMING/'Orbiters/Desktop'
         previous=[]
         for p in psutil.process_iter(['name']):
             try:
@@ -439,13 +785,22 @@ class Session:
             except psutil.Error:pass
         visible=any('--window' in p.cmdline() for p in previous if p.is_running())
         # Restarted at the end only if it was running now.
-        self.j.update(installed_app_stopped=True,app_restore_exe=str(install) if previous else None,app_was_visible=visible)
+        self.j.update(app_restore_exe=str(install) if previous else None,app_was_visible=visible)
         atomic_json(JOURNAL,self.j)
         # --quit only signals the service. Wait for its existing processes to exit before anything else, or
         # single-instance arbitration can silently discard a test program while the installed one shuts down.
         if previous:subprocess.run([str(install),'--quit'],timeout=20,creationflags=subprocess.CREATE_NO_WINDOW,check=True)
         _,alive=psutil.wait_procs(previous,timeout=20)
         if alive:raise RuntimeError('Installed Orbiters did not finish quitting')
+        # Test programs share these files with the installed app; the journal restores their bytes at the end. Taken
+        # after the app's quit (SBX-3): it saves pending settings at shutdown, and that save is the owner's.
+        for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat']:
+            backup(self.j,path)
+        # Claude Code and Codex sessions keep writing these during a session: only the bridge's own entry is recorded.
+        client_backup(self.j,HOME/'.codex/config.toml','codex');client_backup(self.j,HOME/'.claude.json','claude')
+        # Only now: a test program may start (the `app` action stops the installed app again while this is unset).
+        self.j['installed_app_stopped']=True
+        atomic_json(JOURNAL,self.j)
 
     def record(self):
         known = {(p['pid'],p['create_time']) for p in self.j['processes']}
@@ -695,9 +1050,9 @@ class Session:
             holder=self.lease['holder']
             if holder.get('app') and same_process(holder['app']):raise RuntimeError('Your turn already runs '+holder['app']['exe']+'; app_stop it first')
             logs=Path(args.get('logs') or ROOT/'logs').resolve()
-            real=(Path(os.environ['LOCALAPPDATA'])/'Orbiters').resolve()
+            real=(LOCAL/'Orbiters').resolve()
             if logs==real or logs.is_relative_to(real):raise ValueError("logs must not be the owner's own Orbiters folder")
-            install=Path(os.environ['LOCALAPPDATA'])/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
+            install=LOCAL/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
             if not self.j.get('installed_app_stopped'):self.stop_installed_app()
             env=os.environ.copy();env['ORBITERS_VR_SANDBOX_ROOT']=str(Path(__file__).parent.resolve());env.pop('ORBITERS_NO_NETWORK_LISTENING',None)
             # The bridge inside the test program calls sandbox.py with these, so its requests count as this turn's.
@@ -841,7 +1196,8 @@ class Session:
         launcher=STEAM/'steamapps/common/VRChat/launch.exe'
         error=None
         for attempt in (1,2):
-            waited=vrchat_life.wait_idle(self.eac,'before launch',evidence_dir=ROOT)
+            # Only this session's own launches' error dialogs are closed; anybody else's bootstrapper is left alone (SBX-14).
+            waited=vrchat_life.wait_idle(self.eac,'before launch',evidence_dir=ROOT,owned=self.j.setdefault('launches',[]))
             self.j['launch_link']=url;self.j['home_link']=url;atomic_json(JOURNAL,self.j)
             sampler=vrchat_life.Sampler(self.eac,'launch',120)
             began=time.time()
@@ -851,7 +1207,13 @@ class Session:
             # A profile of its own (a bridge session's account) gets that profile's OSC ports, as the bridge gives them.
             osc=[f'--osc={9000+10*profile}:127.0.0.1:{9001+10*profile}'] if profile else []
             self.j['osc_in']=9000+10*profile;self.j['profile']=profile;atomic_json(JOURNAL,self.j)
+            if 'vrchat_window' not in self.j:
+                # Before the first launch of the session: what VRChat's own window settings were (restore puts them back).
+                try:self.j['vrchat_window']=read_vrchat_window();atomic_json(JOURNAL,self.j)
+                except OSError as error:self.eac.write('vrchat_window_not_saved',error=str(error))
+            before=time.time()-1   # a lower bound of launch.exe's creation time, even if it has already exited
             proc=subprocess.Popen([str(launcher),url,f'--profile={profile}',*osc,'-screen-fullscreen','0','-screen-width','1280','-screen-height','720'],creationflags=subprocess.CREATE_NO_WINDOW)
+            self.j.setdefault('launches',[]).append({'pid':proc.pid,'create_time':before});atomic_json(JOURNAL,self.j)
             error=None
             try:
                 while time.time()-began<120:
@@ -862,7 +1224,7 @@ class Session:
                         self.vrchat_seen=v
                         self.j['moved']=False;atomic_json(JOURNAL,self.j)
                         return {'launch_pid':proc.pid,'vrchat_pid':v['pid'],'url':url,'mode':'SteamVR auto-detection; no --no-vr','attempt':attempt}
-                    error=vrchat_life.close_error_windows(self.eac,ROOT)
+                    error=vrchat_life.close_error_windows(self.eac,ROOT,owned=self.j['launches'])
                     if error:break
                     time.sleep(1)
             finally:sampler.stop()
@@ -906,6 +1268,28 @@ def serve(owner=None,stream='shared',keep_app=False):
             s.record();print(json.dumps(restore()),flush=True)
             s.lease['holder']=None;s.publish()
 
+def restore_orphan(by='restore-orphan'):
+    """The scheduled task's repair (every 5 minutes and at logon): restores a session whose controller is gone. A live
+    session is never touched. Never raises: a refusal or failure is written to orphan.log and RESTORE-NEEDED.txt."""
+    session='?'
+    try:
+        j=read_journal()
+        if j is None:return {'nothing':'no journal'}
+        session=j.get('session','?')
+        if j.get('restored'):
+            note_restored(session,by)
+            return {'nothing':'restored','stale_lock_removed':True} if clear_stale_lock(by) else {'nothing':'restored'}
+        if j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):return {'nothing':'live session'}
+        result=restore_session(session)
+        if result.get('restored'):note_restored(session,by)
+        clear_stale_lock(by)
+        return result
+    except Exception as error:
+        why=f'{type(error).__name__}: {error}'
+        try:note_unrestored(session,why,by)
+        except OSError:pass
+        return {'restored':False,'error':why}
+
 def lease_args(owner=None):
     """(owner, token) for a request: the test program's environment, else that owner's saved token."""
     env_owner=os.environ.get('ORBITERS_VR_SANDBOX_OWNER')
@@ -917,7 +1301,8 @@ def lease_args(owner=None):
     return owner,token
 
 def remote(args,journal=None,owner=None,timeout=None):
-    j=json.loads(JOURNAL.read_text()) if journal is None else journal
+    j=read_journal() if journal is None else journal
+    if j is None:raise RuntimeError('No sandbox session journal')
     args=dict(args)
     if args.get('action')!='status':
         o,t=lease_args(owner)
@@ -933,10 +1318,59 @@ def remote(args,journal=None,owner=None,timeout=None):
         except Exception:message=body.decode(errors='replace')
         raise RuntimeError(message) from None
 
+def lock_holder_alive(lock):
+    """The lock's holder still runs: the same pid with the same creation time, or, for a lock without one (older
+    scripts), a process with that pid that already existed when the lock was written."""
+    try:p=psutil.Process(int(lock['pid']))
+    except (psutil.Error,KeyError,ValueError,TypeError):return False
+    try:
+        if process_dead(p):return False
+        if lock.get('owner_create_time') is not None:return p.create_time()==lock['owner_create_time']
+        return p.create_time()<=float(lock.get('time',0))+1
+    except psutil.Error:return False
+
+def clear_stale_lock(by, now=None):
+    """SBX-7: removes steamvr.lock when its holder is gone and nothing of its session is left to restore (its journal is
+    restored, belongs to another session, or was never written). A lock whose session's journal is unrestored stays:
+    the restore removes it. True when removed."""
+    now=time.time() if now is None else now
+    try:raw=LOCK.read_text(encoding='utf-8')
+    except FileNotFoundError:return False
+    try:
+        lock=json.loads(raw)
+        if not isinstance(lock,dict):raise ValueError('not an object')
+    except ValueError:
+        # Killed while writing it: no holder named. Only once it is old and no controller runs.
+        if now-LOCK.stat().st_mtime<120 or controller_alive():return False
+        lock={}
+    if lock and lock_holder_alive(lock):return False
+    try:j=read_journal()
+    except JournalUnreadable:return False
+    if j and j.get('session')==lock.get('session') and not j.get('restored'):return False
+    if not lock and j and not j.get('restored'):return False
+    LOCK.unlink(missing_ok=True)
+    line=time.strftime('%Y-%m-%d %H:%M:%S')+f" {by}: removed a stale steamvr.lock (holder gone, nothing to restore): {raw.strip()[:300]}\n"
+    ROOT.mkdir(parents=True,exist_ok=True)
+    with ORPHAN_LOG.open('a',encoding='utf-8') as log:log.write(line)
+    vrchat_life.Log(EAC_LOG).write('stale_lock_removed',by=by,lock=raw.strip()[:300])
+    return True
+
+def unrestored_session():
+    """Why a new session may not start: a journal not restored whose controller is gone ('' when none)."""
+    try:
+        j=read_journal()
+        if j is None:return ''
+    except JournalUnreadable as error:return str(error)
+    if j.get('restored'):return ''
+    if j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):return ''
+    detail=MARKER.read_text(encoding='utf-8',errors='replace').strip() if MARKER.exists() else f"session {j.get('session')}"
+    return detail
+
 def controller_alive():
     """The live controller's journal, or None."""
-    try:j=json.loads(JOURNAL.read_text())
-    except (OSError,ValueError):return None
+    try:j=read_journal()
+    except JournalUnreadable:return None
+    if j is None:return None
     if j.get('restored') or not j.get('owner_create_time'):return None
     return j if same_process({'pid':j['pid'],'create_time':j['owner_create_time']}) else None
 
@@ -1003,9 +1437,12 @@ def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say
         if j is None:
             foreign=processes()
             wants=owner_wants_vr()
-            if foreign:reason='VR is in use outside the shared session (the owner, or an older sandbox script): '+', '.join(sorted({p['name'] for p in foreign}))
+            dead=unrestored_session()
+            if dead:reason=('A previous sandbox session was not restored; no new session starts until it is (the watcher and the '
+                            'scheduled task keep trying). '+dead)
+            elif foreign:reason='VR is in use outside the shared session (the owner, or an older sandbox script): '+', '.join(sorted({p['name'] for p in foreign}))
             elif wants:reason='Not starting: '+wants
-            elif LOCK.exists():reason='A sandbox lock exists without a live shared controller (an older script, or a restore in progress): '+LOCK.read_text()
+            elif LOCK.exists() and not clear_stale_lock('acquire'):reason='A sandbox lock exists without a live shared controller (an older script, or a restore in progress): '+LOCK.read_text()
             else:
                 if render:write_render(render)
                 try:
@@ -1035,17 +1472,26 @@ def acquire_turn(owner,wait_s=3600,render=None,cold=False,app=None,logs=None,say
         if time.monotonic()>deadline:raise RuntimeError('No turn within %d s: %s'%(wait_s,reason))
         time.sleep(5)
 
+COMMANDS=('start','acquire','yield','restore-orphan','install-restore-task','restore','status','release','renew','shutdown',
+          'neutral','app_stop','call','request','stop')
+
+def refresh_restorer():
+    """At each session start the scheduled task's restorer becomes this session's code, the one that reads its journal
+    (SBX-8). A copy that does not start is never installed; a failure here never stops the session."""
+    if Path(__file__).resolve().parent==(ROOT/'restorer').resolve():return 'running from the restorer'
+    try:restore_task.install_restorer(Path(__file__).parent,ROOT/'restorer');return 'refreshed'
+    except Exception as error:
+        vrchat_life.Log(EAC_LOG).write('restorer_not_refreshed',error=str(error)[:500]);return 'kept: '+str(error)[:200]
+
 def main(argv):
     if argv and argv[0]=='spawn':spawn(json.loads(argv[1]));return
+    if argv and argv[0]=='selftest':print('selftest ok');return     # the restorer copy imports (restore_task.install_restorer)
     if argv and argv[0]=='watch':
-        identity={'pid':int(argv[1]),'create_time':float(argv[2])}
-        while same_process(identity):time.sleep(.5)
-        try:restore(expected_session=argv[3])
-        except Exception as e:(ROOT/'restore-error.txt').write_text(str(e))
+        watch({'pid':int(argv[1]),'create_time':float(argv[2])},argv[3])
         return
     import argparse
     parser=argparse.ArgumentParser(prog='sandbox.py')
-    parser.add_argument('command')
+    parser.add_argument('command',choices=COMMANDS,metavar='command')
     parser.add_argument('json',nargs='?')
     parser.add_argument('--owner')
     parser.add_argument('--wait',type=float,default=3600)
@@ -1054,6 +1500,7 @@ def main(argv):
     parser.add_argument('--app')
     parser.add_argument('--logs')
     parser.add_argument('--force',action='store_true')
+    parser.add_argument('--task-log',action='store_true',help='restore-orphan from the scheduled task: one line per run in restore-task.log')
     parser.add_argument('--keep-app',action='store_true',help="leave the person's installed Orbiters running (its bridge drives a VR session)")
     a=parser.parse_intermixed_args(argv)
     cmd=a.command
@@ -1076,12 +1523,18 @@ def main(argv):
         # Run every few minutes by the scheduled task "Orbiters VR sandbox restore": the watcher started with a session
         # dies with it when every python is killed at once (2026-11-16: the owner's SteamVR stayed forced on the sandbox headset).
         # Acts only when the session's controller is gone; a live session is never touched.
-        if not JOURNAL.exists():return
-        j=json.loads(JOURNAL.read_text())
-        if j.get('restored') or (j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']})):return
-        try:print(json.dumps(restore_session(j['session'])))
-        except Exception as e:(ROOT/'restore-error.txt').write_text(time.strftime('%Y-%m-%d %H:%M:%S ')+str(e))
-        return
+        if a.task_log:
+            try:result=restore_orphan('task')
+            except BaseException as error:result={'error':f'{type(error).__name__}: {error}'}
+            restore_task.log_run(ROOT/'restore-task.log',time.strftime('%Y-%m-%d %H:%M:%S ')+f'{Path(__file__).resolve()} '+json.dumps(result))
+            return
+        print(json.dumps(restore_orphan()));return
+    if cmd=='install-restore-task':
+        # Does not create the task: copies the restorer, writes the XML and prints the command for a person (SBX-8).
+        restorer=restore_task.install_restorer(Path(__file__).parent,ROOT/'restorer')
+        user=os.environ.get('USERDOMAIN','.')+'\\'+os.environ.get('USERNAME','')
+        command=restore_task.write_task(ROOT/'restore-task.xml',sys.executable,restorer,user)
+        print(json.dumps({'restorer':str(restorer),'xml':str(ROOT/'restore-task.xml'),'run':command}));return
     if cmd=='restore':
         j=controller_alive()
         if j and not a.force:
@@ -1107,6 +1560,6 @@ def main(argv):
         elif action=='start':answer=acquire_turn(lease_args()[0] or a.owner or 'mcp',wait_s=30)
         else:answer=remote(args)
         print(json.dumps(answer));return
-    print(json.dumps(remote({'action':cmd},owner=a.owner)))
+    if cmd=='stop':print(json.dumps(remote({'action':cmd},owner=a.owner)));return   # older callers' end of a turn
 
 if __name__=='__main__':main(sys.argv[1:])

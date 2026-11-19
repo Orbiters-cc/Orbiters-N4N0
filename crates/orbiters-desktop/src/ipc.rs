@@ -522,6 +522,23 @@ impl Held {
 }
 
 #[cfg(test)]
+mod closed_link_tests {
+    /// verify-controller (CTL-11 f): a translation asked once the link to the service has closed returns at once,
+    /// not after its 30 s.
+    #[test]
+    fn a_translation_asked_after_the_link_closed_returns_at_once() {
+        let service = crate::service::tests::service();
+        let (client, between) = crate::service::tests::linked_through(&service, crate::ipc::Role::Overlay);
+        between.hang_up();
+        assert!(crate::service::tests::until(|| client.state.lock().unwrap().closed), "the link closed");
+        let asked = std::time::Instant::now();
+        let answer = client.translate(orbiters_translate::provider::Batch { target: "fr".into(), lines: Vec::new() });
+        assert!(answer.is_err());
+        assert!(asked.elapsed() < std::time::Duration::from_secs(5), "it waited {:?}", asked.elapsed());
+    }
+}
+
+#[cfg(test)]
 mod smoothing_ack_tests {
     use super::*;
     /// CTL-12: with no slider shown ahead, what the interface reads is the service's snapshot, not a copy.
@@ -894,6 +911,12 @@ impl Client {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         self.vrchat_data.lock().unwrap().insert(id.clone(), tx);
+        // Registered after the link closed (its close cleared the waiting ones before this one came): no answer can
+        // come, so none is waited for (verify-controller, CTL-11 f).
+        if self.state.lock().unwrap().closed {
+            self.vrchat_data.lock().unwrap().remove(&id);
+            return Err(orbiters_i18n::tr("VRChat data request timed out. Please try again.").into());
+        }
         self.send(&ToService::VrchatData { id: id.clone(), scope, request });
         let result = rx.recv_timeout(Duration::from_secs(120)).unwrap_or_else(|_| Err(orbiters_i18n::tr("VRChat data request timed out. Please try again.").into()));
         self.vrchat_data.lock().unwrap().remove(&id);
@@ -905,6 +928,11 @@ impl Client {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         self.translated.lock().unwrap().insert(id.clone(), tx);
+        // As for VRChat data: after the close, nothing answers.
+        if self.state.lock().unwrap().closed {
+            self.translated.lock().unwrap().remove(&id);
+            return Err(crate::controller::translate::Refused::Unreachable("the link to the service is closed".into())); // i18n: not shown (log detail)
+        }
         self.send(&ToService::Translate { id: id.clone(), batch });
         let result = rx.recv_timeout(Duration::from_secs(30)).unwrap_or(Err(crate::controller::translate::Refused::Unreachable("no answer".into()))); // i18n: not shown (log detail)
         self.translated.lock().unwrap().remove(&id);

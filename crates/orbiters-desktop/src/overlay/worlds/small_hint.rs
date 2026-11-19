@@ -534,6 +534,31 @@ mod tests {
         }
     }
 
+    /// The shared view's chip is the X's twin: the same height and distance on the rim, on the other (left) side, far
+    /// enough from the X to be told apart, and clear of the hint.
+    #[test]
+    fn the_share_chip_mirrors_the_x_and_keeps_clear_of_the_hint() {
+        let eye = [0.0, 1.6, 0.0];
+        for radius in [0.12, 0.2, 0.3, 0.45] {
+            let middle = [0.0, 1.4, -0.6];
+            let x = stereo::position(&chip_place(middle, radius, eye, true));
+            let s = stereo::position(&share_chip_place(middle, radius, eye));
+            assert!((s[0] + x[0] - 2.0 * middle[0]).abs() < 1e-4 && (s[1] - x[1]).abs() < 1e-4 && (s[2] - x[2]).abs() < 1e-4, "mirrored at {radius}: {s:?} {x:?}");
+            assert!(s[0] < middle[0] && x[0] - s[0] > CHIP_WIDTH_M * 1.5, "left of the middle, apart from the X at {radius}");
+            let hint = hint_place(middle, radius, eye);
+            let hint_foot = hint[1] - WIDTH_M * PX[1] as f32 / PX[0] as f32 / 2.0;
+            let hint_left = hint[0] - WIDTH_M / 2.0;
+            assert!(s[1] + CHIP_WIDTH_M / 2.0 < hint_foot || s[0] + CHIP_WIDTH_M / 2.0 < hint_left, "clear of the hint at {radius}: {s:?}, hint {hint:?}");
+            // Each is found by a laser at its own place only.
+            let share = share_chip_place(middle, radius, eye);
+            let towards = |p: V3| stereo::scale(stereo::sub(p, eye), 1.0 / stereo::length(stereo::sub(p, eye)));
+            assert!(on_chip(&share, eye, towards(s)));
+            if x[0] - s[0] > 2.0 * CHIP_AIM_M {
+                assert!(!on_chip(&share, eye, towards(x)), "the X is not the share chip at {radius}");
+            }
+        }
+    }
+
     #[test]
     fn it_faces_who_looks_and_stands_upright() {
         let m = facing([1.0, 1.5, 0.0], [1.0, 1.7, 2.0]);

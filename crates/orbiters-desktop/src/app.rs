@@ -829,19 +829,19 @@ impl App {
     fn idle_facts(&self, ctx: &egui::Context, snap: &Snapshot) -> [(&'static str, bool); 13] {
         use crate::state::UploadState;
         [
-            ("no work of the window runs (a job, a copy, a move, an install, a save, a scan)", pages::working_now() == 0),
-            ("no upload prepares or sends", !snap.uploads.iter().any(|u| matches!(u.state, UploadState::Preparing | UploadState::Sending))),
-            ("no reconstruction runs", snap.reconstruction.is_none()),
-            ("nothing records or imports", !snap.is_capturing()),
-            ("no clean-up runs", snap.cleanup.is_none()),
-            ("no share is under way", !snap.capture_shares.iter().any(|j| j.outcome.is_none())),
-            ("no call", snap.n4n0.calls.call.is_none()),
-            ("no menu is open", !orbiters_ui::popup::any_open(ctx)),
-            ("nothing is open on Home (a profile, the music page)", !self.home.holds()),
-            ("nothing is open in Photos & captures or the captures (a picture, an editor, a viewer, a dialog)", !self.sessions.holds()),
-            ("no world's page or Share window is open", !self.worlds.holds()),
-            ("no event's or picture's window is open", !self.events.holds()),
-            ("no dialog is open on Unity projects", !self.projects.holds()),
+            ("no work of the window runs (a job, a copy, a move, an install, a save, a scan)", pages::working_now() == 0), // i18n: not shown (a reason in code, never displayed)
+            ("no upload prepares or sends", !snap.uploads.iter().any(|u| matches!(u.state, UploadState::Preparing | UploadState::Sending))), // i18n: not shown (a reason in code, never displayed)
+            ("no reconstruction runs", snap.reconstruction.is_none()), // i18n: not shown (a reason in code, never displayed)
+            ("nothing records or imports", !snap.is_capturing()), // i18n: not shown (a reason in code, never displayed)
+            ("no clean-up runs", snap.cleanup.is_none()), // i18n: not shown (a reason in code, never displayed)
+            ("no share is under way", !snap.capture_shares.iter().any(|j| j.outcome.is_none())), // i18n: not shown (a reason in code, never displayed)
+            ("no call", snap.n4n0.calls.call.is_none()), // i18n: not shown (a reason in code, never displayed)
+            ("no menu is open", !orbiters_ui::popup::any_open(ctx)), // i18n: not shown (a reason in code, never displayed)
+            ("nothing is open on Home (a profile, the music page)", !self.home.holds()), // i18n: not shown (a reason in code, never displayed)
+            ("nothing is open in Photos & captures or the captures (a picture, an editor, a viewer, a dialog)", !self.sessions.holds()), // i18n: not shown (a reason in code, never displayed)
+            ("no world's page or Share window is open", !self.worlds.holds()), // i18n: not shown (a reason in code, never displayed)
+            ("no event's or picture's window is open", !self.events.holds()), // i18n: not shown (a reason in code, never displayed)
+            ("no dialog is open on Unity projects", !self.projects.holds()), // i18n: not shown (a reason in code, never displayed)
         ]
     }
 

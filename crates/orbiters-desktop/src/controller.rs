@@ -223,6 +223,8 @@ pub struct Controller {
     updates: Mutex<update::UpdateRuntime>,
     /// Space being freed in the library (controller/cleanup.rs).
     cleanup: Mutex<cleanup::CleanupRuntime>,
+    /// Held for the whole of a lend to a side session's VRChat, or a give-back ([`Controller::lend_vrchat`]).
+    lend_gate: Mutex<()>,
     /// The instances Go and Invite may send the person to (controller/vrchat_data.rs).
     instance_permits: Mutex<vrchat_data::InstancePermits>,
     /// The thread that writes the settings, the newest only ([`Controller::queue_save`]).
@@ -556,6 +558,7 @@ impl Controller {
             cleanup: Mutex::new(cleanup::CleanupRuntime::default()),
             settings_writer: Mutex::new(None),
             instance_permits: Mutex::default(),
+            lend_gate: Mutex::new(()),
             settings_revision: AtomicU64::new(0),
             pending_start: Mutex::new(None),
             #[cfg(test)]

@@ -67,6 +67,9 @@ impl FrameEncoder {
 
 /// Decodes the other side's packets in RTP order: late or repeated packets are dropped, a short gap is filled from
 /// the next packet's FEC (its last frame) and by concealment (the frames before).
+/// Packets this many numbers behind the next one are late (dropped); farther behind, the sender started again.
+const LATE: i16 = 32;
+
 pub struct FrameDecoder {
     decoder: Decoder,
     next: Option<u16>,
@@ -86,10 +89,17 @@ impl FrameDecoder {
         let gap = match self.next {
             Some(next) => {
                 let ahead = sequence.wrapping_sub(next) as i16;
-                if ahead < 0 {
+                if (-LATE..0).contains(&ahead) {
+                    // A packet that came late: its frame was concealed already.
                     return;
                 }
-                ahead as u16
+                // Far behind: the other side started its numbers again (a restarted stream). Taken as a new start,
+                // or every packet would be "late" until the numbers climbed back, up to 11 minutes (SWEEP-17).
+                if ahead < 0 {
+                    0
+                } else {
+                    ahead as u16
+                }
             }
             None => 0,
         };
@@ -144,6 +154,25 @@ mod tests {
             });
         }
         out
+    }
+
+    /// SWEEP-17: after the other side's numbers jump back (a restarted stream), what it sends is heard again at once; a
+    /// packet a few numbers late is still dropped.
+    #[test]
+    fn a_stream_that_starts_its_numbers_again_is_heard() {
+        let packets = packets(30);
+        let mut decoder = FrameDecoder::new().unwrap();
+        let mut out = Vec::new();
+        for (i, p) in packets[..10].iter().enumerate() {
+            decoder.packet(1000 + i as u16, p, &mut out);
+        }
+        let heard = out.len();
+        decoder.packet(1005, &packets[5], &mut out);
+        assert_eq!(out.len(), heard, "a late packet is dropped");
+        for (i, p) in packets[10..20].iter().enumerate() {
+            decoder.packet(5 + i as u16, p, &mut out);
+        }
+        assert!(out.len() >= heard + 10 * FRAME, "the restarted stream is heard: {} after {heard}", out.len());
     }
 
     #[test]

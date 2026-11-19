@@ -104,5 +104,14 @@
   "{name} could not be put back: its folder as it was is kept at {path}": "No se pudo restablecer {name}: su carpeta tal como estaba se guarda en {path}",
   "Copy stopped. The incomplete copy was removed.": "Copia detenida. Se eliminó la copia incompleta.",
   "Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.": "Copia detenida. No se pudo eliminar la copia incompleta en {path} ({why}); no figura como proyecto.",
-  "it is not a copy this one made": "no es una copia hecha por esta"
+  "it is not a copy this one made": "no es una copia hecha por esta",
+  "Copy stopped before anything was copied to {path}.": "Copia detenida antes de copiar nada en {path}.",
+  "it is not the folder this copy made": "no es la carpeta que creó esta copia",
+  "Copy stopped. What it copied was removed; {path} keeps what was not the copy's: {files}": "Copia detenida. Se eliminó lo que había copiado; {path} conserva lo que no era de la copia: {files}",
+  "Required local package {name} is unavailable at {path}": "El paquete local necesario {name} no está disponible en {path}",
+  "{file} in the copy's Packages folder is another archive than the one {name} needs ({path})": "{file} en la carpeta Packages de la copia es otro archivo distinto del que necesita {name} ({path})",
+  "Not everything could be put back: {problems}. What the project had is kept in {path}; the next package change puts it back.": "No se pudo restablecer todo: {problems}. Lo que tenía el proyecto se guarda en {path}; el próximo cambio de paquetes lo restablece.",
+  "Could not keep a copy of the package list before changing it: nothing was changed": "No se pudo guardar una copia de la lista de paquetes antes de cambiarla: no se cambió nada",
+  "{name} could not be put back ({why}): its copy is kept at {path}": "No se pudo restablecer {name} ({why}): su copia se guarda en {path}",
+  "A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.": "Un cambio de paquetes se detuvo a medias y no se pudo restablecer del todo: {problems}. Lo que tenía el proyecto se guarda en {path}."
 }

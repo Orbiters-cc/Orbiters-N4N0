@@ -22,6 +22,24 @@ pub struct CleanupRuntime {
     failed: Vec<String>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's own thread asks that the clean-up's thread fail to start (other tests run beside it).
+    static FAIL_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The clean-up's thread (a test can make it fail to start).
+fn spawn_cleanup(run: impl FnOnce() + Send + 'static) -> std::io::Result<std::thread::JoinHandle<()>> {
+    #[cfg(test)]
+    if FAIL_SPAWN.with(|f| f.get()) {
+        return Err(std::io::Error::other("no thread"));
+    }
+    std::thread::Builder::new().name("cleanup".into()).spawn(run)
+}
+
+/// Why a session asked to be deleted whole (as one without a 3D view) was left alone.
+const HAS_VIEW_NOW: &str = mark("it has a 3D view now");
+
 /// The job's progress goes out this often while it deletes (every file freed counts).
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
@@ -36,7 +54,10 @@ impl Controller {
             trim.into_iter().filter(|d| session_folder(&root, d) && cleanup::has_view(d)).collect(),
             delete.into_iter().filter(|d| session_folder(&root, d)).collect(),
         );
-        let busy: Vec<String> = trim.iter().chain(&delete).filter_map(|d| self.cleanup_blocked(d).map(|why| format!("{} ({})", name(d), tr(why)))).collect();
+        // Whole deletions are of the captures without a 3D view: one that got one since the list was shown stays (SWEEP-12).
+        let (delete, viewed): (Vec<_>, Vec<_>) = delete.into_iter().partition(|d| !cleanup::has_view(d));
+        let mut busy: Vec<String> = trim.iter().chain(&delete).filter_map(|d| self.cleanup_blocked(d).map(|why| format!("{} ({})", name(d), tr(why)))).collect();
+        busy.extend(viewed.iter().map(|d| format!("{} ({})", name(d), tr(HAS_VIEW_NOW))));
         let (trim, delete): (Vec<_>, Vec<_>) = (
             trim.into_iter().filter(|d| self.cleanup_blocked(d).is_none()).collect(),
             delete.into_iter().filter(|d| self.cleanup_blocked(d).is_none()).collect(),
@@ -58,26 +79,29 @@ impl Controller {
             }
         };
         let total: u64 = trim.iter().map(|d| bytes(d, false)).sum::<u64>() + delete.iter().map(|d| bytes(d, true)).sum::<u64>();
-        let start = {
-            let mut rt = self.cleanup.lock().unwrap();
-            if !busy.is_empty() {
-                rt.skipped.extend(busy);
-            }
-            self.update(|s| {
-                let job = s.cleanup.get_or_insert_with(Default::default);
-                job.add(&trim, &delete);
-                job.total += total;
-            });
-            !std::mem::replace(&mut rt.running, true)
-        };
-        if start {
-            let ctl = self.clone();
-            if let Err(e) = std::thread::Builder::new().name("cleanup".into()).spawn(move || ctl.run_cleanup()) {
-                // Nothing runs it: not "running" for good (audit F14, CTL-11 b). What was asked stays listed and goes
-                // with the next clean-up asked for; the error says why it did not start.
-                self.cleanup.lock().unwrap().running = false;
-                return Err(e.into());
-            }
+        // Admission and the start of the thread under one lock: a second request comes either before (and its sessions
+        // go with this job) or after it is known whether a thread runs (verify-controller, CTL-11 b).
+        let mut rt = self.cleanup.lock().unwrap();
+        if !busy.is_empty() {
+            rt.skipped.extend(busy);
+        }
+        self.update(|s| {
+            let job = s.cleanup.get_or_insert_with(Default::default);
+            job.add(&trim, &delete);
+            job.total += total;
+        });
+        if std::mem::replace(&mut rt.running, true) {
+            return Ok(());
+        }
+        let ctl = self.clone();
+        // The thread takes this lock first: it starts its work once this request is in.
+        if let Err(e) = spawn_cleanup(move || ctl.run_cleanup()) {
+            // Nothing runs it: not "running", and nothing listed as being cleaned (it would block a Trash or a
+            // reconstruction of those sessions): the job goes whole, every request in it is told by this error.
+            rt.running = false;
+            *rt = CleanupRuntime::default();
+            self.update(|s| s.cleanup = None);
+            return Err(e.into());
         }
         Ok(())
     }
@@ -134,6 +158,12 @@ impl Controller {
             };
             if let Some(why) = self.cleanup_blocked(&dir) {
                 self.cleanup.lock().unwrap().skipped.push(format!("{} ({})", name(&dir), tr(why)));
+                continue;
+            }
+            // Asked as a capture without a 3D view: one made since (a reconstruction that ended while the job deleted
+            // others) is not deleted with the folder (SWEEP-12).
+            if whole && cleanup::has_view(&dir) {
+                self.cleanup.lock().unwrap().skipped.push(format!("{} ({})", name(&dir), tr(HAS_VIEW_NOW)));
                 continue;
             }
             let mut published = Instant::now();
@@ -290,6 +320,50 @@ mod tests {
         assert!(viewed.trimmed && viewed.capture_bytes == 0 && viewed.size_bytes < 4000);
         let storage = ctl.view().storage.clone();
         assert_eq!((storage.sessions, storage.capture_sessions, storage.capture_bytes), (2, 1, 4500));
+        ctl.shutdown();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// SWEEP-12: deleting "the captures without a 3D view" never deletes one that has a 3D view: not when asked, and not
+    /// one that got its view after the click, before its turn.
+    #[test]
+    fn a_session_that_got_a_3d_view_is_not_deleted_whole() {
+        let (root, dirs) = library("viewed-since");
+        let ctl = Controller::new(Settings { sessions_dir: root.clone(), ..Default::default() });
+        // Asked for a session that has a view already.
+        let refused = ctl.clean_up(vec![], vec![dirs[0].clone()]).unwrap_err();
+        assert!(refused.to_string().contains("it has a 3D view now"), "{refused}");
+        assert!(dirs[0].join("reconstruction/splats.ply").is_file());
+        // Asked while it had none ("Raw"), its view made before its turn comes.
+        ctl.update(|s| s.cleanup.get_or_insert_with(Default::default).add(&Vec::new(), &[dirs[2].clone()]));
+        ctl.cleanup.lock().unwrap().running = true;
+        fs::create_dir_all(dirs[2].join("reconstruction")).unwrap();
+        fs::write(dirs[2].join("reconstruction").join("splats.ply"), vec![1u8; 2000]).unwrap();
+        fs::write(dirs[2].join("reconstruction").join("report.json"), "{}").unwrap();
+        ctl.run_cleanup();
+        assert!(dirs[2].join("reconstruction/splats.ply").is_file(), "its new 3D view stays");
+        let notices: Vec<String> = ctl.take_notices().into_iter().map(|n| format!("{n:?}")).collect();
+        assert!(notices.iter().any(|n| n.contains("Raw (it has a 3D view now)")), "{notices:?}");
+        ctl.shutdown();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// verify-controller (CTL-11 b): a clean-up whose thread cannot start leaves nothing listed as being cleaned and no
+    /// job "running"; the next request starts its own.
+    #[test]
+    fn a_clean_up_that_cannot_start_strands_nothing() {
+        let (root, dirs) = library("no-thread");
+        let ctl = Controller::new(Settings { sessions_dir: root.clone(), ..Default::default() });
+        FAIL_SPAWN.with(|f| f.set(true));
+        let failed = ctl.clean_up(vec![dirs[0].clone()], vec![]);
+        FAIL_SPAWN.with(|f| f.set(false));
+        assert!(failed.is_err());
+        assert!(ctl.view().cleanup.is_none(), "nothing left as being cleaned");
+        assert!(!ctl.cleaning(&dirs[0]));
+        assert!(!ctl.cleanup.lock().unwrap().running);
+        ctl.clean_up(vec![], vec![dirs[2].clone()]).unwrap();
+        let _ = finished(&ctl);
+        assert!(!dirs[2].exists(), "the next request ran");
         ctl.shutdown();
         fs::remove_dir_all(&root).ok();
     }

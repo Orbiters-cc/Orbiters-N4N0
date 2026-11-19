@@ -93,6 +93,8 @@ pub struct State {
     key: Option<(u64, u64, std::path::PathBuf, bool, String, u64)>,
     /// Who the account is, for the key above (not how its check with Orbiters goes).
     account: crate::pages::AccountFollow,
+    /// The environment and account last seen: another one is forgotten at once ([`State::forget_account`]).
+    who: Option<(bool, String)>,
     /// This computer's entries being made, with the revision of what they are made from beyond the pictures, taken
     /// (and when) before any of it was read.
     local_job: Job<(std::time::Instant, u64, Vec<Entry>)>,
@@ -510,6 +512,31 @@ impl State {
         self.requests.open = false;
     }
 
+    /// The account changed (another name, another environment, a sign-in refused): nothing of the old one stays on
+    /// screen or arrives later. Its feed and what is on its way, the remote side of this computer's entries, the open
+    /// picture and its editor, the decoded pictures, the communities' and the assets' lists and their windows, the
+    /// selection. An editor of a picture of this computer stays (it holds the person's own work, nothing of the account).
+    fn forget_account(&mut self) {
+        self.feed_job = Job::default();
+        self.hash_job = Job::default();
+        self.feed = Feed::default();
+        self.asked = None;
+        self.shown_key = None;
+        for entry in &mut self.locals {
+            entry.remote = None;
+        }
+        self.dialog = None;
+        if self.editor.as_ref().is_some_and(|e| e.is_remote()) {
+            self.editor = None;
+        }
+        self.pictures = None;
+        self.hash_asked.clear();
+        self.community.forget_account();
+        self.assets.forget_account();
+        self.select.clear();
+        self.instance = None;
+    }
+
     fn observe_context(&mut self, key: (u64, u64, std::path::PathBuf, bool, String, u64)) {
         if self.key.as_ref().is_none_or(|k| k.1 != key.1 || k.3 != key.3 || k.4 != key.4) {
             self.asked = None;
@@ -561,6 +588,14 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
     }
     let development = cx.snap.settings.development;
     let (account, answered) = state.account.see(&cx.snap.account.state);
+    // Another account (or environment, or a sign-in refused): everything of the old one goes NOW, whatever the scan of
+    // this computer's folders is doing (it went only once that scan ended, and an open remote picture, its editor or a
+    // community's window stayed meanwhile).
+    let who = (development, account.clone());
+    if state.who.as_ref().is_some_and(|w| *w != who) {
+        state.forget_account();
+    }
+    state.who = Some(who);
     // The editor's saves too: a copy saved beside its original shows at once.
     let key = (
         cx.ctl.library_version(),
@@ -599,16 +634,8 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
             }
         });
         if changed_account {
-            state.feed_job = Job::default();
-            state.hash_job = Job::default();
-            state.feed = Feed::default();
+            // (Everything of the old account went when it changed: `forget_account`. The list is made again here.)
             state.shown_key = None;
-            for entry in &mut state.locals {
-                entry.remote = None;
-            }
-            state.dialog = None;
-            state.pictures = None;
-            state.hash_asked.clear();
         }
     }
 }
@@ -619,6 +646,16 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
 /// With no look yet, or no list, there is nothing to compare.
 fn list_is_stale(looked: Option<(std::time::Instant, u64)>, listed: Option<(std::time::Instant, u64)>) -> bool {
     matches!((looked, listed), (Some((looked, seen)), Some((made, from))) if looked > made && seen != from)
+}
+
+/// Whether the row under the heading goes on two rows (the filters above; the layout picker, Requests and the search
+/// under them): under 920 points of head, or when the last filter's words would reach the picker. Only something
+/// really overlapping stacks it: the filters' track's own end (4 points of its edge and 14 of the last segment's
+/// padding) may touch the picker, as English did at ~1225 wide for months (night3, verifier point 7: that size had
+/// moved to two rows and its first picture 48 points down).
+fn row_stacks(head_w: f32, filters_w: f32, requests_w: f32) -> bool {
+    let last_words_end = filters_w - (4.0 + 14.0);
+    head_w < 920.0 || head_w < last_words_end + arrangement::PICKER_W + 12.0 + requests_w + 12.0 + 260.0
 }
 
 /// The filters over the gallery.
@@ -726,9 +763,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     // The filters on one line, the layout, Requests and the search on the right; narrower, the layout and the search
     // go under them.
     // (Also when the row does not fit in this language: the filters ran under the layout picker in Portuguese.)
-    // (The filters may touch the picker, as English does at ~1225 wide: only an overlap stacks it.)
-    let row_needs = widgets::segmented_width(ui, &filter_options(), false) + arrangement::PICKER_W + 12.0 + requests_button().desired_width(ui) + 12.0 + 260.0;
-    let stacked = head.width() < 920.0 || head.width() < row_needs;
+    let stacked = row_stacks(head.width(), widgets::segmented_width(ui, &filter_options(), false), requests_button().desired_width(ui));
     // Communities: the galleries as chips under the filters.
     let chips_h = if state.filter == Filter::Communities { 46.0 } else { 0.0 };
     let controls = Rect::from_min_size(pos2(head.left(), head.bottom() + 14.0), vec2(head.width(), if stacked { 88.0 } else { 40.0 } + chips_h));
@@ -2424,6 +2459,80 @@ mod tests {
         assert!(state.asked.is_some(), "a check that confirms the sign-in asks nothing again");
         frame(&mut state, A::SignedIn { username: "y".into() });
         assert!(state.pictures.is_none(), "another account starts over");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Night3, verifier point 7: the row stacks only when a filter's words would reach the layout picker, not when the
+    /// two tracks only touch. English at 1225 wide (a head of 929 points; filters 420, Requests 113) stays on one row as
+    /// it was; Portuguese there (filters 457) stacks.
+    #[test]
+    fn the_filters_row_stacks_only_when_words_would_reach_the_picker() {
+        assert!(!row_stacks(929.0, 420.0, 113.0), "English at 1225: the tracks touch, no words overlap");
+        assert!(row_stacks(929.0, 457.0, 113.0), "Portuguese at 1225: its last filter would run under the picker");
+        assert!(!row_stacks(984.0, 457.0, 113.0), "Portuguese at 1280: room for all");
+        assert!(row_stacks(919.0, 300.0, 113.0), "under 920 points of head, always two rows");
+    }
+
+    /// Verifier (night3, point 1): another account, or the same one whose sign-in was refused, takes everything of the
+    /// old one off the screen at once, while this computer's folders are still being read: its feed, the decoded
+    /// pictures, an editor of one of its pictures. (They stayed until the scan ended.) An editor of a picture of this
+    /// computer stays.
+    #[test]
+    fn another_account_takes_the_old_ones_pictures_away_at_once_even_during_a_scan() {
+        use crate::state::AccountState as A;
+        use super::super::editor::{files::{Remote, RemoteKind}, Editor, Source};
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl =
+            std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let mut snap = (*ctl.view()).clone();
+        let root = std::env::temp_dir().join(format!("orbiters-gallery-forget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Sessions")).unwrap();
+        let history_file = root.join("visited-worlds.json");
+        orbiters_core::visited::History::default().save(&history_file).unwrap();
+        snap.settings.sessions_dir = root.join("Sessions");
+        let mut state = State { fixture: true, sources: Some((history_file, None)), ..Default::default() };
+        let mut frame = |state: &mut State, account: A| {
+            snap.account.state = account;
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                follow_locals(state, ui, &cx, Server::Production);
+            });
+            output.textures_delta.clear();
+        };
+        let signed_in = |name: &str| A::SignedIn { username: name.into() };
+        let remote_editor = || Editor::open(&ctx, Source::remote(Remote { kind: RemoteKind::Gallery, id: 12, ..Default::default() }), "World");
+        for change in [signed_in("y"), A::Expired { username: Some("x".into()) }] {
+            frame(&mut state, signed_in("x"));
+            // A scan of this computer's folders that does not end.
+            let (hold, held) = std::sync::mpsc::channel::<()>();
+            state.local_job = Job::spawn(&ctx, move || {
+                let _ = held.recv();
+                (std::time::Instant::now(), 0, Vec::new())
+            });
+            // What x has on screen: a page of its feed, decoded pictures, the editor of one of its pictures.
+            state.feed = Feed { items: vec![orbiters_core::shares::Item::default()], ..Default::default() };
+            state.pictures = Some(crate::worlds::Pictures::new(&ctx));
+            state.editor = Some(remote_editor());
+            frame(&mut state, change.clone());
+            assert!(state.local_job.running(), "the scan is still running");
+            assert!(state.feed.items.is_empty(), "{change:?}: the old account's feed goes at once");
+            assert!(state.pictures.is_none(), "{change:?}: and its decoded pictures");
+            assert!(state.editor.is_none(), "{change:?}: and the editor of one of its pictures");
+            drop(hold);
+            while state.local_job.running() && state.local_job.poll().is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            state.local_job = Job::default();
+        }
+        // An editor of a picture of this computer is the person's own work: it stays.
+        frame(&mut state, signed_in("x"));
+        let path = std::env::temp_dir().join("orbiters-test-local-edit.png");
+        state.editor = Some(Editor::open(&ctx, Source::picture(&path), "World"));
+        frame(&mut state, signed_in("z"));
+        assert!(state.editor.is_some());
         std::fs::remove_dir_all(&root).ok();
     }
 

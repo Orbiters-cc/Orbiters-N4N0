@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import lease
+import sandbox_testbase  # first: every machine path into a temp folder
 import sandbox
 import vrchat_life
 
@@ -263,7 +264,7 @@ class SessionTurns(unittest.TestCase):
         self.s.handle({'action': 'acquire', 'owner': 'a'})
         exe = sandbox.ROOT / 'test.exe'
         exe.write_bytes(b'')
-        real = Path(sandbox.os.environ['LOCALAPPDATA']) / 'Orbiters' / 'logs'
+        real = sandbox.LOCAL / 'Orbiters' / 'logs'
         with self.assertRaisesRegex(ValueError, "owner's own"):
             self.ask('a', 'app', app_exe=str(exe), logs=str(real))
 
@@ -390,3 +391,45 @@ class AntiCheatGuards(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OnlyOwnBootstrappers(unittest.TestCase):
+    """SBX-14: the launch-error closer acts only on bootstrappers of the sandbox's own launch.exe."""
+    ERROR = [{'hwnd': 9, 'title': 'Launch Error (30005)', 'rect': [0, 0, 1, 1]}]
+
+    def test_a_foreign_launch_error_is_left_alone_and_logged_once(self):
+        procs = [{'name': 'start_protected_game.exe', 'pid': 7, 'ppid': 555, 'create_time': 100},   # the owner's / a bridge's
+                 {'name': 'start_protected_game.exe', 'pid': 8, 'ppid': 40, 'create_time': 100}]    # ours
+        owned = [{'pid': 40, 'create_time': 99}]
+        with tempfile.TemporaryDirectory() as folder:
+            log = vrchat_life.Log(Path(folder) / 'eac.jsonl')
+            with patch.object(vrchat_life, 'game_processes', return_value=procs), patch.object(vrchat_life, 'windows_of', return_value=self.ERROR):
+                self.assertEqual([p['pid'] for p in vrchat_life.error_windows(now=101, owned=owned, log=log)], [8])
+                vrchat_life.error_windows(now=102, owned=owned, log=log)
+            lines = (Path(folder) / 'eac.jsonl').read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn('foreign_bootstrapper_left_alone', lines[0])
+
+    def test_a_reused_parent_pid_is_not_ours(self):
+        procs = [{'name': 'start_protected_game.exe', 'pid': 7, 'ppid': 40, 'create_time': 50}]   # older than our launch
+        with patch.object(vrchat_life, 'game_processes', return_value=procs), patch.object(vrchat_life, 'windows_of', return_value=self.ERROR):
+            self.assertEqual(vrchat_life.error_windows(now=101, owned=[{'pid': 40, 'create_time': 99}]), [])
+
+    def test_before_the_first_launch_nothing_is_closed(self):
+        procs = [{'name': 'start_protected_game.exe', 'pid': 7, 'ppid': 555, 'create_time': 100}]
+        with patch.object(vrchat_life, 'game_processes', return_value=procs), patch.object(vrchat_life, 'windows_of', return_value=self.ERROR), \
+                patch.object(vrchat_life.user32, 'PostMessageW', side_effect=AssertionError('closed a foreign window')):
+            self.assertEqual(vrchat_life.close_error_windows(vrchat_life.Log(Path(sandbox_testbase.BASE) / 'e.jsonl'), sandbox_testbase.BASE, owned=[]), [])
+
+    def test_the_session_records_its_launch_and_passes_it(self):
+        s = sandbox.Session()
+        s.j = {'processes': []}
+        seen = []
+        with patch.object(sandbox.vrchat_life, 'wait_idle', side_effect=lambda *a, **k: seen.append(list(k['owned'])) or 0), \
+                patch.object(sandbox.vrchat_life, 'Sampler'), patch.object(sandbox, 'atomic_json'), \
+                patch.object(sandbox.subprocess, 'Popen') as popen, patch.object(sandbox.Session, 'record'), \
+                patch.object(sandbox.Session, 'vrchat', return_value={'pid': 5, 'create_time': 2e9}):
+            popen.return_value.pid = 4321
+            s.launch('vrchat://launch?ref=orbiters.cc&id=x', 0)
+        self.assertEqual(seen, [[]])
+        self.assertEqual([l['pid'] for l in s.j['launches']], [4321])

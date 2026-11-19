@@ -738,27 +738,51 @@ const OSC_PRESS: Duration = Duration::from_millis(60);
 /// while the button was still at 1, and VRChat saw no edge).
 #[derive(Debug, Default)]
 struct OscButton {
-    queue: std::collections::VecDeque<(usize, i32, Instant)>,
+    /// Edges to send: hand, value, not before, and the port its press went to (its release goes there too).
+    queue: std::collections::VecDeque<(usize, i32, Instant, u16)>,
+    /// Per hand: when the last edge was really sent, its value and port.
+    sent: [Option<(Instant, i32, u16)>; 2],
 }
 
 impl OscButton {
-    fn toggle(&mut self, hand: usize, now: Instant) {
-        let at = self.queue.iter().rev().find(|(h, _, _)| *h == hand).map_or(now, |(_, _, last)| (*last + OSC_PRESS).max(now));
-        self.queue.push_back((hand, 1, at));
-        self.queue.push_back((hand, 0, at + OSC_PRESS));
+    fn toggle(&mut self, hand: usize, now: Instant, port: u16) {
+        let hand = hand.min(1);
+        // Not before the last edge queued for that hand, nor the last one sent, give OSC_PRESS (verify-vr: a toggle asked just
+        // after a release went out sent its press in the same instant).
+        let queued = self.queue.iter().rev().find(|(h, ..)| *h == hand).map(|(_, _, at, _)| *at + OSC_PRESS);
+        let sent = self.sent[hand].map(|(at, ..)| at + OSC_PRESS);
+        let at = [Some(now), queued, sent].into_iter().flatten().max().unwrap_or(now);
+        self.queue.push_back((hand, 1, at, port));
+        self.queue.push_back((hand, 0, at + OSC_PRESS, port));
     }
 
-    /// What is due now, in order: (hand, value).
-    fn due(&mut self, now: Instant) -> Vec<(usize, i32)> {
+    /// What is due now, in order: (hand, value, port). At most one edge a hand a call, and the hand's next ones put
+    /// OSC_PRESS after this real send: a turn late by 200 ms no longer sends a release, a press and a release together, which
+    /// VRChat takes for nothing (verify-vr).
+    fn due(&mut self, now: Instant) -> Vec<(usize, i32, u16)> {
         let mut out = Vec::new();
-        self.queue.retain(|(hand, value, at)| {
-            let due = *at <= now;
-            if due {
-                out.push((*hand, *value));
+        let mut sent_now = [false; 2];
+        let mut kept = std::collections::VecDeque::with_capacity(self.queue.len());
+        let mut next_at: [Option<Instant>; 2] = [None, None];
+        while let Some((hand, value, at, port)) = self.queue.pop_front() {
+            let at = next_at[hand].map_or(at, |n| at.max(n));
+            if !sent_now[hand] && at <= now {
+                sent_now[hand] = true;
+                self.sent[hand] = Some((now, value, port));
+                out.push((hand, value, port));
+                next_at[hand] = Some(now + OSC_PRESS);
+            } else {
+                kept.push_back((hand, value, at, port));
+                next_at[hand] = Some(at + OSC_PRESS);
             }
-            !due
-        });
+        }
+        self.queue = kept;
         out
+    }
+
+    /// The buttons last sent pressed, to be let go at an orderly end: (hand, port).
+    fn held(&self) -> Vec<(usize, u16)> {
+        (0..2).filter_map(|h| self.sent[h].filter(|(_, value, _)| *value == 1).map(|(_, _, port)| (h, port))).collect()
     }
 }
 
@@ -1501,6 +1525,10 @@ impl Drop for OrbitVr {
         // Teardown owns this OrbitVr while borrowing the live SteamVR Client. Normal camera
         // closing only retires readers; shutdown joins before Client::drop cleans its interfaces.
         if let Some(watch) = self.camera_watch.as_mut() { watch.finish(); }
+        // VRChat's Quick Menu buttons are not left pressed by an overlay that ends between a toggle's edges.
+        for (hand, port) in self.osc_toggle.held() {
+            send_quick_menu_toggle(hand, 0, port);
+        }
         for watch in &mut self.camera_retired { watch.finish(); }
     }
 }
@@ -1679,9 +1707,11 @@ impl OrbitVr {
 
     fn update_inner(&mut self, mut cx: Cx<'_, '_>) -> Turn {
         let now = Instant::now();
+        // A let-go that earned an action runs it at this turn, whatever became of the menus since (verify-vr).
+        self.panels.run_pending(cx.snap);
         // The Quick Menu toggle's edges due, before any early return (OVL2-19: a turn that returned early held its 0 back).
-        for (hand, value) in self.osc_toggle.due(now) {
-            send_quick_menu_toggle(hand, value, cx.snap.settings.osc.vrchat_port);
+        for (hand, value, port) in self.osc_toggle.due(now) {
+            send_quick_menu_toggle(hand, value, port);
         }
         let dt = now.duration_since(self.last_turn).as_secs_f32();
         self.last_turn = now;
@@ -1727,9 +1757,9 @@ impl OrbitVr {
             self.buttons.step(down, now);
             if let Some(hand) = self.buttons.quick_menu_to_toggle() {
                 super::super::vr_log::line(&format!("buttons: toggling VRChat's Quick Menu on hand {hand}, open {:?}", self.buttons.open())); // i18n: not shown (a log's line)
-                self.osc_toggle.toggle(hand, now);
-                for (hand, value) in self.osc_toggle.due(now) {
-                    send_quick_menu_toggle(hand, value, cx.snap.settings.osc.vrchat_port);
+                self.osc_toggle.toggle(hand, now, cx.snap.settings.osc.vrchat_port);
+                for (hand, value, port) in self.osc_toggle.due(now) {
+                    send_quick_menu_toggle(hand, value, port);
                 }
             }
             // Walking closes VRChat's Quick Menu. A moment's touch of the stick does not; laying the parts on it is not walking.
@@ -2143,8 +2173,8 @@ impl OrbitVr {
             }
         }
         // The toggle's button lets go a moment later, as a finger does.
-        for (hand, value) in self.osc_toggle.due(now) {
-            send_quick_menu_toggle(hand, value, cx.snap.settings.osc.vrchat_port);
+        for (hand, value, port) in self.osc_toggle.due(now) {
+            send_quick_menu_toggle(hand, value, port);
         }
         turn.menu_hand = match open {
             Open::Wheel(hand) | Open::QuickMenu(hand) => Some(hand),
@@ -2236,6 +2266,7 @@ impl OrbitVr {
         if page_at.is_none() {
             sheet.page = false;
         }
+        let mut not_shown = Vec::new();
         self.panels.paint(cx.snap, |panel, changed| {
             if let (Some(top), Zone::SheetBack | Zone::Takeover) = (page_at, panel.zone) {
                 if worker_sheet { return; }
@@ -2249,10 +2280,11 @@ impl OrbitVr {
             // rather than submitting its page as a second, overlapping overlay.
             if panel.zone == Zone::Takeover { return; }
             let handle = part_handle(&mut *handles, &mut *refused, overlay, key, panel.zone);
-            if handle != 0 {
-                presenter.show_part(overlay, handle, panel.pixels(), panel.px[0], panel.px[1], changed);
+            if handle == 0 || !presenter.show_part(overlay, handle, panel.pixels(), panel.px[0], panel.px[1], changed) {
+                not_shown.push(panel.zone);
             }
         });
+        self.panels.not_presented(&not_shown);
         if worker_sheet { if let Some(picture) = self.panels.take_sheet_picture() { self.sheet.adopt(picture); } }
         if let Some(top) = page_at.filter(|_| !worker_sheet) {
             if !self.sheet.page {
@@ -2336,18 +2368,46 @@ mod tests {
         let t = Instant::now();
         let ms = |n: u64| t + Duration::from_millis(n);
         let mut button = OscButton::default();
-        button.toggle(1, t);
-        assert_eq!(button.due(t), [(1, 1)], "the first at once, as before");
-        button.toggle(1, ms(20));
+        button.toggle(1, t, 9000);
+        assert_eq!(button.due(t), [(1, 1, 9000)], "the first at once, as before");
+        button.toggle(1, ms(20), 9001);
         assert!(button.due(ms(20)).is_empty(), "not while the button is still at 1");
-        assert_eq!(button.due(ms(60)), [(1, 0)]);
+        assert_eq!(button.due(ms(60)), [(1, 0, 9000)], "its release where its press went");
         assert!(button.due(ms(100)).is_empty());
-        assert_eq!(button.due(ms(120)), [(1, 1)]);
-        assert_eq!(button.due(ms(700)), [(1, 0)], "after a gap with no turns, the pending 0");
-        assert!(button.queue.is_empty());
-        button.toggle(0, ms(800));
-        button.toggle(1, ms(800));
-        assert_eq!(button.due(ms(800)), [(0, 1), (1, 1)], "each hand its own button");
+        assert_eq!(button.due(ms(120)), [(1, 1, 9001)]);
+        assert_eq!(button.held(), [(1, 9001)], "pressed now: let go at an orderly end");
+        assert_eq!(button.due(ms(700)), [(1, 0, 9001)], "after a gap with no turns, the pending 0");
+        assert!(button.queue.is_empty() && button.held().is_empty());
+        button.toggle(0, ms(800), 9000);
+        button.toggle(1, ms(800), 9000);
+        assert_eq!(button.due(ms(800)), [(0, 1, 9000), (1, 1, 9000)], "each hand its own button");
+    }
+
+    /// verify-vr: a turn 180 ms late sends one edge a hand, the next ones spaced from that real send; a toggle asked just after a
+    /// release went out waits its 60 ms.
+    #[test]
+    fn a_late_turn_never_sends_several_edges_together() {
+        use super::OscButton;
+        use std::time::{Duration, Instant};
+        let t = Instant::now();
+        let ms = |n: u64| t + Duration::from_millis(n);
+        let mut button = OscButton::default();
+        button.toggle(1, t, 9000);
+        assert_eq!(button.due(t), [(1, 1, 9000)]);
+        button.toggle(1, ms(20), 9000);
+        assert_eq!(button.due(ms(200)), [(1, 0, 9000)], "one edge, not three");
+        assert!(button.due(ms(200)).is_empty());
+        assert!(button.due(ms(259)).is_empty());
+        assert_eq!(button.due(ms(260)), [(1, 1, 9000)]);
+        assert!(button.due(ms(300)).is_empty());
+        assert_eq!(button.due(ms(320)), [(1, 0, 9000)]);
+        // A toggle asked in the turn whose top sent a release.
+        button.toggle(0, ms(400), 9000);
+        assert_eq!(button.due(ms(400)), [(0, 1, 9000)]);
+        assert_eq!(button.due(ms(460)), [(0, 0, 9000)]);
+        button.toggle(0, ms(460), 9000);
+        assert!(button.due(ms(460)).is_empty(), "not in the instant its release went out");
+        assert_eq!(button.due(ms(520)), [(0, 1, 9000)]);
     }
 
     /// OVL2-1: both lasers on our parts, the right the pointer with nothing held: the left's pull takes the pointer and is the

@@ -87,7 +87,11 @@ pub trait Backend: Send + Sync {
     fn vrchat_login(&self, _command: crate::controller::vrchat_login::Command) {}
     /// What the launcher on Home asks: play, accept an invite, request an invite, boop, a profile
     /// (`orbiters_core::launcher`). The outcome comes in the snapshot's `launcher` (its `notice`).
-    fn launcher(&self, _action: orbiters_core::launcher::Action) {}
+    /// Sends a launcher action; false when it could not be handed to the service (the page then takes back what it
+    /// showed for the press).
+    fn launcher(&self, _action: orbiters_core::launcher::Action) -> bool {
+        false
+    }
     /// Blocking read-only request. Call only from a page job or image loader.
     fn vrchat_data(&self, _scope: controller::vrchat_data::Scope, _request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         Err(tr("VRChat data is unavailable.").into())
@@ -151,8 +155,8 @@ pub trait Backend: Send + Sync {
     }
     /// The window's offer to close to the tray (`crate::window_rest`), or none any more.
     fn window_rest(&self, _offer: Option<crate::state::RestOffer>) {}
-    /// The VR band shows the offer `id`.
-    fn window_rest_shown(&self, _id: u64) {}
+    /// The offer the VR band shows now (`None`: none).
+    fn window_rest_shown(&self, _id: Option<u64>) {}
     /// Keep open, pressed in VR on the offer `id`.
     fn keep_window_open(&self, _id: u64) {}
 }
@@ -165,7 +169,7 @@ pub struct Remote(pub Arc<Client>);
 impl Backend for Remote {
     fn camera_qr(&self, active: bool) { self.0.send(&ToService::CameraQr { active }); }
     fn window_rest(&self, offer: Option<crate::state::RestOffer>) { self.0.send(&ToService::WindowRest { offer }); }
-    fn window_rest_shown(&self, id: u64) { self.0.send(&ToService::WindowRestShown { id }); }
+    fn window_rest_shown(&self, id: Option<u64>) { self.0.send(&ToService::WindowRestShown { id }); }
     fn keep_window_open(&self, id: u64) { self.0.send(&ToService::KeepWindowOpen { id }); }
     fn switch_demo_avatar(&self) { self.0.send(&ToService::SwitchDemoAvatar); }
     fn show_window(&self) {
@@ -309,8 +313,8 @@ impl Backend for Remote {
         self.0.send(&ToService::VrchatLogin { command });
     }
 
-    fn launcher(&self, action: orbiters_core::launcher::Action) {
-        self.0.send(&ToService::Launcher { action });
+    fn launcher(&self, action: orbiters_core::launcher::Action) -> bool {
+        self.0.try_send(&ToService::Launcher { action })
     }
 
     fn request_worker_log(&self) {
@@ -442,7 +446,7 @@ impl Local {
 impl Backend for Local {
     fn camera_qr(&self, active: bool) { self.ctl.camera_qr(active); }
     fn window_rest(&self, offer: Option<crate::state::RestOffer>) { self.ctl.window_rest(offer); }
-    fn window_rest_shown(&self, id: u64) { self.ctl.window_rest_shown(id); }
+    fn window_rest_shown(&self, id: Option<u64>) { self.ctl.window_rest_shown(id); }
     fn keep_window_open(&self, id: u64) { self.ctl.keep_window_open(id); }
     fn translate_status(&self, status: crate::state::TranslateStatus) { self.ctl.set_translate_status(status); }
     fn translate(&self, batch: orbiters_translate::provider::Batch) -> controller::translate::Answer { self.ctl.translate_remote(&batch) }
@@ -562,8 +566,9 @@ impl Backend for Local {
         self.ctl.vrchat_command(command);
     }
 
-    fn launcher(&self, action: orbiters_core::launcher::Action) {
+    fn launcher(&self, action: orbiters_core::launcher::Action) -> bool {
         self.ctl.launcher_action(action);
+        true
     }
 
     fn request_worker_log(&self) {

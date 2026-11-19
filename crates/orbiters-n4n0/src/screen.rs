@@ -466,7 +466,9 @@ impl ScreenRuntime {
             card.out_sent = false;
         }
         if !self.available {
-            self.menu.close();
+            // Run at the next step (MENU-8: the scanner and the friends its page held are let go).
+            let effects = self.menu.close();
+            self.menu.defer(effects);
         }
     }
 
@@ -553,6 +555,7 @@ impl ScreenRuntime {
     /// The app quits: the menu closes, and the owner's screen counts as told so (the quit's last message tells it), so
     /// a step still under way sends nothing more.
     pub(crate) fn quit(&mut self) {
+        // The app ends: its scanner and the friends it read end with it.
         let _ = self.menu.close();
         self.open_sent = Some(false);
     }
@@ -926,7 +929,10 @@ impl ScreenRuntime {
                         (1, false) => "right trigger", // i18n: not shown
                         _ => "someone else's touch", // i18n: not shown
                     };
-                    if let Some((index, target)) = hit {
+                    if let Some((_, target)) = hit.filter(|(_, target)| hand == 2 && !menu::guest_may_press(*target, self.menu.page)) {
+                        // Someone else's fingertip on what only the owner may press (MENU-2): nothing happens.
+                        self.pointer_log.press(who, x, y, &format!("{target:?} on {}: the owner's only, nothing", ScreenPage::of(&self.menu).name())); // i18n: not shown (a log line)
+                    } else if let Some((index, target)) = hit {
                         self.pointer_log.press(who, x, y, &format!("{target:?} on {}", ScreenPage::of(&self.menu).name())); // i18n: not shown (a log line)
                         self.pressed = Some((index, now));
                         self.presses = self.presses.wrapping_add(1);
@@ -941,7 +947,8 @@ impl ScreenRuntime {
                     let hit = layout::hit_near(layout, &self.menu, x, y);
                     self.hand_hover[hand] = hit.map(|(i, _)| i);
                     // Held and moved along the music's timeline: the music follows, a segment at a time.
-                    if let (Some(from), Some((index, target))) = (self.dragging[hand], hit) {
+                    let guest = hand == 2;
+                    if let (Some(from), Some((index, target))) = (self.dragging[hand], hit.filter(|(_, t)| !guest || menu::guest_may_press(*t, self.menu.page))) {
                         let (on, more) = self.menu.drag(from, target);
                         if !more.is_empty() {
                             self.last_activity = now;
@@ -1979,10 +1986,10 @@ impl N4n0 {
                 Effect::InviteMe { location } => self.invite_send(location, true),
                 Effect::QrScan(on) => {
                     let n = self.clone();
-                    std::thread::spawn(move || n.qr_scan(on));
+                    std::thread::spawn(move || n.qr_scan(on, crate::MenuHolder::Screen));
                 }
                 Effect::Captures => self.captures_list(),
-                Effect::Friends(on) => self.friends(on),
+                Effect::Friends(on) => self.friends(on, crate::MenuHolder::Screen),
                 Effect::ShareCapture(ask) => self.share_capture(ask),
                 Effect::Feedback(ask) => self.feedback_ask(ask),
                 Effect::Mirror(ask) => {
@@ -2180,6 +2187,8 @@ pub(crate) fn tick(
     if s.menu.call != call {
         s.menu.set_call(call);
     }
+    // What leaving a page asked though no press left it (a call ringing on the scanner's page, the avatar changed).
+    followups.effects.extend(s.menu.drain());
     // The card, wherever the menu shows; then the full pictures (the card's too).
     s.card_step(now, &mut out);
     s.picture_owner_step(now, &mut out);
@@ -2221,6 +2230,7 @@ pub(crate) fn tick(
     s.sync_open(&mut out);
     if !s.menu.open {
         s.owner_settled = false;
+        s.menu.not_presented();
         return out;
     }
     if now >= s.next_local {
@@ -2231,6 +2241,10 @@ pub(crate) fn tick(
         };
         // Once it holds the whole page, blocks go again only now and then (they repair a block VRChat dropped).
         let settled = s.owner.settled(&frame.bank);
+        // The screen shows this page whole now: a row pressed means what it holds (CORE2-10).
+        if settled {
+            s.menu.presented();
+        }
         if !settled || now >= s.idle_until {
             // A new page's clear, a changed block, else one in turn, in three steps (VRChat's frames apart).
             let send = s.owner.step(&frame.bank);
@@ -2553,7 +2567,7 @@ mod tests {
     fn a_ray_just_beside_the_back_button_takes_it_and_shows_it() {
         let mut s = pointing();
         s.menu.pages = Pages::of_screen(Some(14));
-        s.menu.press(menu::Target::More);
+        let _ = s.menu.press(menu::Target::More);
         let back = Frame::layout(&s.menu).elements.iter().find(|e| e.target == menu::Target::Back).unwrap().rect;
         let t0 = Instant::now();
         let (x, y) = (back.x as f32 + back.w as f32 + 20.0, back.y as f32 + back.h as f32 / 2.0);
@@ -2739,7 +2753,7 @@ mod tests {
         s.point_and_touch(ms(100), &mut Vec::new());
         assert_eq!(s.menu.page, Page::Home, "the next pull works in the submenu");
         assert_eq!(s.presses, 2);
-        s.menu.close();
+        let _ = s.menu.close();
         s.point_and_touch(ms(120), &mut Vec::new());
         assert_eq!(s.holding, [false; 3], "closing during a press releases the input session");
         s.menu.open();
@@ -2759,7 +2773,7 @@ mod tests {
         let mut s = pointing();
         s.menu.pages = Pages::Timeline;
         s.menu.media = Some(menu::Media { title: "Song".into(), can_seek: true, position: Some(0), duration: Some(320), ..Default::default() });
-        s.menu.press(menu::Target::Music);
+        let _ = s.menu.press(menu::Target::Music);
         let place = |i: u8| {
             let r = layout::cached(ScreenPage::Music).elements.iter().find(|e| e.target == menu::Target::Seek(i)).unwrap().rect;
             on_screen(r.x as f32 + r.w as f32 / 2.0, r.y as f32 + r.h as f32 / 2.0)
@@ -2821,6 +2835,58 @@ mod tests {
         }
         assert_eq!(s.menu.page, Page::Home, "someone else's touch went back");
         assert_eq!(s.presses, 2);
+    }
+
+    /// Someone else's fingertip comes onto `target`'s middle from in front, at `t`, `t + 20 ms`, `t + 40 ms`.
+    fn others_touch(s: &mut ScreenRuntime, target: menu::Target, t: Instant) -> Vec<Effect> {
+        let rect = layout::cached(ScreenPage::of(&s.menu)).elements.iter().find(|e| e.target == target).map(|e| e.rect).expect("the target on this page");
+        let at = on_screen(rect.x as f32 + rect.w as f32 / 2.0, rect.y as f32 + rect.h as f32 / 2.0);
+        let mut effects = Vec::new();
+        for (n, z) in [(0, -0.06), (20, -0.03), (40, -0.005)] {
+            for (i, v) in touch::RECEIVERS.iter().map(|c| {
+                let d = ((at[0] - c[0]).powi(2) + (at[1] - c[1]).powi(2) + (z - c[2]).powi(2)).sqrt() - 0.008;
+                (1.0 - d / touch::RADIUS).clamp(0.0, 1.0) as f32
+            }).enumerate() {
+                assert!(s.others_point(&format!("{}{i}", screen::local::OTHERS_PREFIX), v));
+            }
+            s.point_and_touch(t + Duration::from_millis(n), &mut effects);
+        }
+        // The fingertip goes away again.
+        for i in 0..touch::RECEIVERS.len() {
+            s.others_point(&format!("{}{i}", screen::local::OTHERS_PREFIX), 0.0);
+        }
+        s.point_and_touch(t + Duration::from_millis(400), &mut effects);
+        s.point_and_touch(t + Duration::from_millis(800), &mut effects);
+        effects
+    }
+
+    /// MENU-2: others press by touching what only shows; what acts for the owner (here the computer's media keys, the
+    /// music's timeline, held and dragged too) is the owner's alone.
+    #[test]
+    fn someone_else_s_touch_presses_nothing_that_acts_for_the_owner() {
+        let mut s = pointing();
+        // A screen of version 9: Music with its timeline.
+        s.menu.pages = menu::Pages::of_screen(Some(9));
+        s.menu.media = Some(menu::Media { title: "A song".into(), can_play_pause: true, can_seek: true, duration: Some(200), playing: true, ..Default::default() });
+        let t0 = Instant::now();
+        // The owner opened the music page.
+        let _ = s.menu.press(menu::Target::Music);
+        assert_eq!(s.menu.page, Page::Music);
+        let effects = others_touch(&mut s, menu::Target::MediaPlayPause, t0);
+        assert!(!effects.iter().any(|e| matches!(e, Effect::Media(_))), "the owner's media keys: {effects:?}");
+        assert!(s.menu.media.as_ref().is_some_and(|m| m.playing), "nothing shown as pressed");
+        assert_eq!(s.presses, 0, "no click for what the guest may not press");
+        let effects = others_touch(&mut s, menu::Target::Seek(3), t0 + Duration::from_secs(2));
+        assert!(!effects.iter().any(|e| matches!(e, Effect::Media(_))), "the owner's timeline: {effects:?}");
+        // Held there and dragged along: the press was refused, so nothing follows the drag either.
+        assert_eq!(s.dragging[2], None);
+        let effects = others_touch(&mut s, menu::Target::Back, t0 + Duration::from_secs(4));
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(s.menu.page, Page::Home, "Back is theirs");
+        assert_eq!(s.presses, 1);
+        let _ = others_touch(&mut s, menu::Target::YouTube, t0 + Duration::from_secs(6));
+        assert_eq!(s.menu.page, Page::Search, "a tile that only opens a page is theirs too");
+        // The owner's own presses are untouched: the same rule never applies to hands 0 and 1 (the YouTube test above).
     }
 
     #[test]
@@ -2915,7 +2981,7 @@ mod tests {
         // Later, the same click presses the tile.
         assert!(step(&mut s, &mouse, start, 700, DOWN));
         // The menu opened again: half a second again.
-        s.menu.close();
+        let _ = s.menu.close();
         assert!(!step(&mut s, &mouse, start, 800, UP));
         s.menu.open();
         assert!(!step(&mut s, &mouse, start, 900, UP));
@@ -2974,10 +3040,10 @@ mod tests {
         // A copied result's Drop drops it (the card then goes out: its host's part).
         let menu = &mut rt.screen.menu;
         menu.open();
-        menu.search_for("cats");
+        let _ = menu.search_for("cats");
         let video = youtube::Video { id: "dQw4w9WgXcQ".into(), title: "Never".into(), channel: "R".into(), duration: None, live: false };
-        menu.results_arrived(1, youtube::Results { videos: vec![video], continuation: None }, false);
-        menu.press(Target::Copy(0));
+        let _ = menu.results_arrived(1, youtube::Results { videos: vec![video], continuation: None }, false);
+        let _ = menu.press(Target::Copy(0));
         assert!(matches!(&menu.press(Target::Drop(0))[..], [Effect::Drop { video: Some(v), .. }] if v == "dQw4w9WgXcQ"));
         // Without the screen (none, or one the text channel cannot reach), no card.
         rt.screen.avatar(false, false, None, 72);
@@ -2994,11 +3060,11 @@ mod tests {
         let media = Watcher::new(|| Box::new(crate::media::NoMedia));
         let menu = &mut rt.screen.menu;
         menu.open();
-        menu.search_for("cats");
+        let _ = menu.search_for("cats");
         let videos: Vec<youtube::Video> = (0..5)
             .map(|i| youtube::Video { id: format!("video{i:06}"), title: format!("Cats {i}"), channel: "C".into(), duration: None, live: false })
             .collect();
-        menu.results_arrived(1, youtube::Results { videos: videos.clone(), continuation: None }, false);
+        let _ = menu.results_arrived(1, youtube::Results { videos: videos.clone(), continuation: None }, false);
         assert_eq!(menu.page, Page::Results);
         for (i, v) in videos.iter().enumerate() {
             let rgb = orbiters_n4n0_core::picture::Rgb { width: 320, height: 180, pixels: (0..320 * 180 * 3).map(|p| ((p * (7 + i)) % 251) as u8).collect() };

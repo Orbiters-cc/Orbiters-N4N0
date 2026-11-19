@@ -129,6 +129,12 @@ impl Meters {
         *self.seen.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
     }
 
+    /// Whether something looked at them in the last `within` (tests).
+    #[cfg(test)]
+    pub fn looked_within(&self, within: Duration) -> bool {
+        self.seen.lock().unwrap_or_else(|e| e.into_inner()).elapsed() < within
+    }
+
     pub fn levels(&self) -> MicLevels {
         self.now.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }

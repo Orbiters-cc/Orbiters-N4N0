@@ -205,5 +205,7 @@
   "{tones} tones, ink {ink}": "{tones} tonos, tinta {ink}",
   "{tones} tones, ink {ink}, dots": "{tones} tonos, tinta {ink}, puntos",
   "{width} × {height} pixels": "{width} × {height} píxeles",
-  "layer\u0004Hidden": "Oculta"
+  "layer\u0004Hidden": "Oculta",
+  "The picture could not be read.": "No se pudo leer la foto.",
+  "it stopped unexpectedly": "se detuvo de forma inesperada"
 }

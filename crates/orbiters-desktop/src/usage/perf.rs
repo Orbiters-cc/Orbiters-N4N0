@@ -58,6 +58,8 @@ pub struct Sample {
     pub cores: u32,
     /// What making this sample cost N4N0, microseconds.
     pub cost_us: u32,
+    /// Who it is counted for (set by the spool, `super::spool::Spool::perf`): a window sums samples of one stamp.
+    pub who: super::spool::Stamp,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -182,6 +184,9 @@ pub struct Window {
     pub sandbox: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub agent: bool,
+    /// Who it was counted for: on disk only, taken off before it is sent (`super::spool::Stamp`).
+    #[serde(default, skip_serializing_if = "super::spool::Stamp::is_none")]
+    pub who: super::spool::Stamp,
 }
 
 /// What is at work now, as short keys: the person's activities and the overlay loop's parts that did work in the last summary.
@@ -264,6 +269,7 @@ pub fn sample(line: &Line, gpu: Option<&GpuNow>, context: Context, at: u64, cost
         refresh_hz: line.turns.iter().find_map(|t| t.refresh_hz),
         cores,
         cost_us: cost.as_micros().min(u32::MAX as u128) as u32,
+        who: Default::default(),
     }
 }
 
@@ -295,7 +301,7 @@ pub struct Windows {
 impl Windows {
     /// A sample came; the window it closed, if any.
     pub fn push(&mut self, sample: Sample, agent: bool) -> Option<Window> {
-        let closes = self.open.first().is_some_and(|first| first.context != sample.context || sample.at.saturating_sub(first.at) >= WINDOW_MS);
+        let closes = self.open.first().is_some_and(|first| first.context != sample.context || first.who != sample.who || sample.at.saturating_sub(first.at) >= WINDOW_MS);
         let done = if closes { self.close() } else { None };
         self.agent |= agent;
         self.open.push(sample);
@@ -351,21 +357,9 @@ impl Windows {
             debug: debug_build(),
             sandbox: sandbox_run(),
             agent,
+            who: first.who.clone(),
         })
     }
-}
-
-/// The signed-in Orbiters account, as a code the admin can match ("leave out my own use"), only for accounts Orbiters gave its
-/// experimental tools (the team's: `bridge.allowed`); never for anyone else. 16 hex characters of SHA-256 of a fixed prefix and the
-/// lower-cased name: the server computes the same from a name the admin types.
-pub fn team_code(snap: &crate::state::Snapshot) -> Option<String> {
-    use sha2::{Digest, Sha256};
-    if !snap.bridge.allowed {
-        return None;
-    }
-    let crate::state::AccountState::SignedIn { username } = &snap.account.state else { return None };
-    let digest = Sha256::digest(format!("orbiters-n4n0-usage\u{0}{}", username.trim().to_lowercase()).as_bytes());
-    Some(digest.iter().take(8).map(|b| format!("{b:02x}")).collect())
 }
 
 /// The VRChat bridge (an AI agent) drives VRChat or the app now.
@@ -448,17 +442,5 @@ mod tests {
         assert!(keys.contains(&"drawing_menu_panels".to_string()));
         assert!(!keys.contains(&"drawing_3d_view".to_string()), "0.1 ms/s is not at work");
         assert!(keys.contains(&"menus_hidden".to_string()));
-    }
-
-    #[test]
-    fn only_a_team_account_gives_a_code() {
-        let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
-        snap.account.state = crate::state::AccountState::SignedIn { username: "BlackOrbit".into() };
-        assert_eq!(team_code(&snap), None);
-        snap.bridge.allowed = true;
-        let code = team_code(&snap).unwrap();
-        assert_eq!(code.len(), 16);
-        // The server computes the same from the name (backend services/n4n0/usageExclusions.js accountCode; its test has this value).
-        assert_eq!(code, "b14959feefef8a1f");
     }
 }

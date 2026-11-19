@@ -42,17 +42,34 @@ pub enum Where {
     Desktop,
 }
 
+/// Where the person would see the offer now: in VR when the headset is worn and N4N0's SteamVR overlay is up (its band);
+/// on the desktop when no headset can be in use (SteamVR not running, or the overlay says the headset is not worn) and a
+/// card can be drawn over the screen; else nowhere. A worn headset with no overlay, or SteamVR running with nobody to
+/// say whether the headset is worn, is nowhere: the desktop card would be on a monitor nobody looks at (SWEEP-7).
+pub fn where_seen(steamvr: bool, overlay: bool, headset_in_use: Option<bool>, card_can_show: bool) -> Option<Where> {
+    if steamvr {
+        return match headset_in_use {
+            Some(true) => overlay.then_some(Where::Vr),
+            Some(false) => card_can_show.then_some(Where::Desktop),
+            None => None,
+        };
+    }
+    card_can_show.then_some(Where::Desktop)
+}
+
 /// What the app tells the countdown at each look.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Facts {
     pub minimized: bool,
     pub vrchat: bool,
-    /// Where the person would see it now (`None`: nowhere).
+    /// Where the person would see it now (`None`: nowhere: the countdown pauses).
     pub seen_at: Option<Where>,
+    /// Something of the window is at work or open (`App::idle_facts`): no offer, and one up goes.
     pub working: bool,
     /// Settings' switch.
     pub on: bool,
-    /// What the VR band said: the offer it shows, and the one Keep open was pressed on.
+    /// What the VR band says now: the offer it shows this moment (a live fact, not a latch: hidden by SteamVR's
+    /// dashboard or by "Talk with N4N0?", it shows none), and the one Keep open was pressed on.
     pub shown_in_vr: Option<u64>,
     pub kept_in_vr: Option<u64>,
 }
@@ -61,11 +78,11 @@ pub struct Facts {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
     Nothing,
-    /// Put up (or again, its countdown started) this offer, there.
+    /// Put up this offer there, or again with its countdown running or paused.
     Show(RestOffer, Where),
     /// Take the offer down.
     Withdraw,
-    /// The countdown is over: close the window to the tray.
+    /// The countdown is over, every second of it seen: close the window to the tray.
     Close,
 }
 
@@ -73,17 +90,33 @@ struct Up {
     id: u64,
     at: Where,
     offered: f64,
-    started: Option<f64>,
+    /// It was seen at least once (the VR band said so; the desktop card is the window's own).
+    seen: bool,
+    /// Seconds of the countdown left, counted only while it is seen.
+    left: f64,
+    /// While it is seen: when the last look was (the time since counts). `None`: paused.
+    ticking: Option<f64>,
 }
 
 /// The countdown of the window ([`Rest::step`], with a clock given in seconds).
-#[derive(Default)]
 pub struct Rest {
     since: Option<f64>,
     up: Option<Up>,
     kept: bool,
+    /// Offers are numbered from this window's start time (ms), so that a later window's never repeats one the SteamVR
+    /// overlay (which outlives windows) already took or saw pressed (night3, SWEEP-8).
+    base: u64,
     last_id: u64,
     wait_until: f64,
+    /// Settings' switch at the last look.
+    on: bool,
+}
+
+impl Default for Rest {
+    fn default() -> Self {
+        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        Self { since: None, up: None, kept: false, base: (ms & ((1 << 47) - 1)) << 8, last_id: 0, wait_until: 0.0, on: true }
+    }
 }
 
 impl Rest {
@@ -97,22 +130,44 @@ impl Rest {
         self.kept
     }
 
-    /// The offer up and the clock it runs on (`now`, `now_ms`: the same moment in seconds and in Unix ms).
+    /// The offer up and the clock it runs on (`now`, `now_ms`: the same moment in seconds and in Unix ms). Its
+    /// `until_ms` is 0 while it is paused (not seen); `left_ms` then says what is left.
     pub fn offer(&self, now: f64, now_ms: u64) -> Option<(RestOffer, Where)> {
         let up = self.up.as_ref()?;
         let for_ms = (COUNTDOWN * 1000.0) as u64;
-        let until_ms = up.started.map_or(0, |s| now_ms + ((s + COUNTDOWN - now).max(0.0) * 1000.0) as u64);
-        Some((RestOffer { id: up.id, until_ms, for_ms }, up.at))
+        let left = (up.left - up.ticking.map_or(0.0, |t| (now - t).max(0.0))).max(0.0);
+        let left_ms = (left * 1000.0) as u64;
+        let until_ms = if up.ticking.is_some() { now_ms + left_ms } else { 0 };
+        Some((RestOffer { id: up.id, until_ms, for_ms, left_ms }, up.at))
     }
 
-    /// When the next look is needed, in seconds from `now` (None: only when something changes).
+    /// Whether the countdown runs now (its message seen).
+    pub fn running(&self) -> bool {
+        self.up.as_ref().is_some_and(|u| u.ticking.is_some())
+    }
+
+    /// When the next look is needed, in seconds from `now` (None: only when something changes: a new snapshot, a job
+    /// ending, the window restored all wake the window by themselves). Never twice a second for ever (SWEEP-9).
     pub fn next_look(&self, now: f64) -> Option<f64> {
-        match &self.up {
-            // The countdown moves (its line, its seconds).
-            Some(_) => Some(0.1),
-            None if self.kept => None,
-            None => self.since.map(|s| (s + MINIMIZED_FOR).max(self.wait_until) - now).map(|t| t.max(0.5)),
+        if self.kept || !self.on {
+            return None;
         }
+        let t = match &self.up {
+            // The countdown moves (its line, its seconds).
+            Some(up) if up.ticking.is_some() => 0.1,
+            // Offered, the band not showing it yet: until it is too late for it.
+            Some(up) if !up.seen => (up.offered + SEEN_WITHIN - now).max(0.1),
+            // Paused: whatever shows it again comes with a snapshot.
+            Some(_) => return None,
+            None => {
+                let at = (self.since? + MINIMIZED_FOR).max(self.wait_until) - now;
+                if at <= 0.0 {
+                    return None;
+                }
+                at
+            }
+        };
+        Some(t.min(3600.0))
     }
 
     fn withdraw(&mut self) -> Step {
@@ -123,8 +178,13 @@ impl Rest {
         }
     }
 
+    fn shown(&self, now: f64, now_ms: u64) -> Step {
+        self.offer(now, now_ms).map_or(Step::Nothing, |(o, w)| Step::Show(o, w))
+    }
+
     /// One look at `now` (seconds, any clock that does not go back) with the app's `facts`.
     pub fn step(&mut self, now: f64, now_ms: u64, facts: &Facts) -> Step {
+        self.on = facts.on;
         if !facts.minimized {
             // Restored: the time starts again.
             self.since = None;
@@ -139,39 +199,62 @@ impl Rest {
         if self.kept || !facts.on {
             return self.withdraw();
         }
-        let seen_at = if facts.vrchat && !facts.working { facts.seen_at } else { None };
+        let eligible = facts.vrchat && !facts.working;
         let Some(up) = self.up.as_mut() else {
-            let Some(at) = seen_at else { return Step::Nothing };
+            let Some(at) = facts.seen_at.filter(|_| eligible) else { return Step::Nothing };
             if now - since < MINIMIZED_FOR || now < self.wait_until {
                 return Step::Nothing;
             }
             self.last_id += 1;
-            // On the desktop the card is the window's own: it shows from the start.
-            self.up = Some(Up { id: self.last_id, at, offered: now, started: (at == Where::Desktop).then_some(now) });
-            return self.offer(now, now_ms).map_or(Step::Nothing, |(o, w)| Step::Show(o, w));
+            // On the desktop the card is the window's own: it is seen from the start. In VR, once the band says so.
+            let desktop = at == Where::Desktop;
+            self.up = Some(Up { id: self.base | (self.last_id & 0xff), at, offered: now, seen: desktop, left: COUNTDOWN, ticking: desktop.then_some(now) });
+            return self.shown(now, now_ms);
         };
-        if seen_at != Some(up.at) {
+        if !eligible || facts.seen_at.is_some_and(|w| w != up.at) {
             // Something started, VRChat ended, the person went elsewhere: not now.
             self.wait_until = now + AGAIN_AFTER;
             return self.withdraw();
         }
-        match up.started {
-            None if facts.shown_in_vr == Some(up.id) => {
-                up.started = Some(now);
-                self.offer(now, now_ms).map_or(Step::Nothing, |(o, w)| Step::Show(o, w))
-            }
-            None if now - up.offered > SEEN_WITHIN => {
+        // Seen now? The desktop card wherever it can be drawn; the VR band only while it says it shows this offer.
+        let seen_now = match up.at {
+            Where::Desktop => facts.seen_at == Some(Where::Desktop),
+            Where::Vr => facts.seen_at == Some(Where::Vr) && facts.shown_in_vr == Some(up.id),
+        };
+        if !up.seen && !seen_now {
+            if now - up.offered > SEEN_WITHIN {
+                // Never seen: it goes, unseen, and nothing closes.
                 self.wait_until = now + AGAIN_AFTER;
-                self.withdraw()
+                return self.withdraw();
             }
-            None => Step::Nothing,
-            Some(started) if now - started >= COUNTDOWN => {
-                self.up = None;
-                // Closing: nothing more is offered by this window.
-                self.wait_until = f64::INFINITY;
-                Step::Close
+            return Step::Nothing;
+        }
+        match (seen_now, up.ticking) {
+            // Seen and running: count.
+            (true, Some(t)) => {
+                up.left -= (now - t).max(0.0);
+                up.ticking = Some(now);
+                if up.left <= 0.0 {
+                    self.up = None;
+                    // Closing: nothing more is offered by this window.
+                    self.wait_until = f64::INFINITY;
+                    return Step::Close;
+                }
+                Step::Nothing
             }
-            Some(_) => Step::Nothing,
+            // Seen again (or for the first time): it runs from where it stood.
+            (true, None) => {
+                up.seen = true;
+                up.ticking = Some(now);
+                self.shown(now, now_ms)
+            }
+            // Hidden (SteamVR's dashboard, "Talk with N4N0?" on the band, a game in exclusive full screen): it pauses.
+            (false, Some(t)) => {
+                up.left -= (now - t).max(0.0);
+                up.ticking = None;
+                self.shown(now, now_ms)
+            }
+            (false, None) => Step::Nothing,
         }
     }
 }
@@ -429,6 +512,153 @@ mod tests {
         }).collect()
     }
 
+    /// SWEEP-7: in VR the countdown runs only while the band shows the offer. Hidden mid-way (SteamVR's dashboard,
+    /// "Talk with N4N0?" on the band) it pauses, for as long as it stays hidden, and goes on from where it stood once
+    /// shown again: the window closes only after eight seconds SEEN, never unseen.
+    #[test]
+    fn hidden_mid_way_the_countdown_pauses_and_never_closes_unseen() {
+        let mut rest = Rest::default();
+        let vr = Facts { seen_at: Some(Where::Vr), ..facts() };
+        let steps = run(&mut rest, 0.0, MINIMIZED_FOR + 0.05, &vr);
+        let Some(Step::Show(offer, Where::Vr)) = steps.first().copied() else { panic!("{steps:?}") };
+        let shown = Facts { shown_in_vr: Some(offer.id), ..vr };
+        let hidden = Facts { shown_in_vr: None, ..vr };
+        let t0 = MINIMIZED_FOR + 1.0;
+        run(&mut rest, t0, t0 + 3.0, &shown);
+        // Hidden for a minute: no Close, a paused offer saying what is left.
+        let steps = run(&mut rest, t0 + 3.1, t0 + 63.0, &hidden);
+        assert_eq!(kinds(&steps), ["show"], "paused once, nothing else");
+        let Step::Show(paused, _) = steps[0] else { unreachable!() };
+        assert_eq!(paused.until_ms, 0, "paused");
+        assert!((4_500..=5_100).contains(&paused.left_ms), "about five seconds left: {}", paused.left_ms);
+        assert!(!rest.running());
+        // Shown again: it goes on from there and closes after the rest of its eight seconds.
+        let back = t0 + 63.1;
+        let steps = run(&mut rest, back, back + 4.5, &shown);
+        assert_eq!(kinds(&steps), ["show"], "running again, not closed yet");
+        assert_eq!(kinds(&run(&mut rest, back + 4.6, back + 5.5, &shown)), ["close"], "about eight seconds seen in all");
+    }
+
+    /// SWEEP-7 (desktop side): with SteamVR running, the desktop card is used only when the overlay says the headset is
+    /// not worn; a worn headset without the overlay, or nobody to say, is nowhere (no offer, the window stays).
+    #[test]
+    fn the_desktop_card_is_never_for_someone_in_the_headset() {
+        assert_eq!(where_seen(true, true, Some(true), true), Some(Where::Vr));
+        assert_eq!(where_seen(true, false, Some(true), true), None, "in the headset, no overlay: nowhere");
+        assert_eq!(where_seen(true, false, None, true), None, "SteamVR runs, nobody says: nowhere");
+        assert_eq!(where_seen(true, true, Some(false), true), Some(Where::Desktop));
+        assert_eq!(where_seen(false, false, None, true), Some(Where::Desktop));
+        assert_eq!(where_seen(false, false, None, false), None, "a game in exclusive full screen");
+    }
+
+    /// SWEEP-8: offers of a later window never repeat the numbers of an earlier one (the SteamVR overlay outlives
+    /// windows and remembers numbers it showed or saw pressed).
+    #[test]
+    fn offers_are_numbered_apart_from_every_earlier_window() {
+        let first = Rest::default();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        let later = Rest::default();
+        let id = |mut r: Rest| {
+            let steps = run(&mut r, 0.0, MINIMIZED_FOR + 0.05, &facts());
+            match steps.first() {
+                Some(Step::Show(o, _)) => o.id,
+                other => panic!("{other:?}"),
+            }
+        };
+        let (a, b) = (id(first), id(later));
+        assert_ne!(a, b, "two windows' first offers");
+        assert!(a > 255 && b > 255, "not 1, 2, 3 in every window");
+    }
+
+    /// SWEEP-9: once its time is past, a window that cannot offer (switch off, no VRChat, something at work) does not
+    /// wake on a clock: whatever changes that wakes it by itself.
+    #[test]
+    fn a_window_that_cannot_offer_sleeps() {
+        for (why, f) in [("switched off", Facts { on: false, ..facts() }), ("no VRChat", Facts { vrchat: false, ..facts() }), ("working", Facts { working: true, ..facts() })] {
+            let mut rest = Rest::default();
+            run(&mut rest, 0.0, MINIMIZED_FOR + 5.0, &f);
+            assert_eq!(rest.next_look(MINIMIZED_FOR + 5.0), None, "{why}");
+        }
+        let mut rest = Rest::default();
+        run(&mut rest, 0.0, 10.0, &facts());
+        assert!(rest.next_look(10.0).is_some_and(|t| t > MINIMIZED_FOR - 20.0), "before its time: one wake at it");
+        run(&mut rest, 10.1, MINIMIZED_FOR + 1.0, &facts());
+        assert_eq!(rest.next_look(MINIMIZED_FOR + 1.0), Some(0.1), "while it counts down");
+    }
+
+    /// SWEEP-18: every job of the window counts as work: a page `Job` that runs blocks the close until it ended.
+    #[test]
+    fn every_job_of_the_window_counts_as_work() {
+        let ctx = egui::Context::default();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let mut job = crate::pages::Job::spawn(&ctx, move || {
+            let _ = held.recv();
+        });
+        assert!(crate::pages::working_now() >= 1, "a job running is work of the window");
+        drop(release);
+        while job.poll().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// SWEEP-18, safe by construction: every thread the window process starts outside a page `Job` is either counted as
+    /// work (it holds a `pages::Working`) or listed here as idle-safe (it only reads, keeps a cache that is made again,
+    /// or draws in memory), with why. A thread added later and not classified fails this test.
+    #[test]
+    fn every_thread_the_window_starts_is_counted_or_classified() {
+        const IDLE: [(&str, &str); 12] = [
+            ("pages/editor/preview.rs", "draws the editor's previews in memory"),
+            ("pages/gallery_select.rs", "fetches pictures to hand out by a drag (a cache)"),
+            ("pages/projects/builds.rs", "builds project previews (a cache)"),
+            ("pages/projects/thumb_cache.rs", "makes project pictures (a cache)"),
+            ("pages/projects/unity_session.rs", "brings a Unity window to the front"),
+            ("pages/splats/edit3d.rs", "draws photo layers in memory"),
+            ("pages/splat_worker.rs", "draws splats in memory"),
+            ("pages/videos.rs", "fetches video thumbnails into memory"),
+            ("pages/watch.rs", "a page's watch: looks, writes nothing"),
+            ("worlds.rs:world-infos", "reads worlds' names into memory"),
+            ("worlds.rs:pictures-", "decodes pictures (a cache)"),
+            ("media.rs", "asks the music players what plays"),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = vec![root.join("app.rs"), root.join("window.rs"), root.join("views.rs"), root.join("worlds.rs"), root.join("media.rs"), root.join("window_rest.rs"), root.join("drag_out.rs")];
+        let mut dirs = vec![root.join("pages")];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut unclassified = Vec::new();
+        for file in files.iter().filter(|f| f.exists()) {
+            let name = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+            let text = std::fs::read_to_string(file).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            // Only the module's own code: its tests start no thread of the window.
+            let end = lines.iter().position(|l| l.trim_start().starts_with("mod tests")).unwrap_or(lines.len());
+            for (i, line) in lines[..end].iter().enumerate() {
+                if !(line.contains("thread::spawn(") || line.contains("thread::Builder::new()")) || line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let around = lines[i.saturating_sub(4)..(i + 4).min(end)].join("\n");
+                let counted = around.contains("Working::begin") || around.contains("let _working");
+                let idle = IDLE.iter().any(|(at, _)| match at.split_once(':') {
+                    Some((f, thread)) => name == f && lines[i..(i + 3).min(end)].join("\n").contains(thread),
+                    None => name == *at,
+                });
+                let job = name == "pages/mod.rs";
+                if !(counted || idle || job) {
+                    unclassified.push(format!("{name}:{}: {}", i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(unclassified.is_empty(), "threads of the window neither counted as work nor classified idle: {unclassified:#?}");
+    }
+
     #[test]
     fn minimized_for_long_while_vrchat_runs_it_counts_down_eight_seconds_then_closes() {
         let mut rest = Rest::default();
@@ -516,7 +746,7 @@ mod tests {
 
     #[test]
     fn the_countdown_says_its_seconds_and_its_line() {
-        let offer = RestOffer { id: 1, until_ms: 18_000, for_ms: 8_000 };
+        let offer = RestOffer { id: 1, until_ms: 18_000, for_ms: 8_000, left_ms: 8_000 };
         assert_eq!((offer.seconds(10_000), offer.seconds(10_001), offer.seconds(17_001), offer.seconds(18_000)), (8, 8, 1, 0));
         assert!((offer.left(14_000) - 0.5).abs() < 1e-6);
         assert_eq!(RestOffer { until_ms: 0, ..offer }.left(99), 1.0, "not started: full");

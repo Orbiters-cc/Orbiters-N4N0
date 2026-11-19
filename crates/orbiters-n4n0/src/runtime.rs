@@ -272,6 +272,8 @@ pub(crate) struct N4n0Runtime {
     pub(crate) captures: Slice<orbiters_n4n0_core::captures::CapturesView>,
     pub(crate) friends: Slice<orbiters_n4n0_core::captures::Friends>,
     pub(crate) friends_asked: u32,
+    /// The menus whose Share to … lists the friends (MENU-13).
+    pub(crate) friends_holders: std::collections::HashSet<crate::MenuHolder>,
     /// The worlds' feedback as the app last handed it (feedback.rs).
     pub(crate) feedback: orbiters_n4n0_core::feedback::FeedbackView,
     /// The computer's keys for the overlay menu's keyboard (the last few, numbered), and whether the keyboard is taken.
@@ -2073,9 +2075,9 @@ impl N4n0 {
             }),
             Command::Suggest { text, voice } => self.suggestion_send(text, voice, false),
             Command::InviteMe { location } => self.invite_send(location, false),
-            Command::Qr { on } => self.qr_scan(on),
+            Command::Qr { on, holder } => self.qr_scan(on, holder),
             Command::Captures => self.captures_list(),
-            Command::Friends { on } => self.friends(on),
+            Command::Friends { on, holder } => self.friends(on, holder),
             Command::ShareCapture { share } => self.share_capture(share),
             Command::Feedback { ask } => self.feedback_ask(ask),
             Command::Dictate => self.menu_listen(),

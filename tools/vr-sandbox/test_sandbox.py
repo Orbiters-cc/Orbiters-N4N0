@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+import sandbox_testbase  # first: every machine path into a temp folder
 import sandbox
 
 class JournalTests(unittest.TestCase):
@@ -93,14 +94,14 @@ class RecoveryTests(unittest.TestCase):
             j={'session':'concurrent','files':[],'processes':[],'restored':False}
             with patch.multiple(sandbox,ROOT=root,LOCK=root/'lock',JOURNAL=root/'journal'),patch.object(sandbox,'processes',return_value=[]):
                 sandbox.backup(j,target);target.write_bytes(b'changed');sandbox.atomic_json(sandbox.JOURNAL,j)
-                entered=threading.Event();release=threading.Event();original=sandbox.shutil.copy2;calls=[];errors=[];answers=[]
-                def copy(source,destination,*args,**kwargs):
-                    calls.append(destination);entered.set();release.wait(2)
-                    return original(source,destination,*args,**kwargs)
+                entered=threading.Event();release=threading.Event();original=sandbox.fsync_write;calls=[];errors=[];answers=[]
+                def copy(destination,data):
+                    if str(destination).endswith('.sandbox-restore'):calls.append(destination);entered.set();release.wait(2)
+                    return original(destination,data)
                 def recover():
                     try:answers.append(sandbox.restore())
                     except Exception as error:errors.append(error)
-                with patch.object(sandbox.shutil,'copy2',side_effect=copy):
+                with patch.object(sandbox,'fsync_write',side_effect=copy):
                     first=threading.Thread(target=recover);second=threading.Thread(target=recover);first.start();self.assertTrue(entered.wait(2));second.start();time.sleep(.05);release.set();first.join(3);second.join(3)
                 self.assertFalse(first.is_alive() or second.is_alive());self.assertFalse(errors);self.assertEqual(len(calls),1);self.assertEqual(len(answers),2);self.assertEqual(target.read_bytes(),b'original')
 
@@ -127,7 +128,8 @@ class RecoveryTests(unittest.TestCase):
     def test_foreign_process_prevents_writes_and_keeps_recovery(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);journal=root/'journal';journal.write_text(json.dumps({'session':'x','files':[],'processes':[],'restored':False}))
-            with patch.multiple(sandbox,JOURNAL=journal),patch.object(sandbox,'processes',return_value=[{'pid':123,'create_time':1,'name':'VRChat.exe'}]):
+            with patch.multiple(sandbox,JOURNAL=journal),patch.object(sandbox,'processes',return_value=[{'pid':123,'create_time':1,'name':'VRChat.exe'},{'pid':124,'create_time':1,'name':'vrserver.exe'}]):
+                # A foreign SteamVR (with or without a VRChat in it) refuses; a desktop VRChat alone does not (test_orphan, SBX-1).
                 with self.assertRaisesRegex(RuntimeError,'unowned VR processes'):sandbox.restore()
                 self.assertFalse(json.loads(journal.read_text())['restored'])
 
@@ -269,3 +271,17 @@ class PointingTheLaser(unittest.TestCase):
         self.assertAlmostEqual(position[0], 0.2 - 0.032, places=6)
         self.assertAlmostEqual(position[1], 1.65, places=6)
         self.assertAlmostEqual(position[2], -0.1 + 0.015 - 0.05, places=6)
+
+
+class TestBase(unittest.TestCase):
+    """No test reaches the owner's machine: every path sandbox.py changes lives under the temp test base."""
+    def test_every_machine_path_is_inside_the_test_base(self):
+        base = Path(sandbox_testbase.BASE).resolve()
+        for path in (sandbox.ROOT, sandbox.LOCK, sandbox.JOURNAL, sandbox.STEAM, sandbox.PATHS, sandbox.SETTINGS, sandbox.HOME,
+                     sandbox.LOCAL, sandbox.ROAMING):
+            self.assertTrue(Path(path).resolve().is_relative_to(base), path)
+
+    def test_a_test_base_outside_the_temp_directory_is_refused(self):
+        import os
+        with patch.dict(os.environ, {'ORBITERS_VR_SANDBOX_TEST_BASE': str(Path(sandbox.__file__).parent)}):
+            with self.assertRaises(SystemExit):sandbox.machine_base()

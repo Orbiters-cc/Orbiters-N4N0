@@ -67,6 +67,15 @@ pub struct State {
 }
 
 impl State {
+    /// The account changed: its assets and what is on its way go.
+    pub fn forget_account(&mut self) {
+        self.assets.clear();
+        self.job = Job::default();
+        self.asked = None;
+        self.error = None;
+        self.changed = true;
+    }
+
     pub fn busy(&self) -> bool {
         self.job.running()
     }

@@ -10,7 +10,7 @@ use crate::media::Watcher;
 use crate::platform::Locale;
 use crate::screen::{keyboard, mode_setting, photo_length, photo_mode, photo_setting};
 use crate::status::{N4n0Status, StateAction};
-use crate::Command;
+use crate::{Command, MenuHolder};
 use orbiters_core::settings::Settings;
 use orbiters_n4n0_core::menu::{Effect, Light, Menu, Page, Pages, StateRow, SuggestQueue, Target};
 use orbiters_n4n0_core::picture::{self, Rgb};
@@ -65,6 +65,59 @@ enum Thumb<P> {
 }
 
 /// Sets `slot` to `value`, saying whether that changed it.
+/// How long a switch pressed here shows what it was pressed to while the settings or N4N0 still say the old value
+/// (MENU-11: the light's [`LIGHT_ECHO`], for the other switches; the assistant and smoothing go through N4N0's process).
+const SETTING_ECHO: Duration = Duration::from_secs(3);
+
+/// A value pressed here, kept over what the host says until it says the same or [`SETTING_ECHO`] passed: a switch does
+/// not jump back for the round trip, and a second press counts from what the first asked.
+#[derive(Debug)]
+struct Echo<T> {
+    set: Option<(T, Instant)>,
+}
+
+impl<T> Default for Echo<T> {
+    fn default() -> Self {
+        Self { set: None }
+    }
+}
+
+impl<T: PartialEq + Clone> Echo<T> {
+    fn press(&mut self, value: T) {
+        self.set = Some((value, Instant::now()));
+    }
+
+    /// What to show, the host saying `said`.
+    fn shown(&mut self, said: T) -> T {
+        match &self.set {
+            Some((value, at)) if *value != said && at.elapsed() < SETTING_ECHO => value.clone(),
+            _ => {
+                self.set = None;
+                said
+            }
+        }
+    }
+
+    /// The value asked and not yet said, if any (the base a second press counts from).
+    fn asked(&self) -> Option<&T> {
+        self.set.as_ref().filter(|(_, at)| at.elapsed() < SETTING_ECHO).map(|(v, _)| v)
+    }
+
+    fn due(&self) -> Option<Instant> {
+        self.set.as_ref().map(|(_, at)| *at + SETTING_ECHO)
+    }
+}
+
+/// The switches with an echo (MENU-11).
+#[derive(Debug, Default)]
+struct Echoes {
+    fast_walk: Echo<bool>,
+    mismatch: Echo<bool>,
+    assistant: Echo<bool>,
+    photo: Echo<(u32, orbiters_n4n0_core::menu::PhotoLength, orbiters_n4n0_core::menu::PhotoMode)>,
+    tracking: Echo<(bool, [u16; 3])>,
+}
+
 fn set<T: PartialEq>(slot: &mut T, value: T) -> bool {
     if *slot == value {
         return false;
@@ -89,6 +142,8 @@ pub struct MenuHost<P: Pictures> {
     /// The light as last set here, and when: what N4N0 says replaces it once it says the same (or after
     /// [`LIGHT_ECHO`]), so a switch does not jump back while N4N0 is told.
     light_set: Option<(Light, Instant)>,
+    /// The other switches as last pressed here (MENU-11).
+    echoes: Echoes,
     /// Something the menu shows changed since it was last drawn.
     pub dirty: bool,
     language_seen: orbiters_i18n::Language,
@@ -112,6 +167,8 @@ pub struct MenuHost<P: Pictures> {
     feedback_seen: orbiters_n4n0_core::feedback::FeedbackView,
     /// Told when something fetched arrived (none: the interface draws all the time, as the overlay does).
     waker: Option<Waker>,
+    /// Which menu this is, for the scanner and the friends it holds (MENU-13).
+    holder: MenuHolder,
 }
 
 impl<P: Pictures> MenuHost<P> {
@@ -132,6 +189,7 @@ impl<P: Pictures> MenuHost<P> {
             media_seen: 0,
             play_asked: None,
             light_set: None,
+            echoes: Echoes::default(),
             dirty: true,
             states_seen: None,
             note_seen: None,
@@ -143,6 +201,25 @@ impl<P: Pictures> MenuHost<P> {
             capture_pictures: None,
             feedback_seen: Default::default(),
             waker: None,
+            holder: MenuHolder::Any,
+        }
+    }
+
+    /// The same, as `holder` (the SteamVR menu, the panels, the window's Home): its scanner and friends are its own.
+    pub fn with_holder(mut self, holder: MenuHolder) -> Self {
+        self.holder = holder;
+        self
+    }
+
+    /// The page stays this menu's but is no longer seen (a sheet closed, the window's Home left): the scanner and the
+    /// friends it holds are let go now ([`Menu::let_go`]).
+    pub fn let_go(&mut self, service: &dyn MenuService) {
+        for effect in self.menu.let_go() {
+            match effect {
+                Effect::QrScan(on) => service.command(Command::Qr { on, holder: self.holder }),
+                Effect::Friends(on) => service.command(Command::Friends { on, holder: self.holder }),
+                _ => {}
+            }
         }
     }
 
@@ -173,6 +250,7 @@ impl<P: Pictures> MenuHost<P> {
     }
 
     /// A press on `target`: what it does follows from the effects it returns.
+    #[must_use = "a host runs what the menu asks"]
     pub fn press(&mut self, target: Target) -> Vec<Effect> {
         self.dirty = true;
         let effects = self.menu.press(target);
@@ -201,11 +279,13 @@ impl<P: Pictures> MenuHost<P> {
                 changed = true;
             }
         }
-        changed |= set(&mut m.fast_walk, settings.walk_boost.enabled);
+        // Each switch as pressed here until the settings say so too (MENU-11).
+        let e = &mut self.echoes;
+        changed |= set(&mut m.fast_walk, e.fast_walk.shown(settings.walk_boost.enabled));
         // The overlay's Suggest features has the switch of the menu mismatch buttons, the setting Settings › Beta feedback shows too.
-        changed |= set(&mut m.mismatch_buttons, Some(settings.mismatch.buttons));
+        changed |= set(&mut m.mismatch_buttons, Some(e.mismatch.shown(settings.mismatch.buttons)));
         // Home's microphone switches N4N0's assistant: whether it is on (nothing to switch while N4N0 is off).
-        changed |= set(&mut m.assistant, settings.n4n0.enabled.then_some(settings.n4n0.assistant));
+        changed |= set(&mut m.assistant, settings.n4n0.enabled.then(|| e.assistant.shown(settings.n4n0.assistant)));
         changed |= set(&mut m.desktop_mode, n4n0.desktop_mode);
         let said = n4n0.light.map(|l| Light { on: l.on, color: l.color, level: l.level });
         let light = match self.light_set {
@@ -261,11 +341,16 @@ impl<P: Pictures> MenuHost<P> {
         } else {
             self.note_seen.get_or_insert(0);
         }
-        changed |= set(&mut m.photo_timer, settings.photo_3d_timer);
-        changed |= set(&mut m.photo_length, photo_length(settings.photo_3d));
-        changed |= set(&mut m.photo_mode, photo_mode(settings.photo_3d_mode));
+        let (timer, length, mode) = self.echoes.photo.shown((settings.photo_3d_timer, photo_length(settings.photo_3d), photo_mode(settings.photo_3d_mode)));
+        changed |= set(&mut m.photo_timer, timer);
+        changed |= set(&mut m.photo_length, length);
+        changed |= set(&mut m.photo_mode, mode);
         // Tracking smoothing, the versions, and how the last suggestion sent from here went.
-        let tracking = n4n0.tracking.as_ref().map(|t| orbiters_n4n0_core::menu::Tracking { on: t.on, ms: t.ms, note: t.note.clone() });
+        let echoes = &mut self.echoes;
+        let tracking = n4n0.tracking.as_ref().map(|t| {
+            let (on, ms) = echoes.tracking.shown((t.on, t.ms));
+            orbiters_n4n0_core::menu::Tracking { on, ms, note: t.note.clone() }
+        });
         changed |= set(&mut m.tracking, tracking);
         // Compared before they are copied.
         if m.tracking_note != n4n0.tracking_note {
@@ -405,7 +490,8 @@ impl<P: Pictures> MenuHost<P> {
     /// What came back from YouTube, the suggestions once typing paused (one request at a time), and the thumbnails of
     /// the results shown that failed, once their wait is over. Returns what follows from them.
     pub fn poll(&mut self) -> Vec<Effect> {
-        let mut effects = Vec::new();
+        // What a page left by itself asked (a call that rang on the scanner's page: MENU-8).
+        let mut effects = self.menu.drain();
         while let Ok(done) = self.done_rx.try_recv() {
             match done {
                 Done::Suggestions { id, text, result } => {
@@ -471,10 +557,12 @@ impl<P: Pictures> MenuHost<P> {
         let suggestions = self.suggest.next_due();
         let retry = self.thumbs.values().any(|t| matches!(t, Thumb::Failed { tries, .. } if *tries < THUMB_TRIES)).then(|| self.shown_pictures().iter().filter_map(|id| self.retry_at(id)).min()).flatten();
         let light = self.light_set.map(|(_, at)| at + LIGHT_ECHO);
+        let e = &self.echoes;
+        let echo = [e.fast_walk.due(), e.mismatch.due(), e.assistant.due(), e.photo.due(), e.tracking.due()].into_iter().flatten().min().filter(|due| *due > now);
         // Only while it is still to come: [`MenuHost::follow_media`] takes it once due, and a page that does not
         // follow the music would otherwise be asked for a frame at once, at every frame, for ever.
         let play = self.play_asked.map(|(_, at)| at + MEDIA_CATCHES_UP).filter(|due| *due > now);
-        [suggestions, retry, light, play].into_iter().flatten().min().map(|at| at.saturating_duration_since(now))
+        [suggestions, retry, light, play, echo].into_iter().flatten().min().map(|at| at.saturating_duration_since(now))
     }
 
     /// Fetches the thumbnails among `ids` not here yet (one that failed is tried again a little later, a few times).
@@ -536,28 +624,38 @@ impl<P: Pictures> MenuHost<P> {
                 Effect::Copy { link, .. } => service.command(Command::CopyText { text: link }),
                 // No Stay here on the overlay's menu: what stays is the avatar's screen.
                 Effect::StayHere(_) => {}
+                // Counted from what was asked here and not yet said: a second quick press is not lost (MENU-11).
                 Effect::FastWalk(on) => {
-                    let mut changed = settings.clone();
+                    let base = self.asked_settings(settings);
+                    let mut changed = base.clone();
                     changed.walk_boost.enabled = on;
-                    service.save_settings(settings, &changed);
+                    self.echoes.fast_walk.press(on);
+                    service.save_settings(&base, &changed);
                 }
                 // Through N4N0, which stops whatever the assistant was doing as it saves the setting.
-                Effect::Assistant(on) => service.command(Command::Assistant { on }),
+                Effect::Assistant(on) => {
+                    self.echoes.assistant.press(on);
+                    service.command(Command::Assistant { on })
+                }
                 Effect::MismatchButtons(on) => {
-                    let mut changed = settings.clone();
+                    let base = self.asked_settings(settings);
+                    let mut changed = base.clone();
                     changed.mismatch.buttons = on;
-                    service.save_settings(settings, &changed);
+                    self.echoes.mismatch.press(on);
+                    service.save_settings(&base, &changed);
                 }
                 Effect::CallContact { id } => service.command(Command::Call { contact: id }),
                 Effect::Answer => service.command(Command::AnswerCall),
                 Effect::HangUp => service.command(Command::EndCall),
                 Effect::PhotoChoice { timer, length, mode } | Effect::Photo3d { timer, length, mode } => {
                     let take = matches!(effect, Effect::Photo3d { .. });
-                    let mut changed = settings.clone();
+                    let base = self.asked_settings(settings);
+                    let mut changed = base.clone();
                     changed.photo_3d_timer = timer;
                     changed.photo_3d = photo_setting(length);
                     changed.photo_3d_mode = mode_setting(mode);
-                    service.save_settings(settings, &changed);
+                    self.echoes.photo.press((timer, length, mode));
+                    service.save_settings(&base, &changed);
                     if take {
                         service.command(Command::Photo3DIn { seconds: timer });
                     }
@@ -576,7 +674,10 @@ impl<P: Pictures> MenuHost<P> {
                     service.command(Command::Drop { link, title, video });
                     self.dropped = true;
                 }
-                Effect::Tracking { on, ms } => service.command(Command::Tracking { on, ms }),
+                Effect::Tracking { on, ms } => {
+                    self.echoes.tracking.press((on, ms));
+                    service.command(Command::Tracking { on, ms })
+                }
                 Effect::Dictate => service.command(Command::Dictate),
                 Effect::SendSuggestion { text, voice } => service.command(Command::Suggest { text, voice }),
                 Effect::WatchVideo { link } => service.command(Command::Watch { link }),
@@ -586,9 +687,9 @@ impl<P: Pictures> MenuHost<P> {
                 Effect::InviteMe { location } => service.command(Command::InviteMe { location }),
                 Effect::CopyText { text } => service.command(Command::CopyText { text }),
                 Effect::OpenLink { link } => service.command(Command::Watch { link }),
-                Effect::QrScan(on) => service.command(Command::Qr { on }),
+                Effect::QrScan(on) => service.command(Command::Qr { on, holder: self.holder }),
                 Effect::Captures => service.command(Command::Captures),
-                Effect::Friends(on) => service.command(Command::Friends { on }),
+                Effect::Friends(on) => service.command(Command::Friends { on, holder: self.holder }),
                 Effect::ShareCapture(share) => service.command(Command::ShareCapture { share }),
                 Effect::Feedback(ask) => service.command(Command::Feedback { ask }),
                 // The overlay never shows the camera's picture: its card is greyed out there.
@@ -597,6 +698,24 @@ impl<P: Pictures> MenuHost<P> {
             }
         }
         close
+    }
+
+    /// `settings` with what was pressed here and not yet saved: what a change made now is counted from.
+    fn asked_settings(&self, settings: &Settings) -> Settings {
+        let mut base = settings.clone();
+        let e = &self.echoes;
+        if let Some(on) = e.fast_walk.asked() {
+            base.walk_boost.enabled = *on;
+        }
+        if let Some(on) = e.mismatch.asked() {
+            base.mismatch.buttons = *on;
+        }
+        if let Some((timer, length, mode)) = e.photo.asked() {
+            base.photo_3d_timer = *timer;
+            base.photo_3d = photo_setting(*length);
+            base.photo_3d_mode = mode_setting(*mode);
+        }
+        base
     }
 
     /// A picture by its key, once loaded.
@@ -681,6 +800,8 @@ mod tests {
     struct Recorder {
         commands: Mutex<Vec<Command>>,
         saved: Mutex<Vec<Settings>>,
+        /// What each save counted from.
+        before: Mutex<Vec<Settings>>,
     }
 
     impl MenuService for Recorder {
@@ -688,7 +809,8 @@ mod tests {
             self.commands.lock().unwrap().push(command);
         }
 
-        fn save_settings(&self, _before: &Settings, after: &Settings) {
+        fn save_settings(&self, before: &Settings, after: &Settings) {
+            self.before.lock().unwrap().push(before.clone());
             self.saved.lock().unwrap().push(after.clone());
         }
     }
@@ -908,7 +1030,7 @@ mod tests {
         // A note from before this menu was opened is not its own.
         let mut n4n0 = N4n0Status { photo_note: Some((3, "Open the camera before".into())), ..Default::default() };
         h.follow(&n4n0, &settings);
-        h.press(Target::Photo);
+        let _ = h.press(Target::Photo);
         h.follow(&n4n0, &settings);
         assert_eq!(h.menu.notice, None);
         n4n0.photo_note = Some((4, "Open the camera before".into()));
@@ -918,8 +1040,8 @@ mod tests {
         n4n0.card = Some(crate::status::CardView { title: "t".into(), link: "https://x.y/".into(), left: 500 });
         h.follow(&n4n0, &settings);
         assert!(h.menu.card_out);
-        h.press(Target::Back);
-        h.press(Target::Music);
+        let _ = h.press(Target::Back);
+        let _ = h.press(Target::Music);
         let effects = h.press(Target::TakeBack);
         assert!(!h.effects(effects, &settings, &service));
         assert!(matches!(service.commands.lock().unwrap().as_slice(), [Command::TakeBack]));
@@ -942,6 +1064,50 @@ mod tests {
         let n4n0 = N4n0Status { light: Some(N4n0Light { on: true, color: 3, level: 1.0 }), ..Default::default() };
         h.follow(&n4n0, &settings);
         assert!(h.light_set.is_none());
+    }
+
+    /// MENU-11: a switch pressed here stays as pressed while the settings still say the old value, and a second quick
+    /// press counts from what the first asked (fast walk on, then off, both saved).
+    #[test]
+    fn a_switch_pressed_here_does_not_jump_back_and_a_second_press_is_not_lost() {
+        let mut h = host();
+        let settings = Settings::default();
+        assert!(!settings.walk_boost.enabled);
+        h.open(&settings);
+        let n4n0 = N4n0Status::default();
+        h.follow(&n4n0, &settings);
+        let service = Recorder::default();
+        let effects = h.press(Target::FastWalk);
+        h.effects(effects, &settings, &service);
+        h.follow(&n4n0, &settings);
+        assert!(h.menu.fast_walk, "still on while the settings come back");
+        // Pressed again before the settings said on: off is saved, counted from on.
+        let effects = h.press(Target::FastWalk);
+        assert_eq!(effects, vec![Effect::FastWalk(false)]);
+        h.effects(effects, &settings, &service);
+        let (before, saved) = (service.before.lock().unwrap().clone(), service.saved.lock().unwrap().clone());
+        assert_eq!(saved.iter().map(|s| s.walk_boost.enabled).collect::<Vec<_>>(), [true, false]);
+        assert_eq!(before.iter().map(|s| s.walk_boost.enabled).collect::<Vec<_>>(), [false, true], "the second change is not empty");
+        h.follow(&n4n0, &settings);
+        assert!(!h.menu.fast_walk);
+        // The 3D picture's timer and the assistant the same.
+        let mut on = settings.clone();
+        on.n4n0.enabled = true;
+        h.follow(&n4n0, &on);
+        let assistant = h.menu.assistant;
+        let effects = h.press(Target::Assistant);
+        h.effects(effects, &on, &service);
+        h.follow(&n4n0, &on);
+        assert_eq!(h.menu.assistant, assistant.map(|a| !a));
+        let effects = h.press(Target::Timer(2));
+        h.effects(effects, &on, &service);
+        h.follow(&n4n0, &on);
+        assert_eq!(h.menu.photo_timer, orbiters_n4n0_core::menu::TIMERS[2]);
+        // Once the echo is over, what the settings say again (the service refused it).
+        h.echoes.fast_walk.press(true);
+        h.echoes.fast_walk.set.as_mut().unwrap().1 -= SETTING_ECHO;
+        h.follow(&n4n0, &settings);
+        assert!(!h.menu.fast_walk);
     }
 
     #[test]

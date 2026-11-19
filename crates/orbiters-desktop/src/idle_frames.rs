@@ -222,7 +222,7 @@ fn count(backend: Ctl, page: Page, states: bool, warmup: f64, seconds: f64, focu
         // Home's menu is made by its first frame: then its States page, and something asked there.
         if states && !staged {
             if let Some(host) = app.home_mut().menu_host() {
-                host.press(orbiters_n4n0_core::menu::Target::States);
+                let _ = host.press(orbiters_n4n0_core::menu::Target::States);
                 app.home_mut().states_mut().stage_asked("avtr_idle", start.elapsed().as_secs_f64());
                 staged = true;
                 ctx.request_repaint();

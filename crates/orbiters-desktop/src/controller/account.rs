@@ -425,6 +425,26 @@ impl Controller {
         rt.account.as_ref().map(|a| (server, a.username.clone(), a.user.clone()))
     }
 
+    /// The account the beta's usage statistics are linked to (`usage::spool`): its id, the API address its credential is for and the
+    /// credential, only while it is signed in and checked (not while it is being checked, refused or expired). An account file that
+    /// names no id is known by its lower-cased name, on this computer only (the server learns the account from the credential).
+    pub fn usage_account(&self) -> Option<crate::usage::spool::Signed> {
+        if !matches!(self.view().account.state, AccountState::SignedIn { .. }) {
+            return None;
+        }
+        let rt = self.account_runtime.lock().unwrap();
+        let (server, _) = rt.read?;
+        let a = rt.account.as_ref()?;
+        let account = a.user.clone().filter(|u| !u.trim().is_empty()).or_else(|| a.username.as_ref().map(|n| format!("name:{}", n.trim().to_lowercase())))?;
+        Some(crate::usage::spool::Signed { account, base: Api::new(server).url(""), token: a.token.clone() })
+    }
+
+    /// Whom what the usage statistics count now is for: linked to the signed-in account only once the notice saying so was shown.
+    pub fn usage_stamp(&self) -> crate::usage::spool::Stamp {
+        let told = self.view().settings.usage.told_account;
+        crate::usage::spool::Stamp::now(told, if told { self.usage_account().map(|s| s.account) } else { None })
+    }
+
     /// The API and credential for calls to Orbiters, when an account is saved (checked or not).
     pub fn account_api(&self) -> Option<(Api, String)> {
         let rt = self.account_runtime.lock().unwrap();
@@ -436,16 +456,16 @@ impl Controller {
     /// account's id (a digest of its credential when the account file names no id; none when nobody is signed in).
     pub(super) fn account_api_for(&self) -> (Option<(Api, String)>, orbiters_core::world_feedback::Stamp) {
         let rt = self.account_runtime.lock().unwrap();
-        let server = rt.read.map_or_else(Server::current, |(s, _)| s);
+        // The environment chosen now; the account read only when it was read for that environment (just after a switch
+        // the account thread may still hold the other one's: nobody, then, rather than the other server's account).
+        let server = Server::current();
         let api = Api::new(server);
+        let account = rt.account.as_ref().filter(|_| rt.read.is_some_and(|(s, _)| s == server));
         let stamp = orbiters_core::world_feedback::Stamp {
             server: api.url(""),
-            account: rt
-                .account
-                .as_ref()
-                .map(|a| a.user.clone().unwrap_or_else(|| format!("credential:{}", orbiters_core::vrchat_accounts::friend_hash(&a.token)))),
+            account: account.map(|a| a.user.clone().unwrap_or_else(|| format!("credential:{}", orbiters_core::vrchat_accounts::friend_hash(&a.token)))),
         };
-        let with = rt.read.and(rt.account.as_ref()).map(|a| (api, a.token.clone()));
+        let with = account.map(|a| (api, a.token.clone()));
         (with, stamp)
     }
 }
@@ -466,6 +486,30 @@ mod tests {
         assert_eq!(waits, [10, 20, 40, 80, 160, 320, 360, 360]);
         assert_eq!(refused_recheck(0), RECHECK_REFUSED);
         assert_eq!(refused_recheck(u32::MAX), RECHECK_REFUSED_MAX);
+    }
+
+    /// The usage statistics are linked to the account only once the notice saying so was closed, and only while it is signed in and
+    /// checked: before, and while checking or expired, nothing names it (2026-11-19).
+    #[test]
+    fn the_usage_statistics_name_the_account_only_after_the_new_notice() {
+        let ctl = Controller::new(Settings::default());
+        assert!(ctl.usage_stamp().is_none(), "nobody, not told");
+        ctl.account_runtime.lock().unwrap().read = Some((Server::current(), None));
+        ctl.account_runtime.lock().unwrap().account = Some(Account { token: "orbit-secret".into(), user: Some("42".into()), username: Some("Enzo".into()), avatar_url: None });
+        ctl.update(|s| s.account.state = AccountState::SignedIn { username: "Enzo".into() });
+        assert_eq!(ctl.usage_account().map(|s| (s.account, s.token)), Some(("42".into(), "orbit-secret".into())));
+        assert!(ctl.usage_stamp().is_none(), "signed in, but the old notice only: nothing is linked to the account");
+        ctl.update(|s| s.settings.usage.told_account = true);
+        assert_eq!(ctl.usage_stamp(), crate::usage::spool::Stamp { told: true, account: Some("42".into()) });
+        for state in [AccountState::Checking { username: Some("Enzo".into()) }, AccountState::Expired { username: Some("Enzo".into()) }, AccountState::SignedOut] {
+            ctl.update(|s| s.account.state = state.clone());
+            assert_eq!(ctl.usage_stamp(), crate::usage::spool::Stamp { told: true, account: None }, "{state:?}");
+            assert!(ctl.usage_account().is_none());
+        }
+        // An account file without an id: known here by its name, never by its credential.
+        ctl.update(|s| s.account.state = AccountState::SignedIn { username: "Enzo".into() });
+        ctl.account_runtime.lock().unwrap().account = Some(Account { token: "orbit-secret".into(), user: None, username: Some(" Enzo ".into()), avatar_url: None });
+        assert_eq!(ctl.usage_stamp().account.as_deref(), Some("name:enzo"));
     }
 
     /// verify-controller (C-7's earlier window): an account read just before a sign-out and used after it is not installed:
@@ -646,6 +690,14 @@ impl Controller {
         self.account_runtime.lock().unwrap().read = Some((Server::current(), None));
         self.account_runtime.lock().unwrap().account = Some(Account { token: "fake".into(), user: None, username: Some("tester".into()), avatar_url: None });
         self.update(|s| { s.account.state = AccountState::SignedIn { username: "tester".into() }; s.account.development = Server::current() == Server::Development; });
+    }
+
+    /// [`Self::test_account`] with the account's numeric id.
+    pub(super) fn test_account_with_user(&self, user: &str) {
+        self.test_account();
+        if let Some(account) = self.account_runtime.lock().unwrap().account.as_mut() {
+            account.user = Some(user.into());
+        }
     }
 }
 

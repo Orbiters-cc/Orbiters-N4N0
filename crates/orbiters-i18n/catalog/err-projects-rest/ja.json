@@ -104,5 +104,14 @@
   "{name} could not be put back: its folder as it was is kept at {path}": "{name}を元に戻せませんでした。元の状態のフォルダーは{path}に保存されています",
   "Copy stopped. The incomplete copy was removed.": "コピーを停止しました。未完成のコピーは削除されました。",
   "Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.": "コピーを停止しました。{path}の未完成のコピーを削除できませんでした（{why}）。プロジェクトとしては一覧に表示されません。",
-  "it is not a copy this one made": "このコピーで作成されたものではありません"
+  "it is not a copy this one made": "このコピーで作成されたものではありません",
+  "Copy stopped before anything was copied to {path}.": "{path}に何もコピーされる前にコピーを停止しました。",
+  "it is not the folder this copy made": "このコピーが作成したフォルダーではありません",
+  "Copy stopped. What it copied was removed; {path} keeps what was not the copy's: {files}": "コピーを停止しました。コピーした分は削除しました。{path}にはコピー以外のものが残っています：{files}",
+  "Required local package {name} is unavailable at {path}": "必要なローカルパッケージ{name}が{path}にありません",
+  "{file} in the copy's Packages folder is another archive than the one {name} needs ({path})": "コピーのPackagesフォルダーの{file}は、{name}に必要なアーカイブ（{path}）とは別のものです",
+  "Not everything could be put back: {problems}. What the project had is kept in {path}; the next package change puts it back.": "すべてを元に戻せませんでした：{problems}。プロジェクトにあったものは{path}に保存されています。次のパッケージ変更で元に戻します。",
+  "Could not keep a copy of the package list before changing it: nothing was changed": "変更する前にパッケージ一覧のコピーを保存できませんでした。何も変更されていません",
+  "{name} could not be put back ({why}): its copy is kept at {path}": "{name}を元に戻せませんでした（{why}）。コピーは{path}に保存されています",
+  "A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.": "パッケージの変更が途中で止まり、完全には元に戻せませんでした：{problems}。プロジェクトにあったものは{path}に保存されています。"
 }

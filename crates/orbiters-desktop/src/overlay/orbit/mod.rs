@@ -167,6 +167,11 @@ pub struct Panel {
     /// The picture as the platform takes it: the canvas's, cut to its shape.
     out: Vec<u8>,
     shown_pixels: Option<page_painter::Pixels>,
+    /// The last picture SteamVR took, with its controls, while a newer one is handed over: put back when that one is not
+    /// shown, so what is hit-tested is always what shows (verify-vr on OVL2-20).
+    acknowledged: Option<Shown>,
+    /// When a picture SteamVR did not take is handed over again.
+    retry_at: Option<Instant>,
     /// Its shape as a cell of the ring, one byte a pixel, multiplied into each picture.
     mask: Option<std::sync::Arc<Vec<u8>>>,
     pub items: Vec<Item>,
@@ -244,7 +249,7 @@ impl Panel {
             px,
             logical,
             canvas: Canvas::zoomed(px[0], px[1], zoom).in_orbit_look(),
-            out: Vec::new(), shown_pixels: None,
+            out: Vec::new(), shown_pixels: None, acknowledged: None, retry_at: None,
             mask,
             items: Vec::new(),
             hover: None,
@@ -881,7 +886,7 @@ const DEFAULT_PAGE_ACCENT: [u8; 3] = orbiters_n4n0_core::menu::theme::Theme::MOD
 impl Stage {
     fn new(px: [u32; 2], with_worlds: bool, media: &std::sync::Arc<crate::media::Watcher>) -> Self {
         let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
-        let host = MenuHost::with_media(canvas.ctx().clone(), media.clone());
+        let host = MenuHost::with_media(canvas.ctx().clone(), media.clone()).holding(orbiters_n4n0::MenuHolder::Panels);
         let worlds = with_worlds.then(|| Worlds::alone(canvas.ctx().clone()));
         Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::with_context(px, canvas.ctx().clone()), epoch: 0, cache: Vec::new(), retired: Vec::new(), sheet_picture: None, restore: false, presented: None, presented_scene: None, navigation: None, stale: false, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
     }
@@ -1596,13 +1601,27 @@ impl Panels {
         }
     }
 
+    /// What a press in a list turned out to press, now it was let go without moving: once, whether a menu is still up or not.
+    pub fn run_pending(&mut self, snap: &Snapshot) {
+        if let Some(action) = self.pressed_late.take() {
+            crate::usage::press(&usage_name(&action));
+            self.act(action, snap, &mut Pressed::default());
+            self.pressed_facts = None;
+        }
+    }
+
     fn close_sheet(&mut self) {
+        // A menu page on the sheet no longer shows: the scanner and the friends it held are let go (MENU-8).
+        if matches!(self.facts.sheet, Some(Sheet::Menu | Sheet::Results)) {
+            self.stage.host.let_go(&self.backend);
+        }
         self.stage.epoch = self.stage.epoch.wrapping_add(1);
         self.stage.painter.cancel_page(self.stage.epoch);
         self.stage.sheet_picture = None;
         self.stage.navigation = None;
         self.stage.stale = false;
-        self.pressed_late = None; self.pressed_facts = None; self.drag = None;
+        // What a let-go already earned stays to run once (verify-vr); a hold not let go ends.
+        self.drag = None;
         self.stop_talking();
         self.keep_screen();
         self.trail.clear();
@@ -1708,7 +1727,9 @@ impl Panels {
         }
         let kept = self.kept_pages.get(title).copied();
         let host = &mut self.stage.host;
-        let _ = host.menu.close();
+        // What the page left held is let go (MENU-8: the scanner of a QR code sheet left for another page).
+        let effects = host.menu.close();
+        host.effects(effects, snap, &self.backend);
         host.open(snap);
         // Its own way back is the sheet's head.
         host.menu.back_on_the_sheet = true;
@@ -2093,12 +2114,7 @@ impl Panels {
                 worlds.stop_live();
             }
         }
-        // What a press in a list turned out to press, now it was let go without moving.
-        if let Some(action) = self.pressed_late.take() {
-            crate::usage::press(&usage_name(&action));
-            self.act(action, snap, &mut Pressed::default());
-            self.pressed_facts = None;
-        }
+        self.run_pending(snap);
         if self.open.is_none() {
             return;
         }
@@ -3409,8 +3425,8 @@ impl Panels {
         self.seeking = None;
         self.volume_held = None;
         self.share_held = None;
-        self.pressed_late = None;
-        self.pressed_facts = None;
+        // An action a real let-go already earned (`pressed_late`, with the facts it was pressed on) is not cancelled: it runs once,
+        // at the next turn, menu or not ([`Panels::run_pending`]; verify-vr: a menu closing before that turn erased it).
         if let Some(drag) = self.drag.take() {
             // A list being dragged comes to rest as when let go, with no throw.
             if drag.moved && !drag.bar {
@@ -3639,6 +3655,9 @@ impl Panels {
                 // The same picture as the one shown (the worker found no damage and handed back what it had): not uploaded
                 // to SteamVR again (OVL2-20: every change of any fact re-uploaded every part's whole texture).
                 let unchanged = same_picture(panel.painted, panel.shown_pixels.as_ref(), &frame.pixels);
+                if !unchanged {
+                    panel.acknowledged = Some(Shown { pixels: panel.shown_pixels.clone(), items: panel.items.clone(), mask: panel.mask.clone(), painted: panel.painted });
+                }
                 panel.shown_pixels = Some(frame.pixels); panel.items = frame.items; panel.mask = frame.mask;
                 panel.hover = panel.pointer.and_then(|p| panels::hit(&panel.items, p));
                 panel.dirty |= first || panel.hover != frame.hover || panel.pressed != frame.pressed;
@@ -3649,7 +3668,12 @@ impl Panels {
                 }
             }
         }
+        let now = Instant::now();
         for panel in &mut self.list {
+            if panel.retry_at.is_some_and(|at| now >= at) {
+                panel.retry_at = None;
+                panel.dirty = true;
+            }
             if !panel.dirty || (panel.zone == Zone::SheetBack && self.takeover.is_some()) { continue; }
             let mut facts = self.facts.clone();
             if let (Zone::CameraWeb, Some(web)) = (panel.zone, self.web.as_mut()) {
@@ -3744,6 +3768,10 @@ impl Panels {
     pub(super) fn take_sheet_picture(&mut self) -> Option<page_painter::CompleteSheet> { self.stage.sheet_picture.take() }
 
     pub fn paint(&mut self, snap: &Snapshot, mut show: impl FnMut(&Panel, [u32; 4])) {
+        // What may be put back ([`Panel::not_presented`]) is this turn's hand-over only.
+        for panel in &mut self.list {
+            panel.acknowledged = None;
+        }
         if self.stage.async_pages { self.paint_async(snap, show); return; }
         let mut published = false;
         self.paint_serial(snap, |p, damage| { published |= p.zone == Zone::Takeover; show(p, damage); });
@@ -4145,6 +4173,42 @@ fn type_hint(p: &egui::Painter, playing: Option<&str>) {
             shown.push('…');
         }
         p.text(pos2(row.left() + 56.0, row.center().y + 11.0), egui::Align2::LEFT_CENTER, shown, font, panels::look::LABEL);
+    }
+}
+
+/// A part's picture and controls as SteamVR last took them.
+struct Shown {
+    pixels: Option<page_painter::Pixels>,
+    items: Vec<Item>,
+    mask: Option<std::sync::Arc<Vec<u8>>>,
+    painted: bool,
+}
+
+/// How long a part whose picture SteamVR did not take waits before it is handed over again.
+const PRESENT_RETRY: Duration = Duration::from_secs(1);
+
+impl Panel {
+    /// The picture just handed over was not shown (no overlay for it yet, or SteamVR refused it): the last one taken and its
+    /// controls are put back, and the new one is handed over again a moment later.
+    fn not_presented(&mut self, now: Instant) {
+        if let Some(shown) = self.acknowledged.take() {
+            self.shown_pixels = shown.pixels;
+            self.items = shown.items;
+            self.mask = shown.mask;
+            self.painted = shown.painted;
+            self.hover = self.pointer.and_then(|p| panels::hit(&self.items, p));
+        }
+        self.retry_at = Some(now + PRESENT_RETRY);
+    }
+}
+
+impl Panels {
+    /// The parts in `zones` were not shown by the turn's presenter ([`Panel::not_presented`]).
+    pub fn not_presented(&mut self, zones: &[Zone]) {
+        let now = Instant::now();
+        for panel in self.list.iter_mut().filter(|p| zones.contains(&p.zone)) {
+            panel.not_presented(now);
+        }
     }
 }
 

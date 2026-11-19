@@ -191,11 +191,17 @@ impl Controller {
         for (chunk, chunk_sizes) in paths.chunks(PICTURES_PER_REQUEST).zip(sizes.chunks(PICTURES_PER_REQUEST)) {
             let mut parts = Vec::with_capacity(chunk.len());
             let mut taken = Vec::with_capacity(chunk.len());
+            // PRIV-8: each picture goes as a copy without its metadata (who took it, who else was there, the instance),
+            // pixels as they are; the Map explorer knows it by that copy's hash as well (`worlds::map_hashes`). The
+            // copies are removed when this chunk is sent or fails.
+            let mut copies = Vec::with_capacity(chunk.len());
             for p in chunk {
                 taken.push(visited::read_shot(p).map(|i| iso(i.taken)).unwrap_or_default());
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "picture.png".into());
+                let copy = orbiters_core::png_meta::CleanCopy::of(p)?;
                 // Read from the file while it is sent: twelve pictures never sit in memory at once.
-                parts.push(Part::file("pictures", name, "image/png", p)?);
+                parts.push(Part::file("pictures", name, "image/png", &copy.path)?);
+                copies.push(copy);
             }
             let chunk_bytes: u64 = chunk_sizes.iter().sum();
             let mut report = self.progress(id);
@@ -272,7 +278,9 @@ impl Prepared {
     /// Refuses when the session's result is no longer the one these parts were made from (reconstructed again
     /// meanwhile): called once everything to send is in hand, so that all of it comes from one result or none is sent.
     pub fn ensure_current(&self, session: &Path) -> anyhow::Result<()> {
-        anyhow::ensure!(crate::upload_prep::ResultIdentity::read(session) == self.identity, "{}", tr("It was reconstructed again while it was being prepared: share it again."));
+        let now = crate::upload_prep::ResultIdentity::read(session);
+        anyhow::ensure!(self.identity.complete && now.complete, "{}", tr("Its last reconstruction was only partly saved (a file was open in another program): reconstruct it again to share it."));
+        anyhow::ensure!(now == self.identity, "{}", tr("It was reconstructed again while it was being prepared: share it again."));
         Ok(())
     }
 }
@@ -299,6 +307,8 @@ const PREPARE_TRIES: usize = 3;
 /// stop it.
 pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions) -> anyhow::Result<Prepared> {
     let result = reconstruction::result_dir(session);
+    // A result left half replaced (some of its files were held) is no one result: nothing is prepared from it.
+    anyhow::ensure!(crate::upload_prep::ResultIdentity::read(session).complete, "{}", tr("Its last reconstruction was only partly saved (a file was open in another program): reconstruct it again to share it."));
     for _ in 0..PREPARE_TRIES {
         let before = orbiters_reconstruct::edit::generation(&result)?;
         let prepared = prepare_once(session, device)?;

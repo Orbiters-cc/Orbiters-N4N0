@@ -32,7 +32,10 @@ pub const INSTANT_ENTRIES: usize = 256;
 /// stand-in project: with it set, repairs copy only there and orphan removal looks only there.
 pub const CACHE_DIR_VAR: &str = "ORBITERS_UNITY_CACHE_DIR";
 
-const BACKUP_PREFIX: &str = "Library.orbiters-relocation-"; // i18n: not shown (a folder name; an error text, English until errors are decided; a macOS path part)
+const BACKUP_PREFIX: &str = "Library.orbiters-relocation-"; // i18n: not shown (a folder name)
+/// The file a repair puts in its cache before the cache can become Library: such a cache is never removed on its
+/// record's word (verifier, point 3).
+const SWITCHED: &str = ".orbiters-switched"; // i18n: not shown (a file name)
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Health {
@@ -925,8 +928,8 @@ fn relocate_on(
     let backup = project.join(format!("{BACKUP_PREFIX}{}", uuid::Uuid::new_v4().simple()));
     // Its phase too (PROJECTS-21): a cache whose record says it was still being copied was never Library, and a sweep may
     // remove it without asking which projects the gallery knows.
-    let record = |phase: &str| serde_json::json!({"project":project,"library":target,"backup":backup,"phase":phase});
-    crate::write_json(&target.with_extension("json"), &record("copying"))?;
+    let record = |phase: &str, backup_id: Option<crate::owned::FileId>| serde_json::json!({"project":project,"library":target,"backup":backup,"phase":phase,"backup_id":backup_id});
+    crate::write_json(&target.with_extension("json"), &record("copying", None))?;
     std::fs::create_dir_all(target)?;
     update(work.progress, |p| {
         p.phase = Phase::Copying;
@@ -967,12 +970,19 @@ fn relocate_on(
         return Ok(RepairEnd::Cancelled { left: discard_copy(target, work) });
     }
     update(work.progress, |p| p.phase = Phase::Switching);
-    // From here the cache may become Library: no sweep removes it on the gallery's word any more.
-    if let Err(error) = crate::write_json(&target.with_extension("json"), &record("switching")) {
+    // From here the cache may become Library: no sweep removes it on the gallery's word any more. Two proofs first: a
+    // file inside the cache itself (a record restored from an older copy cannot take it away), and the identity of the
+    // Library about to be set aside (a folder put later at the backup's name is not it).
+    let had_library = library.is_dir();
+    let switching = (|| -> anyhow::Result<()> {
+        std::fs::File::options().write(true).create_new(true).open(target.join(SWITCHED))?;
+        let backup_id = if had_library { Some(crate::owned::id_of(&library)?) } else { None };
+        crate::write_json(&target.with_extension("json"), &record("switching", backup_id))
+    })();
+    if let Err(error) = switching {
         let left = discard_copy(target, work);
         return Err(error).with_context(|| tr!("Library was not moved and stays where it is. {note}", note = partial_note(&left)));
     }
-    let had_library = library.is_dir();
     if had_library {
         if let Err(error) = std::fs::rename(&library, &backup) {
             let left = discard_copy(target, work);
@@ -1242,6 +1252,7 @@ fn is_cache_id(name: &str) -> bool {
 
 /// The folders beside `project`'s Library named like an old Library a move leaves: proof of nothing, a person can name a
 /// folder so.
+#[cfg(test)]
 fn named_like_backups(project: &Path) -> Vec<PathBuf> {
     let Ok(dir) = std::fs::read_dir(project) else { return vec![] };
     dir.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(BACKUP_PREFIX) && e.path().is_dir()).map(|e| e.path()).collect()
@@ -1266,7 +1277,9 @@ fn recorded_backup(record: Option<&serde_json::Value>, project: &Path) -> Option
         let reparse = false;
         m.is_dir() && !m.file_type().is_symlink() && !reparse
     });
-    (is_cache_id(id) && beside && real).then_some(backup)
+    // The very folder the repair set aside, by identity: a folder restored or put at that name later is not it.
+    let same = serde_json::from_value::<crate::owned::FileId>(record?["backup_id"].clone()).is_ok_and(|was| crate::owned::is_same(&backup, was));
+    (is_cache_id(id) && beside && real && same).then_some(backup)
 }
 
 /// What to do with one cache.
@@ -1291,6 +1304,10 @@ fn judge(cache: &Path, known: &[PathBuf]) -> Judgement {
     if !project.is_dir() || !crate::discovery::is_project(&project) {
         return Keep(Kept::ProjectMissing);
     }
+    // The record must be this cache's own (a sidecar copied or restored beside another cache is not).
+    if record.as_ref().and_then(|r| r["library"].as_str()).is_none_or(|l| crate::discovery::key(Path::new(l)) != crate::discovery::key(cache)) {
+        return Keep(Kept::Unknown);
+    }
     let own = project.join("Library");
     match points_at(&own, cache) {
         None => return Keep(Kept::Unknown),
@@ -1300,21 +1317,7 @@ fn judge(cache: &Path, known: &[PathBuf]) -> Judgement {
         }
         Some(false) => {}
     }
-    // A record that says how far its repair went decides by itself, whatever the gallery's (possibly stale) list says:
-    // still copying, it was never Library; past that, only an interrupted switch at this very project (its Library
-    // renamed to the recorded backup, no junction made) is undone. Anything else stays.
-    match record.as_ref().and_then(|r| r["phase"].as_str()) {
-        Some("copying") => return Remove { project, restore: None },
-        Some(_) => {
-            let own_missing = std::fs::symlink_metadata(&own).is_err();
-            return match recorded_backup(record.as_ref(), &project) {
-                Some(old) if own_missing => Remove { project, restore: Some(old) },
-                _ => Keep(Kept::Unknown),
-            };
-        }
-        // An older version's record: the gallery's list, as before.
-        None => {}
-    }
+    // Any project known to point at it keeps it, whatever its record says.
     for other in known {
         match points_at(&other.join("Library"), cache) {
             Some(false) => {}
@@ -1322,18 +1325,22 @@ fn judge(cache: &Path, known: &[PathBuf]) -> Judgement {
             None => return Keep(Kept::Unknown),
         }
     }
-    // A Library renamed away, with the junction not yet made: it goes back, when it is the one the record names. A folder
-    // only named like one may be the old Library of an older version's move, or the person's: the cache stays with it.
-    let restore = if std::fs::symlink_metadata(&own).is_err() {
-        match recorded_backup(record.as_ref(), &project) {
-            Some(old) => Some(old),
-            None if named_like_backups(&project).is_empty() => None,
-            None => return Keep(Kept::Unknown),
+    // Removal needs the record's proof, never a missing reference alone (a moved project may be nowhere in the list):
+    // still copying and never made ready to switch, it was never Library; an interrupted switch at this very project
+    // (its Library missing, the very folder set aside still there) is undone. Anything else, an unknown phase or an
+    // older version's record without one, stays.
+    let switched = std::fs::symlink_metadata(cache.join(SWITCHED)).is_ok();
+    match record.as_ref().and_then(|r| r["phase"].as_str()) {
+        Some("copying") if !switched => Remove { project, restore: None },
+        Some("switching") => {
+            let own_missing = std::fs::symlink_metadata(&own).is_err();
+            match recorded_backup(record.as_ref(), &project) {
+                Some(old) if own_missing => Remove { project, restore: Some(old) },
+                _ => Keep(Kept::Unknown),
+            }
         }
-    } else {
-        None
-    };
-    Remove { project, restore }
+        _ => Keep(Kept::Unknown),
+    }
 }
 
 /// Every cache and record in `roots`, by path of the cache.
@@ -1405,16 +1412,20 @@ fn sweep(roots: &[PathBuf], known: &[PathBuf], cancel: &AtomicBool) -> Swept {
                     swept.kept.push((cache, Kept::Busy));
                     continue;
                 };
+                // Decided again under the lock, and removed while it is held: the old Library must still be the very
+                // folder the record names.
                 let still = points_at(&project.join("Library"), &cache) == Some(true);
-                drop(lock);
                 if still {
-                    for path in old {
+                    let record: Option<serde_json::Value> = std::fs::read(cache.with_extension("json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
+                    let proven = recorded_backup(record.as_ref(), &project);
+                    for path in old.into_iter().filter(|p| proven.as_ref() == Some(p)) {
                         match remove_tree(&path, &mut || {}) {
                             Ok(()) => swept.old_removed.push(path),
                             Err(e) => swept.failed.push((path, e.to_string())),
                         }
                     }
                 }
+                drop(lock);
                 swept.kept.push((cache, Kept::InUse));
             }
             Judgement::Remove { project, .. } => {
@@ -1584,7 +1595,9 @@ mod tests {
             let library = project.join("Library");
             assert!(is_redirect(&library).unwrap());
             assert!(moved.starts_with(&cache));
-            assert_eq!(std::fs::read_dir(&library).unwrap().count() > 0, files > 0);
+            // The cache's own switch marker aside (`SWITCHED`, inside it since verifier point 3).
+            let entries = std::fs::read_dir(&library).unwrap().flatten().filter(|e| e.file_name() != SWITCHED).count();
+            assert_eq!(entries > 0, files > 0);
             remove_redirect(&library).unwrap();
         }
     }
@@ -2124,15 +2137,66 @@ mod tests {
         let cache = root.join(id_digit.to_string().repeat(32));
         std::fs::create_dir_all(cache.join("Artifacts")).unwrap();
         std::fs::write(cache.join("Artifacts/data.bin"), b"cache data").unwrap();
-        crate::write_json(&cache.with_extension("json"), &serde_json::json!({"project": project, "library": cache})).unwrap();
+        crate::write_json(&cache.with_extension("json"), &serde_json::json!({"project": project, "library": cache, "phase": "copying"})).unwrap();
         cache
     }
 
     /// The backup name a repair records for `cache` before it moves `project`'s Library aside.
     fn with_backup(cache: &Path, project: &Path) -> PathBuf {
         let old = project.join(format!("{BACKUP_PREFIX}{}", "b".repeat(32)));
-        crate::write_json(&cache.with_extension("json"), &serde_json::json!({"project": project, "library": cache, "backup": old, "phase": "switching"})).unwrap();
+        let id = crate::owned::id_of(&project.join("Library")).unwrap();
+        crate::write_json(&cache.with_extension("json"), &serde_json::json!({"project": project, "library": cache, "backup": old, "phase": "switching", "backup_id": id}))
+            .unwrap();
         old
+    }
+
+    /// Verifier, point 3: an older "copying" record restored over a cache that became a moved project's Library, an
+    /// older version's record without a phase, and a sidecar beside another cache: all kept.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn a_stale_or_foreign_record_never_removes_a_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("UnityCache");
+        let project = project(temp.path(), "project", 1, 64);
+        // Became Library somewhere (the switch marker inside it), its record later replaced by an old "copying" one.
+        let live = cache_for(&root, '5', &project);
+        std::fs::write(live.join(SWITCHED), b"").unwrap();
+        // An older version's record: no phase.
+        let legacy = cache_for(&root, '4', &project);
+        crate::write_json(&legacy.with_extension("json"), &serde_json::json!({"project": project, "library": legacy})).unwrap();
+        // A sidecar naming another cache.
+        let foreign = cache_for(&root, '3', &project);
+        crate::write_json(&foreign.with_extension("json"), &serde_json::json!({"project": project, "library": root.join("1".repeat(32)), "phase": "copying"})).unwrap();
+        let swept = run_sweep(&root, &[]);
+        assert!(swept.removed.is_empty(), "{swept:?}");
+        for c in [&live, &legacy, &foreign] {
+            assert!(c.join("Artifacts/data.bin").is_file());
+        }
+    }
+
+    /// A folder put at the recorded backup's name after the repair (a restored archive, another folder) is neither
+    /// removed beside a live cache nor made the project's Library.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn a_folder_put_at_the_backups_name_later_is_not_the_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("UnityCache");
+        let project = project(temp.path(), "project", 1, 64);
+        let cache = cache_for(&root, '2', &project);
+        let recorded = with_backup(&cache, &project);
+        // The real old Library went; another folder now has its name.
+        std::fs::remove_dir_all(project.join("Library")).unwrap();
+        std::fs::create_dir_all(&recorded).unwrap();
+        std::fs::write(recorded.join("restored.txt"), "someone's").unwrap();
+        let swept = run_sweep(&root, &[]);
+        assert!(swept.restored.is_empty() && swept.removed.is_empty() && swept.old_removed.is_empty(), "{swept:?}");
+        assert!(recorded.join("restored.txt").is_file() && !project.join("Library").exists());
+        // Beside a cache in use: not removed either.
+        redirect(&cache, project.join("Library")).unwrap();
+        let swept = run_sweep(&root, &[]);
+        assert!(swept.old_removed.is_empty(), "{swept:?}");
+        assert!(recorded.join("restored.txt").is_file());
+        remove_redirect(project.join("Library")).unwrap();
     }
 
     /// PROJECTS-33: a folder only named like an old Library (the person's archive, or one an older version left) is never

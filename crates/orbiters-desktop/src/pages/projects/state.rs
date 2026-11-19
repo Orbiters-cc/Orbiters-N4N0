@@ -302,6 +302,14 @@ pub struct State {
     pub(super) bridge_changes: Option<u64>,
     /// Where each row of "Your projects" and of "Found on this computer" stands while a scan runs (PROJECTS-18).
     pub(super) places: [std::collections::HashMap<PathBuf, usize>; 2],
+    /// Each card's and row's place in the gallery this frame (its layout place, before any spring), in screen points.
+    pub(super) row_places: Vec<(PathBuf, egui::Rect)>,
+    /// The first project in view and its place in the gallery's content, kept while a scan adds rows (verifier, point 8).
+    pub(super) scroll_anchor: Option<(PathBuf, f32)>,
+    /// A one-time scroll that keeps that project where it was.
+    pub(super) scroll_fix: Option<f32>,
+    /// Whether a scan ran last frame (its final sort is followed too).
+    pub(super) was_scanning: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -440,6 +448,10 @@ impl Default for State {
             server_now: None,
             bridge_changes: None,
             places: Default::default(),
+            row_places: vec![],
+            scroll_anchor: None,
+            scroll_fix: None,
+            was_scanning: false,
         }
     }
 }
@@ -549,7 +561,10 @@ impl State {
         }
         // A revisit must not replace live discoveries with an older (or temporarily unreadable) disk snapshot.
         let retained = (!self.scan.projects.is_empty()).then(|| self.scan.clone());
+        // Work of the window (it writes the projects' list it keeps): the window does not close to the tray meanwhile.
+        let working = super::super::Working::begin();
         std::thread::spawn(move || {
+            let _working = working;
             let _ = tx.send(ScanEvent::Hidden(hidden::load()));
             let scan = retained.unwrap_or_else(discovery::cached);
             let _ = tx.send(ScanEvent::Update(scan.clone()));
@@ -1075,7 +1090,9 @@ impl State {
         }
         self.hidden_changes += 1;
         let (list, generation) = (self.hidden.clone(), self.hidden_changes);
+        let working = super::super::Working::begin();
         std::thread::spawn(move || {
+            let _working = working;
             if let Err(e) = hidden::save(&list, generation) {
                 eprintln!("hidden projects: {e:#}");
             }

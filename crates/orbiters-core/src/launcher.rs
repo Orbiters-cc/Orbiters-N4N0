@@ -272,6 +272,8 @@ pub enum Game {
     Running(LaunchMode),
     /// VRChat was not found on this computer.
     NotInstalled,
+    /// A Mac without what runs VRChat there ([`crate::obelisk`]).
+    NoEngine,
 }
 
 /// What the page sends.
@@ -286,6 +288,8 @@ pub enum Action {
     RequestInvite { to: String },
     /// Boop; `emoji` from [`LauncherState::boop_emojis`], `None` for a plain boop.
     Boop { to: String, emoji: Option<String> },
+    /// On a Mac: open what runs VRChat there (Obelisk), or where it is got when it is not installed.
+    OpenEngine,
     /// Open the profile modal; the details arrive in [`LauncherState::profile`].
     OpenProfile { id: String },
     CloseProfile,

@@ -1110,7 +1110,7 @@ fn desk_camera_shots(out: &Path) -> anyhow::Result<()> {
 /// One state of the camera's parts round the stand-in panel.
 fn camera_state(name: &str, out: &Path, facts: &Facts, right: bool) -> anyhow::Result<()> {
     const PX: f32 = 2.0;
-    let (x0, y0, x1, y1) = (-340.0f32, -660.0f32, 340.0f32, 330.0f32);
+    let (x0, y0, x1, y1) = (-340.0f32, -660.0f32, 340.0f32, 350.0f32);
     let (w, h) = (((x1 - x0) * PX) as u32, ((y1 - y0) * PX) as u32);
     let at = move |x: f32, y: f32| pos2((x - x0) * PX, (y - y0) * PX);
     let mut ground = Canvas::new(w, h);

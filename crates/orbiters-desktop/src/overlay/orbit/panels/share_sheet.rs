@@ -85,6 +85,8 @@ fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
 
 /// Its buttons' height, a laser's size.
 const BUTTON: f32 = 58.0;
+/// A slot that says how a share went: its reason may take two lines.
+const DONE: f32 = 104.0;
 const PUT_AWAY_W: f32 = 44.0;
 
 /// The share row's items, in a zone `w` x `h`.
@@ -99,7 +101,7 @@ pub fn share_items(w: f32, _h: f32, view: &ShareView) -> Vec<Item> {
             Item { action: Action::ShareConfirm(id), rect: r(w - yes, 0.0, yes, BUTTON), look: Look::ShareYes },
         ];
     }
-    let tall = |step: &Step| if matches!(step, Step::Done(_)) { 84.0 } else { BUTTON };
+    let tall = |step: &Step| if matches!(step, Step::Done(_)) { DONE } else { BUTTON };
     // A column (on a screen, beside the panel): the two over each other, the put-away under them.
     if w < 300.0 {
         let question = view.confirming;
@@ -222,22 +224,31 @@ fn face(p: &Painter, rect: Rect, icon: &str, label: &str, under: Option<&str>, i
     }
 }
 
-/// A status card: an icon and up to two lines, left aligned; `line`: a thin bar along its foot (0 to 1).
+/// A status card: an icon, a bold line, a second that may take two lines (a reason is said whole), a third, left
+/// aligned and centred together; `line`: a thin bar along its foot (0 to 1).
 fn card(p: &Painter, rect: Rect, icon: &str, tint: Color32, first: &str, second: Option<&str>, third: Option<&str>, line: Option<f32>) {
     let round = look::radius(14.0);
     p.rect_filled(rect, round, look::PANEL);
     p.rect_stroke(rect.shrink(0.5), round, Stroke::new(1.0, theme::alpha(tint, 0.45)), egui::StrokeKind::Middle);
     let x = rect.left() + 14.0;
     let room = rect.width() - 14.0 - 30.0 - 12.0;
-    let lines = 1 + second.is_some() as usize + third.is_some() as usize;
-    let top = rect.center().y - (lines as f32 - 1.0) * 9.5;
-    widgets::icon(p, pos2(x + 9.0, top), icon, 18.0, tint);
     let bold = look::font(14.0, weight::BOLD);
-    p.text(pos2(x + 28.0, top), Align2::LEFT_CENTER, fit(p, first, &bold, room), bold, look::LABEL);
     let small = look::font(12.0, weight::SEMIBOLD);
-    for (n, words) in [second, third].into_iter().flatten().enumerate() {
-        let ink = if n == 0 { theme::mix(tint, Color32::WHITE, 0.35) } else { look::MUTED };
-        p.text(pos2(x + 28.0, top + 19.0 * (n + 1) as f32), Align2::LEFT_CENTER, fit(p, words, &small, room), small.clone(), ink);
+    let tinted = theme::mix(tint, Color32::WHITE, 0.35);
+    let second = second.map(|w| p.layout(w.to_string(), small.clone(), tinted, room));
+    let second_h = second.as_ref().map_or(0.0, |g| g.size().y.min(32.0) + 3.0);
+    let tall = 18.0 + second_h + if third.is_some() { 19.0 } else { 0.0 };
+    let top = rect.center().y - tall / 2.0 + 9.0 - if line.is_some() { 2.0 } else { 0.0 };
+    widgets::icon(p, pos2(x + 9.0, top), icon, 18.0, tint);
+    p.text(pos2(x + 28.0, top), Align2::LEFT_CENTER, fit(p, first, &bold, room), bold, look::LABEL);
+    let mut y = top + 11.0;
+    if let Some(g) = second {
+        let clip = Rect::from_min_size(pos2(x + 28.0, y), vec2(room, 32.0));
+        p.with_clip_rect(clip).galley(pos2(x + 28.0, y), g, tinted);
+        y += second_h;
+    }
+    if let Some(words) = third {
+        p.text(pos2(x + 28.0, y + 8.0), Align2::LEFT_CENTER, fit(p, words, &small, room), small.clone(), look::MUTED);
     }
     if let Some(k) = line {
         let track = Rect::from_min_max(pos2(rect.left() + 14.0, rect.bottom() - 7.0), pos2(rect.right() - 14.0, rect.bottom() - 4.0));
@@ -442,13 +453,13 @@ mod tests {
         v.confirming = true;
         assert_eq!(actions(&share_items(520.0, 84.0, &v)), [Action::Idle, Action::ShareCancelConfirm, Action::ShareConfirm(7)]);
         // On a screen, the column beside the panel: the same presses, over each other, none overlapping.
-        let column = share_items(210.0, 228.0, &v);
+        let column = share_items(210.0, 268.0, &v);
         assert_eq!(actions(&column), [Action::Idle, Action::ShareConfirm(7), Action::ShareCancelConfirm]);
         v.confirming = false;
-        let column = share_items(210.0, 228.0, &v);
+        let column = share_items(210.0, 268.0, &v);
         assert_eq!(actions(&column), [Action::Idle, Action::SharePublic(7), Action::ShareDismiss(7)]);
         for pair in column.windows(2) {
-            assert!(pair[0].rect.bottom() <= pair[1].rect.top() && pair[1].rect.bottom() <= 228.0, "{pair:?}");
+            assert!(pair[0].rect.bottom() <= pair[1].rect.top() && pair[1].rect.bottom() <= 268.0, "{pair:?}");
         }
     }
 

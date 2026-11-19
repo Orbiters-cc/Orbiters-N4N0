@@ -26,19 +26,21 @@ fn why_of(earns_one: bool) -> &'static str {
     }
 }
 
-const WIDTH: f32 = 460.0;
-const HEIGHT: f32 = 76.0;
+const WIDTH: f32 = 440.0;
+const HEIGHT: f32 = 124.0;
 const MARGIN: f32 = 20.0;
+/// "Talk with N4N0?"'s card, which keeps the corner when both are up.
+const TALK_HEIGHT: f32 = 76.0;
 
-/// The window's card while a notice is up; `above`: another card ("Talk with N4N0?") holds the corner, this one sits
-/// over it.
+/// The window's card while a notice is up: its words whole on top (the second may take two lines), "Take a 3D picture"
+/// under them on the right, the cross at the top right. `above`: "Talk with N4N0?" holds the corner, this one sits over it.
 pub fn window(ctx: &Context, ctl: &Ctl, notice: Option<&WorldNotice>, above: bool) {
     let now = crate::controller::explorer::now_ms();
     let Some(notice) = notice.filter(|n| n.up(now)) else { return };
     let screen = ctx.content_rect();
     let id = Id::unique(("orbiters-world-notice", notice.id));
     let enter = anim::spring_from(ctx, id.with("enter"), [0.0], [1.0], Spring::BOUNCY)[0];
-    let lift = if above { HEIGHT + 12.0 } else { 0.0 };
+    let lift = if above { TALK_HEIGHT + 12.0 } else { 0.0 };
     let base = Rect::from_min_size(pos2(screen.right() - MARGIN - WIDTH, screen.bottom() - MARGIN - HEIGHT - lift), vec2(WIDTH, HEIGHT));
     let rect = Rect::from_center_size(base.center() + vec2(60.0 * (1.0 - enter), 0.0), base.size() * (0.92 + 0.08 * enter.min(1.0)));
     egui::Area::new(id).order(Order::Foreground).fixed_pos(screen.min).interactable(true).show(ctx, |ui| {
@@ -46,17 +48,17 @@ pub fn window(ctx: &Context, ctl: &Ctl, notice: Option<&WorldNotice>, above: boo
         p.multiply_opacity(enter.clamp(0.0, 1.0));
         ui.interact(rect, id.with("card"), Sense::click());
         widgets::panel(&p, rect, 16.0);
-        // A world, with N4N0's mark: what it is about, and who says it.
-        let mark = Rect::from_center_size(pos2(rect.left() + 16.0 + 14.0, rect.center().y - 1.0), n4n0_logo::size_for_width(28.0));
+        let mark = Rect::from_center_size(pos2(rect.left() + 16.0 + 14.0, rect.top() + 30.0), n4n0_logo::size_for_width(28.0));
         n4n0_logo::paint(&p, mark, theme::MARK);
-        let close = Rect::from_min_size(pos2(rect.right() - 12.0 - 32.0, rect.center().y - 16.0), vec2(32.0, 32.0));
+        let close = Rect::from_min_size(pos2(rect.right() - 10.0 - 32.0, rect.top() + 10.0), vec2(32.0, 32.0));
+        let words = mark.right() + 12.0;
+        let room = close.left() - 8.0 - words;
+        widgets::text_truncated(&p, pos2(words, rect.top() + 24.0), Align2::LEFT_CENTER, &Txt::new(tr(NOTICE_TITLE), 15.0).weight(weight::SEMIBOLD), room);
+        let why = p.layout(why(notice).to_string(), egui::FontId::proportional(12.5), theme::FG_3, room);
+        p.with_clip_rect(Rect::from_min_size(pos2(words, rect.top() + 36.0), vec2(room, 34.0))).galley(pos2(words, rect.top() + 36.0), why, theme::FG_3);
         let take = Button::new(tr(TAKE)).icon(icons::CUBE).variant(Variant::Primary);
         let w = take.desired_width(ui).max(96.0);
-        let at = Rect::from_min_size(pos2(close.left() - 8.0 - w, rect.center().y - 19.0), vec2(w, 38.0));
-        let words = mark.right() + 12.0;
-        let room = at.left() - 10.0 - words;
-        widgets::text_truncated(&p, pos2(words, rect.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(tr(NOTICE_TITLE), 15.0).weight(weight::SEMIBOLD), room);
-        widgets::text_truncated(&p, pos2(words, rect.center().y + 12.0), Align2::LEFT_CENTER, &Txt::new(why(notice), 12.5).color(theme::FG_3), room);
+        let at = Rect::from_min_size(pos2(rect.right() - 14.0 - w, rect.bottom() - 14.0 - 36.0), vec2(w, 36.0));
         if take.width(w).show_at(ui, at).clicked() {
             ctl.explorer(Command::NoticeTake { id: notice.id });
         }

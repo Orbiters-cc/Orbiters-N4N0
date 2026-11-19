@@ -387,7 +387,7 @@ impl Zone {
             // holds the camera, clear of VRChat's row of buttons and of the caption.
             Zone::CameraShare => r(CAMERA_COLUMN_OUT, CAMERA_SHARE[0], CAMERA_HALF[0], CAMERA_SHARE[1]),
             // On a screen: right of the picture with the column's gap, from its top, two buttons over each other.
-            Zone::CameraShareDesk => r(CAMERA_HALF[0] + CAMERA_GAP, -CAMERA_HALF[1], CAMERA_HALF[0] + CAMERA_GAP + 210.0, -CAMERA_HALF[1] + 228.0),
+            Zone::CameraShareDesk => r(CAMERA_HALF[0] + CAMERA_GAP, -CAMERA_HALF[1], CAMERA_HALF[0] + CAMERA_GAP + 210.0, -CAMERA_HALF[1] + 268.0),
             // Where a code's page goes, as tall as it and its bar: stood up on the camera's top edge in a headset.
             Zone::CameraChooser => r(-CAMERA_HALF[0], CAMERA_WEB_BAR[1] - CAMERA_CHOOSER_TALL, CAMERA_HALF[0], CAMERA_WEB_BAR[1]),
             // Right under the ring, whose foot is free in any window: in reach, and over nothing of VRChat's.
@@ -423,7 +423,7 @@ pub const CAMERA_COLUMN_OUT: f32 = -CAMERA_HALF[0] - CAMERA_GAP - CAMERA_TILE[0]
 /// The line under VRChat's row of buttons (from, to).
 const CAMERA_UNDER: [f32; 2] = [166.0, 226.0];
 /// The share row's line under the caption (from, to).
-pub const CAMERA_SHARE: [f32; 2] = [CAMERA_UNDER[1] + 8.0, CAMERA_UNDER[1] + 8.0 + 84.0];
+pub const CAMERA_SHARE: [f32; 2] = [CAMERA_UNDER[1] + 8.0, CAMERA_UNDER[1] + 8.0 + 104.0];
 /// How tall the friends' chooser over the camera is.
 pub const CAMERA_CHOOSER_TALL: f32 = 516.0;
 /// How far the scanning corners stand off the picture.

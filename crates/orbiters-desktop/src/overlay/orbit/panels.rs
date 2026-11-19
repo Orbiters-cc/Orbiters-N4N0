@@ -2439,8 +2439,9 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         // Said above.
         Action::Settings => return None,
         Action::ShareTo(_) => (tr(share_sheet::SHARE_TO).into(), tr(share_sheet::SHARE_TO_WHY).into()),
-        Action::SharePublic(_) | Action::ShareConfirm(_) => (tr(share_sheet::SHARE_PUBLICLY).into(), tr(share_sheet::SHARE_PUBLICLY_WHY).into()),
-        Action::ShareCancelConfirm | Action::ShareDismiss(_) | Action::ChooserPerson(_) | Action::ChooserPage(_) | Action::ChooserSend(_) | Action::ChooserClose | Action::ChooserRetry => return None,
+        Action::SharePublic(_) => (tr(share_sheet::SHARE_PUBLICLY).into(), tr(share_sheet::SHARE_PUBLICLY_WHY).into()),
+        // Its question says it already.
+        Action::ShareConfirm(_) | Action::ShareCancelConfirm | Action::ShareDismiss(_) | Action::ChooserPerson(_) | Action::ChooserPage(_) | Action::ChooserSend(_) | Action::ChooserClose | Action::ChooserRetry => return None,
         Action::Peek => (tr("Hide Orbiters").into(), tr("Reach VRChat's own menus. Nothing here closes.").into()),
         Action::Worlds => (tr("Worlds in 3D").into(), tr("Search any world. See the ones captured in 3D.").into()),
         Action::Picture(mode) if facts.no_kit => (

@@ -101,7 +101,24 @@ class Orphan(unittest.TestCase):
         with patch.object(sandbox, 'same_process', return_value=None), patch.object(sandbox, 'restore', side_effect=answers):
             self.assertEqual(sandbox.watch({'pid': 1, 'create_time': 1.0}, 'dead1', sleep=sleeps.append), {'restored': True})
         self.assertEqual(sleeps, [5, 10, 20, 40])
-        self.assertEqual(self.log().count('watcher: session dead1 NOT restored'), 4)
+        self.assertEqual(self.log().count('watcher: session dead1 NOT restored'), 1, 'the same reason is written once')
+
+    def test_the_watcher_writes_again_when_the_reason_changes_or_after_half_an_hour(self):
+        answers = [RuntimeError('a'), RuntimeError('a'), RuntimeError('b'), RuntimeError('b'), {'restored': True}]
+        now = iter([0, 10, 20, 2000, 2010, 2020])
+        with patch.object(sandbox, 'same_process', return_value=None), patch.object(sandbox, 'restore', side_effect=answers):
+            sandbox.watch({'pid': 1, 'create_time': 1.0}, 'dead1', sleep=lambda _: None, clock=lambda: next(now))
+        self.assertEqual(self.log().count('NOT restored'), 3)
+
+    def test_a_damaged_backup_of_a_file_never_put_back_does_not_block(self):
+        j = sandbox.read_journal()
+        manifest = sandbox.ROOT.parent / 'steamapps.vrmanifest'
+        manifest.write_bytes(b'apps')
+        sandbox.backup(j, manifest); j['files'][-1]['policy'] = 'keep'
+        sandbox.atomic_json(sandbox.JOURNAL, j)
+        Path(j['files'][-1]['backup']).write_bytes(b'')
+        with patch.object(sandbox, 'same_process', return_value=None), patch.object(sandbox, 'processes', return_value=[]):
+            self.assertTrue(sandbox.restore_orphan()['restored'])
 
     def test_the_watcher_leaves_when_another_session_took_over(self):
         with patch.object(sandbox, 'same_process', return_value=None), patch.object(sandbox, 'restore', return_value={'restored': False, 'reason': 'session changed'}):

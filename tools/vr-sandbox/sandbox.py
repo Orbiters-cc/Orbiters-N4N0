@@ -476,7 +476,7 @@ def restore_contents(j):
         raise RuntimeError('VR processes remain; configuration retained for standalone restore')
     # Every backup is checked before anything is overwritten (SBX-5): a damaged one is never copied over a real file. The
     # sound ones are still put back; the journal stays unrestored and says which one needs a person.
-    damaged={entry['path']:problem for entry in j['files'] if (problem:=backup_problem(entry))}
+    damaged={entry['path']:problem for entry in j['files'] if not kept_reason(entry,j) and (problem:=backup_problem(entry))}
     clients={};kept={}
     window=restore_vrchat_window(j)
     for entry in j['files']:
@@ -546,12 +546,12 @@ def note_restored(session, by):
 def write_file_atomic(path, data):
     client_configs.write_atomic(path, data)
 
-def watch(identity, session, sleep=time.sleep):
+def watch(identity, session, sleep=time.sleep, clock=time.monotonic):
     """Started with every session, outside its process tree: once the controller is gone, restores, and keeps retrying
     with back-off (5 s up to 2 min) until restored, until another session's journal replaces this one, or until there is
     no journal (SBX-1: it used to try once and give up)."""
     while same_process(identity):sleep(.5)
-    delay=5
+    delay=5;last=(None,0.0)
     while True:
         try:
             result=restore(expected_session=session)
@@ -560,7 +560,9 @@ def watch(identity, session, sleep=time.sleep):
             if result.get('reason') in ('session changed','no recovery journal'):return result
             why=result.get('reason','not restored')
         except Exception as error:why=f'{type(error).__name__}: {error}'
-        note_unrestored(session,why,'watcher')
+        # A line when the reason changes, else every 30 minutes: a long refusal must not grow the log by 720 lines a day.
+        if why!=last[0] or clock()-last[1]>=1800:
+            note_unrestored(session,why,'watcher');last=(why,clock())
         sleep(delay);delay=min(delay*2,120)
 
 def stop_app(app,timeout=20):

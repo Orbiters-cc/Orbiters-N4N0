@@ -277,7 +277,7 @@
   "SteamVR refused the connection (error {code})": "SteamVR rechazó la conexión (error {code})",
   "SteamVR has no {name} (error {code})": "SteamVR no tiene {name} (error {code})",
   "could not load SteamVR's client: {error}": "no se pudo cargar el cliente de SteamVR: {error}",
-  "the tracking smoothing control is in use by another version of Orbiters - N4N0 (layout {layout}, this one {version})": "el control del rastreo suave lo usa otra versión de Orbiters - N4N0 (diseño {layout}, esta {version})",
+  "the tracking smoothing control is in use by another version of Orbiters - N4N0 (layout {layout}, this one {version})": "el control del seguimiento suave lo usa otra versión de Orbiters - N4N0 (diseño {layout}, esta {version})",
   "SteamVR no longer loads the smoothing driver, but its folder {path} could not be removed (SteamVR may still be using it; close SteamVR and try again)": "SteamVR ya no carga el controlador de suavizado, pero no se pudo eliminar su carpeta {path} (puede que SteamVR aún la use; cierra SteamVR e inténtalo de nuevo)",
   "Spout sender \"{name}\" not found": "No se encontró el emisor de Spout «{name}»",
   "unsupported Spout texture format (DXGI {format})": "formato de textura de Spout no compatible (DXGI {format})",

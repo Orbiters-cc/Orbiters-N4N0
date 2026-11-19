@@ -186,6 +186,9 @@ pub(crate) struct N4n0Runtime {
     /// the state to publish ([`N4n0Runtime::status`]) copies none of them.
     lines: Slice<Vec<N4n0Line>>,
     confirmations: Vec<N4n0Confirmation>,
+    /// The website approvals the owner opened in the browser: dealt with there (the app hears nothing back), they stay
+    /// listed with their link but no longer keep N4N0 from listening.
+    handed_off: HashSet<String>,
     /// What the assistant asked to do that waits for the owner's yes, since when, and its number.
     pub(crate) pending: Vec<Pending>,
     pending_at: Option<Instant>,
@@ -282,7 +285,9 @@ impl N4n0Runtime {
     }
 
     pub(crate) fn ask_busy(&self) -> bool {
-        self.thinking() || !self.confirmations.is_empty() || !self.pending.is_empty()
+        self.thinking()
+            || self.confirmations.iter().any(|c| c.approve_url.starts_with(LOCAL_APPROVAL) || !self.handed_off.contains(&c.id))
+            || !self.pending.is_empty()
             || self.voice.output_playing || self.voice.finalizing
     }
 
@@ -1566,6 +1571,13 @@ impl N4n0 {
         rt.voice.level = 0.0;
         rt.voice.speech = false;
         rt.screen.menu.listening = false;
+        // What waited for the owner's yes is not done by an assistant that is off.
+        if !rt.pending.is_empty() {
+            let what: Vec<String> = std::mem::take(&mut rt.pending).into_iter().map(|p| p.what).collect();
+            rt.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
+        }
+        rt.pending_at = None;
+        rt.confirmations.retain(|c| !c.approve_url.starts_with(LOCAL_APPROVAL));
         if let Some(turn) = rt.turn.take() {
             turn.cancel.store(true, Ordering::Relaxed);
             rt.generation += 1;
@@ -1768,6 +1780,12 @@ impl N4n0 {
 
     /// The owner said yes: what waited for it is done now, by Orbiters - N4N0 (the assistant is told at its next turn).
     fn confirmed(self: &Shared, pending: Vec<Pending>) {
+        if !self.with_settings(|s| s.n4n0.enabled && s.n4n0.assistant) {
+            // Switched off meanwhile: nothing it asked for is done.
+            let what: Vec<String> = pending.into_iter().map(|p| p.what).collect();
+            self.add_line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
+            return;
+        }
         let (mut done, mut failed) = (Vec::new(), Vec::new());
         for p in pending {
             match self.action(p.action, Some(&p.bound)) {
@@ -1820,6 +1838,7 @@ impl N4n0 {
                 rt.conversation.clear();
                 rt.lines.clear();
                 rt.confirmations.clear();
+                rt.handed_off.clear();
                 rt.notes.clear();
                 rt.pending.clear();
                 rt.pending_at = None;
@@ -1863,12 +1882,13 @@ impl N4n0 {
                     // The owner approved, in the window, what N4N0 asked to do.
                     let pending = {
                         let mut rt = self.n4n0.lock().unwrap();
-                        let current = rt.pending_id == id && !rt.pending.is_empty();
-                        rt.confirmations.retain(|c| !c.approve_url.starts_with(LOCAL_APPROVAL));
-                        if current {
-                            rt.pending_at = None;
+                        // A late click on an older question leaves the newer one up and waiting.
+                        if rt.pending_id != id || rt.pending.is_empty() {
+                            return;
                         }
-                        current.then(|| std::mem::take(&mut rt.pending))
+                        rt.confirmations.retain(|c| c.approve_url != url);
+                        rt.pending_at = None;
+                        std::mem::take(&mut rt.pending)
                     };
                     if let Some(pending) = pending {
                         self.confirmed(pending);
@@ -1877,6 +1897,11 @@ impl N4n0 {
                     // Only the Orbiters website (an approval), never a link from elsewhere.
                     if let Err(e) = self.device.browser.open(&url) {
                         self.notify(NoticeKind::Error, e.to_string());
+                    } else {
+                        // Its approval is the website's now: it stays listed, and N4N0 may listen again.
+                        let mut rt = self.n4n0.lock().unwrap();
+                        let ids: Vec<String> = rt.confirmations.iter().filter(|c| c.approve_url == url).map(|c| c.id.clone()).collect();
+                        rt.handed_off.extend(ids);
                     }
                 }
             }
@@ -2062,6 +2087,7 @@ impl N4n0 {
                     let mut rt = self.n4n0.lock().unwrap();
                     rt.line(N4n0Who::Note, tr!("Waiting for your approval on Orbiters: {what}", what = if c.title.is_empty() { &c.summary } else { &c.title }));
                     rt.confirmations.retain(|x| x.id != c.id);
+                    rt.handed_off.remove(&c.id);
                     rt.confirmations.push(N4n0Confirmation { id: c.id, title: c.title, summary: c.summary, approve_url: c.approve_url });
                     drop(rt);
                     self.notify(NoticeKind::Info, tr("N4N0 prepared something that needs your approval: see Orbiters - N4N0 › N4N0."));

@@ -1135,6 +1135,80 @@ fn an_approval_taken_before_an_avatar_change_still_checks_the_avatar_when_it_run
     t.shutdown(&n);
 }
 
+/// A turn on the stand-in server that asks to hold the Hoodie (which waits for the owner's yes).
+fn hold_turn() -> String {
+    done(json!([{ "role": "user", "content": "q" }]), json!([{ "id": "h", "name": "hold_avatar_control", "input": { "control": "hoodie", "on": true } }]))
+}
+
+fn local_ask(t: &TestHost) -> Option<String> {
+    t.view().confirmations.iter().find(|c| c.approve_url.starts_with(LOCAL_APPROVAL)).map(|c| c.approve_url.clone())
+}
+
+#[test]
+fn a_late_click_on_an_older_question_leaves_the_newer_one_up() {
+    // N4N0-20: a click for question A arriving while B is up removed B's button and did neither.
+    let (t, n, _vrchat) = n4n0_with_vrchat();
+    let end = || done(json!([{ "role": "user", "content": "q" }]), json!([]));
+    let (base, bodies) = orbiters(vec![hold_turn(), end(), hold_turn(), end()]);
+    t.sign_in(base, "orbit-test");
+    n.ask("keep my hoodie".into(), "typed");
+    turn_ended(&n, &bodies, 2);
+    let a = local_ask(&t).expect("question A");
+    // Something else asked: A is dropped, and the new turn asks B.
+    n.ask("keep it, really".into(), "typed");
+    turn_ended(&n, &bodies, 4);
+    let b = local_ask(&t).expect("question B");
+    assert_ne!(a, b);
+    n.command(Command::OpenLink { url: a });
+    assert_eq!(local_ask(&t).as_deref(), Some(b.as_str()), "B still up");
+    assert!(t.settings().n4n0.pins.is_empty(), "nothing done by a stale click");
+    n.command(Command::OpenLink { url: b.clone() });
+    assert_eq!(t.settings().n4n0.pins.iter().map(|p| p.parameter.as_str()).collect::<Vec<_>>(), vec!["Hoodie"]);
+    assert!(local_ask(&t).is_none());
+    n.command(Command::OpenLink { url: b });
+    assert_eq!(t.settings().n4n0.pins.len(), 1, "done once");
+    t.shutdown(&n);
+}
+
+#[test]
+fn switching_the_assistant_off_drops_what_waited_for_a_yes() {
+    // N4N0-16: the button of a question asked before the switch-off still did it afterwards.
+    let (t, n, _vrchat) = n4n0_with_vrchat();
+    let (base, bodies) = orbiters(vec![hold_turn(), done(json!([{ "role": "user", "content": "q" }]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("keep my hoodie".into(), "typed");
+    turn_ended(&n, &bodies, 2);
+    let ask = local_ask(&t).expect("asked");
+    n.command(Command::Assistant { on: false });
+    assert!(local_ask(&t).is_none(), "its button goes");
+    n.command(Command::OpenLink { url: ask });
+    n.ask("yes".into(), "typed");
+    assert!(t.settings().n4n0.pins.is_empty(), "nothing done while off");
+    t.shutdown(&n);
+}
+
+#[test]
+fn a_website_approval_opened_in_the_browser_no_longer_keeps_n4n0_from_listening() {
+    // N4N0-19: the app hears nothing back from the website, so the approval kept every listen off until New conversation.
+    let (t, n, _vrchat) = n4n0_with_vrchat();
+    let url = format!("{}/n4n0/approve/c1", orbiters_core::account::Server::current().website().trim_end_matches('/'));
+    let confirmation = format!(
+        "event: confirmation\ndata: {}\n\n{}",
+        json!({ "id": "c1", "title": "Movie night", "summary": "Sat 21:00", "approve_url": url }),
+        done(json!([{ "role": "user", "content": "q" }]), json!([]))
+    );
+    let (base, bodies) = orbiters(vec![confirmation]);
+    t.sign_in(base, "orbit-test");
+    n.ask("plan a movie night".into(), "typed");
+    turn_ended(&n, &bodies, 1);
+    assert!(n.n4n0.lock().unwrap().ask_busy(), "waiting for the website");
+    n.command(Command::OpenLink { url: url.clone() });
+    assert!(!n.n4n0.lock().unwrap().ask_busy(), "handed to the website: N4N0 listens again");
+    assert!(t.view().confirmations.iter().any(|c| c.approve_url == url), "still listed with its link");
+    assert!(n.n4n0.lock().unwrap().conversation.len() == 1, "the conversation stays");
+    t.shutdown(&n);
+}
+
 /// A stand-in VRChat whose OSCQuery service lists no avatar parameters until `after` (as while it loads a heavy
 /// avatar), then `tree`.
 fn vrchat_late(tree: serde_json::Value, after: Duration) -> (UdpSocket, SocketAddr) {

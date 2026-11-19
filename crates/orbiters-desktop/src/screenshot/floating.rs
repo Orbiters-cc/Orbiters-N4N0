@@ -102,6 +102,34 @@ pub(super) fn shots(out: &Path, settings: &Settings) -> anyhow::Result<()> {
             println!("{}", path.display());
         }
     }
+    // The shared 3D view (REQUEST14, stage 1): a friend's offer, at rest and with a laser on Show and on Not now; the share
+    // chip's friend picker with one, two and three friends here, a laser on the second; in every language.
+    for language in orbiters_i18n::Language::ALL {
+        for (state, hover) in [("rest", None), ("show", Some(true)), ("not-now", Some(false))] {
+            let mut canvas = Canvas::new(w, h);
+            orbiters_i18n::in_language(language, || {
+                for _ in 0..2 {
+                    canvas.paint(0.0, |p| crate::shared_view_ui::paint_offer(p, "Nova Fox", "The Black Cat", hover, 0.5));
+                }
+            });
+            let path = out.join(format!("shared-view-offer-vr-{}-{state}.png", language.tag()));
+            save_png(&path, &over_ground(canvas.pixels(), w, h))?;
+            println!("{}", path.display());
+        }
+        let friends: Vec<String> = ["Nova Fox", "Kiri Starlight", "Maximilian von Hohenberg"].map(String::from).to_vec();
+        for count in 1..=3 {
+            let mut canvas = Canvas::new(w, h);
+            let hover = (count > 1).then_some(1);
+            orbiters_i18n::in_language(language, || {
+                for _ in 0..2 {
+                    canvas.paint(0.0, |p| crate::shared_view_ui::paint_pick(p, &friends[..count], hover, 0.7));
+                }
+            });
+            let path = out.join(format!("shared-view-pick-vr-{}-{count}.png", language.tag()));
+            save_png(&path, &over_ground(canvas.pixels(), w, h))?;
+            println!("{}", path.display());
+        }
+    }
     // "Orbiters - N4N0 will minimize to save memory" (LIGHT-DESKTOP-8): the VR band in every language, at rest and under
     // a laser, 4 of its 8 seconds left; the desktop card at 100 % and 150 %, at rest and under the pointer.
     for language in orbiters_i18n::Language::ALL {

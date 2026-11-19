@@ -951,8 +951,15 @@ impl Controller {
                 if nothing {
                     self.burst.lock().unwrap().recording = false;
                     self.scan.lock().unwrap().recording = false;
-                    let why = self.snapshot.lock().unwrap().capture.no_strip.unwrap_or_else(|| self.why_no_strip_now());
-                    self.update(|s| s.capture.no_strip = Some(why));
+                    let why = self.no_strip_reason();
+                    // Only on this recording: a capture started since (the state went Idle above) keeps its own.
+                    self.update_if(|s| {
+                        let ours = s.capture.session_dir == session && !s.is_capturing();
+                        if ours {
+                            s.capture.no_strip = Some(why);
+                        }
+                        ours
+                    });
                     self.notify(
                         NoticeKind::Error,
                         tr!("No 3D capture: {frames} frames came, none with the capture strip, so there are no keyframes. {reason}", frames = manifest.stats.frames, reason = why.message()),
@@ -1155,6 +1162,14 @@ impl Controller {
 
     /// The recording ended or never started: no more values to the worker, and VRChat's camera and the capture
     /// kit's toggles back as they were.
+    /// Why a saved recording had no keyframe: what was said while it ran, or else what is known now. The said reason
+    /// is copied out and the snapshot let go BEFORE the fallback: `why_no_strip_now` takes `osc_values`, and a start
+    /// meanwhile holds `osc_values` and waits for `snapshot` (`start_segment`): the two would wait for each other (C-1).
+    fn no_strip_reason(&self) -> state::NoStrip {
+        let said = self.snapshot.lock().unwrap().capture.no_strip;
+        said.unwrap_or_else(|| self.why_no_strip_now())
+    }
+
     fn put_vrchat_back(&self) {
         self.osc_values.lock().unwrap().forwarding = false;
         self.stop_rig();
@@ -3102,6 +3117,30 @@ mod tests {
         assert_eq!(run(vec![(2, b.clone(), none), (1, a.clone(), none)]), vec![2.0], "reversed in one burst");
         assert_eq!(run(vec![(2, b.clone(), after_write), (1, a.clone(), none)]), vec![2.0], "the older after a write");
         assert_eq!(run(vec![(1, a.clone(), after_write), (2, b.clone(), none)]), vec![1.0, 2.0], "in order");
+    }
+
+    /// C-1: the reason of a recording with no keyframe is worked out without holding `snapshot` while it waits for
+    /// `osc_values`. A start holds `osc_values` and then takes `snapshot` (`start_segment`): here that start can take
+    /// the snapshot while the reason waits.
+    #[test]
+    fn the_no_keyframe_reason_never_holds_the_snapshot_while_it_waits_for_osc_values() {
+        use std::time::{Duration, Instant};
+        let ctl = super::Controller::new(orbiters_core::settings::Settings::default());
+        let start = ctl.osc_values.lock().unwrap();
+        let saving = {
+            let ctl = ctl.clone();
+            std::thread::spawn(move || ctl.no_strip_reason())
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        let until = Instant::now() + Duration::from_secs(1);
+        let mut took = false;
+        while !took && Instant::now() < until {
+            took = ctl.snapshot.try_lock().is_ok();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(start);
+        saving.join().unwrap();
+        assert!(took, "the start (holding osc_values) could take the snapshot while the reason was being worked out");
     }
 
     /// The publish-rate log says a minute's publishes once, with the busiest second, and nothing for a silent minute.

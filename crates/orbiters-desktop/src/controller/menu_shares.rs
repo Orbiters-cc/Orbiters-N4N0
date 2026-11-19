@@ -150,7 +150,7 @@ impl MenuShares {
                     // Gone from the jobs kept: its row says what the listing knows.
                     None => Sharing::Idle,
                     Some(None) => Sharing::Busy { public: ask.public, people },
-                    Some(Some(Outcome::Shared(orbiters_core::shares::Shared::Item { item }))) => {
+                    Some(Some(Outcome::Shared(orbiters_core::shares::Shared::Item { item, .. }))) => {
                         Sharing::Done { public: item.public, people: item.grants.len() as u32 }
                     }
                     Some(Some(Outcome::Shared(orbiters_core::shares::Shared::Request { .. }))) => Sharing::Done { public: ask.public, people },

@@ -47,6 +47,11 @@ pub struct App {
     usage_here: Option<(Page, Option<orbiters_n4n0_core::menu::Page>)>,
     /// The usage statistics' notice was closed here (the service's settings say so a moment later).
     usage_told: bool,
+    /// Minimised for long while VRChat runs: the countdown to closing to the tray (`crate::window_rest`), on its clock.
+    rest: crate::window_rest::Rest,
+    rest_clock: std::time::Instant,
+    #[cfg(windows)]
+    rest_card: crate::window_rest::card::Card,
 }
 
 impl App {
@@ -66,6 +71,10 @@ impl App {
         app.windowed = true;
         app.gpu = cc.wgpu_render_state.as_ref().map(crate::gpu::Handles::of_window);
         app.show_splash = splash;
+        // Closed to the tray to save memory: back on the page it was on.
+        if let Some(page) = crate::window_rest::resume::take().and_then(|name| page_named(&name)) {
+            app.set_page(page, 0.0);
+        }
         app
     }
 
@@ -95,6 +104,10 @@ impl App {
             logo_hovered: false,
             usage_here: None,
             usage_told: false,
+            rest: Default::default(),
+            rest_clock: std::time::Instant::now(),
+            #[cfg(windows)]
+            rest_card: Default::default(),
         }
     }
 
@@ -781,6 +794,7 @@ impl eframe::App for App {
         // Minimized, no frame is drawn and only this runs: what the pages watch on their threads stops until the window
         // shows again (the microphones Settings listens to, Unity's editors, the folders).
         pages::watch::follow_window(ctx);
+        self.follow_rest(ctx);
         if self.ctl.should_close() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
@@ -809,6 +823,89 @@ impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         theme::INK_950.to_normalized_gamma_f32()
     }
+}
+
+impl App {
+    /// Something in the window is at work or open, which closing it would end or lose (`crate::window_rest`): what the
+    /// service runs for it (an upload, a reconstruction, a recording, a clean-up, a share, a call), a page still
+    /// reading, a window, dialog, editor or viewer open on any page (kept while another page shows), a menu open,
+    /// Home's music page.
+    fn working(&self, ctx: &egui::Context, snap: &Snapshot) -> bool {
+        use crate::state::UploadState;
+        snap.uploads.iter().any(|u| matches!(u.state, UploadState::Preparing | UploadState::Sending))
+            || snap.reconstruction.is_some()
+            || snap.is_capturing()
+            || snap.cleanup.is_some()
+            || snap.capture_shares.iter().any(|j| j.outcome.is_none())
+            || snap.n4n0.calls.call.is_some()
+            || self.page_busy()
+            || orbiters_ui::popup::any_open(ctx)
+            || self.home.holds()
+            || self.sessions.holds()
+            || self.worlds.holds()
+            || self.events.holds()
+            || self.projects.holds()
+    }
+
+    /// One look at the countdown to closing to the tray: the offer up, taken down, or the window closing (as its
+    /// close button does, its page kept for the next window). Looked at again when the countdown needs it.
+    fn follow_rest(&mut self, ctx: &egui::Context) {
+        use crate::window_rest::{Facts, Step, Where};
+        if !self.windowed {
+            return;
+        }
+        let snap = self.ctl.view();
+        let in_vr = snap.steamvr.running && snap.steamvr.overlay && snap.steamvr.headset_in_use == Some(true);
+        #[cfg(windows)]
+        let desktop = crate::window_rest::card::can_show();
+        #[cfg(not(windows))]
+        let desktop = false;
+        let facts = Facts {
+            minimized: ctx.input(|i| i.viewport().minimized.unwrap_or(false)),
+            vrchat: snap.vrchat.running && snap.vrchat.runs_here(),
+            seen_at: if in_vr { Some(Where::Vr) } else if desktop { Some(Where::Desktop) } else { None },
+            working: self.working(ctx, &snap),
+            on: snap.settings.close_minimized_window,
+            shown_in_vr: snap.window_rest.shown,
+            kept_in_vr: snap.window_rest.kept,
+        };
+        let now = self.rest_clock.elapsed().as_secs_f64();
+        let now_ms = crate::wake_offer::now_ms();
+        match self.rest.step(now, now_ms, &facts) {
+            Step::Show(offer, Where::Vr) => self.ctl.window_rest(Some(offer)),
+            Step::Show(_, Where::Desktop) | Step::Nothing => {}
+            Step::Withdraw => {
+                self.ctl.window_rest(None);
+                #[cfg(windows)]
+                self.rest_card.hide();
+            }
+            Step::Close => {
+                #[cfg(windows)]
+                self.rest_card.hide();
+                self.ctl.window_rest(None);
+                crate::window_rest::resume::save(&format!("{:?}", self.page));
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+                return;
+            }
+        }
+        #[cfg(windows)]
+        if let Some((offer, Where::Desktop)) = self.rest.offer(now, now_ms) {
+            if self.rest_card.show(ctx.pixels_per_point(), offer.left(now_ms), offer.seconds(now_ms)) {
+                self.rest.keep();
+                self.rest_card.hide();
+            }
+        }
+        if let Some(t) = self.rest.next_look(now) {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(t));
+        }
+    }
+}
+
+/// The page of a name [`App::follow_rest`] saved (its `Debug` name).
+fn page_named(name: &str) -> Option<Page> {
+    [Page::Home, Page::Capture, Page::Projects, Page::N4n0, Page::Sessions, Page::Worlds, Page::Events, Page::Videos, Page::Settings]
+        .into_iter()
+        .find(|p| format!("{p:?}") == name)
 }
 
 /// Shows the window and gives it focus (a second launch or the tray asked for it).

@@ -857,7 +857,7 @@ pub fn uploads(server: Server) -> Vec<(PathBuf, Item)> {
 /// of what is made from those records).
 #[cfg(test)]
 pub(crate) fn write_record_for_test(file: &Path, path: &Path, item: Item) {
-    let uploaded = Uploaded { kind: item.kind, id: item.id, visibility: "private".into() };
+    let uploaded = Uploaded { kind: item.kind, id: item.id, visibility: "private".into(), explorer: None };
     let records = vec![Record { path: path.to_path_buf(), item: Some(item), uploaded, edits: None }];
     std::fs::write(file, serde_json::to_vec(&records).unwrap()).unwrap();
 }
@@ -923,7 +923,7 @@ fn save_record_edits(records: anyhow::Result<&Path>, entry: &Entry, item: &Item,
         records.push(Record {
             path: local.path().into(),
             item: Some(item.clone()),
-            uploaded: Uploaded { kind: item.kind, id: item.id, visibility: if item.public { "public" } else { "private" }.into() },
+            uploaded: Uploaded { kind: item.kind, id: item.id, visibility: if item.public { "public" } else { "private" }.into(), explorer: None },
             edits,
         });
         orbiters_core::write_atomic(path, &serde_json::to_vec(&records)?)?;
@@ -1107,6 +1107,8 @@ fn share_with_once(
     // of was made without any).
     let mut uploaded_edits = record.as_ref().and_then(|r| r.edits.clone()).unwrap_or_else(|| orbiters_reconstruct::edit::UNEDITED.to_string());
     let mut sent_edits = None;
+    // A public upload's points (the share after it earns nothing more for it): what this share earned is both answers'.
+    let mut upload_explorer: Option<orbiters_core::explorer::Outcome> = None;
     let (kind, id) = if let Some(known) = existing {
         // Edited since it was uploaded: its files on Orbiters are replaced first (Update the shared capture).
         if let Some(now) = edits_now(entry)? {
@@ -1191,7 +1193,7 @@ fn share_with_once(
                         let item = api.capture_by_source_key(token, &entry.world_id, Kind::Picture, &source_key)?.ok_or_else(|| {
                             anyhow::anyhow!("{}", tr("The server skipped this picture, but its source identity is not available yet. Refresh the gallery and retry."))
                         })?;
-                        Uploaded { kind: item.kind, id: item.id, visibility: if item.public { "public" } else { "private" }.into() }
+                        Uploaded { kind: item.kind, id: item.id, visibility: if item.public { "public" } else { "private" }.into(), explorer: None }
                     }
                 }
             }
@@ -1205,6 +1207,7 @@ fn share_with_once(
             known.push(Record { path: local.path().into(), item: None, uploaded: uploaded.clone(), edits: sent_edits.clone() });
             orbiters_core::write_atomic(file, &serde_json::to_vec(&known)?)?;
         }
+        upload_explorer = uploaded.explorer.clone();
         (uploaded.kind, uploaded.id)
     };
     // Edited while it was uploading: not shared, and an upload that went public at once taken back from the public.
@@ -1232,16 +1235,20 @@ fn share_with_once(
         step(steps, "kept private", &mut at); // i18n: not shown
         give_picture(api, token, entry, &mut item, steps, &mut at);
         save_record(records, entry, &item)?;
-        return Ok(shares::Shared::Item { item });
+        return Ok(shares::Shared::Item { item, explorer: None });
     }
     report(Stage::Sharing);
     let shared = api.share_capture(token, kind, id, request);
     step(steps, "shared", &mut at);
     match shared {
         Ok(mut result) => {
-            if let shares::Shared::Item { item } = &mut result {
+            if let shares::Shared::Item { item, explorer } = &mut result {
                 give_picture(api, token, entry, item, steps, &mut at);
                 save_record(records, entry, item)?;
+                *explorer = match (upload_explorer, explorer.take()) {
+                    (Some(up), Some(shared)) => Some(up.then(shared)),
+                    (up, shared) => shared.or(up),
+                };
             }
             Ok(result)
         }
@@ -1560,7 +1567,7 @@ pub(crate) mod tests {
 
     fn shared_item(kind: Kind, id: u64) -> String {
         let grants = vec![shares::Grant { id: 1, vrchat_user_id: "usr_friend".into(), display_name: Some("Friend".into()), ..Default::default() }];
-        serde_json::to_string(&shares::Shared::Item { item: Item { kind, id, mine: true, can_share: true, grants, ..Default::default() } }).unwrap()
+        serde_json::to_string(&shares::Shared::Item { explorer: None, item: Item { kind, id, mine: true, can_share: true, grants, ..Default::default() } }).unwrap()
     }
 
     fn to_a_friend() -> shares::Share {
@@ -1641,7 +1648,7 @@ pub(crate) mod tests {
         let session = dir.join("Home 2026-11-02 10-00-00");
         std::fs::create_dir_all(orbiters_core::reconstruction::dir(&session)).unwrap();
         let records = dir.join("capture-uploads.json");
-        let uploaded = Uploaded { kind: Kind::Capture, id: 3, visibility: "public".into() };
+        let uploaded = Uploaded { kind: Kind::Capture, id: 3, visibility: "public".into(), explorer: None };
         std::fs::write(&records, serde_json::to_vec(&[Record { path: session.clone(), item: None, uploaded, edits: edits.clone() }]).unwrap()).unwrap();
         let mut entry = remote_entry(Item::default());
         entry.key = session.to_string_lossy().into();
@@ -2120,7 +2127,7 @@ pub(crate) mod tests {
         // 1. Shared publicly, as trained (the app's share: prepared, uploaded with its picture, shared).
         let shared = share_with(&api, &token, Ok(records.clone()), &entry, &shares::Share { public: true, ..Default::default() }, &|_| {}, &mut Vec::new(), &igpu)
             .unwrap();
-        let shares::Shared::Item { item } = shared else { panic!("shared as its owner") };
+        let shares::Shared::Item { item, .. } = shared else { panic!("shared as its owner") };
         let id = item.id;
         let slot = item.capture.as_ref().and_then(|c| c.vrchat_slot).expect("a public capture holds a VRChat slot");
         assert!(item.capture.as_ref().is_some_and(|c| c.picture_url.is_some() && c.revision == 1));
@@ -2236,7 +2243,7 @@ pub(crate) mod tests {
         entry.world_id = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd".into();
         let (api, seen) = stand_in(vec![("POST /maps/worlds/", 200, added(5)), ("GET /captures/capture/5", 200, kept.clone())]);
         let result = share_with(&api, "token", Ok(records.clone()), &entry, &private, &|_| {}, &mut Vec::new(), &prepared).unwrap();
-        assert!(matches!(result, shares::Shared::Item { ref item } if item.id == 5 && !item.public));
+        assert!(matches!(result, shares::Shared::Item { ref item, .. } if item.id == 5 && !item.public));
         let asked = requests(&seen);
         assert_eq!(asked.len(), 2, "{asked:?}");
         assert!(asked[0].starts_with("POST /maps/worlds/") && asked[0].ends_with("/previews") && asked[1] == "GET /captures/capture/5", "{asked:?}");
@@ -2323,7 +2330,7 @@ pub(crate) mod tests {
             std::fs::write(new.join(name).join("manifest.json"), b"{}").unwrap();
         }
         std::fs::create_dir_all(old.join("Here still")).unwrap();
-        let record = |path: PathBuf, kind: Kind, id: u64| Record { path, item: None, uploaded: Uploaded { kind, id, visibility: "private".into() }, edits: None };
+        let record = |path: PathBuf, kind: Kind, id: u64| Record { path, item: None, uploaded: Uploaded { kind, id, visibility: "private".into(), explorer: None }, edits: None };
         let file = root.join("capture-uploads.json");
         let records = vec![
             record(old.join("Home 1"), Kind::Capture, 1),
@@ -2346,7 +2353,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let session = dir.join("Silent Dawn 2026-10-28 23-52-12");
         let records = dir.join("capture-uploads.json");
-        let uploaded = Uploaded { kind: Kind::Capture, id: 3, visibility: "private".into() };
+        let uploaded = Uploaded { kind: Kind::Capture, id: 3, visibility: "private".into(), explorer: None };
         std::fs::write(&records, serde_json::to_vec(&[Record { path: session.clone(), item: None, uploaded, edits: None }]).unwrap()).unwrap();
         let (api, seen) = fake_orbiters(vec![("POST /captures/capture/3/share", shared_item(Kind::Capture, 3))]);
         let mut entry = remote_entry(Item::default());
@@ -2354,7 +2361,7 @@ pub(crate) mod tests {
         entry.local = Some(Local::Session(session.clone()));
         let stages = Mutex::new(Vec::new());
         let result = share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|s| stages.lock().unwrap().push(s), &mut Vec::new(), &prepared).unwrap();
-        assert!(matches!(result, shares::Shared::Item { ref item } if item.grants.len() == 1));
+        assert!(matches!(result, shares::Shared::Item { ref item, .. } if item.grants.len() == 1));
         assert_eq!(*seen.lock().unwrap(), ["POST /captures/capture/3/share"]);
         assert_eq!(*stages.lock().unwrap(), [Stage::Sharing]);
         let saved = read_records(&records);
@@ -2416,10 +2423,10 @@ pub(crate) mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(60));
             flight.lock().unwrap().0 -= 1;
-            Ok(shares::Shared::Item { item: e.remote.unwrap() })
+            Ok(shares::Shared::Item { explorer: None, item: e.remote.unwrap() })
         };
         let first = share_all(entries.clone(), &|s| stages.lock().unwrap().push(s), one).unwrap();
-        assert!(matches!(first, shares::Shared::Item { ref item } if item.id == 0), "the first item's answer");
+        assert!(matches!(first, shares::Shared::Item { ref item, .. } if item.id == 0), "the first item's answer");
         assert_eq!(flight.lock().unwrap().1, SHARES_AT_ONCE);
         let said = stages.into_inner().unwrap();
         assert_eq!((said.first(), said.last(), said.len()), (Some(&Stage::Items { done: 0, total: 7 }), Some(&Stage::Items { done: 7, total: 7 }), 8));
@@ -2430,7 +2437,7 @@ pub(crate) mod tests {
             if e.remote.as_ref().unwrap().id == 1 {
                 anyhow::bail!("Orbiters could not be reached")
             }
-            Ok(shares::Shared::Item { item: e.remote.unwrap() })
+            Ok(shares::Shared::Item { explorer: None, item: e.remote.unwrap() })
         };
         let error = share_all(entries, &|_| {}, failing).unwrap_err();
         assert_eq!(error.to_string(), "Orbiters could not be reached");
@@ -2665,7 +2672,7 @@ pub(crate) mod tests {
         let expected = crate::capture_picture::jpeg(&session).unwrap();
         let added = r#"{"type":"capture","id":5,"visibility":"private"}"#.to_string();
         let item = |public: bool| serde_json::json!({ "item": capture_item(5, public, true) }).to_string();
-        let shared = |public: bool| serde_json::to_string(&shares::Shared::Item { item: capture_item(5, public, true) }).unwrap();
+        let shared = |public: bool| serde_json::to_string(&shares::Shared::Item { explorer: None, item: capture_item(5, public, true) }).unwrap();
         for public in [false, true] {
             let request = shares::Share { public, ..Default::default() };
             let mut pictures = Vec::new();

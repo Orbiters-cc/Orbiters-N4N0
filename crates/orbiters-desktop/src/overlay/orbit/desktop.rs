@@ -1056,6 +1056,12 @@ thread_local! {
     static MOUSE: RefCell<Vec<(bool, isize)>> = const { RefCell::new(Vec::new()) };
 }
 
+/// What this thread's panel windows heard since the last call: a button going down or up, and which window
+/// ([`PanelWindow::id`]).
+pub(crate) fn take_presses() -> Vec<(bool, isize)> {
+    MOUSE.with(|m| std::mem::take(&mut *m.borrow_mut()))
+}
+
 /// The panels' window procedure: takes the mouse's button, and never the focus. That it answers at all is what keeps the click from the game.
 /// The mouse wheel's movement since last read, in Windows' units (120 a notch): from our windows' messages, or the pointer's hook.
 static WHEEL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
@@ -1093,7 +1099,8 @@ fn class() -> windows::core::PCWSTR {
 }
 
 /// A window of a panel: premultiplied pixels with per-pixel alpha, moved and faded without a new picture. `clicks` false lets them through (our pointer).
-struct PanelWindow {
+/// (Also the window process's card "Orbiters - N4N0 will minimize to save memory", `crate::window_rest::card`.)
+pub(crate) struct PanelWindow {
     hwnd: HWND,
     dc: HDC,
     bitmap: HBITMAP,
@@ -1111,6 +1118,11 @@ struct PanelWindow {
 }
 
 impl PanelWindow {
+    /// What tells its presses from other windows' ([`take_presses`]).
+    pub(crate) fn id(&self) -> isize {
+        self.hwnd.0 as isize
+    }
+
     /// Whether its painted pixels take the mouse from what is under them, from now on: with `false` every pixel of it lets the mouse through, as if it were not there.
     fn catch_mouse(&mut self, on: bool) {
         if self.catches == on {
@@ -1126,7 +1138,7 @@ impl PanelWindow {
         self.catches = on;
     }
 
-    fn new(width: u32, height: u32, clicks: bool) -> anyhow::Result<Self> {
+    pub(crate) fn new(width: u32, height: u32, clicks: bool) -> anyhow::Result<Self> {
         let extra = if clicks { Default::default() } else { WS_EX_TRANSPARENT };
         // SAFETY: plain Win32 calls; every handle made here is released on drop.
         unsafe {
@@ -1159,7 +1171,7 @@ impl PanelWindow {
     }
 
     /// New pixels in the part `changed` (x0, y0, x1, y1) of premultiplied RGBA of the window's size.
-    fn picture(&mut self, rgba: &[u8], changed: [u32; 4]) {
+    pub(crate) fn picture(&mut self, rgba: &[u8], changed: [u32; 4]) {
         let (w, h) = (self.size.cx as usize, self.size.cy as usize);
         if rgba.len() < w * h * 4 {
             return;
@@ -1179,7 +1191,7 @@ impl PanelWindow {
     }
 
     /// Puts the window where it goes, at this alpha, and shows it (above everything: VRChat's a window among others, and what it has it may come above again).
-    fn place(&mut self, at: POINT, alpha: u8) {
+    pub(crate) fn place(&mut self, at: POINT, alpha: u8) {
         let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8 };
         let origin = POINT { x: 0, y: 0 };
         // SAFETY: live handles; the structures outlive the call.

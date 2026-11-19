@@ -167,6 +167,39 @@ impl Api {
     }
 }
 
+/// What a public share, upload or unshare answered about points (`explorer` in its answer, contract section 3): the
+/// member's standing right after it, the points just before, what THIS request earned, a title it reached.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Outcome {
+    pub points: f64,
+    pub half_points: Option<i64>,
+    pub title: Option<Title>,
+    pub next: Option<Next>,
+    pub titles: Vec<Title>,
+    pub before: Option<f64>,
+    pub earned: Option<f64>,
+    pub title_reached: Option<Title>,
+}
+
+impl Outcome {
+    /// Where the member stands after it.
+    pub fn standing(&self) -> Explorer {
+        let points = self.half_points.map_or(self.points, |h| h as f64 / 2.0);
+        Explorer { points, half_points: self.half_points, title: self.title.clone(), next: self.next.clone(), titles: self.titles.clone() }
+    }
+
+    /// Two answers of one share in their order (the upload's, then the share's): what both earned, the second's standing,
+    /// the first's points before, a title either reached (the later one first).
+    pub fn then(self, later: Outcome) -> Outcome {
+        let earned = match (self.earned, later.earned) {
+            (Some(a), Some(b)) => Some(a + b),
+            (a, b) => a.or(b),
+        };
+        Outcome { before: self.before.or(later.before), earned, title_reached: later.title_reached.clone().or(self.title_reached), ..later }
+    }
+}
+
 /// What one public share earned, read from where the member stood before and after it: `None` when the points before
 /// could not be read.
 pub fn earned(before: Option<&Explorer>, after: &Explorer) -> Option<f64> {
@@ -282,6 +315,20 @@ mod tests {
         assert_eq!(e.next_title().map(|n| (n.key, n.remaining)), Some(("navigator".into(), 37.5)));
         let top = Explorer { points: 1000.0, titles, ..Default::default() };
         assert_eq!(top.next_title(), None);
+    }
+
+    /// A picture uploaded publicly by its share: the upload earned, the share after it earned nothing more; what the share
+    /// earned is both, its standing the later answer's.
+    #[test]
+    fn an_upload_and_its_share_say_together_what_the_share_earned() {
+        let up: Outcome = serde_json::from_str(r#"{"points":10.5,"halfPoints":21,"title":{"key":"explorer","points":10,"name":"Explorer"},"next":null,"titles":[],"before":9.5,"earned":1,"titleReached":{"key":"explorer","points":10,"name":"Explorer"}}"#).unwrap();
+        let shared: Outcome = serde_json::from_str(r#"{"points":10.5,"halfPoints":21,"title":{"key":"explorer","points":10,"name":"Explorer"},"next":null,"titles":[],"before":10.5,"earned":0,"titleReached":null}"#).unwrap();
+        let both = up.then(shared);
+        assert_eq!((both.earned, both.before, both.standing().points, both.title_reached.map(|t| t.key)), (Some(1.0), Some(9.5), 10.5, Some("explorer".into())));
+        let shares: crate::shares::Shared = serde_json::from_str(r#"{"item":{"id":5,"public":true},"explorer":null}"#).unwrap();
+        assert!(matches!(shares, crate::shares::Shared::Item { explorer: None, .. }), "null: the share stands, without points");
+        let request: crate::shares::Shared = serde_json::from_str(r#"{"request":{"id":3}}"#).unwrap();
+        assert!(matches!(request, crate::shares::Shared::Request { .. }), "a requester's share earns nothing");
     }
 
     #[test]

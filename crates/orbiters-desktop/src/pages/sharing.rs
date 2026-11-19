@@ -685,7 +685,7 @@ impl Dialog {
 
     fn rollback_or_settle(&mut self, ctx: &egui::Context, cx: &mut Cx, done: Outcome) {
         match done {
-            Outcome::Shared(Shared::Item { item }) | Outcome::Unshared(item) => {
+            Outcome::Shared(Shared::Item { item, .. }) | Outcome::Unshared(item) => {
                 let was_public = self.entry.remote.as_ref().is_some_and(|i| i.public);
                 let notice = match &self.last {
                     Some(Action::Share(s)) if s.public && !s.recipients.is_empty() => tr("Shared publicly and with your friends").to_string(),

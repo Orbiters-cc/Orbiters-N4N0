@@ -141,13 +141,25 @@ impl MouseSurfaces {
     }
 }
 
+/// The top bit of the band's id for the window's offers ([`crate::window_rest`]): they and "Talk with N4N0?" both count
+/// from 1.
+const REST_BIT: u64 = 1 << 63;
+/// The next bit for the world notices ([`crate::world_notice`], REQUEST13), which count from 1 too.
+const NOTICE_BIT: u64 = 1 << 62;
+
 pub struct Floating {
     panel: Panel,
     watch: Watch,
     /// The menu mismatch strip (none when SteamVR would not make its overlay).
     strip: Option<strip::Strip>,
-    /// "Talk with N4N0?" (none when SteamVR would not make its overlay).
+    /// "Talk with N4N0?", or the window's "will minimize to save memory" (none when SteamVR would not make its overlay).
     prompt: Option<prompt::Prompt>,
+    /// The window's offer to close the band last told the service it shows.
+    rest_said: Option<u64>,
+    /// When the world notice was last said to be held back behind a menu (once a second at most).
+    notice_held: Option<Instant>,
+    /// The world notice whose "Take a 3D picture" a trigger pulled: it acts when let go on it ([`notice_release`]).
+    notice_down: Option<u64>,
     lasers: laser::Lasers,
     input: Interaction,
     mouse: MouseSurfaces,
@@ -160,10 +172,6 @@ pub struct Floating {
     bar_pressed: Option<(BarButton, Instant)>,
     /// Nothing of it shows (the watch off, the panel closed): the last turn put everything away.
     resting: bool,
-    /// When the world notice was last said to be held back behind a menu (once a second at most).
-    notice_held: Option<Instant>,
-    /// The world notice whose "Take a 3D picture" a trigger pulled: it acts when let go on it ([`notice_release`]).
-    notice_down: Option<u64>,
 }
 
 impl Floating {
@@ -173,6 +181,9 @@ impl Floating {
             watch: Watch::new(overlay, key)?,
             strip: strip::Strip::new(overlay, key).map_err(|e| eprintln!("{e}")).ok(),
             prompt: prompt::Prompt::new(overlay, key).map_err(|e| eprintln!("{e}")).ok(),
+            rest_said: None,
+            notice_held: None,
+            notice_down: None,
             lasers: laser::Lasers::new(overlay, key)?,
             input: Interaction::default(),
             mouse: MouseSurfaces::default(),
@@ -181,8 +192,6 @@ impl Floating {
             width_seen: None,
             bar_pressed: None,
             resting: false,
-            notice_held: None,
-            notice_down: None,
         })
     }
 
@@ -224,18 +233,27 @@ impl Floating {
         // "Talk with N4N0?", while the wake word heard during a call has it up.
         let now_ms = crate::wake_offer::now_ms();
         let offer = crate::wake_offer::up(cx.snap.n4n0.voice.wake_offer, now_ms).filter(|_| self.prompt.is_some());
-        // Else "No 3D picture of this world yet" (REQUEST13), never over a menu: held back while one is up (its time waits,
-        // a little), and never over SteamVR's dashboard.
-        let notice = cx.snap.explorer.notice.clone().filter(|n| n.up(crate::controller::explorer::now_ms()) && self.prompt.is_some() && offer.is_none());
-        if let Some(n) = notice.as_ref().filter(|_| cx.menu_open || !cx.menu.is_empty() || cx.dashboard || self.panel.is_shown()) {
+        // Or, the band free, "Orbiters - N4N0 will minimize to save memory" with Keep open (`crate::window_rest`).
+        let rest = cx.snap.window_rest.offer.filter(|o| offer.is_none() && self.prompt.is_some() && cx.snap.window_rest.kept != Some(o.id));
+        // The band's ids: a wake offer's, or a rest offer's with the top bit (both count from 1).
+        // Or, the band still free, "No 3D picture of this world yet" (REQUEST13), never over a menu, our panel or SteamVR's
+        // dashboard: held back while one is up (its time waits, a little).
+        let notice = cx.snap.explorer.notice.clone().filter(|n| n.up(crate::controller::explorer::now_ms()) && offer.is_none() && rest.is_none() && self.prompt.is_some());
+        let in_the_way = cx.menu_open || !cx.menu.is_empty() || cx.dashboard || self.panel.is_shown();
+        if let Some(n) = notice.as_ref().filter(|_| in_the_way) {
             if self.notice_held.is_none_or(|at| now.duration_since(at).as_secs_f32() >= 1.0) {
                 self.notice_held = Some(now);
                 cx.backend.explorer(crate::controller::explorer::Command::NoticeHeld { id: n.id });
             }
         }
-        let notice = notice.filter(|_| !cx.menu_open && cx.menu.is_empty() && !cx.dashboard && !self.panel.is_shown());
-        let face = offer.map(prompt::Face::Talk).or(notice.map(prompt::Face::World));
-        if !settings.watch && !strip_on && face.is_none() && !self.panel.is_shown() && !asked && cx.menu.is_empty() {
+        let notice = notice.filter(|_| !in_the_way);
+        let band = offer.map(|o| o.id).or(rest.map(|o| o.id | REST_BIT)).or(notice.as_ref().map(|n| n.id | NOTICE_BIT));
+        if let (Some(p), Some(n)) = (self.prompt.as_mut(), notice.as_ref()) {
+            p.fit(cx.overlay, prompt::Face::World { earns_one: n.earns == Some(1.0) });
+        } else if let Some(p) = self.prompt.as_mut().filter(|_| band.is_some()) {
+            p.fit(cx.overlay, prompt::Face::Talk);
+        }
+        if !settings.watch && !strip_on && band.is_none() && !self.panel.is_shown() && !asked && cx.menu.is_empty() {
             if !self.resting {
                 self.rest(cx.overlay, cx.presenter, state, cx.backend);
             }
@@ -276,7 +294,14 @@ impl Floating {
             .flatten();
         let strip = self.strip.as_mut().and_then(|s| s.place(cx.overlay, strip_at, head.as_ref()));
         // Before the eyes, unless SteamVR's dashboard has the controllers.
-        let prompt = self.prompt.as_mut().and_then(|p| p.place(cx.overlay, face.as_ref().filter(|_| !cx.dashboard), head.as_ref()));
+        let prompt = self.prompt.as_mut().and_then(|p| p.place(cx.overlay, band.filter(|_| !cx.dashboard), head.as_ref()));
+        // The window counts down only once the band is before the eyes.
+        if let (Some(o), Some(p)) = (rest, self.prompt.as_ref()) {
+            if p.showing(o.id | REST_BIT) && self.rest_said != Some(o.id) {
+                self.rest_said = Some(o.id);
+                cx.backend.window_rest_shown(o.id);
+            }
+        }
 
         // Who points at what.
         let panel_targets = self.panel.targets();
@@ -347,30 +372,33 @@ impl Floating {
                 s.pressed(kind, now);
             }
         }
-        // "Talk with N4N0?": N4N0 listens. "Take a 3D picture": the picture waits for VRChat's camera (named by the notice's id).
-        // "Talk with N4N0?" acts on the pull, as it always did. The world notice acts when let go on it, and a band gone or
-        // changed under the held trigger does nothing (verify-vr: presses on release, cancelled when their surface goes).
-        if let Some(face @ prompt::Face::Talk(_)) = face.as_ref().filter(|_| outcome.prompt_press) {
+        // "Talk with N4N0?": N4N0 listens.
+        if let Some(offer) = offer.filter(|_| outcome.prompt_press) {
             clicked = true;
             cx.backend.n4n0(crate::ipc::N4n0Command::WakeOffer { accept: true });
             if let Some(p) = self.prompt.as_mut() {
-                p.pressed(cx.overlay, face);
+                p.pressed(cx.overlay, offer.id);
             }
         }
-        let world = match face.as_ref() {
-            Some(prompt::Face::World(n)) => Some(n.id),
-            _ => None,
-        };
+        // "Take a 3D picture": the picture waits for VRChat's camera. Unlike the two above it acts when let go on the band,
+        // and a band gone or changed under the held trigger does nothing (verify-vr: presses on release).
         let held = cx.actions.triggers().iter().any(|t| *t);
-        match notice_release(&mut self.notice_down, world, outcome.prompt_press, held, outcome.prompt_hover, cx.input_read) {
-            Some(id) => {
-                clicked = true;
-                cx.backend.explorer(crate::controller::explorer::Command::NoticeTake { id });
-                if let (Some(p), Some(face)) = (self.prompt.as_mut(), face.as_ref()) {
-                    p.pressed(cx.overlay, face);
-                }
+        let shown = notice.as_ref().map(|n| n.id);
+        if let Some(id) = notice_release(&mut self.notice_down, shown, outcome.prompt_press, held, outcome.prompt_hover, cx.input_read) {
+            clicked = true;
+            cx.backend.explorer(crate::controller::explorer::Command::NoticeTake { id });
+            if let Some(p) = self.prompt.as_mut() {
+                p.pressed(cx.overlay, id | NOTICE_BIT);
             }
-            None => clicked |= outcome.prompt_press && world.is_some(),
+        }
+        clicked |= outcome.prompt_press && shown.is_some();
+        // Keep open: the window stays.
+        if let Some(o) = rest.filter(|_| outcome.prompt_press) {
+            clicked = true;
+            cx.backend.keep_window_open(o.id);
+            if let Some(p) = self.prompt.as_mut() {
+                p.pressed(cx.overlay, o.id | REST_BIT);
+            }
         }
         // The bar's buttons.
         if let Some(button) = outcome.bar_press.map(|uv| self.panel.picture_uv(uv)).and_then(BarButton::at) {
@@ -406,12 +434,12 @@ impl Floating {
         if let Some(s) = self.strip.as_mut() {
             s.paint(cx.overlay, cx.presenter, outcome.strip_hover.and_then(|uv| strip::row_at(uv[1])), now);
         }
-        if let (Some(p), Some(face)) = (self.prompt.as_mut(), face.as_ref()) {
-            let left = match face {
-                prompt::Face::Talk(o) => o.left(now_ms),
-                prompt::Face::World(n) => n.left(crate::controller::explorer::now_ms()),
-            };
-            p.paint(cx.overlay, cx.presenter, face, outcome.prompt_hover, left);
+        if let (Some(p), Some(offer)) = (self.prompt.as_mut(), offer) {
+            p.paint(cx.overlay, cx.presenter, prompt::Face::Talk, outcome.prompt_hover, offer.left(now_ms));
+        } else if let (Some(p), Some(o)) = (self.prompt.as_mut(), rest) {
+            p.paint(cx.overlay, cx.presenter, prompt::Face::KeepOpen { seconds: o.seconds(now_ms) }, outcome.prompt_hover, o.left(now_ms));
+        } else if let (Some(p), Some(n)) = (self.prompt.as_mut(), notice.as_ref()) {
+            p.paint(cx.overlay, cx.presenter, prompt::Face::World { earns_one: n.earns == Some(1.0) }, outcome.prompt_hover, n.left(crate::controller::explorer::now_ms()));
         }
         turn.clicked = clicked;
         turn
@@ -490,17 +518,14 @@ mod tests {
         assert_eq!(notice_release(&mut down, Some(4), false, false, true, false), None, "input not read: nothing decided");
         assert_eq!(notice_release(&mut down, Some(4), false, false, true, true), Some(4), "let go on it");
         assert_eq!(notice_release(&mut down, Some(4), false, false, true, true), None, "once");
-        // Let go off it.
         notice_release(&mut down, Some(4), true, true, true, true);
-        assert_eq!(notice_release(&mut down, Some(4), false, false, false, true), None);
+        assert_eq!(notice_release(&mut down, Some(4), false, false, false, true), None, "let go off it");
         assert_eq!(down, None);
-        // The band went under the held trigger (a menu came up, its time ended), then came back: nothing.
         notice_release(&mut down, Some(4), true, true, true, true);
-        assert_eq!(notice_release(&mut down, None, false, true, false, true), None);
-        assert_eq!(notice_release(&mut down, Some(4), false, false, true, true), None);
-        // Another notice under the held trigger: nothing.
+        assert_eq!(notice_release(&mut down, None, false, true, false, true), None, "the band went under the trigger");
+        assert_eq!(notice_release(&mut down, Some(4), false, false, true, true), None, "and came back: nothing");
         notice_release(&mut down, Some(4), true, true, true, true);
-        assert_eq!(notice_release(&mut down, Some(5), false, false, true, true), None);
+        assert_eq!(notice_release(&mut down, Some(5), false, false, true, true), None, "another notice");
     }
 
     #[test]

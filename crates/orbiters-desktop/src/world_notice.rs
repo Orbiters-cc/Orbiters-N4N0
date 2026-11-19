@@ -15,7 +15,11 @@ use orbiters_ui::{icons, n4n0_logo};
 
 /// Its second line: what a picture here earns when the server said it, else the plain invitation.
 pub fn why(notice: &WorldNotice) -> &'static str {
-    if notice.earns == Some(1.0) {
+    why_of(notice.earns == Some(1.0))
+}
+
+fn why_of(earns_one: bool) -> &'static str {
+    if earns_one {
         tr(NOTICE_EARNS)
     } else {
         tr(NOTICE_WHY)
@@ -73,7 +77,7 @@ pub const VR_WIDTH_M: f32 = 0.27;
 
 /// The VR band's face: the mark and the two lines, then the whole-width "Take a 3D picture" (the whole band presses it),
 /// the line of time left. `hover`: a laser is on it.
-pub fn paint_vr(p: &Painter, notice: &WorldNotice, hover: bool, left: f32) {
+pub fn paint_vr(p: &Painter, earns_one: bool, hover: bool, left: f32) {
     let all = Rect::from_min_size(pos2(0.0, 0.0), vec2(VR_PX[0] as f32, VR_PX[1] as f32));
     let band = all.shrink(6.0);
     let radius = 36.0;
@@ -87,7 +91,7 @@ pub fn paint_vr(p: &Painter, notice: &WorldNotice, hover: bool, left: f32) {
     let title = tr(NOTICE_TITLE);
     let size = crate::mismatch::fitting(p, title, &[31.0, 28.0, 25.0, 23.0], room);
     widgets::text_truncated(p, pos2(words, band.top() + 42.0), Align2::LEFT_CENTER, &Txt::new(title, size).weight(weight::SEMIBOLD), room + 4.0);
-    let why = why(notice);
+    let why = why_of(earns_one);
     let size = crate::mismatch::fitting(p, why, &[22.0, 20.0, 18.0, 16.5], room);
     widgets::text_truncated(p, pos2(words, band.top() + 80.0), Align2::LEFT_CENTER, &Txt::new(why, size).color(theme::FG_3), room + 4.0);
     // The action, a pill across the band's foot.

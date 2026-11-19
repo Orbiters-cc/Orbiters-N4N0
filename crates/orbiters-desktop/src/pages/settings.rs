@@ -552,6 +552,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     apply |= widgets::toggle(ui, "reduce-motion", &mut draft.reduce_motion);
                 });
                 widgets::separator(ui);
+                // Minimised for long while VRChat runs, the window closes to the tray after a countdown (window_rest).
+                if vrchat_here {
+                    widgets::field(ui, crate::window_rest::setting_label(), Some(crate::window_rest::setting_hint()), 48.0, |ui| {
+                        apply |= widgets::toggle(ui, "close-minimized-window", &mut draft.close_minimized_window);
+                    });
+                    widgets::separator(ui);
+                }
                 if let Some(gpu) = cx.gpu.map(|g| &g.adapter).filter(|a| a.choice) {
                     let gpus = [
                         SegOption::new(WindowGpu::IntegratedGpu, tr("Integrated GPU")).hint(tr("The processor's GPU draws; the graphics card copies each frame to show it")),

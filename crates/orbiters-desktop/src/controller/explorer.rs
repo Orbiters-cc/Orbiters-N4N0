@@ -12,8 +12,9 @@
 //! The share buttons belong to one picture, named by [`Offer::id`]: a press says which picture it was for, and a press
 //! for another picture than the one offered now does nothing. A share is a Photos & captures job (the same upload
 //! records, preparation and server calls, through N4N0's menu's [`super::menu_shares`], which waits for the 3D view);
-//! it is said done only when Orbiters' answer shows it (`item.public`, the grants asked for), and what it earned is the
-//! member's points read before and after it.
+//! it is said done only when Orbiters' answer shows it (`item.public`, the grants asked for), and what it earned is what
+//! THAT answer says (its `explorer`, with the upload's for a picture uploaded by this share): reading the points before
+//! and after would count another share or a removal in between.
 
 use super::Shared;
 use crate::controller::shares::{Outcome, ShareJob};
@@ -267,13 +268,7 @@ impl Told {
 struct Asked {
     public: bool,
     people: Vec<String>,
-    /// Points before it (a public share), read when it was asked.
-    before: Option<Explorer>,
-    /// The picture was public before (it earns nothing again).
-    public_before: bool,
     since: Instant,
-    /// The result is being read (the points after it).
-    reading: bool,
 }
 
 /// What the explorer keeps between ticks.
@@ -380,7 +375,7 @@ impl super::Controller {
             }
         }
         // The offer: its shares, then its time.
-        self.explorer_follow_shares(&mut s, &snap, server);
+        self.explorer_follow_shares(&mut s, &snap);
         let status = self.explorer_status();
         if let Some(offer) = status.offer.as_ref() {
             let recording = snap.is_capturing();
@@ -400,7 +395,7 @@ impl super::Controller {
             s.points_at = None;
         } else if s.points_at.as_ref().is_none_or(|(at, who)| *who != account || at.elapsed() > POINTS_EVERY) {
             s.points_at = Some((now, account.clone()));
-            self.explorer_read_points(server, None);
+            self.explorer_read_points();
         }
     }
 
@@ -433,28 +428,13 @@ impl super::Controller {
     }
 
     /// Reads the member's points on a thread; with `then`, a public share's result for offer `then` is made from them.
-    fn explorer_read_points(self: &Shared, server: Server, then: Option<u64>) {
+    /// Reads the member's points on a thread (Settings' line; the share buttons say what a share's own answer said).
+    fn explorer_read_points(self: &Shared) {
         let ctl = self.clone();
         std::thread::spawn(move || {
-            let points = ctl.account_api().and_then(|(api, token)| api.explorer(&token).ok());
-            if let Some(p) = points.clone() {
-                ctl.update(|st| st.explorer.points = Some(p.clone()));
+            if let Some(p) = ctl.account_api().and_then(|(api, token)| api.explorer(&token).ok()) {
+                ctl.update(|st| st.explorer.points = Some(p));
             }
-            let Some(offer) = then else { return };
-            let mut s = ctl.explorer.lock().unwrap();
-            let Some(asked) = s.public.take() else { return };
-            let would = ctl.view().explorer.offer.as_ref().and_then(|o| o.would_earn);
-            let done = done_from(asked.before.as_ref(), points, would, asked.public_before);
-            drop(s);
-            let words = result_words(&done);
-            ctl.update(|st| {
-                if let Some(o) = st.explorer.offer.as_mut().filter(|o| o.id == offer) {
-                    o.public = Step::Done(done.clone());
-                    o.until_ms = now_ms() + RESULT_MS;
-                }
-            });
-            ctl.notify(super::NoticeKind::Success, words);
-            let _ = server;
         });
     }
 
@@ -521,7 +501,8 @@ impl super::Controller {
     fn explorer_share(self: &Shared, offer: u64, public: bool, recipients: Vec<(String, String)>, confirmed: bool) {
         let Some(o) = self.explorer_status().offer.filter(|o| o.id == offer) else { return };
         let step = if public { &o.public } else { &o.people };
-        if matches!(step, Step::Busy { .. }) || (public && matches!(step, Step::Done(_))) {
+        // One share of a picture at a time (N4N0's menu keeps one ask per capture); a public one done stays done.
+        if o.busy() || (public && matches!(step, Step::Done(_))) {
             return;
         }
         // Public and irreversible in practice: asked once, the first time.
@@ -551,8 +532,6 @@ impl super::Controller {
         let ctl = self.clone();
         let key = o.key.clone();
         std::thread::spawn(move || {
-            // The points before (a public share): what it earned is the difference.
-            let before = if public { ctl.account_api().and_then(|(api, token)| api.explorer(&token).ok()) } else { None };
             let ask = orbiters_n4n0_core::captures::ShareAsk {
                 key: key.clone(),
                 public,
@@ -560,10 +539,9 @@ impl super::Controller {
                 acknowledge_explicit: false,
                 ..Default::default()
             };
-            let public_before = false;
             match ctl.menu_capture_share(ask) {
                 Ok(()) => {
-                    let asked = Asked { public, people: recipients.iter().map(|r| r.0.clone()).collect(), before, public_before, since: Instant::now(), reading: false };
+                    let asked = Asked { public, people: recipients.iter().map(|r| r.0.clone()).collect(), since: Instant::now() };
                     let mut s = ctl.explorer.lock().unwrap();
                     if public {
                         s.public = Some(asked);
@@ -578,13 +556,10 @@ impl super::Controller {
 
     /// Where the offer's shares stand, from N4N0's menu's asks and Photos & captures' jobs; a share confirmed by Orbiters'
     /// answer only.
-    fn explorer_follow_shares(self: &Shared, s: &mut ExplorerState, snap: &crate::state::Snapshot, server: Server) {
+    fn explorer_follow_shares(self: &Shared, s: &mut ExplorerState, snap: &crate::state::Snapshot) {
         let Some(offer) = snap.explorer.offer.as_ref() else { return };
         for public in [true, false] {
             let Some(asked) = (if public { s.public.as_mut() } else { s.people.as_mut() }) else { continue };
-            if asked.reading {
-                continue;
-            }
             let state = self.menu_share_state(&offer.key);
             let step = match state {
                 Some(super::menu_shares::AskState::Waiting) => Step::Busy { making: true, sent: None },
@@ -597,18 +572,21 @@ impl super::Controller {
                         });
                         Step::Busy { making: false, sent }
                     }
-                    Some(ShareJob { outcome: Some(outcome), .. }) => verified(outcome, public, &asked.people),
+                    Some(ShareJob { outcome: Some(outcome), .. }) => verified(outcome, public, &asked.people, offer.would_earn),
                 },
                 None if asked.since.elapsed() < Duration::from_secs(10) => Step::Busy { making: false, sent: None },
                 None => Step::Failed(tr("The share did not start: try again from Photos & captures").into()),
             };
-            match step {
-                // A public share Orbiters confirmed: the points after it, then it is done.
-                Step::Done(_) if public => {
-                    asked.reading = true;
-                    self.explorer_read_points(server, Some(offer.id));
+            // A public share Orbiters confirmed: its points are the member's now, and a toast says what it earned (the
+            // buttons may be gone before it is read).
+            if let (true, Step::Done(done)) = (public, &step) {
+                if let Some(after) = done.after.clone() {
+                    self.update(|st| st.explorer.points = Some(after.clone()));
                 }
-                step => {
+                self.notify(super::NoticeKind::Success, result_words(done));
+            }
+            {
+                {
                     let finished = matches!(step, Step::Done(_) | Step::Failed(_) | Step::Explicit);
                     let id = offer.id;
                     self.update_if(|st| match st.explorer.offer.as_mut().filter(|o| o.id == id) {
@@ -640,12 +618,24 @@ impl super::Controller {
 
 /// What a share job's outcome is, believed only as far as Orbiters' answer shows it: public, its id there, the friends
 /// asked among its grants (verify-core 4: a 2xx without them is no success).
-pub fn verified(outcome: &Outcome, public: bool, people: &[String]) -> Step {
+pub fn verified(outcome: &Outcome, public: bool, people: &[String], would: Option<f64>) -> Step {
     use orbiters_core::shares::Shared;
     match outcome {
-        Outcome::Shared(Shared::Item { item }) if item.id != 0 && (!public || item.public) => {
+        Outcome::Shared(Shared::Item { item, explorer }) if item.id != 0 && (!public || item.public) => {
             let missing = people.iter().filter(|p| !item.grants.iter().any(|g| &g.vrchat_user_id == *p)).count();
-            if public || missing == 0 {
+            if public {
+                // What THIS share's answer says it earned; none when it says nothing (the share stands, said without points).
+                let mut done = Done { people: 0, earned: None, nothing: None, after: None, reached: None };
+                if let Some(e) = explorer.as_ref() {
+                    done.earned = e.earned.map(|x| (x * 2.0).round() / 2.0);
+                    done.after = Some(e.standing());
+                    done.reached = e.title_reached.clone();
+                    if done.earned == Some(0.0) {
+                        done.nothing = Some(why_nothing(would, false));
+                    }
+                }
+                Step::Done(done)
+            } else if missing == 0 {
                 Step::Done(Done { people: people.len() as u32, earned: None, nothing: None, after: None, reached: None })
             } else {
                 Step::Failed(tr("Orbiters did not confirm who sees it: look in Photos & captures").into())
@@ -657,22 +647,6 @@ pub fn verified(outcome: &Outcome, public: bool, people: &[String]) -> Step {
         Outcome::Failed { message, .. } => Step::Failed(message.clone()),
         _ => Step::Failed(tr("Orbiters did not confirm the share: look in Photos & captures").into()),
     }
-}
-
-/// A public share Orbiters confirmed, with the member's points read `before` it and `after` it (either may be missing:
-/// the share is done all the same, said without points), what the world's lookup said it `would` earn, and whether the
-/// picture was public `before`.
-pub fn done_from(before: Option<&Explorer>, after: Option<Explorer>, would: Option<f64>, public_before: bool) -> Done {
-    let mut done = Done { people: 0, earned: None, nothing: None, after: None, reached: None };
-    if let Some(after) = after.as_ref() {
-        done.earned = ex::earned(before, after);
-        done.reached = ex::title_reached(before, after);
-    }
-    if done.earned == Some(0.0) || (done.earned.is_none() && public_before) {
-        done.nothing = Some(why_nothing(would, public_before));
-    }
-    done.after = after;
-    done
 }
 
 /// Who is signed in, as the told worlds are kept by: empty when nobody.
@@ -819,12 +793,12 @@ mod tests {
     /// private, a grant missing, a request instead are no success.
     #[test]
     fn a_share_is_done_only_when_the_answer_shows_it() {
-        let done = |o: Outcome, public, people: &[&str]| verified(&o, public, &people.iter().map(|p| p.to_string()).collect::<Vec<_>>());
-        assert!(matches!(done(Outcome::Shared(Shared::Item { item: item(5, true, &[]) }), true, &[]), Step::Done(_)));
-        assert!(matches!(done(Outcome::Shared(Shared::Item { item: item(0, true, &[]) }), true, &[]), Step::Failed(_)), "{{\"item\":{{}}}}");
-        assert!(matches!(done(Outcome::Shared(Shared::Item { item: item(5, false, &[]) }), true, &[]), Step::Failed(_)), "not public");
-        assert!(matches!(done(Outcome::Shared(Shared::Item { item: item(5, false, &["usr_a", "usr_b"]) }), false, &["usr_a", "usr_b"]), Step::Done(Done { people: 2, .. })));
-        assert!(matches!(done(Outcome::Shared(Shared::Item { item: item(5, false, &["usr_a"]) }), false, &["usr_a", "usr_b"]), Step::Failed(_)), "a grant missing");
+        let done = |o: Outcome, public, people: &[&str]| verified(&o, public, &people.iter().map(|p| p.to_string()).collect::<Vec<_>>(), Some(1.0));
+        assert!(matches!(done(Outcome::Shared(Shared::Item { explorer: None, item: item(5, true, &[]) }), true, &[]), Step::Done(_)));
+        assert!(matches!(done(Outcome::Shared(Shared::Item { explorer: None, item: item(0, true, &[]) }), true, &[]), Step::Failed(_)), "{{\"item\":{{}}}}");
+        assert!(matches!(done(Outcome::Shared(Shared::Item { explorer: None, item: item(5, false, &[]) }), true, &[]), Step::Failed(_)), "not public");
+        assert!(matches!(done(Outcome::Shared(Shared::Item { explorer: None, item: item(5, false, &["usr_a", "usr_b"]) }), false, &["usr_a", "usr_b"]), Step::Done(Done { people: 2, .. })));
+        assert!(matches!(done(Outcome::Shared(Shared::Item { explorer: None, item: item(5, false, &["usr_a"]) }), false, &["usr_a", "usr_b"]), Step::Failed(_)), "a grant missing");
         assert!(matches!(done(Outcome::Shared(Shared::Request { request: ShareRequest::default() }), true, &[]), Step::Failed(_)));
         assert_eq!(done(Outcome::Failed { message: "Sign in".into(), explicit: false }, true, &[]), Step::Failed("Sign in".into()));
         assert_eq!(done(Outcome::Failed { message: String::new(), explicit: true }, true, &[]), Step::Explicit);
@@ -837,15 +811,23 @@ mod tests {
         let api = orbiters_core::account::Api::at(&format!("http://{}", listener.local_addr().unwrap()));
         std::thread::spawn(move || {
             for (status, body) in answers {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut buf = [0u8; 4096];
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
                 let mut got = Vec::new();
-                while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                // The head, then the body its length says.
+                loop {
                     let n = stream.read(&mut buf).unwrap_or(0);
                     if n == 0 {
                         break;
                     }
                     got.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&got).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                        if got.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
                 }
                 let reply = format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 let _ = stream.write_all(reply.as_bytes());
@@ -854,56 +836,60 @@ mod tests {
         api
     }
 
-    const TITLES: &str = r#"[{"key":"explorer","points":10,"name":"Explorer"},{"key":"navigator","points":50,"name":"Navigator"},{"key":"discoverer","points":100,"name":"Discoverer"},{"key":"marcoPolo","points":500,"name":"Marco polo"},{"key":"multiverseTraveler","points":1000,"name":"Multiverse traveler"}]"#;
+    const ITEM: &str = r#"{"type":"capture","id":5,"public":true,"mine":true,"canShare":true,"grants":[],"world":{"id":"wrld_x","name":"W"},"owner":{"id":1,"name":"o"},"createdAt":"2026-11-19T00:00:00Z"}"#;
 
-    fn answer(half: i64, title: Option<(&str, u32)>, next: Option<(&str, u32)>) -> &'static str {
-        let points = half as f64 / 2.0;
-        let title = title.map_or("null".to_string(), |(k, p)| format!(r#"{{"key":"{k}","points":{p},"name":"{k}"}}"#));
-        let next = next.map_or("null".to_string(), |(k, p)| format!(r#"{{"key":"{k}","points":{p},"name":"{k}","remaining":{}}}"#, p as f64 - points));
-        Box::leak(format!(r#"{{"points":{points},"halfPoints":{half},"title":{title},"next":{next},"titles":{TITLES}}}"#).into_boxed_str())
+    fn answer(item: &str, explorer: Option<(i64, i64, Option<i64>, Option<&str>, Option<(&str, u32)>)>) -> &'static str {
+        let explorer = explorer.map_or("null".to_string(), |(half, earned_half, before_half, reached, next)| {
+            let points = half as f64 / 2.0;
+            let title = if points >= 10.0 { r#"{"key":"explorer","points":10,"name":"Explorer"}"# } else { "null" };
+            let reached = reached.map_or("null".to_string(), |k| format!(r#"{{"key":"{k}","points":10,"name":"{k}"}}"#));
+            let next = next.map_or("null".to_string(), |(k, p)| format!(r#"{{"key":"{k}","points":{p},"name":"{k}","remaining":{}}}"#, p as f64 - points));
+            let before = before_half.map_or("null".to_string(), |b| (b as f64 / 2.0).to_string());
+            format!(r#"{{"points":{points},"halfPoints":{half},"title":{title},"next":{next},"titles":[],"before":{before},"earned":{},"titleReached":{reached}}}"#, earned_half as f64 / 2.0)
+        });
+        Box::leak(format!(r#"{{"item":{item},"explorer":{explorer}}}"#).into_boxed_str())
     }
 
-    /// A public share's result from the points before and after it, read from a server: a first picture of a world
-    /// reaching Explorer, a second one's half point, a world with three, a total below zero, the points not readable
-    /// after (the share stands, said without points).
+    fn share(api: &orbiters_core::account::Api) -> anyhow::Result<Shared> {
+        let request = orbiters_core::shares::Share { public: true, recipients: Vec::new(), acknowledge_explicit: false, message: String::new() };
+        api.share_capture("t", orbiters_core::shares::Kind::Capture, 5, &request)
+    }
+
+    /// What a public share earned is what ITS answer says, against a server: a first picture of a world reaching
+    /// Explorer, a half point, a world with three (nothing, and why), a total below zero, an answer whose points could not
+    /// be read (done, said without points), a refusal, an empty 2xx.
     #[test]
-    fn what_a_public_share_earned_is_read_from_the_points_before_and_after() {
+    fn a_public_share_says_what_its_own_answer_earned() {
         let api = serve(vec![
-            (200, answer(19, None, Some(("explorer", 10)))),
-            (200, answer(21, Some(("explorer", 10)), Some(("navigator", 50)))),
-            (200, answer(24, Some(("explorer", 10)), Some(("navigator", 50)))),
-            (200, answer(25, Some(("explorer", 10)), Some(("navigator", 50)))),
-            (200, answer(-2, None, Some(("explorer", 10)))),
-            (200, answer(-2, None, Some(("explorer", 10)))),
-            (500, r#"{"error":"down"}"#),
+            (200, answer(ITEM, Some((21, 2, Some(19), Some("explorer"), Some(("navigator", 50)))))),
+            (200, answer(ITEM, Some((25, 1, Some(24), None, Some(("navigator", 50)))))),
+            (200, answer(ITEM, Some((-2, 0, Some(-2), None, Some(("explorer", 10)))))),
+            (200, answer(ITEM, None)),
+            (403, r#"{"error":"Sign in to Orbiters in Settings first."}"#),
+            (200, r#"{"item":{}}"#),
         ]);
-        let read = || api.explorer("t").ok();
-        // 9.5 -> 10.5: +1 and the first title.
-        let (before, after) = (read(), read());
-        let first = done_from(before.as_ref(), after, Some(1.0), false);
-        assert_eq!((first.earned, first.reached.as_ref().map(|t| t.key.as_str()), first.nothing), (Some(1.0), Some("explorer"), None));
-        // 12 -> 12.5: half a point, no new title.
-        let (before, after) = (read(), read());
-        let second = done_from(before.as_ref(), after, Some(0.5), false);
-        assert_eq!((second.earned, second.reached.is_none()), (Some(0.5), true));
-        // -1 -> -1 in a world with three: nothing, and why.
-        let (before, after) = (read(), read());
-        let full = done_from(before.as_ref(), after, Some(0.0), false);
-        assert_eq!((full.earned, full.nothing), (Some(0.0), Some(Nothing::WorldHasThree)));
-        assert_eq!(full.after.as_ref().map(|a| a.points), Some(-1.0));
-        // The points after could not be read: done, without points.
-        let gone = done_from(full.after.as_ref(), read(), Some(1.0), false);
-        assert_eq!((gone.earned, gone.after.is_none(), gone.nothing), (None, true, None));
-        // A picture public before earns nothing again, said so.
-        let again = done_from(None, None, Some(1.0), true);
-        assert_eq!(again.nothing, Some(Nothing::SharedBefore));
-        assert_eq!(why_nothing(Some(1.0), false), Nothing::Unknown, "nothing earned without a known reason: said plainly");
+        let step = |r: anyhow::Result<Shared>, would| match r {
+            Ok(shared) => verified(&Outcome::Shared(shared), true, &[], would),
+            Err(e) => verified(&Outcome::Failed { message: e.to_string(), explicit: false }, true, &[], would),
+        };
+        let Step::Done(first) = step(share(&api), Some(1.0)) else { panic!("first") };
+        assert_eq!((first.earned, first.reached.as_ref().map(|t| t.key.as_str()), first.after.as_ref().map(|a| a.points)), (Some(1.0), Some("explorer"), Some(10.5)));
+        let Step::Done(half) = step(share(&api), Some(0.5)) else { panic!("half") };
+        assert_eq!((half.earned, half.reached.is_none(), half.nothing), (Some(0.5), true, None));
+        let Step::Done(full) = step(share(&api), Some(0.0)) else { panic!("full") };
+        assert_eq!((full.earned, full.nothing, full.after.as_ref().map(|a| a.points)), (Some(0.0), Some(Nothing::WorldHasThree), Some(-1.0)));
+        let Step::Done(unread) = step(share(&api), Some(1.0)) else { panic!("unread") };
+        assert_eq!((unread.earned, unread.after.is_none(), unread.nothing), (None, true, None));
+        assert_eq!(step(share(&api), Some(1.0)), Step::Failed("Sign in to Orbiters in Settings first.".into()));
+        assert!(matches!(step(share(&api), Some(1.0)), Step::Failed(_)), "an empty answer is no success");
         orbiters_i18n::in_language(orbiters_i18n::Language::En, || {
             assert_eq!(result_words(&first), "Shared publicly · +1 Explorer point · New title: Explorer");
-            assert_eq!(result_words(&second), "Shared publicly · +0.5 Explorer points · 12.5 points · 37.5 to Navigator");
+            assert_eq!(result_words(&half), "Shared publicly · +0.5 Explorer points · 12.5 points · 37.5 to Navigator");
             assert_eq!(result_words(&full), "Shared publicly · No points: this world already has three public 3D pictures · -1 points · 11 to Explorer");
-            assert_eq!(result_words(&gone), "Shared publicly");
+            assert_eq!(result_words(&unread), "Shared publicly");
         });
+        assert_eq!(why_nothing(Some(1.0), false), Nothing::Unknown, "nothing earned without a known reason: said plainly");
+        assert_eq!(why_nothing(Some(1.0), true), Nothing::SharedBefore);
     }
 
     #[test]

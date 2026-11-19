@@ -258,7 +258,13 @@ pub struct ItemAnswer {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Shared {
-    Item { item: Item },
+    /// Its item as it is now; for its owner's public share, what it earned (contract `night-1119/explorer-contract.md`,
+    /// section 3; none from a server that does not say, or when the points could not be read: the share stands).
+    Item {
+        item: Item,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explorer: Option<crate::explorer::Outcome>,
+    },
     Request { request: ShareRequest },
 }
 #[derive(Clone, Debug, Default)]
@@ -435,7 +441,7 @@ impl Api {
             tr("Choose at most 50 people and a message of at most 280 characters.")
         );
         let r = self.agent().post(&self.url(&format!("{}/share", path(kind, id)))).header("Authorization", &format!("Bearer {token}")).send_json(share)?;
-        json_done(r, || Ok(Shared::Item { item: self.capture_item(token, kind, id)? }))
+        json_done(r, || Ok(Shared::Item { explorer: None, item: self.capture_item(token, kind, id)? }))
     }
     pub fn unshare_capture(&self, token: &str, kind: Kind, id: u64, unshare: &Unshare) -> anyhow::Result<Item> {
         #[derive(Deserialize)]

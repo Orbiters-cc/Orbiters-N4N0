@@ -10,7 +10,7 @@
 //! shared on the Map explorer like any reconstructed session, and is not reconstructed again. Files the capture did not
 //! write (something the person put in the folder) are left where they are.
 
-use crate::contracts::manifest::{DEPTH_DIR, KEYFRAMES_DIR, MANIFEST_FILE, RAW_DEPTH_DIR};
+use crate::contracts::manifest::{DEPTH_DIR, FRAMES_FILE, KEYFRAMES_DIR, MANIFEST_FILE, RAW_DEPTH_DIR, THUMBNAIL_FILE};
 use crate::contracts::performance as perf;
 use crate::reconstruction;
 use orbiters_i18n::tr;
@@ -52,10 +52,18 @@ const PERFORMANCE: [&str; 8] = [
     perf::SKELETON_FILE,
 ];
 
+/// What a 3D view reads in its session folder: never a capture file, whatever the manifest names as its video.
+const VIEW_FILES: [&str; 6] =
+    [MANIFEST_FILE, FRAMES_FILE, THUMBNAIL_FILE, crate::bundle::PICTURE_THUMBNAIL_FILE, reconstruction::DIR, reconstruction::OLD_DIR];
+
 /// The part of the capture `name` (an entry of a session folder) is, or `None` for what the 3D view needs and for what
-/// the capture did not write. `video` is the manifest's `capture.video`, taken only as a file of the folder itself;
+/// the capture did not write. `video` is the manifest's `capture.video`, taken only as a file of the folder itself and
+/// never for one of the view's own entries;
 /// `result_in_place`: the latest result is in `reconstruction/` (else `reconstruction.old/` holds it, and stays).
 pub fn capture_part(name: &str, video: Option<&str>, result_in_place: bool) -> Option<Part> {
+    if VIEW_FILES.iter().any(|v| v.eq_ignore_ascii_case(name)) && !(name == reconstruction::OLD_DIR && result_in_place) {
+        return None;
+    }
     match name {
         KEYFRAMES_DIR | KEYFRAMES_GOING => Some(Part::Keyframes),
         DEPTH_DIR | RAW_DEPTH_DIR => Some(Part::Depth),
@@ -92,11 +100,21 @@ pub fn measure(dir: &Path, video: Option<&str>) -> Sizes {
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let bytes = entry_size(&e);
         sizes.total += bytes;
-        if capture_part(&e.file_name().to_string_lossy(), video, in_place).is_some() {
+        if entry_part(&e, video, in_place).is_some() {
             sizes.capture += bytes;
         }
     }
     sizes
+}
+
+/// [`capture_part`] of a folder entry, where the video counts only as a file (or a link, removed as one): a folder the
+/// manifest names as its video is not taken for it.
+fn entry_part(e: &std::fs::DirEntry, video: Option<&str>, in_place: bool) -> Option<Part> {
+    let part = capture_part(&e.file_name().to_string_lossy(), video, in_place)?;
+    if part == Part::Video && !std::fs::symlink_metadata(e.path()).is_ok_and(|m| !m.is_dir()) {
+        return None;
+    }
+    Some(part)
 }
 
 fn entry_size(e: &std::fs::DirEntry) -> u64 {
@@ -126,7 +144,7 @@ pub fn capture_files(dir: &Path) -> Vec<Entry> {
         .flatten()
         .flatten()
         .filter_map(|e| {
-            let part = capture_part(&e.file_name().to_string_lossy(), video.as_deref(), in_place)?;
+            let part = entry_part(&e, video.as_deref(), in_place)?;
             let (bytes, files) = match e.metadata() {
                 Ok(m) if m.is_dir() => count(&e.path()),
                 Ok(m) => (m.len(), 1),
@@ -175,25 +193,7 @@ pub fn trimmed(dir: &Path) -> bool {
 /// goes as it goes. Refused for a session without a finished reconstruction: nothing would be left to see. Returns
 /// the bytes freed; on an error, what went before it stays gone.
 pub fn keep_only_view(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<u64> {
-    anyhow::ensure!(dir.join(MANIFEST_FILE).is_file(), "{}", tr!("{path} is not a session folder.", path = dir.display()));
-    anyhow::ensure!(has_view(dir), "{}", tr("This session has no 3D view to keep: reconstruct it first."));
-    let mut total = 0;
-    let result = (|| {
-        let (keyframes, going) = (dir.join(KEYFRAMES_DIR), dir.join(KEYFRAMES_GOING));
-        if keyframes.is_dir() {
-            // What a deletion cut short left there goes first, to make room.
-            if std::fs::symlink_metadata(&going).is_ok() {
-                total += remove(&going, freed)?;
-            }
-            crate::rename_retrying(&keyframes, &going)?;
-        }
-        for e in capture_files(dir) {
-            total += remove(&e.path, freed)?;
-        }
-        Ok(())
-    })();
-    crate::bundle::forget_sizes(dir);
-    result.map(|()| total)
+    trim(dir, &|_| true, freed)
 }
 
 /// Deletes for good only a reconstructed session's recording that training read and nothing else does: its keyframes, its
@@ -202,24 +202,63 @@ pub fn keep_only_view(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<
 /// gives a share its start view's ground and eye height (`views::eye_level`), so a capture shared after this is the capture
 /// shared before it. It can no longer be reconstructed again. Refused without a finished reconstruction.
 pub fn drop_recording(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<u64> {
+    trim(dir, &|part| matches!(part, Part::Keyframes | Part::Depth | Part::Leftovers), freed)
+}
+
+/// Deletes the capture files of `dir` whose part `takes`, keeping its 3D view. The whole list is made and checked
+/// before anything moves ([`check_plan`]): nothing goes when one entry is, holds or lies inside what the view reads.
+fn trim(dir: &Path, takes: &dyn Fn(Part) -> bool, freed: &mut dyn FnMut(u64)) -> anyhow::Result<u64> {
     anyhow::ensure!(dir.join(MANIFEST_FILE).is_file(), "{}", tr!("{path} is not a session folder.", path = dir.display()));
     anyhow::ensure!(has_view(dir), "{}", tr("This session has no 3D view to keep: reconstruct it first."));
+    let (keyframes, going) = (dir.join(KEYFRAMES_DIR), dir.join(KEYFRAMES_GOING));
+    let plan: Vec<PathBuf> = capture_files(dir).into_iter().filter(|e| takes(e.part)).map(|e| e.path).collect();
+    check_plan(dir, &plan)?;
     let mut total = 0;
     let result = (|| {
-        let (keyframes, going) = (dir.join(KEYFRAMES_DIR), dir.join(KEYFRAMES_GOING));
         if keyframes.is_dir() {
+            // What a deletion cut short left there goes first, to make room.
             if std::fs::symlink_metadata(&going).is_ok() {
                 total += remove(&going, freed)?;
             }
             crate::rename_retrying(&keyframes, &going)?;
         }
-        for e in capture_files(dir).into_iter().filter(|e| matches!(e.part, Part::Keyframes | Part::Depth | Part::Leftovers)) {
-            total += remove(&e.path, freed)?;
+        for path in &plan {
+            // The keyframes are deleted from where they wait; a leftover `keyframes.deleting` went above.
+            let path = if *path == keyframes { &going } else { path };
+            if std::fs::symlink_metadata(path).is_ok() {
+                total += remove(path, freed)?;
+            }
         }
         Ok(())
     })();
     crate::bundle::forget_sizes(dir);
     result.map(|()| total)
+}
+
+/// Refuses a deletion `plan` (entries of the session folder `dir`) when an entry is, holds or lies inside one of the
+/// paths the 3D view reads (its result, manifest, frame records, thumbnails), compared as resolved paths: whatever the
+/// manifest names and whatever links the folder holds, the view a trim promises to keep is never on the list.
+fn check_plan(dir: &Path, plan: &[PathBuf]) -> anyhow::Result<()> {
+    let view = reconstruction::result_dir(dir);
+    let mut kept: Vec<PathBuf> = [view.clone(), view.join(reconstruction::PLY_FILE), view.join(reconstruction::REPORT_FILE)]
+        .into_iter()
+        .chain([MANIFEST_FILE, FRAMES_FILE, THUMBNAIL_FILE, crate::bundle::PICTURE_THUMBNAIL_FILE].map(|f| dir.join(f)))
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .collect();
+    kept.sort();
+    kept.dedup();
+    anyhow::ensure!(kept.iter().any(|k| k.ends_with(reconstruction::PLY_FILE)), "{}", tr("This session has no 3D view to keep: reconstruct it first."));
+    for path in plan {
+        // Where the entry itself is (its folder resolved, a link not followed) and, when it resolves, what it leads to.
+        let at = std::fs::canonicalize(dir)?.join(path.file_name().unwrap_or_default());
+        let leads = std::fs::canonicalize(path).ok();
+        for p in std::iter::once(&at).chain(leads.as_ref()) {
+            if let Some(k) = kept.iter().find(|k| k.starts_with(p) || p.starts_with(k)) {
+                anyhow::bail!("{}", tr!("Nothing was deleted: {path} is part of the 3D view.", path = k.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Deletes a whole session folder for good, the biggest parts first; `freed` as for [`keep_only_view`]. Refused for a
@@ -487,6 +526,81 @@ mod tests {
         for video in ["../colour.mkv", "sub/colour.mkv", "C:/colour.mkv", "/colour.mkv", ".."] {
             assert_eq!(capture_part("colour.mkv", Some(video), true), None, "{video}");
         }
+    }
+
+    /// The manifest of `dir` names `video` as its capture's video.
+    fn name_video(dir: &Path, video: &str) {
+        let mut manifest = bundle::read_manifest(dir).unwrap();
+        manifest.capture.video = Some(video.into());
+        fs::write(dir.join(MANIFEST_FILE), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    }
+
+    /// AS-15: a manifest naming the view's own folder (or file) as its video never puts it on the list: the trim deletes
+    /// the capture and the reconstruction, its splats and report stay whole.
+    #[test]
+    fn a_video_named_as_the_view_is_never_deleted() {
+        for video in ["reconstruction", "Reconstruction", "manifest.json", "frames.bin", "thumbnail.qoi", "thumbnail-picture-v2.qoi"] {
+            let (root, dir) = session("as15", true);
+            name_video(&dir, video);
+            let before = bundle::folder_size(&dir.join("reconstruction"));
+            assert!(capture_files(&dir).iter().all(|e| e.part != Part::Video), "{video}");
+            keep_only_view(&dir, &mut |_| {}).unwrap();
+            assert_eq!(bundle::folder_size(&dir.join("reconstruction")), before, "{video}");
+            assert!(has_view(&dir) && dir.join(MANIFEST_FILE).is_file() && dir.join(THUMBNAIL_FILE).is_file(), "{video}");
+            assert!(!dir.join("keyframes").exists() && !dir.join("depth").exists(), "{video}: the capture still goes");
+            fs::remove_dir_all(&root).ok();
+        }
+        // The previous result is the view while the latest is not in place: never the video either.
+        let (root, dir) = session("as15-old", true);
+        fs::remove_dir_all(dir.join("reconstruction")).unwrap();
+        fs::write(dir.join("reconstruction.old/report.json"), "{}").unwrap();
+        name_video(&dir, "reconstruction.old");
+        drop_recording(&dir, &mut |_| {}).unwrap();
+        assert!(dir.join("reconstruction.old/splats.ply").is_file() && has_view(&dir));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A video is a file: a folder the manifest names (the person's own) is not taken for it, nor counted as capture.
+    #[test]
+    fn a_folder_named_as_the_video_is_not_the_video() {
+        let (root, dir) = session("as15-folder", true);
+        fs::create_dir_all(dir.join("mine")).unwrap();
+        fs::write(dir.join("mine/photo.png"), b"mine").unwrap();
+        name_video(&dir, "mine");
+        let capture = measure(&dir, Some("mine")).capture;
+        assert_eq!(capture, CAPTURE - 5000 + 900 + 1500, "the folder is not counted, nor colour.mkv any more");
+        keep_only_view(&dir, &mut |_| {}).unwrap();
+        assert!(dir.join("mine/photo.png").is_file());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A capture entry that leads into the view (a link or junction to the reconstruction) refuses the whole trim before
+    /// anything moves: the keyframes are still in place and the view whole.
+    #[test]
+    fn a_plan_that_reaches_the_view_deletes_nothing() {
+        let (root, dir) = session("as15-link", true);
+        fs::remove_dir_all(dir.join("audio")).unwrap();
+        let target = dir.join("reconstruction");
+        #[cfg(windows)]
+        let linked = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(dir.join("audio")).arg(&target).output().is_ok_and(|o| o.status.success());
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&target, dir.join("audio")).is_ok();
+        if !linked {
+            eprintln!("no link could be made here: test skipped");
+            fs::remove_dir_all(&root).ok();
+            return;
+        }
+        let before = bundle::folder_size(&target);
+        let err = keep_only_view(&dir, &mut |_| {}).unwrap_err().to_string();
+        assert!(err.starts_with("Nothing was deleted"), "{err}");
+        assert!(dir.join("keyframes").is_dir() && !dir.join(KEYFRAMES_GOING).exists(), "nothing moved");
+        assert!(dir.join("depth").is_dir() && dir.join("colour.mkv").is_file());
+        assert_eq!(bundle::folder_size(&target), before);
+        assert!(drop_recording(&dir, &mut |_| {}).is_ok(), "the link is not on drop_recording's list");
+        assert!(has_view(&dir) && bundle::folder_size(&target) == before);
+        // The junction alone (never what it leads to), then the rest.
+        fs::remove_dir(dir.join("audio")).or_else(|_| fs::remove_file(dir.join("audio"))).ok();
+        fs::remove_dir_all(&root).ok();
     }
 
     /// A link in the capture's folders goes as a link: what it points at stays.

@@ -170,14 +170,32 @@ impl Default for ExportOptions {
     }
 }
 
+/// The image sizes of `sizes`, each once, in their first order.
+fn distinct_sizes(sizes: impl IntoIterator<Item = (u32, u32)>) -> Vec<(u32, u32)> {
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    for size in sizes {
+        if !out.contains(&size) {
+            out.push(size);
+        }
+    }
+    out
+}
+
+/// An all-ones loss mask for every image size of `sizes`, written once a size (RECONSTRUCT-8): every camera of a session
+/// has the same size, and each write stages its own copy until the next submit (530 MB for 256 cameras at 960×540).
+fn full_masks(gpu: &mut Gpu, sizes: impl IntoIterator<Item = (u32, u32)>) -> anyhow::Result<()> {
+    for (w, h) in distinct_sizes(sizes) {
+        gpu.set_mask(w, h, &vec![1.0; (w * h) as usize])?;
+    }
+    Ok(())
+}
+
 /// Each splat's score for [`Rank`] (higher is kept first). Contribution needs the GPU; without one it falls back to area.
 pub fn rank(g: &Gaussians, cameras: &[Camera], gpu: Option<&mut Gpu>, rank: Rank) -> anyhow::Result<Vec<f32>> {
     match (rank, gpu) {
         (Rank::Contribution, Some(gpu)) if !cameras.is_empty() => {
             gpu.upload(g);
-            for c in cameras {
-                gpu.set_mask(c.width, c.height, &vec![1.0; (c.width * c.height) as usize])?;
-            }
+            full_masks(gpu, cameras.iter().map(|c| (c.width, c.height)))?;
             let sums = gpu.contribution(cameras, [0.0; 3])?;
             // Splats no camera sees keep their area order, behind every seen one.
             let area = tree::importances(g);
@@ -314,9 +332,7 @@ fn refit(
     let base = learning_rates(cameras);
     // Appearance only: the splats stay where they are, as they are shaped.
     let base = if appearance_only { LearningRates { means: 0.0, log_scales: 0.0, rotations: 0.0, ..base } } else { base };
-    for (c, _) in train.iter().chain(check) {
-        gpu.set_mask(c.width, c.height, &vec![1.0; (c.width * c.height) as usize])?;
-    }
+    full_masks(gpu, train.iter().chain(check).map(|(c, _)| (c.width, c.height)))?;
     let mean_score = |gpu: &mut Gpu, views: &Views| -> anyhow::Result<f32> {
         Ok(views.iter().map(|(c, t)| gpu.score(c, [0.0; 3], t)).collect::<anyhow::Result<Vec<f32>>>()?.iter().sum::<f32>() / views.len() as f32)
     };
@@ -769,9 +785,7 @@ fn tune_for(
         }
         gpu.upload(&cut);
         gpu.step = 0;
-        for v in &views {
-            gpu.set_mask(v.width, v.height, &vec![1.0; (v.width * v.height) as usize])?;
-        }
+        full_masks(gpu, views.iter().map(|v| (v.width, v.height)))?;
         let mean_score = |gpu: &mut Gpu| -> anyhow::Result<f32> {
             Ok(views.iter().zip(&targets).map(|(v, t)| gpu.score(v, [0.0; 3], t)).collect::<anyhow::Result<Vec<f32>>>()?.iter().sum::<f32>()
                 / views.len() as f32)
@@ -833,6 +847,14 @@ fn tune_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RECONSTRUCT-8: one mask a size, whatever the number of cameras; every size kept, in order.
+    #[test]
+    fn a_full_mask_is_written_once_a_size() {
+        assert_eq!(distinct_sizes(std::iter::repeat_n((960, 540), 256)), [(960, 540)]);
+        assert_eq!(distinct_sizes([(960, 540), (480, 270), (960, 540), (1920, 1080), (480, 270)]), [(960, 540), (480, 270), (1920, 1080)]);
+        assert!(distinct_sizes([]).is_empty());
+    }
 
     fn cloud(n: usize) -> Gaussians {
         let mut g = Gaussians::default();

@@ -82,6 +82,40 @@ pub struct Report {
     /// "nothing there" was taken as unknown, and the result comes from colour alone.
     #[serde(default)]
     pub depth_blind: bool,
+    /// What waiting for VRChat's frames cost the run since its worker last started (a run resumed after a pause counts
+    /// from there); `None` when nothing paced it. Kept so that a slow run explains itself (RECONSTRUCT-10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pacing: Option<Pacing>,
+    /// Graphics memory when the run sized itself (RECONSTRUCT-17); `None` where it was not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemorySeen>,
+}
+
+/// Graphics memory as a run saw it when it sized itself, MB: what the driver let this process still take (the figure
+/// the budget and the keyframes were decided from), what every process together held on the adapter (Windows' own
+/// count), and the adapter's largest device-local heap. Each `None` where it could not be read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemorySeen {
+    pub headroom_mb: Option<u64>,
+    pub adapter_used_mb: Option<u64>,
+    pub heap_mb: Option<u64>,
+}
+
+/// How training was paced beside VRChat (orbiters_reconstruct::governor), for whoever reads a slow run's report.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Pacing {
+    /// Paced by SteamVR's frame timing ("vr"), resting beside VRChat on the desktop ("desktop"), or both in turn.
+    pub mode: String,
+    /// Seconds spent waiting or resting, and the longest single wait.
+    pub waited_s: f32,
+    pub longest_wait_s: f32,
+    /// Looks at the headset's frames that found too little idle time, back-offs after a late frame, and waits a pause
+    /// cut short.
+    pub waits: u32,
+    pub backoffs: u32,
+    pub cut_by_pause: u32,
 }
 
 /// What taking the wearer out did: numbers for the gallery's line and for whoever checks it.

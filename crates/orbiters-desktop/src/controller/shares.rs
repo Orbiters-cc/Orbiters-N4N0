@@ -1039,10 +1039,13 @@ fn share_with(
         let uploaded: Uploaded = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("{}", tr("No local file to upload")))? {
             Local::Session(dir) => {
                 report(Stage::Preparing);
-                let super::maps::Prepared { files, sky, metadata: view, generation } = prepare(dir)?;
+                let prepared = prepare(dir)?;
                 // The picture only when drawn for these edits (capture_picture), and the edits still those prepared.
                 let picture = crate::capture_picture::jpeg(dir);
-                anyhow::ensure!(edits_now(entry)?.as_deref() == Some(generation.as_str()), "{}", tr("Its splat edits changed while it was being prepared: share it again."));
+                anyhow::ensure!(edits_now(entry)?.as_deref() == Some(prepared.generation.as_str()), "{}", tr("Its splat edits changed while it was being prepared: share it again."));
+                // Every part of the one result they were made from (CHALLENGER-C1).
+                prepared.ensure_current(dir)?;
+                let super::maps::Prepared { files, sky, metadata: view, generation, .. } = prepared;
                 sent_edits = Some(generation);
                 step(steps, "prepared", &mut at);
                 let bytes = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
@@ -1239,14 +1242,17 @@ fn update_with(
     let revision = current.capture.as_ref().map_or(1, shares::Capture::revision);
     step(steps, "asked Orbiters", &mut at); // i18n: not shown
     report(Stage::Preparing);
-    let super::maps::Prepared { files, sky, metadata, generation } = prepare(dir)?;
+    let prepared = prepare(dir)?;
     // The picture only when drawn for these edits (capture_picture), and the edits still those prepared.
     let picture = crate::capture_picture::jpeg(dir);
     anyhow::ensure!(
-        edits_now(entry)?.as_deref() == Some(generation.as_str()),
+        edits_now(entry)?.as_deref() == Some(prepared.generation.as_str()),
         "{}",
         tr("Its splat edits changed while it was being prepared: update it again once they are done.")
     );
+    // Every part of the one result they were made from (CHALLENGER-C1).
+    prepared.ensure_current(dir)?;
+    let super::maps::Prepared { files, sky, metadata, generation, .. } = prepared;
     step(steps, "prepared", &mut at);
     let bytes = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1567,6 +1573,7 @@ pub(crate) mod tests {
             sky: None,
             metadata: serde_json::json!({ "view": { "position": [0.0, 1.6, 0.0], "target": [0.0, 1.6, -4.0] }, "quality": 31.5 }),
             generation,
+            identity: crate::upload_prep::ResultIdentity::read(session),
         })
     }
 
@@ -1760,6 +1767,28 @@ pub(crate) mod tests {
         let (item, _) = update_with(&api, "token", records, &entry, &|_| {}, &mut steps, &prepared).unwrap();
         assert_eq!(item.capture.map(|c| c.revision), Some(2));
         assert!(steps.iter().any(|s| s.contains("record could not be saved")), "{steps:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// CHALLENGER-C1: reconstructed again (unedited before and after) while its files were made: not sent, since the
+    /// trees would be the old result's and the picture the new one's.
+    #[test]
+    fn a_result_replaced_while_prepared_is_not_sent() {
+        let (dir, _session, records, mut entry) = uploaded_session("replaced", None);
+        entry.edits = Some(Ok(orbiters_reconstruct::edit::UNEDITED.into()));
+        let (api, seen) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 1))]);
+        let replaced = |s: &Path| {
+            let made = prepared(s);
+            let result = orbiters_core::reconstruction::result_dir(s);
+            std::fs::write(result.join(orbiters_core::reconstruction::REPORT_FILE), br#"{"created_utc":"a newer run"}"#).unwrap();
+            made
+        };
+        let refused = update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &replaced).unwrap_err().to_string();
+        assert!(refused.contains("reconstructed again while it was being prepared"), "{refused}");
+        assert_eq!(requests(&seen), ["GET /captures/capture/3"], "nothing sent");
+        // The same result throughout: sent as before.
+        let (api, _) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 1)), ("PUT /captures/capture/3/files", 200, capture_at(3, 2))]);
+        assert!(update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &prepared).is_ok());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

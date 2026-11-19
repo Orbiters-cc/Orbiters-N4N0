@@ -1143,7 +1143,10 @@ impl Controller {
     /// A start that is a picture's or a scan's own: it fails when anything records or is being saved (it would adopt
     /// that recording), `claim` runs under the start gate the moment it is accepted (the flag that says what it is
     /// for), and the number of the recording it started is handed back (verify-controller, C-2, CTL2-7).
-    fn start_capture_owned(self: &Shared, purpose: CapturePurpose, claim: impl FnOnce()) -> anyhow::Result<u64> {
+    /// `unclaim` undoes `claim` when the start fails after it was accepted, under the same gate: a request refused
+    /// before it claimed anything clears nothing (another capture's flag, while it is saved, is that capture's:
+    /// verify2-controller).
+    fn start_capture_owned(self: &Shared, purpose: CapturePurpose, claim: impl FnOnce(), unclaim: impl FnOnce()) -> anyhow::Result<u64> {
         let (name, dolly) = self.with_settings(|s| (s.spout_sender.clone(), s.dolly_streams));
         let (name, extra) = if dolly {
             (if name.is_empty() { dolly::MAIN_SENDER.to_string() } else { name }, dolly::EXTRA_SENDERS.map(String::from).to_vec())
@@ -1152,7 +1155,7 @@ impl Controller {
         };
         let _ = purpose;
         let generation = self.stop_generation.load(Ordering::Acquire);
-        let started = self.start_segment_claimed(SourceSpec::Spout { name, extra }, false, false, generation, false, Some(claim))?;
+        let started = self.start_segment_claimed(SourceSpec::Spout { name, extra }, false, false, generation, false, Some((claim, unclaim)))?;
         started.ok_or_else(|| anyhow::anyhow!("{}", tr("A recording is under way: stop it first.")))
     }
 
@@ -1166,7 +1169,7 @@ impl Controller {
     }
 
     fn start_segment(self: &Shared, source: SourceSpec, importing: bool, from_osc: bool, stop_generation: u64, rollover: bool) -> anyhow::Result<()> {
-        self.start_segment_claimed(source, importing, from_osc, stop_generation, rollover, None::<fn()>).map(|_| ())
+        self.start_segment_claimed(source, importing, from_osc, stop_generation, rollover, None::<(fn(), fn())>).map(|_| ())
     }
 
     /// [`Controller::start_segment`]; with `claim` (a picture's or a scan's own start), refused while anything records
@@ -1179,7 +1182,7 @@ impl Controller {
         from_osc: bool,
         stop_generation: u64,
         rollover: bool,
-        claim: Option<impl FnOnce()>,
+        claim: Option<(impl FnOnce(), impl FnOnce())>,
     ) -> anyhow::Result<Option<u64>> {
         let _start = self.capture_start_gate.lock().unwrap();
         let exclusive = claim.is_some();
@@ -1210,9 +1213,19 @@ impl Controller {
             return Ok(None);
         }
         // Accepted: what it is for, then its number, under the gate (nothing else starts in between).
-        if let Some(claim) = claim {
-            claim();
+        // Undone (still under the gate: dropped before it) if the start does not go through.
+        struct Undo<F: FnOnce()>(Option<F>);
+        impl<F: FnOnce()> Drop for Undo<F> {
+            fn drop(&mut self) {
+                if let Some(undo) = self.0.take() {
+                    undo();
+                }
+            }
         }
+        let mut undo = claim.map(|(claim, unclaim)| {
+            claim();
+            Undo(Some(unclaim))
+        });
         let number = if rollover {
             self.capture_serial.load(Ordering::Acquire)
         } else {
@@ -1316,6 +1329,9 @@ impl Controller {
             });
             self.capture_ended();
             return Err(e);
+        }
+        if let Some(undo) = undo.as_mut() {
+            undo.0 = None;
         }
         Ok(Some(number))
     }

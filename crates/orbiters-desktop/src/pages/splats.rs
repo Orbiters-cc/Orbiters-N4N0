@@ -1256,7 +1256,7 @@ mod tests {
         for w in (600..=1700).step_by(25).map(|w| w as f32) {
             for views in [1, 3] {
                 for actions in [2, 4] {
-                    for title in [80.0, 200.0, 400.0, 700.0] {
+                    for title in [80.0f32, 200.0, 400.0, 700.0] {
                         for natural in labels {
                             let bar = bar_of(w);
                             let controls = view_controls_left(bar.right(), views);

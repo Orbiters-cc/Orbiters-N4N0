@@ -549,7 +549,10 @@ impl State {
         }
         // A revisit must not replace live discoveries with an older (or temporarily unreadable) disk snapshot.
         let retained = (!self.scan.projects.is_empty()).then(|| self.scan.clone());
+        // Work of the window (it writes the projects' list it keeps): the window does not close to the tray meanwhile.
+        let working = super::super::Working::begin();
         std::thread::spawn(move || {
+            let _working = working;
             let _ = tx.send(ScanEvent::Hidden(hidden::load()));
             let scan = retained.unwrap_or_else(discovery::cached);
             let _ = tx.send(ScanEvent::Update(scan.clone()));
@@ -1075,7 +1078,9 @@ impl State {
         }
         self.hidden_changes += 1;
         let (list, generation) = (self.hidden.clone(), self.hidden_changes);
+        let working = super::super::Working::begin();
         std::thread::spawn(move || {
+            let _working = working;
             if let Err(e) = hidden::save(&list, generation) {
                 eprintln!("hidden projects: {e:#}");
             }

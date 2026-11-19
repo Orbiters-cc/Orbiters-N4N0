@@ -438,7 +438,10 @@ impl Drop for Edits {
         // renderer at a time, as on a small graphics card.
         let running = self.drawing.take();
         let (session, window) = (self.session.clone(), self.window.clone());
+        // Work of the window (it writes the capture's picture): the window does not close to the tray meanwhile.
+        let working = super::super::Working::begin();
         let spawned = std::thread::Builder::new().name("splat edits' picture".into()).spawn(move || { // i18n: not shown
+            let _working = working;
             if let Some(mut job) = running {
                 while job.poll().is_none() && job.running() {
                     std::thread::sleep(std::time::Duration::from_millis(50));

@@ -646,7 +646,8 @@ fn remove_stale_temporaries(dir: &std::path::Path, age: Duration) {
         if !is_atomic_temporary(name) {
             continue;
         }
-        let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|e| e >= age);
+        // A time ahead of the clock (another computer's, a coarse file system) counts as just written.
+        let old = entry.metadata().and_then(|m| m.modified()).ok().is_some_and(|t| t.elapsed().unwrap_or_default() >= age);
         if old && entry.file_type().is_ok_and(|t| t.is_file()) {
             let _ = std::fs::remove_file(entry.path());
         }

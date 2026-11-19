@@ -3183,7 +3183,7 @@ fn write_settings_in_order(rx: mpsc::Receiver<(u64, Settings)>, quiet: Duration,
     let mut written = 0u64;
     while let Ok(first) = rx.recv() {
         let mut latest = Some(first).filter(|(r, _)| *r > written);
-        let mut keep = |latest: &mut Option<(u64, Settings)>, (r, s): (u64, Settings)| {
+        let keep = |latest: &mut Option<(u64, Settings)>, (r, s): (u64, Settings)| {
             if r > latest.as_ref().map_or(written, |(l, _)| *l) {
                 *latest = Some((r, s));
             }

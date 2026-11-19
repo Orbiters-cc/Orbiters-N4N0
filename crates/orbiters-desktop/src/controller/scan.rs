@@ -274,7 +274,9 @@ impl super::Controller {
             }
         });
         if let Err(e) = flight {
-            // The recording was accepted, but nothing would fly it or end it: it ends here.
+            // The recording was accepted, but nothing would fly it or end it: it ends here, as an ordinary one (no
+            // flight: nothing of it is a scan to reconstruct).
+            self.scan.lock().unwrap().recording = false;
             self.scan_stop(owner);
             return Err(e.into());
         }

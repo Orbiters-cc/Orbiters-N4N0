@@ -115,6 +115,8 @@ struct Setup {
     walk_said: bool,
     /// Patched vtable entries to restore: (entry address, the detour we wrote).
     patched: Vec<(usize, usize)>,
+    /// The control block's owner, kept open so each frame's look is one wait, not open + wait + close.
+    owner: OwnerWatch,
 }
 
 /// The filter bank: a filter per device, each guarded by a try-lock so the pose hook never waits (two updates for
@@ -187,6 +189,7 @@ impl State {
                 last_walk_check_ms: 0,
                 walk_said: false,
                 patched: Vec::new(),
+                owner: OwnerWatch::new(),
             }),
             clock: OnceLock::new(),
         }
@@ -457,6 +460,36 @@ mod hook_tests {
     }
 
     #[test]
+    fn the_owner_is_opened_once_and_its_exit_still_reads_as_gone() {
+        let mut watch = OwnerWatch::new();
+        assert!(watch.alive(0), "no owner yet counts as alive");
+        assert_eq!(watch.opens, 0);
+        let me = std::process::id();
+        for _ in 0..100 {
+            assert!(watch.alive(me));
+        }
+        assert_eq!(watch.opens, 1, "one OpenProcess for a hundred frames");
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd starts");
+        let pid = child.id();
+        assert!(watch.alive(pid), "a running owner is alive");
+        assert!(watch.alive(pid));
+        assert_eq!(watch.opens, 2, "a new owner pid opens its own handle once");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!watch.alive(pid), "an owner that exited reads as gone on the next frame");
+        assert!(!watch.alive(pid));
+        assert_eq!(watch.opens, 2);
+        assert!(!watch.alive(u32::MAX - 3), "a pid that cannot be opened is gone");
+        assert!(watch.held.is_none());
+        assert!(watch.alive(0));
+    }
+
+    #[test]
     fn losing_installation_cas_does_not_release_the_reserved_successor() {
         let original = AtomicUsize::new(0);
         let mut slot = 111usize;
@@ -661,6 +694,7 @@ extern "system" fn provider_cleanup(_this: *mut c_void) {
                 true
             });
             setup.control = None;
+            setup.owner.forget();
             setup.last_hook_attempt_ms = 0;
         }
         STATE.context.store(ptr::null_mut(), Ordering::Release);
@@ -781,7 +815,7 @@ fn refresh_from_control(setup: &mut Setup) {
             cell.store(s.to_bits(), Ordering::Relaxed);
         }
     }
-    let alive = owner_alive(block);
+    let alive = setup.owner.alive(block.owner_pid.load(Ordering::Acquire));
     let wanted = block.is_valid() && alive && settings.map(|s| s.enabled).unwrap_or(false);
     // Fast walk has its own writer, the overlay: when that process goes, whatever it left is no longer added.
     if now.saturating_sub(setup.last_walk_check_ms) >= WALK_WRITER_CHECK_MS {
@@ -825,11 +859,61 @@ fn refresh_from_control(setup: &mut Setup) {
     mapping.block().report_driver(&report, now);
 }
 
-/// Whether the process that owns the control block is still running (so a crashed app stops smoothing). An owner of
-/// 0 (not yet set) counts as alive.
-fn owner_alive(block: &ControlBlock) -> bool {
-    let pid = block.owner_pid.load(Ordering::Acquire);
-    pid == 0 || process_alive(pid)
+/// Whether the process that owns the control block is still running (so a crashed app stops smoothing), asked every
+/// SteamVR frame. The owner's handle is opened once per owner pid and kept: a frame's look is then one
+/// `WaitForSingleObject(h, 0)` instead of `OpenProcess` + wait + `CloseHandle` (audit O10, LIGHT-VR-6). The answer is the
+/// same on every frame as opening anew would give, and a pid reused after the owner died can no longer read as alive (the
+/// held handle stays signalled). An owner of 0 (not yet set) counts as alive.
+#[derive(Default)]
+struct OwnerWatch {
+    /// The pid the handle is for, and the handle (`SYNCHRONIZE` only).
+    held: Option<(u32, orbiters_smooth::win::HANDLE)>,
+    /// How many times a handle was opened (tests).
+    opens: u32,
+}
+
+// SAFETY: a process handle is a kernel object reference, usable from any thread; it is only touched under `STATE.setup`.
+unsafe impl Send for OwnerWatch {}
+
+impl OwnerWatch {
+    const fn new() -> Self {
+        Self { held: None, opens: 0 }
+    }
+
+    fn alive(&mut self, pid: u32) -> bool {
+        use orbiters_smooth::win::*;
+        if pid == 0 {
+            self.forget();
+            return true;
+        }
+        if !matches!(self.held, Some((held, _)) if held == pid) {
+            self.forget();
+            // SAFETY: OpenProcess with a pid and SYNCHRONIZE; the handle is closed in `forget`.
+            let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+            if handle == 0 {
+                return false; // Gone, or not ours to open: treat as gone (and try again next frame, as before).
+            }
+            self.opens += 1;
+            self.held = Some((pid, handle));
+        }
+        let Some((_, handle)) = self.held else { return false };
+        // SAFETY: a handle this watch opened and has not closed.
+        unsafe { WaitForSingleObject(handle, 0) != WAIT_OBJECT_0 }
+    }
+
+    /// Closes the held handle, if any.
+    fn forget(&mut self) {
+        if let Some((_, handle)) = self.held.take() {
+            // SAFETY: a handle this watch opened, closed once.
+            unsafe { orbiters_smooth::win::CloseHandle(handle) };
+        }
+    }
+}
+
+impl Drop for OwnerWatch {
+    fn drop(&mut self) {
+        self.forget();
+    }
 }
 
 /// Whether process `pid` runs.

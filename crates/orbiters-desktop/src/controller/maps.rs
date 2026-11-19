@@ -307,7 +307,9 @@ const PREPARE_TRIES: usize = 3;
 /// stop it.
 pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions) -> anyhow::Result<Prepared> {
     let result = reconstruction::result_dir(session);
-    // A result left half replaced (some of its files were held) is no one result: nothing is prepared from it.
+    // A result left half replaced (some of its files were held) is no one result: nothing is prepared from it. One whose
+    // replacement finished but was never unmarked (a crash) is unmarked first, when its parts verify (night4).
+    let _ = reconstruction::settle_replacing(&result);
     anyhow::ensure!(crate::upload_prep::ResultIdentity::read(session).complete, "{}", tr("Its last reconstruction was only partly saved (a file was open in another program): reconstruct it again to share it."));
     for _ in 0..PREPARE_TRIES {
         let before = orbiters_reconstruct::edit::generation(&result)?;

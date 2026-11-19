@@ -210,6 +210,9 @@ pub fn drop_recording(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<
 fn trim(dir: &Path, takes: &dyn Fn(Part) -> bool, freed: &mut dyn FnMut(u64)) -> anyhow::Result<u64> {
     anyhow::ensure!(dir.join(MANIFEST_FILE).is_file(), "{}", tr!("{path} is not a session folder.", path = dir.display()));
     anyhow::ensure!(has_view(dir), "{}", tr("This session has no 3D view to keep: reconstruct it first."));
+    // A result left half replaced is no one run's: its capture is what reconstructs it again, so it stays (night4, the
+    // second verifier). One whose replacement finished but was never unmarked is unmarked first, when its parts verify.
+    anyhow::ensure!(reconstruction::settle_replacing(&reconstruction::result_dir(dir)), "{}", tr("Its last reconstruction was only partly saved (a file was open in another program): reconstruct it again before deleting its capture."));
     let plan: Vec<PathBuf> = capture_files(dir).into_iter().filter(|e| takes(e.part)).map(|e| e.path).collect();
     check_plan(dir, &plan)?;
     // Only what the plan holds moves: the keyframes folder as the listing spelt it (a `KEYFRAMES` folder that is not the
@@ -250,12 +253,12 @@ fn check_plan(dir: &Path, plan: &[PathBuf]) -> anyhow::Result<()> {
     let view = reconstruction::result_dir(dir);
     // The splats themselves, whatever name they resolve to (a link to `final.ply`, a stored `SPLATS.PLY`).
     anyhow::ensure!(std::fs::metadata(view.join(reconstruction::PLY_FILE)).is_ok_and(|m| m.is_file()), "{}", tr("This session has no 3D view to keep: reconstruct it first."));
-    let mut kept = Vec::new();
+    let mut found = Kept::default();
     for f in [MANIFEST_FILE, FRAMES_FILE, THUMBNAIL_FILE, crate::bundle::PICTURE_THUMBNAIL_FILE] {
-        keep_resolved(&dir.join(f), &mut kept)?;
+        keep_resolved(&dir.join(f), &mut found)?;
     }
-    keep_resolved(&view, &mut kept)?;
-    keep_view(&view, &mut kept)?;
+    keep_resolved(&view, &mut found)?;
+    let mut kept = found.paths;
     kept.sort();
     kept.dedup();
     let here = std::fs::canonicalize(dir)?;
@@ -272,31 +275,56 @@ fn check_plan(dir: &Path, plan: &[PathBuf]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `path` resolved, into `kept`; nothing when it is absent (or a link to nothing), an error when it exists and cannot be
-/// resolved (access denied, held by another program).
-fn keep_resolved(path: &Path, kept: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    if std::fs::symlink_metadata(path).is_err() {
-        return Ok(());
-    }
-    match std::fs::canonicalize(path) {
-        Ok(p) => kept.push(p),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => anyhow::bail!("{}", tr!("Nothing was deleted: {path} is part of the 3D view.", path = path.display())),
-    }
-    Ok(())
+/// The most links followed from one dependency, and entries walked in all: past either the trim cannot be sure what the
+/// view needs, and refuses.
+const MOST_HOPS: usize = 40;
+const MOST_ENTRIES: usize = 200_000;
+
+/// What the view depends on, as resolved paths, gathered by [`keep_resolved`].
+#[derive(Default)]
+struct Kept {
+    paths: Vec<PathBuf>,
+    /// Folders already walked (a link loop is walked once), and entries walked.
+    walked: Vec<PathBuf>,
+    entries: usize,
 }
 
-/// Every entry under the result folder `dir`, resolved (a link's target protected whole, never walked into).
-fn keep_view(dir: &Path, kept: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    for e in std::fs::read_dir(dir)? {
-        let e = e?;
-        let path = e.path();
-        keep_resolved(&path, kept)?;
-        if e.file_type()?.is_dir() {
-            keep_view(&path, kept)?;
-        }
+/// `path` and everything it leads to, into `kept` (night4, the second verifier: a chain of links is protected whole):
+/// where `path` and every link on its way to its final target lie, the final target itself, and, for a folder,
+/// everything in it the same way. Nothing when `path` is absent, or a link on its way leads to nothing (already
+/// broken); an error when an entry exists and cannot be read or resolved, or the chain or the walk is too long to be
+/// sure.
+fn keep_resolved(path: &Path, kept: &mut Kept) -> anyhow::Result<()> {
+    let refuse = |p: &Path| anyhow::anyhow!("{}", tr!("Nothing was deleted: {path} is part of the 3D view.", path = p.display()));
+    kept.entries += 1;
+    if kept.entries > MOST_ENTRIES {
+        return Err(refuse(path));
     }
-    Ok(())
+    let mut at = path.to_path_buf();
+    for _ in 0..MOST_HOPS {
+        let meta = match std::fs::symlink_metadata(&at) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(refuse(&at)),
+        };
+        // Where this entry itself lies (its folder resolved, the entry not followed).
+        let parent = at.parent().ok_or_else(|| refuse(&at))?;
+        let place = std::fs::canonicalize(parent).map_err(|_| refuse(&at))?.join(at.file_name().ok_or_else(|| refuse(&at))?);
+        kept.paths.push(place.clone());
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&at).map_err(|_| refuse(&at))?;
+            at = if target.is_absolute() { target } else { place.parent().unwrap_or(parent).join(target) };
+            continue;
+        }
+        if meta.is_dir() && !kept.walked.contains(&place) {
+            kept.walked.push(place.clone());
+            for e in std::fs::read_dir(&at).map_err(|_| refuse(&at))? {
+                keep_resolved(&e.map_err(|_| refuse(&at))?.path(), kept)?;
+            }
+        }
+        return Ok(());
+    }
+    Err(refuse(path))
 }
 
 /// Deletes a whole session folder for good, the biggest parts first; `freed` as for [`keep_only_view`]. Refused for a
@@ -671,6 +699,54 @@ mod tests {
         } else {
             eprintln!("no file link could be made here (Windows without the right): the sky case is covered by the folder link above");
         }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// night4 (the second verifier): a part of the view reached through a CHAIN of links whose middle link lies in the
+    /// capture (held-out -> depth/hop -> a folder outside the session) protects the middle link too: nothing is deleted,
+    /// and the view still resolves. (Before, only the final target was kept, and deleting depth/ broke the chain.)
+    #[test]
+    fn a_chain_of_links_through_the_capture_deletes_nothing() {
+        let (root, dir) = session("as15-chain", true);
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join("000004.qoi"), b"render").unwrap();
+        let hop = dir.join("depth").join("hop");
+        folder_link(&hop, &elsewhere);
+        let held_out = dir.join("reconstruction").join("held-out");
+        fs::remove_dir_all(&held_out).unwrap();
+        folder_link(&held_out, &hop);
+        assert_eq!(fs::read(held_out.join("000004.qoi")).unwrap(), b"render", "the chain resolves");
+        let err = keep_only_view(&dir, &mut |_| {}).unwrap_err().to_string();
+        assert!(err.starts_with("Nothing was deleted"), "{err}");
+        assert!(dir.join("keyframes").is_dir() && fs::symlink_metadata(&hop).is_ok(), "nothing moved");
+        assert_eq!(fs::read(held_out.join("000004.qoi")).unwrap(), b"render");
+        unlink(&held_out);
+        unlink(&hop);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// night4 (the second verifier): a result marked as half replaced keeps its capture (what reconstructs it again);
+    /// one whose mark verifies (the replacement finished, a crash stopped it before unmarking) is unmarked and trimmed.
+    #[test]
+    fn a_half_replaced_result_keeps_its_capture() {
+        let (root, dir) = session("as15-marked", true);
+        let result = dir.join("reconstruction");
+        fs::write(result.join(reconstruction::REPLACING_FILE), b"").unwrap();
+        let err = keep_only_view(&dir, &mut |_| {}).unwrap_err().to_string();
+        assert!(err.contains("only partly saved"), "{err}");
+        assert!(drop_recording(&dir, &mut |_| {}).is_err());
+        assert!(dir.join("keyframes").is_dir() && dir.join("depth").is_dir(), "nothing went");
+        // The mark of a replacement that did finish: every part as listed.
+        let copy = root.join("copy");
+        fs::create_dir_all(&copy).unwrap();
+        for f in ["splats.ply", "sky.png", "report.json", "preview.qoi"] {
+            fs::copy(result.join(f), copy.join(f)).unwrap();
+        }
+        let plan = reconstruction::replacing_plan(&copy, &[]).unwrap();
+        fs::write(result.join(reconstruction::REPLACING_FILE), serde_json::to_vec(&plan).unwrap()).unwrap();
+        keep_only_view(&dir, &mut |_| {}).unwrap();
+        assert!(!result.join(reconstruction::REPLACING_FILE).exists() && !dir.join("keyframes").exists());
         fs::remove_dir_all(&root).ok();
     }
 

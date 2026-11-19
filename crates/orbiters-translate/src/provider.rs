@@ -254,36 +254,45 @@ impl<F: FnMut(&Batch) -> Result<Vec<String>, Failure> + Send> Translator for Rem
 }
 
 /// Translations already made, by (target, text): a sign looked at again costs nothing. Bounded: the oldest go first.
+/// Kept by target, then by the exact text, so that a lookup borrows what it looks for (one per visible line per look).
 #[derive(Default)]
 pub struct Cache {
-    map: std::collections::HashMap<(String, String), String>,
+    map: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     order: std::collections::VecDeque<(String, String)>,
 }
 
 impl Cache {
     const MOST: usize = 4000;
     pub fn get(&self, target: &str, text: &str) -> Option<&String> {
-        self.map.get(&(target.to_string(), text.to_string()))
+        self.map.get(target)?.get(text)
     }
     pub fn put(&mut self, target: &str, text: &str, translation: String) {
-        let k = (target.to_string(), text.to_string());
-        if self.map.insert(k.clone(), translation).is_none() {
-            self.order.push_back(k);
+        let texts = self.map.entry(target.to_string()).or_default();
+        if texts.insert(text.to_string(), translation).is_none() {
+            self.order.push_back((target.to_string(), text.to_string()));
             if self.order.len() > Self::MOST {
-                if let Some(old) = self.order.pop_front() {
-                    self.map.remove(&old);
+                if let Some((old_target, old_text)) = self.order.pop_front() {
+                    self.forget(&old_target, &old_text);
                 }
             }
         }
     }
+    /// Takes `text` out of the map (not the order), and the target with it once it holds nothing.
+    fn forget(&mut self, target: &str, text: &str) -> bool {
+        let Some(texts) = self.map.get_mut(target) else { return false };
+        let gone = texts.remove(text).is_some();
+        if texts.is_empty() {
+            self.map.remove(target);
+        }
+        gone
+    }
     pub fn remove(&mut self, target: &str, text: &str) {
-        let k = (target.to_string(), text.to_string());
-        if self.map.remove(&k).is_some() {
-            self.order.retain(|o| *o != k);
+        if self.forget(target, text) {
+            self.order.retain(|(t, x)| t != target || x != text);
         }
     }
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.order.len()
     }
 
     /// The translations kept from earlier sessions (a sign seen yesterday shows at once): one JSON array a line,
@@ -303,9 +312,9 @@ impl Cache {
     /// Written whole, through a file beside it, so that a cut never leaves half a file.
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
         let mut out = String::new();
-        for k in &self.order {
-            if let Some(t) = self.map.get(k) {
-                out.push_str(&serde_json::to_string(&(&k.0, &k.1, t)).unwrap_or_default());
+        for (target, text) in &self.order {
+            if let Some(t) = self.get(target, text) {
+                out.push_str(&serde_json::to_string(&(target, text, t)).unwrap_or_default());
                 out.push('\n');
             }
         }
@@ -324,6 +333,31 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cache_keeps_exact_texts_by_language_and_lets_the_oldest_go() {
+        let mut cache = Cache::default();
+        cache.put("fr", "Exit", "Sortie".into());
+        cache.put("es", "Exit", "Salida".into());
+        cache.put("fr", "exit", "sortie".into());
+        assert_eq!((cache.get("fr", "Exit").map(String::as_str), cache.get("es", "Exit").map(String::as_str), cache.get("fr", "exit").map(String::as_str)), (Some("Sortie"), Some("Salida"), Some("sortie")));
+        assert_eq!(cache.len(), 3);
+        cache.put("fr", "Exit", "Sortie !".into());
+        assert_eq!(cache.len(), 3, "replaced, not added");
+        cache.remove("es", "Exit");
+        assert_eq!((cache.get("es", "Exit"), cache.len()), (None, 2));
+        for i in 0..Cache::MOST {
+            cache.put("ja", &i.to_string(), i.to_string());
+        }
+        assert_eq!(cache.len(), Cache::MOST);
+        assert!(cache.get("fr", "Exit").is_none() && cache.get("fr", "exit").is_none(), "the oldest went first");
+        assert!(cache.get("ja", "0").is_some());
+        let path = std::env::temp_dir().join(format!("orbiters-translate-cache-{}.jsonl", std::process::id()));
+        cache.save(&path).unwrap();
+        let back = Cache::load(&path);
+        assert_eq!((back.len(), back.get("ja", "7").map(String::as_str)), (Cache::MOST, Some("7")));
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn answers_are_read_strictly_but_found_inside_noise() {

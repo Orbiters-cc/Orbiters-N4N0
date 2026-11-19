@@ -299,7 +299,7 @@ fn fnv(s: &str) -> u64 {
 }
 
 fn load_png(path: &Path) -> Option<Image> {
-    let i = image::open(path).ok()?.to_rgba8();
+    let i = decode_bounded(&std::fs::read(path).ok()?)?.to_rgba8();
     Some(Image { size: [i.width(), i.height()], rgba: i.into_raw() })
 }
 
@@ -472,6 +472,24 @@ fn attributes(tag: &str) -> Vec<(String, String)> {
     }
 }
 
+/// The longest side of a picture an icon is made from: a 4096 px logo still is one, a small file declaring a huge
+/// picture is not decoded at all (PROJECTS-14).
+const DECODE_SIDE: u32 = 4096;
+/// What decoding one may allocate (the default is 512 MiB).
+const DECODE_ALLOC: u64 = 128 << 20;
+
+/// `bytes` decoded when the picture they declare is within [`DECODE_SIDE`] and [`DECODE_ALLOC`]; checked before the
+/// pixels are allocated.
+fn decode_bounded(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(DECODE_SIDE);
+    limits.max_image_height = Some(DECODE_SIDE);
+    limits.max_alloc = Some(DECODE_ALLOC);
+    reader.limits(limits);
+    reader.decode().ok()
+}
+
 /// An icon file (PNG, JPEG, WebP, GIF, ICO or SVG) at most [`SIDE`] pixels on its longest side; none for what is not
 /// one, a speck or nothing visible.
 pub fn decode(bytes: &[u8]) -> Option<Image> {
@@ -493,7 +511,7 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
             .collect();
         image::RgbaImage::from_raw(w, h, rgba)?
     } else {
-        let i = image::load_from_memory(bytes).ok()?.to_rgba8();
+        let i = decode_bounded(bytes)?.to_rgba8();
         let (w, h) = i.dimensions();
         let scale = SIDE as f32 / w.max(h) as f32;
         if scale < 1.0 {
@@ -625,6 +643,12 @@ mod tests {
         let mut ico = vec![];
         image::RgbaImage::from_pixel(48, 48, image::Rgba([200, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut ico), image::ImageFormat::Ico).unwrap();
         assert_eq!(decode(&ico).unwrap().size, [48, 48]);
+        // A small file declaring a picture far larger than an icon: not decoded.
+        let mut big = vec![];
+        let side = DECODE_SIDE + 1;
+        image::RgbaImage::from_pixel(side, side, image::Rgba([1, 2, 3, 255])).write_to(&mut std::io::Cursor::new(&mut big), image::ImageFormat::Png).unwrap();
+        assert!(big.len() < IMAGE_LIMIT, "{} bytes", big.len());
+        assert!(decode(&big).is_none());
         // Not an image, a speck, nothing visible.
         assert!(decode(b"<html>404</html>").is_none());
         let mut speck = vec![];

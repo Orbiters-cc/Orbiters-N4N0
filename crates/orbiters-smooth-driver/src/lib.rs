@@ -115,6 +115,10 @@ struct Setup {
     walk_said: bool,
     /// Patched vtable entries to restore: (entry address, the detour we wrote).
     patched: Vec<(usize, usize)>,
+    /// The last hook attempt's result said in SteamVR's log, so a retry a second that changes nothing says nothing (OVERLAY-5).
+    hooks_said: Said,
+    /// Said that a host's pose successor is ambiguous, per host (until a hook is installed again).
+    ambiguous_said: [bool; MAX_HOOKS],
     /// The control block's owner, kept open so each frame's look is one wait, not open + wait + close.
     owner: OwnerWatch,
 }
@@ -189,6 +193,8 @@ impl State {
                 last_walk_check_ms: 0,
                 walk_said: false,
                 patched: Vec::new(),
+                hooks_said: Said::new(),
+                ambiguous_said: [false; MAX_HOOKS],
                 owner: OwnerWatch::new(),
             }),
             clock: OnceLock::new(),
@@ -336,7 +342,10 @@ unsafe fn hook_host(setup: &mut Setup, host: *mut c_void, index: usize, detour_p
     // Even successful restoration cannot revoke a pointer already fetched by another driver.
     // Reserve the successor forever, including when the installation CAS loses.
     if !reserve_successor(&STATE.pose_originals[index], current) {
-        log_line("Orbiters smoothing: ambiguous pose hook successor; restart SteamVR to reconnect");
+        // Once per host, not at every retry a second.
+        if !std::mem::replace(&mut setup.ambiguous_said[index], true) {
+            log_line("Orbiters smoothing: ambiguous pose hook successor; restart SteamVR to reconnect");
+        }
         return false;
     }
     // A chained callback can outlive Cleanup: pin this small DLL until vrserver exits.
@@ -457,6 +466,19 @@ mod hook_tests {
         let pose = DriverPose::at([0.0; 3], openvr::Quaternion::IDENTITY);
         unsafe { call((&mut host_a as *mut *mut usize).cast(), 0, &pose, std::mem::size_of::<DriverPose>() as u32) };
         STATE.pose_originals[0].store(previous, Ordering::Release);
+    }
+
+    /// OVERLAY-5: a hook attempt a second with no host to hook says so once, not once a second; a change is said, with the count.
+    #[test]
+    fn repeated_hook_attempts_with_the_same_result_are_said_once() {
+        let mut said = Said::new();
+        assert_eq!(said.note(0), Some(0), "the first attempt is said");
+        for _ in 0..3600 {
+            assert_eq!(said.note(0), None);
+        }
+        assert_eq!(said.note(1), Some(3600), "a change is said, with the attempts not said");
+        assert_eq!(said.note(1), None);
+        assert_eq!(said.note(0), Some(1));
     }
 
     #[test]
@@ -629,7 +651,37 @@ unsafe fn install_host_hooks(setup: &mut Setup) {
     }
     STATE.hooks_installed.store(hooked, Ordering::Relaxed);
     STATE.attached_mask.store(mask, Ordering::Release);
-    log_line(&format!("Orbiters smoothing driver {DRIVER_VERSION}: smoothing or Fast walk turned on, {hooked} host hook(s) installed"));
+    if hooked > 0 {
+        setup.ambiguous_said = [false; MAX_HOOKS];
+    }
+    // The first attempt, and then only an attempt whose result differs from the last said (with how many were the same).
+    if let Some(same) = setup.hooks_said.note(mask) {
+        let again = if same > 0 { format!(" ({same} attempt(s) since with the same result)") } else { String::new() };
+        log_line(&format!("Orbiters smoothing driver {DRIVER_VERSION}: smoothing or Fast walk turned on, {hooked} host hook(s) installed{again}"));
+    }
+}
+
+/// A value said in a log only when it differs from the last said, counting the repeats not said.
+#[derive(Default)]
+struct Said {
+    last: Option<u32>,
+    repeats: u32,
+}
+
+impl Said {
+    const fn new() -> Self {
+        Self { last: None, repeats: 0 }
+    }
+
+    /// `Some(repeats not said since the last line)` when `value` is to be said now.
+    fn note(&mut self, value: u32) -> Option<u32> {
+        if self.last == Some(value) {
+            self.repeats = self.repeats.saturating_add(1);
+            return None;
+        }
+        self.last = Some(value);
+        Some(std::mem::take(&mut self.repeats))
+    }
 }
 
 /// A line in SteamVR's `vrserver.txt`, prefixed with the driver name, when the host gave us a log. Best effort.
@@ -695,6 +747,8 @@ extern "system" fn provider_cleanup(_this: *mut c_void) {
             });
             setup.control = None;
             setup.owner.forget();
+            setup.hooks_said = Said::new();
+            setup.ambiguous_said = [false; MAX_HOOKS];
             setup.last_hook_attempt_ms = 0;
         }
         STATE.context.store(ptr::null_mut(), Ordering::Release);

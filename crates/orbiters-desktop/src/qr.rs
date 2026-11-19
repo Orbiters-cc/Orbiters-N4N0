@@ -75,6 +75,23 @@ impl Glimpses {
     }
 }
 
+/// One decoding of a picture any world can show, its panic contained: `None` for that picture (the scan goes on with the
+/// next), noted in the log the first time and every hundredth after (`panics` counts them).
+#[cfg(windows)]
+pub(crate) fn contained<T>(panics: &mut u32, decode: impl FnOnce() -> T) -> Option<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode)) {
+        Ok(v) => Some(v),
+        Err(why) => {
+            *panics += 1;
+            if *panics % 100 == 1 {
+                let why = why.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| why.downcast_ref::<String>().cloned()).unwrap_or_default();
+                crate::overlay::vr_log::line(&format!("qr scan: a picture could not be decoded (the decoder panicked: {why}); skipped, {} so far", *panics)); // i18n: not shown (a log's line)
+            }
+            None
+        }
+    }
+}
+
 /// The scan's handle: dropped, its thread stops at its next look.
 struct Scan(Arc<AtomicBool>);
 
@@ -96,7 +113,11 @@ pub fn start(wanted: String, events: QrEvents) -> Result<Box<dyn QrScan>, String
             .name("qr-scanner".into())
             .spawn(move || {
                 lower_priority();
-                run(&wanted, &events, &flag);
+                // Ended otherwise than by its stop (a panic past the decoder's guard): said, never a scan shown running that
+                // reads nothing.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&wanted, &events, &flag))).is_err() && !flag.load(Ordering::Relaxed) {
+                    events(QrSeen::Failed(tr("The QR scanner stopped after an error: start it again.").into()));
+                }
             })
             .map_err(|e| tr!("The scanner could not start: {error}", error = e))?;
         Ok(Box::new(Scan(stop)))
@@ -144,6 +165,7 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
     // Looks since the last frame (or the start) that found none.
     let mut looks_without = 0u32;
     let mut note = Note::default();
+    let mut panics = 0u32;
     while !stop.load(Ordering::Relaxed) {
         let begun = Instant::now();
         if !connected {
@@ -178,9 +200,17 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
                     last_frame = Some(Instant::now());
                     framed = true;
                     let at = Instant::now();
-                    #[cfg(test)]
-                    tests::maybe_panic(wanted);
-                    let reading = looks.read(&copy);
+                    // The picture is whatever the world in front of the camera shows (SWEEP-14): a decoder that panics on it
+                    // costs that frame, never the scan.
+                    let Some(reading) = contained(&mut panics, || {
+                        #[cfg(test)]
+                        tests::maybe_panic(wanted);
+                        looks.read(&copy)
+                    }) else {
+                        looks = orbiters_qr::Looks::default();
+                        std::thread::sleep(EVERY.saturating_sub(begun.elapsed()));
+                        continue;
+                    };
                     note.looked(copy.look, size, at.elapsed(), &reading);
                     found = reading.codes;
                     let change = if !found.is_empty() {
@@ -288,9 +318,11 @@ mod tests {
     use super::*;
 
     /// Scans (by their sender's name) whose decoder panics on its next pictures, and how many times.
+    #[cfg(windows)]
     static PANICS_FOR: std::sync::Mutex<Vec<(String, u32)>> = std::sync::Mutex::new(Vec::new());
 
     /// The decoder of the scan reading `wanted` panics here when a test asked for it (SWEEP-14: as a crafted grid could).
+    #[cfg(windows)]
     pub(super) fn maybe_panic(wanted: &str) {
         let mut all = PANICS_FOR.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(left) = all.iter_mut().find(|(w, n)| w == wanted && *n > 0) {
@@ -305,6 +337,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_picture_that_makes_the_decoder_panic_costs_that_picture_not_the_scan() {
+        let mut panics = 0;
+        assert_eq!(contained(&mut panics, || -> u8 { panic!("a crafted grid") }), None);
+        assert_eq!((panics, contained(&mut panics, || 7)), (1, Some(7)));
         let name = format!("OrbitersQrPanic{}", std::process::id());
         PANICS_FOR.lock().unwrap().push((name.clone(), 3));
         let seen = scan_a_code(&name, "https://orbiters.cc/after-a-panic");

@@ -218,6 +218,7 @@
   "The request names no raw capture.": "リクエストに元のキャプチャが指定されていません。",
   "The request names no session.": "リクエストにセッションが指定されていません。",
   "The scanner could not start: {error}": "スキャナーを起動できませんでした：{error}",
+  "The QR scanner stopped after an error: start it again.": "QRコードスキャナーがエラーで停止しました。もう一度開始してください。",
   "The sign-in expired. Sign in again.": "ログインの有効期限が切れました。もう一度ログインしてください。",
   "The splat hidden or deleted in its 3D view comes back: you can select it again in the new one.": "3Dビューで非表示または削除したスプラットが元に戻ります。新しいビューでもう一度選択できます。",
   "The update could not be installed: {error}\n\nThis version opens again. You can install the new one by hand from the disk image.": "更新をインストールできませんでした：{error}\n\nこのバージョンをもう一度開きます。新しいバージョンは、ディスクイメージから手動でインストールできます。",

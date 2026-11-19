@@ -38,8 +38,11 @@ pub const APART_M: f32 = 10.0;
 const BODY: (f32, f32) = (0.4, 1.8);
 /// The largest step from cell to cell that is still walking (stairs, slopes), metres.
 const STEP_M: f32 = 0.7;
-/// The most voxels a dense grid may have before it goes coarser.
+/// The most voxels a dense grid may have before it goes coarser; at the coarsest, the box is cut to it (SWEEP-16).
 const MOST_VOXELS: usize = 24_000_000;
+/// How far from the world's origin a picture's camera may have stood: its voxels must fit the saved share's 16 bits
+/// (32,766 × 0.25 m, with the space around a flight).
+pub const MAP_RANGE_M: f32 = 8_000.0;
 
 /// The avatar as a recording saw it: hips (Unity world) and heading.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -73,11 +76,19 @@ mod voxels_text {
     use base64::Engine as _;
     use serde::{Deserialize, Deserializer, Serializer};
 
+    /// The two ends of i16 are never a position: what an older version wrote there was clamped (SWEEP-19 b).
+    fn fits(c: i32) -> bool {
+        c > i16::MIN as i32 && c < i16::MAX as i32
+    }
+
     pub fn serialize<S: Serializer>(v: &[[i32; 4]], s: S) -> Result<S::Ok, S::Error> {
         let mut bytes = Vec::with_capacity(v.len() * 8);
         for [x, y, z, n] in v {
             for c in [*x, *y, *z] {
-                bytes.extend_from_slice(&(c.clamp(i16::MIN as i32, i16::MAX as i32) as i16).to_le_bytes());
+                if !fits(c) {
+                    return Err(serde::ser::Error::custom(format!("a voxel at {c} (× 0.25 m) does not fit the saved share: not saved, never clamped")));
+                }
+                bytes.extend_from_slice(&(c as i16).to_le_bytes());
             }
             bytes.extend_from_slice(&((*n).clamp(0, u16::MAX as i32) as u16).to_le_bytes());
         }
@@ -87,7 +98,7 @@ mod voxels_text {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<[i32; 4]>, D::Error> {
         let text = String::deserialize(d)?;
         let bytes = base64::engine::general_purpose::STANDARD.decode(text).map_err(serde::de::Error::custom)?;
-        Ok(bytes
+        let voxels: Vec<[i32; 4]> = bytes
             .as_chunks::<8>()
             .0
             .iter()
@@ -95,7 +106,11 @@ mod voxels_text {
                 let i = |k: usize| i16::from_le_bytes([c[k], c[k + 1]]) as i32;
                 [i(0), i(2), i(4), u16::from_le_bytes([c[6], c[7]]) as i32]
             })
-            .collect())
+            .collect();
+        if voxels.iter().any(|v| !v[..3].iter().all(|c| fits(*c))) {
+            return Err(serde::de::Error::custom("positions saved clamped (beyond ±8,192 m): read again from the picture"));
+        }
+        Ok(voxels)
     }
 }
 
@@ -155,10 +170,15 @@ fn camera_path(dir: &Path) -> Result<Vec<[f32; 3]>, String> {
         .iter()
         .filter(|r| r.flags & STRIP_OK != 0 && r.flags & GATED == 0 && (r.strip_flags >> 8) & 0xF == 0)
         .map(|r| [r.camera_to_world[3], r.camera_to_world[7], r.camera_to_world[11]])
-        .filter(|p| p.iter().all(|v| v.is_finite() && v.abs() < 100_000.0))
+        .filter(|p| p.iter().all(|v| v.is_finite()))
         .collect();
     if path.is_empty() {
         return Err("no camera poses in its recording".into());
+    }
+    // Beyond the map's range (a world built far from its origin, a pose read wrong): refused, said (SWEEP-16, -19 b).
+    let farthest = path.iter().flatten().fold(0.0f32, |m, v| m.max(v.abs()));
+    if farthest > MAP_RANGE_M {
+        return Err(format!("its camera stood {farthest:.0} m from the world's origin on one axis: a map holds pictures within 8,000 m of it"));
     }
     Ok(path)
 }
@@ -214,7 +234,7 @@ pub fn ply_points(data: &[u8]) -> Result<Vec<[f32; 3]>, String> {
     let scales = [at("scale_0"), at("scale_1"), at("scale_2")];
     let (sky, views) = (at("sky"), at("seen_views"));
     let stride = props.len() * 4;
-    if data.len() < end + count * stride {
+    if count.checked_mul(stride).and_then(|n| n.checked_add(end)).is_none_or(|n| data.len() < n) {
         return Err("a PLY cut short".into());
     }
     let mut out = Vec::with_capacity(count / 2);
@@ -300,6 +320,8 @@ impl Cell {
 
 /// A world's captures as one map.
 pub struct Map {
+    /// What the map leaves out, when its pictures spread too far for one ([`extent_and_cut`]).
+    pub cut: Option<String>,
     /// Voxel side (VOXEL, or coarser for a large world).
     pub voxel: f32,
     /// Corner of voxel (0, 0, 0), metres.
@@ -330,6 +352,21 @@ pub struct Map {
 
 /// The box a map of `captures` covers: its corner, its voxels along each axis, and their side.
 pub(crate) fn extent(captures: &[std::sync::Arc<Capture>]) -> ([f32; 3], [usize; 3], f32) {
+    extent_and_cut(captures).0
+}
+
+/// The voxels of a box along each axis, at a side.
+fn dims_of(lo: [f32; 3], hi: [f32; 3], v: f32) -> [usize; 3] {
+    [0, 1, 2].map(|k| ((hi[k] - lo[k]) / v).ceil().clamp(1.0, 1e9) as usize + 1)
+}
+
+fn count_of(d: [usize; 3]) -> usize {
+    d.iter().try_fold(1usize, |n, k| n.checked_mul(*k)).unwrap_or(usize::MAX)
+}
+
+/// [`extent`], and what was cut when even the coarsest voxels did not fit [`MOST_VOXELS`] (SWEEP-16: the box was allocated
+/// anyway): the box is then cut around the newest picture's centre, and the map says so.
+fn extent_and_cut(captures: &[std::sync::Arc<Capture>]) -> (([f32; 3], [usize; 3], f32), Option<String>) {
     let mut lo = [f32::MAX; 3];
     let mut hi = [f32::MIN; 3];
     for c in captures {
@@ -363,23 +400,42 @@ pub(crate) fn extent(captures: &[std::sync::Arc<Capture>]) -> ([f32; 3], [usize;
         }
     }
     let mut scale = 1;
-    let dims = loop {
-        let v = VOXEL * scale as f32;
-        let d = [0, 1, 2].map(|k| ((hi[k] - lo[k]) / v).ceil().max(1.0) as usize + 1);
-        if d[0] * d[1] * d[2] <= MOST_VOXELS || scale >= 8 {
+    let mut dims = loop {
+        let d = dims_of(lo, hi, VOXEL * scale as f32);
+        if count_of(d) <= MOST_VOXELS || scale >= 8 {
             break d;
         }
         scale *= 2;
     };
     let voxel = VOXEL * scale as f32;
+    let mut cut = None;
+    if count_of(dims) > MOST_VOXELS {
+        // Where the newest picture stood (inside the box: every path point widened it), what fits around it.
+        let c = captures.last().map_or([(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0], |c| c.centre);
+        lo[1] = lo[1].max(c[1] - 4.0 * BELOW_M);
+        hi[1] = hi[1].min(c[1] + 4.0 * ABOVE_M);
+        let tall = dims_of(lo, hi, voxel)[1];
+        let side = ((MOST_VOXELS / tall) as f32).sqrt().floor() - 3.0;
+        let r = side.max(1.0) * voxel / 2.0;
+        for k in [0, 2] {
+            lo[k] = lo[k].max(c[k] - r);
+            hi[k] = hi[k].min(c[k] + r);
+        }
+        dims = dims_of(lo, hi, voxel);
+        cut = Some(format!(
+            "These pictures' camera positions spread too far for one map: it covers {:.0} m around the newest picture's centre; what lies beyond is not on it.",
+            r
+        ));
+    }
     let lo = lo.map(|v| (v / voxel).floor() * voxel);
-    (lo, dims, voxel)
+    ((lo, dims, voxel), cut)
 }
 
 impl Map {
     pub fn build(captures: Vec<std::sync::Arc<Capture>>) -> Map {
-        let (lo, dims, voxel) = extent(&captures);
+        let ((lo, dims, voxel), cut) = extent_and_cut(&captures);
         let mut map = Map {
+            cut,
             voxel,
             lo,
             dims,

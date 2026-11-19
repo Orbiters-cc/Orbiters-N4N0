@@ -17,6 +17,7 @@
 //! `github` also run on their own (`publish` or `github` again after a cut upload). See docs/releasing.md.
 
 mod dist;
+mod licenses;
 mod macos;
 mod pe;
 mod publish;

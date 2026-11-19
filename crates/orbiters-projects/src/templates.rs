@@ -296,7 +296,6 @@ async fn make(
         tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = required.saturating_sub(free))
     );
     copy_keeping(source, &destination, copy.unwrap_or_default(), cancel, progress)?;
-    if copy.is_some() { copy_local_packages(source, &destination, cancel, progress)?; }
     let version = destination.join("ProjectSettings/ProjectVersion.txt");
     if !version.is_file() {
         if vrc_get_vpm::version::UnityVersion::parse(unity).is_none() {
@@ -305,20 +304,24 @@ async fn make(
         std::fs::create_dir_all(version.parent().unwrap())?;
         std::fs::write(version, format!("m_EditorVersion: {unity}\n"))?;
     }
+    if cancel.load(Ordering::Relaxed) {
+        bail!("{}", tr("Cancelled before resolving. The folder was kept and was not registered."));
+    }
+    // Register the completed copy before any fallible restoration (AGENTS.md): from here on every failure leaves a
+    // project the gallery lists, and says where it is.
+    progress.lock().unwrap().phase = mark("Registering project").into();
+    crate::vpm::register(root, &destination, true).await
+        .with_context(|| tr!("The copy is at {path}, but registration failed", path = destination.display()))?;
+    let listed = || tr!("The copy is listed at {path}, but its local packages could not be copied", path = destination.display());
+    if copy.is_some() { copy_local_packages(source, &destination, cancel, progress).with_context(listed)?; }
     // A product GUID of its own; a template's product name always becomes the project's, a copy's when it was the
     // copied project's name.
     let path = destination.join("ProjectSettings/ProjectSettings.asset");
     if let Ok(s) = std::fs::read_to_string(&path) {
         let from = copy.map(|_| source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-        std::fs::write(&path, retarget(&s, name, from.as_deref()))?;
+        std::fs::write(&path, retarget(&s, name, from.as_deref()))
+            .with_context(|| tr!("The copy is listed at {path}, but its project settings could not be updated", path = destination.display()))?;
     }
-    if cancel.load(Ordering::Relaxed) {
-        bail!("{}", tr("Cancelled before resolving. The folder was kept and was not registered."));
-    }
-    // Register the completed copy before any optional restoration: a retained project must remain discoverable.
-    progress.lock().unwrap().phase = mark("Registering project").into();
-    crate::vpm::register(root, &destination, true).await
-        .with_context(|| tr!("The copy is at {path}, but registration failed", path = destination.display()))?;
     // Duplication preserves installed package contents and exact locked versions, including packages whose
     // repositories are no longer available. Resolution is needed only for genuinely missing packages/templates.
     if copy.is_none() || !installed_dependencies_complete(&destination)? {
@@ -561,6 +564,39 @@ mod tests {
         assert!(rt.block_on(crate::vpm::registered(&root)).unwrap().iter().any(|p| p.canonicalize().unwrap() == copy.canonicalize().unwrap()));
         std::fs::remove_file(copy.join("Packages/private.package/package.json")).unwrap();
         assert!(!installed_dependencies_complete(&copy).unwrap());
+    }
+
+    /// A project on disk in `dir`: its version file and a `Packages/manifest.json` with `dependencies`.
+    fn project(dir: &Path, dependencies: serde_json::Value) {
+        std::fs::create_dir_all(dir.join("ProjectSettings")).unwrap();
+        std::fs::create_dir_all(dir.join("Assets")).unwrap();
+        std::fs::write(dir.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
+        std::fs::write(dir.join("Assets/a.txt"), "a").unwrap();
+        crate::write_json(&dir.join("Packages/manifest.json"), &serde_json::json!({ "dependencies": dependencies })).unwrap();
+    }
+    fn is_registered(rt: &tokio::runtime::Runtime, root: &Path, path: &Path) -> bool {
+        let wanted = crate::discovery::key(path);
+        rt.block_on(crate::vpm::registered(root)).unwrap().iter().any(|p| crate::discovery::key(p) == wanted)
+    }
+
+    #[test]
+    fn a_copy_that_fails_after_its_files_are_copied_is_listed_and_named() {
+        // PROJECTS-1: a failure in the steps after the copy (here its local packages) left the copy on disk, unregistered.
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        std::fs::create_dir_all(temp.path().join("External")).unwrap();
+        std::fs::write(temp.path().join("External/package.json"), "{}").unwrap();
+        project(&source, serde_json::json!({ "bad/name": "file:../../External" }));
+        let root = temp.path().join("vcc");
+        let rt = crate::runtime().unwrap();
+        let said = rt
+            .block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())))
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"))
+            .unwrap_err();
+        let copy = temp.path().join("Copy");
+        assert!(said.contains(&copy.display().to_string()), "{said}");
+        assert!(is_registered(&rt, &root, &copy), "the copy is in the gallery's list");
     }
 
     #[test]

@@ -180,6 +180,10 @@ pub fn why_no_strip(mask: Option<bool>, kit: Option<bool>) -> NoStrip {
 pub struct HideRuntime {
     /// The beat of the current recording: a new value ends the last one.
     generation: u64,
+    /// The masks' own turn: bumped when Local User is turned on, Remote User off, and when they are put back. A thread
+    /// that reads a mask back acts only while it is still its turn, checked after its answer (CTL2-3); a new beat
+    /// (an avatar change) does not end it.
+    mask_turn: u64,
     /// A beat is running.
     hiding: bool,
     /// The app turned Local User on, and turns it off again at the end.
@@ -393,11 +397,16 @@ impl super::Controller {
                 self.tell_about_picture(NoticeKind::Warning, tr(OTHERS_COST), tr_latin(OTHERS_SHOW));
             }
             Some(true) => {
-                self.hide.lock().unwrap().others_off = true;
+                let turn = {
+                    let mut hide = self.hide.lock().unwrap();
+                    hide.others_off = true;
+                    hide.mask_turn += 1;
+                    hide.mask_turn
+                };
                 self.note_masks();
                 self.update(|s| s.capture.left_out.others = Left::Out);
                 let _ = self.with_osc(|o| o.send(REMOTE_PLAYER, vec![rosc::OscType::Bool(false)]));
-                self.check_others_went();
+                self.check_others_went(turn);
             }
             None => {
                 self.update(|s| s.capture.left_out.others = Left::InPicture);
@@ -412,14 +421,14 @@ impl super::Controller {
     }
 
     /// Reads Remote User back after a while: VRChat keeping it on leaves nothing to put back.
-    fn check_others_went(self: &Shared) {
+    fn check_others_went(self: &Shared, turn: u64) {
         let ctl = self.clone();
         let spawned = std::thread::Builder::new().name("n4n0-remote-user".into()).spawn(move || {
             std::thread::sleep(CONFIRM);
-            if !ctl.hide.lock().unwrap().others_off || ctl.mask_says(REMOTE_PLAYER) != Some(true) {
+            let kept_on = ctl.mask_says(REMOTE_PLAYER) == Some(true);
+            if !ctl.others_kept_on(turn, kept_on) {
                 return;
             }
-            ctl.hide.lock().unwrap().others_off = false;
             ctl.note_masks();
             ctl.update(|s| s.capture.left_out.others = Left::InPicture);
             ctl.tell_about_picture(NoticeKind::Warning, tr(OTHERS_KEPT), tr_latin(OTHERS_SHOW));
@@ -427,6 +436,17 @@ impl super::Controller {
         if let Err(e) = spawned {
             eprintln!("reading Remote User back: {e}");
         }
+    }
+
+    /// VRChat's answer to Remote User off, read back, taken only while the mask is still this turn's: a recording ended
+    /// meanwhile put Remote User back on itself, and that is not VRChat keeping it (CTL2-3). `true`: it kept it on.
+    fn others_kept_on(&self, turn: u64, kept_on: bool) -> bool {
+        let mut hide = self.hide.lock().unwrap();
+        if !kept_on || !hide.others_off || hide.mask_turn != turn {
+            return false;
+        }
+        hide.others_off = false;
+        true
     }
 
     /// The strip went away with Remote User off: it goes back on, for this picture and the next ones of this run, and `true`.
@@ -538,23 +558,28 @@ impl super::Controller {
 
     /// Local User on, `after` a while, unless the recording ended by then; then checks that VRChat took it.
     fn turn_local_user_on(self: &Shared, after: Duration) {
-        self.hide.lock().unwrap().turned_on = true;
+        let turn = {
+            let mut hide = self.hide.lock().unwrap();
+            hide.turned_on = true;
+            hide.mask_turn += 1;
+            hide.mask_turn
+        };
         self.note_masks();
-        let generation = self.hide.lock().unwrap().generation;
         let ctl = self.clone();
         let spawned = std::thread::Builder::new().name("n4n0-local-user".into()).spawn(move || {
             std::thread::sleep(after);
             let still = |c: &Shared| {
                 let hide = c.hide.lock().unwrap();
-                hide.turned_on && hide.generation == generation
+                hide.turned_on && hide.mask_turn == turn
             };
             if !still(&ctl) {
                 return;
             }
             let _ = ctl.with_osc(|o| o.send(LOCAL_PLAYER, vec![rosc::OscType::Bool(true)]));
             std::thread::sleep(CONFIRM);
-            if still(&ctl) && ctl.mask_says(LOCAL_PLAYER) == Some(false) {
-                ctl.mask_not_taken();
+            // The answer first, then whether it is still this turn's (the recording may have ended during the read).
+            if ctl.mask_says(LOCAL_PLAYER) == Some(false) {
+                ctl.mask_not_taken(turn);
             }
         });
         if let Err(e) = spawned {
@@ -572,9 +597,13 @@ impl super::Controller {
     }
 
     /// VRChat kept the mask off: no strip comes, so there is nothing to hide the avatar for.
-    fn mask_not_taken(self: &Shared) {
+    fn mask_not_taken(self: &Shared, turn: u64) {
         {
             let mut hide = self.hide.lock().unwrap();
+            // Put back (the recording ended) or turned on again since: not this answer's to judge.
+            if !hide.turned_on || hide.mask_turn != turn {
+                return;
+            }
             hide.turned_on = false;
             hide.mask = Some(false);
         }
@@ -600,6 +629,7 @@ impl super::Controller {
     pub(super) fn restore_hide_self(&self) {
         let (turned_on, others_off) = {
             let mut hide = self.hide.lock().unwrap();
+            hide.mask_turn += 1;
             (std::mem::take(&mut hide.turned_on), std::mem::take(&mut hide.others_off))
         };
         if others_off {
@@ -867,6 +897,45 @@ mod tests {
         assert!(sent.iter().any(|(_, a, v)| a == LOCAL_PLAYER && *v == rosc::OscType::Bool(false)), "{sent:?}");
         assert!(!sent.iter().any(|(_, a, _)| a == REMOTE_PLAYER), "{sent:?}");
         assert!(!journal.exists(), "the journal goes");
+        stand.end();
+    }
+
+    /// CTL2-3: a read-back answered after the recording ended (its masks put back, as the person had them) is not taken
+    /// for VRChat refusing: no error, nothing changed; an answer in its own turn still is.
+    #[test]
+    fn a_mask_read_back_after_the_recording_ended_says_nothing() {
+        let stand = stand_in(true);
+        let ctl = &stand.ctl;
+        // Local User on, its read-back pending; the recording ends (restore) before the answer is taken.
+        let turn = {
+            let mut hide = ctl.hide.lock().unwrap();
+            hide.turned_on = true;
+            hide.mask_turn += 1;
+            hide.mask_turn
+        };
+        ctl.restore_hide_self();
+        let _ = ctl.take_notices();
+        ctl.mask_not_taken(turn);
+        assert!(!toast_with(ctl, NoticeKind::Error, &tr(NOT_TAKEN)), "no false error");
+        assert_ne!(ctl.view().capture.left_out.wearer, Left::NotAsked);
+        // Remote User the same way.
+        let turn = {
+            let mut hide = ctl.hide.lock().unwrap();
+            hide.others_off = true;
+            hide.mask_turn += 1;
+            hide.mask_turn
+        };
+        ctl.restore_hide_self();
+        assert!(!ctl.others_kept_on(turn, true), "put back by the end, not kept on by VRChat");
+        // In its own turn, VRChat keeping Local User off is still said.
+        let turn = {
+            let mut hide = ctl.hide.lock().unwrap();
+            hide.turned_on = true;
+            hide.mask_turn += 1;
+            hide.mask_turn
+        };
+        ctl.mask_not_taken(turn);
+        assert!(toast_with(ctl, NoticeKind::Error, &tr(NOT_TAKEN)));
         stand.end();
     }
 

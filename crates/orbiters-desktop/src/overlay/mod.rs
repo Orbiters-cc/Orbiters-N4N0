@@ -82,15 +82,9 @@ impl Stalls {
             return;
         }
         self.said = Some(Instant::now());
-        let dir = orbiters_core::paths::logs_dir();
         let at = orbiters_core::now_utc_iso();
         let line = format!("{at} a turn took {} ms: {}\n", took.as_millis(), doing()); // i18n: not shown (a log's line)
-        if std::fs::create_dir_all(&dir).is_ok() {
-            if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(dir.join("overlay-stalls.log")) {
-                use std::io::Write;
-                let _ = file.write_all(line.as_bytes());
-            }
-        }
+        vr_log::append("overlay-stalls.log", None, line);
     }
 }
 
@@ -690,11 +684,16 @@ enum Ended {
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     // How it ended, in `vr-test.log`: the overlay's own stderr reaches nobody, and an end at a press left no trace
     // (K-qr-page, 2026-11-14 22:08).
+    // The overlay's logs are written off its loop (LIGHT-VR-7); dropping the writer writes what is queued, also when a
+    // panic unwinds through here.
+    let logs = vr_log::Queued::start();
     let ended = session(args);
     match &ended {
         Ok(how) => vr_log::line(&format!("overlay ended: {how:?}")), // i18n: not shown (a log's line)
         Err(e) => vr_log::line(&format!("overlay ended with an error: {e:#}")), // i18n: not shown (a log's line)
     }
+    // Before `process::exit`, which runs no destructor.
+    drop(logs);
     match ended? {
         Ended::Closed | Ended::Retry => Ok(()),
         // Everything was put back as the session ended: only the exit code is left to say.

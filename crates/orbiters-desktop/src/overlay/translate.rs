@@ -550,14 +550,7 @@ impl TranslateHost {
 
 /// A line in `translate.log` beside the app's other logs: how reading goes (never what was read).
 fn note(line: &str) {
-    use std::io::Write;
-    let path = orbiters_core::paths::logs_dir().join("translate.log");
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
-        let _ = std::fs::rename(&path, path.with_extension("old.log"));
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{} {line}", orbiters_core::now_utc_iso());
-    }
+    super::vr_log::append("translate.log", Some(super::vr_log::ROTATE_AT), format!("{} {line}\n", orbiters_core::now_utc_iso()));
 }
 
 fn set_status(shared: &Mutex<Shared>, state: TranslateState) {

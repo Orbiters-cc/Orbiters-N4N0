@@ -28,7 +28,7 @@ fn running(ctl: &Shared, dir: &Path, integrated: bool, lines: &str) {
         exit.on_reconstruct_exit();
         exits.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }).unwrap();
-    *ctl.reconstruction.lock().unwrap() = Some(Reconstruction { handle, dir: dir.to_path_buf(), told: false, integrated, pausing: None, freed: false, stopped: false });
+    *ctl.reconstruction.lock().unwrap() = Some(Reconstruction { handle, dir: dir.to_path_buf(), told: false, integrated, pausing: None, seen: None, freed: false, stopped: false });
     ctl.update(|s| {
         let mut job = ReconstructionJob::new(dir.to_path_buf(), integrated);
         job.stage = Stage::Training;
@@ -71,6 +71,17 @@ fn toast(ctl: &Shared, words: &str) -> bool {
 
 fn capturing(ctl: &Shared, on: bool) {
     ctl.update(|s| s.capture.state = if on { CaptureState::Recording } else { CaptureState::Idle });
+}
+
+/// night2 (the verifier): a worker that said it saw the pause is not stopped at the 15 s of one that never answers (it
+/// is reading back where it stands and giving the GPU back), and is still stopped once its longer limit passes.
+#[test]
+fn a_worker_that_saw_the_pause_has_longer_but_not_for_ever() {
+    let s = Duration::from_secs;
+    assert!(!pause_overdue(s(10), None));
+    assert!(pause_overdue(s(16), None), "silent: stuck after 15 s, as before");
+    assert!(!pause_overdue(s(40), Some(s(30))), "it saw the pause: it may go on reading back");
+    assert!(pause_overdue(s(90), Some(s(61))), "bounded");
 }
 
 #[test]

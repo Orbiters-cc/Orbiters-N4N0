@@ -192,6 +192,8 @@ fn settings_key(args: &Args) -> String {
 /// programs' disk use, and the run cannot go on until it is written (0.7 s for 604 MB otherwise).
 fn leave(session: &Path, key: &str, state: train::Start, extras: &Extras, gpu: gpu::Gpu, dev: wgpu::Device, pause: &Pause) -> anyhow::Result<Ended> {
     pause.ask();
+    // Said once: also when the pause came at a render cut short or while saving, outside the steps.
+    pause.acknowledge();
     let read_back = pause.since_asked();
     drop(gpu);
     drop(dev);
@@ -222,6 +224,7 @@ fn run(args: Args) -> anyhow::Result<Ended> {
     // A swap an earlier run stopped in the middle of: its previous result is back in place first.
     recover(dir);
     let pause = Arc::new(Pause::default());
+    pause.on_acknowledge(|| emit(&Event::PauseSeen));
     {
         let session = dir.clone();
         checkpoint::listen(pause.clone(), move || leave_early(&session));

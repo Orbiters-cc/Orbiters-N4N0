@@ -220,6 +220,9 @@ pub enum Event {
         psnr: Option<f32>,
         seconds: f32,
     },
+    /// It saw the pause between two steps (or at a cut render): what is left is reading back where it stands, giving
+    /// the GPU back and writing the checkpoint. The app then waits longer, bounded, before it takes it for stuck.
+    PauseSeen,
     /// A pause has taken it off the GPU: its memory is free, what is left is writing the checkpoint.
     Pausing,
     /// It stopped for a pause, and exits. `kept`: a checkpoint stands to go on from (else it starts over, which costs
@@ -264,7 +267,7 @@ mod tests {
         assert!(line.starts_with("{\"event\":\"progress\""), "{line}");
         assert_eq!(serde_json::from_str::<Event>(&line).unwrap(), e);
         let s: Event = serde_json::from_str(r#"{"event":"stage","stage":"seeding"}"#).unwrap();
-        for e in [Event::Pausing, Event::Paused { kept: true, message: None }, Event::Resumed { iteration: 5, iterations: 9, gaussians: 7, psnr: None, seconds: 1.0 }] {
+        for e in [Event::PauseSeen, Event::Pausing, Event::Paused { kept: true, message: None }, Event::Resumed { iteration: 5, iterations: 9, gaussians: 7, psnr: None, seconds: 1.0 }] {
             assert_eq!(Event::from_line(&e.to_line()), Some(e));
         }
         assert_eq!(s, Event::Stage { stage: Stage::Seeding, progress: 0.0 });

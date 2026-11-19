@@ -49,11 +49,14 @@ pub struct Pause {
     early: AtomicBool,
     /// When it was first asked, to say what a pause took.
     when: std::sync::OnceLock<std::time::Instant>,
+    /// The run saw it ([`Pause::acknowledge`]), and what says so to the app (the worker's event).
+    seen: AtomicBool,
+    on_seen: std::sync::OnceLock<fn()>,
 }
 
 impl Default for Pause {
     fn default() -> Self {
-        Self { asked: AtomicBool::new(false), early: AtomicBool::new(true), when: std::sync::OnceLock::new() }
+        Self { asked: AtomicBool::new(false), early: AtomicBool::new(true), when: std::sync::OnceLock::new(), seen: AtomicBool::new(false), on_seen: std::sync::OnceLock::new() }
     }
 }
 
@@ -70,6 +73,22 @@ impl Pause {
 
     pub fn asked(&self) -> bool {
         self.asked.load(Ordering::SeqCst)
+    }
+
+    /// What tells the app the pause was seen (called once, by [`Pause::acknowledge`]).
+    pub fn on_acknowledge(&self, tell: fn()) {
+        let _ = self.on_seen.set(tell);
+    }
+
+    /// The run saw the pause and is on its way out (between two steps, or a render cut short): said once. The app then
+    /// gives it longer to read back and write than a run that never answers (night2: a step and its read back can take
+    /// more than the 15 s of a stuck worker on a loaded card).
+    pub fn acknowledge(&self) {
+        if !self.seen.swap(true, Ordering::SeqCst) {
+            if let Some(tell) = self.on_seen.get() {
+                tell();
+            }
+        }
     }
 
     /// From now on a pause has something to keep: the run stops between two steps.
@@ -605,6 +624,23 @@ pub fn read_body(session: &Path, header: &Header) -> anyhow::Result<Checkpoint> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// night2: the run says once that it saw the pause, whoever calls first (a step boundary, then leaving).
+    #[test]
+    fn a_pause_is_acknowledged_once() {
+        static TOLD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let pause = Pause::default();
+        pause.acknowledge();
+        assert_eq!(TOLD.load(Ordering::SeqCst), 0, "nothing to tell yet: no hook");
+        let pause = Pause::default();
+        pause.on_acknowledge(|| {
+            TOLD.fetch_add(1, Ordering::SeqCst);
+        });
+        pause.ask();
+        pause.acknowledge();
+        pause.acknowledge();
+        assert_eq!(TOLD.load(Ordering::SeqCst), 1);
+    }
 
     fn session(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("orbiters-checkpoint-{name}-{}", std::process::id()));

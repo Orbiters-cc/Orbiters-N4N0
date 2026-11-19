@@ -776,6 +776,8 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
         if control.pause_before(it - 1, from_step, iterations) {
             if let Some(p) = control.pause {
                 p.ask();
+                // Seen between two steps: the app waits for the read back and the checkpoint (bounded).
+                p.acknowledge();
             }
             // What is on its way lands first: nothing of a round is kept half done.
             rounds.settle(gpu, &dev, settings, it - 1, relocate_until, scored, extent, &filter_cams)?;

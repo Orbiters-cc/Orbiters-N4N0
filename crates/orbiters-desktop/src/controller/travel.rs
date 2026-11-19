@@ -131,16 +131,40 @@ const PIPE: &str = r"\\.\pipe\VRChatURLLaunchPipe";
 
 impl Travel for Real {
     fn running(&self) -> Vec<u32> {
-        let mut system = sysinfo::System::new();
-        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-        system.processes().values().filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat")).map(|p| p.pid().as_u32()).collect()
+        // The system's own list: no process is opened (sysinfo opened each with memory-read rights).
+        super::bridge_side::vrchat_pids()
     }
 
     fn own_osc_ports(&self, pid: u32) -> bool {
-        let mut system = sysinfo::System::new();
-        let pid = sysinfo::Pid::from_u32(pid);
-        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always));
-        system.process(pid).is_some_and(|p| p.cmd().iter().any(|a| side_osc(&a.to_string_lossy())))
+        // Without opening the game (verify-n4n0 5): its command line as its own log lists it, the log made in the minute
+        // after the process started. Anything uncertain counts as maybe the bridge's: the person is then offered an invite,
+        // and nothing is written into a VRChat that may be an agent's.
+        let crate::bridge::game::Identity::Running(start) = super::bridge_side::vrchat_identity(pid) else { return true };
+        if start == 0 {
+            return true;
+        }
+        let Some(dir) = orbiters_core::paths::vrchat_log_dir() else { return true };
+        let logs: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("output_log_"))
+                    .filter(|e| {
+                        e.metadata()
+                            .ok()
+                            .and_then(|m| m.created().ok())
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .is_some_and(|t| t.as_secs() + 5 >= start && t.as_secs() <= start + 60)
+                    })
+                    .map(|e| e.path())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let [log] = &logs[..] else { return true };
+        match crate::bridge::sessions::complete_args(&crate::bridge::sessions::read_head(log, 64 * 1024)) {
+            Some(args) => args.iter().any(|a| side_osc(a)),
+            None => true,
+        }
     }
 
     fn connect(&self) -> std::io::Result<(Box<dyn LinkPipe>, Option<u32>)> {

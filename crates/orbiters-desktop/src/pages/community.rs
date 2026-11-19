@@ -59,6 +59,13 @@ pub(super) fn source(p: &community::Picture, large: bool, development: bool, sta
     (p.id != 0 || !url.is_empty()).then_some(Picture::Gallery { development, asset: p.asset_id, id: p.id, url, large })
 }
 
+fn ask_galleries(ctx: &egui::Context, server: Server) -> Job<anyhow::Result<Galleries>> {
+    Job::spawn(ctx, move || {
+        let account = orbiters_core::account::read(server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?;
+        Api::new(server).galleries(&account.token)
+    })
+}
+
 fn avatar_of(m: Option<&community::Member>) -> Option<Picture> {
     m?.avatar_url().map(|url| Picture::Gallery { development: false, asset: 0, id: 0, url, large: false })
 }
@@ -73,6 +80,9 @@ pub struct State {
     pub chosen: Option<u64>,
     /// What was asked: the environment, the account, the gallery.
     asked: Option<(bool, String, Option<u64>)>,
+    account: super::AccountFollow,
+    /// Orbiters came to answer for the account since the last look: what failed is asked again.
+    answered: bool,
     error: Option<String>,
     window: Option<PictureWindow>,
     event: Option<events::Window>,
@@ -159,23 +169,32 @@ impl State {
         let development = cx.snap.settings.development;
         let server = if development { Server::Development } else { Server::Production };
         self.covers.development = development;
+        // Who the account is, not how its check goes: offline, the check comes and goes every minute.
+        let (account, answered) = self.account.see(&cx.snap.account.state);
+        self.answered |= answered;
         if !self.fixture && wanted {
-            let account = format!("{:?}", cx.snap.account.state);
             let key = (development, account, self.chosen);
             if self.asked.as_ref() != Some(&key) {
                 let account_changed = self.asked.as_ref().is_none_or(|k| k.0 != key.0 || k.1 != key.1);
                 self.asked = Some(key);
+                self.answered = false;
                 self.error = None;
                 self.feed = community::Pictures::default();
                 self.changed = true;
                 if account_changed {
                     self.galleries = None;
-                    self.galleries_job = Job::spawn(ctx, move || {
-                        let account = orbiters_core::account::read(server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?;
-                        Api::new(server).galleries(&account.token)
-                    });
+                    self.galleries_job = ask_galleries(ctx, server);
                 }
                 self.fetch(ctx, server, false);
+            } else if std::mem::take(&mut self.answered) {
+                // Orbiters answers again: what could not be read is asked again; what shows stays.
+                self.error = None;
+                if self.galleries.is_none() && !self.galleries_job.running() {
+                    self.galleries_job = ask_galleries(ctx, server);
+                }
+                if self.feed.items.is_empty() && !self.feed_job.running() {
+                    self.fetch(ctx, server, false);
+                }
             }
         }
         if let Some(r) = self.galleries_job.take() {

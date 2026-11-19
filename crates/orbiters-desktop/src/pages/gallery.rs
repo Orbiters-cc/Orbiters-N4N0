@@ -89,6 +89,8 @@ pub struct State {
     shown_key: Option<(Filter, String)>,
     shown: Vec<Entry>,
     key: Option<(u64, u64, std::path::PathBuf, bool, String, u64)>,
+    /// Who the account is, for the key above (not how its check with Orbiters goes).
+    account: super::AccountFollow,
     /// This computer's entries being made, with the revision of what they are made from beyond the pictures, taken
     /// (and when) before any of it was read.
     local_job: Job<(std::time::Instant, u64, Vec<Entry>)>,
@@ -534,15 +536,22 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
         state.local_dirty = true;
     }
     let development = cx.snap.settings.development;
+    let (account, answered) = state.account.see(&cx.snap.account.state);
     // The editor's saves too: a copy saved beside its original shows at once.
     let key = (
         cx.ctl.library_version(),
         cx.visit,
         cx.snap.settings.sessions_dir.clone(),
         development,
-        format!("{:?}", cx.snap.account.state),
+        // Who the account is, not how its check goes: offline, the check comes and goes every minute.
+        account,
         crate::pages::editor::saved(),
     );
+    if answered {
+        // Orbiters answers again (it could not be reached, a sign-in was renewed): the feed is asked again; nothing
+        // that shows is put away.
+        state.asked = None;
+    }
     if (state.local_dirty || state.key.as_ref() != Some(&key)) && !state.local_job.running() {
         let changed_account = state.key.as_ref().is_some_and(|k| k.3 != key.3 || k.4 != key.4);
         state.observe_context(key);
@@ -2315,6 +2324,65 @@ mod tests {
             frame(&mut state);
         }
         assert!(state.listed == settled && !state.local_job.running(), "made once, not again and again");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Night PAGES-UI-23: while Orbiters cannot be reached the account's check comes and goes every minute (Offline,
+    /// Checking, Offline): the same person, so the decoded pictures stay and the list is not made again. Orbiters
+    /// answering again asks the feed again; another name is another account and starts over.
+    #[test]
+    fn the_account_check_coming_and_going_is_not_another_account() {
+        use crate::state::AccountState as A;
+        let root = std::env::temp_dir().join(format!("orbiters-gallery-account-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Sessions")).unwrap();
+        let history_file = root.join("visited-worlds.json");
+        orbiters_core::visited::History::default().save(&history_file).unwrap();
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl =
+            std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let mut snap = (*ctl.view()).clone();
+        snap.settings.sessions_dir = root.join("Sessions");
+        let mut state = State { sources: Some((history_file.clone(), None)), ..Default::default() };
+        state.folders.set_sources(history_file, None);
+        let mut time = 0.0;
+        let mut frame = |state: &mut State, account: A| {
+            snap.account.state = account;
+            time += 1.0 / 60.0;
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let mut output = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |ui| {
+                let cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                follow_locals(state, ui, &cx, Server::Production);
+            });
+            output.textures_delta.clear();
+        };
+        let offline = || A::Offline { username: Some("x".into()) };
+        let limit = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while state.listed.is_none() || state.local_job.running() {
+            frame(&mut state, offline());
+            assert!(std::time::Instant::now() < limit, "the first list");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        state.pictures = Some(crate::worlds::Pictures::new(&ctx));
+        state.asked = Some((Filter::All, String::new()));
+        let listed = state.listed;
+        for account in [A::Checking { username: Some("x".into()) }, offline(), A::Checking { username: Some("x".into()) }, offline()] {
+            frame(&mut state, account);
+            assert!(!state.local_job.running(), "the list is not made again");
+            assert!(state.pictures.is_some(), "the decoded pictures stay");
+            assert!(state.asked.is_some(), "nothing new to ask while Orbiters cannot be reached");
+        }
+        assert_eq!(state.listed, listed);
+        frame(&mut state, A::SignedIn { username: "x".into() });
+        assert!(state.pictures.is_some() && !state.local_job.running(), "Orbiters answering is not another account");
+        assert!(state.asked.is_none(), "but the feed is asked again");
+        state.asked = Some((Filter::All, String::new()));
+        frame(&mut state, A::Checking { username: Some("x".into()) });
+        frame(&mut state, A::SignedIn { username: "x".into() });
+        assert!(state.asked.is_some(), "a check that confirms the sign-in asks nothing again");
+        frame(&mut state, A::SignedIn { username: "y".into() });
+        assert!(state.pictures.is_none(), "another account starts over");
         std::fs::remove_dir_all(&root).ok();
     }
 

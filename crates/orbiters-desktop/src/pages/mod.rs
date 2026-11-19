@@ -137,6 +137,36 @@ pub fn under_top(ui: &Ui, cx: &Cx, name: &'static str, from: egui::layers::Shape
     }
 }
 
+/// Follows the account for what a page asked Orbiters for it: WHO it is, not how its check with Orbiters is going.
+/// `Checking`, `Offline` and `SignedIn` of the same name are the same person (the check runs again every minute while
+/// Orbiters cannot be reached, and whenever a tool rewrites the saved account): what was shown for them stays. Another
+/// name (or none), or a sign-in Orbiters refused (`Expired`), is another account.
+#[derive(Default)]
+pub struct AccountFollow {
+    /// Orbiters answered for this account at its last answer (`SignedIn`); a check under way keeps the last answer.
+    answered: bool,
+}
+
+impl AccountFollow {
+    /// The account's key for what a page keeps (another key: another account), and whether Orbiters has just come to
+    /// answer for it (after being unreachable, an expired sign-in renewed): what failed may be asked again, nothing
+    /// shown needs to go.
+    pub fn see(&mut self, state: &crate::state::AccountState) -> (String, bool) {
+        use crate::state::AccountState as A;
+        let answered = match state {
+            A::SignedIn { .. } => true,
+            A::Checking { .. } | A::SigningIn => self.answered,
+            A::Offline { .. } | A::Expired { .. } | A::SignedOut | A::Unknown => false,
+        };
+        let now = answered && !self.answered;
+        self.answered = answered;
+        let name = state.username().unwrap_or_default();
+        // A sign-in Orbiters refused is no longer that account's access: what was asked with it goes.
+        let key = if matches!(state, A::Expired { .. }) { format!("{name}\u{0}expired") } else { name.to_owned() };
+        (key, now)
+    }
+}
+
 /// Work done on a background thread; the interface polls it every frame and repaints when it lands.
 pub struct Job<T> {
     rx: Option<mpsc::Receiver<T>>,
@@ -478,6 +508,24 @@ pub(crate) mod rest {
 mod tests {
     use super::*;
     use orbiters_i18n::{in_language, Language};
+
+    /// Night PAGES-UI-23: the account's key is who it is; "answered" rises once when Orbiters comes to answer.
+    #[test]
+    fn an_account_is_who_it_is_not_how_its_check_goes() {
+        use crate::state::AccountState as A;
+        let x = || Some("x".to_owned());
+        let mut f = AccountFollow::default();
+        assert_eq!(f.see(&A::Unknown), (String::new(), false));
+        assert_eq!(f.see(&A::Checking { username: x() }), ("x".into(), false));
+        assert_eq!(f.see(&A::Offline { username: x() }), ("x".into(), false));
+        assert_eq!(f.see(&A::Checking { username: x() }), ("x".into(), false));
+        assert_eq!(f.see(&A::SignedIn { username: "x".into() }), ("x".into(), true));
+        assert_eq!(f.see(&A::Checking { username: x() }), ("x".into(), false), "a check under way keeps the last answer");
+        assert_eq!(f.see(&A::SignedIn { username: "x".into() }), ("x".into(), false));
+        assert_eq!(f.see(&A::Expired { username: x() }), ("x\u{0}expired".into(), false), "a refused sign-in is not the same access");
+        assert_eq!(f.see(&A::SignedIn { username: "x".into() }), ("x".into(), true), "a renewed sign-in asks again");
+        assert_eq!(f.see(&A::SignedOut), (String::new(), false));
+    }
 
     /// What is said by the day is worked out again at each wait [`local_day_in`] gives. Followed from wait to wait
     /// through a change of the zone's offset, the day believed must be the day it is at every moment in between:

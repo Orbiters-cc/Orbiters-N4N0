@@ -827,21 +827,6 @@ fn remove_owned(path: &Path, kind: Kind) -> std::io::Result<()> {
     })
 }
 
-/// What Orbiters - N4N0 keeps outside its install folder, its own only (`orbiters_core::paths`): settings
-/// (`%APPDATA%\Orbiters\Desktop`), caches and downloaded updates (`%LOCALAPPDATA%\Orbiters\Desktop`), speech models
-/// (`%LOCALAPPDATA%\Orbiters\Models`). What the Orbiters Unity tools share there (the account, Mixer's inbox, avatar
-/// manifests, logs) stays, and so do the sessions.
-pub fn data_dirs() -> Vec<PathBuf> {
-    let mut dirs_found = Vec::new();
-    if let Some(config) = dirs::config_dir() {
-        dirs_found.push(config.join("Orbiters").join("Desktop"));
-    }
-    if let Some(local) = dirs::data_local_dir() {
-        dirs_found.push(local.join("Orbiters").join("Desktop"));
-        dirs_found.push(local.join("Orbiters").join("Models"));
-    }
-    dirs_found
-}
 
 /// Whether two paths name the same folder (as Windows compares them).
 pub fn same_dir(a: &Path, b: &Path) -> bool {

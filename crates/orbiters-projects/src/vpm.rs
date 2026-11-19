@@ -593,7 +593,7 @@ struct Kept {
 /// Whether `rel` is a place a plan may change: under the project's Packages or Assets, plain names only.
 fn allowed(rel: &Path) -> bool {
     rel.components().all(|c| matches!(c, std::path::Component::Normal(_)))
-        && rel.components().next().is_some_and(|c| c.as_os_str() == "Packages" || c.as_os_str() == "Assets")
+        && rel.components().next().is_some_and(|c| c.as_os_str() == "Packages" || c.as_os_str() == "Assets") // i18n: not shown (folder names)
         && rel.components().count() >= 2
 }
 

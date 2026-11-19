@@ -59,6 +59,7 @@ pub fn set_start_with_windows(on: bool) -> anyhow::Result<()> {
 /// that runs the app in the menu bar.
 #[cfg(target_os = "macos")]
 pub mod mac {
+    use orbiters_i18n::tr;
     use std::path::{Path, PathBuf};
 
     const LABEL: &str = "cc.orbiters.n4n0";

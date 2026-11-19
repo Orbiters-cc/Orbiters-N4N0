@@ -80,5 +80,12 @@
   "vrchat status\u0004Busy": "取り込み中",
   "vrchat status\u0004Offline": "オフライン",
   "request invite, short\u0004Request": "リクエスト",
-  "Request an invite from {name}": "{name} に招待をリクエスト"
+  "Request an invite from {name}": "{name} に招待をリクエスト",
+  "VRChat runs on a Mac with Obelisk, free: turn Beta versions on in it.": "Mac では無料の Obelisk で VRChat が動きます。ベータ版をオンにしてください。",
+  "Get Obelisk": "Obelisk を入手",
+  "Download VRChat in Obelisk (Beta versions on in its settings), then come back.": "Obelisk で VRChat をダウンロードして（設定でベータ版をオンに）、戻ってきてください。",
+  "Open Obelisk": "Obelisk を開く",
+  "On this Mac, through Obelisk": "この Mac で、Obelisk を使って",
+  "Obelisk is open": "Obelisk を開きました",
+  "Press Play on VRChat there": "そこで VRChat の「プレイ」を押してください"
 }

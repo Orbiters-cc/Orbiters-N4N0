@@ -173,3 +173,14 @@ fn worlds_get_their_names_once_known() {
     assert_eq!((p.world_name.as_str(), p.world_picture.as_str()), ("Lounge", "https://api.vrchat.cloud/w"));
     assert!(unnamed_worlds(&state).is_empty());
 }
+
+#[test]
+fn only_an_ended_session_stops_the_pipeline() {
+    use orbiters_core::pipeline::NoToken;
+    assert_eq!(token_outcome(Ok("t".into())), Ok("t".into()));
+    assert_eq!(token_outcome(Err(Error::Unauthorized)), Err(NoToken::Refused));
+    assert_eq!(token_outcome(Err(Error::Disabled)), Err(NoToken::Refused));
+    for later in [Error::Unavailable, Error::RateLimited(Duration::from_secs(9)), Error::InvalidResponse, Error::Refused(502, String::new()), Error::DeadlineExceeded] {
+        assert_eq!(token_outcome(Err(later)), Err(NoToken::Later), "a network blip does not end the live list");
+    }
+}

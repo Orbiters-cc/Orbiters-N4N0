@@ -160,6 +160,20 @@ pub fn read_signed_in(client: &Mutex<Client>) -> Result<(LauncherState, Vec<(Str
     Ok((state, groups, worn))
 }
 
+/// A token for one pipeline connection: only a session that is over stops the pipeline; anything else (no network, a
+/// time-out, a 429, a 5xx) is tried again after the pipeline's wait.
+fn pipeline_token(client: &Mutex<Client>) -> Result<String, orbiters_core::pipeline::NoToken> {
+    token_outcome(client.lock().unwrap().pipeline_token().map(|s| s.0))
+}
+
+fn token_outcome(token: Result<String, Error>) -> Result<String, orbiters_core::pipeline::NoToken> {
+    use orbiters_core::pipeline::NoToken;
+    token.map_err(|e| match e {
+        Error::Unauthorized | Error::Disabled => NoToken::Refused,
+        _ => NoToken::Later,
+    })
+}
+
 /// The words for an action that could not be done (in the page's language).
 pub fn error_text(e: &Error) -> String {
     e.to_string()
@@ -356,8 +370,12 @@ impl Controller {
             let mut first = true;
             let ended = orbiters_core::pipeline::run(
                 &stop,
-                || client.lock().unwrap().pipeline_token().ok().map(|s| s.0),
+                || pipeline_token(&client),
                 |message| {
+                    // A message of an account that is no longer the one shown is not applied.
+                    if stop.load(Ordering::Acquire) {
+                        return;
+                    }
                     if let Some(ctl) = weak.upgrade() {
                         ctl.launcher_message(message);
                     }

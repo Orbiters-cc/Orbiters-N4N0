@@ -223,35 +223,112 @@ pub enum Ended {
     Refused,
 }
 
-/// Keeps one pipeline connection open until `stop`: `token` gives a fresh token for each connection (`None`: no session,
-/// stop), `message` gets every text message, `connected` is told each time it is up. Reconnects after 5 s, doubling to
-/// 5 minutes while it keeps failing.
+/// Why no token came for a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoToken {
+    /// The session is over (signed out, or VRChat said 401): stop.
+    Refused,
+    /// Not now (no network, a time-out, a 429, a 5xx): try again after the usual wait.
+    Later,
+}
+
+/// What `run` reads messages from: an open connection (a [`Connection`] for real, a script in tests).
+pub trait Messages {
+    /// As [`Connection::next_message`].
+    fn next_message(&mut self) -> std::io::Result<Option<String>>;
+}
+
+impl<S: Read + Write> Messages for Connection<S> {
+    fn next_message(&mut self) -> std::io::Result<Option<String>> {
+        Connection::next_message(self)
+    }
+}
+
+/// The first wait before a reconnection, and the longest.
+const FIRST_WAIT: Duration = Duration::from_secs(5);
+const LONGEST_WAIT: Duration = Duration::from_secs(300);
+/// A connection that lived this long was a good one: the waits start again from the first.
+const STABLE_AFTER: Duration = Duration::from_secs(60);
+/// After VRChat answered 429 to the opening, at least this long.
+const RATE_LIMITED_WAIT: Duration = Duration::from_secs(60);
+
+/// `wait` spread over half to one and a half of itself by `random` (32768 is `wait` itself), so that every N4N0 does not reconnect
+/// on the same beat after one of VRChat's restarts.
+pub fn jittered(wait: Duration, random: u16) -> Duration {
+    wait.mul_f64(0.5 + f64::from(random) / 65536.0)
+}
+
+/// Keeps one pipeline connection open until `stop`: `token` gives a token for each connection (`Err(NoToken::Refused)`:
+/// no session, stop; `Err(NoToken::Later)`: try again later), `message` gets every text message, `connected` is told each
+/// time it is up. Reconnects after about 5 s (with jitter), doubling to 5 minutes while it keeps failing; a connection
+/// counts as good (and the wait starts again from 5 s) only once it lived a minute, so a server that accepts and closes at
+/// once is not asked every 5 s.
 #[cfg(not(target_os = "android"))]
-pub fn run(stop: &AtomicBool, mut token: impl FnMut() -> Option<String>, mut message: impl FnMut(&str), mut connected: impl FnMut(bool)) -> Ended {
-    let mut wait = Duration::from_secs(5);
+pub fn run(stop: &AtomicBool, token: impl FnMut() -> Result<String, NoToken>, message: impl FnMut(&str), connected: impl FnMut(bool)) -> Ended {
+    run_with(
+        stop,
+        token,
+        connect,
+        message,
+        connected,
+        |d| {
+            let until = Instant::now() + d;
+            while Instant::now() < until && !stop.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        },
+        Instant::now,
+        || {
+            let b = *uuid::Uuid::new_v4().as_bytes();
+            u16::from_be_bytes([b[0], b[1]])
+        },
+    )
+}
+
+/// [`run`] with the connection, the waiting, the clock and the randomness given (tests use made-up ones).
+#[allow(clippy::too_many_arguments)]
+pub fn run_with<C: Messages>(
+    stop: &AtomicBool,
+    mut token: impl FnMut() -> Result<String, NoToken>,
+    mut connect: impl FnMut(&str) -> Result<C, Option<u16>>,
+    mut message: impl FnMut(&str),
+    mut connected: impl FnMut(bool),
+    mut pause: impl FnMut(Duration),
+    clock: impl Fn() -> Instant,
+    mut random: impl FnMut() -> u16,
+) -> Ended {
+    let mut wait = FIRST_WAIT;
     while !stop.load(Ordering::Acquire) {
-        let Some(t) = token() else { return Ended::Refused };
-        match connect(&t) {
-            Ok(mut c) => {
-                connected(true);
-                wait = Duration::from_secs(5);
-                while !stop.load(Ordering::Acquire) {
-                    match c.next_message() {
-                        Ok(Some(text)) => message(&text),
-                        Ok(None) => {}
-                        Err(_) => break,
+        match token() {
+            Err(NoToken::Refused) => return Ended::Refused,
+            Err(NoToken::Later) => {}
+            Ok(t) => match connect(&t) {
+                Ok(mut c) => {
+                    let since = clock();
+                    connected(true);
+                    while !stop.load(Ordering::Acquire) {
+                        match c.next_message() {
+                            // Checked again: a message read while the account changed is not handed on.
+                            Ok(Some(text)) if !stop.load(Ordering::Acquire) => message(&text),
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
+                    }
+                    connected(false);
+                    if clock().saturating_duration_since(since) >= STABLE_AFTER {
+                        wait = FIRST_WAIT;
                     }
                 }
-                connected(false);
-            }
-            Err(Some(401 | 403)) => return Ended::Refused,
-            Err(_) => {}
+                Err(Some(401 | 403)) => return Ended::Refused,
+                Err(Some(429)) => wait = wait.max(RATE_LIMITED_WAIT),
+                Err(_) => {}
+            },
         }
-        let until = Instant::now() + wait;
-        while Instant::now() < until && !stop.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(200));
+        if stop.load(Ordering::Acquire) {
+            break;
         }
-        wait = (wait * 2).min(Duration::from_secs(300));
+        pause(jittered(wait, random()));
+        wait = (wait * 2).min(LONGEST_WAIT);
     }
     Ended::Stopped
 }
@@ -259,8 +336,20 @@ pub fn run(stop: &AtomicBool, mut token: impl FnMut() -> Option<String>, mut mes
 #[cfg(not(target_os = "android"))]
 fn connect(token: &str) -> Result<Connection<native_tls::TlsStream<std::net::TcpStream>>, Option<u16>> {
     use std::net::ToSocketAddrs;
-    let address = (HOST, 443).to_socket_addrs().map_err(|_| None)?.next().ok_or(None)?;
-    let tcp = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(10)).map_err(|_| None)?;
+    // Every address the name gives (an IPv6 one first may have no route here), within one overall deadline.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut tcp = None;
+    for address in (HOST, 443).to_socket_addrs().map_err(|_| None)? {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left < Duration::from_secs(1) {
+            break;
+        }
+        if let Ok(t) = std::net::TcpStream::connect_timeout(&address, left.min(Duration::from_secs(10))) {
+            tcp = Some(t);
+            break;
+        }
+    }
+    let tcp = tcp.ok_or(None)?;
     tcp.set_read_timeout(Some(Duration::from_secs(10))).map_err(|_| None)?;
     tcp.set_write_timeout(Some(Duration::from_secs(10))).map_err(|_| None)?;
     let tls = native_tls::TlsConnector::new().map_err(|_| None)?.connect(HOST, tcp).map_err(|_| None)?;
@@ -369,5 +458,94 @@ mod tests {
         assert_eq!(written[opening], 0x8A, "the ping is answered with a pong");
         let refused = Connection::open(Recorded { incoming: std::io::Cursor::new(b"HTTP/1.1 401 Unauthorized\r\n\r\n".to_vec()), written: vec![] }, HOST, "/", "N4N0");
         assert_eq!(refused.err(), Some(Some(401)));
+    }
+    /// A connection that gives its script, then closes.
+    struct Script(Vec<&'static str>);
+    impl Messages for Script {
+        fn next_message(&mut self) -> std::io::Result<Option<String>> {
+            if self.0.is_empty() {
+                Err(std::io::ErrorKind::ConnectionAborted.into())
+            } else {
+                Ok(Some(self.0.remove(0).to_string()))
+            }
+        }
+    }
+
+    /// Runs the loop with a made-up clock: `connect` answers per attempt; it stops after `attempts` tries.
+    fn simulate(attempts: usize, mut token: impl FnMut(usize) -> Result<String, NoToken>, mut connect: impl FnMut(usize) -> Result<Script, Option<u16>>, lives: Duration) -> (Ended, Vec<Duration>, usize, usize) {
+        let stop = AtomicBool::new(false);
+        let now = std::cell::Cell::new(Instant::now());
+        let (mut tokens, mut tries, mut ups) = (0, 0, 0);
+        let mut pauses = Vec::new();
+        let ended = run_with(
+            &stop,
+            || {
+                tokens += 1;
+                token(tokens)
+            },
+            |_| {
+                tries += 1;
+                if tries >= attempts {
+                    stop.store(true, Ordering::Release);
+                }
+                connect(tries)
+            },
+            |_| {},
+            |up| {
+                if up {
+                    ups += 1;
+                } else {
+                    now.set(now.get() + lives);
+                }
+            },
+            |d| {
+                pauses.push(d);
+                now.set(now.get() + d);
+            },
+            || now.get(),
+            || 32768,
+        );
+        (ended, pauses, tries, ups)
+    }
+
+    #[test]
+    fn a_server_that_accepts_and_closes_at_once_is_asked_less_and_less() {
+        let (ended, pauses, tries, ups) = simulate(8, |_| Ok("t".into()), |_| Ok(Script(vec![])), Duration::from_secs(1));
+        assert_eq!((ended, tries, ups), (Ended::Stopped, 8, 8));
+        let secs: Vec<u64> = pauses.iter().map(|d| d.as_secs()).collect();
+        assert_eq!(secs, [5, 10, 20, 40, 80, 160, 300], "doubling, never back to 5 s for a connection that did not last");
+    }
+
+    #[test]
+    fn a_connection_that_lasted_starts_the_waits_again() {
+        let (_, pauses, ..) = simulate(4, |_| Ok("t".into()), |_| Ok(Script(vec!["{}"])), Duration::from_secs(120));
+        let secs: Vec<u64> = pauses.iter().map(|d| d.as_secs()).collect();
+        assert_eq!(secs, [5, 5, 5]);
+    }
+
+    #[test]
+    fn a_token_that_cannot_be_read_now_is_tried_again_and_a_refused_one_stops() {
+        // No network for three tries, then a connection: the pipeline does not end on the way.
+        let (ended, pauses, tries, _) = simulate(1, |n| if n <= 3 { Err(NoToken::Later) } else { Ok("t".into()) }, |_| Ok(Script(vec![])), Duration::from_secs(1));
+        assert_eq!((ended, tries), (Ended::Stopped, 1));
+        assert_eq!(pauses.iter().map(|d| d.as_secs()).collect::<Vec<_>>(), [5, 10, 20]);
+        let (ended, pauses, tries, _) = simulate(9, |_| Err(NoToken::Refused), |_| Ok(Script(vec![])), Duration::ZERO);
+        assert_eq!((ended, pauses.len(), tries), (Ended::Refused, 0, 0));
+        let (ended, ..) = simulate(9, |_| Ok("t".into()), |_| Err(Some(401)), Duration::ZERO);
+        assert_eq!(ended, Ended::Refused);
+    }
+
+    #[test]
+    fn a_429_on_the_opening_waits_at_least_a_minute() {
+        let (_, pauses, ..) = simulate(2, |_| Ok("t".into()), |_| Err(Some(429)), Duration::ZERO);
+        assert_eq!(pauses[0].as_secs(), 60);
+    }
+
+    #[test]
+    fn waits_are_spread_around_their_length() {
+        let w = Duration::from_secs(10);
+        assert_eq!(jittered(w, 0), Duration::from_secs(5));
+        assert!(jittered(w, u16::MAX) < Duration::from_secs(15) && jittered(w, u16::MAX) > Duration::from_millis(14_990));
+        assert_eq!(jittered(w, 32768), w);
     }
 }

@@ -271,6 +271,9 @@ pub struct CallsRuntime {
     stream_failures: u32,
     stream_retry_at: Option<Instant>,
     stop: bool,
+    /// The server (its API address) and the credential the state above is for: when either changes (an environment
+    /// switch, another account), nothing of the other's is listed or callable any more.
+    identity: Option<(String, String)>,
 }
 
 impl CallsRuntime {
@@ -776,6 +779,43 @@ impl super::Controller {
         let _ = wait.recv_timeout(Duration::from_secs(4));
     }
 
+    /// Calls now go to `api` with `token`: when that is another server or account than the state was for, the other
+    /// one is told this member is gone (its presence), a call under way ends, and its contacts, presence and stream are
+    /// forgotten, so that no contact of one environment or account can be called in the other (audit F25).
+    fn calls_follow_identity(self: &Shared, api: &Api, token: &str) {
+        let now = (api.url(""), token.to_string());
+        let old = {
+            let mut rt = self.calls.lock().unwrap();
+            match rt.identity.replace(now.clone()) {
+                Some(old) if old != now => Some((old, rt.available_sent.is_some())),
+                _ => None,
+            }
+        };
+        let Some(((base, old_token), available)) = old else { return };
+        if available {
+            let agent = orbiters_core::http_agent(Some(Duration::from_secs(5)), Some(Duration::from_secs(10)));
+            let _ = agent.delete(&Api::at(&base).url("n4n0/calls/presence")).header("Authorization", &format!("Bearer {old_token}")).call();
+        }
+        {
+            let mut rt = self.calls.lock().unwrap();
+            if rt.call.is_some() {
+                let acts = rt.hang_up();
+                self.calls_act(rt, acts);
+            }
+        }
+        self.calls_publish(|rt| {
+            rt.contacts.clear();
+            rt.contacts_read = None;
+            rt.presence_sent = None;
+            rt.available_sent = None;
+            rt.friends_sent = None;
+            rt.link = CallLink::default();
+            rt.streaming = None;
+            rt.stream_failures = 0;
+            rt.stream_retry_at = None;
+        });
+    }
+
     /// The API and credential for calls (signed in), through the client kept for the server.
     fn calls_api(self: &Shared) -> Option<(Api, String)> {
         let (fresh, token) = self.account_api()?;
@@ -796,6 +836,9 @@ impl super::Controller {
             self.calls_act(rt, acts);
         }
         let account = if on { self.calls_api() } else { None };
+        if let Some((api, token)) = &account {
+            self.calls_follow_identity(api, token);
+        }
         let Some((api, token)) = account else {
             let was = {
                 let mut rt = self.calls.lock().unwrap();

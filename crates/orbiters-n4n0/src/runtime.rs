@@ -199,7 +199,7 @@ pub(crate) struct N4n0Runtime {
     /// The conversation, the saved videos' list and the processes' footprint as the apps show them: slices, so that making
     /// the state to publish ([`N4n0Runtime::status`]) copies none of them.
     lines: Slice<Vec<N4n0Line>>,
-    confirmations: Vec<N4n0Confirmation>,
+    pub(crate) confirmations: Vec<N4n0Confirmation>,
     /// The website approvals the owner opened in the browser: dealt with there (the app hears nothing back), they stay
     /// listed with their link but no longer keep N4N0 from listening.
     handed_off: HashSet<String>,
@@ -914,7 +914,7 @@ impl N4n0 {
         let mut followups = crate::screen::Followups::default();
         let mut out: Vec<Message> = Vec::new();
         let mut check_avatar = None;
-        let mut title_wanted: Option<String> = None;
+        let mut title_wanted: Option<(String, String)> = None;
         let mut gave_up = false;
         let mut expired = Vec::new();
         let qr_ended;
@@ -2020,9 +2020,7 @@ impl N4n0 {
                         rt.pending_at = None;
                         std::mem::take(&mut rt.pending)
                     };
-                    if let Some(pending) = pending {
-                        self.confirmed(pending);
-                    }
+                    self.confirmed(pending);
                 } else if Server::current().is_website_page(&url) {
                     // Only the Orbiters website (an approval), never a link from elsewhere.
                     if let Err(e) = self.device.browser.open(&url) {

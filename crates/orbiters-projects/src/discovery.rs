@@ -413,11 +413,18 @@ impl Checkpoint {
     }
 }
 
+/// Whether a folder of `path` (it included) is a dot-folder, which the walk skips (PROJECTS-9).
+fn in_dot_folder(path: &Path) -> bool {
+    path.components().any(|c| matches!(c, std::path::Component::Normal(n) if n.to_string_lossy().starts_with('.')))
+}
+
 fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, registered: &HashSet<String>) {
     let old: HashMap<_, _> = scan.projects.iter().map(|p| (key(&p.path), (p.avatars.clone(), p.worlds.clone()))).collect();
     scan.projects = found
         .iter()
-        .filter(|(k, p)| registered.contains(*k) || is_project(p))
+        // A project found earlier inside a dot-folder (a cache from before PROJECTS-9, a seed) is not proposed again;
+        // one the person registered stays wherever it is.
+        .filter(|(k, p)| registered.contains(*k) || (is_project(p) && !in_dot_folder(p)))
         .map(|(k, p)| {
             let mut project = describe(p.clone(), registered.contains(k), &mut scan.scenes);
             (project.avatars, project.worlds) = old.get(k).cloned().unwrap_or_default();
@@ -865,6 +872,32 @@ mod mac_tests {
 #[cfg(test)]
 mod retained_lists {
     use super::*;
+
+    /// Verifier, point 8: a stand-in found inside a dot-folder before (kept in the cache) is not proposed again after a
+    /// Refresh; the same place registered by the person stays.
+    #[test]
+    fn cached_finds_in_dot_folders_are_dropped_but_registered_ones_stay() {
+        let temp = tempfile::tempdir().unwrap();
+        let make = |at: &str| {
+            let p = temp.path().join(at);
+            std::fs::create_dir_all(p.join("ProjectSettings")).unwrap();
+            std::fs::write(p.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1
+").unwrap();
+            p
+        };
+        let stand_in = make(".orbiters-build/runs/Stand-in");
+        let mine = make(".hidden/Mine");
+        let plain = make("Projects/Plain");
+        let found: HashMap<String, PathBuf> = [&stand_in, &mine, &plain].into_iter().map(|p| (key(p), p.clone())).collect();
+        let registered: HashSet<String> = [key(&mine)].into_iter().collect();
+        let mut scan = Scan::default();
+        rebuild(&mut scan, &found, &registered);
+        let mut kept: Vec<PathBuf> = scan.projects.iter().map(|p| p.path.clone()).collect();
+        kept.sort();
+        let mut wanted = vec![mine.clone(), plain.clone()];
+        wanted.sort();
+        assert_eq!(kept, wanted);
+    }
 
     /// PROJECTS-7: 740 publishes over a scan of a minute write the cache a dozen times, not 740.
     #[test]

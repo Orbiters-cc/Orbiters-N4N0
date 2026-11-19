@@ -642,6 +642,16 @@ fn list_is_stale(looked: Option<(std::time::Instant, u64)>, listed: Option<(std:
     matches!((looked, listed), (Some((looked, seen)), Some((made, from))) if looked > made && seen != from)
 }
 
+/// Whether the row under the heading goes on two rows (the filters above; the layout picker, Requests and the search
+/// under them): under 920 points of head, or when the last filter's words would reach the picker. Only something
+/// really overlapping stacks it: the filters' track's own end (4 points of its edge and 14 of the last segment's
+/// padding) may touch the picker, as English did at ~1225 wide for months (night3, verifier point 7: that size had
+/// moved to two rows and its first picture 48 points down).
+fn row_stacks(head_w: f32, filters_w: f32, requests_w: f32) -> bool {
+    let last_words_end = filters_w - (4.0 + 14.0);
+    head_w < 920.0 || head_w < last_words_end + arrangement::PICKER_W + 12.0 + requests_w + 12.0 + 260.0
+}
+
 /// The filters over the gallery.
 fn filter_options() -> [SegOption<'static, Filter>; 5] {
     [
@@ -747,9 +757,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     // The filters on one line, the layout, Requests and the search on the right; narrower, the layout and the search
     // go under them.
     // (Also when the row does not fit in this language: the filters ran under the layout picker in Portuguese.)
-    // (The filters may touch the picker, as English does at ~1225 wide: only an overlap stacks it.)
-    let row_needs = widgets::segmented_width(ui, &filter_options(), false) + arrangement::PICKER_W + 12.0 + requests_button().desired_width(ui) + 12.0 + 260.0;
-    let stacked = head.width() < 920.0 || head.width() < row_needs;
+    let stacked = row_stacks(head.width(), widgets::segmented_width(ui, &filter_options(), false), requests_button().desired_width(ui));
     // Communities: the galleries as chips under the filters.
     let chips_h = if state.filter == Filter::Communities { 46.0 } else { 0.0 };
     let controls = Rect::from_min_size(pos2(head.left(), head.bottom() + 14.0), vec2(head.width(), if stacked { 88.0 } else { 40.0 } + chips_h));
@@ -2446,6 +2454,17 @@ mod tests {
         frame(&mut state, A::SignedIn { username: "y".into() });
         assert!(state.pictures.is_none(), "another account starts over");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Night3, verifier point 7: the row stacks only when a filter's words would reach the layout picker, not when the
+    /// two tracks only touch. English at 1225 wide (a head of 929 points; filters 420, Requests 113) stays on one row as
+    /// it was; Portuguese there (filters 457) stacks.
+    #[test]
+    fn the_filters_row_stacks_only_when_words_would_reach_the_picker() {
+        assert!(!row_stacks(929.0, 420.0, 113.0), "English at 1225: the tracks touch, no words overlap");
+        assert!(row_stacks(929.0, 457.0, 113.0), "Portuguese at 1225: its last filter would run under the picker");
+        assert!(!row_stacks(984.0, 457.0, 113.0), "Portuguese at 1280: room for all");
+        assert!(row_stacks(919.0, 300.0, 113.0), "under 920 points of head, always two rows");
     }
 
     /// Verifier (night3, point 1): another account, or the same one whose sign-in was refused, takes everything of the

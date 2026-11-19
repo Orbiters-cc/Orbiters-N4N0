@@ -1000,9 +1000,11 @@ fn step(steps: &mut Vec<String>, what: &str, at: &mut Instant) {
     steps.push(format!("{what} {:.2} s", at.elapsed().as_secs_f64()));
     *at = Instant::now();
 }
-/// Orbiters' own "not found" for an item (its JSON error, not a proxy's page): the item was removed there.
+/// Orbiters' own "not found" for an item (its JSON error, not a proxy's page): the item was removed there. The captures
+/// API gives an answer without a JSON error its general sentence (orbiters_core::shares `json`): that is no proof.
 fn removed_on_orbiters(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<orbiters_core::account::ApiError>().is_some_and(|a| a.status == 404 && !a.message.is_empty())
+    let general = tr("Orbiters could not complete the request");
+    e.downcast_ref::<orbiters_core::account::ApiError>().is_some_and(|a| a.status == 404 && !a.message.is_empty() && a.message != general)
 }
 
 /// [`share`] through `api` as `token`, this account's upload records in `records`, a capture's files made by `prepare`;

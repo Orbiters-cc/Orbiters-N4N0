@@ -201,16 +201,12 @@ impl super::Controller {
         let pose: [f32; 6] = pose.try_into().expect("six values");
         // The recording this scan started, its number issued with the start, its flag set under the start gate when the
         // start is accepted: everything the scan does later is for it alone (C-2, verify-controller).
-        let owner = match self.start_capture_owned(super::CapturePurpose::Short, || self.scan.lock().unwrap().recording = true) {
-            Ok(owner) => owner,
-            Err(e) => {
-                let _gate = self.capture_start_gate.lock().unwrap();
-                if !self.is_capturing() {
-                    self.scan.lock().unwrap().recording = false;
-                }
-                return Err(e);
-            }
-        };
+        // Its flag taken back by the start itself if it fails once accepted (a refused request clears nothing).
+        let owner = self.start_capture_owned(
+            super::CapturePurpose::Short,
+            || self.scan.lock().unwrap().recording = true,
+            || self.scan.lock().unwrap().recording = false,
+        )?;
         let ctl = self.clone();
         let flight = std::thread::Builder::new().name("scan".into()).spawn(move || {
             let started = Instant::now();

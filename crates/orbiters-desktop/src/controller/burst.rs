@@ -388,7 +388,7 @@ impl super::Controller {
     /// Takes a 3D picture with VRChat's camera where it stands now.
     pub fn take_3d_picture(self: &Shared) -> anyhow::Result<()> {
         let (length, mode) = self.with_settings(|s| (s.photo_3d, s.photo_3d_mode));
-        self.take_3d_picture_of(length, mode)
+        self.take_3d_picture_of(length, mode).map(|_| ())
     }
 
     /// [`Self::take_3d_picture`] of a given length and kind (the VRChat bridge says which; a person's settings say otherwise).
@@ -397,11 +397,12 @@ impl super::Controller {
     /// N4N0 (a toast, and the line of the 3D picture page, which its avatar's screen draws from a Latin-only atlas) keeps the English
     /// as the key it translates where it draws, as it does for [`orbiters_n4n0::platform::CAMERA_CLOSED`]; the VRChat bridge hands
     /// it to an AI, which is told in English. Only the errors are made inside: the recording itself runs on a thread of its own.
-    pub fn take_3d_picture_of(self: &Shared, length: Photo3dLength, mode: PictureMode) -> anyhow::Result<()> {
+    /// The number of the recording it started ([`super::StopOf::Recording`] stops that one only).
+    pub fn take_3d_picture_of(self: &Shared, length: Photo3dLength, mode: PictureMode) -> anyhow::Result<u64> {
         orbiters_i18n::in_language(orbiters_i18n::Language::En, || self.start_3d_picture(length, mode))
     }
 
-    fn start_3d_picture(self: &Shared, length: Photo3dLength, mode: PictureMode) -> anyhow::Result<()> {
+    fn start_3d_picture(self: &Shared, length: Photo3dLength, mode: PictureMode) -> anyhow::Result<u64> {
         anyhow::ensure!(self.snapshot.lock().unwrap().vrchat.running, "{}", tr("Start VRChat and open its camera first."));
         self.ensure_capture_idle()?;
         let (pose, focus, smooth, eye_height) = {
@@ -424,18 +425,12 @@ impl super::Controller {
         // the avatar hides them on its owner's client, out of the picture, and shows them again after it.
         // What it is, set under the start gate the moment the start is accepted, and the number of the recording that
         // start issued: its flight flies, puts back and stops that one only (audit F06, CTL2-7, verify-controller).
-        let started = self.start_capture_owned(super::CapturePurpose::Short, || *self.burst.lock().unwrap() = BurstRuntime { recording: true, mode, length });
-        let owner = match started {
-            Ok(owner) => owner,
-            Err(e) => {
-                // A start that failed after it was accepted leaves no picture flag for the next recording.
-                let _gate = self.capture_start_gate.lock().unwrap();
-                if !self.is_capturing() {
-                    self.burst.lock().unwrap().recording = false;
-                }
-                return Err(e);
-            }
-        };
+        // A start that fails after it was accepted takes its flag back itself, under the gate; one refused took none.
+        let owner = self.start_capture_owned(
+            super::CapturePurpose::Short,
+            || *self.burst.lock().unwrap() = BurstRuntime { recording: true, mode, length },
+            || self.burst.lock().unwrap().recording = false,
+        )?;
         let ctl = self.clone();
         let flight = std::thread::Builder::new().name("3d-picture".into()).spawn(move || {
             let started = Instant::now();
@@ -599,10 +594,12 @@ impl super::Controller {
                     // Its own dolly only: one a recording begun since plays is not this picture's to stop.
                     let gate = ctl.capture_start_gate.lock().unwrap();
                     let ours = ctl.no_recording_since(owner);
-                    drop(gate);
+                    // Its Play(false) and what it reads of the dolly's streams under the gate too: a picture begun
+                    // between the check and the send would have its dolly stopped and its counts told (verify2).
                     if ours {
                         ctl.stop_dolly();
                     }
+                    drop(gate);
                 }
             }
             // What the flight changed of the camera goes back, once, unless another recording began since: that one's camera
@@ -643,7 +640,7 @@ impl super::Controller {
             self.give_up_start_of(owner, || self.burst.lock().unwrap().recording = false);
             return Err(e.into());
         }
-        Ok(())
+        Ok(owner)
     }
 
     /// A 3D picture whose recording did not reach Recording in time (or ended first): its flag goes, and a start still
@@ -737,13 +734,30 @@ mod tests {
         ctl.update(|s| s.capture.state = CaptureState::Recording);
         let number = ctl.recording_number();
         let mut claimed = false;
-        let refused = ctl.start_capture_owned(super::super::CapturePurpose::Short, || claimed = true);
+        let refused = ctl.start_capture_owned(super::super::CapturePurpose::Short, || claimed = true, || {});
         assert!(refused.is_err(), "it would have adopted the recording under way");
         assert!(!claimed, "no picture flag set for the other recording");
         assert_eq!(ctl.capture_serial.load(Ordering::Acquire), number, "no number taken");
         ctl.update(|s| s.capture.state = CaptureState::Stopping);
-        assert!(ctl.start_capture_owned(super::super::CapturePurpose::Short, || claimed = true).is_err(), "nor while it is saved");
+        assert!(ctl.start_capture_owned(super::super::CapturePurpose::Short, || claimed = true, || {}).is_err(), "nor while it is saved");
         assert!(!claimed);
+    }
+
+    /// verify2-controller: a picture request refused while another picture is being saved (it passed the first Idle
+    /// check before that one started) takes back nothing: the saved picture keeps its flag, so it is still reconstructed.
+    #[test]
+    fn a_refused_picture_request_leaves_the_saved_pictures_flag() {
+        let ctl = recording_controller();
+        *ctl.burst.lock().unwrap() = BurstRuntime { recording: true, mode: PictureMode::People, length: Photo3dLength::Standard };
+        ctl.update(|s| s.capture.state = CaptureState::Stopping);
+        let refused = ctl.start_capture_owned(
+            super::super::CapturePurpose::Short,
+            || *ctl.burst.lock().unwrap() = BurstRuntime { recording: true, mode: PictureMode::World, length: Photo3dLength::Full },
+            || ctl.burst.lock().unwrap().recording = false,
+        );
+        assert!(refused.is_err());
+        let saved = ctl.burst.lock().unwrap();
+        assert!(saved.recording && saved.mode == PictureMode::People, "the picture being saved keeps its flag");
     }
 
     static NEXT_PICTURE: std::sync::Mutex<Option<std::sync::Weak<super::super::Controller>>> = std::sync::Mutex::new(None);

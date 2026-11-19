@@ -106,8 +106,18 @@ pub fn paths(flight: &[Pose], seconds: f32, zoom: f32, focus: f32) -> serde_json
 }
 
 /// Writes the paths where VRChat can read them; `/dolly/Import` takes the file's path.
+/// A file of its own per flight: two flights close together (or two builds, or the bridge's VRChats) could otherwise import
+/// each other's paths from one shared file (verify2-controller). Files of earlier flights older than an hour go.
 pub fn write(paths: &serde_json::Value) -> anyhow::Result<PathBuf> {
-    let file = std::env::temp_dir().join("orbiters-n4n0-dolly-3d-picture.json");
+    let temp = std::env::temp_dir();
+    for entry in std::fs::read_dir(&temp).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > 3600);
+        if old && name.starts_with("orbiters-n4n0-dolly-") && name.ends_with(".json") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let file = temp.join(format!("orbiters-n4n0-dolly-{}.json", uuid::Uuid::new_v4().simple()));
     std::fs::write(&file, serde_json::to_vec(paths)?)?;
     Ok(file)
 }

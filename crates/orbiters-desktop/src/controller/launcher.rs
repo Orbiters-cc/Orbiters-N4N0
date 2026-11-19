@@ -306,6 +306,19 @@ impl Controller {
         signed.then_some(client)
     }
 
+    /// The client, only when the list on show is this very account's: a press on a row read for another account (the
+    /// sign-in changed, its new list is still being read) never sends from the new one.
+    fn launcher_sender(&self) -> Result<Arc<Mutex<Client>>, Notice> {
+        let Some(client) = self.launcher_client() else {
+            return Err(Notice::Error(tr("Sign in to VRChat in Settings to boop and ask for invites.").into()));
+        };
+        let account = client.lock().unwrap().signed_in_user_id().map(str::to_owned);
+        match (&self.view().launcher.source, account) {
+            (Source::SignedIn { user_id, .. }, Some(account)) if *user_id == account => Ok(client),
+            _ => Err(Notice::Error(tr("Your VRChat account changed: try again.").into())),
+        }
+    }
+
     pub(super) fn start_launcher(self: &Shared) {
         let weak = Arc::downgrade(self);
         let _ = std::thread::Builder::new().name("launcher".into()).spawn(move || loop {
@@ -456,7 +469,13 @@ impl Controller {
     }
 
     fn launcher_read_signed_in(self: &Shared, client: &Arc<Mutex<Client>>, account: Option<String>) {
-        match read_signed_in(client) {
+        let read = read_signed_in(client);
+        // The sign-in changed while the pages were read: this read belongs to no one shown; the next look starts again.
+        let now_account = self.launcher_client().and_then(|c| c.lock().unwrap().signed_in_user_id().map(str::to_owned));
+        if now_account != account {
+            return;
+        }
+        match read {
             Ok((mut state, groups, worn)) => {
                 let pipeline = {
                     let mut rt = self.launcher.lock().unwrap();
@@ -479,7 +498,8 @@ impl Controller {
                 self.update(|s| {
                     state.game = s.launcher.game.clone();
                     state.possible.play = s.launcher.possible.play;
-                    state.profile = s.launcher.profile.take();
+                    // An open profile stays only when it is one of this account's friends (or the account itself).
+                    state.profile = s.launcher.profile.take().filter(|p| state.friends.iter().any(|f| f.id == p.friend.id) || state.me.as_ref().is_some_and(|m| m.id == p.friend.id));
                     state.notice = s.launcher.notice.take();
                     *s.launcher = state;
                 });
@@ -617,6 +637,12 @@ impl Controller {
         match action {
             Action::Play { mode, destination } => Some(self.launcher_play(mode, destination)),
             Action::AcceptInvite { invite, mode } => {
+                // The invite is the account's on show: never accepted with another account's session.
+                if self.launcher_client().is_some() {
+                    if let Err(notice) = self.launcher_sender() {
+                        return Some(notice);
+                    }
+                }
                 let found = self.view().launcher.invites.iter().find(|i| i.id == invite).cloned();
                 let Some(place) = found.and_then(|i| i.place) else { return Some(Notice::Error(tr("This invite is no longer here.").into())) };
                 let notice = self.launcher_play(mode, Some(place));
@@ -675,7 +701,7 @@ impl Controller {
             let bridge = super::travel::Bridge { main: self.sides.main_pid(), sides: self.sides.side_pids() };
             return match super::travel::go(travel.as_ref(), false, &bridge, &place.world_id, &place.instance_id) {
                 Ok(_) => Notice::Sent { to: place.world_id, action: SentKind::Join },
-                Err(super::travel::GoFailure::Invite(_)) => match self.launcher_client() {
+                Err(super::travel::GoFailure::Invite(_)) => match self.launcher_sender().ok() {
                     Some(client) => match client.lock().unwrap().invite_self(&place.world_id, &place.instance_id) {
                         Ok(()) => Notice::Sent { to: place.world_id, action: SentKind::Join },
                         Err(e) => Notice::Error(error_text(&e)),
@@ -771,15 +797,16 @@ impl Controller {
             s.launcher.boops.retain(|b| b.id != id);
         });
         if was_invite {
-            if let Some(client) = self.launcher_client() {
+            if let Ok(client) = self.launcher_sender() {
                 let _ = client.lock().unwrap().hide_notification(id);
             }
         }
     }
 
     fn launcher_send(&self, boop: bool, to: &str, emoji: Option<&str>) -> Notice {
-        let Some(client) = self.launcher_client() else {
-            return Notice::Error(tr("Sign in to VRChat in Settings to boop and ask for invites.").into());
+        let client = match self.launcher_sender() {
+            Ok(client) => client,
+            Err(notice) => return notice,
         };
         let at = now();
         let taken = self.launcher.lock().unwrap().cooldowns.take(boop, to, at);

@@ -72,7 +72,10 @@ fn one_read_gives_sections_groups_invites_and_boops() {
 fn boops_and_requests_hold_a_cool_down_per_person() {
     let c = controller(Arc::new(Pretend::default()));
     let (_, calls) = c.test_vrchat(vec![(200, json!({"success": {"message": "ok"}})), (400, json!({"error": {"message": "You are not friends", "status_code": 400}})), (200, json!({}))]);
-    c.update(|s| s.launcher.friends = vec![orbiters_core::launcher::Friend { id: A.into(), ..Default::default() }]);
+    c.update(|s| {
+        s.launcher.friends = vec![orbiters_core::launcher::Friend { id: A.into(), ..Default::default() }];
+        s.launcher.source = Source::SignedIn { user_id: "usr_test".into(), name: String::new() };
+    });
     assert_eq!(c.launcher_do(Action::Boop { to: A.into(), emoji: Some("default_heart".into()) }), Some(Notice::Sent { to: A.into(), action: SentKind::Boop }));
     assert!(matches!(c.launcher_do(Action::Boop { to: A.into(), emoji: None }), Some(Notice::CoolingDown { .. })), "a second boop waits");
     assert!(c.view().launcher.friend(A).unwrap().boop_ready_at.is_some(), "the row knows when");
@@ -129,6 +132,7 @@ fn dismissing_an_invite_hides_it_at_vrchat_and_a_boop_only_here() {
     let c = controller(Arc::new(Pretend::default()));
     let (_, calls) = c.test_vrchat(vec![(200, json!({}))]);
     c.update(|s| {
+        s.launcher.source = Source::SignedIn { user_id: "usr_test".into(), name: String::new() };
         s.launcher.invites = vec![Invite { id: "not_1".into(), kind: InviteKind::Request, from_id: A.into(), from_name: String::new(), from_icon: String::new(), place: None, message: String::new(), received_at: 0 }];
         s.launcher.boops = vec![orbiters_core::launcher::Boop { id: "not_2".into(), from_id: A.into(), from_name: String::new(), from_icon: String::new(), emoji: None, received_at: 0 }];
     });
@@ -275,6 +279,7 @@ fn an_accepted_invite_is_hidden_at_vrchat_only_once_the_account_got_there() {
     let machine = Arc::new(Pretend { installed: true, ..Default::default() });
     let c = controller(machine.clone());
     let (client, calls) = c.test_vrchat(vec![(200, json!({}))]);
+    c.update(|s| s.launcher.source = Source::SignedIn { user_id: "usr_test".into(), name: String::new() });
     let place = launcher_feed::place(&format!("{W}:777~friends({A})~region(jp)"), "Café").unwrap();
     let invite = |id: &str| Invite { id: id.into(), kind: InviteKind::Invite, from_id: A.into(), from_name: "Nova".into(), from_icon: String::new(), place: Some(place.clone()), message: String::new(), received_at: 0 };
     c.update(|s| s.launcher.invites = vec![invite("not_1")]);
@@ -293,4 +298,20 @@ fn an_accepted_invite_is_hidden_at_vrchat_only_once_the_account_got_there() {
     c.launcher_settle_accepted(Some(&client));
     assert_eq!(c.view().launcher.invites.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["not_2"]);
     assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_press_on_another_accounts_list_sends_nothing() {
+    let c = controller(Arc::new(Pretend::default()));
+    let (_, calls) = c.test_vrchat(vec![]);
+    // The list on show was read for another account (the sign-in changed; its own list is not read yet).
+    c.update(|s| {
+        s.launcher.source = Source::SignedIn { user_id: B.into(), name: String::new() };
+        s.launcher.friends = vec![orbiters_core::launcher::Friend { id: A.into(), ..Default::default() }];
+        s.launcher.invites = vec![Invite { id: "not_1".into(), kind: InviteKind::Request, from_id: A.into(), from_name: String::new(), from_icon: String::new(), place: None, message: String::new(), received_at: 0 }];
+    });
+    assert!(matches!(c.launcher_do(Action::Boop { to: A.into(), emoji: None }), Some(Notice::Error(_))));
+    assert!(matches!(c.launcher_do(Action::RequestInvite { to: A.into() }), Some(Notice::Error(_))));
+    c.launcher_do(Action::Dismiss { id: "not_1".into() });
+    assert!(calls.lock().unwrap().is_empty(), "nothing sent from the account that is not the list's");
 }

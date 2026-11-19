@@ -184,3 +184,26 @@ fn only_an_ended_session_stops_the_pipeline() {
         assert_eq!(token_outcome(Err(later)), Err(NoToken::Later), "a network blip does not end the live list");
     }
 }
+
+#[test]
+fn a_first_read_that_fails_is_not_asked_again_at_every_look() {
+    let c = controller(Arc::new(Pretend::default()));
+    // Both friend lists answer, then the account itself fails: one round of requests, then a wait.
+    let (_, calls) = c.test_vrchat(vec![(200, json!([])), (200, json!([])), (503, json!({}))]);
+    for _ in 0..4 {
+        c.launcher_tick();
+    }
+    assert_eq!(calls.lock().unwrap().len(), 3, "one round, not one every two seconds: {:?}", calls.lock().unwrap());
+    let wait = c.launcher.lock().unwrap().retry_at.unwrap().saturating_duration_since(Instant::now());
+    assert!(wait > Duration::from_secs(20) && wait <= Duration::from_secs(38), "{wait:?}");
+    assert!(matches!(c.view().launcher.notice, Some(Notice::Error(_))));
+}
+
+#[test]
+fn failed_reads_wait_longer_and_longer_and_respect_vrchats_own_wait() {
+    let e = Error::Unavailable;
+    let secs: Vec<u64> = (1..=7).map(|n| retry_wait(n, &e, 32768).as_secs()).collect();
+    assert_eq!(secs, [30, 60, 120, 240, 480, 600, 600], "neither every tick nor half an hour");
+    assert!(retry_wait(1, &e, 0) >= Duration::from_millis(22_500) && retry_wait(1, &e, u16::MAX) < Duration::from_millis(37_500));
+    assert_eq!(retry_wait(1, &Error::RateLimited(Duration::from_secs(90)), 32768), Duration::from_secs(90));
+}

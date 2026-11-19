@@ -21,6 +21,11 @@ use std::time::{Duration, Instant};
 const LOCAL_EVERY: Duration = Duration::from_secs(120);
 const FULL_EVERY: Duration = Duration::from_secs(30 * 60);
 const GAME_EVERY: Duration = Duration::from_secs(5);
+/// After a failed read of VRChat: the first try again, doubling up to the longest (with jitter), never every tick.
+const RETRY_FIRST: Duration = Duration::from_secs(30);
+const RETRY_LONGEST: Duration = Duration::from_secs(10 * 60);
+/// A pipeline that came back asks for a full read only when the last one is older than this (else it waits until then).
+const RESYNC_AFTER: Duration = Duration::from_secs(5 * 60);
 
 /// The game on this computer, real or a test's.
 pub trait Machine: Send + Sync {
@@ -66,6 +71,9 @@ pub(super) struct Runtime {
     /// The account the state was read for (`None`: the local databases).
     loaded_for: Option<Option<String>>,
     loaded_at: Option<Instant>,
+    /// Reads of VRChat that failed in a row, and when the next try is (none: the usual clock).
+    failures: u32,
+    retry_at: Option<Instant>,
     favourite_groups: Vec<(String, String)>,
     cooldowns: Cooldowns,
     /// Decoration template id → picture (`None` while unknown or failed).
@@ -86,6 +94,8 @@ impl Default for Runtime {
         Self {
             loaded_for: None,
             loaded_at: None,
+            failures: 0,
+            retry_at: None,
             favourite_groups: Vec::new(),
             cooldowns: Cooldowns::default(),
             pictures: HashMap::new(),
@@ -160,6 +170,22 @@ pub fn read_signed_in(client: &Mutex<Client>) -> Result<(LauncherState, Vec<(Str
     Ok((state, groups, worn))
 }
 
+/// How long after the `failures`-th failed read in a row the next one is: 30 s doubling to 10 minutes, spread by
+/// `random` over three quarters to five quarters of that, and never before VRChat's own "try again in".
+fn retry_wait(failures: u32, e: &Error, random: u16) -> Duration {
+    let base = RETRY_FIRST.saturating_mul(1 << failures.saturating_sub(1).min(10)).min(RETRY_LONGEST);
+    let wait = base.mul_f64(0.75 + f64::from(random) / 131072.0);
+    match e {
+        Error::RateLimited(d) => wait.max(*d),
+        _ => wait,
+    }
+}
+
+fn random() -> u16 {
+    let b = *uuid::Uuid::new_v4().as_bytes();
+    u16::from_be_bytes([b[0], b[1]])
+}
+
 /// A token for one pipeline connection: only a session that is over stops the pipeline; anything else (no network, a
 /// time-out, a 429, a 5xx) is tried again after the pipeline's wait.
 fn pipeline_token(client: &Mutex<Client>) -> Result<String, orbiters_core::pipeline::NoToken> {
@@ -211,8 +237,22 @@ impl Controller {
                 rt.pictures.clear();
                 rt.worn.clear();
             }
+            if changed {
+                rt.failures = 0;
+                rt.retry_at = None;
+            }
             let every = if account.is_some() { FULL_EVERY } else { LOCAL_EVERY };
-            let due = changed || rt.resync.swap(false, Ordering::AcqRel) || rt.loaded_at.is_none_or(|t| t.elapsed() > every);
+            // The pipeline came back: a full read, but not more often than every few minutes (kept pending meanwhile).
+            let resync = rt.resync.load(Ordering::Acquire) && rt.loaded_at.is_none_or(|t| t.elapsed() > RESYNC_AFTER);
+            let due = changed
+                || match rt.retry_at {
+                    // After a failure only its own clock counts.
+                    Some(at) => Instant::now() >= at,
+                    None => resync || rt.loaded_at.is_none_or(|t| t.elapsed() > every),
+                };
+            if due {
+                rt.resync.store(false, Ordering::Release);
+            }
             let check_game = rt.game_checked.is_none_or(|t| t.elapsed() > GAME_EVERY);
             if check_game {
                 rt.game_checked = Some(Instant::now());
@@ -321,6 +361,8 @@ impl Controller {
                     let mut rt = self.launcher.lock().unwrap();
                     rt.loaded_for = Some(account);
                     rt.loaded_at = Some(Instant::now());
+                    rt.failures = 0;
+                    rt.retry_at = None;
                     rt.favourite_groups = groups;
                     rt.worn = worn;
                     rt.cooldowns.mark(&mut state.friends, now());
@@ -344,9 +386,11 @@ impl Controller {
             }
             Err(e) => {
                 {
-                    // Tried: the next try after the usual wait, not every two seconds.
+                    // Tried for this account: the next try after a growing wait, never every two seconds.
                     let mut rt = self.launcher.lock().unwrap();
-                    rt.loaded_at = Some(Instant::now());
+                    rt.loaded_for = Some(account);
+                    rt.failures += 1;
+                    rt.retry_at = Some(Instant::now() + retry_wait(rt.failures, &e, random()));
                 }
                 let text = error_text(&e);
                 self.update(|s| {
@@ -493,7 +537,9 @@ impl Controller {
                 None
             }
             Action::Refresh => {
-                self.launcher.lock().unwrap().loaded_at = None;
+                let mut rt = self.launcher.lock().unwrap();
+                rt.loaded_at = None;
+                rt.retry_at = None;
                 None
             }
         }

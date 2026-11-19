@@ -1905,7 +1905,9 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             Content::SuggestLine(_) => return String::new(),
             // So are the links the owner's camera found.
             Content::QrLink | Content::QrNotice => return String::new(),
-            Content::TypeLine(_) if matches!(menu.typing, Typing::Suggestion | Typing::Friend) => return String::new(),
+            // What the owner is typing (a comment, a justification, a state's name, a suggestion, a friend's name) is
+            // not shown to everyone letter by letter: what is sent is shown once sent (verify2 on MENU-2).
+            Content::TypeLine(_) => return String::new(),
             // The owner's friends, which part of a name they look for, and why their capture is flagged.
             Content::ShareFriend(_) | Content::ExplicitWhy(_) => return String::new(),
             Content::FriendsTitle => return tr("Friends").into(),
@@ -2751,6 +2753,24 @@ pub fn timeline_lit(media: &super::Media, i: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// verify2 on MENU-2: what the owner types on the keyboard page never reaches everyone's screen letter by letter (a
+    /// comment or a justification before it is sent, a state's name), while the owner's own picture shows it.
+    #[test]
+    fn everyone_s_screen_never_shows_what_the_owner_is_typing() {
+        use crate::menu::{Menu, Page, Pages, Typing};
+        for typing in [Typing::StateName, Typing::Suggestion, Typing::Friend, Typing::Comment, Typing::Justification] {
+            let mut menu = Menu { pages: Pages::Mirror, ..Default::default() };
+            menu.open();
+            menu.page = Page::Type;
+            menu.typing = typing;
+            menu.typed = "my secret draft".into();
+            let layout = cached(ScreenPage::of(&menu));
+            let lines = |public: bool| layout.slots.iter().filter(|s| matches!(s.content, Content::TypeLine(_))).map(|s| slot_text_for(&menu, s, public)).collect::<String>();
+            assert!(lines(false).contains("my secret draft"), "{typing:?}: the owner sees it");
+            assert!(!lines(true).contains("secret"), "{typing:?}: everyone else does not: {}", lines(true));
+        }
+    }
 
     /// MENU-12: what the page does not show leaves its fingerprint as it was; what it shows changes it.
     #[test]

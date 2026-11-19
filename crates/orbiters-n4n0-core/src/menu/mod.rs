@@ -791,8 +791,10 @@ pub enum Target {
 /// added later is the owner's until someone decides: this match has no catch-all arm.
 pub fn guest_may_press(target: Target, page: Page) -> bool {
     match target {
-        // Navigation that only shows.
-        Target::Close | Target::Back => true,
+        // Navigation that only shows. While the owner types their own text on the keyboard page, leaving it (which drops
+        // what is typed) is the owner's (Enzo, 2026-11-19: "the owner's text is his"). Where Back leads is checked too:
+        // [`Menu::guest_press`] lands on Home rather than on a page a guest may not open ([`guest_may_open`]).
+        Target::Close | Target::Back => page != Page::Type,
         Target::YouTube | Target::Music | Target::Light | Target::States | Target::Tracking | Target::Suggest | Target::More => true,
         // Paging through what is already open, where that list is not the owner's.
         Target::Previous | Target::Next => matches!(page, Page::Results | Page::States),
@@ -883,6 +885,32 @@ pub fn guest_may_press(target: Target, page: Page) -> bool {
         | Target::MirrorZoomIn
         | Target::MirrorZoomOut
         | Target::MirrorStop => false,
+    }
+}
+
+/// Whether a page may be shown because of someone else's press (their Back, Close or a tile): the pages that show nothing
+/// of the owner's own (Home, YouTube's search and results, Music, Light, States, Tracking, Suggest features, More). The
+/// owner's lists (friends to call, the 3D picture page and History, Share to …, Previous instances, World feedback), the
+/// owner's keyboard, the QR code scanner and the mirror are reached only by the owner: a guest's press that would lead
+/// there leads to Home ([`Menu::guest_press`]). A page added later is the owner's until someone decides: no catch-all.
+pub fn guest_may_open(page: Page) -> bool {
+    match page {
+        Page::Home | Page::Search | Page::Results | Page::Music | Page::Light | Page::States | Page::Tracking | Page::Suggest | Page::More => true,
+        Page::Call
+        | Page::Photo
+        | Page::Card
+        | Page::NewState
+        | Page::Type
+        | Page::Instances
+        | Page::AddFriend
+        | Page::Qr
+        | Page::History
+        | Page::ShareTo
+        | Page::Explicit
+        | Page::Feedback
+        | Page::FeedbackLabels
+        | Page::Comments
+        | Page::Mirror => false,
     }
 }
 
@@ -1471,6 +1499,23 @@ impl Menu {
             }
             PlayingVolume::NotFound => None,
         }
+    }
+
+    /// Someone else's fingertip pressed `target` (the avatar's screen): only what [`guest_may_press`] lets them, and never
+    /// onto a page a guest may not open ([`guest_may_open`]): their Back from Add Orbiters as a friend, from History or
+    /// from Share to …, their Cancel on the explicit warning, lead to Home instead of the owner's lists.
+    #[must_use = "a host runs what the menu asks"]
+    pub fn guest_press(&mut self, target: Target) -> Vec<Effect> {
+        if !guest_may_press(target, self.page) {
+            return Vec::new();
+        }
+        let from = self.page;
+        let mut effects = self.press(target);
+        if self.open && self.page != from && !guest_may_open(self.page) {
+            self.go(Page::Home);
+            effects.append(&mut self.outbox);
+        }
+        effects
     }
 
     /// The person pressed `target`. Leaving the QR code scanner's page stops it.
@@ -4174,12 +4219,13 @@ mod tests {
         Everywhere,
         Never,
         On(&'static [Page]),
+        Except(&'static [Page]),
     }
 
     const GUEST_TABLE: [(Target, Guest); 100] = {
         use Guest::*;
         [
-            (Target::Microphones, Never), (Target::Close, Everywhere), (Target::Back, Everywhere), (Target::FastWalk, Never),
+            (Target::Microphones, Never), (Target::Close, Except(&[Page::Type])), (Target::Back, Except(&[Page::Type])), (Target::FastWalk, Never),
             (Target::StayHere, Never), (Target::YouTube, Everywhere), (Target::Call, Never), (Target::Photo, Never), (Target::Music, Everywhere),
             (Target::Light, Everywhere), (Target::Field, Everywhere), (Target::Search, On(&[Page::Search])), (Target::Suggestion(1), On(&[Page::Search])),
             (Target::Key('a'), On(&[Page::Search])), (Target::Space, On(&[Page::Search])), (Target::Backspace, On(&[Page::Search])),
@@ -4222,6 +4268,7 @@ mod tests {
                     Guest::Everywhere => true,
                     Guest::Never => false,
                     Guest::On(pages) => pages.contains(&page),
+                    Guest::Except(pages) => !pages.contains(&page),
                 };
                 assert_eq!(guest_may_press(*target, page), want, "{target:?} on {page:?}");
             }
@@ -4454,6 +4501,78 @@ mod tests {
         // Written from outside (a test, a staged page): never a stale ranking.
         menu.find = "bob".into();
         assert_eq!(ids(&menu), ["usr_b"]);
+    }
+
+    /// Every page, and whether a guest's press may lead there: pinned (changing [`guest_may_open`] means changing this).
+    const GUEST_PAGES: [(Page, bool); 24] = [
+        (Page::Home, true), (Page::Search, true), (Page::Results, true), (Page::Call, false), (Page::Photo, false), (Page::Music, true),
+        (Page::Light, true), (Page::States, true), (Page::Card, false), (Page::NewState, false), (Page::Type, false), (Page::Tracking, true),
+        (Page::Suggest, true), (Page::More, true), (Page::Instances, false), (Page::AddFriend, false), (Page::Qr, false), (Page::History, false),
+        (Page::ShareTo, false), (Page::Explicit, false), (Page::Feedback, false), (Page::FeedbackLabels, false), (Page::Comments, false),
+        (Page::Mirror, false),
+    ];
+
+    /// verify2 on MENU-2: whatever page the owner left open, a guest's Back, Close or allowed press never leads to a page a
+    /// guest may not open: Back from Add Orbiters as a friend went to Previous instances, from History to the 3D picture
+    /// page, Cancel on the warning to History.
+    #[test]
+    fn a_guest_s_press_never_leads_to_a_page_a_guest_may_not_open() {
+        assert_eq!(GUEST_PAGES.iter().map(|(p, _)| *p).collect::<Vec<_>>(), every_page());
+        for (page, open) in GUEST_PAGES {
+            assert_eq!(guest_may_open(page), open, "{page:?}");
+        }
+        for pages in [Pages::Mirror, Pages::Six] {
+            for page in every_page().into_iter().filter(|p| *p != Page::Card) {
+                for (target, _) in &GUEST_TABLE {
+                    let mut menu = Menu { pages, ..Default::default() };
+                    menu.open();
+                    menu.page = page;
+                    menu.share_from = Page::History;
+                    menu.sharing = Some("C:/s/a".into());
+                    let _ = menu.guest_press(*target);
+                    assert!(!menu.open || menu.page == page || guest_may_open(menu.page), "{target:?} on {page:?} led to {:?}", menu.page);
+                }
+            }
+        }
+        // The cases verify2 named: Home instead.
+        for (page, target) in [(Page::AddFriend, Target::Back), (Page::History, Target::Back), (Page::ShareTo, Target::Back), (Page::Explicit, Target::CancelShare)] {
+            let mut menu = Menu { pages: Pages::Mirror, ..Default::default() };
+            menu.open();
+            menu.page = page;
+            menu.share_from = Page::History;
+            let _ = menu.guest_press(target);
+            assert_eq!(menu.page, Page::Home, "{target:?} on {page:?}");
+        }
+        // Back to a page a guest may open stays ordinary navigation; the owner's own Back is unchanged.
+        let mut menu = Menu { pages: Pages::Mirror, ..Default::default() };
+        menu.open();
+        menu.page = Page::Instances;
+        let _ = menu.guest_press(Target::Back);
+        assert_eq!(menu.page, Page::More);
+        menu.page = Page::AddFriend;
+        let _ = menu.press(Target::Back);
+        assert_eq!(menu.page, Page::Instances);
+        // Leaving the scanner's page through a guest's Back still stops it, once.
+        menu.page = Page::Qr;
+        assert_eq!(menu.guest_press(Target::Back), vec![Effect::QrScan(false)]);
+    }
+
+    /// Enzo, 2026-11-19: while the owner types on the keyboard page, someone else's Back or Close does nothing (it would
+    /// drop what the owner typed).
+    #[test]
+    fn a_guest_cannot_leave_the_owner_s_keyboard() {
+        for typing in [Typing::StateName, Typing::Suggestion, Typing::Friend, Typing::Comment, Typing::Justification] {
+            let mut menu = Menu { pages: Pages::Mirror, ..Default::default() };
+            menu.open();
+            menu.typing = typing;
+            menu.page = Page::Type;
+            menu.typed = "half a sentence".into();
+            assert!(menu.guest_press(Target::Back).is_empty() && menu.guest_press(Target::Close).is_empty());
+            assert_eq!((menu.open, menu.page, menu.typed.as_str()), (true, Page::Type, "half a sentence"), "{typing:?}");
+            // The owner's own Back still leaves.
+            let _ = menu.press(Target::Back);
+            assert_ne!(menu.page, Page::Type);
+        }
     }
 }
 

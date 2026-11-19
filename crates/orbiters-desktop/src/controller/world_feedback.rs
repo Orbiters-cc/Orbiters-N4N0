@@ -64,6 +64,8 @@ pub(super) struct WorldFeedbackRuntime {
     /// Why the local address cannot be served (another program has the port).
     pub(super) port_note: Option<String>,
     sent: Option<FeedbackView>,
+    /// Bumped when the environment changes: an answer to a call made before is the other server's.
+    scope: u64,
 }
 
 impl Default for WorldFeedbackRuntime {
@@ -83,6 +85,7 @@ impl Default for WorldFeedbackRuntime {
             instances: (Vec::new(), None),
             port_note: None,
             sent: None,
+            scope: 0,
         }
     }
 }
@@ -299,13 +302,38 @@ impl WorldFeedbackRuntime {
         Some(Call::Read { world })
     }
 
+    /// The other server's answers are forgotten, and those still coming are not taken.
+    fn environment_changed(&mut self) {
+        self.known.clear();
+        self.menu_errors.clear();
+        self.sent = None;
+        self.scope = self.scope.wrapping_add(1);
+    }
+
     /// What Orbiters answered to `call`.
     fn answered(&mut self, call: &Call, result: Result<Option<orbiters_core::world_feedback::ServerView>, Failure>) {
+        self.answered_in(call, result, self.scope);
+    }
+
+    /// [`Self::answered`] for a call made in `scope`: when the environment changed since, the answer is the other
+    /// server's, and only what it did to the queue counts (a sent action is not sent again); what it says of the world
+    /// is not shown.
+    fn answered_in(&mut self, call: &Call, result: Result<Option<orbiters_core::world_feedback::ServerView>, Failure>, scope: u64) {
         let now = now_ms();
         let index = |q: &Queue| match call {
             Call::Send { world, action, since } => q.items.iter().position(|p| &p.world == world && &p.action == action && p.since == *since),
             Call::Read { .. } => None,
         };
+        if scope != self.scope {
+            if let Some(i) = index(&self.queue) {
+                match result {
+                    Ok(_) | Err(Failure::Refused { .. }) => drop(self.queue.items.remove(i)),
+                    Err(_) => self.queue.retry(i, now),
+                }
+                self.save();
+            }
+            return;
+        }
         match (call, result) {
             (Call::Read { world }, Ok(Some(view))) | (Call::Send { world, .. }, Ok(Some(view))) => {
                 self.known.insert(world.clone(), Known { view: Some(view), read_at: now });
@@ -510,10 +538,7 @@ impl super::Controller {
 
     /// The Development environment was switched: what Orbiters answered for worlds is the other server's, so it is read again.
     pub(super) fn world_feedback_environment_changed(&self) {
-        let mut rt = self.world_feedback.lock().unwrap();
-        rt.known.clear();
-        rt.menu_errors.clear();
-        rt.sent = None;
+        self.world_feedback.lock().unwrap().environment_changed();
     }
 
     fn feedback_follow(self: &Shared) -> bool {
@@ -576,7 +601,10 @@ pub(super) fn spawn(ctl: Shared) {
     let c = ctl.clone();
     let _ = std::thread::Builder::new().name("world-feedback-send".into()).spawn(move || {
         while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
-            let call = c.world_feedback.lock().unwrap().next_call();
+            let (call, scope) = {
+                let mut rt = c.world_feedback.lock().unwrap();
+                (rt.next_call(), rt.scope)
+            };
             let Some(call) = call else {
                 std::thread::sleep(Duration::from_millis(300));
                 continue;
@@ -592,7 +620,7 @@ pub(super) fn spawn(ctl: Shared) {
                     }
                 }
             } else {
-                c.world_feedback.lock().unwrap().answered(&call, result);
+                c.world_feedback.lock().unwrap().answered_in(&call, result, scope);
             }
             c.feedback_publish();
         }
@@ -836,6 +864,38 @@ mod tests {
         let view = rt.view(None, true);
         assert_eq!(view.worlds.len(), ASKED_MAX);
         assert_eq!(view.worlds[0].world, format!("wrld_4432ea9b-729c-46e3-8eaf-{:012x}", ASKED_MAX + 1));
+        let _ = std::fs::remove_file(&rt.queue_path);
+    }
+
+    /// CORE-C2: a read the server of before an environment switch answers late shows nothing of that server in the
+    /// new one; an action it took is not sent again.
+    #[test]
+    fn an_answer_from_before_an_environment_switch_is_not_shown() {
+        let mut rt = WorldFeedbackRuntime {
+            queue: Queue::default(),
+            queue_path: std::env::temp_dir().join(format!("orbiters-feedback-switch-{}.json", uuid::Uuid::new_v4())),
+            instances: (Vec::new(), Some(Instant::now())),
+            ..Default::default()
+        };
+        rt.asked(WORLD);
+        rt.push(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }));
+        let read = Call::Read { world: WORLD.into() };
+        let p = rt.queue.items[0].clone();
+        let send = Call::Send { world: p.world.clone(), action: p.action.clone(), since: p.since };
+        let before = rt.scope;
+        rt.environment_changed();
+        let theirs = orbiters_core::world_feedback::ServerView { world_id: WORLD.into(), likes: 41, ..Default::default() };
+        rt.answered_in(&read, Ok(Some(theirs.clone())), before);
+        rt.answered_in(&send, Ok(Some(theirs.clone())), before);
+        assert!(rt.known.get(WORLD).is_none_or(|k| k.view.is_none()), "the other server's view is not shown");
+        assert!(rt.queue.items.is_empty(), "taken by the server it went to: not sent again");
+        // Back to the first environment (A→B→A): an answer from before both switches is still not taken.
+        rt.environment_changed();
+        rt.answered_in(&read, Ok(Some(theirs.clone())), before);
+        assert!(rt.known.get(WORLD).is_none_or(|k| k.view.is_none()));
+        // An answer of this environment is.
+        rt.answered_in(&read, Ok(Some(theirs)), rt.scope);
+        assert_eq!(rt.known[WORLD].view.as_ref().map(|v| v.likes), Some(41));
         let _ = std::fs::remove_file(&rt.queue_path);
     }
 

@@ -1794,6 +1794,12 @@ impl Bridge {
             ));
         }
         let before = seen.capture.session.clone();
+        if !s.is_main() {
+            // The picture lends the app (and its OSC) to this session's VRChat: what the main session holds comes up first,
+            // while its release still reaches the main VRChat (BRIDGE-16: a walk's release went to the side one, the main
+            // avatar walked on).
+            self.release_session(&self.main);
+        }
         s.game.take_picture(length, mode)?;
         // The session is known once the recording started: a new one, as the last recording's stays named meanwhile.
         let began = self.wait_until(Duration::from_secs(10), call, || {

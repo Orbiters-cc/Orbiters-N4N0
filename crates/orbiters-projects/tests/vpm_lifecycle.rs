@@ -73,12 +73,11 @@ impl Drop for Repository {
         }
     }
 }
-fn repository() -> Repository {
+/// A loopback HTTP server answering each request with `answer(request)`.
+fn serve(answer: impl Fn(&str) -> Vec<u8> + Send + 'static) -> (String, Repository) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let package = |name: &str, version: &str, dep: bool| json!({"name":name,"version":version,"displayName":name,"url":format!("{base}/{name}/{version}.zip"),"vpmDependencies":if dep{json!({"test.base":">=1.0.0"})}else{json!({})}});
-    let manifest=serde_json::to_vec(&json!({"id":"test.repo","name":"Disposable repository","url":format!("{base}/index.json"),"packages":{"test.avatar":{"versions":{"1.0.0":package("test.avatar","1.0.0",true),"2.0.0":package("test.avatar","2.0.0",true)}},"test.base":{"versions":{"1.0.0":package("test.base","1.0.0",false)}}}})).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let stopped = stop.clone();
     let worker = std::thread::spawn(move || {
@@ -104,17 +103,7 @@ fn repository() -> Repository {
                 }
                 data.extend_from_slice(&buf[..n]);
             }
-            let request = String::from_utf8_lossy(&data);
-            let path = request.split_whitespace().nth(1).unwrap_or_default();
-            let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
-            let body = if path == "/index.json" {
-                assert!(request.to_ascii_lowercase().contains("x-fixture: enabled"));
-                manifest.clone()
-            } else if parts.len() == 2 {
-                archive(parts[0], parts[1].trim_end_matches(".zip"))
-            } else {
-                vec![]
-            };
+            let body = answer(&String::from_utf8_lossy(&data));
             let header = format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\n\r\n", body.len());
             let _ = stream.write_all(header.as_bytes());
             let _ = stream.write_all(&body);
@@ -122,7 +111,31 @@ fn repository() -> Repository {
             let _ = stream.shutdown(std::net::Shutdown::Write);
         }
     });
-    Repository { url: format!("{base}/index.json"), stop, worker: Some(worker) }
+    (base.clone(), Repository { url: format!("{base}/index.json"), stop, worker: Some(worker) })
+}
+/// A repository whose archives are at `archives` (its own address when `None`).
+fn repository_with_archives(archives: Option<&str>) -> Repository {
+    let manifest = Arc::new(Mutex::new(Vec::new()));
+    let listing = manifest.clone();
+    let (base, repository) = serve(move |request| {
+        let path = request.split_whitespace().nth(1).unwrap_or_default();
+        let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
+        if path == "/index.json" {
+            assert!(request.to_ascii_lowercase().contains("x-fixture: enabled"));
+            listing.lock().unwrap().clone()
+        } else if parts.len() == 2 {
+            archive(parts[0], parts[1].trim_end_matches(".zip"))
+        } else {
+            vec![]
+        }
+    });
+    let at = archives.unwrap_or(&base).to_string();
+    let package = |name: &str, version: &str, dep: bool| json!({"name":name,"version":version,"displayName":name,"url":format!("{at}/{name}/{version}.zip"),"vpmDependencies":if dep{json!({"test.base":">=1.0.0"})}else{json!({})}});
+    *manifest.lock().unwrap() = serde_json::to_vec(&json!({"id":"test.repo","name":"Disposable repository","url":format!("{base}/index.json"),"packages":{"test.avatar":{"versions":{"1.0.0":package("test.avatar","1.0.0",true),"2.0.0":package("test.avatar","2.0.0",true)}},"test.base":{"versions":{"1.0.0":package("test.base","1.0.0",false)}}}})).unwrap();
+    repository
+}
+fn repository() -> Repository {
+    repository_with_archives(None)
 }
 fn project(path: &Path) {
     std::fs::create_dir_all(path.join("ProjectSettings")).unwrap();
@@ -196,4 +209,35 @@ fn repositories_packages_restore_and_templates_work_in_isolation() {
     });
     let config: serde_json::Value = serde_json::from_slice(&std::fs::read(root.path().join("vrc-get/gui-config.json")).unwrap()).unwrap();
     assert_eq!(config["language"], "en");
+}
+
+/// AS-11: a private repository's header (its credential) is never sent to the host its archives are on.
+#[test]
+fn a_repositorys_credential_stays_on_its_own_origin() {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let log = seen.clone();
+    let (cdn, _cdn) = serve(move |request| {
+        log.lock().unwrap().push(request.to_ascii_lowercase());
+        let path = request.split_whitespace().nth(1).unwrap_or_default();
+        let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
+        if parts.len() == 2 { archive(parts[0], parts[1].trim_end_matches(".zip")) } else { vec![] }
+    });
+    let repo = repository_with_archives(Some(&cdn));
+    let root = tempfile::tempdir().unwrap();
+    let projects = tempfile::tempdir().unwrap();
+    let source = projects.path().join("Source");
+    project(&source);
+    orbiters_projects::write_json(&root.path().join("vrc-get/settings.json"), &json!({"ignoreOfficialRepository":true,"ignoreCuratedRepository":true}))
+        .unwrap();
+    let rt = orbiters_projects::runtime().unwrap();
+    rt.block_on(async {
+        vpm::add_repo(root.path(), &repo.url, BTreeMap::from([("X-Fixture".into(), "enabled".into())])).await.unwrap();
+        vpm::change(root.path(), &source, vpm::Change::Install { names: vec![("test.avatar".into(), Some("1.0.0".into()))], prerelease: false })
+            .await
+            .unwrap();
+    });
+    assert_eq!(installed(&source, "test.avatar").as_deref(), Some("1.0.0"));
+    let seen = seen.lock().unwrap();
+    assert!(seen.len() >= 2, "both archives came from the other host: {seen:?}");
+    assert!(seen.iter().all(|r| !r.contains("x-fixture")), "the credential went to another host: {seen:?}");
 }

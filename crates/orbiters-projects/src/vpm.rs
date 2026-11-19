@@ -370,8 +370,9 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
     // Serialize mutations across this app's windows. VCC's database has its own upstream shared LiteDB mutex.
     let io = DefaultEnvironmentIo::new(root.into());
     let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Packages").await?;
-    let (_, packages) = collection(root, true).await?;
-    let client = http()?;
+    let (settings, packages) = collection(root, true).await?;
+    // A private repository's headers go to its own origin only, not to wherever its listing puts an archive (AS-11).
+    let client = crate::vpm_http::Client::new(http()?, &settings)?;
     let mut project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
     if let Change::Plan { install, remove, prerelease } = &action {
         return apply_plan(&io, &client, &packages, path, project, install, remove, *prerelease).await;
@@ -420,7 +421,7 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
 #[allow(clippy::too_many_arguments)]
 async fn apply_plan(
     io: &DefaultEnvironmentIo,
-    client: &reqwest::Client,
+    client: &crate::vpm_http::Client,
     packages: &EnabledCollection,
     path: &Path,
     project: UnityProject,

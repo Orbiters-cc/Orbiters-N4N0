@@ -21,6 +21,7 @@ pub mod suggestions;
 pub mod templates;
 pub mod updates;
 pub mod vpm;
+mod vpm_http;
 
 use orbiters_i18n::tr;
 use std::path::{Path, PathBuf};

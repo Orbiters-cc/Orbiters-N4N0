@@ -243,14 +243,12 @@ pub fn read_text(path: &std::path::Path) -> std::io::Result<Option<String>> {
     let mut wait = std::time::Duration::from_millis(20);
     for attempt in 0..5 {
         match std::fs::read(path) {
+            // A read that works now does not end "could not be read": what this process made without the file is still
+            // not the file, and the next write keeps the file beside first ([`preserve_unreadable`]).
             Ok(bytes) => {
-                mark_unreadable(path, false);
                 return Ok(Some(String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                mark_unreadable(path, false);
-                return Ok(None);
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) if attempt < 4 && (e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(32)) => {
                 std::thread::sleep(wait);
                 wait *= 2;
@@ -421,6 +419,9 @@ mod tests {
         assert!(read_text(&path).is_err());
         assert!(was_unreadable(&path));
         drop(lock);
+        // Another reader of the same process reads it now: still "could not be read" for the writer (verifier, CORE-4).
+        assert_eq!(read_text(&path).unwrap().as_deref(), Some("precious"));
+        assert!(was_unreadable(&path));
         write_atomic(&path, b"defaults").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"defaults");
         let kept: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("history.json.bad-")).collect();

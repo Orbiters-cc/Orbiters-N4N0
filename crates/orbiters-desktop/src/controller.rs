@@ -143,6 +143,9 @@ pub struct Controller {
     camera_scan: Mutex<Option<Box<dyn orbiters_n4n0::QrScan>>>,
     stop_generation: AtomicU64,
     osc_generation: AtomicU64,
+    /// Bumped whenever the VRChat whose camera the app shows changes (OSC started again, another VRChat followed): a
+    /// camera answer asked for before is that VRChat's, and is not shown for the next one (C-8).
+    camera_route: AtomicU64,
     capture_start_gate: Mutex<()>,
     /// Bumped (under `capture_start_gate`) by every start of a new recording, a world split's next part excepted: what
     /// belongs to one recording (a scan's flight) checks it is still the current one under the gate (C-2).
@@ -497,6 +500,7 @@ impl Controller {
             camera_scan: Mutex::new(None),
             stop_generation: AtomicU64::new(0),
             osc_generation: AtomicU64::new(0),
+            camera_route: AtomicU64::new(0),
             capture_start_gate: Mutex::new(()),
             capture_serial: AtomicU64::new(0),
             kit_epoch: Mutex::default(),
@@ -1418,16 +1422,28 @@ impl Controller {
         let kit = if self.view().vrchat.running { self.worn_avatar_has_kit() } else { None };
         self.apply_kit_observation(&epoch,kit);
         if self.view().camera_open_said.is_none() {
+            let route = self.camera_route.load(Ordering::Acquire);
             let camera = self.camera_values().into_iter().find_map(|(p,v)| match v {
                 OscValue::Int(mode) if p == CAMERA_MODE => Some(mode != 0),
                 _ => None,
             });
-            if camera.is_some() { self.update_if(|s| {
-                if s.camera_open_said.is_some() { return false; }
-                s.camera_open_said = camera;
-                true
-            }); }
+            if let Some(open) = camera { self.apply_keeper_camera(route, open); }
         }
+    }
+
+    /// What the keeper's look at VRChat's tree found of its camera, shown while nothing is known yet, and only if the
+    /// VRChat it asked (`route`) is still the one followed: a slow answer of the last one does not seed the next (C-8).
+    fn apply_keeper_camera(&self, route: u64, open: bool) -> bool {
+        self.update_if(|s| {
+            if s.camera_open_said.is_some() || self.camera_route.load(Ordering::Acquire) != route { return false; }
+            s.camera_open_said = Some(open);
+            true
+        })
+    }
+
+    /// Another VRChat's camera from now on ([`Controller::apply_keeper_camera`]).
+    pub(super) fn camera_route_changed(&self) {
+        self.camera_route.fetch_add(1, Ordering::AcqRel);
     }
 
     fn invalidate_kit(&self, avatar: Option<String>) {
@@ -2043,6 +2059,7 @@ impl Controller {
 
     fn start_osc_on(self: &Shared, network: Network, discovery: orbiters_core::osc::Discovery, ports: orbiters_core::osc::Ports) {
         let generation=self.osc_generation.fetch_add(1,Ordering::AcqRel)+1;
+        self.camera_route_changed();
         self.camera_scan.lock().unwrap().take();
         self.release_camera_stream(1);
         self.invalidate_kit(None);
@@ -3152,6 +3169,22 @@ mod tests {
         assert_eq!(run(vec![(2, b.clone(), none), (1, a.clone(), none)]), vec![2.0], "reversed in one burst");
         assert_eq!(run(vec![(2, b.clone(), after_write), (1, a.clone(), none)]), vec![2.0], "the older after a write");
         assert_eq!(run(vec![(1, a.clone(), after_write), (2, b.clone(), none)]), vec![1.0, 2.0], "in order");
+    }
+
+    /// C-8: the keeper's answer about VRChat A's camera, arriving after the app followed VRChat B, is not shown for B;
+    /// one asked of B is.
+    #[test]
+    fn a_late_camera_answer_of_the_last_vrchat_is_not_shown() {
+        use std::sync::atomic::Ordering;
+        let ctl = super::Controller::new(orbiters_core::settings::Settings::default());
+        let asked_a = ctl.camera_route.load(Ordering::Acquire);
+        ctl.camera_route_changed();
+        ctl.update(|s| s.camera_open_said = None);
+        assert!(!ctl.apply_keeper_camera(asked_a, true));
+        assert_eq!(ctl.view().camera_open_said, None);
+        let asked_b = ctl.camera_route.load(Ordering::Acquire);
+        assert!(ctl.apply_keeper_camera(asked_b, false));
+        assert_eq!(ctl.view().camera_open_said, Some(false));
     }
 
     /// C-1: the reason of a recording with no keyframe is worked out without holding `snapshot` while it waits for

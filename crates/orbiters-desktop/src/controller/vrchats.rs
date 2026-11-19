@@ -282,6 +282,8 @@ impl super::Controller {
             .as_ref()
             .filter(|t| t.osc_in != default_port || self.sides.lent().is_some())
             .and_then(|t| t.query.map(|q| (SocketAddr::from(([127, 0, 0, 1], t.osc_in)), q)));
+        // Before what is known of the camera is reset: an answer the keeper asked of the last VRChat is not shown now.
+        self.camera_route_changed();
         let _ = self.with_osc(|o| o.lend(route));
         let heard = pid.and_then(|p| self.sides.camera_heard(p));
         {

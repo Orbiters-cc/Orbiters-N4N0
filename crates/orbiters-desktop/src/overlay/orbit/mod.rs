@@ -875,7 +875,7 @@ const DEFAULT_PAGE_ACCENT: [u8; 3] = orbiters_n4n0_core::menu::theme::Theme::MOD
 impl Stage {
     fn new(px: [u32; 2], with_worlds: bool, media: &std::sync::Arc<crate::media::Watcher>) -> Self {
         let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
-        let host = MenuHost::with_media(canvas.ctx().clone(), media.clone());
+        let host = MenuHost::with_media(canvas.ctx().clone(), media.clone()).holding(orbiters_n4n0::MenuHolder::Panels);
         let worlds = with_worlds.then(|| Worlds::alone(canvas.ctx().clone()));
         Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::with_context(px, canvas.ctx().clone()), epoch: 0, cache: Vec::new(), retired: Vec::new(), sheet_picture: None, restore: false, presented: None, presented_scene: None, navigation: None, stale: false, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
     }
@@ -1594,6 +1594,10 @@ impl Panels {
     }
 
     fn close_sheet(&mut self) {
+        // A menu page on the sheet no longer shows: the scanner and the friends it held are let go (MENU-8).
+        if matches!(self.facts.sheet, Some(Sheet::Menu | Sheet::Results)) {
+            self.stage.host.let_go(&self.backend);
+        }
         self.stage.epoch = self.stage.epoch.wrapping_add(1);
         self.stage.painter.cancel_page(self.stage.epoch);
         self.stage.sheet_picture = None;
@@ -1706,7 +1710,9 @@ impl Panels {
         }
         let kept = self.kept_pages.get(title).copied();
         let host = &mut self.stage.host;
-        let _ = host.menu.close();
+        // What the page left held is let go (MENU-8: the scanner of a QR code sheet left for another page).
+        let effects = host.menu.close();
+        host.effects(effects, snap, &self.backend);
         host.open(snap);
         // Its own way back is the sheet's head.
         host.menu.back_on_the_sheet = true;

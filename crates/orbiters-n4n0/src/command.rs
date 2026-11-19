@@ -4,6 +4,20 @@
 use crate::status::{N4n0Face, StateAction};
 use serde::{Deserialize, Serialize};
 
+/// Which of N4N0's menus asks for the QR code scanner or the friends list (MENU-13): the SteamVR menu, the panels around
+/// VRChat's menus, the window's Home, the avatar's screen. `Any`: a sender that does not say (an older one), whose stop
+/// ends the scan for every menu as before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuHolder {
+    #[default]
+    Any,
+    Overlay,
+    Panels,
+    Window,
+    Screen,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Command {
@@ -160,6 +174,9 @@ pub enum Command {
     /// what it does is the status' `qr`.
     Qr {
         on: bool,
+        /// The menu asking: the scanner runs while any menu holds it, so one menu's stop never ends another's scan.
+        #[serde(default)]
+        holder: MenuHolder,
     },
     /// The overlay's N4N0 menu opened History: the 3D captures listed again (the status' `captures`).
     Captures,
@@ -167,6 +184,9 @@ pub enum Command {
     /// forgotten.
     Friends {
         on: bool,
+        /// The menu asking: the friends are kept while any menu holds them.
+        #[serde(default)]
+        holder: MenuHolder,
     },
     /// A 3D capture shared from the overlay's menu: how it goes comes in its row of the status' `captures`.
     ShareCapture {
@@ -215,8 +235,11 @@ mod tests {
         assert_eq!(worn, Command::States { action: StateAction::Delete { id: "s1".into() }, avatar: None });
         assert_eq!(json(&Command::TakeBack), r#"{"kind":"take_back"}"#);
         assert_eq!(json(&Command::InviteMe { location: "wrld_a:1".into() }), r#"{"kind":"invite_me","location":"wrld_a:1"}"#);
-        assert_eq!(json(&Command::Qr { on: true }), r#"{"kind":"qr","on":true}"#);
-        assert_eq!(json(&Command::Friends { on: false }), r#"{"kind":"friends","on":false}"#);
+        assert_eq!(json(&Command::Qr { on: true, holder: MenuHolder::Overlay }), r#"{"kind":"qr","on":true,"holder":"overlay"}"#);
+        assert_eq!(json(&Command::Friends { on: false, holder: MenuHolder::Window }), r#"{"kind":"friends","on":false,"holder":"window"}"#);
+        // An older sender's command, without a holder.
+        let old: Command = serde_json::from_str(r#"{"kind":"qr","on":true}"#).unwrap();
+        assert_eq!(old, Command::Qr { on: true, holder: MenuHolder::Any });
         let share = Command::ShareCapture {
             share: orbiters_n4n0_core::captures::ShareAsk {
                 key: "C:/s/a".into(),

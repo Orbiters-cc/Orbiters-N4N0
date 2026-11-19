@@ -9,6 +9,8 @@ use crate::status::NoticeKind;
 use orbiters_n4n0_core::qr::{self, Opening, Pace, QrPhase, QrView, Recent};
 use orbiters_i18n::{mark, tr};
 use orbiters_n4n0_core::text::latin;
+use crate::MenuHolder;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,6 +21,8 @@ pub(crate) struct QrRuntime {
     run: Option<Run>,
     /// The number of the last scan started: what an older one still says is not heard.
     number: u64,
+    /// The menus that show the scanner's page (MENU-13): a menu's stop ends the scan only once none holds it.
+    holders: HashSet<MenuHolder>,
 }
 
 struct Run {
@@ -38,6 +42,8 @@ impl QrRuntime {
     }
 
     fn stop(&mut self, phase: QrPhase, note: &str) -> Option<Box<dyn QrScan>> {
+        // Stopped for every menu: the next press of a page's Scan again holds it again.
+        self.holders.clear();
         self.view.phase = phase;
         self.view.note = note.to_string();
         self.run.take().map(|r| r.scan)
@@ -61,12 +67,18 @@ pub(crate) fn tick(rt: &mut N4n0Runtime, now: Instant) -> Option<Box<dyn QrScan>
 }
 
 impl crate::N4n0 {
-    /// Starts the scanner (a menu showed its page, Scan again), or stops it (the page closed).
-    pub(crate) fn qr_scan(self: &Shared, on: bool) {
+    /// Starts the scanner (a menu showed its page, Scan again), or stops it (the page closed) once no other menu
+    /// (`holder`: the one asking) still shows the scanner's page.
+    pub(crate) fn qr_scan(self: &Shared, on: bool, holder: MenuHolder) {
         if !on {
             let scan = {
                 let mut rt = self.n4n0.lock().unwrap();
-                if !rt.qr.view.scanning() {
+                if holder == MenuHolder::Any {
+                    rt.qr.holders.clear();
+                } else {
+                    rt.qr.holders.remove(&holder);
+                }
+                if !rt.qr.view.scanning() || !rt.qr.holders.is_empty() {
                     return;
                 }
                 let scan = rt.qr.stop(QrPhase::Off, "");
@@ -79,6 +91,7 @@ impl crate::N4n0 {
         }
         let number = {
             let mut rt = self.n4n0.lock().unwrap();
+            rt.qr.holders.insert(holder);
             if let Some(run) = rt.qr.run.as_mut() {
                 // Asked again while it runs: its time starts again.
                 run.until = Instant::now() + qr::SCAN_FOR;

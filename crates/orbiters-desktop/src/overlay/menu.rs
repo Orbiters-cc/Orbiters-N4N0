@@ -66,6 +66,8 @@ pub struct MenuOverlay {
     kept: Option<Matrix34>,
     /// The menu is drawn in the retro look (Orbiters - N4N0 › N4N0 › N4N0's menu › Look).
     retro: bool,
+    /// What the last picture of the menu showed ([`MenuOverlay::shows`]); `None`: something else is on the canvas.
+    painted: Option<u64>,
     /// 3D worlds: its pill under the menu, its panel in the menu's place, the capture shown around the person.
     pub worlds: super::worlds::Worlds,
 }
@@ -139,7 +141,7 @@ impl MenuOverlay {
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, 10);
         let canvas = Canvas::new(WIDTH, HEIGHT);
-        let host = MenuHost::new(canvas.ctx().clone());
+        let host = MenuHost::new(canvas.ctx().clone()).holding(orbiters_n4n0::MenuHolder::Overlay);
         let worlds = super::worlds::Worlds::new(overlay, key, canvas.ctx().clone()).inspect_err(|_| {
             let _ = overlay.destroy(handle);
         })?;
@@ -161,6 +163,7 @@ impl MenuOverlay {
             behind: false,
             kept: None,
             retro: false,
+            painted: None,
             worlds,
         })
     }
@@ -225,10 +228,25 @@ impl MenuOverlay {
         self.last_activity = Instant::now();
     }
 
-    fn close(&mut self, overlay: &vr::Overlay) {
-        // (The menu's own close, idle or its button, closed `menu` already: this hides the overlay.)
+    /// What the menu's picture shows now: the page's fingerprint, what the overlay draws over it, and how.
+    fn shows(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let menu = &self.host.menu;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        layout::fingerprint(menu, layout::Glyphs::Fonts).hash(&mut h);
+        (self.hover, self.pressed, self.behind, self.retro, orbiters_i18n::language() as u8).hash(&mut h);
+        for pic in &layout::cached(ScreenPage::of(menu)).pictures {
+            layout::picture_key(menu, pic).is_some_and(|key| self.host.picture(&key, self.retro).is_some()).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    fn close(&mut self, overlay: &vr::Overlay, snap: &Snapshot, backend: &Ctl) {
+        // (The menu's own close, idle or its button, closed `menu` already: this hides the overlay.) Closed here (the
+        // button, the watch, the wake word, the avatar's screen), what its page held is let go (MENU-1).
         self.closed_at = Some(Instant::now());
-        self.host.menu.close();
+        let effects = self.host.menu.close();
+        self.host.effects(effects, snap, backend);
         self.worlds.open = false;
         if self.shown {
             let _ = overlay.hide(self.handle);
@@ -250,21 +268,21 @@ impl MenuOverlay {
             if on_avatar_screen(snap) {
                 backend.n4n0(N4n0Command::ToggleScreen);
             } else if self.host.menu.open {
-                self.close(overlay);
+                self.close(overlay, snap, backend);
             } else {
                 self.open(overlay, steamvr, snap);
             }
         } else if asked && !on_avatar_screen(snap) {
             let just_closed = self.closed_at.is_some_and(|t| t.elapsed() < TOGGLE_AFTER_CLOSE);
             if self.host.menu.open && snap.n4n0.menu_toggle {
-                self.close(overlay);
+                self.close(overlay, snap, backend);
             } else if !self.host.menu.open && !(snap.n4n0.menu_toggle && just_closed) {
                 self.open(overlay, steamvr, snap);
             }
         }
         if on_avatar_screen(snap) && self.host.menu.open {
             // The avatar now has N4N0's screen: the menu lives there.
-            self.close(overlay);
+            self.close(overlay, snap, backend);
         }
         // 3D worlds: the capture around the person and its download whether the menu shows or not, the pill under the
         // menu while it shows its front (not over its keyboard).
@@ -398,7 +416,7 @@ impl MenuOverlay {
         }
         // A close, or a link dropped as a card (it is in the world now, on the avatar's screen).
         if self.host.effects(effects, snap, backend) || std::mem::take(&mut self.host.dropped) {
-            self.close(overlay);
+            self.close(overlay, snap, backend);
         }
         if !self.host.menu.open {
             return clicked;
@@ -417,6 +435,8 @@ impl MenuOverlay {
                     self.canvas.invalidate();
                 }
                 self.worlds.paint(&mut self.canvas);
+                // The canvas holds the worlds panel now: the menu paints whole when it comes back.
+                self.painted = None;
                 if let Some(changed) = self.canvas.damage() {
                     presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, changed);
                 }
@@ -431,8 +451,15 @@ impl MenuOverlay {
         // A like or a label switched on pops for a moment too.
         let animating = self.host.menu.listening || self.host.menu.popping().is_some();
         let due = self.last_paint.is_none_or(|t| t.elapsed() >= if animating { Duration::from_millis(50) } else { super::booster::panel_pace() });
+        // A change of the service's state that this page does not show paints nothing (MENU-12): the page's
+        // fingerprint and what is drawn over it, as when it was last painted.
+        let shows = (self.host.dirty && !animating && self.shown).then(|| self.shows());
+        if shows.is_some() && shows == self.painted {
+            self.host.dirty = false;
+        }
         if (self.host.dirty || animating) && due {
             self.host.dirty = false;
+            self.painted = if animating { None } else { shows.or_else(|| Some(self.shows())) };
             self.last_paint = Some(Instant::now());
             let time = self.last_activity.elapsed().as_secs_f64();
             if !self.shown {

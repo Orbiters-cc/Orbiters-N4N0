@@ -155,10 +155,21 @@ impl Controller {
             }
         };
         drop(rt);
-        self.update(|s| {
+        self.commit_account_check(generation, state);
+    }
+
+    /// Shows what a check of the saved account found, unless a sign-in, its cancel or a sign-out came since it was
+    /// asked: checked under the snapshot's lock, where those publish their own state after they bumped the generation,
+    /// so an old "Signed in" can no longer land after "Signed out" (C-7).
+    fn commit_account_check(&self, generation: u64, state: AccountState) -> bool {
+        self.update_if(|s| {
+            if self.account_generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                return false;
+            }
             s.account.state = state;
             s.account.error = None;
-        });
+            true
+        })
     }
 
     /// Starts a browser sign-in: listens on this computer's loopback, asks Orbiters for a link that names where, and
@@ -176,6 +187,7 @@ impl Controller {
         let (generation, before) = {
             let mut rt = self.account_runtime.lock().unwrap();
             rt.generation += 1;
+            self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
             // The one waiting before goes (its listener with it); what the account showed before it comes back at the
             // end. (Another still asking Orbiters for its link shows "finishing": the account at rest then.)
             let earlier = rt.signing_in.take().map(|e| e.before.clone());
@@ -301,6 +313,7 @@ impl Controller {
         let before = {
             let mut rt = self.account_runtime.lock().unwrap();
             rt.generation += 1;
+            self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
             rt.signing_in.take().map(|s| s.before.clone()).unwrap_or_else(|| rt.resting())
         };
         self.update(|s| {
@@ -318,6 +331,7 @@ impl Controller {
         {
             let mut rt = self.account_runtime.lock().unwrap();
             rt.generation += 1;
+            self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
             rt.signing_in = None;
             rt.account = None;
             rt.read = Some((server, None));
@@ -359,6 +373,25 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::Mutex;
+
+    /// C-7: a check answered before a sign-out and shown after it does not put "Signed in" back.
+    #[test]
+    fn an_old_account_check_does_not_undo_a_sign_out() {
+        let ctl = Controller::new(Settings::default());
+        let generation = ctl.account_runtime.lock().unwrap().generation;
+        assert!(ctl.commit_account_check(generation, AccountState::Checking { username: None }), "a current check shows");
+        // Signed out between the answer and its showing: what `sign_out` does to the runtime and the snapshot (not
+        // `sign_out` itself, which removes the saved account file of the person running the tests).
+        {
+            let mut rt = ctl.account_runtime.lock().unwrap();
+            rt.generation += 1;
+            ctl.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
+            rt.account = None;
+        }
+        ctl.update(|s| s.account.state = AccountState::SignedOut);
+        assert!(!ctl.commit_account_check(generation, AccountState::SignedIn { username: "old".into() }));
+        assert_eq!(ctl.view().account.state, AccountState::SignedOut);
+    }
 
     /// The port and path of the app's listener, as the stand-in was told them.
     type Told = Arc<Mutex<Option<(u16, String)>>>;

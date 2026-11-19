@@ -156,6 +156,8 @@ pub struct Controller {
     avatar_changed_at: Mutex<Option<Instant>>,
     /// The Orbiters account's credential and a sign-in in progress (controller/account.rs).
     account_runtime: Mutex<account::AccountRuntime>,
+    /// `account_runtime`'s generation, readable under the snapshot's lock (controller/account.rs, C-7).
+    account_generation: AtomicU64,
     vrchat_login: Mutex<vrchat_login::Runtime>,
     /// Home's launcher: friends, invites, boops, Play (controller/launcher.rs).
     launcher: Mutex<launcher::Runtime>,
@@ -502,6 +504,7 @@ impl Controller {
             hide: Mutex::new(hide_self::HideRuntime::default()),
             avatar_changed_at: Mutex::new(None),
             account_runtime: Mutex::new(account::AccountRuntime::default()),
+            account_generation: AtomicU64::new(0),
             vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
             launcher: Mutex::new(launcher::Runtime::default()),
             launcher_started: Mutex::new(None),

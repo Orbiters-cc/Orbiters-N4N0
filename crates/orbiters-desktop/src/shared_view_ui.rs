@@ -19,17 +19,13 @@ use orbiters_ui::widgets::{self, Button, Variant};
 use orbiters_ui::{icons, n4n0_logo};
 use std::sync::Mutex;
 
-/// The offer, in English (the catalog area `sharedview` has them in every language).
-pub const ASK: &str = mark("Look at a 3D picture with {name}?");
+/// The offer, in English (the catalog area `sharedview` has them in every language): the friend's name stands above it.
+pub const ASK: &str = mark("Look at a 3D picture together?");
 pub const WHERE: &str = mark("{world} · it opens in front of you");
 pub const SHOW: &str = mark("Show");
 pub const NOT_NOW: &str = mark("Not now");
 /// The sharer's choice of friend.
 pub const WITH_WHOM: &str = mark("Look at it together with");
-
-fn ask(offer: &ShareOffer) -> String {
-    orbiters_i18n::fill(tr(ASK), &[("name", &offer.from)])
-}
 
 fn where_(offer: &ShareOffer) -> String {
     let world = if offer.title.trim().is_empty() { "VRChat" } else { offer.title.trim() };
@@ -37,7 +33,7 @@ fn where_(offer: &ShareOffer) -> String {
 }
 
 const WIDTH: f32 = 400.0;
-const HEIGHT: f32 = 76.0;
+const HEIGHT: f32 = 92.0;
 const MARGIN: f32 = 20.0;
 
 /// The window's card while an offer is up: Show takes it, the cross says not now. Above the "Talk with N4N0?" card's
@@ -64,8 +60,10 @@ pub fn window(ctx: &Context, ctl: &Ctl, offer: Option<&ShareOffer>, below: bool)
         let at = Rect::from_min_size(pos2(close.left() - 8.0 - w, rect.center().y - 19.0), vec2(w, 38.0));
         let words = mark.right() + 12.0;
         let room = at.left() - 10.0 - words;
-        widgets::text_truncated(&p, pos2(words, rect.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(ask(offer), 15.0).weight(weight::SEMIBOLD), room);
-        widgets::text_truncated(&p, pos2(words, rect.center().y + 12.0), Align2::LEFT_CENTER, &Txt::new(where_(offer), 12.5).color(theme::FG_3), room);
+        // Who first, whole: the question and where under it.
+        widgets::text_truncated(&p, pos2(words, rect.center().y - 22.0), Align2::LEFT_CENTER, &Txt::new(&offer.from, 15.5).weight(weight::SEMIBOLD), room);
+        widgets::text_truncated(&p, pos2(words, rect.center().y), Align2::LEFT_CENTER, &Txt::new(tr(ASK), 13.5), room);
+        widgets::text_truncated(&p, pos2(words, rect.center().y + 20.0), Align2::LEFT_CENTER, &Txt::new(where_(offer), 12.5).color(theme::FG_3), room);
         if show.width(w).show_at(ui, at).clicked() {
             ctl.shared_view(SharedViewCommand::Answer { id: offer.id, accept: true });
         }
@@ -82,7 +80,7 @@ pub fn window(ctx: &Context, ctl: &Ctl, offer: Option<&ShareOffer>, below: bool)
 /// The VR band's picture (as "Talk with N4N0?"'s).
 const PX: [f32; 2] = [crate::wake_offer::VR_PX[0] as f32, crate::wake_offer::VR_PX[1] as f32];
 /// Its two pills, stacked at its right: Show over Not now (picture pixels).
-const PILL_W: f32 = 196.0;
+const PILL_W: f32 = 168.0;
 const PILL_H: f32 = 64.0;
 
 fn band() -> Rect {
@@ -172,14 +170,17 @@ pub fn paint_offer(p: &Painter, from: &str, title: &str, hover: Option<bool>, le
     n4n0_logo::paint(p, mark, theme::MARK);
     pill(p, pill_rect(0), tr(SHOW), Some(icons::EYE), true, hover == Some(true));
     pill(p, pill_rect(1), tr(NOT_NOW), None, false, hover == Some(false));
+    // Who first, whole (the size comes down until it fits), then the question, then where it opens.
     let words = mark.right() + 18.0;
     let room = pill_rect(0).left() - 16.0 - words;
-    let title = ask(&offer);
-    let size = crate::mismatch::fitting(p, &title, &[30.0, 27.0, 24.0, 21.0], room);
-    widgets::text_truncated(p, pos2(words, b.center().y - 18.0), Align2::LEFT_CENTER, &Txt::new(&title, size).weight(weight::SEMIBOLD), room + 4.0);
+    let size = crate::mismatch::fitting(p, &offer.from, &[32.0, 29.0, 26.0, 23.0], room);
+    widgets::text_truncated(p, pos2(words, b.center().y - 34.0), Align2::LEFT_CENTER, &Txt::new(&offer.from, size).weight(weight::SEMIBOLD), room + 4.0);
+    let question = tr(ASK);
+    let size = crate::mismatch::fitting(p, question, &[23.0, 21.0, 19.0, 17.0], room);
+    widgets::text_truncated(p, pos2(words, b.center().y + 2.0), Align2::LEFT_CENTER, &Txt::new(question, size), room + 4.0);
     let place = where_(&offer);
-    let size = crate::mismatch::fitting(p, &place, &[22.0, 20.0, 18.0], room);
-    widgets::text_truncated(p, pos2(words, b.center().y + 20.0), Align2::LEFT_CENTER, &Txt::new(&place, size).color(theme::FG_3), room + 4.0);
+    let size = crate::mismatch::fitting(p, &place, &[20.0, 18.0, 16.0], room);
+    widgets::text_truncated(p, pos2(words, b.center().y + 34.0), Align2::LEFT_CENTER, &Txt::new(&place, size).color(theme::FG_3), room + 4.0);
     time_left(p, b, radius, left);
 }
 

@@ -183,7 +183,7 @@ pub fn is_world_id(id: &str) -> bool {
 }
 
 /// An instance as VRChat names it after the world (`77505~group(grp_…)~groupAccessType(public)~region(eu)`).
-fn is_instance(instance: &str) -> bool {
+pub(crate) fn is_instance(instance: &str) -> bool {
     instance.len() <= 512 && instance.bytes().all(|c| c.is_ascii_alphanumeric() || b"~()_-.,:".contains(&c))
 }
 

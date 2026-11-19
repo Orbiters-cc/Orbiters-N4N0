@@ -285,6 +285,7 @@
   "VRChat may have received the request. Check VRChat before trying again.": "VRChat a peut-être reçu la demande. Vérifie dans VRChat avant de réessayer.",
   "{path} could not be read, and is not replaced unseen: {error}": "{path} n’a pas pu être lu et n’est pas remplacé sans avoir été lu : {error}",
   "{path} could not be read, and is not replaced by defaults: {error}": "{path} n’a pas pu être lu et n’est pas remplacé par les valeurs par défaut : {error}",
+  "no copy of it could be kept beside it": "aucune copie n’a pu en être gardée à côté",
   "not a PNG": "pas un PNG",
   "a damaged PNG chunk": "un bloc PNG endommagé",
   "a PNG chunk this copy cannot keep": "un bloc PNG que cette copie ne peut pas garder"

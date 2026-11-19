@@ -68,6 +68,8 @@ pub(super) struct WorldFeedbackRuntime {
     scope: u64,
     /// The server and account of the moment: what is queued is for them, and only what is for them is sent.
     stamp: Stamp,
+    /// Accounts whose credential Orbiters refused, and until when nothing of theirs is sent.
+    parked: Vec<(Stamp, u64)>,
 }
 
 impl Default for WorldFeedbackRuntime {
@@ -89,6 +91,7 @@ impl Default for WorldFeedbackRuntime {
             sent: None,
             scope: 0,
             stamp: Stamp::default(),
+            parked: Vec::new(),
         }
     }
 }
@@ -314,9 +317,11 @@ impl WorldFeedbackRuntime {
         if self.queue.items.len() != before {
             self.save();
         }
-        if let Some(i) = self.queue.due_for(now, &self.stamp) {
+        // A refused credential's account sends nothing until its pause ends, actions added meanwhile included.
+        let parked = self.parked.iter().any(|(stamp, until)| stamp.sends_as(&self.stamp) && now < *until);
+        if let Some(i) = self.queue.due_for(now, &self.stamp).filter(|_| !parked) {
             let p = &self.queue.items[i];
-            return Some(Call::Send { world: p.world.clone(), action: p.action.clone(), since: p.since });
+            return Some(Call::Send { world: p.world.clone(), action: p.action.clone(), op: p.op, to: self.stamp.clone() });
         }
         let stale = |k: Option<&Known>| k.is_none_or(|k| now.saturating_sub(k.read_at) > READ_AGAIN.as_millis() as u64);
         let world = self.wanted.keys().find(|w| stale(self.known.get(*w))).cloned()?;
@@ -344,7 +349,7 @@ impl WorldFeedbackRuntime {
     fn answered_in(&mut self, call: &Call, result: Result<Option<orbiters_core::world_feedback::ServerView>, Failure>, scope: u64) {
         let now = now_ms();
         let index = |q: &Queue| match call {
-            Call::Send { world, action, since } => q.items.iter().position(|p| &p.world == world && &p.action == action && p.since == *since),
+            Call::Send { op, .. } => q.items.iter().position(|p| p.op == *op),
             Call::Read { .. } => None,
         };
         if scope != self.scope {
@@ -390,16 +395,13 @@ impl WorldFeedbackRuntime {
                 self.world.error = Some((self.world.seen, code, message.clone()));
                 self.menu_errors.insert(world.clone(), message);
             }
-            (Call::Send { .. }, Err(Failure::SignedOut)) => {
-                // The credential is refused: nothing of the account that action was for goes for a while (the account is
-                // asked about again meanwhile), rather than each action again every minute for a day.
-                let parked = now + SIGNED_OUT_PAUSE.as_millis() as u64;
-                if let Some(to) = index(&self.queue).and_then(|i| self.queue.items[i].to.clone()) {
-                    for p in self.queue.items.iter_mut().filter(|p| p.to.as_ref() == Some(&to)) {
-                        p.due = p.due.max(parked);
-                    }
-                    self.save();
-                }
+            (Call::Send { to, .. }, Err(Failure::SignedOut)) => {
+                // The credential is refused: nothing of the account that action was sent as goes for a while (the account
+                // is asked about again meanwhile), its actions added meanwhile included, rather than each action again
+                // every minute for a day.
+                let until = now + SIGNED_OUT_PAUSE.as_millis() as u64;
+                self.parked.retain(|(_, u)| *u > now);
+                self.parked.push((to.clone(), until));
             }
             (Call::Send { .. }, Err(_)) => {
                 if let Some(i) = index(&self.queue) {
@@ -457,7 +459,8 @@ fn menu_action(ask: &FeedbackAsk) -> Option<(String, Action)> {
 #[derive(Clone, Debug)]
 enum Call {
     Read { world: String },
-    Send { world: String, action: Action, since: u64 },
+    /// An action waiting: its own number, and the server and account it was made for and goes as.
+    Send { world: String, action: Action, op: u64, to: Stamp },
 }
 
 fn perform(call: &Call, api: Option<&(Api, String)>) -> Result<Option<orbiters_core::world_feedback::ServerView>, Failure> {
@@ -579,11 +582,19 @@ impl super::Controller {
     }
 
     fn feedback_follow(self: &Shared) -> bool {
-        let development = self.settings().development;
-        let (api, stamp) = self.account_api_for();
+        let (development, api, stamp) = self.feedback_context();
         let mut rt = self.world_feedback.lock().unwrap();
         rt.set_stamp(stamp);
         rt.follow(development, api.is_some())
+    }
+
+    /// One read of whom world feedback is for now, for EVERY reader of the log (the follower, the world's local address):
+    /// the environment chosen now, its account (when read for it) and the policy that goes with that environment, never
+    /// one from before a switch and one from after.
+    fn feedback_context(&self) -> (bool, Option<(Api, String)>, Stamp) {
+        let (api, stamp) = self.account_api_for();
+        let development = stamp.server == Api::new(orbiters_core::account::Server::Development).url("");
+        (development, api, stamp)
     }
 }
 
@@ -660,9 +671,9 @@ pub(super) fn spawn(ctl: Shared) {
             let result = perform(&call, api.as_ref());
             if matches!(result, Err(Failure::SignedOut)) && api.is_none() {
                 // Nothing to send with: kept until an account is signed in.
-                if let Call::Send { world, action, since } = &call {
+                if let Call::Send { op, .. } = &call {
                     let mut rt = c.world_feedback.lock().unwrap();
-                    if let Some(i) = rt.queue.items.iter().position(|p| &p.world == world && &p.action == action && p.since == *since) {
+                    if let Some(i) = rt.queue.items.iter().position(|p| p.op == *op) {
                         rt.queue.items[i].due = now_ms() + 10_000;
                     }
                 }
@@ -741,14 +752,19 @@ fn route(method: &str, target: &str, host: &str, in_world: bool) -> Result<(), (
 }
 
 fn answer(ctl: &Shared, stream: TcpStream) -> std::io::Result<()> {
-    respond(&ctl.world_feedback, stream, ctl.settings().development, ctl.feedback_api().is_some())
+    let (development, api, stamp) = ctl.feedback_context();
+    respond(&ctl.world_feedback, stream, development, api.is_some(), Some(stamp))
 }
 
 /// Answers one request on `stream` from what `runtime` knows, once it read the log to its end.
-fn respond(runtime: &std::sync::Mutex<WorldFeedbackRuntime>, mut stream: TcpStream, development: bool, signed_in: bool) -> std::io::Result<()> {
+fn respond(runtime: &std::sync::Mutex<WorldFeedbackRuntime>, mut stream: TcpStream, development: bool, signed_in: bool, stamp: Option<Stamp>) -> std::io::Result<()> {
     let Some((method, target, host)) = request(&mut stream) else { return Ok(()) };
     let (status, body) = {
         let mut rt = runtime.lock().unwrap();
+        // The lines this reads are queued for whom the follower would queue them now (verify2: never the scope of before).
+        if let Some(stamp) = stamp {
+            rt.set_stamp(stamp);
+        }
         // What the world logged before asking counts in this answer.
         rt.follow(development, signed_in);
         match route(&method, &target, &host, accepted(rt.joined.as_deref(), development)) {
@@ -851,7 +867,7 @@ mod tests {
             std::thread::scope(|scope| {
                 scope.spawn(|| {
                     let (stream, _) = listener.accept().unwrap();
-                    respond(rt, stream, false, true).unwrap();
+                    respond(rt, stream, false, true, None).unwrap();
                 });
                 let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
                 write!(client, "GET /n4n0/feedback/v1 HTTP/1.1\r\nHost: {host}\r\nUser-Agent: UnityPlayer\r\n\r\n").unwrap();
@@ -914,6 +930,45 @@ mod tests {
         let _ = std::fs::remove_file(&rt.queue_path);
     }
 
+    /// Verify2 (night4): a refused credential parks its account, actions added after the refusal included; an answer is
+    /// for its own action (its number), never one made for another account in the same millisecond; nobody known sends
+    /// nothing.
+    #[test]
+    fn a_refusal_parks_its_account_and_answers_find_their_own_action() {
+        let mut rt = WorldFeedbackRuntime {
+            queue: Queue::default(),
+            queue_path: std::env::temp_dir().join(format!("orbiters-feedback-parked-{}.json", uuid::Uuid::new_v4())),
+            instances: (Vec::new(), Some(Instant::now())),
+            ..Default::default()
+        };
+        let a = Stamp { server: "https://api.orbiters.cc/".into(), account: Some("1".into()), credential: None };
+        rt.set_stamp(a.clone());
+        rt.push(WORLD, Action::Uncomment { comment: 1 });
+        let Some(call @ Call::Send { .. }) = rt.next_call() else { panic!("a send") };
+        let scope = rt.scope;
+        rt.answered_in(&call, Err(Failure::SignedOut), scope);
+        rt.push(WORLD, Action::Uncomment { comment: 2 });
+        assert!(rt.next_call().is_none_or(|c| !matches!(c, Call::Send { .. })), "parked, the later action too");
+        // Two identical actions for two accounts: the answer to B's leaves A's.
+        let mut q = Queue::default();
+        let b = Stamp { account: Some("2".into()), ..a.clone() };
+        let at = now_ms();
+        q.push_to(WORLD, Action::Uncomment { comment: 5 }, at, a.clone());
+        q.push_to(WORLD, Action::Uncomment { comment: 5 }, at, b.clone());
+        rt.queue = q;
+        rt.parked.clear();
+        rt.set_stamp(b.clone());
+        let Some(call @ Call::Send { .. }) = rt.next_call() else { panic!("B's send") };
+        let scope = rt.scope;
+        rt.answered_in(&call, Ok(None), scope);
+        assert_eq!(rt.queue.items.iter().map(|p| p.to.clone().unwrap().account).collect::<Vec<_>>(), [Some("1".to_string())], "A's stays");
+        // Nobody known: nothing goes.
+        rt.set_stamp(Stamp { account: None, ..a.clone() });
+        rt.push(WORLD, Action::Uncomment { comment: 9 });
+        assert!(rt.next_call().is_none_or(|c| !matches!(c, Call::Send { .. })));
+        let _ = std::fs::remove_file(&rt.queue_path);
+    }
+
     /// Verifier (CORE2-1): another account on the same server (or another server) is another scope: A's late answer is
     /// not shown to B, A's waiting comment is not B's, and it is never sent as B.
     #[test]
@@ -924,7 +979,7 @@ mod tests {
             instances: (Vec::new(), Some(Instant::now())),
             ..Default::default()
         };
-        let a = Stamp { server: "https://api.orbiters.cc/".into(), account: Some("1".into()) };
+        let a = Stamp { server: "https://api.orbiters.cc/".into(), account: Some("1".into()), credential: None };
         let b = Stamp { account: Some("2".into()), ..a.clone() };
         rt.set_stamp(a);
         rt.asked(WORLD);
@@ -955,7 +1010,7 @@ mod tests {
         rt.push(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }));
         let read = Call::Read { world: WORLD.into() };
         let p = rt.queue.items[0].clone();
-        let send = Call::Send { world: p.world.clone(), action: p.action.clone(), since: p.since };
+        let send = Call::Send { world: p.world.clone(), action: p.action.clone(), op: p.op, to: Stamp::default() };
         let before = rt.scope;
         rt.environment_changed();
         let theirs = orbiters_core::world_feedback::ServerView { world_id: WORLD.into(), likes: 41, ..Default::default() };

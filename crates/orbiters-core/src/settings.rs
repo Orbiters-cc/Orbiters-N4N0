@@ -871,6 +871,7 @@ impl Settings {
         // settings) is still the defaults, and a save must go onto the person's file ([`Settings::save_to`]).
         let migrated = migrated(&text);
         let (settings, dropped) = Self::parse(migrated.as_deref().unwrap_or(&text));
+        known_until_unreadable(path, &settings);
         if !dropped.is_empty() {
             let aside = crate::keep_aside(path);
             eprintln!("settings: {} left at their default ({}), the file kept as {:?}", dropped.join(", "), path.display(), aside);
@@ -928,15 +929,15 @@ impl Settings {
                     // without that copy nothing is written.
                     if !kept {
                         let Some(aside) = crate::keep_aside(path) else {
-                            let step = "keep_aside"; // i18n: not shown (the name of the step that failed, as night2/core wrote it)
-                            anyhow::bail!("{}", orbiters_i18n::tr!("{path} could not be read, and is not replaced by defaults: {error}", path = path.display(), error = step));
+                            let why = orbiters_i18n::tr("no copy of it could be kept beside it");
+                            anyhow::bail!("{}", orbiters_i18n::tr!("{path} could not be read, and is not replaced by defaults: {error}", path = path.display(), error = why));
                         };
                         eprintln!("settings: {} kept as {} before the first save onto it", path.display(), aside.display());
                         set_kept_aside(path);
                     }
                     let migrated = migrated(&text);
                     let (on_disk, _) = Self::parse(migrated.as_deref().unwrap_or(&text));
-                    rebased = self.changes_onto(on_disk);
+                    rebased = self.changes_onto(on_disk, &baseline(path));
                     &rebased
                 }
                 Ok(None) => self,
@@ -946,6 +947,9 @@ impl Settings {
             self
         };
         crate::write_atomic(path, serde_json::to_string_pretty(settings)?.as_bytes())?;
+        // What this process holds is now on the file: the next save puts on it what changed since THIS one (a switch
+        // turned on and then off again is off; night4, verify2).
+        saved(path, self);
         Ok(())
     }
 
@@ -957,10 +961,10 @@ impl Settings {
         s
     }
 
-    /// `base` with what these settings change from what they started from when the file could not be read
-    /// ([`Settings::unread`]; a section field by field).
-    fn changes_onto(&self, base: Self) -> Self {
-        let (Ok(mine), Ok(defaults), Ok(mut out)) = (serde_json::to_value(self), serde_json::to_value(Self::unread()), serde_json::to_value(&base)) else {
+    /// `base` with what these settings change from `start` (what this process last knew the file to hold: its last
+    /// read before the file became unreadable, what it last saved, else [`Settings::unread`]), at any depth.
+    fn changes_onto(&self, base: Self, start: &serde_json::Value) -> Self {
+        let (Ok(mine), defaults, Ok(mut out)) = (serde_json::to_value(self), start.clone(), serde_json::to_value(&base)) else {
             return base;
         };
         /// Puts onto `out` each leaf of `mine` that differs from `start`, at any depth (one menu choice changed leaves
@@ -1078,6 +1082,34 @@ fn loaded_unreadable(path: &Path) {
     LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(path.to_path_buf()).or_insert(false);
 }
 
+/// What this process last knew each settings file to hold: what it read while the file could still be read, then what
+/// it saved. What a save after a failed read puts on the file is what changed since then (night4, verify2: never "since
+/// the start-up defaults", which turned a switch the person turned back off on again).
+static KNOWN: std::sync::Mutex<std::collections::BTreeMap<PathBuf, serde_json::Value>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// A read that worked: what the file holds, while it never failed to read in this process (a read after a failure is
+/// no knowledge of what this process holds).
+fn known_until_unreadable(path: &Path, settings: &Settings) {
+    if was_loaded_unreadable(path).is_some() {
+        return;
+    }
+    if let Ok(value) = serde_json::to_value(settings) {
+        KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_path_buf(), value);
+    }
+}
+
+fn saved(path: &Path, settings: &Settings) {
+    if let Ok(value) = serde_json::to_value(settings) {
+        KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_path_buf(), value);
+    }
+}
+
+/// What a save onto the file as it reads puts what changed from: what this process last knew it to hold, else the
+/// defaults it started from.
+fn baseline(path: &Path) -> serde_json::Value {
+    KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path).cloned().unwrap_or_else(|| serde_json::to_value(Settings::unread()).unwrap_or_default())
+}
+
 fn set_kept_aside(path: &Path) {
     LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_path_buf(), true);
 }
@@ -1167,7 +1199,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orbiters-settings-locked-{}", uuid::Uuid::new_v4()));
         let path = dir.join("settings.json");
         let real = Settings { picture_folders: vec![PathBuf::from("I:/VRChat pics")], storage_limit_gb: 7.0, ..Default::default() };
-        real.save_to(&path).unwrap();
+        // The person's file from an earlier run (written by another process, not this one: a save of this process is
+        // what it knows the file to hold).
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, serde_json::to_string_pretty(&real).unwrap()).unwrap();
         let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
         let loaded = Settings::load_from(&path);
         assert_eq!(loaded, Settings { usage: UsageSettings { enabled: false, ..Default::default() }, ..Default::default() }, "unreadable: the defaults for now, statistics off");
@@ -1217,7 +1252,59 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// PRIV-12: a statistics switch that did not read is off, not on by default.
+    /// Night4 (verify2): after a recovery, a switch turned on and then off again in the same run is off at the next start;
+    /// the statistics too (a consent switch never comes back on by itself).
+    #[cfg(windows)]
+    #[test]
+    fn a_switch_turned_back_off_after_a_recovery_stays_off() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("orbiters-settings-toggle-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"storage_limit_gb": 7, "usage": {"enabled": false, "told": true}}"#).unwrap();
+        let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        let mut live = Settings::load_from(&path);
+        drop(lock);
+        // On, saved; then off again, saved.
+        live.dolly_streams = true;
+        live.usage.enabled = true;
+        live.save_to(&path).unwrap();
+        let on = Settings::load_from(&path);
+        assert!(on.dolly_streams && on.usage.enabled && on.storage_limit_gb == 7.0);
+        live.dolly_streams = false;
+        live.usage.enabled = false;
+        live.save_to(&path).unwrap();
+        let after = Settings::load_from(&path);
+        assert!(!after.dolly_streams, "turned back off: off at the next start");
+        assert!(!after.usage.enabled, "the statistics: the last choice, off");
+        assert_eq!(after.storage_limit_gb, 7.0, "the person's other settings kept");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Night4 (verify2): another reader of the same process failing to read the file does not make the writer, which
+    /// read it fine at start, put its changes on it as "changed from the defaults": turning statistics off sticks.
+    #[cfg(windows)]
+    #[test]
+    fn a_readers_failure_does_not_undo_the_writers_choice() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("orbiters-settings-reader-fail-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"usage": {"enabled": true, "told": true}}"#).unwrap();
+        let mut live = Settings::load_from(&path);
+        assert!(live.usage.enabled);
+        // A worker of the same process cannot read it for a moment.
+        let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        let _ = Settings::load_from(&path);
+        drop(lock);
+        // The person turns the statistics off.
+        live.usage.enabled = false;
+        live.save_to(&path).unwrap();
+        assert!(!Settings::load_from(&path).usage.enabled, "off, as chosen");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// PRIV-12: a statistics switch that did not read is off, not on by default.    /// PRIV-12: a statistics switch that did not read is off, not on by default.
     #[test]
     fn statistics_that_did_not_read_are_off() {
         let dir = std::env::temp_dir().join(format!("orbiters-settings-usage-{}", uuid::Uuid::new_v4()));
@@ -1235,7 +1322,7 @@ mod tests {
     fn a_change_from_the_defaults_goes_onto_the_file_as_it_reads() {
         let on_disk = Settings { picture_folders: vec![PathBuf::from("I:/VRChat pics")], storage_limit_gb: 7.0, ..Default::default() };
         let mine = Settings { storage_limit_gb: 3.0, n4n0: N4n0Settings { afk_message: "Back soon".into(), ..Default::default() }, ..Default::default() };
-        let out = mine.changes_onto(on_disk.clone());
+        let out = mine.changes_onto(on_disk.clone(), &serde_json::to_value(Settings::unread()).unwrap());
         assert_eq!((out.picture_folders, out.storage_limit_gb, out.n4n0.afk_message.as_str()), (on_disk.picture_folders, 3.0, "Back soon"));
         assert_eq!(out.n4n0.menu, on_disk.n4n0.menu, "a section changes field by field");
     }

@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The programs the setup installs (`scripts/third_party_licenses.py` lists the same).
-const PROGRAMS: [&str; 5] = ["orbiters-desktop", "orbiters-capture", "orbiters-reconstruct", "orbiters-voice", "orbiters-call"];
+pub(crate) const PROGRAMS: [&str; 5] = ["orbiters-desktop", "orbiters-capture", "orbiters-reconstruct", "orbiters-voice", "orbiters-call"];
 /// The libraries they load, beside them in `target/release` (sherpa-onnx's prebuilt ones, which its build copies there).
 const LIBRARIES: [&str; 3] = ["onnxruntime.dll", "onnxruntime_providers_shared.dll", "sherpa-onnx-c-api.dll"];
 /// The reconstruction's face detector (orbiters_reconstruct::portraits), from the repository; the worker finds it beside
@@ -55,6 +55,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     // Whoever asks: a stable version's programs are never compiled as development builds are.
     options.profile.for_version(&version)?;
     crate::ensure_versions_agree(&version)?;
+    crate::licenses::check(&PROGRAMS)?;
     let target = crate::target_dir();
     let signer = Signer::new(config)?;
     anyhow::ensure!(signer.is_some() || options.unsigned, "{}", SIGNING_HELP);

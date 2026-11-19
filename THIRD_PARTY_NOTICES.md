@@ -56,6 +56,9 @@ every crate built into the programs, and of the native libraries next to them, a
 | Opus (libopus, built into the call worker) | BSD-3-Clause |
 | rusqlite (reading VRCX's and VRCNext's databases) | MIT |
 | SQLite (bundled with rusqlite) | Public domain |
+| webview2-com, webview2-com-sys (WebView2 bindings, orbiters-web) | MIT |
+| tempfile (orbiters-web) | MIT OR Apache-2.0 |
+| unicode-normalization | (MIT OR Apache-2.0) AND Unicode-3.0 |
 
 ## Native libraries next to the voice worker
 
@@ -63,6 +66,12 @@ every crate built into the programs, and of the native libraries next to them, a
 |---|---|
 | sherpa-onnx C API (`sherpa-onnx-c-api.dll`, prebuilt by k2-fsa) | Apache-2.0 |
 | ONNX Runtime (`onnxruntime.dll`, Microsoft) | MIT |
+
+## Native code linked into the window's program
+
+| Component | License |
+|---|---|
+| Microsoft WebView2 SDK loader 1.0.3800.47 (`WebView2LoaderStatic.lib`, carried and linked by webview2-com-sys) | BSD-3-Clause-style, Microsoft Corporation (the SDK's `LICENSE.txt`, in `THIRD_PARTY_LICENSES.md`) |
 
 ## Models distributed with the app
 

@@ -607,7 +607,7 @@ fn a_destination_that_waited_too_long_is_forgotten() {
 }
 
 fn accepted(invite: Invite, owner: &str, ago: Duration) -> Accepted {
-    Accepted { invite, at: Instant::now().checked_sub(ago).unwrap(), owner: owner.into(), from: None, hide_failures: 0, hide_again: None }
+    Accepted { invite, at: Instant::now().checked_sub(ago).unwrap(), owner: owner.into(), from: None, hide_failures: 0, hide_again: None, moved: false }
 }
 
 #[test]

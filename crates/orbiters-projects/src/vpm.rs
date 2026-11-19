@@ -232,7 +232,8 @@ pub(crate) async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Se
     // downloads every remote repository and writes its cache (its `update_cache`).
     if refresh || missing_cache(root, &settings) {
         let before = usable_caches(root, &settings);
-        packages = PackageCollection::load(&settings, &io, Some(&http()?)).await?;
+        // Listings through the same rule as archives: a repository's headers to its own origin only, redirects included.
+        packages = PackageCollection::load(&settings, &io, Some(&crate::vpm_http::Client::new(http()?, &settings)?)).await?;
         restore_usable(&before);
     }
     Ok((settings, EnabledCollection { inner: packages, hidden }))
@@ -331,7 +332,8 @@ pub async fn add_repo(root: &Path, url: &str, headers: BTreeMap<String, String>)
     if settings.get_user_repos().iter().any(|r| r.url() == Some(&url)) {
         return Ok(());
     }
-    environment::add_remote_repo(&mut settings, url, None, headers.into_iter().map(|(k, v)| (k.into(), v.into())).collect(), &io, &http()?).await?;
+    let client = crate::vpm_http::Client::new(http()?, &settings)?.with_new_repository(&url, &headers);
+    environment::add_remote_repo(&mut settings, url, None, headers.into_iter().map(|(k, v)| (k.into(), v.into())).collect(), &io, &client).await?;
     settings.save(&io).await?;
     Ok(())
 }

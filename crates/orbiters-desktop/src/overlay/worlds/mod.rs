@@ -525,8 +525,19 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         }
     }
 
+    /// The environment was switched (Settings, Development): the 3D worlds are listed and downloaded from the server
+    /// chosen now (CORE2-13).
+    fn follow_environment(&mut self) {
+        if !self.source.is_current() {
+            self.source = Source::current();
+            self.catalog.refresh(&self.source);
+            self.panel.dirty = true;
+        }
+    }
+
     /// A turn of [`Worlds::alone`]: what the panel asked of the app, the app's feedback, the lists.
     pub fn update_alone(&mut self, snap: &Snapshot, backend: &Ctl) {
+        self.follow_environment();
         if snap.n4n0.feedback != self.feedback_seen {
             self.feedback_seen = snap.n4n0.feedback.clone();
             self.feedback = snap.n4n0.feedback.clone();
@@ -1521,6 +1532,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         backend: &Ctl,
         menu_at: Option<&Matrix34>,
     ) -> (bool, bool) {
+        self.follow_environment();
         // The app's feedback replaces the panel's own (its presses show at once, before the app has them).
         if snap.n4n0.feedback != self.feedback_seen {
             self.feedback_seen = snap.n4n0.feedback.clone();

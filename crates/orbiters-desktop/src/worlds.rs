@@ -629,7 +629,6 @@ impl Pictures {
             std::thread::Builder::new()
                 .name(format!("pictures-{i}"))
                 .spawn(move || {
-                    let (api, keep) = public_api();
                     loop {
                         let next = {
                             let (lock, ready) = &*queue;
@@ -657,6 +656,9 @@ impl Pictures {
                                     .and_then(|r| if let Response::Image(bytes) = r { decode_image(&bytes) } else { None })
                                     .map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
                             } else {
+                                // The environment of the moment, for each picture (one chosen since the loader started is
+                                // the one asked; CORE2-13).
+                                let (api, keep) = public_api();
                                 decode(&api, keep, &picture)
                             }
                         }))
@@ -912,7 +914,7 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
             Some(ColorImage::from_rgba_premultiplied([tw as usize, th as usize], &rgba))
         }
         Picture::Remote { world_id, url, large } => {
-            let file = cache_dir().join("worlds").join(format!("{world_id}{}.png", if *large { "-large" } else { "" }));
+            let file = cache_dir().join("worlds").join(remote_file_name(world_id, url, *large));
             // One kept that cannot be read (cut short) is fetched again.
             let kept = keep.then(|| std::fs::read(&file).ok()).flatten().and_then(|b| decode_image(&b));
             let (w, h, rgba) = match kept {
@@ -929,6 +931,14 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
             Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
         }
     }
+}
+
+/// The file a world's picture read at `url` is kept in: by world and by address (another environment's picture, or the
+/// same world's new one, is another address, so never the file kept for the other; CORE2-13).
+fn remote_file_name(world_id: &str, url: &str, large: bool) -> String {
+    use sha2::{Digest, Sha256};
+    let digest: String = Sha256::digest(url.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("{world_id}-{digest}{}.png", if large { "-large" } else { "" })
 }
 
 /// Where a capture's picture on Orbiters is kept once read ([`Picture::CaptureView`]): by environment, capture and the
@@ -1024,6 +1034,19 @@ pub fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// Verifier (CORE2-13): a world's picture from one environment (or a new one of the same world) is kept apart from
+    /// the other's: another address, another file.
+    #[test]
+    fn a_worlds_picture_is_kept_by_its_address() {
+        let w = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
+        let prod = remote_file_name(w, "https://api.orbiters.cc/files/1.png", false);
+        let dev = remote_file_name(w, "http://127.0.0.1:4100/files/1.png", false);
+        assert_ne!(prod, dev);
+        assert_eq!(prod, remote_file_name(w, "https://api.orbiters.cc/files/1.png", false), "the same address, the same file");
+        assert_ne!(prod, remote_file_name(w, "https://api.orbiters.cc/files/1.png", true), "the large one apart");
+        assert!(prod.starts_with(w) && prod.ends_with(".png"));
+    }
 
     /// Held by a test that counts on the pictures' revision (one for the process) staying as it left it.
     pub(crate) fn pictures_lock() -> std::sync::MutexGuard<'static, ()> {

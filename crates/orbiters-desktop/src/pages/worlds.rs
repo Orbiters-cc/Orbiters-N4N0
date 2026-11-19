@@ -718,6 +718,8 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     let ctx = ui.ctx().clone();
     // The world's card where the grid last drew it: the page's picture flies out of its picture and back.
     let home = state.open.as_ref().and_then(|o| state.card_homes.get(&o.id)).copied();
+    // The Share window over the page takes Escape (drawn after the page, it closes on the same press).
+    let share_open = state.sharing.is_some();
     let Some(o) = state.open.as_mut() else { return };
     if let Some(h) = home {
         o.origin = Rect::from_min_size(h.min, vec2(h.width(), h.width() * 9.0 / 16.0));
@@ -1046,7 +1048,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     }
 
     // Reconstruct again's question, over the page.
-    let asking = o.again.is_some();
+    let asking = o.again.is_some() || share_open;
     if let Some(a) = o.again.as_mut() {
         if !a.show(&ctx, cx) {
             o.again = None;
@@ -1558,6 +1560,7 @@ fn action_bar(ctx: &egui::Context, o: &Open, world: &VisitedWorld, sharing: &Sha
 
 /// A picture large over the window: arrows (or ←/→) go through the world's pictures, Esc or a click outside closes.
 fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWorld, fixed: &HashSet<PathBuf>, pickable: bool) {
+    let share_open = state.sharing.is_some();
     let Some(o) = state.open.as_mut() else { return };
     let Some(index) = o.viewer else { return };
     let count = world.shots.len();
@@ -1685,7 +1688,8 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
             if i.key_pressed(egui::Key::ArrowRight) {
                 step = 1;
             }
-            if i.key_pressed(egui::Key::Escape) {
+            // (Not while the Share window is over it: that press is the window's.)
+            if i.key_pressed(egui::Key::Escape) && !share_open {
                 close = true;
             }
         });

@@ -59,6 +59,21 @@ pub fn keep_with_service(child: &Child) {
 /// on with its odd bytes replaced: `BufRead::lines` ends on it, which took a living worker for gone (stdout) or stopped
 /// draining its stderr until the worker blocked on a full pipe.
 pub fn pipe_lines(pipe: impl Read, mut each: impl FnMut(String)) {
+    pipe_bytes(pipe, |line| each(String::from_utf8_lossy(line).into_owned()));
+}
+
+/// [`pipe_lines`] for a protocol (a worker's events): a line that is not UTF-8 is passed over whole, with a note, and
+/// the next ones still arrive. Decoded with replacements it could have become a valid event with another file path in it
+/// (verify-controller).
+pub fn pipe_records(pipe: impl Read, what: &str, mut each: impl FnMut(String)) {
+    pipe_bytes(pipe, |line| match std::str::from_utf8(line) {
+        Ok(text) => each(text.to_string()),
+        Err(_) => eprintln!("{what}: a line of {} bytes that is not UTF-8, left out", line.len()),
+    });
+}
+
+/// A pipe's lines as bytes, without their `\r\n`, until it closes.
+fn pipe_bytes(pipe: impl Read, mut each: impl FnMut(&[u8])) {
     let mut reader = BufReader::new(pipe);
     let mut buf = Vec::new();
     loop {
@@ -69,7 +84,7 @@ pub fn pipe_lines(pipe: impl Read, mut each: impl FnMut(String)) {
                 while matches!(buf.last(), Some(b'\n' | b'\r')) {
                     buf.pop();
                 }
-                each(String::from_utf8_lossy(&buf).into_owned());
+                each(&buf);
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => return,
@@ -100,7 +115,7 @@ impl WorkerHandle {
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         std::thread::Builder::new().name("worker-stdout".into()).spawn(move || {
-            pipe_lines(stdout, |line| {
+            pipe_records(stdout, "worker", |line| {
                 // A number written as null (NaN) costs its field, not the event: a lost `Stopped` would leave the
                 // session "being saved" (`WorkerEvent::from_line`).
                 match WorkerEvent::from_line(&line) {
@@ -168,6 +183,13 @@ mod tests {
         input.extend_from_slice(b"\nlast");
         let mut lines = Vec::new();
         super::pipe_lines(&input[..], |l| lines.push(l));
+        // The worker's events: the line that is not UTF-8 (inside a quoted path, it would decode to another path) is
+        // left out, the others arrive.
+        let mut records = Vec::new();
+        super::pipe_records(&input[..], "test", |l| records.push(l));
+        assert_eq!(records.len(), 4, "the one line that is not UTF-8 is left out");
+        assert_eq!(records[1], "{\"event\":1}");
+        assert!(records.iter().all(|r| !r.contains('\u{FFFD}')));
         assert_eq!(lines.len(), 5, "{:?}", lines.iter().map(|l| l.len()).collect::<Vec<_>>());
         assert_eq!(lines[0], "first");
         assert_eq!(lines[1], "\u{FFFD}t\u{FFFD} L\u{FFFD}a");

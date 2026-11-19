@@ -79,7 +79,7 @@ impl Worker {
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         std::thread::Builder::new().name("call-stdout".into()).spawn(move || {
-            crate::worker::pipe_lines(stdout, |line| {
+            crate::worker::pipe_records(stdout, "call", |line| {
                 match serde_json::from_str::<CallEvent>(&line) {
                     Ok(e) => ctl.on_call_worker(e),
                     // Not the line: it may hold a description (addresses).

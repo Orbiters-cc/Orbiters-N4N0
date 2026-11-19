@@ -18,6 +18,10 @@ pub const PLY_FILE: &str = "splats.ply";
 /// draw it wherever the splats leave the view open (contracts Docs/session-bundle.md).
 pub const SKY_FILE: &str = "sky.png";
 pub const REPORT_FILE: &str = "report.json";
+/// In the result folder while its files are being replaced one by one (the folder could not move as a whole: a program
+/// held one of its files): its parts may come from two runs until the marker goes. Nothing is shared from it meanwhile
+/// (night2, the verifier); the next reconstruction replaces the folder.
+pub const REPLACING_FILE: &str = "replacing";
 /// A render of the first held-out keyframe (QOI, RGB). With splat edits ([`EDIT_FILE`]) it is drawn again without the
 /// splats they remove, so that every picture of the capture (its card, its uploads, a drag out of the app) matches its
 /// shared files; the worker's own render waits aside ([`trained_preview_file`]) until the edits are undone.

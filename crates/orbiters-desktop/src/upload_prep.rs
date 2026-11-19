@@ -227,6 +227,8 @@ pub fn has_partial(session: &Path) -> bool {
 /// unedited reconstructions follow each other (their edit generations are the same).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResultIdentity {
+    /// Not being replaced file by file (no reconstruction::REPLACING_FILE): its parts are of one run.
+    pub complete: bool,
     result: PathBuf,
     report: Option<String>,
     splats: Option<(u64, Option<std::time::SystemTime>)>,
@@ -239,7 +241,8 @@ impl ResultIdentity {
         let report = sha256_file(&result.join(reconstruction::REPORT_FILE)).ok();
         let splats = std::fs::metadata(result.join(reconstruction::PLY_FILE)).ok().map(|m| (m.len(), m.modified().ok()));
         let edits = orbiters_reconstruct::edit::generation(&result).ok();
-        Self { result, report, splats, edits }
+        let complete = std::fs::symlink_metadata(result.join(reconstruction::REPLACING_FILE)).is_err();
+        Self { complete, result, report, splats, edits }
     }
 }
 
@@ -248,17 +251,56 @@ impl ResultIdentity {
 pub struct Pinned(PathBuf);
 
 impl Pinned {
-    /// `src` copied, under its own name, into a folder of its own in the temporary folder.
+    /// `src` copied, under its own name, into a folder of its own in the temporary folder: made for it alone (never
+    /// one left by another process), named after this process. Copies a killed preparation left behind go at the first
+    /// copy of the next one ([`clean_pinned`]).
     pub fn copy(src: &Path) -> anyhow::Result<Self> {
+        Self::copy_in(&std::env::temp_dir(), src)
+    }
+
+    fn copy_in(temp: &Path, src: &Path) -> anyhow::Result<Self> {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!("orbiters-share-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
-        std::fs::create_dir_all(&dir)?;
+        static CLEANED: std::sync::Once = std::sync::Once::new();
+        CLEANED.call_once(|| clean_pinned(temp, crate::mixer_inbox::process_alive));
+        let dir = loop {
+            let dir = temp.join(format!("{PINNED_PREFIX}{}-{}-{}", std::process::id(), process_token(), N.fetch_add(1, Ordering::SeqCst)));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => break dir,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        };
         let file = dir.join(src.file_name().unwrap_or_default());
         if let Err(e) = std::fs::copy(src, &file) {
             let _ = std::fs::remove_dir_all(&dir);
             return Err(e.into());
         }
         Ok(Self(file))
+    }
+}
+
+/// The name every pinned copy's folder starts with: `orbiters-share-<pid>-<token>-<n>`.
+const PINNED_PREFIX: &str = "orbiters-share-";
+
+/// What tells this process's copies from those of an earlier process that had the same id.
+fn process_token() -> u64 {
+    static TOKEN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *TOKEN.get_or_init(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64))
+}
+
+/// Removes the pinned copies in `temp` that no running preparation owns: their process has gone (`alive` says no), or
+/// it has the id of this one without its token (an earlier process). Other processes' live copies and anything not
+/// named so stay.
+fn clean_pinned(temp: &Path, alive: impl Fn(u32) -> bool) {
+    for e in std::fs::read_dir(temp).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix(PINNED_PREFIX) else { continue };
+        let mut parts = rest.split('-');
+        let (Some(Ok(pid)), Some(Ok(token))) = (parts.next().map(str::parse::<u32>), parts.next().map(str::parse::<u64>)) else { continue };
+        let ours = pid == std::process::id();
+        if (ours && token != process_token()) || (!ours && !alive(pid)) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
     }
 }
 
@@ -528,6 +570,37 @@ mod tests {
         let copy = pinned.to_path_buf();
         drop(pinned);
         assert!(!copy.exists() && !copy.parent().unwrap().exists());
+        std::fs::remove_dir_all(&session).ok();
+    }
+
+    /// night2 (the verifier): a result marked as being replaced file by file is not complete; a copy a killed preparation
+    /// left behind goes at the next one (its process gone, or an earlier process with this id), others' live copies stay.
+    #[test]
+    fn half_replaced_results_are_not_complete_and_left_copies_go() {
+        let session = std::env::temp_dir().join(format!("orbiters-identity-half-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&session);
+        let result = session.join(reconstruction::DIR);
+        std::fs::create_dir_all(&result).unwrap();
+        std::fs::write(result.join(reconstruction::PLY_FILE), b"splats").unwrap();
+        assert!(ResultIdentity::read(&session).complete);
+        std::fs::write(result.join(reconstruction::REPLACING_FILE), b"").unwrap();
+        assert!(!ResultIdentity::read(&session).complete);
+        let temp = session.join("temp");
+        let me = std::process::id();
+        for name in [format!("{PINNED_PREFIX}4000000001-5-0"), format!("{PINNED_PREFIX}4000000002-5-0"), format!("{PINNED_PREFIX}{me}-1-0"), format!("{PINNED_PREFIX}{me}-{}-0", process_token()), "orbiters-other".into()] {
+            std::fs::create_dir_all(temp.join(&name)).unwrap();
+            std::fs::write(temp.join(&name).join("sky.png"), b"sky").unwrap();
+        }
+        clean_pinned(&temp, |pid| pid == 4000000002);
+        let mut left: Vec<String> = std::fs::read_dir(&temp).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        let mut kept = vec![format!("{PINNED_PREFIX}4000000002-5-0"), format!("{PINNED_PREFIX}{me}-{}-0", process_token()), "orbiters-other".to_string()];
+        kept.sort();
+        assert_eq!(left, kept);
+        // A new copy never takes a folder that is already there.
+        let pinned = Pinned::copy_in(&temp, &result.join(reconstruction::PLY_FILE)).unwrap();
+        assert_eq!(std::fs::read(&*pinned).unwrap(), b"splats");
+        drop(pinned);
         std::fs::remove_dir_all(&session).ok();
     }
 

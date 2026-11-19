@@ -1178,30 +1178,11 @@ impl<T> Default for Told<T> {
     }
 }
 
-/// A value's exact bits, so that 0.0 and -0.0 (or two NaNs) count as different, as two calls would be.
-trait Bits: Copy {
-    type B: PartialEq + Copy;
-    fn bits(self) -> Self::B;
-}
-
-impl Bits for f32 {
-    type B = u32;
-    fn bits(self) -> u32 {
-        self.to_bits()
-    }
-}
-
-impl Bits for vr::Matrix34 {
-    type B = [[u32; 4]; 3];
-    fn bits(self) -> [[u32; 4]; 3] {
-        self.m.map(|row| row.map(f32::to_bits))
-    }
-}
-
-impl<T: Bits> Told<T> {
-    /// Calls `tell` with `value` unless it is what was last told successfully; returns whether it called.
-    fn send<E>(&mut self, value: T, tell: impl FnOnce(T) -> Result<(), E>) -> bool {
-        if self.0.is_some_and(|last| last.bits() == value.bits()) {
+impl Told<f32> {
+    /// Calls `tell` with `value` unless it is what was last told successfully (bit for bit: 0.0 and -0.0 differ, as two
+    /// calls would); returns whether it called.
+    fn send<E>(&mut self, value: f32, tell: impl FnOnce(f32) -> Result<(), E>) -> bool {
+        if self.0.is_some_and(|last| last.to_bits() == value.to_bits()) {
             return false;
         }
         self.0 = tell(value).is_ok().then_some(value);
@@ -1215,7 +1196,6 @@ struct Sent1 {
     handle: vr::OverlayHandle,
     width: Told<f32>,
     alpha: Told<f32>,
-    transform: Told<vr::Matrix34>,
 }
 
 /// What each part's overlay was last told, by part. An overlay made anew (a new handle for the part, or one given back and made
@@ -1378,7 +1358,7 @@ pub struct OrbitVr {
     stuck: Stuck,
     lasers: Lasers,
     handles: HashMap<Zone, vr::OverlayHandle>,
-    /// What each part's overlay was last told (width, place, alpha), so an unchanged value is not told again (LIGHT-VR-5).
+    /// What each part's overlay was last told (width, alpha), so an unchanged value is not told again (LIGHT-VR-5).
     sent: Sent,
     /// Parts SteamVR refused an overlay, and when.
     refused: HashMap<Zone, Instant>,
@@ -2222,14 +2202,14 @@ impl OrbitVr {
                     let _ = cx.overlay.hide(*handle);
                     continue;
                 }
-                // Each told only when it differs from what this overlay was last told (SteamVR keeps them, hidden or not).
+                // Width and alpha told only when they differ from what this overlay was last told (SteamVR keeps them, hidden or
+                // not); the place is told every turn, as before.
                 let told = self.sent.to(panel.zone, *handle);
                 told.width.send(quad.width, |w| cx.overlay.set_width_in_meters(*handle, w));
-                let transform = match place {
-                    Placing::At(transform) => *transform,
-                    Placing::Room => quad.transform,
+                let _ = match place {
+                    Placing::At(transform) => cx.overlay.set_transform_absolute(*handle, transform),
+                    Placing::Room => cx.overlay.set_transform_absolute(*handle, &quad.transform),
                 };
-                told.transform.send(transform, |t| cx.overlay.set_transform_absolute(*handle, &t));
                 told.alpha.send(panel.appear.alpha(), |a| cx.overlay.set_alpha(*handle, a));
                 if !cx.overlay.is_visible(*handle) {
                     let _ = cx.overlay.show(*handle);
@@ -2272,52 +2252,50 @@ impl OrbitVr {
 
 #[cfg(test)]
 mod tests {
-    /// LIGHT-VR-5: a part's width, place and alpha are told to SteamVR when they change, and only then; an overlay made anew
+    /// LIGHT-VR-5: a part's width and alpha are told to SteamVR when they change, and only then; an overlay made anew
     /// (even under a handle SteamVR used before) and a call SteamVR refused are told again.
     #[test]
     fn unchanged_overlay_properties_are_not_told_again() {
-        use super::{vr, Sent, Zone};
+        use super::{Sent, Zone};
         let mut sent = Sent::default();
         let mut calls = Vec::new();
-        let turn = |sent: &mut Sent, zone: Zone, handle: u64, width: f32, x: f32, calls: &mut Vec<&'static str>| {
+        let turn = |sent: &mut Sent, zone: Zone, handle: u64, width: f32, alpha: f32, calls: &mut Vec<&'static str>| {
             let told = sent.to(zone, handle);
             told.width.send(width, |_| {
                 calls.push("width");
                 Ok::<(), i32>(())
             });
-            let mut transform = vr::Matrix34::IDENTITY;
-            transform.m[0][3] = x;
-            told.transform.send(transform, |_| {
-                calls.push("transform");
+            told.alpha.send(alpha, |_| {
+                calls.push("alpha");
                 Ok::<(), i32>(())
             });
         };
         turn(&mut sent, Zone::WingWorlds, 7, 0.2, 1.0, &mut calls);
-        assert_eq!(calls, ["width", "transform"], "a new overlay is told everything");
+        assert_eq!(calls, ["width", "alpha"], "a new overlay is told everything");
         calls.clear();
         for _ in 0..10 {
             turn(&mut sent, Zone::WingWorlds, 7, 0.2, 1.0, &mut calls);
         }
         assert!(calls.is_empty(), "nothing changed, nothing told: {calls:?}");
         turn(&mut sent, Zone::WingWorlds, 7, 0.2, 1.000_001, &mut calls);
-        assert_eq!(calls, ["transform"], "the smallest move is told");
+        assert_eq!(calls, ["alpha"], "the smallest change is told");
         calls.clear();
         turn(&mut sent, Zone::WingWorlds, 7, 0.2, -0.0, &mut calls);
         turn(&mut sent, Zone::WingWorlds, 7, 0.2, 0.0, &mut calls);
-        assert_eq!(calls, ["transform", "transform"], "compared bit for bit");
+        assert_eq!(calls, ["alpha", "alpha"], "compared bit for bit");
         calls.clear();
         // Given back and made again under the same handle value: told everything again.
         sent.forget(7);
         turn(&mut sent, Zone::WingWorlds, 7, 0.2, 0.0, &mut calls);
-        assert_eq!(calls, ["width", "transform"]);
+        assert_eq!(calls, ["width", "alpha"]);
         calls.clear();
         // Another handle for the part: told everything.
         turn(&mut sent, Zone::WingWorlds, 8, 0.2, 0.0, &mut calls);
-        assert_eq!(calls, ["width", "transform"]);
+        assert_eq!(calls, ["width", "alpha"]);
         calls.clear();
         // Another part keeps its own.
         turn(&mut sent, Zone::SheetBack, 9, 0.2, 0.0, &mut calls);
-        assert_eq!(calls, ["width", "transform"]);
+        assert_eq!(calls, ["width", "alpha"]);
         // A refused call is told again next turn.
         let mut tries = 0;
         let told = sent.to(Zone::SheetBack, 9);

@@ -8,7 +8,6 @@
 //! lines it finds queued. Every other process (the service, the app) writes at once, as before.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -38,11 +37,12 @@ pub fn append(file: &'static str, rotate_at: Option<u64>, text: String) {
     if let Some(sender) = sender {
         match sender.try_send(Msg::Line(item)) {
             Ok(()) => return,
-            Err(TrySendError::Full(_)) => {
-                // Never wait on the loop: the line is counted and said lost in the next batch.
-                LOST.fetch_add(1, Ordering::Relaxed);
+            Err(TrySendError::Full(Msg::Line(item))) => {
+                // Never wait on the loop: the line is counted and said lost, in its own file, with the next batch.
+                lose(&LOST, item.file, item.rotate_at);
                 return;
             }
+            Err(TrySendError::Full(_)) => return,
             // The writer is gone (the process is ending): at once, as without one.
             Err(TrySendError::Disconnected(Msg::Line(item))) => return write_batch(&orbiters_core::paths::logs_dir(), &[item]),
             Err(TrySendError::Disconnected(_)) => return,
@@ -53,8 +53,17 @@ pub fn append(file: &'static str, rotate_at: Option<u64>, text: String) {
 
 /// The overlay's writer, while it runs.
 static WRITER: Mutex<Option<SyncSender<Msg>>> = Mutex::new(None);
-/// Lines not queued because the queue was full, since the last said.
-static LOST: AtomicU64 = AtomicU64::new(0);
+/// Lines not queued because the queue was full, since the last said: by file (with its limit), how many.
+type Lost = Mutex<Vec<(&'static str, Option<u64>, u64)>>;
+static LOST: Lost = Mutex::new(Vec::new());
+
+fn lose(lost: &Lost, file: &'static str, rotate_at: Option<u64>) {
+    let mut lost = lost.lock().unwrap_or_else(|e| e.into_inner());
+    match lost.iter_mut().find(|(f, _, _)| *f == file) {
+        Some((_, _, n)) => *n += 1,
+        None => lost.push((file, rotate_at, 1)),
+    }
+}
 /// Lines the queue holds at most (a few minutes of the busiest logging).
 const QUEUE: usize = 4096;
 /// How long an end waits for the queue to be written.
@@ -89,18 +98,29 @@ impl Queued {
         queued
     }
 
-    fn start_in(dir: std::path::PathBuf, lost: &'static AtomicU64) -> Queued {
+    fn start_in(dir: std::path::PathBuf, lost: &'static Lost) -> Queued {
         let (sender, receiver) = std::sync::mpsc::sync_channel(QUEUE);
         let thread = std::thread::Builder::new().name("overlay logs".into()).spawn(move || writer(&dir, &receiver, lost)).ok();
         Queued { sender, thread, installed: false }
     }
 
-    /// Waits (at most [`FLUSH_WAIT`]) until everything queued before is written.
+    /// Waits (at most about [`FLUSH_WAIT`], also when the writer is stuck on a disk) until everything queued before is
+    /// written.
     pub fn flush(&self) {
+        let until = Instant::now() + FLUSH_WAIT;
         let (done, wait) = std::sync::mpsc::sync_channel(1);
-        if self.sender.send(Msg::Flush(done)).is_ok() {
-            let _ = wait.recv_timeout(FLUSH_WAIT);
+        let mut ask = Msg::Flush(done);
+        loop {
+            match self.sender.try_send(ask) {
+                Ok(()) => break,
+                Err(TrySendError::Full(again)) if Instant::now() < until => {
+                    ask = again;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
         }
+        let _ = wait.recv_timeout(until.saturating_duration_since(Instant::now()));
     }
 }
 
@@ -115,7 +135,7 @@ impl Drop for Queued {
     }
 }
 
-fn writer(dir: &Path, receiver: &Receiver<Msg>, lost: &AtomicU64) {
+fn writer(dir: &Path, receiver: &Receiver<Msg>, lost: &Lost) {
     while let Ok(first) = receiver.recv() {
         let mut batch = Vec::new();
         let mut flushes = Vec::new();
@@ -127,10 +147,10 @@ fn writer(dir: &Path, receiver: &Receiver<Msg>, lost: &AtomicU64) {
             }
             next = receiver.try_recv().ok();
         }
-        let dropped = lost.swap(0, Ordering::Relaxed);
-        if dropped > 0 {
-            let text = format!("{} {dropped} lines lost: the log's queue was full\n", orbiters_core::now_utc_iso()); // i18n: not shown (a log's line)
-            batch.push(Item { file: "vr-test.log", rotate_at: Some(ROTATE_AT), text });
+        let dropped = std::mem::take(&mut *lost.lock().unwrap_or_else(|e| e.into_inner()));
+        for (file, rotate_at, n) in dropped {
+            let text = format!("{} {n} lines lost: the log's queue was full\n", orbiters_core::now_utc_iso()); // i18n: not shown (a log's line)
+            batch.push(Item { file, rotate_at, text });
         }
         // In the order said, one open per run of lines for the same file.
         let mut start = 0;
@@ -200,7 +220,7 @@ mod tests {
     /// The writer thread writes the same lines in the same order into the same files as writing at once did.
     #[test]
     fn queued_lines_reach_their_files_in_order() {
-        static LOST_HERE: AtomicU64 = AtomicU64::new(0);
+        static LOST_HERE: Lost = Mutex::new(Vec::new());
         let dir = scratch("order");
         let queued = Queued::start_in(dir.clone(), &LOST_HERE);
         for n in 0..300 {
@@ -234,6 +254,10 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("camera-tiles.old.log")).unwrap().len(), 200);
         write_batch(&dir, &[item("camera-tiles.log", Some(100), "more")]);
         assert_eq!(std::fs::read_to_string(dir.join("camera-tiles.log")).unwrap(), "fresh\nmore\n", "under the limit it appends");
+        std::fs::write(dir.join("vr-test.log"), vec![b'x'; 200]).unwrap();
+        std::fs::create_dir_all(dir.join("vr-test.old.log").join("in the way")).unwrap();
+        write_batch(&dir, &[item("vr-test.log", Some(100), "kept")]);
+        assert_eq!(std::fs::read(dir.join("vr-test.log")).unwrap().len(), 205, "a rotation that fails keeps the log and appends");
         std::fs::write(dir.join("overlay-stalls.log"), vec![b'x'; 200]).unwrap();
         write_batch(&dir, &[item("overlay-stalls.log", None, "stall")]);
         assert_eq!(std::fs::read(dir.join("overlay-stalls.log")).unwrap().len(), 206);
@@ -244,16 +268,21 @@ mod tests {
     /// A full queue never blocks the caller; what was not queued is said in `vr-test.log` with the next batch.
     #[test]
     fn lines_lost_to_a_full_queue_are_counted_and_said() {
-        static LOST_HERE: AtomicU64 = AtomicU64::new(0);
+        static LOST_HERE: Lost = Mutex::new(Vec::new());
         let dir = scratch("lost");
-        LOST_HERE.store(7, Ordering::Relaxed);
+        for _ in 0..7 {
+            lose(&LOST_HERE, "vr-test.log", Some(ROTATE_AT));
+        }
+        lose(&LOST_HERE, "camera-tiles.log", Some(CAMERA_ROTATE_AT));
         let queued = Queued::start_in(dir.clone(), &LOST_HERE);
         queued.sender.send(Msg::Line(item("vr-test.log", Some(ROTATE_AT), "after"))).unwrap();
         queued.flush();
         let text = std::fs::read_to_string(dir.join("vr-test.log")).unwrap();
         assert!(text.starts_with("after\n"), "{text}");
         assert!(text.contains(" 7 lines lost"), "{text}");
-        assert_eq!(LOST_HERE.load(Ordering::Relaxed), 0);
+        let camera = std::fs::read_to_string(dir.join("camera-tiles.log")).unwrap();
+        assert!(camera.contains(" 1 lines lost"), "each file says its own losses: {camera}");
+        assert!(LOST_HERE.lock().unwrap().is_empty());
         drop(queued);
         let _ = std::fs::remove_dir_all(&dir);
     }

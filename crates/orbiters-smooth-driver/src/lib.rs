@@ -859,6 +859,9 @@ fn refresh_from_control(setup: &mut Setup) {
     mapping.block().report_driver(&report, now);
 }
 
+/// `WaitForSingleObject`'s "not signalled" (winerror.h).
+const WAIT_TIMEOUT: u32 = 0x102;
+
 /// Whether the process that owns the control block is still running (so a crashed app stops smoothing), asked every
 /// SteamVR frame. The owner's handle is opened once per owner pid and kept: a frame's look is then one
 /// `WaitForSingleObject(h, 0)` instead of `OpenProcess` + wait + `CloseHandle` (audit O10, LIGHT-VR-6). The answer is the
@@ -886,19 +889,30 @@ impl OwnerWatch {
             self.forget();
             return true;
         }
-        if !matches!(self.held, Some((held, _)) if held == pid) {
-            self.forget();
-            // SAFETY: OpenProcess with a pid and SYNCHRONIZE; the handle is closed in `forget`.
-            let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
-            if handle == 0 {
-                return false; // Gone, or not ours to open: treat as gone (and try again next frame, as before).
+        if let Some((held, handle)) = self.held {
+            if held == pid {
+                // SAFETY: a handle this watch opened and has not closed.
+                match unsafe { WaitForSingleObject(handle, 0) } {
+                    WAIT_OBJECT_0 => return false,
+                    WAIT_TIMEOUT => return true,
+                    // A wait that failed says nothing: the handle goes and the owner is looked at anew, as every frame did.
+                    _ => {}
+                }
             }
-            self.opens += 1;
-            self.held = Some((pid, handle));
         }
-        let Some((_, handle)) = self.held else { return false };
-        // SAFETY: a handle this watch opened and has not closed.
-        unsafe { WaitForSingleObject(handle, 0) != WAIT_OBJECT_0 }
+        self.forget();
+        // SAFETY: OpenProcess with a pid and SYNCHRONIZE; the handle is closed in `forget`.
+        let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+        if handle == 0 {
+            return false; // Gone, or not ours to open: treat as gone (and try again next frame, as before).
+        }
+        self.opens += 1;
+        // SAFETY: the handle just opened. Any answer but "signalled" was "alive" before, and still is.
+        let alive = unsafe { WaitForSingleObject(handle, 0) } != WAIT_OBJECT_0;
+        // While it is held the owner's pid cannot be given to another process, so a later owner with the same number is
+        // the same process.
+        self.held = Some((pid, handle));
+        alive
     }
 
     /// Closes the held handle, if any.

@@ -291,19 +291,10 @@ impl Editor {
         let fetch = source.clone();
         let loading = Job::spawn(ctx, move || {
             // A picture of Orbiters is downloaded first.
-            let download = |fetch: &Source| files::fetch(fetch).map_err(|e| tr!("The picture could not be downloaded: {error}", error = format!("{e:#}")));
-            download(&fetch)?;
-            match load(&files) {
-                // A download that cannot be read (cut short, say) is fetched once more: it was kept, and every later
-                // Edit failed the same way without asking again.
-                Err(_) if fetch.remote.is_some() => {
-                    let _ = std::fs::remove_file(&fetch.picture);
-                    download(&fetch)?;
-                    load(&files)
-                }
-                read => read,
-            }
-            .inspect(|_| c.request_repaint())
+            // (Never deletes the picture it was given, even unreadable: its path may come from a saved edit's file
+            // and name any file; the verifier of night 2026-11-19 had it reverted.)
+            files::fetch(&fetch).map_err(|e| tr!("The picture could not be downloaded: {error}", error = format!("{e:#}")))?;
+            load(&files).inspect(|_| c.request_repaint())
         });
         let mut e = Self::with(source, title.into(), doc, target, Some(loading));
         e.saved_view = view3d.clone();

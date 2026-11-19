@@ -1323,6 +1323,22 @@ fn a_website_approval_opened_in_the_browser_no_longer_keeps_n4n0_from_listening(
     t.shutdown(&n);
 }
 
+#[test]
+fn an_approved_hold_never_pins_the_next_avatar() {
+    // verify-n4n0 (7): the avatar changed between a Hold's write and its pin: the pin was saved for the new avatar.
+    let (t, n, _vrchat) = n4n0_with_vrchat();
+    let bound = {
+        let rt = n.n4n0.lock().unwrap();
+        crate::runtime::Bound::for_test(rt.avatar_epoch, Some("Hoodie"))
+    };
+    let other = n.clone();
+    *crate::runtime::HOLD_BETWEEN.lock().unwrap() = Some(Box::new(move || other.on_avatar("avtr_other".into())));
+    let hold = orbiters_n4n0_core::tools::Action::Hold { control: "hoodie".into(), on: Some(true), value: None, release: false };
+    assert_eq!(n.run_action_for_test(hold, &bound), Err("the avatar changed".to_string()));
+    assert!(t.settings().n4n0.pins.is_empty(), "no pin for the next avatar: {:?}", t.settings().n4n0.pins);
+    t.shutdown(&n);
+}
+
 /// A stand-in VRChat whose OSCQuery service lists no avatar parameters until `after` (as while it loads a heavy
 /// avatar), then `tree`.
 fn vrchat_late(tree: serde_json::Value, after: Duration) -> (UdpSocket, SocketAddr) {

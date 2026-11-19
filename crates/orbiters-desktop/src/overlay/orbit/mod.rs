@@ -1584,13 +1584,23 @@ impl Panels {
         }
     }
 
+    /// What a press in a list turned out to press, now it was let go without moving: once, whether a menu is still up or not.
+    pub fn run_pending(&mut self, snap: &Snapshot) {
+        if let Some(action) = self.pressed_late.take() {
+            crate::usage::press(&usage_name(&action));
+            self.act(action, snap, &mut Pressed::default());
+            self.pressed_facts = None;
+        }
+    }
+
     fn close_sheet(&mut self) {
         self.stage.epoch = self.stage.epoch.wrapping_add(1);
         self.stage.painter.cancel_page(self.stage.epoch);
         self.stage.sheet_picture = None;
         self.stage.navigation = None;
         self.stage.stale = false;
-        self.pressed_late = None; self.pressed_facts = None; self.drag = None;
+        // What a let-go already earned stays to run once (verify-vr); a hold not let go ends.
+        self.drag = None;
         self.stop_talking();
         self.keep_screen();
         self.trail.clear();
@@ -2071,12 +2081,7 @@ impl Panels {
                 worlds.stop_live();
             }
         }
-        // What a press in a list turned out to press, now it was let go without moving.
-        if let Some(action) = self.pressed_late.take() {
-            crate::usage::press(&usage_name(&action));
-            self.act(action, snap, &mut Pressed::default());
-            self.pressed_facts = None;
-        }
+        self.run_pending(snap);
         if self.open.is_none() {
             return;
         }
@@ -3320,8 +3325,8 @@ impl Panels {
         }
         self.seeking = None;
         self.volume_held = None;
-        self.pressed_late = None;
-        self.pressed_facts = None;
+        // An action a real let-go already earned (`pressed_late`, with the facts it was pressed on) is not cancelled: it runs once,
+        // at the next turn, menu or not ([`Panels::run_pending`]; verify-vr: a menu closing before that turn erased it).
         if let Some(drag) = self.drag.take() {
             // A list being dragged comes to rest as when let go, with no throw.
             if drag.moved && !drag.bar {

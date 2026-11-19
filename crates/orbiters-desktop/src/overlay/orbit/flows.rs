@@ -50,6 +50,23 @@ fn a_menu_going_away_under_a_held_press_does_nothing() {
     assert!(p.pressed_late.is_some(), "a let-go runs the press, as before");
 }
 
+/// verify-vr on OVL2-17: a tap let go on a list row earns its action; the menu closing before the next turn does not erase it, and
+/// it runs exactly once.
+#[test]
+fn an_action_earned_by_a_let_go_runs_once_though_the_menu_closed() {
+    let (mut person, heard) = Person::heard();
+    let snap = person.snap.clone();
+    let p = &mut person.panels;
+    p.open = Some(Around::QuickMenu);
+    p.drag = Some(super::Drag { from: Some(0.0), scroll: 0.0, action: Some(Action::NewConversation), moved: false, bar: false, speed: 0.0, last: None });
+    p.release();
+    p.set_open(None, Vec::new(), &snap);
+    p.run_pending(&snap);
+    p.run_pending(&snap);
+    let runs = heard.said().iter().filter(|c| c.contains("NewConversation")).count();
+    assert_eq!(runs, 1, "{:?}", heard.said());
+}
+
 impl Person {
     fn new() -> Self {
         let alone = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());

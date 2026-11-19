@@ -396,6 +396,13 @@ impl Worker {
             return;
         }
         self.mic = None;
+        // A sentence held over this microphone ends with what it heard: the next microphone's sound never joins it
+        // (verify-n4n0 8; the same as for a new default microphone).
+        if error.is_none() && self.listen.as_ref().is_some_and(|l| l.hold || self.speaking) && !self.held.is_empty() {
+            let listen = self.listen.take().expect("checked above");
+            let held = std::mem::take(&mut self.held);
+            self.sentence(held, true, listen.id);
+        }
         self.forget_sound();
         emit(&VoiceEvent::Mic { name: None });
         self.mic_failures += 1;
@@ -1206,6 +1213,18 @@ mod tests {
         worker.listen = Some(Listen { hold: false, since: Instant::now(), id: 8, live: true });
         worker.mic_default_changed(1);
         assert_eq!(worker.listen.as_ref().map(|l| l.id), Some(8));
+    }
+
+    #[test]
+    fn a_microphone_lost_during_a_held_sentence_ends_it_with_what_it_heard() {
+        // verify-n4n0 (8): an endpoint lost (not a default change) kept the held sentence, and the reopened microphone's
+        // sound was appended to it.
+        let (mut worker, _rx) = listening_worker();
+        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 9, live: false });
+        worker.held = vec![0.1; RATE];
+        worker.mic_closed(1, None);
+        assert!(worker.listen.is_none() && worker.held.is_empty(), "ended");
+        assert_eq!(worker.waiting.iter().map(|s| (s.listen, s.samples.len())).collect::<Vec<_>>(), vec![(9, RATE)]);
     }
 
     #[test]

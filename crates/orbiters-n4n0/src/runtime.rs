@@ -431,7 +431,10 @@ impl N4n0Runtime {
     /// VRChat said it muted after Talk was let go: toggled back (from the N4N0 thread's tick).
     pub(crate) fn unmute_step(&mut self, now: Instant) {
         let Some(until) = self.unmute_when_muted else { return };
-        if self.mute_self {
+        // Our own press's release edge has not left yet: the toggle back waits for it (two presses without a release
+        // between them would not be a toggle back, verify-n4n0 8).
+        let pressing = self.outbox.iter().any(|(_, (a, _))| a == "/input/Voice");
+        if self.mute_self && !pressing {
             self.unmute_when_muted = None;
             self.send_at(now, [("/input/Voice".to_string(), OscType::Int(1))]);
             self.send_at(now + VOICE_PRESS, [("/input/Voice".to_string(), OscType::Int(0))]);

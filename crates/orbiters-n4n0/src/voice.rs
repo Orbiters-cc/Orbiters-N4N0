@@ -253,7 +253,8 @@ impl N4n0 {
         let settings = self.with_settings(|s| s.n4n0.clone());
         // Turned off anywhere (Settings' switch included): an answer under way or a sentence it listens to stops too.
         if !(settings.enabled && settings.assistant) {
-            let busy = { let rt = self.n4n0.lock().unwrap(); rt.answering() || rt.listening.is_some() || !rt.pending.is_empty() };
+            // A mute N4N0 made for Talk counts too: switched off in Settings, it is put back (verify-n4n0 8).
+            let busy = { let rt = self.n4n0.lock().unwrap(); rt.answering() || rt.listening.is_some() || !rt.pending.is_empty() || rt.muted_by_n4n0 || rt.unmute_when_muted.is_some() };
             if busy { self.assistant_quiet(); }
         }
         self.ask_follow();

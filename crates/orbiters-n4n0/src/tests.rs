@@ -1236,6 +1236,39 @@ fn a_quick_talk_tap_never_leaves_the_owner_muted() {
 }
 
 #[test]
+fn a_toggle_back_never_starts_before_the_press_s_own_release_left() {
+    use crate::runtime::Source;
+    // verify-n4n0 (8): the press's first edge had left, its release had not, and VRChat said muted: the toggle back's press
+    // was queued at once, two presses with no release between.
+    let (_t, n) = n4n0_ready_to_listen();
+    n.talk(true, Source::Menu);
+    // Only the press's first edge left.
+    n.n4n0.lock().unwrap().outbox.retain(|(_, (a, v))| !(a == "/input/Voice" && *v == OscType::Int(1)));
+    n.talk(false, Source::Menu);
+    n.on_parameter("MuteSelf", &OscValue::Bool(true));
+    n.n4n0.lock().unwrap().unmute_step(Instant::now());
+    assert_eq!(voice_pulses(&n), vec![0], "only the press's own release waits");
+    dispatched(&n);
+    n.n4n0.lock().unwrap().unmute_step(Instant::now());
+    assert_eq!(voice_pulses(&n), vec![1, 0], "then the toggle back, whole");
+}
+
+#[test]
+fn switching_off_in_settings_puts_back_a_mute_talk_made() {
+    use crate::runtime::Source;
+    // verify-n4n0 (8): with only a menu mute owned (the listen over), turning the assistant off in Settings never restored it.
+    let (t, n) = n4n0_ready_to_listen();
+    n.talk(true, Source::Menu);
+    dispatched(&n);
+    n.on_parameter("MuteSelf", &OscValue::Bool(true));
+    n.voice_cancel();
+    n.n4n0.lock().unwrap().listening = None;
+    t.settings.lock().unwrap().n4n0.assistant = false;
+    n.voice_follow();
+    assert_eq!(voice_pulses(&n), vec![1, 0], "toggled back");
+}
+
+#[test]
 fn switching_the_assistant_off_during_talk_puts_the_owner_s_microphone_back() {
     use crate::runtime::Source;
     // N4N0-15: off during a held Talk, the release no longer reached N4N0 and the owner stayed muted.

@@ -214,6 +214,12 @@ pub fn models_dir() -> PathBuf {
     local_data_root().join("Models")
 }
 
+/// The settings file of an app given no folders (the installed desktop app's): for comparing with what another
+/// program computes (the installer's setup), never to read or write in a test.
+pub fn platform_settings_file() -> PathBuf {
+    config_dir_in(None).join("settings.json")
+}
+
 pub fn settings_file() -> PathBuf {
     config_dir().join("settings.json")
 }
@@ -303,7 +309,9 @@ mod tests {
         for dir in [config_dir(), documents_root(), default_sessions_dir(), local_data_root()] {
             assert!(dir.is_absolute(), "{}", dir.display());
         }
-        assert!(logs_dir().starts_with(local_data_root()) && cache_dir().starts_with(local_data_root()));
+        assert!(logs_dir().starts_with(local_data_root()));
+        // The desktop's cache is in its data folder (in a test build the test's own folders are given apart).
+        assert!(cache_dir_in(None).starts_with(local_data_root_in(None)));
         #[cfg(windows)]
         assert!(local_low().is_some_and(|low| low.ends_with("LocalLow")));
     }

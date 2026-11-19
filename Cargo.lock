@@ -4169,6 +4169,7 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "bytemuck",
+ "dirs 6.0.0",
  "eframe",
  "egui",
  "flate2",

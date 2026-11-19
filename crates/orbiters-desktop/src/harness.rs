@@ -28,6 +28,8 @@ pub const REAL_DATA: &str = "--real-data";
 const RUNTIME: &[&str] = &[
     "--window", "--overlay", "--orbit-desktop", "--prepare-upload", "--apply-update",
     "--bridge-shot", "--bridge-guard", "--quit", "--hidden",
+    // Repairs the pictures of the person's own captures (controller::picture_repair), on purpose in place.
+    "--repair-capture-pictures",
 ];
 
 /// Runs once in main. Holding the returned guard through dispatch also cleans up early errors and panics.

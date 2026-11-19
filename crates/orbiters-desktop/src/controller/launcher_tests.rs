@@ -387,3 +387,44 @@ fn a_failed_action_is_said_in_the_toast_and_every_outcome_goes_after_a_while() {
     c.launcher_notice_over(&sent);
     assert_eq!(c.view().launcher.notice, Some(newer), "a newer outcome stays its own time");
 }
+
+#[test]
+fn a_world_that_failed_for_a_passing_reason_is_asked_again_later_not_never() {
+    let (c, _) = loaded_and_idle();
+    let (client, calls) = c.test_vrchat(vec![(503, json!({}))]);
+    c.update(|s| {
+        if let Whereabouts::World(p) = &mut s.launcher.friends[0].whereabouts {
+            p.world_id = "wrld_00000000-0000-4000-8000-0000000000bb".into();
+            p.world_name.clear();
+        }
+        launcher_feed::regroup(&mut s.launcher, &[]);
+    });
+    c.launcher_resolve_worlds(&client);
+    c.launcher_resolve_worlds(&client);
+    assert_eq!(calls.lock().unwrap().len(), 1, "not every tick");
+    let rt = c.launcher.lock().unwrap();
+    assert!(!rt.worlds.contains_key("wrld_00000000-0000-4000-8000-0000000000bb"), "not remembered as 'not given'");
+    assert!(rt.lookup_failed.contains_key("wrld_00000000-0000-4000-8000-0000000000bb"));
+}
+
+#[test]
+fn a_profile_opened_again_is_not_read_again_and_one_closed_is_not_read_on() {
+    let c = controller(Arc::new(Pretend::default()));
+    let (_, calls) = c.test_vrchat(vec![(200, json!({"bio": "hello"})), (200, json!({"note": "n"})), (200, json!({"friends": 2, "groups": 1}))]);
+    c.update(|s| s.launcher.friends = vec![orbiters_core::launcher::Friend { id: A.into(), name: "Nova".into(), ..Default::default() }]);
+    c.launcher_do(Action::OpenProfile { id: A.into() });
+    c.launcher_do(Action::CloseProfile);
+    c.launcher_do(Action::OpenProfile { id: A.into() });
+    assert_eq!(calls.lock().unwrap().len(), 3, "kept five minutes");
+    assert_eq!(c.view().launcher.profile.as_ref().unwrap().bio, "hello");
+}
+
+#[test]
+fn a_boop_put_away_does_not_come_back_with_the_next_message() {
+    let c = controller(Arc::new(Pretend::default()));
+    c.update(|s| s.launcher.boops = vec![orbiters_core::launcher::Boop { id: "not_2".into(), from_id: A.into(), from_name: String::new(), from_icon: String::new(), emoji: None, received_at: 0 }]);
+    c.launcher_do(Action::Dismiss { id: "not_2".into() });
+    let again = json!({"type": "notification-v2", "content": json!({"id": "not_2", "type": "boop", "senderUserId": A, "createdAt": "2026-11-18T09:01:00Z", "data": {}}).to_string()}).to_string();
+    c.launcher_message(&again);
+    assert!(c.view().launcher.boops.is_empty());
+}

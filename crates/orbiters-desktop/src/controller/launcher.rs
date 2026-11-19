@@ -20,6 +20,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const LOCAL_EVERY: Duration = Duration::from_secs(120);
+/// A world or decoration lookup that failed (not "not found": a time-out, VRChat unreachable) is asked again after this.
+const LOOKUP_AGAIN: Duration = Duration::from_secs(10 * 60);
+/// A profile's details, kept per person this long (at most this many people).
+const PROFILE_FOR: Duration = Duration::from_secs(5 * 60);
+const PROFILES_KEPT: usize = 64;
+/// Boops put away, remembered this long (VRChat may list them again on every full read).
+const DISMISSED_FOR: i64 = 30 * 24 * 3600;
 /// A local copy caught busy is read again after this.
 const LOCAL_RETRY: Duration = Duration::from_secs(10);
 const FULL_EVERY: Duration = Duration::from_secs(30 * 60);
@@ -176,6 +183,12 @@ pub(super) struct Runtime {
     worn: BTreeMap<String, Decorations>,
     /// World id → its name and picture (`None` once asked and not given).
     worlds: HashMap<String, Option<(String, String)>>,
+    /// World and decoration ids whose lookup failed for a passing reason, and when: asked again after [`LOOKUP_AGAIN`].
+    lookup_failed: HashMap<String, Instant>,
+    /// Profiles' details read, by person: `/profile`, `/users`, mutuals.
+    profiles: HashMap<String, (Instant, serde_json::Value, serde_json::Value, Option<(u32, u32)>)>,
+    /// Boops put away here (id → when), kept in `launcher-dismissed.json`; read once.
+    dismissed: Option<BTreeMap<String, i64>>,
     pipeline: Option<Arc<AtomicBool>>,
     /// The client (one sign-in, one grant) the pipeline was opened with.
     pipeline_client: Option<Arc<Mutex<Client>>>,
@@ -199,6 +212,9 @@ impl Default for Runtime {
             pictures: HashMap::new(),
             worn: BTreeMap::new(),
             worlds: HashMap::new(),
+            lookup_failed: HashMap::new(),
+            profiles: HashMap::new(),
+            dismissed: None,
             pipeline: None,
             pipeline_client: None,
             accepted: Vec::new(),
@@ -360,6 +376,10 @@ impl Controller {
             if changed {
                 rt.failures = 0;
                 rt.retry_at = None;
+                // What one account was shown (or refused) is not another's.
+                rt.worlds.clear();
+                rt.lookup_failed.clear();
+                rt.profiles.clear();
             }
             let every = if account.is_some() { FULL_EVERY } else { LOCAL_EVERY };
             // The pipeline came back: a full read, but not more often than every few minutes (kept pending meanwhile).
@@ -407,21 +427,28 @@ impl Controller {
         let wanted: Vec<String> = {
             let rt = self.launcher.lock().unwrap();
             let mut ids = unnamed_worlds(&self.view().launcher);
-            ids.retain(|id| !rt.worlds.contains_key(id));
+            ids.retain(|id| !rt.worlds.contains_key(id) && rt.lookup_failed.get(id).is_none_or(|t| t.elapsed() > LOOKUP_AGAIN));
             ids.truncate(2);
             ids
         };
         let mut found = Vec::new();
+        let mut failed = Vec::new();
         for id in wanted {
-            let world = client.lock().unwrap().world(&id);
-            if matches!(world, Err(Error::RateLimited(_))) {
-                break;
+            match client.lock().unwrap().world(&id) {
+                Ok(w) => found.push((id, Some((w.name, if w.thumbnail_image_url.is_empty() { w.image_url } else { w.thumbnail_image_url })))),
+                // Not shown to this account (private, deleted): asked no more.
+                Err(Error::NotFound) => found.push((id, None)),
+                Err(Error::RateLimited(_)) => break,
+                // Passing (a time-out, VRChat unreachable): again later, not never.
+                Err(_) => failed.push(id),
             }
-            found.push((id, world.ok().map(|w| (w.name, if w.thumbnail_image_url.is_empty() { w.image_url } else { w.thumbnail_image_url }))));
         }
         let worlds = {
             let mut rt = self.launcher.lock().unwrap();
             rt.worlds.extend(found);
+            for id in failed {
+                rt.lookup_failed.insert(id, Instant::now());
+            }
             // Nothing known to write in (every unnamed world still unknown or not given): no copy, no publish. A world
             // already known is still written into a friend who just moved there.
             if !unnamed_worlds(&self.view().launcher).iter().any(|id| matches!(rt.worlds.get(id), Some(Some(_)))) {
@@ -523,6 +550,8 @@ impl Controller {
                     rt.cooldowns.mark(&mut state.friends, now());
                     // Accepted here and on the way: VRChat still lists them until the account arrives.
                     state.invites.retain(|i| !rt.accepted.iter().any(|(a, _)| a.id == i.id));
+                    let dismissed = rt.dismissed.get_or_insert_with(load_dismissed);
+                    state.boops.retain(|b| !dismissed.contains_key(&b.id));
                     for f in &mut state.friends {
                         if let Some(d) = rt.worn.get(&f.id) {
                             apply_pictures(&rt.pictures, d, &mut f.look);
@@ -625,11 +654,16 @@ impl Controller {
 
     /// One pipeline message applied to the list.
     pub(super) fn launcher_message(&self, message: &str) {
-        let groups = self.launcher.lock().unwrap().favourite_groups.clone();
+        let (groups, dismissed) = {
+            let mut rt = self.launcher.lock().unwrap();
+            let dismissed: Vec<String> = rt.dismissed.get_or_insert_with(load_dismissed).keys().cloned().collect();
+            (rt.favourite_groups.clone(), dismissed)
+        };
         let mut applied = None;
         self.update_if(|s| {
             let mut state = (*s.launcher).clone();
             let a = launcher_feed::apply(&mut state, &groups, message, now());
+            state.boops.retain(|b| !dismissed.contains(&b.id));
             let changed = state != *s.launcher;
             if changed {
                 *s.launcher = state;
@@ -650,7 +684,13 @@ impl Controller {
     fn launcher_resolve_pictures(&self, client: &Arc<Mutex<Client>>) {
         let wanted: Vec<String> = {
             let rt = self.launcher.lock().unwrap();
-            let mut ids: Vec<String> = rt.worn.values().flat_map(|d| [d.icon_frame.clone(), d.nameplate.clone()]).flatten().filter(|id| !rt.pictures.contains_key(id)).collect();
+            let mut ids: Vec<String> = rt
+                .worn
+                .values()
+                .flat_map(|d| [d.icon_frame.clone(), d.nameplate.clone()])
+                .flatten()
+                .filter(|id| !rt.pictures.contains_key(id) && rt.lookup_failed.get(id).is_none_or(|t| t.elapsed() > LOOKUP_AGAIN))
+                .collect();
             ids.sort();
             ids.dedup();
             ids.truncate(3);
@@ -660,16 +700,21 @@ impl Controller {
             return;
         }
         let mut found = Vec::new();
+        let mut failed = Vec::new();
         for id in wanted {
-            let picture = client.lock().unwrap().inventory_template_picture(&id);
-            if matches!(picture, Err(Error::RateLimited(_))) {
-                break;
+            match client.lock().unwrap().inventory_template_picture(&id) {
+                Ok(p) => found.push((id, Some(p))),
+                Err(Error::NotFound | Error::InvalidResponse) => found.push((id, None)),
+                Err(Error::RateLimited(_)) => break,
+                Err(_) => failed.push(id),
             }
-            found.push((id, picture.ok()));
         }
         let (pictures, worn) = {
             let mut rt = self.launcher.lock().unwrap();
             rt.pictures.extend(found);
+            for id in failed {
+                rt.lookup_failed.insert(id, Instant::now());
+            }
             (rt.pictures.clone(), rt.worn.clone())
         };
         self.update_if(|s| {
@@ -878,6 +923,15 @@ impl Controller {
     /// Hides an invite, a request or a boop here; an invite or a request is hidden at VRChat too (nobody is told).
     fn launcher_dismiss(&self, id: &str) {
         let was_invite = self.view().launcher.invites.iter().any(|i| i.id == id);
+        if self.view().launcher.boops.iter().any(|b| b.id == id) {
+            // VRChat lists a boop again at each full read: remembered here, so that it does not come back.
+            let mut rt = self.launcher.lock().unwrap();
+            let at = now();
+            let dismissed = rt.dismissed.get_or_insert_with(load_dismissed);
+            dismissed.retain(|_, t| at - *t < DISMISSED_FOR);
+            dismissed.insert(id.to_string(), at);
+            save_dismissed(dismissed);
+        }
         self.update(|s| {
             s.launcher.invites.retain(|i| i.id != id);
             s.launcher.boops.retain(|b| b.id != id);
@@ -920,9 +974,35 @@ impl Controller {
         let client = self.launcher_client();
         self.update(|s| s.launcher.profile = Some(Profile { friend: friend.clone(), loading: client.is_some(), ..Profile::default() }));
         let Some(client) = client else { return };
-        let public = client.lock().unwrap().public_profile(id).unwrap_or(serde_json::Value::Null);
-        let user = client.lock().unwrap().user_value(id).unwrap_or(serde_json::Value::Null);
-        let mutuals = client.lock().unwrap().mutuals(id).ok();
+        let kept = self.launcher.lock().unwrap().profiles.get(id).filter(|(at, ..)| at.elapsed() < PROFILE_FOR).map(|(_, p, u, m)| (p.clone(), u.clone(), *m));
+        let (public, user, mutuals) = match kept {
+            Some(kept) => kept,
+            None => {
+                // Each call only while this profile is still the one open (clicking down a list asks for the last one).
+                let wanted = || self.view().launcher.profile.as_ref().is_some_and(|p| p.friend.id == id);
+                if !wanted() {
+                    return;
+                }
+                let public = client.lock().unwrap().public_profile(id).unwrap_or(serde_json::Value::Null);
+                if !wanted() {
+                    return;
+                }
+                let user = client.lock().unwrap().user_value(id).unwrap_or(serde_json::Value::Null);
+                if !wanted() {
+                    return;
+                }
+                let mutuals = client.lock().unwrap().mutuals(id).ok();
+                let mut rt = self.launcher.lock().unwrap();
+                if rt.profiles.len() >= PROFILES_KEPT {
+                    rt.profiles.retain(|_, (at, ..)| at.elapsed() < PROFILE_FOR);
+                    if rt.profiles.len() >= PROFILES_KEPT {
+                        rt.profiles.clear();
+                    }
+                }
+                rt.profiles.insert(id.to_string(), (Instant::now(), public.clone(), user.clone(), mutuals));
+                (public, user, mutuals)
+            }
+        };
         let profile = launcher_feed::profile(friend, &public, &user, mutuals);
         self.update(|s| {
             if s.launcher.profile.as_ref().is_some_and(|p| p.friend.id == profile.friend.id) {
@@ -934,6 +1014,30 @@ impl Controller {
     #[cfg(test)]
     pub(super) fn launcher_machine(&self, machine: Arc<dyn Machine>) {
         self.launcher.lock().unwrap().machine = machine;
+    }
+}
+
+fn dismissed_file() -> Option<std::path::PathBuf> {
+    // Tests keep it in memory: never the person's own file.
+    if cfg!(test) {
+        return None;
+    }
+    orbiters_core::paths::roots().map(|r| r.config.join("launcher-dismissed.json"))
+}
+
+fn load_dismissed() -> BTreeMap<String, i64> {
+    let at = now();
+    let mut kept: BTreeMap<String, i64> = dismissed_file().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    kept.retain(|_, t| at - *t < DISMISSED_FOR);
+    kept
+}
+
+fn save_dismissed(kept: &BTreeMap<String, i64>) {
+    if let (Some(file), Ok(bytes)) = (dismissed_file(), serde_json::to_vec(kept)) {
+        let tmp = file.with_extension("json.tmp");
+        if std::fs::write(&tmp, bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, &file);
+        }
     }
 }
 

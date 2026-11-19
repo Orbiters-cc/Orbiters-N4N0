@@ -97,6 +97,12 @@ pub enum ToService {
     },
     StartCapture { origin: RecordingOrigin },
     CameraQr { active: bool },
+    /// The window's offer to close to the tray (`crate::window_rest`), or none any more.
+    WindowRest { offer: Option<crate::state::RestOffer> },
+    /// The VR band shows this offer.
+    WindowRestShown { id: u64 },
+    /// Keep open, pressed on this offer in VR.
+    KeepWindowOpen { id: u64 },
     SwitchDemoAvatar,
     StopCapture,
     /// The Orbiters window to the front.

@@ -390,6 +390,9 @@ impl Service {
             ToService::Hello { .. } => {}
             ToService::StartCapture { origin } => ctl.request_capture_from(origin),
             ToService::CameraQr { active } => ctl.camera_qr(active),
+            ToService::WindowRest { offer } => ctl.window_rest(offer),
+            ToService::WindowRestShown { id } => ctl.window_rest_shown(id),
+            ToService::KeepWindowOpen { id } => ctl.keep_window_open(id),
             ToService::SwitchDemoAvatar => ctl.switch_demo_avatar(),
             ToService::StopCapture => report(ctl.stop_capture()),
             ToService::Pause { paused } => report(ctl.pause_capture(paused)),
@@ -630,6 +633,10 @@ impl Service {
         self.usage.unlinked(id, self.ctl.view().settings.usage.enabled);
         self.links.lock().unwrap().retain(|l| l.id != id);
         let still_there = self.links.lock().unwrap().iter().any(|l| l.role == role);
+        if role == Role::Window && !still_there {
+            // Its offer to close went with it.
+            self.ctl.window_rest(None);
+        }
         if role == Role::Overlay && !still_there {
             self.ctl.set_overlay_connected(false);
             self.ctl.booster_overlay_gone();

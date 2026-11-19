@@ -735,9 +735,12 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
     regularise_for(gpu, settings, first_set, extent);
     gpu.step = 0;
     gpu.pause = control.pause.cloned();
-    // A resumed run follows VRChat from its first step (RECONSTRUCT-4): the periodic look below comes only every 500
-    // steps, and a run resumed past its steps never reaches it. A fresh run looks at its step 1 as before.
-    if from_resume(trained.is_some(), steps.as_ref().map(|s| s.iteration)) {
+    // A run resumed past its steps follows VRChat before what follows them (RECONSTRUCT-4): it never reaches the periodic
+    // look below. A run resumed between steps does NOT (night2, the verifier): pacing changes when its steps run, and
+    // which step a relocation plan lands at depends on that timing (Rounds::advance looks whether the planner finished),
+    // so it would change the picture. It looks at the next multiple of 500 as before. Finishing takes no relocation
+    // round (they are all joined before it), so pacing it changes only its time.
+    if paced_before_loop(trained.is_some()) {
         if gpu.follow_vrchat() == Some(true) {
             eprintln!("resumed beside VRChat: training paced from the start");
         }
@@ -1067,9 +1070,10 @@ fn keyframes_resident(apple: bool, paused: bool, trained_only: bool, room: impl 
     !apple && !paused && !trained_only && room()
 }
 
-/// Whether this start resumes a paused run (past its steps, or at a step after the first).
-fn from_resume(trained_only: bool, from_step: Option<u32>) -> bool {
-    trained_only || from_step.is_some_and(|s| s > 0)
+/// Whether this start follows VRChat before its loop: only a run resumed past its steps, which takes no step and so no
+/// relocation round whose landing step pacing could move. Fresh and between-steps starts keep their old schedule.
+fn paced_before_loop(trained_only: bool) -> bool {
+    trained_only
 }
 
 /// The regularisers' weights per Gaussian of a set of `n`.
@@ -1541,8 +1545,9 @@ mod tests {
         assert!(keyframes_resident(false, false, false, || true));
         assert!(!keyframes_resident(true, false, false, || true) && !keyframes_resident(false, true, false, || true));
         assert!(!keyframes_resident(false, false, false, || false));
-        assert!(from_resume(true, None) && from_resume(false, Some(1200)));
-        assert!(!from_resume(false, None) && !from_resume(false, Some(0)));
+        // night2: a run resumed between steps keeps its old schedule (pacing would move where relocation plans land).
+        assert!(paced_before_loop(true));
+        assert!(!paced_before_loop(false));
     }
 
     /// The coarse levels keep the wearer out. The loss reads who is left out from the target's alpha, and a level's

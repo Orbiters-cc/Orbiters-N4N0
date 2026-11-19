@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const LOCAL_EVERY: Duration = Duration::from_secs(120);
+/// A local copy caught busy is read again after this.
+const LOCAL_RETRY: Duration = Duration::from_secs(10);
 const FULL_EVERY: Duration = Duration::from_secs(30 * 60);
 const GAME_EVERY: Duration = Duration::from_secs(5);
 /// A start just asked for counts as "starting" this long (Steam, then Easy Anti-Cheat, then VRChat's process).
@@ -473,12 +475,19 @@ impl Controller {
     }
 
     fn launcher_read_local(&self) {
-        let mut state = orbiters_core::launcher_local::read();
+        let Ok(mut state) = orbiters_core::launcher_local::read_now() else {
+            // Caught while VRCX / VRCNext write their copy: the list on show stays; again in a few seconds.
+            let mut rt = self.launcher.lock().unwrap();
+            rt.loaded_for = Some(None);
+            rt.retry_at = Some(Instant::now() + LOCAL_RETRY);
+            return;
+        };
         let groups: Vec<(String, String)> = state.groups.iter().filter(|g| g.kind == orbiters_core::launcher::GroupKind::Favourite).map(|g| (g.id.clone(), g.name.clone())).collect();
         {
             let mut rt = self.launcher.lock().unwrap();
             rt.loaded_for = Some(None);
             rt.loaded_at = Some(Instant::now());
+            rt.retry_at = None;
             rt.favourite_groups = groups;
         }
         self.update_if(|s| {

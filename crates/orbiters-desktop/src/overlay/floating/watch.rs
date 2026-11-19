@@ -23,6 +23,7 @@ const PRESSABLE: f32 = 0.5;
 pub struct Watch {
     handle: vr::OverlayHandle,
     canvas: Canvas,
+    presented: crate::overlay::presented::Presented,
     /// The controller it is on, and where on it SteamVR was last told, while it is placed there.
     on: Option<(u32, Matrix34)>,
     fade: Follow,
@@ -39,7 +40,7 @@ impl Watch {
         let _ = overlay.set_width_in_meters(handle, WIDTH_M);
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, SORT_ORDER);
-        Ok(Self { handle, canvas: Canvas::new(PX, PX), on: None, fade: Follow::at(0.0), alpha: 0.0, visible: false, drawn: None })
+        Ok(Self { handle, canvas: Canvas::new(PX, PX), presented: Default::default(), on: None, fade: Follow::at(0.0), alpha: 0.0, visible: false, drawn: None })
     }
 
     pub fn destroy(&self, overlay: &vr::Overlay) {
@@ -78,6 +79,9 @@ impl Watch {
 
     /// Its picture for `hover` (a laser or a fingertip on it) and `open` (N4N0's menu is), painted when that changed.
     pub(in crate::overlay) fn paint(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, hover: bool, open: bool) {
+        if self.visible {
+            self.presented.hand_over(None, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX, PX, r));
+        }
         if !self.visible || self.drawn == Some((hover, open)) {
             return;
         }
@@ -85,10 +89,14 @@ impl Watch {
         for _ in 0..if self.drawn.is_none() { 2 } else { 1 } {
             self.canvas.paint(0.0, |p| paint(p, hover, open));
         }
-        if let Some(changed) = if self.drawn.is_none() { Some([0, 0, PX, PX]) } else { self.canvas.damage() } {
-            presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX, PX, changed);
-        }
+        let changed = if self.drawn.is_none() { Some([0, 0, PX, PX]) } else { self.canvas.damage() };
+        self.presented.hand_over(changed, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX, PX, r));
         self.drawn = Some((hover, open));
+    }
+
+    /// The watch's picture that shows is of its current look (it may be pressed).
+    pub fn current(&self) -> bool {
+        self.presented.current()
     }
 
     fn set_alpha(&mut self, overlay: &vr::Overlay, alpha: f32) {

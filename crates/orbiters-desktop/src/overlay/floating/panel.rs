@@ -104,6 +104,9 @@ pub struct Panel {
     ctx: egui::Context,
     painter: Software,
     bar_canvas: Canvas,
+    /// What of the panel's and the bar's pictures SteamVR has taken.
+    presented: crate::overlay::presented::Presented,
+    bar_presented: crate::overlay::presented::Presented,
     /// Open (closing, it fades out first); where it is and how wide.
     open: bool,
     placed: Matrix34,
@@ -143,6 +146,8 @@ impl Panel {
             ctx,
             painter: crate::overlay::painter(),
             bar_canvas: Canvas::new(BAR_PX[0], BAR_PX[1]),
+            presented: Default::default(),
+            bar_presented: Default::default(),
             open: false,
             placed: Matrix34::IDENTITY,
             width: FloatingSettings::default().width_m,
@@ -267,13 +272,15 @@ impl Panel {
         }
         let gap = if self.pointer.at.is_some() || !self.pointer.events.is_empty() { MIN_FRAME } else { IDLE_FRAME };
         let due = self.next_frame.is_some_and(|f| f <= Instant::now()) && self.last_frame.is_none_or(|f| f.elapsed() >= gap);
+        self.presented.hand_over(None, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.painter.pixels(), PX[0], PX[1], r));
         if due {
             self.last_frame = Some(Instant::now());
             orbiters_ui::anim::set_live(&self.ctx, !snap.settings.reduce_motion);
             let mut input = RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), ui::SIZE)),
                 time: Some(self.started.elapsed().as_secs_f64()),
-                events: std::mem::take(&mut self.pointer.events),
+                // While SteamVR shows an older picture, only a let-go reaches it: no press on what is not there.
+                events: std::mem::take(&mut self.pointer.events).into_iter().filter(|e| self.presented.admits_egui(e)).collect(),
                 ..Default::default()
             };
             input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(true), ..Default::default() });
@@ -283,9 +290,8 @@ impl Panel {
             self.painter.set_textures(&mut full.textures_delta);
             let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
             self.painter.paint(&primitives, full.pixels_per_point, theme::INK_950);
-            if let Some(changed) = self.painter.damage() {
-                presenter.show_part(overlay, self.handle, self.painter.pixels(), PX[0], PX[1], changed);
-            }
+            let damage = self.painter.damage();
+            self.presented.hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.painter.pixels(), PX[0], PX[1], r));
             self.painter.free_textures(&mut full.textures_delta);
             let delay = full.viewport_output.get(&ViewportId::ROOT).map(|v| v.repaint_delay).unwrap_or(Duration::MAX);
             self.next_frame = if delay < Duration::from_secs(3600) {
@@ -332,6 +338,9 @@ impl Panel {
     /// width changed.
     pub(in crate::overlay) fn paint_bar(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, hover: Option<BarButton>, pressed: Option<BarButton>) {
         let drawn = (hover, pressed, self.width);
+        if self.open {
+            self.bar_presented.hand_over(None, std::time::Instant::now(), |r| presenter.show_part(overlay, self.bar, self.bar_canvas.pixels(), BAR_PX[0], BAR_PX[1], r));
+        }
         if !self.open || self.bar_drawn == Some(drawn) {
             return;
         }
@@ -345,10 +354,13 @@ impl Panel {
             self.bar_canvas.paint(0.0, |p| paint_bar(p, hover, pressed, width));
         }
         let changed = if whole { Some([0, 0, BAR_PX[0], BAR_PX[1]]) } else { self.bar_canvas.damage() };
-        if let Some(changed) = changed {
-            presenter.show_part(overlay, self.bar, self.bar_canvas.pixels(), BAR_PX[0], BAR_PX[1], changed);
-        }
+        self.bar_presented.hand_over(changed, std::time::Instant::now(), |r| presenter.show_part(overlay, self.bar, self.bar_canvas.pixels(), BAR_PX[0], BAR_PX[1], r));
         self.bar_drawn = Some(drawn);
+    }
+
+    /// The bar's picture that shows is of its current layout (its buttons may be pressed).
+    pub fn bar_current(&self) -> bool {
+        self.bar_presented.current()
     }
 }
 

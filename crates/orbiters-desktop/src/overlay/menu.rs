@@ -41,6 +41,8 @@ const IDLE_CLOSE: Duration = Duration::from_secs(120);
 pub struct MenuOverlay {
     handle: vr::OverlayHandle,
     canvas: Canvas,
+    /// What of its picture SteamVR has taken: the lasers' events are taken only while it is current.
+    presented: crate::overlay::presented::Presented,
     /// The menu, kept in step with the service (thumbnails become textures of the canvas's context).
     pub host: MenuHost,
     hover: Option<usize>,
@@ -148,6 +150,7 @@ impl MenuOverlay {
         Ok(Self {
             handle,
             canvas,
+            presented: Default::default(),
             host,
             hover: None,
             pressed: None,
@@ -345,7 +348,7 @@ impl MenuOverlay {
         // The lasers: the controllers' own, as SteamVR's mouse events (from the bottom left).
         let page = layout::cached(ScreenPage::of(&self.host.menu));
         while let Some(e) = overlay.poll_event(self.handle) {
-            if self.behind {
+            if self.behind || !self.presented.admits(e.event_type) {
                 continue;
             }
             if self.worlds.open {
@@ -428,6 +431,11 @@ impl MenuOverlay {
             self.canvas.invalidate();
             self.host.dirty = true;
         }
+        // What SteamVR did not take is handed over again; the row a press means is the picture it took.
+        let was_current = self.presented.current();
+        if self.presented.hand_over(None, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, r)) && !was_current && !self.worlds.open {
+            self.host.menu.presented();
+        }
         if self.worlds.open && !self.behind {
             if self.worlds.wants_paint() || !self.shown {
                 self.last_paint = Some(Instant::now());
@@ -437,9 +445,8 @@ impl MenuOverlay {
                 self.worlds.paint(&mut self.canvas);
                 // The canvas holds the worlds panel now: the menu paints whole when it comes back.
                 self.painted = None;
-                if let Some(changed) = self.canvas.damage() {
-                    presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, changed);
-                }
+                let damage = self.canvas.damage();
+                self.presented.hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, r));
                 if !self.shown {
                     let _ = overlay.show(self.handle);
                     self.shown = true;
@@ -478,15 +485,16 @@ impl MenuOverlay {
                 (false, true) => menu_retro::draw(p, pos2(0.0, 0.0), &view),
             });
             // Only what changed goes to SteamVR, straight from the canvas.
-            if let Some(changed) = self.canvas.damage() {
-                presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, changed);
-            }
+            let damage = self.canvas.damage();
+            let taken = self.presented.hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), WIDTH, HEIGHT, r));
             if !self.shown {
                 let _ = overlay.show(self.handle);
                 self.shown = true;
             }
-            // What a row pressed from now on means: what this picture, just handed to SteamVR, shows in it.
-            self.host.menu.presented();
+            // What a row pressed from now on means: what this picture, just handed to SteamVR, shows in it (once SteamVR took it).
+            if taken {
+                self.host.menu.presented();
+            }
         }
         clicked
     }

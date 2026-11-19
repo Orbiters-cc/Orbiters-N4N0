@@ -103,6 +103,7 @@ pub fn paint_panel(ui: &mut Ui, rect: Rect, snap: &Snapshot) {
 pub struct CoverageOverlayPanel {
     handle: vr::OverlayHandle,
     canvas: Canvas,
+    presented: crate::overlay::presented::Presented,
     /// The controller it is on and for which hand, while shown.
     on: Option<(u32, CoverageOverlay)>,
     shown: Option<Arc<Snapshot>>,
@@ -116,7 +117,7 @@ impl CoverageOverlayPanel {
         let _ = overlay.set_width_in_meters(handle, WIDTH_M);
         // Painted premultiplied, as the menu.
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
-        Ok(Self { handle, canvas: Canvas::new(PX[0], PX[1]), on: None, shown: None, last_paint: None })
+        Ok(Self { handle, canvas: Canvas::new(PX[0], PX[1]), presented: Default::default(), on: None, shown: None, last_paint: None })
     }
 
     pub(super) fn update(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Arc<Snapshot>, now: f64) {
@@ -130,6 +131,7 @@ impl CoverageOverlayPanel {
             }
             return;
         };
+        self.presented.hand_over(None, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX[0], PX[1], r));
         let changed = !self.shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, snap));
         // The path's view springs towards new points: a few more pictures after the last change.
         let settling = self.last_paint.is_some_and(|t| t.elapsed() < Duration::from_secs(2));
@@ -142,9 +144,8 @@ impl CoverageOverlayPanel {
             orbiters_ui::anim::set_live(self.canvas.ctx(), !snap.settings.reduce_motion);
             let size = vec2(PX[0] as f32, PX[1] as f32);
             self.canvas.paint_ui(now, |ui| paint_panel(ui, Rect::from_min_size(pos2(0.0, 0.0), size), snap));
-            if let Some(changed) = self.canvas.damage() {
-                presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX[0], PX[1], changed);
-            }
+            let damage = self.canvas.damage();
+            self.presented.hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX[0], PX[1], r));
         }
         if self.on != Some(device) {
             let _ = overlay.set_transform_device_relative(self.handle, device.0, &on_hand());

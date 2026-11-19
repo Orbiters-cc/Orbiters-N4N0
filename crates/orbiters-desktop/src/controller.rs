@@ -2001,6 +2001,8 @@ impl Controller {
                     ctl.start_osc();
                 }
                 if sessions_changed {
+                    // Upload records of the captures that moved with the library (CTL2-11 k).
+                    shares::follow_moved_library(orbiters_core::account::Server::current(), &ctl.with_settings(|s| s.sessions_dir.clone()));
                     refresh_storage(&ctl);
                     ctl.bump_library();
                 }

@@ -351,5 +351,6 @@
   "{puts} · also after each world join": "{puts} · ワールドに入るたびにも",
   "{reason}: a QR code here opens only http or https pages": "{reason}：ここで開けるのは http または https のページのQRコードだけです",
   "{time} · muted": "{time} · ミュート中",
-  "✓ Link copied": "✓ リンクをコピーしました"
+  "✓ Link copied": "✓ リンクをコピーしました",
+  "Stopped after six pages opened: press Scan again to read the camera": "6ページ開いたため停止しました。「もう一度スキャン」でカメラを読み取ります"
 }

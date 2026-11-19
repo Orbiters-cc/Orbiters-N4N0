@@ -16,6 +16,7 @@
 pub mod input;
 pub mod laser;
 pub mod panel;
+pub mod prompt;
 pub mod space;
 pub mod strip;
 pub mod watch;
@@ -145,6 +146,8 @@ pub struct Floating {
     watch: Watch,
     /// The menu mismatch strip (none when SteamVR would not make its overlay).
     strip: Option<strip::Strip>,
+    /// "Talk with N4N0?" (none when SteamVR would not make its overlay).
+    prompt: Option<prompt::Prompt>,
     lasers: laser::Lasers,
     input: Interaction,
     mouse: MouseSurfaces,
@@ -165,6 +168,7 @@ impl Floating {
             panel: Panel::new(overlay, key)?,
             watch: Watch::new(overlay, key)?,
             strip: strip::Strip::new(overlay, key).map_err(|e| eprintln!("{e}")).ok(),
+            prompt: prompt::Prompt::new(overlay, key).map_err(|e| eprintln!("{e}")).ok(),
             lasers: laser::Lasers::new(overlay, key)?,
             input: Interaction::default(),
             mouse: MouseSurfaces::default(),
@@ -181,6 +185,9 @@ impl Floating {
         self.watch.destroy(overlay);
         if let Some(strip) = &self.strip {
             strip.destroy(overlay);
+        }
+        if let Some(prompt) = &self.prompt {
+            prompt.destroy(overlay);
         }
         self.lasers.destroy(overlay);
     }
@@ -208,7 +215,10 @@ impl Floating {
         let mut turn = Turn::default();
         // The menu mismatch strip shows whenever its switch is on: the moments it is for are those where N4N0's menus are wrong.
         let strip_on = crate::mismatch::switches(&cx.snap.settings).buttons && self.strip.is_some();
-        if !settings.watch && !strip_on && !self.panel.is_shown() && !asked && cx.menu.is_empty() {
+        // "Talk with N4N0?", while the wake word heard during a call has it up.
+        let now_ms = crate::wake_offer::now_ms();
+        let offer = crate::wake_offer::up(cx.snap.n4n0.voice.wake_offer, now_ms).filter(|_| self.prompt.is_some());
+        if !settings.watch && !strip_on && offer.is_none() && !self.panel.is_shown() && !asked && cx.menu.is_empty() {
             if !self.resting {
                 self.rest(cx.overlay, cx.presenter, state, cx.backend);
             }
@@ -248,13 +258,15 @@ impl Floating {
             .then(|| devices[watch_hand].zip(grip(watch_hand)).map(|(d, g)| (d, watch_right, g)))
             .flatten();
         let strip = self.strip.as_mut().and_then(|s| s.place(cx.overlay, strip_at, head.as_ref()));
+        // Before the eyes, unless SteamVR's dashboard has the controllers.
+        let prompt = self.prompt.as_mut().and_then(|p| p.place(cx.overlay, offer.filter(|_| !cx.dashboard), head.as_ref()));
 
         // Who points at what.
         let panel_targets = self.panel.targets();
         if let Some(head) = head.as_ref().filter(|_| self.panel.is_open()) {
             self.panel.face(cx.overlay, head);
         }
-        let pointing = !cx.dashboard && cx.input_read && head.is_some() && (panel_targets.is_some() || watch.is_some() || strip.is_some() || !cx.menu.is_empty());
+        let pointing = !cx.dashboard && cx.input_read && head.is_some() && (panel_targets.is_some() || watch.is_some() || strip.is_some() || prompt.is_some() || !cx.menu.is_empty());
         let outcome = match head.filter(|_| pointing) {
             Some(head) => {
                 let lasers = cx.actions.lasers(cx.steamvr, seconds);
@@ -274,6 +286,7 @@ impl Floating {
                     handle: panel_targets.map(|t| (BarButton::handle_uv(), t.2)),
                     watch: watch.map(|q| (watch_hand, q)),
                     strip: strip.map(|q| (watch_hand, q)),
+                    prompt,
                 };
                 let outcome = self.input.step(&head, hands, &targets);
                 self.lasers_for(cx.overlay, cx.presenter, &outcome, &hands, &devices, &head, &targets);
@@ -317,6 +330,14 @@ impl Floating {
                 s.pressed(kind, now);
             }
         }
+        // "Talk with N4N0?": N4N0 listens.
+        if let Some(offer) = offer.filter(|_| outcome.prompt_press) {
+            clicked = true;
+            cx.backend.n4n0(crate::ipc::N4n0Command::WakeOffer { accept: true });
+            if let Some(p) = self.prompt.as_mut() {
+                p.pressed(cx.overlay, offer);
+            }
+        }
         // The bar's buttons.
         if let Some(button) = outcome.bar_press.map(|uv| self.panel.picture_uv(uv)).and_then(BarButton::at) {
             clicked = true;
@@ -351,6 +372,9 @@ impl Floating {
         if let Some(s) = self.strip.as_mut() {
             s.paint(cx.overlay, cx.presenter, outcome.strip_hover.and_then(|uv| strip::row_at(uv[1])), now);
         }
+        if let (Some(p), Some(offer)) = (self.prompt.as_mut(), offer) {
+            p.paint(cx.overlay, cx.presenter, outcome.prompt_hover, offer.left(now_ms));
+        }
         turn.clicked = clicked;
         turn
     }
@@ -365,6 +389,7 @@ impl Floating {
                     Target::Bar => targets.bar?.transform,
                     Target::Watch => targets.watch?.1.transform,
                     Target::Strip => targets.strip?.1.transform,
+                    Target::Prompt => targets.prompt?.transform,
                 };
                 Some(laser::Laser { device, grip: h.grip, tip: h.tip, eyes: space::position(head), end: hit.point, surface, pressed: h.trigger })
             });
@@ -382,6 +407,9 @@ impl Floating {
         self.watch.place(overlay, None, None, 0.0, false);
         if let Some(s) = self.strip.as_mut() {
             s.place(overlay, None, None);
+        }
+        if let Some(p) = self.prompt.as_mut() {
+            p.place(overlay, None, None);
         }
         for hand in 0..2 {
             self.lasers.update(overlay, presenter, hand, None);

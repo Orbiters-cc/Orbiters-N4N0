@@ -656,6 +656,21 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
+            // N4N0-11: the wake word heard during a call puts "Talk with N4N0?" up, half its time gone.
+            name: "wake-offer",
+            page: Page::Home,
+            snapshot: with_wake_offer(&with_calls(&home, false)),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
             name: "home-ringing",
             page: Page::Home,
             snapshot: with_calls(&home, true),
@@ -3744,6 +3759,16 @@ fn over_ground(rgba: &[u8], width: u32, height: u32) -> egui::ColorImage {
 }
 
 /// A member with calls on, three friends who can be called and one calling.
+/// `snap` with a call connected and "Talk with N4N0?" up (half its time left).
+fn with_wake_offer(snap: &Snapshot) -> Snapshot {
+    use crate::state::{CallPhase, CallView};
+    let mut s = snap.clone();
+    s.n4n0.calls.call = Some(CallView { name: "Nova Fox".into(), phase: CallPhase::Connected, incoming: false, connected_at_ms: Some(crate::wake_offer::now_ms() - 192_000), muted: false, mic_level: 0.2, remote_level: 0.4 });
+    // Long enough for the frames the harness paints.
+    s.n4n0.voice.wake_offer = Some(orbiters_n4n0::status::WakeOffer { id: 1, until_ms: crate::wake_offer::now_ms() + 600_000, for_ms: 1_200_000 });
+    s
+}
+
 fn with_calls(snap: &Snapshot, ringing: bool) -> Snapshot {
     use crate::state::{CallContact, CallLink, CallPhase, CallView};
     let mut s = snap.clone();

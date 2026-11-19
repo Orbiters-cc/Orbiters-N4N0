@@ -154,6 +154,11 @@ pub(crate) struct Going {
 pub(crate) struct Run {
     /// The VRChat the bridge started: only that one is ever acted on. A VRChat somebody else started is theirs.
     pub pid: Option<u32>,
+    /// `pid` is only the main session's candidate: the first VRChat seen after its launch, which may be the person's
+    /// own started at the same moment (a new process proves nothing). It becomes the bridge's once it arrives in the
+    /// private instance made for this start (nobody else knows that instance); until then nothing is sent to it, and
+    /// it is never closed: a candidate that turns up elsewhere, or not at all, is let go, left alone.
+    pub candidate: bool,
     pub going: Option<Going>,
     /// The bridge itself is closing the game: its going away is no news.
     pub closing: bool,
@@ -338,12 +343,16 @@ pub struct Bridge {
     pub(crate) journal: Mutex<journal::Journal>,
     /// One launch of VRChat at a time on this computer: a new VRChat is told apart from the others by appearing after it.
     pub(crate) launching: Mutex<()>,
+    /// One open_session at a time: a second call for a profile whose start runs saw no session yet and launched again (BRIDGE-6).
+    pub(crate) opening: Mutex<()>,
     pub(crate) focus: Mutex<FocusTurn>,
     log: Mutex<VecDeque<LogLine>>,
     client: Mutex<Option<(String, Instant)>>,
     in_flight: AtomicUsize,
     /// Bumped by every take-over: what started before it ends.
     stops: AtomicU64,
+    /// The last close: the person's Stop (`true`) or the bridge's own, and why.
+    last_close: Mutex<Option<(bool, String)>>,
     /// The Unity projects tools and their jobs.
     pub projects: projects::Projects,
     /// The worlds' maps from their 3D pictures, and the avatars' moves (map_tool.rs).
@@ -372,11 +381,13 @@ impl Bridge {
             publish: Mutex::new(None),
             journal: Mutex::default(),
             launching: Mutex::new(()),
+            opening: Mutex::new(()),
             focus: Mutex::default(),
             log: Mutex::new(VecDeque::new()),
             client: Mutex::new(None),
             in_flight: AtomicUsize::new(0),
             stops: AtomicU64::new(0),
+            last_close: Mutex::new(None),
             projects: projects::Projects::default(),
             maps: map_tool::Maps::default(),
         })
@@ -522,6 +533,30 @@ impl Bridge {
     /// The person takes control back: everything held comes up, what runs ends, a recording stops, and the game (left as
     /// it is) is not the bridge's any more.
     pub fn take_over(&self, why: &str) {
+        self.close_down(why, true);
+    }
+
+    /// The bridge closes without the person asking (Orbiters' grant lapsed, a new token, the account or server changed):
+    /// what is held comes up and what runs ends as for Stop, but the VRChat it started stays its own, to go on with (or close)
+    /// once it listens again (BRIDGE-5).
+    pub fn wind_down(&self, why: &str) {
+        self.close_down(why, false);
+    }
+
+    /// Why the calls running now were ended: the person's Stop, or the bridge closing by itself.
+    pub(crate) fn stopped_failure(&self) -> Failure {
+        match self.last_close.lock().unwrap().clone() {
+            Some((false, why)) => Failure::new("bridge_closed", why, "Wait 30 s, then call get_state: the bridge opens again by itself when it can."), // i18n: not shown (an AI client reads it in the tool's answer)
+            _ => Failure::new(
+                "stopped",
+                "The person took control back in Orbiters - N4N0.", // i18n: not shown (an AI client reads it in the tool's answer)
+                "Stop here: the person has to turn the bridge on again.", // i18n: not shown (an AI client reads it in the tool's answer)
+            ),
+        }
+    }
+
+    fn close_down(&self, why: &str, by_person: bool) {
+        *self.last_close.lock().unwrap() = Some((by_person, why.to_string()));
         self.stops.fetch_add(1, Ordering::Relaxed);
         self.release_all();
         // A copy, a Library move, a scan or a size ends where it safely can; a package change finishes.
@@ -529,9 +564,17 @@ impl Bridge {
         for session in self.sessions() {
             let (was_running, was_going) = {
                 let mut run = session.run.lock().unwrap();
-                // A side session's VRChat stays the bridge's, to be closed by close_session: only what runs ends.
-                let pid = if session.is_main() { run.pid.take() } else { run.pid };
-                (pid.is_some(), run.going.take().is_some())
+                // A side session's VRChat stays the bridge's, to be closed by close_session: only what runs ends. The main
+                // one's is the person's from their Stop on; a close of the bridge's own keeps it, and where it was going.
+                if !by_person {
+                    (run.pid.is_some(), false)
+                } else {
+                    let pid = if session.is_main() { run.pid.take() } else { run.pid };
+                    if session.is_main() {
+                        run.candidate = false;
+                    }
+                    (pid.is_some(), run.going.take().is_some())
+                }
             };
             if was_going {
                 session.game.hold_reconstructions(false);
@@ -539,6 +582,8 @@ impl Bridge {
             if was_running && matches!(session.game.seen().capture.state.as_str(), "starting" | "recording" | "paused") {
                 session.game.stop_picture();
             }
+            // A side picture had the app: it goes back to the person's VRChat now (BRIDGE-4).
+            session.game.give_back();
         }
         self.log(true, why.to_string());
     }
@@ -681,11 +726,7 @@ impl Bridge {
                 return Err(Failure::new("client_gone", "The client disconnected: input was released.", "Call the tool again if this still makes sense.")); // i18n: not shown (an AI client reads it in the tool's answer)
             }
             if self.stopped_since(call) {
-                return Err(Failure::new(
-                    "stopped",
-                    "The person took control back in Orbiters - N4N0.", // i18n: not shown (an AI client reads it in the tool's answer)
-                    "Stop here: the person has to turn the bridge on again.", // i18n: not shown (an AI client reads it in the tool's answer)
-                ));
+                return Err(self.stopped_failure());
             }
             // Keys need the person away from the whole computer; OSC only from this session's window.
             if let Some(paused) = if window.is_some() { self.paused() } else { self.paused_in(session) } {

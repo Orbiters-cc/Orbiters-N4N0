@@ -253,6 +253,8 @@ impl App {
         }
         self.title_bar(ui, &snap, title);
         self.toasts.show(&ctx);
+        // "Talk with N4N0?": the wake word heard during a call.
+        crate::wake_offer::window(&ctx, &self.ctl, snap.n4n0.voice.wake_offer);
         if splash_on {
             splash(&ctx, full, splash_t);
         }

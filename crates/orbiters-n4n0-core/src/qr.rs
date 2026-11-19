@@ -12,6 +12,13 @@ pub const SCAN_FOR: Duration = Duration::from_secs(120);
 pub const REOPEN_AFTER: Duration = Duration::from_secs(30);
 /// The longest link opened.
 pub const MAX_LINK: usize = 2048;
+/// Pages a scan opens at once (two codes side by side), then one every [`OPEN_EVERY`], and [`MOST_PER_SCAN`] in all: a
+/// slideshow or a video of codes never floods the browser with tabs (N4N0-13).
+pub const OPEN_BURST: u32 = 2;
+pub const OPEN_EVERY: Duration = Duration::from_secs(5);
+pub const MOST_PER_SCAN: u32 = 6;
+/// What the scanner says once a scan opened [`MOST_PER_SCAN`] pages: it stops.
+pub const ENOUGH_NOTE: &str = mark("Stopped after six pages opened: press Scan again to read the camera");
 
 /// What the scanner does now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,7 +113,66 @@ pub struct Recent {
     seen: Vec<(String, Instant)>,
 }
 
+/// Whether a scan opens one more page now ([`OPEN_BURST`], [`OPEN_EVERY`], [`MOST_PER_SCAN`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pace {
+    Open,
+    /// Not yet: the code opens if it is still in view a moment later.
+    Later,
+    /// This scan opened enough: it stops ([`ENOUGH_NOTE`]).
+    Enough,
+}
+
+/// The pages a scan opened, and when it may open the next ones.
+#[derive(Clone, Debug, Default)]
+pub struct Opening {
+    opened: u32,
+    /// Openings allowed now beyond those used ([`OPEN_BURST`] at most), as of `at`.
+    allowed: f32,
+    at: Option<Instant>,
+}
+
+impl Opening {
+    /// Whether a page opens at `now`; one that does is counted.
+    pub fn take(&mut self, now: Instant) -> Pace {
+        if self.opened >= MOST_PER_SCAN {
+            return Pace::Enough;
+        }
+        let allowed = match self.at {
+            None => OPEN_BURST as f32,
+            Some(at) => (self.allowed + now.saturating_duration_since(at).as_secs_f32() / OPEN_EVERY.as_secs_f32()).min(OPEN_BURST as f32),
+        };
+        self.at = Some(now);
+        if allowed < 1.0 {
+            self.allowed = allowed;
+            return Pace::Later;
+        }
+        self.allowed = allowed - 1.0;
+        self.opened += 1;
+        Pace::Open
+    }
+}
+
 impl Recent {
+    /// Whether `link` was seen within [`REOPEN_AFTER`] of `now`; seen, it is noted as seen again (it waits longer).
+    pub fn lately(&mut self, link: &str, now: Instant) -> bool {
+        self.seen.retain(|(_, at)| now.saturating_duration_since(*at) < REOPEN_AFTER);
+        match self.seen.iter_mut().find(|(l, _)| l == link) {
+            Some((_, at)) => {
+                *at = now;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `link` is being opened at `now`.
+    pub fn opening(&mut self, link: &str, now: Instant) {
+        if !self.lately(link, now) {
+            self.seen.push((link.to_string(), now));
+        }
+    }
+
     /// Whether `link`, seen at `now`, is to be opened; it is noted as seen either way.
     pub fn fresh(&mut self, link: &str, now: Instant) -> bool {
         self.seen.retain(|(_, at)| now.saturating_duration_since(*at) < REOPEN_AFTER);
@@ -151,6 +217,21 @@ mod tests {
         }
         assert_eq!(web_link("https://bank.com@evil.example/login"), Err("The link hides where it goes"));
         assert_eq!(web_link(&format!("https://a.com/{}", "x".repeat(MAX_LINK))), Err("The link is too long"));
+    }
+
+    #[test]
+    fn a_scan_opens_two_pages_at_once_then_one_every_few_seconds_and_six_in_all() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut opening = Opening::default();
+        // A slideshow of codes, three a second: two open, then one every five seconds.
+        let paces: Vec<Pace> = (0..30).map(|i| opening.take(at(i * 333))).collect();
+        assert_eq!(paces.iter().filter(|p| **p == Pace::Open).count(), 3, "{paces:?}");
+        assert_eq!(&paces[..3], &[Pace::Open, Pace::Open, Pace::Later]);
+        let mut opening = Opening::default();
+        let opened = (0..200).map(|i| opening.take(at(i * 1000))).filter(|p| *p == Pace::Open).count();
+        assert_eq!(opened, MOST_PER_SCAN as usize);
+        assert_eq!(opening.take(at(1_000_000)), Pace::Enough, "then it is enough");
     }
 
     #[test]

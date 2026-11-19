@@ -105,6 +105,10 @@ struct State {
     joining: Option<(Instant, String, String)>,
     /// A VRChat somebody else started: no window of ours.
     foreign: bool,
+    /// The running VRChat's command line, as its log lists it.
+    args: Option<Vec<String>>,
+    /// The person's own VRChat, started beside the lab's (the app follows it then).
+    beside: Option<u32>,
     foreground: bool,
     /// When the player exists in the world it is loading.
     player_from: Option<Instant>,
@@ -222,11 +226,19 @@ impl LabGame {
         let mut state = self.state.lock().unwrap();
         state.foreign = instance.is_some();
         state.pid = instance.map(|_| 4242);
+        // Started by the person: their own arguments, no launch link of the bridge's.
+        state.args = instance.map(|_| vec!["VRChat.exe".to_string(), "--no-vr".to_string()]);
         drop(state);
         if let Some(instance) = instance {
             self.new_log();
             self.write_join(LAB_WORLD_A, instance, "Someone's World");
         }
+    }
+
+    /// The person starts their own VRChat beside the lab's: the app follows theirs from then on.
+    #[cfg(test)]
+    pub fn person_starts_beside(&self) {
+        self.state.lock().unwrap().beside = Some(4343);
     }
 
     /// What the stand-in OSC listener heard, oldest first, with when.
@@ -352,6 +364,7 @@ impl LabGame {
         let mut state = self.state.lock().unwrap();
         state.window = Some(window);
         state.pid = Some(std::process::id());
+        state.args = Some(plan.args());
         state.player_from = Some(Instant::now() + state.behaviour.load + state.behaviour.player_after);
         state.joining = (!state.behaviour.never_arrives).then(|| (Instant::now() + state.behaviour.load, plan.world_id.clone(), plan.instance.clone()));
         drop(state);
@@ -442,7 +455,7 @@ impl Game for LabGame {
         let walking = ["/input/MoveForward", "/input/MoveBackward", "/input/MoveLeft", "/input/MoveRight"].iter().any(|a| self.last_value(a) == Some(1.0));
         Seen {
             running,
-            pid: state.pid,
+            pid: state.beside.or(state.pid),
             log_found: true,
             world_id: world.world_id.clone().filter(|_| running),
             world_name: world.world_name.clone().filter(|_| running),
@@ -534,6 +547,16 @@ impl Game for LabGame {
         Ok(())
     }
 
+    fn runs(&self, pid: u32) -> Option<bool> {
+        let state = self.state.lock().unwrap();
+        Some(state.pid == Some(pid) || state.beside == Some(pid))
+    }
+
+    fn launch_args(&self) -> Option<Vec<String>> {
+        let state = self.state.lock().unwrap();
+        state.args.clone().filter(|_| state.pid.is_some())
+    }
+
     fn window(&self, pid: u32) -> Option<GameWindow> {
         if self.state.lock().unwrap().foreign {
             return None;
@@ -599,6 +622,10 @@ impl Game for LabGame {
 
     fn osc_target(&self) -> Option<SocketAddr> {
         Some(self.osc_also.unwrap_or(self.osc_in))
+    }
+
+    fn give_back(&self) {
+        self.state.lock().unwrap().behaviour.lent_away = false;
     }
 
     fn lent_away(&self) -> bool {

@@ -42,10 +42,24 @@ impl From<Option<u16>> for Refusal {
     }
 }
 
-/// The `Retry-After` of an answer head, in seconds (an HTTP date is not read: the minimum wait applies then).
+/// The `Retry-After` of an answer head: seconds, or an HTTP date (`Sun, 06 Nov 1994 08:49:37 GMT`) counted from now.
 pub fn retry_after_of(head: &str) -> Option<Duration> {
-    head.split("\r\n").find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("retry-after")).and_then(|(_, v)| v.trim().parse::<u64>().ok())).map(Duration::from_secs)
+    let value = head.split("\r\n").find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("retry-after")).map(|(_, v)| v.trim().to_string()))?;
+    retry_after_value(&value, time::OffsetDateTime::now_utc())
 }
+
+/// One `Retry-After` value at `now`: seconds, or an HTTP date; a date already past is no wait.
+pub fn retry_after_value(value: &str, now: time::OffsetDateTime) -> Option<Duration> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    use time::format_description::well_known::Rfc2822;
+    let date = time::OffsetDateTime::parse(value, &Rfc2822).or_else(|_| time::OffsetDateTime::parse(&value.replace(" GMT", " +0000").replace(" UTC", " +0000"), &Rfc2822)).ok()?;
+    Some(Duration::from_secs((date - now).whole_seconds().max(0) as u64))
+}
+
+/// The longest a server's wait is honoured as given (a week): beyond it the value is not a wait anyone meant.
+const SERVER_WAIT_MOST: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// The HTTP status of an answer head that did not switch (401: the token is no longer good).
 pub fn status_of(head: &str) -> Option<u16> {
@@ -341,7 +355,8 @@ pub fn run_with<C: Messages>(
                 }
                 Err(Refusal { status: Some(401 | 403), .. }) => return Ended::Refused,
                 Err(Refusal { status: Some(429), retry_after }) => {
-                    at_least = retry_after.unwrap_or(RATE_LIMITED_WAIT).max(RATE_LIMITED_WAIT).min(Duration::from_secs(3600));
+                    // Never below the server's own wait, in either form, and never below our minute.
+                    at_least = retry_after.unwrap_or(RATE_LIMITED_WAIT).max(RATE_LIMITED_WAIT).min(SERVER_WAIT_MOST);
                     wait = wait.max(at_least);
                 }
                 Err(_) => {}
@@ -577,6 +592,15 @@ mod tests {
             assert!(pauses[0] >= Duration::from_secs(900), "the server's own wait, longer than the usual longest: {random}: {:?}", pauses[0]);
         }
         assert_eq!(retry_after_of("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 120\r\n\r\n"), Some(Duration::from_secs(120)));
+        // Two hours, and an HTTP date ten minutes ahead: never shortened, at either jitter extreme.
+        for random in [0, u16::MAX] {
+            let (_, pauses, ..) = simulate_with(2, |_| Ok("t".into()), |_| Err(Refusal { status: Some(429), retry_after: Some(Duration::from_secs(7200)) }), Duration::ZERO, random);
+            assert!(pauses[0] >= Duration::from_secs(7200), "{random}: {:?}", pauses[0]);
+        }
+        let now = time::OffsetDateTime::from_unix_timestamp(1_795_089_600).unwrap();
+        assert_eq!(retry_after_value("Thu, 19 Nov 2026 12:10:00 GMT", now), Some(Duration::from_secs(600)));
+        assert_eq!(retry_after_value("Thu, 19 Nov 2026 11:00:00 GMT", now), Some(Duration::ZERO), "a date gone by");
+        assert_eq!(retry_after_value("soon", now), None);
         assert_eq!(retry_after_of("HTTP/1.1 429 Too Many Requests\r\n\r\n"), None);
     }
 

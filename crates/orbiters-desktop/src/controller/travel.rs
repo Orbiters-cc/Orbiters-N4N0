@@ -91,13 +91,20 @@ pub fn route(remote: bool, running: &[u32], bridge: &Bridge, mut side_by_args: i
 
 /// Takes the person to `world`'s `instance`: the way taken, or why there is none (words for the page).
 pub fn go(travel: &dyn Travel, remote: bool, bridge: &Bridge, world: &str, instance: &str) -> Result<Went, GoFailure> {
+    let running = travel.running();
+    let chosen = route(remote, &running, bridge, |p| travel.own_osc_ports(p));
+    go_on(travel, chosen, &running, bridge, world, instance)
+}
+
+/// [`go`] along a route already chosen from `running` (the caller decided it once, under its start lock): the process
+/// list is not looked at again, so a VRChat that quits in between can never turn a pipe hand-off into a second start.
+pub fn go_on(travel: &dyn Travel, chosen: Route, running: &[u32], bridge: &Bridge, world: &str, instance: &str) -> Result<Went, GoFailure> {
     // Ids come from the network: only VRChat's own grammar reaches the pipe, the link or `launch.exe`.
     if !orbiters_core::vrchat_launch::is_destination(world, instance) {
         return Err(GoFailure::BadDestination);
     }
-    let running = travel.running();
     let link = link(world, instance);
-    match route(remote, &running, bridge, |p| travel.own_osc_ports(p)) {
+    match chosen {
         Route::Invite(why) => Err(GoFailure::Invite(why)),
         Route::BridgeBusy => Err(GoFailure::BridgeBusy),
         Route::Start => travel.start(&link).map(|()| Went::Started).map_err(GoFailure::Start),

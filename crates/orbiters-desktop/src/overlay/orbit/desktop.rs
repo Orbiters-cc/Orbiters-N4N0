@@ -1808,7 +1808,7 @@ pub mod pointer {
     }
 
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, MSLLHOOKSTRUCT, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
         WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MOUSEWHEEL,

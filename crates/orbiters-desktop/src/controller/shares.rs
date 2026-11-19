@@ -2165,7 +2165,19 @@ pub(crate) mod tests {
         let dir = std::env::temp_dir().join(format!("orbiters-share-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let picture = dir.join("VRChat_2026-10-29_19-00-00.000_1920x1080.png");
-        std::fs::write(&picture, [7u8; 4096]).unwrap();
+        // A real PNG, with what VRChat writes of its taker: the copy sent leaves it out (PRIV-8).
+        let png = {
+            let mut bytes = Vec::new();
+            let mut encoder = png::Encoder::new(&mut bytes, 4, 4);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.add_itxt_chunk("XML:com.adobe.xmp".into(), "vrc:AuthorID=usr_00000000-0000-4000-8000-000000000001".into()).unwrap();
+            encoder.write_header().unwrap().write_image_data(&[7u8; 64]).unwrap();
+            bytes
+        };
+        std::fs::write(&picture, &png).unwrap();
+        let mut clean = Vec::new();
+        let sent = orbiters_core::png_meta::copy_without_metadata(&mut png.as_slice(), &mut clean).unwrap();
+        assert!(sent < png.len() as u64 && !String::from_utf8_lossy(&clean).contains("usr_"));
         let records = dir.join("capture-uploads.json");
         let world = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
         let added = r#"{"added":[{"type":"picture","id":9,"visibility":"private"}],"skipped":0}"#.to_string();
@@ -2178,9 +2190,10 @@ pub(crate) mod tests {
         let stages = Mutex::new(Vec::new());
         share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|s| stages.lock().unwrap().push(s), &mut Vec::new(), &prepared).unwrap();
         assert_eq!(*seen.lock().unwrap(), [format!("POST /maps/worlds/{world}/pictures"), "POST /captures/picture/9/share".to_string()]);
-        assert_eq!(*stages.lock().unwrap(), [Stage::Sending { sent: 0, total: 4096 }, Stage::Sharing]);
+        assert_eq!(*stages.lock().unwrap(), [Stage::Sending { sent: 0, total: sent }, Stage::Sharing]);
         let saved = read_records(&records);
         assert_eq!((saved[0].uploaded.id, saved[0].item.as_ref().map(|i| i.id)), (9, Some(9)));
+        assert_eq!(std::fs::read(&picture).unwrap(), png, "the picture here is untouched");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

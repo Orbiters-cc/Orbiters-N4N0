@@ -162,11 +162,17 @@ impl Controller {
         for (chunk, chunk_sizes) in paths.chunks(PICTURES_PER_REQUEST).zip(sizes.chunks(PICTURES_PER_REQUEST)) {
             let mut parts = Vec::with_capacity(chunk.len());
             let mut taken = Vec::with_capacity(chunk.len());
+            // PRIV-8: each picture goes as a copy without its metadata (who took it, who else was there, the instance),
+            // pixels as they are; the Map explorer knows it by that copy's hash as well (`worlds::map_hashes`). The
+            // copies are removed when this chunk is sent or fails.
+            let mut copies = Vec::with_capacity(chunk.len());
             for p in chunk {
                 taken.push(visited::read_shot(p).map(|i| iso(i.taken)).unwrap_or_default());
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "picture.png".into());
+                let copy = orbiters_core::png_meta::CleanCopy::of(p)?;
                 // Read from the file while it is sent: twelve pictures never sit in memory at once.
-                parts.push(Part::file("pictures", name, "image/png", p)?);
+                parts.push(Part::file("pictures", name, "image/png", &copy.path)?);
+                copies.push(copy);
             }
             let chunk_bytes: u64 = chunk_sizes.iter().sum();
             let mut report = self.progress(id);

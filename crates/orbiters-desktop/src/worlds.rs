@@ -355,6 +355,25 @@ pub fn hashes(paths: Vec<PathBuf>) -> HashMap<PathBuf, String> {
     index.every_shot().into_iter().filter(|s| wanted.contains(&s.path)).filter_map(|s| Some((s.path, s.sha256?))).collect()
 }
 
+/// Every hash Orbiters may know each screenshot by: the file's own (what was sent before PRIV-8, and a gallery share's
+/// `sourceKey`) and its copy without metadata's (what is sent now): the Map explorer recognises a picture by either.
+pub fn map_hashes(paths: Vec<PathBuf>) -> HashMap<PathBuf, Vec<String>> {
+    let index_file = visited::shot_index_file();
+    let _one = shot_index_lock();
+    let mut index = visited::ShotIndex::load(&index_file);
+    if index.hash(&paths) {
+        let _ = index.save(&index_file);
+    }
+    let wanted: HashSet<&PathBuf> = paths.iter().collect();
+    index
+        .every_shot()
+        .into_iter()
+        .filter(|s| wanted.contains(&s.path))
+        .map(|s| (s.path, s.sha256.into_iter().chain(s.clean_sha256).collect::<Vec<_>>()))
+        .filter(|(_, h)| !h.is_empty())
+        .collect()
+}
+
 /// World pages, their pictures and thumbnails: made again when missing, so they live on this computer only
 /// ([`orbiters_core::paths::cache_dir`]), not in the roaming config folder where they were before. What was kept there
 /// is moved over once (a rename on the same disk; when it cannot be, it is made again).

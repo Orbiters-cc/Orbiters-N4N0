@@ -504,6 +504,8 @@ pub struct Gpu {
     /// its loss; the backward pass and Adam) goes to the GPU alone once VRChat's frames leave its time idle, and is
     /// waited for. `paced` holds each part's GPU time as last measured.
     pub governor: Option<crate::governor::Governor>,
+    /// What the governors that left (VRChat closed, SteamVR quit) cost the run ([`Gpu::pacing`]).
+    paced_before: crate::governor::Tally,
     paced: [std::time::Duration; 3],
     /// The adapter of a training device (for [`Gpu::free_memory`]), and whether it is an integrated GPU (VRChat's frames
     /// never wait for it).
@@ -1203,6 +1205,7 @@ impl Gpu {
             redraw: false,
             profiler: None,
             governor: None,
+            paced_before: Default::default(),
             paced: [std::time::Duration::from_millis(2); 3],
             wgpu_adapter: None,
             integrated: false,
@@ -2335,19 +2338,33 @@ impl Gpu {
             self.governor = crate::governor::Governor::connect();
             self.governor.is_some().then_some(true)
         } else if !beside && self.governor.is_some() {
-            self.governor = None;
+            self.drop_governor();
             Some(false)
         } else {
             None
         }
     }
 
+    /// The governor goes (what it cost stays in [`Gpu::pacing`]).
+    fn drop_governor(&mut self) {
+        if let Some(g) = self.governor.take() {
+            self.paced_before = self.paced_before.add(&g.tally);
+        }
+    }
+
+    /// What pacing beside VRChat cost this device's work so far, the governors that left included (RECONSTRUCT-10).
+    pub fn pacing(&self) -> crate::governor::Tally {
+        self.governor.as_ref().map_or(self.paced_before, |g| self.paced_before.add(&g.tally))
+    }
+
     /// While governed: waits until VRChat's frames leave part `part` of a step its GPU time idle (a governor that saw
     /// SteamVR quit is dropped).
     fn pace_wait(&mut self, part: usize) {
+        let pause = self.pause.clone();
+        let asked = move || pause.as_ref().is_some_and(|p| p.asked());
         if let Some(g) = self.governor.as_mut() {
-            if !g.wait(self.paced[part]) {
-                self.governor = None;
+            if !g.wait(self.paced[part], &asked) {
+                self.drop_governor();
             }
         }
     }

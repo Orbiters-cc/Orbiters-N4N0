@@ -971,8 +971,16 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
     drop(rounds);
     let _sync = crate::timing::on().then(|| dev.poll(wgpu::PollType::wait_indefinitely()));
     let end_start = Instant::now();
-    if let Some(g) = &gpu.governor {
-        eprintln!("governor: {:.1} s waiting for VRChat's frames, {} back-offs", g.waited.as_secs_f32(), g.backoffs);
+    let paced = gpu.pacing();
+    if paced.vr || paced.desktop {
+        eprintln!(
+            "governor: {:.1} s waiting for VRChat's frames ({} looks without room, longest {:.1} s), {} back-offs, {} waits cut short by a pause",
+            paced.waited.as_secs_f32(),
+            paced.waits,
+            paced.longest.as_secs_f32(),
+            paced.backoffs,
+            paced.cut_by_pause
+        );
     }
     let (mut wearer_left, mut floor_patched) = trained.as_ref().map_or((0, 0), |t| (t.wearer_left, t.floor_patched));
     let mut g = match trained {

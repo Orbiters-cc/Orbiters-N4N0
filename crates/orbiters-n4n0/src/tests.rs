@@ -2827,6 +2827,31 @@ fn a_slideshow_of_qr_codes_opens_two_pages_not_one_per_code() {
 }
 
 #[test]
+fn a_scan_stops_at_its_sixth_page_opened_and_refusals_spend_nothing() {
+    // verify-n4n0 (10): refused opens spent the six-page quota, and the sixth page opened left the scanner looking.
+    use orbiters_n4n0_core::qr::QrPhase;
+    let (host, n) = n4n0(Settings::default());
+    n.command(Command::Qr { on: true });
+    host.qr_sees(QrSeen::Camera(true));
+    *host.watch_fails.lock().unwrap() = true;
+    host.qr_sees(QrSeen::Code("https://example.com/refused".into()));
+    *host.watch_fails.lock().unwrap() = false;
+    // Six pages, paced as a scan opens them (two at once, then one every five seconds: the pace is made up here).
+    for i in 0..6 {
+        if let Some(run) = n.n4n0.lock().unwrap().qr.run.as_mut() {
+            run.opening = orbiters_n4n0_core::qr::Opening::with_opened(i);
+        }
+        host.qr_sees(QrSeen::Code(format!("https://example.com/{i}")));
+    }
+    let view = host.view().qr;
+    assert_eq!(view.opened, 6, "{view:?}");
+    assert_eq!(view.phase, QrPhase::Stopped, "stopped at the sixth page itself");
+    assert_eq!(view.note, orbiters_n4n0_core::qr::ENOUGH_NOTE);
+    assert_eq!(host.qr_dropped.load(Ordering::Relaxed), 1, "its scan let go");
+    n.shutdown();
+}
+
+#[test]
 fn a_qr_link_the_browser_did_not_open_is_not_counted_as_opened() {
     // N4N0-18: the menu said "opened" while the toast said it failed.
     let (host, n) = n4n0(Settings::default());

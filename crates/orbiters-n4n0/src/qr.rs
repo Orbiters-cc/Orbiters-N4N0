@@ -16,12 +16,12 @@ use std::time::Instant;
 #[derive(Default)]
 pub(crate) struct QrRuntime {
     pub(crate) view: QrView,
-    run: Option<Run>,
+    pub(crate) run: Option<Run>,
     /// The number of the last scan started: what an older one still says is not heard.
     number: u64,
 }
 
-struct Run {
+pub(crate) struct Run {
     /// Dropped, it stops.
     scan: Box<dyn QrScan>,
     number: u64,
@@ -29,7 +29,7 @@ struct Run {
     until: Instant,
     recent: Recent,
     /// The pages it opened, and when the next may open.
-    opening: Opening,
+    pub(crate) opening: Opening,
 }
 
 impl QrRuntime {
@@ -191,17 +191,24 @@ impl crate::N4n0 {
                             // Opened: counted, and the scan's time starts again (when it is still this scan).
                             let mut rt = self.n4n0.lock().unwrap();
                             let now = Instant::now();
+                            let mut ended = None;
                             if let Some(run) = rt.qr.run.as_mut().filter(|r| r.number == number) {
                                 run.until = now + qr::SCAN_FOR;
+                                // The sixth page opened: the scan stops at once (verify-n4n0 10).
+                                let last = run.opening.opened();
                                 rt.qr.view.phase = QrPhase::Looking;
                                 rt.qr.view.note.clear();
                                 rt.qr.view.link = Some(link.clone());
                                 rt.qr.view.opened += 1;
                                 // The owner's screen stays open while it finds links.
                                 rt.screen.last_activity = now;
+                                if last {
+                                    ended = rt.qr.stop(QrPhase::Stopped, qr::ENOUGH_NOTE);
+                                }
                                 shown(&mut rt);
                             }
                             drop(rt);
+                            drop(ended);
                             self.notify(NoticeKind::Success, tr!("Opened from a QR code: {link}", link = orbiters_n4n0_core::menu::layout::short_link(&link, 60)));
                         }
                         // Not opened: nothing counts it as opened (and the same link waits before it is tried again).

@@ -133,7 +133,7 @@ pub struct Opening {
 }
 
 impl Opening {
-    /// Whether a page opens at `now`; one that does is counted.
+    /// Whether a page may open at `now` (attempts are paced; only pages opened count, [`Opening::opened`]).
     pub fn take(&mut self, now: Instant) -> Pace {
         if self.opened >= MOST_PER_SCAN {
             return Pace::Enough;
@@ -148,8 +148,19 @@ impl Opening {
             return Pace::Later;
         }
         self.allowed = allowed - 1.0;
-        self.opened += 1;
         Pace::Open
+    }
+
+    /// A scan that opened `opened` pages already, with its whole burst to come (the pace of tests).
+    pub fn with_opened(opened: u32) -> Self {
+        Self { opened, allowed: OPEN_BURST as f32, at: None }
+    }
+
+    /// A page did open (the browser took it): counted towards [`MOST_PER_SCAN`]. True when that was the last one this scan
+    /// opens (it stops then). Attempts the browser refused never count (verify-n4n0 10).
+    pub fn opened(&mut self) -> bool {
+        self.opened += 1;
+        self.opened >= MOST_PER_SCAN
     }
 }
 
@@ -229,9 +240,20 @@ mod tests {
         assert_eq!(paces.iter().filter(|p| **p == Pace::Open).count(), 3, "{paces:?}");
         assert_eq!(&paces[..3], &[Pace::Open, Pace::Open, Pace::Later]);
         let mut opening = Opening::default();
-        let opened = (0..200).map(|i| opening.take(at(i * 1000))).filter(|p| *p == Pace::Open).count();
-        assert_eq!(opened, MOST_PER_SCAN as usize);
+        let mut enough_at = None;
+        for i in 0..200 {
+            if opening.take(at(i * 1000)) == Pace::Open && opening.opened() && enough_at.is_none() {
+                enough_at = Some(i);
+            }
+        }
+        assert!(enough_at.is_some(), "the sixth page opened says it is the last");
         assert_eq!(opening.take(at(1_000_000)), Pace::Enough, "then it is enough");
+        // Refused attempts never count: six of them leave the whole quota.
+        let mut opening = Opening::default();
+        for i in 0..6 {
+            assert_eq!(opening.take(at(i * 10_000)), Pace::Open);
+        }
+        assert_ne!(opening.take(at(100_000)), Pace::Enough, "nothing opened yet");
     }
 
     #[test]

@@ -100,7 +100,7 @@ impl Queued {
 
     fn start_in(dir: std::path::PathBuf, lost: &'static Lost) -> Queued {
         let (sender, receiver) = std::sync::mpsc::sync_channel(QUEUE);
-        let thread = std::thread::Builder::new().name("overlay logs".into()).spawn(move || writer(&dir, &receiver, lost)).ok();
+        let thread = std::thread::Builder::new().name("overlay logs".into()).spawn(move || writer(&dir, &receiver, lost)).ok(); // i18n: not shown (a thread's name)
         Queued { sender, thread, installed: false }
     }
 

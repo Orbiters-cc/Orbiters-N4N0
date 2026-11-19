@@ -366,16 +366,16 @@ enum Unreadable {
 /// [`Unreadable`] for the saved binding at `url` (its `AutosaveURL` beside it), `exists` saying whether a path is there.
 fn unreadable_binding(url: &str, autosave: Option<&str>, exists: impl Fn(&Path) -> bool) -> Unreadable {
     if url.starts_with("vr-input-workshop://") {
-        return Unreadable::Kept("a Workshop binding not downloaded or not readable");
+        return Unreadable::Kept("a Workshop binding not downloaded or not readable"); // i18n: not shown (a log's line)
     }
-    let Some(path) = url.strip_prefix("file:///").or_else(|| url.strip_prefix("file://")) else { return Unreadable::Kept("an address of another kind") };
+    let Some(path) = url.strip_prefix("file:///").or_else(|| url.strip_prefix("file://")) else { return Unreadable::Kept("an address of another kind") }; // i18n: not shown (a log's line)
     let path = Path::new(path);
     if exists(path) {
-        return Unreadable::Kept("a file that is there but could not be read");
+        return Unreadable::Kept("a file that is there but could not be read"); // i18n: not shown (a log's line)
     }
     let drive = path.ancestors().last().filter(|root| !root.as_os_str().is_empty());
     if !drive.is_some_and(|root| exists(root)) {
-        return Unreadable::Kept("a file on a drive that is not there");
+        return Unreadable::Kept("a file on a drive that is not there"); // i18n: not shown (a log's line)
     }
     Unreadable::Gone { autosave_too: autosave == Some(url) }
 }

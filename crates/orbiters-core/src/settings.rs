@@ -907,7 +907,7 @@ impl Settings {
                     &rebased
                 }
                 Ok(None) => self,
-                Err(e) => anyhow::bail!("{} could not be read, and is not replaced by defaults: {e}", path.display()),
+                Err(e) => anyhow::bail!("{}", orbiters_i18n::tr!("{path} could not be read, and is not replaced by defaults: {error}", path = path.display(), error = e)),
             }
         } else {
             self

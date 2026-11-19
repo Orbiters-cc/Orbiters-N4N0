@@ -25,7 +25,7 @@ pub fn copy_without_metadata(src: &mut impl Read, out: &mut impl Write) -> std::
     let mut signature = [0u8; 8];
     src.read_exact(&mut signature)?;
     if &signature != SIGNATURE {
-        return Err(bad("not a PNG"));
+        return Err(bad(orbiters_i18n::tr("not a PNG")));
     }
     out.write_all(SIGNATURE)?;
     let mut written = 8u64;
@@ -36,12 +36,12 @@ pub fn copy_without_metadata(src: &mut impl Read, out: &mut impl Write) -> std::
         let length = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as u64;
         let kind: [u8; 4] = [head[4], head[5], head[6], head[7]];
         if length > (1u64 << 31) || !kind.iter().all(u8::is_ascii_alphabetic) {
-            return Err(bad("a damaged PNG chunk"));
+            return Err(bad(orbiters_i18n::tr("a damaged PNG chunk")));
         }
         let keep = KEPT.iter().any(|k| **k == kind);
         // Bit 5 of the first letter: lowercase is ancillary (may be left out), uppercase critical (must be understood).
         if !keep && kind[0].is_ascii_uppercase() {
-            return Err(bad("a PNG chunk this copy cannot keep"));
+            return Err(bad(orbiters_i18n::tr("a PNG chunk this copy cannot keep")));
         }
         if keep {
             out.write_all(&head)?;

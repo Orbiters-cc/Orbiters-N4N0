@@ -282,5 +282,10 @@
   "Spout sender \"{name}\" not found": "Emissor Spout “{name}” não encontrado",
   "unsupported Spout texture format (DXGI {format})": "formato de textura Spout não compatível (DXGI {format})",
   "The request expired before it could be sent. Please try again.": "A solicitação expirou antes de ser enviada. Tente novamente.",
-  "VRChat may have received the request. Check VRChat before trying again.": "O VRChat pode ter recebido a solicitação. Confira no VRChat antes de tentar de novo."
+  "VRChat may have received the request. Check VRChat before trying again.": "O VRChat pode ter recebido a solicitação. Confira no VRChat antes de tentar de novo.",
+  "{path} could not be read, and is not replaced unseen: {error}": "Não foi possível ler {path}, e ele não é substituído sem ter sido lido: {error}",
+  "{path} could not be read, and is not replaced by defaults: {error}": "Não foi possível ler {path}, e ele não é substituído pelos padrões: {error}",
+  "not a PNG": "não é um PNG",
+  "a damaged PNG chunk": "um bloco PNG danificado",
+  "a PNG chunk this copy cannot keep": "um bloco PNG que esta cópia não pode manter"
 }

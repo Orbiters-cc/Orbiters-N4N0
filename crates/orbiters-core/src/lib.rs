@@ -187,7 +187,7 @@ fn preserve_unreadable(path: &std::path::Path) -> std::io::Result<()> {
             mark_unreadable(path, false);
             Ok(())
         }
-        Err(e) => Err(std::io::Error::new(e.kind(), format!("{} could not be read, and is not replaced unseen: {e}", path.display()))),
+        Err(e) => Err(std::io::Error::new(e.kind(), orbiters_i18n::tr!("{path} could not be read, and is not replaced unseen: {error}", path = path.display(), error = e))),
     }
 }
 

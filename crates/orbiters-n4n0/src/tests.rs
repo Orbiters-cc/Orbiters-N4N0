@@ -2747,6 +2747,22 @@ fn the_qr_code_scanner_opens_web_links_once_and_stops_with_its_page() {
 }
 
 #[test]
+fn the_world_videos_titles_are_asked_once_a_video_and_only_the_last_ones_kept() {
+    // N4N0-21: every distinct link was kept for the whole session and each asked for on a thread, YouTube's or not.
+    let (_t, n) = n4n0(Settings::default());
+    let mut rt = n.n4n0.lock().unwrap();
+    assert_eq!(rt.video_title("https://cdn.example/stream.m3u8"), (None, None), "not YouTube's: nothing asked, nothing kept");
+    let (_, asked) = rt.video_title("https://www.youtube.com/watch?v=36YnV9STBqc&t=10");
+    assert_eq!(asked.map(|(id, _)| id).as_deref(), Some("36YnV9STBqc"));
+    assert_eq!(rt.video_title("https://youtu.be/36YnV9STBqc?si=tracking"), (None, None), "the same video: asked once");
+    for i in 0..100 {
+        rt.video_title(&format!("https://www.youtube.com/watch?v=video{i:06}"));
+    }
+    assert_eq!(rt.video_titles.len(), crate::runtime::VIDEO_TITLES_KEPT);
+    assert!(rt.video_titles.iter().all(|(id, _)| id != "36YnV9STBqc"), "the oldest went");
+}
+
+#[test]
 fn a_slideshow_of_qr_codes_opens_two_pages_not_one_per_code() {
     // N4N0-13: every different code in view opened a tab at once, three a second.
     let (host, n) = n4n0(Settings::default());

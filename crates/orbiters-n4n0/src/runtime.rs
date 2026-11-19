@@ -79,6 +79,8 @@ const PIN_DEBOUNCE: Duration = Duration::from_millis(400);
 const VOICE_PRESS: Duration = Duration::from_millis(80);
 /// How long "Talk with N4N0?" shows after the wake word was heard during a call.
 pub(crate) const WAKE_OFFER_FOR: Duration = Duration::from_secs(6);
+/// The world videos' titles kept (the last ones seen).
+pub(crate) const VIDEO_TITLES_KEPT: usize = 32;
 /// How long after Talk was let go N4N0 waits for VRChat to say it muted, to toggle it back.
 const UNMUTE_WAIT: Duration = Duration::from_millis(1500);
 /// How much of the conversation the assistant gets back each turn (the server trims too).
@@ -275,9 +277,9 @@ pub(crate) struct N4n0Runtime {
     /// The computer's keys for the overlay menu's keyboard (the last few, numbered), and whether the keyboard is taken.
     pub(crate) keys: std::collections::VecDeque<(u32, orbiters_n4n0_core::menu::KeyInput)>,
     pub(crate) keyboard_taken: bool,
-    /// The world's video, and the titles of those seen (`None` while asked).
+    /// The world's video, and the titles of the YouTube videos seen lately, by video id (`None` while asked), oldest first.
     pub(crate) world_video: Option<orbiters_n4n0_core::menu::WorldVideo>,
-    pub(crate) video_titles: HashMap<String, Option<String>>,
+    pub(crate) video_titles: std::collections::VecDeque<(String, Option<String>)>,
     /// The controllers' touchpads and sticks the avatar's input parameters follow (input.rs).
     pub(crate) input: crate::input::InputRuntime,
     /// The screen mirror's camera (mirror.rs).
@@ -340,6 +342,21 @@ impl N4n0Runtime {
         self.light = None;
         self.vr_mode = None;
         self.screen.menu_param_reset(Instant::now());
+    }
+
+    /// The title of the world's video at `url` as known, and what to ask YouTube for (its video id and link) when it is
+    /// a YouTube video not asked yet. A title only YouTube's videos have: asked once a video, whatever its link's tracking
+    /// parts, the last [`VIDEO_TITLES_KEPT`] kept.
+    pub(crate) fn video_title(&mut self, url: &str) -> (Option<String>, Option<(String, String)>) {
+        let Some(id) = videos::youtube_id(url) else { return (None, None) };
+        if let Some((_, title)) = self.video_titles.iter().find(|(known, _)| *known == id) {
+            return (title.clone(), None);
+        }
+        self.video_titles.push_back((id.clone(), None));
+        while self.video_titles.len() > VIDEO_TITLES_KEPT {
+            self.video_titles.pop_front();
+        }
+        (None, Some((id, url.to_string())))
     }
 
     /// Another avatar (or none): what waited for the owner's yes on the last one's controls is dropped (said in the
@@ -926,14 +943,15 @@ impl N4n0 {
                 rt.tracking_note = mark("Smoothing SteamVR's tracking needs Orbiters - N4N0 on the computer running SteamVR").into();
             }
             rt.versions = latin(|| tr!("N4N0 {version} · App {app_version}", version = rt.n4n0_version.as_deref().unwrap_or("?"), app_version = app_version));
-            if let Some(seen) = &seen_video {
-                if !rt.video_titles.contains_key(&seen.url) {
-                    rt.video_titles.insert(seen.url.clone(), None);
-                    title_wanted = Some(seen.url.clone());
+            let title = match &seen_video {
+                Some(seen) => {
+                    let (title, wanted) = rt.video_title(&seen.url);
+                    title_wanted = wanted;
+                    title
                 }
-            }
-            let video =
-                seen_video.map(|seen| orbiters_n4n0_core::menu::WorldVideo { title: rt.video_titles.get(&seen.url).cloned().flatten(), url: seen.url, at: seen.at });
+                None => None,
+            };
+            let video = seen_video.map(|seen| orbiters_n4n0_core::menu::WorldVideo { title, url: seen.url, at: seen.at });
             rt.screen.menu.world_video = video.clone();
             rt.world_video = video;
             // The menu where it shows now (VRChat's mode or N4N0/Screen/Replace may have changed).
@@ -1045,11 +1063,14 @@ impl N4n0 {
             drop(scan);
             self.publish();
         }
-        if let Some(url) = title_wanted {
+        if let Some((id, url)) = title_wanted {
             let n = self.clone();
             let _ = std::thread::Builder::new().name("n4n0-video-title".into()).spawn(move || {
                 let title = orbiters_n4n0_core::videos::youtube_title(&url);
-                n.n4n0.lock().unwrap().video_titles.insert(url, title);
+                // Kept only while its video still is (a long list of videos meanwhile let it go).
+                if let Some(entry) = n.n4n0.lock().unwrap().video_titles.iter_mut().find(|(known, _)| *known == id) {
+                    entry.1 = title;
+                }
                 n.publish();
             });
         }

@@ -26,7 +26,8 @@ fn why_of(earns_one: bool) -> &'static str {
     }
 }
 
-const WIDTH: f32 = 440.0;
+/// As wide as the other cards of the corner ("Talk with N4N0?", a friend's shared view), so their edges line up.
+const WIDTH: f32 = 380.0;
 const HEIGHT: f32 = 124.0;
 const MARGIN: f32 = 20.0;
 

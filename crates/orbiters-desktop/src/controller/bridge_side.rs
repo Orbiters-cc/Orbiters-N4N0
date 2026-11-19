@@ -24,34 +24,38 @@ use std::time::{Duration, Instant, SystemTime};
 /// A side session's log text read at most per look.
 const LOG_CHUNK: u64 = 4 << 20;
 
-/// The VRChats running now, by process id (names only, as the app's watcher reads them).
-fn vrchat_pids() -> Vec<u32> {
-    let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-    system
-        .processes()
-        .values()
-        .filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat"))
-        .map(|p| p.pid().as_u32())
+/// The processes running now: id, name (lower case), start (Unix seconds; 0 when unknown). One list of the system's, as Task
+/// Manager reads it: no process is opened for it, VRChat's least of all (BRIDGE-3; sysinfo opened every process with
+/// memory-read rights, a few times a second).
+fn processes() -> Vec<(u32, String, u64)> {
+    // FILETIME (100 ns since 1601) to Unix seconds.
+    const UNIX_FROM_1601_S: u64 = 11_644_473_600;
+    orbiters_booster::programs::scan()
+        .into_iter()
+        .map(|p| (p.pid, p.name.to_lowercase(), (p.created / 10_000_000).saturating_sub(UNIX_FROM_1601_S)))
         .collect()
+}
+
+fn is_vrchat(name: &str) -> bool {
+    matches!(name, "vrchat.exe" | "vrchat")
+}
+
+fn is_launcher(name: &str) -> bool {
+    matches!(name, "start_protected_game.exe" | "launch.exe")
+}
+
+/// The VRChats running now, by process id.
+fn vrchat_pids() -> Vec<u32> {
+    processes().into_iter().filter(|(_, name, _)| is_vrchat(name)).map(|(pid, _, _)| pid).collect()
 }
 
 /// The VRChats running now with when each started (Unix seconds; 0 when Windows would not say).
 fn vrchat_starts() -> Vec<(u32, u64)> {
-    let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-    system
-        .processes()
-        .values()
-        .filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat"))
-        .map(|p| (p.pid().as_u32(), p.start_time()))
-        .collect()
+    processes().into_iter().filter(|(_, name, _)| is_vrchat(name)).map(|(pid, _, start)| (pid, start)).collect()
 }
 
 fn launcher_runs() -> bool {
-    let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-    system.processes().values().any(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "start_protected_game.exe" | "launch.exe"))
+    processes().iter().any(|(_, name, _)| is_launcher(name))
 }
 
 /// A service's state from a short-lived `sc.exe queryex`, which is given 5 s and then ended: a hung query would hold a handle
@@ -207,14 +211,23 @@ impl Opener for RealOpener {
 
     fn end_launcher(&self, osc: (u16, u16)) -> usize {
         let arg = sessions::osc_arg(osc.0, osc.1);
+        // Only VRChat's launchers are opened to read their command lines (never VRChat itself, nor any other process).
+        let launchers: Vec<sysinfo::Pid> = processes().into_iter().filter(|(_, name, _)| is_launcher(name)).map(|(pid, _, _)| sysinfo::Pid::from_u32(pid)).collect();
+        if launchers.is_empty() {
+            return 0;
+        }
         let mut system = sysinfo::System::new();
-        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always));
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&launchers),
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always),
+        );
         // Only a launcher of this session's own start: its command line carries this session's `--osc` (2026-11-15 07:13: the
         // hung start_protected_game.exe's did).
         system
             .processes()
             .values()
-            .filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "start_protected_game.exe" | "launch.exe"))
+            .filter(|p| is_launcher(&p.name().to_string_lossy().to_lowercase()))
             .filter(|p| p.cmd().iter().any(|a| a.to_string_lossy().contains(&arg)))
             .filter(|p| p.kill())
             .count()
@@ -1016,6 +1029,14 @@ mod tests {
         std::fs::write(&person, "2026.11.15 04:58:40 Debug      -  Launching with args: 1\n2026.11.15 04:58:40 Debug      -  Arg: --no-vr\n").unwrap();
         assert_eq!(own_log(&dir, since, 1, (9010, 9011), std::slice::from_ref(&new)), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn processes_are_listed_without_opening_any() {
+        // BRIDGE-3: the system's own list, with names and start times (this test's process among them).
+        let me = processes().into_iter().find(|(pid, _, _)| *pid == std::process::id()).expect("this process is listed");
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        assert!(me.1.ends_with(".exe") && me.2 > 0 && me.2 <= now && now - me.2 < 3600, "{me:?}");
     }
 
     #[test]

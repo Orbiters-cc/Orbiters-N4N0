@@ -1132,6 +1132,32 @@ mod tests {
     }
 
     #[test]
+    fn a_new_default_microphone_opens_at_once_and_never_joins_two_microphones_in_a_sentence() {
+        // N4N0-14: with the wake word on, the microphone stays open; a new default ends that capture.
+        let (mut worker, _rx) = listening_worker();
+        worker.mic_failures = 2;
+        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 7 });
+        worker.held = vec![0.1; RATE];
+        // A late word from a capture already replaced changes nothing.
+        worker.mic_default_changed(0);
+        assert!(worker.mic.is_some() && worker.listen.is_some());
+        worker.mic_default_changed(1);
+        assert!(worker.mic.is_none(), "the old microphone's capture is over");
+        assert!(worker.listen.is_none() && worker.held.is_empty(), "the held sentence ends with what the old microphone heard");
+        assert_eq!(worker.waiting.iter().map(|s| (s.listen, s.samples.len())).collect::<Vec<_>>(), vec![(7, RATE)]);
+        assert!(worker.reopen_at.is_none() && worker.mic_failures == 2, "no failure pause: it opens again at once");
+        // Idle (the wake word only): nothing to end, the next sentence is the new microphone's.
+        let (mut worker, _rx) = listening_worker();
+        worker.mic_default_changed(1);
+        assert!(worker.waiting.is_empty() && worker.reopen_at.is_none());
+        // A listen that heard nothing yet goes on.
+        let (mut worker, _rx) = listening_worker();
+        worker.listen = Some(Listen { hold: false, since: Instant::now(), id: 8 });
+        worker.mic_default_changed(1);
+        assert_eq!(worker.listen.as_ref().map(|l| l.id), Some(8));
+    }
+
+    #[test]
     fn the_loop_keeps_up_with_the_microphone() {
         // N4N0-5, measured through the worker's own loop: one packet a pass (as before) against all of them.
         let chunks = 300;

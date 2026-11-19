@@ -636,6 +636,32 @@ impl Service {
     }
 }
 
+/// Removes from `dir` the temporary files of [`orbiters_core::write_atomic`] (`<file>.<pid>-<n>.tmp`) older than
+/// `age`: a process killed between writing one and its rename leaves it for good. Nothing else is touched.
+fn remove_stale_temporaries(dir: &std::path::Path, age: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_atomic_temporary(name) {
+            continue;
+        }
+        let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|e| e >= age);
+        if old && entry.file_type().is_ok_and(|t| t.is_file()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// `<file>.<digits>-<digits>.tmp`, as `write_atomic` names its temporary files.
+fn is_atomic_temporary(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".tmp") else { return false };
+    let Some((file, tag)) = stem.rsplit_once('.') else { return false };
+    let Some((pid, serial)) = tag.split_once('-') else { return false };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    !file.is_empty() && digits(pid) && digits(serial)
+}
+
 /// What a window asks that works on files or folders, possibly for seconds: done in its order on the link's work thread,
 /// not on its reading thread ([`Service::serve`]). A reconstruction stopped or unqueued follows the one asked before it.
 fn is_file_work(msg: &ToService) -> bool {
@@ -738,6 +764,12 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     let ctl = Controller::new(settings);
     // What an earlier run of the FPS booster left comes back before anything else starts.
     ctl.start_booster();
+    // What writes killed between their temporary file and its rename left beside the settings (REL-14 c).
+    if let Some(dir) = orbiters_core::paths::settings_file().parent().map(std::path::Path::to_path_buf) {
+        let _ = std::thread::Builder::new().name("tmp-sweep".into()).spawn(move || {
+            remove_stale_temporaries(&dir, Duration::from_secs(24 * 3600));
+        });
+    }
     ctl.start();
     ctl.start_bridge();
 
@@ -910,6 +942,27 @@ pub(crate) mod tests {
         assert!(!steamvr_start_may_be_due(false, false), "no SteamVR");
         assert!(!steamvr_start_may_be_due(true, true), "the overlay looks itself");
         assert!(!steamvr_start_may_be_due(true, false));
+    }
+
+    /// REL-14 c: only `write_atomic`'s temporary files, and only old ones, are removed.
+    #[test]
+    fn only_old_temporaries_of_atomic_writes_are_swept() {
+        assert!(is_atomic_temporary("vr-audio.json.171964-11.tmp"));
+        assert!(is_atomic_temporary("settings.json.1-0.tmp"));
+        for other in ["settings.json", "notes.tmp", "a.b-c.tmp", ".1-2.tmp", "x.12-.tmp", "settings.json.bad-1730000000"] {
+            assert!(!is_atomic_temporary(other), "{other}");
+        }
+        let dir = std::env::temp_dir().join(format!("orbiters-tmp-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["kept.json", "vr-audio.json.5-1.tmp", "note.tmp"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        remove_stale_temporaries(&dir, Duration::from_secs(3600));
+        assert!(dir.join("vr-audio.json.5-1.tmp").exists(), "a young one stays (a write may be under way)");
+        remove_stale_temporaries(&dir, Duration::ZERO);
+        assert!(!dir.join("vr-audio.json.5-1.tmp").exists());
+        assert!(dir.join("kept.json").exists() && dir.join("note.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// How long a Send to Mixer takes in a test ([`Service::handle`]).

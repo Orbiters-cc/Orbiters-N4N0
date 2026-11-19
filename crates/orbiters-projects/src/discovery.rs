@@ -129,7 +129,17 @@ pub fn is_link(m: &std::fs::Metadata) -> bool {
     }
 }
 pub fn is_project(path: &Path) -> bool {
-    path.join("ProjectSettings/ProjectVersion.txt").is_file() && !path.join(crate::templates::INCOMPLETE).exists()
+    path.join("ProjectSettings/ProjectVersion.txt").is_file() && !unfinished_copy(path)
+}
+/// Whether `path` is a copy still being made (or cut short): its marker names this very folder. An older version's
+/// empty marker counts too; one naming another folder (copied, restored) does not.
+fn unfinished_copy(path: &Path) -> bool {
+    let marker = path.join(crate::templates::INCOMPLETE);
+    match std::fs::read(&marker) {
+        Ok(bytes) if bytes.is_empty() => true,
+        Ok(bytes) => serde_json::from_slice::<crate::templates::Marker>(&bytes).is_ok_and(|m| key(&m.destination) == key(path)),
+        Err(_) => false,
+    }
 }
 pub fn describe(path: PathBuf, registered: bool, _scenes: &mut SceneCache) -> Project {
     let unity = std::fs::read_to_string(path.join("ProjectSettings/ProjectVersion.txt")).ok().and_then(|s| parse_version(&s)).unwrap_or_default();

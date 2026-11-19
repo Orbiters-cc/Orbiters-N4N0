@@ -1250,6 +1250,13 @@ pub(crate) mod tests {
         o.calls.picked = 2;
         // The window's offer to close to the tray (window_rest), what the VR band said of it.
         s.window_rest = crate::state::WindowRest { offer: Some(crate::state::RestOffer { id: 3, until_ms: 1_762_800_008_000, for_ms: 8_000 }), shown: Some(3), kept: None };
+        // The shared 3D view: a friend here, an offer waiting, a friend's view followed.
+        s.shared_view.set(crate::state::SharedViewStatus {
+            targets: vec![crate::state::CallContact { id: "c_AAAAAAAAAAAAAAAAAAAAAA".into(), name: "Nova Fox".into() }],
+            outgoing: None,
+            offer: Some(crate::state::ShareOffer { id: 2, from: "Kiri".into(), title: "The Black Cat".into(), until_ms: 1_762_800_030_000, for_ms: 30_000 }),
+            watching: Some(crate::state::ShareWatching { id: 3, from: "Nova Fox".into(), title: "Sky".into(), capture: 412, revision: 77, file: None, start: None, view: Some((12.0, [0.5, -1.0])), failed: None }),
+        });
         s
     }
 

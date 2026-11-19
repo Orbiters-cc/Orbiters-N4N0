@@ -427,7 +427,7 @@ fn code_of(e: &anyhow::Error) -> Option<String> {
 /// Downloads the capture `capture`, signed in (its item for the start view, then its file), into the cache's
 /// `shared-views` folder. Never through a public address: the file route answers only what this account may read.
 fn fetch(api: &Api, token: &str, capture: &CaptureRef) -> Result<(PathBuf, ShareStart), String> {
-    let auth = format!("Bearer {token}");
+    let auth = format!("Bearer {token}"); // i18n: not shown (an HTTP header)
     let item = api
         .agent()
         .get(&api.url(&format!("captures/capture/{}", capture.id)))

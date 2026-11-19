@@ -198,14 +198,16 @@ pub fn read(log_account: Option<&str>) -> LocalVrchat {
 
 /// Which account is this computer's. VRCX and VRCNext signed in to VRChat with theirs, so an account one of them
 /// knows wins; the log's id (the local player's, as VRChat's log names it) picks between them, and stands alone only
-/// when neither knows an account, or when VRCNext knows several and none is the log's.
+/// when neither knows an account, or when VRCNext knows several and none is the log's. A folder in VRCNext's
+/// `Caches\Profiles` is not proof of a sign-in (VRCNext makes one for a person whose favourites were only looked at):
+/// it never stands against the log's own id.
 fn choose(log_account: Option<&str>, vrcx: Option<&str>, next: &[String]) -> Option<(String, Source)> {
     let log = log_account.filter(|id| is_user_id(id));
     match (log, vrcx) {
         (Some(log), Some(vrcx)) if log == vrcx => Some((log.to_string(), Source::Vrcx)),
         (Some(log), _) if next.iter().any(|n| n == log) => Some((log.to_string(), Source::Vrcnext)),
         (_, Some(vrcx)) => Some((vrcx.to_string(), Source::Vrcx)),
-        (_, None) if next.len() == 1 => Some((next[0].clone(), Source::Vrcnext)),
+        (None, None) if next.len() == 1 => Some((next[0].clone(), Source::Vrcnext)),
         (Some(log), None) => Some((log.to_string(), Source::VrchatLog)),
         (None, None) => None,
     }
@@ -228,6 +230,8 @@ mod tests {
         assert_eq!(choose(None, None, &next(&[other])), Some((other.into(), Source::Vrcnext)));
         assert_eq!(choose(Some(third), None, &next(&[me, other])), Some((third.into(), Source::VrchatLog)), "VRCNext cannot tell which");
         assert_eq!(choose(Some(me), None, &[]), Some((me.into(), Source::VrchatLog)));
+        // One profile VRCNext keeps is someone else's (favourites looked at): the log's own id stands.
+        assert_eq!(choose(Some(me), None, &next(&[other])), Some((me.into(), Source::VrchatLog)));
         assert_eq!(choose(Some("usr_bad"), None, &[]), None);
     }
 

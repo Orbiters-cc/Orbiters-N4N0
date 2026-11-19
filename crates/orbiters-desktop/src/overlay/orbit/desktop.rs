@@ -1773,25 +1773,38 @@ pub mod scroll {
 }
 
 pub mod pointer {
-    /// The left button's changes from the counts of downs and ups the hook saw (`downs`, `ups`) and those already read (`seen`),
-    /// in order (true: down). Total: an up whose down came before the hook (the button held as it started) is a plain up. It
-    /// looped for ever on one, with the hook swallowing every mouse move of the computer (OVL2-6).
-    pub(super) fn changes(seen: &mut (u32, u32), downs: u32, ups: u32) -> Vec<bool> {
-        let mut out = Vec::new();
-        while seen.0 < downs || seen.1 < ups {
-            if seen.0 < downs {
-                out.push(true);
-                seen.0 += 1;
-            }
-            if seen.1 < seen.0 && seen.1 < ups {
-                out.push(false);
-                seen.1 += 1;
-            } else if seen.1 < ups && seen.0 >= downs {
-                out.push(false);
-                seen.1 += 1;
-            }
+    /// The left button's edges as the hook saw them, in order (true: down), at most [`EDGES_AT_MOST`] waiting. A button already
+    /// down when the hook started is the game's: its up goes on to the game, not to the panels (verify-vr: two counters could
+    /// not keep the order of an up and a down between two reads, and the game's up was swallowed).
+    #[derive(Debug, Default)]
+    pub(super) struct Edges {
+        queue: std::collections::VecDeque<bool>,
+        /// The game holds the button (it was down when the hook started).
+        game_holds: bool,
+    }
+
+    pub(super) const EDGES_AT_MOST: usize = 64;
+
+    impl Edges {
+        pub(super) fn started(game_holds: bool) -> Self {
+            Self { queue: Default::default(), game_holds }
         }
-        out
+
+        /// An edge seen by the hook: whether it is swallowed (the panels') or goes on (the game's).
+        pub(super) fn edge(&mut self, down: bool) -> bool {
+            if !down && std::mem::take(&mut self.game_holds) {
+                return false;
+            }
+            if self.queue.len() < EDGES_AT_MOST {
+                self.queue.push_back(down);
+            }
+            true
+        }
+
+        /// The edges since the last read, in order.
+        pub(super) fn take(&mut self) -> Vec<bool> {
+            self.queue.drain(..).collect()
+        }
     }
 
     use super::*;
@@ -1806,8 +1819,7 @@ pub mod pointer {
     static DY: AtomicI64 = AtomicI64::new(0);
     static REST_X: AtomicI32 = AtomicI32::new(0);
     static REST_Y: AtomicI32 = AtomicI32::new(0);
-    static DOWNS: AtomicU32 = AtomicU32::new(0);
-    static UPS: AtomicU32 = AtomicU32::new(0);
+    static EDGES: std::sync::Mutex<Option<Edges>> = std::sync::Mutex::new(None);
     static SET: AtomicBool = AtomicBool::new(false);
 
     unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -1822,13 +1834,12 @@ pub mod pointer {
                     DY.fetch_add((info.pt.y - REST_Y.load(Ordering::Relaxed)) as i64, Ordering::Relaxed);
                     return LRESULT(1);
                 }
-                WM_LBUTTONDOWN => {
-                    DOWNS.fetch_add(1, Ordering::Relaxed);
-                    return LRESULT(1);
-                }
-                WM_LBUTTONUP => {
-                    UPS.fetch_add(1, Ordering::Relaxed);
-                    return LRESULT(1);
+                WM_LBUTTONDOWN | WM_LBUTTONUP => {
+                    let down = message == WM_LBUTTONDOWN;
+                    let swallowed = EDGES.lock().map(|mut e| e.get_or_insert_with(Edges::default).edge(down)).unwrap_or(false);
+                    if swallowed {
+                        return LRESULT(1);
+                    }
                 }
                 WM_MOUSEWHEEL => {
                     WHEEL.fetch_add((info.mouseData >> 16) as u16 as i16 as i32, Ordering::Relaxed);
@@ -1854,8 +1865,6 @@ pub mod pointer {
         /// Where it is in screen pixels.
         at: Option<Pos2>,
         taken: (i64, i64),
-        downs: u32,
-        ups: u32,
         window: Option<PanelWindow>,
     }
 
@@ -1907,13 +1916,15 @@ pub mod pointer {
         fn begin(&mut self) {
             DX.store(0, Ordering::Relaxed);
             DY.store(0, Ordering::Relaxed);
-            DOWNS.store(0, Ordering::Relaxed);
-            UPS.store(0, Ordering::Relaxed);
+            // The left button as it is now: held, it is the game's until it is let go.
+            // SAFETY: a plain read of the keyboard and mouse state.
+            let held = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01) as u16 & 0x8000 != 0 };
+            if let Ok(mut edges) = EDGES.lock() {
+                *edges = Some(Edges::started(held));
+            }
             let (x, y) = cursor_at();
             REST_X.store(x, Ordering::Relaxed);
             REST_Y.store(y, Ordering::Relaxed);
-            self.downs = 0;
-            self.ups = 0;
             let (tx, rx) = std::sync::mpsc::channel();
             let spawned = std::thread::Builder::new().name("orbit-mouse-hook".into()).spawn(move || {
                 // SAFETY: a low-level hook of this thread, unset below; its messages are pumped right here, as such a hook needs.
@@ -1964,11 +1975,7 @@ pub mod pointer {
 
         /// The left button's changes since the last read (true: down), in order.
         pub fn take_buttons(&mut self) -> Vec<bool> {
-            let (downs, ups) = (DOWNS.load(Ordering::Relaxed), UPS.load(Ordering::Relaxed));
-            let mut seen = (self.downs, self.ups);
-            let out = changes(&mut seen, downs, ups);
-            (self.downs, self.ups) = seen;
-            out
+            EDGES.lock().ok().and_then(|mut e| e.as_mut().map(Edges::take)).unwrap_or_default()
         }
     }
 
@@ -1991,18 +1998,28 @@ pub mod pointer {
 
 #[cfg(test)]
 mod tests {
-    /// OVL2-6: the button's changes always come to an end, an up without its down included.
+    /// OVL2-6 and verify-vr: the edges come in the order they happened; a button held by the game as the hook started has its up
+    /// passed on to the game, and a press after it is the panels'.
     #[test]
-    fn an_up_without_its_down_ends_the_count() {
-        use super::pointer::changes;
-        assert_eq!(changes(&mut (0, 0), 0, 1), [false], "the button was held as the hook started");
-        assert_eq!(changes(&mut (0, 0), 2, 2), [true, false, true, false]);
-        let mut seen = (0, 0);
-        assert_eq!(changes(&mut seen, 1, 0), [true]);
-        assert_eq!(changes(&mut seen, 1, 1), [false]);
-        assert_eq!(seen, (1, 1));
-        assert_eq!(changes(&mut (0, 0), 1, 3), [true, false, false, false]);
-        assert!(changes(&mut (2, 2), 2, 2).is_empty());
+    fn button_edges_keep_their_order_and_the_game_keeps_its_up() {
+        use super::pointer::{Edges, EDGES_AT_MOST};
+        let mut edges = Edges::started(true);
+        assert!(!edges.edge(false), "the game's up goes to the game");
+        assert!(edges.edge(true), "a new press is the panels'");
+        assert_eq!(edges.take(), [true], "a down while the finger is down, not a click");
+        assert!(edges.edge(false));
+        assert_eq!(edges.take(), [false]);
+        let mut edges = Edges::started(false);
+        assert!(edges.edge(false), "an up with no down is a plain up, and ends");
+        for down in [true, false, true] {
+            edges.edge(down);
+        }
+        assert_eq!(edges.take(), [false, true, false, true]);
+        assert!(edges.take().is_empty());
+        for _ in 0..1000 {
+            edges.edge(true);
+        }
+        assert_eq!(edges.take().len(), EDGES_AT_MOST, "bounded");
     }
 
     /// REL-3: a part's copy box is used only when it lies wholly inside the frame (a frame of the window's older size read with the

@@ -72,7 +72,12 @@ impl Controller {
         };
         if start {
             let ctl = self.clone();
-            std::thread::Builder::new().name("cleanup".into()).spawn(move || ctl.run_cleanup())?;
+            if let Err(e) = std::thread::Builder::new().name("cleanup".into()).spawn(move || ctl.run_cleanup()) {
+                // Nothing runs it: not "running" for good (audit F14, CTL-11 b). What was asked stays listed and goes
+                // with the next clean-up asked for; the error says why it did not start.
+                self.cleanup.lock().unwrap().running = false;
+                return Err(e.into());
+            }
         }
         Ok(())
     }

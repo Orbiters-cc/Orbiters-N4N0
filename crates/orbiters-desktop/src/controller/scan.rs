@@ -204,12 +204,17 @@ impl super::Controller {
             self.scan.lock().unwrap().recording = false;
             return Err(e);
         }
+        // The recording this scan started: everything the scan does later is for it alone (C-2).
+        let owner = self.capture_serial.load(std::sync::atomic::Ordering::Acquire);
         let ctl = self.clone();
-        std::thread::Builder::new().name("scan".into()).spawn(move || {
+        let flight = std::thread::Builder::new().name("scan".into()).spawn(move || {
             let started = Instant::now();
             while ctl.snapshot.lock().unwrap().capture.state != CaptureState::Recording {
-                if started.elapsed() > Duration::from_secs(8) || !ctl.is_capturing() {
-                    ctl.scan.lock().unwrap().recording = false;
+                if started.elapsed() > Duration::from_secs(8) || !ctl.owns_recording(owner) {
+                    // Its flag only while no other recording began (that one may be a scan of its own).
+                    if ctl.capture_serial.load(std::sync::atomic::Ordering::Acquire) == owner {
+                        ctl.scan.lock().unwrap().recording = false;
+                    }
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -222,11 +227,15 @@ impl super::Controller {
                 let tick = Duration::from_secs_f32(1.0 / RATE_HZ as f32);
                 let begin = Instant::now();
                 for (i, p) in poses.into_iter().enumerate() {
-                    if !ctl.is_capturing() {
-                        return false;
+                    {
+                        // Checked and sent under the start gate: no other recording can begin in between.
+                        let _gate = ctl.capture_start_gate.lock().unwrap();
+                        if !ctl.owns_recording(owner) {
+                            return false;
+                        }
+                        // N4N0's camera rig follows in the same bundle (controller/rig.rs).
+                        ctl.place_rig(Some((super::burst::POSE.to_string(), p.iter().map(|v| rosc::OscType::Float(*v)).collect())), &p);
                     }
-                    // N4N0's camera rig follows in the same bundle (controller/rig.rs).
-                    ctl.place_rig(Some((super::burst::POSE.to_string(), p.iter().map(|v| rosc::OscType::Float(*v)).collect())), &p);
                     if let Some(wait) = (tick * (i as u32 + 1)).checked_sub(begin.elapsed()) {
                         std::thread::sleep(wait);
                     }
@@ -234,7 +243,13 @@ impl super::Controller {
                 true
             };
             // Smoothing would trail the path behind.
-            send(super::burst::SMOOTH, vec![rosc::OscType::Bool(false)]);
+            {
+                let _gate = ctl.capture_start_gate.lock().unwrap();
+                if !ctl.owns_recording(owner) {
+                    return;
+                }
+                send(super::burst::SMOOTH, vec![rosc::OscType::Bool(false)]);
+            }
             let mut done = fly(look_around(pose));
             if done {
                 // A coverage map with the look-around's depth in it (the worker sends one a second).
@@ -242,24 +257,36 @@ impl super::Controller {
                 let map = ctl.snapshot.lock().unwrap().capture.coverage.clone();
                 done = fly(rings(pose, map.as_ref()));
             }
-            send(super::burst::POSE, pose.iter().map(|v| rosc::OscType::Float(*v)).collect());
-            if let Some(smooth) = smooth.filter(|s| *s) {
-                send(super::burst::SMOOTH, vec![rosc::OscType::Bool(smooth)]);
+            {
+                // The camera goes back where it was, also after a scan stopped early, unless another recording
+                // began since: that one's camera is not the scan's to move.
+                let _gate = ctl.capture_start_gate.lock().unwrap();
+                if ctl.capture_serial.load(std::sync::atomic::Ordering::Acquire) == owner {
+                    send(super::burst::POSE, pose.iter().map(|v| rosc::OscType::Float(*v)).collect());
+                    if let Some(smooth) = smooth.filter(|s| *s) {
+                        send(super::burst::SMOOTH, vec![rosc::OscType::Bool(smooth)]);
+                    }
+                }
             }
             if done {
                 std::thread::sleep(Duration::from_millis(250));
-                if let Err(e) = ctl.stop_capture() {
-                    ctl.notify(NoticeKind::Error, e.to_string());
-                }
+                ctl.stop_recording_of(owner);
             }
-        })?;
+        });
+        if let Err(e) = flight {
+            // The recording was accepted, but nothing would fly it or end it: it ends here, as an ordinary one (no
+            // flight: nothing of it is a scan to reconstruct).
+            self.scan.lock().unwrap().recording = false;
+            self.stop_recording_of(owner);
+            return Err(e.into());
+        }
         Ok(())
     }
 
-    /// A recording was saved: a scan's goes on to its reconstruction.
+    /// A scan's recording was saved (the caller took its flag before the state went Idle): it goes on to its
+    /// reconstruction.
     pub(super) fn scan_saved(self: &Shared, session: Option<PathBuf>) {
-        let was = std::mem::take(&mut self.scan.lock().unwrap().recording);
-        let Some(dir) = session.filter(|_| was) else { return };
+        let Some(dir) = session else { return };
         match self.queue_reconstruction(dir) {
             Ok(false) => self.notify(NoticeKind::Success, tr("Scan recorded: it is being reconstructed.")),
             Ok(true) => self.notify(NoticeKind::Success, tr!("Scan recorded: its reconstruction starts {when}.", when = tr(self.reconstruction_waits_for()))),
@@ -348,5 +375,35 @@ mod tests {
         smooth_all_along(&poses);
         let far = poses.iter().map(|p| ((p[0] - POSE[0]).powi(2) + (p[2] - POSE[2]).powi(2)).sqrt()).fold(0.0f32, f32::max);
         assert!(far <= CLEARANCE + 1e-3, "{far}");
+    }
+
+    /// C-2: a scan whose recording was stopped, followed by another recording, neither stops nor flies that one: its
+    /// late Stop (after its last pose) is for its own recording only.
+    #[test]
+    fn an_old_scan_never_stops_the_next_recording() {
+        use orbiters_core::protocol::WorkerCommand;
+        use std::sync::atomic::Ordering;
+        let ctl = super::super::Controller::new(orbiters_core::settings::Settings::default());
+        *ctl.test_commands.lock().unwrap() = Some(Vec::new());
+        let stops = |ctl: &super::super::Shared| ctl.test_commands.lock().unwrap().as_ref().unwrap().iter().filter(|c| matches!(c, WorkerCommand::Stop)).count();
+        // The scan's recording.
+        ctl.capture_serial.store(4, Ordering::Release);
+        ctl.update(|s| s.capture.state = CaptureState::Recording);
+        let old = ctl.capture_serial.load(Ordering::Acquire);
+        assert!(ctl.owns_recording(old));
+        // Stopped by the person, then another recording starts before the scan's thread wakes.
+        ctl.update(|s| s.capture.state = CaptureState::Idle);
+        assert!(!ctl.owns_recording(old), "an ended recording is no scan's");
+        ctl.capture_serial.fetch_add(1, Ordering::AcqRel);
+        ctl.update(|s| s.capture.state = CaptureState::Recording);
+        let generation = ctl.stop_generation.load(Ordering::Acquire);
+        ctl.stop_recording_of(old);
+        assert_eq!(stops(&ctl), 0, "the old scan sent no Stop");
+        assert_eq!(ctl.stop_generation.load(Ordering::Acquire), generation, "nor ended the new recording's generation");
+        assert!(!ctl.owns_recording(old), "nor may it fly that recording's camera");
+        // A scan stops its own recording.
+        let new = ctl.capture_serial.load(Ordering::Acquire);
+        ctl.stop_recording_of(new);
+        assert_eq!(stops(&ctl), 1);
     }
 }

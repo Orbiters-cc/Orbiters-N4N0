@@ -103,6 +103,22 @@ fn initial_samples(vrchat: Vec<(String, OscValue)>, latest: &HashMap<String, (Ve
 #[derive(Clone, Copy, PartialEq)]
 enum CapturePurpose { CameraOverlay, Short, Avatar }
 
+/// Lock order (read 2026-11-19, night review CTL-14 with the challenge's corrections; nothing checks it but reading): a
+/// lock on the left may be held while one on its right is taken, never the reverse.
+///
+/// - `publishing` -> `snapshot` -> {`vrchat_login` (in `publish`), `trail`, `burst` (inside `update` closures)}.
+///   `update` lets `snapshot` go before it publishes.
+/// - `capture_start_gate` -> `osc_values` -> `snapshot` (`start_segment`), and -> `worker`. The gate is held across
+///   VRChat's HTTP answers while a start reads them; a scan's flight takes it around each pose it sends (C-2).
+/// - `osc_values` -> `snapshot`, `osc_values` -> `worker`. Never `snapshot` -> `osc_values`: the no-keyframe save
+///   did, and deadlocked a start (C-1, fixed).
+/// - `camera_stream_owners` -> `osc_values` -> `camera_before` (acquire) and `camera_before` -> `osc` -> `osc_values`
+///   (release): opposite orders, safe only because both run under `camera_stream_owners`.
+/// - `kit_epoch` -> `publishing`, `kit_epoch` -> `osc_values`.
+/// - `reconstruction` -> `reconstruct_queue` -> `publishing`; a reconstruction worker is spawned under `reconstruction`.
+/// - `cleanup` -> `publishing`; `camera_scan` -> `publishing`, with VRChat's HTTP under `camera_scan`.
+/// - `account_runtime` is let go before the account is published; its generation is read under `snapshot` through
+///   `account_generation` (C-7).
 pub struct Controller {
     snapshot: Mutex<Snapshot>,
     /// What the interface reads: the snapshot as it was last handed out, swapped on every change. A copy shares every
@@ -143,7 +159,13 @@ pub struct Controller {
     camera_scan: Mutex<Option<Box<dyn orbiters_n4n0::QrScan>>>,
     stop_generation: AtomicU64,
     osc_generation: AtomicU64,
+    /// Bumped whenever the VRChat whose camera the app shows changes (OSC started again, another VRChat followed): a
+    /// camera answer asked for before is that VRChat's, and is not shown for the next one (C-8).
+    camera_route: AtomicU64,
     capture_start_gate: Mutex<()>,
+    /// Bumped (under `capture_start_gate`) by every start of a new recording, a world split's next part excepted: what
+    /// belongs to one recording (a scan's flight) checks it is still the current one under the gate (C-2).
+    capture_serial: AtomicU64,
     kit_epoch: Mutex<(u64,Option<String>)>,
     /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
     /// the app drives them), and when the avatar last (re)loaded, which resets them.
@@ -153,6 +175,8 @@ pub struct Controller {
     avatar_changed_at: Mutex<Option<Instant>>,
     /// The Orbiters account's credential and a sign-in in progress (controller/account.rs).
     account_runtime: Mutex<account::AccountRuntime>,
+    /// `account_runtime`'s generation, readable under the snapshot's lock (controller/account.rs, C-7).
+    account_generation: AtomicU64,
     vrchat_login: Mutex<vrchat_login::Runtime>,
     /// Home's launcher: friends, invites, boops, Play (controller/launcher.rs).
     launcher: Mutex<launcher::Runtime>,
@@ -199,8 +223,13 @@ pub struct Controller {
     updates: Mutex<update::UpdateRuntime>,
     /// Space being freed in the library (controller/cleanup.rs).
     cleanup: Mutex<cleanup::CleanupRuntime>,
+    /// The instances Go and Invite may send the person to (controller/vrchat_data.rs).
+    instance_permits: Mutex<vrchat_data::InstancePermits>,
     /// The thread that writes the settings, the newest only ([`Controller::queue_save`]).
-    settings_writer: Mutex<Option<(mpsc::Sender<Settings>, std::thread::JoinHandle<()>)>>,
+    settings_writer: Mutex<Option<(mpsc::Sender<(u64, Settings)>, std::thread::JoinHandle<()>)>>,
+    /// How many times the settings were changed: taken under `snapshot` with the change, so the writer can tell the
+    /// newer of two copies whatever order they reach it in.
+    settings_revision: AtomicU64,
     /// A capture asked for while the last one was still being saved: it starts once that one is (source, importing,
     /// started from the record toggle).
     pending_start: Mutex<Option<(SourceSpec, bool, bool, u64)>>,
@@ -489,12 +518,15 @@ impl Controller {
             camera_scan: Mutex::new(None),
             stop_generation: AtomicU64::new(0),
             osc_generation: AtomicU64::new(0),
+            camera_route: AtomicU64::new(0),
             capture_start_gate: Mutex::new(()),
+            capture_serial: AtomicU64::new(0),
             kit_epoch: Mutex::default(),
             avatar_before: Mutex::new(None),
             hide: Mutex::new(hide_self::HideRuntime::default()),
             avatar_changed_at: Mutex::new(None),
             account_runtime: Mutex::new(account::AccountRuntime::default()),
+            account_generation: AtomicU64::new(0),
             vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
             launcher: Mutex::new(launcher::Runtime::default()),
             launcher_started: Mutex::new(None),
@@ -523,6 +555,8 @@ impl Controller {
             updates: Mutex::new(update::UpdateRuntime::default()),
             cleanup: Mutex::new(cleanup::CleanupRuntime::default()),
             settings_writer: Mutex::new(None),
+            instance_permits: Mutex::default(),
+            settings_revision: AtomicU64::new(0),
             pending_start: Mutex::new(None),
             #[cfg(test)]
             test_commands: Mutex::new(None),
@@ -734,6 +768,12 @@ impl Controller {
         self.snapshot.lock().unwrap().is_capturing()
     }
 
+    /// How many Stops were asked for (tests of the service's links).
+    #[cfg(test)]
+    pub(crate) fn stop_generation(&self) -> u64 {
+        self.stop_generation.load(Ordering::Acquire)
+    }
+
     fn ensure_worker(self: &Shared) -> anyhow::Result<()> {
         // A late OSC echo or a queued start while the app quits starts no worker.
         anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "{}", tr("Orbiters - N4N0 is quitting."));
@@ -761,21 +801,21 @@ impl Controller {
             let ctl = self.clone();
             move || {
                 ctl.put_vrchat_back();
-                let ended = ctl.update(|s| {
+                // What the recording was for ends with it, BEFORE Idle is published: a start after Idle may be a new
+                // 3D picture's or scan's, whose flag must stay (CTL-11 a).
+                if ctl.snapshot.lock().unwrap().capture.state != CaptureState::Idle {
+                    ctl.burst.lock().unwrap().recording = false;
+                    ctl.scan.lock().unwrap().recording = false;
+                }
+                ctl.update(|s| {
                     s.worker.ready = false;
                     // Whatever it was doing (recording, saving a session) ended with it.
-                    let ended = s.capture.state != CaptureState::Idle;
-                    if ended {
+                    if s.capture.state != CaptureState::Idle {
                         s.capture.state = CaptureState::Idle;
                         s.capture.from_osc = false;
                         s.capture.error = Some(tr("The capture worker stopped unexpectedly.").into());
                     }
-                    ended
                 });
-                if ended {
-                    // A 3D picture under way never comes: the next recording is an ordinary one.
-                    ctl.burst.lock().unwrap().recording = false;
-                }
                 ctl.capture_ended();
             }
         };
@@ -934,6 +974,13 @@ impl Controller {
                 if !restarting {
                     self.put_vrchat_back();
                 }
+                // Whether this recording was a scan, taken BEFORE Idle is published: a scan started after Idle sets
+                // the flag for its own recording, which this save must neither take nor clear (CTL-11 a, C-2).
+                let was_scan = if restarting {
+                    self.scan.lock().unwrap().recording
+                } else {
+                    std::mem::take(&mut self.scan.lock().unwrap().recording)
+                };
                 self.update(|s| {
                     if !restarting {
                         s.capture.state = CaptureState::Idle;
@@ -948,9 +995,15 @@ impl Controller {
                 let nothing = !restarting && manifest.stats.frames > 0 && manifest.stats.keyframes == 0;
                 if nothing {
                     self.burst.lock().unwrap().recording = false;
-                    self.scan.lock().unwrap().recording = false;
-                    let why = self.snapshot.lock().unwrap().capture.no_strip.unwrap_or_else(|| self.why_no_strip_now());
-                    self.update(|s| s.capture.no_strip = Some(why));
+                    let why = self.no_strip_reason();
+                    // Only on this recording: a capture started since (the state went Idle above) keeps its own.
+                    self.update_if(|s| {
+                        let ours = s.capture.session_dir == session && !s.is_capturing();
+                        if ours {
+                            s.capture.no_strip = Some(why);
+                        }
+                        ours
+                    });
                     self.notify(
                         NoticeKind::Error,
                         tr!("No 3D capture: {frames} frames came, none with the capture strip, so there are no keyframes. {reason}", frames = manifest.stats.frames, reason = why.message()),
@@ -965,7 +1018,7 @@ impl Controller {
                 if resized {
                     // A 3D picture's or a scan's part at the old size is reconstructed on its own (a reconstruction
                     // takes one frame size); the part after it when the recording ends.
-                    let part = self.burst.lock().unwrap().recording || self.scan.lock().unwrap().recording;
+                    let part = self.burst.lock().unwrap().recording || was_scan;
                     if let Some(dir) = session.clone().filter(|_| part) {
                         if let Err(e) = self.queue_reconstruction(dir) {
                             self.notify(NoticeKind::Warning, tr!("A part of the recording, at another resolution, is not reconstructed: {error}", error = e));
@@ -975,7 +1028,7 @@ impl Controller {
                 if !restarting {
                     self.world_import_saved(session.clone());
                     self.burst_saved(session.clone());
-                    self.scan_saved(session);
+                    self.scan_saved(session.filter(|_| was_scan && !nothing));
                     self.capture_ended();
                 }
             }
@@ -1035,6 +1088,9 @@ impl Controller {
         anyhow::ensure!(self.stop_generation.load(Ordering::Acquire) == stop_generation, "{}", tr("Finish the current capture first."));
         if rollover { anyhow::ensure!(matches!(self.view().capture.state,CaptureState::Recording|CaptureState::Paused), "{}", tr("Finish the current capture first.")); }
         if !rollover && matches!(self.view().capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused) { return Ok(()); }
+        if !rollover {
+            self.capture_serial.fetch_add(1, Ordering::AcqRel);
+        }
         anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "{}", tr("Orbiters - N4N0 is quitting."));
         let settings = self.settings();
         let spout = matches!(source, SourceSpec::Spout { .. });
@@ -1153,6 +1209,42 @@ impl Controller {
 
     /// The recording ended or never started: no more values to the worker, and VRChat's camera and the capture
     /// kit's toggles back as they were.
+    /// The recording under way now (`Controller::capture_serial`), for a flight that must act on its own only.
+    pub(super) fn recording_number(&self) -> u64 {
+        self.capture_serial.load(Ordering::Acquire)
+    }
+
+    /// Whether the recording a flight started (`owner`, [`Controller::recording_number`] after its start) is still the
+    /// one under way. Asked under `capture_start_gate` by whoever acts on the answer (C-2, CTL2-7).
+    pub(super) fn owns_recording(&self, owner: u64) -> bool {
+        self.capture_serial.load(Ordering::Acquire) == owner && self.is_capturing()
+    }
+
+    /// Whether no other recording began since `owner`'s (it may have ended): what a flight changed of the camera is
+    /// still its own to put back.
+    pub(super) fn no_recording_since(&self, owner: u64) -> bool {
+        self.capture_serial.load(Ordering::Acquire) == owner
+    }
+
+    /// Stops `owner`'s own recording, never one started after it, and calls off no start asked since.
+    pub(super) fn stop_recording_of(self: &Shared, owner: u64) {
+        let _gate = self.capture_start_gate.lock().unwrap();
+        if !self.owns_recording(owner) {
+            return;
+        }
+        if let Err(e) = self.stop_capture() {
+            self.notify(NoticeKind::Error, e.to_string());
+        }
+    }
+
+    /// Why a saved recording had no keyframe: what was said while it ran, or else what is known now. The said reason
+    /// is copied out and the snapshot let go BEFORE the fallback: `why_no_strip_now` takes `osc_values`, and a start
+    /// meanwhile holds `osc_values` and waits for `snapshot` (`start_segment`): the two would wait for each other (C-1).
+    fn no_strip_reason(&self) -> state::NoStrip {
+        let said = self.snapshot.lock().unwrap().capture.no_strip;
+        said.unwrap_or_else(|| self.why_no_strip_now())
+    }
+
     fn put_vrchat_back(&self) {
         self.osc_values.lock().unwrap().forwarding = false;
         self.stop_rig();
@@ -1374,16 +1466,28 @@ impl Controller {
         let kit = if self.view().vrchat.running { self.worn_avatar_has_kit() } else { None };
         self.apply_kit_observation(&epoch,kit);
         if self.view().camera_open_said.is_none() {
+            let route = self.camera_route.load(Ordering::Acquire);
             let camera = self.camera_values().into_iter().find_map(|(p,v)| match v {
                 OscValue::Int(mode) if p == CAMERA_MODE => Some(mode != 0),
                 _ => None,
             });
-            if camera.is_some() { self.update_if(|s| {
-                if s.camera_open_said.is_some() { return false; }
-                s.camera_open_said = camera;
-                true
-            }); }
+            if let Some(open) = camera { self.apply_keeper_camera(route, open); }
         }
+    }
+
+    /// What the keeper's look at VRChat's tree found of its camera, shown while nothing is known yet, and only if the
+    /// VRChat it asked (`route`) is still the one followed: a slow answer of the last one does not seed the next (C-8).
+    fn apply_keeper_camera(&self, route: u64, open: bool) -> bool {
+        self.update_if(|s| {
+            if s.camera_open_said.is_some() || self.camera_route.load(Ordering::Acquire) != route { return false; }
+            s.camera_open_said = Some(open);
+            true
+        })
+    }
+
+    /// Another VRChat's camera from now on ([`Controller::apply_keeper_camera`]).
+    pub(super) fn camera_route_changed(&self) {
+        self.camera_route.fetch_add(1, Ordering::AcqRel);
     }
 
     fn invalidate_kit(&self, avatar: Option<String>) {
@@ -1452,19 +1556,11 @@ impl Controller {
     /// Current values from VRChat's OSCQuery service (empty when it is not running or not found). The request runs
     /// without the OSC lock: camera and kit messages, and the watchers, never wait for VRChat's answer.
     fn vrchat_values(&self) -> Vec<(String, OscValue)> {
-        let query = self.with_osc(|o| o.vrchat_query());
-        let result = match query {
-            None => return Vec::new(),
-            Some(None) => Err(anyhow::anyhow!("VRChat's OSCQuery service was not found")), // i18n: not shown (logged as "current OSC values")
-            Some(Some(addr)) => orbiters_core::osc::vrchat_values(addr, Duration::from_secs(1)),
-        };
-        let mut values = result.unwrap_or_else(|e| {
-            eprintln!("current OSC values: {e:#}");
-            Vec::new()
-        });
+        let (query, mut values) = self.vrchat_avatar_values();
+        let Some(query) = query else { return values };
         // The camera's state, which recording changes and puts back: from VRChat's tree, else from what VRChat
         // sent when it last changed.
-        let camera = query.flatten().map(|addr| orbiters_core::osc::vrchat_camera_values(addr, Duration::from_millis(500))).unwrap_or_default();
+        let camera = query.map(|addr| orbiters_core::osc::vrchat_camera_values(addr, Duration::from_millis(500))).unwrap_or_default();
         if camera.iter().any(|(p, _)| p == CAMERA_MODE) {
             values.extend(camera);
         } else {
@@ -1476,6 +1572,22 @@ impl Controller {
             }
         }
         values
+    }
+
+    /// VRChat's `/avatar` tree alone, and where its OSCQuery answers (`None` outside: no OSC; `Some(None)`: not found).
+    /// The kit probe asks only this: the camera's tree beside it was a second request every 2 s for nothing (CTL-10).
+    pub(super) fn vrchat_avatar_values(&self) -> (Option<Option<std::net::SocketAddr>>, Vec<(String, OscValue)>) {
+        let query = self.with_osc(|o| o.vrchat_query());
+        let result = match query {
+            None => return (None, Vec::new()),
+            Some(None) => Err(anyhow::anyhow!("VRChat's OSCQuery service was not found")), // i18n: not shown (logged as "current OSC values")
+            Some(Some(addr)) => orbiters_core::osc::vrchat_values(addr, Duration::from_secs(1)),
+        };
+        let values = result.unwrap_or_else(|e| {
+            eprintln!("current OSC values: {e:#}");
+            Vec::new()
+        });
+        (query, values)
     }
 
     /// Sends the waiting OSC samples to the worker. Callers hold the values lock, which keeps batches in order.
@@ -1839,8 +1951,12 @@ impl Controller {
                 self.booster.cancel_work();
             }
             s.storage.limit_gb = s.settings.storage_limit_gb;
-            (previous, s.settings.clone())
+            // Numbered under the lock that made the change: two changes on two threads can reach the writer in
+            // either order, and the higher number is the one that holds both.
+            let revision = self.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+            (previous, (revision, s.settings.clone()))
         };
+        let (revision, settings) = settings;
         self.publish();
         if echo && previous.walk_boost.strength != settings.walk_boost.strength {
             self.n4n0.send_parameter(orbiters_contracts::n4n0::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
@@ -1865,7 +1981,7 @@ impl Controller {
             self.update_action(crate::ipc::UpdateAction::Check);
         }
         let (osc_changed, sessions_changed) = (previous.osc != settings.osc, previous.sessions_dir != settings.sessions_dir);
-        self.queue_save((*settings).clone());
+        self.queue_save(revision, (*settings).clone());
         if osc_changed || sessions_changed {
             let ctl = self.clone();
             std::thread::spawn(move || {
@@ -1881,11 +1997,11 @@ impl Controller {
     }
 
     /// Hands the settings to the writing thread (started on first use). One writer, so saves never race; it keeps
-    /// the newest of a burst and writes it once nothing changed for [`SAVE_QUIET`].
-    fn queue_save(self: &Shared, settings: Settings) {
+    /// the newest of a burst (by `revision`, not by arrival) and writes it once nothing changed for [`SAVE_QUIET`].
+    fn queue_save(self: &Shared, revision: u64, settings: Settings) {
         let mut writer = self.settings_writer.lock().unwrap();
         if writer.is_none() {
-            let (tx, rx) = mpsc::channel::<Settings>();
+            let (tx, rx) = mpsc::channel::<(u64, Settings)>();
             let ctl = Arc::downgrade(self);
             let write = move |s: Settings| {
                 // Tests never touch the person's settings file.
@@ -1898,21 +2014,9 @@ impl Controller {
                     }
                 }
             };
-            let thread = std::thread::Builder::new().name("settings-writer".into()).spawn(move || {
-                while let Ok(mut latest) = rx.recv() {
-                    loop {
-                        match rx.recv_timeout(SAVE_QUIET) {
-                            Ok(newer) => latest = newer,
-                            Err(mpsc::RecvTimeoutError::Timeout) => break,
-                            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                write(latest);
-                                return;
-                            }
-                        }
-                    }
-                    write(latest);
-                }
-            });
+            let thread = std::thread::Builder::new()
+                .name("settings-writer".into())
+                .spawn(move || write_settings_in_order(rx, SAVE_QUIET, write));
             match thread {
                 Ok(thread) => *writer = Some((tx, thread)),
                 Err(e) => {
@@ -1922,7 +2026,7 @@ impl Controller {
             }
         }
         if let Some((tx, _)) = writer.as_ref() {
-            let _ = tx.send(settings);
+            let _ = tx.send((revision, settings));
         }
     }
 
@@ -2002,6 +2106,7 @@ impl Controller {
 
     fn start_osc_on(self: &Shared, network: Network, discovery: orbiters_core::osc::Discovery, ports: orbiters_core::osc::Ports) {
         let generation=self.osc_generation.fetch_add(1,Ordering::AcqRel)+1;
+        self.camera_route_changed();
         self.camera_scan.lock().unwrap().take();
         self.release_camera_stream(1);
         self.invalidate_kit(None);
@@ -2178,7 +2283,7 @@ impl Controller {
 
     /// The latest lines the workers logged.
     pub(crate) fn worker_log_lines(&self) -> Vec<String> {
-        self.worker_log.lock().unwrap().iter().cloned().collect()
+        self.worker_log()
     }
 
     /// A capture is starting. Training takes the whole GPU: the game and the recording come first; the run goes on once they
@@ -2769,13 +2874,7 @@ fn refresh_storage(ctl: &Shared) {
     let used: u64 = sessions.iter().map(|s| s.size_bytes).sum();
     // What keeping only their 3D views would free.
     let trimmable: Vec<u64> = sessions.iter().filter(|s| s.reconstruction.is_some() && s.capture_bytes > 0).map(|s| s.capture_bytes).collect();
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    let free = disks
-        .list()
-        .iter()
-        .filter(|d| dir.starts_with(d.mount_point()) || dir.to_string_lossy().to_lowercase().starts_with(&d.mount_point().to_string_lossy().to_lowercase()))
-        .max_by_key(|d| d.mount_point().as_os_str().len())
-        .map(|d| d.available_space());
+    let free = free_space(&dir);
     ctl.update(|s| {
         s.storage.sessions_dir = dir.clone();
         s.storage.used_bytes = used;
@@ -2785,6 +2884,65 @@ fn refresh_storage(ctl: &Shared) {
         s.storage.capture_bytes = trimmable.iter().sum();
         s.storage.capture_sessions = trimmable.len();
     });
+}
+
+/// Free bytes on the disk that holds `dir`: one question to Windows for that folder, not a list of every volume
+/// (LIGHT-DESKTOP-9); sysinfo's list where that cannot answer (the folder does not exist yet, another system).
+fn free_space(dir: &Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetDiskFreeSpaceExW(dir: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
+        }
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+        let mut available = 0u64;
+        // SAFETY: a NUL-terminated path and one out-parameter; the totals are not asked for.
+        if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) } != 0 {
+            return Some(available);
+        }
+    }
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter(|d| dir.starts_with(d.mount_point()) || dir.to_string_lossy().to_lowercase().starts_with(&d.mount_point().to_string_lossy().to_lowercase()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(|d| d.available_space())
+}
+
+/// Only the free space, for the 30 s turns when no session changed ([`StorageSweep`]).
+fn refresh_free_space(ctl: &Shared) {
+    let dir = ctl.with_settings(|s| s.sessions_dir.clone());
+    let free = free_space(&dir);
+    ctl.update_if(|s| {
+        let changed = s.storage.free_bytes != free;
+        s.storage.free_bytes = free;
+        changed
+    });
+}
+
+/// When the watchers' 30 s turn walks the whole library again (every manifest, report and picture file read and parsed:
+/// ~13 file calls a session) rather than only asking for the free space: the app changed a session (`bump_library`),
+/// the folder or the library's own folder changed (a session added or removed by hand), a recording runs (the storage
+/// limit), or ten minutes passed (LIGHT-DESKTOP-9).
+#[derive(Default)]
+struct StorageSweep {
+    last: Option<(u64, PathBuf, Option<std::time::SystemTime>, Instant)>,
+}
+
+impl StorageSweep {
+    const AT_MOST: Duration = Duration::from_secs(600);
+
+    fn due(&mut self, library: u64, dir: &Path, modified: Option<std::time::SystemTime>, recording: bool, now: Instant) -> bool {
+        let due = recording
+            || self.last.as_ref().is_none_or(|(v, d, m, at)| *v != library || d != dir || *m != modified || now.duration_since(*at) >= Self::AT_MOST);
+        if due {
+            self.last = Some((library, dir.to_path_buf(), modified, now));
+        }
+        due
+    }
 }
 
 fn spawn_watchers(ctl: Shared) {
@@ -2813,6 +2971,7 @@ fn spawn_watchers(ctl: Shared) {
             let mut videos = videos::Videos::load();
             let mut system = sysinfo::System::new();
             let mut tick = 0u64;
+            let mut storage_sweep = StorageSweep::default();
             let mut rate = PublishRate::default();
             let mut running = false;
             // Since when VRChat runs, and when VRChat was last asked to find the OSC service.
@@ -3036,9 +3195,15 @@ fn spawn_watchers(ctl: Shared) {
                     }
                 }
 
-                // Storage, every 30 s (it walks the session folders).
+                // Storage, every 30 s: the whole library when something may have changed, else the free space.
                 if tick.is_multiple_of(30) {
-                    refresh_storage(&ctl);
+                    let dir = ctl.with_settings(|s| s.sessions_dir.clone());
+                    let modified = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+                    if storage_sweep.due(ctl.library_version(), &dir, modified, ctl.is_capturing(), Instant::now()) {
+                        refresh_storage(&ctl);
+                    } else {
+                        refresh_free_space(&ctl);
+                    }
                 }
                 // How often the state was published, once a minute (this loop turns once a second, and a little more).
                 let readers = ctl.subscribers.lock().unwrap().len();
@@ -3052,8 +3217,136 @@ fn spawn_watchers(ctl: Shared) {
         .expect("watchers thread");
 }
 
+/// The settings writer's loop: waits for [`SAVE_QUIET`] of quiet after a change, then writes the newest copy it was
+/// given. Newest is the highest revision, kept across writes too: a copy numbered lower than one already written (a
+/// thread that applied first and queued last) is never written over it.
+fn write_settings_in_order(rx: mpsc::Receiver<(u64, Settings)>, quiet: Duration, mut write: impl FnMut(Settings)) {
+    let mut written = 0u64;
+    while let Ok(first) = rx.recv() {
+        let mut latest = Some(first).filter(|(r, _)| *r > written);
+        let keep = |latest: &mut Option<(u64, Settings)>, (r, s): (u64, Settings)| {
+            if r > latest.as_ref().map_or(written, |(l, _)| *l) {
+                *latest = Some((r, s));
+            }
+        };
+        let mut done = false;
+        loop {
+            match rx.recv_timeout(quiet) {
+                Ok(newer) => keep(&mut latest, newer),
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        if let Some((r, s)) = latest {
+            written = r;
+            write(s);
+        }
+        if done {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// CTL-1 / audit F10: two threads that applied A then B (B holding both changes) can queue B then A. The file
+    /// must get B, whether A arrives in the same burst or after B was already written.
+    #[test]
+    fn the_settings_file_gets_the_newest_applied_whatever_the_queue_order() {
+        use orbiters_core::settings::Settings;
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (a, b) = {
+            let mut a = Settings::default();
+            a.storage_limit_gb = 1.0;
+            let mut b = a.clone();
+            b.storage_limit_gb = 2.0;
+            (a, b)
+        };
+        let quiet = Duration::from_millis(40);
+        let run = |sends: Vec<(u64, Settings, Duration)>| {
+            let (tx, rx) = mpsc::channel();
+            let writer = std::thread::spawn(move || {
+                let mut written = Vec::new();
+                super::write_settings_in_order(rx, quiet, |s| written.push(s.storage_limit_gb));
+                written
+            });
+            for (r, s, pause) in sends {
+                tx.send((r, s)).unwrap();
+                std::thread::sleep(pause);
+            }
+            drop(tx);
+            writer.join().unwrap()
+        };
+        let none = Duration::ZERO;
+        let after_write = Duration::from_millis(200);
+        assert_eq!(run(vec![(2, b.clone(), none), (1, a.clone(), none)]), vec![2.0], "reversed in one burst");
+        assert_eq!(run(vec![(2, b.clone(), after_write), (1, a.clone(), none)]), vec![2.0], "the older after a write");
+        assert_eq!(run(vec![(1, a.clone(), after_write), (2, b.clone(), none)]), vec![1.0, 2.0], "in order");
+    }
+
+    /// LIGHT-DESKTOP-9: the library is walked again when something changed, while recording, and every ten minutes;
+    /// the other 30 s turns ask only for the free space.
+    #[test]
+    fn the_library_is_walked_again_only_when_it_may_have_changed() {
+        use std::time::{Duration, Instant, SystemTime};
+        let mut sweep = super::StorageSweep::default();
+        let dir = std::path::PathBuf::from("lib");
+        let t0 = Instant::now();
+        let m = Some(SystemTime::UNIX_EPOCH);
+        assert!(sweep.due(1, &dir, m, false, t0), "the first turn");
+        assert!(!sweep.due(1, &dir, m, false, t0 + Duration::from_secs(30)), "nothing changed");
+        assert!(sweep.due(2, &dir, m, false, t0 + Duration::from_secs(60)), "a session saved, trashed...");
+        assert!(sweep.due(2, &dir, Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(90)), "a folder added by hand");
+        assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(120)));
+        assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), true, t0 + Duration::from_secs(150)), "recording");
+        assert!(!sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(180)));
+        assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(800)), "ten minutes");
+    }
+
+    /// C-8: the keeper's answer about VRChat A's camera, arriving after the app followed VRChat B, is not shown for B;
+    /// one asked of B is.
+    #[test]
+    fn a_late_camera_answer_of_the_last_vrchat_is_not_shown() {
+        use std::sync::atomic::Ordering;
+        let ctl = super::Controller::new(orbiters_core::settings::Settings::default());
+        let asked_a = ctl.camera_route.load(Ordering::Acquire);
+        ctl.camera_route_changed();
+        ctl.update(|s| s.camera_open_said = None);
+        assert!(!ctl.apply_keeper_camera(asked_a, true));
+        assert_eq!(ctl.view().camera_open_said, None);
+        let asked_b = ctl.camera_route.load(Ordering::Acquire);
+        assert!(ctl.apply_keeper_camera(asked_b, false));
+        assert_eq!(ctl.view().camera_open_said, Some(false));
+    }
+
+    /// C-1: the reason of a recording with no keyframe is worked out without holding `snapshot` while it waits for
+    /// `osc_values`. A start holds `osc_values` and then takes `snapshot` (`start_segment`): here that start can take
+    /// the snapshot while the reason waits.
+    #[test]
+    fn the_no_keyframe_reason_never_holds_the_snapshot_while_it_waits_for_osc_values() {
+        use std::time::{Duration, Instant};
+        let ctl = super::Controller::new(orbiters_core::settings::Settings::default());
+        let start = ctl.osc_values.lock().unwrap();
+        let saving = {
+            let ctl = ctl.clone();
+            std::thread::spawn(move || ctl.no_strip_reason())
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        let until = Instant::now() + Duration::from_secs(1);
+        let mut took = false;
+        while !took && Instant::now() < until {
+            took = ctl.snapshot.try_lock().is_ok();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(start);
+        saving.join().unwrap();
+        assert!(took, "the start (holding osc_values) could take the snapshot while the reason was being worked out");
+    }
+
     /// The publish-rate log says a minute's publishes once, with the busiest second, and nothing for a silent minute.
     #[test]
     fn the_publish_rate_is_said_once_a_minute() {
@@ -3813,6 +4106,38 @@ mod tests {
             }
         });
         addr
+    }
+
+    /// CTL-10: the kit probe (every keeper turn while VRChat runs) asks VRChat for its avatar's tree only, not for its
+    /// camera's as well.
+    #[test]
+    fn the_kit_probe_asks_for_the_avatar_tree_only() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = asked.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let line = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or_default().to_string();
+                log.lock().unwrap().push(line);
+                let body = r#"{"FULL_PATH":"/avatar","CONTENTS":{"parameters":{"FULL_PATH":"/avatar/parameters","CONTENTS":{"VRCEmote":{"FULL_PATH":"/avatar/parameters/VRCEmote","TYPE":"i","VALUE":[0]}}}}}"#;
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            }
+        });
+        let ctl = Controller::new(Settings::default());
+        ctl.start_osc_with(false);
+        // The OSC start's own camera seed asks `/usercamera` until the camera is known: known here, and that thread let
+        // go (it looks every 100 ms) before the tree answers, so only the probe asks it.
+        ctl.update(|s| s.camera_open_said = Some(true));
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        ctl.with_osc(|o| o.set_vrchat_query(Some(addr)));
+        let _ = ctl.worn_avatar_has_kit();
+        let asked = asked.lock().unwrap().clone();
+        assert!(!asked.is_empty(), "the avatar's tree was asked for");
+        assert!(asked.iter().all(|l| !l.contains("/usercamera")), "{asked:?}");
     }
 
     fn vrchat_tree(record: Arc<AtomicBool>) -> std::net::SocketAddr {

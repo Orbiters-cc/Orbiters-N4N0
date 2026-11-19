@@ -58,6 +58,9 @@ pub struct Service {
     steamvr_start_seen: Mutex<Option<crate::steamvr_start::Session>>,
     /// Tracking smoothing's driver, kept in step with the settings ([`Service::keep_tracking`]).
     smoothing: Mutex<crate::tracking::Smoothing>,
+    /// Which link holds the app's Talk button down (the window's and the desktop panels' are one Talk to N4N0): only
+    /// that link going away lets it go (AD-1).
+    talk: Mutex<TalkHolder>,
     quitting: AtomicBool,
     /// The beta's usage statistics, a session per link, waiting for Orbiters (`usage::spool`).
     usage: Arc<crate::usage::spool::Spool>,
@@ -85,6 +88,7 @@ impl Service {
             orbit: Mutex::new(None),
             steamvr_start_seen: Mutex::new(None),
             smoothing: Mutex::new(Default::default()),
+            talk: Mutex::new(TalkHolder::default()),
             quitting: AtomicBool::new(false),
             usage: Arc::default(),
             #[cfg(windows)]
@@ -166,8 +170,14 @@ impl Service {
             return;
         }
         let snap = self.ctl.view();
+        // The snapshot's answers first: asking for the session lists every process of the computer, and it was asked
+        // every 2 s with no SteamVR at all, or with the overlay (which does this itself) on: half of the idle
+        // service's processor (LIGHT-DESKTOP-5, CTL-3).
+        if !steamvr_start_may_be_due(snap.settings.steamvr_overlay, snap.steamvr.running) {
+            return;
+        }
         let Some(session) = crate::steamvr_start::ready_session() else { return };
-        if snap.settings.steamvr_overlay || !snap.steamvr.running || (*self.steamvr_start_seen.lock().unwrap() == Some(session) && !snap.settings.startup.steamvr_pending)
+        if (*self.steamvr_start_seen.lock().unwrap() == Some(session) && !snap.settings.startup.steamvr_pending)
             || Some(session.0) != snap.steamvr.pid {
             return;
         }
@@ -414,7 +424,13 @@ impl Service {
             // Deleting runs on a thread of its own; the job shows in the snapshot.
             ToService::CleanUp { trim, delete } => report(ctl.clean_up(trim, delete)),
             ToService::Reconstruct { dir } => report(ctl.reconstruct(dir)),
-            ToService::SendToMixer { dir, title } => report(ctl.send_to_mixer(dir, title)),
+            ToService::SendToMixer { dir, title } => {
+                #[cfg(test)]
+                if let Some(hold) = *tests::FILE_WORK_TAKES.lock().unwrap() {
+                    std::thread::sleep(hold);
+                }
+                report(ctl.send_to_mixer(dir, title))
+            }
             ToService::SignIn => {
                 // Asking Orbiters for the link is a network call: not on the link's reading thread.
                 let c = ctl.clone();
@@ -498,7 +514,12 @@ impl Service {
             ToService::Booster { command } => ctl.booster_command(command),
             ToService::WalkPath { path } => ctl.set_walk_path(crate::tracking::walk_path_said(path)),
             // Which Talk button is held matters: the service lets it go when that window or overlay goes away.
-            ToService::N4n0 { command: N4n0Command::Talk { down } } => ctl.n4n0_app_talk(down, role == Role::Overlay),
+            ToService::N4n0 { command: N4n0Command::Talk { down } } => {
+                if role != Role::Overlay {
+                    self.talk.lock().unwrap().talk(link, down);
+                }
+                ctl.n4n0_app_talk(down, role == Role::Overlay)
+            }
             ToService::N4n0 { command } => ctl.n4n0_command(command),
             ToService::OscReconnect => ctl.osc_rediscover(),
             ToService::Updates { action } => ctl.update_action(action),
@@ -575,12 +596,36 @@ impl Service {
             Role::Overlay => self.ctl.set_overlay_connected(true),
             Role::Orbit => {}
         }
+        // The link's file work (Send to Mixer, Trash, a reconstruction...) is done on a thread of its own, in the order
+        // it came: a Stop, a Talk release or a settings change read after it is not held behind a PLY being written
+        // (CTL-7). Starts, pauses and the QR scan stay on this thread, in their order with Stop.
+        let work = {
+            let (tx, rx) = std::sync::mpsc::channel::<ToService>();
+            let svc = self.clone();
+            std::thread::Builder::new().name("link-work".into()).spawn(move || {
+                for msg in rx {
+                    svc.handle(id, role, msg);
+                }
+            }).ok().map(|_| tx)
+        };
         // Lines of a bounded length: a client cannot make the service hold an endless one.
         while let Ok(Some(line)) = ipc::read_line_capped(&mut reader, MAX_COMMAND) {
             if let Ok(msg) = serde_json::from_str::<ToService>(&line) {
-                self.handle(id, role, msg);
+                match (&work, msg) {
+                    (Some(work), msg) if is_file_work(&msg) => {
+                        let _ = work.send(msg);
+                    }
+                    // Quitting waits for a recording to be saved: the link goes on reading (and gets its Close).
+                    (_, ToService::Quit) => {
+                        let svc = self.clone();
+                        std::thread::spawn(move || svc.quit());
+                    }
+                    (_, msg) => self.handle(id, role, msg),
+                }
             }
         }
+        // What was asked before the link ended is still done, in its order.
+        drop(work);
         mailbox.close();
         self.usage.unlinked(id, self.ctl.view().settings.usage.enabled);
         self.links.lock().unwrap().retain(|l| l.id != id);
@@ -589,12 +634,21 @@ impl Service {
             self.ctl.set_overlay_connected(false);
             self.ctl.booster_overlay_gone();
         }
-        if !still_there && role != Role::Orbit {
-            // What it held (a Talk button, the overlay's open menu) ends with it.
-            self.ctl.n4n0_link_closed(role == Role::Overlay);
+        // The app's Talk (the window's or the panels') is let go only by the link that holds it down: the panels
+        // closing must not end, nor send, a sentence the window is saying (AD-1).
+        let held_talk = role != Role::Overlay && self.talk.lock().unwrap().closed(id);
+        if role == Role::Overlay && !still_there {
+            // What it held (its Talk button, its open menu) ends with it.
+            self.ctl.n4n0_link_closed(true);
+        }
+        if role == Role::Window && held_talk {
+            // A window gone with Talk held: its sentence is dropped (it may have crashed with the button down).
+            self.ctl.n4n0_link_closed(false);
         }
         if role == Role::Orbit {
-            for command in orbit_gone(still_there) {
+            // Its panels' Talk only when they held it down (AD-1: the window's sentence is not theirs to end); its menu; its
+            // Ask N4N0 page when no other panels' link is left (OVL2-13).
+            for command in orbit_gone(still_there, held_talk) {
                 self.ctl.n4n0_command(command);
             }
         }
@@ -603,6 +657,78 @@ impl Service {
             self.quit();
         }
     }
+}
+
+/// Removes from `dir` the temporary files of [`orbiters_core::write_atomic`] (`<file>.<pid>-<n>.tmp`) older than
+/// `age`: a process killed between writing one and its rename leaves it for good. Nothing else is touched.
+fn remove_stale_temporaries(dir: &std::path::Path, age: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_atomic_temporary(name) {
+            continue;
+        }
+        // A time ahead of the clock (another computer's, a coarse file system) counts as just written.
+        let old = entry.metadata().and_then(|m| m.modified()).ok().is_some_and(|t| t.elapsed().unwrap_or_default() >= age);
+        if old && entry.file_type().is_ok_and(|t| t.is_file()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// `<file>.<digits>-<digits>.tmp`, as `write_atomic` names its temporary files.
+fn is_atomic_temporary(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".tmp") else { return false };
+    let Some((file, tag)) = stem.rsplit_once('.') else { return false };
+    let Some((pid, serial)) = tag.split_once('-') else { return false };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    !file.is_empty() && digits(pid) && digits(serial)
+}
+
+/// What a window asks that works on files or folders, possibly for seconds: done in its order on the link's work thread,
+/// not on its reading thread ([`Service::serve`]). A reconstruction stopped or unqueued follows the one asked before it.
+fn is_file_work(msg: &ToService) -> bool {
+    matches!(
+        msg,
+        ToService::SendToMixer { .. }
+            | ToService::Trash { .. }
+            | ToService::CleanUp { .. }
+            | ToService::Reconstruct { .. }
+            | ToService::StopReconstruction
+            | ToService::Unqueue { .. }
+            | ToService::UploadPictures { .. }
+            | ToService::UploadPreview { .. }
+            | ToService::PrepareShare { .. }
+            | ToService::WorkerLog
+    )
+}
+
+/// Which link pressed the app's Talk button last and has not let it go. The window and the desktop panels talk to N4N0 as
+/// one source: what one of them holds is let go when THAT link closes, not when another one does.
+#[derive(Default)]
+struct TalkHolder(Option<u64>);
+
+impl TalkHolder {
+    /// `link` pressed (`down`) or let go the app's Talk. Any link's release lets it go, as the runtime does.
+    fn talk(&mut self, link: u64, down: bool) {
+        self.0 = down.then_some(link);
+    }
+
+    /// `link` went away: whether it held the Talk button (which is then let go).
+    fn closed(&mut self, link: u64) -> bool {
+        let held = self.0 == Some(link);
+        if held {
+            self.0 = None;
+        }
+        held
+    }
+}
+
+/// Whether [`Service::keep_steamvr_start`] has anything to look at, from the snapshot alone: SteamVR runs (the watchers
+/// say) and the overlay, which looks at the SteamVR start itself, is not wanted.
+fn steamvr_start_may_be_due(overlay_on: bool, steamvr_running: bool) -> bool {
+    !overlay_on && steamvr_running
 }
 
 /// An overlay that failed is started again after this.
@@ -633,12 +759,17 @@ fn child_exited(waited: std::io::Result<Option<std::process::ExitStatus>>) -> Op
     }
 }
 
-/// What the desktop panels' process held ends with its link: its Talk, should it have gone while held (the service never saw
-/// that let go), its menu, and, when no other panels' link is left, its Ask N4N0 page: a process killed with that page open left
-/// N4N0 arming the microphone after every sentence with no page anywhere (OVL2-13).
-fn orbit_gone(still_there: bool) -> Vec<crate::ipc::N4n0Command> {
+/// What the desktop panels' process held ends with its link: its Talk, when it went while holding it down (`held_talk`: the
+/// service never saw that let go; a Talk the window holds is not the panels' to end, AD-1), its menu, and, when no other panels'
+/// link is left, its Ask N4N0 page: a process killed with that page open left N4N0 arming the microphone after every sentence
+/// with no page anywhere (OVL2-13).
+fn orbit_gone(still_there: bool, held_talk: bool) -> Vec<crate::ipc::N4n0Command> {
     use crate::ipc::N4n0Command;
-    let mut out = vec![N4n0Command::Talk { down: false }, N4n0Command::MenuState { open: false, dictation: false, keyboard: false }];
+    let mut out = Vec::new();
+    if held_talk {
+        out.push(N4n0Command::Talk { down: false });
+    }
+    out.push(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
     if !still_there {
         out.push(N4n0Command::AskPage { open: false });
     }
@@ -765,6 +896,12 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     let ctl = Controller::new(settings);
     // What an earlier run of the FPS booster left comes back before anything else starts.
     ctl.start_booster();
+    // What writes killed between their temporary file and its rename left beside the settings (REL-14 c).
+    if let Some(dir) = orbiters_core::paths::settings_file().parent().map(std::path::Path::to_path_buf) {
+        let _ = std::thread::Builder::new().name("tmp-sweep".into()).spawn(move || {
+            remove_stale_temporaries(&dir, Duration::from_secs(24 * 3600));
+        });
+    }
     ctl.start();
     ctl.start_bridge();
 
@@ -914,10 +1051,14 @@ pub(crate) mod tests {
     /// OVL2-13: the panels' process gone, its Ask N4N0 page is closed (the microphone no longer armed for it).
     #[test]
     fn the_panels_gone_close_their_ask_page() {
-        let said: Vec<String> = orbit_gone(false).iter().map(|c| format!("{c:?}")).collect();
+        let said: Vec<String> = orbit_gone(false, true).iter().map(|c| format!("{c:?}")).collect();
         assert!(said.iter().any(|c| c.contains("AskPage") && c.contains("false")), "{said:?}");
         assert!(said.iter().any(|c| c.starts_with("Talk")), "its Talk let go, as before");
-        assert!(!orbit_gone(true).iter().any(|c| format!("{c:?}").contains("AskPage")), "another panels' link keeps its page");
+        assert!(!orbit_gone(true, true).iter().any(|c| format!("{c:?}").contains("AskPage")), "another panels' link keeps its page");
+        // AD-1: a Talk the panels did not hold (the window's) is not let go by their going.
+        let said: Vec<String> = orbit_gone(false, false).iter().map(|c| format!("{c:?}")).collect();
+        assert!(!said.iter().any(|c| c.starts_with("Talk")), "{said:?}");
+        assert!(said.iter().any(|c| c.starts_with("MenuState")), "{said:?}");
     }
 
     /// OVERLAY-22: after an overlay saw SteamVR quit, starts for that SteamVR are spaced 2, 4, 8, 16, 30 s from the last end;
@@ -985,6 +1126,75 @@ pub(crate) mod tests {
             assert!(overlay_due(Some(Some(crate::overlay::EXIT_STEAMVR_GONE)), Duration::ZERO, Some((7, 100)), next, 100));
             assert!(!overlay_due(None, Duration::ZERO, Some((7, 100)), next, 100));
         }
+    }
+
+    /// AD-1: the panels closing do not let go the Talk the window holds, and the reverse; the link that holds it does.
+    #[test]
+    fn only_the_link_that_holds_talk_lets_it_go_when_it_closes() {
+        let (window, panels) = (1, 2);
+        let mut talk = TalkHolder::default();
+        talk.talk(window, true);
+        assert!(!talk.closed(panels), "the panels never pressed Talk");
+        assert!(talk.closed(window), "the window held it");
+        assert!(!talk.closed(window), "let go once");
+        talk.talk(panels, true);
+        assert!(!talk.closed(window));
+        assert!(talk.closed(panels));
+        // A release from either lets it go: nothing left for a later close.
+        talk.talk(window, true);
+        talk.talk(panels, false);
+        assert!(!talk.closed(window));
+    }
+
+    /// LIGHT-DESKTOP-5: the SteamVR start is looked at (a scan of every process) only while SteamVR runs and the
+    /// overlay is off; the two other cases returned after the scan before.
+    #[test]
+    fn the_steamvr_start_is_looked_for_only_while_steamvr_runs_without_the_overlay() {
+        assert!(steamvr_start_may_be_due(false, true));
+        assert!(!steamvr_start_may_be_due(false, false), "no SteamVR");
+        assert!(!steamvr_start_may_be_due(true, true), "the overlay looks itself");
+        assert!(!steamvr_start_may_be_due(true, false));
+    }
+
+    /// REL-14 c: only `write_atomic`'s temporary files, and only old ones, are removed.
+    #[test]
+    fn only_old_temporaries_of_atomic_writes_are_swept() {
+        assert!(is_atomic_temporary("vr-audio.json.171964-11.tmp"));
+        assert!(is_atomic_temporary("settings.json.1-0.tmp"));
+        for other in ["settings.json", "notes.tmp", "a.b-c.tmp", ".1-2.tmp", "x.12-.tmp", "settings.json.bad-1730000000"] {
+            assert!(!is_atomic_temporary(other), "{other}");
+        }
+        let dir = std::env::temp_dir().join(format!("orbiters-tmp-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["kept.json", "vr-audio.json.5-1.tmp", "note.tmp"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        remove_stale_temporaries(&dir, Duration::from_secs(3600));
+        assert!(dir.join("vr-audio.json.5-1.tmp").exists(), "a young one stays (a write may be under way)");
+        remove_stale_temporaries(&dir, Duration::ZERO);
+        assert!(!dir.join("vr-audio.json.5-1.tmp").exists());
+        assert!(dir.join("kept.json").exists() && dir.join("note.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// How long a Send to Mixer takes in a test ([`Service::handle`]).
+    pub(crate) static FILE_WORK_TAKES: Mutex<Option<Duration>> = Mutex::new(None);
+
+    /// CTL-7: a Stop sent after a slow Send to Mixer on the same link is done at once, not after the export.
+    #[test]
+    fn a_stop_is_not_held_behind_a_slow_send_to_mixer() {
+        let service = service();
+        let window = linked(&service, Role::Window);
+        *FILE_WORK_TAKES.lock().unwrap() = Some(Duration::from_secs(3));
+        let before = service.ctl.stop_generation();
+        let sent = Instant::now();
+        window.send(&ToService::SendToMixer { dir: PathBuf::from("no such session"), title: "t".into() });
+        window.send(&ToService::StopCapture);
+        let stopped = until(|| service.ctl.stop_generation() > before);
+        let took = sent.elapsed();
+        *FILE_WORK_TAKES.lock().unwrap() = None;
+        assert!(stopped, "the stop arrived");
+        assert!(took < Duration::from_secs(2), "the stop waited {took:?} behind the export");
     }
 
     use crate::link_between::{Between, Line};

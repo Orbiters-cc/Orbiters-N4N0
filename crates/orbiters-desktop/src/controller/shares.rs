@@ -16,9 +16,11 @@ use std::time::Instant;
 /// The sharing contract keeps the member's world captures wanted while they are in VRChat. Screenshots do not
 /// start the controller, so they never send presence. Failed calls back off; a world change is sent on the next tick.
 pub(super) fn spawn_presence(ctl: super::Shared) {
-    std::thread::spawn(move || {
+    let presence = std::thread::Builder::new().name("presence".into()).spawn(move || {
         let mut last = None;
-        let mut sent = std::time::Instant::now() - std::time::Duration::from_secs(300);
+        // "Five minutes ago", or the clock's start when the computer started less than five minutes ago: an `Instant`
+        // before the boot cannot be made, and `now - 300 s` killed this thread after a cold boot (REL-5).
+        let mut sent = ago(std::time::Duration::from_secs(300));
         let mut attempted = sent;
         let mut failed = false;
         while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
@@ -49,6 +51,16 @@ pub(super) fn spawn_presence(ctl: super::Shared) {
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
     });
+    if let Err(e) = presence {
+        eprintln!("capture presence: {e}");
+    }
+}
+
+/// `since` before now, or the clock's start when the computer started less recently than that (`Instant - Duration`
+/// panics before the boot, which is the clock's zero on Windows).
+pub(crate) fn ago(since: std::time::Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_sub(since).unwrap_or(now)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -253,7 +265,7 @@ impl super::Controller {
         let id = request.id.clone();
         std::thread::spawn(move || {
             // Every change goes to every window: bytes at most every 100 ms, the other stages as they come.
-            let last = Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(1));
+            let last = Mutex::new(ago(std::time::Duration::from_secs(1)));
             let report = |stage: Stage| {
                 if let Stage::Sending { sent, total } = stage {
                     let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
@@ -2552,4 +2564,13 @@ pub(crate) mod tests {
         assert!(keep_picture_with(&api, "token", &records, &session).is_err());
         std::fs::remove_dir_all(root).ok();
     }
+}
+
+/// REL-5: "five minutes ago" right after a boot (or any span longer than the uptime) is the clock's start, never a
+/// panic that kills the presence thread.
+#[test]
+fn a_time_before_the_boot_is_the_clocks_start() {
+    let long_ago = ago(std::time::Duration::from_secs(u64::MAX / 4));
+    assert!(long_ago.elapsed() < std::time::Duration::from_secs(5));
+    assert!(ago(std::time::Duration::from_millis(1)).elapsed() >= std::time::Duration::from_millis(1));
 }

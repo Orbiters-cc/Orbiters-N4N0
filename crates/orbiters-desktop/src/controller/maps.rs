@@ -79,7 +79,7 @@ impl Controller {
     /// Reports the bytes sent, at most every 100 ms (each change goes to every interface).
     fn progress(self: &Shared, id: u64) -> impl FnMut(u64, u64) + Send + 'static {
         let c = self.clone();
-        let mut last = Instant::now() - std::time::Duration::from_secs(1);
+        let mut last = super::shares::ago(std::time::Duration::from_secs(1));
         move |sent, total| {
             if sent < total && last.elapsed().as_millis() < 100 {
                 return;

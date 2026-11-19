@@ -104,29 +104,35 @@ pub enum WorldError {
     Api(orbiters_core::vrchat_api::Error),
 }
 
+/// The instances a person may be sent to: those the last listing of a world showed joinable, and those made for their
+/// press. One per controller (it was one for the process: tests ran into each other's, BUILD-7).
 #[derive(Default)]
-struct InstancePermits {
+pub(crate) struct InstancePermits {
     entries: Vec<(Scope, String, String, std::time::Instant)>,
+    /// Made for the person's press: a new listing of the world keeps them (VRChat may not list a room nobody entered
+    /// yet, and the page refreshes its list between Make and Go).
+    made: Vec<(Scope, String, String, std::time::Instant)>,
     pending: Vec<(Scope, String, Vec<String>, std::time::Instant)>,
 }
 impl InstancePermits {
     fn allow(&mut self, scope: &Scope, world: &str, items: &[orbiters_core::vrchat_api::WorldInstance]) {
         self.entries.retain(|(s, w, _, at)| s == scope && w != world && at.elapsed().as_secs() < 300);
+        self.made.retain(|(s, _, _, at)| s == scope && at.elapsed().as_secs() < 300);
         self.entries.extend(items.iter().filter(|i| i.can_join).map(|i| (scope.clone(), world.into(), i.id.clone(), std::time::Instant::now())));
     }
     /// An instance made for the person's press: it may be gone to, beside those listed.
     fn made(&mut self, scope: &Scope, world: &str, id: &str) {
         self.entries.retain(|(s, _, _, at)| s == scope && at.elapsed().as_secs() < 300);
-        self.entries.push((scope.clone(), world.into(), id.into(), std::time::Instant::now()));
+        self.made.retain(|(s, _, _, at)| s == scope && at.elapsed().as_secs() < 300);
+        self.made.push((scope.clone(), world.into(), id.into(), std::time::Instant::now()));
     }
     fn contains(&self, scope: &Scope, world: &str, id: &str) -> bool {
-        self.entries.iter().any(|(s, w, i, at)| s == scope && w == world && i == id && at.elapsed().as_secs() < 300)
+        self.entries.iter().chain(&self.made).any(|(s, w, i, at)| s == scope && w == world && i == id && at.elapsed().as_secs() < 300)
     }
 }
 /// Whether a world request goes there directly or only invites.
 #[derive(Clone, Copy)]
 enum Way { Direct, Invite }
-static INSTANCE_PERMITS: std::sync::Mutex<InstancePermits> = std::sync::Mutex::new(InstancePermits { entries: Vec::new(), pending: Vec::new() });
 
 fn scoped_world_work(
     scope: &Scope,
@@ -271,9 +277,9 @@ impl Controller {
                 Request::WorldDetails { world } => source.personal_until(user, || scope == Scope::of(&self.view()), deadline, |c| c.world(&world)).map(Response::WorldDetails).map_err(WorldError::Api),
                 Request::WorldInstances { world } | Request::WorldInstancesNext { world, .. } => {
                     let ids = continuation;
-                    if ids.is_none() { let mut permits = INSTANCE_PERMITS.lock().unwrap(); permits.allow(&scope, &world, &[]); permits.pending.retain(|(_, w, _, _)| *w != world); }
+                    if ids.is_none() { let mut permits = self.instance_permits.lock().unwrap(); permits.allow(&scope, &world, &[]); permits.pending.retain(|(_, w, _, _)| *w != world); }
                     let ids = match ids { Some(ids) => {
-                        if !INSTANCE_PERMITS.lock().unwrap().pending.iter().any(|(s, w, pending, at)| *s == scope && *w == world && *pending == ids && at.elapsed().as_secs() < 300) { return Err(WorldError::NotListed); }
+                        if !self.instance_permits.lock().unwrap().pending.iter().any(|(s, w, pending, at)| *s == scope && *w == world && *pending == ids && at.elapsed().as_secs() < 300) { return Err(WorldError::NotListed); }
                         ids
                     }, None => source.personal_until(user, || scope == Scope::of(&self.view()), deadline, |c| c.world_instance_ids(&world)).map_err(WorldError::Api)? };
                     let remaining = ids.iter().skip(16).cloned().collect();
@@ -287,7 +293,7 @@ impl Controller {
                         }
                     }
                     if scope != Scope::of(&self.view()) { return Err(WorldError::AccountChanged); }
-                    let mut permits = INSTANCE_PERMITS.lock().unwrap();
+                    let mut permits = self.instance_permits.lock().unwrap();
                     permits.pending.retain(|(s, w, _, at)| *s == scope && *w != world && at.elapsed().as_secs() < 300);
                     if !list.remaining.is_empty() { permits.pending.push((scope.clone(), world.clone(), list.remaining.clone(), std::time::Instant::now())); }
                     permits.entries.extend(list.items.iter().filter(|i| i.can_join).map(|i| (scope.clone(), world.clone(), i.id.clone(), std::time::Instant::now())));
@@ -298,12 +304,12 @@ impl Controller {
                     if scope != Scope::of(&self.view()) { return Err(WorldError::AccountChanged); }
                     // Made for this press: it may be gone to, whatever VRChat says of a room nobody entered yet, and the
                     // instances listed before stay as they were (allow() would forget them).
-                    INSTANCE_PERMITS.lock().unwrap().made(&scope, &world, &instance.id);
+                    self.instance_permits.lock().unwrap().made(&scope, &world, &instance.id);
                     Ok(Response::CreatedInstance(instance))
                 }
                 Request::InviteSelf { world, instance } | Request::GoThere { world, instance } => {
                     let direct = matches!(way, Way::Direct);
-                    if !INSTANCE_PERMITS.lock().unwrap().contains(&scope, &world, &instance) { return Err(WorldError::NotListed); }
+                    if !self.instance_permits.lock().unwrap().contains(&scope, &world, &instance) { return Err(WorldError::NotListed); }
                     let fresh = source.personal_until(user, || scope == Scope::of(&self.view()), deadline, |c| c.world_instance(&world, &instance)).map_err(WorldError::Api)?
                         .ok_or(WorldError::NotJoinable)?;
                     if fresh.full { return Err(WorldError::Full); }
@@ -936,7 +942,7 @@ mod tests {
             "n_users":0,"capacity":80,"full":false,"active":false,"users":[]})
     }
     const MADE_ID: &str = "46657~hidden(usr_test)~region(eu)";
-    // Worlds of their own: permits are one store for the process, and tests run at once (a list read clears its world's).
+    // Worlds of their own (permits are per controller since BUILD-7; kept apart all the same).
     const MADE_WORLD: &str = "wrld_266523e8-9161-40da-acd0-6bd82e075833";
     const KEEP_WORLD: &str = "wrld_266523e8-9161-40da-acd0-6bd82e075834";
     const DIRECT_WORLDS: [&str; 3] = ["wrld_266523e8-9161-40da-acd0-6bd82e075835", "wrld_266523e8-9161-40da-acd0-6bd82e075836", "wrld_266523e8-9161-40da-acd0-6bd82e075837"];
@@ -944,6 +950,25 @@ mod tests {
         let fake = std::sync::Arc::new(fake);
         *ctl.travel.lock().unwrap() = Some(fake.clone() as std::sync::Arc<dyn crate::controller::travel::Travel>);
         fake
+    }
+
+    /// BUILD-7: a listing of the world between Make and Go (the page refreshing) does not forget the room just made,
+    /// which VRChat may not list yet; and another controller's listing (another test) never touches this one's.
+    #[test]
+    fn a_made_instance_survives_a_new_listing_of_its_world() {
+        let other = Controller::new(orbiters_core::settings::Settings::default());
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        let (_, calls) = ctl.test_vrchat(vec![(200, made_answer(REVIEW_WORLD)), (200, serde_json::json!({"instances": []})), (200, made_answer(REVIEW_WORLD)), (200, serde_json::json!({}))]);
+        let _ = other.test_vrchat(vec![(200, serde_json::json!({"instances": []}))]);
+        let scope = Scope::of(&ctl.view());
+        let Response::CreatedInstance(made) = ctl.vrchat_data(scope.clone(), Request::CreateInstance { world: REVIEW_WORLD.into(), access: orbiters_core::vrchat_api::CreateAccess::FriendsPlus, region: orbiters_core::vrchat_api::InstanceRegion::Eu }).unwrap() else { panic!("not made") };
+        let Response::WorldInstances(listed) = ctl.vrchat_data(scope.clone(), Request::WorldInstances { world: REVIEW_WORLD.into() }).unwrap() else { panic!("no listing") };
+        assert!(listed.items.is_empty(), "VRChat does not list it yet");
+        let elsewhere = other.vrchat_data(Scope::of(&other.view()), Request::WorldInstances { world: REVIEW_WORLD.into() }).unwrap();
+        assert!(matches!(elsewhere, Response::WorldInstances(_)), "{elsewhere:?}");
+        let reply = ctl.vrchat_data(scope, Request::InviteSelf { world: REVIEW_WORLD.into(), instance: made.id }).unwrap();
+        assert!(matches!(reply, Response::Invited), "{reply:?}");
+        assert_eq!(calls.lock().unwrap().len(), 4);
     }
 
     /// Enzo's press (L-invite-error): Make a new one, Friends+, then the invite. A new instance said `active: false`, read

@@ -495,7 +495,23 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
     let ctx = ui.ctx().clone();
     let source = new_source(state);
     let valid = templates::validate_name(&state.new_name).is_ok();
-    let enabled = source.as_ref().is_some_and(|(_, u)| !u.is_empty()) && valid && !state.new_location.is_empty() && !state.running();
+    // A copy is checked as Duplicate checks it: its size against the room on the destination's disk, the folder free,
+    // the project's Library not being moved (PROJECTS-3).
+    let copy_problem = match (&source, state.duplicate && valid && !state.new_location.is_empty() && !state.running()) {
+        (Some((path, _)), true) => match state.scan.projects.iter().find(|p| &p.path == path).cloned() {
+            Some(project) => {
+                let (name, location) = (state.new_name.clone(), state.new_location.clone());
+                super::duplicate::copy_problem(&ctx, state, &project, &name, &location)
+            }
+            None => None,
+        },
+        _ => None,
+    };
+    // Said once known (not while the size is being measured).
+    if let Some(problem) = copy_problem.as_deref().filter(|p| *p != tr("Checking required disk space…")) {
+        inline_warning(ui, problem);
+    }
+    let enabled = source.as_ref().is_some_and(|(_, u)| !u.is_empty()) && valid && !state.new_location.is_empty() && !state.running() && copy_problem.is_none();
     let label = match (state.running(), state.duplicate) {
         (true, true) => tr("Copying…"),
         (true, false) => tr("Creating…"),

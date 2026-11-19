@@ -39,8 +39,9 @@ pub(super) enum Modal {
 /// place (on a worker, when they change).
 #[derive(Default)]
 pub(super) struct Dup {
-    pub measured: Option<(bool, Result<u64, String>)>,
-    pub measure: Job<(bool, Result<u64, String>)>,
+    /// The project measured, with Library or not, and what a copy of it takes.
+    pub measured: Option<(PathBuf, bool, Result<u64, String>)>,
+    pub measure: Job<(PathBuf, bool, Result<u64, String>)>,
     pub name: String,
     pub location: String,
     pub library: bool,

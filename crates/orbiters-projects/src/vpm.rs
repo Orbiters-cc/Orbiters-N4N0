@@ -473,11 +473,9 @@ async fn apply_plan(
         kept.discard();
         return Ok(());
     };
-    // Rolled back: the kept folders, the manifest as it was (through a file beside it: a full disk, the likely cause of
-    // the failure, must not leave it empty), then whatever else is missing restored.
-    if let Err(r) = kept.put_back() {
-        return Err(e.context(r));
-    }
+    // Rolled back: the manifest as it was (through a file beside it: a full disk, the likely cause of the failure, must
+    // not leave it empty), whatever is missing restored, then the kept folders over what the resolver put there: the
+    // exact bytes the project had win.
     if let Err(r) = replace_bytes(&manifest, &backup) {
         return Err(e.context(tr!("The package list could not be put back ({why}): use Restore", why = r)));
     }
@@ -489,6 +487,9 @@ async fn apply_plan(
         Ok(())
     }
     .await;
+    if let Err(r) = kept.put_back() {
+        return Err(e.context(r));
+    }
     Err(match restored {
         Ok(()) => e.context(tr("Nothing was changed: the project's packages are as they were")),
         Err(r) => e.context(tr!("The package list was put back, but restoring its packages failed ({why}): use Restore", why = format!("{r:#}"))),

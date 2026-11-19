@@ -227,14 +227,14 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         feedback::banner(ui, Id::unique(("projects-warning", i, w)), Tone::Warn, w, false);
         ui.add_space(12.0);
     }
+    let scanning = state.scanning();
+    let [mut registered_places, mut found_places] = std::mem::take(&mut state.places);
     let q = state.query.trim().to_lowercase();
     let find = orbiters_core::search::Query::new(&q);
     let matches = |p: &&Project| find.matches(&p.name) || (!q.is_empty() && p.path.to_string_lossy().to_lowercase().contains(&q));
     // Hidden projects only when asked for (dimmed and marked then).
     let hidden_n = state.scan.projects.iter().filter(|p| state.is_hidden(&p.path)).count();
     let shown = |p: &&Project| state.show_hidden || !state.is_hidden(&p.path);
-    let scanning = state.scanning();
-    let [mut registered_places, mut found_places] = std::mem::take(&mut state.places);
     let mut registered: Vec<Project> = state.scan.projects.iter().filter(|p| p.registered).filter(matches).filter(shown).cloned().collect();
     keep_places(&mut registered, &mut registered_places, scanning);
     let mut proposals: Vec<Project> = state.scan.projects.iter().filter(|p| !p.registered).filter(matches).filter(shown).cloned().collect();

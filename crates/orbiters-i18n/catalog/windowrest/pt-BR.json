@@ -3,5 +3,6 @@
   "In {seconds} s, to the tray: everything keeps running there.": "Em {seconds} s, para a bandeja: tudo continua funcionando lá.",
   "Keep open": "Manter aberto",
   "Close the minimized window while playing": "Fechar a janela minimizada enquanto você joga",
-  "After 15 minutes minimized while VRChat runs, Orbiters - N4N0 asks for 8 seconds, then closes its window to the tray to give its memory back. Open it again from the tray: it comes back on its page.": "Depois de 15 minutos minimizada enquanto o VRChat roda, Orbiters - N4N0 avisa por 8 segundos e fecha a janela na bandeja para liberar memória. Abra de novo pela bandeja: ela volta para a página em que estava."
+  "After 15 minutes minimized while VRChat runs, Orbiters - N4N0 asks for 8 seconds, then closes its window to the tray to give its memory back. Open it again from the tray: it comes back on its page.": "Depois de 15 minutos minimizada enquanto o VRChat roda, Orbiters - N4N0 avisa por 8 segundos e fecha a janela na bandeja para liberar memória. Abra de novo pela bandeja: ela volta para a página em que estava.",
+  "In {seconds} s": "Em {seconds} s"
 }

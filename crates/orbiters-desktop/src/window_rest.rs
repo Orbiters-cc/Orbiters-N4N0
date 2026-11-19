@@ -167,6 +167,8 @@ impl Rest {
             None => Step::Nothing,
             Some(started) if now - started >= COUNTDOWN => {
                 self.up = None;
+                // Closing: nothing more is offered by this window.
+                self.wait_until = f64::INFINITY;
                 Step::Close
             }
             Some(_) => Step::Nothing,
@@ -240,8 +242,9 @@ pub fn paint_card(p: &Painter, scale: f32, hover: bool, left: f32, seconds: u64)
     p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * left.clamp(0.0, 1.0), track.height())), 2.0 * s, theme::white(0.35));
 }
 
-/// The VR band's face ([`crate::wake_offer::VR_PX`], the band "Talk with N4N0?" uses): N4N0's mark, the words, a Keep
-/// open pill (the whole band presses it), the line of time left. `hover`: a laser is on it.
+/// The VR band's face ([`crate::wake_offer::VR_PX`], the band "Talk with N4N0?" uses): N4N0's mark, the words across
+/// the band, under them the seconds left and a Keep open pill (the whole band presses it), the line of time left.
+/// `hover`: a laser is on it.
 pub fn paint_band(p: &Painter, hover: bool, left: f32, seconds: u64) {
     use crate::wake_offer::VR_PX;
     let all = Rect::from_min_size(pos2(0.0, 0.0), vec2(VR_PX[0] as f32, VR_PX[1] as f32));
@@ -252,20 +255,20 @@ pub fn paint_band(p: &Painter, hover: bool, left: f32, seconds: u64) {
     p.rect_stroke(band, radius, egui::Stroke::new(3.0, if hover { theme::ACCENT } else { theme::white(0.16) }), egui::StrokeKind::Inside);
     let mark = Rect::from_center_size(pos2(band.left() + 30.0 + 26.0, band.center().y - 2.0), n4n0_logo::size_for_width(52.0));
     n4n0_logo::paint(p, mark, theme::MARK);
-    // Keep open on the right, light (Talk's is green: this one only keeps what is).
-    let pill = Rect::from_min_size(pos2(band.right() - 26.0 - 176.0, band.center().y - 32.0), vec2(176.0, 64.0));
-    p.rect_filled(pill, 32.0, if hover { theme::FG } else { theme::mix(theme::INK_950, theme::FG, 0.86) });
-    let k = keep();
-    let size = crate::mismatch::fitting(p, k, &[26.0, 24.0, 22.0, 20.0], pill.width() - 28.0);
-    widgets::text_truncated(p, pill.center(), Align2::CENTER_CENTER, &Txt::new(k, size).weight(weight::SEMIBOLD).color(theme::INK_950), pill.width() - 24.0);
     let words = mark.right() + 22.0;
-    let room = pill.left() - 18.0 - words;
+    // The words, whole, across the band (the size comes down until they fit).
+    let room = band.right() - 30.0 - words;
     let t = title();
-    let size = crate::mismatch::fitting(p, t, &[30.0, 27.0, 24.0, 22.0, 20.0], room);
-    widgets::text_truncated(p, pos2(words, band.center().y - 18.0), Align2::LEFT_CENTER, &Txt::new(t, size).weight(weight::SEMIBOLD), room + 4.0);
-    let l = line(seconds);
-    let size = crate::mismatch::fitting(p, &l, &[21.0, 19.0, 17.0, 16.0], room);
-    widgets::text_truncated(p, pos2(words, band.center().y + 22.0), Align2::LEFT_CENTER, &Txt::new(&l, size).color(theme::FG_3), room + 4.0);
+    let size = crate::mismatch::fitting(p, t, &[28.0, 26.0, 24.0, 22.0, 20.0, 18.0], room);
+    widgets::text_truncated(p, pos2(words, band.top() + 44.0), Align2::LEFT_CENTER, &Txt::new(t, size).weight(weight::SEMIBOLD), room + 4.0);
+    // Under them: the seconds left, and Keep open on the right, light (Talk's is green: this one only keeps what is).
+    let pill = Rect::from_min_size(pos2(band.right() - 26.0 - 184.0, band.top() + 80.0), vec2(184.0, 54.0));
+    p.rect_filled(pill, 27.0, if hover { theme::FG } else { theme::mix(theme::INK_950, theme::FG, 0.86) });
+    let k = keep();
+    let size = crate::mismatch::fitting(p, k, &[24.0, 22.0, 20.0, 18.0], pill.width() - 28.0);
+    widgets::text_truncated(p, pill.center(), Align2::CENTER_CENTER, &Txt::new(k, size).weight(weight::SEMIBOLD).color(theme::INK_950), pill.width() - 24.0);
+    let soon = orbiters_i18n::tr!("In {seconds} s", seconds = seconds);
+    widgets::text_truncated(p, pos2(words, pill.center().y), Align2::LEFT_CENTER, &Txt::new(&soon, 24.0).color(theme::FG_3), pill.left() - 18.0 - words);
     let track = Rect::from_min_max(pos2(band.left() + radius, band.bottom() - 9.0), pos2(band.right() - radius, band.bottom() - 5.0));
     p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * left.clamp(0.0, 1.0), track.height())), 2.0, theme::white(0.35));
 }

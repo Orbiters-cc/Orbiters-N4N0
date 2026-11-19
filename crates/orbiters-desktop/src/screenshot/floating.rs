@@ -16,21 +16,24 @@ use orbiters_ui::offscreen::save_png;
 use std::path::Path;
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
-    // Settings' switch for closing the minimised window while playing (Interface).
-    scenarios.push(Scenario {
-        name: "settings-close-minimized",
-        page: Page::Settings,
-        snapshot: scenarios[0].snapshot.clone(),
-        frames: 120,
-        splash: false,
-        open_detail: false,
-        toasts: vec![],
-        pointer: None,
-        scroll: 2600.0,
-        world: None,
-        home: None,
-        library: None,
-    });
+    // Settings' switch for closing the minimised window while playing (Interface), at three places of the page (its
+    // cards' heights differ by language).
+    for (name, scroll) in [("settings-close-minimized", 3400.0), ("settings-close-minimized-2", 4200.0), ("settings-close-minimized-3", 5000.0)] {
+        scenarios.push(Scenario {
+            name,
+            page: Page::Settings,
+            snapshot: scenarios[0].snapshot.clone(),
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll,
+            world: None,
+            home: None,
+            library: None,
+        });
+    }
     let mut snapshot = scenarios[0].snapshot.clone();
     snapshot.steamvr.running = true;
     snapshot.steamvr.overlay = true;

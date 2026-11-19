@@ -54,6 +54,8 @@ use orbiters_core::clock;
 use orbiters_core::osc::{OscValue, AVATAR_CHANGE, HIDE_SELF_PARAMETER, PARAMETERS_PREFIX, RECORD_PARAMETER};
 use orbiters_core::picture::Left;
 use orbiters_i18n::{mark, tr, tr_latin};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// VRChat's camera mask "Local User" (read and set; VRChat 2025.3.3 and later).
@@ -197,6 +199,40 @@ pub struct HideRuntime {
     /// Told about frames without a strip, for the stretch under way.
     told: bool,
     last_reassert: Option<Instant>,
+    /// Where what the app changed of VRChat's camera masks is noted while it is changed (CTL2-2): `None` in tests.
+    journal: Option<PathBuf>,
+}
+
+impl HideRuntime {
+    /// A runtime that notes changed masks in `journal` (`None`: nowhere, as in tests).
+    pub(super) fn with_journal(journal: Option<PathBuf>) -> Self {
+        Self { journal, ..Self::default() }
+    }
+}
+
+/// VRChat's camera masks as the app changed them, kept on disk while they are changed: if N4N0 is killed or crashes
+/// before it puts them back, its next start puts back the person's own choice, in the same VRChat (CTL2-2), as the VR
+/// sound devices are (controller/vr_audio.rs).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct MasksLeft {
+    /// The VRChat they were changed in: its process and when it started (a reused pid is another VRChat).
+    pid: u32,
+    started: u64,
+    /// What Local User goes back to (`Some(false)`: the app turned it on).
+    local_user: Option<bool>,
+    /// What Remote User goes back to (`Some(true)`: the app turned it off).
+    remote_user: Option<bool>,
+}
+
+/// The camera masks' journal of a service (`camera-masks.json` beside the settings).
+pub(super) fn masks_journal() -> PathBuf {
+    orbiters_core::paths::config_dir().join("camera-masks.json")
+}
+
+/// What to do with masks left changed, found at a start: the VRChat that runs now (`running`) and whether a recording
+/// is under way. `Some`: send these back; `None`: nothing to send (the journal goes either way, except while recording).
+fn masks_to_put_back(left: &MasksLeft, running: Option<(u32, u64)>, recording: bool) -> Option<(Option<bool>, Option<bool>)> {
+    (!recording && running == Some((left.pid, left.started))).then_some((left.local_user, left.remote_user))
 }
 
 fn value_of<'a>(vrchat: &'a [(String, OscValue)], path: &str) -> Option<&'a OscValue> {
@@ -358,6 +394,7 @@ impl super::Controller {
             }
             Some(true) => {
                 self.hide.lock().unwrap().others_off = true;
+                self.note_masks();
                 self.update(|s| s.capture.left_out.others = Left::Out);
                 let _ = self.with_osc(|o| o.send(REMOTE_PLAYER, vec![rosc::OscType::Bool(false)]));
                 self.check_others_went();
@@ -383,6 +420,7 @@ impl super::Controller {
                 return;
             }
             ctl.hide.lock().unwrap().others_off = false;
+            ctl.note_masks();
             ctl.update(|s| s.capture.left_out.others = Left::InPicture);
             ctl.tell_about_picture(NoticeKind::Warning, tr(OTHERS_KEPT), tr_latin(OTHERS_SHOW));
         });
@@ -401,10 +439,72 @@ impl super::Controller {
             }
             hide.others_cost_strip = true;
         }
+        self.note_masks();
         let _ = self.with_osc(|o| o.send(REMOTE_PLAYER, vec![rosc::OscType::Bool(true)]));
         self.update(|s| s.capture.left_out.others = Left::InPicture);
         self.tell_about_picture(NoticeKind::Warning, tr(OTHERS_COST), tr_latin(OTHERS_SHOW));
         true
+    }
+
+    /// Notes on disk what the app changed of the camera masks now (or nothing, and the journal goes), for the VRChat
+    /// followed. Called after every change of `turned_on` / `others_off`, before the mask is sent.
+    fn note_masks(&self) {
+        let (journal, local_user, remote_user) = {
+            let hide = self.hide.lock().unwrap();
+            let Some(journal) = hide.journal.clone() else { return };
+            (journal, hide.turned_on.then_some(false), hide.others_off.then_some(true))
+        };
+        if local_user.is_none() && remote_user.is_none() {
+            let _ = std::fs::remove_file(&journal);
+            return;
+        }
+        let Some((pid, started)) = self.vrchat_process() else { return };
+        let left = MasksLeft { pid, started, local_user, remote_user };
+        if let Ok(bytes) = serde_json::to_vec(&left) {
+            if let Err(e) = orbiters_core::write_atomic(&journal, &bytes) {
+                eprintln!("camera masks journal: {e}");
+            }
+        }
+    }
+
+    /// The VRChat followed: its pid and when its process started (`None` without one on this computer).
+    fn vrchat_process(&self) -> Option<(u32, u64)> {
+        let pid = self.view().vrchat.pid?;
+        let mut system = sysinfo::System::new();
+        let one = sysinfo::Pid::from_u32(pid);
+        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[one]), true, sysinfo::ProcessRefreshKind::nothing());
+        system.process(one).map(|p| (pid, p.start_time()))
+    }
+
+    /// At a start, once the VRChat followed is known (or `wait` passed without one): masks a run that ended without
+    /// putting them back left changed go back to the person's choice, in the same VRChat only; another VRChat, or none,
+    /// and the journal just goes (CTL2-2).
+    pub(super) fn put_back_masks_left(self: &Shared, wait: Duration) {
+        let Some(journal) = self.hide.lock().unwrap().journal.clone() else { return };
+        let Ok(bytes) = std::fs::read(&journal) else { return };
+        let Ok(left) = serde_json::from_slice::<MasksLeft>(&bytes) else {
+            let _ = std::fs::remove_file(&journal);
+            return;
+        };
+        let started = Instant::now();
+        while self.view().vrchat.pid.is_none() && started.elapsed() < wait && !self.quitting.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let recording = self.is_capturing();
+        if recording {
+            // A recording of this run changes and notes them itself: what it notes is what counts.
+            return;
+        }
+        if let Some((local_user, remote_user)) = masks_to_put_back(&left, self.vrchat_process(), recording) {
+            if let Some(remote) = remote_user {
+                let _ = self.with_osc(|o| o.send(REMOTE_PLAYER, vec![rosc::OscType::Bool(remote)]));
+            }
+            if let Some(local) = local_user {
+                let _ = self.with_osc(|o| o.send(LOCAL_PLAYER, vec![rosc::OscType::Bool(local)]));
+            }
+            eprintln!("camera masks: put back as they were before a run that ended during a recording ({left:?})"); // i18n: not shown (a log's line)
+        }
+        let _ = std::fs::remove_file(&journal);
     }
 
     /// Starts holding the avatar hidden, unless it already is.
@@ -439,6 +539,7 @@ impl super::Controller {
     /// Local User on, `after` a while, unless the recording ended by then; then checks that VRChat took it.
     fn turn_local_user_on(self: &Shared, after: Duration) {
         self.hide.lock().unwrap().turned_on = true;
+        self.note_masks();
         let generation = self.hide.lock().unwrap().generation;
         let ctl = self.clone();
         let spawned = std::thread::Builder::new().name("n4n0-local-user".into()).spawn(move || {
@@ -477,6 +578,7 @@ impl super::Controller {
             hide.turned_on = false;
             hide.mask = Some(false);
         }
+        self.note_masks();
         self.end_beat();
         self.update(|s| s.capture.left_out.wearer = Left::NotAsked);
         self.notify(NoticeKind::Error, tr(NOT_TAKEN));
@@ -505,6 +607,9 @@ impl super::Controller {
         }
         if turned_on {
             let _ = self.with_osc(|o| o.send(LOCAL_PLAYER, vec![rosc::OscType::Bool(false)]));
+        }
+        if turned_on || others_off {
+            self.note_masks();
         }
         self.end_beat();
     }
@@ -729,6 +834,40 @@ mod tests {
 
     fn says(ctl: &Shared, mask: bool) {
         ctl.osc_values.lock().unwrap().latest.record(LOCAL_PLAYER.to_string(), vec![OscValue::Bool(mask)], 1);
+    }
+
+    /// CTL2-2: masks a run left changed (it was killed during a recording) go back to the person's choice at the next
+    /// start, in the same VRChat; another VRChat, or one recording, gets nothing; the journal goes.
+    #[test]
+    fn masks_left_changed_by_a_killed_run_are_put_back_in_the_same_vrchat() {
+        let left = MasksLeft { pid: 7, started: 100, local_user: Some(false), remote_user: Some(true) };
+        assert_eq!(masks_to_put_back(&left, Some((7, 100)), false), Some((Some(false), Some(true))));
+        assert_eq!(masks_to_put_back(&left, Some((7, 101)), false), None, "a reused pid is another VRChat");
+        assert_eq!(masks_to_put_back(&left, None, false), None, "no VRChat");
+        assert_eq!(masks_to_put_back(&left, Some((7, 100)), true), None, "a recording runs");
+
+        let stand = stand_in(true);
+        let ctl = &stand.ctl;
+        ctl.update(|s| {
+            s.capture.state = CaptureState::Idle;
+            // This test's own process stands in for the VRChat followed: a pid with a start time.
+            s.vrchat.pid = Some(std::process::id());
+        });
+        let journal = std::env::temp_dir().join(format!("orbiters-masks-{}.json", std::process::id()));
+        ctl.hide.lock().unwrap().journal = Some(journal.clone());
+        // A recording turned Local User on and noted it; the run then died (nothing restored).
+        ctl.hide.lock().unwrap().turned_on = true;
+        ctl.note_masks();
+        let noted: MasksLeft = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+        assert_eq!((noted.pid, noted.local_user, noted.remote_user), (std::process::id(), Some(false), None));
+        ctl.hide.lock().unwrap().turned_on = false;
+        let _ = stand.heard(Duration::from_millis(50));
+        ctl.put_back_masks_left(Duration::ZERO);
+        let sent = stand.heard(Duration::from_millis(150));
+        assert!(sent.iter().any(|(_, a, v)| a == LOCAL_PLAYER && *v == rosc::OscType::Bool(false)), "{sent:?}");
+        assert!(!sent.iter().any(|(_, a, _)| a == REMOTE_PLAYER), "{sent:?}");
+        assert!(!journal.exists(), "the journal goes");
+        stand.end();
     }
 
     fn toast_with(ctl: &Shared, kind: NoticeKind, text: &str) -> bool {

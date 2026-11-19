@@ -523,7 +523,7 @@ impl Controller {
             capture_serial: AtomicU64::new(0),
             kit_epoch: Mutex::default(),
             avatar_before: Mutex::new(None),
-            hide: Mutex::new(hide_self::HideRuntime::default()),
+            hide: Mutex::new(hide_self::HideRuntime::with_journal((!cfg!(test)).then(hide_self::masks_journal))),
             avatar_changed_at: Mutex::new(None),
             account_runtime: Mutex::new(account::AccountRuntime::default()),
             account_generation: AtomicU64::new(0),
@@ -585,6 +585,11 @@ impl Controller {
     pub fn start(self: &Shared) {
         self.start_osc();
         self.start_lan();
+        {
+            // VRChat's camera masks a run killed during a recording left changed (CTL2-2): once VRChat is known.
+            let ctl = self.clone();
+            let _ = std::thread::Builder::new().name("masks-left".into()).spawn(move || ctl.put_back_masks_left(Duration::from_secs(20)));
+        }
         {
             let ctl = self.clone();
             let _ = std::thread::Builder::new().name("paused-reconstructions".into()).spawn(move || ctl.go_on_with_paused());

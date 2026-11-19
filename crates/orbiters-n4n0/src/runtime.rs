@@ -1443,13 +1443,15 @@ impl N4n0 {
             let latest = self.osc.latest(&mut kept.iter().map(|p| parameter(p)));
             kept.into_iter().filter_map(|p| latest.get(&parameter(p)).cloned().map(|v| (p.clone(), v))).collect()
         };
+        let mut dropped = false;
         {
             let mut rt = self.n4n0.lock().unwrap();
             if rt.avatar_id.as_deref() != Some(id.as_str()) {
                 // Another avatar's name is read once it settled.
                 rt.avatar_name = None;
                 // Nothing reviewed on the last avatar acts on this one: its controls are not this one's (they are read
-                // once it settled), and what waited for a yes on them is dropped.
+                // once it settled), and what waited for a yes on them is dropped (said at once).
+                dropped = rt.pending.iter().any(Pending::on_avatar);
                 rt.avatar_epoch += 1;
                 rt.controls = Controls::default();
                 rt.manifest = false;
@@ -1469,6 +1471,9 @@ impl N4n0 {
             // The new avatar's parameters are not the old one's, nor its size (a state being applied); the rest still
             // goes (a mute press's release, a picture's camera put back).
             rt.outbox.retain(|(_, (address, _))| !address.starts_with(PARAMETERS_PREFIX) && address != orbiters_n4n0_core::states::EYE_HEIGHT);
+        }
+        if dropped {
+            self.publish();
         }
         // The new avatar says how it moves again: until then the walk boost follows the stick alone.
         self.host.motion(None);
@@ -2418,6 +2423,10 @@ impl N4n0 {
             Ok(action) => action,
             Err(e) => return result(&e, true),
         };
+        // Raw writes are for avatars without a menu (the tool is offered only there), before any question is asked.
+        if matches!(action, Action::SetParameter { .. }) && self.n4n0.lock().unwrap().manifest {
+            return result("This avatar has menu labels: use set_avatar_control.", true); // i18n: not shown
+        }
         let (bound, control) = self.named_control(&action);
         match turn.policy.review(&action, control.as_ref()) {
             Verdict::Refuse { why } => result(&why, true),

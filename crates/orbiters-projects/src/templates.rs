@@ -216,6 +216,8 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
         std::fs::create_dir_all(destination.join(folder.strip_prefix(&source)?))?;
     }
     progress.lock().unwrap().total = files.len();
+    // One buffer for every file (PROJECTS-6): most are a few KB.
+    let mut buffer = vec![0u8; 1024 * 1024];
     for (i, p) in files.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             bail!("{}", tr!("Copy cancelled. The incomplete folder was kept at {path} and was not registered.", path = destination.display()));
@@ -225,7 +227,6 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
         std::fs::create_dir_all(dst.parent().unwrap())?;
         let mut input = std::fs::File::open(p)?;
         let mut output = std::fs::File::create(&dst)?;
-        let mut buffer = vec![0u8; 1024 * 1024];
         loop {
             if cancel.load(Ordering::Relaxed) {
                 bail!("{}", tr!("Copy cancelled. The incomplete folder was kept at {path} and was not registered.", path = destination.display()));
@@ -235,6 +236,11 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
                 break;
             }
             output.write_all(&buffer[..n]).with_context(|| tr!("Could not copy {path}", path = rel.display()))?;
+        }
+        // The source's modification time: Unity compares it with what it recorded, and a copy with Library then has
+        // nothing to look at again. Where a disk cannot keep it, the copy is still whole.
+        if let Ok(modified) = input.metadata().and_then(|m| m.modified()) {
+            let _ = output.set_modified(modified);
         }
         // A new file is not executable here, and a copy must be usable: a package's tools, a plugin's programs.
         #[cfg(unix)]
@@ -710,6 +716,8 @@ mod tests {
         let dst = temp.path().join("Copy");
         copy(&src, &dst, &AtomicBool::new(false), &progress).unwrap();
         assert!(dst.join("Assets/Empty").is_dir() && !dst.join("Temp").exists());
+        let time = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+        assert_eq!(time(&dst.join("Assets/a.txt")), time(&src.join("Assets/a.txt")), "times kept");
         let has = |f: &str| dst.join(f).exists();
         for kept in ["Assets/a.txt", "Assets/Library/kept.txt", "Assets/Tools/Temp/kept.txt", "Assets/Plugins/Tool.csproj", "ProjectSettings/ProjectVersion.txt"] {
             assert!(has(kept), "{kept}");

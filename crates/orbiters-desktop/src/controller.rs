@@ -200,7 +200,10 @@ pub struct Controller {
     /// Space being freed in the library (controller/cleanup.rs).
     cleanup: Mutex<cleanup::CleanupRuntime>,
     /// The thread that writes the settings, the newest only ([`Controller::queue_save`]).
-    settings_writer: Mutex<Option<(mpsc::Sender<Settings>, std::thread::JoinHandle<()>)>>,
+    settings_writer: Mutex<Option<(mpsc::Sender<(u64, Settings)>, std::thread::JoinHandle<()>)>>,
+    /// How many times the settings were changed: taken under `snapshot` with the change, so the writer can tell the
+    /// newer of two copies whatever order they reach it in.
+    settings_revision: AtomicU64,
     /// A capture asked for while the last one was still being saved: it starts once that one is (source, importing,
     /// started from the record toggle).
     pending_start: Mutex<Option<(SourceSpec, bool, bool, u64)>>,
@@ -521,6 +524,7 @@ impl Controller {
             updates: Mutex::new(update::UpdateRuntime::default()),
             cleanup: Mutex::new(cleanup::CleanupRuntime::default()),
             settings_writer: Mutex::new(None),
+            settings_revision: AtomicU64::new(0),
             pending_start: Mutex::new(None),
             #[cfg(test)]
             test_commands: Mutex::new(None),
@@ -1837,8 +1841,12 @@ impl Controller {
                 self.booster.cancel_work();
             }
             s.storage.limit_gb = s.settings.storage_limit_gb;
-            (previous, s.settings.clone())
+            // Numbered under the lock that made the change: two changes on two threads can reach the writer in
+            // either order, and the higher number is the one that holds both.
+            let revision = self.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+            (previous, (revision, s.settings.clone()))
         };
+        let (revision, settings) = settings;
         self.publish();
         if echo && previous.walk_boost.strength != settings.walk_boost.strength {
             self.n4n0.send_parameter(orbiters_contracts::n4n0::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
@@ -1860,7 +1868,7 @@ impl Controller {
             self.update_action(crate::ipc::UpdateAction::Check);
         }
         let (osc_changed, sessions_changed) = (previous.osc != settings.osc, previous.sessions_dir != settings.sessions_dir);
-        self.queue_save((*settings).clone());
+        self.queue_save(revision, (*settings).clone());
         if osc_changed || sessions_changed {
             let ctl = self.clone();
             std::thread::spawn(move || {
@@ -1876,11 +1884,11 @@ impl Controller {
     }
 
     /// Hands the settings to the writing thread (started on first use). One writer, so saves never race; it keeps
-    /// the newest of a burst and writes it once nothing changed for [`SAVE_QUIET`].
-    fn queue_save(self: &Shared, settings: Settings) {
+    /// the newest of a burst (by `revision`, not by arrival) and writes it once nothing changed for [`SAVE_QUIET`].
+    fn queue_save(self: &Shared, revision: u64, settings: Settings) {
         let mut writer = self.settings_writer.lock().unwrap();
         if writer.is_none() {
-            let (tx, rx) = mpsc::channel::<Settings>();
+            let (tx, rx) = mpsc::channel::<(u64, Settings)>();
             let ctl = Arc::downgrade(self);
             let write = move |s: Settings| {
                 // Tests never touch the person's settings file.
@@ -1893,21 +1901,9 @@ impl Controller {
                     }
                 }
             };
-            let thread = std::thread::Builder::new().name("settings-writer".into()).spawn(move || {
-                while let Ok(mut latest) = rx.recv() {
-                    loop {
-                        match rx.recv_timeout(SAVE_QUIET) {
-                            Ok(newer) => latest = newer,
-                            Err(mpsc::RecvTimeoutError::Timeout) => break,
-                            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                write(latest);
-                                return;
-                            }
-                        }
-                    }
-                    write(latest);
-                }
-            });
+            let thread = std::thread::Builder::new()
+                .name("settings-writer".into())
+                .spawn(move || write_settings_in_order(rx, SAVE_QUIET, write));
             match thread {
                 Ok(thread) => *writer = Some((tx, thread)),
                 Err(e) => {
@@ -1917,7 +1913,7 @@ impl Controller {
             }
         }
         if let Some((tx, _)) = writer.as_ref() {
-            let _ = tx.send(settings);
+            let _ = tx.send((revision, settings));
         }
     }
 
@@ -3037,8 +3033,77 @@ fn spawn_watchers(ctl: Shared) {
         .expect("watchers thread");
 }
 
+/// The settings writer's loop: waits for [`SAVE_QUIET`] of quiet after a change, then writes the newest copy it was
+/// given. Newest is the highest revision, kept across writes too: a copy numbered lower than one already written (a
+/// thread that applied first and queued last) is never written over it.
+fn write_settings_in_order(rx: mpsc::Receiver<(u64, Settings)>, quiet: Duration, mut write: impl FnMut(Settings)) {
+    let mut written = 0u64;
+    while let Ok(first) = rx.recv() {
+        let mut latest = Some(first).filter(|(r, _)| *r > written);
+        let mut keep = |latest: &mut Option<(u64, Settings)>, (r, s): (u64, Settings)| {
+            if r > latest.as_ref().map_or(written, |(l, _)| *l) {
+                *latest = Some((r, s));
+            }
+        };
+        let mut done = false;
+        loop {
+            match rx.recv_timeout(quiet) {
+                Ok(newer) => keep(&mut latest, newer),
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        if let Some((r, s)) = latest {
+            written = r;
+            write(s);
+        }
+        if done {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// CTL-1 / audit F10: two threads that applied A then B (B holding both changes) can queue B then A. The file
+    /// must get B, whether A arrives in the same burst or after B was already written.
+    #[test]
+    fn the_settings_file_gets_the_newest_applied_whatever_the_queue_order() {
+        use orbiters_core::settings::Settings;
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (a, b) = {
+            let mut a = Settings::default();
+            a.storage_limit_gb = 1.0;
+            let mut b = a.clone();
+            b.storage_limit_gb = 2.0;
+            (a, b)
+        };
+        let quiet = Duration::from_millis(40);
+        let run = |sends: Vec<(u64, Settings, Duration)>| {
+            let (tx, rx) = mpsc::channel();
+            let writer = std::thread::spawn(move || {
+                let mut written = Vec::new();
+                super::write_settings_in_order(rx, quiet, |s| written.push(s.storage_limit_gb));
+                written
+            });
+            for (r, s, pause) in sends {
+                tx.send((r, s)).unwrap();
+                std::thread::sleep(pause);
+            }
+            drop(tx);
+            writer.join().unwrap()
+        };
+        let none = Duration::ZERO;
+        let after_write = Duration::from_millis(200);
+        assert_eq!(run(vec![(2, b.clone(), none), (1, a.clone(), none)]), vec![2.0], "reversed in one burst");
+        assert_eq!(run(vec![(2, b.clone(), after_write), (1, a.clone(), none)]), vec![2.0], "the older after a write");
+        assert_eq!(run(vec![(1, a.clone(), after_write), (2, b.clone(), none)]), vec![1.0, 2.0], "in order");
+    }
+
     /// The publish-rate log says a minute's publishes once, with the busiest second, and nothing for a silent minute.
     #[test]
     fn the_publish_rate_is_said_once_a_minute() {

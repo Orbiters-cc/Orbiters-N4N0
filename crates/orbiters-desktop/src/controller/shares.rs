@@ -1761,7 +1761,7 @@ pub(crate) mod tests {
     /// trees would be the old result's and the picture the new one's.
     #[test]
     fn a_result_replaced_while_prepared_is_not_sent() {
-        let (dir, session, records, mut entry) = uploaded_session("replaced", None);
+        let (dir, _session, records, mut entry) = uploaded_session("replaced", None);
         entry.edits = Some(Ok(orbiters_reconstruct::edit::UNEDITED.into()));
         let (api, seen) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 1))]);
         let replaced = |s: &Path| {

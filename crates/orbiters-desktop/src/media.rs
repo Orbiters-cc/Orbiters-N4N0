@@ -231,7 +231,16 @@ mod platform {
         /// What was read of each process (its start time and package), by its number, parent and program: a process
         /// is opened once.
         known: HashMap<(u32, u32, String), (Option<u64>, Option<String>)>,
+        /// The processes as last listed, and when: listed again only when a sound belongs to a process not in it, or
+        /// after [`PROCESSES_FOR`]. (Every reading, once a second while anything showed the music, took a snapshot of
+        /// all the computer's processes: most of the window's CPU, with hundreds of processes.)
+        processes: Option<(std::time::Instant, Vec<Process>)>,
+        /// The processes the last [`Mixer::sounds`] found sounds of.
+        sound_pids: Vec<u32>,
     }
+
+    /// How long a list of the processes is used while every sound's process is in it.
+    const PROCESSES_FOR: std::time::Duration = std::time::Duration::from_secs(30);
 
     impl Mixer for Sessions {
         fn sounds(&mut self) -> Vec<Sound> {
@@ -240,6 +249,7 @@ mod platform {
                 AudioSessionStateActive, AudioSessionStateExpired, IAudioSessionControl2, IAudioSessionManager2, ISimpleAudioVolume, DEVICE_STATE_ACTIVE,
             };
             self.volumes.clear();
+            self.sound_pids.clear();
             let mut out = Vec::new();
             // SAFETY: COM calls on this thread's apartment, on interfaces held here; each is released when dropped.
             unsafe {
@@ -258,6 +268,7 @@ mod platform {
                         let pid = control.cast::<IAudioSessionControl2>().and_then(|c| c.GetProcessId()).unwrap_or(0);
                         let Ok(volume) = control.cast::<ISimpleAudioVolume>() else { continue };
                         let (Ok(level), Ok(muted)) = (volume.GetMasterVolume(), volume.GetMute()) else { continue };
+                        self.sound_pids.push(pid);
                         out.push(Sound { device: i.to_string(), pid, level, muted: muted.as_bool(), playing: state == AudioSessionStateActive });
                         self.volumes.push(volume);
                     }
@@ -267,6 +278,28 @@ mod platform {
         }
 
         fn processes(&mut self) -> Vec<Process> {
+            if let Some((at, list)) = &self.processes {
+                let fresh = at.elapsed() < PROCESSES_FOR;
+                if fresh && self.sound_pids.iter().all(|pid| *pid == 0 || list.iter().any(|p| p.pid == *pid)) {
+                    return list.clone();
+                }
+            }
+            let list = self.list_processes();
+            self.processes = Some((std::time::Instant::now(), list.clone()));
+            list
+        }
+
+        fn windows_of(&mut self, id: &str) -> Vec<u32> {
+            self.find_windows(id)
+        }
+
+        fn set(&mut self, index: usize, level: Option<f32>, muted: Option<bool>) -> Result<(), String> {
+            self.set_sound(index, level, muted)
+        }
+    }
+
+    impl Sessions {
+        pub(super) fn list_processes(&mut self) -> Vec<Process> {
             use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
             let mut out = Vec::new();
             // SAFETY: a snapshot closed below, read with an entry of the size it says.
@@ -299,7 +332,7 @@ mod platform {
             out
         }
 
-        fn windows_of(&mut self, id: &str) -> Vec<u32> {
+        fn find_windows(&mut self, id: &str) -> Vec<u32> {
             use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY};
             use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
             use windows::Win32::System::Variant::VT_LPWSTR;
@@ -340,7 +373,7 @@ mod platform {
             out
         }
 
-        fn set(&mut self, index: usize, level: Option<f32>, muted: Option<bool>) -> Result<(), String> {
+        fn set_sound(&mut self, index: usize, level: Option<f32>, muted: Option<bool>) -> Result<(), String> {
             let volume = self.volumes.get(index).ok_or("that sound ended")?; // i18n: not shown (logged by the media thread)
             // SAFETY: a session's volume held since the last listing; no event context.
             unsafe {
@@ -1024,5 +1057,45 @@ mod tests {
             let found = (0..10).find_map(|_| watcher().fresh(Duration::from_secs(5)).media.and_then(|m| m.link()));
             println!("YouTube link: {found:?}");
         }
+    }
+
+    /// Night: what one reading of the music costs on this computer, and its parts (the window's `orbiters-media`
+    /// thread used 93 of its 107 CPU-seconds with nothing playing). `cargo test -p orbiters-desktop
+    /// what_a_media_reading_costs_here -- --ignored --nocapture`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn what_a_media_reading_costs_here() {
+        use orbiters_n4n0::media::app_sound::Mixer;
+        use orbiters_n4n0::media::MediaBackend;
+        let cpu = || {
+            use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+            let (mut a, mut b, mut kernel, mut user) = Default::default();
+            // SAFETY: this thread's own times.
+            unsafe { GetThreadTimes(GetCurrentThread(), &mut a, &mut b, &mut kernel, &mut user).unwrap() };
+            let ticks = |t: windows::Win32::Foundation::FILETIME| ((t.dwHighDateTime as u64) << 32 | t.dwLowDateTime as u64) as f64 / 10_000.0;
+            ticks(kernel) + ticks(user)
+        };
+        let times = 20;
+        let mut sessions = platform::Sessions::default();
+        let t = cpu();
+        for _ in 0..times {
+            sessions.list_processes();
+        }
+        println!("list of the processes: {:.2} ms of CPU each", (cpu() - t) / times as f64);
+        let t = cpu();
+        for _ in 0..times {
+            sessions.sounds();
+        }
+        println!("audio sessions: {:.2} ms of CPU each", (cpu() - t) / times as f64);
+        let mut media = platform::Media::new();
+        let mut previous = Reading::default();
+        previous = media.read(&previous);
+        let t = cpu();
+        for _ in 0..times {
+            previous = media.read(&previous);
+        }
+        println!("a whole reading (processes listed again only when needed): {:.2} ms of CPU each", (cpu() - t) / times as f64);
+        println!("playing: {:?}", previous.media.as_ref().map(|m| (&m.app, m.playing, &m.sound)));
     }
 }

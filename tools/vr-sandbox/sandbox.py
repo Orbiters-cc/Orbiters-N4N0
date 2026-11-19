@@ -1171,7 +1171,8 @@ class Session:
         launcher=STEAM/'steamapps/common/VRChat/launch.exe'
         error=None
         for attempt in (1,2):
-            waited=vrchat_life.wait_idle(self.eac,'before launch',evidence_dir=ROOT)
+            # Only this session's own launches' error dialogs are closed; anybody else's bootstrapper is left alone (SBX-14).
+            waited=vrchat_life.wait_idle(self.eac,'before launch',evidence_dir=ROOT,owned=self.j.setdefault('launches',[]))
             self.j['launch_link']=url;self.j['home_link']=url;atomic_json(JOURNAL,self.j)
             sampler=vrchat_life.Sampler(self.eac,'launch',120)
             began=time.time()
@@ -1185,7 +1186,9 @@ class Session:
                 # Before the first launch of the session: what VRChat's own window settings were (restore puts them back).
                 try:self.j['vrchat_window']=read_vrchat_window();atomic_json(JOURNAL,self.j)
                 except OSError as error:self.eac.write('vrchat_window_not_saved',error=str(error))
+            before=time.time()-1   # a lower bound of launch.exe's creation time, even if it has already exited
             proc=subprocess.Popen([str(launcher),url,f'--profile={profile}',*osc,'-screen-fullscreen','0','-screen-width','1280','-screen-height','720'],creationflags=subprocess.CREATE_NO_WINDOW)
+            self.j.setdefault('launches',[]).append({'pid':proc.pid,'create_time':before});atomic_json(JOURNAL,self.j)
             error=None
             try:
                 while time.time()-began<120:
@@ -1196,7 +1199,7 @@ class Session:
                         self.vrchat_seen=v
                         self.j['moved']=False;atomic_json(JOURNAL,self.j)
                         return {'launch_pid':proc.pid,'vrchat_pid':v['pid'],'url':url,'mode':'SteamVR auto-detection; no --no-vr','attempt':attempt}
-                    error=vrchat_life.close_error_windows(self.eac,ROOT)
+                    error=vrchat_life.close_error_windows(self.eac,ROOT,owned=self.j['launches'])
                     if error:break
                     time.sleep(1)
             finally:sampler.stop()

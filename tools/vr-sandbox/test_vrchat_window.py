@@ -22,8 +22,9 @@ class VRChatWindow(unittest.TestCase):
         s = sandbox.Session()
         s.j = {'session': 'w', 'files': [], 'processes': [], 'restored': False, 'shared': True}
         with patch.object(sandbox.vrchat_life, 'wait_idle', return_value=0), patch.object(sandbox.vrchat_life, 'Sampler'), \
-                patch.object(sandbox.subprocess, 'Popen'), patch.object(sandbox.Session, 'record'), \
+                patch.object(sandbox.subprocess, 'Popen') as popen, patch.object(sandbox.Session, 'record'), \
                 patch.object(sandbox.Session, 'vrchat', return_value={'pid': 5, 'create_time': 2e9}):
+            popen.return_value.pid = 4321
             s.launch('vrchat://launch?ref=orbiters.cc&id=x', 0)
         # VRChat quits and Unity saves the sandbox's window: 1280x720, windowed, and a value it did not have before.
         sandbox.TEST_REGISTRY.update({'Screenmanager Resolution Width_h182942802': (DWORD, 1280),

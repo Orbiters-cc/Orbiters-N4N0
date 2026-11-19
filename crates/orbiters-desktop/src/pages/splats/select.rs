@@ -357,7 +357,9 @@ impl Edits {
 
     /// Takes in what the picture's job came back with.
     pub(super) fn poll(&mut self) {
-        if let Some(r) = self.drawing.as_mut().and_then(|j| j.take()) {
+        // A drawing whose worker panicked ends as a failed one (it kept the view busy for ever).
+        let r = self.drawing.as_mut().and_then(|j| j.take().or_else(|| j.died().then(|| Err("it stopped unexpectedly".to_string())))); // i18n: not shown (kept as the picture's error, which only stops a redraw)
+        if let Some(r) = r {
             self.drawing = None;
             match r {
                 Ok(_) => self.picture_error = None,

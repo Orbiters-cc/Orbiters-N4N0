@@ -129,7 +129,11 @@ fn close_app(dir: &Path, programs: &[PathBuf], progress: &Progress, silent: bool
     }
     let stop = || progress.forced() || progress.cancelled();
     if !system::wait_for_programs(programs, PATIENCE, stop) {
-        if !silent {
+        if silent {
+            // Nobody to ask and nothing closed by force: the app may be saving a recording. It gets longer, then the
+            // update waits for another time (`main.rs` schedules it at the next sign-in).
+            system::wait_for_programs(programs, silent_patience(), || false);
+        } else {
             progress.stuck(true);
             while !system::wait_for_programs(programs, Duration::from_secs(1), stop) && !stop() {}
             progress.stuck(false);
@@ -137,8 +141,35 @@ fn close_app(dir: &Path, programs: &[PathBuf], progress: &Progress, silent: bool
             system::terminate_programs(programs);
         }
     }
-    anyhow::ensure!(system::processes_of(programs).is_empty(), "{}", orbiters_i18n::tr!("Orbiters - N4N0 is still running from {folder}.", folder = dir.display()));
+    if !system::processes_of(programs).is_empty() {
+        return Err(StillRunning(dir.to_path_buf()).into());
+    }
     Ok(())
+}
+
+/// How much longer an automatic update waits for the app to quit by itself.
+fn silent_patience() -> Duration {
+    if cfg!(test) {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(120)
+    }
+}
+
+/// The install's programs did not quit: nothing was changed, the update can be tried again.
+#[derive(Debug)]
+pub struct StillRunning(pub PathBuf);
+impl std::fmt::Display for StillRunning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&orbiters_i18n::tr!("Orbiters - N4N0 is still running from {folder}.", folder = self.0.display()))
+    }
+}
+impl std::error::Error for StillRunning {}
+
+/// Whether `path` is a real folder: there, and not a link or junction.
+fn real_dir(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink() && m.file_attributes() & 0x400 == 0)
 }
 
 /// `relative` in `dir`, when nothing between them is a link or a junction (PROJECTS-42): a folder of the install
@@ -147,13 +178,19 @@ fn contained(dir: &Path, relative: &str) -> Option<PathBuf> {
     use std::os::windows::fs::MetadataExt;
     const REPARSE_POINT: u32 = 0x400;
     let path = inside(dir, relative)?;
+    // The base itself too: a backup or staging folder that is a junction leads elsewhere.
+    if !real_dir(dir) {
+        return None;
+    }
     let mut at = dir.to_path_buf();
     for part in Path::new(relative).components() {
         at.push(part);
         match std::fs::symlink_metadata(&at) {
             Ok(m) if m.file_type().is_symlink() || m.file_attributes() & REPARSE_POINT != 0 => return None,
             Ok(_) => {}
-            Err(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            // What cannot be looked at cannot be shown to be inside.
+            Err(_) => return None,
         }
     }
     Some(path)
@@ -186,49 +223,55 @@ fn redirected<'a>(dir: &Path, paths: impl Iterator<Item = &'a str>) -> Vec<Strin
 /// What a cut install left (F15): files the last install had that are missing in `dir` and waiting in the backup folder
 /// go back first; then the backup folder (its other files may be the only copy of something) and a staging folder
 /// holding anything but payload files are kept under a name of their own instead of being removed.
-fn recover_leftovers(dir: &Path, staging: &Path, backup: &Path, index: &payload::Index, previous: Option<&InstallRecord>) {
-    let stamp = time::OffsetDateTime::now_utc().unix_timestamp();
-    if backup.is_dir() {
+fn recover_leftovers(dir: &Path, staging: &Path, backup: &Path, previous: Option<&InstallRecord>) -> anyhow::Result<()> {
+    if real_dir(backup) {
         for path in previous.map(|r| r.files.as_slice()).unwrap_or_default() {
             let (Some(dest), Some(from)) = (contained(dir, path), contained(backup, path)) else { continue };
             if !dest.exists() && from.is_file() && make_parent(&dest).is_ok() {
                 let _ = rename(&from, &dest);
             }
         }
-        if std::fs::read_dir(backup).is_ok_and(|mut d| d.next().is_some()) && !files_only_of(backup, &[]) {
-            let _ = rename(backup, &dir.join(format!("{BACKUP}-{stamp}")));
-        } else {
-            remove_tree(backup);
-        }
     }
-    if staging.is_dir() {
-        let payload: Vec<&str> = index.files.iter().map(|f| f.path.as_str()).collect();
-        if files_only_of(staging, &payload) {
-            remove_tree(staging);
-        } else {
-            let _ = rename(staging, &dir.join(format!("{STAGING}-{stamp}")));
+    // What is left in either is kept, under a name of its own; neither is ever removed with its contents (they may be
+    // the person's, or the only copy of a file). When it cannot be kept aside, the install stops here.
+    for folder in [backup, staging] {
+        if std::fs::symlink_metadata(folder).is_err() {
+            continue;
         }
+        if real_dir(folder) {
+            remove_empty_dirs(folder);
+            if !folder.exists() {
+                continue;
+            }
+        }
+        let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let stamp = time::OffsetDateTime::now_utc().unix_timestamp();
+        let free = (0..100).map(|n| dir.join(format!("{name}-{stamp}-{n}"))).find(|p| std::fs::symlink_metadata(p).is_err());
+        let kept = free.map(|to| rename(folder, &to));
+        anyhow::ensure!(
+            matches!(kept, Some(Ok(()))),
+            "{}",
+            tr!("{folder} is left from an earlier install and could not be set aside: nothing was changed.", folder = folder.display())
+        );
     }
+    Ok(())
 }
 
-/// Whether every file under `folder` is one of `paths` (relative, `/` between folders), with no link anywhere.
-fn files_only_of(folder: &Path, paths: &[&str]) -> bool {
-    fn walk(root: &Path, at: &Path, paths: &[&str]) -> bool {
-        let Ok(entries) = std::fs::read_dir(at) else { return false };
-        entries.flatten().all(|e| {
-            let Ok(m) = std::fs::symlink_metadata(e.path()) else { return false };
-            if m.file_type().is_symlink() {
-                false
-            } else if m.is_dir() {
-                walk(root, &e.path(), paths)
-            } else {
-                let rel = e.path().strip_prefix(root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
-                paths.iter().any(|p| p.eq_ignore_ascii_case(&rel))
-            }
-        })
+/// Removes the empty folders of `folder` (and it, once empty), deepest first; never a file, never through a link.
+fn remove_empty_dirs(folder: &Path) {
+    if !real_dir(folder) {
+        return;
     }
-    walk(folder, folder, paths)
+    if let Ok(entries) = std::fs::read_dir(folder) {
+        for e in entries.flatten() {
+            if real_dir(&e.path()) {
+                remove_empty_dirs(&e.path());
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(folder);
 }
+
 
 /// Installs the payload with `options`. `fresh` is a choice the person just made (the setup's window); an update
 /// keeps what they changed since (a desktop shortcut they deleted stays deleted).
@@ -248,7 +291,15 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
     let previous = InstallRecord::read(dir);
     // Nothing is changed when a file of the payload would replace one of the person's, or would be reached through a
     // folder redirected elsewhere.
-    let taken = collisions(dir, &index, previous.as_ref());
+    let mut taken = collisions(dir, &index, previous.as_ref());
+    // The record's own names (PROJECTS-34): without a record of ours, a file there is the person's.
+    if previous.is_none() {
+        for name in [RECORD_FILE.to_string(), format!("{RECORD_FILE}.tmp")] {
+            if std::fs::symlink_metadata(dir.join(&name)).is_ok() {
+                taken.push(name);
+            }
+        }
+    }
     anyhow::ensure!(
         taken.is_empty(),
         "{}",
@@ -262,7 +313,7 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
         tr!("These files of {folder} are reached through a link to another folder: {files}. Nothing was changed.", folder = dir.display(), files = linked.join(", "))
     );
     // What a cut install left.
-    recover_leftovers(dir, &staging, &backup, &index, previous.as_ref());
+    recover_leftovers(dir, &staging, &backup, previous.as_ref())?;
 
     progress.set(0.02, tr("Unpacking…"));
     let unpacked = payload::unpack(bytes, &staging, |done, total, file| {
@@ -331,14 +382,14 @@ fn swap(dir: &Path, staging: &Path, backup: &Path, index: &payload::Index, previ
         // and the backup folder then stays as it is.
         let mut stuck = Vec::new();
         for &path in placed.iter().rev() {
-            if let (Some(dest), Some(from)) = (inside(dir, path), inside(staging, path)) {
+            if let (Some(dest), Some(from)) = (contained(dir, path), contained(staging, path)) {
                 if rename(&dest, &from).is_err() {
                     stuck.push(path);
                 }
             }
         }
         for &path in aside.iter().rev() {
-            if let (Some(to), Some(dest)) = (inside(backup, path), inside(dir, path)) {
+            if let (Some(to), Some(dest)) = (contained(backup, path), contained(dir, path)) {
                 if rename(&to, &dest).is_err() {
                     stuck.push(path);
                 }
@@ -459,15 +510,16 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
         }
         progress.set(0.35 + 0.5 * (i + 1) as f32 / count as f32, tr!("Removing {path}", path = path));
     }
-    remove_tree(&dir.join(STAGING));
-    remove_tree(&dir.join(BACKUP));
+    // Setup's own scratch folders, only as far as they are empty: a file left there may be the only copy of one.
+    remove_empty_dirs(&dir.join(STAGING));
+    remove_empty_dirs(&dir.join(BACKUP));
     let _ = std::fs::remove_file(dir.join(format!("{RECORD_FILE}.tmp")));
     if failed.is_empty() {
         let _ = remove_file(&dir.join(RECORD_FILE));
     }
     // The record's folders, deepest first, then the install folder: each only once empty.
     let mut folders: Vec<PathBuf> =
-        record.files.iter().filter_map(|p| inside(dir, p)).filter_map(|f| f.parent().map(Path::to_path_buf)).filter(|f| f != dir).collect();
+        record.files.iter().filter_map(|p| contained(dir, p)).filter_map(|f| f.parent().map(Path::to_path_buf)).filter(|f| f != dir).collect();
     folders.sort_by_key(|f| std::cmp::Reverse(f.components().count()));
     folders.dedup();
     for folder in folders {
@@ -486,7 +538,10 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
         let _ = std::fs::remove_dir(orbiters_booster::data_dir());
         // Its frame logs, written at every level and Off by default: large, and nobody else's.
         if let Some(local) = dirs::data_local_dir() {
-            orbiters_booster::log::remove_logs(&local.join("Orbiters").join("logs"));
+            let shared = local.join("Orbiters");
+            if real_dir(&local) && real_dir(&shared) && real_dir(&shared.join("logs")) {
+                orbiters_booster::log::remove_logs(&shared.join("logs"));
+            }
             // Everything else N4N0 keeps in the folder it shares with the Orbiters Unity tools (PRIV-6), by name.
             let stems: Vec<String> = record.files.iter().filter_map(|f| f.strip_suffix(".exe")).filter(|s| !s.contains(['/', '\\'])).map(str::to_string).collect();
             failed.extend(remove_own_data(&local.join("Orbiters"), &stems));
@@ -539,22 +594,32 @@ fn finish_booster(progress: &Progress, silent: bool) {
 /// tools: the VRChat session (its cookies), the statistics' install id and queue, the menu reports, its SteamVR files,
 /// the VR tuning, and the Unity projects page's caches. The account the tools share, their avatar manifests, Mixer and
 /// the booster's journal (`finish_booster` decides on it) are not on it.
-const OWN_DATA: &[&str] = &[
-    "vrchat-session.bin",
-    "usage",
-    "menu-reports",
-    "SteamVR",
-    "orbit-vr-tune.json",
-    "unity-projects.json",
-    "project-sizes.json",
-    "hidden-projects.json",
-    "unity-cache-folders.json",
-    "unity-templates",
-    "package-icons",
-    "project-pictures",
-    "avatar-thumbnails",
-    "world-thumbnails",
+const OWN_DATA: &[(&str, Kind)] = &[
+    ("vrchat-session.bin", Kind::File),
+    ("usage", Kind::Folder),
+    ("menu-reports", Kind::Folder),
+    ("SteamVR", Kind::Folder),
+    ("orbit-vr-tune.json", Kind::File),
+    ("unity-projects.json", Kind::File),
+    ("project-sizes.json", Kind::File),
+    ("hidden-projects.json", Kind::File),
+    ("unity-cache-folders.json", Kind::File),
+    ("unity-templates", Kind::Folder),
+    ("package-icons", Kind::Folder),
+    ("project-pictures", Kind::Folder),
+    ("avatar-thumbnails", Kind::Folder),
+    ("world-thumbnails", Kind::Folder),
 ];
+
+/// What an entry of N4N0's is: one of another kind under its name is not N4N0's, and stays.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    File,
+    Folder,
+}
+
+/// N4N0's picture folders in `logs`; everything else of [`OWN_LOGS`] is a file.
+const OWN_LOG_FOLDERS: &[&str] = &["camera-frames", "vr-pictures", "vr-test-frames"];
 
 /// What N4N0 writes in the shared `logs` folder: these names, `perf-report-*.json`, and its programs' panic logs
 /// (`<program>.log`, `<program>.old.log`). The booster's logs are removed by `orbiters_booster::log::remove_logs`.
@@ -596,25 +661,35 @@ const OWN_LOGS: &[&str] = &[
 /// install's programs) from `root` (the shared `%LOCALAPPDATA%\Orbiters`), each by name: never the shared folder itself,
 /// never anything through a link (a link is removed as a link). The paths that could not be removed.
 fn remove_own_data(root: &Path, programs: &[String]) -> Vec<String> {
-    let logs = root.join("logs");
-    let mut targets: Vec<PathBuf> = OWN_DATA.iter().map(|n| root.join(n)).collect();
-    targets.extend(OWN_LOGS.iter().map(|n| logs.join(n)));
-    for program in programs {
-        targets.push(logs.join(format!("{program}.log")));
-        targets.push(logs.join(format!("{program}.old.log")));
+    // Every folder on the way must be a real one (a redirected shared folder, or `logs` on another disk, would lead the
+    // names below to another tool's files): checked before anything in it is looked at.
+    if !real_dir(root) {
+        return if std::fs::symlink_metadata(root).is_ok() { vec![tr!("{path} is a link to another folder: nothing in it was removed", path = root.display())] } else { vec![] };
     }
-    if let Ok(entries) = std::fs::read_dir(&logs) {
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with("perf-report-") && name.ends_with(".json") {
-                targets.push(e.path());
+    let logs = root.join("logs");
+    let mut targets: Vec<(PathBuf, Kind)> = OWN_DATA.iter().map(|(n, k)| (root.join(n), *k)).collect();
+    let mut failed = Vec::new();
+    if real_dir(&logs) {
+        targets.extend(OWN_LOGS.iter().map(|n| (logs.join(n), if OWN_LOG_FOLDERS.contains(n) { Kind::Folder } else { Kind::File })));
+        for program in programs {
+            targets.push((logs.join(format!("{program}.log")), Kind::File));
+            targets.push((logs.join(format!("{program}.old.log")), Kind::File));
+        }
+        if let Ok(entries) = std::fs::read_dir(&logs) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with("perf-report-") && name.ends_with(".json") {
+                    targets.push((e.path(), Kind::File));
+                }
             }
         }
+    } else if std::fs::symlink_metadata(&logs).is_ok() {
+        failed.push(tr!("{path} is a link to another folder: nothing in it was removed", path = logs.display()));
     }
-    let mut failed = Vec::new();
-    for path in targets {
-        if let Err(e) = remove_owned(&path) {
-            failed.push(format!("{} ({e})", path.display()));
+    for (path, kind) in targets {
+        match remove_owned(&path, kind) {
+            Ok(()) => {}
+            Err(e) => failed.push(format!("{} ({e})", path.display())),
         }
     }
     // The logs folder once nothing is left in it (another tool's logs keep it).
@@ -624,7 +699,7 @@ fn remove_own_data(root: &Path, programs: &[String]) -> Vec<String> {
 
 /// `path` removed: a link (or junction) as a link, never what it leads to; a folder with all in it, links inside removed
 /// as links (`remove_dir_all` does not follow them); nothing there is fine.
-fn remove_owned(path: &Path) -> std::io::Result<()> {
+fn remove_owned(path: &Path, kind: Kind) -> std::io::Result<()> {
     use std::os::windows::fs::MetadataExt;
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
@@ -634,6 +709,10 @@ fn remove_owned(path: &Path) -> std::io::Result<()> {
     let link = meta.file_type().is_symlink() || meta.file_attributes() & 0x400 != 0;
     // A junction (or a link to a folder) is a folder to Windows: removed with `remove_dir`, which takes the link only.
     let folder = meta.is_dir() || meta.file_attributes() & 0x10 != 0;
+    // Another kind of entry under N4N0's name is not N4N0's (a link is removed as a link whatever it leads to).
+    if !link && folder != (kind == Kind::Folder) {
+        return Err(std::io::Error::other(tr("not what N4N0 keeps under this name: left as it is")));
+    }
     retrying(|| match (link, folder) {
         (true, true) => std::fs::remove_dir(path),
         (true, false) | (false, false) => std::fs::remove_file(path),
@@ -831,12 +910,61 @@ mod tests {
         std::fs::write(backup.join("other.txt"), b"unknown").unwrap();
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join(APP_EXE), b"half").unwrap();
-        recover_leftovers(&dir, &staging, &backup, &index(&[APP_EXE]), Some(&record(&[APP_EXE])));
+        recover_leftovers(&dir, &staging, &backup, Some(&record(&[APP_EXE]))).unwrap();
         assert_eq!(std::fs::read(dir.join(APP_EXE)).unwrap(), b"old app");
-        assert!(!backup.exists() && !staging.exists(), "the staging folder held payload files only");
-        let kept: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".setup-old-")).collect();
-        assert_eq!(kept.len(), 1);
-        assert_eq!(std::fs::read(kept[0].path().join("other.txt")).unwrap(), b"unknown");
+        assert!(!backup.exists() && !staging.exists(), "both set aside");
+        let kept = |prefix: &str| std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(prefix)).map(|e| e.path()).collect::<Vec<_>>();
+        assert_eq!(std::fs::read(kept(".setup-old-")[0].join("other.txt")).unwrap(), b"unknown");
+        // A staging folder is kept too: payload names prove nothing about the bytes (verifier, point 2).
+        assert_eq!(std::fs::read(kept(".setup-new-")[0].join(APP_EXE)).unwrap(), b"half");
+        remove_tree(&dir);
+    }
+
+    /// A backup folder that is a junction to another folder: nothing is moved out of it, and it is set aside, not
+    /// emptied.
+    #[test]
+    fn a_backup_folder_that_is_a_junction_gives_nothing_away() {
+        let dir = scratch("backup-junction");
+        let elsewhere = scratch("backup-junction-target");
+        std::fs::write(elsewhere.join(APP_EXE), b"someone else's").unwrap();
+        junction(&dir.join(BACKUP), &elsewhere);
+        assert!(contained(&dir.join(BACKUP), APP_EXE).is_none(), "the base itself is checked");
+        recover_leftovers(&dir, &dir.join(STAGING), &dir.join(BACKUP), Some(&record(&[APP_EXE]))).unwrap();
+        assert!(!dir.join(APP_EXE).exists(), "nothing moved out of the junction");
+        assert_eq!(std::fs::read(elsewhere.join(APP_EXE)).unwrap(), b"someone else's");
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let _ = std::fs::remove_dir(e.path());
+        }
+        remove_tree(&dir);
+        remove_tree(&elsewhere);
+    }
+
+    /// The unchecked uninstall's scratch folders: only their empty folders go, a file in them stays.
+    #[test]
+    fn scratch_folders_lose_only_their_empty_folders() {
+        let dir = scratch("scratch");
+        std::fs::create_dir_all(dir.join(BACKUP).join("sub/empty")).unwrap();
+        std::fs::write(dir.join(BACKUP).join("sub/only-copy.dll"), b"x").unwrap();
+        std::fs::create_dir_all(dir.join(STAGING).join("a/b")).unwrap();
+        remove_empty_dirs(&dir.join(BACKUP));
+        remove_empty_dirs(&dir.join(STAGING));
+        assert!(dir.join(BACKUP).join("sub/only-copy.dll").is_file());
+        assert!(!dir.join(BACKUP).join("sub/empty").exists() && !dir.join(STAGING).exists());
+        remove_tree(&dir);
+    }
+
+    /// A first install into a folder holding a file named like the install record refuses before any change.
+    #[test]
+    fn a_record_name_held_by_the_persons_file_stops_a_first_install() {
+        let dir = scratch("record-name");
+        std::fs::write(dir.join(RECORD_FILE), b"the person's").unwrap();
+        let options = Options { dir: dir.clone(), desktop_shortcut: false, start_with_windows: false, start_with_steamvr: false, channel: STABLE.into() };
+        let packed = scratch("record-name-payload").join("payload.bin");
+        payload::pack("1.0.0", &[], &packed).unwrap();
+        let bytes = std::fs::read(&packed).unwrap();
+        let said = format!("{:#}", install(&bytes, &options, &Progress::default(), true, true).unwrap_err());
+        assert!(said.contains(RECORD_FILE), "{said}");
+        assert_eq!(std::fs::read(dir.join(RECORD_FILE)).unwrap(), b"the person's");
         remove_tree(&dir);
     }
 
@@ -905,8 +1033,11 @@ mod tests {
         // A link among N4N0's names: removed as a link, what it leads to stays.
         std::fs::remove_dir_all(root.join("project-pictures")).unwrap();
         junction(&root.join("project-pictures"), &elsewhere);
+        // A folder where N4N0 keeps a file: not N4N0's, it stays and is named.
+        std::fs::create_dir_all(root.join("hidden-projects.json/inside")).unwrap();
         let failed = remove_own_data(&root, &["orbiters-desktop".into()]);
-        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("hidden-projects.json") && root.join("hidden-projects.json/inside").is_dir());
         for gone in ["vrchat-session.bin", "usage", "menu-reports", "orbit-vr-tune.json", "unity-projects.json", "project-pictures", "avatar-thumbnails", "world-thumbnails", "package-icons", "logs/perf.jsonl", "logs/shares.log", "logs/perf-report-20261119.json", "logs/orbiters-desktop.log", "logs/orbiters-desktop.old.log", "logs/vr-test-frames"] {
             assert!(std::fs::symlink_metadata(root.join(gone)).is_err(), "{gone} left");
         }
@@ -914,6 +1045,32 @@ mod tests {
             assert!(root.join(kept).is_file(), "{kept} removed");
         }
         assert_eq!(std::fs::read(elsewhere.join("precious.txt")).unwrap(), b"not N4N0's", "through a link");
+        remove_tree(&root);
+        remove_tree(&elsewhere);
+    }
+
+    /// A `logs` folder redirected to another disk (or a shared folder that is a junction): nothing reached through it is
+    /// removed, and it is said.
+    #[test]
+    fn nothing_is_removed_through_a_redirected_logs_folder() {
+        let root = scratch("logs-redirect");
+        let elsewhere = scratch("logs-redirect-target");
+        for name in ["perf.jsonl", "perf-report-1.json", "orbiters-desktop.log", "theirs.log"] {
+            std::fs::write(elsewhere.join(name), b"another disk").unwrap();
+        }
+        junction(&root.join("logs"), &elsewhere);
+        let failed = remove_own_data(&root, &["orbiters-desktop".into()]);
+        assert!(failed.iter().any(|f| f.contains("logs")), "{failed:?}");
+        for name in ["perf.jsonl", "perf-report-1.json", "orbiters-desktop.log", "theirs.log"] {
+            assert!(elsewhere.join(name).is_file(), "{name} removed through the junction");
+        }
+        let _ = std::fs::remove_dir(root.join("logs"));
+        // The shared folder itself a junction.
+        let shared = scratch("shared-redirect").join("Orbiters");
+        junction(&shared, &elsewhere);
+        assert_eq!(remove_own_data(&shared, &[]).len(), 1);
+        assert!(elsewhere.join("perf.jsonl").is_file());
+        let _ = std::fs::remove_dir(&shared);
         remove_tree(&root);
         remove_tree(&elsewhere);
     }

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use windows::core::{w, Interface, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegDeleteTreeW, RegGetValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD,
+    RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteKeyW, RegDeleteTreeW, RegGetValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD,
     REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::Threading::{
@@ -275,6 +275,22 @@ pub fn unregister() {
     unsafe {
         let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(UNINSTALL_KEY));
         let _ = RegDeleteKeyW(HKEY_CURRENT_USER, &HSTRING::from(UNINSTALL_KEY));
+    }
+}
+
+/// Where an automatic update that had to wait is tried again: once, at the person's next sign-in (verifier, point 6).
+const RUN_ONCE: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
+const UPDATE_RETRY: &str = "OrbitersN4N0UpdateRetry";
+
+/// Has Windows run `command` once at the next sign-in (an update the app kept from finishing).
+pub fn schedule_update_retry(command: &str) -> anyhow::Result<()> {
+    Key::create(RUN_ONCE)?.set_text(UPDATE_RETRY, command)
+}
+
+/// The retry is not needed any more (the update went through).
+pub fn cancel_update_retry() {
+    unsafe {
+        let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(RUN_ONCE), &HSTRING::from(UPDATE_RETRY));
     }
 }
 

@@ -50,6 +50,8 @@ pub struct Targets {
     pub watch: Option<(usize, Quad)>,
     /// The menu mismatch strip, and the hand it is on (the other one presses it).
     pub strip: Option<(usize, Quad)>,
+    /// "Talk with N4N0?" before the eyes (either hand presses it).
+    pub prompt: Option<Quad>,
 }
 
 impl Targets {
@@ -66,6 +68,7 @@ pub enum Target {
     Bar,
     Watch,
     Strip,
+    Prompt,
 }
 
 /// A hand this near the handle takes it with its grip, as N4N0's screen's handle is taken.
@@ -133,6 +136,9 @@ pub struct Outcome {
     /// A laser or a fingertip on the mismatch strip (u, v), and a trigger pulled there.
     pub strip_hover: Option<[f32; 2]>,
     pub strip_press: Option<[f32; 2]>,
+    /// A laser on "Talk with N4N0?", and a trigger pulled there.
+    pub prompt_hover: bool,
+    pub prompt_press: bool,
     /// Where the held panel or menu is now; it was let go this turn (where it last was is to keep).
     pub moved: [Option<Matrix34>; CARRIED],
     pub released: [bool; CARRIED],
@@ -204,6 +210,7 @@ impl Interaction {
                 consider(Target::Surface(s), surface.and_then(|q| q.quad.hit(o, d, 0.0)));
             }
             consider(Target::Bar, targets.bar.and_then(|q| q.hit(o, d, 0.0)));
+            consider(Target::Prompt, targets.prompt.and_then(|q| q.hit(o, d, 0.0)));
             if let Some((_, watch)) = targets.watch.filter(|(on, _)| *on != i) {
                 let (at, gap) = watch.nearest(o);
                 if gap < WATCH_TOUCH_M {
@@ -253,6 +260,7 @@ impl Interaction {
             }
             match out.lasers[i] {
                 Some((Target::Watch, _)) => out.watch_press = true,
+                Some((Target::Prompt, _)) => out.prompt_press = true,
                 Some((Target::Strip, hit)) => out.strip_press = Some(hit.uv),
                 Some((Target::Bar, hit)) => match (targets.handle, targets.carried(PANEL)) {
                     (Some((r, _)), Some(panel)) if (r[0]..=r[2]).contains(&hit.uv[0]) && (r[1]..=r[3]).contains(&hit.uv[1]) => {
@@ -306,6 +314,7 @@ impl Interaction {
         out.bar_hover = hover(Target::Bar);
         out.watch_hover = hover(Target::Watch).is_some();
         out.strip_hover = hover(Target::Strip);
+        out.prompt_hover = hover(Target::Prompt).is_some();
         out.holding = self.holding();
         self.trigger = trigger;
         self.grab = grab;

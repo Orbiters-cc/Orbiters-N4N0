@@ -957,6 +957,9 @@ pub struct Panels {
     header_pointer: Option<Pos2>,
     pressed_late: Option<Action>,
     pressed_facts: Option<Facts>,
+    /// Actions let-goes earned before an earlier one ran, oldest first, each with the facts it was pressed on (verify2: a second
+    /// release, or a second press, before the turn that runs it replaced the first).
+    earned: std::collections::VecDeque<(Action, Option<Facts>)>,
     /// Where the person is, as last told to the usage statistics: which menu is up, the sheet on it, N4N0's page on that.
     usage_here: Option<(Option<Around>, Option<Sheet>, Option<Page>)>,
     /// Each screen as it was left: by its sheet and its name. N4N0's pages keep their results in the menu itself, which goes on being there, and the page they were on here.
@@ -1093,6 +1096,7 @@ impl Panels {
             header_pointer: None,
             pressed_late: None,
             pressed_facts: None,
+            earned: std::collections::VecDeque::new(),
             usage_here: None,
             kept: HashMap::new(),
             kept_pages: HashMap::new(),
@@ -1586,10 +1590,23 @@ impl Panels {
 
     /// What a press in a list turned out to press, now it was let go without moving: once, whether a menu is still up or not.
     pub fn run_pending(&mut self, snap: &Snapshot) {
+        while let Some((action, facts)) = self.earned.pop_front() {
+            let current = std::mem::replace(&mut self.pressed_facts, facts);
+            crate::usage::press(&usage_name(&action));
+            self.act(action, snap, &mut Pressed::default());
+            self.pressed_facts = current;
+        }
         if let Some(action) = self.pressed_late.take() {
             crate::usage::press(&usage_name(&action));
             self.act(action, snap, &mut Pressed::default());
             self.pressed_facts = None;
+        }
+    }
+
+    /// The action a let-go earned and not yet run goes to the queue with its facts, before a new press or let-go takes their place.
+    fn keep_earned(&mut self) {
+        if let Some(action) = self.pressed_late.take() {
+            self.earned.push_back((action, self.pressed_facts.take()));
         }
     }
 
@@ -2678,6 +2695,8 @@ impl Panels {
     /// drag, sheets, N4N0's pages and the world's panel alike.
     pub fn press(&mut self, snap: &Snapshot) -> Pressed {
         let on_something = self.on_something();
+        // An action already earned and not yet run keeps the facts it was pressed on.
+        self.keep_earned();
         self.pressed_facts = self.list.iter().chain(self.takeover.iter()).find(|p| p.hover.is_some()).and_then(|p| p.displayed.clone()).or_else(|| self.stage.presented.as_ref().map(|(_, facts, _)| facts.clone()));
         let mut out = self.press_what(snap);
         if self.drag.is_none() { self.pressed_facts = None; }
@@ -3398,6 +3417,9 @@ impl Panels {
         }
         if let Some(drag) = self.drag.take() {
             if !drag.moved {
+                if drag.action.is_some() {
+                    self.keep_earned();
+                }
                 self.pressed_late = drag.action;
             }
             self.throw = drag.throw(Instant::now());

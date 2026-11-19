@@ -1795,9 +1795,11 @@ pub mod pointer {
             if !down && std::mem::take(&mut self.game_holds) {
                 return false;
             }
-            if self.queue.len() < EDGES_AT_MOST {
-                self.queue.push_back(down);
+            if self.queue.len() >= EDGES_AT_MOST {
+                // Full (the panels stopped reading): the button goes on to the game rather than vanish (verify2).
+                return false;
             }
+            self.queue.push_back(down);
             true
         }
 
@@ -1916,16 +1918,13 @@ pub mod pointer {
         fn begin(&mut self) {
             DX.store(0, Ordering::Relaxed);
             DY.store(0, Ordering::Relaxed);
-            // The left button as it is now: held, it is the game's until it is let go.
-            // SAFETY: a plain read of the keyboard and mouse state.
-            let held = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01) as u16 & 0x8000 != 0 };
-            if let Ok(mut edges) = EDGES.lock() {
-                *edges = Some(Edges::started(held));
-            }
             let (x, y) = cursor_at();
             REST_X.store(x, Ordering::Relaxed);
             REST_Y.store(y, Ordering::Relaxed);
             let (tx, rx) = std::sync::mpsc::channel();
+            // Given up on (it did not start within a second): a hook that comes late never takes the mouse (verify2).
+            let abandoned = std::sync::Arc::new(AtomicBool::new(false));
+            let late = abandoned.clone();
             let spawned = std::thread::Builder::new().name("orbit-mouse-hook".into()).spawn(move || {
                 // SAFETY: a low-level hook of this thread, unset below; its messages are pumped right here, as such a hook needs.
                 unsafe {
@@ -1934,15 +1933,29 @@ pub mod pointer {
                         let _ = tx.send(0);
                         return;
                     };
+                    // The left button as it is now that the hook is in (no event reaches it before this thread pumps): held, it is
+                    // the game's until it is let go (verify2: read before the hook, a press in between was swallowed).
+                    let held = windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01) as u16 & 0x8000 != 0;
+                    if let Ok(mut edges) = EDGES.lock() {
+                        *edges = Some(Edges::started(held));
+                    }
+                    if late.load(Ordering::Acquire) || tx.send(windows::Win32::System::Threading::GetCurrentThreadId()).is_err() {
+                        let _ = UnhookWindowsHookEx(set);
+                        return;
+                    }
                     SET.store(true, Ordering::Relaxed);
-                    let _ = tx.send(windows::Win32::System::Threading::GetCurrentThreadId());
                     let mut msg = MSG::default();
                     while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
                     SET.store(false, Ordering::Relaxed);
                     let _ = UnhookWindowsHookEx(set);
                 }
             });
-            if let (Ok(handle), Ok(id)) = (spawned, rx.recv_timeout(Duration::from_secs(1))) {
+            let answer = rx.recv_timeout(Duration::from_secs(1));
+            if answer.is_err() {
+                abandoned.store(true, Ordering::Release);
+            }
+            drop(rx);
+            if let (Ok(handle), Ok(id)) = (spawned, answer) {
                 if id != 0 {
                     self.thread = Some((id, handle));
                 }
@@ -2016,9 +2029,10 @@ mod tests {
         }
         assert_eq!(edges.take(), [false, true, false, true]);
         assert!(edges.take().is_empty());
-        for _ in 0..1000 {
-            edges.edge(true);
+        for _ in 0..EDGES_AT_MOST {
+            assert!(edges.edge(true));
         }
+        assert!(!edges.edge(false), "full: a release goes on to the game rather than vanish");
         assert_eq!(edges.take().len(), EDGES_AT_MOST, "bounded");
     }
 

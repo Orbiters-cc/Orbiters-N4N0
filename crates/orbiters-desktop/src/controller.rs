@@ -2802,6 +2802,8 @@ fn spawn_watchers(ctl: Shared) {
             let history_file = visited::history_file();
             let mut history = visited::History::load(&history_file);
             let mut history_changed = false;
+            // VRChat closed: how far its log was read is saved at the next beat, not minutes later.
+            let mut history_flush = false;
             // The videos the worlds played, the same way (the Videos page).
             let mut videos = videos::Videos::load();
             let mut system = sysinfo::System::new();
@@ -2896,6 +2898,10 @@ fn spawn_watchers(ctl: Shared) {
                     }
                     if was != running && !remote {
                         ctl.vrchat_changed(running);
+                        if !running {
+                            history_flush = true;
+                            videos.flush();
+                        }
                     }
                     // A minute into a break from the headset, what waited for VRChat to close starts.
                     if running && ctl.headset_on_break() {
@@ -3013,9 +3019,13 @@ fn spawn_watchers(ctl: Shared) {
                     if let Some(dir) = orbiters_core::paths::vrchat_log_dir() {
                         let following = log.last_read().map(|(name, _, to)| (name, to));
                         history_changed |= history.read_logs_following(&dir, following);
-                        if std::mem::take(&mut history_changed) {
-                            if let Err(e) = history.save(&history_file) {
-                                eprintln!("visited worlds: {e}");
+                        // At once when a visit is new, every few minutes for how far the logs were read; a save that
+                        // failed stays to do and is tried again.
+                        let flush = std::mem::take(&mut history_flush);
+                        if history_changed && (flush || history.save_due(true)) {
+                            match history.checkpoint(&history_file) {
+                                Ok(()) => history_changed = false,
+                                Err(e) => eprintln!("visited worlds: {e}"),
                             }
                         }
                     }

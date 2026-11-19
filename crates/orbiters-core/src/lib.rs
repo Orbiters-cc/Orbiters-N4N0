@@ -301,6 +301,43 @@ pub fn json_lenient<T: serde::de::DeserializeOwned + serde::Serialize + Default>
     (serde_json::from_value(base).unwrap_or_default(), dropped)
 }
 
+/// When a file that keeps how far VRChat's logs were read beside what was found in them (the visited worlds, the
+/// videos) is saved: at once when what was found changed, and for the read positions alone every
+/// [`Checkpoint::OFFSETS_EVERY`] (a crash in between reads a few minutes of log again, which finds nothing new). A
+/// failed save is tried again, later each time.
+#[derive(Clone, Debug, Default)]
+pub struct Checkpoint {
+    /// What was found changed since the last save.
+    pub(crate) unsaved: bool,
+    saved_at: Option<std::time::Instant>,
+    retry_at: Option<std::time::Instant>,
+    failures: u32,
+}
+
+impl Checkpoint {
+    pub const OFFSETS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+    const RETRY_FIRST: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Whether to save now, the read positions having moved since the last save (`moved`) or not.
+    pub fn due(&self, moved: bool, now: std::time::Instant) -> bool {
+        if self.retry_at.is_some_and(|t| now < t) {
+            return false;
+        }
+        self.unsaved || (moved && self.saved_at.is_none_or(|t| now.duration_since(t) >= Self::OFFSETS_EVERY))
+    }
+
+    /// A save ended (`ok` or not) at `now`.
+    pub fn saved(&mut self, ok: bool, now: std::time::Instant) {
+        if ok {
+            *self = Self { saved_at: Some(now), ..Self::default() };
+        } else {
+            self.failures = self.failures.saturating_add(1);
+            let wait = Self::RETRY_FIRST.saturating_mul(1 << self.failures.min(5).saturating_sub(1)).min(Self::OFFSETS_EVERY);
+            self.retry_at = Some(now + wait);
+        }
+    }
+}
+
 /// Keeps a copy of `path` beside it as `<name>.bad-<unix seconds>`: a file that could be read only in part, before the
 /// next save replaces it.
 pub fn keep_aside(path: &std::path::Path) -> Option<std::path::PathBuf> {

@@ -129,6 +129,8 @@ pub struct History {
     /// Each video's place in `videos`, by [`canonical`] link.
     #[serde(skip)]
     index: HashMap<String, usize>,
+    #[serde(skip)]
+    checkpoint: crate::Checkpoint,
 }
 
 impl History {
@@ -161,6 +163,18 @@ impl History {
         }
         crate::write_atomic(path, &serde_json::to_vec(self)?)?;
         Ok(())
+    }
+
+    /// Whether to save now ([`crate::Checkpoint`]): `moved`, the logs were read further since the last save.
+    pub fn save_due(&self, moved: bool) -> bool {
+        self.checkpoint.due(moved, std::time::Instant::now())
+    }
+
+    /// [`History::save`], remembered for [`History::save_due`] (a failure is tried again later).
+    pub fn checkpoint(&mut self, path: &Path) -> anyhow::Result<()> {
+        let saved = self.save(path);
+        self.checkpoint.saved(saved.is_ok(), std::time::Instant::now());
+        saved
     }
 
     /// The latest played first, and each video's place known again.
@@ -326,7 +340,11 @@ impl History {
                 log.world = Some(name.clone());
                 false
             }
-            LogEvent::Video { url, at: Some(at) } => self.record(url, *at, log.world_id.as_deref(), log.world.as_deref()),
+            LogEvent::Video { url, at: Some(at) } => {
+                let changed = self.record(url, *at, log.world_id.as_deref(), log.world.as_deref());
+                self.checkpoint.unsaved |= changed;
+                changed
+            }
             _ => false,
         }
     }
@@ -346,6 +364,7 @@ impl History {
         let v = &mut self.videos[i];
         let (title, channel) = found.map_or((None, None), |(t, c)| (Some(t), Some(c).filter(|c| !c.is_empty())));
         let changed = !v.looked_up || v.title != title || v.channel != channel;
+        self.checkpoint.unsaved |= changed;
         v.looked_up = true;
         if title.is_some() {
             v.title = title;

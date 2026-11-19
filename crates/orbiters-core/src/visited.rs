@@ -78,6 +78,8 @@ pub struct History {
     /// The name of the world being joined ("Entering Room" comes right before the join).
     #[serde(skip)]
     entering: Option<String>,
+    #[serde(skip)]
+    checkpoint: crate::Checkpoint,
 }
 
 pub fn history_file() -> PathBuf {
@@ -113,6 +115,18 @@ impl History {
         }
         crate::write_atomic(path, &serde_json::to_vec(self)?)?;
         Ok(())
+    }
+
+    /// Whether to save now ([`crate::Checkpoint`]): `moved`, the logs were read further since the last save.
+    pub fn save_due(&self, moved: bool) -> bool {
+        self.checkpoint.due(moved, std::time::Instant::now())
+    }
+
+    /// [`History::save`], remembered for [`History::save_due`] (a failure is tried again later).
+    pub fn checkpoint(&mut self, path: &Path) -> anyhow::Result<()> {
+        let saved = self.save(path);
+        self.checkpoint.saved(saved.is_ok(), std::time::Instant::now());
+        saved
     }
 
     /// Adds a visit (the same world at the same second counts once); returns whether it was new.
@@ -194,6 +208,7 @@ impl History {
         if !self.instances_read {
             self.instances_read = true;
             self.logs.clear();
+            self.checkpoint.unsaved = true;
         }
         let mut changed = false;
         let mut budget = READ_BUDGET;
@@ -264,6 +279,12 @@ impl History {
 
     // A join reads "Entering Room: <name>", "Joining wrld_…:<instance>", then "Joining or Creating Room: <name>".
     fn observe(&mut self, event: &LogEvent) -> bool {
+        let changed = self.observe_event(event);
+        self.checkpoint.unsaved |= changed;
+        changed
+    }
+
+    fn observe_event(&mut self, event: &LogEvent) -> bool {
         match event {
             LogEvent::Joining { world_id, instance, at: Some(at) } => {
                 let mut changed = self.record(world_id, *at);

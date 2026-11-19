@@ -102,6 +102,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     copy(&face_model, &stage.join(face_model.file_name().expect("a file")))?;
     copy(&bin.join(DRIVER), &stage.join(DRIVER))?;
     ours.push(stage.join(DRIVER));
+    check_staged(&stage, &version)?;
     let runtime = vcruntime(config)?;
     copy(&runtime, &stage.join(VCRUNTIME))?;
     // The camera/WebView desktop also imports the x64 exception-handling runtime. Keep both from the same redist.
@@ -274,10 +275,11 @@ impl Signer {
     }
 }
 
-/// Refuses programs from before this version: each built after the workspace's version last changed (a version bump
-/// rebuilds them all), and the window's program saying this version in its Windows version resource. A program the
-/// running app holds open cannot be replaced, and cargo then leaves the old one in place: 0.2.1's setup shipped a
-/// window labelled 0.2.0 that way.
+/// Refuses programs from before this version: each built after the workspace's version last changed in Cargo.toml (a
+/// stable bump rebuilds them all), and the window's program saying this version in its Windows version resource. A
+/// program the running app holds open cannot be replaced, and cargo then leaves the old one in place: 0.2.1's setup
+/// shipped a window labelled 0.2.0 that way. A development bump writes only `.cargo/config.toml`, so the dates say
+/// nothing then: [`check_staged`] reads what each staged file says.
 fn check_programs(bin: &Path, version: &str) -> anyhow::Result<()> {
     let bumped = std::fs::metadata(crate::root().join("Cargo.toml"))?.modified()?;
     for program in PROGRAMS {
@@ -289,6 +291,39 @@ fn check_programs(bin: &Path, version: &str) -> anyhow::Result<()> {
     let embedded = product_version(&std::fs::read(&window)?);
     anyhow::ensure!(embedded.as_deref() == Some(version), "{} says version {:?}, not {version}", window.display(), embedded);
     Ok(())
+}
+
+/// Refuses a staged program or driver that was not built for `version`, from the bytes that are packed: each is built
+/// with `env!("ORBITERS_VERSION")` (`orbiters_version::set` in each program's `main`, `DRIVER_VERSION` in the driver),
+/// so the version's text is in it. Before a development bump stopped touching Cargo.toml, a worker cargo could not
+/// replace passed the date check unseen (BUILD-16).
+fn check_staged(stage: &Path, version: &str) -> anyhow::Result<()> {
+    let files = PROGRAMS.iter().map(|p| format!("{p}.exe")).chain([DRIVER.to_string()]);
+    for name in files {
+        let path = stage.join(&name);
+        let bytes = std::fs::read(&path).with_context(|| format!("{} cannot be read", path.display()))?;
+        anyhow::ensure!(
+            says_version(&bytes, version),
+            "{} does not say version {version}: it was not rebuilt (is a program from there running?)",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Whether `bytes` hold `version` as a whole version: not as the start of a longer one (0.3.6-dev.1 in 0.3.6-dev.16,
+/// 0.3.7 in 0.3.7-dev.3) nor as the end of one (0.3.6 in 10.3.6). A letter may touch it: the compiler packs string
+/// literals end to end (the capture worker's reads `0.3.6-dev.16o…`).
+fn says_version(bytes: &[u8], version: &str) -> bool {
+    let needle = version.as_bytes();
+    if needle.is_empty() {
+        return false;
+    }
+    bytes.windows(needle.len()).enumerate().any(|(at, w)| {
+        w == needle
+            && !at.checked_sub(1).is_some_and(|b| matches!(bytes[b], b'0'..=b'9' | b'.'))
+            && !bytes.get(at + needle.len()).is_some_and(|a| matches!(a, b'0'..=b'9' | b'.' | b'-' | b'+'))
+    })
 }
 
 /// The ProductVersion string of a Windows version resource (UTF-16: the key, its padding to 4 bytes, the value).
@@ -323,6 +358,43 @@ mod tests {
         bytes.extend("0.3.0\0".encode_utf16().flat_map(u16::to_le_bytes));
         assert_eq!(product_version(&bytes).as_deref(), Some("0.3.0"));
         assert_eq!(product_version(b"no resource here"), None);
+    }
+
+    /// BUILD-16: a worker of another version is refused whatever its date, a version is never taken for a longer or
+    /// shorter one, and the text the compiler packs beside it does not hide it.
+    #[test]
+    fn a_staged_program_must_say_this_very_version() {
+        assert!(says_version(b"\x00\x000.3.6-dev.16\x00\n", "0.3.6-dev.16"));
+        assert!(says_version(b"\x000.3.6-dev.16oneshot", "0.3.6-dev.16"), "a packed literal beside it");
+        assert!(says_version(b"e0.3.6-dev.16\xc1", "0.3.6-dev.16"));
+        assert!(!says_version(b"\x000.3.6-dev.15\x00", "0.3.6-dev.16"), "the version before");
+        assert!(!says_version(b"\x000.3.6-dev.16\x00", "0.3.6-dev.1"), "a prefix of a longer one");
+        assert!(!says_version(b"\x000.3.6-dev.1\x00", "0.3.6-dev.10"));
+        assert!(!says_version(b"\x000.3.7-dev.3\x00", "0.3.7"), "a development build of a stable version");
+        assert!(!says_version(b"\x0010.3.6\x00", "0.3.6"));
+        assert!(!says_version(b"orbiters-core-0.3.6.1\x00", "0.3.6"));
+        assert!(!says_version(b"", "0.3.6"));
+        assert!(!says_version(b"0.3.6", ""));
+        assert!(says_version(b"0.3.6", "0.3.6"), "at both ends of the file");
+
+        let stage = std::env::temp_dir().join(format!("xtask-check-staged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&stage);
+        std::fs::create_dir_all(&stage).unwrap();
+        let write = |name: &str, version: &str| std::fs::write(stage.join(name), [b"MZ\x00".as_slice(), version.as_bytes(), b"\x00"].concat()).unwrap();
+        for program in PROGRAMS {
+            write(&format!("{program}.exe"), "0.3.6-dev.16");
+        }
+        write(DRIVER, "0.3.6-dev.16");
+        check_staged(&stage, "0.3.6-dev.16").expect("all of this version");
+        write("orbiters-voice.exe", "0.3.6-dev.15");
+        let refused = check_staged(&stage, "0.3.6-dev.16").expect_err("a stale worker").to_string();
+        assert!(refused.contains("orbiters-voice.exe"), "{refused}");
+        write("orbiters-voice.exe", "0.3.6-dev.16");
+        write(DRIVER, "0.3.6-dev.1");
+        assert!(check_staged(&stage, "0.3.6-dev.16").is_err(), "a stale driver");
+        std::fs::remove_file(stage.join(DRIVER)).unwrap();
+        assert!(check_staged(&stage, "0.3.6-dev.16").is_err(), "a missing driver");
+        let _ = std::fs::remove_dir_all(&stage);
     }
 
     #[test]

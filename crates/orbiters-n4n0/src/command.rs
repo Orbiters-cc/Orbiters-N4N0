@@ -28,7 +28,12 @@ pub enum Command {
     /// Audio output owns this gate until playback drains, so the answer cannot become input.
     AskPlayback { active: bool },
     /// The "Talk with N4N0?" button the wake word put up during a call: pressed (`accept`), N4N0 listens; else it goes.
-    WakeOffer { accept: bool },
+    WakeOffer {
+        accept: bool,
+        /// The offer shown (`status::WakeOffer::id`): a late press of an older card answers nothing.
+        #[serde(default)]
+        id: Option<u64>,
+    },
     /// N4N0's assistant switched on or off from a menu (Settings' switch, the overlay's tiles, Home's microphone): off, it stops
     /// at once whatever it was doing (listening, the microphone, an answer under way).
     Assistant { on: bool },

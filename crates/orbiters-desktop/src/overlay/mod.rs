@@ -1171,6 +1171,10 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         part = Instant::now();
         // Whether a menu of ours is up (live translation does not read what is under one).
         let mut menus_up = false;
+        // A page painter that panicked too often ends the session, through the teardown (verify2: it exited the process itself).
+        if t.orbit.as_ref().is_some_and(|o| o.painter_failed()) {
+            anyhow::bail!("the page painter panicked three times in ten seconds"); // i18n: not shown (a log's line)
+        }
         // The panels around VRChat's menus, and whose trigger VRChat does not get from the next read on.
         if let Some(orbit) = t.orbit.as_mut() {
             let since = steamvr.time_since_vsync().unwrap_or(0.0);

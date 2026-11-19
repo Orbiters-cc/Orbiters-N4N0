@@ -139,12 +139,18 @@ impl N4n0 {
 
     pub(crate) fn ask_page(self: &Shared, open: bool) {
         let _lifecycle = self.voice_lifecycle.lock();
-        self.voice_cancel();
+        // Closing the page ends what the page is listening to, never a sentence another holds now (the window's Talk, the
+        // avatar menu's): the microphone is whoever holds Talk now, not who opened the page first (verify2).
+        let someone_else = !open && self.n4n0.lock().unwrap().listening.is_some_and(|(s, _)| matches!(s, Source::Window | Source::Menu | Source::Touch | Source::WakeWord));
+        if !someone_else {
+            self.voice_cancel();
+        }
         {
             let wake = self.with_settings(|s| s.n4n0.wake_word);
             let mut voice = self.voice.lock().unwrap();
-            // Open, the page has the microphone; closed, the wake word has it back (as its setting says).
-            voice.ask_owned = open;
+            // The page has the microphone; closed, it is still released: the wake word waits for an explicit listen or a
+            // change of its setting (the documented behaviour; reopening it needs the owner's word, verify-n4n0 9).
+            voice.ask_owned = true;
             voice.wake_requested = wake;
             if !open {
                 voice.wake_from = Some(Instant::now());
@@ -152,7 +158,9 @@ impl N4n0 {
         }
         {
             let mut rt = self.n4n0.lock().unwrap();
-            rt.listening = None;
+            if !someone_else {
+                rt.listening = None;
+            }
             rt.voice.ask_open = open;
             rt.voice.finalizing = false;
             rt.voice.automatic = open;
@@ -253,7 +261,8 @@ impl N4n0 {
         let settings = self.with_settings(|s| s.n4n0.clone());
         // Turned off anywhere (Settings' switch included): an answer under way or a sentence it listens to stops too.
         if !(settings.enabled && settings.assistant) {
-            let busy = { let rt = self.n4n0.lock().unwrap(); rt.answering() || rt.listening.is_some() || !rt.pending.is_empty() };
+            // A mute N4N0 made for Talk counts too: switched off in Settings, it is put back (verify-n4n0 8).
+            let busy = { let rt = self.n4n0.lock().unwrap(); rt.answering() || rt.listening.is_some() || !rt.pending.is_empty() || rt.muted_by_n4n0 || rt.unmute_when_muted.is_some() };
             if busy { self.assistant_quiet(); }
         }
         self.ask_follow();
@@ -489,8 +498,10 @@ impl N4n0 {
                 }
                 if !for_n4n0 {
                     if self.n4n0.lock().unwrap().ask_busy() { return; }
-                    // A wake result can start a follow-up capture. It does not own a finalizing listen.
-                    self.heard(text, false, false);
+                    // A wake result can start a follow-up capture. It does not own a finalizing listen. When its sound began
+                    // tells whether it was heard during a call (its recognition may end after hang-up).
+                    let began = Instant::now().checked_sub(Duration::from_secs_f32(if seconds.is_finite() { seconds.clamp(0.0, 600.0) } else { 0.0 }) + Duration::from_millis(decode_ms as u64));
+                    self.heard_since(text, false, false, began);
                     return;
                 }
                 if for_n4n0 {

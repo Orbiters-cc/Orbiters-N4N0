@@ -137,7 +137,10 @@ fn unfinished_copy(path: &Path) -> bool {
     let marker = path.join(crate::templates::INCOMPLETE);
     match std::fs::read(&marker) {
         Ok(bytes) if bytes.is_empty() => true,
-        Ok(bytes) => serde_json::from_slice::<crate::templates::Marker>(&bytes).is_ok_and(|m| key(&m.destination) == key(path)),
+        // The very folder the copy made, by identity when the marker has it (a project restored at that place with the
+        // marker, or a copy of the folder, is another folder).
+        Ok(bytes) => serde_json::from_slice::<crate::templates::Marker>(&bytes)
+            .is_ok_and(|m| key(&m.destination) == key(path) && m.folder.is_none_or(|id| crate::owned::is_same(path, id))),
         Err(_) => false,
     }
 }

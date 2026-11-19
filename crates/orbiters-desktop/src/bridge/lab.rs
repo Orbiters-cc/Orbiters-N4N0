@@ -36,6 +36,11 @@ pub struct Behaviour {
     pub load: Duration,
     /// The game ends up in this instance instead of the one asked for (a public one, say).
     pub land_in: Option<String>,
+    /// How long asking the window to close takes (a busy computer), before it counts as asked.
+    pub close_takes: Duration,
+    /// Windows refuses the close request; or takes it and VRChat stays.
+    pub close_refused: bool,
+    pub close_ignored: bool,
     /// The game never reaches its world.
     pub never_arrives: bool,
     /// `launch` fails.
@@ -77,6 +82,9 @@ impl Default for Behaviour {
         Self {
             load: Duration::from_millis(200),
             land_in: None,
+            close_takes: Duration::ZERO,
+            close_refused: false,
+            close_ignored: false,
             never_arrives: false,
             launch_fails: false,
             kit: true,
@@ -107,8 +115,13 @@ struct State {
     foreign: bool,
     /// The running VRChat's command line, as its log lists it.
     args: Option<Vec<String>>,
-    /// The person's own VRChat, started beside the lab's (the app follows it then).
+    /// The person's own VRChat, started beside the lab's, and whether the app follows it (the lab's runs on meanwhile).
     beside: Option<u32>,
+    follows_beside: bool,
+    /// Every process a window was asked for, in order: no focus, capture, input or close can reach a process without it.
+    windows_asked: Vec<u32>,
+    /// When the running VRChat started (a new value at each start: its identity with the pid, which the lab shares).
+    started: u64,
     foreground: bool,
     /// When the player exists in the world it is loading.
     player_from: Option<Instant>,
@@ -238,7 +251,21 @@ impl LabGame {
     /// The person starts their own VRChat beside the lab's: the app follows theirs from then on.
     #[cfg(test)]
     pub fn person_starts_beside(&self) {
-        self.state.lock().unwrap().beside = Some(4343);
+        let mut state = self.state.lock().unwrap();
+        state.beside = Some(4343);
+        state.follows_beside = true;
+    }
+
+    /// The app follows the lab's own VRChat again; the person's beside it runs on.
+    #[cfg(test)]
+    pub fn app_follows_the_lab(&self) {
+        self.state.lock().unwrap().follows_beside = false;
+    }
+
+    /// The processes a window was asked for.
+    #[cfg(test)]
+    pub fn windows_asked(&self) -> Vec<u32> {
+        self.state.lock().unwrap().windows_asked.clone()
     }
 
     /// What the stand-in OSC listener heard, oldest first, with when.
@@ -364,6 +391,7 @@ impl LabGame {
         let mut state = self.state.lock().unwrap();
         state.window = Some(window);
         state.pid = Some(std::process::id());
+        state.started += 1000;
         state.args = Some(plan.args());
         state.player_from = Some(Instant::now() + state.behaviour.load + state.behaviour.player_after);
         state.joining = (!state.behaviour.never_arrives).then(|| (Instant::now() + state.behaviour.load, plan.world_id.clone(), plan.instance.clone()));
@@ -452,16 +480,18 @@ impl Game for LabGame {
         drop(watcher);
         let state = self.state.lock().unwrap();
         let running = state.pid.is_some();
+        let reads = running && !(state.follows_beside && state.beside.is_some());
         let walking = ["/input/MoveForward", "/input/MoveBackward", "/input/MoveLeft", "/input/MoveRight"].iter().any(|a| self.last_value(a) == Some(1.0));
         Seen {
             running,
-            pid: state.beside.or(state.pid),
+            pid: if state.follows_beside { state.beside.or(state.pid) } else { state.pid.or(state.beside) },
             log_found: true,
-            world_id: world.world_id.clone().filter(|_| running),
-            world_name: world.world_name.clone().filter(|_| running),
-            instance: world.instance.clone().filter(|_| running),
-            in_world: world.in_world && running,
-            local_player: (running && state.player_from.is_none_or(|from| Instant::now() >= from)).then(|| "Lab Agent".to_string()), // i18n: not shown
+            // What the lab VRChat's own log says is never said of the person's VRChat the app follows instead.
+            world_id: world.world_id.clone().filter(|_| reads),
+            world_name: world.world_name.clone().filter(|_| reads),
+            instance: world.instance.clone().filter(|_| reads),
+            in_world: world.in_world && reads,
+            local_player: (reads && state.player_from.is_none_or(|from| Instant::now() >= from)).then(|| "Lab Agent".to_string()), // i18n: not shown
             avatar_name: running.then(|| state.worn.as_ref().map_or_else(|| "Lab Avatar".to_string(), |id| format!("Lab Avatar {id}"))), // i18n: not shown
             others: 0,
             vrchat_user: Some((LAB_USER.to_string(), "Lab Agent".to_string())), // i18n: not shown
@@ -547,20 +577,39 @@ impl Game for LabGame {
         Ok(())
     }
 
-    fn runs(&self, pid: u32) -> Option<bool> {
+    fn identity(&self, pid: u32) -> super::game::Identity {
+        use super::game::Identity;
         let state = self.state.lock().unwrap();
-        Some(state.pid == Some(pid) || state.beside == Some(pid))
+        if state.beside == Some(pid) {
+            return Identity::Running(600);
+        }
+        match state.pid {
+            Some(p) if p == pid && state.foreign => Identity::Running(500),
+            Some(p) if p == pid => Identity::Running(state.started),
+            _ => Identity::Gone,
+        }
     }
 
-    fn launch_args(&self) -> Option<Vec<String>> {
+    fn launch_args(&self, pid: u32) -> Option<Vec<String>> {
         let state = self.state.lock().unwrap();
-        state.args.clone().filter(|_| state.pid.is_some())
+        // Only the process the app follows now, read with its own log: the person's has its own arguments.
+        let followed = if state.follows_beside { state.beside.or(state.pid) } else { state.pid.or(state.beside) };
+        if followed != Some(pid) {
+            return None;
+        }
+        if state.beside == Some(pid) {
+            return Some(vec!["VRChat.exe".to_string()]);
+        }
+        state.args.clone()
     }
 
     fn window(&self, pid: u32) -> Option<GameWindow> {
-        if self.state.lock().unwrap().foreign {
+        let mut state = self.state.lock().unwrap();
+        state.windows_asked.push(pid);
+        if state.foreign || state.beside == Some(pid) {
             return None;
         }
+        drop(state);
         super::win::window_of(pid, Some(&self.title))
     }
 
@@ -581,8 +630,20 @@ impl Game for LabGame {
     }
 
     fn close(&self, window: &GameWindow) -> Result<(), Failure> {
+        let (takes, refused, ignored) = {
+            let b = &self.state.lock().unwrap().behaviour;
+            (b.close_takes, b.close_refused, b.close_ignored)
+        };
+        std::thread::sleep(takes);
+        if refused {
+            return Err(Failure::new("close_failed", "Windows did not take the close request.", "This is the lab.")); // i18n: not shown
+        }
+        if !ignored {
+            super::win::close_window(window.handle)?;
+        }
+        // Counted once asked for and taken.
         self.state.lock().unwrap().closes += 1;
-        super::win::close_window(window.handle)
+        Ok(())
     }
 
     fn capture(&self, window: &GameWindow, max_width: u32) -> Result<Shot, Failure> {
@@ -982,7 +1043,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
     let osc_also = args.get(1).and_then(|port| port.parse::<u16>().ok()).map(|port| SocketAddr::from(([127, 0, 0, 1], port)));
     let game = LabGame::with_osc_also(&dir, Some(exe.clone()), osc_also);
-    let timing = super::Timing { instance_every: Duration::from_secs(1), start_limit: Duration::from_secs(20) };
+    let timing = super::Timing { instance_every: Duration::from_secs(1), start_limit: Duration::from_secs(20), close_limit: Duration::from_secs(30) };
     let bridge = super::Bridge::with_timing(game.clone(), Some(exe), timing);
     bridge.set_opener(LabOpener::new(&dir.join("sessions")));
     bridge.set_feedback(LabFeedback::signed_in());

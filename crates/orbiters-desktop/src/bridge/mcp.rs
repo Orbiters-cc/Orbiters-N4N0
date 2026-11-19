@@ -579,7 +579,8 @@ fn tool_result(name: &str, answer: Result<Answer, super::game::Failure>) -> Valu
             "isError": false,
         }),
         Err(failure) => {
-            let data = tools::failure_json(&failure);
+            // A failure can name a world too (a wrong instance's): the same label.
+            let data = marked(tools::failure_json(&failure));
             json!({ "content": [{ "type": "text", "text": data.to_string() }], "structuredContent": data, "isError": true })
         }
     }

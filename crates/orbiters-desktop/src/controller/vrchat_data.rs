@@ -324,11 +324,13 @@ impl Controller {
                         // is starting the invite to oneself goes instead (that VRChat shows it once up).
                         let remote = self.view().vrchat.remote;
                         let mut started = self.launcher_started.lock().unwrap();
-                        let starts = super::travel::route(remote, &travel.running(), &bridge, |p| travel.own_osc_ports(p)) == super::travel::Route::Start;
-                        let went = if starts && started.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60)) {
+                        // The route decided once, from one look at the processes, is the one taken.
+                        let processes = travel.running();
+                        let chosen = super::travel::route(remote, &processes, &bridge, |p| travel.own_osc_ports(p));
+                        let went = if chosen == super::travel::Route::Start && started.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60)) {
                             Err(super::travel::GoFailure::Invite(super::travel::Detour::Asked))
                         } else {
-                            super::travel::go(travel.as_ref(), remote, &bridge, &world, &instance)
+                            super::travel::go_on(travel.as_ref(), chosen, &processes, &bridge, &world, &instance)
                         };
                         if went == Ok(super::travel::Went::Started) {
                             *started = Some(std::time::Instant::now());

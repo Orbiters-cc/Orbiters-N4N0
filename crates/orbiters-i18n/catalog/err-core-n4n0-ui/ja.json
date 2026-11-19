@@ -13,6 +13,7 @@
   "The capture's details are not an object": "キャプチャの詳細がJSONオブジェクトではありません",
   "This session has no 3D view to keep: reconstruct it first.": "このセッションには残せる3Dビューがありません：先に再構築してください。",
   "Nothing was deleted: {path} is part of the 3D view.": "何も削除されていません：{path}は3Dビューの一部です。",
+  "Its last reconstruction was only partly saved (a file was open in another program): reconstruct it again before deleting its capture.": "前回の再構築は一部しか保存されませんでした（ファイルが別のプログラムで開かれていました）。キャプチャを削除する前にもう一度再構築してください。",
   "VRChat session storage requires Windows DPAPI": "VRChatのセッションを保存するにはWindows DPAPIが必要です",
   "VRChat was not found on the network yet": "VRChatがネットワーク上でまだ見つかっていません",
   "VRChat's {path} has no value": "VRChat内の{path}に値がありません",

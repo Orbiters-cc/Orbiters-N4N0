@@ -112,17 +112,26 @@ impl std::error::Error for Interrupted {}
 /// The line on the worker's standard input that asks it to pause.
 pub const PAUSE_LINE: &str = "pause";
 
+/// One line of the worker's standard input: a pause asked. Acknowledged at once, from this thread (night4, the second
+/// verifier): the main thread may be inside a step whose GPU wait outlasts the app's 15 s for a silent worker on a loaded
+/// card, and only an acknowledgement gives it the longer, bounded time; a worker that does not even read its input stays
+/// on the short limit.
+fn heard(pause: &Pause, line: &str, leave: &dyn Fn()) {
+    if line.trim() == PAUSE_LINE {
+        pause.ask();
+        if pause.early.load(Ordering::SeqCst) {
+            leave();
+        }
+        pause.acknowledge();
+    }
+}
+
 /// Reads the worker's standard input for [`PAUSE_LINE`]. While nothing is worth keeping, `leave` ends the process right
 /// away. Standard input closing says nothing: a lab run has none, and the output's pipe tells of an app that went.
 pub fn listen(pause: Arc<Pause>, leave: impl Fn() + Send + 'static) {
     let spawned = std::thread::Builder::new().name("pause".into()).spawn(move || {
         for line in std::io::stdin().lines().map_while(Result::ok) {
-            if line.trim() == PAUSE_LINE {
-                pause.ask();
-                if pause.early.load(Ordering::SeqCst) {
-                    leave();
-                }
-            }
+            heard(&pause, &line, &leave);
         }
     });
     if let Err(e) = spawned {
@@ -640,6 +649,24 @@ mod tests {
         pause.acknowledge();
         pause.acknowledge();
         assert_eq!(TOLD.load(Ordering::SeqCst), 1);
+    }
+
+    /// night4 (the second verifier): the pause line is acknowledged as soon as it is read, whatever the training thread
+    /// is doing (before, only a step boundary did, so a long GPU wait still met the 15 s limit); other lines do nothing.
+    #[test]
+    fn a_pause_line_is_acknowledged_when_it_is_read() {
+        static TOLD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let pause = Pause::default();
+        pause.on_acknowledge(|| {
+            TOLD.fetch_add(1, Ordering::SeqCst);
+        });
+        pause.begin_steps();
+        let left = std::sync::atomic::AtomicBool::new(false);
+        heard(&pause, "hello", &|| left.store(true, Ordering::SeqCst));
+        assert!(!pause.asked() && TOLD.load(Ordering::SeqCst) == 0);
+        heard(&pause, " pause ", &|| left.store(true, Ordering::SeqCst));
+        assert!(pause.asked() && TOLD.load(Ordering::SeqCst) == 1, "acknowledged by the reading thread itself");
+        assert!(!left.load(Ordering::SeqCst), "steps begun: it does not leave early");
     }
 
     fn session(name: &str) -> PathBuf {

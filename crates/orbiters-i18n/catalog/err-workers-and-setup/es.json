@@ -107,5 +107,6 @@
   "The previous version could not be fully put back: {files}. Its files are kept in {folder}.": "No se pudo restablecer del todo la versión anterior: {files}. Sus archivos se guardan en {folder}.",
   "{folder} is left from an earlier install and could not be set aside: nothing was changed.": "{folder} quedó de una instalación anterior y no se pudo apartar: no se cambió nada.",
   "{path} is a link to another folder: nothing in it was removed": "{path} es un enlace a otra carpeta: no se eliminó nada de ella",
-  "not what N4N0 keeps under this name: left as it is": "no es lo que N4N0 guarda con este nombre: se deja como está"
+  "not what N4N0 keeps under this name: left as it is": "no es lo que N4N0 guarda con este nombre: se deja como está",
+  "{path} is reached through a link to another folder: nothing in it was removed": "{path} se alcanza a través de un enlace a otra carpeta: no se eliminó nada de ella"
 }

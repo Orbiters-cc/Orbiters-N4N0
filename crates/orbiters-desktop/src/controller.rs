@@ -100,6 +100,15 @@ fn initial_samples(vrchat: Vec<(String, OscValue)>, latest: &HashMap<String, (Ve
     merged.iter().flat_map(|(address, values)| osc_samples(address, values, 0, true).collect::<Vec<_>>()).collect()
 }
 
+/// Which recording a stop is for ([`Controller::stop_capture`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StopOf {
+    /// The person's own Stop: what records now, and a start waiting.
+    Person,
+    /// The recording of this number only ([`Controller::recording_number`] when it started).
+    Recording(u64),
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum CapturePurpose { CameraOverlay, Short, Avatar }
 
@@ -169,6 +178,10 @@ pub struct Controller {
     /// Bumped by every capture worker process started; and the one the recording under way was started on.
     worker_incarnation: AtomicU64,
     recording_worker: AtomicU64,
+    /// The worker installed now (set under `worker` when it is), and the number of the recording `recording_worker`
+    /// was started for (verify2-controller: an end is judged by both, in the same update that acts on it).
+    worker_installed: AtomicU64,
+    recording_worker_number: AtomicU64,
     kit_epoch: Mutex<(u64,Option<String>)>,
     /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
     /// the app drives them), and when the avatar last (re)loaded, which resets them.
@@ -240,6 +253,8 @@ pub struct Controller {
     settings_written: Arc<AtomicU64>,
     #[cfg(test)]
     test_settings_writes: Arc<Mutex<Vec<Settings>>>,
+    #[cfg(test)]
+    test_settings_failing: Arc<AtomicU64>,
     /// How many times the settings were changed: taken under `snapshot` with the change, so the writer can tell the
     /// newer of two copies whatever order they reach it in.
     settings_revision: AtomicU64,
@@ -276,6 +291,9 @@ const STOP_LIMIT: Duration = Duration::from_secs(120);
 
 /// The settings are written once they stopped changing for this long (a slider dragged, the avatar's radial moving).
 const SAVE_QUIET: Duration = Duration::from_millis(250);
+/// The last flush tries this many times, this far apart, before it says the settings could not be written.
+const SAVE_TRIES: u32 = 3;
+const SAVE_RETRY: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Copy, Debug)]
 struct AvatarToggles {
@@ -551,6 +569,8 @@ impl Controller {
             capture_serial: AtomicU64::new(0),
             worker_incarnation: AtomicU64::new(0),
             recording_worker: AtomicU64::new(0),
+            worker_installed: AtomicU64::new(0),
+            recording_worker_number: AtomicU64::new(0),
             kit_epoch: Mutex::default(),
             avatar_before: Mutex::new(None),
             hide: Mutex::new(hide_self::HideRuntime::with_journal((!cfg!(test)).then(hide_self::masks_journal))),
@@ -590,6 +610,8 @@ impl Controller {
             settings_written: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             test_settings_writes: Arc::default(),
+            #[cfg(test)]
+            test_settings_failing: Arc::default(),
             instance_permits: Mutex::default(),
             lend_gate: Mutex::new(()),
             settings_revision: AtomicU64::new(0),
@@ -828,6 +850,8 @@ impl Controller {
         // This worker process: its events and its end count only while the recording under way is its own, or while no
         // other worker started since (verify-controller: a dead worker's late end reset a new worker's recording).
         let incarnation = self.worker_incarnation.fetch_add(1, Ordering::AcqRel) + 1;
+        // Installed from now (under `worker`): its first events (Ready) may come before the spawn returns.
+        self.worker_installed.store(incarnation, Ordering::Release);
         let on_event = {
             let ctl = self.clone();
             move |e| {
@@ -860,36 +884,41 @@ impl Controller {
     /// Whether what worker `incarnation` says still counts: it is the newest worker, or the recording under way was
     /// started on it.
     fn worker_counts(&self, incarnation: u64) -> bool {
-        self.worker_incarnation.load(Ordering::Acquire) == incarnation || self.recording_worker.load(Ordering::Acquire) == incarnation
+        self.worker_installed.load(Ordering::Acquire) == incarnation || self.worker_runs_recording(incarnation)
+    }
+
+    /// Whether the recording under way now was started on worker `incarnation`.
+    fn worker_runs_recording(&self, incarnation: u64) -> bool {
+        self.recording_worker.load(Ordering::Acquire) == incarnation && self.recording_worker_number.load(Ordering::Acquire) == self.capture_serial.load(Ordering::Acquire)
     }
 
     /// Worker `incarnation` ended. Its recording, if one was under way, ended with it; a worker replaced since (a stuck
     /// one restarted) whose end is heard late leaves the newer worker's recording alone.
     fn on_worker_exit(self: &Shared, incarnation: u64) {
-        if !self.worker_counts(incarnation) {
-            return;
+        // Its recording is the one under way only if it was started on this worker, for this number: a recording
+        // being started on a replacement (already numbered, its Start not sent yet) is not its to end (verify2).
+        if self.worker_runs_recording(incarnation) {
+            self.put_vrchat_back();
         }
-        {
-            let ctl = self;
-            {
-                ctl.put_vrchat_back();
-                // What the recording was for ends with it, BEFORE Idle is published: a start after Idle may be a new
-                // 3D picture's or scan's, whose flag must stay (CTL-11 a).
-                if ctl.snapshot.lock().unwrap().capture.state != CaptureState::Idle {
-                    ctl.burst.lock().unwrap().recording = false;
-                    ctl.scan.lock().unwrap().recording = false;
-                }
-                ctl.update(|s| {
-                    s.worker.ready = false;
-                    // Whatever it was doing (recording, saving a session) ended with it.
-                    if s.capture.state != CaptureState::Idle {
-                        s.capture.state = CaptureState::Idle;
-                        s.capture.from_osc = false;
-                        s.capture.error = Some(tr("The capture worker stopped unexpectedly.").into());
-                    }
-                });
-                ctl.capture_ended();
+        let mut ended = false;
+        self.update(|s| {
+            // Judged again here, in the update that acts on it: a replacement installed meanwhile wins.
+            let mine = self.worker_runs_recording(incarnation);
+            if self.worker_installed.load(Ordering::Acquire) == incarnation {
+                s.worker.ready = false;
             }
+            if mine && s.capture.state != CaptureState::Idle {
+                // What the recording was for ends with it, before Idle shows (CTL-11 a).
+                self.burst.lock().unwrap().recording = false;
+                self.scan.lock().unwrap().recording = false;
+                s.capture.state = CaptureState::Idle;
+                s.capture.from_osc = false;
+                s.capture.error = Some(tr("The capture worker stopped unexpectedly.").into());
+                ended = true;
+            }
+        });
+        if ended {
+            self.capture_ended();
         }
     }
 
@@ -1029,15 +1058,16 @@ impl Controller {
                 self.publish();
                 if over_limit {
                     self.notify(NoticeKind::Warning, tr("Storage limit reached: recording stopped. Raise the limit in Settings or free space."));
-                    let _ = self.stop_capture();
+                    let _ = self.stop_capture(StopOf::Recording(self.recording_number()));
                 }
             }
-            WorkerEvent::Stopped { manifest, reason, .. } => {
+            WorkerEvent::Stopped { session_dir, manifest, reason } => {
                 // A new Start came (a world split), or the worker started over by itself at a new frame size
                 // ("resized": a session holds one size): the recording goes on in the next session.
                 let resized = reason == "resized";
                 let restarting = reason == "restarted" || resized;
-                let session = self.snapshot.lock().unwrap().capture.session_dir.clone();
+                // The session the worker says it saved, not whatever the snapshot names by now (verify2).
+                let session = Some(session_dir).filter(|d| !d.as_os_str().is_empty()).or_else(|| self.snapshot.lock().unwrap().capture.session_dir.clone());
                 if !restarting {
                     self.put_vrchat_back();
                 }
@@ -1147,7 +1177,10 @@ impl Controller {
     /// A start that is a picture's or a scan's own: it fails when anything records or is being saved (it would adopt
     /// that recording), `claim` runs under the start gate the moment it is accepted (the flag that says what it is
     /// for), and the number of the recording it started is handed back (verify-controller, C-2, CTL2-7).
-    fn start_capture_owned(self: &Shared, purpose: CapturePurpose, claim: impl FnOnce()) -> anyhow::Result<u64> {
+    /// `unclaim` undoes `claim` when the start fails after it was accepted, under the same gate: a request refused
+    /// before it claimed anything clears nothing (another capture's flag, while it is saved, is that capture's:
+    /// verify2-controller).
+    fn start_capture_owned(self: &Shared, purpose: CapturePurpose, claim: impl FnOnce(), unclaim: impl FnOnce()) -> anyhow::Result<u64> {
         let (name, dolly) = self.with_settings(|s| (s.spout_sender.clone(), s.dolly_streams));
         let (name, extra) = if dolly {
             (if name.is_empty() { dolly::MAIN_SENDER.to_string() } else { name }, dolly::EXTRA_SENDERS.map(String::from).to_vec())
@@ -1156,7 +1189,7 @@ impl Controller {
         };
         let _ = purpose;
         let generation = self.stop_generation.load(Ordering::Acquire);
-        let started = self.start_segment_claimed(SourceSpec::Spout { name, extra }, false, false, generation, false, Some(claim))?;
+        let started = self.start_segment_claimed(SourceSpec::Spout { name, extra }, false, false, generation, false, Some((claim, unclaim)))?;
         started.ok_or_else(|| anyhow::anyhow!("{}", tr("A recording is under way: stop it first.")))
     }
 
@@ -1170,7 +1203,7 @@ impl Controller {
     }
 
     fn start_segment(self: &Shared, source: SourceSpec, importing: bool, from_osc: bool, stop_generation: u64, rollover: bool) -> anyhow::Result<()> {
-        self.start_segment_claimed(source, importing, from_osc, stop_generation, rollover, None::<fn()>).map(|_| ())
+        self.start_segment_claimed(source, importing, from_osc, stop_generation, rollover, None::<(fn(), fn())>).map(|_| ())
     }
 
     /// [`Controller::start_segment`]; with `claim` (a picture's or a scan's own start), refused while anything records
@@ -1183,7 +1216,7 @@ impl Controller {
         from_osc: bool,
         stop_generation: u64,
         rollover: bool,
-        claim: Option<impl FnOnce()>,
+        claim: Option<(impl FnOnce(), impl FnOnce())>,
     ) -> anyhow::Result<Option<u64>> {
         let _start = self.capture_start_gate.lock().unwrap();
         let exclusive = claim.is_some();
@@ -1214,9 +1247,19 @@ impl Controller {
             return Ok(None);
         }
         // Accepted: what it is for, then its number, under the gate (nothing else starts in between).
-        if let Some(claim) = claim {
-            claim();
+        // Undone (still under the gate: dropped before it) if the start does not go through.
+        struct Undo<F: FnOnce()>(Option<F>);
+        impl<F: FnOnce()> Drop for Undo<F> {
+            fn drop(&mut self) {
+                if let Some(undo) = self.0.take() {
+                    undo();
+                }
+            }
         }
+        let mut undo = claim.map(|(claim, unclaim)| {
+            claim();
+            Undo(Some(unclaim))
+        });
         let number = if rollover {
             self.capture_serial.load(Ordering::Acquire)
         } else {
@@ -1289,8 +1332,12 @@ impl Controller {
                 self.flush_osc(&mut osc);
                 osc.forwarding = false;
                 let sent = self.send(&WorkerCommand::Start(Box::new(cmd)));
-                // The worker this recording runs on (the newest: `send` started one if none ran).
-                self.recording_worker.store(self.worker_incarnation.load(Ordering::Acquire), Ordering::Release);
+                // The worker this recording runs on, once its Start went: the one installed (`send` started one if
+                // none ran), with the recording's number. A Start that failed leaves the last one's (verify2).
+                if sent.is_ok() {
+                    self.recording_worker_number.store(number, Ordering::Release);
+                    self.recording_worker.store(self.worker_installed.load(Ordering::Acquire), Ordering::Release);
+                }
                 if sent.is_ok() && record_parameters {
                     let samples = initial_samples(vrchat, &osc.latest, fetch_started);
                     osc.forwarding = true;
@@ -1321,6 +1368,9 @@ impl Controller {
             self.capture_ended();
             return Err(e);
         }
+        if let Some(undo) = undo.as_mut() {
+            undo.0 = None;
+        }
         Ok(Some(number))
     }
 
@@ -1349,7 +1399,7 @@ impl Controller {
         if !self.owns_recording(owner) {
             return;
         }
-        if let Err(e) = self.stop_capture() {
+        if let Err(e) = self.stop_capture_now() {
             self.notify(NoticeKind::Error, e.to_string());
         }
     }
@@ -1375,7 +1425,7 @@ impl Controller {
         }
         flag();
         if self.is_capturing() {
-            if let Err(e) = self.stop_capture() {
+            if let Err(e) = self.stop_capture_now() {
                 self.notify(NoticeKind::Error, e.to_string());
             }
         }
@@ -1486,7 +1536,7 @@ impl Controller {
             self.switch_kit_on(&[]);
             return;
         }
-        let r = if on { self.start_capture(CapturePurpose::Avatar) } else { self.stop_capture() };
+        let r = if on { self.start_capture(CapturePurpose::Avatar) } else { self.stop_capture(StopOf::Person) };
         if let Err(err) = r {
             self.notify(NoticeKind::Error, err.to_string());
         }
@@ -2026,7 +2076,25 @@ impl Controller {
         self.start_with(SourceSpec::RawSequence { path: dir, realtime: false }, true, false)
     }
 
-    pub fn stop_capture(self: &Shared) -> anyhow::Result<()> {
+    /// Stops a recording. A stop must say which: the person's own Stop (the button, the tray, the avatar's record toggle)
+    /// stops what records now and calls off a start waiting; anything automatic (a picture's flight, the bridge's
+    /// clean-up, the storage limit) names the recording it is about, and a recording begun since is left alone
+    /// (verify2-controller: no caller can stop "whatever is recording").
+    pub fn stop_capture(self: &Shared, of: StopOf) -> anyhow::Result<()> {
+        match of {
+            StopOf::Person => self.stop_capture_now(),
+            StopOf::Recording(number) => {
+                let _gate = self.capture_start_gate.lock().unwrap();
+                if !self.owns_recording(number) {
+                    return Ok(());
+                }
+                self.stop_capture_now()
+            }
+        }
+    }
+
+    /// The stop itself; callers hold the start gate when they checked ownership (or stop for the person, or quit).
+    fn stop_capture_now(self: &Shared) -> anyhow::Result<()> {
         self.stop_generation.fetch_add(1, Ordering::AcqRel);
         // A start waiting for the last session to be saved is called off too.
         self.pending_start.lock().unwrap().take();
@@ -2190,8 +2258,13 @@ impl Controller {
     fn settings_sink(self: &Shared) -> impl FnMut(Settings) -> bool + Send + 'static {
         #[cfg(test)]
         {
-            let writes = self.test_settings_writes.clone();
+            let (writes, failing) = (self.test_settings_writes.clone(), self.test_settings_failing.clone());
             move |s: Settings| {
+                // A test can make the next writes fail.
+                if failing.load(Ordering::SeqCst) > 0 {
+                    failing.fetch_sub(1, Ordering::SeqCst);
+                    return false;
+                }
                 writes.lock().unwrap().push(s);
                 true
             }
@@ -2213,12 +2286,34 @@ impl Controller {
 
     /// Writes the settings still waiting, and stops the writing thread (the app quits). The slot stays closed, held
     /// through the join: nothing writes beside the last flush, and what comes after it is written by `queue_save`.
-    fn flush_settings(&self) {
+    fn flush_settings(self: &Shared) {
         let mut writer = self.settings_writer.lock().unwrap();
         if let SettingsWriter::Running(tx, thread) = std::mem::replace(&mut *writer, SettingsWriter::Closed) {
             drop(tx);
             let _ = thread.join();
         }
+        // What was applied may never have reached the writer (a change stalled between applying and queueing), or its
+        // write may have failed: the newest applied settings are written here, tried a few times, and a failure is
+        // said (verify2-controller). Revision and settings read together under the snapshot's lock, where both change.
+        let (revision, settings) = {
+            let s = self.snapshot.lock().unwrap();
+            (self.settings_revision.load(Ordering::SeqCst), (*s.settings).clone())
+        };
+        if revision <= self.settings_written.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut sink = self.settings_sink();
+        for attempt in 0..SAVE_TRIES {
+            if sink(settings.clone()) {
+                self.settings_written.store(revision, Ordering::SeqCst);
+                return;
+            }
+            if attempt + 1 < SAVE_TRIES {
+                std::thread::sleep(SAVE_RETRY);
+            }
+        }
+        // The sink told the person each time; the log keeps it too.
+        eprintln!("settings: revision {revision} could not be written before quitting");
     }
 
     /// How Fast walk carries the person now, for the windows.
@@ -2351,7 +2446,7 @@ impl Controller {
         self.stop_bridge();
         self.pending_start.lock().unwrap().take();
         self.change_queue(VecDeque::clear);
-        if let Err(e) = self.stop_capture() {
+        if let Err(e) = self.stop_capture_now() {
             eprintln!("stopping the capture: {e:#}");
         }
         self.quitting.store(true, Ordering::Relaxed);
@@ -3545,14 +3640,77 @@ mod tests {
     fn a_replaced_workers_late_end_leaves_the_new_recording_alone() {
         use std::sync::atomic::Ordering;
         let ctl = super::Controller::new(orbiters_core::settings::Settings::default());
-        // Worker 1 died, worker 2 was started and records.
-        ctl.worker_incarnation.store(2, Ordering::Release);
+        // Worker 1 died, worker 2 was started and records (recording 5).
+        ctl.worker_installed.store(2, Ordering::Release);
         ctl.recording_worker.store(2, Ordering::Release);
+        ctl.capture_serial.store(5, Ordering::Release);
+        ctl.recording_worker_number.store(5, Ordering::Release);
         ctl.update(|s| s.capture.state = super::CaptureState::Recording);
         ctl.on_worker_exit(1);
         assert_eq!(ctl.view().capture.state, super::CaptureState::Recording, "worker 1's late end");
         ctl.on_worker_exit(2);
         assert_eq!(ctl.view().capture.state, super::CaptureState::Idle, "its own worker ended");
+    }
+
+    /// verify2-controller: a worker whose end was heard while it was still the one installed (nothing recording), and
+    /// is acted on only after the next recording was numbered on a replacement, does not end that recording; the old
+    /// recording number of a worker is not taken for the new one either.
+    #[test]
+    fn a_workers_late_end_never_ends_a_recording_started_since() {
+        use std::sync::atomic::Ordering;
+        let ctl = super::Controller::new(orbiters_core::settings::Settings::default());
+        // Worker 1 ran recording 3 earlier; it is still installed and idle when it dies.
+        ctl.worker_installed.store(1, Ordering::Release);
+        ctl.recording_worker.store(1, Ordering::Release);
+        ctl.recording_worker_number.store(3, Ordering::Release);
+        ctl.capture_serial.store(3, Ordering::Release);
+        // Before its end is acted on: recording 4 is numbered and Starting (its Start not sent yet).
+        ctl.capture_serial.store(4, Ordering::Release);
+        ctl.update(|s| s.capture.state = super::CaptureState::Starting);
+        ctl.on_worker_exit(1);
+        assert_eq!(ctl.view().capture.state, super::CaptureState::Starting, "recording 4 is not worker 1's");
+        // Recording 4 starts on worker 2; worker 1's end, heard again, leaves it.
+        ctl.worker_installed.store(2, Ordering::Release);
+        ctl.recording_worker.store(2, Ordering::Release);
+        ctl.recording_worker_number.store(4, Ordering::Release);
+        ctl.update(|s| s.capture.state = super::CaptureState::Recording);
+        ctl.on_worker_exit(1);
+        assert_eq!(ctl.view().capture.state, super::CaptureState::Recording);
+    }
+
+    /// verify2-controller: at Quit, a change applied but stalled before it was queued is written by the last flush; and
+    /// a write that failed in the debounce, with nothing newer after it, is tried again then (not dropped).
+    #[test]
+    fn quitting_writes_what_was_applied_even_if_never_queued_or_failed_once() {
+        use orbiters_core::settings::Settings;
+        use std::sync::atomic::Ordering;
+        let ctl = super::Controller::new(Settings::default());
+        let written = || ctl.test_settings_writes.lock().unwrap().iter().map(|s| s.storage_limit_gb).collect::<Vec<_>>();
+        // Applied (revision 1, under the snapshot's lock, as `apply_settings` does), stalled before `queue_save`.
+        {
+            let mut s = ctl.snapshot.lock().unwrap();
+            s.settings.storage_limit_gb = 7.0;
+            ctl.settings_revision.fetch_add(1, Ordering::SeqCst);
+        }
+        ctl.flush_settings();
+        assert_eq!(written(), vec![7.0], "the applied change is on disk");
+
+        let ctl = super::Controller::new(Settings::default());
+        let written = || ctl.test_settings_writes.lock().unwrap().iter().map(|s| s.storage_limit_gb).collect::<Vec<_>>();
+        ctl.test_settings_failing.store(1, Ordering::SeqCst);
+        let mut b = Settings::default();
+        b.storage_limit_gb = 8.0;
+        {
+            let mut s = ctl.snapshot.lock().unwrap();
+            s.settings.storage_limit_gb = 8.0;
+            ctl.settings_revision.fetch_add(1, Ordering::SeqCst);
+        }
+        ctl.queue_save(1, b);
+        // The debounced write fails; the writer is back waiting for a next change when the app quits.
+        std::thread::sleep(super::SAVE_QUIET * 4);
+        assert!(written().is_empty(), "the first write failed");
+        ctl.flush_settings();
+        assert_eq!(written(), vec![8.0], "tried again at the last flush");
     }
 
     /// verify-controller (CTL-1 at shutdown): a change queued after the last flush never starts a second writer that writes
@@ -3847,7 +4005,7 @@ mod tests {
         let b=barrier.clone(); let c=ctl.clone();
         let thread=std::thread::spawn(move || {b.wait(); c.resume_pending(pending)});
         ctl.update(|s|s.capture.state=CaptureState::Idle);
-        ctl.stop_capture().unwrap();
+        ctl.stop_capture(StopOf::Person).unwrap();
         barrier.wait();
         assert!(thread.join().unwrap().is_err());
         assert!(ctl.test_commands.lock().unwrap().as_ref().unwrap().is_empty());
@@ -4130,14 +4288,14 @@ mod tests {
         assert!(ctl.require_live_camera().is_err(), "cached received Mode without a fresh query cannot authorize recording");
         ctl.on_osc(vec![(CAMERA_MODE.into(),vec![OscValue::Int(0)])],clock::now_ns());
         assert_eq!(ctl.view().camera_open_said,Some(false));
-        assert!(ctl.stop_capture().is_ok());
+        assert!(ctl.stop_capture(StopOf::Person).is_ok());
         assert!(!ctl.view().live_recording_running());
     }
     #[test]
     fn a_stop_cancels_a_start_that_has_not_passed_preflight() {
         let ctl=Controller::new(Settings::default());
         let generation=ctl.stop_generation.load(Ordering::Acquire);
-        ctl.stop_capture().unwrap();
+        ctl.stop_capture(StopOf::Person).unwrap();
         assert!(ctl.start_capture_generation(CapturePurpose::CameraOverlay,generation).is_err());
         assert_eq!(ctl.view().capture.state,CaptureState::Idle);
     }

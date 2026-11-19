@@ -36,6 +36,9 @@ const BACKUP_PREFIX: &str = "Library.orbiters-relocation-"; // i18n: not shown (
 /// The file a repair puts in its cache before the cache can become Library: such a cache is never removed on its
 /// record's word (verifier, point 3).
 const SWITCHED: &str = ".orbiters-switched"; // i18n: not shown (a file name)
+/// The file a repair puts in its cache when it makes it, and removes when the cache may become Library: the only proof
+/// a sweep accepts that a cache was never Library (verifier round 2: no marker means keep, always).
+const COPYING: &str = ".orbiters-copying"; // i18n: not shown (a file name)
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Health {
@@ -930,7 +933,9 @@ fn relocate_on(
     // remove it without asking which projects the gallery knows.
     let record = |phase: &str, backup_id: Option<crate::owned::FileId>| serde_json::json!({"project":project,"library":target,"backup":backup,"phase":phase,"backup_id":backup_id});
     crate::write_json(&target.with_extension("json"), &record("copying", None))?;
-    std::fs::create_dir_all(target)?;
+    std::fs::create_dir_all(target.parent().with_context(|| tr("A file without a folder"))?)?;
+    std::fs::create_dir(target)?;
+    std::fs::File::options().write(true).create_new(true).open(target.join(COPYING))?;
     update(work.progress, |p| {
         p.phase = Phase::Copying;
         p.bytes_total = bytes;
@@ -944,6 +949,10 @@ fn relocate_on(
     let mut copy_all = || -> anyhow::Result<bool> {
         for (i, (file, _)) in files.iter().enumerate() {
             let relative = file.strip_prefix(&library)?;
+            // A Library copied back from an earlier move holds its cache's markers: they are not taken along.
+            if relative == Path::new(SWITCHED) || relative == Path::new(COPYING) {
+                continue;
+            }
             let to = target.join(relative);
             std::fs::create_dir_all(to.parent().with_context(|| tr("A file without a folder"))?)?;
             update(work.progress, |p| p.file = relative.display().to_string());
@@ -976,6 +985,7 @@ fn relocate_on(
     let had_library = library.is_dir();
     let switching = (|| -> anyhow::Result<()> {
         std::fs::File::options().write(true).create_new(true).open(target.join(SWITCHED))?;
+        std::fs::remove_file(target.join(COPYING))?;
         let backup_id = if had_library { Some(crate::owned::id_of(&library)?) } else { None };
         crate::write_json(&target.with_extension("json"), &record("switching", backup_id))
     })();
@@ -1329,9 +1339,12 @@ fn judge(cache: &Path, known: &[PathBuf]) -> Judgement {
     // still copying and never made ready to switch, it was never Library; an interrupted switch at this very project
     // (its Library missing, the very folder set aside still there) is undone. Anything else, an unknown phase or an
     // older version's record without one, stays.
-    let switched = std::fs::symlink_metadata(cache.join(SWITCHED)).is_ok();
+    // Positive proof only: the cache's own "still copying" file there and no switch file; anything that cannot be read
+    // keeps the cache.
+    let copying = std::fs::symlink_metadata(cache.join(COPYING)).is_ok_and(|m| m.is_file());
+    let unswitched = std::fs::symlink_metadata(cache.join(SWITCHED)).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
     match record.as_ref().and_then(|r| r["phase"].as_str()) {
-        Some("copying") if !switched => Remove { project, restore: None },
+        Some("copying") if copying && unswitched => Remove { project, restore: None },
         Some("switching") => {
             let own_missing = std::fs::symlink_metadata(&own).is_err();
             match recorded_backup(record.as_ref(), &project) {
@@ -1577,6 +1590,22 @@ mod tests {
         let meta = std::fs::symlink_metadata(project.join("Library")).unwrap();
         assert!(!crate::discovery::is_link(&meta), "Library stays a real folder");
         assert!(project.join("Library/Artifacts/ab/0.bin").is_file());
+    }
+
+    /// Verifier round 2: a Library copied back from an earlier move still holds that cache's marker files; moving it
+    /// again works, and the new cache carries its own markers only.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn a_library_copied_back_with_old_markers_moves_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let project = project(temp.path(), "back", 2, 64);
+        std::fs::write(project.join("Library").join(SWITCHED), b"").unwrap();
+        std::fs::write(project.join("Library").join(COPYING), b"").unwrap();
+        let moved = preflight_with(&project, &low(), |_, _| Ok(cache.clone())).unwrap().expect("moved");
+        assert!(is_redirect(project.join("Library")).unwrap());
+        assert!(moved.join(SWITCHED).is_file() && !moved.join(COPYING).exists());
+        remove_redirect(project.join("Library")).unwrap();
     }
 
     #[cfg(any(windows, unix))]
@@ -2137,6 +2166,7 @@ mod tests {
         let cache = root.join(id_digit.to_string().repeat(32));
         std::fs::create_dir_all(cache.join("Artifacts")).unwrap();
         std::fs::write(cache.join("Artifacts/data.bin"), b"cache data").unwrap();
+        std::fs::write(cache.join(COPYING), b"").unwrap();
         crate::write_json(&cache.with_extension("json"), &serde_json::json!({"project": project, "library": cache, "phase": "copying"})).unwrap();
         cache
     }
@@ -2164,12 +2194,16 @@ mod tests {
         // An older version's record: no phase.
         let legacy = cache_for(&root, '4', &project);
         crate::write_json(&legacy.with_extension("json"), &serde_json::json!({"project": project, "library": legacy})).unwrap();
+        // Verifier round 2: no "still copying" file in it (made by an older version, or Library of a moved project),
+        // with a matching "copying" record and another valid project now at the record's place: kept.
+        let markerless = cache_for(&root, '6', &project);
+        std::fs::remove_file(markerless.join(COPYING)).unwrap();
         // A sidecar naming another cache.
         let foreign = cache_for(&root, '3', &project);
         crate::write_json(&foreign.with_extension("json"), &serde_json::json!({"project": project, "library": root.join("1".repeat(32)), "phase": "copying"})).unwrap();
         let swept = run_sweep(&root, &[]);
         assert!(swept.removed.is_empty(), "{swept:?}");
-        for c in [&live, &legacy, &foreign] {
+        for c in [&live, &legacy, &foreign, &markerless] {
             assert!(c.join("Artifacts/data.bin").is_file());
         }
     }

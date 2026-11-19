@@ -60,11 +60,13 @@ pub struct Timing {
     pub instance_every: Duration,
     /// How long a start may take to reach its world (a large world on a first visit downloads for a while).
     pub start_limit: Duration,
+    /// How long its VRChat, asked to close, may take to go before the agent is told it did not.
+    pub close_limit: Duration,
 }
 
 impl Default for Timing {
     fn default() -> Self {
-        Self { instance_every: Duration::from_secs(30), start_limit: Duration::from_secs(240) }
+        Self { instance_every: Duration::from_secs(30), start_limit: Duration::from_secs(240), close_limit: Duration::from_secs(30) }
     }
 }
 
@@ -159,6 +161,21 @@ pub(crate) struct Run {
     /// private instance made for this start (nobody else knows that instance); until then nothing is sent to it, and
     /// it is never closed: a candidate that turns up elsewhere, or not at all, is let go, left alone.
     pub candidate: bool,
+    /// When `pid`'s process started (the system's list): with the pid, the identity of the bridge's VRChat, checked at every
+    /// act. A pid alone can be another process later.
+    pub created: Option<u64>,
+    /// A VRChat that came up during a start of the bridge's and could never be proven its own: it may be the bridge's,
+    /// still running on the account. Said to the agent (get_state) and to the person (the bridge's log); never closed.
+    pub unproven: Option<String>,
+    /// The bridge asked its VRChat to close (it was somewhere it must not be), when, and why: until the process is seen gone
+    /// nothing acts on it and nothing is told; then `event` says why.
+    pub closing_out: Option<Closing>,
+    /// The last recording this session started (its session folder): the only one the bridge's Stop ends.
+    pub recording: Option<std::path::PathBuf>,
+    /// A recording this session asked for is starting (its folder not known yet).
+    pub starting_picture: bool,
+    /// When the bridge last launched this session's VRChat (`None`: one it did not launch, adopted or taken over).
+    pub launched_at: Option<Instant>,
     pub going: Option<Going>,
     /// The bridge itself is closing the game: its going away is no news.
     pub closing: bool,
@@ -188,6 +205,17 @@ pub(crate) struct Run {
     pub given_up: Option<(Instant, std::time::SystemTime, Option<Going>)>,
 }
 
+/// The bridge's own VRChat being closed because it was somewhere it must not be (or the person started theirs).
+#[derive(Clone, Debug)]
+pub(crate) struct Closing {
+    pub since: Instant,
+    /// What the agent is told once it is gone, and whether it counts as left elsewhere (`landed_elsewhere`).
+    pub why: String,
+    pub left: bool,
+    /// Told already that it did not close in time.
+    pub told: bool,
+}
+
 /// One VRChat the bridge drives (bridge/sessions.rs): `main`, the app's own, or a side session beside anything else.
 pub struct Session {
     /// `main`, or `p<profile>-<random>`: what an agent passes as `session`.
@@ -197,6 +225,21 @@ pub struct Session {
     /// A side session's OSC ports, in and out (`None`: main, on VRChat's defaults).
     pub osc: Option<(u16, u16)>,
     pub game: Arc<dyn Game>,
+    /// Lock order in the bridge (read 2026-11-19 for the night2 hang question; nothing checks it but reading): a lock on the
+    /// left may be held while one on its right is taken, never the reverse.
+    ///
+    /// - `Session::action` and `Bridge::opening` are only ever tried (`try_lock`, "busy"): they never wait, so they cannot
+    ///   close a cycle; whatever runs under them takes the locks below in this order.
+    /// - `Bridge::opening` -> `Bridge::launching` -> `Session::run` (`open_session` -> `launch_side`); `launching` is held
+    ///   across a launch (its Easy Anti-Cheat wait), never under `run`.
+    /// - `Bridge::sides` -> `Session::run` (`heard`, through `Session::pid`), `Bridge::sides` -> `Session::lease`
+    ///   (`session_of`). Never `run` -> `sides`.
+    /// - `Session::run` -> leaves only: `Bridge::journal`, `Bridge::log`, and the game's own locks (the lab's `state`). Two
+    ///   sessions' `run` at once only in `open_session`'s rename, whose new session nobody else holds yet.
+    /// - Nothing that waits is called under `run`: a session's held input coming up (`release_session`: OSC, `SendInput`,
+    ///   the guard's pipe), a window looked for (`GetWindowTextW` sends to the window's thread) or asked to close. Those
+    ///   run after `run` is let go, with what must hold meanwhile marked first (`Run::closing_out`).
+    /// - Game calls never take a bridge lock (`Game`'s methods and the lab's are leaves).
     pub(crate) run: Mutex<Run>,
     /// One action at a time in this session: a second one is told so rather than waiting behind it.
     pub(crate) action: Mutex<()>,
@@ -240,8 +283,10 @@ impl Session {
     }
 
     /// The VRChat this session started, while it runs.
+    /// The VRChat this session owns: never a candidate not proven yet.
     pub fn pid(&self) -> Option<u32> {
-        self.run.lock().unwrap().pid
+        let run = self.run.lock().unwrap();
+        run.pid.filter(|_| !run.candidate)
     }
 }
 
@@ -367,7 +412,7 @@ impl Bridge {
     }
 
     pub fn with_timing(game: Arc<dyn Game>, guard_exe: Option<PathBuf>, timing: Timing) -> Arc<Self> {
-        Arc::new(Self {
+        let bridge = Arc::new(Self {
             main: Session::new(sessions::MAIN, None, None, game.clone()),
             game,
             timing,
@@ -390,7 +435,11 @@ impl Bridge {
             last_close: Mutex::new(None),
             projects: projects::Projects::default(),
             maps: map_tool::Maps::default(),
-        })
+        });
+        // The Unity tools look at the person again at the moment they act (verify-n4n0 6).
+        let weak = Arc::downgrade(&bridge);
+        bridge.projects.set_presence(Arc::new(move || weak.upgrade().and_then(|b| b.paused())));
+        bridge
     }
 
     /// Fills in what the bridge itself knows.
@@ -566,20 +615,29 @@ impl Bridge {
                 let mut run = session.run.lock().unwrap();
                 // A side session's VRChat stays the bridge's, to be closed by close_session: only what runs ends. The main
                 // one's is the person's from their Stop on; a close of the bridge's own keeps it, and where it was going.
+                // A candidate never proven is nobody's to stop anything of.
+                let owned = run.pid.is_some() && !run.candidate;
                 if !by_person {
-                    (run.pid.is_some(), false)
+                    (owned, false)
                 } else {
-                    let pid = if session.is_main() { run.pid.take() } else { run.pid };
                     if session.is_main() {
+                        run.pid = None;
+                        run.created = None;
                         run.candidate = false;
                     }
-                    (pid.is_some(), run.going.take().is_some())
+                    (owned, run.going.take().is_some())
                 }
             };
             if was_going {
                 session.game.hold_reconstructions(false);
             }
-            if was_running && matches!(session.game.seen().capture.state.as_str(), "starting" | "recording" | "paused") {
+            // Only the recording this session started: never one of the person's.
+            let capture = session.game.seen().capture;
+            let mine = {
+                let run = session.run.lock().unwrap();
+                run.starting_picture || (capture.session.is_some() && capture.session == run.recording)
+            };
+            if was_running && mine && matches!(capture.state.as_str(), "starting" | "recording" | "paused") {
                 session.game.stop_picture();
             }
             // A side picture had the app: it goes back to the person's VRChat now (BRIDGE-4).

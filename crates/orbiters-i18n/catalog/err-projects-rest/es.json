@@ -113,5 +113,7 @@
   "Not everything could be put back: {problems}. What the project had is kept in {path}; the next package change puts it back.": "No se pudo restablecer todo: {problems}. Lo que tenía el proyecto se guarda en {path}; el próximo cambio de paquetes lo restablece.",
   "Could not keep a copy of the package list before changing it: nothing was changed": "No se pudo guardar una copia de la lista de paquetes antes de cambiarla: no se cambió nada",
   "{name} could not be put back ({why}): its copy is kept at {path}": "No se pudo restablecer {name} ({why}): su copia se guarda en {path}",
-  "A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.": "Un cambio de paquetes se detuvo a medias y no se pudo restablecer del todo: {problems}. Lo que tenía el proyecto se guarda en {path}."
+  "A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.": "Un cambio de paquetes se detuvo a medias y no se pudo restablecer del todo: {problems}. Lo que tenía el proyecto se guarda en {path}.",
+  "its record cannot be used": "su registro no se puede usar",
+  "The packages were changed, but the record of the change at {path} could not be closed: remove it before the next package change": "Los paquetes se cambiaron, pero no se pudo cerrar el registro del cambio en {path}: elimínalo antes del próximo cambio de paquetes"
 }

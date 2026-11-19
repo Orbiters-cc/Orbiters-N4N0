@@ -140,7 +140,7 @@ fn lab_giving_up(name: &str) -> (Arc<LabGame>, Arc<Bridge>, Server, Client) {
 fn lab_timed(name: &str, start_limit: Duration) -> (Arc<LabGame>, Arc<Bridge>, Server, Client) {
     let dir = std::env::temp_dir().join(format!("orbiters-bridge-e2e-{name}-{}", uuid::Uuid::new_v4().simple()));
     let game = LabGame::new(&dir, None);
-    let bridge = Bridge::with_timing(game.clone(), None, Timing { instance_every: Duration::from_millis(50), start_limit });
+    let bridge = Bridge::with_timing(game.clone(), None, Timing { instance_every: Duration::from_millis(50), start_limit, close_limit: Duration::from_secs(30) });
     let server = Server::start(bridge.clone(), 0, TOKEN.to_string()).expect("a free port");
     let client = Client { port: server.port() };
     (game, bridge, server, client)
@@ -232,6 +232,20 @@ impl ClientCli for FakeClient {
         *self.0.lock().unwrap() = None;
         Ok(())
     }
+}
+
+#[test]
+fn stop_after_the_bridge_closed_by_itself_still_makes_its_vrchat_the_person_s() {
+    // verify-n4n0 (4): Orbiters' grant lapsed (the bridge closed by itself, keeping its VRChat), then the person pressed Stop:
+    // with no listener open, Stop did nothing, and a later re-enable could take the game back.
+    let k = keeping("stop-closed", Duration::from_secs(60));
+    assert!(until(PATIENCE, || k.listening()));
+    k.flag.signed_in.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(until(PATIENCE, || !k.listening()), "closed by itself");
+    // What its close kept (no tick runs once the listener is closed).
+    k.keeper.bridge.main.run.lock().unwrap().pid = Some(7777);
+    k.keeper.command(Command::Stop);
+    assert_eq!(k.keeper.bridge.main.run.lock().unwrap().pid, None, "the person's Stop: theirs");
 }
 
 #[test]
@@ -371,7 +385,7 @@ fn it_stays_closed_when_the_person_cannot_be_heard() {
 fn stop_takes_control_back_at_once_and_turns_it_off() {
     let dir = std::env::temp_dir().join(format!("orbiters-bridge-stop-{}", uuid::Uuid::new_v4().simple()));
     let game = LabGame::new(&dir, None);
-    let bridge = Bridge::with_timing(game.clone(), None, Timing { instance_every: Duration::from_millis(50), start_limit: Duration::from_secs(2) });
+    let bridge = Bridge::with_timing(game.clone(), None, Timing { instance_every: Duration::from_millis(50), start_limit: Duration::from_secs(2), close_limit: Duration::from_secs(30) });
     let stand_in = StandIn::start();
     let flag = Arc::new(LabFlag { api: orbiters_core::account::Api::at(&stand_in.address), signed_in: AtomicBool::new(true), enabled: AtomicBool::new(true) });
     let keys = dir.join("keys.dat");
@@ -586,11 +600,80 @@ fn the_person_starting_their_own_vrchat_closes_the_bridge_s_not_theirs() {
     // BRIDGE-15: the app follows the person's new VRChat; the bridge's own stayed open on their account, "crashed" and nobody's.
     let (game, _bridge, _server, client) = lab("person-beside");
     arrive(&client);
+    let own = std::process::id();
     game.person_starts_beside();
-    assert!(until(PATIENCE, || game.closes() >= 1), "the bridge's own window is asked to close");
-    let event = client.state()["bridge"]["last_event"].as_str().unwrap_or_default().to_string();
-    assert!(event.contains("started their own VRChat") && !event.contains("crashed"), "{event}");
+    let said = || client.state()["bridge"]["last_event"].as_str().unwrap_or_default().to_string();
+    assert!(until(PATIENCE, || said().contains("started their own VRChat")), "told once its own is gone: {}", said());
+    assert!(!said().contains("crashed"));
+    assert_eq!(game.closes(), 1, "the bridge's own window was asked to close");
+    assert!(game.windows_asked().iter().all(|p| *p == own), "the person's VRChat was never looked for: {:?}", game.windows_asked());
     client.fails("walk", json!({ "direction": "forward", "seconds": 1 }), "not_started_by_bridge");
+}
+
+#[test]
+fn arrival_of_the_bridge_s_vrchat_never_makes_the_person_s_the_bridge_s() {
+    // verify-n4n0 (1): the person's VRChat P was the first seen during a start (a candidate). The bridge's own B then arrived
+    // in the start's instance: that arrival cleared P's candidacy, and P (still running) was then closed as the bridge's.
+    let (game, _bridge, _server, client) = lab("two-processes");
+    game.set_behaviour(|b| b.comes_up_after = Some(Duration::from_millis(1500)));
+    let person = game.clone();
+    let story = std::thread::spawn(move || {
+        // During the start: once its launch went out (a fixed 300 ms came before go_to_world's first look on a loaded
+        // machine, which then rightly refused the person's VRChat as not the bridge's).
+        assert!(until(PATIENCE, || !person.launches().is_empty()), "the start launched");
+        person.person_starts_beside();
+        // The bridge's own comes up meanwhile; later the app follows it, the person's runs on.
+        std::thread::sleep(Duration::from_millis(2500));
+        person.app_follows_the_lab();
+    });
+    let went = client.tool("go_to_world", json!({ "world_id": LAB_WORLD_A }));
+    story.join().unwrap();
+    let went = match went {
+        Ok(v) if v["arrived"] == true => v,
+        _ => client.tool("wait_for", json!({ "until": "in_world", "timeout_s": 20 })).unwrap(),
+    };
+    assert!(went["arrived"] == true || went["done"] == true, "{went}");
+    assert!(!game.windows_asked().contains(&4343), "the person's VRChat was never looked for (no focus, capture, input or close could reach it): {:?}", game.windows_asked());
+    assert_eq!(game.closes(), 0);
+    let state = client.state();
+    assert!(state["bridge"]["unproven_vrchat"].as_str().unwrap_or_default().contains("4343"), "said to the agent: {state}");
+    assert_eq!(state["vrchat"]["started_by_bridge"], true, "its own, proven by arriving itself: {state}");
+}
+
+#[test]
+fn a_wait_that_only_looks_never_brings_the_person_s_vrchat_forward() {
+    // verify-n4n0 (1): a fresh bridge, the person's own VRChat in a private instance of theirs: wait_for in_world brought it
+    // forward (world_outcome's arrival focus) without asking whose it was.
+    let (game, _bridge, _server, client) = lab("wait-looks");
+    game.set_foreign_game(Some(&format!("11027~private({LAB_USER})~region(eu)")));
+    let _ = client.tool("wait_for", json!({ "until": "in_world", "timeout_s": 2 }));
+    assert!(!game.windows_asked().contains(&4242), "{:?}", game.windows_asked());
+}
+
+#[test]
+fn a_vrchat_that_does_not_close_is_said_so_and_nothing_acts_on_it() {
+    // verify-n4n0 (3): "closed" was said before the close was asked, its failure ignored, its exit never looked at.
+    for (refused, ignored) in [(true, false), (false, true)] {
+        let game = LabGame::new(&std::env::temp_dir().join(format!("orbiters-bridge-e2e-closefail-{}", uuid::Uuid::new_v4().simple())), None);
+        let bridge = Bridge::with_timing(game.clone(), None, Timing { instance_every: Duration::from_millis(50), start_limit: PATIENCE, close_limit: Duration::from_secs(2) });
+        let server = Server::start(bridge.clone(), 0, TOKEN.to_string()).expect("a free port");
+        let client = Client { port: server.port() };
+        game.set_behaviour(|b| {
+            b.land_in = Some("12345~region(eu)".to_string());
+            b.close_refused = refused;
+            b.close_ignored = ignored;
+        });
+        let failure = client.fails("go_to_world", json!({ "world_id": LAB_WORLD_A }), "landed_elsewhere");
+        let message = failure["message"].as_str().unwrap();
+        assert!(message.contains("did not close"), "{refused} {ignored}: {message}");
+        if refused {
+            assert!(message.contains("failed"), "{message}");
+        }
+        assert_eq!(client.state()["vrchat"]["running"], true, "still there: said, not hidden");
+        client.fails("walk", json!({ "direction": "forward", "seconds": 1 }), "vrchat_closing");
+        assert!(!game.heard().iter().any(|(h, _)| h.address.starts_with("/input/")), "nothing went to it");
+        drop(server);
+    }
 }
 
 #[test]
@@ -747,6 +830,19 @@ fn only_private_instances_of_ones_own_are_acted_in() {
     let tools = super::tools::list();
     let go = tools.as_array().unwrap().iter().find(|t| t["name"] == "go_to_world").unwrap();
     assert_eq!(go["inputSchema"]["additionalProperties"], false, "no way to name an instance");
+}
+
+#[test]
+fn a_start_landed_elsewhere_is_told_only_once_its_window_was_asked_to_close() {
+    // Found under load (done-integration.md): the start was marked failed before the window was closed, so the agent could be
+    // told while the game was still open in an instance that is not its own private one. A slow close makes it certain.
+    let (game, _bridge, _server, client) = lab("leave-order");
+    game.set_behaviour(|b| {
+        b.land_in = Some("12345~region(eu)".to_string());
+        b.close_takes = Duration::from_millis(600);
+    });
+    client.fails("go_to_world", json!({ "world_id": LAB_WORLD_A }), "landed_elsewhere");
+    assert!(game.closes() >= 1, "told before its window was asked to close");
 }
 
 #[test]
@@ -907,7 +1003,7 @@ fn failures_say_what_happened_and_what_to_do() {
 fn worlds_are_changed_at_a_sensible_pace() {
     let dir = std::env::temp_dir().join(format!("orbiters-bridge-pace-{}", uuid::Uuid::new_v4().simple()));
     let game = LabGame::new(&dir, None);
-    let bridge = Bridge::with_timing(game.clone(), None, Timing { instance_every: Duration::from_secs(30), start_limit: Duration::from_secs(2) });
+    let bridge = Bridge::with_timing(game.clone(), None, Timing { instance_every: Duration::from_secs(30), start_limit: Duration::from_secs(2), close_limit: Duration::from_secs(30) });
     let server = Server::start(bridge, 0, TOKEN.to_string()).unwrap();
     let client = Client { port: server.port() };
     arrive(&client);
@@ -1280,7 +1376,7 @@ fn an_answer_does_not_wait_for_the_look_at_its_socket() {
     // could not tell from waiting).
     let look = Duration::from_secs(60);
     let dir = std::env::temp_dir().join(format!("orbiters-bridge-e2e-latency-{}", uuid::Uuid::new_v4().simple()));
-    let bridge = Bridge::with_timing(LabGame::new(&dir, None), None, Timing { instance_every: Duration::from_millis(50), start_limit: PATIENCE });
+    let bridge = Bridge::with_timing(LabGame::new(&dir, None), None, Timing { instance_every: Duration::from_millis(50), start_limit: PATIENCE, close_limit: Duration::from_secs(30) });
     let server = Server::start_looking_every(bridge, 0, TOKEN.to_string(), look).expect("a free port");
     let client = Client { port: server.port() };
     let begin = Instant::now();

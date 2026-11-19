@@ -103,6 +103,11 @@ struct Mailbox {
     #[cfg(test)] gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     /// Tests: the next page job panics.
     #[cfg(test)] panic_next: bool,
+    /// Parts whose painting panicked, to be asked for again, and whether a page's did.
+    failed_parts: Vec<Zone>,
+    failed_page: bool,
+    /// Too many panics in a row: the overlay ends, through its own teardown ([`Painter::fatal`]).
+    fatal: bool,
 }
 
 /// Panics of the paint thread within [`PANICS_WITHIN`] after which the overlay ends, for the service to start it again.
@@ -110,8 +115,10 @@ const PANICS_AT_MOST: usize = 3;
 const PANICS_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A job of the paint thread, a panic in it contained: logged in `vr-test.log`, `None` returned (OVL2-11: the thread died and every
-/// VR page stayed as it was for the session, with nothing said). The caller makes its canvases anew.
-fn contained<T>(what: &str, panics: &mut VecDeque<Instant>, job: impl FnOnce() -> T) -> Option<T> {
+/// VR page stayed as it was for the session, with nothing said). The caller makes its canvases anew, and has the job asked for again.
+/// At [`PANICS_AT_MOST`] within [`PANICS_WITHIN`], `fatal` is set: the overlay's loop ends the session through its teardown (verify2:
+/// exiting here skipped the held inputs' release, Fast walk's reset and the readers' joins).
+fn contained<T>(what: &str, panics: &mut VecDeque<Instant>, fatal: &mut bool, job: impl FnOnce() -> T) -> Option<T> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
         Ok(out) => Some(out),
         Err(payload) => {
@@ -122,9 +129,9 @@ fn contained<T>(what: &str, panics: &mut VecDeque<Instant>, job: impl FnOnce() -
             while panics.front().is_some_and(|t| now.duration_since(*t) > PANICS_WITHIN) {
                 panics.pop_front();
             }
-            if panics.len() >= PANICS_AT_MOST && !cfg!(test) {
+            if panics.len() >= PANICS_AT_MOST && !*fatal {
                 crate::overlay::vr_log::line("page painter: three panics in ten seconds; the overlay ends and is started again"); // i18n: not shown (a log's line)
-                std::process::exit(1);
+                *fatal = true;
             }
             None
         }
@@ -280,7 +287,8 @@ impl Painter {
                         let panic_now = std::mem::take(&mut thread.0.lock().unwrap().panic_next);
                         #[cfg(not(test))]
                         let panic_now = false;
-                        let painted = contained("a page", &mut panics, || {
+                        let mut fatal = false;
+                        let painted = contained("a page", &mut panics, &mut fatal, || {
                             if panic_now {
                                 panic!("test: the page job panics");
                             }
@@ -288,7 +296,10 @@ impl Painter {
                         });
                         let Some(mut frame) = painted else {
                             engine = fresh(&thread);
-                            thread.0.lock().unwrap_or_else(|e| e.into_inner()).working = false;
+                            let mut state = thread.0.lock().unwrap_or_else(|e| e.into_inner());
+                            state.failed_page = true;
+                            state.fatal |= fatal;
+                            state.working = false;
                             continue;
                         };
                         frame.phases.finish += std::mem::take(&mut cleanup);
@@ -304,17 +315,25 @@ impl Painter {
                     }
                 }
                 if let Some(request) = part {
-                    match contained("a part", &mut panics, || orbiters_i18n::in_language(request.language, || panels::with_render_style(request.facts.orbit, || engine.part(&request.spec, &request.facts, request.time)))) {
+                    let mut fatal = false;
+                    let zone = request.spec.zone;
+                    match contained("a part", &mut panics, &mut fatal, || orbiters_i18n::in_language(request.language, || panels::with_render_style(request.facts.orbit, || engine.part(&request.spec, &request.facts, request.time)))) {
                         Some(picture) => {
                             let retired = thread.0.lock().unwrap_or_else(|e| e.into_inner()).part_frames.insert(picture.zone, picture);
                             drop(retired);
                         }
-                        None => engine = fresh(&thread),
+                        None => {
+                            engine = fresh(&thread);
+                            let mut state = thread.0.lock().unwrap_or_else(|e| e.into_inner());
+                            state.failed_parts.push(zone);
+                            state.fatal |= fatal;
+                        }
                     }
                 }
                 if let Some((expected, reply)) = audit {
                     let style = expected.facts.orbit;
-                    let result = contained("an audit", &mut panics, || orbiters_i18n::in_language(expected.language, || panels::with_render_style(style, || {
+                    let mut fatal = false;
+                    let result = contained("an audit", &mut panics, &mut fatal, || orbiters_i18n::in_language(expected.language, || panels::with_render_style(style, || {
                         engine.mode(false);
                         let serial = engine.page(expected.request());
                         engine.mode(true);
@@ -325,7 +344,10 @@ impl Painter {
                         Some(result) => {
                             let _ = reply.send(result);
                         }
-                        None => engine = fresh(&thread),
+                        None => {
+                            engine = fresh(&thread);
+                            thread.0.lock().unwrap_or_else(|e| e.into_inner()).fatal |= fatal;
+                        }
                     }
                 }
                 thread.0.lock().unwrap_or_else(|e| e.into_inner()).working = false;
@@ -375,6 +397,13 @@ impl Painter {
         let retired = self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).audit.replace((frame, reply));
         self.shared.1.notify_one(); drop(retired); rx
     }
+    /// The parts whose painting failed since the last call, and whether a page's did: to be asked for again.
+    pub fn take_failed(&self) -> (Vec<Zone>, bool) {
+        let mut s = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
+        (std::mem::take(&mut s.failed_parts), std::mem::take(&mut s.failed_page))
+    }
+    /// Painting panicked too often: the overlay is to end, through its teardown.
+    pub fn fatal(&self) -> bool { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).fatal }
     pub fn take(&self) -> Option<Frame> { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).frame.take() }
     pub fn take_parts(&self) -> Vec<PartPicture> { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).part_frames.drain().map(|(_, f)| f).collect() }
     pub fn busy(&self) -> bool { let s = self.shared.0.lock().unwrap_or_else(|e| e.into_inner()); s.working || s.audit.is_some() || s.request.is_some() || s.frame.is_some() || !s.parts.is_empty() || !s.part_frames.is_empty() || !s.garbage.is_empty() }
@@ -478,13 +507,17 @@ mod tests {
         panel.painted = true;
         panel.items = Vec::new();
         // The hand-over, as `paint_async` makes it.
-        panel.acknowledged = Some(super::super::Shown { pixels: panel.shown_pixels.clone(), items: panel.items.clone(), mask: None, painted: true });
+        let facts_shown = Facts { gallery_scroll: 1.0, ..Default::default() };
+        panel.displayed = Some(facts_shown.clone());
+        panel.acknowledged = Some(super::super::Shown { pixels: panel.shown_pixels.clone(), items: panel.items.clone(), mask: None, painted: true, displayed: panel.displayed.clone() });
+        panel.displayed = Some(Facts { gallery_scroll: 2.0, ..Default::default() });
         panel.shown_pixels = Some(new.clone());
         panel.items = panels::items(Zone::WingWorlds, panel.logical, &Facts::default());
         assert!(!panel.items.is_empty());
         panel.not_presented(Instant::now());
         assert!(Arc::ptr_eq(panel.shown_pixels.as_ref().unwrap(), &old), "the picture that shows");
         assert!(panel.items.is_empty(), "and its controls");
+        assert_eq!(panel.displayed.as_ref().map(|f| f.gallery_scroll), Some(1.0), "and the facts they act on");
         assert!(panel.retry_at.is_some(), "the new one is handed over again");
         assert!(!super::super::same_picture(panel.painted, panel.shown_pixels.as_ref(), &new), "and then not taken for shown already");
     }
@@ -499,6 +532,22 @@ mod tests {
         assert!(!super::super::same_picture(true, Some(&a), &b), "a new picture, even with the same bytes");
         assert!(!super::super::same_picture(false, Some(&a), &a), "a part not painted yet (woken, or new)");
         assert!(!super::super::same_picture(true, None, &a));
+    }
+
+    /// verify2 (OVL2-11): the third panic within ten seconds marks the painter fatal (the loop ends the session through its teardown);
+    /// it no longer exits the process from the worker.
+    #[test]
+    fn three_panics_in_ten_seconds_are_fatal_not_an_exit() {
+        let mut panics = VecDeque::new();
+        let mut fatal = false;
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        for n in 0..3 {
+            assert!(super::contained("a test", &mut panics, &mut fatal, || -> () { panic!("test") }).is_none());
+            assert_eq!(fatal, n == 2, "after {} panics", n + 1);
+        }
+        std::panic::set_hook(hook);
+        assert_eq!(super::contained("a test", &mut panics, &mut fatal, || 7), Some(7));
     }
 
     /// OVL2-11: a panic while a page is painted costs that page once: the next one comes, and the painter is not busy for ever.
@@ -517,6 +566,8 @@ mod tests {
         std::panic::set_hook(hook);
         assert!(painter.take().is_none(), "the page that panicked gives no frame");
         assert!(!painter.busy(), "and the painter is not left working");
+        assert_eq!(painter.take_failed(), (Vec::new(), true), "verify2: and it is asked for again");
+        assert!(!painter.fatal(), "one panic is not the end");
         painter.submit(request(3, Sheet::Settings));
         let frame = loop {
             if let Some(frame) = painter.take() { break frame; }

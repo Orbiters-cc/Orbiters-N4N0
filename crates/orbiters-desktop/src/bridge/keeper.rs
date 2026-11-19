@@ -261,6 +261,12 @@ impl Keeper {
     /// Everything of it goes: input released, what runs ended, the port closed, the person no longer listened to. Only the
     /// person's own Stop (`by_person`) makes the main VRChat theirs (BRIDGE-5).
     fn close(&self, inner: &mut Inner, why: &str, by_person: bool) {
+        if inner.open.is_none() && by_person {
+            // Closed already (Orbiters' grant lapsed, say), the bridge kept its VRChat: the person's Stop makes it theirs all
+            // the same (verify-n4n0 4).
+            self.bridge.take_over(why);
+            return;
+        }
         if let Some(open) = inner.open.take() {
             if by_person {
                 self.bridge.take_over(why);

@@ -107,5 +107,6 @@
   "The previous version could not be fully put back: {files}. Its files are kept in {folder}.": "以前のバージョンを完全には戻せませんでした：{files}。そのファイルは{folder}に保存されています。",
   "{folder} is left from an earlier install and could not be set aside: nothing was changed.": "{folder}は以前のインストールの残りで、退避できませんでした。何も変更されていません。",
   "{path} is a link to another folder: nothing in it was removed": "{path}は別のフォルダーへのリンクです。その中のものは何も削除していません",
-  "not what N4N0 keeps under this name: left as it is": "N4N0がこの名前で保存しているものではないため、そのままにしました"
+  "not what N4N0 keeps under this name: left as it is": "N4N0がこの名前で保存しているものではないため、そのままにしました",
+  "{path} is reached through a link to another folder: nothing in it was removed": "{path}は別のフォルダーへのリンクを経由しています。その中のものは何も削除していません"
 }

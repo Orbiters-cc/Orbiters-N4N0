@@ -88,15 +88,22 @@ impl Owners {
     /// A key event the menu does not look at (another window in front, a key that always goes on): only who holds it changes. A down
     /// there is not the menu's; an up ends whatever held it (verify-vr: a W let go in another window stayed "held" and the next W
     /// typed in the page walked).
-    fn elsewhere(&mut self, vk: u32, down: bool) {
-        if down {
-            if !Self::bit(&self.taken, vk) {
-                Self::set(&mut self.held, vk, true);
+    ///
+    /// Returns whether the event is still the menu's to swallow: a key the menu took, held across a change of window, keeps its first
+    /// down's routing, its repeats and its up included (verify2: they were typed into the window now in front).
+    fn elsewhere(&mut self, vk: u32, down: bool) -> bool {
+        if Self::bit(&self.taken, vk) {
+            if !down {
+                Self::set(&mut self.taken, vk, false);
             }
+            return true;
+        }
+        if down {
+            Self::set(&mut self.held, vk, true);
         } else {
             Self::set(&mut self.held, vk, false);
-            Self::set(&mut self.taken, vk, false);
         }
+        false
     }
 }
 
@@ -218,8 +225,8 @@ unsafe extern "system" fn hook(
             if !injected && !(vrchat != 0 && pid == vrchat && !passes(info.vkCode)) {
                 // Not the menu's to look at: only who holds the key is kept.
                 let down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
-                if let Ok(mut keys) = KEYS.lock() {
-                    keys.elsewhere(info.vkCode, down);
+                if KEYS.lock().map(|mut keys| keys.elsewhere(info.vkCode, down)).unwrap_or(false) {
+                    return windows::Win32::Foundation::LRESULT(1);
                 }
             }
             if !injected && vrchat != 0 && pid == vrchat && !passes(info.vkCode) {
@@ -303,6 +310,19 @@ mod owner_tests {
         assert!(!keys.take(w, false, true), "and its up: the avatar stops walking");
         assert!(keys.take(w, true, true), "pressed again, the menu takes it");
         assert!(keys.take(w, false, true), "and its up");
+    }
+
+    /// verify2: a key the menu took, held while another window comes in front, keeps its routing: its repeats and its up are swallowed.
+    #[test]
+    fn a_menu_key_held_across_a_window_change_stays_the_menus() {
+        let a = 0x41;
+        let mut keys = Owners::new();
+        assert!(keys.take(a, true, true));
+        assert!(keys.elsewhere(a, true), "its repeat in the other window is not typed there");
+        assert!(keys.elsewhere(a, false), "nor its up");
+        assert!(!keys.elsewhere(a, true), "a fresh press there is that window's");
+        assert!(!keys.elsewhere(a, false));
+        assert_eq!(keys, Owners::new());
     }
 
     /// verify-vr: a key's repeats follow its first down; a key let go in another window is no longer held for VRChat.

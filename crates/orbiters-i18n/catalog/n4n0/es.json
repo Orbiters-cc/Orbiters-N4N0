@@ -352,5 +352,22 @@
   "{reason}: a QR code here opens only http or https pages": "{reason}: aquí un código QR solo abre páginas http o https",
   "{time} · muted": "{time} · silenciado",
   "✓ Link copied": "✓ Enlace copiado",
-  "Stopped after six pages opened: press Scan again to read the camera": "Se detuvo tras abrir seis páginas: pulsa Escanear otra vez para leer la cámara"
+  "Stopped after six pages opened: press Scan again to read the camera": "Se detuvo tras abrir seis páginas: pulsa Escanear otra vez para leer la cámara",
+  "N4N0 asks to set {control} to {value}.": "N4N0 pide ajustar {control} a {value}.",
+  "N4N0 asks to turn off {control}.": "N4N0 pide desactivar {control}.",
+  "N4N0 asks to turn on {control}.": "N4N0 pide activar {control}.",
+  "N4N0 asks to keep {control} at {value}, put back after every reset and avatar change until released.": "N4N0 pide mantener {control} en {value}, restablecido tras cada reinicio y cambio de avatar hasta que lo sueltes.",
+  "N4N0 asks to keep {control} off, put back after every reset and avatar change until released.": "N4N0 pide mantener {control} desactivado, restablecido tras cada reinicio y cambio de avatar hasta que lo sueltes.",
+  "N4N0 asks to keep {control} on, put back after every reset and avatar change until released.": "N4N0 pide mantener {control} activado, restablecido tras cada reinicio y cambio de avatar hasta que lo sueltes.",
+  "N4N0 asks to copy to your clipboard: {text}": "N4N0 pide copiar en tu portapapeles: {text}",
+  "N4N0 asks to show {text} to people while you are away, and to turn it on.": "N4N0 pide mostrar {text} a los demás mientras estás ausente, y activarlo.",
+  "N4N0 asks to show {text} to people while you are away, and to keep it off.": "N4N0 pide mostrar {text} a los demás mientras estás ausente, y mantenerlo desactivado.",
+  "N4N0 asks to show {text} to people while you are away.": "N4N0 pide mostrar {text} a los demás mientras estás ausente.",
+  "The avatar's menu tags {control} as nsfw.": "El menú del avatar marca {control} como nsfw.",
+  "Say yes to do it.": "Di que sí para hacerlo.",
+  "Say yes to do them.": "Di que sí para hacerlo todo.",
+  "(or say yes or no)": "(o di sí o no)",
+  "Sign in to Orbiters again to talk to N4N0.": "Vuelve a iniciar sesión en Orbiters para hablar con N4N0.",
+  "N4N0 needs a break: try again in a moment.": "N4N0 necesita un descanso: inténtalo de nuevo en un momento.",
+  "N4N0's assistant is not available right now ({status}).": "El asistente de N4N0 no está disponible ahora mismo ({status})."
 }

@@ -718,6 +718,11 @@ impl<P: Pictures> MenuHost<P> {
         base
     }
 
+    /// The keys of every picture loaded (whatever copies other canvases keep of them).
+    pub fn picture_keys(&self) -> Vec<String> {
+        self.thumbs.iter().filter(|(_, t)| matches!(t, Thumb::Ready(_))).map(|(k, _)| k.clone()).collect()
+    }
+
     /// A picture by its key, once loaded.
     pub fn picture(&self, key: &str) -> Option<&P::Picture> {
         match self.thumbs.get(key) {
@@ -817,6 +822,19 @@ mod tests {
 
     fn host() -> MenuHost<Sizes> {
         MenuHost::new(Sizes, Arc::new(English), Arc::new(Watcher::new(|| Box::new(crate::media::NoMedia))))
+    }
+
+    /// verify2 (OVERLAY-16): the loaded pictures are listed from the host itself, so a page is given every drawable one.
+    #[test]
+    fn every_loaded_picture_is_listed() {
+        let mut host = host();
+        for n in 0..70 {
+            host.done_tx.send(Done::Thumbnail { id: format!("v{n}"), tries: 0, image: Some(Rgb { width: 1, height: 1, pixels: vec![0; 3] }) }).unwrap();
+        }
+        host.poll();
+        let keys = host.picture_keys();
+        assert_eq!(keys.len(), 70);
+        assert!(keys.contains(&"v0".to_string()), "the first, whatever copies were let go");
     }
 
     /// OVERLAY-26: a fetched thumbnail is made, and found, under the key the pages ask for.

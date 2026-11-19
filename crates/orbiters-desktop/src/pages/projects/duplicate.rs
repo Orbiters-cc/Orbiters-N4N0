@@ -203,7 +203,13 @@ pub(super) fn footer(ui: &mut Ui, state: &mut State, path: &Path) {
         state.task(&ctx, &tr!("Duplicating {name}…", name = project.name), move || {
             let root = orbiters_projects::vcc_dir();
             let path = orbiters_projects::runtime()?.block_on(templates::duplicate(&root, &source, &parent, &name, keep, &cancel, &progress))?;
-            Ok(Outcome::Added(path, tr!("{name} is ready: VCC and ALCOM list it too", name = name)))
+            // Ready only when nothing it needs has to come from elsewhere first (PROJECTS-22).
+            let later = if keep.library { vec![] } else { templates::packages_only_in_library(&path) };
+            if later.is_empty() {
+                Ok(Outcome::Added(path, tr!("{name} is ready: VCC and ALCOM list it too", name = name)))
+            } else {
+                Ok(Outcome::Added(path, tr!("{name} is copied and listed, but Unity must download {packages} again when it first opens it", name = name, packages = later.join(", "))))
+            }
         });
     }
     if busy {

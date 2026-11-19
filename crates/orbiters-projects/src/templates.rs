@@ -385,6 +385,30 @@ fn copy_local_packages(source: &Path, destination: &Path, cancel: &AtomicBool, p
     Ok(())
 }
 
+/// The Unity packages of `project` that only its Library holds (PROJECTS-22): those `Packages/packages-lock.json` takes
+/// from Git or from a registry other than Unity's, and that are not in `Packages/` itself. A copy made without Library
+/// has them only after Unity downloads them again from their source, so it is not "ready" while that is unsure.
+pub fn packages_only_in_library(project: &Path) -> Vec<String> {
+    let Ok(bytes) = std::fs::read(project.join("Packages/packages-lock.json")) else { return vec![] };
+    let Ok(lock) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return vec![] };
+    let mut names: Vec<String> = lock["dependencies"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(name, entry)| {
+            let from_elsewhere = match entry["source"].as_str() {
+                Some("git") => true,
+                Some("registry") => entry["url"].as_str().is_some_and(|u| !u.trim_end_matches('/').eq_ignore_ascii_case("https://packages.unity.com")),
+                _ => false,
+            };
+            from_elsewhere && !name.contains(['/', '\\']) && !project.join("Packages").join(name).is_dir()
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
 /// Check every locked dependency, including transitive dependencies, against the copied package metadata.
 fn installed_dependencies_complete(project: &Path) -> anyhow::Result<bool> {
     let path = project.join("Packages/vpm-manifest.json");
@@ -597,6 +621,26 @@ mod tests {
         let copy = temp.path().join("Copy");
         assert!(said.contains(&copy.display().to_string()), "{said}");
         assert!(is_registered(&rt, &root, &copy), "the copy is in the gallery's list");
+    }
+
+    #[test]
+    fn packages_kept_only_in_library_are_named() {
+        let temp = tempfile::tempdir().unwrap();
+        let p = temp.path();
+        std::fs::create_dir_all(p.join("Packages/com.me.embedded")).unwrap();
+        crate::write_json(
+            &p.join("Packages/packages-lock.json"),
+            &serde_json::json!({"dependencies": {
+                "com.unity.textmeshpro": {"version": "3.0.6", "source": "registry", "url": "https://packages.unity.com"},
+                "com.me.tool": {"version": "https://github.com/me/tool.git", "source": "git", "hash": "abc"},
+                "com.scoped.thing": {"version": "1.0.0", "source": "registry", "url": "https://npm.example.com"},
+                "com.me.embedded": {"version": "https://github.com/me/e.git", "source": "git"},
+                "com.unity.modules.ui": {"version": "1.0.0", "source": "builtin"}
+            }}),
+        )
+        .unwrap();
+        assert_eq!(packages_only_in_library(p), ["com.me.tool", "com.scoped.thing"]);
+        assert!(packages_only_in_library(&p.join("nothing")).is_empty());
     }
 
     #[test]

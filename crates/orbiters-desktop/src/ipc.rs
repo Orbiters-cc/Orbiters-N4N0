@@ -97,6 +97,12 @@ pub enum ToService {
     },
     StartCapture { origin: RecordingOrigin },
     CameraQr { active: bool },
+    /// The window's offer to close to the tray (`crate::window_rest`), or none any more.
+    WindowRest { offer: Option<crate::state::RestOffer> },
+    /// The VR band shows this offer.
+    WindowRestShown { id: u64 },
+    /// Keep open, pressed on this offer in VR.
+    KeepWindowOpen { id: u64 },
     SwitchDemoAvatar,
     StopCapture,
     /// The Orbiters window to the front.
@@ -1224,6 +1230,8 @@ pub(crate) mod tests {
         o.qr.note = "Turn the stream camera on".into();
         o.mirror.zoom = 3;
         o.calls.picked = 2;
+        // The window's offer to close to the tray (window_rest), what the VR band said of it.
+        s.window_rest = crate::state::WindowRest { offer: Some(crate::state::RestOffer { id: 3, until_ms: 1_762_800_008_000, for_ms: 8_000 }), shown: Some(3), kept: None };
         s
     }
 

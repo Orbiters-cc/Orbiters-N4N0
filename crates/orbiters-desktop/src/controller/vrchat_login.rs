@@ -51,7 +51,33 @@ pub enum Recovery {
 pub struct Picture {
     pub width: u32,
     pub height: u32,
+    /// As base64 on the link: as a JSON array of numbers a 480 x 360 thumbnail was 2.2 to 2.5 MB of text (8 of them an
+    /// answer), now 0.9 MB (CTL2-1, CTL-12).
+    #[serde(with = "bytes_b64")]
     pub rgba: Vec<u8>,
+}
+
+/// Bytes as base64 text in JSON; read back from that or from the array of numbers older lines and files have.
+pub(crate) mod bytes_b64 {
+    use base64::Engine;
+    use serde::Deserialize;
+
+    pub fn serialize<S: serde::Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Either {
+            Text(String),
+            Numbers(Vec<u8>),
+        }
+        match Either::deserialize(d)? {
+            Either::Text(text) => base64::engine::general_purpose::STANDARD.decode(text).map_err(serde::de::Error::custom),
+            Either::Numbers(numbers) => Ok(numbers),
+        }
+    }
 }
 fn picture(bytes: Vec<u8>) -> Option<Picture> {
     let image = image::load_from_memory(&bytes).ok()?.thumbnail(96, 96).to_rgba8();
@@ -379,6 +405,23 @@ impl Controller {
         let log = w.local_player.as_ref().and_then(|me| w.players.iter().find(|(_, n)| *n == me).map(|(id, _)| id.clone()));
         let operation = self.vrchat_login.lock().unwrap().gate.operation(Instant::now() + Duration::from_secs(60));
         orbiters_core::vrchat_source::Source::scoped(direct, orbiters, log, operation)
+    }
+}
+
+#[cfg(test)]
+mod picture_wire_tests {
+    use super::Picture;
+
+    /// CTL2-1: a 480 x 360 thumbnail crosses the link as base64 (under 1 MB of text, it was 2.2 MB or more as numbers),
+    /// comes back the same, and a picture written the old way still reads.
+    #[test]
+    fn a_thumbnail_crosses_the_link_as_base64_and_the_old_form_still_reads() {
+        let picture = Picture { width: 480, height: 360, rgba: (0..480 * 360 * 4).map(|i| (i % 251) as u8).collect() };
+        let line = serde_json::to_string(&picture).unwrap();
+        assert!(line.len() < 1_000_000, "{} bytes", line.len());
+        assert_eq!(serde_json::from_str::<Picture>(&line).unwrap(), picture);
+        let old = r#"{"width":1,"height":1,"rgba":[1,2,3,255]}"#;
+        assert_eq!(serde_json::from_str::<Picture>(old).unwrap().rgba, vec![1, 2, 3, 255]);
     }
 }
 

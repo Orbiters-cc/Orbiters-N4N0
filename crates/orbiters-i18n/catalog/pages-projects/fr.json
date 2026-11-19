@@ -522,7 +522,7 @@
   "{package} to {version}": "{package} vers {version}",
   "{package} {version} accepts {dependency} {range} only, and none of its versions in your repositories works with {wanted}.": "{package} {version} n’accepte que {dependency} {range}, et aucune de ses versions dans tes dépôts ne fonctionne avec {wanted}.",
   "{package} {version} accepts {range}": "{package} {version} accepte {range}",
-  "{package} {version} is a folder in this project's Packages, so no other version can take its place. It accepts {dependency} {range} only: change that range in its package.json to go on with {wanted}.": "{package} {version} est un dossier du Packages de ce projet : aucune autre version ne peut le remplacer. Il n’accepte que {dependency} {range} : modifie cette plage dans son package.json pour continuer avec {wanted}.",
+  "{package} {version} is a folder in this project's Packages, so no other version can take its place. It accepts {dependency} {range} only: change that range in its package.json to go on with {wanted}.": "{package} {version} est un dossier dans le répertoire Packages de ce projet : aucune autre version ne peut le remplacer. Il n’accepte que {dependency} {range} : modifie cette plage dans son package.json pour continuer avec {wanted}.",
   "{package} {version} {why}: shows what has to change with it first": "{package} {version} ({why}) : montre d’abord ce qui doit changer avec lui",
   "{package} {v} is in none of your repositories": "{package} {v} ne figure dans aucun de tes dépôts",
   "{package} {wanted} needs another Unity version than {unity}": "{package} {wanted} demande une autre version d’Unity que {unity}",

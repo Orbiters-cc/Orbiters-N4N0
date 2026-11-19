@@ -127,6 +127,12 @@ impl State {
         self.shown.filter(|p| *p != Page::Home)
     }
 
+    /// Something on Home is in use (`crate::window_rest`): a profile's window open, or the music page, which plays,
+    /// pauses and sets the volume of what plays.
+    pub fn holds(&self) -> bool {
+        self.launcher.holds() || self.shown() == Some(Page::Music)
+    }
+
     /// Back to Home itself (the sidebar's Home pressed on a feature's page).
     pub fn back_home(&mut self) {
         if let Some(host) = self.host.as_mut() {

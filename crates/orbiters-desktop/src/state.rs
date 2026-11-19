@@ -738,10 +738,52 @@ pub struct Snapshot {
     /// Home's launcher: friends, groups, invites, boops, the game (controller/launcher.rs).
     #[serde(default)]
     pub launcher: Slice<orbiters_core::launcher::LauncherState>,
+    /// The window minimised for long while VRChat runs offers to close to the tray (`crate::window_rest`): its offer,
+    /// for the VR band to show, and what the band said of it.
+    #[serde(default)]
+    pub window_rest: WindowRest,
+}
+
+/// "Orbiters - N4N0 will minimize to the tray to save memory" (LIGHT-DESKTOP-8, Enzo's decision of 2026-11-19), as the
+/// window offers it: an id for each offer, and its countdown once the person can see it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestOffer {
+    pub id: u64,
+    /// When the window goes (Unix ms); 0 while no surface said it shows it yet.
+    pub until_ms: u64,
+    pub for_ms: u64,
+}
+
+impl RestOffer {
+    /// The share of its countdown left at `now_ms` (1 before it started).
+    pub fn left(&self, now_ms: u64) -> f32 {
+        if self.until_ms == 0 || self.for_ms == 0 {
+            return 1.0;
+        }
+        (self.until_ms.saturating_sub(now_ms) as f32 / self.for_ms as f32).clamp(0.0, 1.0)
+    }
+
+    /// Whole seconds left at `now_ms`, as said on it ("in 8 s").
+    pub fn seconds(&self, now_ms: u64) -> u64 {
+        if self.until_ms == 0 {
+            return self.for_ms.div_ceil(1000);
+        }
+        self.until_ms.saturating_sub(now_ms).div_ceil(1000)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowRest {
+    /// The offer up now.
+    pub offer: Option<RestOffer>,
+    /// The offer the VR band shows (it said so).
+    pub shown: Option<u64>,
+    /// The offer someone pressed Keep open on in VR.
+    pub kept: Option<u64>,
 }
 
 orbiters_core::parts!(Snapshot {
-    plain: [smoothing_revision, version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, vrchat_wrists, vrchat_wrists_ns, camera_tools, projects_changed],
+    plain: [smoothing_revision, version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, vrchat_wrists, vrchat_wrists_ns, camera_tools, projects_changed, window_rest],
     slices: [sources, mics, osc, lan, capture, settings, storage, worker, steamvr, reconstruct_queue, account, uploads, update, vr_audio, orbit, booster, translate, perf, launcher],
     identity: [capture_shares],
     nested: [vrchat, n4n0],
@@ -788,6 +830,7 @@ impl Snapshot {
             projects_changed: 0,
             perf: Default::default(),
             launcher: Default::default(),
+            window_rest: Default::default(),
             version: orbiters_core::app_version().into(),
             vrchat: VrchatStatus {
                 running: false,

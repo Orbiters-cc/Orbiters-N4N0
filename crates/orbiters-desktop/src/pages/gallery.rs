@@ -199,6 +199,22 @@ impl State {
     pub fn folders_open(&self) -> bool { self.folders.is_open() }
 
     pub fn busy(&self) -> bool {
+        self.busy_now()
+    }
+
+    /// A window, dialog or editor of the page is open (it would be lost if the window closed: `crate::window_rest`).
+    pub fn holds(&self) -> bool {
+        self.dialog.is_some()
+            || self.editor.is_some()
+            || self.export.is_some()
+            || self.again.is_some()
+            || self.instance.is_some()
+            || self.community.is_open()
+            || self.requests.open
+            || self.requests.is_out()
+    }
+
+    fn busy_now(&self) -> bool {
         self.requests.busy()
             || self.hash_job.running()
             || self.local_job.running()

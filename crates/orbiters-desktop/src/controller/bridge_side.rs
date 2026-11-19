@@ -329,8 +329,10 @@ struct SideState {
     query: Option<SocketAddr>,
     desktop: Option<bool>,
     looked: Option<Instant>,
-    /// The app was lent to it for a picture, since.
+    /// The app's picture started in it, since (the give-back counts from here: "once the picture is saved").
     lent_at: Option<Instant>,
+    /// The app was lent to it, since (the two-minute rule counts from here).
+    lent_since: Option<Instant>,
     /// Its last picture's session.
     last_picture: Option<PathBuf>,
     /// The logs of its earlier VRChats: never this start's.
@@ -354,6 +356,9 @@ pub(crate) struct SideGame {
     /// The thread listening on its out port: joined when the session goes, so the port is free again.
     listener: Mutex<Option<std::thread::JoinHandle<()>>>,
     state: Mutex<SideState>,
+    /// Held by `take_picture` from the lend until its picture started (or failed): the bridge's 100 ms `tick` does not
+    /// judge a lend whose picture is still starting, nor give it back meanwhile (CTL2-5).
+    lending: Mutex<()>,
 }
 
 impl SideGame {
@@ -407,6 +412,7 @@ impl SideGame {
             stop,
             listener: Mutex::new(Some(listener)),
             state: Mutex::default(),
+            lending: Mutex::new(()),
         }))
     }
 
@@ -492,8 +498,9 @@ impl SideGame {
             watcher.poll();
         }
         if let Some(log) = st.log.clone() {
-            let text = read_from(&log, st.read_to, LOG_CHUNK);
-            st.read_to += text.len() as u64;
+            // Whole lines, counted in the file's bytes (controller/vrchats.rs, CTL2-6).
+            let (text, consumed) = super::vrchats::read_log_from(&log, st.read_to, LOG_CHUNK);
+            st.read_to += consumed;
             let asked = text.rfind("No cached credentials found").or_else(|| text.rfind("AuthSelectionPage OnPageShown"));
             let signed = text.rfind("post login checks for ");
             match (asked, signed) {
@@ -543,7 +550,9 @@ impl SideGame {
         if let Ok(ctl) = self.ctl() {
             ctl.lend_vrchat(None, None);
         }
-        self.state.lock().unwrap().lent_at = None;
+        let mut st = self.state.lock().unwrap();
+        st.lent_at = None;
+        st.lent_since = None;
     }
 
     fn values(&self) -> Latest {
@@ -618,18 +627,6 @@ fn own_log(dir: &Path, since: SystemTime, profile: u32, osc: (u16, u16), followe
         .map(|e| e.path())
 }
 
-fn read_from(path: &Path, from: u64, most: u64) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut bytes = Vec::new();
-    if let Ok(mut file) = std::fs::File::open(path) {
-        if file.seek(SeekFrom::Start(from)).is_ok() {
-            let _ = file.take(most).read_to_end(&mut bytes);
-        }
-    }
-    // Up to the last whole line: the rest is read next time.
-    let end = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
-}
 
 impl Game for SideGame {
     fn unresolved(&self) -> Option<String> {
@@ -936,6 +933,8 @@ impl Game for SideGame {
         if !matches!(ctl.view().capture.state, crate::state::CaptureState::Idle) {
             return Err(Failure::new("picture_busy", "Orbiters - N4N0 is recording already (another session's picture).", "Try again in 30 s.").retry_after(30)); // i18n: not shown
         }
+        // From the lend to the picture's start: `tick` leaves this lend alone meanwhile.
+        let _lending = self.lending.lock().unwrap_or_else(|e| e.into_inner());
         if !self.sides.lend(Some(&self.id())) {
             return Err(Failure::new("picture_busy", "Another session is taking a 3D picture: one at a time on this computer.", "Try again in 30 s.").retry_after(30)); // i18n: not shown
         }
@@ -949,7 +948,7 @@ impl Game for SideGame {
             query: None,
         }) };
         ctl.lend_vrchat(Some(mark), Some(self.values()));
-        self.state.lock().unwrap().lent_at = Some(Instant::now());
+        self.state.lock().unwrap().lent_since = Some(Instant::now());
         // The app follows this VRChat once its watcher has looked (every 3 s) and read its log to the end.
         let world = self.state.lock().unwrap().watcher.as_ref().and_then(|w| w.state.world_id.clone());
         let began = Instant::now();
@@ -965,8 +964,9 @@ impl Game for SideGame {
             return Err(Failure::new("picture_did_not_start", "Orbiters - N4N0 did not follow this session's VRChat in time.", "Try again; if it stays, tell the person.")); // i18n: not shown
         }
         let taken = self.inner.take_picture(length, mode);
-        if taken.is_err() {
-            self.unlend();
+        match taken {
+            Ok(()) => self.state.lock().unwrap().lent_at = Some(Instant::now()),
+            Err(_) => self.unlend(),
         }
         taken
     }
@@ -988,17 +988,29 @@ impl Game for SideGame {
     /// Gives the app back once the picture is saved (or after two minutes whatever happens).
     fn tick(&self) {
         self.look();
-        let Some(since) = self.state.lock().unwrap().lent_at else { return };
+        // A picture still starting (the lend is being made, the watchers following): not judged now.
+        let Ok(_lending) = self.lending.try_lock() else { return };
+        let (started, since) = {
+            let st = self.state.lock().unwrap();
+            (st.lent_at, st.lent_since)
+        };
+        let Some(since) = since else { return };
         let Ok(ctl) = self.ctl() else { return };
         let view = ctl.view();
         let idle = matches!(view.capture.state, crate::state::CaptureState::Idle);
-        if idle && since.elapsed() > Duration::from_secs(3) || since.elapsed() > Duration::from_secs(120) {
+        if give_back_due(started.map(|t| t.elapsed()), since.elapsed(), idle) {
             if let Some(session) = view.capture.session_dir.clone() {
                 self.state.lock().unwrap().last_picture = Some(session);
             }
             self.unlend();
         }
     }
+}
+
+/// Whether a lend is over: its picture started (`started` ago) and the capture is Idle again a while after, or two
+/// minutes passed since the lend whatever happens. A lend whose picture has not started yet is not over by being Idle.
+fn give_back_due(started: Option<Duration>, lent_for: Duration, idle: bool) -> bool {
+    idle && started.is_some_and(|s| s > Duration::from_secs(3)) || lent_for > Duration::from_secs(120)
 }
 
 impl Drop for SideGame {
@@ -1012,6 +1024,9 @@ impl Controller {
     /// process and log watchers follow it, OSC goes to its input port and its tree, its datagrams are taken, and what it
     /// said of its camera and avatar is what the app knows now.
     pub(crate) fn lend_vrchat(&self, to: Option<SideMark>, values: Option<Latest>) {
+        // One lend or give-back at a time, whole: the bridge's tick (listener thread) and a picture (client thread) no
+        // longer interleave their four steps (CTL2-5).
+        let _one = self.lend_gate.lock().unwrap_or_else(|e| e.into_inner());
         match &to {
             Some(mark) => {
                 self.sides.lend(Some(&mark.session));
@@ -1022,6 +1037,8 @@ impl Controller {
         }
         let route = to.as_ref().and_then(|m| m.query.map(|q| (SocketAddr::from(([127, 0, 0, 1], m.osc_in)), q)));
         let _ = self.with_osc(|o| o.lend(route));
+        // Another VRChat's camera from here: an answer asked before the loan (or the give-back) is not this one's.
+        self.camera_route_changed();
         let mut osc = self.osc_values.lock().unwrap();
         // The camera's opening was heard, on the session's own out port, by the session: the proof the app asks of a live
         // camera before it records (`require_live_camera`) is that VRChat's, not a value the app wrote.
@@ -1062,6 +1079,18 @@ impl Controller {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// CTL2-5: a lend whose picture has not started is not given back for being Idle (the watchers may take more than
+    /// 3 s to follow); once its picture started, Idle 3 s later gives it back; two minutes give it back whatever.
+    #[test]
+    fn a_lend_is_given_back_only_after_its_picture_started_or_two_minutes() {
+        let s = Duration::from_secs;
+        assert!(!give_back_due(None, s(5), true), "still starting: the watchers have not followed yet");
+        assert!(!give_back_due(Some(s(1)), s(6), true), "just started: the state may not say Recording yet");
+        assert!(give_back_due(Some(s(4)), s(9), true), "started, then Idle: saved");
+        assert!(!give_back_due(Some(s(30)), s(35), false), "still recording");
+        assert!(give_back_due(None, s(121), false), "two minutes whatever happens");
+    }
 
     /// Two free loopback ports.
     fn free_ports() -> (u16, u16) {

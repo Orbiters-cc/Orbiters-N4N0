@@ -336,6 +336,13 @@ pub fn rig_switch(on: bool) -> (String, Vec<rosc::OscType>) {
     (format!("{PARAMETERS_PREFIX}{}", rig::PARAMETER), vec![rosc::OscType::Bool(on)])
 }
 
+/// What a 3D picture's save needs of its recording ([`super::Controller::take_picture_ended`]).
+pub(super) struct PictureEnded {
+    mode: PictureMode,
+    length: Photo3dLength,
+    left_out: crate::state::LeftOut,
+}
+
 /// What a 3D picture waits for once its recording stops.
 #[derive(Default)]
 pub struct BurstRuntime {
@@ -415,13 +422,20 @@ impl super::Controller {
         let pose: [f32; 6] = pose.try_into().expect("six values");
         // N4N0's menu and link card stand in front of their owner: while the capture kit records (N4N0/Capture/Record),
         // the avatar hides them on its owner's client, out of the picture, and shows them again after it.
-        *self.burst.lock().unwrap() = BurstRuntime { recording: true, mode, length };
-        if let Err(e) = self.start_capture(super::CapturePurpose::Short) {
-            self.burst.lock().unwrap().recording = false;
-            return Err(e);
-        }
-        // The recording this picture started: its flight flies, puts back and stops that one only (audit F06, CTL2-7).
-        let owner = self.recording_number();
+        // What it is, set under the start gate the moment the start is accepted, and the number of the recording that
+        // start issued: its flight flies, puts back and stops that one only (audit F06, CTL2-7, verify-controller).
+        let started = self.start_capture_owned(super::CapturePurpose::Short, || *self.burst.lock().unwrap() = BurstRuntime { recording: true, mode, length });
+        let owner = match started {
+            Ok(owner) => owner,
+            Err(e) => {
+                // A start that failed after it was accepted leaves no picture flag for the next recording.
+                let _gate = self.capture_start_gate.lock().unwrap();
+                if !self.is_capturing() {
+                    self.burst.lock().unwrap().recording = false;
+                }
+                return Err(e);
+            }
+        };
         let ctl = self.clone();
         let flight = std::thread::Builder::new().name("3d-picture".into()).spawn(move || {
             let started = Instant::now();
@@ -448,17 +462,15 @@ impl super::Controller {
                 .then(|| session.as_deref().and_then(|dir| first_p11(dir, Duration::from_millis(400))))
                 .flatten()
                 .and_then(|p11| zoom_for_flight(p11).map(|z| (p11, z)));
-            if let Some((p11, (to, back))) = zoom.filter(|_| ctl.owns_recording(owner)) {
-                send(ZOOM, vec![rosc::OscType::Float(to)]);
+            let zoomed = zoom.is_some_and(|(_, (to, _))| ctl.for_recording(owner, || send(ZOOM, vec![rosc::OscType::Float(to)])));
+            if let Some((p11, (to, back))) = zoom.filter(|_| zoomed) {
                 told.push(format!("zoomed in (P11 {p11:.2}): flies at zoom {to}, back to {back} after")); // i18n: not shown
                 std::thread::sleep(ZOOM_FREEZE);
             } else {
                 std::thread::sleep(SETTLE);
             }
             // Smoothing would trail the swing behind.
-            if ctl.owns_recording(owner) {
-                send(SMOOTH, vec![rosc::OscType::Bool(false)]);
-            }
+            ctl.for_recording(owner, || send(SMOOTH, vec![rosc::OscType::Bool(false)]));
             let camera = |p: &[f32; 6]| (POSE.to_string(), p.iter().map(|v| rosc::OscType::Float(*v)).collect::<Vec<_>>());
             // Sends poses at the flight's rate; `true` when they were all sent (the recording may stop under them).
             let fly = |poses: &[[f32; 6]], rig: bool| -> bool {
@@ -506,7 +518,12 @@ impl super::Controller {
                     // No depth with Remote User off is the one thing no recording shows the answer to: it may be what took
                     // the kit away. The blind flight goes through walls, so it comes back on, and the camera looks again.
                     let mut looks = 1;
-                    if seen.frames.len() < LEAST_DEPTH_FRAMES && ctl.hiding_others() && ctl.others_cost_the_strip() {
+                    // Its own recording's mask only: after its flight broke, the hiding state may be the next picture's.
+                    let mut cost = false;
+                    if seen.frames.len() < LEAST_DEPTH_FRAMES {
+                        ctl.for_recording(owner, || cost = ctl.hiding_others() && ctl.others_cost_the_strip());
+                    }
+                    if cost {
                         flying = flying && fly(&around::look(pose, RATE_HZ), false);
                         looks += 1;
                         std::thread::sleep(DEPTH_LATENCY);
@@ -537,10 +554,15 @@ impl super::Controller {
                         while let Some(piece) = flying.then(|| flight.next(&seen)).flatten() {
                             if piece.rig {
                                 // The rig where the camera is, then on: every other colour frame gets its six views.
-                                if let Some(first) = piece.poses.first() {
-                                    ctl.place_rig(None, first);
+                                let placed = ctl.for_recording(owner, || {
+                                    if let Some(first) = piece.poses.first() {
+                                        ctl.place_rig(None, first);
+                                    }
+                                    ctl.hold_rig(true);
+                                });
+                                if !placed {
+                                    break;
                                 }
-                                ctl.hold_rig(true);
                             }
                             flying = fly(&piece.poses, piece.rig);
                             live.poll(&mut seen);
@@ -552,12 +574,11 @@ impl super::Controller {
                 frame = reading.and_then(|r| r.join().ok()).flatten();
             }
             // Stopped during the opening turn (too few depth frames: "blind"), the blind flight does not fly.
-            if !around && ctl.owns_recording(owner) {
-                // The rig on for the blind flight; put back off when VRChat is, whatever ends the recording.
-                ctl.hold_rig(room_rig);
+            // The rig on for the blind flight; put back off when VRChat is, whatever ends the recording.
+            if !around && ctl.for_recording(owner, || ctl.hold_rig(room_rig)) {
                 let flight = path(pose, length, focus, RATE_HZ);
                 // Experimental (VRC+): the camera dolly flies the camera and three more cameras around it (controller/dolly.rs).
-                let dolly = dolly_wanted && ctl.start_dolly(&flight, frame.as_ref().map_or(DEFAULT_P11, |f| f.p11) * ZOOM_PER_P11, focus);
+                let dolly = dolly_wanted && ctl.start_dolly(owner, &flight, frame.as_ref().map_or(DEFAULT_P11, |f| f.p11) * ZOOM_PER_P11, focus);
                 let begin = Instant::now();
                 let tick = Duration::from_secs_f32(1.0 / RATE_HZ as f32);
                 for (i, p) in flight.into_iter().enumerate() {
@@ -575,7 +596,13 @@ impl super::Controller {
                     }
                 }
                 if dolly {
-                    ctl.stop_dolly();
+                    // Its own dolly only: one a recording begun since plays is not this picture's to stop.
+                    let gate = ctl.capture_start_gate.lock().unwrap();
+                    let ours = ctl.no_recording_since(owner);
+                    drop(gate);
+                    if ours {
+                        ctl.stop_dolly();
+                    }
                 }
             }
             // What the flight changed of the camera goes back, once, unless another recording began since: that one's camera
@@ -613,8 +640,7 @@ impl super::Controller {
         });
         if let Err(e) = flight {
             // Accepted, but nothing would fly it or end it: it ends here, as an ordinary recording.
-            self.burst.lock().unwrap().recording = false;
-            self.stop_recording_of(owner);
+            self.give_up_start_of(owner, || self.burst.lock().unwrap().recording = false);
             return Err(e.into());
         }
         Ok(())
@@ -624,15 +650,12 @@ impl super::Controller {
     /// under way is stopped, or it would become a recording nobody flies or stops (CTL2-7). Neither when another recording
     /// began since: that one's flag and recording are not this picture's.
     pub(super) fn give_up_picture_start(self: &Shared, owner: u64) {
-        if self.no_recording_since(owner) {
-            self.burst.lock().unwrap().recording = false;
-            self.stop_recording_of(owner);
-        }
+        self.give_up_start_of(owner, || self.burst.lock().unwrap().recording = false);
     }
 
     /// Hands the flight to VRChat's camera dolly as four paths and plays them (`/dolly/Import`, `/dolly/Play`): false
     /// when that could not be done (the flight then moves the camera alone).
-    fn start_dolly(&self, flight: &[[f32; 6]], zoom: f32, focus: f32) -> bool {
+    fn start_dolly(&self, owner: u64, flight: &[[f32; 6]], zoom: f32, focus: f32) -> bool {
         let seconds = flight.len() as f32 / RATE_HZ as f32;
         let file = match super::dolly::write(&super::dolly::paths(flight, seconds, zoom, focus)) {
             Ok(file) => file,
@@ -641,13 +664,18 @@ impl super::Controller {
                 return false;
             }
         };
-        let imported = self.with_osc(|o| o.send(super::dolly::IMPORT, vec![rosc::OscType::String(file.display().to_string())]));
-        if !imported.is_some_and(|r| r.is_ok()) {
+        let mut imported = false;
+        self.for_recording(owner, || {
+            imported = self.with_osc(|o| o.send(super::dolly::IMPORT, vec![rosc::OscType::String(file.display().to_string())])).is_some_and(|r| r.is_ok());
+        });
+        if !imported {
             return false;
         }
-        // VRChat reads the file before it plays.
+        // VRChat reads the file before it plays (not under the gate: the wait is not the picture's to make others wait).
         std::thread::sleep(Duration::from_millis(300));
-        self.with_osc(|o| o.send(super::dolly::PLAY, vec![rosc::OscType::Bool(true)])).is_some_and(|r| r.is_ok())
+        let mut playing = false;
+        self.for_recording(owner, || playing = self.with_osc(|o| o.send(super::dolly::PLAY, vec![rosc::OscType::Bool(true)])).is_some_and(|r| r.is_ok()));
+        playing
     }
 
     /// Stops the dolly's animation and tells what its extra streams gave.
@@ -667,15 +695,18 @@ impl super::Controller {
         self.notify(NoticeKind::Info, message);
     }
 
-    /// A recording was saved: a 3D picture's goes on to its reconstruction.
-    pub(super) fn burst_saved(self: &Shared, session: Option<PathBuf>) {
-        let (was, mode, length) = {
-            let mut burst = self.burst.lock().unwrap();
-            (std::mem::take(&mut burst.recording), burst.mode, burst.length)
-        };
-        let Some(dir) = session.filter(|_| was) else { return };
-        // Before its reconstruction: it reads where training's steps go from this.
+    /// What a 3D picture's save needs, taken from the ending recording before its Idle is published (after it, they may
+    /// be the next picture's): `None` when it was no picture.
+    pub(super) fn take_picture_ended(&self) -> Option<PictureEnded> {
+        // The snapshot first, then the picture's state: the order `update`'s closures take them in.
         let left_out = self.snapshot.lock().unwrap().capture.left_out.clone();
+        let mut burst = self.burst.lock().unwrap();
+        std::mem::take(&mut burst.recording).then(|| PictureEnded { mode: burst.mode, length: burst.length, left_out })
+    }
+
+    /// A recording was saved: a 3D picture's (`ended`, taken before Idle) goes on to its reconstruction.
+    pub(super) fn burst_saved(self: &Shared, session: Option<PathBuf>, ended: Option<PictureEnded>) {
+        let Some((dir, PictureEnded { mode, length, left_out })) = session.zip(ended) else { return };
         let picture = orbiters_core::picture::Picture { mode, length, wearer: left_out.wearer, others: left_out.others };
         if let Err(e) = picture.save(&dir) {
             self.notify(NoticeKind::Warning, tr!("Could not note what this 3D picture is of: {error}", error = e));
@@ -695,6 +726,58 @@ mod tests {
 
     fn stops(ctl: &Shared) -> usize {
         ctl.test_commands.lock().unwrap().as_ref().unwrap().iter().filter(|c| matches!(c, orbiters_core::protocol::WorkerCommand::Stop)).count()
+    }
+
+    /// verify-controller: a picture's or a scan's start while another recording runs is refused: its flag is not set and
+    /// it takes no number, so it can never adopt that recording, fly it or stop it.
+    #[test]
+    fn an_owned_start_never_adopts_a_recording_under_way() {
+        use std::sync::atomic::Ordering;
+        let ctl = recording_controller();
+        ctl.update(|s| s.capture.state = CaptureState::Recording);
+        let number = ctl.recording_number();
+        let mut claimed = false;
+        let refused = ctl.start_capture_owned(super::super::CapturePurpose::Short, || claimed = true);
+        assert!(refused.is_err(), "it would have adopted the recording under way");
+        assert!(!claimed, "no picture flag set for the other recording");
+        assert_eq!(ctl.capture_serial.load(Ordering::Acquire), number, "no number taken");
+        ctl.update(|s| s.capture.state = CaptureState::Stopping);
+        assert!(ctl.start_capture_owned(super::super::CapturePurpose::Short, || claimed = true).is_err(), "nor while it is saved");
+        assert!(!claimed);
+    }
+
+    static NEXT_PICTURE: std::sync::Mutex<Option<std::sync::Weak<super::super::Controller>>> = std::sync::Mutex::new(None);
+
+    /// A next picture that starts the very moment Idle is published (its flag set by whoever sees Idle first).
+    fn next_picture_at_idle(s: &crate::state::Snapshot) -> bool {
+        if s.capture.state == CaptureState::Idle {
+            if let Some(ctl) = NEXT_PICTURE.lock().unwrap().take().and_then(|w| w.upgrade()) {
+                *ctl.burst.lock().unwrap() = BurstRuntime { recording: true, mode: PictureMode::People, length: Photo3dLength::Standard };
+            }
+        }
+        s.capture.state == CaptureState::Idle
+    }
+
+    /// verify-controller: the save of picture A takes what it is of before Idle is published; a picture B started at
+    /// Idle keeps its own flag, and A's folder gets A's metadata, not B's.
+    #[test]
+    fn a_saved_picture_takes_its_own_metadata_before_the_next_one_starts() {
+        let ctl = recording_controller();
+        let dir = std::env::temp_dir().join(format!("orbiters-picture-a-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        *ctl.burst.lock().unwrap() = BurstRuntime { recording: true, mode: PictureMode::World, length: Photo3dLength::Full };
+        ctl.update(|s| {
+            s.capture.state = CaptureState::Recording;
+            s.capture.session_dir = Some(dir.clone());
+        });
+        *NEXT_PICTURE.lock().unwrap() = Some(std::sync::Arc::downgrade(&ctl));
+        ctl.subscribe(crate::mailbox::Mailbox::watching(next_picture_at_idle));
+        ctl.on_worker_event(orbiters_core::protocol::WorkerEvent::Stopped { session_dir: dir.clone(), manifest: Box::default(), reason: "stopped".into() });
+        assert_eq!(orbiters_core::picture::Picture::read(&dir).map(|p| (p.mode, p.length)), Some((PictureMode::World, Photo3dLength::Full)), "A's own metadata");
+        let next = ctl.burst.lock().unwrap();
+        assert!(next.recording && next.mode == PictureMode::People, "B's flag is B's");
+        drop(next);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     fn recording_controller() -> Shared {
@@ -887,13 +970,13 @@ mod tests {
             s.capture.left_out.wearer = Left::InPicture;
             s.capture.left_out.others = Left::Out;
         });
-        ctl.burst_saved(Some(dir.clone()));
+        ctl.burst_saved(Some(dir.clone()), ctl.take_picture_ended());
         assert_eq!(Picture::read(&dir), Some(Picture { mode: PictureMode::World, length: Photo3dLength::Full, wearer: Left::InPicture, others: Left::Out }));
         assert!(!Picture::trains_faces(&dir));
         // A free recording writes nothing, and no longer counts as a picture.
         assert_eq!(ctl.burst.lock().unwrap().picture_mode(), None);
         std::fs::remove_file(dir.join(orbiters_core::picture::FILE)).unwrap();
-        ctl.burst_saved(Some(dir.clone()));
+        ctl.burst_saved(Some(dir.clone()), ctl.take_picture_ended());
         assert!(Picture::read(&dir).is_none() && Picture::trains_faces(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
     }

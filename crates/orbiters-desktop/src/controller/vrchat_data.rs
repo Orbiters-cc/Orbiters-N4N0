@@ -86,7 +86,8 @@ pub enum Response {
     Avatars { pictures: Vec<(String, super::vrchat_login::Picture)>, errors: Vec<String> },
     Friends(Vec<User>),
     Instance(Option<bool>),
-    Image(Vec<u8>),
+    /// The file's bytes, as base64 on the link (CTL2-1).
+    Image(#[serde(with = "super::vrchat_login::bytes_b64")] Vec<u8>),
     Owned(Vec<String>),
     Worlds(orbiters_core::maps::FoundWorlds),
     Invited,

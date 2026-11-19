@@ -1,0 +1,3 @@
+# "Orbiters - N4N0 will minimize to save memory" (LIGHT-DESKTOP-8, Enzo's decision of 2026-11-19): the window minimised for
+# long while VRChat runs closes to the tray after a countdown with Keep open, and Settings' switch for it.
+crates/orbiters-desktop/src/window_rest.rs

@@ -380,6 +380,12 @@ impl Service {
     }
 
     fn handle(&self, link: u64, role: Role, msg: ToService) {
+        self.handle_in(link, role, msg, None);
+    }
+
+    /// [`Service::handle`]; `library`: the sessions folder when the command was read (file work done later on the link's
+    /// work thread is judged against it, not against a folder the settings switched to meanwhile).
+    fn handle_in(&self, link: u64, role: Role, msg: ToService, library: Option<&std::path::Path>) {
         let ctl = &self.ctl;
         let report = |r: anyhow::Result<()>| {
             if let Err(e) = r {
@@ -390,6 +396,9 @@ impl Service {
             ToService::Hello { .. } => {}
             ToService::StartCapture { origin } => ctl.request_capture_from(origin),
             ToService::CameraQr { active } => ctl.camera_qr(active),
+            ToService::WindowRest { offer } => ctl.window_rest(offer),
+            ToService::WindowRestShown { id } => ctl.window_rest_shown(id),
+            ToService::KeepWindowOpen { id } => ctl.keep_window_open(id),
             ToService::SwitchDemoAvatar => ctl.switch_demo_avatar(),
             ToService::StopCapture => report(ctl.stop_capture()),
             ToService::Pause { paused } => report(ctl.pause_capture(paused)),
@@ -415,7 +424,10 @@ impl Service {
                 }
             }
             ToService::Trash { dir } => {
-                let r = ctl.trash_session(&dir);
+                let r = match library {
+                    Some(root) => ctl.trash_session_in(root, &dir),
+                    None => ctl.trash_session(&dir),
+                };
                 if r.is_ok() {
                     ctl.notify(NoticeKind::Success, tr!("Session moved to the {bin}.", bin = tr(crate::words::BIN)));
                 }
@@ -515,10 +527,16 @@ impl Service {
             ToService::WalkPath { path } => ctl.set_walk_path(crate::tracking::walk_path_said(path)),
             // Which Talk button is held matters: the service lets it go when that window or overlay goes away.
             ToService::N4n0 { command: N4n0Command::Talk { down } } => {
-                if role != Role::Overlay {
-                    self.talk.lock().unwrap().talk(link, down);
+                if role == Role::Overlay {
+                    ctl.n4n0_app_talk(down, true);
+                } else {
+                    // Held through the runtime's transition, as a link's close holds it: a press, a release and a close
+                    // are taken one at a time (verify-controller, AD-1).
+                    let mut talk = self.talk.lock().unwrap();
+                    if talk.talk(link, down) {
+                        ctl.n4n0_app_talk(down, false);
+                    }
                 }
-                ctl.n4n0_app_talk(down, role == Role::Overlay)
             }
             ToService::N4n0 { command } => ctl.n4n0_command(command),
             ToService::OscReconnect => ctl.osc_rediscover(),
@@ -600,11 +618,18 @@ impl Service {
         // it came: a Stop, a Talk release or a settings change read after it is not held behind a PLY being written
         // (CTL-7). Starts, pauses and the QR scan stay on this thread, in their order with Stop.
         let work = {
-            let (tx, rx) = std::sync::mpsc::channel::<ToService>();
+            // Bounded: a client sending file work faster than it is done waits for room (its Stop and Talk are read on
+            // this thread all the same once the line moves), never a queue that grows without end (verify-controller).
+            let (tx, rx) = std::sync::mpsc::sync_channel::<(ToService, PathBuf)>(LINK_WORK);
             let svc = self.clone();
             std::thread::Builder::new().name("link-work".into()).spawn(move || {
                 for msg in rx {
-                    svc.handle(id, role, msg);
+                    // The app quits: what waits is not started under the teardown's feet.
+                    if svc.quitting.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    let (msg, library) = msg;
+                    svc.handle_in(id, role, msg, Some(&library));
                 }
             }).ok().map(|_| tx)
         };
@@ -612,8 +637,11 @@ impl Service {
         while let Ok(Some(line)) = ipc::read_line_capped(&mut reader, MAX_COMMAND) {
             if let Ok(msg) = serde_json::from_str::<ToService>(&line) {
                 match (&work, msg) {
+                    // Quitting: no new file work is taken.
+                    (_, msg) if is_file_work(&msg) && self.quitting.load(Ordering::Relaxed) => {}
                     (Some(work), msg) if is_file_work(&msg) => {
-                        let _ = work.send(msg);
+                        let library = self.ctl.with_settings(|s| s.sessions_dir.clone());
+                        let _ = work.send((msg, library));
                     }
                     // Quitting waits for a recording to be saved: the link goes on reading (and gets its Close).
                     (_, ToService::Quit) => {
@@ -630,13 +658,19 @@ impl Service {
         self.usage.unlinked(id, self.ctl.view().settings.usage.enabled);
         self.links.lock().unwrap().retain(|l| l.id != id);
         let still_there = self.links.lock().unwrap().iter().any(|l| l.role == role);
+        if role == Role::Window && !still_there {
+            // Its offer to close went with it.
+            self.ctl.window_rest(None);
+        }
         if role == Role::Overlay && !still_there {
             self.ctl.set_overlay_connected(false);
             self.ctl.booster_overlay_gone();
         }
         // The app's Talk (the window's or the panels') is let go only by the link that holds it down: the panels
         // closing must not end, nor send, a sentence the window is saying (AD-1).
-        let held_talk = role != Role::Overlay && self.talk.lock().unwrap().closed(id);
+        // Held until what the closed link let go is done: a press of another link waits for it (verify-controller).
+        let mut talk = self.talk.lock().unwrap();
+        let held_talk = role != Role::Overlay && talk.closed(id);
         if role == Role::Overlay && !still_there {
             // What it held (its Talk button, its open menu) ends with it.
             self.ctl.n4n0_link_closed(true);
@@ -652,6 +686,7 @@ impl Service {
                 self.ctl.n4n0_command(command);
             }
         }
+        drop(talk);
         // Without a tray (Linux for now) nothing would bring the window back: closing it quits.
         if role == Role::Window && cfg!(not(any(windows, target_os = "macos"))) {
             self.quit();
@@ -686,6 +721,9 @@ fn is_atomic_temporary(name: &str) -> bool {
     !file.is_empty() && digits(pid) && digits(serial)
 }
 
+/// File work a link may have waiting ([`Service::serve`]).
+const LINK_WORK: usize = 32;
+
 /// What a window asks that works on files or folders, possibly for seconds: done in its order on the link's work thread,
 /// not on its reading thread ([`Service::serve`]). A reconstruction stopped or unqueued follows the one asked before it.
 fn is_file_work(msg: &ToService) -> bool {
@@ -710,9 +748,22 @@ fn is_file_work(msg: &ToService) -> bool {
 struct TalkHolder(Option<u64>);
 
 impl TalkHolder {
-    /// `link` pressed (`down`) or let go the app's Talk. Any link's release lets it go, as the runtime does.
-    fn talk(&mut self, link: u64, down: bool) {
-        self.0 = down.then_some(link);
+    /// `link` pressed (`down`) or let go the app's Talk: whether that goes to N4N0. The first press holds it; a press of
+    /// another link meanwhile (N4N0 ignores it: one sentence at a time) and a release of a link that does not hold it
+    /// go nowhere, so they can neither take the sentence over nor finish it (verify-controller).
+    fn talk(&mut self, link: u64, down: bool) -> bool {
+        match (down, self.0) {
+            (true, None) => {
+                self.0 = Some(link);
+                true
+            }
+            (true, Some(holder)) => holder == link,
+            (false, Some(holder)) if holder == link => {
+                self.0 = None;
+                true
+            }
+            (false, _) => false,
+        }
     }
 
     /// `link` went away: whether it held the Talk button (which is then let go).
@@ -1133,17 +1184,22 @@ pub(crate) mod tests {
     fn only_the_link_that_holds_talk_lets_it_go_when_it_closes() {
         let (window, panels) = (1, 2);
         let mut talk = TalkHolder::default();
-        talk.talk(window, true);
+        assert!(talk.talk(window, true));
         assert!(!talk.closed(panels), "the panels never pressed Talk");
         assert!(talk.closed(window), "the window held it");
         assert!(!talk.closed(window), "let go once");
-        talk.talk(panels, true);
+        assert!(talk.talk(panels, true));
         assert!(!talk.closed(window));
         assert!(talk.closed(panels));
-        // A release from either lets it go: nothing left for a later close.
-        talk.talk(window, true);
-        talk.talk(panels, false);
-        assert!(!talk.closed(window));
+        // verify-controller: a second press while the window holds it takes nothing over, and its release, or its
+        // link closing, finishes nothing; the window's own release does.
+        assert!(talk.talk(window, true));
+        assert!(!talk.talk(panels, true), "N4N0 ignores it: it is not the panels' sentence");
+        assert!(!talk.talk(panels, false), "nor theirs to finish");
+        assert!(!talk.closed(panels));
+        assert!(talk.talk(window, true), "the window's repeated press is still its own");
+        assert!(talk.talk(window, false));
+        assert!(!talk.closed(window), "let go");
     }
 
     /// LIGHT-DESKTOP-5: the SteamVR start is looked at (a scan of every process) only while SteamVR runs and the

@@ -359,6 +359,7 @@ mod tests {
             handle: Some(([0.3, 0.0, 0.7, 1.0], position(&bar))),
             watch: None,
             strip: None,
+            prompt: None,
         }
     }
 
@@ -567,6 +568,28 @@ mod tests {
         i.step(&head(), [None, Some(miss(false))], &t);
         let out = i.step(&head(), [None, Some(miss(true))], &t);
         assert!(!out.watch_hover && !out.watch_press);
+    }
+
+    #[test]
+    fn either_hand_s_laser_presses_talk_with_n4n0() {
+        // N4N0-11: the band before the eyes, pressed by a pull of the trigger with a laser on it, once.
+        let band = Quad { transform: facing([0.0, 1.45, -0.6], [0.0, 1.6, 0.0], [0.0, 1.0, 0.0]).unwrap(), width: 0.26, height: 0.07 };
+        let t = Targets { prompt: Some(band), ..Default::default() };
+        let centre = position(&band.transform);
+        for left in [true, false] {
+            let mut i = Interaction::default();
+            let laser = |trigger| hand([if left { -0.2 } else { 0.2 }, 1.2, -0.2], centre, trigger, false);
+            let hands = |trigger| if left { [Some(laser(trigger)), None] } else { [None, Some(laser(trigger))] };
+            let out = i.step(&head(), hands(false), &t);
+            assert!(out.prompt_hover && !out.prompt_press);
+            assert!(i.step(&head(), hands(true), &t).prompt_press);
+            assert!(!i.step(&head(), hands(true), &t).prompt_press, "held: once");
+        }
+        // Pointing away: nothing.
+        let mut i = Interaction::default();
+        let away = |trigger| hand([0.2, 1.2, -0.2], [3.0, 1.2, 0.0], trigger, false);
+        i.step(&head(), [None, Some(away(false))], &t);
+        assert!(!i.step(&head(), [None, Some(away(true))], &t).prompt_press);
     }
 
     /// The menu mismatch strip on the left wrist, over the watch: the right hand presses one of its rows by laser or fingertip, the left

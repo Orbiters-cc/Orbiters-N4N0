@@ -40,7 +40,7 @@ pub fn window(ctx: &Context, ctl: &Ctl, offer: Option<WakeOffer>) {
     let now = now_ms();
     let Some(offer) = up(offer, now) else { return };
     let screen = ctx.content_rect();
-    let id = Id::new(("orbiters-wake-offer", offer.id));
+    let id = Id::unique(("orbiters-wake-offer", offer.id));
     let enter = anim::spring_from(ctx, id.with("enter"), [0.0], [1.0], Spring::BOUNCY)[0];
     let base = Rect::from_min_size(pos2(screen.right() - MARGIN - WIDTH, screen.bottom() - MARGIN - HEIGHT), vec2(WIDTH, HEIGHT));
     let rect = Rect::from_center_size(base.center() + vec2(60.0 * (1.0 - enter), 0.0), base.size() * (0.92 + 0.08 * enter.min(1.0)));

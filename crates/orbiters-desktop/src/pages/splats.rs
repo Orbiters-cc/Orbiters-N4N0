@@ -212,6 +212,12 @@ const RESET_W: f32 = 132.0;
 const STEP_W: f32 = 40.0;
 const STEP_LABEL_W: f32 = 112.0;
 
+/// Where the view's controls on the right of its top bar start (Recorded view, the views' steps when there are several,
+/// Close), for a bar ending at `right`.
+fn view_controls_left(right: f32, views: usize) -> f32 {
+    right - 44.0 - 10.0 - RESET_W - if views > 1 { 10.0 + 2.0 * STEP_W + STEP_LABEL_W } else { 0.0 }
+}
+
 impl Viewer {
     /// Opens the 3D view of `session`, its splats on the integrated GPU with `integrated` ([`on_integrated`]).
     pub fn open(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String, integrated: bool) -> Self {
@@ -437,14 +443,17 @@ impl Viewer {
         };
         let sub_t = Txt::new(sub, 11.0).color(theme::FG_3);
         let title_t = Txt::new(&self.title, 14.0).weight(weight::SEMIBOLD);
-        let title_w = (widgets::text_size(ui, &title_t).x.max(widgets::text_size(ui, &sub_t).x) + 40.0).min(bar.width() * 0.5);
+        let views = self.loaded.as_ref().map_or(0, |l| l.views.len());
+        // Half the bar at most, and (outside Select splats) room left for the row's buttons as icons at least.
+        let leave = if self.select.on() { 0.0 } else { 4.0 * 50.0 + 10.0 };
+        let title_max = (bar.width() * 0.5).min((view_controls_left(bar.right(), views) - bar.left() - leave).max(120.0));
+        let title_w = (widgets::text_size(ui, &title_t).x.max(widgets::text_size(ui, &sub_t).x) + 40.0).min(title_max);
         let title_r = Rect::from_min_size(bar.min, vec2(title_w, 44.0));
         chip(&p, title_r);
         widgets::text_truncated(&p, pos2(title_r.left() + 20.0, title_r.center().y - 7.0), Align2::LEFT_CENTER, &title_t, title_w - 40.0);
         widgets::text_truncated(&p, pos2(title_r.left() + 20.0, title_r.center().y + 9.0), Align2::LEFT_CENTER, &sub_t, title_w - 40.0);
         if self.select.on() {
-            let views = self.loaded.as_ref().map_or(0, |l| l.views.len());
-            let controls = bar.right() - 44.0 - 10.0 - RESET_W - if views > 1 { 10.0 + 2.0 * STEP_W + STEP_LABEL_W } else { 0.0 };
+            let controls = view_controls_left(bar.right(), views);
             self.select_bar(ui, &p, title_r, controls);
         } else {
             self.save_view(ui, &p, rect, title_r);
@@ -707,15 +716,73 @@ impl Viewer {
         let unsaved = l.edits.as_ref().is_some_and(|e| e.unsaved());
         let views = l.views.len();
         let saving = self.still.is_some();
-        let b = Button::new(if saving { tr("Saving the view…") } else { tr("Save this view") })
+        let save_b = Button::new(if saving { tr("Saving the view…") } else { tr("Save this view") })
             .icon(icons::CAMERA)
             .variant(Variant::Glass)
             .enabled(!saving)
             .hint(tr("Saves the picture of this view in Photos & captures, larger than on screen, to edit or share"))
             .id_salt("splat-save-view");
-        let bw = b.desired_width(ui);
-        let save_r = Rect::from_min_size(pos2(title_r.right() + 10.0, title_r.top() + 2.0), vec2(bw, 40.0));
-        if b.show_at(ui, save_r).clicked() && !saving {
+        let edit_b = Button::new(tr("Edit in 3D"))
+            .icon(icons::SLIDERS_HORIZONTAL)
+            .variant(Variant::Glass)
+            .hint(tr("Edits this view with the photo editor's layers while you keep moving around in 3D"))
+            .id_salt("splat-edit-3d");
+        let can = selectable.unwrap_or(false);
+        let select_b = Button::new(tr("Select splats"))
+            .icon(icons::CROSSHAIR)
+            .variant(Variant::Glass)
+            .enabled(can)
+            .hint(if can { tr("Selects splats to hide or delete them (a leftover avatar, floaters): they leave everything shared from this capture") } else { tr("Discard the edits that could not be applied first") })
+            .id_salt("splat-select");
+        // Export…: what the view shows, as a file for other tools. The file is made from the edits saved beside the PLY:
+        // while the last save failed, it would hold splats this view leaves out, so Export waits for Retry (in Select
+        // splats) as it waits for edits that could not be applied.
+        let ok = can && !unsaved;
+        let export_b = Button::new(tr("Export…"))
+            .icon(icons::UPLOAD_SIMPLE)
+            .variant(Variant::Glass)
+            .enabled(ok)
+            .hint(if !can {
+                tr("Discard the edits that could not be applied first")
+            } else if unsaved {
+                tr("Its splat edits are not saved: Retry in Select splats first, so that the file leaves out what this view hides")
+            } else {
+                tr("Saves what this view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender")
+            })
+            .id_salt("splat-export");
+        // One rule for the row (Night PG2-1: only Export… made room, and the others ran under "View n of m" and
+        // Recorded view on a narrow window or with a long world name): where the whole row would reach the view's
+        // controls on the right (Recorded view, the views' steps when there are several, Close), its buttons become
+        // their icons (the label their tooltip), from the right.
+        let controls = view_controls_left(rect.right() - 16.0, views);
+        let shown = if selectable.is_some() { 4 } else { 2 };
+        let mut widths = [save_b.desired_width(ui), edit_b.desired_width(ui), select_b.desired_width(ui), export_b.desired_width(ui)];
+        let mut icon = [false; 4];
+        let end = |widths: &[f32; 4]| title_r.right() + widths[..shown].iter().map(|w| 10.0 + w).sum::<f32>();
+        for i in (0..shown).rev() {
+            if end(&widths) + 10.0 <= controls {
+                break;
+            }
+            icon[i] = true;
+            widths[i] = 40.0;
+        }
+        let mut x = title_r.right() + 10.0;
+        let mut place = |w: f32| {
+            let r = Rect::from_min_size(pos2(x, title_r.top() + 2.0), vec2(w, 40.0));
+            x = r.right() + 10.0;
+            r
+        };
+        // Its icon alone, dimmed and deaf while it waits as the whole button is.
+        let icon_button = |ui: &mut Ui, r: Rect, glyph: &str, label: &'static str, enabled: bool, salt: &str| {
+            let mut iu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(salt));
+            if !enabled {
+                iu.disable();
+            }
+            IconButton::new(glyph, label).size(40.0, 17.0).backdrop(theme::black(0.55)).id_salt(salt).show_at(&mut iu, r).clicked()
+        };
+        let save_r = place(widths[0]);
+        let save_clicked = if icon[0] { icon_button(ui, save_r, icons::CAMERA, mark("Save this view"), !saving, "splat-save-view-icon") } else { save_b.show_at(ui, save_r).clicked() };
+        if save_clicked && !saving {
             if let Some(orbit) = self.orbit {
                 let ppp = ctx.pixels_per_point();
                 let (vw, vh) = ((rect.width() * ppp).max(16.0), (rect.height() * ppp).max(16.0));
@@ -737,63 +804,20 @@ impl Viewer {
             }
         }
         // Edit in 3D beside it.
-        let e = Button::new(tr("Edit in 3D"))
-            .icon(icons::SLIDERS_HORIZONTAL)
-            .variant(Variant::Glass)
-            .hint(tr("Edits this view with the photo editor's layers while you keep moving around in 3D"))
-            .id_salt("splat-edit-3d");
-        let ew = e.desired_width(ui);
-        let edit_r = Rect::from_min_size(pos2(save_r.right() + 10.0, save_r.top()), vec2(ew, 40.0));
-        if e.show_at(ui, edit_r).clicked() {
+        let edit_r = place(widths[1]);
+        let edit_clicked = if icon[1] { icon_button(ui, edit_r, icons::SLIDERS_HORIZONTAL, mark("Edit in 3D"), true, "splat-edit-3d-icon") } else { edit_b.show_at(ui, edit_r).clicked() };
+        if edit_clicked {
             self.enter_edit(&ctx, rect);
         }
-        // Select splats beside it, for a capture of this computer (a downloaded `.splat` has no edits).
-        if let Some(can) = selectable {
-            let b = Button::new(tr("Select splats"))
-                .icon(icons::CROSSHAIR)
-                .variant(Variant::Glass)
-                .enabled(can)
-                .hint(if can { tr("Selects splats to hide or delete them (a leftover avatar, floaters): they leave everything shared from this capture") } else { tr("Discard the edits that could not be applied first") })
-                .id_salt("splat-select");
-            let bw = b.desired_width(ui);
-            let select_r = Rect::from_min_size(pos2(edit_r.right() + 10.0, edit_r.top()), vec2(bw, 40.0));
-            if b.show_at(ui, select_r).clicked() && can {
+        // Select splats beside it, for a capture of this computer (a downloaded `.splat` has no edits), and Export….
+        if selectable.is_some() {
+            let select_r = place(widths[2]);
+            let select_clicked = if icon[2] { icon_button(ui, select_r, icons::CROSSHAIR, mark("Select splats"), can, "splat-select-icon") } else { select_b.show_at(ui, select_r).clicked() };
+            if select_clicked && can {
                 self.enter_select(&ctx);
             }
-            // Export… beside it: what the view shows, as a file for other tools. Its icon alone (the label its tooltip)
-            // where the whole button would reach the view's controls on the right (a long world name, a narrow window):
-            // Recorded view, the views' steps when there are several, and Close. The file is made from the edits saved
-            // beside the PLY: while the last save failed, it would hold splats this view leaves out, so Export waits for
-            // Retry (in Select splats) as it waits for edits that could not be applied.
-            let ok = can && !unsaved;
-            let b = Button::new(tr("Export…"))
-                .icon(icons::UPLOAD_SIMPLE)
-                .variant(Variant::Glass)
-                .enabled(ok)
-                .hint(if !can {
-                    tr("Discard the edits that could not be applied first")
-                } else if unsaved {
-                    tr("Its splat edits are not saved: Retry in Select splats first, so that the file leaves out what this view hides")
-                } else {
-                    tr("Saves what this view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender")
-                })
-                .id_salt("splat-export");
-            let bw = b.desired_width(ui);
-            let controls = rect.right() - 16.0 - 44.0 - 10.0 - RESET_W - if views > 1 { 10.0 + 2.0 * STEP_W + STEP_LABEL_W } else { 0.0 };
-            let x = select_r.right() + 10.0;
-            let (clicked, export_r) = if x + bw + 10.0 <= controls {
-                let r = Rect::from_min_size(pos2(x, edit_r.top()), vec2(bw, 40.0));
-                (b.show_at(ui, r).clicked(), r)
-            } else {
-                let r = Rect::from_min_size(pos2(x, edit_r.top()), vec2(40.0, 40.0));
-                let icon = IconButton::new(icons::UPLOAD_SIMPLE, mark("Export…")).size(40.0, 17.0).backdrop(theme::black(0.55)).id_salt("splat-export-icon");
-                // Dimmed and deaf while it waits, as the whole button is.
-                let mut iu = ui.new_child(UiBuilder::new().max_rect(r).id_salt("splat-export-icon"));
-                if !ok {
-                    iu.disable();
-                }
-                (icon.show_at(&mut iu, r).clicked(), r)
-            };
+            let export_r = place(widths[3]);
+            let clicked = if icon[3] { icon_button(ui, export_r, icons::UPLOAD_SIMPLE, mark("Export…"), ok, "splat-export-icon") } else { export_b.show_at(ui, export_r).clicked() };
             if clicked && ok {
                 self.export = Some(super::splat_export::Export::open(&ctx, &self.session, &self.title, export_r).order(egui::Order::Tooltip));
             }

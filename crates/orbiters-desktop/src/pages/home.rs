@@ -216,9 +216,6 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     cx.entered = entered.max(*since);
 
     let mut acts = Vec::new();
-    if page != Page::Home && ui.input(|i| i.key_pressed(Key::Escape)) {
-        acts.push(Act::Home);
-    }
     // The 3D picture as the Capture page allows it.
     let take_blocked = if !snap.settings.consent_acknowledged {
         Some(tr("Accept the capture notice on the Capture page first"))
@@ -277,6 +274,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             }
         });
     });
+    // Escape goes back to Home, unless the page took it for itself (a rename it cancels): asked after the page.
+    if page != Page::Home && ui.input(|i| i.key_pressed(Key::Escape)) {
+        acts.insert(0, Act::Home);
+    }
     // Down to where the content starts (its top margin).
     super::under_top(ui, cx, "home", from, ui.max_rect().top() + cx.top + 8.0);
     if let (Some(column), Some(side)) = (right_margin, side) {

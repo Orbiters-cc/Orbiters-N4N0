@@ -12,7 +12,7 @@ use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, IconButton, Size, Variant};
 use orbiters_ui::{format, icons, logo, toast};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime};
 
@@ -102,41 +102,79 @@ type Fetched = (String, Option<ColorImage>);
 /// The rows shown, by day.
 type Groups = Arc<Vec<(String, Vec<Row>)>>;
 
+/// A row's thumbnail not asked for again within this long (scrolled past) is not fetched after all.
+const THUMB_STALE: f64 = 2.0;
+
+/// A thumbnail that could not be fetched is asked again when its row shows this long after: 5 s, doubling, at most
+/// 5 minutes (it was never asked again).
+fn thumb_retry_after(tries: u8) -> f64 {
+    (5.0 * 2f64.powi(tries.saturating_sub(1).min(16) as i32)).min(300.0)
+}
+
 #[derive(Default)]
 struct Thumbs {
     ready: HashMap<String, TextureHandle>,
-    /// Asked for, or failed: not asked again.
-    asked: std::collections::HashSet<String>,
-    queue: VecDeque<String>,
-    running: usize,
+    /// Waiting to be fetched, with when its row last asked (egui's clock): the newest asked go first, those nobody
+    /// asked for since [`THUMB_STALE`] leave (a fast scroll to the end of a long history queued every row passed).
+    queue: Vec<(String, f64)>,
+    /// Being fetched.
+    fetching: std::collections::HashSet<String>,
+    /// Could not be fetched: when, and how many times.
+    failed: HashMap<String, (f64, u8)>,
     channel: Option<(mpsc::Sender<Fetched>, mpsc::Receiver<Fetched>)>,
     /// Never fetched (the screenshot review's stand-ins).
     offline: bool,
 }
 
 impl Thumbs {
-    fn get(&mut self, id: &str) -> Option<TextureId> {
+    fn get(&mut self, id: &str, now: f64) -> Option<TextureId> {
         if let Some(t) = self.ready.get(id) {
             return Some(t.id());
         }
-        if !self.offline && self.asked.insert(id.to_string()) {
-            self.queue.push_back(id.to_string());
+        if self.offline || self.fetching.contains(id) {
+            return None;
+        }
+        if let Some(&(since, tries)) = self.failed.get(id) {
+            if now - since < thumb_retry_after(tries) {
+                return None;
+            }
+        }
+        match self.queue.iter_mut().find(|(q, _)| q == id) {
+            Some(q) => q.1 = now,
+            None => self.queue.push((id.to_string(), now)),
         }
         None
     }
 
-    /// Thumbnails that arrived become textures; the next in the queue are asked for.
+    /// The thumbnail to fetch next: the one asked for most recently; those nobody asked for lately leave the queue.
+    fn next(&mut self, now: f64) -> Option<String> {
+        self.queue.retain(|(_, asked)| now - *asked <= THUMB_STALE);
+        self.queue.sort_by(|a, b| a.1.total_cmp(&b.1));
+        self.queue.pop().map(|(id, _)| id)
+    }
+
+    /// Thumbnails that arrived become textures; the next asked for are fetched, newest first.
     fn step(&mut self, ctx: &egui::Context) {
-        let (tx, rx) = self.channel.get_or_insert_with(mpsc::channel);
-        while let Ok((id, image)) = rx.try_recv() {
-            self.running = self.running.saturating_sub(1);
-            if let Some(image) = image {
-                self.ready.insert(id.clone(), ctx.load_texture(format!("video-{id}"), image, TextureOptions::LINEAR));
+        let now = ctx.input(|i| i.time);
+        let channel = self.channel.get_or_insert_with(mpsc::channel);
+        let tx = channel.0.clone();
+        let arrived: Vec<Fetched> = channel.1.try_iter().collect();
+        for (id, image) in arrived {
+            self.fetching.remove(&id);
+            match image {
+                Some(image) => {
+                    self.failed.remove(&id);
+                    self.ready.insert(id.clone(), ctx.load_texture(format!("video-{id}"), image, TextureOptions::LINEAR));
+                }
+                None => {
+                    let tries = self.failed.get(&id).map_or(0, |f| f.1).saturating_add(1);
+                    self.failed.insert(id, (now, tries));
+                }
             }
         }
-        while self.running < THUMBS_AT_ONCE {
-            let Some(id) = self.queue.pop_front() else { break };
-            self.running += 1;
+        while self.fetching.len() < THUMBS_AT_ONCE {
+            let Some(id) = self.next(now) else { break };
+            self.fetching.insert(id.clone());
             let (tx, ctx) = (tx.clone(), ctx.clone());
             std::thread::spawn(move || {
                 let image = orbiters_n4n0_core::youtube::thumbnail(&id)
@@ -162,6 +200,8 @@ struct Picker {
 
 #[derive(Default)]
 pub struct State {
+    /// The text searched for at the last frame ([`super::new_search`]).
+    searched: Option<String>,
     history: Option<Arc<History>>,
     loading: Job<(History, Option<SystemTime>)>,
     /// The file's time when it was read.
@@ -462,7 +502,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         Shown::History => "history".to_string(),
         Shown::List(id) => id.clone(),
     };
-    egui::ScrollArea::vertical().id_salt(("videos", salt)).auto_shrink([false, false]).scroll_bar_rect(below).show(ui, |ui| {
+    let mut scroll = egui::ScrollArea::vertical().id_salt(("videos", salt));
+    if super::new_search(&mut state.searched, &state.query.to_lowercase()) {
+        scroll = scroll.vertical_scroll_offset(0.0);
+    }
+    scroll.auto_shrink([false, false]).scroll_bar_rect(below).show(ui, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 40 }).show(ui, |ui| {
             ui.add_space(content_top - page.top());
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
@@ -859,7 +903,7 @@ fn video_rows(ui: &mut Ui, state: &mut State, rows: &[Row], now: u64, pick_first
         if i >= cols {
             ui.painter().hline(r.x_range(), r.top(), egui::Stroke::new(1.0, theme::white(0.05)));
         }
-        let texture = row.youtube.as_deref().and_then(|id| state.thumbs.get(id));
+        let texture = row.youtube.as_deref().and_then(|id| state.thumbs.get(id, ui.input(|i| i.time)));
         let was_copied = copied.as_deref() == Some(row.url.as_str());
         let held = state.bookmarks.as_ref().is_some_and(|b| b.any_holds(&row.url));
         if let Some(act) = video_row(ui, r, row, texture, held, was_copied, now) {
@@ -1064,6 +1108,27 @@ fn picker(ctx: &egui::Context, state: &mut State, acts: &mut Vec<Act>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Night PAGES-UI-7: the rows on screen are fetched first, rows scrolled past leave the queue, and a thumbnail
+    /// that could not be fetched is asked again when its row shows after a doubling wait (it never was).
+    #[test]
+    fn video_thumbnails_fetch_what_shows_first_and_retry_what_failed() {
+        let mut t = Thumbs::default();
+        for (id, at) in [("passed", 0.0), ("passed-too", 0.5), ("on-screen", 1.0)] {
+            assert!(t.get(id, at).is_none());
+        }
+        t.get("on-screen", 2.6);
+        assert_eq!(t.next(2.6).as_deref(), Some("on-screen"), "what shows now, first");
+        assert_eq!(t.next(2.6), None, "rows scrolled past are not fetched");
+        t.failed.insert("broken".into(), (3.0, 1));
+        t.get("broken", 5.0);
+        assert!(t.queue.is_empty(), "not before its wait");
+        t.get("broken", 8.5);
+        assert_eq!(t.next(8.5).as_deref(), Some("broken"), "asked again after it");
+        t.failed.insert("broken".into(), (9.0, 2));
+        t.get("broken", 15.0);
+        assert!(t.queue.is_empty(), "the wait doubled");
+    }
 
     fn played(url: &str, last: u64, title: Option<&str>) -> Played {
         Played { url: url.into(), title: title.map(str::to_string), first: last, last, plays: 1, world: Some("Movie Night".into()), ..Default::default() }

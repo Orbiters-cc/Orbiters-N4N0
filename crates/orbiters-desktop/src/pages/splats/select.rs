@@ -414,8 +414,8 @@ pub fn discard_edits(session: &Path) -> anyhow::Result<()> {
 impl Drop for Edits {
     /// The view closed: a save that failed is tried once more (saves are written as they are made, so there is nothing
     /// else to write), a stroke under way ends, and the picture is drawn again in a thread of its own when it does not
-    /// show the edit saved (it checks the file still holds that edit before it says so; a view opened next draws it
-    /// again otherwise).
+    /// show the edit saved, after a drawing still under way (it checks the file still holds that edit before it says so;
+    /// a view opened next draws it again otherwise).
     fn drop(&mut self) {
         self.history.end();
         if self.problem.is_some() {
@@ -428,11 +428,20 @@ impl Drop for Edits {
                 return;
             }
         }
-        if !self.picture_stale || self.drawing.is_some() {
+        if !self.picture_stale {
             return;
         }
+        // A drawing still under way was started for an older edit (it writes nothing once it sees the file changed):
+        // this one waits for it, then draws the last edit (it was left undrawn until the view was opened again). One
+        // renderer at a time, as on a small graphics card.
+        let running = self.drawing.take();
         let (session, window) = (self.session.clone(), self.window.clone());
         let spawned = std::thread::Builder::new().name("splat edits' picture".into()).spawn(move || { // i18n: not shown
+            if let Some(mut job) = running {
+                while job.poll().is_none() && job.running() {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
             if let Err(err) = redraw_picture(&session, window) {
                 eprintln!("The picture of {}: {err:#}", session.display());
             }

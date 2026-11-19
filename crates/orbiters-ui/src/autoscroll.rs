@@ -144,10 +144,20 @@ pub fn raw_input(ctx: &Context, raw: &mut RawInput) {
                 modifiers: Modifiers::NONE,
             });
         }
-        ctx.request_repaint();
+        // Frames while the pointer is past the dead zone (the first one too, when no time has passed yet); inside it
+        // nothing scrolls, and a move of the pointer brings its own frame (it asked for frames at the screen's rate
+        // for as long as it stayed armed).
+        if scrolls(a) {
+            ctx.request_repaint();
+        }
     }
     raw.events = out;
     ctx.data_mut(|d| d.insert_temp(id(), s));
+}
+
+/// Whether the scrolling under way moves anything: the pointer past the dead zone.
+fn scrolls(a: &Active) -> bool {
+    step(a.pointer - a.origin, 1.0) != Vec2::ZERO
 }
 
 /// How far to scroll over `dt` seconds with the pointer `from` the origin (each axis past the dead zone).
@@ -225,6 +235,18 @@ mod tests {
 
     fn wheel(events: &[Event]) -> Vec2 {
         events.iter().map(|e| if let Event::MouseWheel { delta, .. } = e { *delta } else { Vec2::ZERO }).fold(Vec2::ZERO, |a, b| a + b)
+    }
+
+    /// Night PAGES-UI-1 (its autoscroll part): frames are asked for only while the scrolling moves something (the
+    /// pointer past the dead zone), from the first pass on; armed with the pointer inside it, none.
+    #[test]
+    fn armed_inside_the_dead_zone_asks_for_no_frame() {
+        let at = pos2(200.0, 200.0);
+        let active = |to: Pos2, time: Option<f64>| Active { origin: at, pointer: to, held: false, moved: false, time };
+        assert!(!scrolls(&active(at, None)), "at the mark");
+        assert!(!scrolls(&active(at + vec2(3.0, -4.0), Some(1.0))), "inside the dead zone");
+        assert!(scrolls(&active(at + vec2(0.0, 80.0), None)), "past it, the first pass too (no time yet)");
+        assert!(scrolls(&active(at + vec2(-40.0, 0.0), Some(1.0))));
     }
 
     #[test]

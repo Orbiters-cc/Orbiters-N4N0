@@ -22,7 +22,7 @@ use orbiters_ui::photo::render::Stage;
 use orbiters_ui::photo::{Aspect, Crop, Geometry};
 use orbiters_ui::popup::{self, Item};
 use orbiters_ui::theme::{self, weight, Txt};
-use orbiters_ui::widgets::{self, Button, Chip, Size, Variant};
+use orbiters_ui::widgets::{self, Button, Chip, IconButton, Size, Variant};
 use orbiters_ui::{feedback, icons};
 use std::sync::Mutex;
 
@@ -706,19 +706,43 @@ fn tools_row(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
     let g = &mut ed.doc.geometry;
     let resettable = !g.is_identity() || g.aspect != Aspect::Free;
     let shown = anim::toggle(ui.ctx(), id.with("reset-shown"), resettable, Spring::SNAPPY);
+    let reset = Button::new(tr("Reset")).icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).variant(Variant::Ghost).enabled(resettable).id_salt(id.with("reset"));
+    let done = Button::new(tr("Done")).icon(icons::CHECK).size(Size::Sm).variant(Variant::Primary).enabled(changed).id_salt(id.with("done"));
+    let dw = done.desired_width(ui);
+    // The row laid out in one pass (Night PG2-10: Reset was drawn over Flip and Rotate on narrow canvases): the tools
+    // centred as before when they clear Cancel and Reset; else just after them; else with tighter gaps; else Reset as
+    // its icon alone (the right panel has a Reset of its own too).
+    let auto_w = 62.0;
+    let tools = |gap: f32| 4.0 * 36.0 + auto_w + 4.0 * gap;
+    let after_left = |rw: f32| r.left() + cw + if shown > 0.01 { 6.0 + rw } else { 0.0 } + 10.0;
+    let fits = |rw: f32, gap: f32| after_left(rw).max(r.center().x - tools(gap) * 0.5) + tools(gap) <= r.right() - dw - 10.0;
+    let full_rw = reset.desired_width(ui);
+    let (rw, gap, compact) = if fits(full_rw, 12.5) {
+        (full_rw, 12.5, false)
+    } else if fits(full_rw, 6.0) {
+        (full_rw, 6.0, false)
+    } else if fits(32.0, 12.5) {
+        (32.0, 12.5, true)
+    } else {
+        (32.0, 6.0, true)
+    };
+    let start = after_left(rw).max(r.center().x - tools(gap) * 0.5);
     if shown > 0.01 {
-        let b = Button::new(tr("Reset")).icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).variant(Variant::Ghost).enabled(resettable).id_salt(id.with("reset"));
-        let rw = b.desired_width(ui);
         let mut ru = ui.new_child(egui::UiBuilder::new().max_rect(r).id_salt(id.with("reset-ui")));
         ru.multiply_opacity(shown);
-        if super::super::sharing::pressed(b.show_at(&mut ru, Rect::from_min_size(pos2(r.left() + cw + 6.0, mid - 16.0), vec2(rw, 32.0)))) {
+        let at = Rect::from_min_size(pos2(r.left() + cw + 6.0, mid - 16.0), vec2(rw, 32.0));
+        let resp = if compact {
+            IconButton::new(icons::ARROW_COUNTER_CLOCKWISE, mark("Reset")).size(32.0, 16.0).id_salt(id.with("reset")).show_at(&mut ru, at)
+        } else {
+            reset.show_at(&mut ru, at)
+        };
+        if resettable && super::super::sharing::pressed(resp) {
             *g = Geometry::default();
             ed.crop.zeroed = [None; 3];
         }
     }
     // Done, lit once something changed.
-    let b = Button::new(tr("Done")).icon(icons::CHECK).size(Size::Sm).variant(Variant::Primary).enabled(changed).id_salt(id.with("done"));
-    let dw = b.desired_width(ui);
+    let b = done;
     if super::super::sharing::pressed(b.show_at(ui, Rect::from_min_size(pos2(r.right() - dw, mid - 16.0), vec2(dw, 32.0)))) {
         ed.selected = super::Selected::Nothing;
         return;
@@ -727,12 +751,10 @@ fn tools_row(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
     // Flip, rotate, AUTO, shapes, more, in the middle.
     let found = ed.crop.level.flatten();
     let auto_on = found.is_some_and(|f| (g.straighten - auto_straighten(g, &f)).abs() < 0.05 && g.straighten != 0.0);
-    let auto_w = 62.0;
-    let total = 4.0 * 36.0 + auto_w + 5.0 * 10.0;
-    let mut x = r.center().x - total * 0.5;
+    let mut x = start;
     let mut next = |w: f32| {
         let at = Rect::from_min_size(pos2(x, mid - 18.0), vec2(w, 36.0));
-        x += w + 12.5;
+        x += w + gap;
         at
     };
     let flip_r = next(36.0);

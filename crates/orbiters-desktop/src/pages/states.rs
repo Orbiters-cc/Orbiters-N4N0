@@ -509,7 +509,8 @@ fn rename_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, whose: &Whose, id: 
         resp.request_focus();
     }
     let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-    let escape = ui.input(|i| i.key_pressed(Key::Escape));
+    // Taken: this press cancels the rename and nothing else (Home's page would go back to Home on it too).
+    let escape = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
     let x = field.right() + 12.0;
     let save = Button::new(tr("Save")).variant(Variant::Primary).width(96.0).id_salt(("orbiters-state-rename-save", id));
     let saved = save.show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(96.0, 40.0))).clicked();
@@ -532,6 +533,26 @@ mod tests {
 
     fn states(states: &[(&str, &str, bool)]) -> Vec<StateView> {
         states.iter().map(|(id, name, default)| StateView { id: id.to_string(), name: name.to_string(), default: *default, ..Default::default() }).collect()
+    }
+
+    /// Night PAGES-UI-9: Escape while renaming cancels the rename and is taken: Home's page, which asks after it, does
+    /// not go back to Home on the same press.
+    #[test]
+    fn escape_while_renaming_cancels_the_rename_only() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let mut page = StatesPage { renaming: Some(("st_1".into(), "Old".into(), false)), ..Default::default() };
+        let whose = Whose { id: "avtr_a".into(), worn: true };
+        let mut left = None;
+        let escape = egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let mut out = ctx.run_ui(egui::RawInput { events: vec![escape], ..Default::default() }, |ui| {
+            let mut said = Vec::new();
+            rename_row(ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 40.0)), &mut page, &whose, "st_1", 0.0, &mut said);
+            left = Some(ui.input(|i| i.key_pressed(Key::Escape)));
+        });
+        out.textures_delta.clear();
+        assert!(page.renaming.is_none(), "the rename is cancelled");
+        assert_eq!(left, Some(false), "and the press is not seen again after it");
     }
 
     #[test]

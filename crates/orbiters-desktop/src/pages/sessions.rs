@@ -88,6 +88,8 @@ struct Import {
 
 #[derive(Default)]
 pub struct State {
+    /// The text searched for at the last frame ([`super::new_search`]).
+    searched: Option<String>,
     gallery: super::gallery::State,
     manage: bool,
     loaded: Option<(u64, PathBuf, u64)>,
@@ -132,11 +134,24 @@ impl State {
         self.open(ctx, dir, origin);
     }
 
+    /// Whether the list is there (screenshots, the bench). A list that lands here shows what a clean-up asked here
+    /// still has to do as done; what the service is done with is settled by the page ([`State::take_list`]).
     pub fn loaded(&mut self) -> bool {
-        if let Some(list) = self.list.take() {
+        if let Some(mut list) = self.list.take() {
+            self.pending.apply(&mut list);
             self.set_sessions(list);
         }
         self.sessions.is_some()
+    }
+
+    /// Takes in a list that landed, with what a clean-up asked here became (`job`: the service's clean-up). Every
+    /// list goes through here on the page: one taken without it left a finished clean-up unsettled, and the library
+    /// was read again and again.
+    fn take_list(&mut self, job: Option<&crate::state::CleanupJob>, now: f64) {
+        if let Some(mut list) = self.list.take() {
+            self.pending.on_list(&mut list, job, now);
+            self.set_sessions(list);
+        }
     }
 
     /// Whether something is still being read (the list, pictures, what a clean-up would delete): the screenshots
@@ -230,7 +245,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         let dir = cx.snap.settings.sessions_dir.clone();
         state.list = Job::spawn(ui.ctx(), move || crate::worlds::sessions(&dir));
     }
-    state.loaded();
+    state.take_list(cx.snap.cleanup.as_ref(), anim::time(ui.ctx()));
     if !state.manage && state.detail.is_none() && state.storage.is_none() && state.viewer.is_none() {
         state.manage = super::gallery::show(ui, cx, &mut state.gallery);
         return;
@@ -264,10 +279,7 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         state.list = Job::spawn(&ctx, move || crate::worlds::sessions(&dir));
     }
     let now = anim::time(&ctx);
-    if let Some(mut list) = state.list.take() {
-        state.pending.on_list(&mut list, cx.snap.cleanup.as_ref(), now);
-        state.set_sessions(list);
-    }
+    state.take_list(cx.snap.cleanup.as_ref(), now);
     // The service is done with a clean-up asked here (or turned it down): the library, read again, says how it went.
     if state.pending.settled(cx.snap.cleanup.as_ref(), now) && !state.list.running() {
         state.loaded = None;
@@ -312,7 +324,11 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let filtered: &[usize] = state.shown.as_ref().map(|(_, v)| v.as_slice()).unwrap_or_default();
     let sessions = state.sessions.as_deref().unwrap_or_default();
     let mut clicked: Option<(PathBuf, Rect)> = None;
-    egui::ScrollArea::vertical().id_salt("sessions").auto_shrink([false, false]).scroll_bar_rect(below_head).show(&mut gu, |ui| {
+    let mut scroll = egui::ScrollArea::vertical().id_salt("sessions");
+    if super::new_search(&mut state.searched, &q) {
+        scroll = scroll.vertical_scroll_offset(0.0);
+    }
+    scroll.auto_shrink([false, false]).scroll_bar_rect(below_head).show(&mut gu, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 32 }).show(ui, |ui| {
             ui.add_space(grid_top - grid_rect.top());
             let w = ui.available_width();
@@ -1376,5 +1392,30 @@ pub(super) fn mini_stat(p: &egui::Painter, r: Rect, glyph: &str, label: &str, va
     widgets::text_truncated(p, pos2(r.left() + 12.0, r.top() + 44.0), Align2::LEFT_CENTER, &Txt::new(value, 18.0).weight(weight::SEMIBOLD), r.width() - 24.0);
     if let Some(sub) = sub {
         widgets::text_truncated(p, pos2(r.left() + 12.0, r.top() + 64.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.0).color(theme::FG_3), r.width() - 24.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Night PAGES-UI-C2: a list that lands after a finished clean-up settles it, wherever the page takes it in: the
+    /// page took it before the library could, the clean-up stayed "settled but unanswered", and the folder was read
+    /// again at every frame.
+    #[test]
+    fn a_list_after_a_finished_clean_up_settles_it() {
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        state.pending.ask(&[], &[PathBuf::from("Z:/orbiters-test/gone")], 0.0);
+        assert!(state.pending.settled(None, 100.0), "done by the service: the library is read again");
+        state.list = Job::spawn(&ctx, Vec::new);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while state.sessions.is_none() {
+            assert!(std::time::Instant::now() < until);
+            state.take_list(None, 100.0);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(!state.pending.settled(None, 100.0), "that reading answered it: not read again");
+        assert!(state.pending.is_empty());
     }
 }

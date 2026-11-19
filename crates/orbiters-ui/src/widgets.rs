@@ -513,20 +513,56 @@ impl<'a, T> SegOption<'a, T> {
     }
 }
 
-/// Segmented control whose highlight slides between options with a bouncy spring. Returns true when the value
-/// changed (on press).
-pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut T, options: &[SegOption<'_, T>], small: bool) -> bool {
-    let id = ui.scope_id().with(id_salt);
-    let (item_h, pad_x, size) = if small { (28.0, 12.0, 12.0) } else { (32.0, 14.0, 13.0) };
+/// The width of each option of a [`segmented`] control, as it lays them out.
+fn segment_widths<T>(ui: &Ui, options: &[SegOption<'_, T>], small: bool) -> Vec<f32> {
+    let (pad_x, size) = if small { (12.0, 12.0) } else { (14.0, 13.0) };
     let badge_txt = |b: &str| Txt::new(b.to_uppercase(), 9.5).weight(weight::SEMIBOLD).tracking(0.04).color(theme::FG_2);
-    let widths: Vec<f32> = options
+    options
         .iter()
         .map(|o| {
             let t = text_size(ui, &Txt::new(o.label, size).weight(weight::MEDIUM)).x;
             let b = o.badge.map(|b| text_size(ui, &badge_txt(b)).x + 12.0 + 6.0).unwrap_or(0.0);
             t + b + pad_x * 2.0
         })
-        .collect();
+        .collect()
+}
+
+/// The whole width a [`segmented`] control takes with these options (its track), in this language: for a row to know
+/// whether it fits before it is drawn.
+pub fn segmented_width<T>(ui: &Ui, options: &[SegOption<'_, T>], small: bool) -> f32 {
+    segment_widths(ui, options, small).iter().sum::<f32>() + 8.0
+}
+
+/// The options' widths fitted to `avail` (Night PG2-9: a control wider than its column pushed the column out, and
+/// everything laid out after it went past the panel's edge): as they are when they fit; else their padding shrinks, down
+/// to 6 points a side; then they share what there is in proportion (their labels are then cut).
+fn fit_segments(mut widths: Vec<f32>, pad_x: f32, avail: f32) -> Vec<f32> {
+    let natural = widths.iter().sum::<f32>() + 8.0;
+    if widths.is_empty() || natural <= avail || !avail.is_finite() {
+        return widths;
+    }
+    let n = widths.len() as f32;
+    let less = (natural - avail).min(n * 2.0 * (pad_x - 6.0).max(0.0)) / n;
+    for w in &mut widths {
+        *w -= less;
+    }
+    let inner = widths.iter().sum::<f32>();
+    if inner + 8.0 > avail {
+        let k = ((avail - 8.0).max(0.0) / inner).min(1.0);
+        for w in &mut widths {
+            *w *= k;
+        }
+    }
+    widths
+}
+
+/// Segmented control whose highlight slides between options with a bouncy spring. Returns true when the value
+/// changed (on press). Never wider than the room it is given ([`fit_segments`]).
+pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut T, options: &[SegOption<'_, T>], small: bool) -> bool {
+    let id = ui.scope_id().with(id_salt);
+    let (item_h, size) = if small { (28.0, 12.0) } else { (32.0, 13.0) };
+    let badge_txt = |b: &str| Txt::new(b.to_uppercase(), 9.5).weight(weight::SEMIBOLD).tracking(0.04).color(theme::FG_2);
+    let widths = fit_segments(segment_widths(ui, options, small), if small { 12.0 } else { 14.0 }, ui.available_width());
     let track_w = widths.iter().sum::<f32>() + 8.0;
     let (track, _) = ui.allocate_exact_size(vec2(track_w, item_h + 8.0), Sense::hover());
     let painter = ui.painter();
@@ -580,8 +616,18 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt,
         let label = Txt::new(o.label, size).weight(weight::MEDIUM).color(color);
         let lw = text_size(ui, &label).x;
         let bw = o.badge.map(|b| text_size(ui, &badge_txt(b)).x + 12.0 + 6.0).unwrap_or(0.0);
-        let x0 = rects[i].center().x - (lw + bw) * 0.5;
-        text(&p, pos2(x0, rects[i].center().y), Align2::LEFT_CENTER, &label);
+        let room = rects[i].width() - 12.0;
+        let x0 = if lw + bw <= room {
+            let x0 = rects[i].center().x - (lw + bw) * 0.5;
+            text(&p, pos2(x0, rects[i].center().y), Align2::LEFT_CENTER, &label);
+            x0
+        } else {
+            // Squeezed into a column narrower than the labels: cut, from the left padding.
+            let x0 = rects[i].left() + 6.0;
+            text_truncated(&p, pos2(x0, rects[i].center().y), Align2::LEFT_CENTER, &label, (room - bw).max(0.0));
+            x0
+        };
+        let lw = lw.min((room - bw).max(0.0));
         if let Some(b) = o.badge {
             let bt = badge_txt(b);
             let bs = text_size(ui, &bt);
@@ -597,6 +643,23 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt,
         }
     }
     changed
+}
+
+#[cfg(test)]
+mod segmented_tests {
+    use super::fit_segments;
+
+    /// Night PG2-9: a control wider than its column is fitted to it; one that fits is as it was.
+    #[test]
+    fn a_segmented_control_is_never_wider_than_its_room() {
+        let natural = vec![60.0, 80.0, 70.0, 64.0];
+        assert_eq!(fit_segments(natural.clone(), 14.0, 400.0), natural, "it fits: unchanged");
+        let tighter = fit_segments(natural.clone(), 14.0, 260.0);
+        assert!((tighter.iter().sum::<f32>() + 8.0 - 260.0).abs() < 0.01, "padding shrunk to fit: {tighter:?}");
+        let shared = fit_segments(natural.clone(), 14.0, 150.0);
+        assert!(shared.iter().sum::<f32>() + 8.0 <= 150.01, "{shared:?}");
+        assert!(shared.windows(2).all(|w| w[0] > 0.0 && w[1] > 0.0));
+    }
 }
 
 /// Switch: the knob springs across, the track turns Orbiters green. Acts on press.

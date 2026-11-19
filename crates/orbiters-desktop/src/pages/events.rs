@@ -1611,6 +1611,8 @@ fn plain(md: &str) -> String {
 
 #[derive(Default)]
 pub struct State {
+    /// The text searched for at the last frame ([`super::new_search`]).
+    searched: Option<String>,
     list: Job<anyhow::Result<Cards>>,
     cards: Vec<Card>,
     next: Option<u64>,
@@ -1835,7 +1837,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let mut more = false;
     let mut retry = false;
     let pictures = state.pictures.as_mut().unwrap();
-    egui::ScrollArea::vertical().id_salt("events").auto_shrink([false, false]).scroll_bar_rect(Rect::from_min_max(pos2(page.left(), top), page.max)).show(
+    let mut scroll = egui::ScrollArea::vertical().id_salt("events");
+    if super::new_search(&mut state.searched, &state.query.to_lowercase()) {
+        scroll = scroll.vertical_scroll_offset(0.0);
+    }
+    scroll.auto_shrink([false, false]).scroll_bar_rect(Rect::from_min_max(pos2(page.left(), top), page.max)).show(
         &mut gu,
         |ui| {
             egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 40 }).show(ui, |ui| {

@@ -3952,11 +3952,7 @@ mod tests {
                 let line = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or_default().to_string();
                 log.lock().unwrap().push(line);
                 let body = r#"{"FULL_PATH":"/avatar","CONTENTS":{"parameters":{"FULL_PATH":"/avatar/parameters","CONTENTS":{"VRCEmote":{"FULL_PATH":"/avatar/parameters/VRCEmote","TYPE":"i","VALUE":[0]}}}}}"#;
-                let _ = write!(stream, "HTTP/1.1 200 OK
-Content-Length: {}
-Connection: close
-
-{}", body.len(), body);
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
             }
         });
         let ctl = Controller::new(Settings::default());

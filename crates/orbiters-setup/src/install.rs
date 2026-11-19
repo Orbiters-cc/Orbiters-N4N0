@@ -498,65 +498,167 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
     system::refresh_shell();
 
     progress.set(0.35, tr("Removing its files…"));
-    let mut failed = Vec::new();
-    let count = record.files.len().max(1);
-    for (i, path) in record.files.iter().enumerate() {
-        match contained(dir, path) {
-            Some(file) => {
-                if file.is_file() && remove_file(&file).is_err() {
-                    failed.push(file.display().to_string());
-                }
-            }
-            // Reached through a link to another folder: never removed from there (PROJECTS-42).
-            None if inside(dir, path).is_some() => failed.push(dir.join(path).display().to_string()),
-            None => {}
-        }
-        progress.set(0.35 + 0.5 * (i + 1) as f32 / count as f32, tr!("Removing {path}", path = path));
-    }
-    // Setup's own scratch folders, only as far as they are empty: a file left there may be the only copy of one.
-    remove_empty_dirs(&dir.join(STAGING));
-    remove_empty_dirs(&dir.join(BACKUP));
-    let _ = std::fs::remove_file(dir.join(format!("{RECORD_FILE}.tmp")));
-    if failed.is_empty() {
-        let _ = remove_file(&dir.join(RECORD_FILE));
-    }
-    // The record's folders, deepest first, then the install folder: each only once empty.
-    let mut folders: Vec<PathBuf> =
-        record.files.iter().filter_map(|p| contained(dir, p)).filter_map(|f| f.parent().map(Path::to_path_buf)).filter(|f| f != dir).collect();
-    folders.sort_by_key(|f| std::cmp::Reverse(f.components().count()));
-    folders.dedup();
-    for folder in folders {
-        let _ = std::fs::remove_dir(folder);
-    }
-    let _ = std::fs::remove_dir(dir);
-
-    progress.set(0.9, tr("Tidying up…"));
-    remove_tree(&orbiters_update::updates_dir());
-    if remove_data {
-        for folder in data_dirs() {
-            remove_tree(&folder);
-        }
-        // The FPS booster's reminder of what to change back by hand. Its journal is not touched here: `finish_booster` removed it if nothing is owed.
-        let _ = std::fs::remove_file(orbiters_booster::data_dir().join("to-put-back.json"));
-        let _ = std::fs::remove_dir(orbiters_booster::data_dir());
-        // Its frame logs, written at every level and Off by default: large, and nobody else's.
-        if let Some(local) = dirs::data_local_dir() {
-            let shared = local.join("Orbiters");
-            if real_dir(&local) && real_dir(&shared) && real_dir(&shared.join("logs")) {
-                orbiters_booster::log::remove_logs(&shared.join("logs"));
-            }
-            // Everything else N4N0 keeps in the folder it shares with the Orbiters Unity tools (PRIV-6), by name.
-            let stems: Vec<String> = record.files.iter().filter_map(|f| f.strip_suffix(".exe")).filter(|s| !s.contains(['/', '\\'])).map(str::to_string).collect();
-            failed.extend(remove_own_data(&local.join("Orbiters"), &stems));
-        }
-        // The shared Orbiters folders, once nothing else of Orbiters' is left in them.
-        for root in [dirs::config_dir(), dirs::data_local_dir()].into_iter().flatten() {
-            let _ = std::fs::remove_dir(root.join("Orbiters"));
-        }
-    }
+    let roots = Roots {
+        local: dirs::data_local_dir().unwrap_or_default(),
+        config: dirs::config_dir().unwrap_or_default(),
+    };
+    let failed = remove_installation(dir, &record, remove_data, &roots, &mut |fraction, label| progress.set(fraction, label));
     anyhow::ensure!(failed.is_empty(), "{}", tr!("These files could not be removed (in use?): {files}", files = failed.join(", ")));
     progress.set(1.0, tr("Uninstalled"));
     Ok(())
+}
+
+/// The folders uninstall removes things under: the person's local and roaming application data (a test gives its own).
+pub struct Roots {
+    pub local: PathBuf,
+    pub config: PathBuf,
+}
+
+/// The real folders from `top` down to `path`'s parent, each held for as long as the result lives (Windows: none can
+/// be renamed or replaced meanwhile), when `top` and every folder between are real folders, never a link or junction
+/// (verifier round 2: walk down from a verified root, follow no reparse point at any level). `None` otherwise.
+fn pinned_way(top: &Path, path: &Path) -> Option<Vec<std::fs::File>> {
+    let rel = path.strip_prefix(top).ok()?;
+    let mut pins = vec![pin(top)?];
+    let mut at = top.to_path_buf();
+    let parts: Vec<_> = rel.components().collect();
+    for part in parts.iter().take(parts.len().saturating_sub(1)) {
+        if !matches!(part, std::path::Component::Normal(_)) {
+            return None;
+        }
+        at.push(part);
+        pins.push(pin(&at)?);
+    }
+    Some(pins)
+}
+
+/// `path` held open when it is a real folder (not a link), without letting anyone delete or rename it meanwhile.
+fn pin(path: &Path) -> Option<std::fs::File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(0x1 | 0x2)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    (meta.is_dir() && meta.file_attributes() & 0x400 == 0).then_some(file)
+}
+
+/// Removes the folder `path` with all in it (a link there: the link only), when everything from `top` to it is real
+/// and held; links inside are removed as links. What could not be, named.
+fn remove_owned_tree(top: &Path, path: &Path) -> Option<String> {
+    let Some(_pins) = pinned_way(top, path) else {
+        return std::fs::symlink_metadata(path).is_ok().then(|| tr!("{path} is reached through a link to another folder: nothing in it was removed", path = path.display()));
+    };
+    match std::fs::symlink_metadata(path) {
+        Err(_) => None,
+        Ok(_) if !real_dir(path) => std::fs::remove_dir(path).or_else(|_| std::fs::remove_file(path)).err().map(|e| format!("{} ({e})", path.display())),
+        Ok(_) => remove_dir_all_retrying(path).err().map(|e| format!("{} ({e})", path.display())),
+    }
+}
+
+fn remove_dir_all_retrying(path: &Path) -> std::io::Result<()> {
+    retrying(|| match std::fs::remove_dir_all(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    })
+}
+
+/// What uninstall removes once the app is closed and Windows was told: the record's files in `dir` (through real
+/// folders only, `dir` held), its now empty folders, the downloaded updates, and with `remove_data` N4N0's settings,
+/// caches, models and its own entries of the shared folders (by name). Setup's scratch folders and anything not
+/// N4N0's stay. The paths that could not be removed (or were refused), named.
+fn remove_installation(dir: &Path, record: &InstallRecord, remove_data: bool, roots: &Roots, progress: &mut dyn FnMut(f32, String)) -> Vec<String> {
+    let mut failed = Vec::new();
+    // The install folder itself must be a real one, held while its files go: a folder redirected elsewhere is not
+    // emptied (its files there are not N4N0's to remove).
+    match pin(dir) {
+        None => failed.push(tr!("{path} is reached through a link to another folder: nothing in it was removed", path = dir.display())),
+        Some(_held) => {
+            let count = record.files.len().max(1);
+            for (i, path) in record.files.iter().enumerate() {
+                match contained(dir, path) {
+                    Some(file) => {
+                        // Every folder on the way held while it goes.
+                        let pins = pinned_way(dir, &file);
+                        if pins.is_none() {
+                            failed.push(file.display().to_string());
+                        } else if file.is_file() && remove_file(&file).is_err() {
+                            failed.push(file.display().to_string());
+                        }
+                    }
+                    // Reached through a link to another folder: never removed from there (PROJECTS-42).
+                    None if inside(dir, path).is_some() => failed.push(dir.join(path).display().to_string()),
+                    None => {}
+                }
+                progress(0.35 + 0.5 * (i + 1) as f32 / count as f32, tr!("Removing {path}", path = path));
+            }
+            // The record's temporary file, only when it is one of setup's (a person's file of that name stays).
+            let tmp = dir.join(format!("{RECORD_FILE}.tmp"));
+            let ours = std::fs::symlink_metadata(&tmp).is_ok_and(|m| m.is_file())
+                && std::fs::read(&tmp).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).is_some_and(|v| v["product"] == PRODUCT);
+            if ours {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            if failed.is_empty() {
+                let _ = remove_file(&dir.join(RECORD_FILE));
+            }
+            // The record's folders, deepest first: each only once empty, reached through real folders.
+            let mut folders: Vec<PathBuf> =
+                record.files.iter().filter_map(|p| contained(dir, p)).filter_map(|f| f.parent().map(Path::to_path_buf)).filter(|f| f != dir).collect();
+            folders.sort_by_key(|f| std::cmp::Reverse(f.components().count()));
+            folders.dedup();
+            for folder in folders {
+                if pinned_way(dir, &folder).is_some() && real_dir(&folder) {
+                    let _ = std::fs::remove_dir(folder);
+                }
+            }
+        }
+    }
+    // The install folder once empty (setup's scratch folders, left as they are, keep it).
+    if real_dir(dir) {
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    progress(0.9, tr("Tidying up…").to_string());
+    let local = &roots.local;
+    let shared = local.join("Orbiters");
+    failed.extend(remove_owned_tree(local, &shared.join("Desktop").join("updates")));
+    if remove_data {
+        let config_shared = roots.config.join("Orbiters");
+        for (top, folder) in [(&roots.config, config_shared.join("Desktop")), (local, shared.join("Desktop")), (local, shared.join("Models"))] {
+            failed.extend(remove_owned_tree(top, &folder));
+        }
+        // The FPS booster's reminder of what to change back by hand. Its journal is not touched here: `finish_booster`
+        // removed it if nothing is owed.
+        let booster = shared.join("booster");
+        if pinned_way(local, &booster.join("to-put-back.json")).is_some() {
+            let _ = std::fs::remove_file(booster.join("to-put-back.json"));
+            let _ = std::fs::remove_dir(&booster);
+        }
+        // Its frame logs, written at every level and Off by default: large, and nobody else's.
+        if let Some(_pins) = pinned_way(local, &shared.join("logs").join("x")) {
+            orbiters_booster::log::remove_logs(&shared.join("logs"));
+        }
+        // Everything else N4N0 keeps in the folder it shares with the Orbiters Unity tools (PRIV-6), by name.
+        if let Some(_pins) = pinned_way(local, &shared.join("x")) {
+            let stems: Vec<String> = record.files.iter().filter_map(|f| f.strip_suffix(".exe")).filter(|s| !s.contains(['/', '\\'])).map(str::to_string).collect();
+            failed.extend(remove_own_data(&shared, &stems));
+        } else if std::fs::symlink_metadata(&shared).is_ok() {
+            failed.push(tr!("{path} is a link to another folder: nothing in it was removed", path = shared.display()));
+        }
+        // The shared Orbiters folders, once nothing else of Orbiters' is left in them (a link is left as it is).
+        for root in [&roots.config, local] {
+            if real_dir(&root.join("Orbiters")) {
+                let _ = std::fs::remove_dir(root.join("Orbiters"));
+            }
+        }
+    }
+    failed
 }
 
 /// Everything the FPS booster changed comes back, now that the app that could do it has closed. A SteamVR value can't be
@@ -695,8 +797,10 @@ fn remove_own_data(root: &Path, programs: &[String]) -> Vec<String> {
             Err(e) => failed.push(format!("{} ({e})", path.display())),
         }
     }
-    // The logs folder once nothing is left in it (another tool's logs keep it).
-    let _ = std::fs::remove_dir(&logs);
+    // The logs folder once nothing is left in it (another tool's logs keep it); a link there stays a link.
+    if real_dir(&logs) {
+        let _ = std::fs::remove_dir(&logs);
+    }
     failed
 }
 
@@ -1076,6 +1180,55 @@ mod tests {
         let _ = std::fs::remove_dir(&shared);
         remove_tree(&root);
         remove_tree(&elsewhere);
+    }
+
+    /// Verifier round 2: the whole list of what uninstall removes, run on a temporary tree (Windows' own integration
+    /// left out): N4N0's files and data go; a person's file named like setup's temporary record, an old scratch tree,
+    /// another tool's entries, and everything reached through a redirected shared folder or install folder stay.
+    #[test]
+    fn uninstall_removes_only_what_is_n4n0s_through_real_folders() {
+        let base = scratch("uninstall-list");
+        let (dir, local, config, elsewhere) = (base.join("Install"), base.join("Local"), base.join("Roaming"), base.join("Elsewhere"));
+        let write = |p: PathBuf| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        };
+        for f in [APP_EXE, "sub/b.dll"] {
+            write(dir.join(f));
+        }
+        record(&[APP_EXE, "sub/b.dll"]).write(&dir).unwrap();
+        write(dir.join(format!("{RECORD_FILE}.tmp")));
+        std::fs::create_dir_all(dir.join(BACKUP).join("mine/empty")).unwrap();
+        for f in ["Orbiters/Desktop/settings.json"] {
+            write(config.join(f));
+        }
+        // The shared local folder redirected to another disk: what is there is not removed.
+        for f in ["Desktop/updates/setup.exe", "Desktop/cache/x", "Models/m.bin", "vrchat-session.bin", "Mixer/inbox.json"] {
+            write(elsewhere.join(f));
+        }
+        std::fs::create_dir_all(&local).unwrap();
+        junction(&local.join("Orbiters"), &elsewhere);
+        let roots = Roots { local: local.clone(), config: config.clone() };
+        let failed = remove_installation(&dir, &record(&[APP_EXE, "sub/b.dll"]), true, &roots, &mut |_, _| {});
+        assert!(!dir.join(APP_EXE).exists() && !dir.join("sub").exists(), "the install's files go");
+        assert!(dir.join(format!("{RECORD_FILE}.tmp")).is_file(), "a person's file of that name stays");
+        assert!(dir.join(BACKUP).join("mine/empty").is_dir(), "an old scratch tree stays");
+        assert!(!config.join("Orbiters/Desktop").exists(), "settings go");
+        for f in ["Desktop/updates/setup.exe", "Desktop/cache/x", "Models/m.bin", "vrchat-session.bin", "Mixer/inbox.json"] {
+            assert!(elsewhere.join(f).is_file(), "{f} removed through the redirected shared folder");
+        }
+        assert!(failed.iter().any(|f| f.contains("Orbiters")), "{failed:?}");
+        assert!(std::fs::symlink_metadata(local.join("Orbiters")).is_ok(), "the link itself is left");
+        // The install folder itself a junction: nothing in its target goes.
+        let target = base.join("RealInstall");
+        write(target.join(APP_EXE));
+        let linked = base.join("LinkedInstall");
+        junction(&linked, &target);
+        let failed = remove_installation(&linked, &record(&[APP_EXE]), false, &roots, &mut |_, _| {});
+        assert!(target.join(APP_EXE).is_file() && !failed.is_empty());
+        let _ = std::fs::remove_dir(&linked);
+        let _ = std::fs::remove_dir(local.join("Orbiters"));
+        remove_tree(&base);
     }
 
     #[test]

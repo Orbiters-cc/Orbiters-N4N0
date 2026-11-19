@@ -14,7 +14,7 @@
   "Play VRChat": "Jouer à VRChat",
   "How Home's Play buttons start VRChat": "Comment les boutons Jouer de l’Accueil lancent VRChat",
   "Performance launch options": "Options de lancement pour la performance",
-  "VRChat gets a little more of the processor, a frame cap, video decoding on the graphics card and, in VR, a tiny desktop window. Helps when the processor holds VRChat back.": "VRChat reçoit un peu plus du processeur, une limite d’images, le décodage vidéo sur la carte graphique et, en VR, une toute petite fenêtre sur le bureau. Aide quand le processeur freine VRChat.",
+  "VRChat gets a little more of the processor, a frame cap, video decoding on the graphics card and, in VR, a tiny desktop window. Helps when the processor holds VRChat back.": "VRChat reçoit un peu plus du processeur, une limite d’images par seconde, le décodage vidéo sur la carte graphique et, en VR, une toute petite fenêtre sur le bureau. Aide quand le processeur freine VRChat.",
   "VRChat's priority": "Priorité de VRChat",
   "Above normal is enough. High can take time from SteamVR and Virtual Desktop and make the headset stutter.": "Au-dessus de la normale suffit. Haute peut prendre du temps à SteamVR et Virtual Desktop et faire saccader le casque.",
   "Main thread priority": "Priorité du fil principal",

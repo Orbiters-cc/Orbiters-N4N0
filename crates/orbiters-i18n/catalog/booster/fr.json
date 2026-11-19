@@ -111,7 +111,7 @@
   "Measured here": "Mesuré ici",
   "real frames a second at {hz} Hz": "vraies images par seconde à {hz} Hz",
   "Half your headset's rate: SteamVR fills in the frames VRChat misses.": "La moitié du rythme de ton casque : SteamVR complète les images que VRChat rate.",
-  "Filled in by SteamVR: {share} %": "Complétées par SteamVR : {share} %",
+  "Filled in by SteamVR: {share} %": "Complétées par SteamVR : {share} %",
   "Measuring this scene…": "Mesure de cette scène…",
   "Last test: {what}": "Dernier test : {what}",
   "No gain measured yet: nothing has been compared here.": "Aucun gain mesuré pour l’instant : rien n’a été comparé ici.",

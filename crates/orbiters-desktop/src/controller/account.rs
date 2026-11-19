@@ -375,6 +375,8 @@ impl Controller {
             s.account.state = AccountState::SignedOut;
             s.account.error = None;
         });
+        // "My maps" was the account that left (CTL2-8).
+        self.forget_maps();
         Ok(())
     }
 

@@ -199,7 +199,10 @@ pub struct Controller {
     /// Why a session's last reconstruction failed, for the VRChat bridge: a toast reaches no agent.
     reconstruction_failures: Mutex<std::collections::HashMap<PathBuf, String>>,
     /// What this member added to the Map explorer, and the uploads' numbering (controller/maps.rs).
-    maps_mine: Mutex<Option<MapsMine>>,
+    /// The list with whose it is (server and credential), so another account's is never shown as mine.
+    maps_mine: Mutex<Option<(Option<String>, MapsMine)>>,
+    /// Bumped by each fetch of "My maps" (and by a sign-out): only the newest answer is kept (CTL2-8).
+    maps_turn: AtomicU64,
     upload_serial: AtomicU64,
     /// N4N0, the companion on the avatar (`orbiters_n4n0`; the service's side in controller/n4n0.rs).
     n4n0: orbiters_n4n0::Shared,
@@ -541,6 +544,7 @@ impl Controller {
             booster: Default::default(),
             reconstruction_failures: Mutex::default(),
             maps_mine: Mutex::new(None),
+            maps_turn: AtomicU64::new(0),
             upload_serial: AtomicU64::new(0),
             n4n0: {
                 let link = Arc::new(n4n0::Link(me.clone()));

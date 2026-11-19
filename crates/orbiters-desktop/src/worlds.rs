@@ -378,9 +378,14 @@ fn cache_dir() -> PathBuf {
 /// Orbiters for public reads. `ORBITERS_PUBLIC_API` points them at another server (screenshots against a disposable
 /// one); what that server says is then kept in memory only.
 fn public_api() -> (Api, bool) {
+    public_api_of(Server::current())
+}
+
+/// [`public_api`] of `server`.
+fn public_api_of(server: Server) -> (Api, bool) {
     match std::env::var("ORBITERS_PUBLIC_API") {
         Ok(base) if !base.is_empty() => (Api::at(&base), false),
-        _ => (Api::new(Server::current()), true),
+        _ => (Api::new(server), true),
     }
 }
 
@@ -405,23 +410,33 @@ const LISTED_FOR: u64 = 3 * 86_400;
 const UNLISTED_FOR: u64 = 86_400;
 
 /// Worlds' pages, fetched one at a time on a background thread as cards come into view.
+/// Each environment's pages apart (in memory and on disk, a folder each): one server's page is never shown for the
+/// other, and a request goes to the server of the environment it was made in.
 pub struct Infos {
-    known: Arc<Mutex<HashMap<String, Info>>>,
-    asked: HashSet<String>,
-    tx: mpsc::Sender<String>,
+    known: Arc<Mutex<[HashMap<String, Info>; 2]>>,
+    asked: [HashSet<String>; 2],
+    tx: mpsc::Sender<(Server, String)>,
+}
+
+/// Where an environment's pages are in [`Infos`].
+fn env_index(server: Server) -> usize {
+    match server {
+        Server::Production => 0,
+        Server::Development => 1,
+    }
 }
 
 impl Infos {
     pub fn new(ctx: &egui::Context) -> Self {
-        let known: Arc<Mutex<HashMap<String, Info>>> = Arc::default();
-        let (tx, rx) = mpsc::channel::<String>();
+        let known: Arc<Mutex<[HashMap<String, Info>; 2]>> = Arc::default();
+        let (tx, rx) = mpsc::channel::<(Server, String)>();
         let (k, ctx) = (known.clone(), ctx.clone());
         std::thread::Builder::new()
             .name("world-infos".into())
             .spawn(move || {
-                let (api, keep) = public_api();
-                let dir = cache_dir().join("worlds");
-                while let Ok(id) = rx.recv() {
+                while let Ok((server, id)) = rx.recv() {
+                    let (api, keep) = public_api_of(server);
+                    let dir = cache_dir().join("worlds").join(server.cache_name());
                     let file = dir.join(format!("{id}.json"));
                     let cached = keep.then(|| std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<CachedInfo>(&b).ok())).flatten();
                     let fresh =
@@ -444,7 +459,7 @@ impl Infos {
                             Err(_) => cached.and_then(|c| c.page).map_or(Info::Unknown, |p| Info::Listed(Box::new(p))),
                         }
                     };
-                    k.lock().unwrap().insert(id, info);
+                    k.lock().unwrap()[env_index(server)].insert(id, info);
                     ctx.request_repaint();
                     if !fresh {
                         // Gentle on Orbiters (and on VRChat behind it).
@@ -453,23 +468,26 @@ impl Infos {
                 }
             })
             .expect("world infos thread");
-        Self { known, asked: HashSet::new(), tx }
+        Self { known, asked: Default::default(), tx }
     }
 
     /// The world's page once fetched; asks for it the first time.
     pub fn get(&mut self, id: &str) -> Option<Info> {
         // Called for every card in view at every frame: the id is copied only the first time.
-        if !self.asked.contains(id) {
-            self.asked.insert(id.to_string());
-            let _ = self.tx.send(id.to_string());
+        let server = Server::current();
+        let e = env_index(server);
+        if !self.asked[e].contains(id) {
+            self.asked[e].insert(id.to_string());
+            let _ = self.tx.send((server, id.to_string()));
         }
-        self.known.lock().unwrap().get(id).cloned()
+        self.known.lock().unwrap()[e].get(id).cloned()
     }
 
     /// Fetches it again (after sharing something there).
     pub fn refresh(&mut self, id: &str) {
-        let _ = std::fs::remove_file(cache_dir().join("worlds").join(format!("{id}.json")));
-        self.asked.remove(id);
+        let server = Server::current();
+        let _ = std::fs::remove_file(cache_dir().join("worlds").join(server.cache_name()).join(format!("{id}.json")));
+        self.asked[env_index(server)].remove(id);
     }
 }
 
@@ -505,10 +523,34 @@ pub enum Picture {
 }
 
 enum Slot {
-    Loading,
+    /// Being read; `tries`: the failed readings before this one (a retry is not "loading" for the page).
+    Loading { tries: u8 },
     Ready(TextureHandle),
-    Missing,
+    /// Could not be read (`since`: when it failed, egui's clock), `tries` times: read again when asked after
+    /// [`retry_after`]. [`NEVER`] tries: its reading panicked, it is not read again.
+    Missing { since: f64, tries: u8 },
 }
+
+/// A picture whose reading panicked is not read again (the same file would do it again).
+const NEVER: u8 = u8::MAX;
+
+/// A picture that could not be read is read again when asked this long after (Night PAGES-UI-4: one network hiccup,
+/// a server answering 502 during a deploy, left its card blank until the window was reopened): from 5 s for what comes
+/// over the network, 30 s for a file of this computer (a missing file stays missing, mostly), doubling, at most 5 min.
+fn retry_after(picture: &Picture, tries: u8) -> Option<f64> {
+    if tries == NEVER {
+        return None;
+    }
+    let local = match picture {
+        Picture::Glow(inner) => matches!(**inner, Picture::Shot { .. } | Picture::Layer { .. } | Picture::Session(_)),
+        p => matches!(p, Picture::Shot { .. } | Picture::Layer { .. } | Picture::Session(_)),
+    };
+    let first = if local { 30.0 } else { 5.0 };
+    Some((first * 2f64.powi(tries.saturating_sub(1).min(16) as i32)).min(300.0))
+}
+
+/// A picture that could not be read and nobody asked for since this long is forgotten (its next ask reads it).
+const FORGET_MISSING: f64 = 60.0;
 
 /// A picture as the pages keep it, and when they last asked for it (egui's clock).
 struct Kept {
@@ -516,7 +558,8 @@ struct Kept {
     used: f64,
 }
 
-type Loaded = (Picture, Option<ColorImage>);
+/// A picture read by a loader: its image, or none; `Err` when its reading panicked.
+type Loaded = (Picture, Result<Option<ColorImage>, ()>);
 
 /// Bytes of picture textures kept (about ninety thumbnails, three screens of a world's pictures): those asked for
 /// most recently. The others are decoded again (from the small copies kept on disk) when they come back into view.
@@ -537,6 +580,8 @@ pub struct Pictures {
     stopped: Arc<std::sync::atomic::AtomicBool>,
     /// What the loaders start with (the interface they wake, where profile pictures are read), until they started.
     unstarted: Option<(egui::Context, Option<crate::backend::Ctl>)>,
+    /// The interface to wake when a picture that could not be read may be read again.
+    wake: egui::Context,
 }
 
 impl Pictures {
@@ -551,6 +596,7 @@ impl Pictures {
             trimmed: f64::NEG_INFINITY,
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unstarted: Some((ctx.clone(), backend)),
+            wake: ctx.clone(),
         }
     }
 
@@ -581,17 +627,22 @@ impl Pictures {
                             q.pop()
                         };
                         let Some(picture) = next else { continue };
-                        let image = if let Picture::Profile { scope, url } = &picture {
-                            use crate::controller::vrchat_data::{Request, Response};
-                            backend
-                                .as_ref()
-                                .and_then(|b| b.vrchat_data(scope.clone(), Request::Image { url: url.clone() }).ok())
-                                .and_then(|r| if let Response::Image(bytes) = r { decode_image(&bytes) } else { None })
-                                .map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
-                        } else {
-                            decode(&api, keep, &picture)
-                        };
-                        done.lock().unwrap().push((picture, image));
+                        // A decoder that panics on a file of any origin ends this picture, not the loader (three
+                        // such files stopped every picture of the page).
+                        let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if let Picture::Profile { scope, url } = &picture {
+                                use crate::controller::vrchat_data::{Request, Response};
+                                backend
+                                    .as_ref()
+                                    .and_then(|b| b.vrchat_data(scope.clone(), Request::Image { url: url.clone() }).ok())
+                                    .and_then(|r| if let Response::Image(bytes) = r { decode_image(&bytes) } else { None })
+                                    .map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
+                            } else {
+                                decode(&api, keep, &picture)
+                            }
+                        }))
+                        .map_err(|_| ());
+                        done.lock().unwrap_or_else(|e| e.into_inner()).push((picture, image));
                         ctx.request_repaint();
                     }
                 })
@@ -613,12 +664,17 @@ impl Pictures {
     }
 
     pub(crate) fn get_at(&mut self, textures: &crate::overlay::PaintTextures, now: f64, picture: &Picture) -> Option<TextureHandle> {
-        for (p, image) in std::mem::take(&mut *self.done.lock().unwrap()) {
+        for (p, image) in std::mem::take(&mut *self.done.lock().unwrap_or_else(|e| e.into_inner())) {
             // One no longer wanted (scrolled past while it was decoded) is dropped.
             let Some(kept) = self.slots.get_mut(&p) else { continue };
+            let tries = match kept.slot {
+                Slot::Loading { tries } => tries,
+                _ => 0,
+            };
             kept.slot = match image {
-                Some(image) => Slot::Ready(textures.load_texture(format!("picture-{:x}", key(&p)), image, TextureOptions::LINEAR)),
-                None => Slot::Missing,
+                Ok(Some(image)) => Slot::Ready(textures.load_texture(format!("picture-{:x}", key(&p)), image, TextureOptions::LINEAR)),
+                Ok(None) => Slot::Missing { since: now, tries: tries.saturating_add(1).min(NEVER - 1) },
+                Err(()) => Slot::Missing { since: now, tries: NEVER },
             };
         }
         if now - self.trimmed > 0.5 {
@@ -630,8 +686,20 @@ impl Pictures {
                 kept.used = now;
                 match &kept.slot {
                     Slot::Ready(t) => Some(t.clone()),
-                    Slot::Missing => None,
-                    Slot::Loading => {
+                    &Slot::Missing { since, tries } => {
+                        // Asked again (it is on screen): read again once its wait is over; woken then.
+                        let wait = retry_after(picture, tries)?;
+                        if now - since >= wait {
+                            kept.slot = Slot::Loading { tries };
+                            let (lock, ready) = &*self.queue;
+                            lock.lock().unwrap_or_else(|e| e.into_inner()).push(picture.clone());
+                            ready.notify_one();
+                        } else {
+                            self.wake.request_repaint_after(std::time::Duration::from_secs_f64(since + wait - now));
+                        }
+                        None
+                    }
+                    Slot::Loading { .. } => {
                         // (Not in the queue: a loader has it.)
                         let (lock, _) = &*self.queue;
                         let mut q = lock.lock().unwrap();
@@ -645,7 +713,7 @@ impl Pictures {
             }
             None => {
                 self.start();
-                self.slots.insert(picture.clone(), Kept { slot: Slot::Loading, used: now });
+                self.slots.insert(picture.clone(), Kept { slot: Slot::Loading { tries: 0 }, used: now });
                 let (lock, ready) = &*self.queue;
                 lock.lock().unwrap().push(picture.clone());
                 ready.notify_one();
@@ -656,13 +724,18 @@ impl Pictures {
 
     /// Whether pictures asked for are still being decoded.
     pub fn loading(&self) -> bool {
-        self.slots.values().any(|k| matches!(k.slot, Slot::Loading))
+        self.slots.values().any(|k| matches!(k.slot, Slot::Loading { tries: 0 }))
     }
 
     /// Requests nobody repeated for [`STALE_REQUEST`] leave the queue, and the textures asked for longest ago go
     /// beyond [`KEEP_BYTES`] (a big library browsed end to end would otherwise keep hundreds).
     fn trim(&mut self, now: f64) {
-        let stale = |k: &Kept| matches!(k.slot, Slot::Loading) && now - k.used > STALE_REQUEST;
+        let stale = |k: &Kept| match k.slot {
+            Slot::Loading { .. } => now - k.used > STALE_REQUEST,
+            // Not read, and nobody asks any more: forgotten (a page browsed end to end kept every one).
+            Slot::Missing { .. } => now - k.used > FORGET_MISSING,
+            Slot::Ready(_) => false,
+        };
         {
             let (lock, _) = &*self.queue;
             let slots = &self.slots;
@@ -1141,6 +1214,48 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(sessions(&root).is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Night PAGES-UI-4: a picture that could not be read is read again when asked after its wait (doubling), not
+    /// before, without showing as loading; one nobody asks for any more is forgotten.
+    #[test]
+    fn a_picture_that_failed_is_read_again_after_a_wait() {
+        let ctx = egui::Context::default();
+        let textures = crate::overlay::PaintTextures::of(&ctx);
+        let mut pictures = Pictures::new(&ctx);
+        let picture = Picture::Session(PathBuf::from("Z:/orbiters-test/no-such-session-retry"));
+        let slot = |p: &Pictures| match p.slots.get(&picture).map(|k| &k.slot) {
+            Some(Slot::Missing { tries, .. }) => format!("missing {tries}"),
+            Some(Slot::Loading { tries }) => format!("loading {tries}"),
+            Some(Slot::Ready(_)) => "ready".into(),
+            None => "none".into(),
+        };
+        let settle = |p: &mut Pictures, now: f64, want: &str| {
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                p.get_at(&textures, now, &picture);
+                if slot(p) == want {
+                    return;
+                }
+                assert!(std::time::Instant::now() < until, "{want}: {}", slot(p));
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        settle(&mut pictures, 0.0, "missing 1");
+        pictures.get_at(&textures, 20.0, &picture);
+        assert_eq!(slot(&pictures), "missing 1", "not before its wait (30 s for a file here)");
+        pictures.get_at(&textures, 30.5, &picture);
+        assert_eq!(slot(&pictures), "loading 1", "read again once asked after it");
+        assert!(!pictures.loading(), "a retry does not show as loading");
+        settle(&mut pictures, 30.5, "missing 2");
+        pictures.get_at(&textures, 80.0, &picture);
+        assert_eq!(slot(&pictures), "missing 2", "the wait doubled");
+        pictures.get_at(&textures, 91.0, &picture);
+        assert_eq!(slot(&pictures), "loading 2");
+        settle(&mut pictures, 91.0, "missing 3");
+        // Nobody asks for it any more: forgotten at a later trim.
+        pictures.get_at(&textures, 200.0, &Picture::Session(PathBuf::from("Z:/orbiters-test/another")));
+        assert_eq!(slot(&pictures), "none");
     }
 
     /// Every picture window started three loader threads that its first frame threw away (the window makes its set

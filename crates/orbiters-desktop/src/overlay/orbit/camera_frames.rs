@@ -147,15 +147,10 @@ impl Drop for CameraWatch {
     }
 }
 
-/// A line in `camera-tiles.log`, which is how a run in a headset can be read afterwards.
+/// A line in `camera-tiles.log`, which is how a run in a headset can be read afterwards. Kept under 4 MB (the older part in
+/// `camera-tiles.old.log`, LIGHT-VR-8).
 fn note(line: &str) {
-    let dir = orbiters_core::paths::logs_dir();
-    if std::fs::create_dir_all(&dir).is_ok() {
-        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(dir.join("camera-tiles.log")) {
-            use std::io::Write;
-            let _ = writeln!(file, "{} {line}", orbiters_core::now_utc_iso());
-        }
-    }
+    crate::overlay::vr_log::append("camera-tiles.log", Some(crate::overlay::vr_log::CAMERA_ROTATE_AT), format!("{} {line}\n", orbiters_core::now_utc_iso()));
 }
 
 /// How far apart looks are, while it is seen and while it is not.

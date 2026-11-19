@@ -77,6 +77,12 @@ const AVATAR_SETTLE: Duration = Duration::from_millis(1500);
 const PIN_DEBOUNCE: Duration = Duration::from_millis(400);
 /// What VRChat's `/input/Voice` needs between press and release.
 const VOICE_PRESS: Duration = Duration::from_millis(80);
+/// How long "Talk with N4N0?" shows after the wake word was heard during a call.
+pub(crate) const WAKE_OFFER_FOR: Duration = Duration::from_secs(6);
+/// The world videos' titles kept (the last ones seen).
+pub(crate) const VIDEO_TITLES_KEPT: usize = 32;
+/// How long after Talk was let go N4N0 waits for VRChat to say it muted, to toggle it back.
+const UNMUTE_WAIT: Duration = Duration::from_millis(1500);
 /// How much of the conversation the assistant gets back each turn (the server trims too).
 const MAX_CONVERSATION: usize = 40;
 /// Characters of the avatar's controls in the assistant's context.
@@ -105,9 +111,38 @@ struct Turn {
 }
 
 /// An action the assistant asked for that waits for the owner's yes, and what it does in the app's words.
-struct Pending {
+pub(crate) struct Pending {
     action: Action,
     what: String,
+    /// The avatar and the control it was reviewed on: it runs on those or not at all.
+    bound: Bound,
+}
+
+/// What an avatar action was reviewed on: the avatar (its number, [`N4n0Runtime::avatar_epoch`]) and the control its
+/// name resolved to then (its path; `None`: none was found). An action runs only while both are still what they were.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Bound {
+    epoch: u64,
+    path: Option<String>,
+}
+
+#[cfg(test)]
+impl Bound {
+    pub(crate) fn for_test(epoch: u64, path: Option<&str>) -> Self {
+        Self { epoch, path: path.map(str::to_string) }
+    }
+}
+
+impl Pending {
+    /// It acts on the avatar's controls (and so is bound to the avatar it was asked about).
+    fn on_avatar(&self) -> bool {
+        avatar_action(&self.action)
+    }
+}
+
+/// Whether `action` writes to the avatar's controls (by the name of one of them).
+fn avatar_action(action: &Action) -> bool {
+    matches!(action, Action::SetControl { .. } | Action::SetParameter { .. } | Action::Hold { .. })
 }
 
 /// What one turn's tool calls did and asked.
@@ -132,6 +167,9 @@ pub(crate) struct N4n0Runtime {
     pub(crate) params: HashSet<String>,
     pub(crate) controls: Controls,
     pub(crate) manifest: bool,
+    /// Bumped at every change of avatar (and when VRChat closes): an approval or a tool call reviewed on one avatar
+    /// never acts on the next.
+    pub(crate) avatar_epoch: u64,
     /// Messages for the N4N0 thread to send, and when.
     pub(crate) outbox: Vec<(Instant, Message)>,
     /// When the held parameters are put back.
@@ -140,10 +178,18 @@ pub(crate) struct N4n0Runtime {
     /// The face the assistant asked for, while its answer is up.
     mood: Option<N4n0Face>,
     pub(crate) afk: bool,
-    mute_self: bool,
+    pub(crate) mute_self: bool,
     afk_showing: bool,
     pub(crate) listening: Option<(Source, Instant)>,
-    muted_by_n4n0: bool,
+    /// N4N0 toggled VRChat's microphone off for the avatar menu's Talk (and when: its two pulses then).
+    pub(crate) muted_by_n4n0: bool,
+    mute_pressed: Option<Instant>,
+    /// Talk was let go before VRChat said it muted: when it says so (until this deadline), N4N0 toggles it back. Never
+    /// a blind toggle: without the echo by then, nothing is sent.
+    pub(crate) unmute_when_muted: Option<Instant>,
+    /// When "Talk with N4N0?" goes by itself (its status is `voice.wake_offer`), and the last one's number.
+    pub(crate) wake_offer_until: Option<Instant>,
+    wake_offers: u64,
     /// The turn under way (N4N0 thinks), and the last turn's number.
     turn: Option<Turn>,
     turns: u64,
@@ -153,9 +199,12 @@ pub(crate) struct N4n0Runtime {
     /// The conversation, the saved videos' list and the processes' footprint as the apps show them: slices, so that making
     /// the state to publish ([`N4n0Runtime::status`]) copies none of them.
     lines: Slice<Vec<N4n0Line>>,
-    confirmations: Vec<N4n0Confirmation>,
+    pub(crate) confirmations: Vec<N4n0Confirmation>,
+    /// The website approvals the owner opened in the browser: dealt with there (the app hears nothing back), they stay
+    /// listed with their link but no longer keep N4N0 from listening.
+    handed_off: HashSet<String>,
     /// What the assistant asked to do that waits for the owner's yes, since when, and its number.
-    pending: Vec<Pending>,
+    pub(crate) pending: Vec<Pending>,
     pending_at: Option<Instant>,
     pending_id: u64,
     /// What Orbiters - N4N0 tells the assistant at its next turn (the owner's yes, a turn that failed after its
@@ -228,9 +277,9 @@ pub(crate) struct N4n0Runtime {
     /// The computer's keys for the overlay menu's keyboard (the last few, numbered), and whether the keyboard is taken.
     pub(crate) keys: std::collections::VecDeque<(u32, orbiters_n4n0_core::menu::KeyInput)>,
     pub(crate) keyboard_taken: bool,
-    /// The world's video, and the titles of those seen (`None` while asked).
+    /// The world's video, and the titles of the YouTube videos seen lately, by video id (`None` while asked), oldest first.
     pub(crate) world_video: Option<orbiters_n4n0_core::menu::WorldVideo>,
-    pub(crate) video_titles: HashMap<String, Option<String>>,
+    pub(crate) video_titles: std::collections::VecDeque<(String, Option<String>)>,
     /// The controllers' touchpads and sticks the avatar's input parameters follow (input.rs).
     pub(crate) input: crate::input::InputRuntime,
     /// The screen mirror's camera (mirror.rs).
@@ -250,7 +299,9 @@ impl N4n0Runtime {
     }
 
     pub(crate) fn ask_busy(&self) -> bool {
-        self.thinking() || !self.confirmations.is_empty() || !self.pending.is_empty()
+        self.thinking()
+            || self.confirmations.iter().any(|c| c.approve_url.starts_with(LOCAL_APPROVAL) || !self.handed_off.contains(&c.id))
+            || !self.pending.is_empty()
             || self.voice.output_playing || self.voice.finalizing
     }
 
@@ -269,6 +320,8 @@ impl N4n0Runtime {
     fn forget_avatar(&mut self) {
         self.avatar_id = None;
         self.avatar_name = None;
+        self.avatar_epoch += 1;
+        self.drop_avatar_pending();
         self.params.clear();
         self.input.forget_avatar();
         self.mirror.forget_avatar();
@@ -278,6 +331,8 @@ impl N4n0Runtime {
         self.afk = false;
         self.mute_self = false;
         self.muted_by_n4n0 = false;
+        self.mute_pressed = None;
+        self.unmute_when_muted = None;
         self.afk_showing = false;
         self.face_sent = None;
         self.pins_due = None;
@@ -287,6 +342,85 @@ impl N4n0Runtime {
         self.light = None;
         self.vr_mode = None;
         self.screen.menu_param_reset(Instant::now());
+    }
+
+    /// The title of the world's video at `url` as known, and what to ask YouTube for (its video id and link) when it is
+    /// a YouTube video not asked yet. A title only YouTube's videos have: asked once a video, whatever its link's tracking
+    /// parts, the last [`VIDEO_TITLES_KEPT`] kept.
+    pub(crate) fn video_title(&mut self, url: &str) -> (Option<String>, Option<(String, String)>) {
+        let Some(id) = videos::youtube_id(url) else { return (None, None) };
+        if let Some((_, title)) = self.video_titles.iter().find(|(known, _)| *known == id) {
+            return (title.clone(), None);
+        }
+        self.video_titles.push_back((id.clone(), None));
+        while self.video_titles.len() > VIDEO_TITLES_KEPT {
+            self.video_titles.pop_front();
+        }
+        (None, Some((id, url.to_string())))
+    }
+
+    /// Another avatar (or none): what waited for the owner's yes on the last one's controls is dropped (said in the
+    /// conversation, told to the assistant), what names no control (the clipboard, the AFK message) still waits, its
+    /// question asked again without the rest.
+    fn drop_avatar_pending(&mut self) {
+        if !self.pending.iter().any(Pending::on_avatar) {
+            return;
+        }
+        let (gone, kept): (Vec<Pending>, Vec<Pending>) = std::mem::take(&mut self.pending).into_iter().partition(Pending::on_avatar);
+        let what: Vec<String> = gone.into_iter().map(|p| p.what).collect();
+        self.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
+        self.notes.push(format!("The owner's avatar changed before they answered: Orbiters - N4N0 did not {}.", what.join(", nor "))); // i18n: not shown
+        self.confirmations.retain(|c| !c.approve_url.starts_with(LOCAL_APPROVAL));
+        if kept.is_empty() {
+            self.pending_at = None;
+            return;
+        }
+        let whats: Vec<String> = kept.iter().map(|p| p.what.clone()).collect();
+        let question = policy::question(&whats);
+        self.pending = kept;
+        self.pending_id += 1;
+        let n = self.pending_id;
+        self.line(N4n0Who::Note, question.clone());
+        self.confirmations.push(N4n0Confirmation {
+            id: format!("n4n0-{n}"),
+            title: tr("N4N0 asks").into(),
+            summary: format!("{question} (or say yes or no)"), // i18n: not shown
+            approve_url: format!("{LOCAL_APPROVAL}{n}"),
+        });
+    }
+
+    /// The mute N4N0 made for Talk ends (Talk let go, the assistant switched off): VRChat's microphone is toggled back
+    /// on when VRChat said it muted; when it has not said so yet, the press is called off if its pulses have not left,
+    /// else the toggle back waits for VRChat's word. Nothing when N4N0 muted nothing (push-to-talk, already muted).
+    pub(crate) fn release_mute(&mut self, now: Instant) {
+        if !std::mem::take(&mut self.muted_by_n4n0) {
+            return;
+        }
+        let pressed = self.mute_pressed.take();
+        if self.mute_self {
+            self.send_at(now + Duration::from_millis(150), [("/input/Voice".to_string(), OscType::Int(1))]);
+            self.send_at(now + Duration::from_millis(150) + VOICE_PRESS, [("/input/Voice".to_string(), OscType::Int(0))]);
+            return;
+        }
+        let ours = |t: &Instant, address: &str| address == "/input/Voice" && pressed.is_some_and(|p| *t == p || *t == p + VOICE_PRESS);
+        if self.outbox.iter().any(|(t, (a, v))| ours(t, a) && *v == OscType::Int(1)) {
+            // Not sent yet: VRChat never hears of it.
+            self.outbox.retain(|(t, (a, _))| !ours(t, a));
+        } else {
+            self.unmute_when_muted = Some(now + UNMUTE_WAIT);
+        }
+    }
+
+    /// VRChat said it muted after Talk was let go: toggled back (from the N4N0 thread's tick).
+    pub(crate) fn unmute_step(&mut self, now: Instant) {
+        let Some(until) = self.unmute_when_muted else { return };
+        if self.mute_self {
+            self.unmute_when_muted = None;
+            self.send_at(now, [("/input/Voice".to_string(), OscType::Int(1))]);
+            self.send_at(now + VOICE_PRESS, [("/input/Voice".to_string(), OscType::Int(0))]);
+        } else if now >= until {
+            self.unmute_when_muted = None;
+        }
     }
 
     /// The avatar's screen is not known (an avatar loads): the menu goes to the overlay until it is looked at.
@@ -349,6 +483,8 @@ impl N4n0Runtime {
         at(self.sender.as_ref().and_then(TextSender::next_due));
         at(self.outbox.iter().map(|(t, _)| *t).min());
         at(self.pins_due);
+        at(self.unmute_when_muted);
+        at(self.wake_offer_until);
         at(self.listening.map(|(_, since)| since + crate::voice::LISTEN_LIMIT));
         at(self.test_cycle.map(|start| {
             let steps = now.duration_since(start).as_millis() / TEST_CYCLE_STEP.as_millis() + 1;
@@ -778,7 +914,7 @@ impl N4n0 {
         let mut followups = crate::screen::Followups::default();
         let mut out: Vec<Message> = Vec::new();
         let mut check_avatar = None;
-        let mut title_wanted: Option<String> = None;
+        let mut title_wanted: Option<(String, String)> = None;
         let mut gave_up = false;
         let mut expired = Vec::new();
         let qr_ended;
@@ -807,14 +943,15 @@ impl N4n0 {
                 rt.tracking_note = mark("Smoothing SteamVR's tracking needs Orbiters - N4N0 on the computer running SteamVR").into();
             }
             rt.versions = latin(|| tr!("N4N0 {version} · App {app_version}", version = rt.n4n0_version.as_deref().unwrap_or("?"), app_version = app_version));
-            if let Some(seen) = &seen_video {
-                if !rt.video_titles.contains_key(&seen.url) {
-                    rt.video_titles.insert(seen.url.clone(), None);
-                    title_wanted = Some(seen.url.clone());
+            let title = match &seen_video {
+                Some(seen) => {
+                    let (title, wanted) = rt.video_title(&seen.url);
+                    title_wanted = wanted;
+                    title
                 }
-            }
-            let video =
-                seen_video.map(|seen| orbiters_n4n0_core::menu::WorldVideo { title: rt.video_titles.get(&seen.url).cloned().flatten(), url: seen.url, at: seen.at });
+                None => None,
+            };
+            let video = seen_video.map(|seen| orbiters_n4n0_core::menu::WorldVideo { title, url: seen.url, at: seen.at });
             rt.screen.menu.world_video = video.clone();
             rt.world_video = video;
             // The menu where it shows now (VRChat's mode or N4N0/Screen/Replace may have changed).
@@ -876,6 +1013,12 @@ impl N4n0 {
                     out.push((parameter(params::STATE), OscType::Int(face)));
                 }
             }
+            rt.unmute_step(now);
+            if rt.wake_offer_until.is_some_and(|t| t <= now) {
+                // Nobody pressed it: it goes.
+                rt.wake_offer_until = None;
+                rt.voice.wake_offer = None;
+            }
             let ready: Vec<(Instant, Message)>;
             (ready, rt.outbox) = std::mem::take(&mut rt.outbox).into_iter().partition(|(t, _)| *t <= now);
             out.extend(ready.into_iter().map(|(_, m)| m));
@@ -920,11 +1063,14 @@ impl N4n0 {
             drop(scan);
             self.publish();
         }
-        if let Some(url) = title_wanted {
+        if let Some((id, url)) = title_wanted {
             let n = self.clone();
             let _ = std::thread::Builder::new().name("n4n0-video-title".into()).spawn(move || {
                 let title = orbiters_n4n0_core::videos::youtube_title(&url);
-                n.n4n0.lock().unwrap().video_titles.insert(url, title);
+                // Kept only while its video still is (a long list of videos meanwhile let it go).
+                if let Some(entry) = n.n4n0.lock().unwrap().video_titles.iter_mut().find(|(known, _)| *known == id) {
+                    entry.1 = title;
+                }
                 n.publish();
             });
         }
@@ -1255,7 +1401,14 @@ impl N4n0 {
                     self.queue(move |n| n.host.walk_boost(v));
                 }
             }
-            "MuteSelf" => self.n4n0.lock().unwrap().mute_self = value.truthy(),
+            "MuteSelf" => {
+                let mut rt = self.n4n0.lock().unwrap();
+                rt.mute_self = value.truthy();
+                if rt.unmute_when_muted.is_some() {
+                    // The N4N0 thread toggles it back (this thread never sends).
+                    rt.wake();
+                }
+            }
             "InStation" | "Seated" | "VelocityMagnitude" => self.host.motion(Some((name, value))),
             _ => {
                 // A pinned parameter the avatar moved goes back to its pin. Most parameters are no pin: let go at once,
@@ -1290,11 +1443,19 @@ impl N4n0 {
             let latest = self.osc.latest(&mut kept.iter().map(|p| parameter(p)));
             kept.into_iter().filter_map(|p| latest.get(&parameter(p)).cloned().map(|v| (p.clone(), v))).collect()
         };
+        let mut dropped = false;
         {
             let mut rt = self.n4n0.lock().unwrap();
             if rt.avatar_id.as_deref() != Some(id.as_str()) {
                 // Another avatar's name is read once it settled.
                 rt.avatar_name = None;
+                // Nothing reviewed on the last avatar acts on this one: its controls are not this one's (they are read
+                // once it settled), and what waited for a yes on them is dropped (said at once).
+                dropped = rt.pending.iter().any(Pending::on_avatar);
+                rt.avatar_epoch += 1;
+                rt.controls = Controls::default();
+                rt.manifest = false;
+                rt.drop_avatar_pending();
             }
             rt.avatar_id = Some(id.clone());
             if let Some(sender) = rt.sender.as_mut() {
@@ -1310,6 +1471,9 @@ impl N4n0 {
             // The new avatar's parameters are not the old one's, nor its size (a state being applied); the rest still
             // goes (a mute press's release, a picture's camera put back).
             rt.outbox.retain(|(_, (address, _))| !address.starts_with(PARAMETERS_PREFIX) && address != orbiters_n4n0_core::states::EYE_HEIGHT);
+        }
+        if dropped {
+            self.publish();
         }
         // The new avatar says how it moves again: until then the walk boost follows the stick alone.
         self.host.motion(None);
@@ -1496,6 +1660,15 @@ impl N4n0 {
         rt.voice.level = 0.0;
         rt.voice.speech = false;
         rt.screen.menu.listening = false;
+        // A mute N4N0 made for Talk is put back now: the button's release no longer reaches N4N0 once it is off.
+        rt.release_mute(Instant::now());
+        // What waited for the owner's yes is not done by an assistant that is off.
+        if !rt.pending.is_empty() {
+            let what: Vec<String> = std::mem::take(&mut rt.pending).into_iter().map(|p| p.what).collect();
+            rt.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
+        }
+        rt.pending_at = None;
+        rt.confirmations.retain(|c| !c.approve_url.starts_with(LOCAL_APPROVAL));
         if let Some(turn) = rt.turn.take() {
             turn.cancel.store(true, Ordering::Relaxed);
             rt.generation += 1;
@@ -1514,7 +1687,8 @@ impl N4n0 {
         if !settings.enabled || !settings.assistant {
             return;
         }
-        let ask_busy = { let rt = self.n4n0.lock().unwrap(); rt.voice.ask_open && rt.ask_busy() };
+        // N4N0 listens to nothing new while it waits or answers (as `voice_listen` says): then it mutes nothing either.
+        let ask_busy = self.n4n0.lock().unwrap().ask_busy();
         if down && ask_busy {
             self.publish();
             return;
@@ -1529,11 +1703,15 @@ impl N4n0 {
                 return;
             }
             // The sentence for N4N0 stays out of the world: mute VRChat's microphone while the menu's button is held.
-            if source == Source::Menu && settings.mute_while_talking && !rt.mute_self {
+            if source == Source::Menu && settings.mute_while_talking && rt.unmute_when_muted.take().is_some() {
+                // Pressed again before VRChat said the last press muted it: that mute is this press's.
+                rt.muted_by_n4n0 = true;
+            } else if source == Source::Menu && settings.mute_while_talking && !rt.mute_self && !rt.muted_by_n4n0 {
                 let now = Instant::now();
                 rt.send_at(now, [("/input/Voice".to_string(), OscType::Int(1))]);
                 rt.send_at(now + VOICE_PRESS, [("/input/Voice".to_string(), OscType::Int(0))]);
                 rt.muted_by_n4n0 = true;
+                rt.mute_pressed = Some(now);
             }
             drop(rt);
             self.voice_listen(source);
@@ -1545,10 +1723,8 @@ impl N4n0 {
             }
             // Unmute only what N4N0 muted (in push-to-talk mode the press never muted anything), even when the
             // sentence ended on its own meanwhile (its time limit, the worker stopping).
-            if source == Source::Menu && std::mem::take(&mut rt.muted_by_n4n0) && rt.mute_self {
-                let now = Instant::now();
-                rt.send_at(now + Duration::from_millis(150), [("/input/Voice".to_string(), OscType::Int(1))]);
-                rt.send_at(now + Duration::from_millis(150) + VOICE_PRESS, [("/input/Voice".to_string(), OscType::Int(0))]);
+            if source == Source::Menu {
+                rt.release_mute(Instant::now());
             }
             drop(rt);
             if held {
@@ -1642,6 +1818,12 @@ impl N4n0 {
             }
             return;
         }
+        if wake_word && orbiters_n4n0_core::wake::command(&text, &wake_words).is_some() && self.host.calls().call.is_some() {
+            // During a call the voices of the call reach the microphone too: the word starts nothing by itself, it
+            // offers "Talk with N4N0?" where the owner looks, for a few seconds.
+            self.wake_offer();
+            return;
+        }
         if wake_word {
             match orbiters_n4n0_core::wake::command(&text, &wake_words) {
                 Some(command) if command.is_empty() && menu_wake => {
@@ -1656,6 +1838,40 @@ impl N4n0 {
                 Some(command) if !self.answer(&command) && !self.menu_heard(&command) => self.ask(command, "voice"),
                 Some(_) | None => {}
             }
+        }
+    }
+
+    /// The wake word was heard during a call: "Talk with N4N0?" shows for [`WAKE_OFFER_FOR`] (again from the start when
+    /// heard again).
+    fn wake_offer(self: &Shared) {
+        {
+            let mut rt = self.n4n0.lock().unwrap();
+            rt.wake_offers += 1;
+            let unix_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+            rt.wake_offer_until = Some(Instant::now() + WAKE_OFFER_FOR);
+            rt.voice.wake_offer = Some(crate::status::WakeOffer {
+                id: rt.wake_offers,
+                until_ms: unix_ms + WAKE_OFFER_FOR.as_millis() as u64,
+                for_ms: WAKE_OFFER_FOR.as_millis() as u32,
+            });
+        }
+        self.publish();
+    }
+
+    /// "Talk with N4N0?" pressed (`accept`: N4N0 listens, as for the word alone outside a call) or put away.
+    fn wake_offer_answer(self: &Shared, accept: bool) {
+        let up = {
+            let mut rt = self.n4n0.lock().unwrap();
+            let up = rt.voice.wake_offer.take().is_some() && rt.wake_offer_until.take().is_some_and(|t| Instant::now() < t);
+            up
+        };
+        if !up || !accept {
+            return;
+        }
+        if self.with_settings(|s| s.n4n0.menu.wake_word) {
+            self.menu_open(false);
+        } else {
+            self.voice_listen(Source::WakeWord);
         }
     }
 
@@ -1698,9 +1914,15 @@ impl N4n0 {
 
     /// The owner said yes: what waited for it is done now, by Orbiters - N4N0 (the assistant is told at its next turn).
     fn confirmed(self: &Shared, pending: Vec<Pending>) {
+        if !self.with_settings(|s| s.n4n0.enabled && s.n4n0.assistant) {
+            // Switched off meanwhile: nothing it asked for is done.
+            let what: Vec<String> = pending.into_iter().map(|p| p.what).collect();
+            self.add_line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
+            return;
+        }
         let (mut done, mut failed) = (Vec::new(), Vec::new());
         for p in pending {
-            match self.action(p.action) {
+            match self.action(p.action, Some(&p.bound)) {
                 Ok(_) => done.push(p.what),
                 Err(e) => failed.push(format!("{} ({e})", p.what)),
             }
@@ -1729,6 +1951,7 @@ impl N4n0 {
             Command::AskRetry => self.ask_retry(),
             Command::Assistant { on } => self.assistant_switch(on),
             Command::AskTalk { down } => self.ask_talk(down),
+            Command::WakeOffer { accept } => self.wake_offer_answer(accept),
             Command::AskPlayback { active } => {
                 self.n4n0.lock().unwrap().voice.output_playing = active;
                 self.ask_follow();
@@ -1750,6 +1973,7 @@ impl N4n0 {
                 rt.conversation.clear();
                 rt.lines.clear();
                 rt.confirmations.clear();
+                rt.handed_off.clear();
                 rt.notes.clear();
                 rt.pending.clear();
                 rt.pending_at = None;
@@ -1793,20 +2017,24 @@ impl N4n0 {
                     // The owner approved, in the window, what N4N0 asked to do.
                     let pending = {
                         let mut rt = self.n4n0.lock().unwrap();
-                        let current = rt.pending_id == id && !rt.pending.is_empty();
-                        rt.confirmations.retain(|c| !c.approve_url.starts_with(LOCAL_APPROVAL));
-                        if current {
-                            rt.pending_at = None;
+                        // A late click on an older question leaves the newer one up and waiting.
+                        if rt.pending_id != id || rt.pending.is_empty() {
+                            return;
                         }
-                        current.then(|| std::mem::take(&mut rt.pending))
+                        rt.confirmations.retain(|c| c.approve_url != url);
+                        rt.pending_at = None;
+                        std::mem::take(&mut rt.pending)
                     };
-                    if let Some(pending) = pending {
-                        self.confirmed(pending);
-                    }
+                    self.confirmed(pending);
                 } else if Server::current().is_website_page(&url) {
                     // Only the Orbiters website (an approval), never a link from elsewhere.
                     if let Err(e) = self.device.browser.open(&url) {
                         self.notify(NoticeKind::Error, e.to_string());
+                    } else {
+                        // Its approval is the website's now: it stays listed, and N4N0 may listen again.
+                        let mut rt = self.n4n0.lock().unwrap();
+                        let ids: Vec<String> = rt.confirmations.iter().filter(|c| c.approve_url == url).map(|c| c.id.clone()).collect();
+                        rt.handed_off.extend(ids);
                     }
                 }
             }
@@ -1992,6 +2220,7 @@ impl N4n0 {
                     let mut rt = self.n4n0.lock().unwrap();
                     rt.line(N4n0Who::Note, tr!("Waiting for your approval on Orbiters: {what}", what = if c.title.is_empty() { &c.summary } else { &c.title }));
                     rt.confirmations.retain(|x| x.id != c.id);
+                    rt.handed_off.remove(&c.id);
                     rt.confirmations.push(N4n0Confirmation { id: c.id, title: c.title, summary: c.summary, approve_url: c.approve_url });
                     drop(rt);
                     self.notify(NoticeKind::Info, tr("N4N0 prepared something that needs your approval: see Orbiters - N4N0 › N4N0."));
@@ -2035,6 +2264,16 @@ impl N4n0 {
                 // What the assistant was told before this turn has been heard.
                 let heard = notes.min(rt.notes.len());
                 rt.notes.drain(..heard);
+                // What was asked on an avatar the owner no longer wears is not asked at all.
+                let epoch = rt.avatar_epoch;
+                let (stale, waiting): (Vec<Pending>, Vec<Pending>) =
+                    std::mem::take(&mut tools_run.waiting).into_iter().partition(|p| p.on_avatar() && p.bound.epoch != epoch);
+                tools_run.waiting = waiting;
+                if !stale.is_empty() {
+                    let what: Vec<String> = stale.into_iter().map(|p| p.what).collect();
+                    rt.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
+                    rt.notes.push(format!("The owner's avatar changed before they answered: Orbiters - N4N0 did not {}.", what.join(", nor "))); // i18n: not shown
+                }
                 let whats: Vec<String> = tools_run.waiting.iter().map(|p| p.what.clone()).collect();
                 let question = policy::question(&whats);
                 if !shown.is_empty() {
@@ -2184,7 +2423,11 @@ impl N4n0 {
             Ok(action) => action,
             Err(e) => return result(&e, true),
         };
-        let control = self.named_control(&action);
+        // Raw writes are for avatars without a menu (the tool is offered only there), before any question is asked.
+        if matches!(action, Action::SetParameter { .. }) && self.n4n0.lock().unwrap().manifest {
+            return result("This avatar has menu labels: use set_avatar_control.", true); // i18n: not shown
+        }
+        let (bound, control) = self.named_control(&action);
         match turn.policy.review(&action, control.as_ref()) {
             Verdict::Refuse { why } => result(&why, true),
             Verdict::Confirm { what } => {
@@ -2193,12 +2436,12 @@ impl N4n0 {
                     "asked": what,
                     "note": "Orbiters - N4N0 asked the owner, and does it only if they say yes: say so in a few words, without asking again."
                 });
-                turn.waiting.push(Pending { action, what });
+                turn.waiting.push(Pending { action, what, bound });
                 result(&content.to_string(), false)
             }
             Verdict::Run => {
                 let (what, changes) = (policy::what(&action, control.as_ref()), policy::changes(&action));
-                match self.action(action) {
+                match self.action(action, Some(&bound)) {
                     Ok(content) => {
                         if changes {
                             turn.done.push(what);
@@ -2211,15 +2454,39 @@ impl N4n0 {
         }
     }
 
-    /// The control an action names, as the policy looks at it (its path, its nsfw tag), when the avatar has it.
-    fn named_control(&self, action: &Action) -> Option<policy::Control> {
-        let (Action::SetControl { control, .. } | Action::Hold { control, .. }) = action else { return None };
+    /// The control an action names, as the policy looks at it (its path, its nsfw tag), when the avatar has it; and what
+    /// it is reviewed on (the avatar, that control), read together.
+    fn named_control(&self, action: &Action) -> (Bound, Option<policy::Control>) {
         let rt = self.n4n0.lock().unwrap();
-        let found = rt.controls.find(control).ok()?;
-        Some(policy::Control { path: found.path_text(), nsfw: found.tags.contains(&Tag::Nsfw) })
+        let name = match action {
+            Action::SetControl { control, .. } | Action::Hold { control, .. } => Some(control),
+            Action::SetParameter { name, .. } => Some(name),
+            _ => None,
+        };
+        let found = name.and_then(|name| rt.controls.find(name).ok());
+        let bound = Bound { epoch: rt.avatar_epoch, path: found.map(|c| c.path_text()) };
+        (bound, found.map(|c| policy::Control { path: c.path_text(), nsfw: c.tags.contains(&Tag::Nsfw) }))
     }
 
-    fn action(self: &Shared, action: Action) -> Result<Value, String> {
+    /// The control `name` names on the avatar as it is now, when it is still the one `bound` says was reviewed.
+    fn bound_control(rt: &N4n0Runtime, name: &str, bound: Option<&Bound>) -> Result<orbiters_n4n0_core::controls::Control, String> {
+        if bound.is_some_and(|b| b.epoch != rt.avatar_epoch) {
+            return Err("the avatar changed".into()); // i18n: not shown
+        }
+        let found = rt.controls.find(name)?.clone();
+        if bound.is_some_and(|b| b.path.as_deref() != Some(found.path_text().as_str())) {
+            return Err("the avatar's controls changed: ask again".into()); // i18n: not shown
+        }
+        Ok(found)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_action_for_test(self: &Shared, action: Action, bound: &Bound) -> Result<Value, String> {
+        self.action(action, Some(bound))
+    }
+
+    /// Does what the assistant asked (`bound`: what an avatar action was reviewed on; it runs only on that).
+    fn action(self: &Shared, action: Action, bound: Option<&Bound>) -> Result<Value, String> {
         match action {
             Action::SetControl { control, on, value } => {
                 let setting = match (on, value) {
@@ -2229,7 +2496,7 @@ impl N4n0 {
                     (None, None) => Setting::Press,
                 };
                 let mut rt = self.n4n0.lock().unwrap();
-                let found = rt.controls.find(&control)?.clone();
+                let found = Self::bound_control(&rt, &control, bound)?;
                 let plan = rt.controls.plan(&found, setting)?;
                 rt.send_now(plan.now);
                 rt.send_at(Instant::now() + BUTTON_RELEASE, plan.later);
@@ -2238,7 +2505,15 @@ impl N4n0 {
             }
             Action::SetParameter { name, value } => {
                 let mut rt = self.n4n0.lock().unwrap();
-                let found = rt.controls.find(&name)?.clone();
+                // Raw writes are for avatars without a menu (the tool is offered only there): an avatar with menu labels
+                // goes through set_avatar_control, its nsfw tags and its buttons' release.
+                if rt.manifest {
+                    return Err("This avatar has menu labels: use set_avatar_control.".into()); // i18n: not shown
+                }
+                let found = Self::bound_control(&rt, &name, bound)?;
+                if found.kind != orbiters_n4n0_core::controls::Kind::Parameter {
+                    return Err("This avatar has menu labels: use set_avatar_control.".into()); // i18n: not shown
+                }
                 let plan = rt.controls.plan(&found, Setting::Value(value))?;
                 rt.send_now(plan.now);
                 rt.line(N4n0Who::Note, tr!("N4N0 set {control}", control = found.path_text()));
@@ -2262,7 +2537,7 @@ impl N4n0 {
             Action::Hold { control, on, value, release } => {
                 let (target, plan) = {
                     let rt = self.n4n0.lock().unwrap();
-                    let found = rt.controls.find(&control)?.clone();
+                    let found = Self::bound_control(&rt, &control, bound)?;
                     let setting = match (on, value) {
                         (_, Some(v)) => Setting::Value(v),
                         (Some(false), None) => Setting::Off,

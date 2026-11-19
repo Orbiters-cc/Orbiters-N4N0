@@ -209,10 +209,15 @@ impl LaunchPlan {
             args.push(super::sessions::osc_arg(osc_in, osc_out));
         }
         if !self.world_id.is_empty() {
-            args.push(format!("vrchat://launch?ref=orbiters.cc&id={}:{}", self.world_id, self.instance));
+            args.push(launch_link(&self.world_id, &self.instance));
         }
         args
     }
+}
+
+/// The launch link of an instance, as the bridge passes it to VRChat (and as VRChat's log lists it among its arguments).
+pub fn launch_link(world_id: &str, instance: &str) -> String {
+    format!("vrchat://launch?ref=orbiters.cc&id={world_id}:{instance}")
 }
 
 /// What starts side sessions and knows this computer: the controller's for real (controller/bridge_side.rs), the lab's in
@@ -383,6 +388,20 @@ pub trait Game: Send + Sync {
     fn adopt(&self, _since: Option<std::time::SystemTime>) -> Option<u32> {
         None
     }
+    /// The command line of the VRChat followed now, as the start of its own log lists it (`Arg: …`), once all of it is
+    /// written: what tells the main session's own start (its launch link names the instance made for it) from a VRChat the
+    /// person started meanwhile. `None` while unknown.
+    fn launch_args(&self) -> Option<Vec<String>> {
+        None
+    }
+    /// Whether the VRChat process `pid` still runs, whichever VRChat the app follows now (`None`: cannot tell). Read from the
+    /// system's process list: no process is opened.
+    fn runs(&self, _pid: u32) -> Option<bool> {
+        None
+    }
+    /// The bridge closes: the app, lent to this session's VRChat for a picture, is given back to the person's at once (its
+    /// usual giving back runs on the bridge's ticks, which stop with it).
+    fn give_back(&self) {}
     /// The window of the process `pid`, while it has one.
     fn window(&self, pid: u32) -> Option<GameWindow>;
     /// Whether `window` is the foreground window at this moment.

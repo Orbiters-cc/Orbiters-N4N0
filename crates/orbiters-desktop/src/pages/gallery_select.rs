@@ -32,7 +32,7 @@ use orbiters_ui::{
     theme::{self, weight, Txt},
     widgets::{self, Button, Size, Variant},
 };
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -76,6 +76,8 @@ pub struct Selection {
     fetches: Fetches,
     prefetched: BTreeSet<String>,
     prefetching: usize,
+    /// The page made its list again since the last [`Selection::update`]: what left it is no longer selected.
+    list_changed: bool,
     /// The development environment (where pictures from Orbiters come from).
     development: bool,
 }
@@ -234,7 +236,7 @@ impl Selection {
     fn lift(&mut self, ctx: &egui::Context, e: &Entry, order: &[Entry]) {
         let keys: Vec<String> =
             if self.keys.contains(&e.key) { order.iter().filter(|o| self.keys.contains(&o.key)).map(|o| o.key.clone()).collect() } else { vec![e.key.clone()] };
-        let entries: Vec<&Entry> = keys.iter().filter_map(|k| order.iter().find(|o| &o.key == k)).collect();
+        let entries = by_keys(order, &keys);
         if !entries.iter().any(|e| e.local.is_some() || remote(e, self.development).is_some()) {
             self.said = Some((tr("These can't be dragged out").into(), anim::time(ctx)));
             return;
@@ -305,6 +307,11 @@ impl Selection {
         Some(move || download(&from, &stem))
     }
 
+    /// The page made its list again (another filter, a search, what came): [`Selection::update`] drops what left it.
+    pub fn list_changed(&mut self) {
+        self.list_changed = true;
+    }
+
     /// Every frame after the grid: keyboard, the rubber band, the lifted drag's start and end, a copy waiting for its
     /// pictures. The band starts on the grid's empty space (`background`).
     pub fn update(&mut self, ui: &Ui, order: &[Entry], background: &Response, modal: bool) {
@@ -324,9 +331,11 @@ impl Selection {
                 self.copy(&ctx, keys, order);
             }
         }
-        // Gone from the page (another filter, a search): no longer selected.
-        if self.any() {
-            self.keys.retain(|k| order.iter().any(|e| &e.key == k));
+        // Gone from the page (another filter, a search): no longer selected. Looked at when the list was made again
+        // (a key per card, looked up in a set: Select all on a big library compared every key with every card).
+        if std::mem::take(&mut self.list_changed) && self.any() {
+            let shown: HashSet<&str> = order.iter().map(|e| e.key.as_str()).collect();
+            self.keys.retain(|k| shown.contains(k.as_str()));
         }
         // What is selected from Orbiters starts coming (the first few: a drag or a copy asks for the rest).
         if self.keys.iter().any(|k| !self.prefetched.contains(k)) {
@@ -388,7 +397,7 @@ impl Selection {
                 self.carried.clear();
                 self.waiting = None;
             } else if now - self.lifted_at >= LIFT {
-                let entries: Vec<&Entry> = self.carried.iter().filter_map(|k| order.iter().find(|o| &o.key == k)).collect();
+                let entries = by_keys(order, &self.carried);
                 let gathered = self.gather(&entries);
                 if gathered.waiting > 0 {
                     self.waiting = Some((gathered.waiting, entries.len()));
@@ -423,7 +432,7 @@ impl Selection {
 
         // A copy, once what it waits for came.
         if let Some(keys) = self.copying.clone() {
-            let entries: Vec<&Entry> = keys.iter().filter_map(|k| order.iter().find(|o| &o.key == k)).collect();
+            let entries = by_keys(order, &keys);
             let gathered = self.gather(&entries);
             if gathered.waiting > 0 {
                 ctx.request_repaint_after(std::time::Duration::from_millis(120));
@@ -683,6 +692,16 @@ fn nothing_came(g: &Gathered) -> String {
     }
 }
 
+/// The entries of `keys`, in their order, each the first card of `order` with that key (one look-up per key in a map
+/// made once, where a search through every card per key cost selected x shown).
+fn by_keys<'a>(order: &'a [Entry], keys: &[String]) -> Vec<&'a Entry> {
+    let mut first: HashMap<&str, &Entry> = HashMap::with_capacity(order.len());
+    for e in order {
+        first.entry(e.key.as_str()).or_insert(e);
+    }
+    keys.iter().filter_map(|k| first.get(k.as_str()).copied()).collect()
+}
+
 /// "Copied 3 pictures", "Copied a 3D capture", "Copied 2 pictures and a 3D capture": what was handed out (`handed`).
 fn copied(order: &[Entry], handed: &[String]) -> String {
     tr!("Copied {what}", what = copied_what(order, handed))
@@ -690,7 +709,7 @@ fn copied(order: &[Entry], handed: &[String]) -> String {
 
 /// "3 pictures", "a 3D capture", "2 pictures and a 3D capture": what was handed out, to say it in a sentence of its own.
 fn copied_what(order: &[Entry], handed: &[String]) -> String {
-    let entries: Vec<&Entry> = handed.iter().filter_map(|k| order.iter().find(|o| &o.key == k)).collect();
+    let entries = by_keys(order, handed);
     let pictures = entries.iter().filter(|e| e.is_picture()).count();
     let captures = entries.len().saturating_sub(pictures);
     let pictures = (pictures > 0).then(|| tr_n("a picture", "{count} pictures", pictures as u64));
@@ -1124,6 +1143,42 @@ mod tests {
         e.key = key.into();
         e.local = Some(if picture { Local::Picture(PathBuf::from(format!("{key}.png"))) } else { Local::Session(PathBuf::from(key)) });
         e
+    }
+
+    /// Night PAGES-UI-2: Select all on a big library, then frames: each frame compared every selected key with every
+    /// card (20,000 x 20,000 / 2 string comparisons a frame). Now what left the list is looked for when it changed,
+    /// in a set, and a lift finds its cards in a map.
+    #[test]
+    fn select_all_on_a_big_library_keeps_the_frames_cheap() {
+        let order: Vec<Entry> = (0..20_000).map(|i| entry(&format!("C:/Users/someone/Pictures/VRChat/2026-11/picture-{i:06}"), true)).collect();
+        let ctx = egui::Context::default();
+        let mut sel = Selection::default();
+        let started = std::time::Instant::now();
+        let frame = |sel: &mut Selection, order: &[Entry], events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+                let background = ui.interact(ui.max_rect(), Id::unique("band"), Sense::drag());
+                sel.update(ui, order, &background, false);
+            });
+            out.textures_delta.clear();
+        };
+        sel.list_changed();
+        let ctrl_a = egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
+        frame(&mut sel, &order, vec![ctrl_a]);
+        assert_eq!(sel.keys.len(), 20_000, "all selected");
+        for _ in 0..10 {
+            frame(&mut sel, &order, Vec::new());
+        }
+        let first = order[0].clone();
+        sel.lift(&ctx, &first, &order);
+        assert_eq!(sel.carried.len(), 20_000, "the whole selection is lifted");
+        let spent = started.elapsed();
+        assert!(spent < std::time::Duration::from_secs(5), "eleven frames and a lift took {spent:?}");
+        // A list made again without some cards: those are no longer selected, the others stay.
+        let fewer = &order[..15_000];
+        sel.list_changed();
+        frame(&mut sel, fewer, Vec::new());
+        assert_eq!(sel.keys.len(), 15_000);
+        assert!(sel.has(&order[0].key) && !sel.has(&order[19_999].key));
     }
 
     #[test]

@@ -12,6 +12,7 @@
   "Sign in to VRChat in Orbiters - N4N0's Settings to see your favorite worlds.": "お気に入りのワールドを見るには、Orbiters - N4N0の設定でVRChatにログインしてください。",
   "The capture's details are not an object": "キャプチャの詳細がJSONオブジェクトではありません",
   "This session has no 3D view to keep: reconstruct it first.": "このセッションには残せる3Dビューがありません：先に再構築してください。",
+  "Nothing was deleted: {path} is part of the 3D view.": "何も削除されていません：{path}は3Dビューの一部です。",
   "VRChat session storage requires Windows DPAPI": "VRChatのセッションを保存するにはWindows DPAPIが必要です",
   "VRChat was not found on the network yet": "VRChatがネットワーク上でまだ見つかっていません",
   "VRChat's {path} has no value": "VRChat内の{path}に値がありません",

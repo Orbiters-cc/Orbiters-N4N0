@@ -16,6 +16,16 @@ use std::time::{Duration, Instant, SystemTime};
 const LINK_LIFETIME: Duration = Duration::from_secs(600);
 /// An account that could not be checked (offline) is checked again this often.
 const RECHECK_OFFLINE: Duration = Duration::from_secs(60);
+/// A refused credential is asked about again after this long, twice as long each time after, at most
+/// [`RECHECK_REFUSED_MAX`]: a refusal by something in front of Orbiters (a deploy, a firewall page) does not last until
+/// the next start. Meanwhile it stays refused: only a valid answer signs in again.
+const RECHECK_REFUSED: Duration = Duration::from_secs(600);
+const RECHECK_REFUSED_MAX: Duration = Duration::from_secs(6 * 3600);
+
+/// When a credential refused `refusals` times in a row is asked about again.
+fn refused_recheck(refusals: u32) -> Duration {
+    RECHECK_REFUSED.saturating_mul(1 << refusals.clamp(1, 16).saturating_sub(1)).min(RECHECK_REFUSED_MAX)
+}
 
 /// What the service knows besides the snapshot.
 #[derive(Default)]
@@ -28,6 +38,8 @@ pub struct AccountRuntime {
     /// Bumped by every sign-in, cancel and sign-out, so an answer for an older attempt is dropped.
     generation: u64,
     offline_since: Option<Instant>,
+    /// The credential was refused: when, and how many times in a row.
+    refused: Option<(Instant, u32)>,
 }
 
 /// A sign-in waiting for the browser: the page it opened, and the switch that closes its listener.
@@ -102,26 +114,33 @@ impl Controller {
     fn account_tick(self: &Shared) {
         let server = Server::current();
         let modified = account::modified(server);
-        let (changed, offline_due) = {
+        let (changed, offline_due, refused_due) = {
             let rt = self.account_runtime.lock().unwrap();
-            (rt.read != Some((server, modified)), rt.offline_since.is_some_and(|t| t.elapsed() > RECHECK_OFFLINE))
+            (
+                rt.read != Some((server, modified)),
+                rt.offline_since.is_some_and(|t| t.elapsed() > RECHECK_OFFLINE),
+                rt.refused.is_some_and(|(t, n)| t.elapsed() > refused_recheck(n)),
+            )
         };
-        if changed || offline_due {
-            self.read_account(server, modified);
+        if changed || offline_due || refused_due {
+            self.read_account(server, modified, !changed && refused_due);
         }
     }
 
-    /// Reads the saved account for `server` and asks Orbiters whether it still works.
-    fn read_account(self: &Shared, server: Server, modified: Option<SystemTime>) {
+    /// Reads the saved account for `server` and asks Orbiters whether it still works. `again_refused`: asking again
+    /// about a credential that was refused, which shows as refused until an answer says otherwise.
+    fn read_account(self: &Shared, server: Server, modified: Option<SystemTime>, again_refused: bool) {
         let saved = account::read(server);
         let previous_token;
-        let generation = {
+        let (generation, refusals) = {
             let mut rt = self.account_runtime.lock().unwrap();
             previous_token = rt.account.as_ref().map(|a| a.token.clone());
             rt.read = Some((server, modified));
             rt.account = saved.clone();
             rt.offline_since = None;
-            rt.generation
+            let refusals = if again_refused { rt.refused.map_or(0, |(_, n)| n) } else { 0 };
+            rt.refused = None;
+            (rt.generation, refusals)
         };
         let development = server == Server::Development;
         let Some(saved) = saved else {
@@ -133,15 +152,18 @@ impl Controller {
             });
             return;
         };
-        self.update(|s| {
-            let same_server = s.account.development == development;
-            s.account.development = development;
-            // The same account checked again (another Orbiters tool rewrote the shared file): it stays signed in while
-            // Orbiters answers, so that VRChat's sign-in, friends and invites are not switched off for the check.
-            if !rechecking_same(&s.account.state, previous_token.as_deref(), &saved.token, same_server) {
-                s.account.state = AccountState::Checking { username: saved.username.clone() };
-            }
-        });
+        // A refused credential asked about again shows as refused until an answer says otherwise.
+        if !again_refused {
+            self.update(|s| {
+                let same_server = s.account.development == development;
+                s.account.development = development;
+                // The same account checked again (another Orbiters tool rewrote the shared file): it stays signed in while
+                // Orbiters answers, so that VRChat's sign-in, friends and invites are not switched off for the check.
+                if !rechecking_same(&s.account.state, previous_token.as_deref(), &saved.token, same_server) {
+                    s.account.state = AccountState::Checking { username: saved.username.clone() };
+                }
+            });
+        }
         let answer = Api::new(server).check(&saved.token);
         let mut rt = self.account_runtime.lock().unwrap();
         // Signed in or out meanwhile: that newer state wins.
@@ -154,7 +176,10 @@ impl Controller {
                 rt.account = Some(Account { token: saved.token.clone(), ..current });
                 AccountState::SignedIn { username: name }
             }
-            Ok(Check::Refused) => AccountState::Expired { username: saved.username.clone() },
+            Ok(Check::Refused) => {
+                rt.refused = Some((Instant::now(), refusals.saturating_add(1)));
+                AccountState::Expired { username: saved.username.clone() }
+            }
             Err(e) => {
                 eprintln!("account check: {e:#}");
                 rt.offline_since = Some(Instant::now());
@@ -162,10 +187,21 @@ impl Controller {
             }
         };
         drop(rt);
-        self.update(|s| {
+        self.commit_account_check(generation, state);
+    }
+
+    /// Shows what a check of the saved account found, unless a sign-in, its cancel or a sign-out came since it was
+    /// asked: checked under the snapshot's lock, where those publish their own state after they bumped the generation,
+    /// so an old "Signed in" can no longer land after "Signed out" (C-7).
+    fn commit_account_check(&self, generation: u64, state: AccountState) -> bool {
+        self.update_if(|s| {
+            if self.account_generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                return false;
+            }
             s.account.state = state;
             s.account.error = None;
-        });
+            true
+        })
     }
 
     /// Starts a browser sign-in: listens on this computer's loopback, asks Orbiters for a link that names where, and
@@ -183,6 +219,7 @@ impl Controller {
         let (generation, before) = {
             let mut rt = self.account_runtime.lock().unwrap();
             rt.generation += 1;
+            self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
             // The one waiting before goes (its listener with it); what the account showed before it comes back at the
             // end. (Another still asking Orbiters for its link shows "finishing": the account at rest then.)
             let earlier = rt.signing_in.take().map(|e| e.before.clone());
@@ -255,6 +292,7 @@ impl Controller {
                     rt.account = Some(account);
                     rt.read = Some((server, account::modified(server)));
                     rt.offline_since = None;
+                    rt.refused = None;
                     drop(rt);
                     if let Err(e) = saved {
                         self.notify(NoticeKind::Warning, tr!("Signed in, but the Unity tools will not share it: {error}", error = e));
@@ -308,6 +346,7 @@ impl Controller {
         let before = {
             let mut rt = self.account_runtime.lock().unwrap();
             rt.generation += 1;
+            self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
             rt.signing_in.take().map(|s| s.before.clone()).unwrap_or_else(|| rt.resting())
         };
         self.update(|s| {
@@ -321,10 +360,13 @@ impl Controller {
     /// Signs out of Orbiters in every tool (the saved account is removed, as in Unity).
     pub fn sign_out(&self) -> anyhow::Result<()> {
         let server = Server::current();
+        // Calls leave Orbiters with the account that leaves, before it is gone (PRIV-7).
+        self.calls_depart();
         account::remove(server)?;
         {
             let mut rt = self.account_runtime.lock().unwrap();
             rt.generation += 1;
+            self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
             rt.signing_in = None;
             rt.account = None;
             rt.read = Some((server, None));
@@ -356,6 +398,23 @@ impl Controller {
         let (server, _) = rt.read?;
         rt.account.as_ref().map(|a| (Api::new(server), a.token.clone()))
     }
+
+    /// [`Self::account_api`] with whom it is for (read together, so the two agree): the server's API address and the
+    /// account's id (a digest of its credential when the account file names no id; none when nobody is signed in).
+    pub(super) fn account_api_for(&self) -> (Option<(Api, String)>, orbiters_core::world_feedback::Stamp) {
+        let rt = self.account_runtime.lock().unwrap();
+        let server = rt.read.map_or_else(Server::current, |(s, _)| s);
+        let api = Api::new(server);
+        let stamp = orbiters_core::world_feedback::Stamp {
+            server: api.url(""),
+            account: rt
+                .account
+                .as_ref()
+                .map(|a| a.user.clone().unwrap_or_else(|| format!("credential:{}", orbiters_core::vrchat_accounts::friend_hash(&a.token)))),
+        };
+        let with = rt.read.and(rt.account.as_ref()).map(|a| (api, a.token.clone()));
+        (with, stamp)
+    }
 }
 
 #[cfg(test)]
@@ -366,6 +425,34 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::Mutex;
+
+    /// A refused credential is asked about again, later each time, never more often than every ten minutes.
+    #[test]
+    fn a_refused_credential_is_asked_about_again_later_each_time() {
+        let waits: Vec<u64> = (1..=8).map(|n| refused_recheck(n).as_secs() / 60).collect();
+        assert_eq!(waits, [10, 20, 40, 80, 160, 320, 360, 360]);
+        assert_eq!(refused_recheck(0), RECHECK_REFUSED);
+        assert_eq!(refused_recheck(u32::MAX), RECHECK_REFUSED_MAX);
+    }
+
+    /// C-7: a check answered before a sign-out and shown after it does not put "Signed in" back.
+    #[test]
+    fn an_old_account_check_does_not_undo_a_sign_out() {
+        let ctl = Controller::new(Settings::default());
+        let generation = ctl.account_runtime.lock().unwrap().generation;
+        assert!(ctl.commit_account_check(generation, AccountState::Checking { username: None }), "a current check shows");
+        // Signed out between the answer and its showing: what `sign_out` does to the runtime and the snapshot (not
+        // `sign_out` itself, which removes the saved account file of the person running the tests).
+        {
+            let mut rt = ctl.account_runtime.lock().unwrap();
+            rt.generation += 1;
+            ctl.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
+            rt.account = None;
+        }
+        ctl.update(|s| s.account.state = AccountState::SignedOut);
+        assert!(!ctl.commit_account_check(generation, AccountState::SignedIn { username: "old".into() }));
+        assert_eq!(ctl.view().account.state, AccountState::SignedOut);
+    }
 
     /// The port and path of the app's listener, as the stand-in was told them.
     type Told = Arc<Mutex<Option<(u16, String)>>>;

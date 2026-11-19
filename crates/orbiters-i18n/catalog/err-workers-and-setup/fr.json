@@ -100,5 +100,9 @@
   "{url}: not the file Orbiters knows (SHA-256 {digest})": "{url} : ce n’est pas le fichier qu’Orbiters connaît (SHA-256 {digest})",
   "{url}: not the file the release names (its SHA-256 differs)": "{url} : ce n’est pas le fichier indiqué par la version (son SHA-256 diffère)",
   "{url}: the download stopped at {have} of {size} bytes": "{url} : le téléchargement s’est arrêté à {have} octets sur {size}",
-  "{url}: the download stopped at {have} of {size} bytes (the next try goes on from there)": "{url} : le téléchargement s’est arrêté à {have} octets sur {size} (le prochain essai reprend à cet endroit)"
+  "{url}: the download stopped at {have} of {size} bytes (the next try goes on from there)": "{url} : le téléchargement s’est arrêté à {have} octets sur {size} (le prochain essai reprend à cet endroit)",
+  "These files are already in {folder} and are not Orbiters - N4N0's: {files}. Nothing was changed: choose another folder.": "Ces fichiers sont déjà dans {folder} et n’appartiennent pas à Orbiters - N4N0 : {files}. Rien n’a été changé : choisis un autre dossier.",
+  "These files of {folder} are reached through a link to another folder: {files}. Nothing was changed.": "Ces fichiers de {folder} passent par un lien vers un autre dossier : {files}. Rien n’a été changé.",
+  "{path} is reached through a link to another folder": "{path} passe par un lien vers un autre dossier",
+  "The previous version could not be fully put back: {files}. Its files are kept in {folder}.": "La version précédente n’a pas pu être entièrement remise : {files}. Ses fichiers sont gardés dans {folder}."
 }

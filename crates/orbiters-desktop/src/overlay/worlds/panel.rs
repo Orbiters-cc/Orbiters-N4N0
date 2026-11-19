@@ -1126,6 +1126,11 @@ impl Panel {
     }
 
     /// Let go: what was pressed, if it stayed a press; thrown, if it was moving.
+    /// A press of the lasers that ends with no let-go (its menu went): no target, no throw.
+    pub fn vr_cancel(&mut self) {
+        self.vr_hold = None;
+    }
+
     pub fn vr_release(&mut self, time: f64) -> Option<Target> {
         let hold = self.vr_hold.take()?;
         if hold.dragged {

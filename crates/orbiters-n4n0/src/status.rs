@@ -102,6 +102,27 @@ pub struct VoiceStatus {
     /// The models stopped loading (the worker stopped twice while loading them): installing again repairs them.
     #[serde(default)]
     pub repair: bool,
+    /// The wake word was heard during a call: instead of listening, N4N0 offers "Talk with N4N0?" until then.
+    #[serde(default)]
+    pub wake_offer: Option<WakeOffer>,
+}
+
+/// "Talk with N4N0?", up for a few seconds after the wake word was heard during a call (the call's voices reach the
+/// microphone: a caller saying the word starts nothing by themselves). Pressed, N4N0 listens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeOffer {
+    /// Its number (a new one each time the word is heard).
+    pub id: u64,
+    /// When it goes by itself (Unix ms), and how long it shows in all (ms).
+    pub until_ms: u64,
+    pub for_ms: u32,
+}
+
+impl WakeOffer {
+    /// What is left of its time, from 1 (it just came) to 0 (gone), at `now_ms` (Unix ms).
+    pub fn left(&self, now_ms: u64) -> f32 {
+        (self.until_ms.saturating_sub(now_ms) as f32 / self.for_ms.max(1) as f32).clamp(0.0, 1.0)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

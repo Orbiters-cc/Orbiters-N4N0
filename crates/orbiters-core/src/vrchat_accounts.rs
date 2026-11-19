@@ -62,6 +62,45 @@ pub(crate) fn vrcx_table_prefix(id: &str) -> String {
     id.replace(['_', '-'], "")
 }
 
+/// How long [`vrcx_last_pictures`] keeps what it read while VRCX's database files look unchanged.
+const PICTURES_KEPT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Each person's last avatar picture in VRCX's feed for `account` (id → address, as VRCX wrote it), from the database
+/// at `path`, open as `db`. VRCX's `feed_avatar` has no index for "the last of each": the query reads the whole
+/// table (hundreds of thousands of rows, a third of a second), so what it found is kept while the database and its
+/// write-ahead log keep their length and time, for [`PICTURES_KEPT`] at most.
+pub(crate) fn vrcx_last_pictures(path: &Path, db: &Connection, account: &str) -> std::sync::Arc<std::collections::HashMap<String, String>> {
+    vrcx_last_pictures_now(path, db, account).unwrap_or_default()
+}
+
+/// [`vrcx_last_pictures`], `None` when the query fails now (SQLITE_BUSY while VRCX writes): nothing is kept then, so the
+/// next round reads again instead of keeping "no pictures" for ten minutes.
+pub(crate) fn vrcx_last_pictures_now(path: &Path, db: &Connection, account: &str) -> Option<std::sync::Arc<std::collections::HashMap<String, String>>> {
+    type Kept = (PathBuf, String, Vec<Option<(u64, std::time::SystemTime)>>, std::time::Instant, std::sync::Arc<std::collections::HashMap<String, String>>);
+    static KEPT: std::sync::Mutex<Option<Kept>> = std::sync::Mutex::new(None);
+    let stamp = |p: &Path| std::fs::metadata(p).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let stamps = vec![stamp(path), stamp(Path::new(&wal))];
+    if let Some((p, a, s, at, pictures)) = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+        if p == path && a == account && *s == stamps && at.elapsed() < PICTURES_KEPT {
+            return Some(pictures.clone());
+        }
+    }
+    let table = format!("{}_feed_avatar", vrcx_table_prefix(account));
+    let mut pictures = std::collections::HashMap::new();
+    let sql = format!("SELECT a.user_id, a.current_avatar_thumbnail_image_url FROM \"{table}\" a JOIN (SELECT user_id, MAX(id) AS latest FROM \"{table}\" GROUP BY user_id) b ON a.id = b.latest"); // i18n: not shown (SQL)
+    let mut q = db.prepare(&sql).ok()?;
+    let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))).ok()?;
+    for row in rows {
+        let (id, image) = row.ok()?;
+        pictures.entry(id).or_insert_with(|| image.unwrap_or_default());
+    }
+    let pictures = std::sync::Arc::new(pictures);
+    *KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((path.to_path_buf(), account.to_string(), stamps, std::time::Instant::now(), pictures.clone()));
+    Some(pictures)
+}
+
 fn vrcx_friends(db: &Connection, account: &str) -> BTreeSet<String> {
     let table = format!("{}_friend_log_current", vrcx_table_prefix(account));
     let Ok(mut q) = db.prepare(&format!("SELECT user_id FROM \"{table}\"")) else { return BTreeSet::new() }; // i18n: not shown (SQL)
@@ -101,7 +140,7 @@ pub fn friends(log_account: Option<&str>) -> Vec<Friend> {
     let mut out: std::collections::BTreeMap<String, Friend> =
         local.friends.iter().map(|id| (id.clone(), Friend { id: id.clone(), name: id.clone(), image: None })).collect();
     if let Some((account, _)) = &local.account {
-        if let Some(db) = vrcx_db().and_then(|p| open(&p)) {
+        if let Some((path, db)) = vrcx_db().and_then(|p| open(&p).map(|db| (p, db))) {
             if vrcx_account(&db).as_ref() == Some(account) {
                 let table = format!("{}_friend_log_current", vrcx_table_prefix(account));
                 if let Ok(mut q) = db.prepare(&format!("SELECT user_id,display_name FROM \"{table}\"")) { // i18n: not shown (SQL)
@@ -113,9 +152,11 @@ pub fn friends(log_account: Option<&str>) -> Vec<Friend> {
                         }
                     }
                 }
-                let table = format!("{}_feed_avatar", vrcx_table_prefix(account));
-                if let Ok(mut q)=db.prepare(&format!("SELECT a.user_id,a.current_avatar_thumbnail_image_url FROM \"{table}\" a JOIN (SELECT user_id,MAX(id) AS latest FROM \"{table}\" GROUP BY user_id) b ON a.id=b.latest")) {
-                    if let Ok(rows)=q.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))) {for (id,image) in rows.flatten(){if let Some(f)=out.get_mut(&id){f.image=image.filter(|s|s.starts_with("https://"));}}}
+                let pictures = vrcx_last_pictures(&path, &db, account);
+                for f in out.values_mut() {
+                    if let Some(image) = pictures.get(&f.id) {
+                        f.image = Some(image.clone()).filter(|s| s.starts_with("https://"));
+                    }
                 }
             }
         }
@@ -144,7 +185,17 @@ pub fn friends(log_account: Option<&str>) -> Vec<Friend> {
 /// Reconstruct the roster at the picture's timestamp from VRCX's recorded joins/leaves, when retained locally.
 pub fn instance_people(location: &str, taken: u64) -> Vec<String> {
     let Some(db) = vrcx_db().and_then(|p| open(&p)) else { return Vec::new() };
-    let Ok(mut q)=db.prepare("SELECT type,display_name,user_id FROM gamelog_join_leave WHERE location=?1 AND CAST(strftime('%s',created_at) AS INTEGER)<=?2 ORDER BY created_at,id LIMIT 20000") else {return Vec::new()};
+    instance_people_in(&db, location, taken)
+}
+
+/// [`instance_people`] in VRCX's database `db`: each person's last join or leave there before `taken` (however many
+/// events the instance had before it), those whose last one is a join.
+fn instance_people_in(db: &Connection, location: &str, taken: u64) -> Vec<String> {
+    let Ok(mut q) = db.prepare(
+        "SELECT type,display_name,user_id FROM (SELECT type,display_name,user_id,ROW_NUMBER() OVER (PARTITION BY COALESCE(user_id,display_name) ORDER BY created_at DESC,id DESC) AS latest FROM gamelog_join_leave WHERE location=?1 AND type IN ('OnPlayerJoined','OnPlayerLeft') AND CAST(strftime('%s',created_at) AS INTEGER)<=?2) WHERE latest=1 LIMIT 20000", // i18n: not shown (SQL)
+    ) else {
+        return Vec::new();
+    };
     let mut roster = std::collections::BTreeMap::new();
     if let Ok(rows) =
         q.query_map(rusqlite::params![location, taken as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))
@@ -188,14 +239,16 @@ pub fn read(log_account: Option<&str>) -> LocalVrchat {
 
 /// Which account is this computer's. VRCX and VRCNext signed in to VRChat with theirs, so an account one of them
 /// knows wins; the log's id (the local player's, as VRChat's log names it) picks between them, and stands alone only
-/// when neither knows an account, or when VRCNext knows several and none is the log's.
+/// when neither knows an account, or when VRCNext knows several and none is the log's. A folder in VRCNext's
+/// `Caches\Profiles` is not proof of a sign-in (VRCNext makes one for a person whose favourites were only looked at):
+/// it never stands against the log's own id.
 fn choose(log_account: Option<&str>, vrcx: Option<&str>, next: &[String]) -> Option<(String, Source)> {
     let log = log_account.filter(|id| is_user_id(id));
     match (log, vrcx) {
         (Some(log), Some(vrcx)) if log == vrcx => Some((log.to_string(), Source::Vrcx)),
         (Some(log), _) if next.iter().any(|n| n == log) => Some((log.to_string(), Source::Vrcnext)),
         (_, Some(vrcx)) => Some((vrcx.to_string(), Source::Vrcx)),
-        (_, None) if next.len() == 1 => Some((next[0].clone(), Source::Vrcnext)),
+        (None, None) if next.len() == 1 => Some((next[0].clone(), Source::Vrcnext)),
         (Some(log), None) => Some((log.to_string(), Source::VrchatLog)),
         (None, None) => None,
     }
@@ -218,6 +271,8 @@ mod tests {
         assert_eq!(choose(None, None, &next(&[other])), Some((other.into(), Source::Vrcnext)));
         assert_eq!(choose(Some(third), None, &next(&[me, other])), Some((third.into(), Source::VrchatLog)), "VRCNext cannot tell which");
         assert_eq!(choose(Some(me), None, &[]), Some((me.into(), Source::VrchatLog)));
+        // One profile VRCNext keeps is someone else's (favourites looked at): the log's own id stands.
+        assert_eq!(choose(Some(me), None, &next(&[other])), Some((me.into(), Source::VrchatLog)));
         assert_eq!(choose(Some("usr_bad"), None, &[]), None);
     }
 
@@ -246,6 +301,66 @@ mod tests {
         let me = vrcx_account(&db).unwrap();
         assert_eq!(me, "usr_11111111-1111-1111-1111-111111111111");
         assert_eq!(vrcx_friends(&db, &me), ["usr_22222222-2222-2222-2222-222222222222".to_string()].into());
+    }
+
+    /// CORE-10: VRCX's avatar feed is scanned once while its database is unchanged, again when it changed.
+    #[test]
+    fn last_pictures_are_read_again_only_when_vrcx_wrote() {
+        let dir = std::env::temp_dir().join(format!("orbiters-vrcx-pictures-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("VRCX.sqlite3");
+        let me = "usr_11111111-1111-1111-1111-111111111111";
+        let table = format!("{}_feed_avatar", vrcx_table_prefix(me));
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(&format!(
+            "CREATE TABLE \"{table}\" (id INTEGER PRIMARY KEY, user_id TEXT, current_avatar_thumbnail_image_url TEXT);
+             INSERT INTO \"{table}\" (user_id, current_avatar_thumbnail_image_url) VALUES ('usr_a', 'https://old'), ('usr_a', 'https://new'), ('usr_b', NULL);"
+        ))
+        .unwrap();
+        let first = vrcx_last_pictures(&path, &db, me);
+        assert_eq!((first["usr_a"].as_str(), first["usr_b"].as_str()), ("https://new", ""), "each person's last");
+        assert!(std::sync::Arc::ptr_eq(&first, &vrcx_last_pictures(&path, &db, me)), "unchanged: not read again");
+        let rows: String = (0..200).map(|i| format!("('usr_c', 'https://{i}{}'),", "x".repeat(200))).collect();
+        db.execute_batch(&format!("INSERT INTO \"{table}\" (user_id, current_avatar_thumbnail_image_url) VALUES {} ('usr_a', 'https://newest');", rows)).unwrap();
+        let again = vrcx_last_pictures(&path, &db, me);
+        assert_eq!(again["usr_a"], "https://newest", "VRCX wrote: read again");
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_roster_counts_each_persons_last_event_however_busy_the_instance() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE gamelog_join_leave (id INTEGER PRIMARY KEY, created_at TEXT, type TEXT, display_name TEXT, location TEXT, user_id TEXT, time INTEGER);",
+        )
+        .unwrap();
+        let here = "wrld_00000000-0000-4000-8000-000000000001:1~region(eu)";
+        let event = |db: &Connection, at: u64, kind: &str, name: &str, id: Option<&str>, location: &str| {
+            let at = time::OffsetDateTime::from_unix_timestamp(at as i64).unwrap().format(&time::format_description::well_known::Rfc3339).unwrap();
+            db.execute("INSERT INTO gamelog_join_leave (created_at,type,display_name,location,user_id,time) VALUES (?1,?2,?3,?4,?5,0)", rusqlite::params![at, kind, name, location, id]).unwrap();
+        };
+        let base = 1_790_000_000;
+        // Kite joins first and leaves just before the picture, after 20 000 others came and went.
+        event(&db, base, "OnPlayerJoined", "Kite", Some("usr_k"), here);
+        let tx = db.unchecked_transaction().unwrap();
+        for i in 0..10_000u64 {
+            event(&tx, base + 1 + i, "OnPlayerJoined", "Crowd", Some(&format!("usr_c{i}")), here);
+            event(&tx, base + 1 + i, "OnPlayerLeft", "Crowd", Some(&format!("usr_c{i}")), here);
+        }
+        tx.commit().unwrap();
+        let late = base + 20_000;
+        event(&db, late, "OnPlayerLeft", "Kite", Some("usr_k"), here);
+        // Nova joins late and stays; a name without an id joins; Lark joins after the picture; Moss joins elsewhere.
+        event(&db, late, "OnPlayerJoined", "Nova", Some("usr_n"), here);
+        event(&db, late, "OnPlayerJoined", "Wren", None, here);
+        event(&db, late + 100, "OnPlayerJoined", "Lark", Some("usr_l"), here);
+        event(&db, late, "OnPlayerJoined", "Moss", Some("usr_m"), "wrld_other:2");
+        let mut people = instance_people_in(&db, here, late + 10);
+        people.sort();
+        assert_eq!(people, ["Nova", "Wren"]);
+        // Before Kite left, Kite was there.
+        assert!(instance_people_in(&db, here, late - 1).contains(&"Kite".to_string()));
     }
 
     #[test]

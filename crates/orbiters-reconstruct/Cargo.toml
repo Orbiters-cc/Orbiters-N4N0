@@ -31,7 +31,8 @@ rayon = { workspace = true }
 png = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true }
+# Win32_System_Performance: what the whole graphics adapter holds, for the run's report (crate::gpu::adapter_memory).
+windows = { workspace = true, features = ["Win32_System_Performance"] }
 sysinfo = "0.37"
 
 [target.'cfg(not(target_vendor = "apple"))'.dependencies]

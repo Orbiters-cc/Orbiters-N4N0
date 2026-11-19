@@ -25,6 +25,7 @@ pub mod osc;
 pub mod pipeline;
 pub mod panic_log;
 pub mod paths;
+pub mod png_meta;
 pub mod pose;
 pub mod protocol;
 pub mod reconstruction;
@@ -150,9 +151,50 @@ pub fn write_atomic_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Re
     write_atomic_as(path, bytes, true)
 }
 
+/// The files [`read_text`] last failed to read (locked by another program for longer than it waits, access denied):
+/// what this process holds for them is a default, not their content.
+static UNREADABLE: std::sync::Mutex<std::collections::BTreeSet<std::path::PathBuf>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn mark_unreadable(path: &std::path::Path, unreadable: bool) {
+    let mut set = UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if unreadable {
+        set.insert(path.to_path_buf());
+    } else if !set.is_empty() {
+        set.remove(path);
+    }
+}
+
+/// Whether the last [`read_text`] of `path` failed (not "there is none": it could not be read).
+pub fn was_unreadable(path: &std::path::Path) -> bool {
+    UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(path)
+}
+
+/// A file whose last read failed is never replaced unseen: it is first copied aside ([`keep_aside`]) or, when it still
+/// cannot be read, moved aside; when neither works the write is refused and the file stays as it is.
+fn preserve_unreadable(path: &std::path::Path) -> std::io::Result<()> {
+    if !was_unreadable(path) {
+        return Ok(());
+    }
+    if !path.exists() || keep_aside(path).is_some() {
+        mark_unreadable(path, false);
+        return Ok(());
+    }
+    let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(format!(".bad-{seconds}"));
+    match std::fs::rename(path, std::path::PathBuf::from(aside)) {
+        Ok(()) => {
+            mark_unreadable(path, false);
+            Ok(())
+        }
+        Err(e) => Err(std::io::Error::new(e.kind(), orbiters_i18n::tr!("{path} could not be read, and is not replaced unseen: {error}", path = path.display(), error = e))),
+    }
+}
+
 fn write_atomic_as(path: &std::path::Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
+    preserve_unreadable(path)?;
     static SERIAL: AtomicU64 = AtomicU64::new(0);
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".{}-{}.tmp", std::process::id(), SERIAL.fetch_add(1, Ordering::Relaxed)));
@@ -201,13 +243,23 @@ pub fn read_text(path: &std::path::Path) -> std::io::Result<Option<String>> {
     let mut wait = std::time::Duration::from_millis(20);
     for attempt in 0..5 {
         match std::fs::read(path) {
-            Ok(bytes) => return Ok(Some(String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Ok(bytes) => {
+                mark_unreadable(path, false);
+                return Ok(Some(String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                mark_unreadable(path, false);
+                return Ok(None);
+            }
             Err(e) if attempt < 4 && (e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(32)) => {
                 std::thread::sleep(wait);
                 wait *= 2;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // Until it is read again, a write must not replace it with what was made without it.
+                mark_unreadable(path, true);
+                return Err(e);
+            }
         }
     }
     unreachable!("the last attempt returns")
@@ -251,6 +303,43 @@ pub fn json_lenient<T: serde::de::DeserializeOwned + serde::Serialize + Default>
     (serde_json::from_value(base).unwrap_or_default(), dropped)
 }
 
+/// When a file that keeps how far VRChat's logs were read beside what was found in them (the visited worlds, the
+/// videos) is saved: at once when what was found changed, and for the read positions alone every
+/// [`Checkpoint::OFFSETS_EVERY`] (a crash in between reads a few minutes of log again, which finds nothing new). A
+/// failed save is tried again, later each time.
+#[derive(Clone, Debug, Default)]
+pub struct Checkpoint {
+    /// What was found changed since the last save.
+    pub(crate) unsaved: bool,
+    saved_at: Option<std::time::Instant>,
+    retry_at: Option<std::time::Instant>,
+    failures: u32,
+}
+
+impl Checkpoint {
+    pub const OFFSETS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+    const RETRY_FIRST: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Whether to save now, the read positions having moved since the last save (`moved`) or not.
+    pub fn due(&self, moved: bool, now: std::time::Instant) -> bool {
+        if self.retry_at.is_some_and(|t| now < t) {
+            return false;
+        }
+        self.unsaved || (moved && self.saved_at.is_none_or(|t| now.duration_since(t) >= Self::OFFSETS_EVERY))
+    }
+
+    /// A save ended (`ok` or not) at `now`.
+    pub fn saved(&mut self, ok: bool, now: std::time::Instant) {
+        if ok {
+            *self = Self { saved_at: Some(now), ..Self::default() };
+        } else {
+            self.failures = self.failures.saturating_add(1);
+            let wait = Self::RETRY_FIRST.saturating_mul(1 << self.failures.min(5).saturating_sub(1)).min(Self::OFFSETS_EVERY);
+            self.retry_at = Some(now + wait);
+        }
+    }
+}
+
 /// Keeps a copy of `path` beside it as `<name>.bad-<unix seconds>`: a file that could be read only in part, before the
 /// next save replaces it.
 pub fn keep_aside(path: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -290,6 +379,60 @@ pub fn safe_file_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CORE-7 / CORE-C4: what was found is saved at once, read positions alone every few minutes, and a failed save
+    /// stays to do, tried again later each time.
+    #[test]
+    fn history_saves_finds_at_once_positions_now_and_then_and_retries_failures() {
+        let t0 = std::time::Instant::now();
+        let mut c = Checkpoint::default();
+        assert!(c.due(true, t0), "never saved: the first move is saved");
+        c.saved(true, t0);
+        assert!(!c.due(true, t0 + std::time::Duration::from_secs(10)), "positions alone: not every beat");
+        assert!(c.due(true, t0 + Checkpoint::OFFSETS_EVERY), "but every few minutes");
+        assert!(!c.due(false, t0 + Checkpoint::OFFSETS_EVERY), "nothing moved: nothing to save");
+        c.unsaved = true;
+        assert!(c.due(false, t0 + std::time::Duration::from_secs(10)), "a find: at once");
+        let t1 = t0 + std::time::Duration::from_secs(20);
+        c.saved(false, t1);
+        assert!(c.unsaved, "a failed save keeps it to do");
+        assert!(!c.due(false, t1 + std::time::Duration::from_secs(5)));
+        assert!(c.due(false, t1 + std::time::Duration::from_secs(10)), "tried again 10 s later");
+        c.saved(false, t1 + std::time::Duration::from_secs(10));
+        assert!(!c.due(false, t1 + std::time::Duration::from_secs(25)) && c.due(false, t1 + std::time::Duration::from_secs(30)), "then 20 s");
+        for _ in 0..10 {
+            c.saved(false, t1);
+        }
+        assert!(c.due(false, t1 + Checkpoint::OFFSETS_EVERY), "never more than five minutes apart");
+        c.saved(true, t1);
+        assert!(!c.unsaved && !c.due(false, t1));
+    }
+
+    /// A file another program held when it was read is kept aside before a write replaces it.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_that_could_not_be_read_is_kept_before_it_is_replaced() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("orbiters-unreadable-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+        std::fs::write(&path, b"precious").unwrap();
+        let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        assert!(read_text(&path).is_err());
+        assert!(was_unreadable(&path));
+        drop(lock);
+        write_atomic(&path, b"defaults").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"defaults");
+        let kept: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("history.json.bad-")).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read(kept[0].path()).unwrap(), b"precious");
+        assert!(!was_unreadable(&path));
+        // Read again, written again: nothing more kept.
+        assert_eq!(read_text(&path).unwrap().as_deref(), Some("defaults"));
+        write_atomic(&path, b"next").unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn each_platform_has_its_own_tls() {

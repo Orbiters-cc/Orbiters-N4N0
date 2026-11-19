@@ -59,8 +59,9 @@ pub fn vrcnext_now(dir: &Path) -> Result<Option<LauncherState>, Busy> {
 
 /// VRCNext's `user_tracking` rows (id, picture, banner, note) fill what its friends cache left empty.
 pub fn fill_from_tracking(state: &mut LauncherState, rows: &[[String; 4]]) {
+    let at: std::collections::HashMap<String, usize> = state.friends.iter().enumerate().rev().map(|(i, f)| (f.id.clone(), i)).collect();
     for [id, picture, banner, note] in rows {
-        if let Some(f) = state.friends.iter_mut().find(|f| &f.id == id) {
+        if let Some(f) = at.get(id).map(|&i| &mut state.friends[i]) {
             if f.look.icon.is_empty() && picture.starts_with("https://") {
                 f.look.icon = picture.clone();
             }
@@ -139,16 +140,40 @@ pub fn vrcx_now(db: &Path) -> Result<Option<LauncherState>, Busy> {
     };
     let friends = rows(format!("SELECT user_id, display_name, trust_level FROM \"{prefix}_friend_log_current\""))?; // i18n: not shown (SQL)
     let notes = rows(format!("SELECT user_id, note FROM \"{prefix}_notes\"")).unwrap_or_default(); // i18n: not shown (SQL)
-    let pictures = rows(format!("SELECT a.user_id, a.current_avatar_thumbnail_image_url FROM \"{prefix}_feed_avatar\" a JOIN (SELECT user_id, MAX(id) AS latest FROM \"{prefix}_feed_avatar\" GROUP BY user_id) b ON a.id = b.latest"))?; // i18n: not shown (SQL)
+    let pictures = crate::vrchat_accounts::vrcx_last_pictures_now(db, &connection, &account).ok_or(Busy)?;
     let seen = rows(format!("SELECT user_id, MAX(created_at) FROM \"{prefix}_feed_online_offline\" GROUP BY user_id"))?; // i18n: not shown (SQL)
     let favourites = rows("SELECT user_id, group_name FROM favorite_friend".into()).unwrap_or_default(); // i18n: not shown (SQL)
     let state = from_vrcx(&friends, &notes, &pictures, &seen, &favourites, modified(db));
     Ok((!state.friends.is_empty()).then_some(state))
 }
 
-/// [`vrcx`] on the rows read.
-pub fn from_vrcx(friends: &[Vec<String>], notes: &[Vec<String>], pictures: &[Vec<String>], seen: &[Vec<String>], favourites: &[Vec<String>], read_at: i64) -> LauncherState {
-    let find = |rows: &[Vec<String>], id: &str| rows.iter().find(|r| r.first().map(String::as_str) == Some(id)).and_then(|r| r.get(1)).cloned().unwrap_or_default();
+/// [`vrcx`] on the rows read (`pictures`: each person's last avatar picture).
+pub fn from_vrcx(
+    friends: &[Vec<String>],
+    notes: &[Vec<String>],
+    pictures: &std::collections::HashMap<String, String>,
+    seen: &[Vec<String>],
+    favourites: &[Vec<String>],
+    read_at: i64,
+) -> LauncherState {
+    // Each table looked up by id once (a person's first row, as a search from the top finds it), not searched for each friend.
+    fn by_id(rows: &[Vec<String>]) -> std::collections::HashMap<&str, &str> {
+        let mut map = std::collections::HashMap::new();
+        for r in rows {
+            if let Some(id) = r.first() {
+                map.entry(id.as_str()).or_insert_with(|| r.get(1).map_or("", String::as_str));
+            }
+        }
+        map
+    }
+    let (notes, seen) = (by_id(notes), by_id(seen));
+    let mut groups_of: std::collections::HashMap<&str, Vec<String>> = std::collections::HashMap::new();
+    for r in favourites {
+        if let (Some(id), Some(group)) = (r.first(), r.get(1)) {
+            groups_of.entry(id.as_str()).or_default().push(group.clone());
+        }
+    }
+    let find = |map: &std::collections::HashMap<&str, &str>, id: &str| map.get(id).map(|s| s.to_string()).unwrap_or_default();
     let mut group_names: Vec<String> = favourites.iter().filter_map(|r| r.get(1)).filter(|g| !g.is_empty()).cloned().collect();
     group_names.sort();
     group_names.dedup();
@@ -171,15 +196,15 @@ pub fn from_vrcx(friends: &[Vec<String>], notes: &[Vec<String>], pictures: &[Vec
             "New User" => Rank::NewUser,
             _ => Rank::Visitor,
         };
-        let picture = find(pictures, id);
+        let picture = pictures.get(id).cloned().unwrap_or_default();
         state.friends.push(Friend {
             id: id.clone(),
             name: if name.is_empty() { id.clone() } else { name.clone() },
             look: Look { icon: if picture.starts_with("https://") { picture } else { String::new() }, rank, ..Look::default() },
             whereabouts: Whereabouts::Unknown,
-            last_seen: launcher_feed::seconds(&find(seen, id)),
-            note: find(notes, id),
-            favourite_groups: favourites.iter().filter(|r| r.first() == Some(id)).filter_map(|r| r.get(1).cloned()).collect(),
+            last_seen: launcher_feed::seconds(&find(&seen, id)),
+            note: find(&notes, id),
+            favourite_groups: groups_of.get(id.as_str()).cloned().unwrap_or_default(),
             ..Friend::default()
         });
     }
@@ -246,7 +271,7 @@ mod tests {
         let s = from_vrcx(
             &[r(&[A, "Nova", "Trusted User"]), r(&[B, "Kite", "User"]), r(&["bad", "x", ""])],
             &[r(&[A, "met at a meetup"])],
-            &[r(&[A, "https://api.vrchat.cloud/a"])],
+            &[(A.to_string(), "https://api.vrchat.cloud/a".to_string())].into_iter().collect(),
             &[r(&[B, "2026-11-10T08:00:00.000Z"])],
             &[r(&[A, "Close"])],
             9,

@@ -23,6 +23,7 @@ crates/orbiters-core/src/maps.rs
 crates/orbiters-core/src/osc.rs
 crates/orbiters-core/src/panic_log.rs
 crates/orbiters-core/src/paths.rs
+crates/orbiters-core/src/png_meta.rs
 crates/orbiters-core/src/picture.rs
 crates/orbiters-core/src/settings.rs
 crates/orbiters-core/src/shares.rs

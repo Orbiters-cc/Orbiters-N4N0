@@ -30,6 +30,7 @@ pub struct State {
     outgoing: Vec<ShareRequest>,
     outgoing_box: bool,
     loaded: Option<(bool, String, u64)>,
+    account: crate::pages::AccountFollow,
     list: Job<anyhow::Result<(shares::Requests, shares::Requests)>>,
     /// The requests asked for again every [`REFRESH_EVERY`] on a thread while the page shows (for an environment and
     /// an account), and what it brought that could not be taken in yet. The page is drawn when the answer differs.
@@ -114,7 +115,13 @@ impl State {
         });
     }
     pub fn poll(&mut self, ctx: &egui::Context, cx: &Cx) {
-        let key = (cx.snap.settings.development, format!("{:?}", cx.snap.account.state), cx.visit);
+        // Who the account is, not how its check goes: offline, the check comes and goes every minute.
+        let (account, answered) = self.account.see(&cx.snap.account.state);
+        let key = (cx.snap.settings.development, account, cx.visit);
+        if answered && self.loaded.as_ref().is_some_and(|old| old.0 == key.0 && old.1 == key.1) {
+            // Orbiters answers again: asked again, nothing that shows is put away.
+            self.loaded = None;
+        }
         if self.loaded.as_ref().is_some_and(|old| old.0 != key.0 || old.1 != key.1) {
             self.list = Job::default();
             self.loaded = None;

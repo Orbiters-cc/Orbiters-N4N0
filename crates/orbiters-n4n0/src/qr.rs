@@ -6,7 +6,7 @@
 use crate::platform::{QrScan, QrSeen};
 use crate::runtime::{N4n0Runtime, Shared};
 use crate::status::NoticeKind;
-use orbiters_n4n0_core::qr::{self, QrPhase, QrView, Recent};
+use orbiters_n4n0_core::qr::{self, Opening, Pace, QrPhase, QrView, Recent};
 use orbiters_i18n::{mark, tr};
 use orbiters_n4n0_core::text::latin;
 use std::sync::Arc;
@@ -28,6 +28,8 @@ struct Run {
     /// It stops at this time unless a link opens before (each one gives it [`qr::SCAN_FOR`] again).
     until: Instant,
     recent: Recent,
+    /// The pages it opened, and when the next may open.
+    opening: Opening,
 }
 
 impl QrRuntime {
@@ -98,10 +100,10 @@ impl crate::N4n0 {
         let late = {
             let mut rt = self.n4n0.lock().unwrap();
             match started {
-                // Stopped (or started again) while it started: this one goes.
-                Ok(scan) if rt.qr.number != number || rt.qr.view.phase == QrPhase::Off => Some(scan),
+                // Stopped (or started again, or it said it failed) while it started: this one goes.
+                Ok(scan) if rt.qr.number != number || !rt.qr.view.scanning() => Some(scan),
                 Ok(scan) => {
-                    rt.qr.run = Some(Run { scan, number, until: Instant::now() + qr::SCAN_FOR, recent: Recent::default() });
+                    rt.qr.run = Some(Run { scan, number, until: Instant::now() + qr::SCAN_FOR, recent: Recent::default(), opening: Opening::default() });
                     None
                 }
                 Err(why) => {
@@ -119,7 +121,11 @@ impl crate::N4n0 {
 
     /// What the scanner `number` saw (on its thread).
     fn qr_seen(self: &Shared, number: u64, seen: QrSeen) {
-        let current = |rt: &N4n0Runtime| rt.qr.run.as_ref().is_some_and(|r| r.number == number);
+        // This scan's word: the one running, or the one starting (its thread may speak before the app has its handle).
+        let current = |rt: &N4n0Runtime| match rt.qr.run.as_ref() {
+            Some(r) => r.number == number,
+            None => rt.qr.number == number && rt.qr.view.scanning(),
+        };
         match seen {
             QrSeen::Camera(true) => {
                 let mut rt = self.n4n0.lock().unwrap();
@@ -145,24 +151,28 @@ impl crate::N4n0 {
                 let link = qr::web_link(&text);
                 let open = {
                     let mut rt = self.n4n0.lock().unwrap();
-                    if !current(&rt) {
-                        return;
-                    }
                     let now = Instant::now();
-                    let run = rt.qr.run.as_mut().expect("current");
+                    let Some(run) = rt.qr.run.as_mut().filter(|r| r.number == number) else { return };
                     match &link {
-                        Ok(link) if run.recent.fresh(link, now) => {
-                            run.until = now + qr::SCAN_FOR;
-                            rt.qr.view.phase = QrPhase::Looking;
-                            rt.qr.view.note.clear();
-                            rt.qr.view.link = Some(link.clone());
-                            rt.qr.view.opened += 1;
-                            // The owner's screen stays open while it finds links.
-                            rt.screen.last_activity = now;
-                            shown(&mut rt);
-                            Some(link.clone())
-                        }
-                        Ok(_) => return,
+                        // Seen lately: opened already (or failing): never again meanwhile.
+                        Ok(link) if run.recent.lately(link, now) => return,
+                        Ok(link) => match run.opening.take(now) {
+                            Pace::Open => {
+                                // Noted before the browser is asked: the same code in the next look waits.
+                                run.recent.opening(link, now);
+                                Some(link.clone())
+                            }
+                            // Not yet: still in view a moment later, it opens then.
+                            Pace::Later => return,
+                            Pace::Enough => {
+                                let scan = rt.qr.stop(QrPhase::Stopped, qr::ENOUGH_NOTE);
+                                shown(&mut rt);
+                                drop(rt);
+                                drop(scan);
+                                self.publish();
+                                return;
+                            }
+                        },
                         Err(why) => {
                             // Said once per kind of code, never what it holds (the screen is seen by everyone).
                             let note = latin(|| tr!("{reason}: a QR code here opens only http or https pages", reason = tr(why)));
@@ -177,7 +187,24 @@ impl crate::N4n0 {
                 };
                 if let Some(link) = open {
                     match self.host.watch(&link) {
-                        Ok(()) => self.notify(NoticeKind::Success, tr!("Opened from a QR code: {link}", link = orbiters_n4n0_core::menu::layout::short_link(&link, 60))),
+                        Ok(()) => {
+                            // Opened: counted, and the scan's time starts again (when it is still this scan).
+                            let mut rt = self.n4n0.lock().unwrap();
+                            let now = Instant::now();
+                            if let Some(run) = rt.qr.run.as_mut().filter(|r| r.number == number) {
+                                run.until = now + qr::SCAN_FOR;
+                                rt.qr.view.phase = QrPhase::Looking;
+                                rt.qr.view.note.clear();
+                                rt.qr.view.link = Some(link.clone());
+                                rt.qr.view.opened += 1;
+                                // The owner's screen stays open while it finds links.
+                                rt.screen.last_activity = now;
+                                shown(&mut rt);
+                            }
+                            drop(rt);
+                            self.notify(NoticeKind::Success, tr!("Opened from a QR code: {link}", link = orbiters_n4n0_core::menu::layout::short_link(&link, 60)));
+                        }
+                        // Not opened: nothing counts it as opened (and the same link waits before it is tried again).
                         Err(e) => self.notify(NoticeKind::Warning, e),
                     }
                 }

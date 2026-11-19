@@ -79,7 +79,7 @@ impl Controller {
     /// Reports the bytes sent, at most every 100 ms (each change goes to every interface).
     fn progress(self: &Shared, id: u64) -> impl FnMut(u64, u64) + Send + 'static {
         let c = self.clone();
-        let mut last = Instant::now() - std::time::Duration::from_secs(1);
+        let mut last = super::shares::ago(std::time::Duration::from_secs(1));
         move |sent, total| {
             if sent < total && last.elapsed().as_millis() < 100 {
                 return;
@@ -192,10 +192,13 @@ impl Controller {
         std::thread::spawn(move || {
             let result = reconstruction::result_dir(&session);
             let edits_now = || orbiters_reconstruct::edit::generation(&result);
-            let state = match web_preview(&session).and_then(|Prepared { files, sky, metadata, generation }| {
+            let state = match web_preview(&session).and_then(|prepared: Prepared| {
                 // The picture only when drawn for these edits (capture_picture), and the edits still those prepared.
                 let picture = crate::capture_picture::jpeg(&session);
-                anyhow::ensure!(edits_now()? == generation, "{}", tr("Its splat edits changed while it was being prepared: upload it again."));
+                anyhow::ensure!(edits_now()? == prepared.generation, "{}", tr("Its splat edits changed while it was being prepared: upload it again."));
+                // Every part (trees, sky, picture) of the one result they were made from, read before this (C1).
+                prepared.ensure_current(&session)?;
+                let Prepared { files, sky, metadata, generation, .. } = prepared;
                 let total = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
                 c.update_if(|s| match s.uploads.iter_mut().find(|u| u.id == id) {
                     Some(u) => {
@@ -228,9 +231,21 @@ impl Controller {
 /// record keeps and the share checks again before anything is shared.
 pub struct Prepared {
     pub files: PreviewFiles,
-    pub sky: Option<PathBuf>,
+    /// A copy of the sky map taken while the result was the one prepared (crate::upload_prep::Pinned).
+    pub sky: Option<crate::upload_prep::Pinned>,
     pub metadata: serde_json::Value,
     pub generation: String,
+    /// The result the parts were made from (CHALLENGER-C1), read when the preparation started and checked when it ended.
+    pub identity: crate::upload_prep::ResultIdentity,
+}
+
+impl Prepared {
+    /// Refuses when the session's result is no longer the one these parts were made from (reconstructed again
+    /// meanwhile): called once everything to send is in hand, so that all of it comes from one result or none is sent.
+    pub fn ensure_current(&self, session: &Path) -> anyhow::Result<()> {
+        anyhow::ensure!(crate::upload_prep::ResultIdentity::read(session) == self.identity, "{}", tr("It was reconstructed again while it was being prepared: share it again."));
+        Ok(())
+    }
 }
 
 /// A session's splats (without those its edits hide or delete: orbiters_reconstruct::edit) as VRChat's splat trees
@@ -259,10 +274,10 @@ pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions)
         let before = orbiters_reconstruct::edit::generation(&result)?;
         let prepared = prepare_once(session, device)?;
         let after = orbiters_reconstruct::edit::generation(&result)?;
-        if prepared.generation == before && after == before {
+        if prepared.generation == before && after == before && crate::upload_prep::ResultIdentity::read(session) == prepared.identity {
             return Ok(prepared);
         }
-        eprintln!("the splat edits of {} changed while it was prepared: again", session.display());
+        eprintln!("the splat edits or the result of {} changed while it was prepared: again", session.display());
     }
     anyhow::bail!("{}", tr("Its splat edits kept changing while it was being prepared: share it again once they are done."))
 }
@@ -272,6 +287,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
     use orbiters_reconstruct::timing::PrepStage;
     let _total = PrepStage::new("total");
     let _preparing = crate::upload_prep::PREPARING.lock().unwrap_or_else(|e| e.into_inner());
+    let identity = crate::upload_prep::ResultIdentity::read(session);
     let result = reconstruction::result_dir(session);
     let key = crate::upload_prep::tree_key();
     let stage = PrepStage::new("cache fingerprint"); // i18n: not shown
@@ -282,9 +298,9 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
     drop(stage);
     if let Some(((files, metadata), generation)) = cached {
         let stage = PrepStage::new("sky");
-        let sky = crate::upload_prep::sky(&result);
+        let sky = crate::upload_prep::sky(&result).map(|p| crate::upload_prep::Pinned::copy(&p)).transpose()?;
         drop(stage);
-        return Ok(Prepared { files, sky, metadata, generation });
+        return Ok(Prepared { files, sky, metadata, generation, identity });
     }
     let stage = PrepStage::new("read result"); // i18n: not shown
     // Without what the 3D view hid or deleted (orbiters_reconstruct::edit): an edit that cannot be applied stops the
@@ -331,7 +347,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
         "capturedAt": recorded,
     });
     let stage = PrepStage::new("sky");
-    let sky = crate::upload_prep::sky(&result);
+    let sky = crate::upload_prep::sky(&result).map(|p| crate::upload_prep::Pinned::copy(&p)).transpose()?;
     drop(stage);
     // Never persist the untuned CPU fallback, or outputs whose sources changed while preparation was running.
     // A full/read-only disk must not prevent the upload; the next share can prepare again.
@@ -345,7 +361,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
         }
         drop(stage);
     }
-    Ok(Prepared { files, sky, metadata, generation })
+    Ok(Prepared { files, sky, metadata, generation, identity })
 }
 
 

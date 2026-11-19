@@ -80,18 +80,24 @@ pub type Connect = Box<dyn FnMut() -> Option<Box<dyn PoseSource>> + Send>;
 /// ("not installed" every 3 s filled the worker's log in twenty minutes).
 pub fn steamvr() -> Connect {
     let mut logged: Option<String> = None;
-    Box::new(move || match SteamVr::connect() {
-        Ok(s) => {
-            logged = None;
-            Some(Box::new(s) as Box<dyn PoseSource>)
+    Box::new(move || {
+        // No server, no connection: SteamVR's client is not loaded to learn that (REL-13). Asked as often as before.
+        if !vr::server_running() {
+            return None;
         }
-        Err(e) => {
-            let why = e.to_string();
-            if !e.not_running() && logged.as_deref() != Some(why.as_str()) {
-                eprintln!("SteamVR: {why}");
-                logged = Some(why);
+        match SteamVr::connect() {
+            Ok(s) => {
+                logged = None;
+                Some(Box::new(s) as Box<dyn PoseSource>)
             }
-            None
+            Err(e) => {
+                let why = e.to_string();
+                if !e.not_running() && logged.as_deref() != Some(why.as_str()) {
+                    eprintln!("SteamVR: {why}");
+                    logged = Some(why);
+                }
+                None
+            }
         }
     })
 }

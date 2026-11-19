@@ -44,12 +44,22 @@ fn how(o: &Owned) -> &'static str {
     }
 }
 
+fn ask(ctx: &egui::Context, server: Server) -> Job<anyhow::Result<Vec<Owned>>> {
+    Job::spawn(ctx, move || {
+        let Some(account) = orbiters_core::account::read(server) else { return Ok(Vec::new()) };
+        Api::new(server).owned_assets(&account.token)
+    })
+}
+
 #[derive(Default)]
 pub struct State {
     assets: Vec<Owned>,
     job: Job<anyhow::Result<Vec<Owned>>>,
     /// What was asked: the environment and the account.
     asked: Option<(bool, String)>,
+    account: crate::pages::AccountFollow,
+    /// Orbiters came to answer for the account since the last look: what failed is asked again.
+    answered: bool,
     error: Option<String>,
     changed: bool,
     stand_ins: Vec<Picture>,
@@ -127,17 +137,22 @@ impl State {
     pub fn poll(&mut self, ctx: &egui::Context, cx: &Cx, wanted: bool) -> bool {
         let development = cx.snap.settings.development;
         let server = if development { Server::Development } else { Server::Production };
+        // Who the account is, not how its check goes: offline, the check comes and goes every minute.
+        let (account, answered) = self.account.see(&cx.snap.account.state);
+        self.answered |= answered;
         if !self.fixture && wanted {
-            let key = (development, format!("{:?}", cx.snap.account.state));
+            let key = (development, account);
             if self.asked.as_ref() != Some(&key) {
                 self.asked = Some(key);
+                self.answered = false;
                 self.error = None;
                 self.assets.clear();
                 self.changed = true;
-                self.job = Job::spawn(ctx, move || {
-                    let Some(account) = orbiters_core::account::read(server) else { return Ok(Vec::new()) };
-                    Api::new(server).owned_assets(&account.token)
-                });
+                self.job = ask(ctx, server);
+            } else if std::mem::take(&mut self.answered) && (self.assets.is_empty() || self.error.is_some()) && !self.job.running() {
+                // Orbiters answers again: what could not be read is asked again; what shows stays.
+                self.error = None;
+                self.job = ask(ctx, server);
             }
         }
         if let Some(r) = self.job.take() {

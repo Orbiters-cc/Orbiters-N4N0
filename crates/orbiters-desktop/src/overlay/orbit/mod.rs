@@ -1360,7 +1360,8 @@ impl Panels {
             self.stop_talking();
             self.facts.pointed = None;
             self.facts.sheet = None;
-            self.release();
+            // Whatever was held ends, done by nobody: a menu going away is no let-go (OVL2-17).
+            self.cancel();
             self.stage.epoch = self.stage.epoch.wrapping_add(1);
             self.stage.painter.cancel_page(self.stage.epoch);
             self.stage.painter.retain_parts(&[]);
@@ -3238,7 +3239,7 @@ impl Panels {
                     panel.dirty = true;
                 }
                 out.hide = self.hidden;
-                self.release();
+                self.cancel();
             }
             // Asked for, never by itself: it waits for VRChat to have put it on and for the kit to be seen (camera-core).
             Action::DemoAvatar => {
@@ -3291,6 +3292,53 @@ impl Panels {
     }
 
     /// The pointer's button went up.
+    /// Whatever is held ends without being let go, because its menu went away (a lost headset pose, the walking stick, the
+    /// dashboard): nothing is done, nothing is saved. A press in a list is not run later, a held slider is not saved where it
+    /// was, a colour being chosen goes back to the saved one, the page under a hold is not clicked (OVL2-17: `release` ran
+    /// all of these, so an invite could be sent by walking).
+    pub fn cancel(&mut self) {
+        if let Some(web) = self.web.as_mut() {
+            web.cancel();
+        }
+        self.booster_held = None;
+        self.smoothing_held = None;
+        if self.hue_held.take().is_some() {
+            let saved = self.backend.view().settings.orbit;
+            self.facts.orbit = saved;
+            panels::set_style(&saved);
+            self.paint_all_again();
+        }
+        if self.turning.take().is_some() {
+            if let Some(view) = &self.sheet_view {
+                view.hold(false);
+            }
+        }
+        self.seeking = None;
+        self.volume_held = None;
+        self.pressed_late = None;
+        self.pressed_facts = None;
+        if let Some(drag) = self.drag.take() {
+            // A list being dragged comes to rest as when let go, with no throw.
+            if drag.moved && !drag.bar {
+                if let Some(sheet) = self.facts.sheet {
+                    let (at, max) = (self.facts.gallery_scroll, panels::max_scroll(sheet, &self.facts));
+                    if at >= 0.0 && at <= max {
+                        self.gallery_to = panels::snap_scroll(sheet, &self.facts, at);
+                    }
+                }
+            }
+        }
+        for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+            if panel.pressed.take().is_some() {
+                panel.dirty = true;
+            }
+        }
+        if let Some(worlds) = self.stage.worlds.as_mut() {
+            worlds.cancel_alone();
+        }
+        self.stage.host.dirty = true;
+    }
+
     pub fn release(&mut self) {
         if let Some(web) = self.web.as_mut() {
             web.release();
@@ -3485,12 +3533,17 @@ impl Panels {
             if let Some(panel) = self.list.iter_mut().find(|p| p.zone == frame.zone && p.token == frame.token) {
                 if panel.px[0] as usize * panel.px[1] as usize * 4 != frame.pixels.len() { continue; }
                 let first = !panel.painted;
+                // The same picture as the one shown (the worker found no damage and handed back what it had): not uploaded
+                // to SteamVR again (OVL2-20: every change of any fact re-uploaded every part's whole texture).
+                let unchanged = same_picture(panel.painted, panel.shown_pixels.as_ref(), &frame.pixels);
                 panel.shown_pixels = Some(frame.pixels); panel.items = frame.items; panel.mask = frame.mask;
                 panel.hover = panel.pointer.and_then(|p| panels::hit(&panel.items, p));
                 panel.dirty |= first || panel.hover != frame.hover || panel.pressed != frame.pressed;
                 panel.canvas.ran = true;
                 panel.painted = true; panel.again = false; panel.displayed = Some(frame.facts);
-                show(panel, [0, 0, panel.px[0], panel.px[1]]);
+                if !unchanged {
+                    show(panel, [0, 0, panel.px[0], panel.px[1]]);
+                }
             }
         }
         for panel in &mut self.list {
@@ -3992,10 +4045,15 @@ fn type_hint(p: &egui::Painter, playing: Option<&str>) {
     }
 }
 
+/// Whether a part's new picture is the very one already shown on it (the same pixels, handed back unchanged).
+fn same_picture(painted: bool, shown: Option<&page_painter::Pixels>, new: &page_painter::Pixels) -> bool {
+    painted && shown.is_some_and(|p| std::sync::Arc::ptr_eq(p, new))
+}
+
 impl Drop for Panels {
     fn drop(&mut self) {
         self.stop_talking();
-        self.release();
+        self.cancel();
         if self.reported.is_some_and(|r| r.0) {
             self.backend.n4n0(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
         }

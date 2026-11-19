@@ -115,6 +115,16 @@ impl RealGame {
 }
 
 impl Game for RealGame {
+    fn runs(&self, pid: u32) -> Option<bool> {
+        Some(super::bridge_side::vrchat_pids().contains(&pid))
+    }
+
+    fn launch_args(&self) -> Option<Vec<String>> {
+        let ctl = self.ctl().ok()?;
+        let log = ctl.view().vrchat.world.log_file.clone()?;
+        crate::bridge::sessions::complete_args(&read_head(&log, LOG_HEAD))
+    }
+
     fn seen(&self) -> Seen {
         let Ok(ctl) = self.ctl() else { return Seen::default() };
         let snap = ctl.view();
@@ -274,7 +284,7 @@ impl Game for RealGame {
         self.ctl()?.take_3d_picture_of(length, mode).map_err(|e| {
             let said = e.to_string();
             if said.contains(orbiters_n4n0::platform::CAMERA_CLOSED) {
-                Failure::new("camera_closed", "VRChat's camera is not open.", "press esc, screenshot, click the camera's icon with mouse, press esc.") // i18n: not shown
+                Failure::new("camera_closed", "VRChat's camera is not open.", "press esc, screenshot, click the camera icon in the menu's bottom row, screenshot, click Stream Camera.") // i18n: not shown
             } else {
                 Failure::new("picture_did_not_start", said, "Call get_state and try again; if it stays, tell the person.") // i18n: not shown
             }
@@ -369,6 +379,8 @@ impl crate::bridge::projects::Host for RealProjectsHost {
                 "splats": s.reconstruction.as_ref().map(|r| r.gaussians),
             })).collect::<Vec<_>>(),
             "pictures": world.shots.len(),
+            // The pictures add_pictures may share: these only.
+            "picture_files": world.shots.iter().take(500).map(|s| s.path.clone()).collect::<Vec<_>>(),
             "pictures_folder": world.shots.first().and_then(|s| s.path.parent().map(Path::to_path_buf)),
         })
     }

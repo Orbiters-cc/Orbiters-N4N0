@@ -10,7 +10,7 @@ use orbiters_contracts::world_feedback::{self as contract, Action as Line, Refus
 use orbiters_core::account::Api;
 use orbiters_core::vrchat_log::{LogEvent, LogWatcher};
 use orbiters_i18n::{mark, tr, tr_latin};
-use orbiters_core::world_feedback::{client_id, Action, Client, Failure, Known, Queue, Seen, Set};
+use orbiters_core::world_feedback::{client_id, Action, Client, Failure, Known, Queue, Seen, Set, Stamp};
 use orbiters_n4n0_core::feedback::{CommentRow, FeedbackAsk, FeedbackView, LabelCount, Subject, Why, WorldFeedback, SUBJECTS_MAX};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -64,6 +64,10 @@ pub(super) struct WorldFeedbackRuntime {
     /// Why the local address cannot be served (another program has the port).
     pub(super) port_note: Option<String>,
     sent: Option<FeedbackView>,
+    /// Bumped when the environment changes: an answer to a call made before is the other server's.
+    scope: u64,
+    /// The server and account of the moment: what is queued is for them, and only what is for them is sent.
+    stamp: Stamp,
 }
 
 impl Default for WorldFeedbackRuntime {
@@ -83,9 +87,14 @@ impl Default for WorldFeedbackRuntime {
             instances: (Vec::new(), None),
             port_note: None,
             sent: None,
+            scope: 0,
+            stamp: Stamp::default(),
         }
     }
 }
+
+/// What waits for an account whose credential Orbiters refused, before it is tried again.
+const SIGNED_OUT_PAUSE: Duration = Duration::from_secs(600);
 
 /// Whether the log's world is one whose lines count (the N4N0 world, or any in the Development environment).
 fn accepted(world: Option<&str>, development: bool) -> bool {
@@ -166,7 +175,7 @@ impl WorldFeedbackRuntime {
                 return;
             }
         }
-        self.queue.push(world, action, now_ms());
+        self.queue.push_to(world, action, now_ms(), self.stamp.clone());
         self.wanted.insert(world.to_string(), Instant::now());
         self.save();
     }
@@ -288,7 +297,13 @@ impl WorldFeedbackRuntime {
     fn next_call(&mut self) -> Option<Call> {
         let now = now_ms();
         self.wanted.retain(|_, at| at.elapsed() < WANTED_FOR);
-        if let Some(i) = self.queue.due(now) {
+        // What waits for another server or account is never sent here; it leaves after a day.
+        let before = self.queue.items.len();
+        self.queue.expire(now);
+        if self.queue.items.len() != before {
+            self.save();
+        }
+        if let Some(i) = self.queue.due_for(now, &self.stamp) {
             let p = &self.queue.items[i];
             return Some(Call::Send { world: p.world.clone(), action: p.action.clone(), since: p.since });
         }
@@ -299,13 +314,38 @@ impl WorldFeedbackRuntime {
         Some(Call::Read { world })
     }
 
+    /// The other server's answers are forgotten, and those still coming are not taken.
+    fn environment_changed(&mut self) {
+        self.known.clear();
+        self.menu_errors.clear();
+        self.sent = None;
+        self.scope = self.scope.wrapping_add(1);
+    }
+
     /// What Orbiters answered to `call`.
     fn answered(&mut self, call: &Call, result: Result<Option<orbiters_core::world_feedback::ServerView>, Failure>) {
+        self.answered_in(call, result, self.scope);
+    }
+
+    /// [`Self::answered`] for a call made in `scope`: when the environment changed since, the answer is the other
+    /// server's, and only what it did to the queue counts (a sent action is not sent again); what it says of the world
+    /// is not shown.
+    fn answered_in(&mut self, call: &Call, result: Result<Option<orbiters_core::world_feedback::ServerView>, Failure>, scope: u64) {
         let now = now_ms();
         let index = |q: &Queue| match call {
             Call::Send { world, action, since } => q.items.iter().position(|p| &p.world == world && &p.action == action && p.since == *since),
             Call::Read { .. } => None,
         };
+        if scope != self.scope {
+            if let Some(i) = index(&self.queue) {
+                match result {
+                    Ok(_) | Err(Failure::Refused { .. }) => drop(self.queue.items.remove(i)),
+                    Err(_) => self.queue.retry(i, now),
+                }
+                self.save();
+            }
+            return;
+        }
         match (call, result) {
             (Call::Read { world }, Ok(Some(view))) | (Call::Send { world, .. }, Ok(Some(view))) => {
                 self.known.insert(world.clone(), Known { view: Some(view), read_at: now });
@@ -338,6 +378,16 @@ impl WorldFeedbackRuntime {
                 let code = code.map_or("refused", |c| c.code()).to_string();
                 self.world.error = Some((self.world.seen, code, message.clone()));
                 self.menu_errors.insert(world.clone(), message);
+            }
+            (Call::Send { .. }, Err(Failure::SignedOut)) => {
+                // The credential is refused: nothing of this account goes for a while (the account is asked about again
+                // meanwhile), rather than each action again every minute for a day.
+                let parked = now + SIGNED_OUT_PAUSE.as_millis() as u64;
+                let stamp = self.stamp.clone();
+                for p in self.queue.items.iter_mut().filter(|p| p.to.as_ref().is_some_and(|to| to.sends_as(&stamp))) {
+                    p.due = p.due.max(parked);
+                }
+                self.save();
             }
             (Call::Send { .. }, Err(_)) => {
                 if let Some(i) = index(&self.queue) {
@@ -411,7 +461,7 @@ fn perform(call: &Call, api: Option<&(Api, String)>) -> Result<Option<orbiters_c
         Call::Read { world } => client.read(world).map(Some),
         Call::Send { .. } if api.is_none() => Err(Failure::SignedOut),
         Call::Send { world, action, .. } => match action {
-            Action::Set(set) => client.set(world, set).map(Some),
+            Action::Set(set) => client.set(world, set),
             Action::Comment { text, client_id } => client.comment(world, text, client_id).map(|_| None),
             Action::Uncomment { comment } => client.uncomment(*comment).map(|_| None),
             Action::Report { comment, reason } => client.report(*comment, reason.as_deref()).map(|_| None),
@@ -473,8 +523,10 @@ impl super::Controller {
 
     /// What one of N4N0's menus asked (controller/n4n0.rs: `Host::world_feedback`).
     pub(super) fn world_feedback_ask(self: &Shared, ask: FeedbackAsk) {
+        let (_, stamp) = self.account_api_for();
         {
             let mut rt = self.world_feedback.lock().unwrap();
+            rt.stamp = stamp;
             match menu_action(&ask) {
                 Some((world, action)) => {
                     let world = world.to_ascii_lowercase();
@@ -510,16 +562,15 @@ impl super::Controller {
 
     /// The Development environment was switched: what Orbiters answered for worlds is the other server's, so it is read again.
     pub(super) fn world_feedback_environment_changed(&self) {
-        let mut rt = self.world_feedback.lock().unwrap();
-        rt.known.clear();
-        rt.menu_errors.clear();
-        rt.sent = None;
+        self.world_feedback.lock().unwrap().environment_changed();
     }
 
     fn feedback_follow(self: &Shared) -> bool {
         let development = self.settings().development;
-        let signed_in = self.feedback_api().is_some();
-        self.world_feedback.lock().unwrap().follow(development, signed_in)
+        let (api, stamp) = self.account_api_for();
+        let mut rt = self.world_feedback.lock().unwrap();
+        rt.stamp = stamp;
+        rt.follow(development, api.is_some())
     }
 }
 
@@ -576,12 +627,17 @@ pub(super) fn spawn(ctl: Shared) {
     let c = ctl.clone();
     let _ = std::thread::Builder::new().name("world-feedback-send".into()).spawn(move || {
         while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
-            let call = c.world_feedback.lock().unwrap().next_call();
+            // The account and server read once: what is handed out is for them, and goes with them.
+            let (api, stamp) = c.account_api_for();
+            let (call, scope) = {
+                let mut rt = c.world_feedback.lock().unwrap();
+                rt.stamp = stamp;
+                (rt.next_call(), rt.scope)
+            };
             let Some(call) = call else {
                 std::thread::sleep(Duration::from_millis(300));
                 continue;
             };
-            let api = c.feedback_api();
             let result = perform(&call, api.as_ref());
             if matches!(result, Err(Failure::SignedOut)) && api.is_none() {
                 // Nothing to send with: kept until an account is signed in.
@@ -592,7 +648,7 @@ pub(super) fn spawn(ctl: Shared) {
                     }
                 }
             } else {
-                c.world_feedback.lock().unwrap().answered(&call, result);
+                c.world_feedback.lock().unwrap().answered_in(&call, result, scope);
             }
             c.feedback_publish();
         }
@@ -836,6 +892,38 @@ mod tests {
         let view = rt.view(None, true);
         assert_eq!(view.worlds.len(), ASKED_MAX);
         assert_eq!(view.worlds[0].world, format!("wrld_4432ea9b-729c-46e3-8eaf-{:012x}", ASKED_MAX + 1));
+        let _ = std::fs::remove_file(&rt.queue_path);
+    }
+
+    /// CORE-C2: a read the server of before an environment switch answers late shows nothing of that server in the
+    /// new one; an action it took is not sent again.
+    #[test]
+    fn an_answer_from_before_an_environment_switch_is_not_shown() {
+        let mut rt = WorldFeedbackRuntime {
+            queue: Queue::default(),
+            queue_path: std::env::temp_dir().join(format!("orbiters-feedback-switch-{}.json", uuid::Uuid::new_v4())),
+            instances: (Vec::new(), Some(Instant::now())),
+            ..Default::default()
+        };
+        rt.asked(WORLD);
+        rt.push(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }));
+        let read = Call::Read { world: WORLD.into() };
+        let p = rt.queue.items[0].clone();
+        let send = Call::Send { world: p.world.clone(), action: p.action.clone(), since: p.since };
+        let before = rt.scope;
+        rt.environment_changed();
+        let theirs = orbiters_core::world_feedback::ServerView { world_id: WORLD.into(), likes: 41, ..Default::default() };
+        rt.answered_in(&read, Ok(Some(theirs.clone())), before);
+        rt.answered_in(&send, Ok(Some(theirs.clone())), before);
+        assert!(rt.known.get(WORLD).is_none_or(|k| k.view.is_none()), "the other server's view is not shown");
+        assert!(rt.queue.items.is_empty(), "taken by the server it went to: not sent again");
+        // Back to the first environment (A→B→A): an answer from before both switches is still not taken.
+        rt.environment_changed();
+        rt.answered_in(&read, Ok(Some(theirs.clone())), before);
+        assert!(rt.known.get(WORLD).is_none_or(|k| k.view.is_none()));
+        // An answer of this environment is.
+        rt.answered_in(&read, Ok(Some(theirs)), rt.scope);
+        assert_eq!(rt.known[WORLD].view.as_ref().map(|v| v.likes), Some(41));
         let _ = std::fs::remove_file(&rt.queue_path);
     }
 

@@ -108,15 +108,18 @@ pub fn gltf(g: &Gaussians) -> anyhow::Result<Vec<u8>> {
         let offset = bin.len();
         let mut min = vec![f32::INFINITY; width];
         let mut max = vec![f32::NEG_INFINITY; width];
+        bin.reserve(ids.len() * width * 4);
         for &i in &ids {
-            let values: Vec<f32> = match a {
-                0 => Frame::Gltf.position(g.means[i]).to_vec(),
-                1 => Frame::Gltf.rotation(g.rotations[i]).to_vec(),
-                2 => g.log_scales[i].map(f32::exp).to_vec(),
-                3 => vec![sigmoid(g.opacity_logits[i])],
-                _ => sh0(g.colors[i]).to_vec(),
-            };
-            for (k, v) in values.into_iter().enumerate() {
+            // A fixed array a splat, of which the attribute's first `width` values (RECONSTRUCT-14l: no vector each).
+            let mut values = [0.0f32; 4];
+            match a {
+                0 => values[..3].copy_from_slice(&Frame::Gltf.position(g.means[i])),
+                1 => values.copy_from_slice(&Frame::Gltf.rotation(g.rotations[i])),
+                2 => values[..3].copy_from_slice(&g.log_scales[i].map(f32::exp)),
+                3 => values[0] = sigmoid(g.opacity_logits[i]),
+                _ => values[..3].copy_from_slice(&sh0(g.colors[i])),
+            }
+            for (k, &v) in values[..width].iter().enumerate() {
                 min[k] = min[k].min(v);
                 max[k] = max[k].max(v);
                 bin.extend(v.to_le_bytes());
@@ -394,6 +397,34 @@ pub fn spz_cli(args: &[String]) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::gaussians::rotation_matrix;
+
+    /// RECONSTRUCT-14l: the GLB's values are byte for byte those of the per-splat vectors it used to build.
+    #[test]
+    fn the_glb_holds_the_same_bytes_without_a_vector_a_splat() {
+        let mut g = Gaussians::default();
+        for i in 0..40 {
+            let f = i as f32;
+            g.push([f * 0.3, -f, 2.0 + f * 0.01], [-2.0 + f * 0.01, -3.0, -1.5], [0.9, 0.1 * f, -0.3, 0.2], f * 0.1 - 2.0, [0.2, 0.01 * f, 0.9]);
+        }
+        let ids = exported(&g).unwrap();
+        let mut expected = Vec::new();
+        for a in 0..5 {
+            for &i in &ids {
+                let values: Vec<f32> = match a {
+                    0 => Frame::Gltf.position(g.means[i]).to_vec(),
+                    1 => Frame::Gltf.rotation(g.rotations[i]).to_vec(),
+                    2 => g.log_scales[i].map(f32::exp).to_vec(),
+                    3 => vec![sigmoid(g.opacity_logits[i])],
+                    _ => sh0(g.colors[i]).to_vec(),
+                };
+                for v in values {
+                    expected.extend(v.to_le_bytes());
+                }
+            }
+        }
+        let glb = gltf(&g).unwrap();
+        assert!(glb.windows(expected.len()).any(|w| w == expected.as_slice()), "the binary chunk changed");
+    }
     use std::collections::HashMap;
 
     fn sample() -> Gaussians {

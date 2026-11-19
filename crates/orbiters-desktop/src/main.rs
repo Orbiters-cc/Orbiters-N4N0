@@ -52,6 +52,7 @@ mod tray;
 mod upload_prep;
 mod usage;
 mod views;
+mod wake_offer;
 mod worlds;
 mod window;
 mod words;

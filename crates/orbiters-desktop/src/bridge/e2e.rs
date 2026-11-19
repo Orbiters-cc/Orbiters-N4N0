@@ -553,6 +553,63 @@ fn keyboard_and_mouse_go_only_into_the_foreground_game_window() {
 }
 
 #[test]
+fn only_the_person_s_stop_disowns_the_main_vrchat() {
+    // BRIDGE-5: a lapse of Orbiters' grant, a new token or a server change closed the bridge as the person's Stop did: the
+    // VRChat it started became "the person's" and nothing could close it.
+    let (game, bridge, _server, client) = lab("wind-down");
+    arrive(&client);
+    let port = client.port;
+    let walking = std::thread::spawn(move || Client { port }.tool("walk", json!({ "direction": "forward", "seconds": 8 })));
+    assert!(until(Duration::from_secs(3), || game.last_value("/input/MoveForward") == Some(1.0)));
+    bridge.wind_down("Orbiters no longer says this account has the bridge: it closed.");
+    let ended = walking.join().unwrap().unwrap_err();
+    assert_eq!(ended["code"], "bridge_closed", "{ended}");
+    assert_eq!(game.last_value("/input/MoveForward"), Some(0.0), "released");
+    // Still the bridge's: it can go on with it.
+    client.tool("walk", json!({ "direction": "forward", "seconds": 0.2 })).expect("its own VRChat still");
+    // The person's Stop: theirs from then on.
+    bridge.take_over("Stopped from Settings: control is back with the person.");
+    client.fails("walk", json!({ "direction": "forward", "seconds": 0.2 }), "not_started_by_bridge");
+}
+
+#[test]
+fn stop_gives_the_app_back_from_a_side_picture_at_once() {
+    // BRIDGE-4: the lend was given back only by the bridge's ticks, which stop with it.
+    let (game, bridge, _server, _client) = lab("give-back");
+    game.set_behaviour(|b| b.lent_away = true);
+    bridge.take_over("The person pressed Stop.");
+    assert!(!super::game::Game::lent_away(game.as_ref()), "the app is the person's again");
+}
+
+#[test]
+fn the_person_starting_their_own_vrchat_closes_the_bridge_s_not_theirs() {
+    // BRIDGE-15: the app follows the person's new VRChat; the bridge's own stayed open on their account, "crashed" and nobody's.
+    let (game, _bridge, _server, client) = lab("person-beside");
+    arrive(&client);
+    game.person_starts_beside();
+    assert!(until(PATIENCE, || game.closes() >= 1), "the bridge's own window is asked to close");
+    let event = client.state()["bridge"]["last_event"].as_str().unwrap_or_default().to_string();
+    assert!(event.contains("started their own VRChat") && !event.contains("crashed"), "{event}");
+    client.fails("walk", json!({ "direction": "forward", "seconds": 1 }), "not_started_by_bridge");
+}
+
+#[test]
+fn a_click_is_called_off_when_the_person_comes_back_during_its_hover() {
+    // BRIDGE-2: the press came 500 ms after the pointer was placed, without looking at the person again.
+    let (game, bridge, _server, client) = lab("click-hover");
+    arrive(&client);
+    game.set_foreground(true);
+    let person = bridge.clone();
+    let back = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        person.heard(Heard::PersonInput);
+    });
+    client.fails("mouse", json!({ "action": "click", "x": 12, "y": 34 }), "paused_by_person");
+    back.join().unwrap();
+    assert!(!game.injected().iter().any(|i| matches!(i, Input::Button { .. })), "no press: {:?}", game.injected());
+}
+
+#[test]
 fn a_new_start_is_brought_forward_when_nobody_is_at_the_computer_and_says_how_that_went() {
     let (game, bridge, _server, client) = lab("forward");
     // Windows says no: told, and the keys stay refused.
@@ -783,6 +840,39 @@ fn a_vrchat_the_person_started_is_left_alone() {
     }
     assert!(game.instances().is_empty() && game.launches().is_empty() && game.heard().is_empty());
     assert_eq!(game.closes(), 0);
+}
+
+#[test]
+fn a_vrchat_the_person_starts_while_the_bridge_s_start_hangs_is_never_taken_nor_closed() {
+    // N4N0-8: the bridge's launch does not come up, and the person starts their own VRChat meanwhile: a new process
+    // proves nothing. Theirs lands at their home, not in the instance made for the start: it is let go, never closed.
+    let (game, _bridge, _server, client) = lab("person-starts");
+    game.set_behaviour(|b| b.launch_hangs = true);
+    let person = game.clone();
+    let theirs = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        person.set_foreign_game(Some("77777~region(eu)"));
+    });
+    let failure = client.fails("go_to_world", json!({ "world_id": LAB_WORLD_A }), "start_timeout");
+    theirs.join().unwrap();
+    assert!(failure["message"].as_str().unwrap().contains("left it alone"), "{failure}");
+    assert_eq!(game.closes(), 0);
+    let state = client.state();
+    assert_eq!(state["vrchat"]["started_by_bridge"], false, "{state}");
+    for (tool, args) in [("close_vrchat", json!({})), ("walk", json!({ "direction": "forward", "seconds": 1 })), ("screenshot", json!({}))] {
+        client.fails(tool, args, "not_started_by_bridge");
+    }
+    assert!(!game.heard().iter().any(|(h, _)| h.address.starts_with("/input/")), "not one input went to it");
+}
+
+#[test]
+fn the_bridge_s_own_start_that_lands_elsewhere_is_still_closed() {
+    // N4N0-8: its own VRChat is told by its command line (the start's launch link), so leaving a public instance at once
+    // stays as it was.
+    let (game, _bridge, _server, client) = lab("own-elsewhere");
+    game.set_behaviour(|b| b.land_in = Some("12345~region(eu)".to_string()));
+    client.fails("go_to_world", json!({ "world_id": LAB_WORLD_A }), "landed_elsewhere");
+    assert!(game.closes() >= 1);
 }
 
 #[test]
@@ -1148,7 +1238,9 @@ fn a_click_rests_on_its_place_before_it_presses() {
     client.tool("mouse", json!({ "action": "click", "x": 20, "y": 30 })).unwrap();
     let sent = game.injected();
     assert!(matches!(sent[0], Input::MoveTo { x: 20, y: 30 }), "{sent:?}");
-    assert!(matches!(sent[1], Input::Button { down: true, .. }), "{sent:?}");
+    // After the rest, the pointer is put back there with the press, in one batch (BRIDGE-2).
+    assert!(matches!(sent[1], Input::MoveTo { x: 20, y: 30 }), "{sent:?}");
+    assert!(matches!(sent[2], Input::Button { down: true, .. }), "{sent:?}");
 }
 
 #[test]

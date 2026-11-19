@@ -73,6 +73,10 @@ impl Remote {
         let server = if self.development { "dev" } else { "prod" };
         let name = match self.kind {
             RemoteKind::Shared => format!("shared-{server}-{}", self.id),
+            // An asset's showcase pictures are numbered apart from the community galleries' (another route on
+            // Orbiters): the asset is in the name, or two pictures of one number opened as each other. A community
+            // gallery's keeps its old name (what is downloaded is not fetched again).
+            RemoteKind::Gallery if self.asset != 0 => format!("gallery-{server}-{}-{}", self.asset, self.id),
             RemoteKind::Gallery => format!("gallery-{server}-{}", self.id),
             RemoteKind::Link => {
                 // Its link, hashed (a link is the picture's only name).
@@ -661,6 +665,11 @@ mod tests {
         // An asset's picture by its link alone: named after the link, one file per link.
         let link = |url: &str| Source::remote(Remote { kind: RemoteKind::Link, url: url.into(), ..Default::default() }).picture;
         assert_ne!(link("https://orbiters.cc/a.webp"), link("https://orbiters.cc/b.webp"));
+        // Night PG2-7: a community gallery's picture 12 and an asset's showcase picture 12 are two files.
+        let gallery = |asset: u64| Remote { kind: RemoteKind::Gallery, id: 12, asset, ..Default::default() }.file();
+        assert_ne!(gallery(0), gallery(5));
+        assert_ne!(gallery(5), gallery(6));
+        assert!(gallery(0).ends_with("gallery-prod-12.img"), "a community gallery's keeps its name");
         assert!(link("https://orbiters.cc/a.webp").file_name().unwrap().to_string_lossy().starts_with("link-"));
                 // A shared picture with no name nor world is named by its id.
         let plain = Source::remote(Remote { kind: RemoteKind::Shared, id: 7, ..Default::default() });

@@ -370,8 +370,9 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
     // Serialize mutations across this app's windows. VCC's database has its own upstream shared LiteDB mutex.
     let io = DefaultEnvironmentIo::new(root.into());
     let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Packages").await?;
-    let (_, packages) = collection(root, true).await?;
-    let client = http()?;
+    let (settings, packages) = collection(root, true).await?;
+    // A private repository's headers go to its own origin only, not to wherever its listing puts an archive (AS-11).
+    let client = crate::vpm_http::Client::new(http()?, &settings)?;
     let mut project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
     if let Change::Plan { install, remove, prerelease } = &action {
         return apply_plan(&io, &client, &packages, path, project, install, remove, *prerelease).await;
@@ -420,7 +421,7 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
 #[allow(clippy::too_many_arguments)]
 async fn apply_plan(
     io: &DefaultEnvironmentIo,
-    client: &reqwest::Client,
+    client: &crate::vpm_http::Client,
     packages: &EnabledCollection,
     path: &Path,
     project: UnityProject,
@@ -430,6 +431,19 @@ async fn apply_plan(
 ) -> anyhow::Result<()> {
     let manifest = path.join("Packages/vpm-manifest.json");
     let backup = std::fs::read(&manifest)?;
+    // Every version asked for is looked up before anything changes: one gone from the repositories changes nothing.
+    let mut requested = vec![];
+    for (name, version) in install {
+        let v: vrc_get_vpm::version::Version = version.parse()?;
+        requested.push(
+            packages
+                .find_package_by_name(name, VersionSelector::specific_version(&v))
+                .with_context(|| tr!("{name} {version} is no longer in the enabled repositories.", name = name, version = version))?,
+        );
+    }
+    // The folders the plan removes or replaces, kept as they are (local edits, bytes no repository has) until the whole
+    // plan has gone through (PROJECTS-35): a failure puts these exact folders back.
+    let kept = Kept::take(path, remove.iter().chain(install.iter().map(|(n, _)| n)))?;
     let installer = PackageInstaller::new(io, Some(client));
     let result: anyhow::Result<()> = async {
         let mut project = project;
@@ -439,15 +453,6 @@ async fn apply_plan(
             project.apply_pending_changes(&installer, changes).await?;
             project.save().await?;
             project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
-        }
-        let mut requested = vec![];
-        for (name, version) in install {
-            let v: vrc_get_vpm::version::Version = version.parse()?;
-            requested.push(
-                packages
-                    .find_package_by_name(name, VersionSelector::specific_version(&v))
-                    .with_context(|| tr!("{name} {version} is no longer in the enabled repositories.", name = name, version = version))?,
-            );
         }
         let changes = project.add_package_request(packages, &requested, vrc_get_vpm::unity_project::AddPackageOperation::AutoDetected, prerelease).await?;
         if !changes.conflicts().is_empty() {
@@ -464,21 +469,149 @@ async fn apply_plan(
         Ok(())
     }
     .await;
-    if let Err(e) = result {
-        // Rolled back: the manifest as it was, its locked packages restored.
-        std::fs::write(&manifest, &backup)?;
-        let restored: anyhow::Result<()> = async {
-            let mut project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
-            let changes = project.resolve_request(packages).await?;
-            project.apply_pending_changes(&installer, changes).await?;
-            project.save().await?;
-            Ok(())
+    let Err(e) = result else {
+        kept.discard();
+        return Ok(());
+    };
+    // Rolled back: the manifest as it was (through a file beside it: a full disk, the likely cause of the failure, must
+    // not leave it empty), whatever is missing restored, then the kept folders over what the resolver put there: the
+    // exact bytes the project had win.
+    if let Err(r) = replace_bytes(&manifest, &backup) {
+        return Err(e.context(tr!("The package list could not be put back ({why}): use Restore", why = r)));
+    }
+    let restored: anyhow::Result<()> = async {
+        let mut project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
+        let changes = project.resolve_request(packages).await?;
+        project.apply_pending_changes(&installer, changes).await?;
+        project.save().await?;
+        Ok(())
+    }
+    .await;
+    if let Err(r) = kept.put_back() {
+        return Err(e.context(r));
+    }
+    Err(match restored {
+        Ok(()) => e.context(tr("Nothing was changed: the project's packages are as they were")),
+        Err(r) => e.context(tr!("The package list was put back, but restoring its packages failed ({why}): use Restore", why = format!("{r:#}"))),
+    })
+}
+
+/// `bytes` written over `path` through a file beside it, renamed over it: never a half-written file.
+fn replace_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("json.orbiters-{}", uuid::Uuid::new_v4().simple()));
+    let written = (|| {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// Exact copies of a project's package folders, in a folder of the project this plan made for them.
+struct Kept {
+    dir: PathBuf,
+    packages: PathBuf,
+    names: Vec<String>,
+}
+impl Kept {
+    /// Copies of `names`' folders in `project`'s Packages (those that are there, as real folders). Fails, changing
+    /// nothing in Packages, when one cannot be copied.
+    fn take<'a>(project: &Path, names: impl Iterator<Item = &'a String>) -> anyhow::Result<Kept> {
+        let packages = project.join("Packages");
+        let dir = project.join(format!(".orbiters-plan-{}", uuid::Uuid::new_v4().simple()));
+        let mut kept = Kept { dir, packages, names: vec![] };
+        let mut wanted: Vec<&String> = names.collect();
+        wanted.sort();
+        wanted.dedup();
+        for name in wanted {
+            anyhow::ensure!(!name.contains(['/', '\\']) && name != ".." && name != ".", "{}", tr!("Invalid package name: {name}", name = name));
+            let from = kept.packages.join(name);
+            let Ok(meta) = std::fs::symlink_metadata(&from) else { continue };
+            if !meta.is_dir() || meta.file_type().is_symlink() || is_link(&from) {
+                continue;
+            }
+            if kept.names.is_empty() {
+                std::fs::create_dir(&kept.dir)?;
+            }
+            if let Err(e) = copy_tree(&from, &kept.dir.join(name)) {
+                kept.discard();
+                return Err(e.context(tr!("Could not keep a copy of {name} before changing it: nothing was changed", name = name)));
+            }
+            kept.names.push(name.clone());
         }
-        .await;
-        return Err(match restored {
-            Ok(()) => e.context(tr("Nothing was changed: the project's packages are as they were")),
-            Err(r) => e.context(tr!("The package list was put back, but restoring its packages failed ({why}): use Restore", why = format!("{r:#}"))),
-        });
+        Ok(kept)
+    }
+    /// The kept folders back in Packages, in place of what the plan left there. On a failure the copies stay, named.
+    fn put_back(&self) -> anyhow::Result<()> {
+        for name in &self.names {
+            let at = self.packages.join(name);
+            let put = (|| -> std::io::Result<()> {
+                match std::fs::symlink_metadata(&at) {
+                    Ok(m) if m.file_type().is_symlink() || is_link(&at) => std::fs::remove_dir(&at).or_else(|_| std::fs::remove_file(&at))?,
+                    Ok(m) if m.is_dir() => std::fs::remove_dir_all(&at)?,
+                    Ok(_) => std::fs::remove_file(&at)?,
+                    Err(_) => {}
+                }
+                std::fs::rename(self.dir.join(name), &at)
+            })();
+            if let Err(e) = put {
+                return Err(anyhow::anyhow!("{e}").context(tr!(
+                    "{name} could not be put back: its folder as it was is kept at {path}",
+                    name = name,
+                    path = self.dir.join(name).display()
+                )));
+            }
+        }
+        let _ = std::fs::remove_dir(&self.dir);
+        Ok(())
+    }
+    /// The plan went through: the copies are not needed.
+    fn discard(&self) {
+        if self.dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&self.dir) {
+                eprintln!("the copies kept for a package plan could not be removed from {}: {e}", self.dir.display()); // i18n: not shown (a log line)
+            }
+        }
+    }
+}
+
+/// Whether `path` is a junction or another reparse point (Windows), which `symlink_metadata` does not always call a link.
+fn is_link(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const REPARSE_POINT: u32 = 0x400;
+        std::fs::symlink_metadata(path).is_ok_and(|m| m.file_attributes() & REPARSE_POINT != 0)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+    }
+}
+
+/// `from` copied to `to` (new) as it is, file times kept; a link inside is refused (it could not be put back as it was).
+fn copy_tree(from: &Path, to: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let (source, target) = (entry.path(), to.join(entry.file_name()));
+        let meta = std::fs::symlink_metadata(&source)?;
+        if meta.file_type().is_symlink() || is_link(&source) {
+            bail!("{}", tr!("{path} is a link", path = source.display()));
+        } else if meta.is_dir() {
+            copy_tree(&source, &target)?;
+        } else {
+            std::fs::copy(&source, &target)?;
+            if let Ok(modified) = meta.modified() {
+                let _ = std::fs::File::options().write(true).open(&target).and_then(|f| f.set_modified(modified));
+            }
+        }
     }
     Ok(())
 }

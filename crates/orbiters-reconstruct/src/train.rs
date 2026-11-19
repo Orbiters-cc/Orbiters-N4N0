@@ -725,7 +725,9 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
     const LEFT: u64 = 1 << 30;
     let keyframe_bytes: u64 = data.views.iter().map(|v| v.image.len() as u64 * 4).sum();
     let paused_already = control.pause.is_some_and(|p| p.asked());
-    let resident = !cfg!(target_vendor = "apple") && !paused_already && gpu.free_memory().is_some_and(|free| free >= gpu.training_memory(settings.budget) + keyframe_bytes + LEFT);
+    // A run resumed past its steps (Start::Trained) never takes a step: no keyframe is read from the device (C4).
+    let room = |free: u64| free >= gpu.training_memory(settings.budget) + keyframe_bytes + LEFT;
+    let resident = keyframes_resident(cfg!(target_vendor = "apple"), paused_already, trained.is_some(), || gpu.free_memory().is_some_and(room));
     if resident {
         let images: Vec<&[u32]> = data.views.iter().map(|v| v.image.as_slice()).collect();
         gpu.set_keyframes(&images);
@@ -733,6 +735,13 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
     regularise_for(gpu, settings, first_set, extent);
     gpu.step = 0;
     gpu.pause = control.pause.cloned();
+    // A resumed run follows VRChat from its first step (RECONSTRUCT-4): the periodic look below comes only every 500
+    // steps, and a run resumed past its steps never reaches it. A fresh run looks at its step 1 as before.
+    if from_resume(trained.is_some(), steps.as_ref().map(|s| s.iteration)) {
+        if gpu.follow_vrchat() == Some(true) {
+            eprintln!("resumed beside VRChat: training paced from the start");
+        }
+    }
     crate::timing::add("4a train setup", setup_start.elapsed());
     // Relocation ends where it would without the tile steps: they come after it (crate::portraits).
     let relocate_until = (base_iterations as f32 * settings.relocate_until) as u32;
@@ -971,8 +980,16 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
     drop(rounds);
     let _sync = crate::timing::on().then(|| dev.poll(wgpu::PollType::wait_indefinitely()));
     let end_start = Instant::now();
-    if let Some(g) = &gpu.governor {
-        eprintln!("governor: {:.1} s waiting for VRChat's frames, {} back-offs", g.waited.as_secs_f32(), g.backoffs);
+    let paced = gpu.pacing();
+    if paced.vr || paced.desktop {
+        eprintln!(
+            "governor: {:.1} s waiting for VRChat's frames ({} looks without room, longest {:.1} s), {} back-offs, {} waits cut short by a pause",
+            paced.waited.as_secs_f32(),
+            paced.waits,
+            paced.longest.as_secs_f32(),
+            paced.backoffs,
+            paced.cut_by_pause
+        );
     }
     let (mut wearer_left, mut floor_patched) = trained.as_ref().map_or((0, 0), |t| (t.wearer_left, t.floor_patched));
     let mut g = match trained {
@@ -1042,6 +1059,17 @@ fn finish(data: &Dataset, gpu: &mut Gpu, g: &mut Gaussians, settings: &Settings,
     }
     let sample: Vec<usize> = train_views.iter().copied().step_by((train_views.len() / 8).max(1)).collect();
     Ok(evaluate(gpu, data, &sample, settings.background)?.unwrap_or(0.0))
+}
+
+/// Whether the keyframes go on the device: never on a Mac (its GPU reads the RAM they are in), never when a pause is
+/// already asked, never for a run resumed past its steps (no step reads them), else when `room` says they fit.
+fn keyframes_resident(apple: bool, paused: bool, trained_only: bool, room: impl FnOnce() -> bool) -> bool {
+    !apple && !paused && !trained_only && room()
+}
+
+/// Whether this start resumes a paused run (past its steps, or at a step after the first).
+fn from_resume(trained_only: bool, from_step: Option<u32>) -> bool {
+    trained_only || from_step.is_some_and(|s| s > 0)
 }
 
 /// The regularisers' weights per Gaussian of a set of `n`.
@@ -1499,6 +1527,23 @@ fn normal(rng: &mut fastrand::Rng) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C4 and RECONSTRUCT-4: a run resumed past its steps puts no keyframe on the device and never asks for room; any
+    /// resume follows VRChat before its first step, a fresh run as before (at its step 1).
+    #[test]
+    fn a_trained_resume_uploads_no_keyframes_and_resumes_paced() {
+        let asked = std::cell::Cell::new(false);
+        let room = || {
+            asked.set(true);
+            true
+        };
+        assert!(!keyframes_resident(false, false, true, room) && !asked.get());
+        assert!(keyframes_resident(false, false, false, || true));
+        assert!(!keyframes_resident(true, false, false, || true) && !keyframes_resident(false, true, false, || true));
+        assert!(!keyframes_resident(false, false, false, || false));
+        assert!(from_resume(true, None) && from_resume(false, Some(1200)));
+        assert!(!from_resume(false, None) && !from_resume(false, Some(0)));
+    }
 
     /// The coarse levels keep the wearer out. The loss reads who is left out from the target's alpha, and a level's
     /// pixel is left out when any pixel under it is, through both reductions (half, then a quarter); every other pixel

@@ -16,9 +16,11 @@ use std::time::Instant;
 /// The sharing contract keeps the member's world captures wanted while they are in VRChat. Screenshots do not
 /// start the controller, so they never send presence. Failed calls back off; a world change is sent on the next tick.
 pub(super) fn spawn_presence(ctl: super::Shared) {
-    std::thread::spawn(move || {
+    let presence = std::thread::Builder::new().name("presence".into()).spawn(move || {
         let mut last = None;
-        let mut sent = std::time::Instant::now() - std::time::Duration::from_secs(300);
+        // "Five minutes ago", or the clock's start when the computer started less than five minutes ago: an `Instant`
+        // before the boot cannot be made, and `now - 300 s` killed this thread after a cold boot (REL-5).
+        let mut sent = ago(std::time::Duration::from_secs(300));
         let mut attempted = sent;
         let mut failed = false;
         while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
@@ -49,6 +51,16 @@ pub(super) fn spawn_presence(ctl: super::Shared) {
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
     });
+    if let Err(e) = presence {
+        eprintln!("capture presence: {e}");
+    }
+}
+
+/// `since` before now, or the clock's start when the computer started less recently than that (`Instant - Duration`
+/// panics before the boot, which is the clock's zero on Windows).
+pub(crate) fn ago(since: std::time::Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_sub(since).unwrap_or(now)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -253,7 +265,7 @@ impl super::Controller {
         let id = request.id.clone();
         std::thread::spawn(move || {
             // Every change goes to every window: bytes at most every 100 ms, the other stages as they come.
-            let last = Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(1));
+            let last = Mutex::new(ago(std::time::Duration::from_secs(1)));
             let report = |stage: Stage| {
                 if let Stage::Sending { sent, total } = stage {
                     let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
@@ -1039,10 +1051,13 @@ fn share_with(
         let uploaded: Uploaded = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("{}", tr("No local file to upload")))? {
             Local::Session(dir) => {
                 report(Stage::Preparing);
-                let super::maps::Prepared { files, sky, metadata: view, generation } = prepare(dir)?;
+                let prepared = prepare(dir)?;
                 // The picture only when drawn for these edits (capture_picture), and the edits still those prepared.
                 let picture = crate::capture_picture::jpeg(dir);
-                anyhow::ensure!(edits_now(entry)?.as_deref() == Some(generation.as_str()), "{}", tr("Its splat edits changed while it was being prepared: share it again."));
+                anyhow::ensure!(edits_now(entry)?.as_deref() == Some(prepared.generation.as_str()), "{}", tr("Its splat edits changed while it was being prepared: share it again."));
+                // Every part of the one result they were made from (CHALLENGER-C1).
+                prepared.ensure_current(dir)?;
+                let super::maps::Prepared { files, sky, metadata: view, generation, .. } = prepared;
                 sent_edits = Some(generation);
                 step(steps, "prepared", &mut at);
                 let bytes = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
@@ -1063,10 +1078,23 @@ fn share_with(
                 .inspect(|_| step(steps, &format!("sent {:.1} MB and stored", bytes as f64 / 1e6), &mut at))? // i18n: not shown
             }
             Local::Picture(path) => {
+                // PRIV-8: what goes is a copy without the picture's metadata (who took it, who else was there, the
+                // instance), the pixels as they are; the file here keeps it all, and the original's hash stays its
+                // identity (`sourceKey`), so a picture shared again is still recognised.
+                let clean = orbiters_core::paths::cache_dir().join("uploads").join(format!("{}.png", uuid::Uuid::new_v4().simple()));
+                std::fs::create_dir_all(clean.parent().unwrap_or(&clean))?;
+                struct Gone(PathBuf);
+                impl Drop for Gone {
+                    fn drop(&mut self) {
+                        let _ = std::fs::remove_file(&self.0);
+                    }
+                }
+                let _gone = Gone(clean.clone());
+                let length = orbiters_core::png_meta::write_without_metadata(path, &clean)?;
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                let part = Part::file("pictures", name.as_ref(), "image/png", path)?;
+                let part = Part::file("pictures", name.as_ref(), "image/png", &clean)?;
                 metadata["takenAt"] = serde_json::json!([iso(entry.taken)]);
-                report(Stage::Sending { sent: 0, total: std::fs::metadata(path).map_or(0, |m| m.len()) });
+                report(Stage::Sending { sent: 0, total: length });
                 let result = api.add_shared_pictures(token, &entry.world_id, vec![part], &metadata)?;
                 step(steps, "sent and stored", &mut at); // i18n: not shown
                 match result.added.into_iter().next() {
@@ -1226,14 +1254,17 @@ fn update_with(
     let revision = current.capture.as_ref().map_or(1, shares::Capture::revision);
     step(steps, "asked Orbiters", &mut at); // i18n: not shown
     report(Stage::Preparing);
-    let super::maps::Prepared { files, sky, metadata, generation } = prepare(dir)?;
+    let prepared = prepare(dir)?;
     // The picture only when drawn for these edits (capture_picture), and the edits still those prepared.
     let picture = crate::capture_picture::jpeg(dir);
     anyhow::ensure!(
-        edits_now(entry)?.as_deref() == Some(generation.as_str()),
+        edits_now(entry)?.as_deref() == Some(prepared.generation.as_str()),
         "{}",
         tr("Its splat edits changed while it was being prepared: update it again once they are done.")
     );
+    // Every part of the one result they were made from (CHALLENGER-C1).
+    prepared.ensure_current(dir)?;
+    let super::maps::Prepared { files, sky, metadata, generation, .. } = prepared;
     step(steps, "prepared", &mut at);
     let bytes = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1554,6 +1585,7 @@ pub(crate) mod tests {
             sky: None,
             metadata: serde_json::json!({ "view": { "position": [0.0, 1.6, 0.0], "target": [0.0, 1.6, -4.0] }, "quality": 31.5 }),
             generation,
+            identity: crate::upload_prep::ResultIdentity::read(session),
         })
     }
 
@@ -1747,6 +1779,28 @@ pub(crate) mod tests {
         let (item, _) = update_with(&api, "token", records, &entry, &|_| {}, &mut steps, &prepared).unwrap();
         assert_eq!(item.capture.map(|c| c.revision), Some(2));
         assert!(steps.iter().any(|s| s.contains("record could not be saved")), "{steps:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// CHALLENGER-C1: reconstructed again (unedited before and after) while its files were made: not sent, since the
+    /// trees would be the old result's and the picture the new one's.
+    #[test]
+    fn a_result_replaced_while_prepared_is_not_sent() {
+        let (dir, _session, records, mut entry) = uploaded_session("replaced", None);
+        entry.edits = Some(Ok(orbiters_reconstruct::edit::UNEDITED.into()));
+        let (api, seen) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 1))]);
+        let replaced = |s: &Path| {
+            let made = prepared(s);
+            let result = orbiters_core::reconstruction::result_dir(s);
+            std::fs::write(result.join(orbiters_core::reconstruction::REPORT_FILE), br#"{"created_utc":"a newer run"}"#).unwrap();
+            made
+        };
+        let refused = update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &replaced).unwrap_err().to_string();
+        assert!(refused.contains("reconstructed again while it was being prepared"), "{refused}");
+        assert_eq!(requests(&seen), ["GET /captures/capture/3"], "nothing sent");
+        // The same result throughout: sent as before.
+        let (api, _) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 1)), ("PUT /captures/capture/3/files", 200, capture_at(3, 2))]);
+        assert!(update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &prepared).is_ok());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2152,7 +2206,19 @@ pub(crate) mod tests {
         let dir = std::env::temp_dir().join(format!("orbiters-share-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let picture = dir.join("VRChat_2026-10-29_19-00-00.000_1920x1080.png");
-        std::fs::write(&picture, [7u8; 4096]).unwrap();
+        // A real PNG, with what VRChat writes of its taker: the copy sent leaves it out (PRIV-8).
+        let png = {
+            let mut bytes = Vec::new();
+            let mut encoder = png::Encoder::new(&mut bytes, 4, 4);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.add_itxt_chunk("XML:com.adobe.xmp".into(), "vrc:AuthorID=usr_00000000-0000-4000-8000-000000000001".into()).unwrap();
+            encoder.write_header().unwrap().write_image_data(&[7u8; 64]).unwrap();
+            bytes
+        };
+        std::fs::write(&picture, &png).unwrap();
+        let mut clean = Vec::new();
+        let sent = orbiters_core::png_meta::copy_without_metadata(&mut png.as_slice(), &mut clean).unwrap();
+        assert!(sent < png.len() as u64 && !String::from_utf8_lossy(&clean).contains("usr_"));
         let records = dir.join("capture-uploads.json");
         let world = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
         let added = r#"{"added":[{"type":"picture","id":9,"visibility":"private"}],"skipped":0}"#.to_string();
@@ -2165,9 +2231,10 @@ pub(crate) mod tests {
         let stages = Mutex::new(Vec::new());
         share_with(&api, "token", Ok(records.clone()), &entry, &to_a_friend(), &|s| stages.lock().unwrap().push(s), &mut Vec::new(), &prepared).unwrap();
         assert_eq!(*seen.lock().unwrap(), [format!("POST /maps/worlds/{world}/pictures"), "POST /captures/picture/9/share".to_string()]);
-        assert_eq!(*stages.lock().unwrap(), [Stage::Sending { sent: 0, total: 4096 }, Stage::Sharing]);
+        assert_eq!(*stages.lock().unwrap(), [Stage::Sending { sent: 0, total: sent }, Stage::Sharing]);
         let saved = read_records(&records);
         assert_eq!((saved[0].uploaded.id, saved[0].item.as_ref().map(|i| i.id)), (9, Some(9)));
+        assert_eq!(std::fs::read(&picture).unwrap(), png, "the picture here is untouched");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2497,4 +2564,13 @@ pub(crate) mod tests {
         assert!(keep_picture_with(&api, "token", &records, &session).is_err());
         std::fs::remove_dir_all(root).ok();
     }
+}
+
+/// REL-5: "five minutes ago" right after a boot (or any span longer than the uptime) is the clock's start, never a
+/// panic that kills the presence thread.
+#[test]
+fn a_time_before_the_boot_is_the_clocks_start() {
+    let long_ago = ago(std::time::Duration::from_secs(u64::MAX / 4));
+    assert!(long_ago.elapsed() < std::time::Duration::from_secs(5));
+    assert!(ago(std::time::Duration::from_millis(1)).elapsed() >= std::time::Duration::from_millis(1));
 }

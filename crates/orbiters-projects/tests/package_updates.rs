@@ -455,10 +455,10 @@ fn a_tool_without_a_coherent_version_blocks_until_removed_and_failures_roll_back
         assert!(plan.solved(), "{plan:#?}");
         let removed = plan.steps.iter().find(|s| s.name == "dev.hai-vr.fuck-osc-config").unwrap();
         assert_eq!((removed.from.as_deref(), removed.to.as_deref()), (Some("1.1.5"), None));
-        // A plan that fails halfway (a version gone from the repositories) puts everything back.
+        // A plan asking for a version gone from the repositories changes nothing at all: it is looked up first.
         let broken = vpm::Change::Plan { install: vec![("com.vrchat.avatars".into(), "9.9.9".into())], remove: plan.remove.clone(), prerelease: false };
         let e = vpm::change(root.path(), &source, broken).await.unwrap_err();
-        assert!(format!("{e:#}").contains("as they were"), "{e:#}");
+        assert!(format!("{e:#}").contains("no longer in the enabled repositories"), "{e:#}");
         assert_eq!(installed(&source, "dev.hai-vr.fuck-osc-config").as_deref(), Some("1.1.5"));
         assert!(source.join("Packages/dev.hai-vr.fuck-osc-config/package.json").is_file(), "the removed package restored");
         assert_eq!(installed(&source, "com.vrchat.avatars").as_deref(), Some("3.7.5"));
@@ -467,5 +467,38 @@ fn a_tool_without_a_coherent_version_blocks_until_removed_and_failures_roll_back
         assert_eq!(installed(&source, "com.vrchat.base").as_deref(), Some("3.9.0"));
         assert_eq!(installed(&source, "dev.hai-vr.fuck-osc-config"), None);
         assert!(!source.join("Packages/dev.hai-vr.fuck-osc-config").exists());
+    });
+}
+
+/// PROJECTS-35: a plan that fails after its removals (the repository gone mid-way) puts back the very folders it took
+/// away, a local edit included, not a fresh download of the same version.
+#[test]
+fn a_failed_plan_puts_back_the_removed_package_with_its_local_edits() {
+    let server = sample_avatar(false);
+    let root = tempfile::tempdir().unwrap();
+    let projects = tempfile::tempdir().unwrap();
+    let source = projects.path().join("N4N0 sample avatar");
+    let rt = orbiters_projects::runtime().unwrap();
+    rt.block_on(async {
+        sample_project(root.path(), &server, &source).await;
+        let plan = conflicted(install(root.path(), &source, &[("com.vrchat.avatars", "3.9.0")]).await.unwrap_err());
+        let plan = coherent::solve(root.path(), &source, &plan.requested, &["dev.hai-vr.fuck-osc-config".into()], false).await.unwrap();
+        assert!(plan.solved(), "{plan:#?}");
+        let edit = source.join("Packages/dev.hai-vr.fuck-osc-config/Mine.cs");
+        std::fs::write(&edit, "// my own change").unwrap();
+        let avatars_edit = source.join("Packages/com.vrchat.avatars/Mine.txt");
+        std::fs::write(&avatars_edit, "kept").unwrap();
+        // The repository goes away: the removal works, the 3.9.0 archives cannot be downloaded.
+        drop(server);
+        let e = vpm::change(root.path(), &source, vpm::Change::Plan { install: plan.install.clone(), remove: plan.remove.clone(), prerelease: false })
+            .await
+            .unwrap_err();
+        assert!(format!("{e:#}").contains("as they were"), "{e:#}");
+        assert_eq!(std::fs::read_to_string(&edit).unwrap(), "// my own change");
+        assert_eq!(std::fs::read_to_string(&avatars_edit).unwrap(), "kept");
+        assert_eq!(installed(&source, "dev.hai-vr.fuck-osc-config").as_deref(), Some("1.1.5"));
+        assert_eq!(installed(&source, "com.vrchat.avatars").as_deref(), Some("3.7.5"));
+        let left: Vec<_> = std::fs::read_dir(&source).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".orbiters-plan-")).collect();
+        assert!(left.is_empty(), "the kept copies are cleaned up");
     });
 }

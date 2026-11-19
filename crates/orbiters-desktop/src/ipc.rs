@@ -503,6 +503,12 @@ impl Held {
     fn follow_smoothing(&mut self) {
         let revision = self.service.smoothing_revision;
         self.smoothing.retain(|p| p.2.is_none_or(|ack| revision < ack));
+        if self.smoothing.is_empty() {
+            // Nothing shown ahead of the service (the usual case): the interface reads the service's snapshot itself,
+            // not a second whole copy of it per line (CTL-12, AD-12).
+            self.shown = self.service.clone();
+            return;
+        }
         let mut shown = (*self.service).clone();
         for (_, patch, _) in &self.smoothing { shown.settings = shown.settings.patched(patch).0.into(); }
         self.shown = Arc::new(shown);
@@ -512,6 +518,22 @@ impl Held {
 #[cfg(test)]
 mod smoothing_ack_tests {
     use super::*;
+    /// CTL-12: with no slider shown ahead, what the interface reads is the service's snapshot, not a copy.
+    #[test]
+    fn with_nothing_pending_the_shown_state_is_the_service_s() {
+        let first = Arc::new(Snapshot::new(orbiters_core::settings::Settings::default()));
+        let mut h = Held { service: first.clone(), shown: first.clone(), closed: false, next_smoothing: 1, smoothing: vec![
+            (1, serde_json::json!({"tracking":{"ms":[90,0,0]}}), Some(1)),
+        ] };
+        h.follow_smoothing();
+        assert!(!Arc::ptr_eq(&h.shown, &h.service), "a patch still waits for its revision");
+        let mut acked = (*first).clone();
+        acked.smoothing_revision = 1;
+        h.service = Arc::new(acked);
+        h.follow_smoothing();
+        assert!(Arc::ptr_eq(&h.shown, &h.service));
+    }
+
     #[test]
     fn two_device_sliders_and_both_menu_sliders_survive_a_stale_snapshot() {
         let first = Arc::new(Snapshot::new(orbiters_core::settings::Settings::default()));
@@ -618,6 +640,8 @@ impl Client {
             ToClient::Snapshot { snapshot } => Arc::new(*snapshot),
             other => anyhow::bail!("{}", orbiters_i18n::tr!("unexpected first message from the service: {message}", message = format!("{other:?}"))),
         };
+        // Every process that takes the service's state reads Orbiters in the app's environment, never Unity's switch.
+        crate::controller::follow_environment(first.settings.development);
         let client = Arc::new(Self {
             writer: Mutex::new(writer),
             state: Mutex::new(Held { service: first.clone(), shown: first, closed: false, smoothing: Vec::new(), next_smoothing: 0 }),
@@ -782,6 +806,7 @@ impl Client {
     fn take_snapshot(&self, snapshot: Arc<Snapshot>) {
         let mut held = self.state.lock().unwrap();
         if held.closed { return; }
+        crate::controller::follow_environment(snapshot.settings.development);
         held.service = snapshot.clone();
         held.shown = snapshot;
         held.follow_smoothing();
@@ -802,6 +827,9 @@ impl Client {
             return false;
         }
         let next = Arc::new(next);
+        if next.settings.development != held.service.settings.development {
+            crate::controller::follow_environment(next.settings.development);
+        }
         held.service = next.clone();
         held.shown = next;
         held.follow_smoothing();
@@ -827,8 +855,10 @@ impl Client {
     }
 
     fn finish_close(&self) {
-        // Cancels waiting receivers, not work the service has already accepted. Nothing is replayed.
+        // Cancels waiting receivers, not work the service has already accepted. Nothing is replayed. A translation
+        // waiting for its answer returns at once too, not after its 30 s (CTL-11 f).
         self.vrchat_data.lock().unwrap().clear();
+        self.translated.lock().unwrap().clear();
         if SAY_STATE.load(Ordering::Relaxed) { println!("link ended"); }
         self.repaint(false);
         leave_soon();

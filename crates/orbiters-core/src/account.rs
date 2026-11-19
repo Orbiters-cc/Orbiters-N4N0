@@ -53,7 +53,28 @@ pub fn choose_server(server: Option<Server>) {
     CHOSEN.store(value, Ordering::Relaxed);
 }
 
+/// "Which Orbiters environment" for every process of the app (the service, the window, the SteamVR overlay, the
+/// desktop panels, the workers): the app's own Development setting, never Unity's switch, from the first call on, a
+/// production setting included. Returns whether this process used another environment until now (true at the first
+/// call): what it read and kept of the other one is not this one's.
+pub fn follow_environment(development: bool) -> bool {
+    follow_in(&CHOSEN, development)
+}
+
+fn follow_in(chosen: &std::sync::atomic::AtomicU8, development: bool) -> bool {
+    let value = if development { 2 } else { 1 };
+    chosen.swap(value, Ordering::Relaxed) != value
+}
+
 impl Server {
+    /// A folder or key name for what is kept of this environment apart from the other's (a cache).
+    pub fn cache_name(self) -> &'static str {
+        match self {
+            Server::Development => "development",
+            Server::Production => "production",
+        }
+    }
+
     pub fn n4n0_gallery_asset_id(self) -> Option<u64> {
         match self {
             Server::Development => Some(30),
@@ -400,6 +421,14 @@ pub enum Check {
 /// Calls to the Orbiters API of one server.
 /// How long the language may take: nothing waits on it, and it is tried again.
 const LANGUAGE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A large file's download in all ([`Api::get_transfer`]): 41 MB at 0.2 Mbit/s.
+pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// What the server has to start answering a download.
+pub const TRANSFER_ANSWER: Duration = Duration::from_secs(60);
+
+fn transfer(request: ureq::RequestBuilder<ureq::typestate::WithoutBody>) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+    request.config().timeout_global(Some(TRANSFER_TIMEOUT)).timeout_recv_response(Some(TRANSFER_ANSWER)).build()
+}
 
 #[derive(serde::Deserialize)]
 struct LanguageAnswer {
@@ -424,6 +453,9 @@ pub struct Api {
 pub struct ApiError {
     pub status: u16,
     pub message: String,
+    /// The contract's machine-readable reason (`{"code": "not_linked"}`), when the answer gave one: what tells
+    /// Orbiters' own refusal from a 403 or a 409 of something in front of it.
+    pub code: Option<String>,
 }
 
 impl std::fmt::Display for ApiError {
@@ -467,6 +499,12 @@ impl Api {
 
     pub fn agent(&self) -> &ureq::Agent {
         &self.agent
+    }
+
+    /// `GET url` for a large file (a 3D world, a shared capture): the 90 s every call has would cut it on a slow line
+    /// however well it goes, so it has [`TRANSFER_TIMEOUT`] in all, the server still [`TRANSFER_ANSWER`] to start answering.
+    pub fn get_transfer(&self, url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+        transfer(self.agent.get(url))
     }
 
     /// The answer as JSON, or the server's error.
@@ -710,14 +748,51 @@ fn respond(stream: &mut TcpStream, location: Option<&str>) {
 }
 
 fn error(status: u16, body: &str) -> ApiError {
-    let message =
-        serde_json::from_str::<serde_json::Value>(body).ok().and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string)).unwrap_or_default();
-    ApiError { status, message }
+    let value = serde_json::from_str::<serde_json::Value>(body).ok();
+    let text = |key: &str| value.as_ref().and_then(|v| v.get(key)).and_then(|e| e.as_str()).map(str::to_string);
+    ApiError { status, message: text("error").unwrap_or_default(), code: text("code") }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CORE-19: a file that arrives slowly but steadily is not cut by the time every API call has (here 1 s for the
+    /// 90 s), while a call is.
+    #[test]
+    fn a_slow_download_outlasts_the_api_calls_time() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request);
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n12345").unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(1600));
+                let _ = stream.write_all(b"67890");
+            }
+        });
+        let agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(1))).build().new_agent();
+        let call = agent.get(&url).call().and_then(|r| r.into_body().read_to_vec());
+        assert!(call.is_err(), "an API call has its time: {call:?}");
+        let body = transfer(agent.get(&url)).call().unwrap().into_body().read_to_vec().unwrap();
+        assert_eq!(body, b"1234567890");
+        server.join().unwrap();
+    }
+
+    /// CORE2-13: the app's setting decides from the first call on, production too; a change is told once.
+    #[test]
+    fn every_process_follows_the_apps_environment() {
+        let chosen = std::sync::atomic::AtomicU8::new(0);
+        assert!(follow_in(&chosen, false), "the first call chooses, production included (not Unity's switch)");
+        assert!(!follow_in(&chosen, false));
+        assert!(follow_in(&chosen, true), "switched");
+        assert!(!follow_in(&chosen, true));
+        assert_eq!((Server::Development.cache_name(), Server::Production.cache_name()), ("development", "production"));
+    }
 
     /// One answer each from a server on this computer, and what was asked of it.
     fn serve(answers: Vec<(&'static str, &'static str)>) -> (Api, std::thread::JoinHandle<Vec<String>>) {

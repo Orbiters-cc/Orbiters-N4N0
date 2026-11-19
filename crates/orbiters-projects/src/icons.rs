@@ -111,14 +111,15 @@ pub fn resolve_all_in(cache: &Path, list: &[Sources]) -> Vec<Option<Image>> {
     let Ok(rt) = crate::runtime() else { return list.iter().map(|_| None).collect() };
     let found: HashMap<Sources, Option<Image>> = rt.block_on(async {
         let client = client();
+        let public = public_client();
         let mut found = HashMap::new();
         for chunk in unique.chunks(4) {
             let tasks: Vec<_> = chunk
                 .iter()
                 .map(|s| {
-                    let (s, cache, client) = (s.clone(), cache.to_path_buf(), client.clone());
+                    let (s, cache, client, public) = (s.clone(), cache.to_path_buf(), client.clone(), public.clone());
                     tokio::spawn(async move {
-                        let image = resolve(&cache, &s, client.as_ref()).await;
+                        let image = resolve(&cache, &s, client.as_ref(), public.as_ref()).await;
                         (s, image)
                     })
                 })
@@ -144,15 +145,107 @@ fn client() -> Option<reqwest::Client> {
         .ok()
 }
 
-async fn resolve(cache: &Path, s: &Sources, client: Option<&reqwest::Client>) -> Option<Image> {
+/// The client for websites a repository's listing names (PROJECTS-13): any listing can name any address, so these
+/// requests never reach this computer or its network (by address, by name resolving to one, through a redirect or a
+/// proxy). An icon there falls back to the next source.
+fn public_client() -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(format!("Orbiters-N4N0/{} (package icons)", orbiters_core::app_version())) // i18n: not shown (a user agent)
+        .connect_timeout(Duration::from_secs(6))
+        .timeout(Duration::from_secs(12))
+        .no_proxy()
+        .dns_resolver(std::sync::Arc::new(PublicResolver))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 || !public_target(attempt.url()) {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()
+        .ok()
+}
+
+/// Names resolved to public addresses only.
+struct PublicResolver;
+impl reqwest::dns::Resolve for PublicResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let found: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.filter(|a| public_ip(a.ip())).collect();
+            if found.is_empty() {
+                return Err(std::io::Error::other(format!("{host} has no public address")).into()); // i18n: not shown (a request error)
+            }
+            Ok(Box::new(found.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Whether `ip` is on the internet: not this computer, its network, link-local, shared (CGNAT), unique-local,
+/// multicast, documentation or unspecified.
+pub fn public_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || a == 0
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 192 && b == 0)
+                || (a == 198 && (18..20).contains(&b))
+                || a >= 240)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return public_ip(IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            !(v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80 || first == 0x2001 && v6.segments()[1] == 0x0db8)
+        }
+    }
+}
+
+/// Whether a request to `url` may leave for the internet: an address that is public, or a name not kept for local
+/// networks (its addresses are checked again when it is resolved).
+pub fn public_target(url: &Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => public_ip(ip.into()),
+        Some(url::Host::Ipv6(ip)) => public_ip(ip.into()),
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            let local = ["localhost", "local", "lan", "internal", "home.arpa", "intranet", "corp"];
+            name.contains('.') && !local.iter().any(|l| name == *l || name.ends_with(&format!(".{l}")))
+        }
+        None => false,
+    }
+}
+
+/// Where requests go: the Orbiters server's own addresses (a logo; the development server is on this computer), or a
+/// website a listing names, public only.
+struct Web<'a> {
+    client: &'a reqwest::Client,
+    public: bool,
+}
+
+async fn resolve(cache: &Path, s: &Sources, client: Option<&reqwest::Client>, public: Option<&reqwest::Client>) -> Option<Image> {
     if let Some(logo) = &s.logo {
-        if let Some(image) = cached_or(cache, logo, client, |c| async move { image_at(c, &Url::parse(logo).ok()?).await }).await {
+        if let Some(image) = cached_or(cache, logo, client, |c| async move { image_at(&Web { client: c, public: false }, &Url::parse(logo).ok()?).await }).await {
             return Some(image);
         }
     }
     for site in &s.sites {
         let Some(url) = site_url(site) else { continue };
-        if let Some(image) = cached_or(cache, url.as_str(), client, |c| site_icon(c, url.clone())).await {
+        let at = url.clone();
+        if let Some(image) = cached_or(cache, url.as_str(), public, |c| async move { site_icon(&Web { client: c, public: true }, at).await }).await {
             return Some(image);
         }
     }
@@ -206,7 +299,7 @@ fn fnv(s: &str) -> u64 {
 }
 
 fn load_png(path: &Path) -> Option<Image> {
-    let i = image::open(path).ok()?.to_rgba8();
+    let i = decode_bounded(&std::fs::read(path).ok()?)?.to_rgba8();
     Some(Image { size: [i.width(), i.height()], rgba: i.into_raw() })
 }
 
@@ -218,7 +311,7 @@ pub fn site_url(site: &str) -> Option<Url> {
         parsed => parsed.ok()?,
     };
     let plain = url.username().is_empty() && url.password().is_none();
-    (plain && matches!(url.scheme(), "http" | "https") && url.host_str().is_some_and(|h| h.contains('.') || h == "localhost")).then_some(url)
+    (plain && matches!(url.scheme(), "http" | "https") && url.host_str().is_some_and(|h| h.contains('.'))).then_some(url)
 }
 
 /// The GitHub account a page belongs to: github.com/<owner>/… or <owner>.github.io.
@@ -238,7 +331,7 @@ pub fn github_owner(url: &Url) -> Option<String> {
     (owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && !reserved.contains(&owner.as_str())).then_some(owner)
 }
 
-async fn site_icon(client: &reqwest::Client, site: Url) -> Option<Image> {
+async fn site_icon(client: &Web<'_>, site: Url) -> Option<Image> {
     let avatar = |owner: String| Url::parse(&format!("https://github.com/{owner}.png?size={SIDE}")).ok();
     let owner = github_owner(&site);
     if site.host_str().is_some_and(|h| h.trim_start_matches("www.").eq_ignore_ascii_case("github.com")) {
@@ -267,17 +360,17 @@ async fn site_icon(client: &reqwest::Client, site: Url) -> Option<Image> {
     image_at(client, &avatar(owner?)?).await
 }
 
-async fn image_at(client: &reqwest::Client, url: &Url) -> Option<Image> {
+async fn image_at(client: &Web<'_>, url: &Url) -> Option<Image> {
     let (bytes, _) = get(client, url, IMAGE_LIMIT).await?;
     decode(&bytes)
 }
 
 /// The body of a successful GET (at most `limit` bytes, else none) and the address it came from after redirects.
-async fn get(client: &reqwest::Client, url: &Url, limit: usize) -> Option<(Vec<u8>, Url)> {
-    if !matches!(url.scheme(), "http" | "https") {
+async fn get(web: &Web<'_>, url: &Url, limit: usize) -> Option<(Vec<u8>, Url)> {
+    if !matches!(url.scheme(), "http" | "https") || (web.public && !public_target(url)) {
         return None;
     }
-    let mut response = client.get(url.clone()).send().await.ok()?;
+    let mut response = web.client.get(url.clone()).send().await.ok()?;
     if !response.status().is_success() || response.content_length().is_some_and(|n| n as usize > limit) {
         return None;
     }
@@ -379,6 +472,24 @@ fn attributes(tag: &str) -> Vec<(String, String)> {
     }
 }
 
+/// The longest side of a picture an icon is made from: a 4096 px logo still is one, a small file declaring a huge
+/// picture is not decoded at all (PROJECTS-14).
+const DECODE_SIDE: u32 = 4096;
+/// What decoding one may allocate (the default is 512 MiB).
+const DECODE_ALLOC: u64 = 128 << 20;
+
+/// `bytes` decoded when the picture they declare is within [`DECODE_SIDE`] and [`DECODE_ALLOC`]; checked before the
+/// pixels are allocated.
+fn decode_bounded(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(DECODE_SIDE);
+    limits.max_image_height = Some(DECODE_SIDE);
+    limits.max_alloc = Some(DECODE_ALLOC);
+    reader.limits(limits);
+    reader.decode().ok()
+}
+
 /// An icon file (PNG, JPEG, WebP, GIF, ICO or SVG) at most [`SIDE`] pixels on its longest side; none for what is not
 /// one, a speck or nothing visible.
 pub fn decode(bytes: &[u8]) -> Option<Image> {
@@ -400,7 +511,7 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
             .collect();
         image::RgbaImage::from_raw(w, h, rgba)?
     } else {
-        let i = image::load_from_memory(bytes).ok()?.to_rgba8();
+        let i = decode_bounded(bytes)?.to_rgba8();
         let (w, h) = i.dimensions();
         let scale = SIDE as f32 / w.max(h) as f32;
         if scale < 1.0 {
@@ -481,6 +592,38 @@ mod tests {
         assert_eq!(owner("https://orbiters.cc"), None);
     }
 
+    /// PROJECTS-13: a listing's website on this computer or its network is never asked for anything.
+    #[test]
+    fn websites_inside_the_network_are_never_requested() {
+        for blocked in [
+            "http://127.0.0.1:47615/x",
+            "http://192.168.1.1/",
+            "http://10.0.0.8/",
+            "http://172.16.4.4/",
+            "http://169.254.169.254/latest",
+            "http://100.64.0.1/",
+            "http://0.0.0.0/",
+            "http://[::1]/",
+            "http://[fe80::1]/",
+            "http://[fd00::1]/",
+            "http://[::ffff:192.168.0.1]/",
+            "http://localhost/",
+            "http://router.local/",
+            "http://nas.lan/",
+            "http://printer.home.arpa/",
+            "ftp://example.com/",
+        ] {
+            assert!(!public_target(&Url::parse(blocked).unwrap()), "{blocked}");
+        }
+        for open in ["https://orbiters.cc/", "https://8.8.8.8/", "https://[2606:4700::1111]/", "https://vrlabs.dev/x"] {
+            assert!(public_target(&Url::parse(open).unwrap()), "{open}");
+        }
+        assert!(site_url("localhost").is_none());
+        let rt = crate::runtime().unwrap();
+        let web = Web { client: &public_client().unwrap(), public: true };
+        assert!(rt.block_on(get(&web, &Url::parse("http://127.0.0.1:9/").unwrap(), 10)).is_none());
+    }
+
     #[test]
     fn icons_decode_to_at_most_their_side() {
         // A 300x150 PNG: scaled to 128x64.
@@ -500,6 +643,12 @@ mod tests {
         let mut ico = vec![];
         image::RgbaImage::from_pixel(48, 48, image::Rgba([200, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut ico), image::ImageFormat::Ico).unwrap();
         assert_eq!(decode(&ico).unwrap().size, [48, 48]);
+        // A small file declaring a picture far larger than an icon: not decoded.
+        let mut big = vec![];
+        let side = DECODE_SIDE + 1;
+        image::RgbaImage::from_pixel(side, side, image::Rgba([1, 2, 3, 255])).write_to(&mut std::io::Cursor::new(&mut big), image::ImageFormat::Png).unwrap();
+        assert!(big.len() < IMAGE_LIMIT, "{} bytes", big.len());
+        assert!(decode(&big).is_none());
         // Not an image, a speck, nothing visible.
         assert!(decode(b"<html>404</html>").is_none());
         let mut speck = vec![];

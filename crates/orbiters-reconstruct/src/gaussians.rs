@@ -64,6 +64,19 @@ impl Gaussians {
         self.means.is_empty()
     }
 
+    /// Room for exactly `n` more Gaussians in every vector, so that pushing a count known in advance (a PLY's) never
+    /// grows them one doubling at a time, holding the old and the new at once.
+    pub fn reserve_exact(&mut self, n: usize) {
+        self.means.reserve_exact(n);
+        self.log_scales.reserve_exact(n);
+        self.rotations.reserve_exact(n);
+        self.opacity_logits.reserve_exact(n);
+        self.colors.reserve_exact(n);
+        self.sky.reserve_exact(n);
+        self.filter_3d.reserve_exact(n);
+        self.seen.reserve_exact(n);
+    }
+
     pub fn push(&mut self, mean: [f32; 3], log_scale: [f32; 3], rotation: [f32; 4], opacity_logit: f32, color: [f32; 3]) {
         self.means.push(mean);
         self.log_scales.push(log_scale);

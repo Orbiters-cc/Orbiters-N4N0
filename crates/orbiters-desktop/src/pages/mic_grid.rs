@@ -51,6 +51,8 @@ pub struct State {
     asked: Option<String>,
     /// Why the last press did not take.
     error: Option<String>,
+    /// Where the card's body was drawn last (is it in view?).
+    body: Option<Rect>,
 }
 
 impl State {
@@ -94,17 +96,27 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
         }
     }
     section(ui, cx, index, icons::MICROPHONE, tr("Microphones"), Some(tr("Speak: the one that moves is the one hearing you. Press one to make it Windows' default.")), |ui| {
+        let start = ui.cursor().min;
+        // The card is laid out wherever it is on the page (Settings runs every card's body): scrolled out of view,
+        // nothing looks at the microphones, so its watch ends and they close by themselves (they stayed open, and
+        // Settings redrew up to 30 times a second, for as long as the page showed). Back in view, they open again.
+        let in_view = state.body.is_none_or(|r| ui.is_rect_visible(r));
+        (|ui: &mut Ui| {
         let meters = state.meters.get_or_insert_with(|| Arc::new(audio_devices::Meters::start()));
         // While something looks: off the screen or minimized, this is not drawn, its watch ends, and they close by
         // themselves.
-        meters.looked_at();
-        state.looks.keep(&ctx, &(), LOOK_EVERY, || {
-            let meters = meters.clone();
-            move || {
-                meters.looked_at();
-                Shown(meters.levels())
-            }
-        });
+        if in_view {
+            meters.looked_at();
+            state.looks.keep(&ctx, &(), LOOK_EVERY, || {
+                let meters = meters.clone();
+                move || {
+                    meters.looked_at();
+                    Shown(meters.levels())
+                }
+            });
+        } else {
+            state.looks.stop();
+        }
         let levels: MicLevels = meters.levels();
         if levels.mics.is_empty() {
             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), TILE_HIGH), Sense::hover());
@@ -183,6 +195,8 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
                 state.setting = Some(Job::spawn(&ctx, move || ROLES.iter().try_for_each(|role| audio_devices::set_default(&id, *role))));
             }
         }
+        })(ui);
+        state.body = Some(Rect::from_min_max(start, pos2(ui.max_rect().right(), ui.min_rect().bottom().max(start.y + 1.0))));
     });
 }
 

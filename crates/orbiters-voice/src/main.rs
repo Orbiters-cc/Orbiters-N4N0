@@ -43,6 +43,36 @@ const PREFIX: usize = RATE * 5 / 2;
 const STALL: Duration = Duration::from_secs(60);
 /// The share of the progress bar the downloads take; unpacking (15 to 30 s) the rest.
 const DOWNLOAD_SHARE: f32 = 0.9;
+/// Microphone packets the capture thread may have waiting for the loop (one every 10 ms or so): more are dropped.
+const AUDIO_QUEUE: usize = 8;
+/// Packets one pass of the loop takes at most before it looks at the commands and its deadlines again: far more than
+/// come between two passes (a pass waits at most 10 ms for a command, ~16 ms on Windows' default timer), so the queue
+/// is emptied each time and a burst after a slow pass catches up at once.
+const AUDIO_PER_PASS: usize = 64;
+/// Dropped packets are said in the log at most this often.
+const DROPS_SAID_EVERY: Duration = Duration::from_secs(60);
+
+/// Microphone packets the capture thread dropped because the loop's queue was full, and their frames.
+#[derive(Default)]
+struct Drops {
+    packets: AtomicU64,
+    frames: AtomicU64,
+}
+
+/// Hands one microphone packet of capture `generation` to the loop: dropped (and counted) when its queue is full; an
+/// error when the worker is gone.
+fn offer(audio: &mpsc::SyncSender<(u64, Vec<f32>)>, drops: &Drops, generation: u64, chunk: Vec<f32>) -> anyhow::Result<()> {
+    let frames = chunk.len() as u64;
+    match audio.try_send((generation, chunk)) {
+        Ok(()) => Ok(()),
+        Err(mpsc::TrySendError::Full(_)) => {
+            drops.packets.fetch_add(1, Ordering::Relaxed);
+            drops.frames.fetch_add(frames, Ordering::Relaxed);
+            Ok(())
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => Err(anyhow::anyhow!("{}", orbiters_i18n::tr("the worker stopped"))),
+    }
+}
 
 /// What reaches the worker's loop. Microphone messages carry the generation of the capture thread that sent them:
 /// a thread being replaced may still speak once or twice after its successor started.
@@ -50,6 +80,8 @@ enum Input {
     Command(VoiceCommand),
     MicOpened(u64, String),
     MicClosed(u64, Option<String>),
+    /// The system's default microphone changed while capture `n` (of the default one) ran: it ended.
+    MicDefaultChanged(u64),
     /// The recogniser of load `n` loaded (or not), in this long.
     Loaded(u64, Result<OfflineRecognizer, String>, Duration),
     Installed(Result<(), String>),
@@ -146,6 +178,8 @@ struct Listen {
     since: Instant,
     /// The service's number for it, given back with its sentence.
     id: u64,
+    /// What it heard so far is shown as it comes ([`Worker::partial`]).
+    live: bool,
 }
 
 // i18n: not shown (inference scheduler and transcript internals)
@@ -206,8 +240,16 @@ struct Worker {
     tx: mpsc::Sender<Input>,
     audio_tx: mpsc::SyncSender<(u64, Vec<f32>)>,
     audio_rx: mpsc::Receiver<(u64, Vec<f32>)>,
+    /// What the capture threads dropped, and what of it the log has said (and when).
+    drops: Arc<Drops>,
+    drops_said: (u64, Instant),
+    /// Packets of the current microphone the loop took (for the tests).
+    taken: u64,
     decoder: Decoder,
     decode_generation: Arc<AtomicU64>,
+    /// Bumped when the wake word is turned off (the Ask page took the microphone): a wake sentence heard before is not
+    /// said after.
+    wake_generation: Arc<AtomicU64>,
     live: Arc<Mutex<LiveText>>,
     models: Option<PathBuf>,
     vad: Option<VoiceActivityDetector>,
@@ -241,10 +283,14 @@ struct Worker {
 
 impl Worker {
     fn new(tx: mpsc::Sender<Input>) -> Self {
-        let (audio_tx, audio_rx) = mpsc::sync_channel(8);
+        let (audio_tx, audio_rx) = mpsc::sync_channel(AUDIO_QUEUE);
         Self {
             tx, audio_tx, audio_rx, decoder: Decoder::new(),
+            drops: Arc::new(Drops::default()),
+            drops_said: (0, Instant::now()),
+            taken: 0,
             decode_generation: Arc::new(AtomicU64::new(0)),
+            wake_generation: Arc::new(AtomicU64::new(0)),
             live: Arc::new(Mutex::new(LiveText::default())),
             models: None,
             vad: None,
@@ -285,26 +331,34 @@ impl Worker {
             let generation = self.mic_generation;
             let stop = Arc::new(AtomicBool::new(false));
             let (tx, id, s) = (self.tx.clone(), self.mic_id.clone(), stop.clone());
-            let audio_tx = self.audio_tx.clone();
+            let (audio_tx, drops) = (self.audio_tx.clone(), self.drops.clone());
             let _ = std::thread::Builder::new().name("mic".into()).spawn(move || {
                 let (ready, audio) = (tx.clone(), audio_tx);
-                let result = orbiters_audio::capture(
+                // The default microphone is followed: a headset put on (Virtual Desktop, SteamVR, the app's own "When
+                // SteamVR starts") is heard from then on. A microphone chosen by name stays that one.
+                let options = orbiters_audio::Options { rate: Some(voice::SAMPLE_RATE), follow_default: true, ..Default::default() };
+                let result = orbiters_audio::capture_packets(
                     &AudioSource::Mic(id),
-                    Some(voice::SAMPLE_RATE),
+                    &options,
                     &s,
                     |name, _| {
                         let _ = ready.send(Input::MicOpened(generation, name.to_string()));
                         Ok(())
                     },
-                    |_, frames, samples| {
-                        let chunk = samples.map(<[f32]>::to_vec).unwrap_or_else(|| vec![0.0; frames as usize]);
-                        match audio.try_send((generation, chunk)) {
-                            Ok(()) | Err(mpsc::TrySendError::Full(_)) => Ok(()),
-                            Err(mpsc::TrySendError::Disconnected(_)) => Err(anyhow::anyhow!("{}", orbiters_i18n::tr("the worker stopped"))),
-                        }
+                    |p| {
+                        let chunk = p.samples.map(<[f32]>::to_vec).unwrap_or_else(|| vec![0.0; p.frames as usize]);
+                        offer(&audio, &drops, generation, chunk)
                     },
                 );
-                let _ = tx.send(Input::MicClosed(generation, result.err().map(|e| format!("{e:#}"))));
+                let _ = tx.send(match result {
+                    Ok((_, orbiters_audio::Ended::DefaultChanged)) => Input::MicDefaultChanged(generation),
+                    Ok((name, orbiters_audio::Ended::Lost(e) | orbiters_audio::Ended::Refused(e))) => {
+                        eprintln!("{name}: capture ended early: {e}");
+                        Input::MicClosed(generation, None)
+                    }
+                    Ok((_, orbiters_audio::Ended::Stopped)) => Input::MicClosed(generation, None),
+                    Err(e) => Input::MicClosed(generation, Some(format!("{e:#}"))),
+                });
             });
             self.mic = Some(Mic { stop, generation });
         } else if !self.wants_mic() && self.mic.is_some() {
@@ -358,6 +412,27 @@ impl Worker {
         }
     }
 
+    /// The system's default microphone changed under the current capture (of the default one): the new one opens at
+    /// once, without the pause of a failure. A sentence under way ends with what the last microphone heard, so no
+    /// sentence is made of two microphones' sound; one that heard nothing yet goes on with the new one.
+    fn mic_default_changed(&mut self, generation: u64) {
+        if !self.mic.as_ref().is_some_and(|m| m.generation == generation) {
+            return;
+        }
+        self.mic = None;
+        if self.listen.as_ref().is_some_and(|l| l.hold || self.speaking) && !self.held.is_empty() {
+            let listen = self.listen.take().expect("checked above");
+            let held = std::mem::take(&mut self.held);
+            self.sentence(held, true, listen.id);
+        } else {
+            self.held.clear();
+        }
+        self.forget_sound();
+        emit(&VoiceEvent::Mic { name: None });
+        self.reopen_at = None;
+        self.follow_mic();
+    }
+
     /// Runs `command`; false when the worker should quit.
     fn command(&mut self, command: VoiceCommand) -> bool {
         match command {
@@ -390,7 +465,7 @@ impl Worker {
                     self.reopen_at = None;
                 }
             }
-            VoiceCommand::Listen { hold, id } => {
+            VoiceCommand::Listen { hold, id, live } => {
                 self.decoder.clear(); self.waiting.clear();
                 self.decode_generation.fetch_add(1, Ordering::SeqCst);
                 self.live = Arc::new(Mutex::new(LiveText::default()));
@@ -403,7 +478,7 @@ impl Worker {
                 self.held = if hold { self.preroll.iter().copied().collect() } else { Vec::new() };
                 self.partial_id.store(id, Ordering::Relaxed);
                 self.partial_at = Instant::now();
-                self.listen = Some(Listen { hold, since: Instant::now(), id });
+                self.listen = Some(Listen { hold, since: Instant::now(), id, live });
                 // Someone speaks now: a microphone that failed a moment ago is tried again at once, and the
                 // recogniser loads while they speak.
                 self.reopen_at = None;
@@ -428,6 +503,11 @@ impl Worker {
                 self.held.clear();
             }
             VoiceCommand::WakeWord { on, words } => {
+                if self.wake_word && !on {
+                    // What the wake word heard so far is nobody's now.
+                    self.wake_generation.fetch_add(1, Ordering::SeqCst);
+                    self.waiting.retain(|s| s.for_n4n0);
+                }
                 self.wake_word = on;
                 self.wake_words = words;
             }
@@ -597,8 +677,11 @@ impl Worker {
         // Final decode also runs away from the audio/VAD loop. The single recognizer serializes inference.
         let generation = self.decode_generation.clone();
         let expected = generation.load(Ordering::SeqCst);
+        let wake_generation = self.wake_generation.clone();
+        let wake_expected = wake_generation.load(Ordering::SeqCst);
+        let stale = move || generation.load(Ordering::SeqCst) != expected || (!s.for_n4n0 && wake_generation.load(Ordering::SeqCst) != wake_expected);
         self.decoder.submit(s.for_n4n0, Box::new(move || {
-            if generation.load(Ordering::SeqCst) != expected { return; }
+            if stale() { return; }
             let recognizer = recognizer.lock().unwrap();
             let seconds = s.samples.len() as f32 / RATE as f32;
             if !s.for_n4n0 && !wake_words.is_empty() && s.samples.len() > PREFIX {
@@ -606,7 +689,7 @@ impl Worker {
                 if orbiters_n4n0_core::wake::command(&start, &wake_words).is_none() { return; }
             }
             let (text, decode_ms) = transcribe(&recognizer, &s.samples);
-            if generation.load(Ordering::SeqCst) == expected {
+            if !stale() {
                 emit(&VoiceEvent::Heard { text, for_n4n0: s.for_n4n0, seconds, decode_ms, listen: s.listen });
             }
         }));
@@ -615,6 +698,8 @@ impl Worker {
     /// One running job and one replaceable pending snapshot; an active final has priority.
     fn partial(&mut self) {
         if self.held.len() < RATE || self.partial_at.elapsed() < Duration::from_millis(1000) { return; }
+        // Nobody reads it (a listen outside the Ask page): only the whole sentence is transcribed.
+        if !self.listen.as_ref().is_some_and(|l| l.live) { return; }
         let Recognizer::Ready(recognizer) = &self.recognizer else { return };
 
         self.partial_at = Instant::now();
@@ -639,9 +724,66 @@ impl Worker {
         }));
     }
 
+    /// Takes the microphone's packets waiting for the loop, at most `most`: those of the current capture are heard,
+    /// those of one being replaced dropped. How many were taken.
+    fn take_audio(&mut self, most: usize) -> usize {
+        let mut taken = 0;
+        while taken < most {
+            let Ok((generation, samples)) = self.audio_rx.try_recv() else { break };
+            taken += 1;
+            if self.mic.as_ref().is_some_and(|m| m.generation == generation) {
+                self.taken += 1;
+                self.audio(samples);
+            }
+        }
+        taken
+    }
+
+    /// One pass of the worker's loop: a command or a message (waiting up to 10 ms for one), the microphone's packets
+    /// (up to `most`), the deadlines. False when the worker should quit.
+    fn pass(&mut self, rx: &mpsc::Receiver<Input>, most: usize) -> bool {
+        match rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(Input::Command(c)) => {
+                if !self.command(c) {
+                    return false;
+                }
+            }
+            Ok(Input::MicOpened(generation, name)) => self.mic_opened(generation, name),
+            Ok(Input::MicClosed(generation, error)) => self.mic_closed(generation, error),
+            Ok(Input::MicDefaultChanged(generation)) => self.mic_default_changed(generation),
+            Ok(Input::Loaded(load, result, took)) => self.loaded(load, result, took),
+            Ok(Input::Installed(result)) => {
+                match result {
+                    Ok(()) => emit(&VoiceEvent::Installed),
+                    Err(e) => {
+                        let message = orbiters_i18n::tr!("Could not install N4N0's speech models: {error}", error = e);
+                        emit(&VoiceEvent::Error { message })
+                    }
+                }
+                return false;
+            }
+            Ok(Input::StdinClosed) => return false,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+        self.take_audio(most);
+        self.tick()
+    }
+
+    /// Says in the log, at most once a minute, how much sound the loop's queue dropped since it last said.
+    fn say_drops(&mut self) {
+        let packets = self.drops.packets.load(Ordering::Relaxed);
+        if packets > self.drops_said.0 && self.drops_said.1.elapsed() >= DROPS_SAID_EVERY {
+            let frames = self.drops.frames.load(Ordering::Relaxed);
+            eprintln!("voice: the microphone's queue was full: {} packets dropped ({frames} frames in all)", packets - self.drops_said.0);
+            self.drops_said = (packets, Instant::now());
+        }
+    }
+
     /// A sentence for N4N0 that never started, or went on too long; a microphone due to open again; a recogniser
     /// idle long enough to go. False when the install stalled (the worker then quits).
     fn tick(&mut self) -> bool {
+        self.say_drops();
         if let Some(progress) = &self.installing {
             if progress.idle_for() > STALL {
                 emit(&VoiceEvent::Error {
@@ -978,37 +1120,7 @@ fn main() {
         let _ = commands.send(Input::StdinClosed);
     });
     let mut worker = Worker::new(tx);
-    loop {
-        match rx.recv_timeout(Duration::from_millis(10)) {
-            Ok(Input::Command(c)) => {
-                if !worker.command(c) {
-                    break;
-                }
-            }
-            Ok(Input::MicOpened(generation, name)) => worker.mic_opened(generation, name),
-            Ok(Input::MicClosed(generation, error)) => worker.mic_closed(generation, error),
-            Ok(Input::Loaded(load, result, took)) => worker.loaded(load, result, took),
-            Ok(Input::Installed(result)) => {
-                match result {
-                    Ok(()) => emit(&VoiceEvent::Installed),
-                    Err(e) => {
-                        let message = orbiters_i18n::tr!("Could not install N4N0's speech models: {error}", error = e);
-                        emit(&VoiceEvent::Error { message })
-                    }
-                }
-                break;
-            }
-            Ok(Input::StdinClosed) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-        if let Ok((generation, samples)) = worker.audio_rx.try_recv() {
-            if worker.mic.as_ref().is_some_and(|m| m.generation == generation) { worker.audio(samples); }
-        }
-        if !worker.tick() {
-            break;
-        }
-    }
+    while worker.pass(&rx, AUDIO_PER_PASS) {}
     // An install or a recogniser still loading may hold a thread: the process ends here all the same.
     std::process::exit(0);
 }
@@ -1016,6 +1128,97 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worker whose microphone (capture `generation` 1) is "open", without a device: only the loop is exercised.
+    fn listening_worker() -> (Worker, mpsc::Receiver<Input>) {
+        let (tx, rx) = mpsc::channel();
+        let mut worker = Worker::new(tx);
+        worker.mic = Some(Mic { stop: Arc::new(AtomicBool::new(false)), generation: 1 });
+        (worker, rx)
+    }
+
+    #[test]
+    fn one_pass_takes_every_packet_waiting_and_none_of_an_old_microphone() {
+        // N4N0-5: the loop took one packet a pass; a full queue is emptied by one pass now.
+        let (mut worker, rx) = listening_worker();
+        let drops = worker.drops.clone();
+        for _ in 0..AUDIO_QUEUE {
+            offer(&worker.audio_tx, &drops, 1, vec![0.0; 160]).unwrap();
+        }
+        assert!(worker.pass(&rx, AUDIO_PER_PASS));
+        assert_eq!(worker.taken, AUDIO_QUEUE as u64, "the whole queue in one pass");
+        // A packet of the capture being replaced is taken off the queue, not heard.
+        offer(&worker.audio_tx, &drops, 0, vec![0.0; 160]).unwrap();
+        offer(&worker.audio_tx, &drops, 1, vec![0.0; 160]).unwrap();
+        assert!(worker.pass(&rx, AUDIO_PER_PASS));
+        assert_eq!(worker.taken, AUDIO_QUEUE as u64 + 1);
+        // A full queue drops, and counts what it dropped.
+        for _ in 0..AUDIO_QUEUE + 3 {
+            offer(&worker.audio_tx, &drops, 1, vec![0.0; 160]).unwrap();
+        }
+        assert_eq!((drops.packets.load(Ordering::Relaxed), drops.frames.load(Ordering::Relaxed)), (3, 480));
+    }
+
+    /// Runs the loop against a stand-in microphone sending `chunks` packets 10 ms apart, as WASAPI's shared mode does;
+    /// the loop takes at most `most` packets a pass. What was dropped.
+    fn loop_drops(most: usize, chunks: u64) -> (u64, u64) {
+        let (mut worker, rx) = listening_worker();
+        let (audio, drops) = (worker.audio_tx.clone(), worker.drops.clone());
+        let producer = std::thread::spawn(move || {
+            let start = Instant::now();
+            for i in 0..chunks {
+                let due = start + Duration::from_millis(10 * i);
+                if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(wait);
+                }
+                offer(&audio, &drops, 1, vec![0.0; 160]).unwrap();
+            }
+        });
+        while !producer.is_finished() {
+            assert!(worker.pass(&rx, most));
+        }
+        producer.join().unwrap();
+        while worker.take_audio(most) > 0 {}
+        (worker.taken, worker.drops.packets.load(Ordering::Relaxed))
+    }
+
+    #[test]
+    fn a_new_default_microphone_opens_at_once_and_never_joins_two_microphones_in_a_sentence() {
+        // N4N0-14: with the wake word on, the microphone stays open; a new default ends that capture.
+        let (mut worker, _rx) = listening_worker();
+        worker.mic_failures = 2;
+        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 7, live: true });
+        worker.held = vec![0.1; RATE];
+        // A late word from a capture already replaced changes nothing.
+        worker.mic_default_changed(0);
+        assert!(worker.mic.is_some() && worker.listen.is_some());
+        worker.mic_default_changed(1);
+        assert!(worker.mic.is_none(), "the old microphone's capture is over");
+        assert!(worker.listen.is_none() && worker.held.is_empty(), "the held sentence ends with what the old microphone heard");
+        assert_eq!(worker.waiting.iter().map(|s| (s.listen, s.samples.len())).collect::<Vec<_>>(), vec![(7, RATE)]);
+        assert!(worker.reopen_at.is_none() && worker.mic_failures == 2, "no failure pause: it opens again at once");
+        // Idle (the wake word only): nothing to end, the next sentence is the new microphone's.
+        let (mut worker, _rx) = listening_worker();
+        worker.mic_default_changed(1);
+        assert!(worker.waiting.is_empty() && worker.reopen_at.is_none());
+        // A listen that heard nothing yet goes on.
+        let (mut worker, _rx) = listening_worker();
+        worker.listen = Some(Listen { hold: false, since: Instant::now(), id: 8, live: true });
+        worker.mic_default_changed(1);
+        assert_eq!(worker.listen.as_ref().map(|l| l.id), Some(8));
+    }
+
+    #[test]
+    fn the_loop_keeps_up_with_the_microphone() {
+        // N4N0-5, measured through the worker's own loop: one packet a pass (as before) against all of them.
+        let chunks = 300;
+        let (old_taken, old_dropped) = loop_drops(1, chunks);
+        let (taken, dropped) = loop_drops(AUDIO_PER_PASS, chunks);
+        eprintln!("one packet a pass: {old_taken} taken, {old_dropped} dropped of {chunks}; all of them: {taken} taken, {dropped} dropped");
+        assert_eq!(taken + dropped, chunks);
+        // A busy test machine may hold the loop back 80 ms at worst once or twice: never a share of the sound.
+        assert!(dropped * 100 <= chunks, "{dropped} of {chunks} dropped");
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("orbiters-voice-{name}-{}", std::process::id()));
@@ -1168,7 +1371,7 @@ mod fixture_tests {
         let models = orbiters_core::paths::models_dir();
         worker.vad = Some(load_vad(&models).unwrap());
         worker.recognizer = Recognizer::Ready(Arc::new(Mutex::new(load_recognizer(&models).unwrap())));
-        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 41 });
+        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 41, live: true });
         worker.partial_id.store(41, Ordering::Relaxed);
         let began = Instant::now();
         let mut previous = String::new();
@@ -1199,7 +1402,7 @@ mod fixture_tests {
     #[test]
     fn review_long_sentence_never_clears_live_identity() {
         let (tx, _) = mpsc::channel(); let mut worker = Worker::new(tx);
-        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 41 });
+        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 41, live: true });
         worker.partial_id.store(41, Ordering::Relaxed);
         for seconds in [8, 9, 12, 20, 30] {
             worker.held = vec![0.0; RATE * seconds]; worker.partial();
@@ -1279,7 +1482,7 @@ mod fixture_tests {
         let (tx, _) = mpsc::channel();
         let mut worker = Worker::new(tx);
         worker.vad = Some(load_vad(&orbiters_core::paths::models_dir()).unwrap());
-        worker.listen = Some(Listen { hold: false, since: Instant::now(), id: 41 });
+        worker.listen = Some(Listen { hold: false, since: Instant::now(), id: 41, live: true });
         for chunk in wave.samples().chunks(WINDOW) { worker.audio(chunk.to_vec()); }
         for _ in 0..40 { worker.audio(vec![0.0; WINDOW]); }
         assert!(worker.listen.is_none(), "Silero ended the sentence");

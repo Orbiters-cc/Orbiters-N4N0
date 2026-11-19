@@ -268,6 +268,9 @@ impl Spool {
         id
     }
 
+    /// The longest the first send waits for the account to be known ([`Spool::run`]).
+    pub const ORIGIN_WAIT: Duration = Duration::from_secs(60);
+
     /// Sends the oldest batch to `api`: the request runs without the lock, so steps keep arriving meanwhile.
     pub fn send(&self, api: &orbiters_core::account::Api) -> Sent {
         let (batch, perf, team) = {
@@ -327,11 +330,21 @@ impl Spool {
     }
 
     /// Every minute while the app runs, the waiting steps go to Orbiters while `enabled` says so (the first a little after the start).
-    pub fn run(self: std::sync::Arc<Self>, enabled: impl Fn() -> bool + Send + 'static) {
+    /// `origin` says who is using the app now (an agent driving it, the team's code), `None` while the account is still being
+    /// read: a send takes it just before it goes, and the first one waits for it (at most [`Spool::ORIGIN_WAIT`]), so that the start of
+    /// a run is not counted as a tester's for want of an answer yet (PRIV-4).
+    pub fn run(self: std::sync::Arc<Self>, enabled: impl Fn() -> bool + Send + 'static, origin: impl Fn() -> Option<(bool, Option<String>)> + Send + 'static) {
         let _ = std::thread::Builder::new().name("usage-upload".into()).spawn(move || {
+            let started = std::time::Instant::now();
             std::thread::sleep(Duration::from_secs(20));
+            while origin().is_none() && started.elapsed() < Self::ORIGIN_WAIT {
+                std::thread::sleep(Duration::from_secs(5));
+            }
             loop {
                 if enabled() {
+                    if let Some((agent, team)) = origin() {
+                        self.origin(agent, team);
+                    }
                     let api = api();
                     // A backlog goes a batch after another; a failure waits for the next minute.
                     while let Sent::Taken(_) | Sent::Dropped(_) = self.send(&api) {}

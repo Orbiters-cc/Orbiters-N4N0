@@ -425,8 +425,8 @@
   "Nothing yet: VRChat's camera, Stream mode": "まだ何もありません：VRChatのカメラをStreamモードに",
   "An agent drives this VRChat through the bridge. While you take a picture here, it waits, and its own pictures wait for you.": "エージェントがブリッジ経由でこのVRChatを操作しています。ここで撮影している間、エージェントは待機し、エージェント自身の撮影もあなたが終えるまで待ちます。",
   "An agent started this VRChat and is gone: nobody drives it.": "エージェントがこのVRChatを起動し、もういません：誰も操作していません。",
-  "{count} VRChat on this computer": "このPCのVRChat {count}個",
-  "{count} VRChats on this computer": "このPCのVRChat {count}個",
+  "{count} VRChat on this computer": "このコンピューターのVRChat {count}個",
+  "{count} VRChats on this computer": "このコンピューターのVRChat {count}個",
   "Pictures are taken in the one you pick": "選んだVRChatで撮影します",
   "Pictures here": "ここで撮影",
   "Take pictures here": "ここで撮影する",
@@ -444,5 +444,5 @@
   "No sound from {app} to set yet.": "{app} にはまだ調整できる音がありません。",
   "Beta feedback": "ベータのフィードバック",
   "Menu mismatch buttons": "メニューずれ報告ボタン",
-  "Three buttons, on your wrist in VR and in a corner of VRChat's window on the desktop, to press when N4N0's menus do not match VRChat's; each press keeps a report on this computer, never what you type or say.": "VRでは手首に、デスクトップではVRChatのウィンドウの隅に出る3つのボタン。N4N0のメニューがVRChatと合わないときに押すと、レポートをこのPCに保存します（入力や発話の内容は含みません）。"
+  "Three buttons, on your wrist in VR and in a corner of VRChat's window on the desktop, to press when N4N0's menus do not match VRChat's; each press keeps a report on this computer, never what you type or say.": "VRでは手首に、デスクトップではVRChatのウィンドウの隅に出る3つのボタン。N4N0のメニューがVRChatと合わないときに押すと、レポートをこのコンピューターに保存します（入力や発話の内容は含みません）。"
 }

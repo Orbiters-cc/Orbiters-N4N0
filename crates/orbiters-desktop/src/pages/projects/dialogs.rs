@@ -495,7 +495,23 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
     let ctx = ui.ctx().clone();
     let source = new_source(state);
     let valid = templates::validate_name(&state.new_name).is_ok();
-    let enabled = source.as_ref().is_some_and(|(_, u)| !u.is_empty()) && valid && !state.new_location.is_empty() && !state.running();
+    // A copy is checked as Duplicate checks it: its size against the room on the destination's disk, the folder free,
+    // the project's Library not being moved (PROJECTS-3).
+    let copy_problem = match (&source, state.duplicate && valid && !state.new_location.is_empty() && !state.running()) {
+        (Some((path, _)), true) => match state.scan.projects.iter().find(|p| &p.path == path).cloned() {
+            Some(project) => {
+                let (name, location) = (state.new_name.clone(), state.new_location.clone());
+                super::duplicate::copy_problem(&ctx, state, &project, &name, &location)
+            }
+            None => None,
+        },
+        _ => None,
+    };
+    // Said once known (not while the size is being measured).
+    if let Some(problem) = copy_problem.as_deref().filter(|p| *p != tr("Checking required disk space…")) {
+        inline_warning(ui, problem);
+    }
+    let enabled = source.as_ref().is_some_and(|(_, u)| !u.is_empty()) && valid && !state.new_location.is_empty() && !state.running() && copy_problem.is_none();
     let label = match (state.running(), state.duplicate) {
         (true, true) => tr("Copying…"),
         (true, false) => tr("Creating…"),
@@ -513,6 +529,8 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
         let cancel = state.copy_cancel.clone();
         let progress = state.copy_progress.clone();
         let id = state.dialog_id();
+        // A failure restoring the new project's packages is the new project's (PROJECTS-39).
+        state.last_change = Some((location.join(&name), vpm::Change::Resolve));
         state.task(&ctx, if duplicate { tr("Copying the project…") } else { tr("Creating the project…") }, move || {
             let path = orbiters_projects::runtime()?.block_on(templates::create(
                 &orbiters_projects::vcc_dir(),
@@ -524,10 +542,14 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
                 &cancel,
                 &progress,
             ))?;
-            Ok(Outcome::Added(
-                path.clone(),
-                tr!("{name} is ready: VCC and ALCOM list it too", name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
-            ))
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            // A copy is ready only when nothing it needs has to come from elsewhere first (PROJECTS-22).
+            let later = if duplicate { templates::packages_only_in_library(&path) } else { vec![] };
+            if later.is_empty() {
+                Ok(Outcome::Added(path.clone(), tr!("{name} is ready: VCC and ALCOM list it too", name = name)))
+            } else {
+                Ok(Outcome::Added(path.clone(), tr!("{name} is copied and listed, but Unity must download {packages} again when it first opens it", name = name, packages = later.join(", "))))
+            }
         });
         let _ = id;
     }

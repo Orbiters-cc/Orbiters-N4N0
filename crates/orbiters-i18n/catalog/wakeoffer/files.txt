@@ -1,0 +1,3 @@
+# "Talk with N4N0?", the button the wake word puts up during a call (night 2026-11-19, N4N0-11): the window's and the
+# SteamVR overlay's.
+crates/orbiters-desktop/src/wake_offer.rs

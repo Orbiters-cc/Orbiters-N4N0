@@ -100,5 +100,9 @@
   "{url}: not the file Orbiters knows (SHA-256 {digest})": "{url}：Orbitersが知っているファイルではありません（SHA-256 {digest}）",
   "{url}: not the file the release names (its SHA-256 differs)": "{url}：リリースが指定するファイルではありません（SHA-256が異なります）",
   "{url}: the download stopped at {have} of {size} bytes": "{url}：ダウンロードが{size}バイト中{have}バイトで止まりました",
-  "{url}: the download stopped at {have} of {size} bytes (the next try goes on from there)": "{url}：ダウンロードが{size}バイト中{have}バイトで止まりました（次回はそこから再開します）"
+  "{url}: the download stopped at {have} of {size} bytes (the next try goes on from there)": "{url}：ダウンロードが{size}バイト中{have}バイトで止まりました（次回はそこから再開します）",
+  "These files are already in {folder} and are not Orbiters - N4N0's: {files}. Nothing was changed: choose another folder.": "次のファイルはすでに{folder}にあり、Orbiters - N4N0のものではありません：{files}。何も変更されていません。別のフォルダーを選んでください。",
+  "These files of {folder} are reached through a link to another folder: {files}. Nothing was changed.": "{folder}の次のファイルは別のフォルダーへのリンクを経由しています：{files}。何も変更されていません。",
+  "{path} is reached through a link to another folder": "{path}は別のフォルダーへのリンクを経由しています",
+  "The previous version could not be fully put back: {files}. Its files are kept in {folder}.": "以前のバージョンを完全には戻せませんでした：{files}。そのファイルは{folder}に保存されています。"
 }

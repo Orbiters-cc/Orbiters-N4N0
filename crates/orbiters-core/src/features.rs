@@ -137,7 +137,7 @@ mod tests {
         // The server refusing the credential is a no, not a server out of reach.
         let mut grant = Grant::new(refresh, lifetime);
         grant.answered(&Ok(true), start);
-        grant.answered(&Err(crate::account::ApiError { status: 401, message: "expired".into() }.into()), start + Duration::from_secs(1));
+        grant.answered(&Err(crate::account::ApiError { status: 401, message: "expired".into(), code: None }.into()), start + Duration::from_secs(1));
         assert!(!grant.allowed(start + Duration::from_secs(1)));
         // Another account starts from nothing.
         let mut grant = Grant::new(refresh, lifetime);

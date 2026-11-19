@@ -79,21 +79,17 @@ impl Worker {
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         std::thread::Builder::new().name("call-stdout".into()).spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
+            crate::worker::pipe_lines(stdout, |line| {
                 match serde_json::from_str::<CallEvent>(&line) {
                     Ok(e) => ctl.on_call_worker(e),
                     // Not the line: it may hold a description (addresses).
                     Err(e) => eprintln!("call: unexpected output ({} bytes): {e}", line.len()),
                 }
-            }
+            });
             ctl.on_call_worker_exit(number);
         })?;
         std::thread::Builder::new().name("call-stderr".into()).spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
-                eprintln!("call: {}", line.strip_prefix("call: ").unwrap_or(&line));
-            }
+            crate::worker::pipe_lines(stderr, |line| eprintln!("call: {}", line.strip_prefix("call: ").unwrap_or(&line)));
         })?;
         Ok(Self { child, stdin, number })
     }
@@ -271,6 +267,9 @@ pub struct CallsRuntime {
     stream_failures: u32,
     stream_retry_at: Option<Instant>,
     stop: bool,
+    /// The server (its API address) and the credential the state above is for: when either changes (an environment
+    /// switch, another account), nothing of the other's is listed or callable any more.
+    identity: Option<(String, String)>,
 }
 
 impl CallsRuntime {
@@ -550,9 +549,16 @@ fn friends_digest(hashes: &[String]) -> u64 {
     h.finish()
 }
 
-/// Orbiters refused: this VRChat account is not the member's verified link (403 on calls).
+/// Orbiters refused: this VRChat account is not the member's verified link (403 `{"code": "not_linked"}` on calls; a
+/// 403 without a code, as a server from before codes answered, counts too). Another 403 (a firewall page, a feature
+/// refused) is not "link your VRChat account".
 fn not_linked(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<ApiError>().is_some_and(|a| a.status == 403)
+    refused_as(e, 403, "not_linked")
+}
+
+/// Whether `e` is Orbiters' answer `status` with the contract's `code` (or with no code at all).
+fn refused_as(e: &anyhow::Error, status: u16, code: &str) -> bool {
+    e.downcast_ref::<ApiError>().is_some_and(|a| a.status == status && a.code.as_deref().is_none_or(|c| c == code))
 }
 
 /// The panel's text for the call menu: four contacts around the chosen one, `>` before it.
@@ -739,6 +745,35 @@ impl super::Controller {
         });
     }
 
+    /// Signing out of Orbiters (PRIV-7): with the identity that leaves, while it is still there, the call under way is
+    /// ended on Orbiters and this computer leaves the callable list; the next tick, signed out, ends the call here. Sent
+    /// in the background (sign-out finishes offline too); nothing of the credential is kept for later.
+    pub(super) fn calls_depart(&self) {
+        let Some((api, token)) = self.account_api() else { return };
+        let (was_on, call_id) = {
+            let mut rt = self.calls.lock().unwrap();
+            let call_id = rt.call.as_ref().and_then(|c| c.id.clone());
+            let was_on = rt.available_sent.take().is_some();
+            rt.streaming = None;
+            rt.presence_sent = None;
+            rt.identity = None;
+            (was_on, call_id)
+        };
+        if !was_on && call_id.is_none() {
+            return;
+        }
+        let _ = std::thread::Builder::new().name("calls-depart".into()).spawn(move || {
+            let agent = orbiters_core::http_agent(Some(Duration::from_secs(2)), Some(Duration::from_secs(5)));
+            let auth = format!("Bearer {token}"); // i18n: not shown
+            if let Some(id) = call_id {
+                let _ = agent.post(&api.url(&format!("n4n0/calls/{id}/end"))).header("Authorization", &auth).send_json(json!({}));
+            }
+            if was_on {
+                let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call();
+            }
+        });
+    }
+
     /// Calls stop (the app quits): the call worker ends, the call under way ends for the friend too, and this
     /// computer leaves the callable list.
     pub(super) fn calls_stop(self: &Shared) {
@@ -769,6 +804,43 @@ impl super::Controller {
         let _ = wait.recv_timeout(Duration::from_secs(4));
     }
 
+    /// Calls now go to `api` with `token`: when that is another server or account than the state was for, the other
+    /// one is told this member is gone (its presence), a call under way ends, and its contacts, presence and stream are
+    /// forgotten, so that no contact of one environment or account can be called in the other (audit F25).
+    fn calls_follow_identity(self: &Shared, api: &Api, token: &str) {
+        let now = (api.url(""), token.to_string());
+        let old = {
+            let mut rt = self.calls.lock().unwrap();
+            match rt.identity.replace(now.clone()) {
+                Some(old) if old != now => Some((old, rt.available_sent.is_some())),
+                _ => None,
+            }
+        };
+        let Some(((base, old_token), available)) = old else { return };
+        if available {
+            let agent = orbiters_core::http_agent(Some(Duration::from_secs(5)), Some(Duration::from_secs(10)));
+            let _ = agent.delete(&Api::at(&base).url("n4n0/calls/presence")).header("Authorization", &format!("Bearer {old_token}")).call();
+        }
+        {
+            let mut rt = self.calls.lock().unwrap();
+            if rt.call.is_some() {
+                let acts = rt.hang_up();
+                self.calls_act(rt, acts);
+            }
+        }
+        self.calls_publish(|rt| {
+            rt.contacts.clear();
+            rt.contacts_read = None;
+            rt.presence_sent = None;
+            rt.available_sent = None;
+            rt.friends_sent = None;
+            rt.link = CallLink::default();
+            rt.streaming = None;
+            rt.stream_failures = 0;
+            rt.stream_retry_at = None;
+        });
+    }
+
     /// The API and credential for calls (signed in), through the client kept for the server.
     fn calls_api(self: &Shared) -> Option<(Api, String)> {
         let (fresh, token) = self.account_api()?;
@@ -789,6 +861,9 @@ impl super::Controller {
             self.calls_act(rt, acts);
         }
         let account = if on { self.calls_api() } else { None };
+        if let Some((api, token)) = &account {
+            self.calls_follow_identity(api, token);
+        }
         let Some((api, token)) = account else {
             let was = {
                 let mut rt = self.calls.lock().unwrap();
@@ -1148,7 +1223,7 @@ impl super::Controller {
                 Signal::Create { number, contact, offer } => {
                     let answer = match post(&api, &token, "n4n0/calls", &json!({ "contact": contact, "offer": offer })) {
                         Ok(v) => v["call"].as_str().filter(|id| !id.is_empty()).map(str::to_string).ok_or(Ending::Failed),
-                        Err(e) if e.downcast_ref::<ApiError>().is_some_and(|a| a.status == 409) => Err(Ending::Busy),
+                        Err(e) if refused_as(&e, 409, "busy") => Err(Ending::Busy),
                         Err(e) => {
                             eprintln!("calls n4n0/calls: {e:#}");
                             self.notify(NoticeKind::Warning, tr!("Call: {message}", message = e));
@@ -1348,6 +1423,18 @@ impl super::Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CORE2-11: "link your VRChat account" and "busy" are Orbiters' own refusals (their code), not any 403 or 409 of
+    /// something in front of it; a server from before codes still reads as before.
+    #[test]
+    fn refusals_are_read_by_their_code() {
+        let e = |status: u16, code: Option<&str>| anyhow::Error::from(ApiError { status, message: String::new(), code: code.map(str::to_string) });
+        assert!(not_linked(&e(403, Some("not_linked"))) && not_linked(&e(403, None)));
+        assert!(!not_linked(&e(403, Some("feature_disabled"))), "another 403 is not about the link");
+        assert!(!not_linked(&e(401, None)) && !not_linked(&anyhow::anyhow!("offline")));
+        assert!(refused_as(&e(409, Some("busy")), 409, "busy") && refused_as(&e(409, None), 409, "busy"));
+        assert!(!refused_as(&e(409, Some("conflict")), 409, "busy"));
+    }
 
     fn contacts(n: usize) -> Vec<CallContact> {
         (0..n).map(|i| CallContact { id: format!("c_{i}"), name: format!("Friend {i}") }).collect()

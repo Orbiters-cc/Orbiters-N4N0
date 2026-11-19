@@ -81,15 +81,9 @@ impl Stalls {
             return;
         }
         self.said = Some(Instant::now());
-        let dir = orbiters_core::paths::logs_dir();
         let at = orbiters_core::now_utc_iso();
         let line = format!("{at} a turn took {} ms: {}\n", took.as_millis(), doing()); // i18n: not shown (a log's line)
-        if std::fs::create_dir_all(&dir).is_ok() {
-            if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(dir.join("overlay-stalls.log")) {
-                use std::io::Write;
-                let _ = file.write_all(line.as_bytes());
-            }
-        }
+        vr_log::append("overlay-stalls.log", None, line);
     }
 }
 
@@ -689,11 +683,16 @@ enum Ended {
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     // How it ended, in `vr-test.log`: the overlay's own stderr reaches nobody, and an end at a press left no trace
     // (K-qr-page, 2026-11-14 22:08).
+    // The overlay's logs are written off its loop (LIGHT-VR-7); dropping the writer writes what is queued, also when a
+    // panic unwinds through here.
+    let logs = vr_log::Queued::start();
     let ended = session(args);
     match &ended {
         Ok(how) => vr_log::line(&format!("overlay ended: {how:?}")), // i18n: not shown (a log's line)
         Err(e) => vr_log::line(&format!("overlay ended with an error: {e:#}")), // i18n: not shown (a log's line)
     }
+    // Before `process::exit`, which runs no destructor.
+    drop(logs);
     match ended? {
         Ended::Closed | Ended::Retry => Ok(()),
         // Everything was put back as the session ended: only the exit code is left to say.
@@ -857,7 +856,6 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
 
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
-    let sounds = Sounds::start();
     let mut stall = Stalls::default();
     let mut mismatch_noted = MismatchNoted::default();
     let mut input_log = vr_log::Every::default();
@@ -874,9 +872,13 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     walk.set_frame(steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map(|hz| Duration::from_secs_f32(1.0 / hz)));
     let mut devices = crate::tracking::DeviceKindsWatch::default();
     let mut state = ui::OverlayUi::default();
-    let world = World::new(&overlay)?;
-    let menu = menu::MenuOverlay::new(&overlay, KEY)?;
-    let coverage = coverage::CoverageOverlayPanel::new(&overlay)?;
+    // Which required part could not be made is said in `vr-test.log`'s "overlay ended with an error" (OVERLAY-17).
+    let world = World::new(&overlay).context("the calibration overlays")?; // i18n: not shown (a log's line)
+    let menu = menu::MenuOverlay::new(&overlay, KEY).context("N4N0's menu overlays")?; // i18n: not shown (a log's line)
+    let coverage = coverage::CoverageOverlayPanel::new(&overlay).context("the coverage panel's overlay")?; // i18n: not shown (a log's line)
+    // "Reveal" once every required part is made: a start that fails at one of them makes no sound (it played at every
+    // retry, every 2 to 4 s, OVERLAY-17).
+    let sounds = Sounds::start();
     // The floating panel is an addition: without its overlays the tab and the rest work as before.
     let floating = floating::Floating::new(&overlay, KEY).map_err(|e| eprintln!("floating panel unavailable: {e}")).ok();
     let orbit = orbit::vr::OrbitVr::new(&overlay, KEY, backend.clone()).map_err(|e| eprintln!("panels around VRChat's menus unavailable: {e}")).ok();

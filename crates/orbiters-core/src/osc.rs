@@ -46,12 +46,13 @@ impl OscValue {
         }
     }
 
+    /// `None` also for a float that is not a finite number (NaN, an infinity, a double beyond a float's range).
     pub fn from_osc(arg: &OscType) -> Option<Self> {
         Some(match arg {
             OscType::Bool(b) => OscValue::Bool(*b),
             OscType::Int(i) => OscValue::Int(*i),
-            OscType::Float(f) => OscValue::Float(*f),
-            OscType::Double(d) => OscValue::Float(*d as f32),
+            OscType::Float(f) if f.is_finite() => OscValue::Float(*f),
+            OscType::Double(d) if (*d as f32).is_finite() => OscValue::Float(*d as f32),
             // A long beyond an int keeps its size, as a float, rather than wrapping around.
             OscType::Long(l) => i32::try_from(*l).map_or(OscValue::Float(*l as f32), OscValue::Int),
             OscType::String(s) => OscValue::Text(s.clone()),
@@ -181,6 +182,11 @@ fn event_of(mut address: String, args: Vec<OscType>) -> Option<OscEvent> {
             Some(OscType::String(id)) if is_avatar_id(&id) => Some(OscEvent::AvatarChanged { id }),
             _ => None,
         };
+    }
+    // A float that is not a number has no meaning for any reader, and cannot travel in the app's state (JSON writes
+    // it as null, which no number reads): the message is let go whole, as a pose with one value missing would mislead.
+    if args.iter().any(|a| matches!(a, OscType::Float(_) | OscType::Double(_)) && OscValue::from_osc(a).is_none()) {
+        return None;
     }
     let values: Vec<OscValue> = args.into_iter().filter_map(OscValue::from_osc_owned).collect();
     (!values.is_empty()).then_some(OscEvent::Values { address, values })
@@ -462,7 +468,7 @@ pub fn vrchat_nodes(addr: SocketAddr, timeout: Duration) -> anyhow::Result<Vec<T
 fn walk_tree(tree: &serde_json::Value, f: &mut dyn FnMut(TreeNode)) {
     if let (Some(path), Some(kind), Some(value)) = (tree["FULL_PATH"].as_str(), tree["TYPE"].as_str(), tree["VALUE"].get(0)) {
         let v = match kind.chars().next() {
-            Some('f') | Some('d') => value.as_f64().map(|f| OscValue::Float(f as f32)),
+            Some('f') | Some('d') => value.as_f64().map(|f| f as f32).filter(|f| f.is_finite()).map(OscValue::Float),
             Some('i') | Some('h') => value.as_i64().map(|i| i32::try_from(i).map_or(OscValue::Float(i as f32), OscValue::Int)),
             Some('T') | Some('F') => value.as_bool().map(OscValue::Bool),
             Some('s') => value.as_str().map(|s| OscValue::Text(s.to_string())),
@@ -1562,6 +1568,28 @@ mod platform_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CORE2-8: a float that is not a number never leaves the reader: a pose with one is let go whole, a parameter with
+    /// one too, and the finite ones pass as before.
+    #[test]
+    fn floats_that_are_not_numbers_stay_out() {
+        let pose = "/tracking/vrsystem/leftwrist/pose";
+        let six = |bad: f32| vec![OscType::Float(0.1), OscType::Float(1.2), OscType::Float(0.3), OscType::Float(bad), OscType::Float(0.0), OscType::Float(0.0)];
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(event_of(pose.into(), six(bad)), None, "{bad}");
+            assert_eq!(event_of("/avatar/parameters/Speed".into(), vec![OscType::Float(bad)]), None, "{bad}");
+        }
+        assert_eq!(event_of(pose.into(), vec![OscType::Double(1e300)]), None, "a double beyond a float");
+        assert!(matches!(event_of(pose.into(), six(0.5)), Some(OscEvent::Values { values, .. }) if values.len() == 6));
+        assert_eq!(
+            event_of("/avatar/parameters/Speed".into(), vec![OscType::Float(0.25)]),
+            Some(OscEvent::Parameter { name: "Speed".into(), value: OscValue::Float(0.25) })
+        );
+        let tree = serde_json::json!({"FULL_PATH": "/avatar/parameters/Big", "TYPE": "f", "VALUE": [1e300], "ACCESS": 3});
+        let mut nodes = Vec::new();
+        walk_tree(&tree, &mut |n| nodes.push(n));
+        assert!(nodes.is_empty(), "OSCQuery's value beyond a float is no value");
+    }
 
     /// How long a test waits for what has to come: far longer than a machine running the whole test suite takes, and only
     /// waited in full by a test that fails.

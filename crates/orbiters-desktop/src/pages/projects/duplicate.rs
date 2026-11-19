@@ -52,16 +52,62 @@ fn problem(state: &State, project: &Project) -> Option<String> {
     if *exists {
         return Some(tr!("{location} has a folder named {name} already: choose another name.", location = d.location.trim(), name = name));
     }
-    if let Some((_, Err(error))) = &d.measured { return Some(error.clone()); }
+    if let Some((_, _, Err(error))) = d.measured.as_ref().filter(|(p, l, _)| *p == project.path && *l == d.library) { return Some(error.clone()); }
     let Some(need) = needed(state, project) else { return Some(tr("Checking required disk space…").into()); };
     if free.is_none() { return Some(tr("Cannot check free space. Choose an accessible destination.").into()); }
     free.filter(|f| *f < need).map(|f| tr!("The copy needs about {need}, and that disk has {free} left. Free some space or choose another disk.", need = format::bytes(need as f64), free = format::bytes(f as f64)))
 }
 
+/// Starts looking, on workers, at what a copy of `project` at `state.dup`'s place takes: its size (with Library or not)
+/// and whether the place is free, with the room on its disk; each again when it changed.
+fn look(ctx: &egui::Context, state: &mut State, project: &Project) {
+    if let Some(measured) = state.dup.measure.take() { state.dup.measured = Some(measured); }
+    let library = state.dup.library;
+    if !state.fixture && !state.dup.measure.running() && state.dup.measured.as_ref().is_none_or(|(p, l, _)| *p != project.path || *l != library) {
+        let source = project.path.clone();
+        state.dup.measure = Job::spawn(ctx, move || {
+            let size = templates::duplication_bytes(&source, templates::Keep { library }).map_err(|e| e.to_string());
+            (source, library, size)
+        });
+    }
+    let key = (state.dup.location.trim().to_string(), state.dup.name.clone());
+    let checked = state.dup.checked.as_ref().is_some_and(|(l, n, _, _)| (l, n) == (&key.0, &key.1));
+    if !checked && !state.dup.check.running() && !state.fixture && !key.0.is_empty() {
+        let (location, name) = key.clone();
+        state.dup.check = Job::spawn(ctx, move || {
+            let dir = PathBuf::from(&location);
+            let exists = !name.is_empty() && dir.join(&name).exists();
+            let free = size::free_space(&dir);
+            (location, name, exists, free)
+        });
+    }
+}
+
+/// For the New dialog's "Copy a project" (PROJECTS-3): the same checks as Duplicate for a copy of `project`, without
+/// Library, named `name` in `location`. `None` once the copy may start; else what is in the way (or that the checks are
+/// still running).
+pub(super) fn copy_problem(ctx: &egui::Context, state: &mut State, project: &Project, name: &str, location: &str) -> Option<String> {
+    if state.fixture {
+        return None;
+    }
+    if state.dup.name != name || state.dup.location != location || state.dup.library {
+        state.dup.name = name.to_string();
+        state.dup.location = location.to_string();
+        state.dup.library = false;
+    }
+    look(ctx, state, project);
+    let place = state.dup.checked.as_ref().is_some_and(|(l, n, _, _)| l == state.dup.location.trim() && n == &state.dup.name);
+    match problem(state, project) {
+        Some(p) => Some(p),
+        None if !place => Some(tr("Checking required disk space…").into()),
+        None => None,
+    }
+}
+
 /// About what the copy takes, once the project was measured.
 fn needed(state: &State, project: &Project) -> Option<u64> {
     if !state.fixture {
-        return state.dup.measured.as_ref().filter(|(library, _)| *library == state.dup.library).and_then(|(_, size)| size.as_ref().ok()).copied();
+        return state.dup.measured.as_ref().filter(|(p, library, _)| *p == project.path && *library == state.dup.library).and_then(|(_, _, size)| size.as_ref().ok()).copied();
     }
     let s = state.sizes.get(&project.path)?;
     Some(if state.dup.library { s.total } else { s.without_library() })
@@ -75,27 +121,10 @@ pub(super) fn body(ui: &mut Ui, state: &mut State, path: &Path) {
         return;
     };
     state.want_size(&ctx, &project.path);
-    if let Some(measured) = state.dup.measure.take() { state.dup.measured = Some(measured); }
-    if !state.fixture && !state.dup.measure.running() && state.dup.measured.as_ref().is_none_or(|(library, _)| *library != state.dup.library) {
-        let source = project.path.clone();
-        let library = state.dup.library;
-        state.dup.measure = Job::spawn(&ctx, move || (library, templates::duplication_bytes(&source, templates::Keep { library }).map_err(|e| e.to_string())));
-    }
     if let Some(Some(dir)) = state.dup.pick.take() {
         state.dup.location = dir.display().to_string();
     }
-    // Whether the place is free, and the room on its disk: looked at on a worker as they change.
-    let key = (state.dup.location.trim().to_string(), state.dup.name.clone());
-    let checked = state.dup.checked.as_ref().is_some_and(|(l, n, _, _)| (l, n) == (&key.0, &key.1));
-    if !checked && !state.dup.check.running() && !state.fixture && !key.0.is_empty() {
-        let (location, name) = key.clone();
-        state.dup.check = Job::spawn(&ctx, move || {
-            let dir = PathBuf::from(&location);
-            let exists = !name.is_empty() && dir.join(&name).exists();
-            let free = size::free_space(&dir);
-            (location, name, exists, free)
-        });
-    }
+    look(&ctx, state, &project);
     let w = ui.available_width();
     let busy = state.running();
     if busy {
@@ -197,10 +226,19 @@ pub(super) fn footer(ui: &mut Ui, state: &mut State, path: &Path) {
         *state.copy_progress.lock().unwrap() = Default::default();
         let cancel = state.copy_cancel.clone();
         let progress = state.copy_progress.clone();
+        // A failure restoring the copy's packages is the copy's: its card's retry must change the copy, never the project
+        // open in the panel (PROJECTS-39).
+        state.last_change = Some((parent.join(&name), orbiters_projects::vpm::Change::Resolve));
         state.task(&ctx, &tr!("Duplicating {name}…", name = project.name), move || {
             let root = orbiters_projects::vcc_dir();
             let path = orbiters_projects::runtime()?.block_on(templates::duplicate(&root, &source, &parent, &name, keep, &cancel, &progress))?;
-            Ok(Outcome::Added(path, tr!("{name} is ready: VCC and ALCOM list it too", name = name)))
+            // Ready only when nothing it needs has to come from elsewhere first (PROJECTS-22).
+            let later = if keep.library { vec![] } else { templates::packages_only_in_library(&path) };
+            if later.is_empty() {
+                Ok(Outcome::Added(path, tr!("{name} is ready: VCC and ALCOM list it too", name = name)))
+            } else {
+                Ok(Outcome::Added(path, tr!("{name} is copied and listed, but Unity must download {packages} again when it first opens it", name = name, packages = later.join(", "))))
+            }
         });
     }
     if busy {

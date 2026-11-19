@@ -186,7 +186,7 @@ impl Keeper {
                 inner.identity = identity.clone();
                 inner.grant.forget();
                 self.generation.fetch_add(1, Ordering::Relaxed);
-                self.close(&mut inner, tr("The Orbiters account or server changed: the bridge closed."));
+                self.close(&mut inner, tr("The Orbiters account or server changed: the bridge closed."), false);
             }
             identity.is_some() && inner.grant.due(now) && !self.asking.swap(true, Ordering::Relaxed)
         };
@@ -211,8 +211,9 @@ impl Keeper {
         if wanted && inner.open.is_none() {
             self.open(&mut inner);
         } else if !wanted && inner.open.is_some() {
+            // Turned off in Settings is the person's; Orbiters' grant lapsing is not.
             let why = if allowed { tr("The bridge was turned off.") } else { tr("Orbiters no longer says this account has the bridge: it closed.") };
-            self.close(&mut inner, why);
+            self.close(&mut inner, why, allowed);
         } else if !wanted {
             inner.problem = None;
         }
@@ -257,10 +258,15 @@ impl Keeper {
         }
     }
 
-    /// Everything of it goes: input released, what runs ended, the port closed, the person no longer listened to.
-    fn close(&self, inner: &mut Inner, why: &str) {
+    /// Everything of it goes: input released, what runs ended, the port closed, the person no longer listened to. Only the
+    /// person's own Stop (`by_person`) makes the main VRChat theirs (BRIDGE-5).
+    fn close(&self, inner: &mut Inner, why: &str, by_person: bool) {
         if let Some(open) = inner.open.take() {
-            self.bridge.take_over(why);
+            if by_person {
+                self.bridge.take_over(why);
+            } else {
+                self.bridge.wind_down(why);
+            }
             drop(open);
             self.bridge.stop_guard();
         }
@@ -272,7 +278,7 @@ impl Keeper {
             Command::Stop => {
                 self.flag.turn_off();
                 let mut inner = self.inner.lock().unwrap();
-                self.close(&mut inner, tr("Stopped from Settings: control is back with the person."));
+                self.close(&mut inner, tr("Stopped from Settings: control is back with the person."), true);
                 drop(inner);
                 // Whatever paused it is over with it: the next time it is on, it starts clean.
                 self.bridge.presence.lock().unwrap().resume();
@@ -285,7 +291,7 @@ impl Keeper {
                 keys.save(&self.keys_file);
                 let mut inner = self.inner.lock().unwrap();
                 if inner.open.is_some() {
-                    self.close(&mut inner, tr("A new token: the agents it was added to are updated, others have to be given it again."));
+                    self.close(&mut inner, tr("A new token: the agents it was added to are updated, others have to be given it again."), false);
                 }
                 // Also while closed: nothing else would ever tell them.
                 self.repair_due.store(true, Ordering::Relaxed);
@@ -303,7 +309,7 @@ impl Keeper {
     /// Ends it all when the app quits.
     pub fn shutdown(&self) {
         let mut inner = self.inner.lock().unwrap();
-        self.close(&mut inner, tr("The app is closing."));
+        self.close(&mut inner, tr("The app is closing."), true);
     }
 
     /// The address clients use, when open.

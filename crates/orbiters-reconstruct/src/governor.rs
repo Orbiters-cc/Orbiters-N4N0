@@ -27,6 +27,24 @@ const LONGEST_BACKOFF: Duration = Duration::from_secs(2);
 pub const DESKTOP_SHARE: f32 = 0.3;
 /// The longest rest after one part (a slow part's rest is not allowed to stall training for seconds).
 const LONGEST_REST: Duration = Duration::from_millis(250);
+/// The longest sleep between two looks at whether a pause was asked (RECONSTRUCT-15): the app gives a pausing worker
+/// 15 s to leave the GPU, and a back-off alone can last 2 s.
+const PAUSE_LOOK: Duration = Duration::from_millis(50);
+
+/// Sleeps `d`, looking at `asked` at least every [`PAUSE_LOOK`]; true when it was asked (the sleep is cut short).
+fn sleep_unless(d: Duration, asked: &dyn Fn() -> bool) -> bool {
+    let end = Instant::now() + d;
+    loop {
+        if asked() {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= end {
+            return false;
+        }
+        std::thread::sleep((end - now).min(PAUSE_LOOK));
+    }
+}
 
 /// How long to rest after a part that took the GPU `cost`, beside VRChat on the desktop.
 pub fn desktop_rest(cost: Duration) -> Duration {
@@ -65,6 +83,36 @@ pub fn verdict(recent: &[FrameTiming], frame_ms: f32, cost_ms: f32, answered: u3
     }
 }
 
+/// What pacing cost a run so far (RECONSTRUCT-10): kept in its report, so that a slow run explains itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tally {
+    /// Time spent waiting or resting, and back-offs after late frames.
+    pub waited: Duration,
+    pub backoffs: u32,
+    /// Looks that found too little idle time ([`Verdict::Wait`]), the longest single wait, and waits a pause cut short.
+    pub waits: u32,
+    pub longest: Duration,
+    pub cut_by_pause: u32,
+    /// Paced by SteamVR's frames, and resting beside VRChat on the desktop, at some point of the run.
+    pub vr: bool,
+    pub desktop: bool,
+}
+
+impl Tally {
+    /// Both tallies, as one.
+    pub fn add(&self, other: &Tally) -> Tally {
+        Tally {
+            waited: self.waited + other.waited,
+            backoffs: self.backoffs + other.backoffs,
+            waits: self.waits + other.waits,
+            longest: self.longest.max(other.longest),
+            cut_by_pause: self.cut_by_pause + other.cut_by_pause,
+            vr: self.vr || other.vr,
+            desktop: self.desktop || other.desktop,
+        }
+    }
+}
+
 pub struct Governor {
     /// SteamVR's client; `None` beside VRChat on the desktop, where the trainer keeps to [`DESKTOP_SHARE`] of the GPU.
     client: Option<Client>,
@@ -74,9 +122,8 @@ pub struct Governor {
     backoff: Duration,
     /// The newest frame a back-off answered: a late frame stays among the recent ones for a few frames.
     answered: u32,
-    /// Time spent waiting, and back-offs, since the start.
-    pub waited: Duration,
-    pub backoffs: u32,
+    /// What it cost since it joined.
+    pub tally: Tally,
 }
 
 impl Governor {
@@ -84,7 +131,18 @@ impl Governor {
     pub fn connect() -> Option<Self> {
         let client = Client::connect(AppType::Background).ok();
         let hz = client.as_ref().and_then(|c| c.float_property(0, orbiters_openvr::prop::DISPLAY_FREQUENCY)).filter(|hz| *hz > 1.0).unwrap_or(90.0);
-        Some(Self { client, frame_ms: 1000.0 / hz, timings: [FrameTiming::default(); RECENT], backoff: Duration::ZERO, answered: 0, waited: Duration::ZERO, backoffs: 0 })
+        Some(Self::with(client, 1000.0 / hz))
+    }
+
+    fn with(client: Option<Client>, frame_ms: f32) -> Self {
+        Self {
+            frame_ms,
+            timings: [FrameTiming::default(); RECENT],
+            backoff: Duration::ZERO,
+            answered: 0,
+            tally: Tally { vr: client.is_some(), desktop: client.is_none(), ..Default::default() },
+            client,
+        }
     }
 
     /// Beside VRChat on the desktop (no SteamVR to read frames from).
@@ -93,43 +151,57 @@ impl Governor {
     }
 
     /// Waits until the GPU can take `cost` of work without the scene application missing a frame. False once SteamVR
-    /// quits: nothing is governed any more.
-    pub fn wait(&mut self, cost: Duration) -> bool {
+    /// quits: nothing is governed any more. A pause asked (`asked`) ends the wait at once, as if the frames had room
+    /// (RECONSTRUCT-15): the step under way finishes unpaced, and the run pauses between two steps as it always does,
+    /// well within the time the app gives it.
+    pub fn wait(&mut self, cost: Duration, asked: &dyn Fn() -> bool) -> bool {
         let start = Instant::now();
-        let Some(client) = self.client.as_ref() else {
-            std::thread::sleep(desktop_rest(cost));
-            self.waited += start.elapsed();
-            return true;
-        };
-        let alive = loop {
-            let mut quitting = false;
-            while let Some(e) = client.poll_event() {
-                quitting |= e.event_type == orbiters_openvr::event::QUIT;
+        let mut cut = false;
+        let alive = match self.client.as_ref() {
+            None => {
+                cut = sleep_unless(desktop_rest(cost), asked);
+                true
             }
-            if quitting {
-                client.acknowledge_quit();
-                break false;
-            }
-            let Ok(compositor) = client.compositor() else { break true };
-            let n = compositor.frame_timings(&mut self.timings);
-            match verdict(&self.timings[..n], self.frame_ms, cost.as_secs_f32() * 1000.0, self.answered) {
-                Verdict::Free => break true,
-                Verdict::Go => {
-                    // Frames on time: the next back-off starts lower.
-                    self.backoff /= 2;
+            Some(client) => loop {
+                if asked() {
+                    cut = true;
                     break true;
                 }
-                Verdict::BackOff(newest) => {
-                    self.answered = newest;
-                    self.backoff = (self.backoff * 2).clamp(FIRST_BACKOFF, LONGEST_BACKOFF);
-                    self.backoffs += 1;
-                    std::thread::sleep(self.backoff);
+                let mut quitting = false;
+                while let Some(e) = client.poll_event() {
+                    quitting |= e.event_type == orbiters_openvr::event::QUIT;
                 }
-                // About a frame, then the next frames' timing.
-                Verdict::Wait => std::thread::sleep(Duration::from_secs_f32(self.frame_ms / 1000.0)),
-            }
+                if quitting {
+                    client.acknowledge_quit();
+                    break false;
+                }
+                let Ok(compositor) = client.compositor() else { break true };
+                let n = compositor.frame_timings(&mut self.timings);
+                match verdict(&self.timings[..n], self.frame_ms, cost.as_secs_f32() * 1000.0, self.answered) {
+                    Verdict::Free => break true,
+                    Verdict::Go => {
+                        // Frames on time: the next back-off starts lower.
+                        self.backoff /= 2;
+                        break true;
+                    }
+                    Verdict::BackOff(newest) => {
+                        self.answered = newest;
+                        self.backoff = (self.backoff * 2).clamp(FIRST_BACKOFF, LONGEST_BACKOFF);
+                        self.tally.backoffs += 1;
+                        sleep_unless(self.backoff, asked);
+                    }
+                    // About a frame, then the next frames' timing.
+                    Verdict::Wait => {
+                        self.tally.waits += 1;
+                        sleep_unless(Duration::from_secs_f32(self.frame_ms / 1000.0), asked);
+                    }
+                }
+            },
         };
-        self.waited += start.elapsed();
+        let took = start.elapsed();
+        self.tally.waited += took;
+        self.tally.longest = self.tally.longest.max(took);
+        self.tally.cut_by_pause += u32::from(cut);
         alive
     }
 }
@@ -174,10 +246,33 @@ mod tests {
             assert!((share - DESKTOP_SHARE).abs() < 0.01, "{ms} ms: share {share}");
         }
         assert_eq!(desktop_rest(Duration::from_secs(1)), LONGEST_REST);
-        let mut desktop = Governor { client: None, frame_ms: 11.1, timings: [FrameTiming::default(); RECENT], backoff: Duration::ZERO, answered: 0, waited: Duration::ZERO, backoffs: 0 };
+        let mut desktop = Governor::with(None, 11.1);
         assert!(desktop.on_desktop());
         let began = Instant::now();
-        assert!(desktop.wait(Duration::from_millis(3)), "the desktop never ends governing by itself");
+        assert!(desktop.wait(Duration::from_millis(3), &|| false), "the desktop never ends governing by itself");
         assert!(began.elapsed() >= Duration::from_millis(6), "{:?}", began.elapsed());
+        assert_eq!(desktop.tally.cut_by_pause, 0);
+    }
+
+    /// RECONSTRUCT-15: a pause asked while the trainer rests is seen within a look, not after the whole rest.
+    #[test]
+    fn a_pause_cuts_a_rest_short() {
+        let asked = std::sync::atomic::AtomicBool::new(false);
+        let began = Instant::now();
+        let cut = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(30));
+                asked.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            sleep_unless(Duration::from_secs(5), &|| asked.load(std::sync::atomic::Ordering::SeqCst))
+        });
+        assert!(cut && began.elapsed() < Duration::from_secs(1), "{:?}", began.elapsed());
+        assert!(!sleep_unless(Duration::from_millis(5), &|| false));
+        // The desktop's rest (250 ms for a slow part) ends at once when the pause was already asked, and says so.
+        let mut desktop = Governor::with(None, 11.1);
+        let began = Instant::now();
+        assert!(desktop.wait(Duration::from_secs(1), &|| true));
+        assert!(began.elapsed() < Duration::from_millis(100), "{:?}", began.elapsed());
+        assert_eq!(desktop.tally.cut_by_pause, 1);
     }
 }

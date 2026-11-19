@@ -156,7 +156,7 @@
   "On orbiters.cc/maps and in the world's viewer": "Sur orbiters.cc/maps et dans le visualiseur du monde",
   "On · {color}": "{color}",
   "On · {color} · {level}": "Allumée · {color} · {level}",
-  "On: {headset} / {controllers} / {trackers} ms": "Activé : {headset} / {controllers} / {trackers} ms",
+  "On: {headset} / {controllers} / {trackers} ms": "Activé : {headset} / {controllers} / {trackers} ms",
   "Only in VR": "VR seulement",
   "Only web links can be dropped as cards.": "Seuls les liens web peuvent être posés en carte.",
   "Only you see the picture: others see this page. Aim again to move it.": "Toi seul vois l’image : les autres voient cette page. Vise à nouveau pour la déplacer.",
@@ -350,7 +350,8 @@
   "✓ Link copied": "✓ Lien copié",
   "panel\u0004Search videos": "Rechercher",
   "N4N0 can't reach Orbiters right now. Try again in a moment.": "N4N0 n’arrive pas à joindre Orbiters pour le moment. Réessaie dans un instant.",
-  "A QR code is cut by the camera's edge: bring all of it into the picture": "Un QR code est coupé par le bord de la caméra : faites-le entrer en entier dans l’image",
-  "A QR code is in view: hold the camera still, a little closer": "Un QR code est en vue : tenez la caméra immobile, un peu plus près",
-  "No sound found": "Aucun son trouvé"
+  "A QR code is cut by the camera's edge: bring all of it into the picture": "Un QR code est coupé par le bord de la caméra : fais-le entrer en entier dans l’image",
+  "A QR code is in view: hold the camera still, a little closer": "Un QR code est en vue : tiens la caméra immobile, un peu plus près",
+  "No sound found": "Aucun son trouvé",
+  "Stopped after six pages opened: press Scan again to read the camera": "Arrêté après six pages ouvertes : appuie sur Scanner encore pour lire la caméra"
 }

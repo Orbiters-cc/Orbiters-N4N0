@@ -76,10 +76,44 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER I
 OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
 
-# Native libraries the voice worker loads; their texts are not in the Cargo registry.
+# The WebView2 SDK's LICENSE.txt (NuGet package Microsoft.Web.WebView2 1.0.3800.47, whose x64 WebView2LoaderStatic.lib
+# is byte for byte the one webview2-com-sys 0.39.1 carries and links into orbiters-desktop). The crate's own MIT licence
+# does not cover Microsoft's loader. Check it again when webview2-com-sys changes.
+WEBVIEW2_SDK_LICENSE = """Copyright (C) Microsoft Corporation. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * The name of Microsoft Corporation, or the names of its contributors
+may not be used to endorse or promote products derived from this
+software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE."""
+
+# Native code that is not Rust: the libraries the voice worker loads, and the WebView2 loader linked into the window's
+# program. Their texts are not in the Cargo registry.
 NATIVE = [
     ("ONNX Runtime (onnxruntime.dll)", "MIT", MIT_TEMPLATE.format(holders="Microsoft Corporation")),
     ("sherpa-onnx C API (sherpa-onnx-c-api.dll)", "Apache-2.0", None),
+    ("Microsoft WebView2 SDK loader 1.0.3800.47 (WebView2LoaderStatic.lib, linked into orbiters-desktop by webview2-com-sys)",
+     "BSD-3-Clause", WEBVIEW2_SDK_LICENSE),
 ]
 
 

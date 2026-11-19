@@ -14,6 +14,7 @@
   "It is still being recorded: share it once it is saved": "まだ録画中です。保存されてから共有してください",
   "Its capture files are being deleted.": "キャプチャファイルを削除中です。",
   "Its splat edits changed while it was being prepared: share it again.": "準備中にスプラットの編集内容が変わりました。もう一度共有してください。",
+  "It was reconstructed again while it was being prepared: share it again.": "準備中にもう一度再構築されました。もう一度共有してください。",
   "Its splat edits changed while it was being prepared: update it again once they are done.": "準備中にスプラットの編集内容が変わりました。編集が終わってから、もう一度更新してください。",
   "Its splat edits changed while it was being prepared: upload it again.": "準備中にスプラットの編集内容が変わりました。もう一度アップロードしてください。",
   "Its splat edits kept changing while it was being prepared: share it again once they are done.": "準備中にスプラットの編集内容が変わり続けました。編集が終わってから、もう一度共有してください。",

@@ -627,6 +627,10 @@ pub struct Keeper {
     before: Option<(Instant, Vec<Raw>, Option<(u64, u64)>)>,
     log: PathBuf,
     said: Vec<String>,
+    /// Which of our processes is which (the service tells it the children it starts), for [`MemoryLine`].
+    roles: Vec<(u32, &'static str)>,
+    /// When the last [`MemoryLine`] was written.
+    memory_at: Option<Instant>,
 }
 
 pub fn keeper() -> &'static Mutex<Keeper> {
@@ -636,7 +640,18 @@ pub fn keeper() -> &'static Mutex<Keeper> {
 
 impl Keeper {
     pub fn new(log: PathBuf) -> Self {
-        Self { lines: VecDeque::with_capacity(KEPT), turns: Vec::new(), before: None, log, said: Vec::new() }
+        Self { lines: VecDeque::with_capacity(KEPT), turns: Vec::new(), before: None, log, said: Vec::new(), roles: Vec::new(), memory_at: None }
+    }
+
+    /// The service started `pid` as `role` (`window`, `overlay`, `orbit-desktop`).
+    pub fn role(&mut self, pid: u32, role: &'static str) {
+        self.roles.retain(|(p, r)| *p != pid && *r != role);
+        self.roles.push((pid, role));
+    }
+
+    /// `perf-memory.jsonl`, beside the log.
+    fn memory_log(&self) -> PathBuf {
+        self.log.with_file_name(MEMORY_LOG)
     }
 
     /// A loop's summary came.
@@ -696,6 +711,11 @@ impl Keeper {
             last.hint = line.hint.clone();
         }
         append(&self.log, &line);
+        if line.mode != "idle" && self.memory_at.is_none_or(|at| now.duration_since(at) >= MEMORY_EVERY) {
+            self.memory_at = Some(now);
+            let memory = MemoryLine::of(&line, std::process::id(), &self.roles);
+            append_to(&self.memory_log(), &memory, MEMORY_LOG_MAX);
+        }
         Some(line)
     }
 
@@ -709,15 +729,67 @@ impl Keeper {
     }
 }
 
+/// The memory of our processes while VRChat or SteamVR runs, a line a minute, in its own file: `perf.jsonl` keeps 10 to 20 hours,
+/// mostly idle lines, and no VR evening survived in it when Windows had flagged the VR overlay as leaking 8 times (REL-4). About
+/// 300 bytes a minute: [`MEMORY_LOG_MAX`] and its older file hold some 400 hours in VR. Nothing reads it but a person or a
+/// script looking for a leak: whether the overlay grows over a VR night.
+pub const MEMORY_LOG: &str = "perf-memory.jsonl";
+pub const MEMORY_LOG_MAX: u64 = 4 * 1024 * 1024;
+pub const MEMORY_EVERY: Duration = Duration::from_secs(60);
+
+/// One [`MEMORY_LOG`] line.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryLine {
+    pub at: String,
+    pub mode: String,
+    pub ram_free_mb: f32,
+    pub ours: Vec<MemoryUse>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryUse {
+    /// `service`, `window`, `overlay`, `orbit-desktop`, or the program's name for a worker.
+    pub role: String,
+    pub pid: u32,
+    pub private_mb: f32,
+    pub working_mb: f32,
+    pub threads: u32,
+}
+
+impl MemoryLine {
+    /// From a [`Line`]: each of our processes by its role, `service` being `service_pid`.
+    pub fn of(line: &Line, service_pid: u32, roles: &[(u32, &'static str)]) -> Self {
+        let role = |p: &ProcUse| {
+            if p.pid == service_pid {
+                return "service".to_string();
+            }
+            roles.iter().find(|(pid, _)| *pid == p.pid).map_or_else(|| p.name.clone(), |(_, r)| (*r).to_string())
+        };
+        Self {
+            at: line.at.clone(),
+            mode: line.mode.clone(),
+            ram_free_mb: line.ram_free_mb,
+            ours: line.ours.iter().map(|p| MemoryUse { role: role(p), pid: p.pid, private_mb: p.private_mb, working_mb: p.working_mb, threads: p.threads }).collect(),
+        }
+    }
+}
+
 /// Appends `line` to the log, starting it again past [`LOG_MAX`] (the older one kept once).
 pub fn append(path: &Path, line: &Line) {
+    append_to(path, line, LOG_MAX);
+}
+
+/// Appends `line` as JSON to `path`, starting it again past `max` bytes (the older one kept once, as `<path>.1`).
+pub fn append_to<T: Serialize>(path: &Path, line: &T, max: u64) {
     use std::io::Write;
     let Ok(mut text) = serde_json::to_string(line) else { return };
     text.push('\n');
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if std::fs::metadata(path).is_ok_and(|m| m.len() + text.len() as u64 > LOG_MAX) {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() + text.len() as u64 > max) {
         let mut old = path.as_os_str().to_owned();
         old.push(".1");
         let _ = std::fs::rename(path, PathBuf::from(old));

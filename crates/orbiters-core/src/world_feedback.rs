@@ -111,6 +111,16 @@ impl Failure {
     }
 }
 
+/// A world id as it may go into the API's path (VRChat's `wrld_` and a UUID; capitals read as VRChat's lowercase).
+fn world_path(world: &str) -> Result<String, Failure> {
+    let world = world.to_ascii_lowercase();
+    if crate::vrchat_log::is_world_id(&world) {
+        Ok(world)
+    } else {
+        Err(Failure::Refused { code: None, message: tr!("Not a VRChat world: {world}", world = format!("{world:?}")) })
+    }
+}
+
 fn failure(status: u16, body: &str) -> Failure {
     let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let message = json.get("error").and_then(|e| e.as_str()).unwrap_or("").to_string();
@@ -173,25 +183,30 @@ impl Client<'_> {
 
     /// A world's feedback (the member's own too when signed in).
     pub fn read(&self, world: &str) -> Result<ServerView, Failure> {
+        let world = world_path(world)?;
         let (_, text) = self.call("GET", &format!("maps/worlds/{world}/feedback"), None)?;
         Self::json(&text)
     }
 
-    /// Sets the member's like and labels as `set` says.
-    pub fn set(&self, world: &str, set: &Set) -> Result<ServerView, Failure> {
+    /// Sets the member's like and labels as `set` says: the world's feedback as Orbiters answers it, `None` when it was
+    /// done but its answer does not read (a newer shape: read the world again rather than set it again).
+    pub fn set(&self, world: &str, set: &Set) -> Result<Option<ServerView>, Failure> {
+        let world = world_path(world)?;
         let (_, text) = self.call("PUT", &format!("maps/worlds/{world}/feedback"), Some(set.body()))?;
-        Self::json(&text)
+        Ok(Self::json(&text).ok())
     }
 
-    /// Writes a comment (`client_id`: its own id, so a retry answers the one made).
-    pub fn comment(&self, world: &str, text: &str, client_id: &str) -> Result<Comment, Failure> {
+    /// Writes a comment (`client_id`: its own id, so a retry answers the one made); `None` when it was written but its
+    /// answer does not read.
+    pub fn comment(&self, world: &str, text: &str, client_id: &str) -> Result<Option<Comment>, Failure> {
+        let world = world_path(world)?;
         let body = serde_json::json!({ "text": text, "clientId": client_id });
         let (_, answer) = self.call("POST", &format!("maps/worlds/{world}/comments"), Some(body))?;
         #[derive(Deserialize)]
         struct Made {
             comment: Comment,
         }
-        Ok(Self::json::<Made>(&answer)?.comment)
+        Ok(Self::json::<Made>(&answer).ok().map(|m| m.comment))
     }
 
     pub fn uncomment(&self, comment: u64) -> Result<(), Failure> {
@@ -264,6 +279,27 @@ pub struct Pending {
     pub due: u64,
     #[serde(default)]
     pub tries: u32,
+    /// Where it goes: the server and the account it was made for. Comment ids and test comments mean something on one
+    /// server only, and an action is the member's own: it is sent there and nowhere else. One without (written by an
+    /// earlier version) is dropped at load.
+    #[serde(default)]
+    pub to: Option<Stamp>,
+}
+
+/// The server (its API address) and the Orbiters account (its id; none while nobody was signed in, then it goes with
+/// the account that signs in on that server) an action was made for.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stamp {
+    pub server: String,
+    #[serde(default)]
+    pub account: Option<String>,
+}
+
+impl Stamp {
+    /// Whether an action made for `self` may go out as `now`.
+    pub fn sends_as(&self, now: &Stamp) -> bool {
+        self.server == now.server && (self.account.is_none() || self.account == now.account)
+    }
 }
 
 /// The actions waiting, oldest first, kept in a file of their own.
@@ -279,44 +315,94 @@ impl Queue {
     }
 
     /// The queue kept in `path` (none when there is no readable one), its actions older than [`DROP_AFTER`] left out.
+    /// Each action is read on its own: one that does not read (a file cut short, a newer version's) or names no world
+    /// is left out and the others kept, the file first kept beside as `world-feedback-queue.json.bad-<time>`. A file
+    /// that cannot be read at all is not saved over unseen ([`crate::write_atomic`]).
     pub fn load(path: &Path, now_ms: u64) -> Self {
-        let mut queue: Queue = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let text = match crate::read_text(path) {
+            Ok(Some(text)) => text,
+            Ok(None) => return Self::default(),
+            Err(e) => {
+                eprintln!("world feedback queue: {}: {e}", path.display());
+                return Self::default();
+            }
+        };
+        let value: Option<serde_json::Value> = serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).ok();
+        let items = value.as_ref().and_then(|v| v.get("items")).and_then(serde_json::Value::as_array);
+        let mut queue = Queue::default();
+        let mut lost = items.is_none();
+        for item in items.into_iter().flatten() {
+            match serde_json::from_value::<Pending>(item.clone()) {
+                Ok(mut p) => {
+                    // The contract takes a world id in capitals too; the queue keeps VRChat's own lowercase.
+                    p.world = p.world.to_ascii_lowercase();
+                    if p.to.is_none() {
+                        // From before actions said where they go: never sent to a server it may not be for.
+                        eprintln!("world feedback queue: an action without its server dropped");
+                    } else if crate::vrchat_log::is_world_id(&p.world) {
+                        queue.items.push(p);
+                    } else {
+                        lost = true;
+                    }
+                }
+                Err(_) => lost = true,
+            }
+        }
+        if lost {
+            let aside = crate::keep_aside(path);
+            eprintln!("world feedback queue: {} partly unreadable, the file kept as {aside:?}", path.display());
+        }
         queue.items.retain(|p| now_ms.saturating_sub(p.since) < DROP_AFTER.as_millis() as u64);
         queue
     }
 
-    /// Writes it whole (a new file moved over the old one).
+    /// Writes it whole ([`crate::write_atomic`]: a crash or a power cut leaves the old queue or the new one).
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(self).unwrap_or_default())?;
-        std::fs::rename(&tmp, path)
+        crate::write_atomic(path, &serde_json::to_vec(self)?)
     }
 
     /// Adds an action: a world's likes and labels go into the one waiting for it (sent [`COALESCE`] after this
     /// change); a comment deleted before it went is never sent.
     pub fn push(&mut self, world: &str, action: Action, now_ms: u64) {
+        self.push_to(world, action, now_ms, Stamp::default());
+    }
+
+    /// [`Queue::push`] for the server and account `to`: a world's likes and labels go together only with those made
+    /// for the same.
+    pub fn push_to(&mut self, world: &str, action: Action, now_ms: u64, to: Stamp) {
         let due = now_ms + COALESCE.as_millis() as u64;
         match action {
             Action::Set(set) => {
-                if let Some(p) = self.items.iter_mut().find(|p| p.world == world && matches!(p.action, Action::Set(_))) {
+                if let Some(p) = self.items.iter_mut().find(|p| p.world == world && matches!(p.action, Action::Set(_)) && p.to.as_ref() == Some(&to)) {
                     if let Action::Set(waiting) = &mut p.action {
                         waiting.merge(&set);
                     }
                     p.due = p.due.max(due);
                     return;
                 }
-                self.items.push(Pending { world: world.into(), action: Action::Set(set), since: now_ms, due, tries: 0 });
+                self.items.push(Pending { world: world.into(), action: Action::Set(set), since: now_ms, due, tries: 0, to: Some(to) });
             }
-            other => self.items.push(Pending { world: world.into(), action: other, since: now_ms, due: now_ms, tries: 0 }),
+            other => self.items.push(Pending { world: world.into(), action: other, since: now_ms, due: now_ms, tries: 0, to: Some(to) }),
         }
     }
 
     /// The first action due at `now_ms`, if any (its index).
     pub fn due(&self, now_ms: u64) -> Option<usize> {
         self.items.iter().position(|p| p.due <= now_ms)
+    }
+
+    /// The first action due at `now_ms` that may go out as `now` ([`Stamp::sends_as`]); the others wait for their
+    /// server and account (and leave after [`DROP_AFTER`]).
+    pub fn due_for(&self, now_ms: u64, now: &Stamp) -> Option<usize> {
+        self.items.iter().position(|p| p.due <= now_ms && p.to.as_ref().is_some_and(|to| to.sends_as(now)))
+    }
+
+    /// Drops the actions older than [`DROP_AFTER`], wherever they were for.
+    pub fn expire(&mut self, now_ms: u64) {
+        self.items.retain(|p| now_ms.saturating_sub(p.since) < DROP_AFTER.as_millis() as u64);
     }
 
     /// The action at `i` failed for now: tried again after 2, 4, 8 … seconds (at most a minute), dropped after a day.
@@ -466,10 +552,10 @@ mod tests {
         let had = mine(&before);
         println!("account {:?} (id {:?}) on {}: chill {} before, count {}", account.username, account.user, server.api(), had, count(&before));
         let set = |on: bool| Set { labels: [("chill".to_string(), on)].into_iter().collect(), ..Default::default() };
-        let changed = client.set(world, &set(!had)).expect("set");
+        let changed = client.set(world, &set(!had)).expect("set").expect("its answer reads");
         println!("after: mine {}, count {}", mine(&changed), count(&changed));
         assert_eq!(mine(&changed), !had);
-        let back = client.set(world, &set(had)).expect("set back");
+        let back = client.set(world, &set(had)).expect("set back").expect("its answer reads");
         println!("back: mine {}, count {}", mine(&back), count(&back));
         assert_eq!((mine(&back), count(&back)), (had, count(&before)), "as it was");
         let unknown = Set { labels: [("beautiful".to_string(), true)].into_iter().collect(), ..Default::default() };
@@ -516,11 +602,77 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orbiters-feedback-queue-{}", std::process::id()));
         let path = dir.join("q.json");
         let mut q = Queue::default();
-        q.push("w", set(Some(true), &[]), 5);
+        q.push(WORLD, set(Some(true), &[]), 5);
         q.save(&path).unwrap();
         assert_eq!(Queue::load(&path, 10).items.len(), 1);
         assert!(Queue::load(&path, DROP_AFTER.as_millis() as u64 + 10).items.is_empty(), "a day old: dropped");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    const WORLD: &str = "wrld_99a5eb21-1d58-4f13-b66a-73d327c42705";
+
+    /// One action that does not read, or that names no world, costs only itself: the others are kept as they were, and
+    /// the file is kept beside before the next save replaces it.
+    #[test]
+    fn a_damaged_queue_keeps_what_reads_and_the_file() {
+        let dir = std::env::temp_dir().join(format!("orbiters-feedback-damaged-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("q.json");
+        let mut q = Queue::default();
+        q.push(WORLD, set(Some(true), &[("mirror", true)]), 5);
+        q.push(&WORLD.to_uppercase().replace("WRLD", "wrld"), Action::Comment { text: "hi".into(), client_id: "n4n0-1".into() }, 6);
+        q.push("wrld_../../maps/comments/1", Action::Uncomment { comment: 1 }, 7);
+        let mut value = serde_json::to_value(&q).unwrap();
+        value["items"].as_array_mut().unwrap().push(serde_json::json!({"world": WORLD, "action": {"kind": "from_a_newer_version"}, "since": 8, "due": 8}));
+        std::fs::write(&path, value.to_string()).unwrap();
+        let loaded = Queue::load(&path, 10);
+        assert_eq!(loaded.items.len(), 2, "{:?}", loaded.items);
+        assert_eq!((loaded.items[0].clone(), loaded.items[1].world.as_str(), loaded.items[1].due), (q.items[0].clone(), WORLD, 6));
+        let kept = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("q.json.bad-")).count();
+        assert_eq!(kept, 1, "the file kept beside");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// CORE2-1: an action goes to the server and account it was made for, never to another; one from before actions
+    /// said where they go is dropped, not sent.
+    #[test]
+    fn an_action_goes_only_where_it_was_made() {
+        let dev = Stamp { server: "http://127.0.0.1:4100/".into(), account: Some("7".into()) };
+        let prod = Stamp { server: "https://api.orbiters.cc/".into(), account: Some("7".into()) };
+        let other = Stamp { account: Some("8".into()), ..prod.clone() };
+        let mut q = Queue::default();
+        q.push_to(WORLD, Action::Uncomment { comment: 5 }, 0, dev.clone());
+        q.push_to(WORLD, set(Some(true), &[]), 0, dev.clone());
+        q.push_to(WORLD, set(Some(false), &[]), 0, prod.clone());
+        assert_eq!(q.items.len(), 3, "a like of each server waits apart");
+        let due = |q: &Queue, s: &Stamp| (0..q.items.len()).filter(|&i| q.items[i].to.as_ref().unwrap().sends_as(s)).collect::<Vec<_>>();
+        assert_eq!(due(&q, &prod), [2]);
+        assert_eq!(q.due_for(10_000, &prod), Some(2));
+        assert_eq!(q.due_for(10_000, &other), None, "nor another account's");
+        q.items.remove(2);
+        assert_eq!(q.due_for(10_000, &prod), None, "Development's delete never goes to production");
+        assert_eq!(q.due_for(10_000, &dev), Some(0), "it goes back home");
+        // Made while nobody was signed in: goes with whoever signs in on that server.
+        let nobody = Stamp { account: None, ..prod.clone() };
+        q.push_to(WORLD, Action::Report { comment: 3, reason: None }, 0, nobody);
+        assert!(q.due_for(10_000, &other).is_some() && q.due_for(10_000, &prod).is_some());
+        q.expire(DROP_AFTER.as_millis() as u64 + 1);
+        assert!(q.items.is_empty(), "a day old: gone wherever it was for");
+        // An earlier version's file: its actions say nowhere, and go nowhere.
+        let dir = std::env::temp_dir().join(format!("orbiters-feedback-unstamped-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("q.json");
+        std::fs::write(&path, serde_json::json!({"items": [{"world": WORLD, "action": {"kind": "uncomment", "comment": 5}, "since": 1, "due": 1}]}).to_string()).unwrap();
+        assert!(Queue::load(&path, 2).items.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_world_ids_go_into_the_apis_paths() {
+        assert_eq!(world_path(&WORLD.to_uppercase().replace("WRLD", "wrld")).unwrap(), WORLD);
+        for bad in ["", "w", "wrld_../../maps/comments/1", "wrld_99a5eb21-1d58-4f13-b66a-73d327c42705/x"] {
+            assert!(matches!(world_path(bad), Err(Failure::Refused { code: None, .. })), "{bad}");
+        }
     }
 
     #[test]
@@ -583,7 +735,7 @@ mod tests {
         let empty = anyone.read(&world).unwrap();
         assert_eq!((empty.likes, empty.mine.clone()), (0, None));
         let set = Set { liked: Some(true), labels: [("meetup".to_string(), true), ("mirror".to_string(), true)].into_iter().collect(), justification: None };
-        let view = member.set(&world, &set).unwrap();
+        let view = member.set(&world, &set).unwrap().expect("its answer reads");
         assert_eq!(view.likes, 1);
         assert_eq!(view.mine.as_ref().map(|m| m.liked), Some(true));
         assert_eq!(view.labels.len(), 2);
@@ -593,11 +745,11 @@ mod tests {
         );
         assert!(matches!(refused, Err(Failure::Refused { code: Some(Refusal::JustificationTooShort), .. })), "{refused:?}");
         let id = client_id();
-        let first = member.comment(&world, "Great place for meetups!", &id).unwrap();
+        let first = member.comment(&world, "Great place for meetups!", &id).unwrap().expect("its answer reads");
         let again = member.comment(&world, "Great place for meetups!", &id);
         // A retry inside the server's 20 s window is held back (429, tried later) or answers the same comment.
         match again {
-            Ok(c) => assert_eq!(c.id, first.id),
+            Ok(c) => assert_eq!(c.map(|c| c.id), Some(first.id)),
             Err(e) => assert!(matches!(e, Failure::Later(_)), "{e:?}"),
         }
         let read = member.read(&world).unwrap();

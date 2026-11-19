@@ -82,6 +82,8 @@ struct Instance {
 
 #[derive(Default)]
 pub struct State {
+    /// The text searched for at the last frame ([`super::new_search`]).
+    searched: Option<String>,
     folders: folders::State,
     requests: super::requests::State,
     hash_job: Job<std::collections::HashMap<std::path::PathBuf, String>>,
@@ -89,6 +91,8 @@ pub struct State {
     shown_key: Option<(Filter, String)>,
     shown: Vec<Entry>,
     key: Option<(u64, u64, std::path::PathBuf, bool, String, u64)>,
+    /// Who the account is, for the key above (not how its check with Orbiters goes).
+    account: crate::pages::AccountFollow,
     /// This computer's entries being made, with the revision of what they are made from beyond the pictures, taken
     /// (and when) before any of it was read.
     local_job: Job<(std::time::Instant, u64, Vec<Entry>)>,
@@ -534,15 +538,22 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
         state.local_dirty = true;
     }
     let development = cx.snap.settings.development;
+    let (account, answered) = state.account.see(&cx.snap.account.state);
     // The editor's saves too: a copy saved beside its original shows at once.
     let key = (
         cx.ctl.library_version(),
         cx.visit,
         cx.snap.settings.sessions_dir.clone(),
         development,
-        format!("{:?}", cx.snap.account.state),
+        // Who the account is, not how its check goes: offline, the check comes and goes every minute.
+        account,
         crate::pages::editor::saved(),
     );
+    if answered {
+        // Orbiters answers again (it could not be reached, a sign-in was renewed): the feed is asked again; nothing
+        // that shows is put away.
+        state.asked = None;
+    }
     if (state.local_dirty || state.key.as_ref() != Some(&key)) && !state.local_job.running() {
         let changed_account = state.key.as_ref().is_some_and(|k| k.3 != key.3 || k.4 != key.4);
         state.observe_context(key);
@@ -586,6 +597,22 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
 /// With no look yet, or no list, there is nothing to compare.
 fn list_is_stale(looked: Option<(std::time::Instant, u64)>, listed: Option<(std::time::Instant, u64)>) -> bool {
     matches!((looked, listed), (Some((looked, seen)), Some((made, from))) if looked > made && seen != from)
+}
+
+/// The filters over the gallery.
+fn filter_options() -> [SegOption<'static, Filter>; 5] {
+    [
+        SegOption::new(Filter::All, tr("All")),
+        SegOption::new(Filter::Mine, tr("Mine")),
+        SegOption::new(Filter::Shared, tr("Shared with me")),
+        SegOption::new(Filter::Communities, tr("Communities")).hint(tr("Pictures of your communities' galleries and their events")),
+        SegOption::new(Filter::Assets, tr("My assets")).hint(tr("Pictures of the avatars and other assets you made or own on Orbiters")),
+    ]
+}
+
+/// The Requests button beside the search.
+fn requests_button() -> Button<'static> {
+    Button::new(tr("Requests")).icon(icons::TRAY).hint(tr("People asking to share what you shared with them, and what you asked"))
 }
 
 /// `true` opens the existing capture-management surface (reconstruction, storage, import).
@@ -676,7 +703,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let narrow = head.width() < 690.0;
     // The filters on one line, the layout, Requests and the search on the right; narrower, the layout and the search
     // go under them.
-    let stacked = head.width() < 920.0;
+    // (Also when the row does not fit in this language: the filters ran under the layout picker in Portuguese.)
+    // (The filters may touch the picker, as English does at ~1225 wide: only an overlap stacks it.)
+    let row_needs = widgets::segmented_width(ui, &filter_options(), false) + arrangement::PICKER_W + 12.0 + requests_button().desired_width(ui) + 12.0 + 260.0;
+    let stacked = head.width() < 920.0 || head.width() < row_needs;
     // Communities: the galleries as chips under the filters.
     let chips_h = if state.filter == Filter::Communities { 46.0 } else { 0.0 };
     let controls = Rect::from_min_size(pos2(head.left(), head.bottom() + 14.0), vec2(head.width(), if stacked { 88.0 } else { 40.0 } + chips_h));
@@ -687,6 +717,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         std::mem::take(&mut state.shown)
     } else {
         state.shown_key = Some(shown_key);
+        state.select.list_changed();
         let mut entries: Vec<Entry> = state
             .locals
             .iter()
@@ -774,7 +805,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         }
     }
     let mut scroll = egui::ScrollArea::vertical().id_salt("photos-captures");
-    if let Some(offset) = anchored_scroll_offset(state.scroll_offset, state.scroll_anchor.as_ref().map(|(key, _)| key.as_str()), &state.layout_positions, &positions) {
+    // A new search starts at the top of its results (not held at the picture that was in view).
+    if super::new_search(&mut state.searched, &q) {
+        scroll = scroll.vertical_scroll_offset(0.0);
+    } else if let Some(offset) = anchored_scroll_offset(state.scroll_offset, state.scroll_anchor.as_ref().map(|(key, _)| key.as_str()), &state.layout_positions, &positions) {
         scroll = scroll.vertical_scroll_offset(offset);
     }
     let output = scroll
@@ -1005,11 +1039,20 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     state.layout_positions = positions;
     super::under_top(&gu, cx, "photos-captures", from, top);
     if let Some(background) = &background {
-        state.select.update(ui, &entries, background, modal);
+        // The keys (Escape, Ctrl+A, Ctrl+C) are not the grid's under a window opened from a card's menu (Export,
+        // Reconstruct again) or the requests' window: they belong to what is in front.
+        let covered = modal || state.export.is_some() || state.again.is_some() || state.requests.is_out();
+        state.select.update(ui, &entries, background, covered);
     }
 
     // Heading and the bar over the grid (drawn after it: what scrolls up goes under them).
     let (head_r, head_a) = super::entering(ui, cx, 0, head);
+    let mb = Button::new(tr("Manage captures")).icon(icons::FOLDER_OPEN).hint(tr("Reconstruct, free up space and import raw captures"));
+    let mw = mb.desired_width(ui);
+    let fw = Button::new(folders::LABEL).icon(icons::FOLDER_OPEN).desired_width(ui);
+    // The line under the title stops before the two buttons on the head's right (Night PG2-12: cut at 60 % of the
+    // head whatever stood there, it ran under "Manage folders" in French and Portuguese at the minimum width).
+    let sub_room = (head.width() - mw - 10.0 - fw - 12.0).min(head.width() * 0.6).max(0.0);
     {
         let mut hu = ui.new_child(UiBuilder::new().max_rect(head_r).id_salt("gallery-head"));
         hu.multiply_opacity(head_a);
@@ -1033,32 +1076,17 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             }
             parts.join(" · ")
         };
-        super::heading(&hu, head_r, tr("Library"), tr("Photos & captures"), Some(&sub));
+        super::heading_in(&hu, head_r, tr("Library"), tr("Photos & captures"), Some(&sub), sub_room);
     }
     let mut manage = false;
-    let mb = Button::new(tr("Manage captures")).icon(icons::FOLDER_OPEN).hint(tr("Reconstruct, free up space and import raw captures"));
-    let mw = mb.desired_width(ui);
     let b = Rect::from_min_size(pos2(head.right() - mw, head.bottom() - 40.0), vec2(mw, 40.0));
     if sharing::pressed(mb.show_at(ui, b)) {
         manage = true;
     }
-    let fw = Button::new(folders::LABEL).icon(icons::FOLDER_OPEN).desired_width(ui);
     state.folders.show(ui, cx, Rect::from_min_size(pos2(b.left() - 10.0 - fw, b.top()), vec2(fw, 40.0)));
     let mut cu = ui.new_child(UiBuilder::new().max_rect(controls).id_salt("gallery-controls"));
     let before_filter = state.filter;
-    widgets::segmented(
-        &mut cu,
-        "gallery-filter",
-        &mut state.filter,
-        &[
-            SegOption::new(Filter::All, tr("All")),
-            SegOption::new(Filter::Mine, tr("Mine")),
-            SegOption::new(Filter::Shared, tr("Shared with me")),
-            SegOption::new(Filter::Communities, tr("Communities")).hint(tr("Pictures of your communities' galleries and their events")),
-            SegOption::new(Filter::Assets, tr("My assets")).hint(tr("Pictures of the avatars and other assets you made or own on Orbiters")),
-        ],
-        false,
-    );
+    widgets::segmented(&mut cu, "gallery-filter", &mut state.filter, &filter_options(), false);
     if state.filter == Filter::Communities {
         let chips = Rect::from_min_size(pos2(controls.left(), controls.bottom() - widgets::CHIP_H), vec2(controls.width(), widgets::CHIP_H));
         let before = state.community.chosen;
@@ -1077,7 +1105,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         Rect::from_min_size(pos2(controls.right() - 260.0, controls.top()), vec2(260.0, 40.0))
     };
     let pending = state.requests.pending();
-    let rb = Button::new(tr("Requests")).icon(icons::TRAY).hint(tr("People asking to share what you shared with them, and what you asked"));
+    let rb = requests_button();
     let rw = rb.desired_width(ui);
     let request_button = Rect::from_min_size(pos2(if stacked { controls.right() - rw } else { search.left() - 12.0 - rw }, controls.top()), vec2(rw, 40.0));
     // The layout picker: before Requests, or before the search under the filters.
@@ -2315,6 +2343,65 @@ mod tests {
             frame(&mut state);
         }
         assert!(state.listed == settled && !state.local_job.running(), "made once, not again and again");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Night PAGES-UI-23: while Orbiters cannot be reached the account's check comes and goes every minute (Offline,
+    /// Checking, Offline): the same person, so the decoded pictures stay and the list is not made again. Orbiters
+    /// answering again asks the feed again; another name is another account and starts over.
+    #[test]
+    fn the_account_check_coming_and_going_is_not_another_account() {
+        use crate::state::AccountState as A;
+        let root = std::env::temp_dir().join(format!("orbiters-gallery-account-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Sessions")).unwrap();
+        let history_file = root.join("visited-worlds.json");
+        orbiters_core::visited::History::default().save(&history_file).unwrap();
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl =
+            std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let mut snap = (*ctl.view()).clone();
+        snap.settings.sessions_dir = root.join("Sessions");
+        let mut state = State { sources: Some((history_file.clone(), None)), ..Default::default() };
+        state.folders.set_sources(history_file, None);
+        let mut time = 0.0;
+        let mut frame = |state: &mut State, account: A| {
+            snap.account.state = account;
+            time += 1.0 / 60.0;
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let mut output = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |ui| {
+                let cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                follow_locals(state, ui, &cx, Server::Production);
+            });
+            output.textures_delta.clear();
+        };
+        let offline = || A::Offline { username: Some("x".into()) };
+        let limit = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while state.listed.is_none() || state.local_job.running() {
+            frame(&mut state, offline());
+            assert!(std::time::Instant::now() < limit, "the first list");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        state.pictures = Some(crate::worlds::Pictures::new(&ctx));
+        state.asked = Some((Filter::All, String::new()));
+        let listed = state.listed;
+        for account in [A::Checking { username: Some("x".into()) }, offline(), A::Checking { username: Some("x".into()) }, offline()] {
+            frame(&mut state, account);
+            assert!(!state.local_job.running(), "the list is not made again");
+            assert!(state.pictures.is_some(), "the decoded pictures stay");
+            assert!(state.asked.is_some(), "nothing new to ask while Orbiters cannot be reached");
+        }
+        assert_eq!(state.listed, listed);
+        frame(&mut state, A::SignedIn { username: "x".into() });
+        assert!(state.pictures.is_some() && !state.local_job.running(), "Orbiters answering is not another account");
+        assert!(state.asked.is_none(), "but the feed is asked again");
+        state.asked = Some((Filter::All, String::new()));
+        frame(&mut state, A::Checking { username: Some("x".into()) });
+        frame(&mut state, A::SignedIn { username: "x".into() });
+        assert!(state.asked.is_some(), "a check that confirms the sign-in asks nothing again");
+        frame(&mut state, A::SignedIn { username: "y".into() });
+        assert!(state.pictures.is_none(), "another account starts over");
         std::fs::remove_dir_all(&root).ok();
     }
 

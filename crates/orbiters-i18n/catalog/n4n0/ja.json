@@ -160,7 +160,7 @@
   "On orbiters.cc/maps and in the world's viewer": "orbiters.cc/maps とワールドのビューアーで公開中",
   "On · {color}": "オン · {color}",
   "On · {color} · {level}": "オン · {color} · {level}",
-  "On: {headset} / {controllers} / {trackers} ms": "オン: {headset} / {controllers} / {trackers} ms",
+  "On: {headset} / {controllers} / {trackers} ms": "オン：{headset} / {controllers} / {trackers} ms",
   "Only in VR": "VRのみ",
   "Only web links can be dropped as cards.": "カードとして置けるのはWebリンクだけです。",
   "Only you see the picture: others see this page. Aim again to move it.": "映像が見えるのはあなただけで、他の人にはこのページが見えます。動かすにはもう一度狙ってください。",
@@ -351,5 +351,6 @@
   "{puts} · also after each world join": "{puts} · ワールドに入るたびにも",
   "{reason}: a QR code here opens only http or https pages": "{reason}：ここで開けるのは http または https のページのQRコードだけです",
   "{time} · muted": "{time} · ミュート中",
-  "✓ Link copied": "✓ リンクをコピーしました"
+  "✓ Link copied": "✓ リンクをコピーしました",
+  "Stopped after six pages opened: press Scan again to read the camera": "6ページ開いたため停止しました。「もう一度スキャン」でカメラを読み取ります"
 }

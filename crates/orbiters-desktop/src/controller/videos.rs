@@ -25,13 +25,19 @@ pub(super) struct Videos {
     /// The titles being asked for.
     titles: Option<mpsc::Receiver<Answer>>,
     offline_until: Option<Instant>,
+    flush: bool,
 }
 
 impl Videos {
     /// The videos kept in `video-history.json`.
     pub(super) fn load() -> Self {
         let file = orbiters_core::video_history::history_file();
-        Self { history: History::load(&file), file, changed: false, titles: None, offline_until: None }
+        Self { history: History::load(&file), file, changed: false, flush: false, titles: None, offline_until: None }
+    }
+
+    /// VRChat closed: what changed is saved at the next beat, how far the logs were read included.
+    pub(super) fn flush(&mut self) {
+        self.flush = true;
     }
 
     /// The follower's last read (`last_read`: the log's name and the bytes read, `events` what they said); on `beat`, the
@@ -48,9 +54,13 @@ impl Videos {
             self.changed |= self.history.read_logs_following(&dir, last_read.map(|(name, _, to)| (name, to)));
         }
         self.ask_titles();
-        if std::mem::take(&mut self.changed) {
-            if let Err(e) = self.history.save(&self.file) {
-                eprintln!("video history: {e}");
+        // At once when a video or a title is new, every few minutes for how far the logs were read; a save that failed
+        // stays to do and is tried again.
+        let flush = std::mem::take(&mut self.flush);
+        if self.changed && (flush || self.history.save_due(true)) {
+            match self.history.checkpoint(&self.file) {
+                Ok(()) => self.changed = false,
+                Err(e) => eprintln!("video history: {e}"),
             }
         }
     }

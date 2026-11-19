@@ -694,6 +694,16 @@ impl Gpu {
     }
 }
 
+/// The box (left, top, right, bottom) of a part at `[x0, y0, width, height]` of the client area, which lies at `offset` in the frame,
+/// when the whole of it is inside a frame of `frame` pixels; `None` otherwise (and on an overflow).
+fn source_box([x0, y0, width, height]: [u32; 4], offset: (u32, u32), frame: (u32, u32)) -> Option<[u32; 4]> {
+    let left = x0.checked_add(offset.0)?;
+    let top = y0.checked_add(offset.1)?;
+    let right = left.checked_add(width)?;
+    let bottom = top.checked_add(height)?;
+    (width > 0 && height > 0 && right <= frame.0 && bottom <= frame.1).then_some([left, top, right, bottom])
+}
+
 impl Capture {
     fn new(window: HWND, gpu: &Gpu) -> Result<Self, String> {
         let text = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
@@ -731,6 +741,11 @@ impl Capture {
         let access: IDirect3DDxgiInterfaceAccess = surface.cast().ok()?;
         // SAFETY: the surface is a Direct3D 11 texture, as the pool was made for.
         let texture: ID3D11Texture2D = unsafe { access.GetInterface() }.ok()?;
+        // What the copies may read: the frame's texture, and of it what this frame holds (REL-3).
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: a plain read of the texture's description into a local.
+        unsafe { texture.GetDesc(&mut desc) };
+        let frame_size = (desc.Width.min(content.Width.max(0) as u32), desc.Height.min(content.Height.max(0) as u32));
         let (dx, dy) = client_in_frame(window);
         // Each part keeps its slot, and so its staging texture, whichever of them a look reads: the menus' two first, the camera's lines after them.
         let menu_parts = detect::parts(client);
@@ -749,10 +764,14 @@ impl Capture {
             if width == 0 || height == 0 {
                 return None;
             }
+            // The client's size was measured a moment ago, the frame may still be of the window's older, smaller size: a box
+            // outside the frame is undefined in Direct3D 11 (an access violation in d3d11.dll was seen, REL-3). Then no look
+            // this frame; the next frame is of the new size.
+            let [left, top, right, bottom] = source_box([x0, y0, width, height], (dx, dy), frame_size)?;
             let staging = self.staging_for(i, width, height)?;
-            let region = D3D11_BOX { left: x0 + dx, top: y0 + dy, front: 0, right: x0 + dx + width, bottom: y0 + dy + height, back: 1 };
+            let region = D3D11_BOX { left, top, front: 0, right, bottom, back: 1 };
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            // SAFETY: both textures are this device's and of one format; the box is inside the frame (the parts are inside the client area), and the mapping is read
+            // SAFETY: both textures are this device's and of one format; the box is inside the frame (`source_box`), and the mapping is read
             // within its pitch and height, and unmapped before anything else happens to it.
             unsafe {
                 self.context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &texture, 0, Some(&region));
@@ -1742,6 +1761,27 @@ pub mod scroll {
 }
 
 pub mod pointer {
+    /// The left button's changes from the counts of downs and ups the hook saw (`downs`, `ups`) and those already read (`seen`),
+    /// in order (true: down). Total: an up whose down came before the hook (the button held as it started) is a plain up. It
+    /// looped for ever on one, with the hook swallowing every mouse move of the computer (OVL2-6).
+    pub(super) fn changes(seen: &mut (u32, u32), downs: u32, ups: u32) -> Vec<bool> {
+        let mut out = Vec::new();
+        while seen.0 < downs || seen.1 < ups {
+            if seen.0 < downs {
+                out.push(true);
+                seen.0 += 1;
+            }
+            if seen.1 < seen.0 && seen.1 < ups {
+                out.push(false);
+                seen.1 += 1;
+            } else if seen.1 < ups && seen.0 >= downs {
+                out.push(false);
+                seen.1 += 1;
+            }
+        }
+        out
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, Ordering};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -1895,6 +1935,8 @@ pub mod pointer {
 
         /// Alt let go, the wheel gone, anything: the mouse is VRChat's again at once.
         pub fn stop(&mut self) {
+            // First, as the scroll's `stop` does: the hook passes everything on from now, whatever its thread does.
+            SET.store(false, Ordering::Relaxed);
             if let Some((id, handle)) = self.thread.take() {
                 // SAFETY: a message to the hook's own thread.
                 unsafe {
@@ -1911,17 +1953,9 @@ pub mod pointer {
         /// The left button's changes since the last read (true: down), in order.
         pub fn take_buttons(&mut self) -> Vec<bool> {
             let (downs, ups) = (DOWNS.load(Ordering::Relaxed), UPS.load(Ordering::Relaxed));
-            let mut out = Vec::new();
-            while self.downs < downs || self.ups < ups {
-                if self.downs < downs {
-                    out.push(true);
-                    self.downs += 1;
-                }
-                if self.ups < self.downs && self.ups < ups {
-                    out.push(false);
-                    self.ups += 1;
-                }
-            }
+            let mut seen = (self.downs, self.ups);
+            let out = changes(&mut seen, downs, ups);
+            (self.downs, self.ups) = seen;
             out
         }
     }
@@ -1945,6 +1979,36 @@ pub mod pointer {
 
 #[cfg(test)]
 mod tests {
+    /// OVL2-6: the button's changes always come to an end, an up without its down included.
+    #[test]
+    fn an_up_without_its_down_ends_the_count() {
+        use super::pointer::changes;
+        assert_eq!(changes(&mut (0, 0), 0, 1), [false], "the button was held as the hook started");
+        assert_eq!(changes(&mut (0, 0), 2, 2), [true, false, true, false]);
+        let mut seen = (0, 0);
+        assert_eq!(changes(&mut seen, 1, 0), [true]);
+        assert_eq!(changes(&mut seen, 1, 1), [false]);
+        assert_eq!(seen, (1, 1));
+        assert_eq!(changes(&mut (0, 0), 1, 3), [true, false, false, false]);
+        assert!(changes(&mut (2, 2), 2, 2).is_empty());
+    }
+
+    /// REL-3: a part's copy box is used only when it lies wholly inside the frame (a frame of the window's older size read with the
+    /// new client's parts was a box outside the texture).
+    #[test]
+    fn a_copy_box_outside_the_frame_is_never_used() {
+        use super::source_box;
+        let frame = (1936, 1119);
+        assert_eq!(source_box([10, 20, 100, 50], (8, 31), frame), Some([18, 51, 118, 101]));
+        assert_eq!(source_box([1828, 0, 100, 50], (8, 31), frame), Some([1836, 31, 1936, 81]), "exactly fitting");
+        assert_eq!(source_box([1829, 0, 100, 50], (8, 31), frame), None, "beyond the right edge");
+        assert_eq!(source_box([0, 1039, 100, 50], (8, 31), frame), None, "beyond the bottom");
+        assert_eq!(source_box([0, 0, 0, 50], (8, 31), frame), None, "nothing to copy");
+        assert_eq!(source_box([u32::MAX - 4, 0, 10, 10], (8, 31), (u32::MAX, u32::MAX)), None, "an overflow");
+        // The old window's frame, the new window's part: what happened while VRChat's window grew.
+        assert_eq!(source_box([1200, 600, 300, 200], (8, 31), (1296, 759)), None);
+    }
+
     use super::*;
 
     /// Those of ours that show, as they lie, top first.
@@ -2039,6 +2103,103 @@ mod tests {
         unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(p) }
     }
 
+    /// Whose a window is, for a failure's message: its process and its class.
+    fn whose(hwnd: HWND) -> String {
+        let mut pid = 0u32;
+        let mut class = [0u16; 128];
+        // SAFETY: plain questions about a window; the buffer outlives the call.
+        let (len, _) = unsafe { (GetClassNameW(hwnd, &mut class), GetWindowThreadProcessId(hwnd, Some(&mut pid))) };
+        let class = String::from_utf16_lossy(&class[..len.max(0) as usize]);
+        format!("{hwnd:?} of process {pid} (this one is {}), class {class:?}", std::process::id())
+    }
+
+    /// The name of the mutex that keeps these tests' real windows one test at a time across processes, and the file that says who holds it.
+    const WINDOWS_MUTEX: windows::core::PCWSTR = w!("Local\\OrbitersDesktopTests.RealWindows");
+    const WINDOWS_HOLDER: &str = "orbiters-desktop-tests-real-windows.holder";
+
+    /// These tests' real windows lie at one place off every screen ([`off_screen`]), the same in every process, and Windows' hit testing answers for the whole desktop:
+    /// two test processes at once (two streams' runs, a test binary copied out and run beside the queue) lay their windows over each other's, and one finds a window
+    /// "neither ours nor the stand-in" (BUILD-8). One such test at a time in the process ([`super::super::flows::ONE_AT_A_TIME`]), then one across processes, always in
+    /// that order, held from the first window to the last one's end; let go in the other order on drop, panics included.
+    struct WindowsAlone {
+        _across: AcrossProcesses,
+        _in_process: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn windows_alone() -> WindowsAlone {
+        let in_process = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let across = across_processes(Duration::from_secs(600)).unwrap_or_else(|e| panic!("{e}"));
+        WindowsAlone { _across: across, _in_process: in_process }
+    }
+
+    /// The real windows' place held across processes: the named mutex, owned by the thread that took it.
+    struct AcrossProcesses(windows::Win32::Foundation::HANDLE);
+
+    /// Takes the real windows' place across processes, waiting at most `wait` for another process to let go; the error says who holds it.
+    fn across_processes(wait: Duration) -> Result<AcrossProcesses, String> {
+        use windows::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+        let holder = std::env::temp_dir().join(WINDOWS_HOLDER);
+        // SAFETY: a named mutex this process opens and closes (in `Drop` or below).
+        let mutex = unsafe { CreateMutexW(None, false, WINDOWS_MUTEX) }.map_err(|e| format!("the real windows' mutex: {e}"))?;
+        // SAFETY: a live handle.
+        let got = unsafe { WaitForSingleObject(mutex, wait.as_millis().min(u32::MAX as u128 - 1) as u32) };
+        if got != WAIT_OBJECT_0 && got != WAIT_ABANDONED {
+            // SAFETY: opened above, not owned.
+            let _ = unsafe { CloseHandle(mutex) };
+            let who = std::fs::read_to_string(&holder).unwrap_or_else(|_| "nobody said".into());
+            return Err(format!("another test process kept the real windows' place for more than {wait:?} ({got:?}); its holder: {who}"));
+        }
+        if got == WAIT_ABANDONED {
+            eprintln!("the real windows' mutex was left by a process that ended without letting go; taken over"); // i18n: not shown (a test's note)
+        }
+        let me = format!("process {} test {:?}", std::process::id(), std::thread::current().name().unwrap_or("?"));
+        let _ = std::fs::write(&holder, me);
+        Ok(AcrossProcesses(mutex))
+    }
+
+    impl Drop for AcrossProcesses {
+        fn drop(&mut self) {
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::System::Threading::ReleaseMutex;
+            // SAFETY: owned by this thread since `across_processes` (a test holds it on its own thread), released and closed once.
+            unsafe {
+                let _ = ReleaseMutex(self.0);
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    /// Another process holding the real windows' place keeps a test here waiting, and lets it in once it goes; a test here waits for nothing when nobody holds it.
+    #[test]
+    fn the_real_windows_are_one_test_process_s_at_a_time() {
+        use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject, INFINITE};
+        // This process's real-window tests wait outside: none of them holds the place across processes while this one plays the other process.
+        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        drop(across_processes(Duration::from_secs(600)).expect("nobody else holds it"));
+        // Another process, as far as the mutex knows: another thread (a mutex is its owning thread's), holding it until told.
+        let (held, hold) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+        let other = std::thread::spawn(move || {
+            // SAFETY: as in `across_processes`: opened, owned, released and closed on this thread.
+            unsafe {
+                let mutex = CreateMutexW(None, false, WINDOWS_MUTEX).expect("the mutex");
+                assert_eq!(WaitForSingleObject(mutex, INFINITE), WAIT_OBJECT_0);
+                let _ = std::fs::write(std::env::temp_dir().join(WINDOWS_HOLDER), "the other test thread");
+                held.0.send(()).unwrap();
+                let _ = hold.1.recv();
+                let _ = ReleaseMutex(mutex);
+                let _ = CloseHandle(mutex);
+            }
+        });
+        held.1.recv().unwrap();
+        let refused = across_processes(Duration::from_millis(200)).err().expect("kept out while another holds it");
+        assert!(refused.contains("the other test thread"), "{refused}");
+        hold.0.send(()).unwrap();
+        let _in = across_processes(Duration::from_secs(600)).expect("let in once the other goes");
+        other.join().unwrap();
+    }
+
     /// The desktop's parts as [`run`] lays them, paints them and puts up their windows, over a stand-in for VRChat's window of `client` pixels with `open` up, turned
     /// until each part rests where it goes. `sheet` presses All tools on the wing first, and waits for its page.
     fn put_up(open: Around, client: Vec2, sheet: bool) -> (Panels, Windows, StandIn, Pos2) {
@@ -2111,7 +2272,7 @@ mod tests {
                     return (p, None);
                 }
                 let zone = windows.list.iter().find(|(_, w)| w.hwnd == got).map(|(z, _)| *z);
-                (p, Some(zone.unwrap_or_else(|| panic!("at {p:?} the mouse goes to a window that is neither ours nor the stand-in"))))
+                (p, Some(zone.unwrap_or_else(|| panic!("at {p:?} the mouse goes to a window that is neither ours nor the stand-in: {}", whose(got)))))
             })
             .collect()
     }
@@ -2131,7 +2292,7 @@ mod tests {
                     return Some((p, None));
                 }
                 let zone = windows.list.iter().find(|(_, w)| w.hwnd == got).map(|(z, _)| *z);
-                Some((p, Some(zone.unwrap_or_else(|| panic!("at {p:?} the mouse goes to a window that is neither ours nor the stand-in")))))
+                Some((p, Some(zone.unwrap_or_else(|| panic!("at {p:?} the mouse goes to a window that is neither ours nor the stand-in: {}", whose(got))))))
             })
             .collect()
     }
@@ -2159,7 +2320,7 @@ mod tests {
     /// mouse anywhere; the ring's cells are pressed through Left Alt's pointer and the number keys, as ever.
     #[test]
     fn with_vrchat_s_wheel_open_every_click_reaches_vrchat() {
-        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let _alone = windows_alone();
         for client in [vec2(1280.0, 720.0), vec2(1920.0, 1080.0), vec2(1000.0, 1000.0)] {
             let (panels, windows, stand_in, origin) = put_up(Around::Wheel, client, false);
             hit_testing_reads_the_pixels(origin, &stand_in);
@@ -2187,7 +2348,7 @@ mod tests {
     /// of ours that is pressed there, and every part's middle is ours (its buttons still work).
     #[test]
     fn with_the_quick_menu_open_only_our_parts_take_the_mouse() {
-        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let _alone = windows_alone();
         let client = vec2(1280.0, 720.0);
         for sheet in [false, true] {
             let (panels, windows, stand_in, origin) = put_up(Around::QuickMenu, client, sheet);
@@ -2214,7 +2375,7 @@ mod tests {
     /// each row's middle is that row.
     #[test]
     fn the_mismatch_corner_takes_only_its_rows_and_never_the_wheel_s_centre() {
-        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let _alone = windows_alone();
         for (open, client) in [(Around::Wheel, vec2(1280.0, 720.0)), (Around::Wheel, vec2(1920.0, 1080.0)), (Around::QuickMenu, vec2(1280.0, 720.0)), (Around::QuickMenu, vec2(1000.0, 900.0))] {
             let (_panels, windows, stand_in, origin) = put_up(open, client, open == Around::QuickMenu);
             let mut corner = Corner::default();
@@ -2236,7 +2397,7 @@ mod tests {
                     let on_row = [0.0, -2.0, 2.0].iter().any(|dy| Corner::row_at(q + vec2(0.0, dy / zoom)).is_some() || Corner::row_at(q + vec2(dy / zoom, 0.0)).is_some());
                     assert!(rect.expand(2.0).contains(p) && on_row, "{open:?} {client:?}: {p:?} goes to the corner off its rows"); // i18n: not shown (a menu mismatch report's line)
                 } else if got != stand_in.0 {
-                    assert!(windows.list.values().any(|w| w.hwnd == got), "{open:?} {client:?}: {p:?} goes to a window neither ours nor VRChat's"); // i18n: not shown (a menu mismatch report's line)
+                    assert!(windows.list.values().any(|w| w.hwnd == got), "{open:?} {client:?}: {p:?} goes to a window neither ours nor VRChat's: {}", whose(got)); // i18n: not shown (a menu mismatch report's line)
                     assert!(open != Around::Wheel, "{open:?} {client:?}: with the wheel open {p:?} goes to a part of ours"); // i18n: not shown (a menu mismatch report's line)
                     on_ours += 1;
                 }
@@ -2283,7 +2444,7 @@ mod tests {
     /// while the corners round the panel say a code is looked for (their window lets every click through).
     #[test]
     fn with_vrchat_s_camera_open_only_the_column_takes_the_mouse() {
-        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let _alone = windows_alone();
         for (client, panel) in [
             (vec2(1280.0, 720.0), egui::Rect::from_min_max(pos2(332.0, 185.0), pos2(948.0, 535.0))),
             (vec2(1920.0, 1080.0), egui::Rect::from_min_max(pos2(498.0, 277.5), pos2(1422.0, 802.5))),
@@ -2344,7 +2505,7 @@ mod tests {
     /// window, and costs little; when a recording starts, only what changed is painted again (Record and the words). Measured times are printed for the report.
     #[test]
     fn the_camera_column_at_rest_costs_a_turn_nothing_and_a_change_only_its_parts() {
-        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let _alone = windows_alone();
         for client in [vec2(1280.0, 720.0), vec2(2560.0, 1440.0)] {
             let panel = egui::Rect::from_center_size(pos2(client.x / 2.0, client.y / 2.0), vec2(616.0, 350.0) * client.y / 720.0);
             let mut snap = crate::screenshot::idle_snapshot(&orbiters_core::settings::Settings::default(), &[]);
@@ -2725,7 +2886,7 @@ mod tests {
                         wrong.push(format!(
                             "{when}: the middle of {:?} is found on {found:?}, and Windows gives it to {} ({}; ours from the top: {order:?})",
                             panel.zone,
-                            if got == self.stand_in.0 { "VRChat".to_string() } else { format!("{:?}", self.windows.list.iter().find(|(_, w)| w.hwnd == got).map(|(z, _)| *z)) },
+                            if got == self.stand_in.0 { "VRChat".to_string() } else { self.windows.list.iter().find(|(_, w)| w.hwnd == got).map_or_else(|| whose(got), |(z, _)| format!("{z:?}")) },
                             facts.unwrap_or_default()
                         ));
                     }
@@ -2865,7 +3026,7 @@ mod tests {
     /// place, in a corner, over an empty body. Every part must be where the full screen puts it from the next turn on, the list where it was scrolled to, and back.
     #[test]
     fn the_worlds_page_follows_vrchat_going_full_screen() {
-        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let _alone = windows_alone();
         let all = changes();
         let his: Vec<_> = all.iter().filter(|(what, _, _)| matches!(*what, "full-screen" | "windowed-again" | "other-screen")).cloned().collect();
         let wrong = follow_through(Up::WorldsList, &his, &[vec2(1280.0, 720.0), vec2(1920.0, 1080.0), vec2(2560.0, 1440.0)]);
@@ -2876,7 +3037,7 @@ mod tests {
     /// with its small 3D view among them), the wheel's ring, a page from the wheel, the camera's column.
     #[test]
     fn every_part_follows_every_change_of_vrchat_s_window() {
-        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let _alone = windows_alone();
         let ups = [
             Up::Tiles,
             Up::WorldsList,

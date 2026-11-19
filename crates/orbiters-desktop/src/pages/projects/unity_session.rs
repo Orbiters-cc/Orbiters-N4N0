@@ -193,8 +193,19 @@ pub(super) fn controls(ui: &mut Ui, state: &mut State, project: &Project, rect: 
             // The longer words when they fit.
             let long = Button::new(tr("Kill, losing unsaved changes")).icon(icons::X_CIRCLE).size(size).desired_width(ui);
             let cancel_w = Button::new(tr("Cancel")).size(size).desired_width(ui);
-            let words = if long + gap + cancel_w <= rect.width() { tr("Kill, losing unsaved changes") } else { tr("Kill, losing changes") };
+            // Decided with the width the button then gets (Night PG2-11: the long words were chosen beside a Cancel of
+            // its own width, then drawn in 63 % of the row, past both ends of the button in French): the row split
+            // 1.7 : 1 as before when the words fit there; else the red button takes what Cancel leaves it.
+            let short = Button::new(tr("Kill, losing changes")).icon(icons::X_CIRCLE).size(size).desired_width(ui);
             let r = split(&[1.7, 1.0]);
+            let room = rect.width() - gap - cancel_w;
+            let (words, need) = if long <= r[0].width() || long <= room { (tr("Kill, losing unsaved changes"), long) } else { (tr("Kill, losing changes"), short) };
+            let r = if need <= r[0].width() {
+                r
+            } else {
+                let kill = Rect::from_min_size(rect.min, vec2(room, rect.height()));
+                vec![kill, Rect::from_min_max(pos2(kill.right() + gap, rect.top()), rect.max)]
+            };
             let kill = Button::new(words)
                 .icon(icons::X_CIRCLE)
                 .variant(Variant::Danger)

@@ -326,9 +326,19 @@ fn keep_saved_bindings_whole(steamvr: &vr::Client, dir: &Path) {
         let saved = saved_binding_file(&url, runtime.as_deref()).and_then(|file| std::fs::read_to_string(file).ok());
         let Ok(ours) = std::fs::read_to_string(dir.join(format!("bindings_{controller}.json"))) else { continue };
         let Some(saved) = saved else {
-            eprintln!("SteamVR's saved binding for {controller} cannot be read ({url}): the default one applies");
-            steamvr.remove_setting(section, &key("CurrentURL"));
-            steamvr.remove_setting(section, &key("AutosaveURL"));
+            // Only a file that is gone is let go (the default applies); one unreadable for now (a Workshop item not downloaded
+            // yet, a drive not there, a file in use, an address of another kind) stays the person's choice (OVERLAY-3).
+            let autosave = steamvr.setting_string(section, &key("AutosaveURL"));
+            match unreadable_binding(&url, autosave.as_deref(), |p| p.exists()) {
+                Unreadable::Gone { autosave_too } => {
+                    super::vr_log::line(&format!("bindings: SteamVR's saved binding for {controller} is a file that is gone: the default one applies")); // i18n: not shown (a log's line)
+                    steamvr.remove_setting(section, &key("CurrentURL"));
+                    if autosave_too {
+                        steamvr.remove_setting(section, &key("AutosaveURL"));
+                    }
+                }
+                Unreadable::Kept(why) => super::vr_log::line(&format!("bindings: SteamVR's saved binding for {controller} cannot be read now ({why}): left as it is")), // i18n: not shown (a log's line)
+            }
             continue;
         };
         let Some(merged) = merged_binding(&saved, &ours) else { continue };
@@ -342,6 +352,32 @@ fn keep_saved_bindings_whole(steamvr: &vr::Client, dir: &Path) {
         }
     }
     }
+}
+
+/// What becomes of a saved binding that could not be read.
+#[derive(Debug, PartialEq)]
+enum Unreadable {
+    /// A `file://` binding whose file is gone from a drive that is there: let go, its autosave too when it is the same address.
+    Gone { autosave_too: bool },
+    /// Anything else stays as it is, for this reason (no address in the log: it holds the person's folders).
+    Kept(&'static str),
+}
+
+/// [`Unreadable`] for the saved binding at `url` (its `AutosaveURL` beside it), `exists` saying whether a path is there.
+fn unreadable_binding(url: &str, autosave: Option<&str>, exists: impl Fn(&Path) -> bool) -> Unreadable {
+    if url.starts_with("vr-input-workshop://") {
+        return Unreadable::Kept("a Workshop binding not downloaded or not readable"); // i18n: not shown (a log's line)
+    }
+    let Some(path) = url.strip_prefix("file:///").or_else(|| url.strip_prefix("file://")) else { return Unreadable::Kept("an address of another kind") }; // i18n: not shown (a log's line)
+    let path = Path::new(path);
+    if exists(path) {
+        return Unreadable::Kept("a file that is there but could not be read"); // i18n: not shown (a log's line)
+    }
+    let drive = path.ancestors().last().filter(|root| !root.as_os_str().is_empty());
+    if !drive.is_some_and(|root| exists(root)) {
+        return Unreadable::Kept("a file on a drive that is not there"); // i18n: not shown (a log's line)
+    }
+    Unreadable::Gone { autosave_too: autosave == Some(url) }
 }
 
 /// The file a saved binding's address stands for: a Workshop item's (the one file in its folder, under SteamVR's own Steam library) or a file's.
@@ -867,6 +903,22 @@ mod tests {
         assert_eq!(saved_binding_file("file:///C:/x/y.json", None), Some(PathBuf::from("C:/x/y.json")));
         assert_eq!(saved_binding_file("something else", Some(&runtime)), None);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// OVERLAY-3: only a file:// binding whose file is gone from a drive that is there is let go (its autosave only when the
+    /// same); a Workshop item not downloaded, a missing drive, a file in use and an unknown address stay.
+    #[test]
+    fn an_unreadable_saved_binding_is_let_go_only_when_its_file_is_gone() {
+        use std::path::Path;
+        let there = |p: &Path| matches!(p.to_str(), Some("C:/") | Some("C:/in-use.json"));
+        let url = "file:///C:/gone.json";
+        assert_eq!(unreadable_binding(url, Some(url), there), Unreadable::Gone { autosave_too: true });
+        assert_eq!(unreadable_binding(url, Some("file:///C:/other.json"), there), Unreadable::Gone { autosave_too: false }, "another autosave stays");
+        assert_eq!(unreadable_binding(url, None, there), Unreadable::Gone { autosave_too: false });
+        assert!(matches!(unreadable_binding("file:///C:/in-use.json", None, there), Unreadable::Kept(_)), "there but unreadable");
+        assert!(matches!(unreadable_binding("file:///E:/binding.json", None, there), Unreadable::Kept(_)), "a drive not there");
+        assert!(matches!(unreadable_binding("vr-input-workshop://3830136132", None, there), Unreadable::Kept(_)));
+        assert!(matches!(unreadable_binding("steam://something", None, there), Unreadable::Kept(_)));
     }
 
     /// With this application's real bindings: the very case that hid the panels in VR.

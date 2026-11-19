@@ -85,7 +85,9 @@ pub fn parse(data: &[u8]) -> anyhow::Result<Gaussians> {
     if data.len() < needed {
         bail!("{}", tr("PLY truncated"));
     }
+    // The count is checked against the file's length above: reserving it can never take more than the file is.
     let mut g = Gaussians::default();
+    g.reserve_exact(count);
     for i in 0..count {
         let f = |k: usize| f32::from_le_bytes(data[end + i * stride + k * 4..end + i * stride + k * 4 + 4].try_into().unwrap());
         g.push(
@@ -115,6 +117,22 @@ mod tests {
         assert_eq!(parse(b"").unwrap_err().to_string(), "no PLY header");
         assert_eq!(in_language(Language::Fr, || parse(b"").unwrap_err().to_string()), "pas d’en-tête PLY");
         assert_eq!(in_language(Language::Ja, || parse(b"").unwrap_err().to_string()), "PLYのヘッダーがありません");
+    }
+
+    /// RECONSTRUCT-14g: a PLY's splats are read into vectors sized once from its header, the same splats as before.
+    #[test]
+    fn reading_sizes_the_vectors_once() {
+        let mut g = Gaussians::default();
+        for i in 0..1000 {
+            g.push([i as f32, 0.0, 1.0], [-2.0; 3], [1.0, 0.0, 0.0, 0.0], 0.1, [0.5; 3]);
+        }
+        let path = std::env::temp_dir().join(format!("orbiters-ply-capacity-{}.ply", std::process::id()));
+        write(&path, &g).unwrap();
+        let back = read(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(back.len(), 1000);
+        assert_eq!((back.means.capacity(), back.seen.capacity(), back.sky.capacity()), (1000, 1000, 1000), "grown by doubling (1024)");
+        assert_eq!(back.means, g.means);
     }
 
     #[test]

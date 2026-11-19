@@ -4496,6 +4496,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "png",
+ "serde",
  "serde_json",
  "tempfile",
  "url",

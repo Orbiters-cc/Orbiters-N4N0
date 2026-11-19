@@ -130,15 +130,15 @@ pub fn from_vrcx(
     read_at: i64,
 ) -> LauncherState {
     // Each table looked up by id once (a person's first row, as a search from the top finds it), not searched for each friend.
-    let by_id = |rows: &[Vec<String>]| {
-        let mut map: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    fn by_id(rows: &[Vec<String>]) -> std::collections::HashMap<&str, &str> {
+        let mut map = std::collections::HashMap::new();
         for r in rows {
             if let Some(id) = r.first() {
                 map.entry(id.as_str()).or_insert_with(|| r.get(1).map_or("", String::as_str));
             }
         }
         map
-    };
+    }
     let (notes, seen) = (by_id(notes), by_id(seen));
     let mut groups_of: std::collections::HashMap<&str, Vec<String>> = std::collections::HashMap::new();
     for r in favourites {

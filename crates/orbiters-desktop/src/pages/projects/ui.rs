@@ -101,14 +101,30 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let mut scroll = egui::ScrollArea::vertical().id_salt("unity-projects").auto_shrink([false, false]).scroll_bar_rect(bar);
     if let Some(y) = state.scroll_gallery {
         scroll = scroll.vertical_scroll_offset(y);
+    } else if let Some(y) = state.scroll_fix.take() {
+        scroll = scroll.vertical_scroll_offset(y);
     }
-    scroll.show(&mut gu, |ui| {
+    state.row_places.clear();
+    let out = scroll.show(&mut gu, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: PAD_X as i8, right: edge.round() as i8, top: 0, bottom: 104 }).show(ui, |ui| {
             ui.add_space(placed.content_top - page.top());
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             gallery(ui, cx, state);
         });
     });
+    // While a scan adds rows (and when it ends and sorts), the first project in view stays where it is on screen: what
+    // grows above it scrolls the gallery by as much (AGENTS.md: progressive galleries keep the visible item).
+    let (offset, top) = (out.state.offset.y, out.inner_rect.top());
+    let places: Vec<(PathBuf, f32)> = state.row_places.iter().map(|(p, r)| (p.clone(), r.top() - top + offset)).collect();
+    let scanning = state.scanning();
+    if scanning || state.was_scanning {
+        if let Some(dy) = anchor_shift(state.scroll_anchor.as_ref(), &places) {
+            state.scroll_fix = Some((offset + dy).max(0.0));
+            ctx.request_repaint();
+        }
+    }
+    state.was_scanning = scanning;
+    state.scroll_anchor = first_in_view(&state.row_places, top).and_then(|path| places.iter().find(|(p, _)| *p == path).cloned());
     // Across the whole page, not the cards' width only: the docked panel starts lower, and the cards blurred under the
     // header would otherwise stop at a hard edge above the gap between them and the panel.
     pages::under_top(ui, cx, "unity-projects", from, placed.band_bottom);
@@ -204,6 +220,18 @@ fn hidden_filter(ui: &mut Ui, state: &mut State, row: Rect, n: usize) {
     }
 }
 
+/// How far `anchor` (a project and its place in the content) moved since it was taken, if it did.
+fn anchor_shift(anchor: Option<&(PathBuf, f32)>, places: &[(PathBuf, f32)]) -> Option<f32> {
+    let (path, was) = anchor?;
+    let now = places.iter().find(|(p, _)| p == path)?.1;
+    ((now - was).abs() > 0.5).then_some(now - was)
+}
+
+/// The project whose card or row is the first one in view (top at or below `top`, or across it).
+fn first_in_view(places: &[(PathBuf, Rect)], top: f32) -> Option<PathBuf> {
+    places.iter().filter(|(_, r)| r.bottom() > top).min_by(|a, b| a.1.top().total_cmp(&b.1.top()).then(a.1.left().total_cmp(&b.1.left()))).map(|(p, _)| p.clone())
+}
+
 /// The order of a list of projects: newest first, except while a scan runs (PROJECTS-18, Enzo 2026-11-19: "Yes please"):
 /// then every row keeps the place it had and what the scan finds goes at the end, so nothing moves under the pointer.
 /// The date order comes back when the scan ends.
@@ -291,8 +319,11 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {
     for (i, p) in projects.iter().enumerate() {
         // Each card springs to its place (in the grid's own coordinates, so scrolling never animates): when the panel
         // takes room or gives it back, the cards reflow instead of jumping.
-        let target = [(i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (card_h + GAP), card_w];
-        let [x, y, cw] = anim::spring(&ctx, Id::unique(("project-card-slot", &p.path)), target, Spring::SOFT);
+        // Only the place springs: a card's size is set at once (AGENTS.md: no spring on layout dimensions).
+        let target = [(i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (card_h + GAP)];
+        state.row_places.push((p.path.clone(), Rect::from_min_size(area.min + vec2(target[0], target[1]), vec2(card_w, card_h))));
+        let [x, y] = anim::spring(&ctx, Id::unique(("project-card-place", &p.path)), target, Spring::SOFT);
+        let cw = card_w;
         let r = Rect::from_min_size(area.min + vec2(x, y), vec2(cw, (cw * 0.5625).round() + CARD_BODY));
         state.anchors.insert(format!("card-{i}"), r);
         if !ui.is_rect_visible(r.expand(12.0)) {
@@ -508,8 +539,10 @@ fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[Project]) {
     let mut add = None;
     let mut picked = None;
     for (i, p) in list.iter().take(shown).enumerate() {
-        let target = [(i % cols) as f32 * (row_w + 12.0), (i / cols) as f32 * (row_h + 12.0), row_w];
-        let [x, y, rw] = anim::spring(&ctx, Id::unique(("found-slot", &p.path)), target, Spring::SOFT);
+        let target = [(i % cols) as f32 * (row_w + 12.0), (i / cols) as f32 * (row_h + 12.0)];
+        state.row_places.push((p.path.clone(), Rect::from_min_size(area.min + vec2(target[0], target[1]), vec2(row_w, row_h))));
+        let [x, y] = anim::spring(&ctx, Id::unique(("found-place", &p.path)), target, Spring::SOFT);
+        let rw = row_w;
         let r = Rect::from_min_size(area.min + vec2(x, y), vec2(rw, row_h));
         if !ui.is_rect_visible(r.expand(8.0)) {
             continue;
@@ -702,6 +735,23 @@ mod order_tests {
     }
     fn names(list: &[Project]) -> Vec<String> {
         list.iter().map(|p| p.name.clone()).collect()
+    }
+
+    /// Verifier, point 8: rows added above the first project in view (the other section growing, a banner) scroll the
+    /// gallery by as much, so that project stays where it was on screen.
+    #[test]
+    fn growth_above_the_first_row_in_view_is_followed() {
+        let p = |n: &str| std::path::PathBuf::from(format!("C:/P/{n}"));
+        let rect = |y: f32| Rect::from_min_size(pos2(0.0, y), vec2(100.0, 80.0));
+        // In view from 300 on (the viewport's top): "b" is the first row there.
+        let frame1 = vec![(p("a"), rect(200.0)), (p("b"), rect(310.0)), (p("c"), rect(420.0))];
+        assert_eq!(first_in_view(&frame1, 300.0), Some(p("b")));
+        let anchor = (p("b"), 310.0 - 300.0 + 40.0);
+        // Next frame a row of 110 came in above it: the gallery scrolls 110 further.
+        let frame2 = vec![(p("new"), 50.0 + 40.0), (p("a"), 310.0 - 300.0 + 40.0 - 0.0), (p("b"), 420.0 - 300.0 + 40.0)];
+        assert_eq!(anchor_shift(Some(&anchor), &frame2), Some(110.0));
+        // Nothing moved: nothing to do.
+        assert_eq!(anchor_shift(Some(&anchor), &[(p("b"), 50.0)]), None);
     }
 
     /// PROJECTS-18: while a scan runs, a newer project found later goes at the end and no row moves; once it ends, the

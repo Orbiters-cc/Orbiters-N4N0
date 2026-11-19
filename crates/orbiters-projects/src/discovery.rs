@@ -881,8 +881,7 @@ mod retained_lists {
         let make = |at: &str| {
             let p = temp.path().join(at);
             std::fs::create_dir_all(p.join("ProjectSettings")).unwrap();
-            std::fs::write(p.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1
-").unwrap();
+            std::fs::write(p.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
             p
         };
         let stand_in = make(".orbiters-build/runs/Stand-in");

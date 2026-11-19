@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn a_view_part_linked_into_the_capture_deletes_nothing() {
         let (root, dir) = session("as15-viewlink", true);
-        let held_out = dir.join("reconstruction/held-out");
+        let held_out = dir.join("reconstruction").join("held-out");
         fs::remove_dir_all(&held_out).unwrap();
         folder_link(&held_out, &dir.join("depth-raw"));
         let err = keep_only_view(&dir, &mut |_| {}).unwrap_err().to_string();

@@ -505,6 +505,10 @@ def restore_contents(j):
     j['dead_processes']=[info for info in j['processes'] if info['pid'] in warnings]
     atomic_json(JOURNAL, j)
     note_restored(j['session'],'restore')
+    copy=Path(j['files'][0]['backup']).parent/'journal.json' if j['files'] else None
+    if copy and copy.exists():
+        try:atomic_json(copy,{k:v for k,v in j.items() if k!='token'})   # the folder says it was restored (prune_backups)
+        except OSError:pass
     if j.get('app_restore_exe'):
         args=[j['app_restore_exe']]+([] if j.get('app_was_visible') else ['--hidden'])
         subprocess.Popen(args,creationflags=subprocess.CREATE_NO_WINDOW)
@@ -645,6 +649,24 @@ def sandbox_leftovers(settings=None, paths=None):
     except (OSError,ValueError) as error:found.append(f'openvrpaths.vrpath unreadable ({error})')
     return found
 
+def prune_backups(keep=5):
+    """SBX-16a: earlier backup-<ns> folders pile up (110 seen, each with a copy of the bridge's token). Keeps the `keep`
+    newest, the newest whose SteamVR files are clean (SBX-15's way back) and any whose own journal.json is unrestored;
+    deletes the others. Returns the names deleted."""
+    folders=sorted(ROOT.glob('backup-*'),key=lambda p:p.name,reverse=True)
+    keep_names={p.name for p in folders[:keep]}
+    for folder in folders:
+        if not sandbox_leftovers(folder/'1',folder/'0') and (folder/'0').is_file():keep_names.add(folder.name);break
+    deleted=[]
+    for folder in folders:
+        if folder.name in keep_names:continue
+        try:
+            if not json.loads((folder/'journal.json').read_text()).get('restored'):continue
+        except FileNotFoundError:pass        # older folders describe nothing: only their age counts
+        except (OSError,ValueError):continue
+        shutil.rmtree(folder,ignore_errors=True);deleted.append(folder.name)
+    return deleted
+
 def clean_backup_hint():
     """The newest earlier backup folder whose SteamVR files are clean, for a person to restore from."""
     for folder in sorted(ROOT.glob('backup*'),key=lambda p:p.stat().st_mtime,reverse=True):
@@ -704,6 +726,7 @@ class Session:
         old = ROOT / 'backup'
         if old.exists():
             old.rename(ROOT / ('backup-' + str(time.time_ns())))
+        self.j['pruned_backups']=len(prune_backups())
         for path in [PATHS, SETTINGS, STEAM/'config/chaperone_info.vrchap', STEAM/'config/steamvr.vrappconfig', STEAM/'config/steamapps.vrmanifest']:
             backup(self.j, path)
         for path in [STEAM/'config/vrappconfig', LOCAL/'Orbiters/SteamVR']:

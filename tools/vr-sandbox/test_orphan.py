@@ -189,3 +189,30 @@ class DurableBackups(unittest.TestCase):
             sandbox.atomic_json(sandbox.JOURNAL, {'session': 'x', 'files': []})
         self.assertEqual(order, ['fsync', 'replace', 'fsync', 'replace'], 'journal, then its copy')
         self.assertEqual(json.loads(sandbox.journal_prev().read_text()), {'session': 'x', 'files': []})
+
+
+class Pruning(unittest.TestCase):
+    """SBX-16a: old backup folders are pruned; the newest five, the newest clean one and unrestored ones stay."""
+    def test_prune(self):
+        shutil.rmtree(sandbox.ROOT, ignore_errors=True); sandbox.ROOT.mkdir(parents=True)
+        sandboxed = json.dumps({'external_drivers': [str(sandbox.ROOT / 'driver')]})
+        for i in range(12):
+            folder = sandbox.ROOT / f'backup-{1000 + i}'; folder.mkdir()
+            (folder / '0').write_text('{}' if i == 2 else sandboxed); (folder / '1').write_text('{}')
+        sandbox.atomic_json(sandbox.ROOT / 'backup-1004' / 'journal.json', {'session': 'u', 'restored': False})
+        sandbox.atomic_json(sandbox.ROOT / 'backup-1005' / 'journal.json', {'session': 'r', 'restored': True})
+        deleted = sandbox.prune_backups(keep=5)
+        left = sorted(p.name for p in sandbox.ROOT.glob('backup-*'))
+        self.assertEqual(left, ['backup-1002', 'backup-1004'] + [f'backup-{1000 + i}' for i in range(7, 12)])
+        self.assertIn('backup-1005', deleted)
+
+    def test_a_restore_marks_its_backup_folder(self):
+        shutil.rmtree(sandbox.ROOT, ignore_errors=True); sandbox.ROOT.mkdir(parents=True)
+        target = sandbox.ROOT.parent / 'f'; target.write_text('a')
+        j = {'session': 'm', 'files': [], 'processes': [], 'restored': False, 'shared': True, 'token': 'secret'}
+        sandbox.backup(j, target); sandbox.atomic_json(sandbox.JOURNAL, j)
+        sandbox.atomic_json(sandbox.ROOT / 'backup' / 'journal.json', {k: v for k, v in j.items() if k != 'token'})
+        with patch.object(sandbox, 'processes', return_value=[]):
+            sandbox.restore()
+        copy = json.loads((sandbox.ROOT / 'backup' / 'journal.json').read_text())
+        self.assertTrue(copy['restored']); self.assertNotIn('token', copy)

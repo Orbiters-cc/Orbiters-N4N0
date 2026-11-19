@@ -105,9 +105,38 @@ struct Turn {
 }
 
 /// An action the assistant asked for that waits for the owner's yes, and what it does in the app's words.
-struct Pending {
+pub(crate) struct Pending {
     action: Action,
     what: String,
+    /// The avatar and the control it was reviewed on: it runs on those or not at all.
+    bound: Bound,
+}
+
+/// What an avatar action was reviewed on: the avatar (its number, [`N4n0Runtime::avatar_epoch`]) and the control its
+/// name resolved to then (its path; `None`: none was found). An action runs only while both are still what they were.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Bound {
+    epoch: u64,
+    path: Option<String>,
+}
+
+#[cfg(test)]
+impl Bound {
+    pub(crate) fn for_test(epoch: u64, path: Option<&str>) -> Self {
+        Self { epoch, path: path.map(str::to_string) }
+    }
+}
+
+impl Pending {
+    /// It acts on the avatar's controls (and so is bound to the avatar it was asked about).
+    fn on_avatar(&self) -> bool {
+        avatar_action(&self.action)
+    }
+}
+
+/// Whether `action` writes to the avatar's controls (by the name of one of them).
+fn avatar_action(action: &Action) -> bool {
+    matches!(action, Action::SetControl { .. } | Action::SetParameter { .. } | Action::Hold { .. })
 }
 
 /// What one turn's tool calls did and asked.
@@ -132,6 +161,9 @@ pub(crate) struct N4n0Runtime {
     pub(crate) params: HashSet<String>,
     pub(crate) controls: Controls,
     pub(crate) manifest: bool,
+    /// Bumped at every change of avatar (and when VRChat closes): an approval or a tool call reviewed on one avatar
+    /// never acts on the next.
+    pub(crate) avatar_epoch: u64,
     /// Messages for the N4N0 thread to send, and when.
     pub(crate) outbox: Vec<(Instant, Message)>,
     /// When the held parameters are put back.
@@ -155,7 +187,7 @@ pub(crate) struct N4n0Runtime {
     lines: Slice<Vec<N4n0Line>>,
     confirmations: Vec<N4n0Confirmation>,
     /// What the assistant asked to do that waits for the owner's yes, since when, and its number.
-    pending: Vec<Pending>,
+    pub(crate) pending: Vec<Pending>,
     pending_at: Option<Instant>,
     pending_id: u64,
     /// What Orbiters - N4N0 tells the assistant at its next turn (the owner's yes, a turn that failed after its
@@ -269,6 +301,8 @@ impl N4n0Runtime {
     fn forget_avatar(&mut self) {
         self.avatar_id = None;
         self.avatar_name = None;
+        self.avatar_epoch += 1;
+        self.drop_avatar_pending();
         self.params.clear();
         self.input.forget_avatar();
         self.mirror.forget_avatar();
@@ -287,6 +321,36 @@ impl N4n0Runtime {
         self.light = None;
         self.vr_mode = None;
         self.screen.menu_param_reset(Instant::now());
+    }
+
+    /// Another avatar (or none): what waited for the owner's yes on the last one's controls is dropped (said in the
+    /// conversation, told to the assistant), what names no control (the clipboard, the AFK message) still waits, its
+    /// question asked again without the rest.
+    fn drop_avatar_pending(&mut self) {
+        if !self.pending.iter().any(Pending::on_avatar) {
+            return;
+        }
+        let (gone, kept): (Vec<Pending>, Vec<Pending>) = std::mem::take(&mut self.pending).into_iter().partition(Pending::on_avatar);
+        let what: Vec<String> = gone.into_iter().map(|p| p.what).collect();
+        self.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
+        self.notes.push(format!("The owner's avatar changed before they answered: Orbiters - N4N0 did not {}.", what.join(", nor "))); // i18n: not shown
+        self.confirmations.retain(|c| !c.approve_url.starts_with(LOCAL_APPROVAL));
+        if kept.is_empty() {
+            self.pending_at = None;
+            return;
+        }
+        let whats: Vec<String> = kept.iter().map(|p| p.what.clone()).collect();
+        let question = policy::question(&whats);
+        self.pending = kept;
+        self.pending_id += 1;
+        let n = self.pending_id;
+        self.line(N4n0Who::Note, question.clone());
+        self.confirmations.push(N4n0Confirmation {
+            id: format!("n4n0-{n}"),
+            title: tr("N4N0 asks").into(),
+            summary: format!("{question} (or say yes or no)"), // i18n: not shown
+            approve_url: format!("{LOCAL_APPROVAL}{n}"),
+        });
     }
 
     /// The avatar's screen is not known (an avatar loads): the menu goes to the overlay until it is looked at.
@@ -1295,6 +1359,12 @@ impl N4n0 {
             if rt.avatar_id.as_deref() != Some(id.as_str()) {
                 // Another avatar's name is read once it settled.
                 rt.avatar_name = None;
+                // Nothing reviewed on the last avatar acts on this one: its controls are not this one's (they are read
+                // once it settled), and what waited for a yes on them is dropped.
+                rt.avatar_epoch += 1;
+                rt.controls = Controls::default();
+                rt.manifest = false;
+                rt.drop_avatar_pending();
             }
             rt.avatar_id = Some(id.clone());
             if let Some(sender) = rt.sender.as_mut() {
@@ -1700,7 +1770,7 @@ impl N4n0 {
     fn confirmed(self: &Shared, pending: Vec<Pending>) {
         let (mut done, mut failed) = (Vec::new(), Vec::new());
         for p in pending {
-            match self.action(p.action) {
+            match self.action(p.action, Some(&p.bound)) {
                 Ok(_) => done.push(p.what),
                 Err(e) => failed.push(format!("{} ({e})", p.what)),
             }
@@ -2035,6 +2105,16 @@ impl N4n0 {
                 // What the assistant was told before this turn has been heard.
                 let heard = notes.min(rt.notes.len());
                 rt.notes.drain(..heard);
+                // What was asked on an avatar the owner no longer wears is not asked at all.
+                let epoch = rt.avatar_epoch;
+                let (stale, waiting): (Vec<Pending>, Vec<Pending>) =
+                    std::mem::take(&mut tools_run.waiting).into_iter().partition(|p| p.on_avatar() && p.bound.epoch != epoch);
+                tools_run.waiting = waiting;
+                if !stale.is_empty() {
+                    let what: Vec<String> = stale.into_iter().map(|p| p.what).collect();
+                    rt.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
+                    rt.notes.push(format!("The owner's avatar changed before they answered: Orbiters - N4N0 did not {}.", what.join(", nor "))); // i18n: not shown
+                }
                 let whats: Vec<String> = tools_run.waiting.iter().map(|p| p.what.clone()).collect();
                 let question = policy::question(&whats);
                 if !shown.is_empty() {
@@ -2184,7 +2264,7 @@ impl N4n0 {
             Ok(action) => action,
             Err(e) => return result(&e, true),
         };
-        let control = self.named_control(&action);
+        let (bound, control) = self.named_control(&action);
         match turn.policy.review(&action, control.as_ref()) {
             Verdict::Refuse { why } => result(&why, true),
             Verdict::Confirm { what } => {
@@ -2193,12 +2273,12 @@ impl N4n0 {
                     "asked": what,
                     "note": "Orbiters - N4N0 asked the owner, and does it only if they say yes: say so in a few words, without asking again."
                 });
-                turn.waiting.push(Pending { action, what });
+                turn.waiting.push(Pending { action, what, bound });
                 result(&content.to_string(), false)
             }
             Verdict::Run => {
                 let (what, changes) = (policy::what(&action, control.as_ref()), policy::changes(&action));
-                match self.action(action) {
+                match self.action(action, Some(&bound)) {
                     Ok(content) => {
                         if changes {
                             turn.done.push(what);
@@ -2211,15 +2291,39 @@ impl N4n0 {
         }
     }
 
-    /// The control an action names, as the policy looks at it (its path, its nsfw tag), when the avatar has it.
-    fn named_control(&self, action: &Action) -> Option<policy::Control> {
-        let (Action::SetControl { control, .. } | Action::Hold { control, .. }) = action else { return None };
+    /// The control an action names, as the policy looks at it (its path, its nsfw tag), when the avatar has it; and what
+    /// it is reviewed on (the avatar, that control), read together.
+    fn named_control(&self, action: &Action) -> (Bound, Option<policy::Control>) {
         let rt = self.n4n0.lock().unwrap();
-        let found = rt.controls.find(control).ok()?;
-        Some(policy::Control { path: found.path_text(), nsfw: found.tags.contains(&Tag::Nsfw) })
+        let name = match action {
+            Action::SetControl { control, .. } | Action::Hold { control, .. } => Some(control),
+            Action::SetParameter { name, .. } => Some(name),
+            _ => None,
+        };
+        let found = name.and_then(|name| rt.controls.find(name).ok());
+        let bound = Bound { epoch: rt.avatar_epoch, path: found.map(|c| c.path_text()) };
+        (bound, found.map(|c| policy::Control { path: c.path_text(), nsfw: c.tags.contains(&Tag::Nsfw) }))
     }
 
-    fn action(self: &Shared, action: Action) -> Result<Value, String> {
+    /// The control `name` names on the avatar as it is now, when it is still the one `bound` says was reviewed.
+    fn bound_control(rt: &N4n0Runtime, name: &str, bound: Option<&Bound>) -> Result<orbiters_n4n0_core::controls::Control, String> {
+        if bound.is_some_and(|b| b.epoch != rt.avatar_epoch) {
+            return Err("the avatar changed".into()); // i18n: not shown
+        }
+        let found = rt.controls.find(name)?.clone();
+        if bound.is_some_and(|b| b.path.as_deref() != Some(found.path_text().as_str())) {
+            return Err("the avatar's controls changed: ask again".into()); // i18n: not shown
+        }
+        Ok(found)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_action_for_test(self: &Shared, action: Action, bound: &Bound) -> Result<Value, String> {
+        self.action(action, Some(bound))
+    }
+
+    /// Does what the assistant asked (`bound`: what an avatar action was reviewed on; it runs only on that).
+    fn action(self: &Shared, action: Action, bound: Option<&Bound>) -> Result<Value, String> {
         match action {
             Action::SetControl { control, on, value } => {
                 let setting = match (on, value) {
@@ -2229,7 +2333,7 @@ impl N4n0 {
                     (None, None) => Setting::Press,
                 };
                 let mut rt = self.n4n0.lock().unwrap();
-                let found = rt.controls.find(&control)?.clone();
+                let found = Self::bound_control(&rt, &control, bound)?;
                 let plan = rt.controls.plan(&found, setting)?;
                 rt.send_now(plan.now);
                 rt.send_at(Instant::now() + BUTTON_RELEASE, plan.later);
@@ -2238,7 +2342,15 @@ impl N4n0 {
             }
             Action::SetParameter { name, value } => {
                 let mut rt = self.n4n0.lock().unwrap();
-                let found = rt.controls.find(&name)?.clone();
+                // Raw writes are for avatars without a menu (the tool is offered only there): an avatar with menu labels
+                // goes through set_avatar_control, its nsfw tags and its buttons' release.
+                if rt.manifest {
+                    return Err("This avatar has menu labels: use set_avatar_control.".into()); // i18n: not shown
+                }
+                let found = Self::bound_control(&rt, &name, bound)?;
+                if found.kind != orbiters_n4n0_core::controls::Kind::Parameter {
+                    return Err("This avatar has menu labels: use set_avatar_control.".into()); // i18n: not shown
+                }
                 let plan = rt.controls.plan(&found, Setting::Value(value))?;
                 rt.send_now(plan.now);
                 rt.line(N4n0Who::Note, tr!("N4N0 set {control}", control = found.path_text()));
@@ -2262,7 +2374,7 @@ impl N4n0 {
             Action::Hold { control, on, value, release } => {
                 let (target, plan) = {
                     let rt = self.n4n0.lock().unwrap();
-                    let found = rt.controls.find(&control)?.clone();
+                    let found = Self::bound_control(&rt, &control, bound)?;
                     let setting = match (on, value) {
                         (_, Some(v)) => Setting::Value(v),
                         (Some(false), None) => Setting::Off,

@@ -127,7 +127,8 @@ impl TurnPolicy {
             Action::Hold { release, .. } => !release,
             Action::CopyToClipboard { .. } => true,
             Action::SetAfkMessage { text, .. } => text.is_some(),
-            Action::SetControl { .. } => control.is_some_and(|c| c.nsfw),
+            // A raw parameter write names a control too (its name, path or label): the same nsfw rule.
+            Action::SetControl { .. } | Action::SetParameter { .. } => control.is_some_and(|c| c.nsfw),
             _ => false,
         };
         if confirm {
@@ -173,7 +174,7 @@ pub fn what(action: &Action, control: Option<&Control>) -> String {
             };
             format!("show {} to people while you are away{switch}", quoted(text, ASKED_CHARS)) // i18n: not shown
         }
-        Action::SetParameter { name, value } => format!("set {} to {value:.2}", named(name)), // i18n: not shown
+        Action::SetParameter { name, value } => format!("set {} to {value:.2}{nsfw}", named(name)), // i18n: not shown
         Action::FindControls { .. } => "search the avatar's controls".into(), // i18n: not shown
         Action::TakePhoto { .. } => "take a picture".into(), // i18n: not shown
         Action::SaveVideo => "save the video".into(), // i18n: not shown
@@ -261,6 +262,9 @@ mod tests {
         let nsfw = Control { path: "Outfits / Lingerie".into(), nsfw: true };
         let Verdict::Confirm { what } = policy.review(&hoodie(true), Some(&nsfw)) else { panic!("an nsfw control waits") };
         assert_eq!(what, "turn on \"Outfits / Lingerie\", which the avatar's menu tags nsfw");
+        let raw = Action::SetParameter { name: "Lingerie".into(), value: 1.0 };
+        let Verdict::Confirm { what } = policy.review(&raw, Some(&nsfw)) else { panic!("a raw write to an nsfw control waits too") };
+        assert_eq!(what, "set \"Outfits / Lingerie\" to 1.00, which the avatar's menu tags nsfw");
         let hold = Action::Hold { control: "hoodie".into(), on: Some(true), value: None, release: false };
         assert!(matches!(policy.review(&hold, None), Verdict::Confirm { .. }), "a pin lasts");
         let release = Action::Hold { control: "hoodie".into(), on: None, value: None, release: true };

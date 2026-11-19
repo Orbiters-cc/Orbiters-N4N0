@@ -1045,6 +1045,96 @@ fn what_lasts_waits_for_the_owner_s_yes_and_n4n0_s_own_parameters_are_never_reac
     t.shutdown(&n);
 }
 
+/// N4N0 on the stand-in avatar `id`, with a manifest whose menu has the Hoodie parameter as "Outfits / Lingerie",
+/// tagged nsfw.
+fn n4n0_on_nsfw_manifest(id: &str) -> (Arc<TestHost>, Shared, UdpSocket) {
+    let (t, n, vrchat) = started_on(avatar_tree(id));
+    std::fs::create_dir_all(&n.files.avatars).unwrap();
+    let manifest = json!({ "format": "orbiters.avatar", "version": 1, "avatar_id": id,
+        "parameters": [{ "name": "Hoodie", "type": "bool" }],
+        "controls": [{ "path": ["Outfits", "Lingerie"], "type": "toggle", "parameter": "Hoodie", "value": 1, "tags": ["nsfw"] }] });
+    std::fs::write(n.files.avatars.join(orbiters_contracts::avatar::file_name(id)), manifest.to_string()).unwrap();
+    n.refresh_avatar(None, HashMap::new(), 0);
+    assert!(n.n4n0.lock().unwrap().manifest);
+    (t, n, vrchat)
+}
+
+#[test]
+fn a_raw_parameter_write_never_reaches_an_avatar_with_menu_labels() {
+    // N4N0-1: set_avatar_parameter is offered only to avatars without a manifest; called anyway on one that has, it
+    // would turn on an nsfw toggle without the owner's yes.
+    let (t, n, vrchat) = n4n0_on_nsfw_manifest("avtr_raw_nsfw");
+    let calls = json!([{ "id": "c1", "name": "set_avatar_parameter", "input": { "name": "Lingerie", "value": 1 } }]);
+    let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "q" }]), calls), done(json!([{ "role": "user", "content": "q" }]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("mets ma lingerie".into(), "typed");
+    turn_ended(&n, &bodies, 2);
+    {
+        let bodies = bodies.lock().unwrap();
+        assert!(!bodies[0]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "set_avatar_parameter"), "not offered with a manifest");
+        let result = &bodies[1]["tool_results"][0];
+        assert_eq!(result["is_error"], true, "{result}");
+        assert!(result["content"].as_str().unwrap().contains("set_avatar_control"), "{result}");
+    }
+    let sent = received(&vrchat, Duration::from_millis(300));
+    assert!(!sent.iter().any(|(a, _)| *a == parameter("Hoodie")), "nothing written: {sent:?}");
+    assert!(n.n4n0.lock().unwrap().confirmations.is_empty());
+    t.shutdown(&n);
+}
+
+#[test]
+fn a_yes_never_acts_on_another_avatar_than_the_one_it_was_asked_about() {
+    // N4N0-2: the question was about avatar A's control; the owner switched to B before saying yes.
+    let (t, n, vrchat) = n4n0_on_nsfw_manifest("avtr_bound_a");
+    let calls = json!([
+        { "id": "c1", "name": "set_avatar_control", "input": { "control": "Lingerie", "on": true } },
+        { "id": "c2", "name": "set_afk_message", "input": { "text": "brb", "enabled": true } }
+    ]);
+    let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "q" }]), calls), done(json!([{ "role": "user", "content": "q" }]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("lingerie and an afk message".into(), "typed");
+    turn_ended(&n, &bodies, 2);
+    assert_eq!(n.n4n0.lock().unwrap().pending.len(), 2, "both wait for the owner");
+    let first_id = t.view().confirmations.iter().find(|c| c.approve_url.starts_with(LOCAL_APPROVAL)).unwrap().approve_url.clone();
+    // Another avatar loads: its controls are not the last one's, even before it settled.
+    n.on_avatar("avtr_bound_b".into());
+    {
+        let rt = n.n4n0.lock().unwrap();
+        assert!(rt.controls.is_empty(), "the last avatar's controls are not this one's");
+        assert_eq!(rt.pending.len(), 1, "only what names no control still waits");
+    }
+    let status = t.view();
+    let asks: Vec<&N4n0Confirmation> = status.confirmations.iter().filter(|c| c.approve_url.starts_with(LOCAL_APPROVAL)).collect();
+    assert_eq!(asks.len(), 1);
+    assert!(asks[0].approve_url != first_id && !asks[0].summary.contains("Lingerie"), "asked again without the avatar's part: {:?}", asks[0]);
+    assert!(status.lines.iter().any(|l| l.text.starts_with("Not done: turn on \"Outfits / Lingerie\"")), "{:?}", status.lines);
+    let _ = received(&vrchat, Duration::from_millis(100));
+    n.ask("yes".into(), "typed");
+    let sent = received(&vrchat, Duration::from_millis(300));
+    assert!(!sent.iter().any(|(a, _)| *a == parameter("Hoodie")), "nothing written to the new avatar: {sent:?}");
+    assert_eq!(t.settings().n4n0.afk_message, "brb", "what names no control is done");
+    t.shutdown(&n);
+}
+
+#[test]
+fn an_approval_taken_before_an_avatar_change_still_checks_the_avatar_when_it_runs() {
+    // N4N0-2: a reviewed action carries the avatar it was reviewed on, wherever it waited meanwhile.
+    let (t, n, vrchat) = n4n0_on_nsfw_manifest("avtr_bound_c");
+    let bound = {
+        let rt = n.n4n0.lock().unwrap();
+        crate::runtime::Bound::for_test(rt.avatar_epoch, Some("Outfits / Lingerie"))
+    };
+    let action = orbiters_n4n0_core::tools::Action::SetControl { control: "Lingerie".into(), on: Some(true), value: None };
+    n.on_avatar("avtr_bound_d".into());
+    // The same controls again on the new avatar (its manifest is the same): still not the reviewed avatar.
+    n.refresh_avatar(Some("avtr_bound_d".into()), HashMap::new(), crate::runtime::TREE_RETRIES);
+    let _ = received(&vrchat, Duration::from_millis(100));
+    assert_eq!(n.run_action_for_test(action, &bound), Err("the avatar changed".to_string()));
+    let sent = received(&vrchat, Duration::from_millis(300));
+    assert!(!sent.iter().any(|(a, _)| *a == parameter("Hoodie")), "{sent:?}");
+    t.shutdown(&n);
+}
+
 /// A stand-in VRChat whose OSCQuery service lists no avatar parameters until `after` (as while it loads a heavy
 /// avatar), then `tree`.
 fn vrchat_late(tree: serde_json::Value, after: Duration) -> (UdpSocket, SocketAddr) {

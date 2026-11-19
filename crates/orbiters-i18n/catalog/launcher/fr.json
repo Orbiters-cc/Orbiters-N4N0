@@ -10,19 +10,19 @@
   "Normal": "Normale",
   "Above normal": "Au-dessus de la normale",
   "In VR": "En VR",
-  "On the desktop": "Sur l’écran",
+  "On the desktop": "Sur le bureau",
   "Play VRChat": "Jouer à VRChat",
   "How Home's Play buttons start VRChat": "Comment les boutons Jouer de l’Accueil lancent VRChat",
   "Performance launch options": "Options de lancement pour la performance",
-  "VRChat gets a little more of the processor, a frame cap, video decoding on the graphics card and, in VR, a tiny desktop window. Helps when the processor holds VRChat back.": "VRChat reçoit un peu plus du processeur, une limite d’images, le décodage vidéo sur la carte graphique et, en VR, une toute petite fenêtre sur l’écran. Aide quand le processeur freine VRChat.",
+  "VRChat gets a little more of the processor, a frame cap, video decoding on the graphics card and, in VR, a tiny desktop window. Helps when the processor holds VRChat back.": "VRChat reçoit un peu plus du processeur, une limite d’images, le décodage vidéo sur la carte graphique et, en VR, une toute petite fenêtre sur le bureau. Aide quand le processeur freine VRChat.",
   "VRChat's priority": "Priorité de VRChat",
   "Above normal is enough. High can take time from SteamVR and Virtual Desktop and make the headset stutter.": "Au-dessus de la normale suffit. Haute peut prendre du temps à SteamVR et Virtual Desktop et faire saccader le casque.",
   "Main thread priority": "Priorité du fil principal",
   "The thread VRChat's world runs on.": "Le fil sur lequel tourne le monde de VRChat.",
   "Frame cap": "Limite d’images",
-  "Frames per second on the desktop. In VR, the headset sets the pace.": "Images par seconde sur l’écran. En VR, c’est le casque qui donne le rythme.",
+  "Frames per second on the desktop. In VR, the headset sets the pace.": "Images par seconde sur le bureau. En VR, c’est le casque qui donne le rythme.",
   "Video decoding on the graphics card": "Décodage vidéo sur la carte graphique",
   "Videos in worlds cost the processor less.": "Les vidéos des mondes coûtent moins au processeur.",
   "Tiny desktop window in VR": "Toute petite fenêtre en VR",
-  "A 100 × 100 window on the monitor while you play in VR, so it costs almost nothing. Turn it off to show or record the game on the monitor. Desktop mode keeps its window.": "Une fenêtre de 100 × 100 sur l’écran pendant que tu joues en VR : elle ne coûte presque rien. Désactive-la pour montrer ou enregistrer le jeu sur l’écran. Le mode écran garde sa fenêtre."
+  "A 100 × 100 window on the monitor while you play in VR, so it costs almost nothing. Turn it off to show or record the game on the monitor. Desktop mode keeps its window.": "Une fenêtre de 100 × 100 sur l’écran pendant que tu joues en VR : elle ne coûte presque rien. Désactive-la pour montrer ou enregistrer le jeu sur l’écran. Le mode bureau garde sa fenêtre."
 }

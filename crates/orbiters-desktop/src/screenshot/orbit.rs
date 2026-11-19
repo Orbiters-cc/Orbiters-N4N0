@@ -1110,7 +1110,7 @@ fn desk_camera_shots(out: &Path) -> anyhow::Result<()> {
 /// One state of the camera's parts round the stand-in panel.
 fn camera_state(name: &str, out: &Path, facts: &Facts, right: bool) -> anyhow::Result<()> {
     const PX: f32 = 2.0;
-    let (x0, y0, x1, y1) = (-340.0f32, -660.0f32, 340.0f32, 240.0f32);
+    let (x0, y0, x1, y1) = (-340.0f32, -660.0f32, 340.0f32, 330.0f32);
     let (w, h) = (((x1 - x0) * PX) as u32, ((y1 - y0) * PX) as u32);
     let at = move |x: f32, y: f32| pos2((x - x0) * PX, (y - y0) * PX);
     let mut ground = Canvas::new(w, h);
@@ -1580,6 +1580,106 @@ pub fn behaviour_shots(out: &Path) -> anyhow::Result<()> {
         facts.tracking = Some((true, values, String::new()));
         facts.smoothing_held = held;
         qm_scene(&format!("tracking-{name}"), out, vec2(1920.0, 1080.0), &facts, None, Some(Sheet::Tracking))?;
+    }
+    Ok(())
+}
+
+
+/// Explorer (REQUEST13), in the language pinned for the run (`--only explorer --language <tag>`): the share buttons beside
+/// VRChat's camera in a headset in each state (`explorer-vr-<state>-<lang>.png`, the stand-in panel), the friends' chooser
+/// over it, the same buttons in desktop mode over a real frame of the game (`explorer-desk-<state>-<lang>.png`), and the
+/// band "No 3D picture of this world yet" before the eyes (`explorer-band-<lang>-<rest|laser>.png`). Sample people only.
+pub(super) fn explorer_shots(out: &Path) -> anyhow::Result<()> {
+    use crate::controller::explorer::{Done, Nothing, Offer, Step, WorldNotice};
+    use orbiters_core::explorer::{Explorer, Next, Title};
+    use panels::{Action, CameraNow, ChooserRow, ChooserView, ShareView};
+    let lang = orbiters_i18n::language().tag();
+    let title = |key: &str, points: f64| Title { key: key.into(), points, name: key.into() };
+    let next = |key: &str, points: f64, now: f64| Next { key: key.into(), points, name: key.into(), remaining: points - now };
+    let at = |points: f64, t: Option<Title>, n: Option<Next>| Explorer { points, half_points: Some((points * 2.0) as i64), title: t, next: n, titles: Vec::new() };
+    let offer = |would: Option<f64>, public: Step, people: Step| Offer { id: 7, key: "C:/Sessions/2026-11-19_21-04-10".into(), world_id: "wrld_sample".into(), would_earn: would, until_ms: u64::MAX, public, people };
+    let share = |offer: Offer, confirming: bool, chooser: Option<ChooserView>| ShareView { offer, confirming, asks_first: true, chooser };
+    let done = |earned: Option<f64>, nothing: Option<Nothing>, after: Option<Explorer>, reached: Option<Title>| Step::Done(Done { people: 0, earned, nothing, after, reached });
+    let names = ["Nova Fox", "Pixel Moth", "Sora Lantern", "Kite Runner", "Juniper", "Echo Vale", "Mika Drift", "Orbit Cat"];
+    let rows = |chosen: &[usize], here: &[usize]| {
+        names.iter().take(6).enumerate().map(|(i, n)| ChooserRow { key: i as u64 + 1, name: (*n).into(), here: here.contains(&i), chosen: chosen.contains(&i) }).collect::<Vec<_>>()
+    };
+    let chooser = |chosen: &[usize], loading: bool, error: Option<&str>| ChooserView {
+        rows: if loading || error.is_some() { Vec::new() } else { rows(chosen, &[0, 1]) },
+        page: 0,
+        pages: 3,
+        chosen: chosen.len(),
+        loading,
+        error: error.map(str::to_owned),
+    };
+    let states: Vec<(&str, ShareView, Option<Action>)> = vec![
+        ("idle", share(offer(Some(1.0), Step::Idle, Step::Idle), false, None), None),
+        ("idle-half", share(offer(Some(0.5), Step::Idle, Step::Idle), false, None), Some(Action::SharePublic(7))),
+        ("idle-full", share(offer(Some(0.0), Step::Idle, Step::Idle), false, None), None),
+        ("confirm", share(offer(Some(1.0), Step::Idle, Step::Idle), true, None), Some(Action::ShareConfirm(7))),
+        ("making", share(offer(Some(1.0), Step::Busy { making: true, sent: None }, Step::Idle), false, None), None),
+        ("sending", share(offer(Some(1.0), Step::Busy { making: false, sent: Some(0.42) }, Step::Idle), false, None), None),
+        ("done-title", share(offer(Some(1.0), done(Some(1.0), None, Some(at(10.0, Some(title("explorer", 10.0)), Some(next("navigator", 50.0, 10.0)))), Some(title("explorer", 10.0))), Step::Idle), false, None), None),
+        ("done-half", share(offer(Some(0.5), done(Some(0.5), None, Some(at(12.5, Some(title("explorer", 10.0)), Some(next("navigator", 50.0, 12.5)))), None), Step::Idle), false, None), None),
+        ("done-zero-negative", share(offer(Some(0.0), done(Some(0.0), Some(Nothing::WorldHasThree), Some(at(-1.0, None, Some(next("explorer", 10.0, -1.0)))), None), Step::Idle), false, None), None),
+        ("done-first-point", share(offer(Some(1.0), done(Some(1.0), None, Some(at(1.0, None, Some(next("explorer", 10.0, 1.0)))), None), Step::Idle), false, None), None),
+        ("done-top", share(offer(Some(1.0), done(Some(1.0), None, Some(at(1000.5, Some(title("multiverseTraveler", 1000.0)), None)), None), Step::Idle), false, None), None),
+        ("done-no-points", share(offer(Some(1.0), done(None, None, None, None), Step::Idle), false, None), None),
+        ("people-done", share(offer(Some(1.0), Step::Idle, Step::Done(Done { people: 3, earned: None, nothing: None, after: None, reached: None })), false, None), None),
+        ("failed", share(offer(Some(1.0), Step::Failed(orbiters_i18n::tr("Sign in to Orbiters in Settings first.").into()), Step::Idle), false, None), Some(Action::SharePublic(7))),
+        ("explicit", share(offer(Some(1.0), Step::Explicit, Step::Idle), false, None), None),
+        ("chooser", share(offer(Some(1.0), Step::Idle, Step::Idle), false, Some(chooser(&[0, 3], false, None))), Some(Action::ChooserPerson(2))),
+        ("chooser-none", share(offer(Some(1.0), Step::Idle, Step::Idle), false, Some(chooser(&[], false, None))), None),
+        ("chooser-loading", share(offer(Some(1.0), Step::Idle, Step::Idle), false, Some(chooser(&[], true, None))), None),
+        ("chooser-failed", share(offer(Some(1.0), Step::Idle, Step::Idle), false, Some(chooser(&[], false, Some("No VRChat friends found: sign in to VRChat in Orbiters - N4N0, or use VRCX or VRCNext")))), None),
+    ];
+    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: false, vr_close: true, camera: CameraNow { kit: Some(true), ..Default::default() }, ..Default::default() };
+    for (state, view, pointed) in &states {
+        let facts = Facts { camera: CameraNow { share: Some(view.clone()), ..idle.camera.clone() }, pointed: *pointed, ..idle.clone() };
+        camera_state(&format!("explorer-vr-{state}-{lang}"), out, &facts, false)?;
+    }
+    // The tiles on the camera's right: the row follows them.
+    let facts = Facts { camera: CameraNow { share: Some(states[0].1.clone()), on_the_right: true, ..idle.camera.clone() }, ..idle.clone() };
+    camera_state(&format!("explorer-vr-idle-right-{lang}"), out, &facts, true)?;
+    // Desktop mode, over a real frame with the panel found as the desktop finds it.
+    {
+        use crate::overlay::orbit::detect;
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/desktop");
+        let frame = image::open(folder.join("panel-bright-station.jpg"))?.to_rgba8();
+        let (w, h) = frame.dimensions();
+        let bgra: Vec<u8> = frame.pixels().flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+        let panel = detect::camera_panel_in(&bgra, w, h).ok_or_else(|| anyhow::anyhow!("no camera panel found"))?;
+        let desk = Facts { desktop: true, vr_close: false, ..idle.clone() };
+        for (state, view, pointed) in states.iter().filter(|(s, _, _)| ["idle", "confirm", "sending", "done-half", "done-zero-negative", "failed"].contains(s)) {
+            let facts = Facts { camera: CameraNow { share: Some(view.clone()), ..desk.camera.clone() }, pointed: *pointed, ..desk.clone() };
+            let mut image = frame.as_raw().clone();
+            for placed in zones::camera_on_screen(panel, vec2(w as f32, h as f32)) {
+                if placed.zone.only_while_needed() && !panels::needed(placed.zone, &facts) {
+                    continue;
+                }
+                if placed.zone == Zone::CameraCaption && panels::camera_words(&facts).is_none() {
+                    continue;
+                }
+                let hovered = facts.pointed.and_then(|a| panels::items(placed.zone, placed.logical(), &facts).iter().position(|i| i.action == a));
+                let (pixels, px) = picture(&placed, &facts, hovered, None);
+                blit(&mut image, w, &pixels, px, placed.rect.min);
+            }
+            let path = out.join(format!("explorer-desk-{state}-{lang}.png"));
+            save_png(&path, &over_ground(&image, w, h))?;
+            println!("{}", path.display());
+        }
+    }
+    // The band before the eyes.
+    let notice = WorldNotice { id: 1, world_id: "wrld_sample".into(), world_name: "Sample world".into(), earns: Some(1.0), until_ms: u64::MAX, for_ms: 1 };
+    let [bw, bh] = crate::world_notice::VR_PX;
+    for (state, hover) in [("rest", false), ("laser", true)] {
+        let mut canvas = Canvas::new(bw, bh);
+        for _ in 0..2 {
+            canvas.paint(0.0, |p| crate::world_notice::paint_vr(p, &notice, hover, 0.6));
+        }
+        let path = out.join(format!("explorer-band-{lang}-{state}.png"));
+        save_png(&path, &over_ground(canvas.pixels(), bw, bh))?;
+        println!("{}", path.display());
     }
     Ok(())
 }

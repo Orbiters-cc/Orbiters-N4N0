@@ -21,6 +21,11 @@ struct Person {
     _alone: std::sync::MutexGuard<'static, ()>,
 }
 
+/// Turns of 11 ms the springs get to rest once everything they show is in: 22 s of their time, many times what any part takes.
+const AT_REST_TURNS: usize = 2000;
+/// How long the other threads' pictures and lists may take before a test calls it a hang.
+const AT_REST_HANG: Duration = Duration::from_secs(120);
+
 pub(super) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Person {
@@ -58,6 +63,30 @@ impl Person {
             assert!(began.elapsed() < Duration::from_secs(10), "{what}: it never came");
             std::thread::sleep(Duration::from_millis(2));
             self.turn();
+        }
+    }
+
+    /// Turns until every part is painted and at rest and the gallery's list is read. The two halves wait differently (BUILD-9): the springs move a fixed 11 ms a turn,
+    /// so once the pictures and the list are in they must rest within [`AT_REST_TURNS`] turns whatever the machine does; the pictures and the list come from other
+    /// threads, in their own time, so they have a clock, only against a hang: a debug build sharing the processor with other builds took more than 10 s for what
+    /// takes about one alone. A failure says how many turns it took and what was still moving, unpainted or being read.
+    fn turns_until_at_rest(&mut self, what: &str) {
+        let began = Instant::now();
+        let (mut turns, mut since_in) = (0usize, 0usize);
+        loop {
+            let moving: Vec<Zone> = self.panels.all().filter(|p| !p.appear.settled()).map(|p| p.zone).collect();
+            let unpainted: Vec<Zone> = self.panels.all().filter(|p| !p.painted).map(|p| p.zone).collect();
+            let reading = self.panels.recents.rx.is_some();
+            if moving.is_empty() && unpainted.is_empty() && !reading {
+                return;
+            }
+            since_in = if unpainted.is_empty() && !reading { since_in + 1 } else { 0 };
+            let state = || format!("after {turns} turns ({:?}): moving {moving:?}, unpainted {unpainted:?}, the list being read {reading}, the painter busy {}", began.elapsed(), self.panels.stage.painter.busy());
+            assert!(since_in <= AT_REST_TURNS, "{what}: the springs never rested, {}", state());
+            assert!(began.elapsed() < AT_REST_HANG, "{what}: the pictures or the list never came, {}", state());
+            std::thread::sleep(Duration::from_millis(2));
+            self.turn();
+            turns += 1;
         }
     }
 
@@ -484,7 +513,7 @@ fn with_nothing_changing_no_part_is_painted() {
             person.turns(3);
         }
         // Everything in: the parts on their springs, the list read, the song's picture.
-        person.turns_until("its parts at rest", |p| p.panels.all().all(|part| part.appear.settled() && part.painted) && p.panels.recents.rx.is_none());
+        person.turns_until_at_rest("its parts at rest");
         person.turns(10);
         for turn in 0..30 {
             assert_eq!(due(&mut person), [], "{around:?} {sheets:?}, turn {turn}: painted for nothing");
@@ -510,7 +539,7 @@ fn the_song_s_picture_arriving_paints_all_tools_again() {
     person.around = Some(Around::QuickMenu);
     person.turns(3);
     person.press(Action::All);
-    person.turns_until("its parts at rest", |p| p.panels.all().all(|part| part.appear.settled() && part.painted) && p.panels.recents.rx.is_none());
+    person.turns_until_at_rest("its parts at rest");
     person.turns(10);
     assert_eq!(turn_of(&mut person.panels, &person.snap, person.around, 0), [], "at rest");
     // The same song, with another picture for it.
@@ -869,7 +898,7 @@ fn the_song_s_picture_disappearing_paints_all_tools_again() {
     person.around = Some(Around::QuickMenu);
     person.turns(3);
     person.press(Action::All);
-    person.turns_until("its parts at rest", |p| p.panels.all().all(|part| part.appear.settled() && part.painted) && p.panels.recents.rx.is_none());
+    person.turns_until_at_rest("its parts at rest");
     person.turns(10);
     assert_eq!(turn_of(&mut person.panels, &person.snap, person.around, 0), [], "at rest");
     // Only the artwork disappears; all other facts stay the same.

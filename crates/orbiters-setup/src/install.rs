@@ -487,6 +487,9 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
         // Its frame logs, written at every level and Off by default: large, and nobody else's.
         if let Some(local) = dirs::data_local_dir() {
             orbiters_booster::log::remove_logs(&local.join("Orbiters").join("logs"));
+            // Everything else N4N0 keeps in the folder it shares with the Orbiters Unity tools (PRIV-6), by name.
+            let stems: Vec<String> = record.files.iter().filter_map(|f| f.strip_suffix(".exe")).filter(|s| !s.contains(['/', '\\'])).map(str::to_string).collect();
+            failed.extend(remove_own_data(&local.join("Orbiters"), &stems));
         }
         // The shared Orbiters folders, once nothing else of Orbiters' is left in them.
         for root in [dirs::config_dir(), dirs::data_local_dir()].into_iter().flatten() {
@@ -530,6 +533,110 @@ fn finish_booster(progress: &Progress, silent: bool) {
         store.remove_if_empty();
         booster::remove_restorer_copy();
     }
+}
+
+/// What N4N0 itself writes at the top of the `Orbiters` folder of `%LOCALAPPDATA%` it shares with the Orbiters Unity
+/// tools: the VRChat session (its cookies), the statistics' install id and queue, the menu reports, its SteamVR files,
+/// the VR tuning, and the Unity projects page's caches. The account the tools share, their avatar manifests, Mixer and
+/// the booster's journal (`finish_booster` decides on it) are not on it.
+const OWN_DATA: &[&str] = &[
+    "vrchat-session.bin",
+    "usage",
+    "menu-reports",
+    "SteamVR",
+    "orbit-vr-tune.json",
+    "unity-projects.json",
+    "project-sizes.json",
+    "hidden-projects.json",
+    "unity-cache-folders.json",
+    "unity-templates",
+    "package-icons",
+    "project-pictures",
+    "avatar-thumbnails",
+    "world-thumbnails",
+];
+
+/// What N4N0 writes in the shared `logs` folder: these names, `perf-report-*.json`, and its programs' panic logs
+/// (`<program>.log`, `<program>.old.log`). The booster's logs are removed by `orbiters_booster::log::remove_logs`.
+const OWN_LOGS: &[&str] = &[
+    "perf.jsonl",
+    "perf.jsonl.1",
+    "perf-old-publishing.flag",
+    "vr-test.log",
+    "vr-test.old.log",
+    "shares.log",
+    "shares.old.log",
+    "publishes.log",
+    "publishes.old.log",
+    "translate.log",
+    "camera-tiles.log",
+    "camera-events.jsonl",
+    "camera-truth.jsonl",
+    "camera-reader.json",
+    "camera-reader.png",
+    "overlay-stalls.log",
+    "overlay-worlds.jsonl",
+    "overlay-worlds.old.jsonl",
+    "walk-boost.log",
+    "walk-boost.previous.log",
+    "n4n0-pointer.log",
+    "n4n0-pointer.old.log",
+    "n4n0-pictures.log",
+    "n4n0-pictures.old.log",
+    "qr-test-sender.txt",
+    "fps-test-report.txt",
+    "mismatch-press.txt",
+    // Folders of pictures only N4N0 writes.
+    "camera-frames",
+    "vr-pictures",
+    "vr-test-frames",
+];
+
+/// Removes N4N0's own entries ([`OWN_DATA`], [`OWN_LOGS`], the panic logs of `programs`, the file stems of the
+/// install's programs) from `root` (the shared `%LOCALAPPDATA%\Orbiters`), each by name: never the shared folder itself,
+/// never anything through a link (a link is removed as a link). The paths that could not be removed.
+fn remove_own_data(root: &Path, programs: &[String]) -> Vec<String> {
+    let logs = root.join("logs");
+    let mut targets: Vec<PathBuf> = OWN_DATA.iter().map(|n| root.join(n)).collect();
+    targets.extend(OWN_LOGS.iter().map(|n| logs.join(n)));
+    for program in programs {
+        targets.push(logs.join(format!("{program}.log")));
+        targets.push(logs.join(format!("{program}.old.log")));
+    }
+    if let Ok(entries) = std::fs::read_dir(&logs) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("perf-report-") && name.ends_with(".json") {
+                targets.push(e.path());
+            }
+        }
+    }
+    let mut failed = Vec::new();
+    for path in targets {
+        if let Err(e) = remove_owned(&path) {
+            failed.push(format!("{} ({e})", path.display()));
+        }
+    }
+    // The logs folder once nothing is left in it (another tool's logs keep it).
+    let _ = std::fs::remove_dir(&logs);
+    failed
+}
+
+/// `path` removed: a link (or junction) as a link, never what it leads to; a folder with all in it, links inside removed
+/// as links (`remove_dir_all` does not follow them); nothing there is fine.
+fn remove_owned(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let link = meta.file_type().is_symlink() || meta.file_attributes() & 0x400 != 0;
+    retrying(|| match (link, meta.is_dir()) {
+        (true, true) => std::fs::remove_dir(path),
+        (true, false) | (false, false) => std::fs::remove_file(path),
+        (false, true) => std::fs::remove_dir_all(path),
+    })
 }
 
 /// What Orbiters - N4N0 keeps outside its install folder, its own only (`orbiters_core::paths`): settings
@@ -756,6 +863,57 @@ mod tests {
         let _ = other.kill();
         let _ = (mine.wait(), other.wait());
         remove_tree(&dir);
+    }
+
+    /// PRIV-6: the checked uninstall removes what N4N0 wrote in the shared Orbiters folder (the VRChat session, the
+    /// statistics' id, its logs and caches) and nothing of the Unity tools', nor anything a link leads to.
+    #[test]
+    fn removing_the_data_takes_n4n0s_own_files_and_nothing_else() {
+        let root = scratch("own-data");
+        let elsewhere = scratch("own-data-elsewhere");
+        std::fs::write(elsewhere.join("precious.txt"), b"not N4N0's").unwrap();
+        let write = |rel: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        };
+        for own in [
+            "vrchat-session.bin",
+            "usage/install-id",
+            "usage/waiting.jsonl",
+            "menu-reports/2026-11-19-a/report.json",
+            "orbit-vr-tune.json",
+            "unity-projects.json",
+            "project-pictures/a.jpg",
+            "avatar-thumbnails/direct/avtr_a.image",
+            "world-thumbnails/wrld_a.image",
+            "package-icons/0123.png",
+            "logs/perf.jsonl",
+            "logs/shares.log",
+            "logs/perf-report-20261119.json",
+            "logs/orbiters-desktop.log",
+            "logs/orbiters-desktop.old.log",
+            "logs/vr-test-frames/1.png",
+        ] {
+            write(own);
+        }
+        for theirs in ["account.json", "Avatars/avtr_a.json", "Mixer/inbox.json", "booster/journal.json", "logs/toolkit.log", "VCC/settings.json"] {
+            write(theirs);
+        }
+        // A link among N4N0's names: removed as a link, what it leads to stays.
+        std::fs::remove_dir_all(root.join("project-pictures")).unwrap();
+        junction(&root.join("project-pictures"), &elsewhere);
+        let failed = remove_own_data(&root, &["orbiters-desktop".into()]);
+        assert!(failed.is_empty(), "{failed:?}");
+        for gone in ["vrchat-session.bin", "usage", "menu-reports", "orbit-vr-tune.json", "unity-projects.json", "project-pictures", "avatar-thumbnails", "world-thumbnails", "package-icons", "logs/perf.jsonl", "logs/shares.log", "logs/perf-report-20261119.json", "logs/orbiters-desktop.log", "logs/orbiters-desktop.old.log", "logs/vr-test-frames"] {
+            assert!(std::fs::symlink_metadata(root.join(gone)).is_err(), "{gone} left");
+        }
+        for kept in ["account.json", "Avatars/avtr_a.json", "Mixer/inbox.json", "booster/journal.json", "logs/toolkit.log", "VCC/settings.json"] {
+            assert!(root.join(kept).is_file(), "{kept} removed");
+        }
+        assert_eq!(std::fs::read(elsewhere.join("precious.txt")).unwrap(), b"not N4N0's", "through a link");
+        remove_tree(&root);
+        remove_tree(&elsewhere);
     }
 
     #[test]

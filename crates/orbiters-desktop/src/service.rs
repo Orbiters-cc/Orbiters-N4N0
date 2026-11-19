@@ -64,6 +64,10 @@ pub struct Service {
     /// Which link opened the Ask N4N0 page and has not closed it.
     ask: Mutex<TalkHolder>,
     quitting: AtomicBool,
+    /// File work being done now on the links' work threads; Quit waits for it, bounded, and none starts after
+    /// (verify2-controller).
+    file_work: Mutex<usize>,
+    file_work_done: std::sync::Condvar,
     /// The beta's usage statistics, a session per link, waiting for Orbiters (`usage::spool`).
     usage: Arc<crate::usage::spool::Spool>,
     #[cfg(windows)]
@@ -93,6 +97,8 @@ impl Service {
             talk: Mutex::new(TalkHolder::default()),
             ask: Mutex::new(TalkHolder::default()),
             quitting: AtomicBool::new(false),
+            file_work: Mutex::new(0),
+            file_work_done: std::sync::Condvar::new(),
             usage: Arc::default(),
             #[cfg(windows)]
             main_thread: unsafe { windows::Win32::System::Threading::GetCurrentThreadId() },
@@ -351,6 +357,19 @@ impl Service {
         for link in self.links.lock().unwrap().iter() {
             link.mailbox.post(ToClient::Close);
         }
+        // A file operation under way (an export, a Trash) ends before the teardown, for a while at most; no other
+        // starts (the work threads see `quitting`).
+        let until = Instant::now() + FILE_WORK_AT_QUIT;
+        let mut running = self.file_work.lock().unwrap();
+        while *running > 0 {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                eprintln!("quitting: {} file operation(s) still under way after {:?}", *running, FILE_WORK_AT_QUIT);
+                break;
+            }
+            running = self.file_work_done.wait_timeout(running, left).unwrap().0;
+        }
+        drop(running);
         self.ctl.booster_quit();
         self.ctl.shutdown();
         #[cfg(windows)]
@@ -638,12 +657,19 @@ impl Service {
             let svc = self.clone();
             std::thread::Builder::new().name("link-work".into()).spawn(move || {
                 for msg in rx {
-                    // The app quits: what waits is not started under the teardown's feet.
-                    if svc.quitting.load(Ordering::Relaxed) {
-                        continue;
+                    // The app quits: what waits is not started under the teardown's feet. Checked under the lock Quit
+                    // counts the work in progress under: either Quit sees this one, or this one sees Quit.
+                    {
+                        let mut running = svc.file_work.lock().unwrap();
+                        if svc.quitting.load(Ordering::SeqCst) {
+                            continue;
+                        }
+                        *running += 1;
                     }
                     let (msg, library) = msg;
                     svc.handle_in(id, role, msg, Some(&library));
+                    *svc.file_work.lock().unwrap() -= 1;
+                    svc.file_work_done.notify_all();
                 }
             }).ok().map(|_| tx)
         };
@@ -655,7 +681,11 @@ impl Service {
                     (_, msg) if is_file_work(&msg) && self.quitting.load(Ordering::Relaxed) => {}
                     (Some(work), msg) if is_file_work(&msg) => {
                         let library = self.ctl.with_settings(|s| s.sessions_dir.clone());
-                        let _ = work.send((msg, library));
+                        // Never waits for room: a full line refuses this one, so the Stop or the Talk release behind it
+                        // is read at once (verify2-controller).
+                        if let Err(std::sync::mpsc::TrySendError::Full(_)) = work.try_send((msg, library)) {
+                            self.ctl.notify(NoticeKind::Error, tr("Orbiters is busy with many requests: try again in a moment."));
+                        }
                     }
                     // Quitting waits for a recording to be saved: the link goes on reading (and gets its Close).
                     (_, ToService::Quit) => {
@@ -739,6 +769,9 @@ fn is_atomic_temporary(name: &str) -> bool {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     !file.is_empty() && digits(pid) && digits(serial)
 }
+
+/// How long Quit waits for a file operation under way.
+const FILE_WORK_AT_QUIT: Duration = Duration::from_secs(20);
 
 /// File work a link may have waiting ([`Service::serve`]).
 const LINK_WORK: usize = 32;
@@ -1283,6 +1316,26 @@ pub(crate) mod tests {
         *FILE_WORK_TAKES.lock().unwrap() = None;
         assert!(stopped, "the stop arrived");
         assert!(took < Duration::from_secs(2), "the stop waited {took:?} behind the export");
+    }
+
+    /// verify2-controller: with a slow export running and the link's line of file work full, more file work is refused
+    /// at once, and the Stop sent after it is read and done without waiting for room.
+    #[test]
+    fn a_full_file_line_never_holds_a_stop() {
+        let service = service();
+        let window = linked(&service, Role::Window);
+        *FILE_WORK_TAKES.lock().unwrap() = Some(Duration::from_secs(2));
+        let before = service.ctl.stop_generation();
+        for _ in 0..LINK_WORK + 4 {
+            window.send(&ToService::SendToMixer { dir: PathBuf::from("no such session"), title: "t".into() });
+        }
+        let sent = Instant::now();
+        window.send(&ToService::StopCapture);
+        let stopped = until(|| service.ctl.stop_generation() > before);
+        let took = sent.elapsed();
+        *FILE_WORK_TAKES.lock().unwrap() = None;
+        assert!(stopped, "the stop arrived");
+        assert!(took < Duration::from_millis(1500), "the stop waited {took:?} for room in the file line");
     }
 
     use crate::link_between::{Between, Line};

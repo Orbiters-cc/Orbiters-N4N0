@@ -916,7 +916,8 @@ impl Settings {
                     // without that copy nothing is written.
                     if !kept {
                         let Some(aside) = crate::keep_aside(path) else {
-                            anyhow::bail!("{}", orbiters_i18n::tr!("{path} could not be read, and is not replaced by defaults: {error}", path = path.display(), error = "keep_aside"));
+                            let step = "keep_aside"; // i18n: not shown (the name of the step that failed, as night2/core wrote it)
+                            anyhow::bail!("{}", orbiters_i18n::tr!("{path} could not be read, and is not replaced by defaults: {error}", path = path.display(), error = step));
                         };
                         eprintln!("settings: {} kept as {} before the first save onto it", path.display(), aside.display());
                         set_kept_aside(path);

@@ -100,7 +100,10 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
         // The card is laid out wherever it is on the page (Settings runs every card's body): scrolled out of view,
         // nothing looks at the microphones, so its watch ends and they close by themselves (they stayed open, and
         // Settings redrew up to 30 times a second, for as long as the page showed). Back in view, they open again.
-        let in_view = state.body.is_none_or(|r| ui.is_rect_visible(r));
+        // Where the card is now, as tall as it was last drawn (night3, verifier point 6: the last frame's place lagged a
+        // frame behind a scroll, and a page opened with the card off the screen opened every microphone).
+        let height = state.body.map_or(TILE_HIGH, |r| r.height()).max(1.0);
+        let in_view = ui.is_rect_visible(Rect::from_min_size(start, vec2(ui.available_width().max(1.0), height)));
         (|ui: &mut Ui| {
         let meters = state.meters.get_or_insert_with(|| Arc::new(audio_devices::Meters::start()));
         // While something looks: off the screen or minimized, this is not drawn, its watch ends, and they close by
@@ -203,6 +206,44 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Night3, verifier point 6: the card looks at the microphones while it is in view, stops when it is scrolled out
+    /// of view, and looks again (its watch running again) when it comes back; a page opened with the card out of view
+    /// opens none. Made-up microphones: no device of this computer opens.
+    #[test]
+    fn the_meters_stop_out_of_view_and_start_again_back_in_view() {
+        audio_devices::made_up_mics();
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl =
+            std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let snap = (*ctl.view()).clone();
+        let mut state = State::default();
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 700.0));
+        let mut frame = |state: &mut State, top: f32| {
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                let cx = super::super::Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(0.0, top), vec2(900.0, 2000.0))));
+                card(&mut cu, &cx, 0, state);
+            });
+            out.textures_delta.clear();
+        };
+        // Opened with the card far below the screen: nothing looks.
+        frame(&mut state, 5000.0);
+        assert!(!state.looks.is_running(), "a card out of view on the first frame looks at nothing");
+        // In view: it looks.
+        frame(&mut state, 20.0);
+        assert!(state.looks.is_running());
+        assert!(state.meters.as_ref().is_some_and(|m| m.looked_within(Duration::from_secs(1))));
+        // Scrolled out of view: the watch stops.
+        frame(&mut state, -4000.0);
+        assert!(!state.looks.is_running(), "out of view: the microphones are let go");
+        // Back in view: it looks again.
+        frame(&mut state, 20.0);
+        assert!(state.looks.is_running(), "back in view: the meters start again");
+    }
 
     #[test]
     fn a_bar_reads_loudness_and_falls_slowly() {

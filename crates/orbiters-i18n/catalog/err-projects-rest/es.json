@@ -101,5 +101,8 @@
   "The package list could not be put back ({why}): use Restore": "No se pudo restablecer la lista de paquetes ({why}): usa Restaurar",
   "{name} is copied and listed, but Unity must download {packages} again when it first opens it": "{name} está copiado y en la lista, pero Unity debe volver a descargar {packages} la primera vez que lo abra",
   "{path} is a link": "{path} es un enlace",
-  "{name} could not be put back: its folder as it was is kept at {path}": "No se pudo restablecer {name}: su carpeta tal como estaba se guarda en {path}"
+  "{name} could not be put back: its folder as it was is kept at {path}": "No se pudo restablecer {name}: su carpeta tal como estaba se guarda en {path}",
+  "Copy stopped. The incomplete copy was removed.": "Copia detenida. Se eliminó la copia incompleta.",
+  "Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.": "Copia detenida. No se pudo eliminar la copia incompleta en {path} ({why}); no figura como proyecto.",
+  "it is not a copy this one made": "no es una copia hecha por esta"
 }

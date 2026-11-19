@@ -178,6 +178,36 @@ pub fn copy(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &S
 }
 /// [`copy`], taking along what `keep` asks for.
 pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
+    copy_keeping_then(source, destination, keep, cancel, progress, || {})
+}
+
+/// The folder this copy made, marked [`INCOMPLETE`] (so made by it), removed after a Stop (PROJECTS-4, Enzo
+/// 2026-11-19: "Yes"). Nothing else is removed: a folder without the marker, or a link, stays.
+fn discard_partial(destination: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(destination)?;
+    #[cfg(windows)]
+    let reparse = {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & 0x400 != 0
+    };
+    #[cfg(not(windows))]
+    let reparse = false;
+    if !meta.is_dir() || meta.file_type().is_symlink() || reparse || !destination.join(INCOMPLETE).is_file() {
+        return Err(std::io::Error::other(tr("it is not a copy this one made")));
+    }
+    std::fs::remove_dir_all(destination)
+}
+
+/// A Stop during the copy into `destination`: its folder goes, or says why it stayed.
+fn stopped(destination: &Path) -> anyhow::Error {
+    match discard_partial(destination) {
+        Ok(()) => anyhow::anyhow!("{}", tr("Copy stopped. The incomplete copy was removed.")),
+        Err(e) => anyhow::anyhow!("{}", tr!("Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.", path = destination.display(), why = e)),
+    }
+}
+
+/// [`copy_keeping`], running `made` once its folder exists (a test stops the copy there).
+fn copy_keeping_then(source: &Path, destination: &Path, keep: Keep, cancel: &AtomicBool, progress: &SharedProgress, made: impl FnOnce()) -> anyhow::Result<()> {
     if !source.is_dir() {
         bail!("{}", tr("The source folder no longer exists."));
     }
@@ -215,12 +245,13 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
     for folder in &folders {
         std::fs::create_dir_all(destination.join(folder.strip_prefix(&source)?))?;
     }
+    made();
     progress.lock().unwrap().total = files.len();
     // One buffer for every file (PROJECTS-6): most are a few KB.
     let mut buffer = vec![0u8; 1024 * 1024];
     for (i, p) in files.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
-            bail!("{}", tr!("Copy cancelled. The incomplete folder was kept at {path} and was not registered.", path = destination.display()));
+            return Err(stopped(destination));
         }
         let rel = p.strip_prefix(&source)?;
         let dst = destination.join(rel);
@@ -229,7 +260,9 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
         let mut output = std::fs::File::create(&dst)?;
         loop {
             if cancel.load(Ordering::Relaxed) {
-                bail!("{}", tr!("Copy cancelled. The incomplete folder was kept at {path} and was not registered.", path = destination.display()));
+                // The file being written is let go first: Windows removes no file still open.
+                drop(output);
+                return Err(stopped(destination));
             }
             let n = input.read(&mut buffer)?;
             if n == 0 {
@@ -663,6 +696,29 @@ mod tests {
         let whole = temp.path().join("Whole");
         copy_keeping(&source, &whole, Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap();
         assert!(crate::discovery::is_project(&whole) && !whole.join(INCOMPLETE).exists());
+    }
+
+    /// PROJECTS-4: Stop during the copy removes the folder that copy made, and only that one.
+    #[test]
+    fn stop_removes_the_incomplete_copy_and_nothing_else() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        let neighbour = temp.path().join("Neighbour");
+        std::fs::create_dir_all(&neighbour).unwrap();
+        std::fs::write(neighbour.join("mine.txt"), "mine").unwrap();
+        let cancel = AtomicBool::new(false);
+        let copy = temp.path().join("Copy");
+        let said = copy_keeping_then(&source, &copy, Keep::default(), &cancel, &Arc::new(Mutex::default()), || cancel.store(true, Ordering::Relaxed))
+            .unwrap_err()
+            .to_string();
+        assert!(said.contains("removed"), "{said}");
+        assert!(!copy.exists(), "the incomplete copy is gone");
+        assert!(source.join("Assets/a.txt").is_file() && neighbour.join("mine.txt").is_file());
+        // A folder without the marker is never removed.
+        std::fs::create_dir_all(&copy).unwrap();
+        assert!(discard_partial(&copy).is_err());
+        assert!(copy.is_dir());
     }
 
     #[test]

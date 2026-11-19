@@ -101,5 +101,8 @@
   "The package list could not be put back ({why}): use Restore": "パッケージ一覧を元に戻せませんでした（{why}）。「復元」を使ってください",
   "{name} is copied and listed, but Unity must download {packages} again when it first opens it": "{name}はコピーされ一覧に追加されましたが、最初に開くときにUnityが{packages}を再ダウンロードする必要があります",
   "{path} is a link": "{path}はリンクです",
-  "{name} could not be put back: its folder as it was is kept at {path}": "{name}を元に戻せませんでした。元の状態のフォルダーは{path}に保存されています"
+  "{name} could not be put back: its folder as it was is kept at {path}": "{name}を元に戻せませんでした。元の状態のフォルダーは{path}に保存されています",
+  "Copy stopped. The incomplete copy was removed.": "コピーを停止しました。未完成のコピーは削除されました。",
+  "Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.": "コピーを停止しました。{path}の未完成のコピーを削除できませんでした（{why}）。プロジェクトとしては一覧に表示されません。",
+  "it is not a copy this one made": "このコピーで作成されたものではありません"
 }

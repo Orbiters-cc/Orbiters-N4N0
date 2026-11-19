@@ -349,7 +349,8 @@ impl N4n0 {
         rt.current = Some(id);
         self.n4n0.lock().unwrap().listening = Some((source, Instant::now()));
         if let Some(handle) = rt.handle.as_mut() {
-            if let Err(e) = handle.inner.send(&VoiceCommand::Listen { hold, id }) {
+            // The sentence as it is spoken shows on the Ask page only: elsewhere, no work for it.
+            if let Err(e) = handle.inner.send(&VoiceCommand::Listen { hold, id, live: ask }) {
                 eprintln!("voice: {e:#}");
             }
         }

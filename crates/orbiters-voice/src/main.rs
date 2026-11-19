@@ -176,6 +176,8 @@ struct Listen {
     since: Instant,
     /// The service's number for it, given back with its sentence.
     id: u64,
+    /// What it heard so far is shown as it comes ([`Worker::partial`]).
+    live: bool,
 }
 
 // i18n: not shown (inference scheduler and transcript internals)
@@ -429,7 +431,7 @@ impl Worker {
                     self.reopen_at = None;
                 }
             }
-            VoiceCommand::Listen { hold, id } => {
+            VoiceCommand::Listen { hold, id, live } => {
                 self.decoder.clear(); self.waiting.clear();
                 self.decode_generation.fetch_add(1, Ordering::SeqCst);
                 self.live = Arc::new(Mutex::new(LiveText::default()));
@@ -442,7 +444,7 @@ impl Worker {
                 self.held = if hold { self.preroll.iter().copied().collect() } else { Vec::new() };
                 self.partial_id.store(id, Ordering::Relaxed);
                 self.partial_at = Instant::now();
-                self.listen = Some(Listen { hold, since: Instant::now(), id });
+                self.listen = Some(Listen { hold, since: Instant::now(), id, live });
                 // Someone speaks now: a microphone that failed a moment ago is tried again at once, and the
                 // recogniser loads while they speak.
                 self.reopen_at = None;
@@ -662,6 +664,8 @@ impl Worker {
     /// One running job and one replaceable pending snapshot; an active final has priority.
     fn partial(&mut self) {
         if self.held.len() < RATE || self.partial_at.elapsed() < Duration::from_millis(1000) { return; }
+        // Nobody reads it (a listen outside the Ask page): only the whole sentence is transcribed.
+        if !self.listen.as_ref().is_some_and(|l| l.live) { return; }
         let Recognizer::Ready(recognizer) = &self.recognizer else { return };
 
         self.partial_at = Instant::now();
@@ -1148,7 +1152,7 @@ mod tests {
         // N4N0-14: with the wake word on, the microphone stays open; a new default ends that capture.
         let (mut worker, _rx) = listening_worker();
         worker.mic_failures = 2;
-        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 7 });
+        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 7, live: true });
         worker.held = vec![0.1; RATE];
         // A late word from a capture already replaced changes nothing.
         worker.mic_default_changed(0);
@@ -1164,7 +1168,7 @@ mod tests {
         assert!(worker.waiting.is_empty() && worker.reopen_at.is_none());
         // A listen that heard nothing yet goes on.
         let (mut worker, _rx) = listening_worker();
-        worker.listen = Some(Listen { hold: false, since: Instant::now(), id: 8 });
+        worker.listen = Some(Listen { hold: false, since: Instant::now(), id: 8, live: true });
         worker.mic_default_changed(1);
         assert_eq!(worker.listen.as_ref().map(|l| l.id), Some(8));
     }
@@ -1332,7 +1336,7 @@ mod fixture_tests {
         let models = orbiters_core::paths::models_dir();
         worker.vad = Some(load_vad(&models).unwrap());
         worker.recognizer = Recognizer::Ready(Arc::new(Mutex::new(load_recognizer(&models).unwrap())));
-        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 41 });
+        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 41, live: true });
         worker.partial_id.store(41, Ordering::Relaxed);
         let began = Instant::now();
         let mut previous = String::new();
@@ -1363,7 +1367,7 @@ mod fixture_tests {
     #[test]
     fn review_long_sentence_never_clears_live_identity() {
         let (tx, _) = mpsc::channel(); let mut worker = Worker::new(tx);
-        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 41 });
+        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 41, live: true });
         worker.partial_id.store(41, Ordering::Relaxed);
         for seconds in [8, 9, 12, 20, 30] {
             worker.held = vec![0.0; RATE * seconds]; worker.partial();
@@ -1443,7 +1447,7 @@ mod fixture_tests {
         let (tx, _) = mpsc::channel();
         let mut worker = Worker::new(tx);
         worker.vad = Some(load_vad(&orbiters_core::paths::models_dir()).unwrap());
-        worker.listen = Some(Listen { hold: false, since: Instant::now(), id: 41 });
+        worker.listen = Some(Listen { hold: false, since: Instant::now(), id: 41, live: true });
         for chunk in wave.samples().chunks(WINDOW) { worker.audio(chunk.to_vec()); }
         for _ in 0..40 { worker.audio(vec![0.0; WINDOW]); }
         assert!(worker.listen.is_none(), "Silero ended the sentence");

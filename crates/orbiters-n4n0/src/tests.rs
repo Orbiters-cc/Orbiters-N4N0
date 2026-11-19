@@ -2476,7 +2476,7 @@ fn the_ears_start_with_vrchat_listen_and_stop_and_a_crash_is_told() {
     assert_eq!(device.ears.workers.lock().unwrap().len(), 1);
     // Talk: a held listen, then its end.
     n.app_talk(true, false);
-    assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: true, id: 1 })));
+    assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: true, id: 1, .. })));
     n.app_talk(false, false);
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Finish)));
     // It stops on its own: N4N0 says so and the next start waits.
@@ -2869,8 +2869,26 @@ fn review_wake_followup_is_admitted_only_outside_pause_gates() {
     }
     { let mut rt = n.n4n0.lock().unwrap(); rt.voice.output_playing = false; rt.voice.finalizing = false; }
     worker.say(wake());
-    assert!(worker.commands().contains(&VoiceCommand::Listen { hold: false, id: 2 }));
+    assert!(worker.commands().iter().any(|c| matches!(c, VoiceCommand::Listen { hold: false, id: 2, .. })));
     assert!(t.view().listening);
+}
+
+#[test]
+fn only_the_ask_page_s_listens_ask_for_the_sentence_as_it_is_spoken() {
+    // N4N0-6: what was heard so far shows on the Ask page only; elsewhere the worker decodes the whole sentence alone.
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.app_talk(true, false);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { live: false, .. })), "the window's Talk: {:?}", worker.commands());
+    n.app_talk(false, false);
+    n.ask_page(true);
+    assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: false, live: true, .. })), "the Ask page: {:?}", worker.commands());
+    n.ask_talk(true);
+    assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: true, live: true, .. })), "Talk on the Ask page");
+    t.shutdown(&n);
 }
 
 #[test]
@@ -2915,7 +2933,7 @@ fn ask_auto_final_stream_pause_rearm_manual_exit_and_stale_words() {
     n.n4n0.lock().unwrap().voice.installed = true;
     n.ask_page(true);
     let worker = d.ears.workers.lock().unwrap()[0].clone();
-    assert!(worker.commands().contains(&VoiceCommand::Listen { hold: false, id: 1 }));
+    assert!(worker.commands().iter().any(|c| matches!(c, VoiceCommand::Listen { hold: false, id: 1, .. })));
     worker.say(VoiceEvent::Speech { active: true });
     worker.say(VoiceEvent::Provisional { listen: 1, text: "Hi".into() });
     assert_eq!(t.view().voice.provisional.unwrap().text, "Hi");
@@ -2938,14 +2956,14 @@ fn ask_auto_final_stream_pause_rearm_manual_exit_and_stale_words() {
     assert!(t.view().voice.provisional.is_none());
     status_when(&t, |s| !s.thinking);
     n.ask_follow(); n.publish();
-    assert!(worker.commands().contains(&VoiceCommand::Listen { hold: false, id: 2 }));
+    assert!(worker.commands().iter().any(|c| matches!(c, VoiceCommand::Listen { hold: false, id: 2, .. })));
     assert_eq!(bodies.lock().unwrap().len(), 1);
     assert_eq!(t.view().lines.iter().filter(|l| l.who == N4n0Who::You).count(), 1);
     worker.say(VoiceEvent::Provisional { listen: 2, text: "cancel this".into() });
     n.ask_talk(true);
     assert!(t.view().voice.provisional.is_none());
     assert!(worker.commands().contains(&VoiceCommand::Cancel));
-    assert!(worker.commands().contains(&VoiceCommand::Listen { hold: true, id: 3 }));
+    assert!(worker.commands().iter().any(|c| matches!(c, VoiceCommand::Listen { hold: true, id: 3, .. })));
     assert!(!t.view().voice.automatic);
     n.ask_talk(false);
     assert_eq!(worker.commands().last(), Some(&VoiceCommand::Finish));
@@ -3004,7 +3022,7 @@ fn ask_output_gate_pauses_capture_and_retry_is_explicit() {
     n.ask_follow();
     assert_eq!(worker.commands().iter().filter(|c| matches!(c, VoiceCommand::Listen { .. })).count(), 1);
     n.command(Command::AskPlayback { active: false });
-    assert!(worker.commands().contains(&VoiceCommand::Listen { hold: false, id: 2 }));
+    assert!(worker.commands().iter().any(|c| matches!(c, VoiceCommand::Listen { hold: false, id: 2, .. })));
     worker.crash(3, "fixture failure");
     assert!(!t.view().voice.automatic);
     n.command(Command::AskRetry);

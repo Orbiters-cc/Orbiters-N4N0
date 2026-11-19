@@ -59,6 +59,11 @@ pub fn damaged(models: &Path) -> Vec<String> {
     out
 }
 
+/// [`VoiceCommand::Listen`]'s `live` in lines that lack it.
+fn live_default() -> bool {
+    true
+}
+
 /// Service → voice worker.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -83,6 +88,10 @@ pub enum VoiceCommand {
         hold: bool,
         #[serde(default)]
         id: u64,
+        /// Someone reads the sentence as it is spoken (the Ask page): the worker sends what it heard so far
+        /// ([`VoiceEvent::Provisional`]). Without, only the whole sentence is transcribed. Lines from before it: on.
+        #[serde(default = "live_default")]
+        live: bool,
     },
     /// The held sentence is complete: transcribe it.
     Finish,
@@ -184,10 +193,10 @@ mod tests {
         assert_eq!(serde_json::from_str::<VoiceCommand>(&m.to_line()).unwrap(), m);
         let e = VoiceEvent::Heard { text: "Nano, mets mon sweat".into(), for_n4n0: false, seconds: 1.5, decode_ms: 120, listen: 0 };
         assert_eq!(serde_json::from_str::<VoiceEvent>(&e.to_line()).unwrap(), e);
-        let l = VoiceCommand::Listen { hold: true, id: 7 };
+        let l = VoiceCommand::Listen { hold: true, id: 7, live: false };
         assert_eq!(serde_json::from_str::<VoiceCommand>(&l.to_line()).unwrap(), l);
         // Lines from before listens were numbered still read.
-        assert_eq!(serde_json::from_str::<VoiceCommand>(r#"{"type":"listen","hold":false}"#).unwrap(), VoiceCommand::Listen { hold: false, id: 0 });
+        assert_eq!(serde_json::from_str::<VoiceCommand>(r#"{"type":"listen","hold":false}"#).unwrap(), VoiceCommand::Listen { hold: false, id: 0, live: true });
         assert!(!installed(Path::new("does-not-exist")));
     }
 

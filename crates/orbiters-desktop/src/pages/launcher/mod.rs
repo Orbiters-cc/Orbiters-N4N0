@@ -234,7 +234,35 @@ impl State {
     /// Sends `action` and shows it at once.
     fn act(&mut self, cx: &Cx, clock: f64, action: Action) {
         self.note(clock, &action);
-        cx.ctl.launcher(action);
+        let sent = cx.ctl.launcher(self.as_shown(action.clone()));
+        if !sent {
+            // Never reached the service: nothing went, so nothing says it did.
+            self.unnote(&action);
+        }
+    }
+
+    /// The action bound to the VRChat account whose list is on show: the service sends nothing with another one.
+    fn as_shown(&self, action: Action) -> Action {
+        match &self.data.source {
+            orbiters_core::launcher::Source::SignedIn { user_id, .. } if !user_id.is_empty() => Action::As { account: user_id.clone(), action: Box::new(action) },
+            _ => action,
+        }
+    }
+
+    /// Takes back what [`Self::note`] showed for `action`.
+    fn unnote(&mut self, action: &Action) {
+        match action {
+            Action::RequestInvite { to } => {
+                self.requested.remove(to);
+            }
+            Action::Boop { to, .. } => {
+                self.booped.remove(to);
+            }
+            Action::Dismiss { id } => {
+                self.dismissed.remove(id);
+            }
+            _ => {}
+        }
     }
 
     /// What a press shows before the service answers.

@@ -256,6 +256,13 @@ mod tests {
     }
 
     #[test]
+    fn a_redirect_is_no_proof_that_a_boop_or_a_request_was_sent() {
+        let (mut c, _) = client(&[(302, "{}"), (301, "{}")]);
+        assert_eq!(c.boop(A, None), Err(Error::OutcomeUnknown), "maybe sent: the cool-down stays");
+        assert_eq!(c.request_invite(A), Err(Error::OutcomeUnknown));
+    }
+
+    #[test]
     fn nothing_odd_is_sent() {
         let (mut c, seen) = client(&[]);
         assert_eq!(c.boop(A, Some("file_123")), Err(Error::NotFound), "uploaded emojis are not offered");

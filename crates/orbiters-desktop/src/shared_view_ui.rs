@@ -46,7 +46,8 @@ pub fn window(ctx: &Context, ctl: &Ctl, offer: Option<&ShareOffer>, below: bool)
     let screen = ctx.content_rect();
     let id = Id::unique(("orbiters-shared-view-offer", offer.id));
     let enter = anim::spring_from(ctx, id.with("enter"), [0.0], [1.0], Spring::BOUNCY)[0];
-    let lift = if below { HEIGHT + 12.0 } else { 0.0 };
+    // Over "Talk with N4N0?"'s card when it is up: its height, and the toasts' 12 between them.
+    let lift = if below { crate::wake_offer::HEIGHT + 12.0 } else { 0.0 };
     let base = Rect::from_min_size(pos2(screen.right() - MARGIN - WIDTH, screen.bottom() - MARGIN - HEIGHT - lift), vec2(WIDTH, HEIGHT));
     let rect = Rect::from_center_size(base.center() + vec2(60.0 * (1.0 - enter), 0.0), base.size() * (0.92 + 0.08 * enter.min(1.0)));
     egui::Area::new(id).order(Order::Foreground).fixed_pos(screen.min).interactable(true).show(ctx, |ui| {

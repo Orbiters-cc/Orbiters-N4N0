@@ -32,7 +32,7 @@ pub fn up(offer: Option<WakeOffer>, now_ms: u64) -> Option<WakeOffer> {
 
 /// As wide as the window's toasts, and as far from its corner.
 const WIDTH: f32 = 380.0;
-const HEIGHT: f32 = 76.0;
+pub(crate) const HEIGHT: f32 = 76.0;
 const MARGIN: f32 = 20.0;
 
 /// The window's card, while an offer is up: Talk starts the listen, the cross puts it away.

@@ -553,6 +553,15 @@ fn keyboard_and_mouse_go_only_into_the_foreground_game_window() {
 }
 
 #[test]
+fn stop_gives_the_app_back_from_a_side_picture_at_once() {
+    // BRIDGE-4: the lend was given back only by the bridge's ticks, which stop with it.
+    let (game, bridge, _server, _client) = lab("give-back");
+    game.set_behaviour(|b| b.lent_away = true);
+    bridge.take_over("The person pressed Stop.");
+    assert!(!super::game::Game::lent_away(game.as_ref()), "the app is the person's again");
+}
+
+#[test]
 fn the_person_starting_their_own_vrchat_closes_the_bridge_s_not_theirs() {
     // BRIDGE-15: the app follows the person's new VRChat; the bridge's own stayed open on their account, "crashed" and nobody's.
     let (game, _bridge, _server, client) = lab("person-beside");

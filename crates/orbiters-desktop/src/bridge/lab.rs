@@ -624,6 +624,10 @@ impl Game for LabGame {
         Some(self.osc_also.unwrap_or(self.osc_in))
     }
 
+    fn give_back(&self) {
+        self.state.lock().unwrap().behaviour.lent_away = false;
+    }
+
     fn lent_away(&self) -> bool {
         self.state.lock().unwrap().behaviour.lent_away
     }

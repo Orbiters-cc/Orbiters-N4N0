@@ -399,6 +399,9 @@ pub trait Game: Send + Sync {
     fn runs(&self, _pid: u32) -> Option<bool> {
         None
     }
+    /// The bridge closes: the app, lent to this session's VRChat for a picture, is given back to the person's at once (its
+    /// usual giving back runs on the bridge's ticks, which stop with it).
+    fn give_back(&self) {}
     /// The window of the process `pid`, while it has one.
     fn window(&self, pid: u32) -> Option<GameWindow>;
     /// Whether `window` is the foreground window at this moment.

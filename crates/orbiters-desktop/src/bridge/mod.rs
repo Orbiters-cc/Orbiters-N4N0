@@ -547,6 +547,8 @@ impl Bridge {
             if was_running && matches!(session.game.seen().capture.state.as_str(), "starting" | "recording" | "paused") {
                 session.game.stop_picture();
             }
+            // A side picture had the app: it goes back to the person's VRChat now (BRIDGE-4).
+            session.game.give_back();
         }
         self.log(true, why.to_string());
     }

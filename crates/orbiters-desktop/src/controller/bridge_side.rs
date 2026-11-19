@@ -556,6 +556,12 @@ fn read_from(path: &Path, from: u64, most: u64) -> String {
 }
 
 impl Game for SideGame {
+    fn give_back(&self) {
+        if self.lent_to_me() {
+            self.unlend();
+        }
+    }
+
     fn seen(&self) -> Seen {
         self.look();
         let Ok(ctl) = self.ctl() else { return Seen::default() };

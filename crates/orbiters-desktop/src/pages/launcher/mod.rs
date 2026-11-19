@@ -85,7 +85,8 @@ pub struct State {
     rows: Vec<Row>,
     keys: Vec<String>,
     tops: Vec<f32>,
-    made_for: Option<(usize, String, u64)>,
+    /// The data the rows were made for (held, so that its address is never handed to a newer state), the search, the folds.
+    made_for: Option<(Arc<LauncherState>, String, u64)>,
     folds: u64,
     /// The row at the list's top and how far into it, kept across refreshes.
     anchor: Option<(String, f32)>,
@@ -287,12 +288,11 @@ impl State {
             self.folded_read = true;
             self.folded = load_folded();
         }
-        let key = (Arc::as_ptr(&self.data) as usize, self.query.clone(), self.folds);
-        if self.made_for.as_ref() == Some(&key) {
+        if self.made_for.as_ref().is_some_and(|(data, query, folds)| Arc::ptr_eq(data, &self.data) && *query == self.query && *folds == self.folds) {
             return None;
         }
-        let same_search = self.made_for.as_ref().is_some_and(|m| m.1 == key.1);
-        self.made_for = Some(key);
+        let same_search = self.made_for.as_ref().is_some_and(|m| m.1 == self.query);
+        self.made_for = Some((self.data.clone(), self.query.clone(), self.folds));
         self.rows = list::rows(&self.data, &self.query, &self.folded);
         self.keys = self.rows.iter().map(|r| r.key(&self.data)).collect();
         self.tops = list::tops(&self.rows);

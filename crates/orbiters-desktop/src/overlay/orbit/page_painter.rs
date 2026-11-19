@@ -101,6 +101,34 @@ struct Mailbox {
     stop: bool, working: bool, was_page: bool,
     #[cfg(test)] publish_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     #[cfg(test)] gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    /// Tests: the next page job panics.
+    #[cfg(test)] panic_next: bool,
+}
+
+/// Panics of the paint thread within [`PANICS_WITHIN`] after which the overlay ends, for the service to start it again.
+const PANICS_AT_MOST: usize = 3;
+const PANICS_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A job of the paint thread, a panic in it contained: logged in `vr-test.log`, `None` returned (OVL2-11: the thread died and every
+/// VR page stayed as it was for the session, with nothing said). The caller makes its canvases anew.
+fn contained<T>(what: &str, panics: &mut VecDeque<Instant>, job: impl FnOnce() -> T) -> Option<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
+        Ok(out) => Some(out),
+        Err(payload) => {
+            let why = payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_default();
+            crate::overlay::vr_log::line(&format!("page painter: painting {what} panicked ({why}); its canvases are made anew")); // i18n: not shown (a log's line)
+            let now = Instant::now();
+            panics.push_back(now);
+            while panics.front().is_some_and(|t| now.duration_since(*t) > PANICS_WITHIN) {
+                panics.pop_front();
+            }
+            if panics.len() >= PANICS_AT_MOST && !cfg!(test) {
+                crate::overlay::vr_log::line("page painter: three panics in ten seconds; the overlay ends and is started again"); // i18n: not shown (a log's line)
+                std::process::exit(1);
+            }
+            None
+        }
+    }
 }
 pub(super) struct Painter { shared: Arc<(Mutex<Mailbox>, Condvar)>, pub ctx: egui::Context }
 struct PartCanvas { id: u64, canvas: Canvas, mask: Option<Arc<Vec<u8>>>, pixels: Vec<u8>, published: Option<Pixels>, style: Option<orbiters_core::settings::OrbitSettings> }
@@ -210,8 +238,16 @@ impl Painter {
         page.textures = crate::overlay::PaintTextures::of(&ctx); page.ctx = ctx.clone(); page.painter.set_parallel(true);
         let shared = Arc::new((Mutex::new(Mailbox { garbage: Vec::with_capacity(1024), ..Default::default() }), Condvar::new()));
         let thread = shared.clone();
+        let fresh_ctx = ctx.clone();
         std::thread::Builder::new().name("orbit-page-paint".into()).spawn(move || {
             let mut engine = Engine { page, parts: HashMap::new(), parallel: true, shared: Arc::downgrade(&thread) };
+            // After a contained panic: canvases made as at the start (one left mid-paint is not used again).
+            let fresh = |thread: &Arc<(Mutex<Mailbox>, Condvar)>| {
+                let mut page = Canvas::zoomed(px[0], px[1], px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32).in_orbit_look();
+                page.textures = crate::overlay::PaintTextures::of(&fresh_ctx); page.ctx = fresh_ctx.clone(); page.painter.set_parallel(true);
+                Engine { page, parts: HashMap::new(), parallel: true, shared: Arc::downgrade(thread) }
+            };
+            let mut panics = VecDeque::new();
             let mut cleanup = std::time::Duration::ZERO;
             let mut garbage = Vec::with_capacity(1024);
             loop {
@@ -240,7 +276,21 @@ impl Painter {
                         let epoch = request.epoch;
                         let style = request.facts.orbit;
                         let language = request.language;
-                        let mut frame = orbiters_i18n::in_language(language, || panels::with_render_style(style, || engine.page(request)));
+                        #[cfg(test)]
+                        let panic_now = std::mem::take(&mut thread.0.lock().unwrap().panic_next);
+                        #[cfg(not(test))]
+                        let panic_now = false;
+                        let painted = contained("a page", &mut panics, || {
+                            if panic_now {
+                                panic!("test: the page job panics");
+                            }
+                            orbiters_i18n::in_language(language, || panels::with_render_style(style, || engine.page(request)))
+                        });
+                        let Some(mut frame) = painted else {
+                            engine = fresh(&thread);
+                            thread.0.lock().unwrap_or_else(|e| e.into_inner()).working = false;
+                            continue;
+                        };
                         frame.phases.finish += std::mem::take(&mut cleanup);
                         #[cfg(test)] {
                             let gate = thread.0.lock().unwrap().publish_gate.take();
@@ -254,20 +304,29 @@ impl Painter {
                     }
                 }
                 if let Some(request) = part {
-                    let picture = orbiters_i18n::in_language(request.language, || panels::with_render_style(request.facts.orbit, || engine.part(&request.spec, &request.facts, request.time)));
-                    let retired = thread.0.lock().unwrap_or_else(|e| e.into_inner()).part_frames.insert(picture.zone, picture);
-                    drop(retired);
+                    match contained("a part", &mut panics, || orbiters_i18n::in_language(request.language, || panels::with_render_style(request.facts.orbit, || engine.part(&request.spec, &request.facts, request.time)))) {
+                        Some(picture) => {
+                            let retired = thread.0.lock().unwrap_or_else(|e| e.into_inner()).part_frames.insert(picture.zone, picture);
+                            drop(retired);
+                        }
+                        None => engine = fresh(&thread),
+                    }
                 }
                 if let Some((expected, reply)) = audit {
                     let style = expected.facts.orbit;
-                    let result = orbiters_i18n::in_language(expected.language, || panels::with_render_style(style, || {
+                    let result = contained("an audit", &mut panics, || orbiters_i18n::in_language(expected.language, || panels::with_render_style(style, || {
                         engine.mode(false);
                         let serial = engine.page(expected.request());
                         engine.mode(true);
                         let parallel = engine.page(expected.request());
                         Audit::compare(&expected, &serial, &parallel)
-                    }));
-                    let _ = reply.send(result);
+                    })));
+                    match result {
+                        Some(result) => {
+                            let _ = reply.send(result);
+                        }
+                        None => engine = fresh(&thread),
+                    }
                 }
                 thread.0.lock().unwrap_or_else(|e| e.into_inner()).working = false;
             }
@@ -405,6 +464,31 @@ mod tests {
         }
         });
         }
+    }
+
+    /// OVL2-11: a panic while a page is painted costs that page once: the next one comes, and the painter is not busy for ever.
+    #[test]
+    fn a_panic_in_a_page_job_is_contained() {
+        let painter = Painter::new([512, 288]);
+        painter.shared.0.lock().unwrap().panic_next = true;
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        painter.submit(request(3, Sheet::Settings));
+        let began = Instant::now();
+        while painter.shared.0.lock().unwrap().request.is_some() || painter.shared.0.lock().unwrap().working {
+            assert!(began.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        std::panic::set_hook(hook);
+        assert!(painter.take().is_none(), "the page that panicked gives no frame");
+        assert!(!painter.busy(), "and the painter is not left working");
+        painter.submit(request(3, Sheet::Settings));
+        let frame = loop {
+            if let Some(frame) = painter.take() { break frame; }
+            assert!(began.elapsed() < Duration::from_secs(20), "the next page still comes");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(frame.pixels.len(), 512 * 288 * 4);
     }
 
     #[test]

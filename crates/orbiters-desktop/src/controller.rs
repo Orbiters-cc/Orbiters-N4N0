@@ -301,12 +301,14 @@ fn calibration_file() -> PathBuf {
 /// Talks to Orbiters' development environment (the server on this computer, its account and update feed) or to
 /// orbiters.cc, as the settings' Development environment switch says, whatever the Unity tools are set to.
 pub fn use_environment(development: bool) {
-    orbiters_core::account::choose_server(Some(if development {
-        orbiters_core::account::Server::Development
-    } else {
-        orbiters_core::account::Server::Production
-    }));
+    follow_environment(development);
+}
+
+/// [`use_environment`] for any process of the app, each time it learns the settings (orbiters_core's
+/// `follow_environment`): returns whether the environment changed for this process (true the first time).
+pub fn follow_environment(development: bool) -> bool {
     orbiters_update::set_development(development);
+    orbiters_core::account::follow_environment(development)
 }
 
 /// The calibration kept; one that cannot be read is kept beside (`calibration.json.bad-<time>`) before the next
@@ -1846,6 +1848,9 @@ impl Controller {
         if previous.language != settings.language {
             crate::language::follow(&settings);
         }
+        if previous.world_performance && !settings.world_performance {
+            self.performance_forget();
+        }
         if previous.reconstruct_while_playing != settings.reconstruct_while_playing {
             // One running where the setting no longer has it pauses; those held while VRChat runs may start now.
             self.follow_while_playing();
@@ -2802,6 +2807,8 @@ fn spawn_watchers(ctl: Shared) {
             let history_file = visited::history_file();
             let mut history = visited::History::load(&history_file);
             let mut history_changed = false;
+            // VRChat closed: how far its log was read is saved at the next beat, not minutes later.
+            let mut history_flush = false;
             // The videos the worlds played, the same way (the Videos page).
             let mut videos = videos::Videos::load();
             let mut system = sysinfo::System::new();
@@ -2896,6 +2903,10 @@ fn spawn_watchers(ctl: Shared) {
                     }
                     if was != running && !remote {
                         ctl.vrchat_changed(running);
+                        if !running {
+                            history_flush = true;
+                            videos.flush();
+                        }
                     }
                     // A minute into a break from the headset, what waited for VRChat to close starts.
                     if running && ctl.headset_on_break() {
@@ -3013,9 +3024,13 @@ fn spawn_watchers(ctl: Shared) {
                     if let Some(dir) = orbiters_core::paths::vrchat_log_dir() {
                         let following = log.last_read().map(|(name, _, to)| (name, to));
                         history_changed |= history.read_logs_following(&dir, following);
-                        if std::mem::take(&mut history_changed) {
-                            if let Err(e) = history.save(&history_file) {
-                                eprintln!("visited worlds: {e}");
+                        // At once when a visit is new, every few minutes for how far the logs were read; a save that
+                        // failed stays to do and is tried again.
+                        let flush = std::mem::take(&mut history_flush);
+                        if history_changed && (flush || history.save_due(true)) {
+                            match history.checkpoint(&history_file) {
+                                Ok(()) => history_changed = false,
+                                Err(e) => eprintln!("visited worlds: {e}"),
                             }
                         }
                     }

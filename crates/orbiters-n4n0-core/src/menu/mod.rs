@@ -45,6 +45,18 @@ pub const INSTANCES_PER_PAGE: usize = 5;
 /// 3D captures on a page of History, and friends on a page of Share to ….
 pub const CAPTURES_PER_PAGE: usize = 5;
 pub const FRIENDS_PER_PAGE: usize = 5;
+/// How long after a list changed under the hand a row is checked against what it showed before: the avatar's screen
+/// shows the menu up to a second or so late, the SteamVR overlay a frame.
+pub const ROWS_SETTLE: Duration = Duration::from_millis(1500);
+
+/// Whether row `i`, holding `now`, may be acted on: less than [`ROWS_SETTLE`] after a change of the list, only if it
+/// held the same before, or nothing (a list that just appeared shifts nothing).
+fn row_still(moved: &Option<(Vec<String>, Instant)>, i: usize, now: &str) -> bool {
+    match moved {
+        Some((before, at)) if at.elapsed() < ROWS_SETTLE => before.get(i).is_none_or(|k| k == now),
+        _ => true,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Page {
@@ -959,6 +971,11 @@ pub struct Menu {
     pub state_page: usize,
     /// A save pressed here, shown in the list until the host's list has it (or [`SAVE_SHOWN`] passed).
     pending_save: Option<(String, Instant)>,
+    /// History's rows on the page shown before the host's list changed them, and when: for [`ROWS_SETTLE`] a row's
+    /// share acts only if it still holds the capture it held (a press means what was on screen).
+    captures_moved: Option<(Vec<String>, Instant)>,
+    /// The same for Share to …'s friends (their ids).
+    friends_moved: Option<(Vec<String>, Instant)>,
     /// The result whose link was copied last (its video id): its row offers Drop.
     pub copied: Option<String>,
     /// A copied link can be dropped as a card: the avatar's screen is of version 5 or later.
@@ -1552,20 +1569,25 @@ impl Menu {
                 Some(key) if self.pages.share() => self.share_public(key),
                 _ => Vec::new(),
             },
+            // A row that holds another capture than a moment ago (the list changed under the hand) does nothing: the
+            // person pressed what they saw, which may be the neighbour now.
             Target::SharePublic(i) => match self.page_captures().get(i as usize).map(|c| c.key.clone()) {
-                Some(key) => self.share_public(key),
-                None => Vec::new(),
+                Some(key) if row_still(&self.captures_moved, i as usize, &key) => self.share_public(key),
+                _ => Vec::new(),
             },
             Target::ShareLatestTo => match self.captures.latest.as_ref().map(|c| c.key.clone()) {
                 Some(key) if self.pages.share() => self.share_to(key),
                 _ => Vec::new(),
             },
             Target::ShareTo(i) => match self.page_captures().get(i as usize).map(|c| c.key.clone()) {
-                Some(key) => self.share_to(key),
-                None => Vec::new(),
+                Some(key) if row_still(&self.captures_moved, i as usize, &key) => self.share_to(key),
+                _ => Vec::new(),
             },
             Target::Friend(i) | Target::FriendMark(i) => {
                 let Some(friend) = self.page_friends().get(i as usize).map(|f| (*f).clone()) else { return Vec::new() };
+                if !row_still(&self.friends_moved, i as usize, &friend.id) {
+                    return Vec::new();
+                }
                 if let Some(at) = self.chosen.iter().position(|f| f.id == friend.id) {
                     self.chosen.remove(at);
                     self.notice = None;
@@ -2256,9 +2278,13 @@ impl Menu {
         if self.captures == captures {
             return Vec::new();
         }
+        let before: Vec<String> = self.page_captures().iter().map(|c| c.key.clone()).collect();
         self.captures = captures;
         let pages = self.captures.history.len().div_ceil(CAPTURES_PER_PAGE).max(1);
         self.capture_page = self.capture_page.min(pages - 1);
+        if self.page_captures().iter().map(|c| &c.key).ne(before.iter()) {
+            self.captures_moved = Some((before, Instant::now()));
+        }
         if let Some((key, was)) = self.asked.clone() {
             use crate::captures::Sharing;
             match self.captures.find(&key).map(|c| c.sharing.clone()) {
@@ -2292,9 +2318,13 @@ impl Menu {
         if self.friends == friends {
             return;
         }
+        let before: Vec<String> = self.page_friends().iter().map(|f| f.id.clone()).collect();
         self.friends = friends;
         let pages = self.found_friends().len().div_ceil(FRIENDS_PER_PAGE).max(1);
         self.friend_page = self.friend_page.min(pages - 1);
+        if self.page_friends().iter().map(|f| &f.id).ne(before.iter()) {
+            self.friends_moved = Some((before, Instant::now()));
+        }
     }
 
     /// Share publicly: at once, or after the warning for a capture flagged explicit.
@@ -3334,6 +3364,39 @@ mod tests {
         old.page = Page::Qr;
         assert_eq!(ScreenPage::of(&old), ScreenPage::HomeQuiet);
         assert!(target_state(&old, Target::QrAgain).hidden);
+    }
+
+    /// CORE2-10: a press means the row as it was on screen. A capture made since the last listing moves every row down a
+    /// moment after History appeared: Share publicly on row 0 then must not publish the new one (nor Share to … open it),
+    /// and a friends list read again must not mark the person who slid under the hand. Once the rows settled, it acts.
+    #[test]
+    fn a_row_that_changed_under_the_hand_shares_nothing() {
+        use crate::captures::{CapturePhase, CaptureRow, CapturesView, Friend, Friends};
+        let row = |key: &str| CaptureRow { key: key.into(), world: "World".into(), phase: CapturePhase::Ready, ..Default::default() };
+        let mut menu = Menu { pages: Pages::Share, ..Default::default() };
+        menu.open();
+        menu.press(Target::History);
+        let listed = |keys: &[&str]| CapturesView { history: keys.iter().map(|k| row(k)).collect(), listed: true, ..Default::default() };
+        menu.set_captures(listed(&["C:/s/old-1", "C:/s/old-2"]));
+        // The list appeared: nothing shifted, a press acts at once.
+        assert!(row_still(&menu.captures_moved, 0, "C:/s/old-1"));
+        // A newer capture lands first: row 0 now holds it.
+        menu.set_captures(listed(&["C:/s/new", "C:/s/old-1", "C:/s/old-2"]));
+        assert!(menu.press(Target::SharePublic(0)).is_empty(), "the neighbour is not published");
+        assert!(menu.press(Target::ShareTo(1)).is_empty());
+        assert_eq!(menu.page, Page::History);
+        // Settled: the press means what is shown.
+        menu.captures_moved.as_mut().unwrap().1 -= ROWS_SETTLE;
+        assert!(menu.press(Target::SharePublic(0)).iter().any(|e| matches!(e, Effect::ShareCapture(a) if a.key == "C:/s/new")));
+        // Friends: read again while shown, a new one first.
+        let f = |id: &str| Friend { id: id.into(), name: id.into() };
+        menu.set_friends(Friends::ready(vec![f("usr_b"), f("usr_c")]));
+        menu.set_friends(Friends::ready(vec![f("usr_a"), f("usr_b"), f("usr_c")]));
+        menu.press(Target::Friend(0));
+        assert!(menu.chosen.is_empty(), "usr_a slid under the press: not marked");
+        menu.friends_moved.as_mut().unwrap().1 -= ROWS_SETTLE;
+        menu.press(Target::Friend(0));
+        assert_eq!(menu.chosen, [f("usr_a")]);
     }
 
     #[test]

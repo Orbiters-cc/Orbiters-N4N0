@@ -204,6 +204,19 @@ impl super::Controller {
         self.performance_send_if_due(false);
     }
 
+    /// "Share my frame rate per world" was turned off (PRIV-12): what waited to be sent is forgotten, here and on
+    /// disk, and the minute being gathered too, so that turning it on later never sends what was gathered before.
+    pub(super) fn performance_forget(&self) {
+        let mut rt = self.performance.lock().unwrap();
+        rt.pending = Some(Vec::new());
+        rt.minute = None;
+        match std::fs::remove_file(pending_file()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("world performance: the summaries waiting could not be removed: {e}"),
+        }
+    }
+
     fn performance_keep(&self, sample: Sample) {
         let mut rt = self.performance.lock().unwrap();
         let pending = rt.pending.get_or_insert_with(read_pending);
@@ -238,6 +251,10 @@ impl super::Controller {
         std::thread::spawn(move || match send(&api, &token, &batch.0, &batch.1) {
             Ok(()) => {
                 let mut rt = ctl.performance.lock().unwrap();
+                // Turned off meanwhile: forgotten already, nothing to write back.
+                if !ctl.with_settings(|s| s.world_performance) {
+                    return;
+                }
                 if let Some(pending) = rt.pending.as_mut() {
                     pending.retain(|s| !batch.0.contains(s));
                     keep_pending(pending);

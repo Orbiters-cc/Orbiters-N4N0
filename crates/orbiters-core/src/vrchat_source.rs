@@ -187,9 +187,20 @@ impl Source {
     }
 }
 
+/// The signed-in account's friends as VRChat listed them, a picture VRCX or VRCNext kept filling one VRChat left
+/// empty. Nobody is added from them: what they hold may be another account's friends on this computer (another VRChat
+/// account, one VRCX last used, a profile VRCNext only looked at), or people unfriended since.
 fn merge_friends(direct: Vec<User>, local: Vec<User>) -> Vec<User> {
+    let pictures: std::collections::HashMap<String, String> = local.into_iter().filter(|u| !u.user_icon.is_empty()).map(|u| (u.id, u.user_icon)).collect();
     let mut seen = std::collections::HashSet::new();
-    let mut users: Vec<_> = direct.into_iter().chain(local).filter(|u| u.id.starts_with("usr_") && seen.insert(u.id.clone())).collect();
+    let mut users: Vec<_> = direct.into_iter().filter(|u| u.id.starts_with("usr_") && seen.insert(u.id.clone())).collect();
+    for u in &mut users {
+        if u.user_icon.is_empty() {
+            if let Some(picture) = pictures.get(&u.id) {
+                u.user_icon = picture.clone();
+            }
+        }
+    }
     users.sort_by_cached_key(|u| u.display_name.to_lowercase());
     users
 }
@@ -200,8 +211,11 @@ mod tests {
     #[test]
     fn personal_friends_win_over_local_duplicates() {
         let user = |id: &str, name: &str| User { id: id.into(), display_name: name.into(), ..Default::default() };
-        let merged = merge_friends(vec![user("usr_a", "Fresh")], vec![user("usr_a", "Stale"), user("usr_b", "Other"), user("invalid", "Skip")]);
-        assert_eq!(merged.iter().map(|u| u.display_name.as_str()).collect::<Vec<_>>(), ["Fresh", "Other"]);
+        let pictured = User { user_icon: "https://api.vrchat.cloud/a".into(), ..user("usr_a", "Stale") };
+        let merged = merge_friends(vec![user("usr_a", "Fresh")], vec![pictured, user("usr_b", "Other"), user("invalid", "Skip")]);
+        // CORE2-6: with a VRChat sign-in the list is that account's friends; the local apps only fill a picture.
+        assert_eq!(merged.iter().map(|u| u.display_name.as_str()).collect::<Vec<_>>(), ["Fresh"], "usr_b may be another account's friend");
+        assert_eq!(merged[0].user_icon, "https://api.vrchat.cloud/a");
     }
     #[test]
     fn world_search_without_a_session_asks_orbiters_map_explorer() {

@@ -23,7 +23,7 @@ impl Kind {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Person {
     pub id: u64,
     pub name: String,
@@ -31,14 +31,14 @@ pub struct Person {
     pub vrchat_user_id: Option<String>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct World {
     pub id: String,
     pub name: String,
     pub thumbnail_url: Option<String>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Grant {
     pub id: u64,
     pub vrchat_user_id: String,
@@ -48,7 +48,7 @@ pub struct Grant {
     pub created_at: String,
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Capture {
     pub splat_count: u64,
     pub preview_url: String,
@@ -73,15 +73,17 @@ impl Capture {
     }
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Picture {
     pub url: String,
     pub thumbnail_url: String,
     pub width: u32,
     pub height: u32,
 }
+/// Read leniently (a field a server leaves out gets its default); in a list, an item of a kind this build does not
+/// know, or without its id, is left out alone ([`Feed`]).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Item {
     #[serde(rename = "type")]
     pub kind: Kind,
@@ -137,8 +139,40 @@ impl Item {
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Feed {
+    #[serde(default, deserialize_with = "items_that_read")]
     pub items: Vec<Item>,
+    #[serde(default)]
     pub next: Option<String>,
+}
+
+/// The elements of a list that read as `T` and pass `known` (a kind this build knows, an id): one the server added
+/// later, or sent without a field this build needs, costs itself, not the page.
+fn list_that_reads<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D, known: fn(&serde_json::Value) -> bool) -> Result<Vec<T>, D::Error> {
+    let values = Option::<Vec<serde_json::Value>>::deserialize(d)?.unwrap_or_default();
+    let total = values.len();
+    let out: Vec<T> = values.into_iter().filter(known).filter_map(|v| serde_json::from_value(v).ok()).collect();
+    if out.len() < total {
+        eprintln!("captures: {} of {total} left out (not read by this version)", total - out.len()); // i18n: not shown (a log's line)
+    }
+    Ok(out)
+}
+
+fn known_item(v: &serde_json::Value) -> bool {
+    matches!(v.get("type").and_then(serde_json::Value::as_str), Some("capture" | "picture")) && v.get("id").is_some_and(serde_json::Value::is_u64)
+}
+
+fn known_request(v: &serde_json::Value) -> bool {
+    matches!(v.get("type").and_then(serde_json::Value::as_str), Some("capture" | "picture"))
+        && matches!(v.get("status").and_then(serde_json::Value::as_str), Some("pending" | "approved" | "denied" | "cancelled"))
+        && v.get("id").is_some_and(serde_json::Value::is_u64)
+}
+
+fn items_that_read<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Item>, D::Error> {
+    list_that_reads(d, known_item)
+}
+
+fn requests_that_read<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ShareRequest>, D::Error> {
+    list_that_reads(d, known_request)
 }
 impl Feed {
     /// Cursor is opaque. Deduplicate overlapping pages, and stop a repeated cursor rather than looping.
@@ -185,14 +219,14 @@ pub enum RequestStatus {
     Cancelled,
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Member {
     pub id: u64,
     pub name: String,
     pub avatar_url: Option<String>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct ShareRequest {
     pub id: u64,
     #[serde(rename = "type")]
@@ -210,6 +244,7 @@ pub struct ShareRequest {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Requests {
+    #[serde(default, deserialize_with = "requests_that_read")]
     pub requests: Vec<ShareRequest>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -297,9 +332,23 @@ pub(crate) fn json<T: serde::de::DeserializeOwned>(response: ureq::http::Respons
         if status == 429 {
             return Err(RateLimited { retry_after_s: retry_after_seconds(retry_after.as_deref()), message }.into());
         }
-        return Err(ApiError { status, message }.into());
+        return Err(ApiError { status, message, code: value["code"].as_str().map(str::to_string) }.into());
     }
     Ok(serde_json::from_str(&text)?)
+}
+
+/// [`json`] for a request that changes something: Orbiters said it was done (2xx) but its answer does not read (a
+/// newer shape): done all the same, and what it is now is asked again with `again`, rather than reporting a failure
+/// that would be tried again.
+fn json_done<T: serde::de::DeserializeOwned>(response: ureq::http::Response<ureq::Body>, again: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    let done = response.status().is_success();
+    match json::<T>(response) {
+        Err(e) if done && e.downcast_ref::<serde_json::Error>().is_some() => {
+            eprintln!("captures: done, its answer not read ({e}); reading it again"); // i18n: not shown (a log's line)
+            again()
+        }
+        other => other,
+    }
 }
 /// Whether `address` is a 3D capture's picture on the server asked ([`Api::capture_picture`]): a path of its own API
 /// (`/captures/capture/<id>/file?part=picture`, with its revision), never another host's address.
@@ -345,14 +394,15 @@ impl Api {
             address.push(if address.contains('?') { '&' } else { '?' });
             address.push_str("thumbnail=true");
         }
-        let mut request = self.agent().get(&self.url(&address));
+        // The picture itself can be large: a download's time; its thumbnail an API call's.
+        let mut request = if thumbnail { self.agent().get(&self.url(&address)) } else { self.get_transfer(&self.url(&address)) };
         if let Some(token) = token {
             request = request.header("Authorization", &format!("Bearer {token}"));
         }
         let response = request.call()?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            return Err(ApiError { status, message: String::new() }.into());
+            return Err(ApiError { status, message: String::new(), code: None }.into());
         }
         Ok(response.into_body().with_config().limit(16 << 20).read_to_vec()?)
     }
@@ -384,7 +434,8 @@ impl Api {
             "{}",
             tr("Choose at most 50 people and a message of at most 280 characters.")
         );
-        json(self.agent().post(&self.url(&format!("{}/share", path(kind, id)))).header("Authorization", &format!("Bearer {token}")).send_json(share)?)
+        let r = self.agent().post(&self.url(&format!("{}/share", path(kind, id)))).header("Authorization", &format!("Bearer {token}")).send_json(share)?;
+        json_done(r, || Ok(Shared::Item { item: self.capture_item(token, kind, id)? }))
     }
     pub fn unshare_capture(&self, token: &str, kind: Kind, id: u64, unshare: &Unshare) -> anyhow::Result<Item> {
         #[derive(Deserialize)]
@@ -397,10 +448,10 @@ impl Api {
             .header("Authorization", &format!("Bearer {token}"))
             .force_send_body()
             .send_json(unshare)?;
-        Ok(json::<Answer>(r)?.item)
+        Ok(json_done(r, || Ok(Answer { item: self.capture_item(token, kind, id)? }))?.item)
     }
     pub fn capture_file(&self, token: &str, kind: Kind, id: u64, out: &std::path::Path) -> anyhow::Result<()> {
-        let r = self.agent().get(&self.url(&format!("{}/file", path(kind, id)))).header("Authorization", &format!("Bearer {token}")).call()?;
+        let r = self.get_transfer(&self.url(&format!("{}/file", path(kind, id)))).header("Authorization", &format!("Bearer {token}")).call()?;
         if !r.status().is_success() {
             json::<serde_json::Value>(r)?;
             unreachable!();
@@ -423,7 +474,11 @@ impl Api {
             .agent()
             .post(&self.url(&format!("captures/requests/{id}/{}", if approve { "approve" } else { "deny" })))
             .header("Authorization", &format!("Bearer {token}"));
-        json(if approve { request.send_json(serde_json::json!({"acknowledgeExplicit":acknowledge_explicit}))? } else { request.send_empty()? })
+        let r = if approve { request.send_json(serde_json::json!({"acknowledgeExplicit":acknowledge_explicit}))? } else { request.send_empty()? };
+        json_done(r, || {
+            let request = self.capture_requests(token, true)?.requests.into_iter().find(|r| r.id == id);
+            request.map(|request| RequestAnswer { request }).ok_or_else(|| anyhow::anyhow!("{}", tr("Orbiters could not complete the request")))
+        })
     }
     pub fn moderate_capture(&self, token: &str, kind: Kind, id: u64, reason: Option<&str>) -> anyhow::Result<serde_json::Value> {
         json(
@@ -478,6 +533,33 @@ mod tests {
         assert!(share.public);
         assert_eq!(serde_json::to_value(share).unwrap()["acknowledgeExplicit"], false);
     }
+    /// CORE2-2: what a later server adds costs only itself: an item of a kind this build does not know, or a request of a
+    /// status it does not know, is left out; an item without a field the contract made optional since still reads.
+    #[test]
+    fn a_page_reads_whatever_one_item_holds() {
+        let mut page: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/captures.json")).unwrap();
+        let known = page["items"][0].clone();
+        let mut newer = known.clone();
+        newer["type"] = "recording".into();
+        newer["id"] = 999.into();
+        let mut sparse = known.clone();
+        sparse["id"] = 1000.into();
+        for field in ["canShare", "explicit", "mine", "public", "createdAt", "world", "owner"] {
+            sparse.as_object_mut().unwrap().remove(field);
+        }
+        page["items"] = serde_json::json!([known, newer, sparse, {"type": "capture"}]);
+        let feed: Feed = serde_json::from_value(page).unwrap();
+        assert_eq!(feed.items.iter().map(|i| i.id).collect::<Vec<_>>(), [feed.items[0].id, 1000], "the unknown kind and the item without id left out");
+        assert!(!feed.items[1].can_share);
+        let requests: Requests = serde_json::from_value(serde_json::json!({"requests": [
+            {"id": 1, "type": "capture", "itemId": 3, "status": "pending", "public": true, "recipients": [], "message": "", "requester": {"id": 1, "name": "A"}, "approver": {"id": 2, "name": "B"}, "createdAt": "2026-11-19T00:00:00Z"},
+            {"id": 2, "type": "capture", "itemId": 3, "status": "expired"},
+            {"id": 3, "type": "picture", "itemId": 4, "status": "denied"}
+        ]}))
+        .unwrap();
+        assert_eq!(requests.requests.iter().map(|r| r.id).collect::<Vec<_>>(), [1, 3]);
+    }
+
     #[test]
     fn paging_is_opaque_deduplicated_and_stops_repeated_cursor() {
         let mut feed: Feed = serde_json::from_str(include_str!("../tests/fixtures/captures.json")).unwrap();

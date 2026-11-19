@@ -662,7 +662,15 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     service.usage.open(crate::usage::spool::folder());
     crate::usage::spool::set_current(service.usage.clone());
     let ctl = service.ctl.clone();
-    service.usage.clone().run(move || ctl.view().settings.usage.enabled);
+    let who = service.ctl.clone();
+    service.usage.clone().run(
+        move || ctl.view().settings.usage.enabled,
+        move || {
+            let snap = who.view();
+            let known = !matches!(snap.account.state, crate::state::AccountState::Unknown | crate::state::AccountState::Checking { .. });
+            known.then(|| (crate::usage::perf::agent_driving(&snap), crate::usage::perf::team_code(&snap)))
+        },
+    );
     service.accept(listener)?;
 
     if !hidden {

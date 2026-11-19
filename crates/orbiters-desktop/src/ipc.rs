@@ -618,6 +618,8 @@ impl Client {
             ToClient::Snapshot { snapshot } => Arc::new(*snapshot),
             other => anyhow::bail!("{}", orbiters_i18n::tr!("unexpected first message from the service: {message}", message = format!("{other:?}"))),
         };
+        // Every process that takes the service's state reads Orbiters in the app's environment, never Unity's switch.
+        crate::controller::follow_environment(first.settings.development);
         let client = Arc::new(Self {
             writer: Mutex::new(writer),
             state: Mutex::new(Held { service: first.clone(), shown: first, closed: false, smoothing: Vec::new(), next_smoothing: 0 }),
@@ -782,6 +784,7 @@ impl Client {
     fn take_snapshot(&self, snapshot: Arc<Snapshot>) {
         let mut held = self.state.lock().unwrap();
         if held.closed { return; }
+        crate::controller::follow_environment(snapshot.settings.development);
         held.service = snapshot.clone();
         held.shown = snapshot;
         held.follow_smoothing();
@@ -802,6 +805,9 @@ impl Client {
             return false;
         }
         let next = Arc::new(next);
+        if next.settings.development != held.service.settings.development {
+            crate::controller::follow_environment(next.settings.development);
+        }
         held.service = next.clone();
         held.shown = next;
         held.follow_smoothing();

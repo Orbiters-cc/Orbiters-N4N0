@@ -16,13 +16,16 @@ impl Proxy {
     pub fn new() -> anyhow::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
+        // Waits in `accept` (no polling while a page is open); `Drop` wakes it with a connection of its own.
         std::thread::spawn(move || {
             let count = Arc::new(AtomicUsize::new(0));
             while !flag.load(Ordering::Relaxed) {
                 if let Ok((s, _)) = listener.accept() {
+                    if flag.load(Ordering::Relaxed) {
+                        break;
+                    }
                     // Bounded, but well above Chromium's own 32 sockets a proxy: tunnels Chromium has let go may still be
                     // draining here, and a connection dropped at accept fails a page's request (a page that never loads).
                     if count.load(Ordering::Relaxed) >= 256 {
@@ -36,7 +39,7 @@ impl Proxy {
                         count.fetch_sub(1, Ordering::Relaxed);
                     });
                 } else {
-                    // Each new connection waits for this at most.
+                    // A failed accept (the system short of sockets): not a busy loop.
                     std::thread::sleep(Duration::from_millis(2));
                 }
             }
@@ -47,6 +50,8 @@ impl Proxy {
 impl Drop for Proxy {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // The accepting thread waits for a connection: this one ends it.
+        let _ = TcpStream::connect_timeout(&(std::net::Ipv4Addr::LOCALHOST, self.port).into(), Duration::from_secs(1));
     }
 }
 fn public(ip: IpAddr) -> bool {
@@ -178,6 +183,19 @@ mod tests {
         assert!(public("8.8.8.8".parse().unwrap()));
         assert!(public("192.0.78.24".parse().unwrap()));
         assert!(public("192.2.1.1".parse().unwrap()));
+    }
+    /// CORE-11: the proxy waits in `accept` rather than polling every 2 ms, and a page closing still ends it.
+    #[test]
+    fn a_closed_proxy_stops_listening() {
+        let proxy = Proxy::new().unwrap();
+        let port = proxy.port;
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_ok(), "listening");
+        drop(proxy);
+        let closed = (0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            TcpStream::connect_timeout(&(std::net::Ipv4Addr::LOCALHOST, port).into(), Duration::from_millis(200)).is_err()
+        });
+        assert!(closed, "the listener ended with the proxy");
     }
     #[test]
     fn blocked_request_never_arrives_at_local_service() {

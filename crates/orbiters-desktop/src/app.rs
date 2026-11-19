@@ -206,10 +206,9 @@ impl App {
         let snap = self.ctl.view();
         crate::language::follow(&snap.settings);
         orbiters_ui::fonts::follow_language(&ctx);
-        // This process reads Orbiters too (the Map explorer's public pages): from the environment the service uses.
-        if snap.settings.development != orbiters_update::development() {
-            crate::controller::use_environment(snap.settings.development);
-        }
+        // This process reads Orbiters too (the Map explorer's public pages): from the environment the service uses,
+        // production included (else Unity's switch would decide).
+        crate::controller::follow_environment(snap.settings.development);
         let now = anim::time(&ctx);
         let started = *self.started.get_or_insert(now);
         if self.visit == 0 {

@@ -567,10 +567,11 @@ unsafe fn run_sta(
             let raw = pending.borrow_mut().take();
             if let Some(raw) = raw {
                 let frame_navigation = *capture_navigation.borrow();
-                let v: serde_json::Value = serde_json::from_str(&raw)?;
-                cdp_async(&web, "Page.screencastFrameAck", serde_json::json!({"sessionId":v["sessionId"]}), &failures)?;
+                // The picture's text is read where it lies, not copied into a JSON value first (it is up to a few MB).
+                let v: Cast = serde_json::from_str(&raw)?;
+                cdp_async(&web, "Page.screencastFrameAck", serde_json::json!({"sessionId":v.session_id}), &failures)?;
                 last = Instant::now();
-                let bytes = base64::engine::general_purpose::STANDARD.decode(v["data"].as_str().unwrap_or(""))?;
+                let bytes = base64::engine::general_purpose::STANDARD.decode(v.data.as_bytes())?;
                 let (width, height, rgba) = decode_jpeg(&bytes)?;
                 if !current_frame(frame_navigation, *navigation.borrow(), *active.borrow()) {
                     continue;
@@ -590,6 +591,15 @@ unsafe fn run_sta(
     // Close runs unconditionally through Resources, even if CDP or a browser process failed.
     Ok(())
 }
+/// `Page.screencastFrame`'s parameters: the picture (JPEG in base64) and the id to acknowledge it with.
+#[derive(serde::Deserialize)]
+struct Cast<'a> {
+    #[serde(borrow, default)]
+    data: std::borrow::Cow<'a, str>,
+    #[serde(rename = "sessionId", default)]
+    session_id: serde_json::Value,
+}
+
 fn verify_profile(actual: &std::path::Path, owned: &std::path::Path) -> anyhow::Result<()> {
     anyhow::ensure!(std::fs::canonicalize(actual)? == std::fs::canonicalize(owned)?, "effective profile override rejected");
     Ok(())

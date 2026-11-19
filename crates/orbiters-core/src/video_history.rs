@@ -129,6 +129,8 @@ pub struct History {
     /// Each video's place in `videos`, by [`canonical`] link.
     #[serde(skip)]
     index: HashMap<String, usize>,
+    #[serde(skip)]
+    checkpoint: crate::Checkpoint,
 }
 
 impl History {
@@ -163,6 +165,18 @@ impl History {
         Ok(())
     }
 
+    /// Whether to save now ([`crate::Checkpoint`]): `moved`, the logs were read further since the last save.
+    pub fn save_due(&self, moved: bool) -> bool {
+        self.checkpoint.due(moved, std::time::Instant::now())
+    }
+
+    /// [`History::save`], remembered for [`History::save_due`] (a failure is tried again later).
+    pub fn checkpoint(&mut self, path: &Path) -> anyhow::Result<()> {
+        let saved = self.save(path);
+        self.checkpoint.saved(saved.is_ok(), std::time::Instant::now());
+        saved
+    }
+
     /// The latest played first, and each video's place known again.
     fn sort(&mut self) {
         self.videos.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.url.cmp(&b.url)));
@@ -187,7 +201,7 @@ impl History {
         }
         let key = canonical(url);
         let Some(&i) = self.index.get(&key) else {
-            self.videos.push(Played {
+            let new = Played {
                 url: url.to_string(),
                 first: at,
                 last: at,
@@ -195,7 +209,21 @@ impl History {
                 world_id: world_id.map(str::to_string),
                 world: world.map(str::to_string),
                 ..Default::default()
-            });
+            };
+            if self.videos.len() == MAX_VIDEOS {
+                // Full: the one kept least (played longest ago, then by link, as the sort orders them) goes, or the new
+                // one when it is that one, in place: no sort and no new index for every video a long history adds.
+                let worse = |a: &Played, b: &Played| a.last < b.last || (a.last == b.last && a.url > b.url);
+                let w = (0..self.videos.len()).reduce(|m, x| if worse(&self.videos[x], &self.videos[m]) { x } else { m }).expect("full");
+                if worse(&new, &self.videos[w]) {
+                    return false;
+                }
+                let gone = std::mem::replace(&mut self.videos[w], new);
+                self.index.remove(&canonical(&gone.url));
+                self.index.insert(key, w);
+                return true;
+            }
+            self.videos.push(new);
             self.index.insert(key, self.videos.len() - 1);
             if self.videos.len() > MAX_VIDEOS {
                 self.sort();
@@ -326,7 +354,11 @@ impl History {
                 log.world = Some(name.clone());
                 false
             }
-            LogEvent::Video { url, at: Some(at) } => self.record(url, *at, log.world_id.as_deref(), log.world.as_deref()),
+            LogEvent::Video { url, at: Some(at) } => {
+                let changed = self.record(url, *at, log.world_id.as_deref(), log.world.as_deref());
+                self.checkpoint.unsaved |= changed;
+                changed
+            }
             _ => false,
         }
     }
@@ -346,6 +378,7 @@ impl History {
         let v = &mut self.videos[i];
         let (title, channel) = found.map_or((None, None), |(t, c)| (Some(t), Some(c).filter(|c| !c.is_empty())));
         let changed = !v.looked_up || v.title != title || v.channel != channel;
+        self.checkpoint.unsaved |= changed;
         v.looked_up = true;
         if title.is_some() {
             v.title = title;
@@ -537,6 +570,32 @@ impl Bookmarks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AS-30: a full history keeps the same videos as a sort and a cut would, without sorting for each new one.
+    #[test]
+    fn a_full_history_lets_the_oldest_go_as_a_sort_would() {
+        let mut h = History::default();
+        let url = |i: u64| format!("https://example.com/v{i}");
+        for i in 0..MAX_VIDEOS as u64 {
+            assert!(h.record(&url(i), 10_000 + i * 1000, None, None));
+        }
+        h.sort();
+        // Older than every kept one: not kept, nothing changed.
+        assert!(!h.record(&url(9_000_000), 5, None, None));
+        assert_eq!(h.videos.len(), MAX_VIDEOS);
+        assert!(h.get(&url(9_000_000)).is_none());
+        // Newer: the oldest goes. Same last play as the next oldest: the link orders them, as the sort does.
+        assert!(h.record(&url(9_000_001), 99_999_999, None, None));
+        assert!(h.get(&url(0)).is_none() && h.get(&url(9_000_001)).is_some());
+        let tie = 10_000 + 1000;
+        assert!(h.record("https://example.com/a-first", tie, None, None), "sorts before v1 at the same time: v1 goes");
+        assert!(h.get(&url(1)).is_none() && h.get("https://example.com/a-first").is_some());
+        assert_eq!(h.videos.len(), MAX_VIDEOS);
+        // Each one still found where it is.
+        for v in &h.videos {
+            assert_eq!(h.get(&v.url).map(|p| &p.url), Some(&v.url));
+        }
+    }
 
     const A: &str = "wrld_99123966-6b37-4b5b-9f3c-0a1b2c3d4e5f";
     const B: &str = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";

@@ -437,12 +437,12 @@ impl Source {
             progress.total.store(bytes.len() as u64, Ordering::Relaxed);
             progress.read.store(bytes.len() as u64, Ordering::Relaxed);
         };
-        if let Some((bytes, validators)) = &kept {
-            if !validators.askable() {
-                disk.touch(name);
-                whole(bytes);
-                return Ok(bytes.clone());
-            }
+        // Nothing to ask the storage with: the kept file as it is (moved out, not copied: it can be tens of MB).
+        if kept.as_ref().is_some_and(|(_, validators)| !validators.askable()) {
+            let (bytes, _) = kept.expect("just looked");
+            disk.touch(name);
+            whole(&bytes);
+            return Ok(bytes);
         }
         match self.fetch(url, kept.as_ref().map(|(_, v)| v), progress) {
             Ok((None, _)) => {
@@ -470,7 +470,8 @@ impl Source {
 
     /// Downloads `url` (`None` when `kept` is still what the storage has), with what the storage said of it.
     fn fetch(&self, url: &str, kept: Option<&Validators>, progress: &Progress) -> anyhow::Result<(Option<Vec<u8>>, Validators)> {
-        let mut request = self.api.agent().get(url);
+        // Up to tens of MB: a download's time, not an API call's 90 s.
+        let mut request = self.api.get_transfer(url);
         if let Some(v) = kept {
             if let Some(etag) = &v.etag {
                 request = request.header("If-None-Match", etag);

@@ -78,6 +78,8 @@ pub struct History {
     /// The name of the world being joined ("Entering Room" comes right before the join).
     #[serde(skip)]
     entering: Option<String>,
+    #[serde(skip)]
+    checkpoint: crate::Checkpoint,
 }
 
 pub fn history_file() -> PathBuf {
@@ -113,6 +115,18 @@ impl History {
         }
         crate::write_atomic(path, &serde_json::to_vec(self)?)?;
         Ok(())
+    }
+
+    /// Whether to save now ([`crate::Checkpoint`]): `moved`, the logs were read further since the last save.
+    pub fn save_due(&self, moved: bool) -> bool {
+        self.checkpoint.due(moved, std::time::Instant::now())
+    }
+
+    /// [`History::save`], remembered for [`History::save_due`] (a failure is tried again later).
+    pub fn checkpoint(&mut self, path: &Path) -> anyhow::Result<()> {
+        let saved = self.save(path);
+        self.checkpoint.saved(saved.is_ok(), std::time::Instant::now());
+        saved
     }
 
     /// Adds a visit (the same world at the same second counts once); returns whether it was new.
@@ -194,6 +208,7 @@ impl History {
         if !self.instances_read {
             self.instances_read = true;
             self.logs.clear();
+            self.checkpoint.unsaved = true;
         }
         let mut changed = false;
         let mut budget = READ_BUDGET;
@@ -264,6 +279,12 @@ impl History {
 
     // A join reads "Entering Room: <name>", "Joining wrld_…:<instance>", then "Joining or Creating Room: <name>".
     fn observe(&mut self, event: &LogEvent) -> bool {
+        let changed = self.observe_event(event);
+        self.checkpoint.unsaved |= changed;
+        changed
+    }
+
+    fn observe_event(&mut self, event: &LogEvent) -> bool {
         match event {
             LogEvent::Joining { world_id, instance, at: Some(at) } => {
                 let mut changed = self.record(world_id, *at);
@@ -516,7 +537,14 @@ impl ShotIndex {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        crate::write_atomic(path, &serde_json::to_vec(self)?)?;
+        // A picture whose name is not Unicode (Windows allows it) cannot be a JSON key: it stays in the gallery and is
+        // read again at each start, rather than no picture's reading ever being kept.
+        #[derive(Serialize)]
+        struct Saved<'a> {
+            files: BTreeMap<&'a Path, &'a ShotEntry>,
+        }
+        let files = self.files.iter().filter(|(p, _)| p.to_str().is_some()).map(|(p, e)| (p.as_path(), e)).collect();
+        crate::write_atomic(path, &serde_json::to_vec(&Saved { files })?)?;
         Ok(())
     }
 
@@ -644,6 +672,24 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CORE-17 (a): one picture whose name is not Unicode no longer keeps the whole index from being saved.
+    #[cfg(windows)]
+    #[test]
+    fn a_picture_with_a_name_json_cannot_hold_does_not_stop_the_index() {
+        use std::os::windows::ffi::OsStringExt;
+        let dir = std::env::temp_dir().join(format!("orbiters-shots-{}", uuid::Uuid::new_v4()));
+        let file = dir.join("screenshots.json");
+        let entry = ShotEntry { size: 1, modified: 2, info: ShotInfo::default(), sha256: None };
+        let mut index = ShotIndex::default();
+        index.files.insert(dir.join("good.png"), entry.clone());
+        index.files.insert(dir.join(std::ffi::OsString::from_wide(&[0xD800, b'.' as u16, b'p' as u16])), entry.clone());
+        index.save(&file).unwrap();
+        let read = ShotIndex::load(&file);
+        assert_eq!(read.files.len(), 1);
+        assert_eq!(read.files.get(&dir.join("good.png")), Some(&entry));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The history's file is saved whenever VRChat's log was read further; those who show the visits make their lists
     /// again only when the visits changed.

@@ -100,7 +100,9 @@ pub fn arguments(mode: LaunchMode, settings: &LaunchSettings, destination: Optio
     }
     out.extend(settings.options(mode));
     if let Some((world, instance)) = destination {
-        if crate::vrchat_log::is_world_id(world) && !instance.is_empty() && !instance.contains(char::is_whitespace) && instance.len() <= 512 {
+        // Only what an instance is made of (its number and tags): no space, quote or link character can become an
+        // option of its own on the command line Steam builds again.
+        if crate::vrchat_log::is_world_id(world) && !instance.is_empty() && crate::vrchat_log::is_instance(instance) {
             out.push(link(world, instance));
         }
     }
@@ -211,6 +213,11 @@ mod tests {
         assert_eq!(args, ["--no-vr".to_string(), format!("vrchat://launch?ref=orbiters.cc&id={w}:777~friends(usr_x)~region(jp)")]);
         let bad = arguments(LaunchMode::Desktop, &LaunchSettings { performance: false, ..Default::default() }, Some((w, "1 --evil")));
         assert_eq!(bad, ["--no-vr"], "nothing that would split into another option");
+        for bad in ["1\"--evil", "1&id=wrld_x", "1%20x", "1^x", "1?x", "1#x", ""] {
+            assert_eq!(arguments(LaunchMode::Desktop, &LaunchSettings { performance: false, ..Default::default() }, Some((w, bad))), ["--no-vr"], "{bad}");
+        }
+        let group = "12345~group(grp_00000000-0000-4000-8000-000000000001)~groupAccessType(plus)~canRequestInvite~region(use)~nonce(ab12)";
+        assert_eq!(arguments(LaunchMode::Vr, &LaunchSettings { performance: false, ..Default::default() }, Some((w, group))).len(), 1);
         assert_eq!(arguments(LaunchMode::Vr, &LaunchSettings { performance: false, ..Default::default() }, Some(("wrld_bad", "1"))), Vec::<String>::new());
     }
 

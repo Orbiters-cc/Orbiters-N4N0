@@ -378,9 +378,14 @@ fn cache_dir() -> PathBuf {
 /// Orbiters for public reads. `ORBITERS_PUBLIC_API` points them at another server (screenshots against a disposable
 /// one); what that server says is then kept in memory only.
 fn public_api() -> (Api, bool) {
+    public_api_of(Server::current())
+}
+
+/// [`public_api`] of `server`.
+fn public_api_of(server: Server) -> (Api, bool) {
     match std::env::var("ORBITERS_PUBLIC_API") {
         Ok(base) if !base.is_empty() => (Api::at(&base), false),
-        _ => (Api::new(Server::current()), true),
+        _ => (Api::new(server), true),
     }
 }
 
@@ -405,23 +410,33 @@ const LISTED_FOR: u64 = 3 * 86_400;
 const UNLISTED_FOR: u64 = 86_400;
 
 /// Worlds' pages, fetched one at a time on a background thread as cards come into view.
+/// Each environment's pages apart (in memory and on disk, a folder each): one server's page is never shown for the
+/// other, and a request goes to the server of the environment it was made in.
 pub struct Infos {
-    known: Arc<Mutex<HashMap<String, Info>>>,
-    asked: HashSet<String>,
-    tx: mpsc::Sender<String>,
+    known: Arc<Mutex<[HashMap<String, Info>; 2]>>,
+    asked: [HashSet<String>; 2],
+    tx: mpsc::Sender<(Server, String)>,
+}
+
+/// Where an environment's pages are in [`Infos`].
+fn env_index(server: Server) -> usize {
+    match server {
+        Server::Production => 0,
+        Server::Development => 1,
+    }
 }
 
 impl Infos {
     pub fn new(ctx: &egui::Context) -> Self {
-        let known: Arc<Mutex<HashMap<String, Info>>> = Arc::default();
-        let (tx, rx) = mpsc::channel::<String>();
+        let known: Arc<Mutex<[HashMap<String, Info>; 2]>> = Arc::default();
+        let (tx, rx) = mpsc::channel::<(Server, String)>();
         let (k, ctx) = (known.clone(), ctx.clone());
         std::thread::Builder::new()
             .name("world-infos".into())
             .spawn(move || {
-                let (api, keep) = public_api();
-                let dir = cache_dir().join("worlds");
-                while let Ok(id) = rx.recv() {
+                while let Ok((server, id)) = rx.recv() {
+                    let (api, keep) = public_api_of(server);
+                    let dir = cache_dir().join("worlds").join(server.cache_name());
                     let file = dir.join(format!("{id}.json"));
                     let cached = keep.then(|| std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<CachedInfo>(&b).ok())).flatten();
                     let fresh =
@@ -444,7 +459,7 @@ impl Infos {
                             Err(_) => cached.and_then(|c| c.page).map_or(Info::Unknown, |p| Info::Listed(Box::new(p))),
                         }
                     };
-                    k.lock().unwrap().insert(id, info);
+                    k.lock().unwrap()[env_index(server)].insert(id, info);
                     ctx.request_repaint();
                     if !fresh {
                         // Gentle on Orbiters (and on VRChat behind it).
@@ -453,23 +468,26 @@ impl Infos {
                 }
             })
             .expect("world infos thread");
-        Self { known, asked: HashSet::new(), tx }
+        Self { known, asked: Default::default(), tx }
     }
 
     /// The world's page once fetched; asks for it the first time.
     pub fn get(&mut self, id: &str) -> Option<Info> {
         // Called for every card in view at every frame: the id is copied only the first time.
-        if !self.asked.contains(id) {
-            self.asked.insert(id.to_string());
-            let _ = self.tx.send(id.to_string());
+        let server = Server::current();
+        let e = env_index(server);
+        if !self.asked[e].contains(id) {
+            self.asked[e].insert(id.to_string());
+            let _ = self.tx.send((server, id.to_string()));
         }
-        self.known.lock().unwrap().get(id).cloned()
+        self.known.lock().unwrap()[e].get(id).cloned()
     }
 
     /// Fetches it again (after sharing something there).
     pub fn refresh(&mut self, id: &str) {
-        let _ = std::fs::remove_file(cache_dir().join("worlds").join(format!("{id}.json")));
-        self.asked.remove(id);
+        let server = Server::current();
+        let _ = std::fs::remove_file(cache_dir().join("worlds").join(server.cache_name()).join(format!("{id}.json")));
+        self.asked[env_index(server)].remove(id);
     }
 }
 

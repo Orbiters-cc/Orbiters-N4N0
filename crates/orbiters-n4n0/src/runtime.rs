@@ -80,12 +80,12 @@ const VOICE_PRESS: Duration = Duration::from_millis(80);
 /// What of `outbox` goes at `now`, in order, and what waits. Two edges of VRChat's `/input/Voice` never go in one step (a late
 /// step would send a press and its release together, which VRChat may read in one frame, N4N0-12): the second waits
 /// [`VOICE_PRESS`] more.
-pub(crate) fn due(outbox: Vec<(Instant, Message)>, now: Instant) -> (Vec<Message>, Vec<(Instant, Message)>) {
+pub(crate) fn due_now(outbox: Vec<(Instant, Message)>, now: Instant) -> (Vec<Message>, Vec<(Instant, Message)>) {
     let (mut ready, mut waiting): (Vec<(Instant, Message)>, Vec<(Instant, Message)>) = outbox.into_iter().partition(|(t, _)| *t <= now);
     ready.sort_by_key(|(t, _)| *t);
     let mut out = Vec::with_capacity(ready.len());
     let mut voice = false;
-    for (at, message) in ready {
+    for (_, message) in ready {
         if message.0 == "/input/Voice" {
             if voice {
                 waiting.push((now + VOICE_PRESS, message));
@@ -1074,7 +1074,7 @@ impl N4n0 {
                 rt.wake_offer_until = None;
                 rt.voice.wake_offer = None;
             }
-            let (ready, waiting) = due(std::mem::take(&mut rt.outbox), now);
+            let (ready, waiting) = due_now(std::mem::take(&mut rt.outbox), now);
             rt.outbox = waiting;
             out.extend(ready);
             if rt.pins_due.is_some_and(|t| t <= now) {

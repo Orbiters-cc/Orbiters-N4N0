@@ -1278,7 +1278,7 @@ fn a_late_step_never_sends_a_voice_press_and_its_release_together() {
         (past + Duration::from_millis(80), ("/input/Voice".to_string(), OscType::Int(0))),
         (past, (parameter("Hoodie"), OscType::Bool(true))),
     ];
-    let (sent, waiting) = crate::runtime::due(outbox, now);
+    let (sent, waiting) = crate::runtime::due_now(outbox, now);
     assert_eq!(sent.iter().filter(|(a, _)| a == "/input/Voice").count(), 1, "{sent:?}");
     assert_eq!(sent[0], ("/input/Voice".to_string(), OscType::Int(1)), "the press first");
     assert_eq!(waiting.len(), 1);

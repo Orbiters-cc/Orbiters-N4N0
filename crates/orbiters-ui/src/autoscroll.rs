@@ -144,7 +144,12 @@ pub fn raw_input(ctx: &Context, raw: &mut RawInput) {
                 modifiers: Modifiers::NONE,
             });
         }
-        ctx.request_repaint();
+        // Frames while the pointer is past the dead zone (the first one too, when no time has passed yet); inside it
+        // nothing scrolls, and a move of the pointer brings its own frame (it asked for frames at the screen's rate
+        // for as long as it stayed armed).
+        if step(a.pointer - a.origin, 1.0) != Vec2::ZERO {
+            ctx.request_repaint();
+        }
     }
     raw.events = out;
     ctx.data_mut(|d| d.insert_temp(id(), s));
@@ -225,6 +230,30 @@ mod tests {
 
     fn wheel(events: &[Event]) -> Vec2 {
         events.iter().map(|e| if let Event::MouseWheel { delta, .. } = e { *delta } else { Vec2::ZERO }).fold(Vec2::ZERO, |a, b| a + b)
+    }
+
+    /// Night PAGES-UI-1 (its autoscroll part): armed with the pointer inside the dead zone, nothing scrolls and no
+    /// frame is asked for; past it, frames come.
+    #[test]
+    fn armed_inside_the_dead_zone_asks_for_no_frame() {
+        let ctx = Context::default();
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = asked.clone();
+        ctx.set_request_repaint_callback(move |_| {
+            a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let at = pos2(200.0, 200.0);
+        frame(&ctx, 0.0, vec![Event::PointerMoved(at), press(PointerButton::Middle, true, at), press(PointerButton::Middle, false, at)]);
+        assert!(active(&ctx), "pressed and let go: it goes on");
+        let input = |time: f64, to: Pos2| {
+            let mut raw = RawInput { time: Some(time), events: vec![Event::PointerMoved(to)], ..Default::default() };
+            raw_input(&ctx, &mut raw);
+        };
+        let before = asked.load(std::sync::atomic::Ordering::SeqCst);
+        input(0.5, at + vec2(3.0, 0.0));
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), before, "inside the dead zone: no frame asked");
+        input(0.6, at + vec2(0.0, 80.0));
+        assert!(asked.load(std::sync::atomic::Ordering::SeqCst) > before, "past it: frames");
     }
 
     #[test]

@@ -199,22 +199,26 @@ impl super::Controller {
             anyhow::bail!("{}", tr("Move VRChat's camera once so Orbiters knows where it is, then try again."));
         };
         let pose: [f32; 6] = pose.try_into().expect("six values");
-        self.scan.lock().unwrap().recording = true;
-        if let Err(e) = self.start_capture(super::CapturePurpose::Short) {
-            self.scan.lock().unwrap().recording = false;
-            return Err(e);
-        }
-        // The recording this scan started: everything the scan does later is for it alone (C-2).
-        let owner = self.capture_serial.load(std::sync::atomic::Ordering::Acquire);
+        // The recording this scan started, its number issued with the start, its flag set under the start gate when the
+        // start is accepted: everything the scan does later is for it alone (C-2, verify-controller).
+        let owner = match self.start_capture_owned(super::CapturePurpose::Short, || self.scan.lock().unwrap().recording = true) {
+            Ok(owner) => owner,
+            Err(e) => {
+                let _gate = self.capture_start_gate.lock().unwrap();
+                if !self.is_capturing() {
+                    self.scan.lock().unwrap().recording = false;
+                }
+                return Err(e);
+            }
+        };
         let ctl = self.clone();
         let flight = std::thread::Builder::new().name("scan".into()).spawn(move || {
             let started = Instant::now();
             while ctl.snapshot.lock().unwrap().capture.state != CaptureState::Recording {
                 if started.elapsed() > Duration::from_secs(8) || !ctl.owns_recording(owner) {
-                    // Its flag only while no other recording began (that one may be a scan of its own).
-                    if ctl.capture_serial.load(std::sync::atomic::Ordering::Acquire) == owner {
-                        ctl.scan.lock().unwrap().recording = false;
-                    }
+                    // Its flag, and a start still under way after 8 s (it would become a recording nobody flies or
+                    // stops), only while no other recording began: that one may be a scan of its own.
+                    ctl.give_up_start_of(owner, || ctl.scan.lock().unwrap().recording = false);
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -276,8 +280,7 @@ impl super::Controller {
         if let Err(e) = flight {
             // The recording was accepted, but nothing would fly it or end it: it ends here, as an ordinary one (no
             // flight: nothing of it is a scan to reconstruct).
-            self.scan.lock().unwrap().recording = false;
-            self.stop_recording_of(owner);
+            self.give_up_start_of(owner, || self.scan.lock().unwrap().recording = false);
             return Err(e.into());
         }
         Ok(())

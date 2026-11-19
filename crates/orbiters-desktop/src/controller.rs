@@ -231,7 +231,11 @@ pub struct Controller {
     /// The instances Go and Invite may send the person to (controller/vrchat_data.rs).
     instance_permits: Mutex<vrchat_data::InstancePermits>,
     /// The thread that writes the settings, the newest only ([`Controller::queue_save`]).
-    settings_writer: Mutex<Option<(mpsc::Sender<(u64, Settings)>, std::thread::JoinHandle<()>)>>,
+    settings_writer: Mutex<SettingsWriter>,
+    /// The highest settings revision written to disk, by the writing thread or after it closed (CTL-1).
+    settings_written: Arc<AtomicU64>,
+    #[cfg(test)]
+    test_settings_writes: Arc<Mutex<Vec<Settings>>>,
     /// How many times the settings were changed: taken under `snapshot` with the change, so the writer can tell the
     /// newer of two copies whatever order they reach it in.
     settings_revision: AtomicU64,
@@ -560,7 +564,10 @@ impl Controller {
             calls: Mutex::new(calls::CallsRuntime::default()),
             updates: Mutex::new(update::UpdateRuntime::default()),
             cleanup: Mutex::new(cleanup::CleanupRuntime::default()),
-            settings_writer: Mutex::new(None),
+            settings_writer: Mutex::new(SettingsWriter::Idle),
+            settings_written: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            test_settings_writes: Arc::default(),
             instance_permits: Mutex::default(),
             lend_gate: Mutex::new(()),
             settings_revision: AtomicU64::new(0),
@@ -993,6 +1000,12 @@ impl Controller {
                 } else {
                     std::mem::take(&mut self.scan.lock().unwrap().recording)
                 };
+                // The same for a 3D picture (its flag, what it is of, who it left out), and the reason it has no
+                // keyframe, all before Idle: after it, the next picture's own are there (verify-controller).
+                let ended = self.capture_serial.load(Ordering::Acquire);
+                let picture = if restarting { None } else { self.take_picture_ended() };
+                let nothing = !restarting && manifest.stats.frames > 0 && manifest.stats.keyframes == 0;
+                let why = nothing.then(|| self.no_strip_reason());
                 self.update(|s| {
                     if !restarting {
                         s.capture.state = CaptureState::Idle;
@@ -1004,13 +1017,10 @@ impl Controller {
                 });
                 self.bump_library();
                 // Frames, but not one with a pose: no capture, whatever a green "saved" would say, and nothing to reconstruct.
-                let nothing = !restarting && manifest.stats.frames > 0 && manifest.stats.keyframes == 0;
-                if nothing {
-                    self.burst.lock().unwrap().recording = false;
-                    let why = self.no_strip_reason();
-                    // Only on this recording: a capture started since (the state went Idle above) keeps its own.
+                if let Some(why) = why {
+                    // Only on this recording: one started since (it took the next number) keeps its own.
                     self.update_if(|s| {
-                        let ours = s.capture.session_dir == session && !s.is_capturing();
+                        let ours = self.no_recording_since(ended) && !s.is_capturing();
                         if ours {
                             s.capture.no_strip = Some(why);
                         }
@@ -1039,7 +1049,7 @@ impl Controller {
                 }
                 if !restarting {
                     self.world_import_saved(session.clone());
-                    self.burst_saved(session.clone());
+                    self.burst_saved(session.clone(), picture.filter(|_| !nothing));
                     self.scan_saved(session.filter(|_| was_scan && !nothing));
                     self.capture_ended();
                 }
@@ -1086,6 +1096,22 @@ impl Controller {
         })
     }
 
+    /// A start that is a picture's or a scan's own: it fails when anything records or is being saved (it would adopt
+    /// that recording), `claim` runs under the start gate the moment it is accepted (the flag that says what it is
+    /// for), and the number of the recording it started is handed back (verify-controller, C-2, CTL2-7).
+    pub(super) fn start_capture_owned(self: &Shared, purpose: CapturePurpose, claim: impl FnOnce()) -> anyhow::Result<u64> {
+        let (name, dolly) = self.with_settings(|s| (s.spout_sender.clone(), s.dolly_streams));
+        let (name, extra) = if dolly {
+            (if name.is_empty() { dolly::MAIN_SENDER.to_string() } else { name }, dolly::EXTRA_SENDERS.map(String::from).to_vec())
+        } else {
+            (name, Vec::new())
+        };
+        let _ = purpose;
+        let generation = self.stop_generation.load(Ordering::Acquire);
+        let started = self.start_segment_claimed(SourceSpec::Spout { name, extra }, false, false, generation, false, Some(claim))?;
+        started.ok_or_else(|| anyhow::anyhow!("{}", tr("A recording is under way: stop it first.")))
+    }
+
     fn start_with(self: &Shared, source: SourceSpec, importing: bool, from_osc: bool) -> anyhow::Result<()> {
         let stop_generation = self.stop_generation.load(Ordering::Acquire);
         self.start_with_generation(source, importing, from_osc, stop_generation)
@@ -1096,12 +1122,31 @@ impl Controller {
     }
 
     fn start_segment(self: &Shared, source: SourceSpec, importing: bool, from_osc: bool, stop_generation: u64, rollover: bool) -> anyhow::Result<()> {
+        self.start_segment_claimed(source, importing, from_osc, stop_generation, rollover, None::<fn()>).map(|_| ())
+    }
+
+    /// [`Controller::start_segment`]; with `claim` (a picture's or a scan's own start), refused while anything records
+    /// or is being saved, `claim` run under the gate once accepted. `Some(number)`: the recording this call started (or,
+    /// for a world split, the one it goes on with); `None`: nothing started (one records already, or a stop came).
+    fn start_segment_claimed(
+        self: &Shared,
+        source: SourceSpec,
+        importing: bool,
+        from_osc: bool,
+        stop_generation: u64,
+        rollover: bool,
+        claim: Option<impl FnOnce()>,
+    ) -> anyhow::Result<Option<u64>> {
         let _start = self.capture_start_gate.lock().unwrap();
+        let exclusive = claim.is_some();
         anyhow::ensure!(self.stop_generation.load(Ordering::Acquire) == stop_generation, "{}", tr("Finish the current capture first."));
         if rollover { anyhow::ensure!(matches!(self.view().capture.state,CaptureState::Recording|CaptureState::Paused), "{}", tr("Finish the current capture first.")); }
-        if !rollover && matches!(self.view().capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused) { return Ok(()); }
-        if !rollover {
-            self.capture_serial.fetch_add(1, Ordering::AcqRel);
+        if !rollover && matches!(self.view().capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused) {
+            anyhow::ensure!(!exclusive, "{}", tr("A recording is under way: stop it first."));
+            return Ok(None);
+        }
+        if exclusive {
+            self.ensure_capture_idle()?;
         }
         anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "{}", tr("Orbiters - N4N0 is quitting."));
         let settings = self.settings();
@@ -1115,10 +1160,20 @@ impl Controller {
         }
         if self.snapshot.lock().unwrap().capture.state == CaptureState::Stopping {
             anyhow::ensure!(!rollover, "{}", tr("Finish the current capture first."));
-            // The last session is still being saved: this one starts once it is (`capture_ended`).
+            // The last session is still being saved: this one starts once it is (`capture_ended`), and gets its number
+            // then (a start refused or queued takes none: it would end what the last flight still owes).
             *self.pending_start.lock().unwrap() = Some((source, importing, from_osc, stop_generation));
-            return Ok(());
+            return Ok(None);
         }
+        // Accepted: what it is for, then its number, under the gate (nothing else starts in between).
+        if let Some(claim) = claim {
+            claim();
+        }
+        let number = if rollover {
+            self.capture_serial.load(Ordering::Acquire)
+        } else {
+            self.capture_serial.fetch_add(1, Ordering::AcqRel) + 1
+        };
         let cmd = StartCapture {
             source: source.clone(),
             sessions_dir: settings.sessions_dir.clone(),
@@ -1204,7 +1259,7 @@ impl Controller {
                 s.capture.from_osc = false;
             });
             self.capture_ended();
-            return Ok(());
+            return Ok(None);
         };
         if let Err(e) = sent {
             self.put_vrchat_back();
@@ -1216,7 +1271,7 @@ impl Controller {
             self.capture_ended();
             return Err(e);
         }
-        Ok(())
+        Ok(Some(number))
     }
 
     /// The recording ended or never started: no more values to the worker, and VRChat's camera and the capture
@@ -1246,6 +1301,33 @@ impl Controller {
         }
         if let Err(e) = self.stop_capture() {
             self.notify(NoticeKind::Error, e.to_string());
+        }
+    }
+
+    /// Does `effect` (an OSC message, the rig, a mask) for `owner`'s recording only: checked and done under the start
+    /// gate, so no other recording can begin between the check and the effect. Whether it was done.
+    pub(super) fn for_recording(&self, owner: u64, effect: impl FnOnce()) -> bool {
+        let _gate = self.capture_start_gate.lock().unwrap();
+        let ours = self.owns_recording(owner);
+        if ours {
+            effect();
+        }
+        ours
+    }
+
+    /// A flight that gives its start up (it never reached Recording, or its thread could not start): `flag` (what said
+    /// the recording was a picture's or a scan's) goes, and the start is stopped when it is still under way, all under
+    /// the gate; nothing when another recording began since (its flag and recording are its own).
+    pub(super) fn give_up_start_of(self: &Shared, owner: u64, flag: impl FnOnce()) {
+        let _gate = self.capture_start_gate.lock().unwrap();
+        if !self.no_recording_since(owner) {
+            return;
+        }
+        flag();
+        if self.is_capturing() {
+            if let Err(e) = self.stop_capture() {
+                self.notify(NoticeKind::Error, e.to_string());
+            }
         }
     }
 
@@ -2025,40 +2107,65 @@ impl Controller {
     /// the newest of a burst (by `revision`, not by arrival) and writes it once nothing changed for [`SAVE_QUIET`].
     fn queue_save(self: &Shared, revision: u64, settings: Settings) {
         let mut writer = self.settings_writer.lock().unwrap();
-        if writer.is_none() {
-            let (tx, rx) = mpsc::channel::<(u64, Settings)>();
-            let ctl = Arc::downgrade(self);
-            let write = move |s: Settings| {
-                // Tests never touch the person's settings file.
-                if cfg!(test) {
-                    return;
-                }
-                if let Err(e) = s.save() {
-                    if let Some(ctl) = ctl.upgrade() {
-                        ctl.notify(NoticeKind::Error, tr!("Could not save the settings: {error}", error = e));
+        match &*writer {
+            SettingsWriter::Idle => {
+                let (tx, rx) = mpsc::channel::<(u64, Settings)>();
+                let (mut write, written) = (self.settings_sink(), self.settings_written.clone());
+                let thread = std::thread::Builder::new()
+                    .name("settings-writer".into())
+                    .spawn(move || write_settings_in_order(rx, SAVE_QUIET, &written, &mut write));
+                match thread {
+                    Ok(thread) => {
+                        let _ = tx.send((revision, settings));
+                        *writer = SettingsWriter::Running(tx, thread);
                     }
+                    Err(e) => eprintln!("settings writer: {e}"),
                 }
-            };
-            let thread = std::thread::Builder::new()
-                .name("settings-writer".into())
-                .spawn(move || write_settings_in_order(rx, SAVE_QUIET, write));
-            match thread {
-                Ok(thread) => *writer = Some((tx, thread)),
-                Err(e) => {
-                    eprintln!("settings writer: {e}");
-                    return;
+            }
+            SettingsWriter::Running(tx, _) => {
+                let _ = tx.send((revision, settings));
+            }
+            // A change applied after the last flush (a link still talking while the app quits): written here and now,
+            // under this lock, and only when it is newer than what is on disk. A second writer started then began from
+            // nothing and could write an older copy over the flushed one (verify-controller, CTL-1).
+            SettingsWriter::Closed => {
+                if revision > self.settings_written.load(Ordering::SeqCst) && (self.settings_sink())(settings) {
+                    self.settings_written.store(revision, Ordering::SeqCst);
                 }
             }
         }
-        if let Some((tx, _)) = writer.as_ref() {
-            let _ = tx.send((revision, settings));
+    }
+
+    /// Where settings are written: the settings file, a notice when that fails (`false`). Tests keep them in memory.
+    fn settings_sink(self: &Shared) -> impl FnMut(Settings) -> bool + Send + 'static {
+        #[cfg(test)]
+        {
+            let writes = self.test_settings_writes.clone();
+            move |s: Settings| {
+                writes.lock().unwrap().push(s);
+                true
+            }
+        }
+        #[cfg(not(test))]
+        {
+            let ctl = Arc::downgrade(self);
+            move |s: Settings| match s.save() {
+                Ok(()) => true,
+                Err(e) => {
+                    if let Some(ctl) = ctl.upgrade() {
+                        ctl.notify(NoticeKind::Error, tr!("Could not save the settings: {error}", error = e));
+                    }
+                    false
+                }
+            }
         }
     }
 
-    /// Writes the settings still waiting, and stops the writing thread (the app quits).
+    /// Writes the settings still waiting, and stops the writing thread (the app quits). The slot stays closed, held
+    /// through the join: nothing writes beside the last flush, and what comes after it is written by `queue_save`.
     fn flush_settings(&self) {
-        let writer = self.settings_writer.lock().unwrap().take();
-        if let Some((tx, thread)) = writer {
+        let mut writer = self.settings_writer.lock().unwrap();
+        if let SettingsWriter::Running(tx, thread) = std::mem::replace(&mut *writer, SettingsWriter::Closed) {
             drop(tx);
             let _ = thread.join();
         }
@@ -3245,15 +3352,25 @@ fn spawn_watchers(ctl: Shared) {
 /// The settings writer's loop: waits for [`SAVE_QUIET`] of quiet after a change, then writes the newest copy it was
 /// given. Newest is the highest revision, kept across writes too: a copy numbered lower than one already written (a
 /// thread that applied first and queued last) is never written over it.
-fn write_settings_in_order(rx: mpsc::Receiver<(u64, Settings)>, quiet: Duration, mut write: impl FnMut(Settings)) {
-    let mut written = 0u64;
+/// The settings writer's state: not started, running, or closed by the last flush (the app quits).
+enum SettingsWriter {
+    Idle,
+    Running(mpsc::Sender<(u64, Settings)>, std::thread::JoinHandle<()>),
+    Closed,
+}
+
+fn write_settings_in_order(rx: mpsc::Receiver<(u64, Settings)>, quiet: Duration, watermark: &AtomicU64, write: &mut impl FnMut(Settings) -> bool) {
+    let mut written = watermark.load(Ordering::SeqCst);
+    // A copy whose write failed waits for the next burst, unless a newer one comes (it holds the same changes).
+    let mut carried: Option<(u64, Settings)> = None;
     while let Ok(first) = rx.recv() {
-        let mut latest = Some(first).filter(|(r, _)| *r > written);
+        let mut latest = carried.take().filter(|(r, _)| *r > written);
         let keep = |latest: &mut Option<(u64, Settings)>, (r, s): (u64, Settings)| {
             if r > latest.as_ref().map_or(written, |(l, _)| *l) {
                 *latest = Some((r, s));
             }
         };
+        keep(&mut latest, first);
         let mut done = false;
         loop {
             match rx.recv_timeout(quiet) {
@@ -3266,10 +3383,20 @@ fn write_settings_in_order(rx: mpsc::Receiver<(u64, Settings)>, quiet: Duration,
             }
         }
         if let Some((r, s)) = latest {
-            written = r;
-            write(s);
+            if write(s.clone()) {
+                written = r;
+                watermark.store(r, Ordering::SeqCst);
+            } else {
+                carried = Some((r, s));
+            }
         }
         if done {
+            // The last flush: one more try for a copy that failed.
+            if let Some((r, s)) = carried.take() {
+                if write(s) {
+                    watermark.store(r, Ordering::SeqCst);
+                }
+            }
             return;
         }
     }
@@ -3300,9 +3427,11 @@ mod tests {
             let (wrote_tx, wrote) = mpsc::channel();
             let writer = std::thread::spawn(move || {
                 let mut written = Vec::new();
-                super::write_settings_in_order(rx, quiet, |s| {
+                let watermark = std::sync::atomic::AtomicU64::new(0);
+                super::write_settings_in_order(rx, quiet, &watermark, &mut |s: Settings| {
                     written.push(s.storage_limit_gb);
                     let _ = wrote_tx.send(());
+                    true
                 });
                 written
             });
@@ -3318,6 +3447,29 @@ mod tests {
         assert_eq!(run(vec![(2, b.clone(), false), (1, a.clone(), false)]), vec![2.0], "reversed in one burst");
         assert_eq!(run(vec![(2, b.clone(), true), (1, a.clone(), false)]), vec![2.0], "the older after a write");
         assert_eq!(run(vec![(1, a.clone(), true), (2, b.clone(), false)]), vec![1.0, 2.0], "in order");
+    }
+
+    /// verify-controller (CTL-1 at shutdown): a change queued after the last flush never starts a second writer that writes
+    /// an older copy over the flushed one; a newer one is still written.
+    #[test]
+    fn a_change_after_the_last_flush_never_writes_an_older_copy() {
+        use orbiters_core::settings::Settings;
+        let ctl = super::Controller::new(Settings::default());
+        let with = |gb: f64| {
+            let mut s = Settings::default();
+            s.storage_limit_gb = gb;
+            s
+        };
+        let written = || ctl.test_settings_writes.lock().unwrap().iter().map(|s| s.storage_limit_gb).collect::<Vec<_>>();
+        ctl.queue_save(2, with(2.0));
+        ctl.flush_settings();
+        assert_eq!(written(), vec![2.0], "the flush wrote B");
+        // A applied first (revision 1) and queued late, after the flush.
+        ctl.queue_save(1, with(1.0));
+        ctl.flush_settings();
+        assert_eq!(written(), vec![2.0], "A is older than what is on disk");
+        ctl.queue_save(3, with(3.0));
+        assert_eq!(written(), vec![2.0, 3.0], "a newer change after the flush is written at once");
     }
 
     /// LIGHT-DESKTOP-9: the library is walked again when something changed, while recording, and every ten minutes;

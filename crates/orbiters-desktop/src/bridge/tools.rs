@@ -1645,10 +1645,16 @@ impl Bridge {
                 // been over for a moment, so that with both in one go the first click on anything only highlighted it.
                 self.send_own(s, &window, &[Input::MoveTo { x, y }])?;
                 std::thread::sleep(CLICK_HOVER);
+                // The person may have come back during the hover (BRIDGE-2): looked at again right before the press.
+                if let Some(paused) = self.paused_in(s) {
+                    return Err(paused_failure(&paused));
+                }
                 let hold = Hold::Button(button);
                 s.held.press(hold.clone(), Instant::now() + CLICK_HOLD * 5);
                 self.tell_guard(format!("down {}", hold.guard_line()));
-                let sent = self.send_own(s, &window, &[Input::Button { button, down: true }]);
+                // The pointer put back where the agent asked and the button pressed in one batch: no input of the person's
+                // can come between them, so the press is at (x, y) whatever the pointer did meanwhile.
+                let sent = self.send_own(s, &window, &[Input::MoveTo { x, y }, Input::Button { button, down: true }]);
                 if sent.is_ok() {
                     // Long enough for a game that samples its input each frame, at the frame rates it has with a capture running.
                     std::thread::sleep(CLICK_HOLD);

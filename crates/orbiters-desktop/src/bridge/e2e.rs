@@ -553,6 +553,22 @@ fn keyboard_and_mouse_go_only_into_the_foreground_game_window() {
 }
 
 #[test]
+fn a_click_is_called_off_when_the_person_comes_back_during_its_hover() {
+    // BRIDGE-2: the press came 500 ms after the pointer was placed, without looking at the person again.
+    let (game, bridge, _server, client) = lab("click-hover");
+    arrive(&client);
+    game.set_foreground(true);
+    let person = bridge.clone();
+    let back = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        person.heard(Heard::PersonInput);
+    });
+    client.fails("mouse", json!({ "action": "click", "x": 12, "y": 34 }), "paused_by_person");
+    back.join().unwrap();
+    assert!(!game.injected().iter().any(|i| matches!(i, Input::Button { .. })), "no press: {:?}", game.injected());
+}
+
+#[test]
 fn a_new_start_is_brought_forward_when_nobody_is_at_the_computer_and_says_how_that_went() {
     let (game, bridge, _server, client) = lab("forward");
     // Windows says no: told, and the keys stay refused.

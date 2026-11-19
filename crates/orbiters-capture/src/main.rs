@@ -10,6 +10,18 @@
 //! * `orbiters-capture verify <raw capture folder> [--frames N]`
 //! * `orbiters-capture list-sources`
 
+/// Every `eprintln!` of the worker writes to stderr and lets a failed write go, where std's panics: stderr is the
+/// service's pipe, and when the service goes (an update, a crash) its end closes while the worker is still to finish
+/// the session it records (manifest, audio, tracking). std's `eprintln!` then killed the worker in the middle of
+/// `finish` ("failed printing to stderr: The pipe is being closed", logs 2026-11-12; REL-1). Defined before the
+/// modules, so it is the `eprintln!` all of them use.
+macro_rules! eprintln {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), $($t)*);
+    }};
+}
+
 mod audio;
 mod coverage;
 mod performance;

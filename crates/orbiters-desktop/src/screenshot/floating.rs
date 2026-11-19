@@ -69,6 +69,21 @@ pub(super) fn shots(out: &Path, settings: &Settings) -> anyhow::Result<()> {
         save_png(&path, &over_ground(&px, panel::BAR_PX[0], panel::BAR_PX[1]))?;
         println!("{}", path.display());
     }
+    // "Talk with N4N0?" before the eyes (N4N0-11): in every language, at rest and under a laser, half its time left.
+    let [w, h] = crate::wake_offer::VR_PX;
+    for language in orbiters_i18n::Language::ALL {
+        for (state, hover) in [("rest", false), ("laser", true)] {
+            let mut canvas = Canvas::new(w, h);
+            orbiters_i18n::in_language(language, || {
+                for _ in 0..2 {
+                    canvas.paint(0.0, |p| crate::wake_offer::paint_vr(p, hover, 0.5));
+                }
+            });
+            let path = out.join(format!("wake-offer-vr-{}-{state}.png", language.tag()));
+            save_png(&path, &over_ground(canvas.pixels(), w, h))?;
+            println!("{}", path.display());
+        }
+    }
     // The watch: closed, then open under a laser, side by side.
     let n = watch::PX;
     let mut both = vec![0u8; (n * 2 * n * 4) as usize];

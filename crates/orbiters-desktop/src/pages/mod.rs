@@ -151,23 +151,16 @@ pub fn new_search(last: &mut Option<String>, query: &str) -> bool {
 }
 
 /// The cache the pages keep what they fetch or make in (the editor's downloads, the drag's files): the app's own, or
-/// for tests a folder of this process under the system's temporary folder. Tests never read or write the person's own
-/// folders, by construction (night4: a test of the editor computed, and could have filled, the real cache).
+/// in a test build the test process's own (`orbiters_core::paths::test_roots`, night6: every per-user folder of every
+/// test is there, by construction).
 pub fn cache_root() -> std::path::PathBuf {
-    #[cfg(test)]
-    {
-        test_root().join("cache")
-    }
-    #[cfg(not(test))]
-    {
-        orbiters_core::paths::cache_dir()
-    }
+    orbiters_core::paths::cache_dir()
 }
 
 /// Tests: this process's own folder for what they write.
 #[cfg(test)]
 pub fn test_root() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("orbiters-desktop-tests-{}", std::process::id()))
+    orbiters_core::paths::test_roots().config.parent().expect("the test root").to_path_buf()
 }
 
 /// Who a page's work for Orbiters is for: the environment and the account's key ([`AccountFollow::see`]).

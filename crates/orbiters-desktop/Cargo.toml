@@ -67,6 +67,7 @@ objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
 
 [dev-dependencies]
 orbiters-core = { workspace = true, features = ["test-support"] }
+dirs = { workspace = true }
 # Draws the QR codes the scanner's tests read.
 qrcode = { version = "0.14", default-features = false }
 # Reads back the SPZ files Export writes (version 3: one gzip stream).

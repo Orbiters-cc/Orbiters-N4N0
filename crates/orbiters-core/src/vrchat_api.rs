@@ -686,7 +686,8 @@ impl Client {
             friends: None,
             instances: HashMap::new(),
             world_lists: HashMap::new(),
-            store: dirs::data_local_dir().map(|d| d.join("Orbiters/vrchat-session.bin")),
+            // `%LOCALAPPDATA%/Orbiters` as before, or the given folders' (a harness, a test: never the person's session).
+            store: Some(crate::paths::local_data_root().join("vrchat-session.bin")),
         }
     }
     pub fn operation(&self, deadline: Instant) -> Operation { self.allowed.operation(deadline) }

@@ -843,12 +843,15 @@ impl Settings {
             Ok(Some(text)) => text,
             Ok(None) => return Self::default(),
             Err(e) => {
-                // Unreadable for now: the defaults, and the file kept, as the next save will replace it.
+                // Unreadable for now: the defaults, until a save, which puts its changes on the file as it reads then
+                // ([`Settings::save_to`]) rather than these defaults over it.
                 eprintln!("settings: {}: {e}", path.display());
                 crate::keep_aside(path);
+                loaded_unreadable(path, true);
                 return Self::default();
             }
         };
+        loaded_unreadable(path, false);
         let migrated = migrated(&text);
         let (settings, dropped) = crate::json_lenient::<Self>(migrated.as_deref().unwrap_or(&text));
         if !dropped.is_empty() {
@@ -883,13 +886,55 @@ impl Settings {
     }
 
     /// Writes the whole file at once ([`crate::write_atomic`]): a crash, a power cut or another save at the same time
-    /// leaves the old settings or the new ones.
+    /// leaves the old settings or the new ones. When this process could not read the file (these settings started
+    /// from the defaults), what differs from the defaults is put on the file as it reads now, and while it still
+    /// cannot be read nothing is written.
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        crate::write_atomic(path, serde_json::to_string_pretty(self)?.as_bytes())?;
+        let rebased;
+        let settings = if was_loaded_unreadable(path) {
+            match crate::read_text(path) {
+                Ok(Some(text)) => {
+                    let migrated = migrated(&text);
+                    let (on_disk, _) = crate::json_lenient::<Self>(migrated.as_deref().unwrap_or(&text));
+                    rebased = self.changes_onto(on_disk);
+                    &rebased
+                }
+                Ok(None) => self,
+                Err(e) => anyhow::bail!("{} could not be read, and is not replaced by defaults: {e}", path.display()),
+            }
+        } else {
+            self
+        };
+        crate::write_atomic(path, serde_json::to_string_pretty(settings)?.as_bytes())?;
         Ok(())
+    }
+
+    /// `base` with what these settings change from the defaults (a section field by field).
+    fn changes_onto(&self, base: Self) -> Self {
+        let (Ok(mine), Ok(defaults), Ok(mut out)) = (serde_json::to_value(self), serde_json::to_value(Self::default()), serde_json::to_value(&base)) else {
+            return base;
+        };
+        let (Some(mine), Some(defaults)) = (mine.as_object(), defaults.as_object()) else { return base };
+        for (key, value) in mine {
+            let default = defaults.get(key);
+            if default == Some(value) {
+                continue;
+            }
+            match (value.as_object(), default.and_then(|d| d.as_object()), out.get_mut(key).and_then(|o| o.as_object_mut())) {
+                (Some(inner), Some(inner_default), Some(target)) => {
+                    for (inner_key, inner_value) in inner {
+                        if inner_default.get(inner_key) != Some(inner_value) {
+                            target.insert(inner_key.clone(), inner_value.clone());
+                        }
+                    }
+                }
+                _ => out[key] = value.clone(),
+            }
+        }
+        serde_json::from_value(out).unwrap_or(base)
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -973,6 +1018,23 @@ const LEGACY_N4N0_KEY: &str = "orb";
 
 /// The settings' text with N4N0's section moved from its earlier key to `n4n0` (today's wins when both are there),
 /// or `None` when the text has no earlier key (or is not a JSON object: [`crate::json_lenient`] deals with that).
+/// The settings files this process could not read when it loaded them ([`Settings::load_from`]): it holds defaults for
+/// them, which must never be saved over the real ones.
+static LOADED_UNREADABLE: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn loaded_unreadable(path: &Path, unreadable: bool) {
+    let mut set = LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if unreadable {
+        set.insert(path.to_path_buf());
+    } else if !set.is_empty() {
+        set.remove(path);
+    }
+}
+
+fn was_loaded_unreadable(path: &Path) -> bool {
+    LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(path)
+}
+
 fn migrated(text: &str) -> Option<String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut value: serde_json::Value = serde_json::from_str(text).ok()?;
@@ -1041,6 +1103,39 @@ mod tests {
         std::fs::write(&path, both).unwrap();
         assert!(!Settings::load_from(&path).n4n0.wake_word);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Settings another program held while they were loaded (a backup, an antivirus, a sync client) are not saved over
+    /// with the defaults the app started from: nothing is written while they cannot be read, then the change made
+    /// meanwhile goes onto them.
+    #[cfg(windows)]
+    #[test]
+    fn settings_that_could_not_be_read_are_never_saved_over() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("orbiters-settings-locked-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("settings.json");
+        let real = Settings { picture_folders: vec![PathBuf::from("I:/VRChat pics")], storage_limit_gb: 7.0, ..Default::default() };
+        real.save_to(&path).unwrap();
+        let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded, Settings::default(), "unreadable: the defaults for now");
+        let changed = Settings { dolly_streams: true, n4n0: N4n0Settings { wake_word: !N4n0Settings::default().wake_word, ..loaded.n4n0.clone() }, ..loaded };
+        assert!(changed.save_to(&path).is_err(), "not written while it cannot be read");
+        drop(lock);
+        changed.save_to(&path).unwrap();
+        let after = Settings::load_from(&path);
+        assert_eq!((after.picture_folders.clone(), after.storage_limit_gb), (real.picture_folders.clone(), 7.0), "the real settings kept");
+        assert!(after.dolly_streams && after.n4n0.wake_word != N4n0Settings::default().wake_word, "and the change made meanwhile");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_change_from_the_defaults_goes_onto_the_file_as_it_reads() {
+        let on_disk = Settings { picture_folders: vec![PathBuf::from("I:/VRChat pics")], storage_limit_gb: 7.0, ..Default::default() };
+        let mine = Settings { storage_limit_gb: 3.0, n4n0: N4n0Settings { afk_message: "Back soon".into(), ..Default::default() }, ..Default::default() };
+        let out = mine.changes_onto(on_disk.clone());
+        assert_eq!((out.picture_folders, out.storage_limit_gb, out.n4n0.afk_message.as_str()), (on_disk.picture_folders, 3.0, "Back soon"));
+        assert_eq!(out.n4n0.menu, on_disk.n4n0.menu, "a section changes field by field");
     }
 
     #[test]

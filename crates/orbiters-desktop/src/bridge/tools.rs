@@ -2254,14 +2254,22 @@ impl Bridge {
         *s.lease.lock().unwrap() = Some(Lease { owner: owner.clone(), last_call: Instant::now() });
         // A start that fails releases all it took: its OSC listener and its mark (2026-11-15 07:13: a failed start kept port
         // 9011 bound until the app restarted, and every open_session after it answered port_taken).
-        if let Err(failure) = self.launch_side(&s, LaunchPlan { world_id: String::new(), instance: String::new(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: Some(profile), osc: Some(osc), vr: rig.is_some() }, call) {
+        // Listed before its launch (BRIDGE-6): Stop, the ticks and the profile's other callers see a start under way.
+        self.sides.lock().unwrap().push(s.clone());
+        if let Err(mut failure) = self.launch_side(&s, LaunchPlan { world_id: String::new(), instance: String::new(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: Some(profile), osc: Some(osc), vr: rig.is_some() }, call) {
+            if s.run.lock().unwrap().given_up.is_some() {
+                // The launch went out and its VRChat has not come up (yet): the session stays, to take it when it does
+                // (never someone else's) and so that nothing of it is forgotten; its id is said.
+                failure.message = format!("{} Session {id} stays open for the VRChat this launch may still bring up: call list_sessions, then close_session with it if you give up.", failure.message); // i18n: not shown (an AI client reads it)
+                return Err(failure);
+            }
+            self.sides.lock().unwrap().retain(|x| x.id != s.id);
             opener.forget(&id);
             if let Some(rig) = &rig {
                 rig.release();
             }
             return Err(failure);
         }
-        self.sides.lock().unwrap().push(s.clone());
         // Its log says who signed in, or that it waits for one.
         let known = self.wait_until(Duration::from_secs(40), call, || {
             let seen = s.game.seen();

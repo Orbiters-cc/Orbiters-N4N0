@@ -317,6 +317,7 @@ fn under_menu(at: &Matrix34, height_m: f32) -> Matrix34 {
 impl Worlds {
     /// The pill's and the bar's overlays; the panel draws on the menu's canvas, whose context `ctx` is.
     pub fn new(overlay: &vr::Overlay, key: &str, ctx: egui::Context) -> anyhow::Result<Self> {
+        forget_kept_eye_frames();
         let chip = crate::overlay::slots::create(overlay, &format!("{key}.worlds-chip"), "N4N0's 3D worlds").map_err(|c| anyhow::anyhow!("3D worlds pill: SteamVR overlay error {c}"))?; // i18n: not shown (the overlay's name in SteamVR)
         interactive(overlay, chip, CHIP_WIDTH_M);
         let bar = crate::overlay::slots::create(overlay, &format!("{key}.worlds-bar"), "N4N0's 3D world controls").map_err(|c| { // i18n: not shown (a name for SteamVR, or the overlay process's own stderr)
@@ -412,6 +413,7 @@ impl Worlds {
     }
 
     /// What the left eye shows now, half size, into `vr-test-frames` in the logs' folder: what the compositor really shows at a panel's hole.
+    /// Only when [`eye_frames_wanted`].
 fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     let Ok(compositor) = steamvr.compositor() else { return };
     let Ok(reader) = orbiters_openvr::mirror::EyeReader::new(steamvr.dxgi_adapter_index()) else { return };
@@ -426,6 +428,22 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         }
         Err(e) => super::vr_log::line(&format!("eye frame: {e}")), // i18n: not shown (a log's line)
     }
+}
+
+/// Whether the pictures of the left eye at a docked small view are kept: in a development build, or when the eye pictures are
+/// asked for (`ORBITERS_VR_PICTURES`); never otherwise.
+fn eye_frames_wanted(debug_build: bool, pictures_asked: bool) -> bool {
+    debug_build || pictures_asked
+}
+
+/// Those a release build kept before it stopped (PRIV-5) go, once, when they are not wanted.
+fn forget_kept_eye_frames() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if !eye_frames_wanted(cfg!(debug_assertions), std::env::var_os("ORBITERS_VR_PICTURES").is_some()) {
+            let _ = std::fs::remove_dir_all(orbiters_core::paths::logs_dir().join("vr-test-frames"));
+        }
+    });
 }
 
 /// The panel alone, for the desktop's panels around VRChat's menus (`overlay::orbit`): no SteamVR, no pill, no bar, nothing shown around the person. Its lists, a world's page
@@ -1222,7 +1240,9 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             let chip = self.hide_chip.as_ref().map_or("no X".to_string(), |c| c.report()); // i18n: not shown (a line of the VR test log)
             super::vr_log::line(&format!("{} | {hint} | {chip} | menus up {} | hint used {}", self.view.report(overlay), self.menu_boxes.len(), self.hint_used)); // i18n: not shown (a log's line)
             // And three times a session, what the eye itself shows while it lies in a hole: what no render can say. Kept in the logs' folder of this computer only.
-            if small.is_some_and(|s| s.docked) && self.eye_frames_kept < 3 {
+            // Only in a development build or when asked (`ORBITERS_VR_PICTURES`), as the other eye pictures: it was on for everyone,
+            // three pictures of what the person sees in every session (PRIV-5). Decided before anything is read.
+            if eye_frames_wanted(cfg!(debug_assertions), std::env::var_os("ORBITERS_VR_PICTURES").is_some()) && small.is_some_and(|s| s.docked) && self.eye_frames_kept < 3 {
                 self.eye_frames_kept += 1;
                 Self::keep_an_eye_frame(steamvr, self.eye_frames_kept);
             }
@@ -2398,6 +2418,14 @@ fn same_but_stats(a: &Status, b: &Status) -> bool {
 
 #[cfg(test)]
 mod go_tests {
+    /// PRIV-5: a release build keeps no picture of the person's view unless they are asked for.
+    #[test]
+    fn eye_pictures_are_kept_only_in_development_or_when_asked() {
+        assert!(!super::eye_frames_wanted(false, false), "a release build, not asked: none");
+        assert!(super::eye_frames_wanted(false, true));
+        assert!(super::eye_frames_wanted(true, false));
+    }
+
     /// OVL2-21: a relayed status whose only change is the undrawn figures does not repaint the page; any other change does.
     #[test]
     fn undrawn_figures_do_not_repaint_the_page() {

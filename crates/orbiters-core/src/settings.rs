@@ -848,12 +848,16 @@ impl Settings {
                 eprintln!("settings: {}: {e}", path.display());
                 crate::keep_aside(path);
                 loaded_unreadable(path, true);
-                return Self::default();
+                return Self::unread();
             }
         };
         loaded_unreadable(path, false);
         let migrated = migrated(&text);
-        let (settings, dropped) = crate::json_lenient::<Self>(migrated.as_deref().unwrap_or(&text));
+        let (mut settings, dropped) = crate::json_lenient::<Self>(migrated.as_deref().unwrap_or(&text));
+        // A statistics switch that did not read is off, never on by default: the person may have turned it off (PRIV-12).
+        if dropped.iter().any(|d| d == "usage" || d == "usage.enabled" || d == "(not JSON)") {
+            settings.usage.enabled = false;
+        }
         if !dropped.is_empty() {
             let aside = crate::keep_aside(path);
             eprintln!("settings: {} left at their default ({}), the file kept as {:?}", dropped.join(", "), path.display(), aside);
@@ -912,9 +916,18 @@ impl Settings {
         Ok(())
     }
 
-    /// `base` with what these settings change from the defaults (a section field by field).
+    /// What a process holds when its settings file could not be read: the defaults, the statistics off (a person
+    /// may have turned them off, and nothing tells it now; PRIV-12).
+    fn unread() -> Self {
+        let mut s = Self::default();
+        s.usage.enabled = false;
+        s
+    }
+
+    /// `base` with what these settings change from what they started from when the file could not be read
+    /// ([`Settings::unread`]; a section field by field).
     fn changes_onto(&self, base: Self) -> Self {
-        let (Ok(mine), Ok(defaults), Ok(mut out)) = (serde_json::to_value(self), serde_json::to_value(Self::default()), serde_json::to_value(&base)) else {
+        let (Ok(mine), Ok(defaults), Ok(mut out)) = (serde_json::to_value(self), serde_json::to_value(Self::unread()), serde_json::to_value(&base)) else {
             return base;
         };
         let (Some(mine), Some(defaults)) = (mine.as_object(), defaults.as_object()) else { return base };
@@ -1118,7 +1131,7 @@ mod tests {
         real.save_to(&path).unwrap();
         let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
         let loaded = Settings::load_from(&path);
-        assert_eq!(loaded, Settings::default(), "unreadable: the defaults for now");
+        assert_eq!(loaded, Settings { usage: UsageSettings { enabled: false, ..Default::default() }, ..Default::default() }, "unreadable: the defaults for now, statistics off");
         let changed = Settings { dolly_streams: true, n4n0: N4n0Settings { wake_word: !N4n0Settings::default().wake_word, ..loaded.n4n0.clone() }, ..loaded };
         assert!(changed.save_to(&path).is_err(), "not written while it cannot be read");
         drop(lock);
@@ -1126,6 +1139,21 @@ mod tests {
         let after = Settings::load_from(&path);
         assert_eq!((after.picture_folders.clone(), after.storage_limit_gb), (real.picture_folders.clone(), 7.0), "the real settings kept");
         assert!(after.dolly_streams && after.n4n0.wake_word != N4n0Settings::default().wake_word, "and the change made meanwhile");
+        assert!(after.usage.enabled, "the statistics off for that run only: the file's own choice kept");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// PRIV-12: a statistics switch that did not read is off, not on by default.
+    #[test]
+    fn statistics_that_did_not_read_are_off() {
+        let dir = std::env::temp_dir().join(format!("orbiters-settings-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"storage_limit_gb": 3, "usage": {"enabled": "maybe"}}"#).unwrap();
+        let s = Settings::load_from(&path);
+        assert!(!s.usage.enabled && s.storage_limit_gb == 3.0);
+        std::fs::write(&path, r#"{"storage_limit_gb": 3}"#).unwrap();
+        assert!(Settings::load_from(&path).usage.enabled, "absent from a file of before: today's default");
         std::fs::remove_dir_all(dir).ok();
     }
 

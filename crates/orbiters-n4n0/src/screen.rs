@@ -2221,6 +2221,7 @@ pub(crate) fn tick(
     s.sync_open(&mut out);
     if !s.menu.open {
         s.owner_settled = false;
+        s.menu.not_presented();
         return out;
     }
     if now >= s.next_local {
@@ -2231,6 +2232,10 @@ pub(crate) fn tick(
         };
         // Once it holds the whole page, blocks go again only now and then (they repair a block VRChat dropped).
         let settled = s.owner.settled(&frame.bank);
+        // The screen shows this page whole now: a row pressed means what it holds (CORE2-10).
+        if settled {
+            s.menu.presented();
+        }
         if !settled || now >= s.idle_until {
             // A new page's clear, a changed block, else one in turn, in three steps (VRChat's frames apart).
             let send = s.owner.step(&frame.bank);

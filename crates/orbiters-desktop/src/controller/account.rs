@@ -436,16 +436,16 @@ impl Controller {
     /// account's id (a digest of its credential when the account file names no id; none when nobody is signed in).
     pub(super) fn account_api_for(&self) -> (Option<(Api, String)>, orbiters_core::world_feedback::Stamp) {
         let rt = self.account_runtime.lock().unwrap();
-        let server = rt.read.map_or_else(Server::current, |(s, _)| s);
+        // The environment chosen now; the account read only when it was read for that environment (just after a switch
+        // the account thread may still hold the other one's: nobody, then, rather than the other server's account).
+        let server = Server::current();
         let api = Api::new(server);
+        let account = rt.account.as_ref().filter(|_| rt.read.is_some_and(|(s, _)| s == server));
         let stamp = orbiters_core::world_feedback::Stamp {
             server: api.url(""),
-            account: rt
-                .account
-                .as_ref()
-                .map(|a| a.user.clone().unwrap_or_else(|| format!("credential:{}", orbiters_core::vrchat_accounts::friend_hash(&a.token)))),
+            account: account.map(|a| a.user.clone().unwrap_or_else(|| format!("credential:{}", orbiters_core::vrchat_accounts::friend_hash(&a.token)))),
         };
-        let with = rt.read.and(rt.account.as_ref()).map(|a| (api, a.token.clone()));
+        let with = account.map(|a| (api, a.token.clone()));
         (with, stamp)
     }
 }

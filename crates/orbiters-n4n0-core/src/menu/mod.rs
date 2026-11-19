@@ -51,9 +51,25 @@ pub const ROWS_SETTLE: Duration = Duration::from_millis(1500);
 
 /// Whether row `i`, holding `now`, may be acted on: less than [`ROWS_SETTLE`] after a change of the list, only if it
 /// held the same before, or nothing (a list that just appeared shifts nothing).
-fn row_still(moved: &Option<(Vec<String>, Instant)>, i: usize, now: &str) -> bool {
+/// A list's rows changed: what was on screen before the FIRST change of a run of changes is what the person may still
+/// be looking at, until the rows stay still for [`ROWS_SETTLE`] (a second change soon after does not replace it).
+fn moved(slot: &mut Option<(Vec<String>, Instant, u32)>, before: Vec<String>) {
+    match slot {
+        Some((_, at, changes)) if at.elapsed() < ROWS_SETTLE => {
+            *at = Instant::now();
+            *changes += 1;
+        }
+        _ => *slot = Some((before, Instant::now(), 1)),
+    }
+}
+
+fn row_still(moved: &Option<(Vec<String>, Instant, u32)>, i: usize, now: &str) -> bool {
     match moved {
-        Some((before, at)) if at.elapsed() < ROWS_SETTLE => before.get(i).is_none_or(|k| k == now),
+        // A row empty before one single change (a list that just appeared) shifted nothing; after two, who knows.
+        Some((before, at, changes)) if at.elapsed() < ROWS_SETTLE => match before.get(i) {
+            Some(k) => k == now,
+            None => *changes == 1,
+        },
         _ => true,
     }
 }
@@ -973,9 +989,12 @@ pub struct Menu {
     pending_save: Option<(String, Instant)>,
     /// History's rows on the page shown before the host's list changed them, and when: for [`ROWS_SETTLE`] a row's
     /// share acts only if it still holds the capture it held (a press means what was on screen).
-    captures_moved: Option<(Vec<String>, Instant)>,
+    captures_moved: Option<(Vec<String>, Instant, u32)>,
     /// The same for Share to …'s friends (their ids).
-    friends_moved: Option<(Vec<String>, Instant)>,
+    friends_moved: Option<(Vec<String>, Instant, u32)>,
+    /// History's capture keys and Share to …'s friend ids on the page as the avatar's screen last showed it whole
+    /// ([`Menu::presented`]): a row's share or mark acts on the one it showed, or not at all.
+    shown: Option<(Vec<String>, Vec<String>)>,
     /// The result whose link was copied last (its video id): its row offers Drop.
     pub copied: Option<String>,
     /// A copied link can be dropped as a card: the avatar's screen is of version 5 or later.
@@ -1572,7 +1591,7 @@ impl Menu {
             // A row that holds another capture than a moment ago (the list changed under the hand) does nothing: the
             // person pressed what they saw, which may be the neighbour now.
             Target::SharePublic(i) => match self.page_captures().get(i as usize).map(|c| c.key.clone()) {
-                Some(key) if row_still(&self.captures_moved, i as usize, &key) => self.share_public(key),
+                Some(key) if self.row_shown(true, i as usize, &key) => self.share_public(key),
                 _ => Vec::new(),
             },
             Target::ShareLatestTo => match self.captures.latest.as_ref().map(|c| c.key.clone()) {
@@ -1580,12 +1599,12 @@ impl Menu {
                 _ => Vec::new(),
             },
             Target::ShareTo(i) => match self.page_captures().get(i as usize).map(|c| c.key.clone()) {
-                Some(key) if row_still(&self.captures_moved, i as usize, &key) => self.share_to(key),
+                Some(key) if self.row_shown(true, i as usize, &key) => self.share_to(key),
                 _ => Vec::new(),
             },
             Target::Friend(i) | Target::FriendMark(i) => {
                 let Some(friend) = self.page_friends().get(i as usize).map(|f| (*f).clone()) else { return Vec::new() };
-                if !row_still(&self.friends_moved, i as usize, &friend.id) {
+                if !self.row_shown(false, i as usize, &friend.id) {
                     return Vec::new();
                 }
                 if let Some(at) = self.chosen.iter().position(|f| f.id == friend.id) {
@@ -2224,6 +2243,29 @@ impl Menu {
         &self.instances[start..(start + INSTANCES_PER_PAGE).min(self.instances.len())]
     }
 
+    /// The screen that shows this menu now holds the page whole (the avatar's screen once its blocks settled): what a
+    /// row's share or mark acts on is what it shows now.
+    pub fn presented(&mut self) {
+        let captures = self.page_captures().iter().map(|c| c.key.clone()).collect();
+        let friends = self.page_friends().iter().map(|f| f.id.clone()).collect();
+        self.shown = Some((captures, friends));
+    }
+
+    /// No screen holds this menu's page any more (closed): rows are judged by the list's changes alone again.
+    pub fn not_presented(&mut self) {
+        self.shown = None;
+    }
+
+    /// Whether row `i` (of History when `captures`, else of Share to …'s friends), holding `key` now, holds what the
+    /// person saw there: the page as last presented whole when a screen says so ([`Menu::presented`]), else what it held
+    /// before a change of the list still settling.
+    fn row_shown(&self, captures: bool, i: usize, key: &str) -> bool {
+        match &self.shown {
+            Some((c, f)) => (if captures { c } else { f }).get(i).is_some_and(|k| k == key),
+            None => row_still(if captures { &self.captures_moved } else { &self.friends_moved }, i, key),
+        }
+    }
+
     /// History's captures on the page shown.
     pub fn page_captures(&self) -> &[CaptureRow] {
         let history = &self.captures.history;
@@ -2283,7 +2325,7 @@ impl Menu {
         let pages = self.captures.history.len().div_ceil(CAPTURES_PER_PAGE).max(1);
         self.capture_page = self.capture_page.min(pages - 1);
         if self.page_captures().iter().map(|c| &c.key).ne(before.iter()) {
-            self.captures_moved = Some((before, Instant::now()));
+            moved(&mut self.captures_moved, before);
         }
         if let Some((key, was)) = self.asked.clone() {
             use crate::captures::Sharing;
@@ -2323,7 +2365,7 @@ impl Menu {
         let pages = self.found_friends().len().div_ceil(FRIENDS_PER_PAGE).max(1);
         self.friend_page = self.friend_page.min(pages - 1);
         if self.page_friends().iter().map(|f| &f.id).ne(before.iter()) {
-            self.friends_moved = Some((before, Instant::now()));
+            moved(&mut self.friends_moved, before);
         }
     }
 
@@ -3397,6 +3439,37 @@ mod tests {
         menu.friends_moved.as_mut().unwrap().1 -= ROWS_SETTLE;
         menu.press(Target::Friend(0));
         assert_eq!(menu.chosen, [f("usr_a")]);
+    }
+
+    /// Verifier (CORE2-10): two refreshes in a row still leave the rows the person saw as the reference; and once a screen
+    /// said what it shows, a row acts on that capture or not at all, however long the screen takes to catch up.
+    #[test]
+    fn a_press_acts_on_the_capture_it_was_drawn_for() {
+        use crate::captures::{CapturePhase, CaptureRow, CapturesView};
+        let row = |key: &str| CaptureRow { key: key.into(), world: "World".into(), phase: CapturePhase::Ready, ..Default::default() };
+        let listed = |keys: &[&str]| CapturesView { history: keys.iter().map(|k| row(k)).collect(), listed: true, ..Default::default() };
+        let shared = |effects: Vec<Effect>| effects.iter().find_map(|e| if let Effect::ShareCapture(a) = e { Some(a.key.clone()) } else { None });
+        let mut menu = Menu { pages: Pages::Share, ..Default::default() };
+        menu.open();
+        menu.press(Target::History);
+        menu.set_captures(listed(&["A", "X"]));
+        menu.captures_moved = None;
+        // [A, X] on screen; two refreshes before it updates: [B, X] then [B, Y].
+        menu.set_captures(listed(&["B", "X"]));
+        menu.set_captures(listed(&["B", "Y"]));
+        assert_eq!(shared(menu.press(Target::SharePublic(0))), None, "B is not what was pressed");
+        // The avatar's screen holds [B, Y] whole: then row 0 is B.
+        menu.presented();
+        assert_eq!(shared(menu.press(Target::SharePublic(0))), Some("B".into()));
+        // The list changes again and the screen is slow: long after, row 0 still means B, which is not there any more.
+        menu.set_captures(listed(&["C", "B", "Y"]));
+        menu.captures_moved.as_mut().unwrap().1 -= ROWS_SETTLE * 10;
+        assert_eq!(shared(menu.press(Target::SharePublic(0))), None, "C was never shown in that row");
+        menu.presented();
+        assert_eq!(shared(menu.press(Target::SharePublic(0))), Some("C".into()));
+        // Closed: judged by the list's changes again.
+        menu.not_presented();
+        assert!(menu.shown.is_none());
     }
 
     #[test]

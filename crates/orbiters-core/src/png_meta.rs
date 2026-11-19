@@ -66,6 +66,73 @@ pub fn copy_without_metadata(src: &mut impl Read, out: &mut impl Write) -> std::
     }
 }
 
+/// SHA-256 (lowercase hex) of the copy [`copy_without_metadata`] makes of the file at `path`: what Orbiters knows that
+/// picture by once it received it without its metadata.
+pub fn clean_sha256(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    struct Hashing(Sha256);
+    impl Write for Hashing {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut hashing = Hashing(Sha256::new());
+    copy_without_metadata(&mut std::io::BufReader::new(std::fs::File::open(path)?), &mut hashing)?;
+    Ok(hashing.0.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Copies that went to Orbiters are removed once sent; one that a stopped app left (a crash, a forced end) is removed
+/// the next time a copy is made, after an hour (a copy being sent by another process at the same moment is younger).
+pub fn sweep_copies(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age > std::time::Duration::from_secs(3600));
+        if old && e.path().extension().is_some_and(|x| x == "png") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// A copy without metadata of a picture, being sent: removed when dropped (sent, failed, or the upload's thread
+/// ended); a copy a stopped app left is removed by the next one made ([`sweep_copies`]).
+pub struct CleanCopy {
+    pub path: std::path::PathBuf,
+    pub len: u64,
+}
+
+impl CleanCopy {
+    /// The copy of `src` in [`copies_dir`].
+    pub fn of(src: &Path) -> std::io::Result<Self> {
+        let dir = copies_dir();
+        std::fs::create_dir_all(&dir)?;
+        sweep_copies(&dir);
+        let path = dir.join(format!("{}.png", uuid::Uuid::new_v4().simple()));
+        let len = write_without_metadata(src, &path)?;
+        Ok(Self { path, len })
+    }
+}
+
+impl Drop for CleanCopy {
+    fn drop(&mut self) {
+        // A reader may still hold it for a moment (an antivirus): tried a few times.
+        for _ in 0..5 {
+            match std::fs::remove_file(&self.path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => std::thread::sleep(std::time::Duration::from_millis(40)),
+                _ => return,
+            }
+        }
+    }
+}
+
+/// The folder the copies being sent are written to.
+pub fn copies_dir() -> std::path::PathBuf {
+    crate::paths::cache_dir().join("uploads")
+}
+
 /// [`copy_without_metadata`] of the file at `src` into a new file at `dst` (flushed); its length.
 pub fn write_without_metadata(src: &Path, dst: &Path) -> std::io::Result<u64> {
     let mut input = std::io::BufReader::new(std::fs::File::open(src)?);
@@ -175,6 +242,37 @@ mod tests {
         assert_eq!(write_without_metadata(&src, &dst).unwrap(), out.len() as u64);
         assert_eq!(std::fs::read(&dst).unwrap(), out);
         assert_eq!(std::fs::read(&src).unwrap(), original);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Verifier (PRIV-8): the clean copy's hash is the hash of what is sent (the Map explorer knows the picture by it);
+    /// a copy is removed when dropped, and one a stopped app left is removed by the next copy after an hour.
+    #[test]
+    fn copies_are_known_by_their_hash_and_never_left_behind() {
+        use sha2::{Digest, Sha256};
+        let (original, _) = shot();
+        let dir = std::env::temp_dir().join(format!("orbiters-png-copies-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("shot.png");
+        std::fs::write(&src, &original).unwrap();
+        let mut clean = Vec::new();
+        copy_without_metadata(&mut original.as_slice(), &mut clean).unwrap();
+        let hex = |b: &[u8]| Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect::<String>();
+        assert_eq!(clean_sha256(&src).unwrap(), hex(&clean));
+        assert_ne!(clean_sha256(&src).unwrap(), hex(&original));
+        let copy = CleanCopy::of(&src).unwrap();
+        assert_eq!((std::fs::read(&copy.path).unwrap(), copy.len), (clean.clone(), clean.len() as u64));
+        let path = copy.path.clone();
+        drop(copy);
+        assert!(!path.exists(), "removed once sent");
+        // Left by a stopped app two hours ago, and one being sent now by another.
+        let stale = dir.join("stale.png");
+        let fresh = dir.join("fresh.png");
+        std::fs::write(&stale, b"x").unwrap();
+        std::fs::write(&fresh, b"x").unwrap();
+        std::fs::File::options().write(true).open(&stale).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200)).unwrap();
+        sweep_copies(&dir);
+        assert!(!stale.exists() && fresh.exists() && src.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

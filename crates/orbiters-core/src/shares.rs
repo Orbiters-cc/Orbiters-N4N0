@@ -374,7 +374,7 @@ fn json_done<T: serde::de::DeserializeOwned>(
 fn with_fields<T: serde::de::DeserializeOwned>(value: serde_json::Value, required: &[&str]) -> anyhow::Result<T> {
     if let Some(missing) = required.iter().find(|p| value.pointer(p).is_none()) {
         // A shape that does not say it: read again, as an answer that does not read.
-        return Err(serde_json::from_str::<serde_json::Value>(&format!("missing {missing}")).unwrap_err().into());
+        return Err(serde_json::from_str::<serde_json::Value>(&format!("missing {missing}")).unwrap_err().into()); // i18n: not shown (an internal marker that the answer lacked a field; only makes the answer read again)
     }
     Ok(serde_json::from_value(value)?)
 }

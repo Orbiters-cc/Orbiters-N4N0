@@ -63,7 +63,6 @@ struct Acts {
 struct Out {
     number: u64,
     share: Option<String>,
-    contact: String,
     name: String,
     capture: CaptureRef,
     phase: ShareOutPhase,
@@ -165,8 +164,8 @@ impl SharedRuntime {
         let number = self.next_number();
         self.sending = Sending::default();
         let state = self.sending.first(reach, moved, now);
-        acts.requests.push(Request::Offer { number, contact: friend.id.clone(), capture: capture.clone(), state });
-        self.out = Some(Out { number, share: None, contact: friend.id, name: friend.name, capture, phase: ShareOutPhase::Offering, stopped: false });
+        acts.requests.push(Request::Offer { number, contact: friend.id, capture: capture.clone(), state });
+        self.out = Some(Out { number, share: None, name: friend.name, capture, phase: ShareOutPhase::Offering, stopped: false });
         acts.publish = true;
         acts
     }

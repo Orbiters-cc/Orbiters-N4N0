@@ -268,6 +268,9 @@ impl App {
         self.toasts.show(&ctx);
         // "Talk with N4N0?": the wake word heard during a call.
         crate::wake_offer::window(&ctx, &self.ctl, snap.n4n0.voice.wake_offer);
+        // A friend here offers to look at a 3D picture together (`crate::shared_view_ui`): over that card when both are up.
+        let talk_up = crate::wake_offer::up(snap.n4n0.voice.wake_offer, crate::wake_offer::now_ms()).is_some();
+        crate::shared_view_ui::window(&ctx, &self.ctl, snap.shared_view.offer.as_ref(), talk_up);
         if splash_on {
             splash(&ctx, full, splash_t);
         }

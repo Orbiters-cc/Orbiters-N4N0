@@ -1,0 +1,4 @@
+# The shared 3D view (REQUEST14, stage 1, 2026-11-19): looking at the same 3D picture together with a friend here,
+# each in front of themselves: the offer, the friend picker, what the sharer and the viewer are told.
+crates/orbiters-desktop/src/shared_view_ui.rs
+crates/orbiters-desktop/src/controller/shared_view.rs

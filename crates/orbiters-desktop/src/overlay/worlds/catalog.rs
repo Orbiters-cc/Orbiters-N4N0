@@ -185,6 +185,21 @@ impl Entry {
         }
     }
 
+    /// A friend's capture shown to this player (`controller/shared_view.rs`): the file the service downloaded signed in
+    /// (never from a public address), shown from its start view. Its id is neither a listing's nor a world's nor a
+    /// session's.
+    pub fn shared(file: std::path::PathBuf, capture: u64, revision: u64, name: String, view: StartView) -> Self {
+        let mut entry = Self::local(file, name, revision);
+        entry.id = (capture & ((1 << 60) - 1)) | (1 << 61);
+        entry.view = view;
+        entry
+    }
+
+    /// Whether it is a friend's shared capture ([`Self::shared`]).
+    pub fn is_shared(&self) -> bool {
+        self.id & (3 << 61) == 1 << 61
+    }
+
     /// Whether `query` finds its world's name, its author's or its sharer's however they are written
     /// ([`orbiters_core::search`]), or found it.
     pub fn matches(&self, query: &str) -> bool {
@@ -789,6 +804,18 @@ fn ceiling_in(heights: &[f32], camera: f32) -> Option<f32> {
     }
     let under = count[2..from].iter().sum::<u32>() as f32 / (from - 2) as f32;
     count.iter().enumerate().skip(from).find(|(_, c)| **c as f32 > under * 2.2).map(|(i, _)| i as f32 * LAYER)
+}
+
+/// What a kept entry's `local` path holds, as the 3D view takes it: a friend's shared capture file ([`Entry::shared`]),
+/// or a session of this computer ([`read_local`]).
+pub fn read_kept(entry: &Entry, path: &std::path::Path, progress: &Progress) -> anyhow::Result<Capture> {
+    if !path.is_file() {
+        return read_local(path, progress);
+    }
+    progress.stage.store(STAGE_PREPARING, Ordering::Relaxed);
+    let bytes = std::fs::read(path)?;
+    let g = orbiters_reconstruct::web::read_splat(&bytes)?;
+    Ok(Capture::new(g, None, entry.view))
 }
 
 /// A session of this computer as the 3D view takes it: its splats less what was edited out, its sky, and the start view its upload would say.

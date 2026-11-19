@@ -103,6 +103,25 @@ struct Download {
     answer: mpsc::Receiver<anyhow::Result<Capture>>,
 }
 
+/// What the overlay's 3D worlds do with the shared 3D view (`Worlds::update_shared`).
+#[derive(Default)]
+struct SharedSide {
+    /// The friend's view opened (its number), and whether it showed since.
+    opened: Option<u64>,
+    shown: bool,
+    /// The friend's zoom and pan last applied.
+    applied: Option<(f32, [f32; 2])>,
+    /// The small mode before a friend's view made it small.
+    small_was: Option<bool>,
+    /// This player's view last sent: when, its zoom and pan; a stop sent.
+    sent: Option<(Instant, f32, [f32; 2])>,
+    stop_sent: bool,
+    /// The share chip, the hand whose trigger was pulled on it, and the triggers last turn.
+    chip: Option<small_hint::HideChip>,
+    down: Option<usize>,
+    triggers_were: [bool; 2],
+}
+
 /// What the bar shows: when it changes, it is painted again.
 type BarLook = (Option<Target>, Option<Target>, Option<u64>, bool, bool, Quality, Option<u16>, Option<String>, Option<String>);
 
@@ -201,6 +220,8 @@ pub struct Worlds {
     small_logged: super::vr_log::Every,
     eye_frames_kept: u32,
     hide_chip: Option<small_hint::HideChip>,
+    /// The shared 3D view (`controller/shared_view.rs`): what this side does with it.
+    shared: SharedSide,
     small_place: Option<(vr::Matrix34, f32)>,
     /// Where each hand's tool is and which way it points, and its trigger, now and a turn ago.
     small_rays: [Option<([f32; 3], [f32; 3])>; 2],
@@ -391,6 +412,7 @@ impl Worlds {
             key: key.to_string(),
             hint: None,
             hide_chip: None,
+            shared: SharedSide::default(),
             small_rays: [None; 2],
             small_triggers: [false; 2],
             small_triggers_were: [false; 2],
@@ -504,6 +526,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             key: String::new(),
             hint: None,
             hide_chip: None,
+            shared: SharedSide::default(),
             small_rays: [None; 2],
             small_triggers: [false; 2],
             small_triggers_were: [false; 2],
@@ -624,7 +647,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     fn start_live(&mut self, entry: &Entry) {
         let (source, from) = (self.source.clone(), entry.clone());
         let load = move || match &from.local {
-            Some(dir) => catalog::read_local(dir, &Default::default()),
+            Some(dir) => catalog::read_kept(&from, dir, &Default::default()),
             None => source.download(&from, &Default::default()),
         };
         self.live = Some((entry.id, super::orbit::sheet_view::SheetView::open_with(load, self.live_turns, 2)));
@@ -1019,6 +1042,9 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         if let Some(chip) = self.hide_chip.take() {
             chip.destroy(overlay);
         }
+        if let Some(chip) = self.shared.chip.take() {
+            chip.destroy(overlay);
+        }
         let _ = overlay.destroy(self.chip);
         let _ = overlay.destroy(self.bar);
     }
@@ -1280,6 +1306,128 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         }
         if wanted.is_some_and(|(_, _, pressed)| pressed) {
             self.deferred.push(Action::Hide);
+        }
+    }
+
+    /// The shared 3D view, each turn: a friend's view opens (small, before this player) once its file came and follows
+    /// their zoom and pan; this player's X on it leaves it. The share chip on this player's own small view of an Orbiters
+    /// capture, while friends here can be shown it: one friend, shown at once; several, the band's picker; sharing, it
+    /// stops. Pressed on the trigger's release, still on it; gone under a held trigger, nothing.
+    fn update_shared(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Snapshot, backend: &Ctl) {
+        let sv = snap.shared_view.arc();
+        let now = Instant::now();
+        // A friend's view.
+        match sv.watching.as_ref() {
+            Some(w) => {
+                if self.shared.opened != Some(w.id) {
+                    if let (Some(file), Some(start)) = (&w.file, w.start) {
+                        let view = stereo::StartView { position: start.position, target: start.target, floor: start.floor, eye_height: start.eye_height };
+                        let entry = Entry::shared(file.clone(), w.capture, w.revision, w.title.clone(), view);
+                        // Small, before this player, whatever the 3D worlds show otherwise (as it was once it ends).
+                        if !self.view.small_on() {
+                            self.shared.small_was = Some(false);
+                            self.view.set_small(true, overlay, steamvr);
+                        }
+                        let id = entry.id;
+                        self.picked = Some(entry);
+                        self.deferred.push(Action::Show(id));
+                        self.shared.opened = Some(w.id);
+                        self.shared.shown = false;
+                        self.shared.applied = None;
+                    }
+                } else {
+                    let showing = self.current.as_ref().is_some_and(|e| e.is_shared());
+                    if showing {
+                        self.shared.shown = true;
+                    } else if self.shared.shown {
+                        // Its X (or another capture opened): this player stops looking.
+                        self.shared.shown = false;
+                        backend.shared_view(crate::ipc::SharedViewCommand::Leave);
+                    }
+                    if showing && self.view.small_now().is_some() && w.view.is_some() && self.shared.applied != w.view {
+                        let (reach, moved) = w.view.expect("just looked");
+                        self.view.follow_shared(reach, moved);
+                        self.shared.applied = w.view;
+                    }
+                }
+            }
+            None => {
+                if self.shared.opened.take().is_some() {
+                    // The friend stopped, or this player left: the view goes, the 3D worlds show as before.
+                    if self.current.as_ref().is_some_and(|e| e.is_shared()) {
+                        self.deferred.push(Action::Hide);
+                    }
+                    if let Some(was) = self.shared.small_was.take() {
+                        self.deferred.push(Action::Small(was));
+                    }
+                }
+            }
+        }
+        // This player's own small view of an Orbiters capture (not a session of this computer, not a friend's).
+        let own = self.current.as_ref().filter(|e| e.capture && e.local.is_none()).map(|e| (e.id, e.key as u64));
+        let small = self.view.small_now().copied().filter(|s| !s.docked && self.menu_boxes.is_empty());
+        let sharing = sv.outgoing.as_ref();
+        if let Some(out) = sharing {
+            match (own, self.view.small_now()) {
+                (Some((id, _)), Some(s)) if id == out.capture => {
+                    let (reach, moved) = (s.reach(), s.moved());
+                    let due = self.shared.sent.is_none_or(|(at, r, m)| (r != reach || m != moved) && now.duration_since(at) >= Duration::from_millis(orbiters_core::shared_view::SEND_EVERY_MS));
+                    if due {
+                        self.shared.sent = Some((now, reach, moved));
+                        backend.shared_view(crate::ipc::SharedViewCommand::View { reach, moved });
+                    }
+                }
+                // Hidden, or another capture: it stops (once the download of the same one is not still on its way).
+                _ if self.download.as_ref().is_none_or(|d| d.id != out.capture) && own.is_none_or(|(id, _)| id != out.capture) => {
+                    if !self.shared.stop_sent {
+                        self.shared.stop_sent = true;
+                        backend.shared_view(crate::ipc::SharedViewCommand::Stop);
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            self.shared.sent = None;
+            self.shared.stop_sent = false;
+        }
+        let lit = sharing.is_some_and(|o| own.is_some_and(|(id, _)| id == o.capture));
+        let eye = stereo::position(&view::head_pose(steamvr, 0.0));
+        let wanted = small.zip(own).filter(|_| lit || (!sv.targets.is_empty() && sharing.is_none())).map(|(s, _)| {
+            let place = small_hint::share_chip_place(s.anchor, s.radius(), eye);
+            let holding = s.held_by();
+            let on = |h: usize| Some(h) != holding && self.small_rays[h].is_some_and(|(tip, along)| small_hint::on_chip(&place, tip, along));
+            (place, on(0) || on(1), [on(0), on(1)])
+        });
+        let mut pressed = false;
+        match (self.shared.down, wanted) {
+            (_, None) => self.shared.down = None,
+            (None, Some((_, _, on))) => {
+                self.shared.down = (0..2).find(|&h| on[h] && self.small_triggers[h] && !self.shared.triggers_were[h]);
+            }
+            (Some(h), Some((_, _, on))) if !self.small_triggers[h] => {
+                self.shared.down = None;
+                pressed = on[h];
+            }
+            _ => {}
+        }
+        self.shared.triggers_were = self.small_triggers;
+        if wanted.is_some() && self.shared.chip.is_none() {
+            self.shared.chip = small_hint::HideChip::share(overlay, &self.key).map_err(|e| eprintln!("{e:#}")).ok();
+        }
+        if let Some(chip) = self.shared.chip.as_mut() {
+            chip.set_lit(lit);
+            chip.update(overlay, presenter, wanted.map(|(place, pointed, _)| (place, pointed)));
+        }
+        if let (true, Some((_, key)), Some(s)) = (pressed, own, small) {
+            let capture = self.current.as_ref().map_or(0, |e| e.id);
+            let ms = crate::wake_offer::now_ms();
+            if lit {
+                backend.shared_view(crate::ipc::SharedViewCommand::Stop);
+            } else if let [friend] = sv.targets.as_slice() {
+                backend.shared_view(crate::ipc::SharedViewCommand::Share { contact: friend.id.clone(), capture, revision: key, reach: s.reach(), moved: s.moved() });
+            } else {
+                crate::shared_view_ui::ask_pick(capture, key, s.reach(), s.moved(), ms);
+            }
         }
     }
 
@@ -1572,6 +1720,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.log_flip_times();
         self.update_hint(overlay, steamvr, presenter, snap);
         self.update_hide_chip(overlay, steamvr, presenter);
+        self.update_shared(overlay, steamvr, presenter, snap, backend);
         if self.current.is_some() && self.download.is_none() && !self.view.active() {
             // Hidden (or failed): nothing is current any more.
             self.current = None;
@@ -1778,7 +1927,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         let (source, p, e) = (self.source.clone(), progress.clone(), entry.clone());
         let _ = std::thread::Builder::new().name("3d-worlds-ahead".into()).spawn(move || {
             let _ = tx.send(match &e.local {
-                Some(dir) => catalog::read_local(dir, &p),
+                Some(dir) => catalog::read_kept(&e, dir, &p),
                 None => source.download(&e, &p),
             });
         });
@@ -1961,7 +2110,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                     let (source, p, e) = (self.source.clone(), progress.clone(), entry.clone());
                     let _ = std::thread::Builder::new().name("3d-worlds-download".into()).spawn(move || {
                         let _ = tx.send(match &e.local {
-                            Some(dir) => catalog::read_local(dir, &p),
+                            Some(dir) => catalog::read_kept(&e, dir, &p),
                             None => source.download(&e, &p),
                         });
                     });

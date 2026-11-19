@@ -148,6 +148,11 @@ const CHIP_AIM_M: f32 = 0.08;
 
 /// [`HideChip`]'s picture.
 pub fn paint_chip(p: &Painter, pointed: bool) {
+    paint_chip_with(p, pointed, false, icons::X);
+}
+
+/// A chip's picture with `glyph` in its round; `lit` (the share chip while it shares) in the accent.
+pub fn paint_chip_with(p: &Painter, pointed: bool, lit: bool, glyph: &str) {
     let page = Rect::from_min_size(Pos2::ZERO, vec2(CHIP_PX[0] as f32, CHIP_PX[0] as f32));
     let radius = page.height() / 2.0 - 2.0;
     // Its stem first, from the round down to the capture's rim, a dot where it stands: what joins it to the capture (round 18's judges saw it attached to nothing,
@@ -159,13 +164,19 @@ pub fn paint_chip(p: &Painter, pointed: bool) {
     p.circle_filled(foot, 8.0, theme::alpha(theme::INK_900, 0.8));
     p.circle_filled(foot, 5.5, ink);
     p.circle_filled(page.center(), radius, theme::alpha(theme::INK_900, 0.95));
-    p.circle_stroke(page.center(), radius - 1.5, egui::Stroke::new(3.0, if pointed { orbit_look::accent() } else { theme::white(0.25) }));
-    widgets::icon(p, page.center(), icons::X, radius * 1.05, if pointed { orbit_look::accent() } else { theme::FG });
+    let ring = if pointed || lit { orbit_look::accent() } else { theme::white(0.25) };
+    p.circle_stroke(page.center(), radius - 1.5, egui::Stroke::new(3.0, ring));
+    let size = if glyph == icons::X { radius * 1.05 } else { radius * 0.95 };
+    widgets::icon(p, page.center(), glyph, size, if pointed || lit { orbit_look::accent() } else { theme::FG });
 }
 
 pub struct HideChip {
     handle: vr::OverlayHandle,
     canvas: Canvas,
+    /// What its round shows: the X, or the share chip's people ([`Self::share`]).
+    glyph: &'static str,
+    /// Lit: the share chip while it shares.
+    lit: bool,
     shown: Option<bool>,
     /// The language its picture was drawn in: a picture kept on the overlay does not change with the language, so it is drawn again.
     drawn_in: Language,
@@ -182,7 +193,26 @@ impl HideChip {
         let _ = overlay.set_width_in_meters(handle, CHIP_WIDTH_M);
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, 3);
-        Ok(Self { handle, canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]), shown: None, drawn_in: language() })
+        Ok(Self { handle, canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]), glyph: icons::X, lit: false, shown: None, drawn_in: language() })
+    }
+
+    /// The share chip: "look at it with a friend here" (`controller/shared_view.rs`), the X's twin on the capture's
+    /// other side; lit while it shares.
+    pub fn share(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
+        let handle = crate::overlay::slots::create(overlay, &format!("{key}.small-share"), "Look at a small 3D view with a friend").map_err(|c| anyhow::anyhow!("the small view's share: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR)
+        let _ = overlay.set_width_in_meters(handle, CHIP_WIDTH_M);
+        let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
+        let _ = overlay.set_sort_order(handle, 3);
+        Ok(Self { handle, canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]), glyph: icons::USERS, lit: false, shown: None, drawn_in: language() })
+    }
+
+    /// Lit (it shares) or not: drawn again when that changes.
+    pub fn set_lit(&mut self, lit: bool) {
+        if self.lit != lit {
+            self.lit = lit;
+            self.shown = None;
+            self.canvas.invalidate();
+        }
     }
 
     /// Where it shows, and whether a hand points at it; or nowhere.
@@ -194,12 +224,14 @@ impl HideChip {
             return;
         };
         if self.shown != Some(pointed) || self.drawn_in != language() {
-            if self.shown.is_none() || self.drawn_in != language() {
+            let was_hidden = self.shown.is_none();
+            if was_hidden || self.drawn_in != language() {
                 self.canvas.invalidate();
             }
             self.drawn_in = language();
+            let (glyph, lit) = (self.glyph, self.lit);
             for _ in 0..2 {
-                self.canvas.paint(0.0, |p| paint_chip(p, pointed));
+                self.canvas.paint(0.0, |p| paint_chip_with(p, pointed, lit, glyph));
             }
             if let Some(changed) = self.canvas.damage() {
                 presenter.show_part(overlay, self.handle, self.canvas.pixels(), CHIP_PX[0], CHIP_PX[1], changed);
@@ -229,6 +261,18 @@ pub fn chip_place(middle: V3, radius: f32, eye: V3, over_the_hint: bool) -> vr::
     let flat = (towards[0] * towards[0] + towards[2] * towards[2]).sqrt().max(1e-4);
     let back = [-towards[0] / flat, 0.0, -towards[2] / flat];
     let on_the_rim = stereo::add(stereo::scale(right, radius * RIM_ACROSS), stereo::scale(back, radius * RIM_BACK));
+    let up = (CHIP_STEM_M + CHIP_WIDTH_M / 2.0).min(radius * TOP_OF_RADIUS + ABOVE_M - CHIP_WIDTH_M / 2.0 - 0.005);
+    facing(stereo::add(stereo::add(middle, on_the_rim), [0.0, up, 0.0]), eye)
+}
+
+/// Where a view's share chip lies, facing `eye`: the X's twin, on the capture's own rim at its far left as seen from the eyes, on the
+/// same stem: above the capture, joined to it, never on the hint (which stands over the view's top) nor beside the view.
+pub fn share_chip_place(middle: V3, radius: f32, eye: V3) -> vr::Matrix34 {
+    let left = stereo::scale(right_of(middle, eye), -1.0);
+    let towards = stereo::sub(eye, middle);
+    let flat = (towards[0] * towards[0] + towards[2] * towards[2]).sqrt().max(1e-4);
+    let back = [-towards[0] / flat, 0.0, -towards[2] / flat];
+    let on_the_rim = stereo::add(stereo::scale(left, radius * RIM_ACROSS), stereo::scale(back, radius * RIM_BACK));
     let up = (CHIP_STEM_M + CHIP_WIDTH_M / 2.0).min(radius * TOP_OF_RADIUS + ABOVE_M - CHIP_WIDTH_M / 2.0 - 0.005);
     facing(stereo::add(stereo::add(middle, on_the_rim), [0.0, up, 0.0]), eye)
 }

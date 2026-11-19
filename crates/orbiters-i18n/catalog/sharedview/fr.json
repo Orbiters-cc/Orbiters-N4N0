@@ -1,0 +1,21 @@
+{
+  "Look at a 3D picture with {name}?": "Regarder une image 3D avec {name} ?",
+  "{world} · it opens in front of you": "{world} · elle s’ouvre devant toi",
+  "Look at it together with": "La regarder avec",
+  "{name} can't open this 3D picture. Share it with them in the gallery first.": "{name} ne peut pas ouvrir cette image 3D. Partage-la d’abord avec cette personne depuis la galerie.",
+  "This 3D picture can't be shown to friends.": "Cette image 3D ne peut pas être montrée à des amis.",
+  "This 3D picture was replaced. Open it again to show it.": "Cette image 3D a été remplacée. Ouvre-la à nouveau pour la montrer.",
+  "{name} has other 3D pictures waiting. Try again in a moment.": "{name} a d’autres images 3D en attente. Réessaie dans un instant.",
+  "{name} needs a newer Orbiters - N4N0 to look at it with you.": "{name} a besoin d’un Orbiters - N4N0 plus récent pour la regarder avec toi.",
+  "{name} can't be shown it right now.": "Impossible de la montrer à {name} pour le moment.",
+  "This friend can't be shown it right now.": "Impossible de la montrer à cet ami pour le moment.",
+  "{name}'s 3D picture isn't shown any more.": "L’image 3D de {name} n’est plus montrée.",
+  "{name}'s 3D picture could not be opened: {message}": "Impossible d’ouvrir l’image 3D de {name} : {message}",
+  "it has no start view": "elle n’a pas de vue de départ",
+  "Orbiters answered {status}": "Orbiters a répondu {status}",
+  "{name} is looking at it with you.": "{name} la regarde avec toi.",
+  "{name} said not now.": "{name} a dit pas maintenant.",
+  "{name} stopped looking.": "{name} a arrêté de regarder.",
+  "{name} can't see it any more.": "{name} ne peut plus la voir.",
+  "{name} stopped showing their 3D picture.": "{name} a arrêté de montrer son image 3D."
+}

@@ -52,6 +52,7 @@ mod tray;
 mod upload_prep;
 mod usage;
 mod views;
+mod shared_view_ui;
 mod wake_offer;
 mod window_rest;
 mod worlds;

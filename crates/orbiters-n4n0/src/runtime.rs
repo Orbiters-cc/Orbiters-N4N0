@@ -77,6 +77,8 @@ const AVATAR_SETTLE: Duration = Duration::from_millis(1500);
 const PIN_DEBOUNCE: Duration = Duration::from_millis(400);
 /// What VRChat's `/input/Voice` needs between press and release.
 const VOICE_PRESS: Duration = Duration::from_millis(80);
+/// How long after Talk was let go N4N0 waits for VRChat to say it muted, to toggle it back.
+const UNMUTE_WAIT: Duration = Duration::from_millis(1500);
 /// How much of the conversation the assistant gets back each turn (the server trims too).
 const MAX_CONVERSATION: usize = 40;
 /// Characters of the avatar's controls in the assistant's context.
@@ -172,10 +174,15 @@ pub(crate) struct N4n0Runtime {
     /// The face the assistant asked for, while its answer is up.
     mood: Option<N4n0Face>,
     pub(crate) afk: bool,
-    mute_self: bool,
+    pub(crate) mute_self: bool,
     afk_showing: bool,
     pub(crate) listening: Option<(Source, Instant)>,
-    muted_by_n4n0: bool,
+    /// N4N0 toggled VRChat's microphone off for the avatar menu's Talk (and when: its two pulses then).
+    pub(crate) muted_by_n4n0: bool,
+    mute_pressed: Option<Instant>,
+    /// Talk was let go before VRChat said it muted: when it says so (until this deadline), N4N0 toggles it back. Never
+    /// a blind toggle: without the echo by then, nothing is sent.
+    pub(crate) unmute_when_muted: Option<Instant>,
     /// The turn under way (N4N0 thinks), and the last turn's number.
     turn: Option<Turn>,
     turns: u64,
@@ -317,6 +324,8 @@ impl N4n0Runtime {
         self.afk = false;
         self.mute_self = false;
         self.muted_by_n4n0 = false;
+        self.mute_pressed = None;
+        self.unmute_when_muted = None;
         self.afk_showing = false;
         self.face_sent = None;
         self.pins_due = None;
@@ -356,6 +365,40 @@ impl N4n0Runtime {
             summary: format!("{question} (or say yes or no)"), // i18n: not shown
             approve_url: format!("{LOCAL_APPROVAL}{n}"),
         });
+    }
+
+    /// The mute N4N0 made for Talk ends (Talk let go, the assistant switched off): VRChat's microphone is toggled back
+    /// on when VRChat said it muted; when it has not said so yet, the press is called off if its pulses have not left,
+    /// else the toggle back waits for VRChat's word. Nothing when N4N0 muted nothing (push-to-talk, already muted).
+    pub(crate) fn release_mute(&mut self, now: Instant) {
+        if !std::mem::take(&mut self.muted_by_n4n0) {
+            return;
+        }
+        let pressed = self.mute_pressed.take();
+        if self.mute_self {
+            self.send_at(now + Duration::from_millis(150), [("/input/Voice".to_string(), OscType::Int(1))]);
+            self.send_at(now + Duration::from_millis(150) + VOICE_PRESS, [("/input/Voice".to_string(), OscType::Int(0))]);
+            return;
+        }
+        let ours = |t: &Instant, address: &str| address == "/input/Voice" && pressed.is_some_and(|p| *t == p || *t == p + VOICE_PRESS);
+        if self.outbox.iter().any(|(t, (a, v))| ours(t, a) && *v == OscType::Int(1)) {
+            // Not sent yet: VRChat never hears of it.
+            self.outbox.retain(|(t, (a, _))| !ours(t, a));
+        } else {
+            self.unmute_when_muted = Some(now + UNMUTE_WAIT);
+        }
+    }
+
+    /// VRChat said it muted after Talk was let go: toggled back (from the N4N0 thread's tick).
+    pub(crate) fn unmute_step(&mut self, now: Instant) {
+        let Some(until) = self.unmute_when_muted else { return };
+        if self.mute_self {
+            self.unmute_when_muted = None;
+            self.send_at(now, [("/input/Voice".to_string(), OscType::Int(1))]);
+            self.send_at(now + VOICE_PRESS, [("/input/Voice".to_string(), OscType::Int(0))]);
+        } else if now >= until {
+            self.unmute_when_muted = None;
+        }
     }
 
     /// The avatar's screen is not known (an avatar loads): the menu goes to the overlay until it is looked at.
@@ -418,6 +461,7 @@ impl N4n0Runtime {
         at(self.sender.as_ref().and_then(TextSender::next_due));
         at(self.outbox.iter().map(|(t, _)| *t).min());
         at(self.pins_due);
+        at(self.unmute_when_muted);
         at(self.listening.map(|(_, since)| since + crate::voice::LISTEN_LIMIT));
         at(self.test_cycle.map(|start| {
             let steps = now.duration_since(start).as_millis() / TEST_CYCLE_STEP.as_millis() + 1;
@@ -945,6 +989,7 @@ impl N4n0 {
                     out.push((parameter(params::STATE), OscType::Int(face)));
                 }
             }
+            rt.unmute_step(now);
             let ready: Vec<(Instant, Message)>;
             (ready, rt.outbox) = std::mem::take(&mut rt.outbox).into_iter().partition(|(t, _)| *t <= now);
             out.extend(ready.into_iter().map(|(_, m)| m));
@@ -1324,7 +1369,14 @@ impl N4n0 {
                     self.queue(move |n| n.host.walk_boost(v));
                 }
             }
-            "MuteSelf" => self.n4n0.lock().unwrap().mute_self = value.truthy(),
+            "MuteSelf" => {
+                let mut rt = self.n4n0.lock().unwrap();
+                rt.mute_self = value.truthy();
+                if rt.unmute_when_muted.is_some() {
+                    // The N4N0 thread toggles it back (this thread never sends).
+                    rt.wake();
+                }
+            }
             "InStation" | "Seated" | "VelocityMagnitude" => self.host.motion(Some((name, value))),
             _ => {
                 // A pinned parameter the avatar moved goes back to its pin. Most parameters are no pin: let go at once,
@@ -1571,6 +1623,8 @@ impl N4n0 {
         rt.voice.level = 0.0;
         rt.voice.speech = false;
         rt.screen.menu.listening = false;
+        // A mute N4N0 made for Talk is put back now: the button's release no longer reaches N4N0 once it is off.
+        rt.release_mute(Instant::now());
         // What waited for the owner's yes is not done by an assistant that is off.
         if !rt.pending.is_empty() {
             let what: Vec<String> = std::mem::take(&mut rt.pending).into_iter().map(|p| p.what).collect();
@@ -1596,7 +1650,8 @@ impl N4n0 {
         if !settings.enabled || !settings.assistant {
             return;
         }
-        let ask_busy = { let rt = self.n4n0.lock().unwrap(); rt.voice.ask_open && rt.ask_busy() };
+        // N4N0 listens to nothing new while it waits or answers (as `voice_listen` says): then it mutes nothing either.
+        let ask_busy = self.n4n0.lock().unwrap().ask_busy();
         if down && ask_busy {
             self.publish();
             return;
@@ -1611,11 +1666,15 @@ impl N4n0 {
                 return;
             }
             // The sentence for N4N0 stays out of the world: mute VRChat's microphone while the menu's button is held.
-            if source == Source::Menu && settings.mute_while_talking && !rt.mute_self {
+            if source == Source::Menu && settings.mute_while_talking && rt.unmute_when_muted.take().is_some() {
+                // Pressed again before VRChat said the last press muted it: that mute is this press's.
+                rt.muted_by_n4n0 = true;
+            } else if source == Source::Menu && settings.mute_while_talking && !rt.mute_self && !rt.muted_by_n4n0 {
                 let now = Instant::now();
                 rt.send_at(now, [("/input/Voice".to_string(), OscType::Int(1))]);
                 rt.send_at(now + VOICE_PRESS, [("/input/Voice".to_string(), OscType::Int(0))]);
                 rt.muted_by_n4n0 = true;
+                rt.mute_pressed = Some(now);
             }
             drop(rt);
             self.voice_listen(source);
@@ -1627,10 +1686,8 @@ impl N4n0 {
             }
             // Unmute only what N4N0 muted (in push-to-talk mode the press never muted anything), even when the
             // sentence ended on its own meanwhile (its time limit, the worker stopping).
-            if source == Source::Menu && std::mem::take(&mut rt.muted_by_n4n0) && rt.mute_self {
-                let now = Instant::now();
-                rt.send_at(now + Duration::from_millis(150), [("/input/Voice".to_string(), OscType::Int(1))]);
-                rt.send_at(now + Duration::from_millis(150) + VOICE_PRESS, [("/input/Voice".to_string(), OscType::Int(0))]);
+            if source == Source::Menu {
+                rt.release_mute(Instant::now());
             }
             drop(rt);
             if held {

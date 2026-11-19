@@ -1135,6 +1135,95 @@ fn an_approval_taken_before_an_avatar_change_still_checks_the_avatar_when_it_run
     t.shutdown(&n);
 }
 
+/// N4N0 ready to listen (models "installed", signed in, the stand-in ears), not started: what it would send to VRChat
+/// stays in its outbox.
+fn n4n0_ready_to_listen() -> (Arc<TestHost>, Shared) {
+    let (t, n, device) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *device.ears.allowed.lock().unwrap() = true;
+    n.n4n0.lock().unwrap().voice.installed = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    (t, n)
+}
+
+/// The `/input/Voice` pulses waiting in the outbox, in order.
+fn voice_pulses(n: &Shared) -> Vec<i32> {
+    let rt = n.n4n0.lock().unwrap();
+    let mut out: Vec<(Instant, i32)> = rt
+        .outbox
+        .iter()
+        .filter(|(_, (a, _))| a == "/input/Voice")
+        .map(|(t, (_, v))| (*t, if let OscType::Int(i) = v { *i } else { -1 }))
+        .collect();
+    out.sort_by_key(|(t, _)| *t);
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
+/// The pulses left the app (as the N4N0 thread sends them).
+fn dispatched(n: &Shared) {
+    n.n4n0.lock().unwrap().outbox.clear();
+}
+
+#[test]
+fn a_quick_talk_tap_never_leaves_the_owner_muted() {
+    use crate::runtime::Source;
+    // N4N0-3: let go before VRChat's MuteSelf echo, N4N0 forgot it had muted, and VRChat then muted the owner.
+    let (_t, n) = n4n0_ready_to_listen();
+    // Let go before the press's pulses even left: they are called off.
+    n.talk(true, Source::Menu);
+    assert_eq!(voice_pulses(&n), vec![1, 0]);
+    n.talk(false, Source::Menu);
+    assert_eq!(voice_pulses(&n), Vec::<i32>::new(), "VRChat never hears of it");
+    assert!(n.n4n0.lock().unwrap().unmute_when_muted.is_none());
+    // Let go after the pulses left, before the echo: the toggle back waits for VRChat's word, then goes once.
+    n.talk(true, Source::Menu);
+    dispatched(&n);
+    n.talk(false, Source::Menu);
+    assert_eq!(voice_pulses(&n), Vec::<i32>::new(), "no blind toggle");
+    n.on_parameter("MuteSelf", &OscValue::Bool(true));
+    n.n4n0.lock().unwrap().unmute_step(Instant::now());
+    assert_eq!(voice_pulses(&n), vec![1, 0], "toggled back once");
+    n.n4n0.lock().unwrap().unmute_step(Instant::now());
+    assert_eq!(voice_pulses(&n), vec![1, 0]);
+    dispatched(&n);
+    n.on_parameter("MuteSelf", &OscValue::Bool(false));
+    // No echo at all: nothing is sent, and the wait ends.
+    n.talk(true, Source::Menu);
+    dispatched(&n);
+    n.talk(false, Source::Menu);
+    n.n4n0.lock().unwrap().unmute_step(Instant::now() + Duration::from_secs(5));
+    assert!(n.n4n0.lock().unwrap().unmute_when_muted.is_none() && voice_pulses(&n).is_empty());
+    // Pressed again before the echo: that mute is the new press's, no second toggle.
+    n.talk(true, Source::Menu);
+    dispatched(&n);
+    n.talk(false, Source::Menu);
+    n.talk(true, Source::Menu);
+    assert!(voice_pulses(&n).is_empty(), "no second toggle");
+    n.on_parameter("MuteSelf", &OscValue::Bool(true));
+    n.n4n0.lock().unwrap().unmute_step(Instant::now());
+    assert!(voice_pulses(&n).is_empty(), "still held: stays muted");
+    n.talk(false, Source::Menu);
+    assert_eq!(voice_pulses(&n), vec![1, 0], "let go: toggled back");
+    dispatched(&n);
+    // Muted by the owner before: Talk mutes nothing, unmutes nothing.
+    n.talk(true, Source::Menu);
+    n.talk(false, Source::Menu);
+    assert!(voice_pulses(&n).is_empty());
+}
+
+#[test]
+fn switching_the_assistant_off_during_talk_puts_the_owner_s_microphone_back() {
+    use crate::runtime::Source;
+    // N4N0-15: off during a held Talk, the release no longer reached N4N0 and the owner stayed muted.
+    let (_t, n) = n4n0_ready_to_listen();
+    n.talk(true, Source::Menu);
+    dispatched(&n);
+    n.on_parameter("MuteSelf", &OscValue::Bool(true));
+    n.command(Command::Assistant { on: false });
+    assert_eq!(voice_pulses(&n), vec![1, 0], "toggled back once");
+    n.talk(false, Source::Menu);
+    assert_eq!(voice_pulses(&n), vec![1, 0], "and not again at the release");
+}
+
 /// A turn on the stand-in server that asks to hold the Hoodie (which waits for the owner's yes).
 fn hold_turn() -> String {
     done(json!([{ "role": "user", "content": "q" }]), json!([{ "id": "h", "name": "hold_avatar_control", "input": { "control": "hoodie", "on": true } }]))

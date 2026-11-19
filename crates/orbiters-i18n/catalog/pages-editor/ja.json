@@ -205,5 +205,7 @@
   "{tones} tones, ink {ink}": "{tones}階調、インク {ink}",
   "{tones} tones, ink {ink}, dots": "{tones}階調、インク {ink}、ドット",
   "{width} × {height} pixels": "{width} × {height} ピクセル",
-  "layer\u0004Hidden": "非表示"
+  "layer\u0004Hidden": "非表示",
+  "The picture could not be read.": "写真を読み込めませんでした。",
+  "it stopped unexpectedly": "予期せず停止しました"
 }

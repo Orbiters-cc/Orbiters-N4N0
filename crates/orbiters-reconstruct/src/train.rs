@@ -1142,7 +1142,7 @@ impl Rounds {
     #[allow(clippy::too_many_arguments)]
     fn settle(&mut self, gpu: &mut Gpu, dev: &wgpu::Device, settings: &Settings, it: u32, relocate_until: u32, scored: bool, extent: f32, filter_cams: &[Camera]) -> anyhow::Result<()> {
         while self.weights.is_some() || self.plan.is_some() {
-            dev.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{}", tr!("waiting for the GPU: {error}", error = e)))?;
+            crate::gpu::wait_for_gpu(dev, "the training's queue")?; // i18n: not shown (a detail of a GPU error)
             if self.plan.as_ref().is_some_and(|h| !h.is_finished()) {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }

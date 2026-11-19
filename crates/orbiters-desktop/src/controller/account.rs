@@ -419,6 +419,22 @@ impl Controller {
     }
 
     /// The server and the saved account's name and id, when one is saved: whom world labels go under.
+    /// The server, the account's id and the API with its credential, read together (what a send goes as and the list
+    /// it was taken from are the same account).
+    pub(super) fn account_with_api(&self) -> Option<(Server, Option<String>, Api, String)> {
+        let rt = self.account_runtime.lock().unwrap();
+        let (server, _) = rt.read?;
+        rt.account.as_ref().map(|a| (server, a.user.clone(), Api::new(server), a.token.clone()))
+    }
+
+    /// Tests: an account signed in as `user` on `server`, as the account thread would have read it.
+    #[cfg(test)]
+    pub(super) fn signed_in_for_test(&self, server: Server, user: &str) {
+        let mut rt = self.account_runtime.lock().unwrap();
+        rt.read = Some((server, None));
+        rt.account = Some(Account { token: format!("orbit-test-{user}"), user: Some(user.into()), username: Some(user.into()), avatar_url: None });
+    }
+
     pub(super) fn feedback_account(&self) -> Option<(Server, Option<String>, Option<String>)> {
         let rt = self.account_runtime.lock().unwrap();
         let (server, _) = rt.read?;

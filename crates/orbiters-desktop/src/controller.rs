@@ -1635,6 +1635,8 @@ impl Controller {
     fn on_osc_events(self: &Shared, events: &mut Vec<OscEvent>, at_ns: u64, record_parameter: &str) {
         let mut messages = Vec::with_capacity(events.len());
         let mut went_off = false;
+        // The avatar this batch's events already invalidated the kit for: `on_osc` does not do it a second time.
+        let mut invalidated: Option<String> = None;
         // How the player moves, for live translation in VR (the overlay keeps translations on the world as the person
         // walks with the stick): forwarded only while it is on.
         let mut locomotion: Vec<(String, f32)> = Vec::new();
@@ -1669,6 +1671,7 @@ impl Controller {
                 }
                 OscEvent::AvatarChanged { id } => {
                     self.invalidate_kit(Some(id.clone()));
+                    invalidated = Some(id.clone());
                     self.on_avatar_changed();
                     // N4N0 reads the parameters the last avatar held before they go (`on_osc`).
                     self.n4n0.on_avatar(id.clone());
@@ -1707,7 +1710,7 @@ impl Controller {
             // Only the readers that show things (the overlay, a window): the tray's mailbox would only keep them.
             subs.retain(|m| !m.shows_notices() || m.post(ToClient::Locomotion { values: locomotion.clone() }));
         }
-        self.on_osc(messages, at_ns);
+        self.on_osc_after(messages, at_ns, invalidated);
         if went_off {
             let _ = self.osc_action(|c| c.local_user_went_off());
         }
@@ -1716,11 +1719,19 @@ impl Controller {
     /// Keeps what VRChat said (and passes it to a session recording it). An avatar change forgets the last avatar's
     /// parameters: a session started now lists the avatar worn, not every avatar worn before.
     fn on_osc(&self, messages: Vec<(String, Vec<OscValue>)>, at_ns: u64) {
+        self.on_osc_after(messages, at_ns, None);
+    }
+
+    /// [`Controller::on_osc`], for a batch whose events already invalidated the kit for the avatar `invalidated`
+    /// ([`Controller::on_osc_events`]): one invalidation (an epoch, a publish) per avatar change, not two (CTL-11 c).
+    fn on_osc_after(&self, messages: Vec<(String, Vec<OscValue>)>, at_ns: u64, invalidated: Option<String>) {
         let avatar_changed = messages.iter().any(|(p,_)| p == AVATAR_CHANGE);
         if avatar_changed {
             let avatar=messages.iter().rev().find(|(p,_)| p==AVATAR_CHANGE).and_then(|(_,v)| match v.first() { Some(OscValue::Text(id))=>Some(id.clone()), _=>None });
             // Invalidate before the new id becomes observable to the demo completion watcher.
-            self.invalidate_kit(avatar);
+            if avatar.is_none() || avatar != invalidated {
+                self.invalidate_kit(avatar);
+            }
         }
         let camera = messages.iter().rev().find(|(p, _)| p == CAMERA_MODE).and_then(|(_, v)| match v.first() {
             Some(OscValue::Int(mode)) => Some(*mode != 0),
@@ -3326,6 +3337,21 @@ mod tests {
         assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), true, t0 + Duration::from_secs(150)), "recording");
         assert!(!sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(180)));
         assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(800)), "ten minutes");
+    }
+
+    /// CTL-11 c: an avatar change heard as an event invalidates the kit once (one epoch, the last avatar's), also with
+    /// two changes in one batch; a message given straight to `on_osc` still invalidates by itself.
+    #[test]
+    fn an_avatar_change_invalidates_the_kit_once() {
+        let ctl = super::Controller::new(orbiters_core::settings::Settings::default());
+        let epoch = || ctl.kit_epoch.lock().unwrap().clone();
+        let start = epoch().0;
+        ctl.on_osc_events(&mut vec![OscEvent::AvatarChanged { id: "avtr_a".into() }], clock::now_ns(), RECORD_PARAMETER);
+        assert_eq!(epoch(), (start + 1, Some("avtr_a".into())));
+        ctl.on_osc_events(&mut vec![OscEvent::AvatarChanged { id: "avtr_b".into() }, OscEvent::AvatarChanged { id: "avtr_c".into() }], clock::now_ns(), RECORD_PARAMETER);
+        assert_eq!(epoch(), (start + 3, Some("avtr_c".into())), "one per change, the last avatar's");
+        ctl.on_osc(vec![(AVATAR_CHANGE.to_string(), vec![OscValue::Text("avtr_d".into())])], clock::now_ns());
+        assert_eq!(epoch(), (start + 4, Some("avtr_d".into())));
     }
 
     /// C-8: the keeper's answer about VRChat A's camera, arriving after the app followed VRChat B, is not shown for B;

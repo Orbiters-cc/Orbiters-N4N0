@@ -61,11 +61,14 @@ fn read_ready() -> Option<Ready> {
     serde_json::from_slice(&std::fs::read(orbiters_update::updates_dir().join(READY_FILE)).ok()?).ok()
 }
 
-fn write_ready(ready: &Ready) {
+/// Notes `ready` beside its setup; an error when the note could not be written (then nothing may rely on it).
+fn write_ready(ready: &Ready) -> std::io::Result<()> {
     let path = orbiters_update::updates_dir().join(READY_FILE);
-    if let Err(e) = serde_json::to_vec_pretty(ready).map_err(std::io::Error::other).and_then(|json| orbiters_core::write_atomic(&path, &json)) {
+    let written = serde_json::to_vec_pretty(ready).map_err(std::io::Error::other).and_then(|json| orbiters_core::write_atomic(&path, &json));
+    if let Err(e) = &written {
         eprintln!("updates: {}: {e}", path.display());
     }
+    written
 }
 
 /// Whether `setup` is the whole file `ready` names.
@@ -100,7 +103,8 @@ pub fn pending_setup() -> Option<(PathBuf, PathBuf)> {
     if !verified(&setup, &ready) {
         return None;
     }
-    write_ready(&Ready { started: true, ..ready });
+    // Started once only: without the mark on disk, a setup that fails would start again at every start.
+    write_ready(&Ready { started: true, ..ready }).ok()?;
     Some((setup, dir))
 }
 
@@ -289,7 +293,14 @@ impl Controller {
         }
         // Noted already (it was started once): kept as it is.
         if noted.is_none() {
-            write_ready(&ready);
+            // Ready only once noted: the restart reads the note, and without it would call the setup damaged.
+            if let Err(e) = write_ready(&ready) {
+                if !self.quitting.load(Ordering::Relaxed) {
+                    let message = tr!("Version {version} could not be downloaded: {error}", version = version, error = e);
+                    self.update(|s| s.update.state = UpdateState::Failed { message });
+                }
+                return;
+            }
         }
         tidy(Some(&version));
         self.update(|s| s.update.state = UpdateState::Ready { version: version.clone(), notes: release.notes.clone() });
@@ -322,7 +333,8 @@ impl Controller {
             self.update_action(UpdateAction::Check);
             return;
         };
-        write_ready(&Ready { started: true, ..ready });
+        // Asked for by the person: it goes even when the mark could not be written.
+        let _ = write_ready(&Ready { started: true, ..ready });
         let u = self.updates.lock().unwrap();
         match (&u.restarter, &u.install) {
             (Some(restart), Some(dir)) => restart(&setup, dir),

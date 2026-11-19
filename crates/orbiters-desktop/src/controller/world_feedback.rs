@@ -93,6 +93,9 @@ impl Default for WorldFeedbackRuntime {
     }
 }
 
+/// What waits for an account whose credential Orbiters refused, before it is tried again.
+const SIGNED_OUT_PAUSE: Duration = Duration::from_secs(600);
+
 /// Whether the log's world is one whose lines count (the N4N0 world, or any in the Development environment).
 fn accepted(world: Option<&str>, development: bool) -> bool {
     world.is_some_and(|w| development || w.eq_ignore_ascii_case(contract::N4N0_WORLD))
@@ -376,6 +379,16 @@ impl WorldFeedbackRuntime {
                 self.world.error = Some((self.world.seen, code, message.clone()));
                 self.menu_errors.insert(world.clone(), message);
             }
+            (Call::Send { .. }, Err(Failure::SignedOut)) => {
+                // The credential is refused: nothing of this account goes for a while (the account is asked about again
+                // meanwhile), rather than each action again every minute for a day.
+                let parked = now + SIGNED_OUT_PAUSE.as_millis() as u64;
+                let stamp = self.stamp.clone();
+                for p in self.queue.items.iter_mut().filter(|p| p.to.as_ref().is_some_and(|to| to.sends_as(&stamp))) {
+                    p.due = p.due.max(parked);
+                }
+                self.save();
+            }
             (Call::Send { .. }, Err(_)) => {
                 if let Some(i) = index(&self.queue) {
                     self.queue.retry(i, now);
@@ -448,7 +461,7 @@ fn perform(call: &Call, api: Option<&(Api, String)>) -> Result<Option<orbiters_c
         Call::Read { world } => client.read(world).map(Some),
         Call::Send { .. } if api.is_none() => Err(Failure::SignedOut),
         Call::Send { world, action, .. } => match action {
-            Action::Set(set) => client.set(world, set).map(Some),
+            Action::Set(set) => client.set(world, set),
             Action::Comment { text, client_id } => client.comment(world, text, client_id).map(|_| None),
             Action::Uncomment { comment } => client.uncomment(*comment).map(|_| None),
             Action::Report { comment, reason } => client.report(*comment, reason.as_deref()).map(|_| None),

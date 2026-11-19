@@ -188,15 +188,17 @@ impl Client<'_> {
         Self::json(&text)
     }
 
-    /// Sets the member's like and labels as `set` says.
-    pub fn set(&self, world: &str, set: &Set) -> Result<ServerView, Failure> {
+    /// Sets the member's like and labels as `set` says: the world's feedback as Orbiters answers it, `None` when it was
+    /// done but its answer does not read (a newer shape: read the world again rather than set it again).
+    pub fn set(&self, world: &str, set: &Set) -> Result<Option<ServerView>, Failure> {
         let world = world_path(world)?;
         let (_, text) = self.call("PUT", &format!("maps/worlds/{world}/feedback"), Some(set.body()))?;
-        Self::json(&text)
+        Ok(Self::json(&text).ok())
     }
 
-    /// Writes a comment (`client_id`: its own id, so a retry answers the one made).
-    pub fn comment(&self, world: &str, text: &str, client_id: &str) -> Result<Comment, Failure> {
+    /// Writes a comment (`client_id`: its own id, so a retry answers the one made); `None` when it was written but its
+    /// answer does not read.
+    pub fn comment(&self, world: &str, text: &str, client_id: &str) -> Result<Option<Comment>, Failure> {
         let world = world_path(world)?;
         let body = serde_json::json!({ "text": text, "clientId": client_id });
         let (_, answer) = self.call("POST", &format!("maps/worlds/{world}/comments"), Some(body))?;
@@ -204,7 +206,7 @@ impl Client<'_> {
         struct Made {
             comment: Comment,
         }
-        Ok(Self::json::<Made>(&answer)?.comment)
+        Ok(Self::json::<Made>(&answer).ok().map(|m| m.comment))
     }
 
     pub fn uncomment(&self, comment: u64) -> Result<(), Failure> {
@@ -550,10 +552,10 @@ mod tests {
         let had = mine(&before);
         println!("account {:?} (id {:?}) on {}: chill {} before, count {}", account.username, account.user, server.api(), had, count(&before));
         let set = |on: bool| Set { labels: [("chill".to_string(), on)].into_iter().collect(), ..Default::default() };
-        let changed = client.set(world, &set(!had)).expect("set");
+        let changed = client.set(world, &set(!had)).expect("set").expect("its answer reads");
         println!("after: mine {}, count {}", mine(&changed), count(&changed));
         assert_eq!(mine(&changed), !had);
-        let back = client.set(world, &set(had)).expect("set back");
+        let back = client.set(world, &set(had)).expect("set back").expect("its answer reads");
         println!("back: mine {}, count {}", mine(&back), count(&back));
         assert_eq!((mine(&back), count(&back)), (had, count(&before)), "as it was");
         let unknown = Set { labels: [("beautiful".to_string(), true)].into_iter().collect(), ..Default::default() };

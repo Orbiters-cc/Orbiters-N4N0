@@ -450,8 +450,9 @@ impl SideGame {
             watcher.poll();
         }
         if let Some(log) = st.log.clone() {
-            let text = read_from(&log, st.read_to, LOG_CHUNK);
-            st.read_to += text.len() as u64;
+            // Whole lines, counted in the file's bytes (controller/vrchats.rs, CTL2-6).
+            let (text, consumed) = super::vrchats::read_log_from(&log, st.read_to, LOG_CHUNK);
+            st.read_to += consumed;
             let asked = text.rfind("No cached credentials found").or_else(|| text.rfind("AuthSelectionPage OnPageShown"));
             let signed = text.rfind("post login checks for ");
             match (asked, signed) {
@@ -550,18 +551,6 @@ fn own_log(dir: &Path, since: SystemTime, profile: u32, osc: (u16, u16), followe
         .map(|e| e.path())
 }
 
-fn read_from(path: &Path, from: u64, most: u64) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut bytes = Vec::new();
-    if let Ok(mut file) = std::fs::File::open(path) {
-        if file.seek(SeekFrom::Start(from)).is_ok() {
-            let _ = file.take(most).read_to_end(&mut bytes);
-        }
-    }
-    // Up to the last whole line: the rest is read next time.
-    let end = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
-}
 
 impl Game for SideGame {
     fn give_back(&self) {

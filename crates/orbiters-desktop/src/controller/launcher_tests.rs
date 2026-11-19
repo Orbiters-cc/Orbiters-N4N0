@@ -31,6 +31,15 @@ impl Machine for Pretend {
     }
 }
 
+/// A press on the list of the test client's account (`usr_test`).
+fn mine(action: Action) -> Action {
+    Action::As { account: "usr_test".into(), action: Box::new(action) }
+}
+
+fn signed_in_list(c: &Shared) {
+    c.update(|s| s.launcher.source = Source::SignedIn { user_id: "usr_test".into(), name: String::new() });
+}
+
 fn controller(machine: Arc<Pretend>) -> Shared {
     let c = Controller::new(Settings::default());
     c.launcher_machine(machine);
@@ -76,11 +85,11 @@ fn boops_and_requests_hold_a_cool_down_per_person() {
         s.launcher.friends = vec![orbiters_core::launcher::Friend { id: A.into(), ..Default::default() }];
         s.launcher.source = Source::SignedIn { user_id: "usr_test".into(), name: String::new() };
     });
-    assert_eq!(c.launcher_do(Action::Boop { to: A.into(), emoji: Some("default_heart".into()) }), Some(Notice::Sent { to: A.into(), action: SentKind::Boop }));
-    assert!(matches!(c.launcher_do(Action::Boop { to: A.into(), emoji: None }), Some(Notice::CoolingDown { .. })), "a second boop waits");
+    assert_eq!(c.launcher_do(mine(Action::Boop { to: A.into(), emoji: Some("default_heart".into()) })), Some(Notice::Sent { to: A.into(), action: SentKind::Boop }));
+    assert!(matches!(c.launcher_do(mine(Action::Boop { to: A.into(), emoji: None })), Some(Notice::CoolingDown { .. })), "a second boop waits");
     assert!(c.view().launcher.friend(A).unwrap().boop_ready_at.is_some(), "the row knows when");
-    assert!(matches!(c.launcher_do(Action::RequestInvite { to: B.into() }), Some(Notice::Failed { action: SentKind::RequestInvite, .. })), "the page takes its Sent back");
-    assert_eq!(c.launcher_do(Action::RequestInvite { to: B.into() }), Some(Notice::Sent { to: B.into(), action: SentKind::RequestInvite }), "a refused one can be tried again");
+    assert!(matches!(c.launcher_do(mine(Action::RequestInvite { to: B.into() })), Some(Notice::Failed { action: SentKind::RequestInvite, .. })), "the page takes its Sent back");
+    assert_eq!(c.launcher_do(mine(Action::RequestInvite { to: B.into() })), Some(Notice::Sent { to: B.into(), action: SentKind::RequestInvite }), "a refused one can be tried again");
     let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
     assert_eq!(calls, [format!("POST /users/{A}/boop"), format!("POST /requestInvite/{B}"), format!("POST /requestInvite/{B}")]);
 }
@@ -109,16 +118,18 @@ fn play_starts_one_vrchat_with_the_options_and_never_a_second() {
 fn accepting_an_invite_starts_in_its_instance() {
     let machine = Arc::new(Pretend { installed: true, ..Default::default() });
     let c = controller(machine.clone());
+    let (_, _) = c.test_vrchat(vec![]);
+    signed_in_list(&c);
     let place = launcher_feed::place(&format!("{W}:777~friends({A})~region(jp)"), "Café").unwrap();
     c.update(|s| {
         s.launcher.invites = vec![Invite { id: "not_1".into(), kind: InviteKind::Invite, from_id: A.into(), from_name: "Nova".into(), from_icon: String::new(), place: Some(place), message: String::new(), received_at: 0 }];
     });
-    c.launcher_do(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Vr });
+    c.launcher_do(mine(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Vr }));
     let args = machine.started.lock().unwrap()[0].clone();
     assert_eq!(args.last().unwrap(), &format!("vrchat://launch?ref=orbiters.cc&id={W}:777~friends({A})~region(jp)"));
     assert!(args.contains(&"-screen-width".to_string()), "the small window in VR");
     assert!(c.view().launcher.invites.is_empty(), "the card goes");
-    assert!(matches!(c.launcher_do(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Vr }), Some(Notice::Error(_))));
+    assert!(matches!(c.launcher_do(mine(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Vr })), Some(Notice::Error(_))));
 }
 
 #[test]
@@ -136,8 +147,8 @@ fn dismissing_an_invite_hides_it_at_vrchat_and_a_boop_only_here() {
         s.launcher.invites = vec![Invite { id: "not_1".into(), kind: InviteKind::Request, from_id: A.into(), from_name: String::new(), from_icon: String::new(), place: None, message: String::new(), received_at: 0 }];
         s.launcher.boops = vec![orbiters_core::launcher::Boop { id: "not_2".into(), from_id: A.into(), from_name: String::new(), from_icon: String::new(), emoji: None, received_at: 0 }];
     });
-    c.launcher_do(Action::Dismiss { id: "not_1".into() });
-    c.launcher_do(Action::Dismiss { id: "not_2".into() });
+    c.launcher_do(mine(Action::Dismiss { id: "not_1".into() }));
+    c.launcher_do(mine(Action::Dismiss { id: "not_2".into() }));
     assert!(c.view().launcher.invites.is_empty() && c.view().launcher.boops.is_empty());
     assert_eq!(calls.lock().unwrap().len(), 1);
     assert!(calls.lock().unwrap()[0].1.ends_with("/auth/user/notifications/not_1/hide"));
@@ -283,7 +294,7 @@ fn an_accepted_invite_is_hidden_at_vrchat_only_once_the_account_got_there() {
     let place = launcher_feed::place(&format!("{W}:777~friends({A})~region(jp)"), "Café").unwrap();
     let invite = |id: &str| Invite { id: id.into(), kind: InviteKind::Invite, from_id: A.into(), from_name: "Nova".into(), from_icon: String::new(), place: Some(place.clone()), message: String::new(), received_at: 0 };
     c.update(|s| s.launcher.invites = vec![invite("not_1")]);
-    c.launcher_do(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Vr });
+    c.launcher_do(mine(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Vr }));
     assert!(c.view().launcher.invites.is_empty(), "the card goes at once");
     c.launcher_settle_accepted(Some(&client));
     assert!(calls.lock().unwrap().is_empty(), "nothing hidden at VRChat while VRChat is only starting");
@@ -294,7 +305,7 @@ fn an_accepted_invite_is_hidden_at_vrchat_only_once_the_account_got_there() {
     assert!(calls.lock().unwrap()[0].1.ends_with("/auth/user/notifications/not_1/hide"));
     // One that never arrives comes back as a card, and VRChat was told nothing.
     c.update(|s| s.launcher.me = None);
-    c.launcher.lock().unwrap().accepted.push((invite("not_2"), Instant::now().checked_sub(ARRIVE_WITHIN + Duration::from_secs(1)).unwrap()));
+    c.launcher.lock().unwrap().accepted.push(accepted(invite("not_2"), "usr_test", ARRIVE_WITHIN + Duration::from_secs(1)));
     c.launcher_settle_accepted(Some(&client));
     assert_eq!(c.view().launcher.invites.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["not_2"]);
     assert_eq!(calls.lock().unwrap().len(), 1);
@@ -557,7 +568,7 @@ fn a_destination_on_a_mac_is_an_invite_to_oneself_now_or_once_the_game_is_up() {
     c.update(|s| s.launcher.source = Source::SignedIn { user_id: "usr_test".into(), name: String::new() });
     c.launcher_game(machine.as_ref());
     // Not running: Obelisk opens, the destination waits, nothing is sent yet.
-    assert_eq!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) }), Some(Notice::Sent { to: W.into(), action: SentKind::Launch }));
+    assert_eq!(c.launcher_do(mine(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) })), Some(Notice::Sent { to: W.into(), action: SentKind::Launch }));
     assert!(calls.lock().unwrap().is_empty());
     machine.running.lock().unwrap().push((42, true));
     c.launcher_game(machine.as_ref());
@@ -574,7 +585,7 @@ fn a_destination_on_a_mac_is_an_invite_to_oneself_now_or_once_the_game_is_up() {
     c.launcher_game(machine.as_ref());
     assert_eq!(sent(1).len(), 1, "once");
     // Running: at once, never through Windows' link pipe.
-    assert_eq!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) }), Some(Notice::Sent { to: W.into(), action: SentKind::Join }));
+    assert_eq!(c.launcher_do(mine(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) })), Some(Notice::Sent { to: W.into(), action: SentKind::Join }));
     assert_eq!(sent(2).len(), 2);
     assert_eq!(*machine.opened.lock().unwrap(), 1);
 }
@@ -590,5 +601,141 @@ fn a_destination_that_waited_too_long_is_forgotten() {
     c.launcher_game(machine.as_ref());
     std::thread::sleep(Duration::from_millis(150));
     assert!(calls.lock().unwrap().is_empty(), "the game of another evening does not get yesterday's invite");
+    assert!(c.launcher.lock().unwrap().pending.is_none());
+}
+
+fn accepted(invite: Invite, owner: &str, ago: Duration) -> Accepted {
+    Accepted { invite, at: Instant::now().checked_sub(ago).unwrap(), owner: owner.into(), from: None, hide_failures: 0, hide_again: None }
+}
+
+#[test]
+fn a_press_made_on_account_as_list_never_goes_out_with_bs_session() {
+    // B (the test client, usr_test) is signed in and B's list is on show; the press was made on A's list before.
+    let c = controller(Arc::new(Pretend::default()));
+    let (_, calls) = c.test_vrchat(vec![]);
+    signed_in_list(&c);
+    c.update(|s| s.launcher.friends = vec![orbiters_core::launcher::Friend { id: A.into(), ..Default::default() }]);
+    let from_a = |action: Action| Action::As { account: "usr_aaaa".into(), action: Box::new(action) };
+    assert!(matches!(c.launcher_do(from_a(Action::Boop { to: A.into(), emoji: None })), Some(Notice::Failed { action: SentKind::Boop, .. })), "refused, and the page takes its Sent back");
+    assert!(matches!(c.launcher_do(from_a(Action::RequestInvite { to: A.into() })), Some(Notice::Failed { .. })));
+    // A press that names no account sends nothing either.
+    assert!(matches!(c.launcher_do(Action::Boop { to: A.into(), emoji: None }), Some(Notice::Failed { .. })));
+    assert!(calls.lock().unwrap().is_empty(), "nothing went out with B's session: {:?}", calls.lock().unwrap());
+    assert!(c.view().launcher.friend(A).unwrap().boop_ready_at.is_none(), "no cool-down taken for a send that never went");
+}
+
+#[test]
+fn the_send_itself_checks_whose_session_it_is() {
+    let (client, calls) = orbiters_core::vrchat_api::test_client(Arc::new(orbiters_core::vrchat_api::Gate::for_duration(Duration::from_secs(60))), vec![]);
+    let client = Mutex::new(client);
+    assert!(send_as(&client, "usr_aaaa", |c| c.boop(A, None)).is_err(), "the session became another account's");
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_private_profile_is_closed_when_the_account_changes() {
+    let c = controller(Arc::new(Pretend::default()));
+    let (_, _) = c.test_vrchat(vec![(503, json!({}))]);
+    c.update(|s| {
+        s.launcher.source = Source::SignedIn { user_id: "usr_aaaa".into(), name: String::new() };
+        s.launcher.profile = Some(orbiters_core::launcher::Profile { friend: orbiters_core::launcher::Friend { id: A.into(), note: "A's private note".into(), ..Default::default() }, ..Default::default() });
+    });
+    c.launcher.lock().unwrap().loaded_for = Some(Some("usr_aaaa".into()));
+    c.launcher_tick();
+    assert!(c.view().launcher.profile.is_none(), "B never sees A's note");
+}
+
+#[test]
+fn an_accepted_invite_of_another_account_is_neither_hidden_nor_shown_and_a_failed_hide_is_tried_again() {
+    let c = controller(Arc::new(Pretend::default()));
+    let (client, calls) = c.test_vrchat(vec![(503, json!({})), (200, json!({}))]);
+    signed_in_list(&c);
+    let place = launcher_feed::place(&format!("{W}:777~friends({A})~region(jp)"), "Café").unwrap();
+    let invite = |id: &str| Invite { id: id.into(), kind: InviteKind::Invite, from_id: A.into(), from_name: "Nova".into(), from_icon: String::new(), place: Some(place.clone()), message: String::new(), received_at: 0 };
+    c.update(|s| s.launcher.me = Some(orbiters_core::launcher::Friend { id: "usr_test".into(), whereabouts: Whereabouts::World(place.clone()), ..Default::default() }));
+    // A's invite, ten minutes on, while B's list is on show: B's list does not get A's card; B's session hides nothing.
+    c.launcher.lock().unwrap().accepted.push(accepted(invite("not_a"), "usr_aaaa", ARRIVE_WITHIN + Duration::from_secs(1)));
+    c.launcher_settle_accepted(Some(&client));
+    assert!(c.view().launcher.invites.is_empty());
+    assert!(calls.lock().unwrap().is_empty());
+    // An account change drops them.
+    c.launcher.lock().unwrap().accepted.clear();
+    // B's own, arrived: the hide fails once (503), is kept, and goes a minute later.
+    c.launcher.lock().unwrap().accepted.push(accepted(invite("not_b"), "usr_test", Duration::from_secs(5)));
+    c.launcher_settle_accepted(Some(&client));
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    {
+        let mut rt = c.launcher.lock().unwrap();
+        assert_eq!(rt.accepted.len(), 1, "a failed hide is not dropped");
+        rt.accepted[0].hide_again = Some(Instant::now());
+    }
+    c.launcher_settle_accepted(Some(&client));
+    assert_eq!(calls.lock().unwrap().len(), 2);
+    assert!(c.launcher.lock().unwrap().accepted.is_empty(), "hidden: done");
+}
+
+#[test]
+fn being_in_the_instance_already_is_no_arrival_and_a_second_accept_is_refused() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    let (client, calls) = c.test_vrchat(vec![]);
+    signed_in_list(&c);
+    let place = launcher_feed::place(&format!("{W}:777~friends({A})~region(jp)"), "Café").unwrap();
+    let invite = Invite { id: "not_1".into(), kind: InviteKind::Invite, from_id: A.into(), from_name: "Nova".into(), from_icon: String::new(), place: Some(place.clone()), message: String::new(), received_at: 0 };
+    // The cached location of the account is that instance already (an old visit).
+    c.update(|s| {
+        s.launcher.invites = vec![invite.clone()];
+        s.launcher.me = Some(orbiters_core::launcher::Friend { id: "usr_test".into(), whereabouts: Whereabouts::World(place.clone()), ..Default::default() });
+    });
+    c.launcher_do(mine(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Vr }));
+    c.launcher_settle_accepted(Some(&client));
+    assert!(calls.lock().unwrap().is_empty(), "not hidden on a location seen before the press");
+    // The same notification again from the pipeline: the card does not come back while the invite is on the way.
+    c.update(|s| s.launcher.invites = vec![invite.clone()]);
+    assert!(matches!(c.launcher_do(mine(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Vr })), Some(Notice::Error(_))), "one accept per invite");
+    assert_eq!(machine.started.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn two_joins_with_only_a_side_session_running_start_one_vrchat() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    machine.running.lock().unwrap().push((20, false));
+    let c = controller(machine.clone());
+    let fake = Arc::new(super::super::travel::tests::Fake { running: vec![20], side_args: vec![20], ..Default::default() });
+    *c.travel.lock().unwrap() = Some(fake.clone() as Arc<dyn super::super::travel::Travel>);
+    let place = launcher_feed::place(&format!("{W}:1~region(eu)"), "").unwrap();
+    let first = c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place.clone()) });
+    assert_eq!(first, Some(Notice::Sent { to: W.into(), action: SentKind::Join }));
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place) }), Some(Notice::Error(_))), "VRChat is starting");
+    assert_eq!(fake.started.lock().unwrap().len(), 1, "one VRChat started");
+}
+
+#[test]
+fn an_unchanged_scheduled_full_read_publishes_nothing() {
+    let (c, _) = loaded_and_idle();
+    let state = (*c.view().launcher).clone();
+    let before = c.publishes.load(Ordering::Relaxed);
+    // The same list read again (as the 30-minute read would): applied through the read's own commit.
+    c.launcher_commit_read(state.clone());
+    assert_eq!(c.publishes.load(Ordering::Relaxed), before, "nothing new: nothing published");
+    let mut moved = state;
+    moved.friends[0].status_text = "new".into();
+    c.launcher_commit_read(moved);
+    assert_eq!(c.publishes.load(Ordering::Relaxed), before + 1, "a change is published");
+}
+
+#[test]
+fn a_second_play_on_a_mac_keeps_the_first_destination_and_an_account_change_drops_it() {
+    let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    c.launcher_do(mine(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) }));
+    // A plain Play pressed again while the person is still to press Play in Obelisk.
+    c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None });
+    assert!(c.launcher.lock().unwrap().pending.as_ref().is_some_and(|(p, _, a)| p.world_id == W && a.as_deref() == Some("usr_test")), "the first destination stays, bound to its account");
+    // Another account signs in before the game is up: the destination is not sent to it.
+    let (_, _calls) = c.test_vrchat(vec![(503, json!({}))]);
+    c.launcher.lock().unwrap().loaded_for = Some(Some("usr_aaaa".into()));
+    c.launcher_tick();
     assert!(c.launcher.lock().unwrap().pending.is_none());
 }

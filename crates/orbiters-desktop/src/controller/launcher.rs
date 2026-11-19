@@ -756,21 +756,7 @@ impl Controller {
                     }
                     rt.pipeline.is_none()
                 };
-                self.update_if(|s| {
-                    state.game = s.launcher.game.clone();
-                    state.possible.play = s.launcher.possible.play;
-                    // An open profile stays only when the list on show was this same account's, and the person is in it.
-                    let same_account = s.launcher.source == state.source;
-                    state.profile = s.launcher.profile.clone().filter(|p| same_account && (state.friends.iter().any(|f| f.id == p.friend.id) || state.me.as_ref().is_some_and(|m| m.id == p.friend.id)));
-                    state.notice = s.launcher.notice.clone();
-                    state.loading = false;
-                    // The scheduled read that found nothing new publishes nothing.
-                    let changed = state != *s.launcher;
-                    if changed {
-                        *s.launcher = state;
-                    }
-                    changed
-                });
+                self.launcher_commit_read(state);
                 if pipeline {
                     self.launcher_pipeline(client.clone());
                 }
@@ -794,6 +780,25 @@ impl Controller {
                 });
             }
         }
+    }
+
+    /// A full read's list into the state: published only when it differs from what is on show.
+    pub(super) fn launcher_commit_read(&self, mut state: LauncherState) {
+        self.update_if(|s| {
+            state.game = s.launcher.game.clone();
+            state.possible.play = s.launcher.possible.play;
+            // An open profile stays only when the list on show was this same account's, and the person is in it.
+            let same_account = s.launcher.source == state.source;
+            state.profile = s.launcher.profile.clone().filter(|p| same_account && (state.friends.iter().any(|f| f.id == p.friend.id) || state.me.as_ref().is_some_and(|m| m.id == p.friend.id)));
+            state.notice = s.launcher.notice.clone();
+            state.loading = false;
+            // The scheduled read that found nothing new publishes nothing.
+            let changed = state != *s.launcher;
+            if changed {
+                *s.launcher = state;
+            }
+            changed
+        });
     }
 
     /// The one pipeline connection, until the account changes (or the session ends).

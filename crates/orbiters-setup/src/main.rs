@@ -245,10 +245,37 @@ fn relocate(args: &Args) -> i32 {
 fn silent(args: &Args, payload: Option<&'static [u8]>) -> i32 {
     let progress = install::Progress::default();
     let result = run_task(args, payload, &progress, true, false);
+    if args.mode == Mode::Update {
+        match &result {
+            // The app kept running: nothing changed, and the same update is tried again at the next sign-in.
+            Err(e) if e.downcast_ref::<install::StillRunning>().is_some() => {
+                if let (Ok(me), Some(dir)) = (std::env::current_exe(), install_dir(args)) {
+                    if let Err(e) = system::schedule_update_retry(&retry_command(&me, &dir, args)) {
+                        eprintln!("the update could not be scheduled again: {e:#}"); // i18n: not shown (a log line)
+                    }
+                }
+            }
+            Ok(()) => system::cancel_update_retry(),
+            Err(_) => {}
+        }
+    }
     if let Err(e) = &result {
         eprintln!("{e:#}");
     }
     result.is_err() as i32
+}
+
+/// The command line that tries the update of `dir` again, silently, as `args` asked for it.
+#[cfg(windows)]
+fn retry_command(setup: &std::path::Path, dir: &std::path::Path, args: &Args) -> String {
+    let mut line = format!("\"{}\" --update --silent --dir \"{}\"", setup.display(), dir.display());
+    if args.relaunch {
+        line.push_str(" --relaunch");
+    }
+    if args.hidden {
+        line.push_str(" --hidden");
+    }
+    line
 }
 
 /// The task of `args` as `--silent` and the message boxes run it.
@@ -346,6 +373,15 @@ fn fallback(args: &Args, payload: Option<&'static [u8]>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The retry a waiting automatic update schedules is the same update, silent, with what it was asked for.
+    #[cfg(windows)]
+    #[test]
+    fn a_waiting_update_is_tried_again_the_same_way() {
+        let args = Args::parse(["--update", "--silent", "--relaunch", "--hidden"].map(String::from));
+        let line = retry_command(std::path::Path::new(r"C:\U\setup.exe"), std::path::Path::new(r"C:\P\Orbiters - N4N0"), &args);
+        assert_eq!(line, r#""C:\U\setup.exe" --update --silent --dir "C:\P\Orbiters - N4N0" --relaunch --hidden"#);
+    }
 
     #[test]
     fn arguments_pick_the_mode() {

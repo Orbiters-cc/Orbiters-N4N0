@@ -73,8 +73,17 @@ impl Drop for Repository {
         }
     }
 }
-/// A loopback HTTP server answering each request with `answer(request)`.
+/// A loopback HTTP server answering each request with `answer(request)`, a body sent with 200 OK.
 fn serve(answer: impl Fn(&str) -> Vec<u8> + Send + 'static) -> (String, Repository) {
+    serve_raw(move |request| {
+        let body = answer(request);
+        let mut out = format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\n\r\n", body.len()).into_bytes();
+        out.extend(body);
+        out
+    })
+}
+/// A loopback HTTP server answering each request with the whole response `answer(request)` gives.
+fn serve_raw(answer: impl Fn(&str) -> Vec<u8> + Send + 'static) -> (String, Repository) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -103,10 +112,7 @@ fn serve(answer: impl Fn(&str) -> Vec<u8> + Send + 'static) -> (String, Reposito
                 }
                 data.extend_from_slice(&buf[..n]);
             }
-            let body = answer(&String::from_utf8_lossy(&data));
-            let header = format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\n\r\n", body.len());
-            let _ = stream.write_all(header.as_bytes());
-            let _ = stream.write_all(&body);
+            let _ = stream.write_all(&answer(&String::from_utf8_lossy(&data)));
             let _ = stream.flush();
             let _ = stream.shutdown(std::net::Shutdown::Write);
         }
@@ -239,5 +245,33 @@ fn a_repositorys_credential_stays_on_its_own_origin() {
     assert_eq!(installed(&source, "test.avatar").as_deref(), Some("1.0.0"));
     let seen = seen.lock().unwrap();
     assert!(seen.len() >= 2, "both archives came from the other host: {seen:?}");
+    assert!(seen.iter().all(|r| !r.contains("x-fixture")), "the credential went to another host: {seen:?}");
+}
+
+/// Verifier, point 5: a listing whose address redirects to another host: the repository's header is not sent there,
+/// while the listing still arrives.
+#[test]
+fn a_redirected_listing_never_takes_the_credential_along() {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let log = seen.clone();
+    let listing = Arc::new(Mutex::new(Vec::new()));
+    let body = listing.clone();
+    let (other, _other) = serve(move |request| {
+        log.lock().unwrap().push(request.to_ascii_lowercase());
+        body.lock().unwrap().clone()
+    });
+    *listing.lock().unwrap() = serde_json::to_vec(&json!({"id":"test.moved","name":"Moved","url":format!("{other}/index.json"),"packages":{}})).unwrap();
+    let target = format!("{other}/index.json");
+    let (first, _first) = serve_raw(move |_| format!("HTTP/1.0 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes());
+    let root = tempfile::tempdir().unwrap();
+    orbiters_projects::write_json(&root.path().join("vrc-get/settings.json"), &json!({"ignoreOfficialRepository":true,"ignoreCuratedRepository":true}))
+        .unwrap();
+    let rt = orbiters_projects::runtime().unwrap();
+    rt.block_on(async {
+        vpm::add_repo(root.path(), &format!("{first}/index.json"), BTreeMap::from([("X-Fixture".into(), "secret".into())])).await.unwrap();
+        vpm::view(root.path(), None, true).await.unwrap();
+    });
+    let seen = seen.lock().unwrap();
+    assert!(!seen.is_empty(), "the listing was fetched from where it moved");
     assert!(seen.iter().all(|r| !r.contains("x-fixture")), "the credential went to another host: {seen:?}");
 }

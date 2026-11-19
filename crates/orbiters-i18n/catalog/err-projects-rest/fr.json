@@ -104,5 +104,14 @@
   "{name} could not be put back: its folder as it was is kept at {path}": "{name} n’a pas pu être remis : son dossier tel qu’il était est gardé dans {path}",
   "Copy stopped. The incomplete copy was removed.": "Copie arrêtée. La copie incomplète a été supprimée.",
   "Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.": "Copie arrêtée. La copie incomplète dans {path} n’a pas pu être supprimée ({why}) ; elle n’est pas listée comme projet.",
-  "it is not a copy this one made": "ce n’est pas une copie faite par celle-ci"
+  "it is not a copy this one made": "ce n’est pas une copie faite par celle-ci",
+  "Copy stopped before anything was copied to {path}.": "Copie arrêtée avant que rien ne soit copié dans {path}.",
+  "it is not the folder this copy made": "ce n’est pas le dossier créé par cette copie",
+  "Copy stopped. What it copied was removed; {path} keeps what was not the copy's: {files}": "Copie arrêtée. Ce qu’elle avait copié a été supprimé ; {path} garde ce qui n’était pas à la copie : {files}",
+  "Required local package {name} is unavailable at {path}": "Le package local requis {name} est introuvable dans {path}",
+  "{file} in the copy's Packages folder is another archive than the one {name} needs ({path})": "{file} dans le dossier Packages de la copie est une autre archive que celle dont {name} a besoin ({path})",
+  "Not everything could be put back: {problems}. What the project had is kept in {path}; the next package change puts it back.": "Tout n’a pas pu être remis : {problems}. Ce que le projet avait est gardé dans {path} ; la prochaine modification de packages le remet.",
+  "Could not keep a copy of the package list before changing it: nothing was changed": "Impossible de garder une copie de la liste des packages avant de la modifier : rien n’a été changé",
+  "{name} could not be put back ({why}): its copy is kept at {path}": "{name} n’a pas pu être remis ({why}) : sa copie est gardée dans {path}",
+  "A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.": "Une modification de packages s’est arrêtée en cours et n’a pas pu être entièrement annulée : {problems}. Ce que le projet avait est gardé dans {path}."
 }

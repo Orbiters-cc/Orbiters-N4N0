@@ -502,3 +502,40 @@ fn a_failed_plan_puts_back_the_removed_package_with_its_local_edits() {
         assert!(left.is_empty(), "the kept copies are cleaned up");
     });
 }
+
+/// Verifier, point 4: a package the plan removes only because nothing needs it any more (a dependency of the one named)
+/// keeps its local edits when the plan fails later; and so does a whole failed rollback, finished at the next change.
+#[test]
+fn a_failed_plan_puts_back_a_dependency_it_removed_on_the_way() {
+    let server = serve(vec![(
+        "index.json",
+        "test.repo",
+        vec![
+            ("com.test.base", "1.0.0", json!({})),
+            ("com.test.base", "2.0.0", json!({})),
+            ("com.test.tool", "1.0.0", json!({"com.test.helper":"1.0.0"})),
+            ("com.test.helper", "1.0.0", json!({})),
+        ],
+    )]);
+    let root = tempfile::tempdir().unwrap();
+    let projects = tempfile::tempdir().unwrap();
+    let source = projects.path().join("Indirect");
+    project(&source);
+    vcc(root.path());
+    let rt = orbiters_projects::runtime().unwrap();
+    rt.block_on(async {
+        vpm::add_repo(root.path(), &format!("{}/index.json", server.base), Default::default()).await.unwrap();
+        install(root.path(), &source, &[("com.test.base", "1.0.0"), ("com.test.tool", "1.0.0")]).await.unwrap();
+        assert_eq!(installed(&source, "com.test.helper").as_deref(), Some("1.0.0"));
+        let edit = source.join("Packages/com.test.helper/Mine.cs");
+        std::fs::write(&edit, "// my change to the helper").unwrap();
+        // The repository goes away: removing the tool (and the helper with it) works, base 2.0.0 cannot be downloaded.
+        drop(server);
+        let plan = vpm::Change::Plan { install: vec![("com.test.base".into(), "2.0.0".into())], remove: vec!["com.test.tool".into()], prerelease: false };
+        let e = vpm::change(root.path(), &source, plan).await.unwrap_err();
+        assert!(format!("{e:#}").contains("as they were"), "{e:#}");
+        assert_eq!(std::fs::read_to_string(&edit).unwrap(), "// my change to the helper");
+        assert_eq!(installed(&source, "com.test.helper").as_deref(), Some("1.0.0"));
+        assert!(source.join("Packages/com.test.tool/package.json").is_file());
+    });
+}

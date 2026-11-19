@@ -62,6 +62,40 @@ pub(crate) fn vrcx_table_prefix(id: &str) -> String {
     id.replace(['_', '-'], "")
 }
 
+/// How long [`vrcx_last_pictures`] keeps what it read while VRCX's database files look unchanged.
+const PICTURES_KEPT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Each person's last avatar picture in VRCX's feed for `account` (id → address, as VRCX wrote it), from the database
+/// at `path`, open as `db`. VRCX's `feed_avatar` has no index for "the last of each": the query reads the whole
+/// table (hundreds of thousands of rows, a third of a second), so what it found is kept while the database and its
+/// write-ahead log keep their length and time, for [`PICTURES_KEPT`] at most.
+pub(crate) fn vrcx_last_pictures(path: &Path, db: &Connection, account: &str) -> std::sync::Arc<std::collections::HashMap<String, String>> {
+    type Kept = (PathBuf, String, Vec<Option<(u64, std::time::SystemTime)>>, std::time::Instant, std::sync::Arc<std::collections::HashMap<String, String>>);
+    static KEPT: std::sync::Mutex<Option<Kept>> = std::sync::Mutex::new(None);
+    let stamp = |p: &Path| std::fs::metadata(p).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let stamps = vec![stamp(path), stamp(Path::new(&wal))];
+    if let Some((p, a, s, at, pictures)) = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+        if p == path && a == account && *s == stamps && at.elapsed() < PICTURES_KEPT {
+            return pictures.clone();
+        }
+    }
+    let table = format!("{}_feed_avatar", vrcx_table_prefix(account));
+    let mut pictures = std::collections::HashMap::new();
+    let sql = format!("SELECT a.user_id, a.current_avatar_thumbnail_image_url FROM \"{table}\" a JOIN (SELECT user_id, MAX(id) AS latest FROM \"{table}\" GROUP BY user_id) b ON a.id = b.latest"); // i18n: not shown (SQL)
+    if let Ok(mut q) = db.prepare(&sql) {
+        if let Ok(rows) = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))) {
+            for (id, image) in rows.flatten() {
+                pictures.entry(id).or_insert_with(|| image.unwrap_or_default());
+            }
+        }
+    }
+    let pictures = std::sync::Arc::new(pictures);
+    *KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((path.to_path_buf(), account.to_string(), stamps, std::time::Instant::now(), pictures.clone()));
+    pictures
+}
+
 fn vrcx_friends(db: &Connection, account: &str) -> BTreeSet<String> {
     let table = format!("{}_friend_log_current", vrcx_table_prefix(account));
     let Ok(mut q) = db.prepare(&format!("SELECT user_id FROM \"{table}\"")) else { return BTreeSet::new() }; // i18n: not shown (SQL)
@@ -101,7 +135,7 @@ pub fn friends(log_account: Option<&str>) -> Vec<Friend> {
     let mut out: std::collections::BTreeMap<String, Friend> =
         local.friends.iter().map(|id| (id.clone(), Friend { id: id.clone(), name: id.clone(), image: None })).collect();
     if let Some((account, _)) = &local.account {
-        if let Some(db) = vrcx_db().and_then(|p| open(&p)) {
+        if let Some((path, db)) = vrcx_db().and_then(|p| open(&p).map(|db| (p, db))) {
             if vrcx_account(&db).as_ref() == Some(account) {
                 let table = format!("{}_friend_log_current", vrcx_table_prefix(account));
                 if let Ok(mut q) = db.prepare(&format!("SELECT user_id,display_name FROM \"{table}\"")) { // i18n: not shown (SQL)
@@ -113,9 +147,11 @@ pub fn friends(log_account: Option<&str>) -> Vec<Friend> {
                         }
                     }
                 }
-                let table = format!("{}_feed_avatar", vrcx_table_prefix(account));
-                if let Ok(mut q)=db.prepare(&format!("SELECT a.user_id,a.current_avatar_thumbnail_image_url FROM \"{table}\" a JOIN (SELECT user_id,MAX(id) AS latest FROM \"{table}\" GROUP BY user_id) b ON a.id=b.latest")) {
-                    if let Ok(rows)=q.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))) {for (id,image) in rows.flatten(){if let Some(f)=out.get_mut(&id){f.image=image.filter(|s|s.starts_with("https://"));}}}
+                let pictures = vrcx_last_pictures(&path, &db, account);
+                for f in out.values_mut() {
+                    if let Some(image) = pictures.get(&f.id) {
+                        f.image = Some(image.clone()).filter(|s| s.starts_with("https://"));
+                    }
                 }
             }
         }
@@ -260,6 +296,31 @@ mod tests {
         let me = vrcx_account(&db).unwrap();
         assert_eq!(me, "usr_11111111-1111-1111-1111-111111111111");
         assert_eq!(vrcx_friends(&db, &me), ["usr_22222222-2222-2222-2222-222222222222".to_string()].into());
+    }
+
+    /// CORE-10: VRCX's avatar feed is scanned once while its database is unchanged, again when it changed.
+    #[test]
+    fn last_pictures_are_read_again_only_when_vrcx_wrote() {
+        let dir = std::env::temp_dir().join(format!("orbiters-vrcx-pictures-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("VRCX.sqlite3");
+        let me = "usr_11111111-1111-1111-1111-111111111111";
+        let table = format!("{}_feed_avatar", vrcx_table_prefix(me));
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(&format!(
+            "CREATE TABLE \"{table}\" (id INTEGER PRIMARY KEY, user_id TEXT, current_avatar_thumbnail_image_url TEXT);
+             INSERT INTO \"{table}\" (user_id, current_avatar_thumbnail_image_url) VALUES ('usr_a', 'https://old'), ('usr_a', 'https://new'), ('usr_b', NULL);"
+        ))
+        .unwrap();
+        let first = vrcx_last_pictures(&path, &db, me);
+        assert_eq!((first["usr_a"].as_str(), first["usr_b"].as_str()), ("https://new", ""), "each person's last");
+        assert!(std::sync::Arc::ptr_eq(&first, &vrcx_last_pictures(&path, &db, me)), "unchanged: not read again");
+        let rows: String = (0..200).map(|i| format!("('usr_c', 'https://{i}{}'),", "x".repeat(200))).collect();
+        db.execute_batch(&format!("INSERT INTO \"{table}\" (user_id, current_avatar_thumbnail_image_url) VALUES {} ('usr_a', 'https://newest');", rows)).unwrap();
+        let again = vrcx_last_pictures(&path, &db, me);
+        assert_eq!(again["usr_a"], "https://newest", "VRCX wrote: read again");
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

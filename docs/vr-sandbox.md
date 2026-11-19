@@ -199,6 +199,32 @@ A separate watcher attempts recovery if the controller dies. Recovery refuses
 foreign VR processes and retains the journal on failure; resolve that conflict
 before running restore again. Successful restoration verifies backed-up file hashes.
 
+Since night-1119 (find-sandbox.md SBX-1..16):
+
+- A dead session is never silent: the watcher keeps retrying (5 s up to 2 min);
+  every refused or failed attempt writes a dated line to `orphan.log` and
+  `RESTORE-NEEDED.txt` (why, since when, how to heal: close SteamVR) in the sandbox
+  root; the restore that succeeds removes the marker. `acquire` starts no new
+  session while one is unrestored and prints that marker. A desktop VRChat alone no
+  longer blocks the file restore; any SteamVR process still does.
+- `~/.claude.json` and `~/.codex/config.toml` are never put back as bytes: only the
+  test bridge's `orbiters-vrchat` entry is recorded and put back, and only when a
+  test program ran (other Claude Code / Codex sessions write these files all the time).
+- Journal and backups are written temp + fsync + rename and verified by hash before
+  use; `session.prev.json` is read when `session.json` is damaged; a damaged backup is
+  never copied over a real file. A session refuses to start while SteamVR's live files
+  still carry a sandbox state (forced driver, sandbox driver path) and names the newest
+  clean `backup-*` folder.
+- The installed app's `Orbiters/SteamVR` folder is put back only when a test program
+  ran, by rename (never half deleted); `steamapps.vrmanifest` is never put back.
+  VRChat's saved window values (registry `Screenmanager *`) are put back.
+- The scheduled task runs a fixed copy in `<root>/restorer` (refreshed at each session
+  start), every 5 minutes and at logon, one line per run in `restore-task.log`:
+  `python tools/vr-sandbox/sandbox.py install-restore-task` writes the task XML and
+  prints the `schtasks` command (it never creates the task itself).
+- Tests: `python -I -m unittest discover -s tools/vr-sandbox -p "test_*.py"`; every
+  machine path is moved into a temp folder (`sandbox_testbase.py`), the registry is a fake.
+
 Other installed drivers are disabled only in the sandbox's temporary settings.
 This matters: the first local run crashed with installed pose-hook drivers loaded.
 The virtual display component supplies display timing; a display-only emulated

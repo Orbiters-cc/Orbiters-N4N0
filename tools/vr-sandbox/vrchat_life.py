@@ -238,14 +238,28 @@ def capture_window(window, path):
         return f'capture failed: {error}'
 
 
-def error_windows(min_age_s=ERROR_WINDOW_AGE_S, now=None):
+def launched_by(p, owned):
+    """The bootstrapper was started by one of `owned` launch.exe identities ({'pid', 'create_time'}): launch.exe starts
+    start_protected_game.exe itself, and Windows keeps the parent's pid after the parent exits; the creation-time order
+    rules out a reused pid."""
+    return any(p.get('ppid') == o['pid'] and p['create_time'] >= o['create_time'] for o in owned)
+
+
+def error_windows(min_age_s=ERROR_WINDOW_AGE_S, now=None, owned=None, log=None):
     """Bootstrapper processes that kept a window for min_age_s while no VRChat.exe started after them: the EAC
-    "Launch Error" dialog (the normal splash closes within seconds, when VRChat.exe starts)."""
+    "Launch Error" dialog (the normal splash closes within seconds, when VRChat.exe starts). With `owned` (the launch.exe
+    identities the caller started), only their bootstrappers: the owner's own launch and a bridge session's are left
+    alone and, with `log`, logged once (SBX-14)."""
     now = time.time() if now is None else now
     procs = game_processes()
     found = []
     for p in procs:
         if p['name'].lower() != 'start_protected_game.exe':
+            continue
+        if owned is not None and not launched_by(p, owned):
+            if log is not None and (p['pid'], p['create_time']) not in _left_alone:
+                _left_alone.add((p['pid'], p['create_time']))
+                log.write('foreign_bootstrapper_left_alone', process=p)
             continue
         wins = windows_of(p['pid'])
         # The dialog's title is "Launch Error (30005)" (seen 2026-11-13); an older splash without VRChat counts too.
@@ -262,10 +276,14 @@ def error_windows(min_age_s=ERROR_WINDOW_AGE_S, now=None):
     return found
 
 
-def close_error_windows(log, evidence_dir, min_age_s=ERROR_WINDOW_AGE_S):
-    """Presses the dialog's Exit (WM_CLOSE), kills the bootstrapper if it stays, and logs the EAC state first."""
+_left_alone = set()
+
+
+def close_error_windows(log, evidence_dir, min_age_s=ERROR_WINDOW_AGE_S, owned=None):
+    """Presses the dialog's Exit (WM_CLOSE), kills the bootstrapper if it stays, and logs the EAC state first. With
+    `owned`, only bootstrappers of those launches (see error_windows)."""
     handled = []
-    for p in error_windows(min_age_s):
+    for p in error_windows(min_age_s, owned=owned, log=log):
         shot = capture_window(p['windows'][0], Path(evidence_dir) / f"launch-error-{p['pid']}-{int(time.time())}.png")
         log.write('launch_error_window', process=p, picture=shot, driver_events=driver_events(), **snapshot())
         for w in p['windows']:
@@ -285,7 +303,7 @@ def close_error_windows(log, evidence_dir, min_age_s=ERROR_WINDOW_AGE_S):
     return handled
 
 
-def wait_idle(log, label, timeout=IDLE_TIMEOUT_S, margin=IDLE_MARGIN_S, evidence_dir=None, sleep=time.sleep, clock=time.monotonic):
+def wait_idle(log, label, timeout=IDLE_TIMEOUT_S, margin=IDLE_MARGIN_S, evidence_dir=None, sleep=time.sleep, clock=time.monotonic, owned=None):
     """Blocks until EAC is idle for `margin` seconds. Leftover error dialogs are closed. Raises on timeout, never
     returns early: a launch must not happen while anything of the previous run is still unloading."""
     began = clock()
@@ -293,7 +311,7 @@ def wait_idle(log, label, timeout=IDLE_TIMEOUT_S, margin=IDLE_MARGIN_S, evidence
     first = None
     while True:
         if evidence_dir is not None:
-            close_error_windows(log, evidence_dir)
+            close_error_windows(log, evidence_dir, owned=owned)
         snap = snapshot()
         first = first or snap
         if idle(snap):

@@ -1099,7 +1099,7 @@ impl Controller {
     /// A start that is a picture's or a scan's own: it fails when anything records or is being saved (it would adopt
     /// that recording), `claim` runs under the start gate the moment it is accepted (the flag that says what it is
     /// for), and the number of the recording it started is handed back (verify-controller, C-2, CTL2-7).
-    pub(super) fn start_capture_owned(self: &Shared, purpose: CapturePurpose, claim: impl FnOnce()) -> anyhow::Result<u64> {
+    fn start_capture_owned(self: &Shared, purpose: CapturePurpose, claim: impl FnOnce()) -> anyhow::Result<u64> {
         let (name, dolly) = self.with_settings(|s| (s.spout_sender.clone(), s.dolly_streams));
         let (name, extra) = if dolly {
             (if name.is_empty() { dolly::MAIN_SENDER.to_string() } else { name }, dolly::EXTRA_SENDERS.map(String::from).to_vec())
@@ -2211,6 +2211,8 @@ impl Controller {
         // The service before goes outside the lock: stopping it waits for its receiving thread, which may be calling in.
         let before = self.osc.lock().unwrap().take();
         drop(before);
+        // No VRChat is asked any more over the service that went: a camera answer of it is no one's now.
+        self.camera_route_changed();
         let (enabled, vrchat_port) = self.with_settings(|s| (s.osc.enabled, s.osc.vrchat_port));
         if !enabled {
             self.update(|s| *s.osc = state::OscStatus { enabled: false, ..Default::default() });
@@ -2228,9 +2230,11 @@ impl Controller {
     }
 
     /// Starts OSC for the VRChat `network` says, replacing any that runs.
-    fn apply_camera_seed(&self, generation:u64, open:bool) -> bool {
+    fn apply_camera_seed(&self, generation:u64, route: u64, open:bool) -> bool {
         self.update_if(|s| {
-            if self.osc_generation.load(Ordering::Acquire)!=generation || s.camera_open_said.is_some() { return false; }
+            // The OSC start's seed: for its connection, and for the VRChat it asked (a followed VRChat may change
+            // within one connection: verify-controller, C-8).
+            if self.osc_generation.load(Ordering::Acquire)!=generation || self.camera_route.load(Ordering::Acquire) != route || s.camera_open_said.is_some() { return false; }
             s.camera_open_said=Some(open);
             true
         })
@@ -2266,13 +2270,15 @@ impl Controller {
                 std::thread::spawn(move || {
                     for _ in 0..100 {
                         if ctl.osc_generation.load(Ordering::Acquire)!=generation || ctl.view().camera_open_said.is_some() { break; }
+                        let route = ctl.camera_route.load(Ordering::Acquire);
                         let camera = ctl.camera_values().into_iter().find_map(|(p,v)| match v {
                             OscValue::Int(mode) if p == CAMERA_MODE => Some(mode != 0),
                             _ => None,
                         });
                         if let Some(open) = camera {
-                            ctl.apply_camera_seed(generation,open);
-                            break;
+                            if ctl.apply_camera_seed(generation, route, open) {
+                                break;
+                            }
                         }
                         std::thread::sleep(Duration::from_millis(100));
                     }
@@ -3061,13 +3067,35 @@ fn refresh_free_space(ctl: &Shared) {
 /// limit), or ten minutes passed (LIGHT-DESKTOP-9).
 #[derive(Default)]
 struct StorageSweep {
-    last: Option<(u64, PathBuf, Option<std::time::SystemTime>, Instant)>,
+    last: Option<(u64, PathBuf, u64, Instant)>,
+}
+
+/// What every session folder's size and summary depend on, in one number: the library's own time and, for each session,
+/// the five times the size cache keys on (orbiters_core::bundle `stamp`: its manifest, its folder, its reconstruction
+/// report, its keyframes and depth folders). One `metadata` each, no file opened or parsed: a turn with an unchanged
+/// fingerprint has nothing a full walk would find, also for a session changed by hand (verify-controller).
+fn library_fingerprint(dir: &Path) -> u64 {
+    use orbiters_core::contracts::manifest::{DEPTH_DIR, KEYFRAMES_DIR, MANIFEST_FILE};
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    let time = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    time(dir).hash(&mut hash);
+    let mut sessions: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    sessions.sort();
+    for session in &sessions {
+        session.hash(&mut hash);
+        let report = orbiters_core::reconstruction::result_dir(session).join(orbiters_core::reconstruction::REPORT_FILE);
+        for part in [session.join(MANIFEST_FILE), session.clone(), report, session.join(KEYFRAMES_DIR), session.join(DEPTH_DIR)] {
+            time(&part).hash(&mut hash);
+        }
+    }
+    hash.finish()
 }
 
 impl StorageSweep {
     const AT_MOST: Duration = Duration::from_secs(600);
 
-    fn due(&mut self, library: u64, dir: &Path, modified: Option<std::time::SystemTime>, recording: bool, now: Instant) -> bool {
+    fn due(&mut self, library: u64, dir: &Path, modified: u64, recording: bool, now: Instant) -> bool {
         let due = recording
             || self.last.as_ref().is_none_or(|(v, d, m, at)| *v != library || d != dir || *m != modified || now.duration_since(*at) >= Self::AT_MOST);
         if due {
@@ -3330,7 +3358,7 @@ fn spawn_watchers(ctl: Shared) {
                 // Storage, every 30 s: the whole library when something may have changed, else the free space.
                 if tick.is_multiple_of(30) {
                     let dir = ctl.with_settings(|s| s.sessions_dir.clone());
-                    let modified = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+                    let modified = library_fingerprint(&dir);
                     if storage_sweep.due(ctl.library_version(), &dir, modified, ctl.is_capturing(), Instant::now()) {
                         refresh_storage(&ctl);
                     } else {
@@ -3476,19 +3504,43 @@ mod tests {
     /// the other 30 s turns ask only for the free space.
     #[test]
     fn the_library_is_walked_again_only_when_it_may_have_changed() {
-        use std::time::{Duration, Instant, SystemTime};
+        use std::time::{Duration, Instant};
         let mut sweep = super::StorageSweep::default();
         let dir = std::path::PathBuf::from("lib");
         let t0 = Instant::now();
-        let m = Some(SystemTime::UNIX_EPOCH);
+        let m = 1u64;
         assert!(sweep.due(1, &dir, m, false, t0), "the first turn");
         assert!(!sweep.due(1, &dir, m, false, t0 + Duration::from_secs(30)), "nothing changed");
         assert!(sweep.due(2, &dir, m, false, t0 + Duration::from_secs(60)), "a session saved, trashed...");
-        assert!(sweep.due(2, &dir, Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(90)), "a folder added by hand");
-        assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(120)));
-        assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), true, t0 + Duration::from_secs(150)), "recording");
-        assert!(!sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(180)));
-        assert!(sweep.due(2, std::path::Path::new("other"), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)), false, t0 + Duration::from_secs(800)), "ten minutes");
+        assert!(sweep.due(2, &dir, 2u64, false, t0 + Duration::from_secs(90)), "a folder added by hand");
+        assert!(sweep.due(2, std::path::Path::new("other"), 2u64, false, t0 + Duration::from_secs(120)));
+        assert!(sweep.due(2, std::path::Path::new("other"), 2u64, true, t0 + Duration::from_secs(150)), "recording");
+        assert!(!sweep.due(2, std::path::Path::new("other"), 2u64, false, t0 + Duration::from_secs(180)));
+        assert!(sweep.due(2, std::path::Path::new("other"), 2u64, false, t0 + Duration::from_secs(800)), "ten minutes");
+    }
+
+    /// verify-controller (LIGHT-DESKTOP-9): a session changed inside (its manifest rewritten, keyframes added), with the
+    /// library's own folder untouched, changes the fingerprint: the next 30 s turn walks the library, as before.
+    #[test]
+    fn a_change_inside_a_session_is_seen_on_the_next_turn() {
+        use std::time::{Duration, SystemTime};
+        let root = std::env::temp_dir().join(format!("orbiters-fingerprint-{}", uuid::Uuid::new_v4()));
+        let session = root.join("Home 1");
+        std::fs::create_dir_all(session.join("keyframes")).unwrap();
+        std::fs::write(session.join("manifest.json"), b"{}").unwrap();
+        let at = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + s);
+        let touch = |p: &std::path::Path, s: u64| std::fs::File::options().write(true).open(p).unwrap().set_modified(at(s)).unwrap();
+        touch(&session.join("manifest.json"), 0);
+        let before = super::library_fingerprint(&root);
+        assert_eq!(super::library_fingerprint(&root), before, "nothing changed");
+        touch(&session.join("manifest.json"), 60);
+        let after = super::library_fingerprint(&root);
+        assert_ne!(after, before, "its manifest rewritten");
+        let mut sweep = super::StorageSweep::default();
+        let t0 = std::time::Instant::now();
+        assert!(sweep.due(1, &root, before, false, t0));
+        assert!(sweep.due(1, &root, after, false, t0 + Duration::from_secs(30)), "walked on the next turn");
+        std::fs::remove_dir_all(root).ok();
     }
 
     /// CTL-11 c: an avatar change heard as an event invalidates the kit once (one epoch, the last avatar's), also with
@@ -3815,15 +3867,31 @@ mod tests {
     fn review_camera_bootstrap_cannot_publish_across_reconnection() {
         let (ctl,_socket)=review_controller();
         let old=ctl.osc_generation.load(Ordering::Acquire);
+        let route=ctl.camera_route.load(Ordering::Acquire);
         let release=Arc::new(std::sync::Barrier::new(2));
         let b=release.clone(); let c=ctl.clone();
-        let response=std::thread::spawn(move || {b.wait(); c.apply_camera_seed(old,true)});
+        let response=std::thread::spawn(move || {b.wait(); c.apply_camera_seed(old,route,true)});
         ctl.start_osc_with(false);
         release.wait();
         response.join().unwrap();
         assert_eq!(ctl.view().camera_open_said,None);
-        ctl.apply_camera_seed(ctl.osc_generation.load(Ordering::Acquire),false);
+        ctl.apply_camera_seed(ctl.osc_generation.load(Ordering::Acquire),ctl.camera_route.load(Ordering::Acquire),false);
         assert_eq!(ctl.view().camera_open_said,Some(false));
+        ctl.shutdown();
+    }
+
+    /// verify-controller (C-8): the OSC start's camera seed asked of VRChat A, answering after the app followed VRChat B
+    /// within the same OSC connection, is not shown for B.
+    #[test]
+    fn the_start_seed_of_one_vrchat_is_not_shown_for_the_next() {
+        let (ctl,_socket)=review_controller();
+        let generation=ctl.osc_generation.load(Ordering::Acquire);
+        let asked_a=ctl.camera_route.load(Ordering::Acquire);
+        // The app follows another VRChat: same connection, a new route.
+        ctl.camera_route_changed();
+        ctl.update(|s| s.camera_open_said=None);
+        assert!(!ctl.apply_camera_seed(generation,asked_a,true));
+        assert_eq!(ctl.view().camera_open_said,None);
         ctl.shutdown();
     }
 

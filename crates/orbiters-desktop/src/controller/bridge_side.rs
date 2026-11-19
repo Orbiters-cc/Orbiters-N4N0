@@ -947,6 +947,8 @@ impl Controller {
         }
         let route = to.as_ref().and_then(|m| m.query.map(|q| (SocketAddr::from(([127, 0, 0, 1], m.osc_in)), q)));
         let _ = self.with_osc(|o| o.lend(route));
+        // Another VRChat's camera from here: an answer asked before the loan (or the give-back) is not this one's.
+        self.camera_route_changed();
         let mut osc = self.osc_values.lock().unwrap();
         // The camera's opening was heard, on the session's own out port, by the session: the proof the app asks of a live
         // camera before it records (`require_live_camera`) is that VRChat's, not a value the app wrote.

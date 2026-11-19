@@ -130,10 +130,21 @@ impl Controller {
     /// Reads the saved account for `server` and asks Orbiters whether it still works. `again_refused`: asking again
     /// about a credential that was refused, which shows as refused until an answer says otherwise.
     fn read_account(self: &Shared, server: Server, modified: Option<SystemTime>, again_refused: bool) {
-        let saved = account::read(server);
+        self.read_account_from(server, modified, again_refused, || account::read(server));
+    }
+
+    /// [`Controller::read_account`] with the saved account read by `read` (tests: no file of the person's).
+    fn read_account_from(self: &Shared, server: Server, modified: Option<SystemTime>, again_refused: bool, read: impl FnOnce() -> Option<Account>) {
+        // The generation before the file is read: a sign-out (or a sign-in) between the read and its use makes what was
+        // read stale, and it is not installed (verify-controller, C-7).
+        let before = self.account_runtime.lock().unwrap().generation;
+        let saved = read();
         let previous_token;
         let (generation, refusals) = {
             let mut rt = self.account_runtime.lock().unwrap();
+            if rt.generation != before {
+                return;
+            }
             previous_token = rt.account.as_ref().map(|a| a.token.clone());
             rt.read = Some((server, modified));
             rt.account = saved.clone();
@@ -143,18 +154,27 @@ impl Controller {
             (rt.generation, refusals)
         };
         let development = server == Server::Development;
+        let current = || self.account_generation.load(std::sync::atomic::Ordering::SeqCst) == generation;
         let Some(saved) = saved else {
-            self.update(|s| {
+            self.update_if(|s| {
+                if !current() {
+                    return false;
+                }
                 s.account.development = development;
                 if s.account.state != AccountState::SigningIn {
                     s.account.state = AccountState::SignedOut;
                 }
+                true
             });
             return;
         };
         // A refused credential asked about again shows as refused until an answer says otherwise.
         if !again_refused {
-            self.update(|s| {
+            self.update_if(|s| {
+                // Signed out meanwhile: "Checking" would show an account that is gone.
+                if !current() {
+                    return false;
+                }
                 let same_server = s.account.development == development;
                 s.account.development = development;
                 // The same account checked again (another Orbiters tool rewrote the shared file): it stays signed in while
@@ -162,6 +182,7 @@ impl Controller {
                 if !rechecking_same(&s.account.state, previous_token.as_deref(), &saved.token, same_server) {
                     s.account.state = AccountState::Checking { username: saved.username.clone() };
                 }
+                true
             });
         }
         let answer = Api::new(server).check(&saved.token);
@@ -435,6 +456,28 @@ mod tests {
         assert_eq!(waits, [10, 20, 40, 80, 160, 320, 360, 360]);
         assert_eq!(refused_recheck(0), RECHECK_REFUSED);
         assert_eq!(refused_recheck(u32::MAX), RECHECK_REFUSED_MAX);
+    }
+
+    /// verify-controller (C-7's earlier window): an account read just before a sign-out and used after it is not installed:
+    /// the runtime keeps no account (no credential for calls), and neither "Checking" nor "Signed in" is shown.
+    #[test]
+    fn an_account_read_before_a_sign_out_is_not_installed_after_it() {
+        let ctl = Controller::new(Settings::default());
+        ctl.update(|s| s.account.state = AccountState::SignedIn { username: "old".into() });
+        let old = Account { token: "old-token".into(), user: Some("7".into()), username: Some("old".into()), avatar_url: None };
+        ctl.read_account_from(Server::Production, None, false, || {
+            // Signed out while the file was being read: what `sign_out` does to the runtime and the snapshot.
+            {
+                let mut rt = ctl.account_runtime.lock().unwrap();
+                rt.generation += 1;
+                ctl.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
+                rt.account = None;
+            }
+            ctl.update(|s| s.account.state = AccountState::SignedOut);
+            Some(old)
+        });
+        assert!(ctl.account_runtime.lock().unwrap().account.is_none(), "no credential of the account that left");
+        assert_eq!(ctl.view().account.state, AccountState::SignedOut);
     }
 
     /// C-7: a check answered before a sign-out and shown after it does not put "Signed in" back.

@@ -36,11 +36,15 @@ fn the_qr_code_sheet_closed_or_left_stops_its_scan() {
     use orbiters_n4n0::MenuHolder;
     use orbiters_n4n0_core::menu::Target;
     let (mut person, heard) = Person::heard();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    heard.n4n0.lock().unwrap().clear();
     let snap = person.snap.clone();
     let p = &mut person.panels;
     let qr = |heard: &Heard| heard.n4n0.lock().unwrap().iter().filter_map(|c| match c { N4n0Command::Qr { on, holder } => Some((*on, *holder)), _ => None }).collect::<Vec<_>>();
     p.open_page(Target::Qr, &snap);
     assert_eq!(qr(&heard), [(true, MenuHolder::Panels)]);
+    assert_eq!(p.facts.sheet, Some(Sheet::Menu));
     p.close_sheet();
     assert_eq!(qr(&heard), [(true, MenuHolder::Panels), (false, MenuHolder::Panels)], "closed, the scan is let go");
     heard.n4n0.lock().unwrap().clear();

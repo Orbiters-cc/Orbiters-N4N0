@@ -127,7 +127,7 @@ pub fn is_link(m: &std::fs::Metadata) -> bool {
     }
 }
 pub fn is_project(path: &Path) -> bool {
-    path.join("ProjectSettings/ProjectVersion.txt").is_file()
+    path.join("ProjectSettings/ProjectVersion.txt").is_file() && !path.join(crate::templates::INCOMPLETE).exists()
 }
 pub fn describe(path: PathBuf, registered: bool, _scenes: &mut SceneCache) -> Project {
     let unity = std::fs::read_to_string(path.join("ProjectSettings/ProjectVersion.txt")).ok().and_then(|s| parse_version(&s)).unwrap_or_default();

@@ -168,6 +168,10 @@ fn excluded(name: &str, depth: usize, dir: bool, keep: Keep) -> bool {
         _ => !dir && (n.ends_with(".csproj") || n.ends_with(".sln")),
     }
 }
+/// The file a copy keeps at the top of its folder until every file is in (PROJECTS-4): a copy stopped, failed or cut by
+/// a kill is then never taken for a whole project ([`crate::discovery::is_project`]). Nothing removes the folder.
+pub const INCOMPLETE: &str = ".orbiters-incomplete-copy";
+
 /// Copy into a newly reserved folder only. Reparse points are excluded even when Windows reports them as dirs.
 pub fn copy(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
     copy_keeping(source, destination, Keep::default(), cancel, progress)
@@ -186,6 +190,8 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
     }
     anyhow::ensure!(!destination.exists(), "{}", tr("The destination already exists; choose a new project name."));
     let mut files = vec![];
+    // Folders too, empty ones included (PROJECTS-41): an empty asset folder has its .meta beside it.
+    let mut folders = vec![];
     for entry in walkdir::WalkDir::new(&source)
         .follow_links(true)
         .into_iter()
@@ -199,9 +205,16 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
         let e = entry?;
         if e.file_type().is_file() {
             files.push(e.path().to_path_buf());
+        } else if e.file_type().is_dir() && e.depth() > 0 {
+            folders.push(e.path().to_path_buf());
         }
     }
     std::fs::create_dir(destination).with_context(|| tr("The destination already exists or cannot be created; choose a new project name."))?;
+    let incomplete = destination.join(INCOMPLETE);
+    std::fs::write(&incomplete, b"")?;
+    for folder in &folders {
+        std::fs::create_dir_all(destination.join(folder.strip_prefix(&source)?))?;
+    }
     progress.lock().unwrap().total = files.len();
     for (i, p) in files.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
@@ -236,6 +249,7 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
         }
         *progress.lock().unwrap() = Progress { copied: i + 1, total: files.len(), file: rel.display().to_string(), phase: String::from(mark("Copying project")) };
     }
+    std::fs::remove_file(&incomplete)?;
     Ok(())
 }
 /// A new project in `parent`/`name` from the template (or, with `duplicate`, the project) in `source`, its packages
@@ -623,6 +637,28 @@ mod tests {
         assert!(is_registered(&rt, &root, &copy), "the copy is in the gallery's list");
     }
 
+    /// PROJECTS-4: a copy that stops halfway is not a project the gallery lists, and its folder is kept as it is.
+    #[cfg(windows)]
+    #[test]
+    fn a_copy_cut_halfway_is_never_taken_for_a_project() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        std::fs::create_dir_all(source.join("Zz")).unwrap();
+        std::fs::write(source.join("Zz/locked.bin"), "x").unwrap();
+        // Held by another program: the copy fails on it, after ProjectSettings is in.
+        let _held = std::fs::File::options().read(true).share_mode(0).open(source.join("Zz/locked.bin")).unwrap();
+        let copy = temp.path().join("Copy");
+        assert!(copy_keeping(&source, &copy, Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())).is_err());
+        assert!(copy.join("ProjectSettings/ProjectVersion.txt").is_file(), "kept as it is");
+        assert!(!crate::discovery::is_project(&copy));
+        drop(_held);
+        let whole = temp.path().join("Whole");
+        copy_keeping(&source, &whole, Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap();
+        assert!(crate::discovery::is_project(&whole) && !whole.join(INCOMPLETE).exists());
+    }
+
     #[test]
     fn packages_kept_only_in_library_are_named() {
         let temp = tempfile::tempdir().unwrap();
@@ -668,9 +704,12 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "x").unwrap();
         }
+        std::fs::create_dir_all(src.join("Assets/Empty")).unwrap();
+        std::fs::create_dir_all(src.join("Temp/EmptyToo")).unwrap();
         let progress: SharedProgress = Arc::new(Mutex::default());
         let dst = temp.path().join("Copy");
         copy(&src, &dst, &AtomicBool::new(false), &progress).unwrap();
+        assert!(dst.join("Assets/Empty").is_dir() && !dst.join("Temp").exists());
         let has = |f: &str| dst.join(f).exists();
         for kept in ["Assets/a.txt", "Assets/Library/kept.txt", "Assets/Tools/Temp/kept.txt", "Assets/Plugins/Tool.csproj", "ProjectSettings/ProjectVersion.txt"] {
             assert!(has(kept), "{kept}");
@@ -679,6 +718,8 @@ mod tests {
             assert!(!has(left), "{left}");
         }
         assert_eq!(progress.lock().unwrap().total, 5);
+        // An empty asset folder stays, beside its .meta (PROJECTS-41).
+        assert!(!has("Library") && has("Assets/Library"));
         let with = temp.path().join("With Library");
         copy_keeping(&src, &with, Keep { library: true }, &AtomicBool::new(false), &progress).unwrap();
         assert!(with.join("Library/ArtifactDB").is_file());

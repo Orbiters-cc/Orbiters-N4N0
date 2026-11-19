@@ -1063,10 +1063,23 @@ fn share_with(
                 .inspect(|_| step(steps, &format!("sent {:.1} MB and stored", bytes as f64 / 1e6), &mut at))? // i18n: not shown
             }
             Local::Picture(path) => {
+                // PRIV-8: what goes is a copy without the picture's metadata (who took it, who else was there, the
+                // instance), the pixels as they are; the file here keeps it all, and the original's hash stays its
+                // identity (`sourceKey`), so a picture shared again is still recognised.
+                let clean = orbiters_core::paths::cache_dir().join("uploads").join(format!("{}.png", uuid::Uuid::new_v4().simple()));
+                std::fs::create_dir_all(clean.parent().unwrap_or(&clean))?;
+                struct Gone(PathBuf);
+                impl Drop for Gone {
+                    fn drop(&mut self) {
+                        let _ = std::fs::remove_file(&self.0);
+                    }
+                }
+                let _gone = Gone(clean.clone());
+                let length = orbiters_core::png_meta::write_without_metadata(path, &clean)?;
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                let part = Part::file("pictures", name.as_ref(), "image/png", path)?;
+                let part = Part::file("pictures", name.as_ref(), "image/png", &clean)?;
                 metadata["takenAt"] = serde_json::json!([iso(entry.taken)]);
-                report(Stage::Sending { sent: 0, total: std::fs::metadata(path).map_or(0, |m| m.len()) });
+                report(Stage::Sending { sent: 0, total: length });
                 let result = api.add_shared_pictures(token, &entry.world_id, vec![part], &metadata)?;
                 step(steps, "sent and stored", &mut at); // i18n: not shown
                 match result.added.into_iter().next() {

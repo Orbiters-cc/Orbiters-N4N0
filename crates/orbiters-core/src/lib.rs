@@ -24,6 +24,7 @@ pub mod osc;
 pub mod pipeline;
 pub mod panic_log;
 pub mod paths;
+pub mod png_meta;
 pub mod pose;
 pub mod protocol;
 pub mod reconstruction;

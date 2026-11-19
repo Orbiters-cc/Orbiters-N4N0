@@ -57,7 +57,7 @@ pub struct State {
     job: Job<anyhow::Result<Vec<Owned>>>,
     /// What was asked: the environment and the account.
     asked: Option<(bool, String)>,
-    account: super::AccountFollow,
+    account: crate::pages::AccountFollow,
     /// Orbiters came to answer for the account since the last look: what failed is asked again.
     answered: bool,
     error: Option<String>,

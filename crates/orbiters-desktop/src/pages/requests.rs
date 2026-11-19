@@ -30,7 +30,7 @@ pub struct State {
     outgoing: Vec<ShareRequest>,
     outgoing_box: bool,
     loaded: Option<(bool, String, u64)>,
-    account: super::AccountFollow,
+    account: crate::pages::AccountFollow,
     list: Job<anyhow::Result<(shares::Requests, shares::Requests)>>,
     /// The requests asked for again every [`REFRESH_EVERY`] on a thread while the page shows (for an environment and
     /// an account), and what it brought that could not be taken in yet. The page is drawn when the answer differs.

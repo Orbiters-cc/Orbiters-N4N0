@@ -1154,9 +1154,9 @@ mod tests {
         let ctx = egui::Context::default();
         let mut sel = Selection::default();
         let started = std::time::Instant::now();
-        let mut frame = |sel: &mut Selection, order: &[Entry], events: Vec<egui::Event>| {
+        let frame = |sel: &mut Selection, order: &[Entry], events: Vec<egui::Event>| {
             let mut out = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
-                let background = ui.interact(ui.max_rect(), Id::new("band"), Sense::drag());
+                let background = ui.interact(ui.max_rect(), Id::unique("band"), Sense::drag());
                 sel.update(ui, order, &background, false);
             });
             out.textures_delta.clear();

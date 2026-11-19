@@ -80,7 +80,7 @@ pub struct State {
     pub chosen: Option<u64>,
     /// What was asked: the environment, the account, the gallery.
     asked: Option<(bool, String, Option<u64>)>,
-    account: super::AccountFollow,
+    account: crate::pages::AccountFollow,
     /// Orbiters came to answer for the account since the last look: what failed is asked again.
     answered: bool,
     error: Option<String>,

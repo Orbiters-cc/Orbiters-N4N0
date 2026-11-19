@@ -332,10 +332,13 @@ fn one_at_a_time(running: &'static std::sync::atomic::AtomicBool, name: &str, wo
     }
     // Dropped with the closure when the thread cannot start, at the end of the work, or as a panic unwinds through it.
     let clear = Clear(running);
+    // Work of the window while it runs (it writes the pictures' index): the window does not close to the tray meanwhile.
+    let working = crate::pages::Working::begin();
     std::thread::Builder::new()
         .name(name.into())
         .spawn(move || {
             let _clear = clear;
+            let _working = working;
             work();
         })
         .is_ok()

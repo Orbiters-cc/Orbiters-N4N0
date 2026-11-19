@@ -149,8 +149,8 @@ pub trait Backend: Send + Sync {
     }
     /// The window's offer to close to the tray (`crate::window_rest`), or none any more.
     fn window_rest(&self, _offer: Option<crate::state::RestOffer>) {}
-    /// The VR band shows the offer `id`.
-    fn window_rest_shown(&self, _id: u64) {}
+    /// The offer the VR band shows now (`None`: none).
+    fn window_rest_shown(&self, _id: Option<u64>) {}
     /// Keep open, pressed in VR on the offer `id`.
     fn keep_window_open(&self, _id: u64) {}
 }
@@ -163,7 +163,7 @@ pub struct Remote(pub Arc<Client>);
 impl Backend for Remote {
     fn camera_qr(&self, active: bool) { self.0.send(&ToService::CameraQr { active }); }
     fn window_rest(&self, offer: Option<crate::state::RestOffer>) { self.0.send(&ToService::WindowRest { offer }); }
-    fn window_rest_shown(&self, id: u64) { self.0.send(&ToService::WindowRestShown { id }); }
+    fn window_rest_shown(&self, id: Option<u64>) { self.0.send(&ToService::WindowRestShown { id }); }
     fn keep_window_open(&self, id: u64) { self.0.send(&ToService::KeepWindowOpen { id }); }
     fn switch_demo_avatar(&self) { self.0.send(&ToService::SwitchDemoAvatar); }
     fn show_window(&self) {
@@ -436,7 +436,7 @@ impl Local {
 impl Backend for Local {
     fn camera_qr(&self, active: bool) { self.ctl.camera_qr(active); }
     fn window_rest(&self, offer: Option<crate::state::RestOffer>) { self.ctl.window_rest(offer); }
-    fn window_rest_shown(&self, id: u64) { self.ctl.window_rest_shown(id); }
+    fn window_rest_shown(&self, id: Option<u64>) { self.ctl.window_rest_shown(id); }
     fn keep_window_open(&self, id: u64) { self.ctl.keep_window_open(id); }
     fn translate_status(&self, status: crate::state::TranslateStatus) { self.ctl.set_translate_status(status); }
     fn translate(&self, batch: orbiters_translate::provider::Batch) -> controller::translate::Answer { self.ctl.translate_remote(&batch) }

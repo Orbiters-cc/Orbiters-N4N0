@@ -88,6 +88,8 @@ pub struct Meters {
     now: Arc<Mutex<MicLevels>>,
     seen: Arc<Mutex<Instant>>,
     stop: Arc<AtomicBool>,
+    /// Its thread, asleep while nothing looks (woken by a look or the end).
+    thread: Option<std::thread::Thread>,
 }
 
 /// Renders show made-up microphones: none of this computer's opens to draw a picture.
@@ -117,16 +119,19 @@ impl Meters {
         let (now, seen, stop) = (Arc::<Mutex<MicLevels>>::default(), Arc::new(Mutex::new(Instant::now())), Arc::new(AtomicBool::new(false)));
         if MADE_UP_MICS.load(Ordering::Relaxed) {
             *now.lock().unwrap_or_else(|e| e.into_inner()) = made_up();
-            return Self { now, seen, stop };
+            return Self { now, seen, stop, thread: None };
         }
         let (t_now, t_seen, t_stop) = (now.clone(), seen.clone(), stop.clone());
-        let _ = std::thread::Builder::new().name("mic levels".into()).spawn(move || watch(&t_now, &t_seen, &t_stop)); // i18n: not shown (a thread's name)
-        Self { now, seen, stop }
+        let thread = std::thread::Builder::new().name("mic levels".into()).spawn(move || watch(&t_now, &t_seen, &t_stop)).ok().map(|h| h.thread().clone()); // i18n: not shown (a thread's name)
+        Self { now, seen, stop, thread }
     }
 
     /// Something looks at them now.
     pub fn looked_at(&self) {
         *self.seen.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        if let Some(thread) = &self.thread {
+            thread.unpark();
+        }
     }
 
     pub fn levels(&self) -> MicLevels {
@@ -137,6 +142,9 @@ impl Meters {
 impl Drop for Meters {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = &self.thread {
+            thread.unpark();
+        }
     }
 }
 
@@ -150,7 +158,8 @@ fn watch(now: &Mutex<MicLevels>, seen: &Mutex<Instant>, stop: &AtomicBool) {
         if !looked {
             open.clear();
             listed = None;
-            std::thread::sleep(Duration::from_millis(100));
+            // Asleep until something looks again (or it ends): no wake-ups while no page shows the meters (N4N0-12).
+            std::thread::park_timeout(Duration::from_secs(60));
             continue;
         }
         if listed.is_none_or(|t| t.elapsed() >= METERS_LIST_EVERY) {

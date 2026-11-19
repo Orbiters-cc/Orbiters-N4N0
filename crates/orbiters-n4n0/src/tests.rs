@@ -1269,6 +1269,23 @@ fn switching_off_in_settings_puts_back_a_mute_talk_made() {
 }
 
 #[test]
+fn a_late_step_never_sends_a_voice_press_and_its_release_together() {
+    // N4N0-12: both edges overdue in one step went in one bundle; VRChat may read them in one frame and not toggle.
+    let now = Instant::now();
+    let past = now - Duration::from_millis(300);
+    let outbox = vec![
+        (past, ("/input/Voice".to_string(), OscType::Int(1))),
+        (past + Duration::from_millis(80), ("/input/Voice".to_string(), OscType::Int(0))),
+        (past, (parameter("Hoodie"), OscType::Bool(true))),
+    ];
+    let (sent, waiting) = crate::runtime::due(outbox, now);
+    assert_eq!(sent.iter().filter(|(a, _)| a == "/input/Voice").count(), 1, "{sent:?}");
+    assert_eq!(sent[0], ("/input/Voice".to_string(), OscType::Int(1)), "the press first");
+    assert_eq!(waiting.len(), 1);
+    assert!(waiting[0].0 > now && waiting[0].1 == ("/input/Voice".to_string(), OscType::Int(0)), "its release a step later");
+}
+
+#[test]
 fn switching_the_assistant_off_during_talk_puts_the_owner_s_microphone_back() {
     use crate::runtime::Source;
     // N4N0-15: off during a held Talk, the release no longer reached N4N0 and the owner stayed muted.

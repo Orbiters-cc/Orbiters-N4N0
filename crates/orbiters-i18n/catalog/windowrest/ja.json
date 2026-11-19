@@ -4,5 +4,5 @@
   "Keep open": "開いたままにする",
   "Close the minimized window while playing": "プレイ中は最小化したウィンドウを閉じる",
   "After 15 minutes minimized while VRChat runs, Orbiters - N4N0 asks for 8 seconds, then closes its window to the tray to give its memory back. Open it again from the tray: it comes back on its page.": "VRChat の実行中に 15 分間最小化されていると、Orbiters - N4N0 は 8 秒間お知らせしてから、メモリを解放するためにウィンドウをトレイに閉じます。トレイから開き直すと、元のページに戻ります。",
-  "In {seconds} s": "{seconds} 秒後"
+  "In {seconds} s": "{seconds}秒後"
 }

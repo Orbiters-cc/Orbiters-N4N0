@@ -165,8 +165,14 @@ impl Service {
             return;
         }
         let snap = self.ctl.view();
+        // The snapshot's answers first: asking for the session lists every process of the computer, and it was asked
+        // every 2 s with no SteamVR at all, or with the overlay (which does this itself) on: half of the idle
+        // service's processor (LIGHT-DESKTOP-5, CTL-3).
+        if !steamvr_start_may_be_due(snap.settings.steamvr_overlay, snap.steamvr.running) {
+            return;
+        }
         let Some(session) = crate::steamvr_start::ready_session() else { return };
-        if snap.settings.steamvr_overlay || !snap.steamvr.running || (*self.steamvr_start_seen.lock().unwrap() == Some(session) && !snap.settings.startup.steamvr_pending)
+        if (*self.steamvr_start_seen.lock().unwrap() == Some(session) && !snap.settings.startup.steamvr_pending)
             || Some(session.0) != snap.steamvr.pid {
             return;
         }
@@ -621,6 +627,12 @@ impl TalkHolder {
     }
 }
 
+/// Whether [`Service::keep_steamvr_start`] has anything to look at, from the snapshot alone: SteamVR runs (the watchers
+/// say) and the overlay, which looks at the SteamVR start itself, is not wanted.
+fn steamvr_start_may_be_due(overlay_on: bool, steamvr_running: bool) -> bool {
+    !overlay_on && steamvr_running
+}
+
 /// An overlay that failed is started again after this.
 const OVERLAY_RETRY: Duration = Duration::from_secs(2);
 
@@ -840,6 +852,16 @@ pub(crate) mod tests {
         talk.talk(window, true);
         talk.talk(panels, false);
         assert!(!talk.closed(window));
+    }
+
+    /// LIGHT-DESKTOP-5: the SteamVR start is looked at (a scan of every process) only while SteamVR runs and the
+    /// overlay is off; the two other cases returned after the scan before.
+    #[test]
+    fn the_steamvr_start_is_looked_for_only_while_steamvr_runs_without_the_overlay() {
+        assert!(steamvr_start_may_be_due(false, true));
+        assert!(!steamvr_start_may_be_due(false, false), "no SteamVR");
+        assert!(!steamvr_start_may_be_due(true, true), "the overlay looks itself");
+        assert!(!steamvr_start_may_be_due(true, false));
     }
 
     use crate::link_between::{Between, Line};

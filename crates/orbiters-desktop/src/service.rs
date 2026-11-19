@@ -401,6 +401,7 @@ impl Service {
             ToService::WindowRest { offer } => ctl.window_rest(offer),
             ToService::WindowRestShown { id } => ctl.window_rest_shown(id),
             ToService::KeepWindowOpen { id } => ctl.keep_window_open(id),
+            ToService::SharedView { command } => ctl.shared_view(command),
             ToService::SwitchDemoAvatar => ctl.switch_demo_avatar(),
             ToService::StopCapture => report(ctl.stop_capture()),
             ToService::Pause { paused } => report(ctl.pause_capture(paused)),

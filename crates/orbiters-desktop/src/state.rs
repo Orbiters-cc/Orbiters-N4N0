@@ -742,6 +742,90 @@ pub struct Snapshot {
     /// for the VR band to show, and what the band said of it.
     #[serde(default)]
     pub window_rest: WindowRest,
+    /// The shared 3D view (contracts `Docs/n4n0-shared-view.md`, `controller/shared_view.rs`): friends here to show the
+    /// small view to, the share this side makes, an offer to look at a friend's, the friend's view being looked at.
+    #[serde(default)]
+    pub shared_view: Slice<SharedViewStatus>,
+}
+
+/// The shared 3D view as the service holds it: looking at the same capture together, each copy in front of its own viewer.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SharedViewStatus {
+    /// Friends in this instance who run Orbiters - N4N0 and whose own log sees this player too.
+    pub targets: Vec<CallContact>,
+    /// This side shows its small view to a friend.
+    pub outgoing: Option<ShareOut>,
+    /// A friend offers to show theirs (the first of those waiting).
+    pub offer: Option<ShareOffer>,
+    /// A friend's view, accepted and followed.
+    pub watching: Option<ShareWatching>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShareOutPhase {
+    /// The offer is on its way to Orbiters.
+    #[default]
+    Offering,
+    /// The friend is asked.
+    Asked,
+    /// The friend looks at it.
+    Watching,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShareOut {
+    /// The friend's name and the capture's listing id.
+    pub to: String,
+    pub capture: u64,
+    pub phase: ShareOutPhase,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShareOffer {
+    /// This side's number for it (the band's id), counting from 1.
+    pub id: u64,
+    pub from: String,
+    /// The capture's world.
+    pub title: String,
+    /// When it goes (Unix ms), and how long it was up for.
+    pub until_ms: u64,
+    pub for_ms: u64,
+}
+
+impl ShareOffer {
+    /// The share of its time left at `now_ms`.
+    pub fn left(&self, now_ms: u64) -> f32 {
+        if self.for_ms == 0 {
+            return 0.0;
+        }
+        (self.until_ms.saturating_sub(now_ms) as f32 / self.for_ms as f32).clamp(0.0, 1.0)
+    }
+}
+
+/// A capture's start view as Orbiters gives it (right-handed, Unity's world with Z negated).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShareStart {
+    pub position: [f32; 3],
+    pub target: [f32; 3],
+    pub floor: Option<f32>,
+    pub eye_height: Option<f32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShareWatching {
+    /// This side's number for it: a new one is a new view to open.
+    pub id: u64,
+    pub from: String,
+    pub title: String,
+    pub capture: u64,
+    pub revision: u64,
+    /// The capture's file once downloaded (signed in, never from a public address), and its start view.
+    pub file: Option<PathBuf>,
+    pub start: Option<ShareStart>,
+    /// The friend's view: zoom (capture metres around the middle) and pan, the last state applied.
+    pub view: Option<(f32, [f32; 2])>,
+    /// The download failed: what to say.
+    pub failed: Option<String>,
 }
 
 /// "Orbiters - N4N0 will minimize to the tray to save memory" (LIGHT-DESKTOP-8, Enzo's decision of 2026-11-19), as the
@@ -784,7 +868,7 @@ pub struct WindowRest {
 
 orbiters_core::parts!(Snapshot {
     plain: [smoothing_revision, version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, vrchat_wrists, vrchat_wrists_ns, camera_tools, projects_changed, window_rest],
-    slices: [sources, mics, osc, lan, capture, settings, storage, worker, steamvr, reconstruct_queue, account, uploads, update, vr_audio, orbit, booster, translate, perf, launcher],
+    slices: [sources, mics, osc, lan, capture, settings, storage, worker, steamvr, reconstruct_queue, account, uploads, update, vr_audio, orbit, booster, translate, perf, launcher, shared_view],
     identity: [capture_shares],
     nested: [vrchat, n4n0],
 });
@@ -831,6 +915,7 @@ impl Snapshot {
             perf: Default::default(),
             launcher: Default::default(),
             window_rest: Default::default(),
+            shared_view: Default::default(),
             version: orbiters_core::app_version().into(),
             vrchat: VrchatStatus {
                 running: false,

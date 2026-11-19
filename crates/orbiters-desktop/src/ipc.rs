@@ -77,6 +77,22 @@ pub enum ToClient {
     },
 }
 
+/// What a surface asks of the shared 3D view (contracts `Docs/n4n0-shared-view.md`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SharedViewCommand {
+    /// Show the small view of this capture (its listing id and upload key) to this friend (their contact id).
+    Share { contact: String, capture: u64, revision: u64, reach: f32, moved: [f32; 2] },
+    /// The small view shown is now so (its zoom and pan).
+    View { reach: f32, moved: [f32; 2] },
+    /// Stop showing it.
+    Stop,
+    /// The offer `id`: Show, or Not now.
+    Answer { id: u64, accept: bool },
+    /// Stop looking at the friend's view.
+    Leave,
+}
+
 /// A long recording can only be started by the camera overlay. Other UI surfaces remain stop-only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,6 +119,8 @@ pub enum ToService {
     WindowRestShown { id: u64 },
     /// Keep open, pressed on this offer in VR.
     KeepWindowOpen { id: u64 },
+    /// The shared 3D view (`controller/shared_view.rs`).
+    SharedView { command: SharedViewCommand },
     SwitchDemoAvatar,
     StopCapture,
     /// The Orbiters window to the front.

@@ -153,6 +153,8 @@ pub trait Backend: Send + Sync {
     fn window_rest_shown(&self, _id: u64) {}
     /// Keep open, pressed in VR on the offer `id`.
     fn keep_window_open(&self, _id: u64) {}
+    /// The shared 3D view: share, the view now, stop, an offer's answer, leave.
+    fn shared_view(&self, _command: crate::ipc::SharedViewCommand) {}
 }
 
 pub type Ctl = Arc<dyn Backend>;
@@ -165,6 +167,7 @@ impl Backend for Remote {
     fn window_rest(&self, offer: Option<crate::state::RestOffer>) { self.0.send(&ToService::WindowRest { offer }); }
     fn window_rest_shown(&self, id: u64) { self.0.send(&ToService::WindowRestShown { id }); }
     fn keep_window_open(&self, id: u64) { self.0.send(&ToService::KeepWindowOpen { id }); }
+    fn shared_view(&self, command: crate::ipc::SharedViewCommand) { self.0.send(&ToService::SharedView { command }); }
     fn switch_demo_avatar(&self) { self.0.send(&ToService::SwitchDemoAvatar); }
     fn show_window(&self) {
         self.0.send(&ToService::ShowWindow);
@@ -438,6 +441,7 @@ impl Backend for Local {
     fn window_rest(&self, offer: Option<crate::state::RestOffer>) { self.ctl.window_rest(offer); }
     fn window_rest_shown(&self, id: u64) { self.ctl.window_rest_shown(id); }
     fn keep_window_open(&self, id: u64) { self.ctl.keep_window_open(id); }
+    fn shared_view(&self, command: crate::ipc::SharedViewCommand) { self.ctl.shared_view(command); }
     fn translate_status(&self, status: crate::state::TranslateStatus) { self.ctl.set_translate_status(status); }
     fn translate(&self, batch: orbiters_translate::provider::Batch) -> controller::translate::Answer { self.ctl.translate_remote(&batch) }
     fn switch_demo_avatar(&self) { self.ctl.switch_demo_avatar(); }

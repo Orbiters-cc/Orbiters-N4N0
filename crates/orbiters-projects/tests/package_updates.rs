@@ -455,10 +455,10 @@ fn a_tool_without_a_coherent_version_blocks_until_removed_and_failures_roll_back
         assert!(plan.solved(), "{plan:#?}");
         let removed = plan.steps.iter().find(|s| s.name == "dev.hai-vr.fuck-osc-config").unwrap();
         assert_eq!((removed.from.as_deref(), removed.to.as_deref()), (Some("1.1.5"), None));
-        // A plan that fails halfway (a version gone from the repositories) puts everything back.
+        // A plan asking for a version gone from the repositories changes nothing at all: it is looked up first.
         let broken = vpm::Change::Plan { install: vec![("com.vrchat.avatars".into(), "9.9.9".into())], remove: plan.remove.clone(), prerelease: false };
         let e = vpm::change(root.path(), &source, broken).await.unwrap_err();
-        assert!(format!("{e:#}").contains("as they were"), "{e:#}");
+        assert!(format!("{e:#}").contains("no longer in the enabled repositories"), "{e:#}");
         assert_eq!(installed(&source, "dev.hai-vr.fuck-osc-config").as_deref(), Some("1.1.5"));
         assert!(source.join("Packages/dev.hai-vr.fuck-osc-config/package.json").is_file(), "the removed package restored");
         assert_eq!(installed(&source, "com.vrchat.avatars").as_deref(), Some("3.7.5"));

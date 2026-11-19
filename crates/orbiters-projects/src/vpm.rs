@@ -498,7 +498,14 @@ async fn apply_plan(
 /// `bytes` written over `path` through a file beside it, renamed over it: never a half-written file.
 fn replace_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("json.orbiters-{}", uuid::Uuid::new_v4().simple()));
-    let written = std::fs::write(&tmp, bytes).and_then(|()| std::fs::File::open(&tmp)?.sync_all()).and_then(|()| std::fs::rename(&tmp, path));
+    let written = (|| {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

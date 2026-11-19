@@ -632,7 +632,9 @@ fn remove_owned(path: &Path) -> std::io::Result<()> {
         Err(e) => return Err(e),
     };
     let link = meta.file_type().is_symlink() || meta.file_attributes() & 0x400 != 0;
-    retrying(|| match (link, meta.is_dir()) {
+    // A junction (or a link to a folder) is a folder to Windows: removed with `remove_dir`, which takes the link only.
+    let folder = meta.is_dir() || meta.file_attributes() & 0x10 != 0;
+    retrying(|| match (link, folder) {
         (true, true) => std::fs::remove_dir(path),
         (true, false) | (false, false) => std::fs::remove_file(path),
         (false, true) => std::fs::remove_dir_all(path),

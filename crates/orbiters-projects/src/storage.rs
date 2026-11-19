@@ -2155,6 +2155,7 @@ mod tests {
         assert_eq!(swept.old_removed, vec![recorded.clone()], "only the recorded one");
         assert!(mine.join("keep.txt").is_file());
         remove_redirect(project.join("Library")).unwrap();
+        let _ = std::fs::remove_dir(project.join("Library"));
         // Library missing, only the person's folder there: it is not made the Library, and the cache stays.
         let swept = run_sweep(&root, &[]);
         assert!(swept.restored.is_empty() && swept.removed.is_empty(), "{swept:?}");

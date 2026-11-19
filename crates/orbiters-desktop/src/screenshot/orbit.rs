@@ -1628,6 +1628,8 @@ pub(super) fn explorer_shots(out: &Path) -> anyhow::Result<()> {
         ("people-done", share(offer(Some(1.0), Step::Idle, Step::Done(Done { people: 3, earned: None, nothing: None, after: None, reached: None })), false, None), None),
         ("failed", share(offer(Some(1.0), Step::Failed(orbiters_i18n::tr("Sign in to Orbiters in Settings first.").into()), Step::Idle), false, None), Some(Action::SharePublic(7))),
         ("explicit", share(offer(Some(1.0), Step::Explicit, Step::Idle), false, None), None),
+        ("limited", share(offer(Some(1.0), Step::Limited, Step::Idle), false, None), Some(Action::ShareTo(7))),
+        ("not-ready", share(offer(Some(1.0), Step::Failed(orbiters_i18n::tr(crate::controller::explorer::NOT_READY).into()), Step::Idle), false, None), None),
         ("chooser", share(offer(Some(1.0), Step::Idle, Step::Idle), false, Some(chooser(&[0, 3], false, None))), Some(Action::ChooserPerson(2))),
         ("chooser-none", share(offer(Some(1.0), Step::Idle, Step::Idle), false, Some(chooser(&[], false, None))), None),
         ("chooser-loading", share(offer(Some(1.0), Step::Idle, Step::Idle), false, Some(chooser(&[], true, None))), None),
@@ -1650,7 +1652,7 @@ pub(super) fn explorer_shots(out: &Path) -> anyhow::Result<()> {
         let bgra: Vec<u8> = frame.pixels().flat_map(|p| [p[2], p[1], p[0], 255]).collect();
         let panel = detect::camera_panel_in(&bgra, w, h).ok_or_else(|| anyhow::anyhow!("no camera panel found"))?;
         let desk = Facts { desktop: true, vr_close: false, ..idle.clone() };
-        for (state, view, pointed) in states.iter().filter(|(s, _, _)| ["idle", "confirm", "sending", "done-half", "done-zero-negative", "failed"].contains(s)) {
+        for (state, view, pointed) in states.iter().filter(|(s, _, _)| ["idle", "confirm", "sending", "done-half", "done-zero-negative", "failed", "limited"].contains(s)) {
             let facts = Facts { camera: CameraNow { share: Some(view.clone()), ..desk.camera.clone() }, pointed: *pointed, ..desk.clone() };
             let mut image = frame.as_raw().clone();
             for placed in zones::camera_on_screen(panel, vec2(w as f32, h as f32)) {

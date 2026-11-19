@@ -165,6 +165,26 @@ pub struct ShareJob {
     /// It updates a shared capture's files ([`Operation::Update`]): its card says so.
     #[serde(default)]
     pub update: bool,
+    /// Why Orbiters refused it, when it is one the interfaces say in their own way ([`refusal`]).
+    #[serde(default)]
+    pub refused: Option<Refusal>,
+}
+
+/// Refusals said in their own way (contract `night-1119/explorer-contract.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Refusal {
+    /// 30 first public shares in 24 hours: nothing changed, it can be shared publicly tomorrow.
+    DailyLimit,
+    /// 503: the server is not ready (its start-up ranking): try again in a moment.
+    NotReady,
+}
+
+/// Which [`Refusal`] an error is, if any.
+pub fn refusal(e: &anyhow::Error) -> Option<Refusal> {
+    if e.downcast_ref::<shares::ExplorerDailyLimit>().is_some() {
+        return Some(Refusal::DailyLimit);
+    }
+    e.downcast_ref::<orbiters_core::account::ApiError>().filter(|a| a.status == 503).map(|_| Refusal::NotReady)
 }
 /// What a running share is doing (docs/share-speed-2026-10-29.md): what the window and the gallery's card say.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -255,7 +275,7 @@ impl super::Controller {
             if s.capture_shares.iter().any(|j| j.id == request.id) {
                 return false;
             }
-            s.capture_shares.push(ShareJob { id: request.id.clone(), key: request.entry.key.clone(), stage: Stage::Starting, outcome: None, update });
+            s.capture_shares.push(ShareJob { id: request.id.clone(), key: request.entry.key.clone(), stage: Stage::Starting, outcome: None, update, refused: None });
             true
         });
         if !accepted {
@@ -282,8 +302,9 @@ impl super::Controller {
                     None => false,
                 });
             };
-            let outcome = work(request, &report)
-                .unwrap_or_else(|e| Outcome::Failed { explicit: e.downcast_ref::<shares::ExplicitAcknowledgement>().is_some(), message: e.to_string() });
+            let result = work(request, &report);
+            let refused = result.as_ref().err().and_then(refusal);
+            let outcome = result.unwrap_or_else(|e| Outcome::Failed { explicit: e.downcast_ref::<shares::ExplicitAcknowledgement>().is_some(), message: e.to_string() });
             let (kind, message) = match &outcome {
                 Outcome::Failed { message, explicit: false } => (super::NoticeKind::Error, message.clone()),
                 Outcome::Failed { explicit: true, .. } => {
@@ -298,6 +319,7 @@ impl super::Controller {
             ctl.update(|s| {
                 if let Some(j) = s.capture_shares.iter_mut().find(|j| j.id == id) {
                     j.outcome = Some(outcome);
+                    j.refused = refused;
                 }
                 while s.capture_shares.len() > 32 {
                     if let Some(i) = s.capture_shares.iter().position(|j| j.outcome.is_some()) {

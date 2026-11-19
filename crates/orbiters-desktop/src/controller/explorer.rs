@@ -121,6 +121,8 @@ pub enum Step {
     Done(Done),
     /// It is explicit: confirming that is done in Photos & captures.
     Explicit,
+    /// Refused: 30 first public shares in 24 hours. Nothing changed; tomorrow, or to friends now.
+    Limited,
     Failed(String),
 }
 
@@ -269,6 +271,41 @@ struct Asked {
     public: bool,
     people: Vec<String>,
     since: Instant,
+    /// What was asked, to ask it again once after a "not ready" ([`after_refusal`]).
+    ask: orbiters_n4n0_core::captures::ShareAsk,
+    retried: bool,
+    retry_at: Option<Instant>,
+    /// The refused job, while its retry is not listed yet.
+    skip_job: Option<String>,
+}
+
+/// How long a share refused because Orbiters is not ready waits before it is asked again, once.
+pub const RETRY_AFTER: Duration = Duration::from_secs(15);
+pub const LIMIT_TITLE: &str = mark("Daily limit reached");
+pub const LIMIT_WHY: &str = mark("Share it publicly tomorrow, or to friends now.");
+pub const NOT_READY: &str = mark("Orbiters is getting ready: try again in a moment");
+
+/// What follows a share refused as `refused`, `retried` already or not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfterRefusal {
+    /// Not a refusal said in its own way: as the answer says.
+    AsAnswered,
+    /// Orbiters not ready: asked again once, by itself, in a moment.
+    RetryOnce,
+    /// Still not ready after that: said, and pressing tries again.
+    NotReady,
+    /// The daily limit: said plainly.
+    Limited,
+}
+
+pub fn after_refusal(refused: Option<crate::controller::shares::Refusal>, retried: bool) -> AfterRefusal {
+    use crate::controller::shares::Refusal;
+    match refused {
+        Some(Refusal::DailyLimit) => AfterRefusal::Limited,
+        Some(Refusal::NotReady) if !retried => AfterRefusal::RetryOnce,
+        Some(Refusal::NotReady) => AfterRefusal::NotReady,
+        None => AfterRefusal::AsAnswered,
+    }
 }
 
 /// What the explorer keeps between ticks.
@@ -539,9 +576,10 @@ impl super::Controller {
                 acknowledge_explicit: false,
                 ..Default::default()
             };
+            let ask_again = ask.clone();
             match ctl.menu_capture_share(ask) {
                 Ok(()) => {
-                    let asked = Asked { public, people: recipients.iter().map(|r| r.0.clone()).collect(), since: Instant::now() };
+                    let asked = Asked { public, people: recipients.iter().map(|r| r.0.clone()).collect(), since: Instant::now(), ask: ask_again, retried: false, retry_at: None, skip_job: None };
                     let mut s = ctl.explorer.lock().unwrap();
                     if public {
                         s.public = Some(asked);
@@ -560,7 +598,33 @@ impl super::Controller {
         let Some(offer) = snap.explorer.offer.as_ref() else { return };
         for public in [true, false] {
             let Some(asked) = (if public { s.public.as_mut() } else { s.people.as_mut() }) else { continue };
+            // Asked again once after "not ready": when its moment comes, on a thread (it lists the computer's captures).
+            if let Some(at) = asked.retry_at {
+                if Instant::now() >= at {
+                    asked.retry_at = None;
+                    asked.since = Instant::now();
+                    let (ctl, ask, id) = (self.clone(), asked.ask.clone(), offer.id);
+                    std::thread::spawn(move || {
+                        if let Err(message) = ctl.menu_capture_share(ask) {
+                            ctl.update(|st| {
+                                if let Some(o) = st.explorer.offer.as_mut().filter(|o| o.id == id) {
+                                    if public {
+                                        o.public = Step::Failed(message.clone());
+                                    } else {
+                                        o.people = Step::Failed(message.clone());
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+                continue;
+            }
             let state = self.menu_share_state(&offer.key);
+            let state = match state {
+                Some(super::menu_shares::AskState::Job(id)) if asked.skip_job.as_ref() == Some(&id) => None,
+                other => other,
+            };
             let step = match state {
                 Some(super::menu_shares::AskState::Waiting) => Step::Busy { making: true, sent: None },
                 Some(super::menu_shares::AskState::Failed(message)) => Step::Failed(message),
@@ -572,9 +636,19 @@ impl super::Controller {
                         });
                         Step::Busy { making: false, sent }
                     }
-                    Some(ShareJob { outcome: Some(outcome), .. }) => verified(outcome, public, &asked.people, offer.would_earn),
+                    Some(ShareJob { outcome: Some(outcome), refused, .. }) => match after_refusal(*refused, asked.retried) {
+                        AfterRefusal::AsAnswered => verified(outcome, public, &asked.people, offer.would_earn),
+                        AfterRefusal::Limited => Step::Limited,
+                        AfterRefusal::NotReady => Step::Failed(tr(NOT_READY).into()),
+                        AfterRefusal::RetryOnce => {
+                            asked.retried = true;
+                            asked.retry_at = Some(Instant::now() + RETRY_AFTER);
+                            asked.skip_job = Some(id.clone());
+                            Step::Busy { making: false, sent: None }
+                        }
+                    },
                 },
-                None if asked.since.elapsed() < Duration::from_secs(10) => Step::Busy { making: false, sent: None },
+                None if asked.since.elapsed() < Duration::from_secs(10) || asked.skip_job.is_some() && asked.since.elapsed() < Duration::from_secs(30) => Step::Busy { making: false, sent: None },
                 None => Step::Failed(tr("The share did not start: try again from Photos & captures").into()),
             };
             // A public share Orbiters confirmed: its points are the member's now, and a toast says what it earned (the
@@ -587,7 +661,7 @@ impl super::Controller {
             }
             {
                 {
-                    let finished = matches!(step, Step::Done(_) | Step::Failed(_) | Step::Explicit);
+                    let finished = matches!(step, Step::Done(_) | Step::Failed(_) | Step::Explicit | Step::Limited);
                     let id = offer.id;
                     self.update_if(|st| match st.explorer.offer.as_mut().filter(|o| o.id == id) {
                         Some(o) => {
@@ -890,6 +964,29 @@ mod tests {
         });
         assert_eq!(why_nothing(Some(1.0), false), Nothing::Unknown, "nothing earned without a known reason: said plainly");
         assert_eq!(why_nothing(Some(1.0), true), Nothing::SharedBefore);
+    }
+
+    /// The daily limit is said plainly at once; "not ready" is asked again once by itself, then said; other failures
+    /// are as answered. The refusals are recognised from the errors the share returns.
+    #[test]
+    fn refusals_are_said_their_own_way_and_not_ready_is_retried_once() {
+        use crate::controller::shares::{refusal, Refusal};
+        assert_eq!(after_refusal(Some(Refusal::DailyLimit), false), AfterRefusal::Limited);
+        assert_eq!(after_refusal(Some(Refusal::NotReady), false), AfterRefusal::RetryOnce);
+        assert_eq!(after_refusal(Some(Refusal::NotReady), true), AfterRefusal::NotReady);
+        assert_eq!(after_refusal(None, false), AfterRefusal::AsAnswered);
+        let limit: anyhow::Error = orbiters_core::shares::ExplorerDailyLimit("x".into()).into();
+        let not_ready: anyhow::Error = orbiters_core::account::ApiError { status: 503, message: "x".into(), code: None }.into();
+        let forbidden: anyhow::Error = orbiters_core::account::ApiError { status: 403, message: "x".into(), code: None }.into();
+        let rate: anyhow::Error = orbiters_core::shares::RateLimited { retry_after_s: 60, message: "x".into() }.into();
+        assert_eq!([&limit, &not_ready, &forbidden, &rate].map(|e| refusal(e)), [Some(Refusal::DailyLimit), Some(Refusal::NotReady), None, None]);
+        for language in orbiters_i18n::Language::TRANSLATED {
+            orbiters_i18n::in_language(language, || {
+                for words in [LIMIT_TITLE, LIMIT_WHY, NOT_READY] {
+                    assert_ne!(tr(words), words, "{language:?}");
+                }
+            });
+        }
     }
 
     #[test]

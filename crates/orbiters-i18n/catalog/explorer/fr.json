@@ -37,5 +37,8 @@
   "Worlds without a 3D picture": "Mondes sans photo 3D",
   "Yes, share publicly": "Oui, partager publiquement",
   "{page} of {pages}": "{page} sur {pages}",
-  "{remaining} to {title}": "{remaining} avant {title}"
+  "{remaining} to {title}": "{remaining} avant {title}",
+  "Daily limit reached": "Limite du jour atteinte",
+  "Share it publicly tomorrow, or to friends now.": "Partage-la publiquement demain, ou avec des amis dès maintenant.",
+  "Orbiters is getting ready: try again in a moment": "Orbiters se prépare : réessaie dans un instant"
 }

@@ -331,6 +331,26 @@ mod tests {
         assert!(matches!(request, crate::shares::Shared::Request { .. }), "a requester's share earns nothing");
     }
 
+    /// A first public share refused for the day (429 `explorer-daily-limit`) is not the address's rate limit (a 429
+    /// without that code), and a 503 is the server's own (not ready).
+    #[test]
+    fn the_daily_limit_and_not_ready_are_told_apart() {
+        let (api, server) = serve(vec![
+            (429, r#"{"error":"Limite du jour atteinte","code":"explorer-daily-limit"}"#),
+            (429, r#"{"error":"Too many requests"}"#),
+            (503, r#"{"error":"Not ready"}"#),
+        ]);
+        let share = crate::shares::Share { public: true, recipients: Vec::new(), acknowledge_explicit: false, message: String::new() };
+        let call = || api.share_capture("t", crate::shares::Kind::Capture, 5, &share).unwrap_err();
+        let limit = call();
+        assert_eq!(limit.downcast_ref::<crate::shares::ExplorerDailyLimit>().map(|e| e.0.as_str()), Some("Limite du jour atteinte"));
+        let busy = call();
+        assert!(busy.downcast_ref::<crate::shares::RateLimited>().is_some() && busy.downcast_ref::<crate::shares::ExplorerDailyLimit>().is_none());
+        let not_ready = call();
+        assert_eq!(not_ready.downcast_ref::<crate::account::ApiError>().map(|e| e.status), Some(503));
+        server.join().unwrap();
+    }
+
     #[test]
     fn only_a_world_id_is_a_world_id() {
         assert!(is_world_id(WORLD));

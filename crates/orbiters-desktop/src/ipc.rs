@@ -1103,7 +1103,7 @@ pub(crate) mod tests {
             4 => s.settings.walk_boost.strength = (round % 10) as f32 / 10.0,
             5 => s.projects_changed += 1,
             6 => s.capture.trail.push([round as f32, 1.0, 2.0]),
-            7 => s.capture_shares.push(crate::controller::shares::ShareJob { id: format!("job-{round}"), key: "capture".into(), stage: Default::default(), outcome: None, update: false }),
+            7 => s.capture_shares.push(crate::controller::shares::ShareJob { id: format!("job-{round}"), key: "capture".into(), stage: Default::default(), outcome: None, update: false, refused: None }),
             _ => {
                 // Two parts that go together: the account and what it may do.
                 s.account.state = crate::state::AccountState::SignedIn { username: format!("member-{round}") };
@@ -1188,7 +1188,7 @@ pub(crate) mod tests {
         s.settings.walk_boost.strength += 0.25;
         s.reconstruction = Some(ReconstructionJob::new(PathBuf::from("a session"), true));
         s.vrchat_login.revision = 3;
-        s.capture_shares.push(crate::controller::shares::ShareJob { id: "job".into(), key: "capture".into(), stage: Default::default(), outcome: None, update: true });
+        s.capture_shares.push(crate::controller::shares::ShareJob { id: "job".into(), key: "capture".into(), stage: Default::default(), outcome: None, update: true, refused: None });
         s.update.channel = "another channel".into();
         s.cleanup = Some(CleanupJob::default());
         s.vr_audio.last = Some(crate::controller::vr_audio::Event { utc_ms: 1, text: "Set to the headset's".into(), error: false });

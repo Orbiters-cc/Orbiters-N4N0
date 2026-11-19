@@ -101,7 +101,7 @@ pub fn share_items(w: f32, _h: f32, view: &ShareView) -> Vec<Item> {
             Item { action: Action::ShareConfirm(id), rect: r(w - yes, 0.0, yes, BUTTON), look: Look::ShareYes },
         ];
     }
-    let tall = |step: &Step| if matches!(step, Step::Done(_)) { DONE } else { BUTTON };
+    let tall = |step: &Step| if matches!(step, Step::Done(_) | Step::Limited) { DONE } else { BUTTON };
     // A column (on a screen, beside the panel): the two over each other, the put-away under them.
     if w < 300.0 {
         let question = view.confirming;
@@ -295,6 +295,8 @@ fn slot(p: &Painter, rect: Rect, view: &ShareView, public: bool, hovered: bool, 
             card(p, rect, icons::CHECK_CIRCLE, good, &words, None, None, None);
         }
         Step::Explicit => card(p, rect, icons::WARNING, theme::WARN, tr(EXPLICIT), None, None, None),
+        // Said plainly; "Share to …" beside it still works.
+        Step::Limited => card(p, rect, icons::CLOCK, theme::WARN, tr(ex::LIMIT_TITLE), Some(tr(ex::LIMIT_WHY)), None, None),
         Step::Failed(message) => {
             // Pressed again, it tries again.
             let round = look::radius(14.0);
@@ -450,6 +452,10 @@ mod tests {
         v.offer.public = Step::Failed("No".into());
         v.offer.people = Step::Done(Done { people: 2, earned: None, nothing: None, after: None, reached: None });
         assert_eq!(actions(&share_items(520.0, 84.0, &v)), [Action::Idle, Action::SharePublic(7), Action::ShareDismiss(7)]);
+        // The daily limit: public cannot be pressed again today, "Share to …" still can.
+        let mut limited = view();
+        limited.offer.public = Step::Limited;
+        assert_eq!(actions(&share_items(520.0, 84.0, &limited)), [Action::ShareTo(7), Action::Idle, Action::ShareDismiss(7)]);
         v.confirming = true;
         assert_eq!(actions(&share_items(520.0, 84.0, &v)), [Action::Idle, Action::ShareCancelConfirm, Action::ShareConfirm(7)]);
         // On a screen, the column beside the panel: the same presses, over each other, none overlapping.

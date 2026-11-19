@@ -316,6 +316,17 @@ impl std::fmt::Display for RateLimited {
 }
 impl std::error::Error for RateLimited {}
 
+/// A first public share refused: the member made 30 in the last 24 hours (429 `explorer-daily-limit`). Nothing was
+/// changed; the server's sentence in the member's language.
+#[derive(Debug)]
+pub struct ExplorerDailyLimit(pub String);
+impl std::fmt::Display for ExplorerDailyLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ExplorerDailyLimit {}
+
 /// A `Retry-After` header's seconds (a date is not what Orbiters sends: a minute then).
 pub fn retry_after_seconds(value: Option<&str>) -> u64 {
     value.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(60).max(1)
@@ -334,6 +345,10 @@ pub(crate) fn json<T: serde::de::DeserializeOwned>(response: ureq::http::Respons
         }
         if status == 409 && value["code"] == "revision-conflict" {
             return Err(RevisionConflict { revision: value["revision"].as_u64().unwrap_or(0), message }.into());
+        }
+        // A member's 31st first public share in 24 hours (contract `night-1119/explorer-contract.md`): nothing changed.
+        if status == 429 && value["code"] == "explorer-daily-limit" {
+            return Err(ExplorerDailyLimit(message).into());
         }
         if status == 429 {
             return Err(RateLimited { retry_after_s: retry_after_seconds(retry_after.as_deref()), message }.into());

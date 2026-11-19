@@ -37,5 +37,8 @@
   "Worlds without a 3D picture": "3D写真のないワールド",
   "Yes, share publicly": "はい、公開で共有する",
   "{page} of {pages}": "{page} / {pages}",
-  "{remaining} to {title}": "{title}まであと{remaining}"
+  "{remaining} to {title}": "{title}まであと{remaining}",
+  "Daily limit reached": "1日の上限に達しました",
+  "Share it publicly tomorrow, or to friends now.": "公開での共有は明日、フレンドへの共有なら今できます。",
+  "Orbiters is getting ready: try again in a moment": "Orbitersの準備中です。少し待ってからもう一度お試しください"
 }

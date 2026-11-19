@@ -285,7 +285,7 @@ pub fn fetch(source: &Source) -> anyhow::Result<()> {
     }
     // Tests never ask Orbiters, with the person's saved sign-in or without (night4).
     if cfg!(test) {
-        anyhow::bail!("tests never download");
+        anyhow::bail!("tests never download"); // i18n: not shown (tests only)
     }
     use orbiters_core::account::{Api, Server};
     let server = if r.development { Server::Development } else { Server::Production };

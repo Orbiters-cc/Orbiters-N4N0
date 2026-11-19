@@ -1120,7 +1120,7 @@ fn kept(stem: &Path) -> Option<PathBuf> {
 fn fetch(from: &Remote, stem: &Path) -> anyhow::Result<PathBuf> {
     // Tests never ask Orbiters (night4).
     if cfg!(test) {
-        anyhow::bail!("tests never download");
+        anyhow::bail!("tests never download"); // i18n: not shown (tests only)
     }
     let dir = stem.parent().ok_or_else(|| anyhow::anyhow!("{}", tr("no folder")))?;
     std::fs::create_dir_all(dir)?;

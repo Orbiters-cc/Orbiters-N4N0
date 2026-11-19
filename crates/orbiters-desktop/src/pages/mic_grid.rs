@@ -220,7 +220,7 @@ mod tests {
         let snap = (*ctl.view()).clone();
         let mut state = State::default();
         let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 700.0));
-        let mut frame = |state: &mut State, top: f32| {
+        let frame = |state: &mut State, top: f32| {
             let mut toasts = orbiters_ui::toast::Toasts::default();
             let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
             let mut out = ctx.run_ui(input, |ui| {

@@ -47,6 +47,10 @@ pub struct Stamp {
     /// The Orbiters account signed in then (its id), only when `told`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The server (its API address) that account is on: account ids are per server, so the same id on the other
+    /// environment is another person. A stamp without it (counted before 2026-11-19 night4) is never sent with a credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
 }
 
 impl Stamp {
@@ -54,9 +58,16 @@ impl Stamp {
         *self == Self::default()
     }
 
-    /// What is counted now: `told` from the settings, `account` the account signed in (ignored unless told).
-    pub fn now(told: bool, account: Option<String>) -> Self {
-        Self { told, account: account.filter(|_| told) }
+    /// What is counted now: `told` from the settings, `account` the account signed in and the server it is on (ignored unless told).
+    pub fn now(told: bool, account: Option<(String, String)>) -> Self {
+        let (account, server) = account.filter(|_| told).map_or((None, None), |(a, s)| (Some(a), Some(s)));
+        Self { told, account, server }
+    }
+
+    /// Whether a batch stamped so goes with `signed`'s credential to `base`: the very account it was counted for, on the very
+    /// server, and only there.
+    pub fn sends_as(&self, signed: &Signed, base: &str) -> bool {
+        self.account.as_deref() == Some(signed.account.as_str()) && self.server.as_deref() == Some(signed.base.as_str()) && signed.base == base
     }
 }
 
@@ -396,7 +407,7 @@ impl Spool {
                 who,
             )
         };
-        let token = who.account.as_deref().and_then(|account| signed.filter(|s| s.account == account && s.base == api.url("")).map(|s| s.token.clone()));
+        let token = signed.filter(|s| who.sends_as(s, &api.url(""))).map(|s| s.token.clone());
         // `perf` is new (2026-11-16): an older server reads `install` and `events` and leaves the rest. The stamps stay here.
         let events: Vec<Event> = batch.iter().cloned().map(|e| Event { who: Stamp::default(), ..e }).collect();
         let mut body = serde_json::json!({ "install": self.install(who.told), "events": events });
@@ -456,13 +467,23 @@ impl Spool {
             }
             loop {
                 if enabled() {
-                    let signed = origin().and_then(|(agent, signed)| {
-                        self.origin(agent);
-                        signed
-                    });
-                    let api = api();
-                    // A backlog goes a batch after another; a failure waits for the next minute.
-                    while let Sent::Taken(_) | Sent::Dropped(_) = self.send(&api, signed.as_ref()) {}
+                    // A backlog goes a batch after another; a failure waits for the next minute. Before EACH batch the switch,
+                    // the account signed in and the server are read again: one turned off, signed out or switched meanwhile
+                    // is never the one a later batch goes as.
+                    loop {
+                        if !enabled() {
+                            self.forget();
+                            break;
+                        }
+                        let signed = origin().and_then(|(agent, signed)| {
+                            self.origin(agent);
+                            signed
+                        });
+                        let api = api();
+                        if !matches!(self.send(&api, signed.as_ref()), Sent::Taken(_) | Sent::Dropped(_)) {
+                            break;
+                        }
+                    }
                 } else {
                     self.forget();
                 }

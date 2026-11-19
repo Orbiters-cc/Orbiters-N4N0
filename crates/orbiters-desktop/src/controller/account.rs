@@ -442,7 +442,7 @@ impl Controller {
     /// Whom what the usage statistics count now is for: linked to the signed-in account only once the notice saying so was shown.
     pub fn usage_stamp(&self) -> crate::usage::spool::Stamp {
         let told = self.view().settings.usage.told_account;
-        crate::usage::spool::Stamp::now(told, if told { self.usage_account().map(|s| s.account) } else { None })
+        crate::usage::spool::Stamp::now(told, if told { self.usage_account().map(|s| (s.account, s.base)) } else { None })
     }
 
     /// The API and credential for calls to Orbiters, when an account is saved (checked or not).
@@ -500,10 +500,10 @@ mod tests {
         assert_eq!(ctl.usage_account().map(|s| (s.account, s.token)), Some(("42".into(), "orbit-secret".into())));
         assert!(ctl.usage_stamp().is_none(), "signed in, but the old notice only: nothing is linked to the account");
         ctl.update(|s| s.settings.usage.told_account = true);
-        assert_eq!(ctl.usage_stamp(), crate::usage::spool::Stamp { told: true, account: Some("42".into()) });
+        assert_eq!(ctl.usage_stamp(), crate::usage::spool::Stamp { told: true, account: Some("42".into()), server: Some(Api::new(Server::current()).url("")) });
         for state in [AccountState::Checking { username: Some("Enzo".into()) }, AccountState::Expired { username: Some("Enzo".into()) }, AccountState::SignedOut] {
             ctl.update(|s| s.account.state = state.clone());
-            assert_eq!(ctl.usage_stamp(), crate::usage::spool::Stamp { told: true, account: None }, "{state:?}");
+            assert_eq!(ctl.usage_stamp(), crate::usage::spool::Stamp { told: true, account: None, server: None }, "{state:?}");
             assert!(ctl.usage_account().is_none());
         }
         // An account file without an id: known here by its name, never by its credential.

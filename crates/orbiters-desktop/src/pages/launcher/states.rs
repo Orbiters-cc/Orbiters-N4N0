@@ -87,13 +87,16 @@ pub enum PlayState {
     Running(LaunchMode),
     /// VRChat is not on this computer.
     NotInstalled,
-    /// Nothing can start it here (a Mac, or the service has not said yet).
+    /// A Mac without Obelisk, which runs VRChat there.
+    NoEngine,
+    /// Nothing can start it here (it runs on another device, or the service has not said yet).
     Unavailable,
 }
 
 pub fn play(state: &LauncherState) -> PlayState {
     match state.game {
         Game::NotInstalled => PlayState::NotInstalled,
+        Game::NoEngine => PlayState::NoEngine,
         Game::Starting(mode) => PlayState::Starting(mode),
         Game::Running(mode) => PlayState::Running(mode),
         Game::NotRunning if state.possible.play => PlayState::Ready,
@@ -183,6 +186,8 @@ mod tests {
         assert_eq!(play(&s), PlayState::Running(LaunchMode::Vr));
         s.game = Game::NotInstalled;
         assert_eq!(play(&s), PlayState::NotInstalled);
+        s.game = Game::NoEngine;
+        assert_eq!(play(&s), PlayState::NoEngine);
         s.game = Game::NotRunning;
         s.possible.play = false;
         assert_eq!(play(&s), PlayState::Unavailable);

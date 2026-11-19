@@ -4,6 +4,7 @@ use super::states::{self, PlayState};
 use super::{access_name, cover_uv, region_tag, Cx, State};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, Sense, Ui};
 use orbiters_core::launcher::{Action, Invite, InviteKind, LaunchMode};
+use orbiters_core::vrchat_launch::VR_HERE;
 use orbiters_i18n::tr;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
@@ -29,12 +30,19 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     let height = match (&invite, play) {
         (Some(_), PlayState::Ready | PlayState::Starting(_) | PlayState::Running(_)) => INVITE_H,
         (_, PlayState::Ready | PlayState::Starting(_)) => PLAY_H,
-        (_, PlayState::Running(_) | PlayState::NotInstalled) => LINE_H,
+        (_, PlayState::Running(_) | PlayState::NotInstalled | PlayState::NoEngine) => LINE_H,
         (_, PlayState::Unavailable) => return,
     };
     super::super::block(ui, cx, index, height, |ui, rect| match (invite, play) {
         (Some(invite), PlayState::Ready | PlayState::Starting(_) | PlayState::Running(_)) => invite_card(ui, cx, state, rect, &invite, play),
         (_, PlayState::Ready | PlayState::Starting(_)) => {
+            if !VR_HERE {
+                // A Mac: one button, the desktop game.
+                if play_button(ui, rect, LaunchMode::Desktop, play, true) {
+                    state.act(cx, anim::time(ui.ctx()), Action::Play { mode: LaunchMode::Desktop, destination: None });
+                }
+                return;
+            }
             let gap = 12.0;
             let w = (rect.width() - gap) * 0.5;
             let vr = Rect::from_min_size(rect.min, vec2(w, rect.height()));
@@ -56,6 +64,23 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             };
             widgets::text(p, pos2(rect.left() + 42.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 14.0).weight(weight::MEDIUM));
         }
+        (_, missing) if !VR_HERE => {
+            // A Mac: what is missing, and the button that goes and gets it (Obelisk's site, or Obelisk itself).
+            let (line, label) = match missing {
+                PlayState::NoEngine => (tr("VRChat runs on a Mac with Obelisk, free: turn Beta versions on in it."), tr("Get Obelisk")),
+                _ => (tr("Download VRChat in Obelisk (Beta versions on in its settings), then come back."), tr("Open Obelisk")),
+            };
+            let button = widgets::Button::new(label).variant(widgets::Variant::Secondary).id_salt("launcher-engine");
+            let bw = button.desired_width(ui);
+            let at = Rect::from_min_size(pos2(rect.right() - 12.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
+            let p = ui.painter().clone();
+            widgets::frame(&p, rect, 16.0, theme::surface_soft());
+            widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, theme::WARN);
+            widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), at.left() - rect.left() - 58.0);
+            if button.show_at(ui, at).clicked() {
+                state.act(cx, anim::time(ui.ctx()), Action::OpenEngine);
+            }
+        }
         (_, _) => {
             let p = ui.painter();
             widgets::frame(p, rect, 16.0, theme::surface_soft());
@@ -72,6 +97,7 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
     let ctx = ui.ctx().clone();
     let (label, sub, glyph) = match mode {
         LaunchMode::Vr => (tr("Play in VR"), tr("With your headset, through SteamVR"), icons::VIRTUAL_REALITY),
+        LaunchMode::Desktop if !VR_HERE => (tr("Play VRChat"), tr("On this Mac, through Obelisk"), icons::DESKTOP),
         LaunchMode::Desktop => (tr("Play in Desktop"), tr("Keyboard and mouse, no headset"), icons::DESKTOP),
     };
     let starting = play == PlayState::Starting(mode);
@@ -87,7 +113,8 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
     if !enabled && !starting {
         p.multiply_opacity(0.4);
     }
-    let primary = mode == LaunchMode::Vr;
+    // The one button of a Mac is the green one.
+    let primary = mode == LaunchMode::Vr || !VR_HERE;
     let (fill, fg, fg2) = if primary {
         (theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover), theme::ON_ACCENT, theme::alpha(theme::ON_ACCENT, 0.72))
     } else {
@@ -110,7 +137,12 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
             widgets::icon(&p, c, glyph, 24.0, fg);
         }
         x += chip + 14.0;
-        let title = if starting { tr("Starting VRChat…") } else { label };
+        // A Mac: Obelisk is open and the person presses Play there.
+        let (title, sub) = match starting {
+            true if !VR_HERE => (tr("Obelisk is open"), tr("Press Play on VRChat there")),
+            true => (tr("Starting VRChat…"), sub),
+            false => (label, sub),
+        };
         let room = r.right() - x - 14.0;
         // What it uses, when it fits whole; the name alone otherwise.
         let sub = Txt::new(sub, 12.5).color(fg2);
@@ -219,6 +251,11 @@ fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Inv
         _ => {
             let gap = 10.0;
             let bw = ((right - x - gap) * 0.5).min(220.0);
+            if !VR_HERE {
+                if play_button(ui, Rect::from_min_size(pos2(x, by), vec2(bw, bh)), LaunchMode::Desktop, play, false) {
+                    state.act(cx, clock, Action::AcceptInvite { invite: invite.id.clone(), mode: LaunchMode::Desktop });
+                }
+            } else {
             let vr = Rect::from_min_size(pos2(x, by), vec2(bw, bh));
             let desk = Rect::from_min_size(pos2(vr.right() + gap, by), vec2(bw, bh));
             if play_button(ui, vr, LaunchMode::Vr, play, false) {
@@ -226,6 +263,7 @@ fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Inv
             }
             if play_button(ui, desk, LaunchMode::Desktop, play, false) {
                 state.act(cx, clock, Action::AcceptInvite { invite: invite.id.clone(), mode: LaunchMode::Desktop });
+            }
             }
         }
     }

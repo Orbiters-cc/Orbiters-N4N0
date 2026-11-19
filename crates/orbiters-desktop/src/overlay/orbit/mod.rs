@@ -156,6 +156,11 @@ pub struct Panel {
     /// The picture as the platform takes it: the canvas's, cut to its shape.
     out: Vec<u8>,
     shown_pixels: Option<page_painter::Pixels>,
+    /// The last picture SteamVR took, with its controls, while a newer one is handed over: put back when that one is not
+    /// shown, so what is hit-tested is always what shows (verify-vr on OVL2-20).
+    acknowledged: Option<Shown>,
+    /// When a picture SteamVR did not take is handed over again.
+    retry_at: Option<Instant>,
     /// Its shape as a cell of the ring, one byte a pixel, multiplied into each picture.
     mask: Option<std::sync::Arc<Vec<u8>>>,
     pub items: Vec<Item>,
@@ -233,7 +238,7 @@ impl Panel {
             px,
             logical,
             canvas: Canvas::zoomed(px[0], px[1], zoom).in_orbit_look(),
-            out: Vec::new(), shown_pixels: None,
+            out: Vec::new(), shown_pixels: None, acknowledged: None, retry_at: None,
             mask,
             items: Vec::new(),
             hover: None,
@@ -3536,6 +3541,9 @@ impl Panels {
                 // The same picture as the one shown (the worker found no damage and handed back what it had): not uploaded
                 // to SteamVR again (OVL2-20: every change of any fact re-uploaded every part's whole texture).
                 let unchanged = same_picture(panel.painted, panel.shown_pixels.as_ref(), &frame.pixels);
+                if !unchanged {
+                    panel.acknowledged = Some(Shown { pixels: panel.shown_pixels.clone(), items: panel.items.clone(), mask: panel.mask.clone(), painted: panel.painted });
+                }
                 panel.shown_pixels = Some(frame.pixels); panel.items = frame.items; panel.mask = frame.mask;
                 panel.hover = panel.pointer.and_then(|p| panels::hit(&panel.items, p));
                 panel.dirty |= first || panel.hover != frame.hover || panel.pressed != frame.pressed;
@@ -3546,7 +3554,12 @@ impl Panels {
                 }
             }
         }
+        let now = Instant::now();
         for panel in &mut self.list {
+            if panel.retry_at.is_some_and(|at| now >= at) {
+                panel.retry_at = None;
+                panel.dirty = true;
+            }
             if !panel.dirty || (panel.zone == Zone::SheetBack && self.takeover.is_some()) { continue; }
             let mut facts = self.facts.clone();
             if let (Zone::CameraWeb, Some(web)) = (panel.zone, self.web.as_mut()) {
@@ -3641,6 +3654,10 @@ impl Panels {
     pub(super) fn take_sheet_picture(&mut self) -> Option<page_painter::CompleteSheet> { self.stage.sheet_picture.take() }
 
     pub fn paint(&mut self, snap: &Snapshot, mut show: impl FnMut(&Panel, [u32; 4])) {
+        // What may be put back ([`Panel::not_presented`]) is this turn's hand-over only.
+        for panel in &mut self.list {
+            panel.acknowledged = None;
+        }
         if self.stage.async_pages { self.paint_async(snap, show); return; }
         let mut published = false;
         self.paint_serial(snap, |p, damage| { published |= p.zone == Zone::Takeover; show(p, damage); });
@@ -4042,6 +4059,42 @@ fn type_hint(p: &egui::Painter, playing: Option<&str>) {
             shown.push('…');
         }
         p.text(pos2(row.left() + 56.0, row.center().y + 11.0), egui::Align2::LEFT_CENTER, shown, font, panels::look::LABEL);
+    }
+}
+
+/// A part's picture and controls as SteamVR last took them.
+struct Shown {
+    pixels: Option<page_painter::Pixels>,
+    items: Vec<Item>,
+    mask: Option<std::sync::Arc<Vec<u8>>>,
+    painted: bool,
+}
+
+/// How long a part whose picture SteamVR did not take waits before it is handed over again.
+const PRESENT_RETRY: Duration = Duration::from_secs(1);
+
+impl Panel {
+    /// The picture just handed over was not shown (no overlay for it yet, or SteamVR refused it): the last one taken and its
+    /// controls are put back, and the new one is handed over again a moment later.
+    fn not_presented(&mut self, now: Instant) {
+        if let Some(shown) = self.acknowledged.take() {
+            self.shown_pixels = shown.pixels;
+            self.items = shown.items;
+            self.mask = shown.mask;
+            self.painted = shown.painted;
+            self.hover = self.pointer.and_then(|p| panels::hit(&self.items, p));
+        }
+        self.retry_at = Some(now + PRESENT_RETRY);
+    }
+}
+
+impl Panels {
+    /// The parts in `zones` were not shown by the turn's presenter ([`Panel::not_presented`]).
+    pub fn not_presented(&mut self, zones: &[Zone]) {
+        let now = Instant::now();
+        for panel in self.list.iter_mut().filter(|p| zones.contains(&p.zone)) {
+            panel.not_presented(now);
+        }
     }
 }
 

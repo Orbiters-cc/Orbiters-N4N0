@@ -466,6 +466,29 @@ mod tests {
         }
     }
 
+    /// verify-vr on OVL2-20: a picture SteamVR did not take is taken back with its controls, so what is hit-tested is what shows,
+    /// and it is handed over again a moment later.
+    #[test]
+    fn a_picture_not_shown_puts_back_the_last_shown_with_its_controls() {
+        let shared = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
+        let mut panel = super::super::Panel::new(super::super::zones::in_units(Zone::WingWorlds), 2.0, 0, false);
+        let old = PixelBuffer::new(vec![1; 16], Arc::downgrade(&shared));
+        let new = PixelBuffer::new(vec![2; 16], Arc::downgrade(&shared));
+        panel.shown_pixels = Some(old.clone());
+        panel.painted = true;
+        panel.items = Vec::new();
+        // The hand-over, as `paint_async` makes it.
+        panel.acknowledged = Some(super::super::Shown { pixels: panel.shown_pixels.clone(), items: panel.items.clone(), mask: None, painted: true });
+        panel.shown_pixels = Some(new.clone());
+        panel.items = panels::items(Zone::WingWorlds, panel.logical, &Facts::default());
+        assert!(!panel.items.is_empty());
+        panel.not_presented(Instant::now());
+        assert!(Arc::ptr_eq(panel.shown_pixels.as_ref().unwrap(), &old), "the picture that shows");
+        assert!(panel.items.is_empty(), "and its controls");
+        assert!(panel.retry_at.is_some(), "the new one is handed over again");
+        assert!(!super::super::same_picture(panel.painted, panel.shown_pixels.as_ref(), &new), "and then not taken for shown already");
+    }
+
     /// OVL2-20: a part handed back with the very pixels it showed is not shown (uploaded) again; new pixels, or a first picture, are.
     #[test]
     fn an_unchanged_part_is_not_uploaded_again() {

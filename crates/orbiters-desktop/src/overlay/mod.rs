@@ -198,15 +198,16 @@ impl Presenter {
         self.show_part(overlay, handle, rgba, width, height, [0, 0, width, height]);
     }
 
-    /// Shows a picture on `handle` that differs from the last one shown there only in `changed` (x0, y0, x1, y1).
-    fn show_part(&mut self, overlay: &vr::Overlay, handle: vr::OverlayHandle, rgba: &[u8], width: u32, height: u32, changed: [u32; 4]) {
+    /// Shows a picture on `handle` that differs from the last one shown there only in `changed` (x0, y0, x1, y1). Says whether
+    /// SteamVR took it.
+    fn show_part(&mut self, overlay: &vr::Overlay, handle: vr::OverlayHandle, rgba: &[u8], width: u32, height: u32, changed: [u32; 4]) -> bool {
         crate::perf::uploaded(u64::from(changed[2].saturating_sub(changed[0])) * u64::from(changed[3].saturating_sub(changed[1])));
         #[cfg(windows)]
         if let Some(gpu) = self.device() {
             let failed = match gpu.present_part(overlay, handle, rgba, width, height, changed) {
                 Ok(()) => {
                     self.refusals = 0;
-                    return;
+                    return true;
                 }
                 Err(vr::gpu::PresentError::DeviceLost(e)) => (e, DEVICE_RETRY),
                 Err(vr::gpu::PresentError::Refused(e)) => {
@@ -222,7 +223,9 @@ impl Presenter {
         let _ = changed;
         if let Err(code) = overlay.set_raw(handle, rgba, width, height) {
             eprintln!("overlay pixels: SteamVR overlay error {code}");
+            return false;
         }
+        true
     }
 }
 

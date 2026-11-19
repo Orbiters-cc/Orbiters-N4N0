@@ -2233,6 +2233,7 @@ impl OrbitVr {
         if page_at.is_none() {
             sheet.page = false;
         }
+        let mut not_shown = Vec::new();
         self.panels.paint(cx.snap, |panel, changed| {
             if let (Some(top), Zone::SheetBack | Zone::Takeover) = (page_at, panel.zone) {
                 if worker_sheet { return; }
@@ -2246,10 +2247,11 @@ impl OrbitVr {
             // rather than submitting its page as a second, overlapping overlay.
             if panel.zone == Zone::Takeover { return; }
             let handle = part_handle(&mut *handles, &mut *refused, overlay, key, panel.zone);
-            if handle != 0 {
-                presenter.show_part(overlay, handle, panel.pixels(), panel.px[0], panel.px[1], changed);
+            if handle == 0 || !presenter.show_part(overlay, handle, panel.pixels(), panel.px[0], panel.px[1], changed) {
+                not_shown.push(panel.zone);
             }
         });
+        self.panels.not_presented(&not_shown);
         if worker_sheet { if let Some(picture) = self.panels.take_sheet_picture() { self.sheet.adopt(picture); } }
         if let Some(top) = page_at.filter(|_| !worker_sheet) {
             if !self.sheet.page {

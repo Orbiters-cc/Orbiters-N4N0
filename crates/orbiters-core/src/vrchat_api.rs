@@ -635,6 +635,9 @@ pub struct Client {
     limiter: Arc<Mutex<Limiter>>,
     user: Option<User>,
     pending_methods: Vec<TwoFactor>,
+    /// VRChat said "verified" to a code for the challenge now pending: the next try only asks who is signed in, so that
+    /// a recovery code is never spent twice when the lookup after it failed. A new challenge clears it.
+    challenge_verified: bool,
     avatars: HashMap<String, (Instant, Avatar)>,
     worlds: HashMap<String, (Instant, World)>,
     friends: Option<(Instant, Vec<User>)>,
@@ -666,6 +669,7 @@ impl Client {
             limiter: LIMITER.get_or_init(Default::default).clone(),
             user: None,
             pending_methods: Vec::new(),
+            challenge_verified: false,
             avatars: HashMap::new(),
             worlds: HashMap::new(),
             friends: None,
@@ -733,6 +737,7 @@ impl Client {
         self.cookies = Cookies::default();
         self.user = None;
         self.pending_methods.clear();
+        self.challenge_verified = false;
         self.avatars.clear();
         self.worlds.clear();
         self.friends = None;
@@ -845,8 +850,11 @@ impl Client {
                 self.save()?;
                 self.user = Some(user.clone());
                 self.pending_methods.clear();
+                self.challenge_verified = false;
             }
             Login::TwoFactor(methods) => {
+                // A new challenge (also when a saved two-factor cookie no longer counts): the next code is sent.
+                self.challenge_verified = false;
                 self.user = None;
                 self.avatars.clear();
                 self.worlds.clear();
@@ -870,7 +878,7 @@ impl Client {
             return Err(Error::InvalidResponse);
         }
         // A successful verification followed by a failed user lookup must not consume a recovery code twice.
-        if !self.cookies.two_factor_auth.is_empty() {
+        if self.challenge_verified {
             return self.current_login();
         }
         let body = serde_json::json!({"code":code}).to_string();
@@ -880,6 +888,7 @@ impl Client {
         if value["verified"] != true {
             return Err(Error::WrongCode);
         }
+        self.challenge_verified = true;
         self.current_login()
     }
     pub fn current_login(&mut self) -> Result<Login> {
@@ -1978,6 +1987,37 @@ pub(crate) mod tests {
             assert_eq!(seen[2].cookie, "auth=session; twoFactorAuth=factor");
             assert!(seen[1].url.ends_with(&format!("/{}/verify", method.path())));
         }
+    }
+    #[test]
+    fn a_saved_two_factor_cookie_that_no_longer_counts_does_not_swallow_the_code() {
+        let (mut c, seen) = mock(vec![
+            response(200, r#"{"requiresTwoFactorAuth":["totp"]}"#, &[]),
+            response(200, r#"{"verified":true}"#, &["twoFactorAuth=fresh; HttpOnly"]),
+            response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &[]),
+        ]);
+        // A session restored from disk: both cookies, nobody signed in yet.
+        c.user = None;
+        c.cookies.two_factor_auth = "lapsed".into();
+        assert!(matches!(c.resume(), Ok(Some(Login::TwoFactor(_)))));
+        assert!(matches!(c.verify(TwoFactor::Totp, "123456"), Ok(Login::SignedIn(_))));
+        let seen = seen.lock().unwrap();
+        assert!(seen[1].url.ends_with("/totp/verify"), "the code is sent: {}", seen[1].url);
+        assert_eq!(seen[2].cookie, "auth=mock-session; twoFactorAuth=fresh");
+    }
+    #[test]
+    fn a_recovery_code_is_sent_once_when_the_lookup_after_it_fails() {
+        let (mut c, seen) = mock(vec![
+            response(200, r#"{"requiresTwoFactorAuth":["otp"]}"#, &["auth=session; HttpOnly"]),
+            response(200, r#"{"verified":true}"#, &["twoFactorAuth=factor; HttpOnly"]),
+            response(503, "", &[]),
+            response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &[]),
+        ]);
+        assert!(matches!(c.sign_in("user", "pass"), Ok(Login::TwoFactor(_))));
+        assert_eq!(c.verify(TwoFactor::Recovery, "abcd-1234"), Err(Error::Unavailable));
+        assert!(matches!(c.verify(TwoFactor::Recovery, "abcd-1234"), Ok(Login::SignedIn(_))));
+        let urls: Vec<String> = seen.lock().unwrap().iter().map(|r| r.url.clone()).collect();
+        assert_eq!(urls.iter().filter(|u| u.ends_with("/verify")).count(), 1, "{urls:?}");
+        assert!(urls[3].ends_with("/auth/user"));
     }
     #[test]
     fn expired_session_and_rate_limit_are_actionable() {

@@ -137,9 +137,8 @@ def process_dead(p):
 def processes():
     result=[]
     dead=[]
-    if JOURNAL.exists():
-        saved=json.loads(JOURNAL.read_text())
-        dead=saved.get('dead_processes',[])
+    try:dead=(read_journal() or {}).get('dead_processes',[])
+    except JournalUnreadable:pass
     for pid,name in process_names():
         if name.lower() in NAMES:
             try:
@@ -158,35 +157,119 @@ def same_process(info):
     except psutil.NoSuchProcess:
         return None
 
+def fsync_write(path, data):
+    with open(path, 'wb') as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+def replace_retrying(tmp, path):
+    for attempt in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as error:
+            # A concurrent journal reader can briefly deny DELETE sharing
+            # on Windows. Keep the previous recovery intact while retrying.
+            if getattr(error, 'winerror', None) not in (5, 32, 33) or attempt == 19:
+                raise
+            time.sleep(.05)
+
 def atomic_json(path, value):
+    """Temp file, flushed to disk (SBX-5: a power cut must not leave a renamed but empty file), then renamed over `path`.
+    The journal also keeps session.prev.json, the same content written the same way, read when session.json is not."""
+    path = Path(path)
     tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps(value, indent=2), encoding='utf-8')
     try:
-        for attempt in range(20):
-            try:
-                os.replace(tmp, path)
-                return
-            except PermissionError as error:
-                # A concurrent journal reader can briefly deny DELETE sharing
-                # on Windows. Keep the previous recovery intact while retrying.
-                if getattr(error, 'winerror', None) not in (5, 32, 33) or attempt == 19:
-                    raise
-                time.sleep(.05)
+        fsync_write(tmp, json.dumps(value, indent=2).encode('utf-8'))
+        replace_retrying(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+    if path == JOURNAL:
+        prev = journal_prev().with_suffix('.tmp')
+        try:
+            fsync_write(prev, json.dumps(value, indent=2).encode('utf-8'))
+            replace_retrying(prev, journal_prev())
+        except OSError:
+            pass   # the copy is a fallback only
+        finally:
+            prev.unlink(missing_ok=True)
+
+def journal_prev():
+    """session.prev.json: the same journal, written right after it, read when session.json is damaged."""
+    return JOURNAL.with_name(JOURNAL.stem + '.prev.json')
+
+class JournalUnreadable(RuntimeError):
+    pass
+
+def read_journal():
+    """The recovery journal, or None when there is none. Falls back to session.prev.json when session.json is empty or
+    corrupt; raises JournalUnreadable (with a message, never a bare JSON error) when neither can be read."""
+    if not JOURNAL.exists() and not journal_prev().exists():
+        return None
+    errors = []
+    for path in (JOURNAL, journal_prev()):
+        try:
+            j = json.loads(path.read_text(encoding='utf-8'))
+            if isinstance(j, dict) and j.get('session'):
+                return j
+            errors.append(f'{path.name}: not a sandbox journal')
+        except FileNotFoundError:
+            errors.append(f'{path.name}: missing')
+        except (OSError, ValueError) as error:
+            errors.append(f'{path.name}: {error}')
+    raise JournalUnreadable('The sandbox recovery journal cannot be read (' + '; '.join(errors) + '). Nothing was changed. '
+                            'The backups are in ' + str(ROOT / 'backup') + ' (journal copy: backup/journal.json).')
+
+def sha256_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+def tree_sha256(path):
+    return hashlib.sha256(json.dumps(sorted(tree_hashes(path).items())).encode()).hexdigest()
+
+def fsync_tree(path):
+    for p in Path(path).rglob('*'):
+        if p.is_file():
+            with open(p, 'rb+') as f:os.fsync(f.fileno())
 
 def backup(journal, path, tree=False):
+    """Copies `path` into this session's backup folder, flushed to disk and verified against the original by hash before
+    it is journalled (SBX-5)."""
     entry = {'path': str(path), 'tree': tree, 'exists': path.exists()}
     saved = ROOT / 'backup' / str(len(journal['files']))
     if path.exists():
         if tree:
             shutil.copytree(path, saved)
+            fsync_tree(saved)
+            entry['tree_sha256'] = tree_sha256(path)
+            if tree_sha256(saved) != entry['tree_sha256']:
+                raise RuntimeError('Backup copy differs from its original (changed while copied?): ' + str(path))
         else:
             saved.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, saved)
-            entry['sha256'] = hashlib.sha256(saved.read_bytes()).hexdigest()
+            data = path.read_bytes()
+            fsync_write(saved, data)
+            entry['sha256'] = hashlib.sha256(data).hexdigest()
+            if sha256_file(saved) != entry['sha256']:
+                raise RuntimeError('Backup copy differs from its original: ' + str(path))
     entry['backup'] = str(saved)
     journal['files'].append(entry)
+
+def backup_problem(entry):
+    """Why this entry's backup must not be copied back ('' when it is sound): checked BEFORE any file is overwritten."""
+    if client_kind(entry) or not entry['exists']:
+        return ''
+    saved = Path(entry['backup'])
+    if not saved.exists():
+        return 'backup missing: ' + str(saved)
+    if entry['tree']:
+        if not saved.is_dir():
+            return 'backup is not a folder: ' + str(saved)
+        if entry.get('tree_sha256') and tree_sha256(saved) != entry['tree_sha256']:
+            return 'backup folder damaged (hash differs from the journal): ' + str(saved)
+        return ''
+    if sha256_file(saved) != entry.get('sha256'):
+        return 'backup damaged (hash differs from the journal): ' + str(saved)
+    return ''
 
 def client_kind(entry):
     """'claude' / 'codex' for the two agent-client files (SBX-2), else None. Older journals list them as plain files."""
@@ -222,9 +305,9 @@ def tree_hashes(path):
     return {str(p.relative_to(path)):hashlib.sha256(p.read_bytes()).hexdigest() for p in path.rglob('*') if p.is_file()}
 
 def restore(expected_session=None):
-    if not JOURNAL.exists():
+    j = read_journal()
+    if j is None:
         return {'restored': False, 'reason': 'no recovery journal'}
-    j = json.loads(JOURNAL.read_text())
     if expected_session is not None and j['session']!=expected_session:
         return {'restored':False,'reason':'session changed'}
     if j.get('restored'):
@@ -235,7 +318,7 @@ def restore(expected_session=None):
         # A clean VRChat close waits for its anti-cheat session and for EAC to unload (vrchat_life.close_vrchat).
         deadline=time.monotonic()+420
         while time.monotonic()<deadline:
-            latest=json.loads(JOURNAL.read_text())
+            latest=read_journal()
             if latest['session']!=j['session']:return {'restored':False,'reason':'session changed'}
             if latest.get('restored'):return {'restored':True,'verified_files':len(latest['files'])}
             if not same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):return restore_session(j['session'])
@@ -254,7 +337,8 @@ def restore_session(expected_session):
         result=kernel.WaitForSingleObject(mutex,30000)
         if result not in (0,128):raise RuntimeError('Another restore did not finish within 30 seconds')
         acquired=True
-        j=json.loads(JOURNAL.read_text())
+        j=read_journal()
+        if j is None:return {'restored':False,'reason':'no recovery journal'}
         if j['session']!=expected_session:return {'restored':False,'reason':'session changed'}
         if j.get('restored'):return {'restored':True,'already_restored':True}
         return restore_contents(j)
@@ -304,9 +388,14 @@ def restore_contents(j):
         raise RuntimeError('VR processes remain; configuration retained for standalone restore')
     if [p for p in processes() if (p['pid'],p['create_time']) in owned and p['pid'] not in warnings]:
         raise RuntimeError('VR processes remain; configuration retained for standalone restore')
+    # Every backup is checked before anything is overwritten (SBX-5): a damaged one is never copied over a real file. The
+    # sound ones are still put back; the journal stays unrestored and says which one needs a person.
+    damaged={entry['path']:problem for entry in j['files'] if (problem:=backup_problem(entry))}
     clients={}
     for entry in j['files']:
         path, saved = Path(entry['path']), Path(entry['backup'])
+        if entry['path'] in damaged:
+            continue
         if client_kind(entry):
             clients[entry['path']]=restore_client(entry,j)
         elif entry['tree']:
@@ -317,11 +406,17 @@ def restore_contents(j):
                 shutil.copytree(saved, path)
                 if tree_hashes(path)!=expected:raise RuntimeError('Restore tree hash mismatch: '+str(path))
         elif entry['exists']:
-            shutil.copy2(saved, path)
-            if hashlib.sha256(path.read_bytes()).hexdigest() != entry['sha256']:
-                raise RuntimeError('Restore hash mismatch: ' + str(path))
+            # Beside the target, flushed and verified, then renamed over it: the real file is never half written.
+            tmp=path.with_name(path.name+'.sandbox-restore')
+            try:
+                fsync_write(tmp,saved.read_bytes())
+                if sha256_file(tmp)!=entry['sha256']:raise RuntimeError('Restore hash mismatch: ' + str(path))
+                replace_retrying(tmp,path)
+            finally:tmp.unlink(missing_ok=True)
         else:
             path.unlink(missing_ok=True)
+    if damaged:
+        raise RuntimeError('Not restored, damaged backup (the other files were put back): '+json.dumps(damaged))
     j['restored'] = True
     j['dead_processes']=[info for info in j['processes'] if info['pid'] in warnings]
     atomic_json(JOURNAL, j)
@@ -448,6 +543,33 @@ def disable_autolaunch(folder):
             changed.append(path.stem)
     return changed
 
+def sandbox_leftovers(settings=None, paths=None):
+    """What in SteamVR's live files only a sandbox session puts there ([] when they are clean)."""
+    found=[]
+    try:
+        config=json.loads(Path(settings or SETTINGS).read_text(encoding='utf-8-sig'))
+        if (config.get('steamvr') or {}).get('forcedDriver')=='orbiters_sandbox':found.append('steamvr.forcedDriver is orbiters_sandbox')
+        if 'driver_orbiters_sandbox' in config:found.append('steamvr.vrsettings has driver_orbiters_sandbox')
+    except FileNotFoundError:pass
+    except (OSError,ValueError) as error:found.append(f'steamvr.vrsettings unreadable ({error})')
+    try:
+        drivers=json.loads(Path(paths or PATHS).read_text(encoding='utf-8-sig')).get('external_drivers') or []
+        ours=os.path.normcase(str(ROOT/'driver'))
+        if any(os.path.normcase(str(d))==ours or 'vr-sandbox' in str(d).lower() for d in drivers):
+            found.append('openvrpaths.vrpath lists the sandbox driver')
+    except FileNotFoundError:pass
+    except (OSError,ValueError) as error:found.append(f'openvrpaths.vrpath unreadable ({error})')
+    return found
+
+def clean_backup_hint():
+    """The newest earlier backup folder whose SteamVR files are clean, for a person to restore from."""
+    for folder in sorted(ROOT.glob('backup*'),key=lambda p:p.stat().st_mtime,reverse=True):
+        settings,paths=folder/'1',folder/'0'
+        if settings.is_file() and paths.is_file() and not sandbox_leftovers(settings,paths):
+            return (f'The newest clean originals are in {folder} (0 = {PATHS}, 1 = {SETTINGS}); put them back by hand once '
+                    'SteamVR is closed, or run `sandbox.py restore-orphan` if the journal is only unreadable.')
+    return 'No clean earlier backup was found in '+str(ROOT)+'.'
+
 def owner_file(owner):
     return LEASES/(re.sub(r'[^A-Za-z0-9._-]','_',owner)+'.json')
 
@@ -477,10 +599,16 @@ class Session:
         running = processes()
         if running:
             raise RuntimeError('Person is using VR; no changes made: ' + json.dumps(running))
-        if JOURNAL.exists() and not json.loads(JOURNAL.read_text()).get('restored'):
+        previous=read_journal()   # an unreadable journal refuses here too (JournalUnreadable), before any change
+        if previous and not previous.get('restored'):
             raise RuntimeError('Unrestored session exists; run restore first')
         wants=owner_wants_vr()
         if wants:raise RuntimeError('Not starting: '+wants)
+        left=sandbox_leftovers()
+        if left:
+            # SBX-15: backing these up would make the sandbox state the "original" that this session's restore puts back.
+            raise RuntimeError('SteamVR still holds a sandbox state from a session that was not restored ('+'; '.join(left)+'); '
+                               'nothing was changed. '+clean_backup_hint())
         identity = secrets.token_hex(16)
         # Same keys as before the shared session (older scripts read session/pid/stream/time); `shared` is new.
         lock = {'session': identity, 'pid': os.getpid(), 'stream': stream, 'time': time.time(), 'shared': True}
@@ -496,6 +624,8 @@ class Session:
         for path in [STEAM/'config/vrappconfig', LOCAL/'Orbiters/SteamVR']:
             backup(self.j, path, tree=True)
         atomic_json(JOURNAL, self.j)
+        # Each backup folder describes itself: what it holds survives a lost journal (SBX-15).
+        atomic_json(ROOT/'backup'/'journal.json', {k:v for k,v in self.j.items() if k!='token'})
         # Recovery outlives the control server, including an abrupt crash.
         detached([sys.executable, __file__, 'watch', str(os.getpid()), str(psutil.Process().create_time()), self.j['session']])
         self.devices()
@@ -1020,8 +1150,8 @@ def restore_orphan(by='restore-orphan'):
     session is never touched. Never raises: a refusal or failure is written to orphan.log and RESTORE-NEEDED.txt."""
     session='?'
     try:
-        if not JOURNAL.exists():return {'nothing':'no journal'}
-        j=json.loads(JOURNAL.read_text())
+        j=read_journal()
+        if j is None:return {'nothing':'no journal'}
         session=j.get('session','?')
         if j.get('restored'):
             note_restored(session,by);return {'nothing':'restored'}
@@ -1046,7 +1176,8 @@ def lease_args(owner=None):
     return owner,token
 
 def remote(args,journal=None,owner=None,timeout=None):
-    j=json.loads(JOURNAL.read_text()) if journal is None else journal
+    j=read_journal() if journal is None else journal
+    if j is None:raise RuntimeError('No sandbox session journal')
     args=dict(args)
     if args.get('action')!='status':
         o,t=lease_args(owner)
@@ -1065,9 +1196,9 @@ def remote(args,journal=None,owner=None,timeout=None):
 def unrestored_session():
     """Why a new session may not start: a journal not restored whose controller is gone ('' when none)."""
     try:
-        if not JOURNAL.exists():return ''
-        j=json.loads(JOURNAL.read_text())
-    except (OSError,ValueError) as error:return f'Its journal cannot be read ({error}); see {MARKER}'
+        j=read_journal()
+        if j is None:return ''
+    except JournalUnreadable as error:return str(error)
     if j.get('restored'):return ''
     if j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):return ''
     detail=MARKER.read_text(encoding='utf-8',errors='replace').strip() if MARKER.exists() else f"session {j.get('session')}"
@@ -1075,8 +1206,9 @@ def unrestored_session():
 
 def controller_alive():
     """The live controller's journal, or None."""
-    try:j=json.loads(JOURNAL.read_text())
-    except (OSError,ValueError):return None
+    try:j=read_journal()
+    except JournalUnreadable:return None
+    if j is None:return None
     if j.get('restored') or not j.get('owner_create_time'):return None
     return j if same_process({'pid':j['pid'],'create_time':j['owner_create_time']}) else None
 

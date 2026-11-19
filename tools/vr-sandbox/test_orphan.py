@@ -2,6 +2,7 @@
 new session starts over it. No SteamVR: processes() is patched, every path lives under the temp test base."""
 import json
 import shutil
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -57,12 +58,42 @@ class Orphan(unittest.TestCase):
             self.assertEqual(sandbox.restore_orphan(), {'nothing': 'live session'})
         self.assertEqual(self.target.read_bytes(), b'forced sandbox')
 
+    def test_an_empty_journal_falls_back_to_its_copy(self):
+        # SBX-5: a power cut leaves session.json renamed but empty; session.prev.json still holds the session.
+        sandbox.JOURNAL.write_bytes(b'')
+        with patch.object(sandbox, 'same_process', return_value=None), patch.object(sandbox, 'processes', return_value=[]):
+            self.assertTrue(sandbox.restore_orphan()['restored'])
+        self.assertEqual(self.target.read_bytes(), b'original')
+        self.assertTrue(sandbox.read_journal()['restored'], 'session.json written again')
+
     def test_an_unreadable_journal_is_written_down_not_a_crash(self):
         sandbox.JOURNAL.write_bytes(b'')
-        result = sandbox.restore_orphan()
+        sandbox.journal_prev().write_bytes(bytes(64))
+        with patch.object(sandbox, 'same_process', return_value=None), patch.object(sandbox, 'processes', return_value=[]):
+            result = sandbox.restore_orphan()
+            self.assertFalse(result['restored'])
+            self.assertIn('cannot be read', result['error'])
+            self.assertIn('NOT restored', self.log())
+            self.assertTrue(sandbox.MARKER.exists())
+            with self.assertRaisesRegex(sandbox.JournalUnreadable, 'Nothing was changed'):
+                sandbox.Session().start()
+        self.assertEqual(self.target.read_bytes(), b'forced sandbox')
+
+    def test_a_damaged_backup_is_never_copied_over_the_real_file(self):
+        j = sandbox.read_journal()
+        other = sandbox.ROOT.parent / 'openvrpaths.vrpath'
+        other.write_bytes(b'paths original')
+        sandbox.backup(j, other)
+        sandbox.atomic_json(sandbox.JOURNAL, j)
+        other.write_bytes(b'paths sandboxed')
+        Path(j['files'][0]['backup']).write_bytes(b'')          # the settings backup came back empty after a power cut
+        with patch.object(sandbox, 'same_process', return_value=None), patch.object(sandbox, 'processes', return_value=[]):
+            result = sandbox.restore_orphan()
         self.assertFalse(result['restored'])
-        self.assertIn('NOT restored', self.log())
-        self.assertTrue(sandbox.MARKER.exists())
+        self.assertIn('damaged backup', result['error']); self.assertIn('steamvr.vrsettings', result['error'])
+        self.assertEqual(self.target.read_bytes(), b'forced sandbox', 'the damaged copy was not put over it')
+        self.assertEqual(other.read_bytes(), b'paths original', 'the sound one was put back')
+        self.assertFalse(sandbox.read_journal()['restored'])
 
     def test_the_watcher_keeps_trying_with_back_off_until_restored(self):
         answers = [RuntimeError('Restore refused while unowned VR processes run: vrserver.exe')] * 4 + [{'restored': True}]
@@ -90,3 +121,71 @@ class Orphan(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SandboxStateIsNeverTheOriginal(unittest.TestCase):
+    """SBX-15: with the journal lost, the live SteamVR files still say "sandbox": a new session refuses to back them up."""
+    def setUp(self):
+        shutil.rmtree(sandbox.ROOT, ignore_errors=True)
+        sandbox.ROOT.mkdir(parents=True)
+        sandbox.SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        sandbox.PATHS.parent.mkdir(parents=True, exist_ok=True)
+
+    def start(self):
+        with patch.object(sandbox, 'processes', return_value=[]), patch.object(sandbox, 'owner_wants_vr', return_value=None), \
+                patch.object(sandbox.mmap, 'mmap', side_effect=AssertionError('no device memory')):
+            sandbox.Session().start()
+
+    def test_forced_driver_or_sandbox_driver_path_refuses_before_any_backup(self):
+        clean_paths = json.dumps({'external_drivers': [], 'runtime': ['C:/SteamVR']})
+        for settings, paths in ((json.dumps({'steamvr': {'forcedDriver': 'orbiters_sandbox'}}), clean_paths),
+                                (json.dumps({'driver_orbiters_sandbox': {'enable': True}}), clean_paths),
+                                (json.dumps({'steamvr': {}}), json.dumps({'external_drivers': [str(sandbox.ROOT / 'driver')]}))):
+            sandbox.SETTINGS.write_text(settings); sandbox.PATHS.write_text(paths)
+            with self.assertRaisesRegex(RuntimeError, 'sandbox state'):
+                self.start()
+            self.assertFalse((sandbox.ROOT / 'backup').exists())
+            self.assertFalse(sandbox.LOCK.exists())
+            self.assertEqual(sandbox.SETTINGS.read_text(), settings)
+
+    def test_the_refusal_names_the_newest_clean_backup(self):
+        import os, time
+        old = sandbox.ROOT / 'backup-1'; old.mkdir()
+        (old / '0').write_text(json.dumps({'external_drivers': []})); (old / '1').write_text(json.dumps({'steamvr': {}}))
+        bad = sandbox.ROOT / 'backup-2'; bad.mkdir()
+        (bad / '0').write_text(json.dumps({'external_drivers': [str(sandbox.ROOT / 'driver')]})); (bad / '1').write_text('{}')
+        os.utime(old, (time.time() - 100, time.time() - 100))
+        sandbox.SETTINGS.write_text(json.dumps({'steamvr': {'forcedDriver': 'orbiters_sandbox'}}))
+        sandbox.PATHS.write_text('{}')
+        with self.assertRaisesRegex(RuntimeError, 'backup-1'):
+            self.start()
+
+    def test_clean_files_pass(self):
+        sandbox.SETTINGS.write_text(json.dumps({'steamvr': {'forcedDriver': ''}, 'driver_lighthouse': {}}))
+        sandbox.PATHS.write_text(json.dumps({'external_drivers': ['D:/other/driver']}))
+        self.assertEqual(sandbox.sandbox_leftovers(), [])
+
+
+class DurableBackups(unittest.TestCase):
+    def test_a_backup_is_verified_and_a_tree_gets_a_hash(self):
+        shutil.rmtree(sandbox.ROOT, ignore_errors=True); sandbox.ROOT.mkdir(parents=True)
+        folder = sandbox.ROOT.parent / 'tree'; shutil.rmtree(folder, ignore_errors=True); folder.mkdir(); (folder / 'a').write_bytes(b'1')
+        j = {'files': []}
+        sandbox.backup(j, folder, tree=True)
+        self.assertEqual(j['files'][0]['tree_sha256'], sandbox.tree_sha256(folder))
+        (Path(j['files'][0]['backup']) / 'a').write_bytes(b'2')
+        self.assertIn('damaged', sandbox.backup_problem(j['files'][0]))
+        single = sandbox.ROOT.parent / 'one'; single.write_bytes(b'x')
+        with patch.object(sandbox, 'sha256_file', return_value='different'):
+            with self.assertRaisesRegex(RuntimeError, 'differs from its original'):
+                sandbox.backup(j, single)
+
+    def test_journal_writes_are_flushed_before_the_rename(self):
+        order = []
+        real_fsync, real_replace = sandbox.os.fsync, sandbox.os.replace
+        with patch.object(sandbox.os, 'fsync', side_effect=lambda fd: (order.append('fsync'), real_fsync(fd))), \
+                patch.object(sandbox.os, 'replace', side_effect=lambda a, b: (order.append('replace'), real_replace(a, b))):
+            sandbox.ROOT.mkdir(parents=True, exist_ok=True)
+            sandbox.atomic_json(sandbox.JOURNAL, {'session': 'x', 'files': []})
+        self.assertEqual(order, ['fsync', 'replace', 'fsync', 'replace'], 'journal, then its copy')
+        self.assertEqual(json.loads(sandbox.journal_prev().read_text()), {'session': 'x', 'files': []})

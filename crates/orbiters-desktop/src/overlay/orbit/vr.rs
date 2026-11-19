@@ -1167,6 +1167,28 @@ fn hidden_parts(handles: &mut HashMap<Zone, vr::OverlayHandle>, up: &[Zone], vis
     zones.iter().filter_map(|zone| handles.remove(zone)).collect()
 }
 
+/// Where the `i`-th part of this turn's snapshot goes, and its quad; `None` past the snapshot (never an index out of bounds).
+fn placed_at<'a>(quads: &'a [(Quad, Placed)], placing: &[Placing], i: usize) -> Option<(Matrix34, &'a Quad)> {
+    let quad = &quads.get(i)?.0;
+    let frame = match placing.get(i)? {
+        Placing::At(m) => *m,
+        Placing::Room => quad.transform,
+    };
+    Some((frame, quad))
+}
+
+/// Where the 3D capture shows small on the Worlds sheet's `hole`, from the parts as they were when `quads` and `placing` were
+/// made (`zones`): `None` for a turn whose snapshot has no sheet page yet. A press that opened the sheet later in the same turn
+/// made the page one part more than the snapshot, and indexing by the parts of now crashed the overlay (REL-2, 2026-11-13);
+/// the next turn has the page.
+fn small_place_in(zones: &[Zone], quads: &[(Quad, Placed)], placing: &[Placing], hole: egui::Rect) -> Option<(Matrix34, f32)> {
+    let i = zones.iter().position(|z| *z == Zone::Takeover)?;
+    let (frame, quad) = placed_at(quads, placing, i)?;
+    let (x, y) = ((hole.center().x / 1024.0 - 0.5) * quad.width, (0.5 - hole.center().y / 576.0) * quad.height);
+    let there = Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
+    Some((space::compose(&frame, &there), hole.width() / 1024.0 * quad.width / 2.0 * super::super::worlds::SMALL_FILLS_HOLE))
+}
+
 /// The last value told to SteamVR for one property of one overlay, compared bit for bit: telling it the same again changes
 /// nothing SteamVR shows, so it is not told (LIGHT-VR-5). A call SteamVR refused is told again next turn, as before.
 #[derive(Clone, Copy, Debug)]
@@ -1859,6 +1881,9 @@ impl OrbitVr {
                 (quad, p.placed)
             })
             .collect();
+        // Which part each of `quads` (and `placing`) is: the parts as they are now, before a press later in this turn can open a
+        // sheet and add one (REL-2).
+        let turn_zones: Vec<Zone> = self.panels.all().map(|p| p.zone).collect();
 
         // How the parts on the hand follow it (Enzo: "both options"). The pose asked for lies ahead of now by what placing an overlay in the room takes to show, so that with no smoothing nothing
         // trails, and every move of the slider is then that much softer, with no jitter: what is told to SteamVR is where it lies, and it goes there at the next frame.
@@ -2030,28 +2055,16 @@ impl OrbitVr {
             };
             turn.menus_up.push(super::super::worlds::stereo::MenuBox { place: plane.frame, width: width * plane.unit, height: height * plane.unit });
         }
-        turn.small_place = self.panels.small_place_on_sheet().and_then(|hole| {
-            let i = self.panels.all().position(|p| p.zone == Zone::Takeover)?;
-            let quad = &quads[i].0;
-            let frame = match &placing[i] {
-                Placing::At(m) => *m,
-                Placing::Room => quad.transform,
-            };
-            let (x, y) = ((hole.center().x / 1024.0 - 0.5) * quad.width, (0.5 - hole.center().y / 576.0) * quad.height);
-            let there = Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
-            Some((space::compose(&frame, &there), hole.width() / 1024.0 * quad.width / 2.0 * super::super::worlds::SMALL_FILLS_HOLE))
-        });
+        turn.small_place = self.panels.small_place_on_sheet().and_then(|hole| small_place_in(&turn_zones, &quads, &placing, hole));
         // Our layer between the capture and VRChat's menu (G1): drawn behind the capture in its own pictures, through the hole and under the sheet round it.
         turn.small_opening = turn.small_place.zip(self.panels.small_place_on_sheet()).and_then(|((at, radius), hole)| {
             use super::super::worlds::opening::{self, Look, Opening};
-            let frame_of = |i: usize| match &placing[i] {
-                Placing::At(m) => *m,
-                Placing::Room => quads[i].0.transform,
-            };
-            let page = self.panels.all().position(|p| p.zone == Zone::Takeover)?;
-            let half = [hole.width() / 1024.0 * quads[page].0.width / 2.0, hole.height() / 576.0 * quads[page].0.height / 2.0];
-            let sheet = self.panels.all().position(|p| p.zone == Zone::SheetBack).unwrap_or(page);
-            let sheet = opening::rect_from(&at, &frame_of(sheet), quads[sheet].0.width, quads[sheet].0.height);
+            let page = turn_zones.iter().position(|z| *z == Zone::Takeover)?;
+            let (_, page_quad) = placed_at(&quads, &placing, page)?;
+            let half = [hole.width() / 1024.0 * page_quad.width / 2.0, hole.height() / 576.0 * page_quad.height / 2.0];
+            let sheet = turn_zones.iter().position(|z| *z == Zone::SheetBack).unwrap_or(page);
+            let (sheet_frame, sheet_quad) = placed_at(&quads, &placing, sheet)?;
+            let sheet = opening::rect_from(&at, &sheet_frame, sheet_quad.width, sheet_quad.height);
             let accent = super::panels::look::accent();
             Some(Opening::in_sheet(at, half, sheet, radius, Look::ours([accent.r(), accent.g(), accent.b()], super::panels::look::retro())))
         });
@@ -2252,6 +2265,40 @@ impl OrbitVr {
 
 #[cfg(test)]
 mod tests {
+    /// REL-2: the panels as they were at the top of the turn (nine wing parts, the "len is 9" of the panic) and a press that
+    /// opened the Worlds sheet since: no small place this turn, no panic; with the page in the snapshot, the place as before.
+    #[test]
+    fn a_sheet_opened_by_a_press_this_turn_is_not_indexed_past_the_snapshot() {
+        use super::{placed_at, small_place_in, Placing, Quad, Zone};
+        use crate::overlay::orbit::zones::Placed;
+        let part = |zone| {
+            let quad = Quad { transform: super::Matrix34::IDENTITY, width: 1.0, height: 0.5625 };
+            (quad, Placed { zone, rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)), center: egui::pos2(0.0, 0.0), unit: 1.0 })
+        };
+        let wing = [
+            Zone::WingYouTube, Zone::WingWorlds, Zone::WingInstances, Zone::WingName, Zone::WingAll, Zone::QmCaption, Zone::WingTalk, Zone::WingPictures,
+            Zone::WingPlaying,
+        ];
+        let quads: Vec<_> = wing.iter().map(|z| part(*z)).collect();
+        let placing = vec![Placing::Room; quads.len()];
+        let hole = egui::Rect::from_min_size(egui::pos2(312.0, 88.0), egui::vec2(400.0, 400.0));
+        // The parts of now: the sheet's back and page added by the press.
+        let now: Vec<Zone> = wing.iter().copied().chain([Zone::SheetBack, Zone::Takeover]).collect();
+        assert_eq!(now.iter().position(|z| *z == Zone::Takeover), Some(10), "what the old code indexed `quads` with");
+        assert_eq!(small_place_in(&wing, &quads, &placing, hole), None);
+        assert!(placed_at(&quads, &placing, 9).is_none() && placed_at(&quads, &placing, usize::MAX).is_none());
+        // Next turn: the snapshot has the page.
+        let quads: Vec<_> = now.iter().map(|z| part(*z)).collect();
+        let mut placing = vec![Placing::Room; quads.len()];
+        let (at, radius) = small_place_in(&now, &quads, &placing, hole).expect("the page is in the snapshot");
+        assert_eq!(at.m[0][3], 0.0, "the hole's centre is the page's");
+        assert!(radius > 0.0);
+        let mut moved = super::Matrix34::IDENTITY;
+        moved.m[1][3] = 2.0;
+        placing[10] = Placing::At(moved);
+        assert_eq!(small_place_in(&now, &quads, &placing, hole).unwrap().0.m[1][3], 2.0, "where the page is placed");
+    }
+
     /// LIGHT-VR-5: a part's width and alpha are told to SteamVR when they change, and only then; an overlay made anew
     /// (even under a handle SteamVR used before) and a call SteamVR refused are told again.
     #[test]

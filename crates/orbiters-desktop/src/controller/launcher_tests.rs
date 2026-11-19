@@ -269,3 +269,28 @@ fn play_goes_through_steam_only_when_steam_has_vrchat() {
     assert_eq!(route(false, true), Route::Launcher, "the Meta store's VRChat beside a Steam without it");
     assert_eq!(route(false, false), Route::NotInstalled);
 }
+
+#[test]
+fn an_accepted_invite_is_hidden_at_vrchat_only_once_the_account_got_there() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    let (client, calls) = c.test_vrchat(vec![(200, json!({}))]);
+    let place = launcher_feed::place(&format!("{W}:777~friends({A})~region(jp)"), "Café").unwrap();
+    let invite = |id: &str| Invite { id: id.into(), kind: InviteKind::Invite, from_id: A.into(), from_name: "Nova".into(), from_icon: String::new(), place: Some(place.clone()), message: String::new(), received_at: 0 };
+    c.update(|s| s.launcher.invites = vec![invite("not_1")]);
+    c.launcher_do(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Vr });
+    assert!(c.view().launcher.invites.is_empty(), "the card goes at once");
+    c.launcher_settle_accepted(Some(&client));
+    assert!(calls.lock().unwrap().is_empty(), "nothing hidden at VRChat while VRChat is only starting");
+    // The account's own location arrives (the pipeline's user-location): now VRChat hides it.
+    c.update(|s| s.launcher.me = Some(orbiters_core::launcher::Friend { id: "usr_test".into(), whereabouts: Whereabouts::World(place.clone()), ..Default::default() }));
+    c.launcher_settle_accepted(Some(&client));
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(calls.lock().unwrap()[0].1.ends_with("/auth/user/notifications/not_1/hide"));
+    // One that never arrives comes back as a card, and VRChat was told nothing.
+    c.update(|s| s.launcher.me = None);
+    c.launcher.lock().unwrap().accepted.push((invite("not_2"), Instant::now().checked_sub(ARRIVE_WITHIN + Duration::from_secs(1)).unwrap()));
+    c.launcher_settle_accepted(Some(&client));
+    assert_eq!(c.view().launcher.invites.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["not_2"]);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+}

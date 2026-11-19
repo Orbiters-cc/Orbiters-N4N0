@@ -9,7 +9,7 @@
 //! - Play: VRChat through Steam (`-applaunch 438100`) with the launch options of Settings; never a second VRChat: when
 //!   one runs, a destination goes to it through its own link pipe (`travel`), else an invite to oneself.
 use super::{Controller, Shared};
-use orbiters_core::launcher::{Action, Game, LaunchMode, LauncherState, Notice, Place, Possible, Profile, SentKind, Source};
+use orbiters_core::launcher::{Action, Game, Invite, LaunchMode, LauncherState, Notice, Place, Possible, Profile, SentKind, Source, Whereabouts};
 use orbiters_core::launcher_feed::{self, Cooldowns, Decorations};
 use orbiters_core::vrchat_api::{Client, Error};
 use orbiters_core::vrchat_launch::{desktop_window, SavedWindow};
@@ -29,6 +29,9 @@ const RETRY_FIRST: Duration = Duration::from_secs(30);
 const RETRY_LONGEST: Duration = Duration::from_secs(10 * 60);
 /// A pipeline that came back asks for a full read only when the last one is older than this (else it waits until then).
 const RESYNC_AFTER: Duration = Duration::from_secs(5 * 60);
+/// An accepted invite is hidden at VRChat once the account is in its instance; if it never gets there in this time, the
+/// card comes back (and VRChat still has the invite).
+const ARRIVE_WITHIN: Duration = Duration::from_secs(10 * 60);
 
 /// The game on this computer, real or a test's.
 pub trait Machine: Send + Sync {
@@ -170,6 +173,8 @@ pub(super) struct Runtime {
     /// World id → its name and picture (`None` once asked and not given).
     worlds: HashMap<String, Option<(String, String)>>,
     pipeline: Option<Arc<AtomicBool>>,
+    /// Invites accepted here, waiting for the account to arrive in their instance before VRChat is told to hide them.
+    accepted: Vec<(Invite, Instant)>,
     /// The pipeline came back after a cut: read everything again (what came meanwhile was missed).
     resync: Arc<AtomicBool>,
     game_checked: Option<Instant>,
@@ -189,6 +194,7 @@ impl Default for Runtime {
             worn: BTreeMap::new(),
             worlds: HashMap::new(),
             pipeline: None,
+            accepted: Vec::new(),
             resync: Arc::new(AtomicBool::new(false)),
             game_checked: None,
             machine: Arc::new(RealMachine::default()),
@@ -358,6 +364,7 @@ impl Controller {
                 None => self.launcher_read_local(),
             }
         }
+        self.launcher_settle_accepted(client.as_ref());
         if let Some(client) = &client {
             self.launcher_resolve_pictures(client);
             self.launcher_resolve_worlds(client);
@@ -460,6 +467,8 @@ impl Controller {
                     rt.favourite_groups = groups;
                     rt.worn = worn;
                     rt.cooldowns.mark(&mut state.friends, now());
+                    // Accepted here and on the way: VRChat still lists them until the account arrives.
+                    state.invites.retain(|i| !rt.accepted.iter().any(|(a, _)| a.id == i.id));
                     for f in &mut state.friends {
                         if let Some(d) = rt.worn.get(&f.id) {
                             apply_pictures(&rt.pictures, d, &mut f.look);
@@ -612,7 +621,12 @@ impl Controller {
                 let Some(place) = found.and_then(|i| i.place) else { return Some(Notice::Error(tr("This invite is no longer here.").into())) };
                 let notice = self.launcher_play(mode, Some(place));
                 if !matches!(notice, Notice::Error(_)) {
-                    self.launcher_dismiss(&invite);
+                    // The card goes here at once; VRChat hides the invite only once the account got there (a start that
+                    // fails, or lands at home, leaves it in VRChat and brings the card back).
+                    if let Some(found) = self.view().launcher.invites.iter().find(|i| i.id == invite).cloned() {
+                        self.launcher.lock().unwrap().accepted.push((found, Instant::now()));
+                    }
+                    self.update(|s| s.launcher.invites.retain(|i| i.id != invite));
                 }
                 Some(notice)
             }
@@ -707,6 +721,45 @@ impl Controller {
                 Notice::Sent { to: destination.map(|p| p.world_id).unwrap_or_default(), action: SentKind::Launch }
             }
             Err(words) => Notice::Error(tr!("VRChat could not be started: {reason}", reason = words)),
+        }
+    }
+
+    /// Accepted invites: hidden at VRChat once the account is in their instance; after [`ARRIVE_WITHIN`] without arriving,
+    /// their card comes back.
+    fn launcher_settle_accepted(&self, client: Option<&Arc<Mutex<Client>>>) {
+        let here = match &self.view().launcher.me {
+            Some(me) => match &me.whereabouts {
+                Whereabouts::World(p) => Some((p.world_id.clone(), p.instance_id.clone())),
+                _ => None,
+            },
+            None => None,
+        };
+        let (arrived, back) = {
+            let mut rt = self.launcher.lock().unwrap();
+            if rt.accepted.is_empty() {
+                return;
+            }
+            let (arrived, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut rt.accepted)
+                .into_iter()
+                .partition(|(i, _)| i.place.as_ref().is_some_and(|p| here.as_ref().is_some_and(|(w, inst)| *w == p.world_id && *inst == p.instance_id)));
+            let (back, waiting): (Vec<_>, Vec<_>) = waiting.into_iter().partition(|(_, at)| at.elapsed() > ARRIVE_WITHIN);
+            rt.accepted = waiting;
+            (arrived, back)
+        };
+        if let Some(client) = client {
+            for (invite, _) in &arrived {
+                let _ = client.lock().unwrap().hide_notification(&invite.id);
+            }
+        }
+        if !back.is_empty() {
+            self.update(|s| {
+                for (invite, _) in back {
+                    if !s.launcher.invites.iter().any(|i| i.id == invite.id) {
+                        s.launcher.invites.push(invite);
+                    }
+                }
+                s.launcher.invites.sort_by_key(|i| std::cmp::Reverse(i.received_at));
+            });
         }
     }
 

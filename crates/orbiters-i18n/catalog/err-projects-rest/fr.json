@@ -94,5 +94,12 @@
   "These package changes conflict with installed packages: {names}. No changes were applied.": "Ces changements de packages entrent en conflit avec des packages installés : {names}. Aucun changement n’a été appliqué.",
   "No local disk has room: the Library and Unity's imports need {needed} bytes; the most any other disk has is {free} bytes ({disk}).": "Aucun disque local n’a assez de place : le Library et les imports d’Unity demandent {needed} octets ; le plus d’espace sur un autre disque est de {free} octets ({disk}).",
   "Could not restore Library after a failed redirect. It is at {backup}, and a checked copy is at {copy}.": "Impossible de restaurer Library après l’échec de la redirection. Il est dans {backup}, et une copie vérifiée est dans {copy}.",
-  "The plan conflicts again with: {names} (the repositories changed since it was made).": "Le plan est de nouveau en conflit avec : {names} (les dépôts ont changé depuis sa création)."
+  "The plan conflicts again with: {names} (the repositories changed since it was made).": "Le plan est de nouveau en conflit avec : {names} (les dépôts ont changé depuis sa création).",
+  "Could not keep a copy of {name} before changing it: nothing was changed": "Impossible de garder une copie de {name} avant de le modifier : rien n’a été changé",
+  "The copy is listed at {path}, but its local packages could not be copied": "La copie est listée dans {path}, mais ses packages locaux n’ont pas pu être copiés",
+  "The copy is listed at {path}, but its project settings could not be updated": "La copie est listée dans {path}, mais ses réglages de projet n’ont pas pu être mis à jour",
+  "The package list could not be put back ({why}): use Restore": "La liste des packages n’a pas pu être remise ({why}) : utilise Restaurer",
+  "{name} is copied and listed, but Unity must download {packages} again when it first opens it": "{name} est copié et listé, mais Unity doit retélécharger {packages} à sa première ouverture",
+  "{path} is a link": "{path} est un lien",
+  "{name} could not be put back: its folder as it was is kept at {path}": "{name} n’a pas pu être remis : son dossier tel qu’il était est gardé dans {path}"
 }

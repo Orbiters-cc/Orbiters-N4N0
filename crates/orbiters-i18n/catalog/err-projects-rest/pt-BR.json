@@ -94,5 +94,12 @@
   "These package changes conflict with installed packages: {names}. No changes were applied.": "Essas alterações de pacotes entram em conflito com pacotes instalados: {names}. Nenhuma alteração foi aplicada.",
   "No local disk has room: the Library and Unity's imports need {needed} bytes; the most any other disk has is {free} bytes ({disk}).": "Nenhum disco local tem espaço: a Library e as importações do Unity precisam de {needed} bytes; o máximo que outro disco tem é {free} bytes ({disk}).",
   "Could not restore Library after a failed redirect. It is at {backup}, and a checked copy is at {copy}.": "Não foi possível restaurar a Library após a falha do redirecionamento. Ela está em {backup}, e uma cópia verificada está em {copy}.",
-  "The plan conflicts again with: {names} (the repositories changed since it was made).": "O plano entra em conflito de novo com: {names} (os repositórios mudaram desde que ele foi feito)."
+  "The plan conflicts again with: {names} (the repositories changed since it was made).": "O plano entra em conflito de novo com: {names} (os repositórios mudaram desde que ele foi feito).",
+  "Could not keep a copy of {name} before changing it: nothing was changed": "Não foi possível guardar uma cópia de {name} antes de alterá-lo: nada foi alterado",
+  "The copy is listed at {path}, but its local packages could not be copied": "A cópia está listada em {path}, mas não foi possível copiar seus pacotes locais",
+  "The copy is listed at {path}, but its project settings could not be updated": "A cópia está listada em {path}, mas não foi possível atualizar as configurações do projeto",
+  "The package list could not be put back ({why}): use Restore": "Não foi possível restaurar a lista de pacotes ({why}): use Restaurar",
+  "{name} is copied and listed, but Unity must download {packages} again when it first opens it": "{name} foi copiado e listado, mas o Unity precisa baixar {packages} de novo na primeira vez que abri-lo",
+  "{path} is a link": "{path} é um link",
+  "{name} could not be put back: its folder as it was is kept at {path}": "Não foi possível restaurar {name}: a pasta como estava está guardada em {path}"
 }

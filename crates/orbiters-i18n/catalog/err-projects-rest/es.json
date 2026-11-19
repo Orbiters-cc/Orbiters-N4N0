@@ -94,5 +94,12 @@
   "These package changes conflict with installed packages: {names}. No changes were applied.": "Estos cambios de paquetes entran en conflicto con paquetes instalados: {names}. No se aplicó ningún cambio.",
   "No local disk has room: the Library and Unity's imports need {needed} bytes; the most any other disk has is {free} bytes ({disk}).": "Ningún disco local tiene espacio: la Library y las importaciones de Unity necesitan {needed} bytes; el que más tiene entre los demás discos tiene {free} bytes ({disk}).",
   "Could not restore Library after a failed redirect. It is at {backup}, and a checked copy is at {copy}.": "No se pudo restaurar la Library tras el fallo de la redirección. Está en {backup}, y hay una copia comprobada en {copy}.",
-  "The plan conflicts again with: {names} (the repositories changed since it was made).": "El plan vuelve a entrar en conflicto con: {names} (los repositorios cambiaron desde que se hizo)."
+  "The plan conflicts again with: {names} (the repositories changed since it was made).": "El plan vuelve a entrar en conflicto con: {names} (los repositorios cambiaron desde que se hizo).",
+  "Could not keep a copy of {name} before changing it: nothing was changed": "No se pudo guardar una copia de {name} antes de cambiarlo: no se cambió nada",
+  "The copy is listed at {path}, but its local packages could not be copied": "La copia figura en {path}, pero no se pudieron copiar sus paquetes locales",
+  "The copy is listed at {path}, but its project settings could not be updated": "La copia figura en {path}, pero no se pudo actualizar la configuración del proyecto",
+  "The package list could not be put back ({why}): use Restore": "No se pudo restablecer la lista de paquetes ({why}): usa Restaurar",
+  "{name} is copied and listed, but Unity must download {packages} again when it first opens it": "{name} está copiado y en la lista, pero Unity debe volver a descargar {packages} la primera vez que lo abra",
+  "{path} is a link": "{path} es un enlace",
+  "{name} could not be put back: its folder as it was is kept at {path}": "No se pudo restablecer {name}: su carpeta tal como estaba se guarda en {path}"
 }

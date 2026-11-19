@@ -97,7 +97,7 @@ fn boops_and_requests_hold_a_cool_down_per_person() {
 #[test]
 fn without_a_sign_in_nothing_is_sent() {
     let c = controller(Arc::new(Pretend::default()));
-    assert!(matches!(c.launcher_do(Action::Boop { to: A.into(), emoji: None }), Some(Notice::Error(_))));
+    assert!(matches!(c.launcher_do(Action::Boop { to: A.into(), emoji: None }), Some(Notice::Failed { .. })));
 }
 
 #[test]
@@ -321,8 +321,8 @@ fn a_press_on_another_accounts_list_sends_nothing() {
         s.launcher.friends = vec![orbiters_core::launcher::Friend { id: A.into(), ..Default::default() }];
         s.launcher.invites = vec![Invite { id: "not_1".into(), kind: InviteKind::Request, from_id: A.into(), from_name: String::new(), from_icon: String::new(), place: None, message: String::new(), received_at: 0 }];
     });
-    assert!(matches!(c.launcher_do(Action::Boop { to: A.into(), emoji: None }), Some(Notice::Error(_))));
-    assert!(matches!(c.launcher_do(Action::RequestInvite { to: A.into() }), Some(Notice::Error(_))));
+    assert!(matches!(c.launcher_do(Action::Boop { to: A.into(), emoji: None }), Some(Notice::Failed { .. })));
+    assert!(matches!(c.launcher_do(Action::RequestInvite { to: A.into() }), Some(Notice::Failed { .. })));
     c.launcher_do(Action::Dismiss { id: "not_1".into() });
     assert!(calls.lock().unwrap().is_empty(), "nothing sent from the account that is not the list's");
 }

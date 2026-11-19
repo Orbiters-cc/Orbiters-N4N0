@@ -2208,7 +2208,7 @@ impl Controller {
 
     /// The latest lines the workers logged.
     pub(crate) fn worker_log_lines(&self) -> Vec<String> {
-        self.worker_log.lock().unwrap().iter().cloned().collect()
+        self.worker_log()
     }
 
     /// A capture is starting. Training takes the whole GPU: the game and the recording come first; the run goes on once they

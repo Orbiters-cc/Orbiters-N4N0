@@ -1222,6 +1222,12 @@ impl PanelWindow {
         self.stale = false;
     }
 
+    /// Its picture is on the screen: Windows took the last one and the window is visible (`crate::window_rest::card`).
+    pub(crate) fn presented(&self) -> bool {
+        // SAFETY: a plain query on a live window.
+        self.shown && !self.stale && unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(self.hwnd) }.as_bool()
+    }
+
     /// Above every other window of ours.
     fn raise(&self) {
         // SAFETY: a live window.

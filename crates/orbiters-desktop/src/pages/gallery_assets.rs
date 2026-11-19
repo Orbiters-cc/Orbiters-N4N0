@@ -44,8 +44,8 @@ fn how(o: &Owned) -> &'static str {
     }
 }
 
-fn ask(ctx: &egui::Context, server: Server) -> Job<anyhow::Result<Vec<Owned>>> {
-    Job::spawn(ctx, move || {
+fn ask(ctx: &egui::Context, server: Server, owner: &crate::pages::Owner) -> Job<crate::pages::ForAccount<anyhow::Result<Vec<Owned>>>> {
+    crate::pages::job_for(ctx, owner, move || {
         let Some(account) = orbiters_core::account::read(server) else { return Ok(Vec::new()) };
         Api::new(server).owned_assets(&account.token)
     })
@@ -54,7 +54,7 @@ fn ask(ctx: &egui::Context, server: Server) -> Job<anyhow::Result<Vec<Owned>>> {
 #[derive(Default)]
 pub struct State {
     assets: Vec<Owned>,
-    job: Job<anyhow::Result<Vec<Owned>>>,
+    job: Job<crate::pages::ForAccount<anyhow::Result<Vec<Owned>>>>,
     /// What was asked: the environment and the account.
     asked: Option<(bool, String)>,
     account: crate::pages::AccountFollow,
@@ -147,7 +147,11 @@ impl State {
         let development = cx.snap.settings.development;
         let server = if development { Server::Development } else { Server::Production };
         // Who the account is, not how its check goes: offline, the check comes and goes every minute.
-        let (account, answered) = self.account.see(&cx.snap.account.state);
+        let seen = self.account.see(&cx.snap.account.state, development);
+        if seen.changed {
+            self.forget_account();
+        }
+        let (account, answered, owner) = (seen.owner.account.clone(), seen.answered, seen.owner);
         self.answered |= answered;
         if !self.fixture && wanted {
             let key = (development, account);
@@ -157,14 +161,14 @@ impl State {
                 self.error = None;
                 self.assets.clear();
                 self.changed = true;
-                self.job = ask(ctx, server);
+                self.job = ask(ctx, server, &owner);
             } else if std::mem::take(&mut self.answered) && (self.assets.is_empty() || self.error.is_some()) && !self.job.running() {
                 // Orbiters answers again: what could not be read is asked again; what shows stays.
                 self.error = None;
-                self.job = ask(ctx, server);
+                self.job = ask(ctx, server, &owner);
             }
         }
-        if let Some(r) = self.job.take() {
+        if let Some(r) = self.job.take().and_then(|r| r.take_for(self.account.owner())) {
             match r {
                 Ok(a) => self.assets = a,
                 Err(e) => self.error = Some(e.to_string()),

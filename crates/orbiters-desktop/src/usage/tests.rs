@@ -282,12 +282,15 @@ fn only_what_was_counted_after_the_new_notice_goes_with_the_account() {
     let spool = Spool::default();
     spool.open(dir.clone());
     spool.linked(7, Role::Window);
+    let (base, got) = server(200);
+    let api = orbiters_core::account::Api::at(&base);
+    let here = || Some(("42".to_string(), api.url("")));
     // Signed in all along, the old notice only: the account is not even kept.
-    spool.collecting(Stamp::now(false, Some("42".into())));
+    spool.collecting(Stamp::now(false, here()));
     spool.steps(7, vec![step(Kind::Enter, "Home", None, None)], true);
     assert!(spool.waiting().iter().all(|e| e.who.is_none()), "{:?}", spool.waiting());
     // The new notice closed: the session ends under the old stamp and starts again under a new id.
-    spool.collecting(Stamp::now(true, Some("42".into())));
+    spool.collecting(Stamp::now(true, here()));
     spool.steps(7, vec![step(Kind::Enter, "Settings", Some("Home"), None), step(Kind::Press, "Settings", None, Some("Beta usage statistics"))], true);
     // Signed out: again a new session, linked to nobody.
     spool.collecting(Stamp::now(true, None));
@@ -299,8 +302,6 @@ fn only_what_was_counted_after_the_new_notice_goes_with_the_account() {
     again.open(dir.clone());
     assert_eq!(again.waiting(), spool.waiting());
 
-    let (base, got) = server(200);
-    let api = orbiters_core::account::Api::at(&base);
     let signed = Signed { account: "42".into(), base: api.url(""), token: "orbit-secret".into() };
     while let Sent::Taken(_) = spool.send(&api, Some(&signed)) {}
     assert!(spool.waiting().is_empty());
@@ -327,7 +328,7 @@ fn only_what_was_counted_after_the_new_notice_goes_with_the_account() {
     assert!(!dir.join("install-id").exists() && dir.join("install-id-2").exists());
 
     // Stamped for 42, but now another account is signed in, or the credential is for another server: no credential goes.
-    spool.collecting(Stamp::now(true, Some("42".into())));
+    spool.collecting(Stamp::now(true, here()));
     spool.steps(7, vec![step(Kind::Enter, "Worlds", None, None)], true);
     let other = Signed { account: "43".into(), ..signed.clone() };
     while let Sent::Taken(_) = spool.send(&api, Some(&other)) {}
@@ -339,6 +340,15 @@ fn only_what_was_counted_after_the_new_notice_goes_with_the_account() {
     let later: usize = sent[3..].iter().map(|r| r["events"].as_array().unwrap().len()).sum();
     assert_eq!(later, 4, "the signed-out session's end, then Worlds' start and enter, then Home: {:?}", &sent[3..]);
     assert!(sent[3..].iter().all(|r| r.get("authorization").is_none()), "{:?}", &sent[3..]);
+    // Night4 (verify2): counted for account 42 of ANOTHER server (the other environment's 42 is another person), sent here
+    // while this server's 42 is signed in: no credential, never that person's.
+    spool.collecting(Stamp::now(true, Some(("42".into(), "http://127.0.0.1:4100/".into()))));
+    spool.steps(7, vec![step(Kind::Enter, "Videos", None, None)], true);
+    while let Sent::Taken(_) = spool.send(&api, Some(&signed)) {}
+    let sent = got.lock().unwrap().clone();
+    assert!(sent.last().unwrap().get("authorization").is_none(), "another server's 42 is not this one's: {:?}", sent.last());
+    // A stamp from before stamps named their server: never with a credential.
+    assert!(!Stamp { told: true, account: Some("42".into()), server: None }.sends_as(&signed, &api.url("")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -351,10 +361,13 @@ fn performance_windows_are_split_by_whom_they_were_counted_for() {
     let spool = Spool::default();
     spool.open(dir.clone());
     let sample = |at: u64| Sample { at, seconds: 10.0, context: Context { mode: "idle".into(), ..Default::default() }, cpu_system: 5.0, cores: 8, ..Default::default() };
-    spool.collecting(Stamp::now(false, Some("42".into())));
+    let (base, got) = server(200);
+    let api = orbiters_core::account::Api::at(&base);
+    let here = || Some(("42".to_string(), api.url("")));
+    spool.collecting(Stamp::now(false, here()));
     spool.perf(sample(1_000_000), true);
     spool.perf(sample(1_010_000), true);
-    spool.collecting(Stamp::now(true, Some("42".into())));
+    spool.collecting(Stamp::now(true, here()));
     spool.perf(sample(1_020_000), true);
     spool.perf(sample(1_030_000), true);
     spool.collecting(Stamp::now(true, None));
@@ -363,8 +376,6 @@ fn performance_windows_are_split_by_whom_they_were_counted_for() {
     assert_eq!(waiting.len(), 2, "closed at each change of stamp");
     assert_eq!((waiting[0].samples, waiting[0].who.clone()), (2, Stamp::default()));
     assert_eq!((waiting[1].samples, waiting[1].who.account.as_deref()), (2, Some("42")));
-    let (base, got) = server(200);
-    let api = orbiters_core::account::Api::at(&base);
     let signed = Signed { account: "42".into(), base: api.url(""), token: "orbit-secret".into() };
     while let Sent::Taken(_) = spool.send(&api, Some(&signed)) {}
     let sent = got.lock().unwrap().clone();

@@ -218,6 +218,7 @@
   "The request names no raw capture.": "O pedido não indica nenhuma captura bruta.",
   "The request names no session.": "O pedido não indica nenhuma sessão.",
   "The scanner could not start: {error}": "Não foi possível iniciar o scanner: {error}",
+  "The QR scanner stopped after an error: start it again.": "O leitor de QR codes parou depois de um erro: inicie-o de novo.",
   "The sign-in expired. Sign in again.": "O login expirou. Entre de novo.",
   "The splat hidden or deleted in its 3D view comes back: you can select it again in the new one.": "O splat ocultado ou excluído na visão 3D dela volta: você pode selecioná-lo de novo na nova.",
   "The update could not be installed: {error}\n\nThis version opens again. You can install the new one by hand from the disk image.": "Não foi possível instalar a atualização: {error}\n\nEsta versão abre de novo. Você pode instalar a nova manualmente a partir da imagem de disco.",

@@ -59,8 +59,8 @@ pub(super) fn source(p: &community::Picture, large: bool, development: bool, sta
     (p.id != 0 || !url.is_empty()).then_some(Picture::Gallery { development, asset: p.asset_id, id: p.id, url, large })
 }
 
-fn ask_galleries(ctx: &egui::Context, server: Server) -> Job<anyhow::Result<Galleries>> {
-    Job::spawn(ctx, move || {
+fn ask_galleries(ctx: &egui::Context, server: Server, owner: &crate::pages::Owner) -> Job<crate::pages::ForAccount<anyhow::Result<Galleries>>> {
+    crate::pages::job_for(ctx, owner, move || {
         let account = orbiters_core::account::read(server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?;
         Api::new(server).galleries(&account.token)
     })
@@ -73,9 +73,9 @@ fn avatar_of(m: Option<&community::Member>) -> Option<Picture> {
 #[derive(Default)]
 pub struct State {
     galleries: Option<Galleries>,
-    galleries_job: Job<anyhow::Result<Galleries>>,
+    galleries_job: Job<crate::pages::ForAccount<anyhow::Result<Galleries>>>,
     feed: community::Pictures,
-    feed_job: Job<anyhow::Result<community::Pictures>>,
+    feed_job: Job<crate::pages::ForAccount<anyhow::Result<community::Pictures>>>,
     /// The gallery chosen among the chips (none: all of them).
     pub chosen: Option<u64>,
     /// What was asked: the environment, the account, the gallery.
@@ -183,7 +183,11 @@ impl State {
         let server = if development { Server::Development } else { Server::Production };
         self.covers.development = development;
         // Who the account is, not how its check goes: offline, the check comes and goes every minute.
-        let (account, answered) = self.account.see(&cx.snap.account.state);
+        let seen = self.account.see(&cx.snap.account.state, development);
+        if seen.changed {
+            self.forget_account();
+        }
+        let (account, answered, owner) = (seen.owner.account.clone(), seen.answered, seen.owner);
         self.answered |= answered;
         if !self.fixture && wanted {
             let key = (development, account, self.chosen);
@@ -196,28 +200,28 @@ impl State {
                 self.changed = true;
                 if account_changed {
                     self.galleries = None;
-                    self.galleries_job = ask_galleries(ctx, server);
+                    self.galleries_job = ask_galleries(ctx, server, &owner);
                 }
                 self.fetch(ctx, server, false);
             } else if std::mem::take(&mut self.answered) {
                 // Orbiters answers again: what could not be read is asked again; what shows stays.
                 self.error = None;
                 if self.galleries.is_none() && !self.galleries_job.running() {
-                    self.galleries_job = ask_galleries(ctx, server);
+                    self.galleries_job = ask_galleries(ctx, server, &owner);
                 }
                 if self.feed.items.is_empty() && !self.feed_job.running() {
                     self.fetch(ctx, server, false);
                 }
             }
         }
-        if let Some(r) = self.galleries_job.take() {
+        if let Some(r) = self.galleries_job.take().and_then(|r| r.take_for(self.account.owner())) {
             match r {
                 Ok(g) => self.galleries = Some(g),
                 Err(e) => self.error = Some(e.to_string()),
             }
             self.changed = true;
         }
-        if let Some(r) = self.feed_job.take() {
+        if let Some(r) = self.feed_job.take().and_then(|r| r.take_for(self.account.owner())) {
             match r {
                 Ok(page) => self.feed.append(page),
                 Err(e) => self.error = Some(e.to_string()),
@@ -229,7 +233,8 @@ impl State {
 
     fn fetch(&mut self, ctx: &egui::Context, server: Server, more: bool) {
         let (gallery, cursor) = (self.chosen, if more { self.feed.next() } else { None });
-        self.feed_job = Job::spawn(ctx, move || {
+        let owner = self.account.owner().cloned().unwrap_or_default();
+        self.feed_job = crate::pages::job_for(ctx, &owner, move || {
             let Some(account) = orbiters_core::account::read(server) else { return Ok(community::Pictures::default()) };
             Api::new(server).gallery_pictures(&account.token, gallery, cursor.as_deref(), 24)
         });

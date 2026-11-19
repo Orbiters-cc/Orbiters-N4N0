@@ -54,6 +54,7 @@ mod usage;
 mod views;
 mod shared_view_ui;
 mod wake_offer;
+mod world_notice;
 mod window_rest;
 mod worlds;
 mod window;

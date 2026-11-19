@@ -419,6 +419,22 @@ impl Controller {
     }
 
     /// The server and the saved account's name and id, when one is saved: whom world labels go under.
+    /// The server, the account's id and the API with its credential, read together (what a send goes as and the list
+    /// it was taken from are the same account).
+    pub(super) fn account_with_api(&self) -> Option<(Server, Option<String>, Api, String)> {
+        let rt = self.account_runtime.lock().unwrap();
+        let (server, _) = rt.read?;
+        rt.account.as_ref().map(|a| (server, a.user.clone(), Api::new(server), a.token.clone()))
+    }
+
+    /// Tests: an account signed in as `user` on `server`, as the account thread would have read it.
+    #[cfg(test)]
+    pub(super) fn signed_in_for_test(&self, server: Server, user: &str) {
+        let mut rt = self.account_runtime.lock().unwrap();
+        rt.read = Some((server, None));
+        rt.account = Some(Account { token: format!("orbit-test-{user}"), user: Some(user.into()), username: Some(user.into()), avatar_url: None });
+    }
+
     pub(super) fn feedback_account(&self) -> Option<(Server, Option<String>, Option<String>)> {
         let rt = self.account_runtime.lock().unwrap();
         let (server, _) = rt.read?;
@@ -442,7 +458,7 @@ impl Controller {
     /// Whom what the usage statistics count now is for: linked to the signed-in account only once the notice saying so was shown.
     pub fn usage_stamp(&self) -> crate::usage::spool::Stamp {
         let told = self.view().settings.usage.told_account;
-        crate::usage::spool::Stamp::now(told, if told { self.usage_account().map(|s| s.account) } else { None })
+        crate::usage::spool::Stamp::now(told, if told { self.usage_account().map(|s| (s.account, s.base)) } else { None })
     }
 
     /// The API and credential for calls to Orbiters, when an account is saved (checked or not).
@@ -463,7 +479,8 @@ impl Controller {
         let account = rt.account.as_ref().filter(|_| rt.read.is_some_and(|(s, _)| s == server));
         let stamp = orbiters_core::world_feedback::Stamp {
             server: api.url(""),
-            account: account.map(|a| a.user.clone().unwrap_or_else(|| format!("credential:{}", orbiters_core::vrchat_accounts::friend_hash(&a.token)))),
+            account: account.and_then(|a| a.user.clone()).filter(|u| !u.trim().is_empty()),
+            credential: account.map(|a| format!("credential:{}", orbiters_core::vrchat_accounts::friend_hash(&a.token))),
         };
         let with = account.map(|a| (api, a.token.clone()));
         (with, stamp)
@@ -500,10 +517,10 @@ mod tests {
         assert_eq!(ctl.usage_account().map(|s| (s.account, s.token)), Some(("42".into(), "orbit-secret".into())));
         assert!(ctl.usage_stamp().is_none(), "signed in, but the old notice only: nothing is linked to the account");
         ctl.update(|s| s.settings.usage.told_account = true);
-        assert_eq!(ctl.usage_stamp(), crate::usage::spool::Stamp { told: true, account: Some("42".into()) });
+        assert_eq!(ctl.usage_stamp(), crate::usage::spool::Stamp { told: true, account: Some("42".into()), server: Some(Api::new(Server::current()).url("")) });
         for state in [AccountState::Checking { username: Some("Enzo".into()) }, AccountState::Expired { username: Some("Enzo".into()) }, AccountState::SignedOut] {
             ctl.update(|s| s.account.state = state.clone());
-            assert_eq!(ctl.usage_stamp(), crate::usage::spool::Stamp { told: true, account: None }, "{state:?}");
+            assert_eq!(ctl.usage_stamp(), crate::usage::spool::Stamp { told: true, account: None, server: None }, "{state:?}");
             assert!(ctl.usage_account().is_none());
         }
         // An account file without an id: known here by its name, never by its credential.

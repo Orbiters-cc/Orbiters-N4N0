@@ -10,6 +10,7 @@
 
 pub mod block;
 pub mod camera_frames;
+pub mod camera_share;
 pub mod camera_reckon;
 pub mod camera_track;
 pub mod camera_web;
@@ -69,6 +70,16 @@ fn menu_press_compatible(shown: &orbiters_n4n0_core::menu::Menu, live: &orbiters
     let current = layout::cached(ScreenPage::of(live));
     current.elements.get(element) == Some(row) && layout::state(shown, row).pointable()
         && layout::state(shown, row) == layout::state(live, row)
+}
+
+/// Whether a press acts when let go rather than when pressed: the share buttons and the friends' chooser (REQUEST13),
+/// so that a part going away under a held trigger cancels it.
+fn commits_on_release(action: Action) -> bool {
+    matches!(
+        action,
+        Action::ShareTo(_) | Action::SharePublic(_) | Action::ShareConfirm(_) | Action::ShareCancelConfirm | Action::ShareDismiss(_)
+            | Action::ChooserPerson(_) | Action::ChooserPage(_) | Action::ChooserSend(_) | Action::ChooserClose | Action::ChooserRetry
+    )
 }
 
 /// A press's name for the usage statistics: the action's own (`Capture(3)` is `Capture`, `Page(Key('a'))` is `Page.Key`).
@@ -1022,6 +1033,10 @@ pub struct Panels {
     pub camera_finding: bool,
     /// The page a code found beside the camera opened over it, and which of the camera's scans found it.
     web: Option<camera_web::CameraWeb>,
+    /// The share buttons after a 3D picture: the first time's question, the friends' chooser (REQUEST13).
+    share: camera_share::CameraShare,
+    /// A share button pressed: it acts when let go on it, never when its part went away under the trigger.
+    share_held: Option<Action>,
     web_for: Option<u64>,
     /// When the demo avatar was put on: said for a moment.
     demo_done: Option<Instant>,
@@ -1130,6 +1145,8 @@ impl Panels {
             stop_asked: None,
             camera_finding: false,
             web: None,
+            share: Default::default(),
+            share_held: None,
             web_for: None,
             demo_done: None,
             #[cfg(test)]
@@ -1963,6 +1980,11 @@ impl Panels {
         away_words(snap, &self.facts.note, self.facts.picture_mode)
     }
 
+    /// The share row is up beside VRChat's camera in a headset: the caption goes under it ([`zones::caption_under_share`]).
+    pub(super) fn share_row_up(&self) -> Option<f32> {
+        self.needed(Zone::CameraShare).then(|| self.facts.camera.share.as_ref().map_or(0.0, panels::share_sheet::row_height))
+    }
+
     /// Whether a part that shows only while it has something to do has it now ([`Zone::only_while_needed`]).
     fn needed(&self, zone: Zone) -> bool {
         panels::needed(zone, &self.facts)
@@ -1993,7 +2015,8 @@ impl Panels {
             _ => None,
         };
         let web = self.web.as_ref().map(camera_web::CameraWeb::facts);
-        panels::CameraNow { finding: self.camera_finding, kit: snap.worn_kit, demo, qr, web, on_the_right: self.camera_right }
+        let share = self.share.view(snap);
+        panels::CameraNow { finding: self.camera_finding, kit: snap.worn_kit, demo, qr, web, on_the_right: self.camera_right, share }
     }
 
     /// A code's page in the computer's own browser, off this thread (the shell may take a moment). Tests count it rather than open anything.
@@ -2036,6 +2059,10 @@ impl Panels {
         self.note_screen();
         // Amortize invalidated cache destruction: one picture pair per input turn.
         drop(self.stage.retired.pop());
+        // The share buttons: another picture closes the last one's question and chooser; friends arriving.
+        if self.share.follow(snap) {
+            self.camera_dirty();
+        }
         // A code found beside the camera: its page opens over the camera, once for each scan, and the camera stops looking (Enzo, F17).
         if let crate::controller::camera_tools::Qr::Found { url } = &snap.camera_tools.qr {
             if self.web_for != Some(snap.camera_tools.qr_generation) {
@@ -2842,6 +2869,11 @@ impl Panels {
             }
         }
         let Some(action) = action else { return out };
+        // The share buttons and the chooser act when let go on what was pressed ([`Panels::release`]).
+        if commits_on_release(action) {
+            self.share_held = Some(action);
+            return out;
+        }
         self.act(action, snap, &mut out);
         out
     }
@@ -3277,6 +3309,67 @@ impl Panels {
                 self.cancel();
             }
             // Asked for, never by itself: it waits for VRChat to have put it on and for the kit to be seen (camera-core).
+            Action::ShareTo(id) | Action::SharePublic(id) | Action::ShareConfirm(id) | Action::ShareDismiss(id) | Action::ChooserSend(id)
+                if snap.explorer.offer.as_ref().is_none_or(|o| o.id != id) => {}
+            Action::ShareTo(id) => {
+                if self.facts.desktop {
+                    // On a screen, the window's own share dialog, on its friends (the camera's picture cannot be covered there).
+                    if let Some(offer) = snap.explorer.offer.as_ref() {
+                        self.backend.show_page(&format!("share-to:{}", offer.key)); // i18n: not shown (a page's name for the app)
+                    }
+                } else {
+                    self.share.confirming = None;
+                    // A code's page takes the same place: the chooser takes it.
+                    self.web = None;
+                    self.share.chooser = Some(camera_share::Chooser::open(id, &self.backend, snap));
+                }
+                self.camera_dirty();
+            }
+            Action::SharePublic(id) => {
+                self.share.chooser = None;
+                self.share.public(id, snap, &self.backend);
+                self.camera_dirty();
+            }
+            Action::ShareConfirm(id) => {
+                self.share.confirm(id, &self.backend);
+                self.camera_dirty();
+            }
+            Action::ShareCancelConfirm => {
+                self.share.confirming = None;
+                self.camera_dirty();
+            }
+            Action::ShareDismiss(id) => {
+                self.share.confirming = None;
+                self.share.chooser = None;
+                self.backend.explorer(crate::controller::explorer::Command::OfferDismiss { offer: id });
+                self.camera_dirty();
+            }
+            Action::ChooserPerson(key) => {
+                if self.share.chooser.as_mut().is_some_and(|c| c.toggle(key)) {
+                    self.camera_dirty();
+                }
+            }
+            Action::ChooserPage(next) => {
+                if let Some(c) = self.share.chooser.as_mut() {
+                    c.step(next);
+                    self.camera_dirty();
+                }
+            }
+            Action::ChooserSend(id) => {
+                self.share.send(id, &self.backend);
+                self.camera_dirty();
+            }
+            Action::ChooserClose => {
+                self.share.chooser = None;
+                self.camera_dirty();
+            }
+            Action::ChooserRetry => {
+                let backend = self.backend.clone();
+                if let Some(c) = self.share.chooser.as_mut() {
+                    c.load(&backend, snap);
+                    self.camera_dirty();
+                }
+            }
             Action::DemoAvatar => {
                 if snap.can_switch_demo_avatar() {
                     self.backend.switch_demo_avatar();
@@ -3350,6 +3443,7 @@ impl Panels {
         }
         self.seeking = None;
         self.volume_held = None;
+        self.share_held = None;
         // An action a real let-go already earned (`pressed_late`, with the facts it was pressed on) is not cancelled: it runs once,
         // at the next turn, menu or not ([`Panels::run_pending`]; verify-vr: a menu closing before that turn erased it).
         if let Some(drag) = self.drag.take() {
@@ -3377,6 +3471,15 @@ impl Panels {
     pub fn release(&mut self) {
         if let Some(web) = self.web.as_mut() {
             web.release();
+        }
+        // A share button let go: only on what was pressed, and only while it is still there (a part gone under the
+        // trigger, or another picture's, commits nothing).
+        if let Some(held) = self.share_held.take() {
+            let on_it = self.list.iter().any(|p| p.hover.and_then(|i| p.items.get(i)).is_some_and(|item| item.action == held));
+            if on_it {
+                let snap = self.backend.view();
+                self.act(held, &snap, &mut Pressed::default());
+            }
         }
         if let Some(held) = self.booster_held.take() {
             let snap = self.backend.view();

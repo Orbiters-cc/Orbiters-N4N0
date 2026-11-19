@@ -705,6 +705,8 @@ impl super::Controller {
     pub(super) fn burst_saved(self: &Shared, session: Option<PathBuf>, ended: Option<PictureEnded>) {
         let Some((dir, PictureEnded { mode, length, left_out })) = session.zip(ended) else { return };
         let picture = orbiters_core::picture::Picture { mode, length, wearer: left_out.wearer, others: left_out.others };
+        // Right after it, under the camera: "Share to …" and "Share publicly" for this picture (REQUEST13).
+        self.explorer_offer(&dir);
         if let Err(e) = picture.save(&dir) {
             self.notify(NoticeKind::Warning, tr!("Could not note what this 3D picture is of: {error}", error = e));
         }

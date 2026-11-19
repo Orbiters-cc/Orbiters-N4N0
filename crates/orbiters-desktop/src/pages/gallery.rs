@@ -93,11 +93,10 @@ pub struct State {
     key: Option<(u64, u64, std::path::PathBuf, bool, String, u64)>,
     /// Who the account is, for the key above (not how its check with Orbiters goes).
     account: crate::pages::AccountFollow,
-    /// The environment and account last seen: another one is forgotten at once ([`State::forget_account`]).
-    who: Option<(bool, String)>,
     /// This computer's entries being made, with the revision of what they are made from beyond the pictures, taken
     /// (and when) before any of it was read.
-    local_job: Job<(std::time::Instant, u64, Vec<Entry>)>,
+    /// This computer's entries, with the remote side read for the owner asked for (`ForAccount`: dropped when another).
+    local_job: Job<super::ForAccount<(std::time::Instant, u64, Vec<Entry>)>>,
     locals: Vec<Entry>,
     /// The revision `locals` was made from, and when it was taken ([`list_is_stale`]).
     listed: Option<(std::time::Instant, u64)>,
@@ -105,7 +104,7 @@ pub struct State {
     #[cfg(test)]
     sources: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
     feed: Feed,
-    feed_job: Job<Result<Feed, anyhow::Error>>,
+    feed_job: Job<super::ForAccount<Result<Feed, anyhow::Error>>>,
     asked: Option<(Filter, String)>,
     query: String,
     filter: Filter,
@@ -438,6 +437,12 @@ impl State {
         }
     }
 
+    /// Opens `entry`'s window on its friends to choose ("Share to …" beside VRChat's camera, REQUEST13).
+    pub fn open_share_to(&mut self, ctx: &egui::Context, entry: Entry) {
+        self.dialog = Some(Dialog::new(ctx, entry, true));
+        self.from_card = false;
+    }
+
     /// Starts closing the open window (screenshots).
     pub fn close_window(&mut self) {
         if let Some(d) = self.dialog.as_mut() {
@@ -527,7 +532,7 @@ impl State {
         self.hash_asked.clear();
         self.community.forget_account();
         self.assets.forget_account();
-        self.select.clear();
+        self.select.forget_account();
         self.instance = None;
     }
 
@@ -548,7 +553,8 @@ impl State {
             ..Default::default()
         };
         self.error = None;
-        self.feed_job = Job::spawn(ctx, move || controller::feed(server, q));
+        let owner = self.account.owner().cloned().unwrap_or_default();
+        self.feed_job = super::job_for(ctx, &owner, move || controller::feed(server, q));
     }
 }
 
@@ -566,7 +572,21 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
         }
         // Progressive discoveries keep existing decoded pictures visible.
     }
-    if let Some((made, revision, entries)) = state.local_job.take() {
+    let development = cx.snap.settings.development;
+    let seen = state.account.see(&cx.snap.account.state, development);
+    // Another account (or environment, or a sign-in refused): everything of the old one goes NOW, whatever the scan of
+    // this computer's folders is doing (it went only once that scan ended, and an open remote picture, its editor or a
+    // community's window stayed meanwhile).
+    if seen.changed {
+        state.forget_account();
+    }
+    // A list made for another owner (asked before the change, landing after it) is dropped and made again: its remote
+    // side, its sharing and associations are the old account's (night4, verify2).
+    let landed = state.local_job.take().map(|r| r.take_for(state.account.owner()));
+    if let Some(None) = landed {
+        state.local_dirty = true;
+    }
+    if let Some(Some((made, revision, entries))) = landed {
         state.locals = entries;
         state.listed = Some((made, revision));
         state.shown_key = None;
@@ -580,16 +600,7 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
     if !state.local_job.running() && list_is_stale(state.folders.local_seen(), state.listed) {
         state.local_dirty = true;
     }
-    let development = cx.snap.settings.development;
-    let (account, answered) = state.account.see(&cx.snap.account.state);
-    // Another account (or environment, or a sign-in refused): everything of the old one goes NOW, whatever the scan of
-    // this computer's folders is doing (it went only once that scan ended, and an open remote picture, its editor or a
-    // community's window stayed meanwhile).
-    let who = (development, account.clone());
-    if state.who.as_ref().is_some_and(|w| *w != who) {
-        state.forget_account();
-    }
-    state.who = Some(who);
+    let (account, answered) = (seen.owner.account.clone(), seen.answered);
     // The editor's saves too: a copy saved beside its original shows at once.
     let key = (
         cx.ctl.library_version(),
@@ -614,7 +625,8 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
         let sources: Option<(std::path::PathBuf, Option<std::path::PathBuf>)> = None;
         #[cfg(test)]
         let sources = state.sources.clone();
-        state.local_job = Job::spawn(ctx, move || {
+        let owner = seen.owner.clone();
+        state.local_job = super::job_for(ctx, &owner, move || {
             // The revision first, then the list: a change in between is in the list or not, and a later look, which
             // sees it, differs from this revision either way.
             let made = std::time::Instant::now();
@@ -688,7 +700,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     if state.pictures.is_none() {
         state.pictures = Some(crate::worlds::Pictures::new(&ctx));
     }
-    if let Some(r) = state.feed_job.take() {
+    if let Some(r) = state.feed_job.take().and_then(|r| r.take_for(state.account.owner())) {
         match r {
             Ok(page) => {
                 state.feed.append(page);
@@ -2500,26 +2512,44 @@ mod tests {
         let remote_editor = || Editor::open(&ctx, Source::remote(Remote { kind: RemoteKind::Gallery, id: 12, ..Default::default() }), "World");
         for change in [signed_in("y"), A::Expired { username: Some("x".into()) }] {
             frame(&mut state, signed_in("x"));
-            // A scan of this computer's folders that does not end.
+            // A scan of this computer's folders that does not end, made for x: it read x's upload records (an entry
+            // shared by x, `x_key`).
             let (hold, held) = std::sync::mpsc::channel::<()>();
+            let x = state.account.owner().cloned().expect("x seen");
+            let x_entry = controller::remote_entry(orbiters_core::shares::Item { kind: orbiters_core::shares::Kind::Picture, id: 77, mine: true, ..Default::default() });
+            let x_key = x_entry.key.clone();
             state.local_job = Job::spawn(&ctx, move || {
                 let _ = held.recv();
-                (std::time::Instant::now(), 0, Vec::new())
+                super::super::ForAccount::new(&x, (std::time::Instant::now(), 0, vec![x_entry]))
             });
             // What x has on screen: a page of its feed, decoded pictures, the editor of one of its pictures.
             state.feed = Feed { items: vec![orbiters_core::shares::Item::default()], ..Default::default() };
             state.pictures = Some(crate::worlds::Pictures::new(&ctx));
             state.editor = Some(remote_editor());
+            // And a picture of x carried out of its window, its file arriving (verify2: it stayed, and could still be
+            // handed to Windows while the button was down).
+            let carried = controller::remote_entry(orbiters_core::shares::Item { kind: orbiters_core::shares::Kind::Picture, id: 78, ..Default::default() });
+            state.select.stage_carried(&carried, root.join("x-picture.png"));
             frame(&mut state, change.clone());
+            assert!(!state.select.keeps_anything(), "{change:?}: nothing of x's to drag, copy or fetch");
             assert!(state.local_job.running(), "the scan is still running");
             assert!(state.feed.items.is_empty(), "{change:?}: the old account's feed goes at once");
             assert!(state.pictures.is_none(), "{change:?}: and its decoded pictures");
             assert!(state.editor.is_none(), "{change:?}: and the editor of one of its pictures");
+            // Night4, verify2: x's scan ends after the change: its list is never taken in (it was, wholesale, with x's
+            // sharing and associations); it is made again for who is signed in now.
             drop(hold);
-            while state.local_job.running() && state.local_job.poll().is_none() {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                frame(&mut state, change.clone());
+                assert!(!state.locals.iter().any(|e| e.key == x_key), "{change:?}: x's list landed after the change");
+                if !state.local_job.running() {
+                    break;
+                }
+                assert!(std::time::Instant::now() < until, "the scans never ended");
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
-            state.local_job = Job::default();
+            assert!(state.listed.is_some(), "{change:?}: the list was made again");
         }
         // An editor of a picture of this computer is the person's own work: it stays.
         frame(&mut state, signed_in("x"));

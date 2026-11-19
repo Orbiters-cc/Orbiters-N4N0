@@ -284,21 +284,44 @@ pub struct Pending {
     /// earlier version) is dropped at load.
     #[serde(default)]
     pub to: Option<Stamp>,
+    /// This action's own number (a new one each time a waiting Set takes a later change): an answer is for the item it
+    /// was sent as, never another made for another account in the same millisecond, nor a Set changed while on its way.
+    #[serde(default)]
+    pub op: u64,
 }
 
-/// The server (its API address) and the Orbiters account (its id; none while nobody was signed in, then it goes with
-/// the account that signs in on that server) an action was made for.
+/// A new [`Pending::op`].
+fn next_op() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let clock = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    (clock ^ ((std::process::id() as u64) << 40)).wrapping_add(N.fetch_add(1, Ordering::Relaxed)).max(1)
+}
+
+/// The server (its API address) and the Orbiters account an action was made for: its id, and a digest of its credential
+/// (an account file may name no id until the account check answers). Neither known (nobody signed in, or the account of
+/// the environment just chosen not read yet): it is never sent, by anyone.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stamp {
     pub server: String,
     #[serde(default)]
     pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
 }
 
 impl Stamp {
-    /// Whether an action made for `self` may go out as `now`.
+    /// Whether an action made for `self` may go out as `now`: the same server, and the same account by its id or by its
+    /// credential; an action made for nobody goes as nobody.
     pub fn sends_as(&self, now: &Stamp) -> bool {
-        self.server == now.server && (self.account.is_none() || self.account == now.account)
+        self.server == now.server
+            && ((self.account.is_some() && self.account == now.account) || (self.credential.is_some() && self.credential == now.credential))
+    }
+
+    /// Whether an action made for `self` shows as waiting to `now`: one that may go as `now`, or one made for exactly
+    /// `now` (a press while nobody is signed in shows as waiting there, and is still never sent as anybody).
+    pub fn shows_as(&self, now: &Stamp) -> bool {
+        self == now || self.sends_as(now)
     }
 }
 
@@ -337,6 +360,9 @@ impl Queue {
                 Ok(mut p) => {
                     // The contract takes a world id in capitals too; the queue keeps VRChat's own lowercase.
                     p.world = p.world.to_ascii_lowercase();
+                    if p.op == 0 {
+                        p.op = next_op();
+                    }
                     if p.to.is_none() {
                         // From before actions said where they go (nothing in the file tells which server or account):
                         // never sent where it may not be for, and never deleted: kept beside, unsent (below).
@@ -391,11 +417,13 @@ impl Queue {
                         waiting.merge(&set);
                     }
                     p.due = p.due.max(due);
+                    // Another number: an answer to the values sent before does not take these later ones away.
+                    p.op = next_op();
                     return;
                 }
-                self.items.push(Pending { world: world.into(), action: Action::Set(set), since: now_ms, due, tries: 0, to: Some(to) });
+                self.items.push(Pending { world: world.into(), action: Action::Set(set), since: now_ms, due, tries: 0, to: Some(to), op: next_op() });
             }
-            other => self.items.push(Pending { world: world.into(), action: other, since: now_ms, due: now_ms, tries: 0, to: Some(to) }),
+            other => self.items.push(Pending { world: world.into(), action: other, since: now_ms, due: now_ms, tries: 0, to: Some(to), op: next_op() }),
         }
     }
 
@@ -417,7 +445,7 @@ impl Queue {
 
     /// The actions that may go out as `now` ([`Stamp::sends_as`]): what this server and account show as waiting.
     pub fn for_stamp(&self, now: &Stamp) -> Queue {
-        Queue { items: self.items.iter().filter(|p| p.to.as_ref().is_some_and(|to| to.sends_as(now))).cloned().collect() }
+        Queue { items: self.items.iter().filter(|p| p.to.as_ref().is_some_and(|to| to.shows_as(now))).cloned().collect() }
     }
 
     /// The action at `i` failed for now: tried again after 2, 4, 8 … seconds (at most a minute), dropped after a day.
@@ -652,8 +680,8 @@ mod tests {
     /// said where they go is dropped, not sent.
     #[test]
     fn an_action_goes_only_where_it_was_made() {
-        let dev = Stamp { server: "http://127.0.0.1:4100/".into(), account: Some("7".into()) };
-        let prod = Stamp { server: "https://api.orbiters.cc/".into(), account: Some("7".into()) };
+        let dev = Stamp { server: "http://127.0.0.1:4100/".into(), account: Some("7".into()), credential: None };
+        let prod = Stamp { server: "https://api.orbiters.cc/".into(), account: Some("7".into()), credential: None };
         let other = Stamp { account: Some("8".into()), ..prod.clone() };
         let mut q = Queue::default();
         q.push_to(WORLD, Action::Uncomment { comment: 5 }, 0, dev.clone());
@@ -667,10 +695,18 @@ mod tests {
         q.items.remove(2);
         assert_eq!(q.due_for(10_000, &prod), None, "Development's delete never goes to production");
         assert_eq!(q.due_for(10_000, &dev), Some(0), "it goes back home");
-        // Made while nobody was signed in: goes with whoever signs in on that server.
+        // Made while nobody was known (signed out, or the account of a just-chosen environment not read yet): it goes as
+        // nobody, never as the first account to come (night4, verify2).
         let nobody = Stamp { account: None, ..prod.clone() };
-        q.push_to(WORLD, Action::Report { comment: 3, reason: None }, 0, nobody);
-        assert!(q.due_for(10_000, &other).is_some() && q.due_for(10_000, &prod).is_some());
+        q.push_to(WORLD, Action::Report { comment: 3, reason: None }, 0, nobody.clone());
+        assert!(q.due_for(10_000, &other).is_none() && q.due_for(10_000, &prod).is_none() && q.due_for(10_000, &nobody).is_none());
+        // An account file without an id: known by its credential, still the same account once the check gives the id.
+        let by_credential = Stamp { account: None, credential: Some("c1".into()), ..prod.clone() };
+        q.push_to(WORLD, Action::Report { comment: 4, reason: None }, 0, by_credential);
+        let checked = Stamp { account: Some("9".into()), credential: Some("c1".into()), ..prod.clone() };
+        assert_eq!(q.due_for(10_000, &checked).map(|i| &q.items[i].action), Some(&Action::Report { comment: 4, reason: None }));
+        let elsewhere = Stamp { account: Some("10".into()), credential: Some("c2".into()), ..prod.clone() };
+        assert!(q.due_for(10_000, &elsewhere).is_none(), "another account, another credential: nothing");
         q.expire(DROP_AFTER.as_millis() as u64 + 1);
         assert!(q.items.is_empty(), "a day old: gone wherever it was for");
         // An earlier version's file: its actions say nowhere, and go nowhere, but are never deleted: the file is kept

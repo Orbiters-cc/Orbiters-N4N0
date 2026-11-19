@@ -35,7 +35,7 @@ fn where_(offer: &ShareOffer) -> String {
 /// As wide as "Talk with N4N0?"'s card, a line taller: its buttons on the name's row, the question and where under them
 /// across the card, whole in every language.
 const WIDTH: f32 = 380.0;
-const HEIGHT: f32 = 104.0;
+pub(crate) const HEIGHT: f32 = 104.0;
 const MARGIN: f32 = 20.0;
 
 /// The window's card while an offer is up: Show takes it, the cross says not now. Above the "Talk with N4N0?" card's

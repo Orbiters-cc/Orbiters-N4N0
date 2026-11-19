@@ -1,0 +1,7 @@
+# Explorer points (REQUEST13, night 2026-11-19): the notice in worlds with no public 3D picture yet, the share buttons
+# and the friends' chooser beside VRChat's camera, Explorer points and titles in Settings.
+crates/orbiters-desktop/src/controller/explorer.rs
+crates/orbiters-desktop/src/world_notice.rs
+crates/orbiters-desktop/src/overlay/orbit/panels/share_sheet.rs
+crates/orbiters-desktop/src/overlay/orbit/camera_share.rs
+crates/orbiters-core/src/explorer.rs

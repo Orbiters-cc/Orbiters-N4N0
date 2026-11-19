@@ -72,6 +72,9 @@ struct Minute {
     worn: BTreeMap<String, String>,
     players: u32,
     avatar: Option<OwnAvatar>,
+    /// The account's waiting list it is gathered for (signed in when it began): a minute across a change of account
+    /// is nobody's, and is dropped.
+    for_list: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -201,6 +204,7 @@ impl super::Controller {
         let start = now - now % 60;
         let place = format!("{world_id}:{instance}");
         let local = world.local_player.clone();
+        let list = self.performance_file();
         let finished = {
             let mut rt = self.performance.lock().unwrap();
             rt.hardware.gpu = chunk.gpu.clone().or(rt.hardware.gpu.take());
@@ -219,8 +223,9 @@ impl super::Controller {
                 worn: BTreeMap::new(),
                 players: 0,
                 avatar: None,
+                for_list: list.clone(),
             });
-            if m.place != place {
+            if m.place != place || m.for_list != list {
                 m.mixed = true;
             }
             m.intervals.extend(chunk.intervals_ms.iter().copied());
@@ -233,8 +238,11 @@ impl super::Controller {
             m.avatar = (avatar_id.is_some() || world.avatar_name.is_some()).then(|| OwnAvatar { id: avatar_id.clone(), name: world.avatar_name.clone() });
             done
         };
-        if let Some(sample) = finished.and_then(Minute::finish) {
-            self.performance_keep(sample);
+        if let Some((sample, list)) = finished.and_then(|m| {
+            let list = m.for_list.clone();
+            m.finish().map(|s| (s, list))
+        }) {
+            self.performance_keep_for(sample, list.as_deref());
         }
         self.performance_send_if_due(false);
     }
@@ -264,9 +272,20 @@ impl super::Controller {
         Some(pending_file_in(&orbiters_core::paths::config_dir(), server, &user))
     }
 
+    #[cfg(test)]
     fn performance_keep(&self, sample: Sample) {
+        let list = self.performance_file();
+        self.performance_keep_for(sample, list.as_deref());
+    }
+
+    /// Keeps a minute in the list of the account it was gathered for, only while that account is still the one signed
+    /// in (verify2: never into another account's list).
+    fn performance_keep_for(&self, sample: Sample, gathered_for: Option<&std::path::Path>) {
         // Gathered signed out: sent as nobody's, so kept for nobody (it was sent later as whoever signed in, CTL2-9).
         let Some(path) = self.performance_file() else { return };
+        if gathered_for != Some(path.as_path()) {
+            return;
+        }
         let mut rt = self.performance.lock().unwrap();
         // Turned off while this minute was being finished: it is not kept (the switch is read under the lock that
         // forgetting takes, so it is either forgotten after this or never kept).
@@ -305,9 +324,17 @@ impl super::Controller {
             let samples: Vec<Sample> = rt.pending.iter().flat_map(|(_, p)| p.iter()).take(MAX_PER_REQUEST).cloned().collect();
             (samples, hardware)
         };
-        let Some((api, token)) = self.account_api() else { return };
+        // The credential read with the account, and that account the one the samples were taken for (verify2).
+        let Some((server, Some(user), api, token)) = self.account_with_api() else { return };
+        if pending_file_in(&orbiters_core::paths::config_dir(), server, &user) != path {
+            return;
+        }
         let ctl = self.clone();
         std::thread::spawn(move || {
+            // Just before they go: still on, still that account; else nothing goes.
+            if !ctl.with_settings(|s| s.world_performance) || ctl.performance_file().as_ref() != Some(&path) {
+                return;
+            }
             let sent = send(&api, &token, &batch.0, &batch.1);
             match &sent {
                 Ok(()) => {}
@@ -386,6 +413,28 @@ mod tests {
         assert!(summarize(&vec![11.1; 1000]).is_none(), "11 s measured is too little");
     }
 
+    /// Verify2 (night4): a minute gathered while A was signed in, finished once B is, goes into nobody's list.
+    #[test]
+    fn a_minute_gathered_for_one_account_is_not_kept_for_another() {
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings { world_performance: true, ..Default::default() });
+        let server = orbiters_core::account::Server::Development;
+        ctl.signed_in_for_test(server, "2");
+        let for_a = pending_file_in(&orbiters_core::paths::config_dir(), server, "1");
+        let m = Minute {
+            start: 1_761_073_440,
+            place: "wrld_a:1".into(),
+            world_id: "wrld_a".into(),
+            mixed: false,
+            intervals: vec![11.1; 3000],
+            worn: Default::default(),
+            players: 1,
+            avatar: None,
+            for_list: Some(for_a.clone()),
+        };
+        ctl.performance_keep_for(m.finish().expect("a minute measured"), Some(&for_a));
+        assert!(ctl.performance.lock().unwrap().pending.as_ref().is_none_or(|(_, p)| p.is_empty()), "not kept in B's list");
+    }
+
     /// Verifier (PRIV-12c): a minute finished while the share was being turned off is never kept nor sent.
     #[test]
     fn a_minute_finished_after_off_is_not_kept() {
@@ -402,6 +451,7 @@ mod tests {
             worn: Default::default(),
             players: 1,
             avatar: None,
+            for_list: None,
         };
         ctl.performance_keep(m.finish().expect("a minute measured"));
         let rt = ctl.performance.lock().unwrap();
@@ -419,6 +469,7 @@ mod tests {
             worn: [("Alice".to_string(), "Fox".to_string()), ("Bob".to_string(), "Fox".to_string()), ("Carol".to_string(), "Avali".to_string())].into(),
             players: 4,
             avatar: Some(OwnAvatar { id: Some("avtr_x".into()), name: Some("Mine".into()) }),
+            for_list: None,
         };
         let sample = m.finish().unwrap();
         assert_eq!(sample.started_utc, "2025-10-21T19:04:00Z");
@@ -436,6 +487,7 @@ mod tests {
                 worn: BTreeMap::new(),
                 players: 1,
                 avatar: None,
+            for_list: None,
             }
         };
         assert!(mixed.finish().is_none(), "a minute in two worlds is dropped");

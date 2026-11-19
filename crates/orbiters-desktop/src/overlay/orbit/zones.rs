@@ -172,6 +172,14 @@ pub enum Zone {
     CameraScan,
     CameraWebBar,
     CameraWeb,
+    /// Right after a 3D picture, under what the tiles say (REQUEST13): "Share to …" and "Share publicly", then how each share
+    /// goes and what it earned. Never on the camera's picture or its buttons.
+    CameraShare,
+    /// The same on a screen, as a column at the panel's right: under the panel is VRChat's row of buttons, the caption
+    /// and the window's foot (no room at 720 tall), and where the bridge clicks.
+    CameraShareDesk,
+    /// "Share to …" in a headset: the friends to choose, over the camera's top edge where a code's page goes (never both).
+    CameraChooser,
     /// While a recording runs: its clock and Stop, under the wheel and under the wing (Enzo, F13). Nothing here starts one.
     WheelStop,
     QmStop,
@@ -239,8 +247,20 @@ impl Zone {
         [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying, Zone::QmCaption, Zone::QmStop];
 
     /// The zones around a menu.
-    pub const CAMERA: [Zone; 9] =
-        [Zone::CameraScan, Zone::CameraPeople, Zone::CameraWorld, Zone::CameraRecord, Zone::CameraQr, Zone::CameraCaption, Zone::CameraAct, Zone::CameraWebBar, Zone::CameraWeb];
+    pub const CAMERA: [Zone; 12] = [
+        Zone::CameraScan,
+        Zone::CameraPeople,
+        Zone::CameraWorld,
+        Zone::CameraRecord,
+        Zone::CameraQr,
+        Zone::CameraCaption,
+        Zone::CameraAct,
+        Zone::CameraWebBar,
+        Zone::CameraWeb,
+        Zone::CameraShare,
+        Zone::CameraShareDesk,
+        Zone::CameraChooser,
+    ];
 
     pub fn around(around: Around) -> &'static [Zone] {
         match around {
@@ -305,7 +325,7 @@ impl Zone {
     /// A part that shows only while it has something to do (a recording to stop, a code being looked for, a page opened, a button to offer): it joins the menu's
     /// parts and leaves them as that changes ([`super::Panels::set_open`]).
     pub fn only_while_needed(self) -> bool {
-        matches!(self, Zone::WheelStop | Zone::QmStop | Zone::CameraAct | Zone::CameraScan | Zone::CameraWebBar | Zone::CameraWeb)
+        matches!(self, Zone::WheelStop | Zone::QmStop | Zone::CameraAct | Zone::CameraScan | Zone::CameraWebBar | Zone::CameraWeb | Zone::CameraShare | Zone::CameraShareDesk | Zone::CameraChooser)
     }
 
     /// Its place in the menu's units from the menu's centre, y down: around the wheel in hundredths of its radius (a 1280 x 720 window's pixels, nearly), around the Quick
@@ -363,6 +383,13 @@ impl Zone {
             // Over the camera's top edge, never in front of it: its bar nearest the camera, the page above. Stood up on that edge in a headset ([`super::vr`]).
             Zone::CameraWebBar => r(-CAMERA_HALF[0], CAMERA_WEB_BAR[0], CAMERA_HALF[0], CAMERA_WEB_BAR[1]),
             Zone::CameraWeb => r(-CAMERA_HALF[0], CAMERA_WEB_BAR[0] - 6.0 - CAMERA_WEB_TALL, CAMERA_HALF[0], CAMERA_WEB_BAR[0] - 6.0),
+            // Under what the tiles say, from the column's outer edge to the picture's right edge: in reach of the hand that
+            // holds the camera, clear of VRChat's row of buttons and of the caption.
+            Zone::CameraShare => r(CAMERA_COLUMN_OUT, CAMERA_SHARE[0], CAMERA_HALF[0], CAMERA_SHARE[1]),
+            // On a screen: right of the picture with the column's gap, from its top, two buttons over each other.
+            Zone::CameraShareDesk => r(CAMERA_HALF[0] + CAMERA_GAP, -CAMERA_HALF[1], CAMERA_HALF[0] + CAMERA_GAP + 190.0, -CAMERA_HALF[1] + 308.0),
+            // Where a code's page goes, as tall as it and its bar: stood up on the camera's top edge in a headset.
+            Zone::CameraChooser => r(-CAMERA_HALF[0], CAMERA_WEB_BAR[1] - CAMERA_CHOOSER_TALL, CAMERA_HALF[0], CAMERA_WEB_BAR[1]),
             // Right under the ring, whose foot is free in any window: in reach, and over nothing of VRChat's.
             Zone::WheelStop => r(-78.0, 188.0, 78.0, 228.0),
             // Under the wing's foot, as wide as it.
@@ -395,6 +422,25 @@ const CAMERA_TILE: [f32; 2] = [92.0, 60.0];
 pub const CAMERA_COLUMN_OUT: f32 = -CAMERA_HALF[0] - CAMERA_GAP - CAMERA_TILE[0];
 /// The line under VRChat's row of buttons (from, to).
 const CAMERA_UNDER: [f32; 2] = [166.0, 226.0];
+/// The share row's line (from, to): right under VRChat's row of buttons, where the caption is the rest of the time
+/// (Enzo: "right under the camera UI"). While the row is up the caption goes under it ([`caption_under_share`]).
+pub const CAMERA_SHARE: [f32; 2] = [CAMERA_UNDER[0], CAMERA_UNDER[0] + 104.0];
+
+/// While the share row is up, the camera's caption (what the tiles say: a pointed tile, a QR code's state, a recording's
+/// clock…) lies under the row instead of where the row is: in a headset's places (in units), moved down by the row's height.
+/// `row`: how tall the row is drawn now (its buttons, or a share's outcome).
+pub fn caption_under_share(places: &mut [Placed], row: f32) {
+    for placed in places.iter_mut().filter(|p| p.zone == Zone::CameraCaption) {
+        placed.rect = placed.rect.translate(egui::vec2(0.0, caption_under_share_by(row)));
+    }
+}
+
+/// How far down the caption goes while the share row is up, `row` tall: right under it, with the gap it has otherwise.
+pub fn caption_under_share_by(row: f32) -> f32 {
+    row.min(CAMERA_SHARE[1] - CAMERA_SHARE[0]) + 8.0
+}
+/// How tall the friends' chooser over the camera is.
+pub const CAMERA_CHOOSER_TALL: f32 = 516.0;
 /// How far the scanning corners stand off the picture.
 const CAMERA_SCAN_OUT: f32 = 8.0;
 /// The page's bar over the camera's top edge (from, to), and how tall the page over it is: a phone's page, about 30 cm wide.
@@ -405,6 +451,8 @@ const CAMERA_WEB_TALL: f32 = 470.0;
 /// the rim's foot down, from its left edge in, from its right edge in. Its arrow to the next buttons hangs past the right edge. Measured on `p1-stream-camera` and
 /// `07-after-walk` (1280 x 720): the row is 383 to 895 across, 535 to 620 down, under a rim 332 to 948, 185 to 535.
 pub const DESK_CAMERA_BUTTONS: [f32; 3] = [86.0, 51.0, 53.0];
+/// How far VRChat's arrow to its next camera buttons hangs past the panel's right edge, at 720 tall.
+pub const DESK_CAMERA_ARROW: f32 = 25.0;
 /// How large Orbiters' tiles are beside it, in pixels a unit at 720 tall: a tile of 92 x 60 is 124 x 81, as tall as VRChat's own buttons (80), the column of four
 /// about the panel's height, as Enzo drew it (2026-11-15).
 pub const DESK_CAMERA_UNIT: f32 = 1.35;
@@ -432,6 +480,8 @@ pub fn camera_on_screen(panel: Rect, client: Vec2) -> Vec<Placed> {
     let caption = Rect::from_min_size(pos2(column_left, under), vec2(CAMERA_COLUMN_OUT.abs() + 64.0, CAMERA_UNDER[1] - CAMERA_UNDER[0]) * unit);
     let act = Rect::from_min_size(pos2(caption.right() + 8.0 * unit, under), vec2(224.0, 34.0) * unit);
     let scan = panel.expand(CAMERA_SCAN_OUT * k);
+    // Past VRChat's arrow to its next buttons, which hangs about 25 px (at 720) past the panel's right edge.
+    let share = Rect::from_min_size(pos2(panel.right() + DESK_CAMERA_ARROW * k + CAMERA_GAP * unit, panel.top()), Zone::CameraShareDesk.units().size() * unit);
     [
         (Zone::CameraPeople, tile(0)),
         (Zone::CameraWorld, tile(1)),
@@ -440,6 +490,7 @@ pub fn camera_on_screen(panel: Rect, client: Vec2) -> Vec<Placed> {
         (Zone::CameraCaption, caption),
         (Zone::CameraAct, act),
         (Zone::CameraScan, scan),
+        (Zone::CameraShareDesk, share),
     ]
     .into_iter()
     .map(|(zone, rect)| Placed { zone, rect: Rect::from_min_max(rect.min.round(), rect.max.round()), center, unit })
@@ -923,4 +974,35 @@ mod tests {
             assert!(place(Zone::WheelStop, vec2(w, h)).is_some(), "{w}x{h}: no room under the ring");
         }
     }
+
+    /// REQUEST13: the share column beside VRChat's camera on a screen is there at 1280 x 720 (the panel measured on
+    /// `p1-stream-camera`), past VRChat's arrow, under nothing of VRChat's row, inside the window.
+    /// REQUEST13: in a headset the share row sits right under VRChat's row of buttons (the line the caption takes the rest
+    /// of the time), with the gap the caption has from them; the caption then goes under the row; nothing of it lies on
+    /// the camera's picture or on VRChat's buttons.
+    #[test]
+    fn the_share_row_sits_right_under_vrchat_s_buttons_and_the_caption_under_it() {
+        let share = Zone::CameraShare.units();
+        let caption = Zone::CameraCaption.units();
+        assert_eq!(share.top(), caption.top(), "where the caption is otherwise");
+        let picture = Rect::from_min_max(pos2(-CAMERA_HALF[0], -CAMERA_HALF[1]), pos2(CAMERA_HALF[0], CAMERA_HALF[1]));
+        let buttons = Rect::from_min_max(pos2(-165.0, 113.0), pos2(150.0, 158.0));
+        assert!(!share.intersects(picture) && !share.intersects(buttons) && share.top() - buttons.bottom() <= 10.0, "{share:?}");
+        let mut places = vec![in_units(Zone::CameraCaption), in_units(Zone::CameraShare)];
+        caption_under_share(&mut places, CAMERA_SHARE[1] - CAMERA_SHARE[0]);
+        let moved = places[0].rect;
+        assert!(moved.top() >= share.bottom() && moved.top() - share.bottom() <= 10.0, "the caption right under the row: {moved:?}");
+        assert_eq!(places[1].rect, share, "the row stays");
+    }
+
+    #[test]
+    fn the_share_column_is_right_of_the_camera_at_720() {
+        let panel = Rect::from_min_max(pos2(332.0, 185.0), pos2(948.0, 535.0));
+        let placed = camera_on_screen(panel, vec2(1280.0, 720.0));
+        let share = placed.iter().find(|p| p.zone == Zone::CameraShareDesk).expect("placed at 720");
+        assert!(share.rect.left() >= panel.right() + DESK_CAMERA_ARROW + 10.0, "{:?}", share.rect);
+        assert!(share.rect.right() <= 1280.0 && share.rect.bottom() <= 720.0, "{:?}", share.rect);
+        assert!((share.logical() - Zone::CameraShareDesk.units().size()).length() < 2.5);
+    }
+
 }

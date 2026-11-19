@@ -63,6 +63,7 @@ impl App {
             orbiters_ui::install_wgpu(&rs.device, rs.target_format, 1, &mut rs.renderer.write().callback_resources);
         }
         ctl.attach(&cc.egui_ctx);
+        pages::wake_when_work_ends(&cc.egui_ctx);
         #[cfg(windows)]
         round_corners(cc);
         #[cfg(target_os = "macos")]
@@ -274,6 +275,10 @@ impl App {
         // A friend here offers to look at a 3D picture together (`crate::shared_view_ui`): over that card when both are up.
         let talk_up = crate::wake_offer::up(snap.n4n0.voice.wake_offer, crate::wake_offer::now_ms()).is_some();
         crate::shared_view_ui::window(&ctx, &self.ctl, snap.shared_view.offer.as_ref(), talk_up);
+        // "No 3D picture of this world yet" (REQUEST13), over both when they are up, each card 12 above the one under it.
+        let shared_up = snap.shared_view.offer.as_ref().is_some_and(|o| o.until_ms > crate::wake_offer::now_ms());
+        let lift = if talk_up { crate::wake_offer::HEIGHT + 12.0 } else { 0.0 } + if shared_up { crate::shared_view_ui::HEIGHT + 12.0 } else { 0.0 };
+        crate::world_notice::window(&ctx, &self.ctl, snap.explorer.notice.as_ref(), lift);
         if splash_on {
             splash(&ctx, full, splash_t);
         }
@@ -777,6 +782,14 @@ impl eframe::App for App {
         if let Some(page) = self.ctl.take_show_page() {
             if page == "projects" {
                 self.set_page(Page::Projects, anim::time(ctx));
+            } else if let Some(dir) = page.strip_prefix("share-to:") {
+                // "Share to …" beside VRChat's camera on the desktop: this window's own share dialog, on its friends.
+                let server = if self.ctl.view().settings.development { orbiters_core::account::Server::Development } else { orbiters_core::account::Server::Production };
+                if let Some(entry) = crate::controller::shares::session_entry(std::path::Path::new(dir), server) {
+                    self.set_page(Page::Sessions, anim::time(ctx));
+                    self.sessions.gallery_mut().open_share_to(ctx, entry);
+                    bring_to_front(ctx);
+                }
             } else if let Some(dir) = page.strip_prefix("session:") {
                 // Asked from a capture turning on a sheet: it opens here, in the app's own 3D viewer.
                 self.set_page(Page::Sessions, anim::time(ctx));
@@ -829,19 +842,19 @@ impl App {
     fn idle_facts(&self, ctx: &egui::Context, snap: &Snapshot) -> [(&'static str, bool); 13] {
         use crate::state::UploadState;
         [
-            ("no work of the window runs (a job, a copy, a move, an install, a save, a scan)", pages::working_now() == 0),
-            ("no upload prepares or sends", !snap.uploads.iter().any(|u| matches!(u.state, UploadState::Preparing | UploadState::Sending))),
-            ("no reconstruction runs", snap.reconstruction.is_none()),
-            ("nothing records or imports", !snap.is_capturing()),
-            ("no clean-up runs", snap.cleanup.is_none()),
-            ("no share is under way", !snap.capture_shares.iter().any(|j| j.outcome.is_none())),
-            ("no call", snap.n4n0.calls.call.is_none()),
-            ("no menu is open", !orbiters_ui::popup::any_open(ctx)),
-            ("nothing is open on Home (a profile, the music page)", !self.home.holds()),
-            ("nothing is open in Photos & captures or the captures (a picture, an editor, a viewer, a dialog)", !self.sessions.holds()),
-            ("no world's page or Share window is open", !self.worlds.holds()),
-            ("no event's or picture's window is open", !self.events.holds()),
-            ("no dialog is open on Unity projects", !self.projects.holds()),
+            ("no work of the window runs (a job, a copy, a move, an install, a save, a scan)", pages::working_now() == 0), // i18n: not shown (a reason in code, never displayed)
+            ("no upload prepares or sends", !snap.uploads.iter().any(|u| matches!(u.state, UploadState::Preparing | UploadState::Sending))), // i18n: not shown (a reason in code, never displayed)
+            ("no reconstruction runs", snap.reconstruction.is_none()), // i18n: not shown (a reason in code, never displayed)
+            ("nothing records or imports", !snap.is_capturing()), // i18n: not shown (a reason in code, never displayed)
+            ("no clean-up runs", snap.cleanup.is_none()), // i18n: not shown (a reason in code, never displayed)
+            ("no share is under way", !snap.capture_shares.iter().any(|j| j.outcome.is_none())), // i18n: not shown (a reason in code, never displayed)
+            ("no call", snap.n4n0.calls.call.is_none()), // i18n: not shown (a reason in code, never displayed)
+            ("no menu is open", !orbiters_ui::popup::any_open(ctx)), // i18n: not shown (a reason in code, never displayed)
+            ("nothing is open on Home (a profile, the music page)", !self.home.holds()), // i18n: not shown (a reason in code, never displayed)
+            ("nothing is open in Photos & captures or the captures (a picture, an editor, a viewer, a dialog)", !self.sessions.holds()), // i18n: not shown (a reason in code, never displayed)
+            ("no world's page or Share window is open", !self.worlds.holds()), // i18n: not shown (a reason in code, never displayed)
+            ("no event's or picture's window is open", !self.events.holds()), // i18n: not shown (a reason in code, never displayed)
+            ("no dialog is open on Unity projects", !self.projects.holds()), // i18n: not shown (a reason in code, never displayed)
         ]
     }
 
@@ -857,6 +870,14 @@ impl App {
         let desktop = crate::window_rest::card::can_show();
         #[cfg(not(windows))]
         let desktop = false;
+        let now = self.rest_clock.elapsed().as_secs_f64();
+        let now_ms = crate::wake_offer::now_ms();
+        // What the desktop card confirms on the screen, and a Keep open pressed on it: read right before the look, so
+        // that a press arriving before the close happens wins (verify2).
+        #[cfg(windows)]
+        let (card_shows, kept_on_desktop) = (self.rest.offer(now, now_ms).is_some_and(|(o, _)| self.rest_card.shows() == Some(o.id)), self.rest_card.take_keep());
+        #[cfg(not(windows))]
+        let (card_shows, kept_on_desktop) = (false, false);
         let facts = Facts {
             minimized: ctx.input(|i| i.viewport().minimized.unwrap_or(false)),
             vrchat: snap.vrchat.running && snap.vrchat.runs_here(),
@@ -865,9 +886,9 @@ impl App {
             on: snap.settings.close_minimized_window,
             shown_in_vr: snap.window_rest.shown,
             kept_in_vr: snap.window_rest.kept,
+            card_shows,
+            kept_on_desktop,
         };
-        let now = self.rest_clock.elapsed().as_secs_f64();
-        let now_ms = crate::wake_offer::now_ms();
         match self.rest.step(now, now_ms, &facts) {
             Step::Show(offer, Where::Vr) => self.ctl.window_rest(Some(offer)),
             Step::Show(_, Where::Desktop) | Step::Nothing => {}
@@ -885,14 +906,12 @@ impl App {
                 return;
             }
         }
-        // The desktop card shows while its countdown runs; paused (a game in exclusive full screen), it is not drawn.
+        // The desktop card shows its offer wherever a card can be seen (its countdown runs once Windows confirmed it);
+        // where it cannot (a game in exclusive full screen), it is not drawn and the countdown pauses.
         #[cfg(windows)]
         match self.rest.offer(now, now_ms) {
-            Some((offer, Where::Desktop)) if self.rest.running() => {
-                if self.rest_card.show(ctx.pixels_per_point(), offer.left(now_ms), offer.seconds(now_ms)) {
-                    self.rest.keep();
-                    self.rest_card.hide();
-                }
+            Some((offer, Where::Desktop)) if facts.seen_at == Some(Where::Desktop) => {
+                self.rest_card.present(offer.id, ctx.pixels_per_point(), offer.left(now_ms), offer.seconds(now_ms));
             }
             _ => self.rest_card.hide(),
         }

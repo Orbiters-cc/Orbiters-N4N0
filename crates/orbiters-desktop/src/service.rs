@@ -577,6 +577,7 @@ impl Service {
                 ctl.n4n0_command(N4n0Command::AskPage { open })
             }
             ToService::N4n0 { command } => ctl.n4n0_command(command),
+            ToService::Explorer { command } => ctl.explorer_command(command),
             ToService::OscReconnect => ctl.osc_rediscover(),
             ToService::Updates { action } => ctl.update_action(action),
             // Quickly, on this thread: Stop is the person taking control back.

@@ -496,3 +496,53 @@ fn pictures_kilometres_apart_are_other_parts_of_the_world() {
     assert_eq!((here.len(), elsewhere.len()), (1, 1));
     assert_eq!(here[0].session, "near", "the plan is of where the newest picture is");
 }
+
+/// SWEEP-16: one far camera position (a teleport during the flight, a pose read wrong, a saved share of an older version)
+/// widened the map's box past its cap, and at the coarsest voxels the box was allocated all the same (a 10 km jump: about
+/// 1.5 GB; past what Windows gives, the service aborts). The box stays within the cap, around the newest picture.
+#[test]
+fn a_far_camera_position_never_makes_the_map_larger_than_its_cap() {
+    let mut c = (*capture("one", &two_rooms(), ([0.0, 0.0], [24.0, 10.0]), [4.0, 5.0], None)).clone();
+    c.path.push([7000.0, 1.6, 7000.0]);
+    let (lo, dims, voxel) = extent(&[Arc::new(c)]);
+    let voxels = dims.iter().try_fold(1usize, |n, d| n.checked_mul(*d));
+    assert!(voxels.is_some_and(|n| n <= MOST_VOXELS), "{voxels:?} voxels: {dims:?} of {voxel} m");
+    // What the picture saw is still in it.
+    assert!((0..3).all(|k| lo[k] <= [4.0, 1.6, 5.0][k] && [4.0, 1.6, 5.0][k] < lo[k] + dims[k] as f32 * voxel), "{lo:?} {dims:?}");
+}
+
+/// SWEEP-16, same family: a PLY whose vertex count overflows the size check is refused, not a panic.
+#[test]
+fn a_ply_whose_count_overflows_is_refused_not_a_panic() {
+    let mut data = format!("ply\nformat binary_little_endian 1.0\nelement vertex {}\nproperty float x\nproperty float y\nproperty float z\nproperty float opacity\nend_header\n", usize::MAX / 4).into_bytes();
+    data.extend([0u8; 64]);
+    let read = std::panic::catch_unwind(|| ply_points(&data));
+    assert!(read.as_ref().is_ok_and(|r| r.is_err()), "{:?}", read.map(|r| r.map(|p| p.len())));
+}
+
+/// SWEEP-16 / SWEEP-19 b: a picture taken beyond what a saved map can hold (±8,000 m from the world's origin) is refused
+/// with why, which map_plan lists under left_out; it was mapped, then saved clamped onto a plane.
+#[test]
+fn a_picture_beyond_the_map_s_range_is_refused_with_why() {
+    let dir = std::env::temp_dir().join(format!("orbiters-map-far-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    write_session(&dir, &box_walls(9000.0, 0.0, 9010.0, 10.0), ([9000.0, 0.0], [9010.0, 10.0]), [9005.0, 5.0], [9005.0, 1.0, 5.0], 0.0);
+    let read = Capture::read(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    let why = read.err().unwrap_or_default();
+    assert!(why.contains("8,000 m"), "refused with why: {why:?}");
+}
+
+/// SWEEP-19 b: a saved share never holds a position other than the one mapped: one that does not fit is refused (and the
+/// share kept in memory only), and a file of an older version holding the clamp's value is not read as if it were true.
+#[test]
+fn a_saved_share_is_exact_or_refused_never_clamped() {
+    let mut c = (*capture("one", &two_rooms(), ([0.0, 0.0], [24.0, 10.0]), [4.0, 5.0], None)).clone();
+    c.voxels.push([40_000, 4, 20, 3]);
+    assert!(serde_json::to_string(&c).is_err(), "x = 40,000 voxels (10 km) does not fit the file: refused, not clamped");
+    c.voxels.pop();
+    c.voxels.push([i16::MAX as i32, 4, 20, 3]);
+    let text = serde_json::to_string(&c).map_err(|e| e.to_string());
+    let back = text.as_deref().ok().and_then(|t| serde_json::from_str::<Capture>(t).ok());
+    assert!(back.is_none(), "the clamp's own value is never taken for a position");
+}

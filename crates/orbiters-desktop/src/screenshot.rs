@@ -259,6 +259,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("orbit-camera") {
         return orbit::camera_shots(&out);
     }
+    if only.as_deref() == Some("explorer") {
+        return orbit::explorer_shots(&out);
+    }
     if let Some(refs) = only.as_deref().and_then(|o| o.strip_prefix("orbit-vr=")) {
         return orbit::vr_shots(&out, std::path::Path::new(refs));
     }
@@ -1608,6 +1611,66 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             name: "usage-notice",
             page: Page::Home,
             snapshot: { let mut s = idle.clone(); s.settings.usage.told = false; s },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        // REQUEST13: Explorer points under the Orbiters account (12.5 points, Explorer, 37.5 to Navigator), and the switch.
+        Scenario {
+            name: "settings-explorer",
+            page: Page::Settings,
+            snapshot: with_explorer_points(&signed_in, 12.5),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        // Below zero after a picture was removed: no title, the way to Explorer.
+        Scenario {
+            name: "settings-explorer-negative",
+            page: Page::Settings,
+            snapshot: with_explorer_points(&signed_in, -1.0),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        // The three cards of the corner at once: "Talk with N4N0?", a friend's shared view, the world notice, 12 apart.
+        Scenario {
+            name: "world-notice-stacked",
+            page: Page::Home,
+            snapshot: with_world_notice(&with_share_offer(&with_wake_offer(&with_calls(&idle, false)))),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        // REQUEST13: arriving in a world with no public 3D picture yet: the window's card.
+        Scenario {
+            name: "world-notice",
+            page: Page::Home,
+            snapshot: with_world_notice(&idle),
             frames: 90,
             splash: false,
             open_detail: false,
@@ -3795,6 +3858,27 @@ fn over_ground(rgba: &[u8], width: u32, height: u32) -> egui::ColorImage {
 
 /// A member with calls on, three friends who can be called and one calling.
 /// `snap` with a call connected and "Talk with N4N0?" up (half its time left).
+/// The member's Explorer points as the server would say them (REQUEST13), with its titles.
+fn with_explorer_points(snap: &Snapshot, points: f64) -> Snapshot {
+    use orbiters_core::explorer::{Explorer, Next, Title};
+    let titles: Vec<Title> = [("explorer", 10.0, "Explorer"), ("navigator", 50.0, "Navigator"), ("discoverer", 100.0, "Discoverer"), ("marcoPolo", 500.0, "Marco polo"), ("multiverseTraveler", 1000.0, "Multiverse traveler")]
+        .map(|(key, points, name)| Title { key: key.into(), points, name: name.into() })
+        .to_vec();
+    let title = titles.iter().rev().find(|t| t.points <= points).cloned();
+    let next = titles.iter().find(|t| t.points > points).map(|t| Next { key: t.key.clone(), points: t.points, name: t.name.clone(), remaining: t.points - points });
+    let mut s = snap.clone();
+    s.explorer.points = Some(Explorer { points, half_points: Some((points * 2.0) as i64), title, next, titles });
+    s
+}
+
+/// "No 3D picture of this world yet" up, a picture there earning 1 point (long enough for the frames the harness paints).
+fn with_world_notice(snap: &Snapshot) -> Snapshot {
+    let mut s = snap.clone();
+    let now = crate::controller::explorer::now_ms();
+    s.explorer.notice = Some(crate::controller::explorer::WorldNotice { id: 1, world_id: "wrld_sample".into(), world_name: "Sample world".into(), earns: Some(1.0), until_ms: now + 600_000, for_ms: 1_000_000 });
+    s
+}
+
 fn with_wake_offer(snap: &Snapshot) -> Snapshot {
     use crate::state::{CallPhase, CallView};
     let mut s = snap.clone();

@@ -116,6 +116,8 @@ pub trait Backend: Send + Sync {
     fn calibrated(&self, calibration: Calibration);
     /// N4N0: a question, the Talk button, the panel, saved videos.
     fn n4n0(&self, command: N4n0Command);
+    /// Explorer points: the world notice's and the camera's share buttons' presses (controller/explorer.rs).
+    fn explorer(&self, _command: controller::explorer::Command) {}
     /// VRChat's frames the overlay saw, for world performance statistics.
     fn frames(&self, chunk: crate::state::FrameChunk);
     /// Whether someone wears the headset (the overlay reads SteamVR's activity level).
@@ -398,6 +400,10 @@ impl Backend for Remote {
         self.0.send(&ToService::N4n0 { command });
     }
 
+    fn explorer(&self, command: controller::explorer::Command) {
+        self.0.send(&ToService::Explorer { command });
+    }
+
     fn updates(&self, action: UpdateAction) {
         self.0.send(&ToService::Updates { action });
     }
@@ -631,6 +637,10 @@ impl Backend for Local {
 
     fn n4n0(&self, command: N4n0Command) {
         self.ctl.n4n0_command(command);
+    }
+
+    fn explorer(&self, command: controller::explorer::Command) {
+        self.ctl.explorer_command(command);
     }
 
     fn updates(&self, action: UpdateAction) {

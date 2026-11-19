@@ -1167,6 +1167,17 @@ fn hidden_parts(handles: &mut HashMap<Zone, vr::OverlayHandle>, up: &[Zone], vis
     zones.iter().filter_map(|zone| handles.remove(zone)).collect()
 }
 
+/// The pointer's hand this turn from last turn's (`active`), which hands' lasers meet a part (`on`), their triggers now and
+/// last turn; and the hand that was the pointer and lets go now off every part, whose up is delivered before another hand
+/// takes the pointer (else its release was never seen, OVERLAY-25).
+fn pointer_hand(active: Option<usize>, on: [bool; 2], triggers: [bool; 2], was: [bool; 2]) -> (Option<usize>, Option<usize>) {
+    if active.is_some_and(|h| on[h] || triggers[h]) {
+        return (active, None);
+    }
+    let let_go = active.filter(|&h| was[h] && !triggers[h]);
+    ([1, 0].into_iter().find(|&i| on[i]), let_go)
+}
+
 /// Where the `i`-th part of this turn's snapshot goes, and its quad; `None` past the snapshot (never an index out of bounds).
 fn placed_at<'a>(quads: &'a [(Quad, Placed)], placing: &[Placing], i: usize) -> Option<(Matrix34, &'a Quad)> {
     let quad = &quads.get(i)?.0;
@@ -1985,10 +1996,13 @@ impl OrbitVr {
         if now.duration_since(self.pointing_since) >= IDLE_OPEN {
             self.buttons.reset_because("no press and no laser on our parts for IDLE_OPEN (300 s)"); // i18n: not shown (a menu mismatch report's line)
         }
-        // The pointer: the hand that pressed stays; else the right, else the left.
-        if self.active.is_none_or(|h| hits[h].is_none() && !triggers[h]) {
-            self.active = [1, 0].into_iter().find(|&i| hits[i].is_some());
+        // The pointer: the hand that pressed stays; else the right, else the left. A hand that lets go off every part is
+        // the pointer until its up is delivered, where it last was (OVERLAY-25: a slider stayed held).
+        let (active, let_go) = pointer_hand(self.active, hits.map(|h| h.is_some()), triggers, self.trigger_was);
+        if let_go.is_some() {
+            self.panels.release();
         }
+        self.active = active;
         let pointer = self.active.and_then(|h| hits[h]).map(|(panel, uv, _)| {
             let logical: Pos2 = self.panels.all().nth(panel).map_or(Pos2::ZERO, |p| p.to_logical(uv));
             (panel, logical)
@@ -2016,7 +2030,7 @@ impl OrbitVr {
             if down && !was && blocked_before[h] {
                 let pressed = self.panels.press(cx.snap);
                 turn.clicked |= pressed.clicked;
-            } else if !down && was {
+            } else if !down && was && let_go.is_none() {
                 self.panels.release();
             }
         }
@@ -2265,6 +2279,46 @@ impl OrbitVr {
 
 #[cfg(test)]
 mod tests {
+    /// OVERLAY-25: right presses on a slider, both lasers leave every part while it is held, the right lets go there while
+    /// the left points at a part: exactly one release, delivered before the left takes the pointer; coming back without a
+    /// press releases nothing more.
+    #[test]
+    fn a_release_off_every_part_is_delivered_once_before_the_other_hand_points() {
+        use super::pointer_hand;
+        // (laser on a part [left, right], triggers [left, right])
+        let turns = [
+            ([false, true], [false, false]),
+            ([false, true], [false, true]),  // the right presses on the slider
+            ([false, false], [false, true]), // both off every part, the right still held
+            ([true, false], [false, false]), // the right lets go off every part, the left points
+            ([true, true], [false, false]),  // back, no press
+            ([true, true], [false, false]),
+        ];
+        let (mut active, mut was, mut releases, mut pointers) = (None, [false; 2], 0, Vec::new());
+        for (on, triggers) in turns {
+            let (now, let_go) = pointer_hand(active, on, triggers, was);
+            if let_go.is_some() {
+                releases += 1;
+            }
+            active = now;
+            // As the turn does after it: the pointer's own up, unless delivered above.
+            if let Some(h) = active {
+                if !triggers[h] && was[h] && let_go.is_none() {
+                    releases += 1;
+                }
+            }
+            pointers.push(active);
+            was = triggers;
+        }
+        assert_eq!(releases, 1);
+        assert_eq!(pointers, [Some(1), Some(1), Some(1), Some(0), Some(0), Some(0)], "the left keeps the pointer it took");
+        // A hand still held off every part stays the pointer; one that points keeps it as before.
+        assert_eq!(pointer_hand(Some(1), [true, false], [false, true], [false, true]), (Some(1), None));
+        assert_eq!(pointer_hand(Some(0), [true, true], [false, false], [false, false]), (Some(0), None));
+        assert_eq!(pointer_hand(None, [true, true], [false, false], [false, false]), (Some(1), None));
+        assert_eq!(pointer_hand(Some(0), [false, false], [false, false], [false, false]), (None, None), "no press, nothing to let go");
+    }
+
     /// REL-2: the panels as they were at the top of the turn (nine wing parts, the "len is 9" of the panic) and a press that
     /// opened the Worlds sheet since: no small place this turn, no panic; with the page in the snapshot, the place as before.
     #[test]

@@ -19,6 +19,14 @@ const WAIT_UNQUEUED: Duration = Duration::from_secs(15);
 /// A job just started shows as on its way until the snapshots have it.
 const JOB_SHOWS: Duration = Duration::from_secs(10);
 
+/// Where an ask stands, for [`super::explorer`].
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum AskState {
+    Waiting,
+    Job(String),
+    Failed(String),
+}
+
 /// What a menu asked for a capture.
 #[derive(Clone, Debug)]
 enum Asked {
@@ -142,7 +150,7 @@ impl MenuShares {
                     // Gone from the jobs kept: its row says what the listing knows.
                     None => Sharing::Idle,
                     Some(None) => Sharing::Busy { public: ask.public, people },
-                    Some(Some(Outcome::Shared(orbiters_core::shares::Shared::Item { item }))) => {
+                    Some(Some(Outcome::Shared(orbiters_core::shares::Shared::Item { item, .. }))) => {
                         Sharing::Done { public: item.public, people: item.grants.len() as u32 }
                     }
                     Some(Some(Outcome::Shared(orbiters_core::shares::Shared::Request { .. }))) => Sharing::Done { public: ask.public, people },
@@ -303,6 +311,17 @@ impl super::Controller {
         Ok(())
     }
 
+    /// Where the share a menu (or the camera's buttons, [`super::explorer`]) asked for capture `key` stands: its 3D view
+    /// awaited, its Photos & captures job, or why it could not go. None when nothing was asked.
+    pub(super) fn menu_share_state(&self, key: &str) -> Option<AskState> {
+        let m = self.menu_shares.lock().unwrap();
+        Some(match m.asked.get(&folder_of(key))? {
+            Asked::Waiting { .. } => AskState::Waiting,
+            Asked::Job { id, .. } => AskState::Job(id.clone()),
+            Asked::Failed(message) => AskState::Failed(message.clone()),
+        })
+    }
+
     /// Starts the Photos & captures job sharing `entry` as `ask` says.
     fn menu_share_job(self: &Shared, entry: Entry, ask: ShareAsk, development: bool) -> Asked {
         let id = format!("n4n0-menu-{}", uuid::Uuid::new_v4().simple());
@@ -423,7 +442,7 @@ mod tests {
         let ask = ShareAsk { key: entry(&dir, true).key, public: true, ..Default::default() };
         m.asked.insert(name.clone(), Asked::Job { id: "j".into(), ask: ask.clone(), since: Instant::now() - JOB_SHOWS });
         assert_eq!(row(&m, &snap).sharing, Sharing::Idle, "a job no longer kept");
-        snap.capture_shares.push(ShareJob { id: "j".into(), key: ask.key.clone(), stage: Default::default(), outcome: None, update: false });
+        snap.capture_shares.push(ShareJob { id: "j".into(), key: ask.key.clone(), stage: Default::default(), outcome: None, update: false, refused: None });
         assert_eq!(row(&m, &snap).sharing, Sharing::Busy { public: true, people: 0 });
         snap.capture_shares[0].outcome = Some(Outcome::Failed { message: orbiters_core::shares::EXPLICIT_WARNING.into(), explicit: true });
         let flagged = row(&m, &snap);

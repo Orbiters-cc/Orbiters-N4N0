@@ -244,6 +244,10 @@ pub enum ToService {
     N4n0 {
         command: N4n0Command,
     },
+    /// Explorer points: a press on the world notice or the camera's share buttons.
+    Explorer {
+        command: crate::controller::explorer::Command,
+    },
     /// Make VRChat find the OSC service again (it sends avatar parameters only to services it found).
     OscReconnect,
     /// A loop's last ten seconds, for the performance self-check (`perf`).
@@ -1151,7 +1155,7 @@ pub(crate) mod tests {
             4 => s.settings.walk_boost.strength = (round % 10) as f32 / 10.0,
             5 => s.projects_changed += 1,
             6 => s.capture.trail.push([round as f32, 1.0, 2.0]),
-            7 => s.capture_shares.push(crate::controller::shares::ShareJob { id: format!("job-{round}"), key: "capture".into(), stage: Default::default(), outcome: None, update: false }),
+            7 => s.capture_shares.push(crate::controller::shares::ShareJob { id: format!("job-{round}"), key: "capture".into(), stage: Default::default(), outcome: None, update: false, refused: None }),
             _ => {
                 // Two parts that go together: the account and what it may do.
                 s.account.state = crate::state::AccountState::SignedIn { username: format!("member-{round}") };
@@ -1236,7 +1240,7 @@ pub(crate) mod tests {
         s.settings.walk_boost.strength += 0.25;
         s.reconstruction = Some(ReconstructionJob::new(PathBuf::from("a session"), true));
         s.vrchat_login.revision = 3;
-        s.capture_shares.push(crate::controller::shares::ShareJob { id: "job".into(), key: "capture".into(), stage: Default::default(), outcome: None, update: true });
+        s.capture_shares.push(crate::controller::shares::ShareJob { id: "job".into(), key: "capture".into(), stage: Default::default(), outcome: None, update: true, refused: None });
         s.update.channel = "another channel".into();
         s.cleanup = Some(CleanupJob::default());
         s.vr_audio.last = Some(crate::controller::vr_audio::Event { utc_ms: 1, text: "Set to the headset's".into(), error: false });
@@ -1249,6 +1253,7 @@ pub(crate) mod tests {
         s.camera_tools.qr = crate::controller::camera_tools::Qr::Found { url: "https://orbiters.cc".into() };
         s.camera_tools.demo = crate::controller::camera_tools::Demo::Busy;
         s.camera_tools.qr_generation = 3;
+        s.explorer.points = Some(orbiters_core::explorer::Explorer { points: 12.5, half_points: Some(25), ..Default::default() });
         s.projects_changed = 5;
         s.translate.set(crate::state::TranslateStatus { lines: 3, ..Default::default() });
         s.perf.set(crate::perf::PerfView { hint: Some(crate::perf::Hint { key: "overlay_cpu".into(), part: None }), report: None });

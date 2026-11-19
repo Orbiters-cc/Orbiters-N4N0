@@ -275,6 +275,10 @@ impl App {
         // A friend here offers to look at a 3D picture together (`crate::shared_view_ui`): over that card when both are up.
         let talk_up = crate::wake_offer::up(snap.n4n0.voice.wake_offer, crate::wake_offer::now_ms()).is_some();
         crate::shared_view_ui::window(&ctx, &self.ctl, snap.shared_view.offer.as_ref(), talk_up);
+        // "No 3D picture of this world yet" (REQUEST13), over both when they are up, each card 12 above the one under it.
+        let shared_up = snap.shared_view.offer.as_ref().is_some_and(|o| o.until_ms > crate::wake_offer::now_ms());
+        let lift = if talk_up { crate::wake_offer::HEIGHT + 12.0 } else { 0.0 } + if shared_up { crate::shared_view_ui::HEIGHT + 12.0 } else { 0.0 };
+        crate::world_notice::window(&ctx, &self.ctl, snap.explorer.notice.as_ref(), lift);
         if splash_on {
             splash(&ctx, full, splash_t);
         }
@@ -778,6 +782,14 @@ impl eframe::App for App {
         if let Some(page) = self.ctl.take_show_page() {
             if page == "projects" {
                 self.set_page(Page::Projects, anim::time(ctx));
+            } else if let Some(dir) = page.strip_prefix("share-to:") {
+                // "Share to …" beside VRChat's camera on the desktop: this window's own share dialog, on its friends.
+                let server = if self.ctl.view().settings.development { orbiters_core::account::Server::Development } else { orbiters_core::account::Server::Production };
+                if let Some(entry) = crate::controller::shares::session_entry(std::path::Path::new(dir), server) {
+                    self.set_page(Page::Sessions, anim::time(ctx));
+                    self.sessions.gallery_mut().open_share_to(ctx, entry);
+                    bring_to_front(ctx);
+                }
             } else if let Some(dir) = page.strip_prefix("session:") {
                 // Asked from a capture turning on a sheet: it opens here, in the app's own 3D viewer.
                 self.set_page(Page::Sessions, anim::time(ctx));

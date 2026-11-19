@@ -102,7 +102,7 @@ impl Pacer {
             let request = shares::Share { public: job.public, recipients: Vec::new(), acknowledge_explicit: false, message: String::new() };
             let explicit = job.public && job.entry.content.explicit;
             match (self.share)(server, job.entry.clone(), request, &report) {
-                Ok(shares::Shared::Item { item }) => {
+                Ok(shares::Shared::Item { item, .. }) => {
                     self.jobs.lock().unwrap().insert(dir, (server, done(server, &item)));
                 }
                 Ok(_) => {
@@ -351,7 +351,7 @@ mod tests {
                 }
                 *left -= 1;
                 let id = sent.lock().unwrap().len() as u64;
-                Ok(shares::Shared::Item { item: item(id, request.public) })
+                Ok(shares::Shared::Item { explorer: None, item: item(id, request.public) })
             })
         };
         let pacer = Pacer::new(share, Arc::new(|| {}));

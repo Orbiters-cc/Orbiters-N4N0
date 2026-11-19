@@ -16,13 +16,13 @@ const SORT_ORDER: u32 = 12;
 /// Steps of its line of time left that are painted (about ten a second over six seconds).
 const STEPS: f32 = 60.0;
 
-pub fn height_m() -> f32 {
-    VR_WIDTH_M * VR_PX[1] as f32 / VR_PX[0] as f32
-}
 
 pub struct Prompt {
     handle: vr::OverlayHandle,
     canvas: Canvas,
+    /// Its picture's size and its width in the play space, as its face takes ([`Face::size`]).
+    px: [u32; 2],
+    width_m: f32,
     /// The offer it shows, and where it was put for it.
     placed: Option<(u64, Matrix34)>,
     /// The offer pressed here: it goes at once, before the app's word that it was taken.
@@ -57,6 +57,19 @@ impl Evidence {
 pub enum Face {
     Talk,
     KeepOpen { seconds: u64 },
+    /// "No 3D picture of this world yet" with "Take a 3D picture" (`crate::world_notice`, REQUEST13); whether it says the
+    /// point a picture there earns.
+    World { earns_one: bool },
+}
+
+impl Face {
+    /// Its picture's size and width: the world notice has a row for its words and one for its action.
+    pub fn size(self) -> ([u32; 2], f32) {
+        match self {
+            Face::World { .. } => (crate::world_notice::VR_PX, crate::world_notice::VR_WIDTH_M),
+            _ => (VR_PX, VR_WIDTH_M),
+        }
+    }
 }
 
 impl Prompt {
@@ -65,7 +78,25 @@ impl Prompt {
         let _ = overlay.set_width_in_meters(handle, VR_WIDTH_M);
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, SORT_ORDER);
-        Ok(Self { handle, canvas: Canvas::new(VR_PX[0], VR_PX[1]), placed: None, pressed: None, visible: false, drawn: None, drawn_with: None, evidence: Evidence::default() })
+        Ok(Self { handle, canvas: Canvas::new(VR_PX[0], VR_PX[1]), px: VR_PX, width_m: VR_WIDTH_M, placed: None, pressed: None, visible: false, drawn: None, drawn_with: None, evidence: Evidence::default() })
+    }
+
+    /// At the size `face` takes (before [`Prompt::place`]): another size is a new picture, placed again.
+    pub fn fit(&mut self, overlay: &vr::Overlay, face: Face) {
+        let (px, width_m) = face.size();
+        if px != self.px || width_m != self.width_m {
+            self.canvas = Canvas::new(px[0], px[1]);
+            self.px = px;
+            self.width_m = width_m;
+            let _ = overlay.set_width_in_meters(self.handle, width_m);
+            self.placed = None;
+            self.drawn = None;
+            self.drawn_with = None;
+        }
+    }
+
+    fn height_m(&self) -> f32 {
+        self.width_m * self.px[1] as f32 / self.px[0] as f32
     }
 
     pub fn destroy(&self, overlay: &vr::Overlay) {
@@ -103,7 +134,7 @@ impl Prompt {
             self.visible = overlay.show(self.handle).is_ok();
             self.evidence.shown = self.visible;
         }
-        Some(Quad { transform: at, width: VR_WIDTH_M, height: height_m() })
+        Some(Quad { transform: at, width: self.width_m, height: self.height_m() })
     }
 
     /// Whether it shows the offer `id` now: only when SteamVR took its place, its visibility and its picture.
@@ -132,11 +163,13 @@ impl Prompt {
             self.canvas.paint(0.0, |p| match face {
                 Face::Talk => paint_vr(p, hover, left),
                 Face::KeepOpen { seconds } => crate::window_rest::paint_band(p, hover, left, seconds),
+                Face::World { earns_one } => crate::world_notice::paint_vr(p, earns_one, hover, left),
             });
         }
-        let changed = if first { Some([0, 0, VR_PX[0], VR_PX[1]]) } else { self.canvas.damage() };
+        let px = self.px;
+        let changed = if first { Some([0, 0, px[0], px[1]]) } else { self.canvas.damage() };
         if let Some(changed) = changed {
-            if !presenter.show_part(overlay, self.handle, self.canvas.pixels(), VR_PX[0], VR_PX[1], changed) {
+            if !presenter.show_part(overlay, self.handle, self.canvas.pixels(), px[0], px[1], changed) {
                 // Refused: the band does not show this picture; painted whole again next turn.
                 self.evidence.pictured = false;
                 self.drawn = None;
@@ -159,11 +192,13 @@ impl Prompt {
         for _ in 0..if first { 2 } else { 1 } {
             self.canvas.paint(0.0, |p| draw(p));
         }
-        let changed = if first { Some([0, 0, VR_PX[0], VR_PX[1]]) } else { self.canvas.damage() };
+        // At the band's size now (the caller fits it to "Talk with N4N0?"'s first: [`Self::fit`]).
+        let px = self.px;
+        let changed = if first { Some([0, 0, px[0], px[1]]) } else { self.canvas.damage() };
         if let Some(changed) = changed {
             // Refused: this face is not shown; painted whole again next turn (as the offers' own picture). It is never
             // the countdown's evidence: that is only the countdown's own picture.
-            if !presenter.show_part(overlay, self.handle, self.canvas.pixels(), VR_PX[0], VR_PX[1], changed) {
+            if !presenter.show_part(overlay, self.handle, self.canvas.pixels(), px[0], px[1], changed) {
                 self.drawn_with = None;
                 return;
             }
@@ -209,6 +244,14 @@ mod tests {
                 }
             });
             assert!(canvas.pixels().iter().any(|&b| b != 0), "{language:?}: something was painted");
+            let (px, _) = Face::World { earns_one: true }.size();
+            let mut world = Canvas::new(px[0], px[1]);
+            orbiters_i18n::in_language(language, || {
+                for _ in 0..2 {
+                    world.paint(0.0, |p| crate::world_notice::paint_vr(p, true, true, 0.5));
+                }
+            });
+            assert!(world.pixels().iter().any(|&b| b != 0), "{language:?}: the world notice was painted");
         }
     }
 }

@@ -191,6 +191,9 @@ pub struct Uploaded {
     pub kind: crate::shares::Kind,
     pub id: u64,
     pub visibility: String,
+    /// A public upload's points (contract `night-1119/explorer-contract.md`, section 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explorer: Option<crate::explorer::Outcome>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

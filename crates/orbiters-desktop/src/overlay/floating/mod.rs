@@ -150,6 +150,8 @@ const SHARE_BIT: u64 = 1 << 62;
 const PICK_BIT: u64 = 1 << 61;
 /// Steps of a band's line of time left that are painted.
 const STEPS: f32 = 60.0;
+/// And the world notices' ([`crate::world_notice`], REQUEST13), which count from 1 too.
+const NOTICE_BIT: u64 = 1 << 60;
 
 /// What the band has to tell the service of the window's offer it shows (`showing`: now), given what it last said:
 /// `Some(what)` when that changed, then remembered as said.
@@ -169,6 +171,10 @@ pub struct Floating {
     prompt: Option<prompt::Prompt>,
     /// The window's offer to close the band last told the service it shows (`None`: it said it shows none).
     rest_said: Option<u64>,
+    /// When the world notice was last said to be held back behind a menu (once a second at most).
+    notice_held: Option<Instant>,
+    /// The world notice whose "Take a 3D picture" a trigger pulled: it acts when let go on it ([`notice_release`]).
+    notice_down: Option<u64>,
     lasers: laser::Lasers,
     input: Interaction,
     mouse: MouseSurfaces,
@@ -191,6 +197,8 @@ impl Floating {
             strip: strip::Strip::new(overlay, key).map_err(|e| eprintln!("{e}")).ok(),
             prompt: prompt::Prompt::new(overlay, key).map_err(|e| eprintln!("{e}")).ok(),
             rest_said: None,
+            notice_held: None,
+            notice_down: None,
             lasers: laser::Lasers::new(overlay, key)?,
             input: Interaction::default(),
             mouse: MouseSurfaces::default(),
@@ -249,6 +257,24 @@ impl Floating {
         let rest = cx.snap.window_rest.offer.filter(|o| offer.is_none() && share_offer.is_none() && pick.is_none() && self.prompt.is_some() && cx.snap.window_rest.kept != Some(o.id));
         // The band's ids: a wake offer's, a share offer's, a picker's, or a rest offer's, each kind with its top bit (all count from 1).
         let band = offer.map(|o| o.id).or(share_offer.as_ref().map(|o| o.id | SHARE_BIT)).or(pick.map(|p| p.id | PICK_BIT)).or(rest.map(|o| o.id | REST_BIT));
+        // Or, the band still free, "No 3D picture of this world yet" (REQUEST13), never over a menu, our panel or SteamVR's
+        // dashboard: held back while one is up (its time waits, a little).
+        let notice = cx.snap.explorer.notice.clone().filter(|n| n.up(crate::controller::explorer::now_ms()) && band.is_none() && self.prompt.is_some());
+        let in_the_way = cx.menu_open || !cx.menu.is_empty() || cx.dashboard || self.panel.is_shown();
+        if let Some(n) = notice.as_ref().filter(|_| in_the_way) {
+            if self.notice_held.is_none_or(|at| now.duration_since(at).as_secs_f32() >= 1.0) {
+                self.notice_held = Some(now);
+                cx.backend.explorer(crate::controller::explorer::Command::NoticeHeld { id: n.id });
+            }
+        }
+        let notice = notice.filter(|_| !in_the_way);
+        let band = band.or(notice.as_ref().map(|n| n.id | NOTICE_BIT));
+        // The band at the size of what it shows: the world notice is taller; every other face is "Talk with N4N0?"'s size.
+        if let (Some(p), Some(n)) = (self.prompt.as_mut(), notice.as_ref()) {
+            p.fit(cx.overlay, prompt::Face::World { earns_one: n.earns == Some(1.0) });
+        } else if let Some(p) = self.prompt.as_mut().filter(|_| band.is_some()) {
+            p.fit(cx.overlay, prompt::Face::Talk);
+        }
         if !settings.watch && !strip_on && band.is_none() && !self.panel.is_shown() && !asked && cx.menu.is_empty() {
             if !self.resting {
                 self.rest(cx.overlay, cx.presenter, state, cx.backend);
@@ -396,6 +422,18 @@ impl Floating {
                 }
             }
         }
+        // "Take a 3D picture": the picture waits for VRChat's camera. Unlike the two above it acts when let go on the band,
+        // and a band gone or changed under the held trigger does nothing (verify-vr: presses on release).
+        let held = cx.actions.triggers().iter().any(|t| *t);
+        let shown = notice.as_ref().map(|n| n.id);
+        if let Some(id) = notice_release(&mut self.notice_down, shown, outcome.prompt_press, held, outcome.prompt_hover, cx.input_read) {
+            clicked = true;
+            cx.backend.explorer(crate::controller::explorer::Command::NoticeTake { id });
+            if let Some(p) = self.prompt.as_mut() {
+                p.pressed(cx.overlay, id | NOTICE_BIT);
+            }
+        }
+        clicked |= outcome.prompt_press && shown.is_some();
         // Keep open: the window stays.
         if let Some(o) = rest.filter(|_| outcome.prompt_press) {
             clicked = true;
@@ -453,6 +491,8 @@ impl Floating {
             p.paint_with(cx.overlay, cx.presenter, look, |painter| crate::shared_view_ui::paint_pick(painter, &names, hover, left));
         } else if let (Some(p), Some(o)) = (self.prompt.as_mut(), rest) {
             p.paint(cx.overlay, cx.presenter, prompt::Face::KeepOpen { seconds: o.seconds(now_ms) }, outcome.prompt_hover, o.left(now_ms));
+        } else if let (Some(p), Some(n)) = (self.prompt.as_mut(), notice.as_ref()) {
+            p.paint(cx.overlay, cx.presenter, prompt::Face::World { earns_one: n.earns == Some(1.0) }, outcome.prompt_hover, n.left(crate::controller::explorer::now_ms()));
         }
         turn.clicked = clicked;
         turn
@@ -496,13 +536,53 @@ impl Floating {
         for hand in 0..2 {
             self.lasers.update(overlay, presenter, hand, None);
         }
+        self.notice_down = None;
         self.resting = true;
     }
+}
+
+/// The world notice's press, acted on when let go: `down` the notice a pull began on; `shown` the notice the band shows
+/// now; `pulled` a trigger was pulled on the band this turn; `held` a trigger is still down; `on` a laser is on the band;
+/// `read` this turn's input was read. Returns the notice to take now. A band showing another notice, or none, cancels.
+pub fn notice_release(down: &mut Option<u64>, shown: Option<u64>, pulled: bool, held: bool, on: bool, read: bool) -> Option<u64> {
+    if shown.is_none() || (down.is_some() && *down != shown) {
+        *down = None;
+        return None;
+    }
+    if pulled {
+        *down = shown;
+        return None;
+    }
+    if !read || held {
+        return None;
+    }
+    let id = down.take()?;
+    on.then_some(id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The notice's "Take a 3D picture": nothing on the pull, done on the let-go on it; let go off it, or the band gone or
+    /// showing another notice under the held trigger, nothing.
+    #[test]
+    fn the_world_notice_acts_when_let_go_on_it_and_never_after_it_went() {
+        let mut down = None;
+        assert_eq!(notice_release(&mut down, Some(4), true, true, true, true), None, "the pull does nothing yet");
+        assert_eq!(notice_release(&mut down, Some(4), false, true, true, true), None, "held");
+        assert_eq!(notice_release(&mut down, Some(4), false, false, true, false), None, "input not read: nothing decided");
+        assert_eq!(notice_release(&mut down, Some(4), false, false, true, true), Some(4), "let go on it");
+        assert_eq!(notice_release(&mut down, Some(4), false, false, true, true), None, "once");
+        notice_release(&mut down, Some(4), true, true, true, true);
+        assert_eq!(notice_release(&mut down, Some(4), false, false, false, true), None, "let go off it");
+        assert_eq!(down, None);
+        notice_release(&mut down, Some(4), true, true, true, true);
+        assert_eq!(notice_release(&mut down, None, false, true, false, true), None, "the band went under the trigger");
+        assert_eq!(notice_release(&mut down, Some(4), false, false, true, true), None, "and came back: nothing");
+        notice_release(&mut down, Some(4), true, true, true, true);
+        assert_eq!(notice_release(&mut down, Some(5), false, false, true, true), None, "another notice");
+    }
 
     /// Night3, SWEEP-7 and -8: what the band says of the window's offer follows what it shows, both ways, every time:
     /// shown, hidden (the dashboard, "Talk with N4N0?"), shown again; and an offer shown, gone, then one of the same

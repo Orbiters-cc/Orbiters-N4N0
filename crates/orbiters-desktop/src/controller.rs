@@ -224,6 +224,8 @@ pub struct Controller {
     n4n0: orbiters_n4n0::Shared,
     /// The 3D captures N4N0's menu lists and shares (controller/menu_shares.rs).
     menu_shares: Mutex<menu_shares::MenuShares>,
+    /// Explorer points: the notice in worlds with no public 3D picture, the camera's share buttons (controller/explorer.rs).
+    explorer: Mutex<explorer::ExplorerState>,
     /// VRChat's frame rate per world, gathered for Orbiters (controller/performance.rs).
     performance: Mutex<performance::PerformanceRuntime>,
     /// A 3D picture under way (controller/burst.rs).
@@ -523,6 +525,7 @@ pub mod vrchat_data;
 pub mod vrchat_login;
 pub mod camera_tools;
 pub mod vr_audio;
+pub mod explorer;
 mod shared_view;
 mod window_rest;
 mod world_captures;
@@ -596,6 +599,7 @@ impl Controller {
                 orbiters_n4n0::N4n0::new(link.clone(), link, crate::device::platform(), n4n0::files())
             },
             menu_shares: Mutex::new(menu_shares::MenuShares::default()),
+            explorer: Mutex::new(explorer::ExplorerState::default()),
             performance: Mutex::new(performance::PerformanceRuntime::default()),
             burst: Mutex::new(burst::BurstRuntime::default()),
             world_captures: Mutex::new(world_captures::WorldCapturesRuntime::default()),
@@ -670,6 +674,7 @@ impl Controller {
         });
         spawn_watchers(self.clone());
         shares::spawn_presence(self.clone());
+        explorer::spawn(self.clone());
         world_captures::spawn(self.clone());
         world_feedback::spawn(self.clone());
         self.start_account();

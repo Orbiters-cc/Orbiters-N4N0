@@ -258,7 +258,13 @@ pub struct ItemAnswer {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Shared {
-    Item { item: Item },
+    /// Its item as it is now; for its owner's public share, what it earned (contract `night-1119/explorer-contract.md`,
+    /// section 3; none from a server that does not say, or when the points could not be read: the share stands).
+    Item {
+        item: Item,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explorer: Option<crate::explorer::Outcome>,
+    },
     Request { request: ShareRequest },
 }
 #[derive(Clone, Debug, Default)]
@@ -310,6 +316,17 @@ impl std::fmt::Display for RateLimited {
 }
 impl std::error::Error for RateLimited {}
 
+/// A first public share refused: the member made 30 in the last 24 hours (429 `explorer-daily-limit`). Nothing was
+/// changed; the server's sentence in the member's language.
+#[derive(Debug)]
+pub struct ExplorerDailyLimit(pub String);
+impl std::fmt::Display for ExplorerDailyLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ExplorerDailyLimit {}
+
 /// A `Retry-After` header's seconds (a date is not what Orbiters sends: a minute then).
 pub fn retry_after_seconds(value: Option<&str>) -> u64 {
     value.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(60).max(1)
@@ -328,6 +345,10 @@ pub(crate) fn json<T: serde::de::DeserializeOwned>(response: ureq::http::Respons
         }
         if status == 409 && value["code"] == "revision-conflict" {
             return Err(RevisionConflict { revision: value["revision"].as_u64().unwrap_or(0), message }.into());
+        }
+        // A member's 31st first public share in 24 hours (contract `night-1119/explorer-contract.md`): nothing changed.
+        if status == 429 && value["code"] == "explorer-daily-limit" {
+            return Err(ExplorerDailyLimit(message).into());
         }
         if status == 429 {
             return Err(RateLimited { retry_after_s: retry_after_seconds(retry_after.as_deref()), message }.into());
@@ -384,7 +405,7 @@ fn with_fields<T: serde::de::DeserializeOwned>(value: serde_json::Value, require
 /// exactly the visibility and the people asked (night4, verify2: never another request's or another set of people).
 fn shared_as_asked(shared: &Shared, kind: Kind, id: u64, share: &Share) -> bool {
     match shared {
-        Shared::Item { item } => {
+        Shared::Item { item, .. } => {
             item.kind == kind
                 && item.id == id
                 && (!share.public || item.public)
@@ -503,7 +524,7 @@ impl Api {
         json_done(r, &[], |s| shared_as_asked(s, kind, id, share), || {
             // What is there now: the item as asked, or (another member's item) the request made for it.
             let item = self.capture_item_with(token, kind, id, &["/item/grants", "/item/public"])?;
-            let shared = Shared::Item { item };
+            let shared = Shared::Item { explorer: None, item };
             if shared_as_asked(&shared, kind, id, share) {
                 return Ok(shared);
             }
@@ -626,7 +647,7 @@ mod tests {
         assert!(api.share_capture("t", Kind::Capture, 3, &share).is_err());
         // Its answer does not read, but the item shows the grant: done.
         let api = answering(vec![(200, "{}".into()), (200, item(vec![grant("usr_friend")]))]);
-        assert!(matches!(api.share_capture("t", Kind::Capture, 3, &share), Ok(Shared::Item { item }) if item.id == 3));
+        assert!(matches!(api.share_capture("t", Kind::Capture, 3, &share), Ok(Shared::Item { item, .. }) if item.id == 3));
         // The answer itself shows it: no second request (the stand-in has none).
         let api = answering(vec![(200, item(vec![grant("usr_friend")]))]);
         assert!(api.share_capture("t", Kind::Capture, 3, &share).is_ok());

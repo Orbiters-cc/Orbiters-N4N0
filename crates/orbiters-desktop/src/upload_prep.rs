@@ -317,18 +317,30 @@ pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on
         return Ok(false);
     }
     let Some(dir) = b.queue.pop_front() else { return Ok(false) };
-    let mut cmd = Command::new(std::env::current_exe()?);
-    cmd.arg("--prepare-upload").arg(&dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
-    if integrated {
-        cmd.args(["--gpu", "integrated"]);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW; it picks its own priority class (orbiters_reconstruct::priority), as the reconstruction does.
-        cmd.creation_flags(0x0800_0000);
-    }
-    let mut child = cmd.spawn()?;
+    // A start that fails before the child runs keeps the session first in line (CHALLENGER-C5): the next look tries
+    // again, nothing is lost.
+    let spawned = (|| -> anyhow::Result<std::process::Child> {
+        fail_point(0)?;
+        let mut cmd = Command::new(std::env::current_exe()?);
+        cmd.arg("--prepare-upload").arg(&dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+        if integrated {
+            cmd.args(["--gpu", "integrated"]);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NO_WINDOW; it picks its own priority class (orbiters_reconstruct::priority), as the reconstruction does.
+            cmd.creation_flags(0x0800_0000);
+        }
+        Ok(cmd.spawn()?)
+    })();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) => {
+            b.queue.push_front(dir);
+            return Err(e);
+        }
+    };
     crate::worker::keep_with_service(&child);
     let stderr = child.stderr.take();
     let child = Arc::new(Mutex::new(child));
@@ -336,14 +348,42 @@ pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on
     let stopped = Arc::new(AtomicBool::new(false));
     b.running = Some(Running { dir: dir.clone(), child: child.clone(), done: done.clone(), stopped: stopped.clone() });
     drop(guard);
+    // A helper thread that cannot start leaves no running child behind and no slot taken (CHALLENGER-C5): the child is
+    // stopped and reaped, the slot freed, whoever waits on it woken, and the session goes back first in line.
+    let abandon = |e: anyhow::Error, child: &Arc<Mutex<std::process::Child>>, done: &Arc<(Mutex<bool>, Condvar)>| {
+        stop(child);
+        let _ = child.lock().unwrap_or_else(|e| e.into_inner()).wait();
+        background(|b| {
+            b.running = None;
+            b.queue.retain(|d| *d != dir);
+            b.queue.push_front(dir.clone());
+        });
+        let (flag, wake) = &**done;
+        *flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        wake.notify_all();
+        e
+    };
     if let Some(stderr) = stderr {
-        std::thread::Builder::new().name("upload-prep-log".into()).spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                on_log(line);
-            }
-        })?;
+        let logging = fail_point(1).and_then(|()| {
+            std::thread::Builder::new()
+                .name("upload-prep-log".into())
+                .spawn(move || {
+                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                        on_log(line);
+                    }
+                })
+                .map_err(anyhow::Error::from)
+        });
+        if let Err(e) = logging {
+            return Err(abandon(e, &child, &done));
+        }
     }
-    std::thread::Builder::new().name("upload-prep".into()).spawn(move || {
+    if let Err(e) = fail_point(2) {
+        return Err(abandon(e, &child, &done));
+    }
+    let (child_w, done_w, dir_w) = (child.clone(), done.clone(), dir.clone());
+    let waiter = std::thread::Builder::new().name("upload-prep".into()).spawn(move || {
+        let (child, done, dir) = (child_w, done_w, dir_w);
         // Polled rather than waited on: pause and claim kill it through the same handle.
         let status = loop {
             match child.lock().unwrap_or_else(|e| e.into_inner()).try_wait() {
@@ -361,8 +401,23 @@ pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on
         *flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
         wake.notify_all();
         on_exit();
-    })?;
+    });
+    if let Err(e) = waiter {
+        return Err(abandon(e.into(), &child, &done));
+    }
     Ok(true)
+}
+
+/// Tests make a start fail at a chosen point (0: before the child, 1: its log thread, 2: its waiter).
+#[cfg(test)]
+static FAIL_AT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
+
+fn fail_point(_at: u8) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if FAIL_AT.load(Ordering::SeqCst) == _at {
+        anyhow::bail!("failure injected at {_at}"); // i18n: not shown
+    }
+    Ok(())
 }
 
 /// A share of `dir` is about to prepare it: it leaves the queue, and when its background preparation runs, the share
@@ -410,6 +465,21 @@ mod tests {
         forget(&a);
         assert!(queued().is_empty());
         claim(&a);
+        // CHALLENGER-C5: a start failing before its child or at either helper thread keeps the session first in line and
+        // leaves no slot taken; the next start runs it.
+        for at in 0..3u8 {
+            queue(a.clone());
+            FAIL_AT.store(at, Ordering::SeqCst);
+            assert!(start_next(false, |_| {}, || {}).is_err(), "{at}");
+            FAIL_AT.store(u8::MAX, Ordering::SeqCst);
+            assert_eq!(queued(), vec![a.clone()], "{at}: still first in line");
+            assert!(background(|bg| bg.running.is_none()), "{at}: no slot left taken");
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(start_next(false, |_| {}, move || tx.send(()).unwrap()).unwrap());
+        rx.recv_timeout(Duration::from_secs(30)).expect("the process exits and says so");
+        forget(&a);
+        assert!(queued().is_empty());
     }
 
     /// A stopped preparation goes on only on the very result it was made from, and its file goes once it is done.

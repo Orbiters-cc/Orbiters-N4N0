@@ -100,6 +100,8 @@ pub fn skip_dir(name: &str) -> bool {
         n.as_str(),
         "windows" | "programdata" | "$recycle.bin" | "system volume information" | "appdata" | "library" | "temp" | "logs" | "obj" | "node_modules" | ".git" // i18n: not shown (folder names and a macOS query the scan skips or asks for)
     ) || n.starts_with("program files")
+        // Dot-folders, on every system (PROJECTS-9, Enzo 2026-11-19: "Yes"): caches, tools' state, test stand-ins.
+        || n.starts_with('.')
         || mac_only_skip(&n)
 }
 /// Hidden folders (the Trash, Spotlight's and Time Machine's, a shell's caches) and what the Finder shows as one file: an
@@ -762,6 +764,24 @@ mod mac_tests {
         let mut expected: Vec<&String> = wanted.iter().collect();
         expected.sort();
         assert_eq!(keys, expected);
+    }
+
+    /// PROJECTS-9: a project inside a dot-folder is not found by the walk; one beside it is.
+    #[test]
+    fn the_walk_skips_dot_folders() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = |at: &str| {
+            let p = temp.path().join(at);
+            std::fs::create_dir_all(p.join("ProjectSettings")).unwrap();
+            std::fs::write(p.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
+            key(&p)
+        };
+        let wanted = project("Projects/Mine");
+        project(".orbiters-build/runs/Stand-in");
+        project("Projects/.cache/Other");
+        let mut found = HashMap::new();
+        walk(temp.path(), None, false, &AtomicBool::new(false), &mut found, &AtomicU64::new(0), None);
+        assert_eq!(found.keys().collect::<Vec<_>>(), [&wanted]);
     }
 
     #[test]

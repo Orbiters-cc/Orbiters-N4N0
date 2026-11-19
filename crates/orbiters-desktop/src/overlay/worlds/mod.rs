@@ -2406,18 +2406,66 @@ fn eye_frames_wanted(debug_build: bool, pictures_asked: bool) -> bool {
     debug_build || pictures_asked
 }
 
+/// The pictures [`Worlds::keep_an_eye_frame`] writes, by name: only these are ever deleted (verify-vr: the whole folder went,
+/// with whatever else someone kept there).
+const EYE_FRAME_NAMES: [&str; 3] = ["small-in-its-hole-1.png", "small-in-its-hole-2.png", "small-in-its-hole-3.png"];
+
+/// Deletes the eye pictures in `dir`, then `dir` itself only if nothing else is left in it. Says what could not be deleted.
+fn forget_eye_frames_in(dir: &std::path::Path) -> Vec<String> {
+    let mut problems = Vec::new();
+    for name in EYE_FRAME_NAMES {
+        match std::fs::remove_file(dir.join(name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => problems.push(format!("{name} could not be deleted: {e}")), // i18n: not shown (a log's line)
+        }
+    }
+    if std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none()) {
+        if let Err(e) = std::fs::remove_dir(dir) {
+            problems.push(format!("the empty folder could not be deleted: {e}")); // i18n: not shown (a log's line)
+        }
+    }
+    problems
+}
+
 /// Those a release build kept before it stopped (PRIV-5) go, once, when they are not wanted.
 fn forget_kept_eye_frames() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         if !eye_frames_wanted(cfg!(debug_assertions), std::env::var_os("ORBITERS_VR_PICTURES").is_some()) {
-            let _ = std::fs::remove_dir_all(orbiters_core::paths::logs_dir().join("vr-test-frames"));
+            for problem in forget_eye_frames_in(&orbiters_core::paths::logs_dir().join("vr-test-frames")) {
+                super::vr_log::line(&format!("eye frames: {problem}")); // i18n: not shown (a log's line)
+            }
         }
     });
 }
 
 #[cfg(test)]
 mod go_tests {
+    /// verify-vr on PRIV-5: only the three eye pictures go; anything else in the folder stays, and so does the folder then.
+    #[test]
+    fn only_the_eye_pictures_are_deleted() {
+        let dir = std::env::temp_dir().join(format!("orbiters-eye-frames-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("notes")).unwrap();
+        for name in super::EYE_FRAME_NAMES {
+            std::fs::write(dir.join(name), b"png").unwrap();
+        }
+        std::fs::write(dir.join("comparison.png"), b"mine").unwrap();
+        std::fs::write(dir.join("notes").join("kept.txt"), b"mine").unwrap();
+        assert!(super::forget_eye_frames_in(&dir).is_empty());
+        for name in super::EYE_FRAME_NAMES {
+            assert!(!dir.join(name).exists(), "{name}");
+        }
+        assert!(dir.join("comparison.png").exists() && dir.join("notes").join("kept.txt").exists(), "nothing else is touched");
+        std::fs::remove_file(dir.join("comparison.png")).unwrap();
+        std::fs::remove_dir_all(dir.join("notes")).unwrap();
+        std::fs::write(dir.join(super::EYE_FRAME_NAMES[0]), b"png").unwrap();
+        assert!(super::forget_eye_frames_in(&dir).is_empty());
+        assert!(!dir.exists(), "a folder left empty goes");
+        assert!(super::forget_eye_frames_in(&dir).is_empty(), "nothing there: nothing to say");
+    }
+
     /// PRIV-5: a release build keeps no picture of the person's view unless they are asked for.
     #[test]
     fn eye_pictures_are_kept_only_in_development_or_when_asked() {

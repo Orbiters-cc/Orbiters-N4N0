@@ -32,6 +32,7 @@ pub mod protocol;
 pub mod reconstruction;
 pub mod search;
 pub mod settings;
+pub mod shared_view;
 pub mod shares;
 pub mod slice;
 pub mod video_history;

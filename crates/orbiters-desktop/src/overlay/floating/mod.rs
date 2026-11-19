@@ -144,8 +144,14 @@ impl MouseSurfaces {
 /// The top bit of the band's id for the window's offers ([`crate::window_rest`]): they and "Talk with N4N0?" both count
 /// from 1.
 const REST_BIT: u64 = 1 << 63;
-/// The next bit for the world notices ([`crate::world_notice`], REQUEST13), which count from 1 too.
-const NOTICE_BIT: u64 = 1 << 62;
+/// The top bits of a friend's offer to look at a 3D picture together, and of the share chip's friend picker
+/// (`crate::shared_view_ui`).
+const SHARE_BIT: u64 = 1 << 62;
+const PICK_BIT: u64 = 1 << 61;
+/// Steps of a band's line of time left that are painted.
+const STEPS: f32 = 60.0;
+/// And the world notices' ([`crate::world_notice`], REQUEST13), which count from 1 too.
+const NOTICE_BIT: u64 = 1 << 60;
 
 /// What the band has to tell the service of the window's offer it shows (`showing`: now), given what it last said:
 /// `Some(what)` when that changed, then remembered as said.
@@ -242,12 +248,18 @@ impl Floating {
         // "Talk with N4N0?", while the wake word heard during a call has it up.
         let now_ms = crate::wake_offer::now_ms();
         let offer = crate::wake_offer::up(cx.snap.n4n0.voice.wake_offer, now_ms).filter(|_| self.prompt.is_some());
+        // Or, the band free, a friend's offer to look at a 3D picture together, then the share chip's friend picker
+        // (`crate::shared_view_ui`).
+        let shared = cx.snap.shared_view.arc();
+        let share_offer = shared.offer.clone().filter(|o| offer.is_none() && self.prompt.is_some() && o.until_ms > now_ms);
+        let pick = crate::shared_view_ui::picking(now_ms).filter(|_| offer.is_none() && share_offer.is_none() && self.prompt.is_some() && shared.outgoing.is_none() && !shared.targets.is_empty());
         // Or, the band free, "Orbiters - N4N0 will minimize to save memory" with Keep open (`crate::window_rest`).
-        let rest = cx.snap.window_rest.offer.filter(|o| offer.is_none() && self.prompt.is_some() && cx.snap.window_rest.kept != Some(o.id));
-        // The band's ids: a wake offer's, or a rest offer's with the top bit (both count from 1).
+        let rest = cx.snap.window_rest.offer.filter(|o| offer.is_none() && share_offer.is_none() && pick.is_none() && self.prompt.is_some() && cx.snap.window_rest.kept != Some(o.id));
+        // The band's ids: a wake offer's, a share offer's, a picker's, or a rest offer's, each kind with its top bit (all count from 1).
+        let band = offer.map(|o| o.id).or(share_offer.as_ref().map(|o| o.id | SHARE_BIT)).or(pick.map(|p| p.id | PICK_BIT)).or(rest.map(|o| o.id | REST_BIT));
         // Or, the band still free, "No 3D picture of this world yet" (REQUEST13), never over a menu, our panel or SteamVR's
         // dashboard: held back while one is up (its time waits, a little).
-        let notice = cx.snap.explorer.notice.clone().filter(|n| n.up(crate::controller::explorer::now_ms()) && offer.is_none() && rest.is_none() && self.prompt.is_some());
+        let notice = cx.snap.explorer.notice.clone().filter(|n| n.up(crate::controller::explorer::now_ms()) && band.is_none() && self.prompt.is_some());
         let in_the_way = cx.menu_open || !cx.menu.is_empty() || cx.dashboard || self.panel.is_shown();
         if let Some(n) = notice.as_ref().filter(|_| in_the_way) {
             if self.notice_held.is_none_or(|at| now.duration_since(at).as_secs_f32() >= 1.0) {
@@ -256,7 +268,8 @@ impl Floating {
             }
         }
         let notice = notice.filter(|_| !in_the_way);
-        let band = offer.map(|o| o.id).or(rest.map(|o| o.id | REST_BIT)).or(notice.as_ref().map(|n| n.id | NOTICE_BIT));
+        let band = band.or(notice.as_ref().map(|n| n.id | NOTICE_BIT));
+        // The band at the size of what it shows: the world notice is taller; every other face is "Talk with N4N0?"'s size.
         if let (Some(p), Some(n)) = (self.prompt.as_mut(), notice.as_ref()) {
             p.fit(cx.overlay, prompt::Face::World { earns_one: n.earns == Some(1.0) });
         } else if let Some(p) = self.prompt.as_mut().filter(|_| band.is_some()) {
@@ -388,6 +401,27 @@ impl Floating {
                 p.pressed(cx.overlay, offer.id);
             }
         }
+        // A friend's offer: Show or Not now, on the release, on its pill.
+        if let (Some(o), Some(uv)) = (share_offer.as_ref(), outcome.prompt_release) {
+            if let Some(accept) = crate::shared_view_ui::answer_at(uv) {
+                clicked = true;
+                cx.backend.shared_view(crate::ipc::SharedViewCommand::Answer { id: o.id, accept });
+                if let Some(p) = self.prompt.as_mut() {
+                    p.pressed(cx.overlay, o.id | SHARE_BIT);
+                }
+            }
+        }
+        // The picker: shown to the friend whose pill it is.
+        if let (Some(pk), Some(uv)) = (pick, outcome.prompt_release) {
+            if let Some(friend) = crate::shared_view_ui::pick_at(uv, shared.targets.len()).and_then(|i| shared.targets.get(i)) {
+                clicked = true;
+                cx.backend.shared_view(crate::ipc::SharedViewCommand::Share { contact: friend.id.clone(), capture: pk.capture, revision: pk.revision, reach: pk.reach, moved: pk.moved });
+                crate::shared_view_ui::clear_pick();
+                if let Some(p) = self.prompt.as_mut() {
+                    p.pressed(cx.overlay, pk.id | PICK_BIT);
+                }
+            }
+        }
         // "Take a 3D picture": the picture waits for VRChat's camera. Unlike the two above it acts when let go on the band,
         // and a band gone or changed under the held trigger does nothing (verify-vr: presses on release).
         let held = cx.actions.triggers().iter().any(|t| *t);
@@ -444,6 +478,17 @@ impl Floating {
         }
         if let (Some(p), Some(offer)) = (self.prompt.as_mut(), offer) {
             p.paint(cx.overlay, cx.presenter, prompt::Face::Talk, outcome.prompt_hover, offer.left(now_ms));
+        } else if let (Some(p), Some(o)) = (self.prompt.as_mut(), share_offer.as_ref()) {
+            let hover = outcome.prompt_at.and_then(crate::shared_view_ui::answer_at);
+            let left = o.left(now_ms);
+            let look = prompt::look_of((o.id, &o.from, &o.title, hover, orbiters_i18n::language(), (left * STEPS).ceil() as u32));
+            p.paint_with(cx.overlay, cx.presenter, look, |painter| crate::shared_view_ui::paint_offer(painter, &o.from, &o.title, hover, left));
+        } else if let (Some(p), Some(pk)) = (self.prompt.as_mut(), pick) {
+            let names: Vec<String> = shared.targets.iter().map(|t| t.name.clone()).collect();
+            let hover = outcome.prompt_at.and_then(|uv| crate::shared_view_ui::pick_at(uv, names.len()));
+            let left = pk.left(now_ms);
+            let look = prompt::look_of((pk.id, &names, hover, orbiters_i18n::language(), (left * STEPS).ceil() as u32));
+            p.paint_with(cx.overlay, cx.presenter, look, |painter| crate::shared_view_ui::paint_pick(painter, &names, hover, left));
         } else if let (Some(p), Some(o)) = (self.prompt.as_mut(), rest) {
             p.paint(cx.overlay, cx.presenter, prompt::Face::KeepOpen { seconds: o.seconds(now_ms) }, outcome.prompt_hover, o.left(now_ms));
         } else if let (Some(p), Some(n)) = (self.prompt.as_mut(), notice.as_ref()) {

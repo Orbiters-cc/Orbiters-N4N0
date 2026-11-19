@@ -29,18 +29,16 @@ fn why_of(earns_one: bool) -> &'static str {
 const WIDTH: f32 = 440.0;
 const HEIGHT: f32 = 124.0;
 const MARGIN: f32 = 20.0;
-/// "Talk with N4N0?"'s card, which keeps the corner when both are up.
-const TALK_HEIGHT: f32 = 76.0;
 
 /// The window's card while a notice is up: its words whole on top (the second may take two lines), "Take a 3D picture"
-/// under them on the right, the cross at the top right. `above`: "Talk with N4N0?" holds the corner, this one sits over it.
-pub fn window(ctx: &Context, ctl: &Ctl, notice: Option<&WorldNotice>, above: bool) {
+/// under them on the right, the cross at the top right. `lift`: how much of the corner the cards under it take ("Talk with
+/// N4N0?", a friend's offer to look at a 3D picture together), their gaps included.
+pub fn window(ctx: &Context, ctl: &Ctl, notice: Option<&WorldNotice>, lift: f32) {
     let now = crate::controller::explorer::now_ms();
     let Some(notice) = notice.filter(|n| n.up(now)) else { return };
     let screen = ctx.content_rect();
     let id = Id::unique(("orbiters-world-notice", notice.id));
     let enter = anim::spring_from(ctx, id.with("enter"), [0.0], [1.0], Spring::BOUNCY)[0];
-    let lift = if above { TALK_HEIGHT + 12.0 } else { 0.0 };
     let base = Rect::from_min_size(pos2(screen.right() - MARGIN - WIDTH, screen.bottom() - MARGIN - HEIGHT - lift), vec2(WIDTH, HEIGHT));
     let rect = Rect::from_center_size(base.center() + vec2(60.0 * (1.0 - enter), 0.0), base.size() * (0.92 + 0.08 * enter.min(1.0)));
     egui::Area::new(id).order(Order::Foreground).fixed_pos(screen.min).interactable(true).show(ctx, |ui| {

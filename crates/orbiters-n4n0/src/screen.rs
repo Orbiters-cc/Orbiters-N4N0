@@ -938,7 +938,8 @@ impl ScreenRuntime {
                         self.presses = self.presses.wrapping_add(1);
                         self.dragging[hand] = menu::timeline_segment(target);
                         self.hand_hover[hand] = Some(index);
-                        effects.extend(self.menu.press(target));
+                        // Someone else's press never leads to a page of the owner's own (verify2 on MENU-2).
+                        effects.extend(if hand == 2 { self.menu.guest_press(target) } else { self.menu.press(target) });
                     } else {
                         self.pointer_log.press(who, x, y, &format!("nothing there on {}", ScreenPage::of(&self.menu).name())); // i18n: not shown
                     }
@@ -2887,6 +2888,17 @@ mod tests {
         let _ = others_touch(&mut s, menu::Target::YouTube, t0 + Duration::from_secs(6));
         assert_eq!(s.menu.page, Page::Search, "a tile that only opens a page is theirs too");
         // The owner's own presses are untouched: the same rule never applies to hands 0 and 1 (the YouTube test above).
+    }
+
+    /// verify2 on MENU-2: someone else's Back on a page the owner opened leads to Home, never to the owner's list behind it
+    /// (Add Orbiters as a friend's Back is Previous instances: where the owner has been).
+    #[test]
+    fn someone_else_s_back_never_opens_the_owner_s_lists() {
+        let mut s = pointing();
+        s.menu.pages = menu::Pages::of_screen(Some(16));
+        s.menu.page = Page::AddFriend;
+        let _ = others_touch(&mut s, menu::Target::Back, Instant::now());
+        assert_eq!(s.menu.page, Page::Home);
     }
 
     #[test]

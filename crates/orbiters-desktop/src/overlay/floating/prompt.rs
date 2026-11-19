@@ -30,6 +30,8 @@ pub struct Prompt {
     visible: bool,
     /// What its picture shows: which face, hovered, the language, the step of time left.
     drawn: Option<(Face, bool, orbiters_i18n::Language, u32)>,
+    /// Or a face of the shared 3D view's ([`Self::paint_with`]): a digest of what it shows.
+    drawn_with: Option<u64>,
 }
 
 /// What the band asks: "Talk with N4N0?" (`crate::wake_offer`), or "Orbiters - N4N0 will minimize to save memory" with
@@ -59,7 +61,7 @@ impl Prompt {
         let _ = overlay.set_width_in_meters(handle, VR_WIDTH_M);
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, SORT_ORDER);
-        Ok(Self { handle, canvas: Canvas::new(VR_PX[0], VR_PX[1]), px: VR_PX, width_m: VR_WIDTH_M, placed: None, pressed: None, visible: false, drawn: None })
+        Ok(Self { handle, canvas: Canvas::new(VR_PX[0], VR_PX[1]), px: VR_PX, width_m: VR_WIDTH_M, placed: None, pressed: None, visible: false, drawn: None, drawn_with: None })
     }
 
     /// At the size `face` takes (before [`Prompt::place`]): another size is a new picture, placed again.
@@ -72,6 +74,7 @@ impl Prompt {
             let _ = overlay.set_width_in_meters(self.handle, width_m);
             self.placed = None;
             self.drawn = None;
+            self.drawn_with = None;
         }
     }
 
@@ -100,6 +103,7 @@ impl Prompt {
             let _ = overlay.set_transform_absolute(self.handle, &at);
             self.placed = Some((id, at));
             self.drawn = None;
+            self.drawn_with = None;
         }
         let (_, at) = self.placed?;
         if !self.visible {
@@ -131,6 +135,7 @@ impl Prompt {
             return;
         }
         let first = self.drawn.is_none();
+        self.drawn_with = None;
         for _ in 0..if first { 2 } else { 1 } {
             self.canvas.paint(0.0, |p| match face {
                 Face::Talk => paint_vr(p, hover, left),
@@ -145,6 +150,34 @@ impl Prompt {
         }
         self.drawn = Some(look);
     }
+
+    /// A face of the shared 3D view's (`crate::shared_view_ui`), painted by `draw` when `look` (a digest of what it shows:
+    /// its words, the pill under a laser, the language, the step of time left) changed.
+    pub(in crate::overlay) fn paint_with(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, look: u64, draw: impl Fn(&egui::Painter)) {
+        if !self.visible || self.drawn_with == Some(look) {
+            return;
+        }
+        let first = self.drawn_with.is_none();
+        self.drawn = None;
+        for _ in 0..if first { 2 } else { 1 } {
+            self.canvas.paint(0.0, |p| draw(p));
+        }
+        // At the band's size now (the caller fits it to "Talk with N4N0?"'s first: [`Self::fit`]).
+        let px = self.px;
+        let changed = if first { Some([0, 0, px[0], px[1]]) } else { self.canvas.damage() };
+        if let Some(changed) = changed {
+            presenter.show_part(overlay, self.handle, self.canvas.pixels(), px[0], px[1], changed);
+        }
+        self.drawn_with = Some(look);
+    }
+}
+
+/// A digest of what a face shows, for [`Prompt::paint_with`].
+pub fn look_of(parts: impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    parts.hash(&mut h);
+    h.finish()
 }
 
 #[cfg(test)]

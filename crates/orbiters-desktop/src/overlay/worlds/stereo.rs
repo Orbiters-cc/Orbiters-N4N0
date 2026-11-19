@@ -478,6 +478,22 @@ impl Small {
         add(eye, [self.moved[0], 0.0, self.moved[1]])
     }
 
+    /// How far its middle was moved from the start eye along the capture's ground (X, Z), capture metres.
+    pub fn moved(&self) -> [f32; 2] {
+        self.moved
+    }
+
+    /// Shows what a friend's view shows (`controller/shared_view.rs`): `reach` around a middle `moved` from the start,
+    /// kept in its range and no farther than `limit`, where the capture ends. Where it stands stays this player's.
+    pub fn follow(&mut self, reach: f32, moved: [f32; 2], limit: f32) {
+        if !reach.is_finite() || !moved.iter().all(|m| m.is_finite()) {
+            return;
+        }
+        self.reach = reach.clamp(SMALL_REACHES.0, SMALL_REACHES.1);
+        let far = moved[0].hypot(moved[1]);
+        self.moved = if far > limit && far > 0.0 { [moved[0] * limit / far, moved[1] * limit / far] } else { moved };
+    }
+
     /// How far its middle was moved.
     pub fn moved_by(&self) -> f32 {
         self.moved[0].hypot(self.moved[1])

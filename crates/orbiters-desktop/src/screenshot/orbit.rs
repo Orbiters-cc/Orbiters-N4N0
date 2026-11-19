@@ -601,6 +601,16 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let chip = small_hint::chip_place(held.anchor, held.radius(), space::position(&head), true);
             eye.quad(&Quad { transform: small_hint::chip_quad(&chip), width: small_hint::CHIP_WIDTH_M, height: small_hint::CHIP_WIDTH_M * small_hint::CHIP_PX[1] as f32 / small_hint::CHIP_PX[0] as f32 }, canvas.pixels(), small_hint::CHIP_PX, 1.0);
             eye.save(out, &format!("vr-small-in-a-hand{names}"))?;
+            // The shared 3D view (REQUEST14, stage 1): with friends here, the share chip, the X's twin on the capture's other side; then lit, as while it shares.
+            for (lit, name) in [(false, "vr-small-share-chip"), (true, "vr-small-share-chip-lit")] {
+                let mut canvas = Canvas::new(small_hint::CHIP_PX[0], small_hint::CHIP_PX[1]);
+                for _ in 0..2 {
+                    canvas.paint(0.0, |p| small_hint::paint_chip_with(p, false, lit, orbiters_ui::icons::USERS));
+                }
+                let share = small_hint::share_chip_place(held.anchor, held.radius(), space::position(&head));
+                eye.quad(&Quad { transform: small_hint::chip_quad(&share), width: small_hint::CHIP_WIDTH_M, height: small_hint::CHIP_WIDTH_M * small_hint::CHIP_PX[1] as f32 / small_hint::CHIP_PX[0] as f32 }, canvas.pixels(), small_hint::CHIP_PX, 1.0);
+                eye.save(out, &format!("{name}{names}"))?;
+            }
             // G1 (Enzo, 2026-11-12): our backdrop between the capture and VRChat's menu behind the sheet, as each eye sees it, before the sheet and
             // from both sides, the Worlds page painted in the language now; and, for the comparison, the hole bare as dev.40 had it.
             {

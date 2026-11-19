@@ -271,9 +271,13 @@ impl App {
         self.toasts.show(&ctx);
         // "Talk with N4N0?": the wake word heard during a call.
         crate::wake_offer::window(&ctx, &self.ctl, snap.n4n0.voice.wake_offer);
-        // "No 3D picture of this world yet" (REQUEST13), over that card when both are up.
+        // A friend here offers to look at a 3D picture together (`crate::shared_view_ui`): over that card when both are up.
         let talk_up = crate::wake_offer::up(snap.n4n0.voice.wake_offer, crate::wake_offer::now_ms()).is_some();
-        crate::world_notice::window(&ctx, &self.ctl, snap.explorer.notice.as_ref(), talk_up);
+        crate::shared_view_ui::window(&ctx, &self.ctl, snap.shared_view.offer.as_ref(), talk_up);
+        // "No 3D picture of this world yet" (REQUEST13), over both when they are up, each card 12 above the one under it.
+        let shared_up = snap.shared_view.offer.as_ref().is_some_and(|o| o.until_ms > crate::wake_offer::now_ms());
+        let lift = if talk_up { crate::wake_offer::HEIGHT + 12.0 } else { 0.0 } + if shared_up { crate::shared_view_ui::HEIGHT + 12.0 } else { 0.0 };
+        crate::world_notice::window(&ctx, &self.ctl, snap.explorer.notice.as_ref(), lift);
         if splash_on {
             splash(&ctx, full, splash_t);
         }

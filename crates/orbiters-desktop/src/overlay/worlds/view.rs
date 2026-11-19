@@ -708,6 +708,13 @@ impl View {
         self.small_opening = opening;
     }
 
+    /// What shows small shows what a friend's view shows: its zoom and pan (`controller/shared_view.rs`).
+    pub fn follow_shared(&mut self, reach: f32, moved: [f32; 2]) {
+        let (Some(small), Some(capture)) = (self.small.as_mut(), self.capture.as_ref()) else { return };
+        small.follow(reach, moved, capture.farthest());
+        self.placement = Some(small.placement(capture.view.eye()));
+    }
+
     /// What shows small, once it shows.
     pub fn small_now(&self) -> Option<&stereo::Small> {
         self.small.as_ref().filter(|_| matches!(self.phase, Phase::Shown { .. }))

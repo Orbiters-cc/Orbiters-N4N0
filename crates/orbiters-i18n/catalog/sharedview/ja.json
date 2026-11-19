@@ -1,0 +1,21 @@
+{
+  "Look at a 3D picture together?": "一緒に3D写真を見ますか？",
+  "{world} · it opens in front of you": "{world}・あなたの目の前に開きます",
+  "Look at it together with": "一緒に見る相手",
+  "{name} can't open this 3D picture. Share it with them in the gallery first.": "{name}はこの3D写真を開けません。先にギャラリーから共有してください。",
+  "This 3D picture can't be shown to friends.": "この3D写真はフレンドに見せられません。",
+  "This 3D picture was replaced. Open it again to show it.": "この3D写真は置き換えられました。見せるにはもう一度開いてください。",
+  "{name} has other 3D pictures waiting. Try again in a moment.": "{name}には待機中の3D写真がほかにあります。少し待ってからもう一度お試しください。",
+  "{name} needs a newer Orbiters - N4N0 to look at it with you.": "{name}があなたと一緒に見るには、新しいOrbiters - N4N0が必要です。",
+  "{name} can't be shown it right now.": "今は{name}に見せられません。",
+  "This friend can't be shown it right now.": "今はこのフレンドに見せられません。",
+  "{name}'s 3D picture isn't shown any more.": "{name}の3D写真はもう表示されていません。",
+  "{name}'s 3D picture could not be opened: {message}": "{name}の3D写真を開けませんでした：{message}",
+  "it has no start view": "開始ビューがありません",
+  "Orbiters answered {status}": "Orbitersの応答：{status}",
+  "{name} is looking at it with you.": "{name}があなたと一緒に見ています。",
+  "{name} said not now.": "{name}は「今はしない」を選びました。",
+  "{name} stopped looking.": "{name}は見るのをやめました。",
+  "{name} can't see it any more.": "{name}はもう見られません。",
+  "{name} stopped showing their 3D picture.": "{name}は3D写真を見せるのをやめました。"
+}

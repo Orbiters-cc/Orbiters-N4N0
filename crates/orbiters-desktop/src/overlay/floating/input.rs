@@ -114,6 +114,8 @@ pub struct Interaction {
     hold: Option<Hold>,
     /// Each surface's pointer was on it last turn.
     pointing: [bool; SURFACES],
+    /// The hand whose trigger was pulled on the band and is still held: its release there presses it.
+    prompt_down: Option<usize>,
 }
 
 /// What this turn does.
@@ -139,6 +141,10 @@ pub struct Outcome {
     /// A laser on "Talk with N4N0?", and a trigger pulled there.
     pub prompt_hover: bool,
     pub prompt_press: bool,
+    /// Where on the band a laser is, and where a trigger pulled on it was let go, still on it (the shared view's faces
+    /// act on the release; one let go off the band, or held while the band went, does nothing).
+    pub prompt_at: Option<[f32; 2]>,
+    pub prompt_release: Option<[f32; 2]>,
     /// Where the held panel or menu is now; it was let go this turn (where it last was is to keep).
     pub moved: [Option<Matrix34>; CARRIED],
     pub released: [bool; CARRIED],
@@ -148,7 +154,7 @@ pub struct Outcome {
 
 impl Default for Interaction {
     fn default() -> Self {
-        Self { trigger: [true; 2], grab: [true; 2], active: [None; SURFACES], press: None, hold: None, pointing: [false; SURFACES] }
+        Self { trigger: [true; 2], grab: [true; 2], active: [None; SURFACES], press: None, hold: None, pointing: [false; SURFACES], prompt_down: None }
     }
 }
 
@@ -260,7 +266,10 @@ impl Interaction {
             }
             match out.lasers[i] {
                 Some((Target::Watch, _)) => out.watch_press = true,
-                Some((Target::Prompt, _)) => out.prompt_press = true,
+                Some((Target::Prompt, _)) => {
+                    out.prompt_press = true;
+                    self.prompt_down = Some(i);
+                }
                 Some((Target::Strip, hit)) => out.strip_press = Some(hit.uv),
                 Some((Target::Bar, hit)) => match (targets.handle, targets.carried(PANEL)) {
                     (Some((r, _)), Some(panel)) if (r[0]..=r[2]).contains(&hit.uv[0]) && (r[1]..=r[3]).contains(&hit.uv[1]) => {
@@ -314,7 +323,19 @@ impl Interaction {
         out.bar_hover = hover(Target::Bar);
         out.watch_hover = hover(Target::Watch).is_some();
         out.strip_hover = hover(Target::Strip);
-        out.prompt_hover = hover(Target::Prompt).is_some();
+        out.prompt_at = hover(Target::Prompt);
+        out.prompt_hover = out.prompt_at.is_some();
+        // The band's release: on it still, the trigger let go; gone under the held trigger (or the hand lost), nothing.
+        if let Some(h) = self.prompt_down {
+            if targets.prompt.is_none() || hands[h].is_none() {
+                self.prompt_down = None;
+            } else if !trigger[h] {
+                self.prompt_down = None;
+                if let Some((Target::Prompt, hit)) = out.lasers[h] {
+                    out.prompt_release = Some(hit.uv);
+                }
+            }
+        }
         out.holding = self.holding();
         self.trigger = trigger;
         self.grab = grab;
@@ -590,6 +611,37 @@ mod tests {
         let away = |trigger| hand([0.2, 1.2, -0.2], [3.0, 1.2, 0.0], trigger, false);
         i.step(&head(), [None, Some(away(false))], &t);
         assert!(!i.step(&head(), [None, Some(away(true))], &t).prompt_press);
+    }
+
+    /// The shared view's faces act on the trigger's release, still on the band, where it is let go; let go off the
+    /// band, or held while the band went (the offer timed out, another face came), nothing happens.
+    #[test]
+    fn the_band_s_release_presses_and_a_band_gone_under_a_held_trigger_cancels() {
+        let band = Quad { transform: facing([0.0, 1.45, -0.6], [0.0, 1.6, 0.0], [0.0, 1.0, 0.0]).unwrap(), width: 0.26, height: 0.07 };
+        let t = Targets { prompt: Some(band), ..Default::default() };
+        let on = |trigger| hand([0.2, 1.2, -0.2], position(&band.transform), trigger, false);
+        let away = |trigger| hand([0.2, 1.2, -0.2], [3.0, 1.2, 0.0], trigger, false);
+        // Pulled and let go on it: released there, once, with where.
+        let mut i = Interaction::default();
+        i.step(&head(), [None, Some(on(false))], &t);
+        assert!(i.step(&head(), [None, Some(on(true))], &t).prompt_release.is_none(), "nothing on the pull");
+        let out = i.step(&head(), [None, Some(on(false))], &t);
+        let uv = out.prompt_release.expect("released on it");
+        assert!((uv[0] - 0.5).abs() < 0.05 && (uv[1] - 0.5).abs() < 0.05, "{uv:?}");
+        assert!(i.step(&head(), [None, Some(on(false))], &t).prompt_release.is_none(), "once");
+        // Pulled on it, let go pointing away: nothing.
+        i.step(&head(), [None, Some(on(true))], &t);
+        i.step(&head(), [None, Some(away(true))], &t);
+        assert!(i.step(&head(), [None, Some(away(false))], &t).prompt_release.is_none());
+        // Pulled on it, the band goes while held, comes back: the release presses nothing.
+        let none = Targets::default();
+        i.step(&head(), [None, Some(on(false))], &t);
+        i.step(&head(), [None, Some(on(true))], &t);
+        i.step(&head(), [None, Some(on(true))], &none);
+        assert!(i.step(&head(), [None, Some(on(false))], &t).prompt_release.is_none());
+        // A pull that began off the band and is let go on it: nothing.
+        i.step(&head(), [None, Some(away(true))], &t);
+        assert!(i.step(&head(), [None, Some(on(false))], &t).prompt_release.is_none());
     }
 
     /// The menu mismatch strip on the left wrist, over the watch: the right hand presses one of its rows by laser or fingertip, the left

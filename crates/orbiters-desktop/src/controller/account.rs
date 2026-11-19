@@ -16,6 +16,16 @@ use std::time::{Duration, Instant, SystemTime};
 const LINK_LIFETIME: Duration = Duration::from_secs(600);
 /// An account that could not be checked (offline) is checked again this often.
 const RECHECK_OFFLINE: Duration = Duration::from_secs(60);
+/// A refused credential is asked about again after this long, twice as long each time after, at most
+/// [`RECHECK_REFUSED_MAX`]: a refusal by something in front of Orbiters (a deploy, a firewall page) does not last until
+/// the next start. Meanwhile it stays refused: only a valid answer signs in again.
+const RECHECK_REFUSED: Duration = Duration::from_secs(600);
+const RECHECK_REFUSED_MAX: Duration = Duration::from_secs(6 * 3600);
+
+/// When a credential refused `refusals` times in a row is asked about again.
+fn refused_recheck(refusals: u32) -> Duration {
+    RECHECK_REFUSED.saturating_mul(1 << refusals.clamp(1, 16).saturating_sub(1)).min(RECHECK_REFUSED_MAX)
+}
 
 /// What the service knows besides the snapshot.
 #[derive(Default)]
@@ -28,6 +38,8 @@ pub struct AccountRuntime {
     /// Bumped by every sign-in, cancel and sign-out, so an answer for an older attempt is dropped.
     generation: u64,
     offline_since: Option<Instant>,
+    /// The credential was refused: when, and how many times in a row.
+    refused: Option<(Instant, u32)>,
 }
 
 /// A sign-in waiting for the browser: the page it opened, and the switch that closes its listener.
@@ -102,24 +114,31 @@ impl Controller {
     fn account_tick(self: &Shared) {
         let server = Server::current();
         let modified = account::modified(server);
-        let (changed, offline_due) = {
+        let (changed, offline_due, refused_due) = {
             let rt = self.account_runtime.lock().unwrap();
-            (rt.read != Some((server, modified)), rt.offline_since.is_some_and(|t| t.elapsed() > RECHECK_OFFLINE))
+            (
+                rt.read != Some((server, modified)),
+                rt.offline_since.is_some_and(|t| t.elapsed() > RECHECK_OFFLINE),
+                rt.refused.is_some_and(|(t, n)| t.elapsed() > refused_recheck(n)),
+            )
         };
-        if changed || offline_due {
-            self.read_account(server, modified);
+        if changed || offline_due || refused_due {
+            self.read_account(server, modified, !changed && refused_due);
         }
     }
 
-    /// Reads the saved account for `server` and asks Orbiters whether it still works.
-    fn read_account(self: &Shared, server: Server, modified: Option<SystemTime>) {
+    /// Reads the saved account for `server` and asks Orbiters whether it still works. `again_refused`: asking again
+    /// about a credential that was refused, which shows as refused until an answer says otherwise.
+    fn read_account(self: &Shared, server: Server, modified: Option<SystemTime>, again_refused: bool) {
         let saved = account::read(server);
-        let generation = {
+        let (generation, refusals) = {
             let mut rt = self.account_runtime.lock().unwrap();
             rt.read = Some((server, modified));
             rt.account = saved.clone();
             rt.offline_since = None;
-            rt.generation
+            let refusals = if again_refused { rt.refused.map_or(0, |(_, n)| n) } else { 0 };
+            rt.refused = None;
+            (rt.generation, refusals)
         };
         let development = server == Server::Development;
         let Some(saved) = saved else {
@@ -131,10 +150,12 @@ impl Controller {
             });
             return;
         };
-        self.update(|s| {
-            s.account.development = development;
-            s.account.state = AccountState::Checking { username: saved.username.clone() };
-        });
+        if !again_refused {
+            self.update(|s| {
+                s.account.development = development;
+                s.account.state = AccountState::Checking { username: saved.username.clone() };
+            });
+        }
         let answer = Api::new(server).check(&saved.token);
         let mut rt = self.account_runtime.lock().unwrap();
         // Signed in or out meanwhile: that newer state wins.
@@ -147,7 +168,10 @@ impl Controller {
                 rt.account = Some(Account { token: saved.token.clone(), ..current });
                 AccountState::SignedIn { username: name }
             }
-            Ok(Check::Refused) => AccountState::Expired { username: saved.username.clone() },
+            Ok(Check::Refused) => {
+                rt.refused = Some((Instant::now(), refusals.saturating_add(1)));
+                AccountState::Expired { username: saved.username.clone() }
+            }
             Err(e) => {
                 eprintln!("account check: {e:#}");
                 rt.offline_since = Some(Instant::now());
@@ -248,6 +272,7 @@ impl Controller {
                     rt.account = Some(account);
                     rt.read = Some((server, account::modified(server)));
                     rt.offline_since = None;
+                    rt.refused = None;
                     drop(rt);
                     if let Err(e) = saved {
                         self.notify(NoticeKind::Warning, tr!("Signed in, but the Unity tools will not share it: {error}", error = e));
@@ -359,6 +384,15 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::Mutex;
+
+    /// A refused credential is asked about again, later each time, never more often than every ten minutes.
+    #[test]
+    fn a_refused_credential_is_asked_about_again_later_each_time() {
+        let waits: Vec<u64> = (1..=8).map(|n| refused_recheck(n).as_secs() / 60).collect();
+        assert_eq!(waits, [10, 20, 40, 80, 160, 320, 360, 360]);
+        assert_eq!(refused_recheck(0), RECHECK_REFUSED);
+        assert_eq!(refused_recheck(u32::MAX), RECHECK_REFUSED_MAX);
+    }
 
     /// The port and path of the app's listener, as the stand-in was told them.
     type Told = Arc<Mutex<Option<(u16, String)>>>;

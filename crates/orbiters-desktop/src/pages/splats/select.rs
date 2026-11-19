@@ -1404,10 +1404,10 @@ mod tests {
         (g, avatar)
     }
 
-    fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
-        let adapter = orbiters_reconstruct::gpu::block_on(instance.request_adapter(&Default::default())).ok()?;
-        orbiters_reconstruct::gpu::block_on(adapter.request_device(&Default::default())).ok()
+    /// A device for a test, DX12 only, with the GPU held for that test alone while the guard lives (night5: these tests
+    /// stalled for ever when they ran at once, each on its own device of every backend).
+    fn device(what: &str) -> Option<((wgpu::Device, wgpu::Queue), std::sync::MutexGuard<'static, ()>)> {
+        crate::gpu::testing::device(what).map(|(d, q, held)| ((d, q), held))
     }
 
     fn reds(session: &Path) -> usize {
@@ -1431,7 +1431,7 @@ mod tests {
     /// meanwhile are refused. Opens its own GPU device.
     #[test]
     fn the_picture_is_drawn_again_without_what_is_removed() {
-        let Some(window) = device() else { return };
+        let Some((window, _gpu)) = device("the_picture_is_drawn_again_without_what_is_removed") else { return };
         let dir = temp("picture");
         let (g, avatar) = session(&dir);
         let result = reconstruction::dir(&dir);
@@ -1490,7 +1490,7 @@ mod tests {
     /// discarded. Opens its own GPU device (the picture's).
     #[test]
     fn edits_are_on_the_disk_as_they_are_made() {
-        let Some(window) = device() else { return };
+        let Some((window, _gpu)) = device("edits_are_on_the_disk_as_they_are_made") else { return };
         let dir = temp("edits");
         let (g, avatar) = session(&dir);
         let ply = reconstruction::dir(&dir).join(reconstruction::PLY_FILE);
@@ -1545,7 +1545,7 @@ mod tests {
     /// its own, and undoing it brings back the selection the stroke made.
     #[test]
     fn a_cancelled_stroke_is_one_step_of_its_own() {
-        let Some(window) = device() else { return };
+        let Some((window, _gpu)) = device("a_cancelled_stroke_is_one_step_of_its_own") else { return };
         let dir = temp("stroke");
         let (_, avatar) = session(&dir);
         let mut e = open(&dir, &window);

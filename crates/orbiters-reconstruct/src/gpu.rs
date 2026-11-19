@@ -222,6 +222,43 @@ fn rates_of(lr: LearningRates) -> [f32; 16] {
     rates
 }
 
+/// The longest any wait for the GPU may take: what was submitted, a read-back. Windows resets a graphics card that
+/// does not answer within two seconds; a wait two minutes long is a GPU or a driver that will not answer, and it ends
+/// as an error naming what was waited for instead of a thread stuck for ever (night5: tests stalled for 40 minutes).
+pub const GPU_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Waits for what was submitted to `device`, at most [`GPU_WAIT_LIMIT`]; beyond it, or on a lost device, an error that
+/// says what was waited for (`what`: a technical detail beside wgpu's own words).
+pub fn wait_for_gpu(device: &wgpu::Device, what: &str) -> anyhow::Result<()> {
+    wait_for_gpu_within(device, what, GPU_WAIT_LIMIT)
+}
+
+/// [`wait_for_gpu`] with another limit.
+pub fn wait_for_gpu_within(device: &wgpu::Device, what: &str, limit: std::time::Duration) -> anyhow::Result<()> {
+    match device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(limit) }) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(anyhow!("{}", tr!("waiting for the GPU: {error}", error = format!("{what}: {e} ({} s)", limit.as_secs())))), // i18n: not shown (a technical detail inside the translated sentence, as wgpu's own words)
+    }
+}
+
+/// [`block_on`] for at most `limit`: an error naming `what` when the future has not resolved by then. (On native
+/// backends wgpu's own futures are ready at once; this bounds any other.)
+pub fn block_on_within<F: Future>(what: &str, limit: std::time::Duration, f: F) -> anyhow::Result<F::Output> {
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
+    let mut f = std::pin::pin!(f);
+    let start = std::time::Instant::now();
+    loop {
+        if let std::task::Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+            return Ok(v);
+        }
+        if start.elapsed() >= limit {
+            bail!("{what}: not done after {} s", limit.as_secs()); // i18n: not shown (a stall of the GPU's set-up, for the log and tests)
+        }
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+}
+
 pub fn block_on<F: Future>(f: F) -> F::Output {
     let waker = std::task::Waker::noop();
     let mut cx = std::task::Context::from_waker(waker);
@@ -754,7 +791,7 @@ impl Profiler {
         enc.copy_buffer_to_buffer(&self.resolve, 0, &self.readback, 0, n as u64 * 8);
         queue.submit([enc.finish()]);
         self.readback.map_async(wgpu::MapMode::Read, .., |_| {});
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = wait_for_gpu(device, "the profiler's timings"); // i18n: not shown (a detail of a GPU error)
         let Ok(view) = self.readback.get_mapped_range(..) else {
             // The timings did not come back (a lost device): this step's are dropped.
             self.labels.borrow_mut().clear();
@@ -1658,7 +1695,7 @@ impl Gpu {
             let state = state.clone();
             staging.map_async(wgpu::MapMode::Read, .., move |r| state.store(if r.is_ok() { 1 } else { 2 }, Ordering::SeqCst));
         }
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("{}", tr!("waiting for the GPU: {error}", error = e)))?;
+        wait_for_gpu(&self.device, "a buffer's read-back")?; // i18n: not shown (a detail of a GPU error)
         // An error since (out of memory, a lost device) means what came back is not the result.
         self.check()?;
         anyhow::ensure!(state.load(Ordering::SeqCst) == 1, "{}", tr("the GPU did not hand its results back (was the device lost?)"));
@@ -2102,7 +2139,7 @@ impl Gpu {
         if self.ring[slot].state.load(Ordering::SeqCst) == 1 {
             let index = self.ring[slot].submission.clone();
             let start = std::time::Instant::now();
-            let _ = self.device.poll(wgpu::PollType::Wait { submission_index: index, timeout: None });
+            let _ = self.device.poll(wgpu::PollType::Wait { submission_index: index, timeout: Some(GPU_WAIT_LIMIT) });
             crate::timing::add("8 steps: waiting for the GPU", start.elapsed());
         }
         self.take_readback(slot);
@@ -2255,7 +2292,7 @@ impl Gpu {
                 let state = state.clone();
                 self.total_staging.map_async(wgpu::MapMode::Read, .., move |r| state.store(if r.is_ok() { 1 } else { 2 }, Ordering::SeqCst));
             }
-            self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("{}", tr!("waiting for the GPU: {error}", error = e)))?;
+            wait_for_gpu(&self.device, "the tile count's read-back")?; // i18n: not shown (a detail of a GPU error)
             let total = match self.total_staging.get_mapped_range(..) {
                 Ok(view) if state.load(Ordering::SeqCst) == 1 => bytemuck::cast_slice::<u8, u32>(&view)[0],
                 _ => bail!("{}", tr("the GPU did not hand back a view's tile count (was the device lost?)")),
@@ -2525,7 +2562,7 @@ impl Gpu {
             return Ok(());
         }
         let start = std::time::Instant::now();
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("{}", tr!("waiting for the GPU: {error}", error = e)))?;
+        wait_for_gpu(&self.device, "a paced part of a step")?; // i18n: not shown (a detail of a GPU error)
         // A moving average: one slow part (VRChat's work in between) moves it a quarter.
         let took = start.elapsed();
         self.paced[part] = (self.paced[part] * 3 + took) / 4;

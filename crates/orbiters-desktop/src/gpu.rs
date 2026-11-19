@@ -193,3 +193,45 @@ fn primary_display_adapter() -> Option<(u32, u32)> {
     }
     None
 }
+
+/// Tests that use a GPU: one at a time in the test process, each on a device of the platform's own backend only.
+/// (night5: GPU tests run at once, each on its own device of every backend wgpu knows, OpenGL included, stalled the
+/// test process for ever 4 times in 10 rounds; the app itself never makes an OpenGL device on Windows.)
+#[cfg(test)]
+pub mod testing {
+    use eframe::wgpu;
+    use std::sync::{Mutex, MutexGuard};
+    use std::time::Duration;
+
+    static GPU: Mutex<()> = Mutex::new(());
+
+    /// The GPU, for this test alone while the guard lives.
+    pub fn lock() -> MutexGuard<'static, ()> {
+        GPU.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The backends tests use: the platform's own (DX12 on Windows), never OpenGL.
+    pub fn backends() -> wgpu::Backends {
+        if cfg!(windows) {
+            wgpu::Backends::DX12
+        } else if cfg!(target_os = "macos") {
+            wgpu::Backends::METAL
+        } else {
+            wgpu::Backends::VULKAN
+        }
+    }
+
+    /// How long a test waits for its device.
+    const SET_UP: Duration = Duration::from_secs(30);
+
+    /// A device for the test `what`, with the GPU held for it (None: no GPU here, the test passes as before). Its set-up
+    /// fails, naming `what`, instead of waiting for ever.
+    pub fn device(what: &str) -> Option<(wgpu::Device, wgpu::Queue, MutexGuard<'static, ()>)> {
+        let held = lock();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: backends(), ..wgpu::InstanceDescriptor::new_without_display_handle() });
+        use orbiters_reconstruct::gpu::block_on_within;
+        let adapter = block_on_within(&format!("{what}: the GPU adapter"), SET_UP, instance.request_adapter(&Default::default())).unwrap_or_else(|e| panic!("{e}")).ok()?;
+        let (device, queue) = block_on_within(&format!("{what}: the GPU device"), SET_UP, adapter.request_device(&Default::default())).unwrap_or_else(|e| panic!("{e}")).ok()?;
+        Some((device, queue, held))
+    }
+}

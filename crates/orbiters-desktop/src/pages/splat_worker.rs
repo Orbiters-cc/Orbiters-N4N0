@@ -275,8 +275,10 @@ impl Readback {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{}", orbiters_i18n::tr!("waiting for the integrated GPU: {error}", error = e)))?;
-        rx.recv()?.map_err(|e| anyhow::anyhow!("{}", orbiters_i18n::tr!("reading the frame back: {error}", error = e)))?;
+        // Bounded (night5): a GPU that never answers is an error naming the wait, not a worker stuck for ever.
+        orbiters_reconstruct::gpu::wait_for_gpu(device, "the integrated GPU's frame read-back")?; // i18n: not shown (a detail of a GPU error)
+        let answer = rx.recv_timeout(std::time::Duration::from_secs(5)).map_err(|_| anyhow::anyhow!("{}", orbiters_i18n::tr!("reading the frame back: {error}", error = orbiters_i18n::tr("no answer"))))?;
+        answer.map_err(|e| anyhow::anyhow!("{}", orbiters_i18n::tr!("reading the frame back: {error}", error = e)))?;
         let mut pixels = Vec::with_capacity((w * h * 4) as usize);
         {
             let data = slice.get_mapped_range().map_err(|e| anyhow::anyhow!("{}", orbiters_i18n::tr!("reading the frame back: {error}", error = format!("{e:?}"))))?;
@@ -343,7 +345,6 @@ impl egui_wgpu::CallbackTrait for FrameCallback {
 mod tests {
     use super::*;
     use orbiters_reconstruct::gaussians::{Gaussians, Seen};
-    use orbiters_reconstruct::gpu::block_on;
 
     /// A wall of coloured splats two metres ahead.
     fn wall() -> Gaussians {
@@ -362,10 +363,9 @@ mod tests {
 
     #[test]
     fn the_integrated_gpu_hands_over_what_the_window_would_have_drawn() {
+        // The GPU held for this test alone, the window's device on DX12 only (night5).
+        let Some((wd, wq, _gpu)) = crate::gpu::testing::device("the integrated GPU's test, the window's device") else { return };
         let Ok((device, queue)) = crate::gpu::integrated_device() else { return };
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
-        let Ok(adapter) = block_on(instance.request_adapter(&Default::default())) else { return };
-        let (wd, wq) = block_on(adapter.request_device(&Default::default())).expect("device");
         let g = wall();
         let camera = Camera::look([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.0, 150, 90);
         let request = Request { camera, confidence: Confidence::default(), far: FarField::default(), dof: DepthOfField::default(), probe: None, marks: 0 };

@@ -515,18 +515,31 @@ impl<'a, T> SegOption<'a, T> {
 
 /// Segmented control whose highlight slides between options with a bouncy spring. Returns true when the value
 /// changed (on press).
-pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut T, options: &[SegOption<'_, T>], small: bool) -> bool {
-    let id = ui.scope_id().with(id_salt);
-    let (item_h, pad_x, size) = if small { (28.0, 12.0, 12.0) } else { (32.0, 14.0, 13.0) };
+/// The width of each option of a [`segmented`] control, as it lays them out.
+fn segment_widths<T>(ui: &Ui, options: &[SegOption<'_, T>], small: bool) -> Vec<f32> {
+    let (pad_x, size) = if small { (12.0, 12.0) } else { (14.0, 13.0) };
     let badge_txt = |b: &str| Txt::new(b.to_uppercase(), 9.5).weight(weight::SEMIBOLD).tracking(0.04).color(theme::FG_2);
-    let widths: Vec<f32> = options
+    options
         .iter()
         .map(|o| {
             let t = text_size(ui, &Txt::new(o.label, size).weight(weight::MEDIUM)).x;
             let b = o.badge.map(|b| text_size(ui, &badge_txt(b)).x + 12.0 + 6.0).unwrap_or(0.0);
             t + b + pad_x * 2.0
         })
-        .collect();
+        .collect()
+}
+
+/// The whole width a [`segmented`] control takes with these options (its track), in this language: for a row to know
+/// whether it fits before it is drawn.
+pub fn segmented_width<T>(ui: &Ui, options: &[SegOption<'_, T>], small: bool) -> f32 {
+    segment_widths(ui, options, small).iter().sum::<f32>() + 8.0
+}
+
+pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut T, options: &[SegOption<'_, T>], small: bool) -> bool {
+    let id = ui.scope_id().with(id_salt);
+    let (item_h, size) = if small { (28.0, 12.0) } else { (32.0, 13.0) };
+    let badge_txt = |b: &str| Txt::new(b.to_uppercase(), 9.5).weight(weight::SEMIBOLD).tracking(0.04).color(theme::FG_2);
+    let widths = segment_widths(ui, options, small);
     let track_w = widths.iter().sum::<f32>() + 8.0;
     let (track, _) = ui.allocate_exact_size(vec2(track_w, item_h + 8.0), Sense::hover());
     let painter = ui.painter();

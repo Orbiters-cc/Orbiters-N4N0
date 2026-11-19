@@ -90,7 +90,7 @@ pub struct State {
     shown: Vec<Entry>,
     key: Option<(u64, u64, std::path::PathBuf, bool, String, u64)>,
     /// Who the account is, for the key above (not how its check with Orbiters goes).
-    account: super::AccountFollow,
+    account: crate::pages::AccountFollow,
     /// This computer's entries being made, with the revision of what they are made from beyond the pictures, taken
     /// (and when) before any of it was read.
     local_job: Job<(std::time::Instant, u64, Vec<Entry>)>,
@@ -597,6 +597,22 @@ fn list_is_stale(looked: Option<(std::time::Instant, u64)>, listed: Option<(std:
     matches!((looked, listed), (Some((looked, seen)), Some((made, from))) if looked > made && seen != from)
 }
 
+/// The filters over the gallery.
+fn filter_options() -> [SegOption<'static, Filter>; 5] {
+    [
+        SegOption::new(Filter::All, tr("All")),
+        SegOption::new(Filter::Mine, tr("Mine")),
+        SegOption::new(Filter::Shared, tr("Shared with me")),
+        SegOption::new(Filter::Communities, tr("Communities")).hint(tr("Pictures of your communities' galleries and their events")),
+        SegOption::new(Filter::Assets, tr("My assets")).hint(tr("Pictures of the avatars and other assets you made or own on Orbiters")),
+    ]
+}
+
+/// The Requests button beside the search.
+fn requests_button() -> Button<'static> {
+    Button::new(tr("Requests")).icon(icons::TRAY).hint(tr("People asking to share what you shared with them, and what you asked"))
+}
+
 /// `true` opens the existing capture-management surface (reconstruction, storage, import).
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let ctx = ui.ctx().clone();
@@ -685,7 +701,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let narrow = head.width() < 690.0;
     // The filters on one line, the layout, Requests and the search on the right; narrower, the layout and the search
     // go under them.
-    let stacked = head.width() < 920.0;
+    // (Also when the row does not fit in this language: the filters ran under the layout picker in Portuguese.)
+    let row_needs = widgets::segmented_width(ui, &filter_options(), false) + 12.0 + arrangement::PICKER_W + 12.0 + requests_button().desired_width(ui) + 12.0 + 260.0;
+    let stacked = head.width() < 920.0 || head.width() < row_needs;
     // Communities: the galleries as chips under the filters.
     let chips_h = if state.filter == Filter::Communities { 46.0 } else { 0.0 };
     let controls = Rect::from_min_size(pos2(head.left(), head.bottom() + 14.0), vec2(head.width(), if stacked { 88.0 } else { 40.0 } + chips_h));
@@ -1059,19 +1077,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     state.folders.show(ui, cx, Rect::from_min_size(pos2(b.left() - 10.0 - fw, b.top()), vec2(fw, 40.0)));
     let mut cu = ui.new_child(UiBuilder::new().max_rect(controls).id_salt("gallery-controls"));
     let before_filter = state.filter;
-    widgets::segmented(
-        &mut cu,
-        "gallery-filter",
-        &mut state.filter,
-        &[
-            SegOption::new(Filter::All, tr("All")),
-            SegOption::new(Filter::Mine, tr("Mine")),
-            SegOption::new(Filter::Shared, tr("Shared with me")),
-            SegOption::new(Filter::Communities, tr("Communities")).hint(tr("Pictures of your communities' galleries and their events")),
-            SegOption::new(Filter::Assets, tr("My assets")).hint(tr("Pictures of the avatars and other assets you made or own on Orbiters")),
-        ],
-        false,
-    );
+    widgets::segmented(&mut cu, "gallery-filter", &mut state.filter, &filter_options(), false);
     if state.filter == Filter::Communities {
         let chips = Rect::from_min_size(pos2(controls.left(), controls.bottom() - widgets::CHIP_H), vec2(controls.width(), widgets::CHIP_H));
         let before = state.community.chosen;
@@ -1090,7 +1096,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         Rect::from_min_size(pos2(controls.right() - 260.0, controls.top()), vec2(260.0, 40.0))
     };
     let pending = state.requests.pending();
-    let rb = Button::new(tr("Requests")).icon(icons::TRAY).hint(tr("People asking to share what you shared with them, and what you asked"));
+    let rb = requests_button();
     let rw = rb.desired_width(ui);
     let request_button = Rect::from_min_size(pos2(if stacked { controls.right() - rw } else { search.left() - 12.0 - rw }, controls.top()), vec2(rw, 40.0));
     // The layout picker: before Requests, or before the search under the filters.

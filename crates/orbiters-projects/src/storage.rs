@@ -923,7 +923,10 @@ fn relocate_on(
     // name the old Library will have while it is moved aside: the only folder a later sweep may put back or remove
     // (PROJECTS-33: a folder merely named like one is the person's).
     let backup = project.join(format!("{BACKUP_PREFIX}{}", uuid::Uuid::new_v4().simple()));
-    crate::write_json(&target.with_extension("json"), &serde_json::json!({"project":project,"library":target,"backup":backup}))?;
+    // Its phase too (PROJECTS-21): a cache whose record says it was still being copied was never Library, and a sweep may
+    // remove it without asking which projects the gallery knows.
+    let record = |phase: &str| serde_json::json!({"project":project,"library":target,"backup":backup,"phase":phase});
+    crate::write_json(&target.with_extension("json"), &record("copying"))?;
     std::fs::create_dir_all(target)?;
     update(work.progress, |p| {
         p.phase = Phase::Copying;
@@ -964,6 +967,11 @@ fn relocate_on(
         return Ok(RepairEnd::Cancelled { left: discard_copy(target, work) });
     }
     update(work.progress, |p| p.phase = Phase::Switching);
+    // From here the cache may become Library: no sweep removes it on the gallery's word any more.
+    if let Err(error) = crate::write_json(&target.with_extension("json"), &record("switching")) {
+        let left = discard_copy(target, work);
+        return Err(error).with_context(|| tr!("Library was not moved and stays where it is. {note}", note = partial_note(&left)));
+    }
     let had_library = library.is_dir();
     if had_library {
         if let Err(error) = std::fs::rename(&library, &backup) {
@@ -1282,6 +1290,21 @@ fn judge(cache: &Path, known: &[PathBuf]) -> Judgement {
             return if old.is_empty() { Keep(Kept::InUse) } else { KeepAndClean { project, old } };
         }
         Some(false) => {}
+    }
+    // A record that says how far its repair went decides by itself, whatever the gallery's (possibly stale) list says:
+    // still copying, it was never Library; past that, only an interrupted switch at this very project (its Library
+    // renamed to the recorded backup, no junction made) is undone. Anything else stays.
+    match record.as_ref().and_then(|r| r["phase"].as_str()) {
+        Some("copying") => return Remove { project, restore: None },
+        Some(_) => {
+            let own_missing = std::fs::symlink_metadata(&own).is_err();
+            return match recorded_backup(record.as_ref(), &project) {
+                Some(old) if own_missing => Remove { project, restore: Some(old) },
+                _ => Keep(Kept::Unknown),
+            };
+        }
+        // An older version's record: the gallery's list, as before.
+        None => {}
     }
     for other in known {
         match points_at(&other.join("Library"), cache) {
@@ -2099,7 +2122,7 @@ mod tests {
     /// The backup name a repair records for `cache` before it moves `project`'s Library aside.
     fn with_backup(cache: &Path, project: &Path) -> PathBuf {
         let old = project.join(format!("{BACKUP_PREFIX}{}", "b".repeat(32)));
-        crate::write_json(&cache.with_extension("json"), &serde_json::json!({"project": project, "library": cache, "backup": old})).unwrap();
+        crate::write_json(&cache.with_extension("json"), &serde_json::json!({"project": project, "library": cache, "backup": old, "phase": "switching"})).unwrap();
         old
     }
 
@@ -2128,6 +2151,25 @@ mod tests {
         assert!(swept.restored.is_empty() && swept.removed.is_empty(), "{swept:?}");
         assert!(mine.join("keep.txt").is_file() && !project.join("Library").exists());
         assert!(cache.join("Artifacts/data.bin").is_file());
+    }
+
+    /// PROJECTS-21: a cache whose record says it became Library is kept even when no project the gallery knows points at
+    /// it (the project was moved, junction and all, and its new place is not in the cached list yet); one whose record
+    /// says it was still being copied goes, whatever the list.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn the_records_phase_decides_without_the_gallerys_list() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("UnityCache");
+        let project = project(temp.path(), "project", 1, 64);
+        let switched = cache_for(&root, '7', &project);
+        crate::write_json(&switched.with_extension("json"), &serde_json::json!({"project": project, "library": switched, "phase": "switching"})).unwrap();
+        let copying = cache_for(&root, '6', &project);
+        crate::write_json(&copying.with_extension("json"), &serde_json::json!({"project": project, "library": copying, "phase": "copying"})).unwrap();
+        let swept = run_sweep(&root, &[]);
+        assert_eq!(swept.removed, vec![copying.clone()]);
+        assert!(switched.join("Artifacts/data.bin").is_file(), "the moved project's Library stays");
+        assert!(project.join("Library").is_dir(), "the project's own Library is not touched");
     }
 
     #[cfg(any(windows, unix))]

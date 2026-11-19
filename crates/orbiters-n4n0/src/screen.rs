@@ -926,7 +926,10 @@ impl ScreenRuntime {
                         (1, false) => "right trigger", // i18n: not shown
                         _ => "someone else's touch", // i18n: not shown
                     };
-                    if let Some((index, target)) = hit {
+                    if let Some((_, target)) = hit.filter(|(_, target)| hand == 2 && !menu::guest_may_press(*target, self.menu.page)) {
+                        // Someone else's fingertip on what only the owner may press (MENU-2): nothing happens.
+                        self.pointer_log.press(who, x, y, &format!("{target:?} on {}: the owner's only, nothing", ScreenPage::of(&self.menu).name())); // i18n: not shown (a log line)
+                    } else if let Some((index, target)) = hit {
                         self.pointer_log.press(who, x, y, &format!("{target:?} on {}", ScreenPage::of(&self.menu).name())); // i18n: not shown (a log line)
                         self.pressed = Some((index, now));
                         self.presses = self.presses.wrapping_add(1);
@@ -941,7 +944,8 @@ impl ScreenRuntime {
                     let hit = layout::hit_near(layout, &self.menu, x, y);
                     self.hand_hover[hand] = hit.map(|(i, _)| i);
                     // Held and moved along the music's timeline: the music follows, a segment at a time.
-                    if let (Some(from), Some((index, target))) = (self.dragging[hand], hit) {
+                    let guest = hand == 2;
+                    if let (Some(from), Some((index, target))) = (self.dragging[hand], hit.filter(|(_, t)| !guest || menu::guest_may_press(*t, self.menu.page))) {
                         let (on, more) = self.menu.drag(from, target);
                         if !more.is_empty() {
                             self.last_activity = now;
@@ -2826,6 +2830,56 @@ mod tests {
         }
         assert_eq!(s.menu.page, Page::Home, "someone else's touch went back");
         assert_eq!(s.presses, 2);
+    }
+
+    /// Someone else's fingertip comes onto `target`'s middle from in front, at `t`, `t + 20 ms`, `t + 40 ms`.
+    fn others_touch(s: &mut ScreenRuntime, target: menu::Target, t: Instant) -> Vec<Effect> {
+        let rect = layout::cached(ScreenPage::of(&s.menu)).elements.iter().find(|e| e.target == target).map(|e| e.rect).expect("the target on this page");
+        let at = on_screen(rect.x as f32 + rect.w as f32 / 2.0, rect.y as f32 + rect.h as f32 / 2.0);
+        let mut effects = Vec::new();
+        for (n, z) in [(0, -0.06), (20, -0.03), (40, -0.005)] {
+            for (i, v) in touch::RECEIVERS.iter().map(|c| {
+                let d = ((at[0] - c[0]).powi(2) + (at[1] - c[1]).powi(2) + (z - c[2]).powi(2)).sqrt() - 0.008;
+                (1.0 - d / touch::RADIUS).clamp(0.0, 1.0) as f32
+            }).enumerate() {
+                assert!(s.others_point(&format!("{}{i}", screen::local::OTHERS_PREFIX), v));
+            }
+            s.point_and_touch(t + Duration::from_millis(n), &mut effects);
+        }
+        // The fingertip goes away again.
+        for i in 0..touch::RECEIVERS.len() {
+            s.others_point(&format!("{}{i}", screen::local::OTHERS_PREFIX), 0.0);
+        }
+        s.point_and_touch(t + Duration::from_millis(400), &mut effects);
+        s.point_and_touch(t + Duration::from_millis(800), &mut effects);
+        effects
+    }
+
+    /// MENU-2: others press by touching what only shows; what acts for the owner (here the computer's media keys, the
+    /// music's timeline, held and dragged too) is the owner's alone.
+    #[test]
+    fn someone_else_s_touch_presses_nothing_that_acts_for_the_owner() {
+        let mut s = pointing();
+        s.avatar(true, true, Some(9), 72);
+        s.menu.open();
+        s.menu.media = Some(menu::Media { title: "A song".into(), can_play_pause: true, can_seek: true, duration: Some(200), playing: true, ..Default::default() });
+        let t0 = Instant::now();
+        let effects = others_touch(&mut s, menu::Target::Music, t0);
+        assert_eq!(s.menu.page, Page::Music, "the tile only opens a page: theirs to press");
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(s.presses, 1);
+        let effects = others_touch(&mut s, menu::Target::MediaPlayPause, t0 + Duration::from_secs(2));
+        assert!(!effects.iter().any(|e| matches!(e, Effect::Media(_))), "the owner's media keys: {effects:?}");
+        assert!(s.menu.media.as_ref().is_some_and(|m| m.playing), "nothing shown as pressed");
+        assert_eq!(s.presses, 1, "no click for what the guest may not press");
+        let effects = others_touch(&mut s, menu::Target::Seek(3), t0 + Duration::from_secs(4));
+        assert!(!effects.iter().any(|e| matches!(e, Effect::Media(_))), "the owner's timeline: {effects:?}");
+        // Held there and dragged along: the press was refused, so nothing follows the drag either.
+        assert_eq!(s.dragging[2], None);
+        let effects = others_touch(&mut s, menu::Target::Back, t0 + Duration::from_secs(6));
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(s.menu.page, Page::Home, "Back is theirs");
+        // The owner's own presses are untouched: the same rule never applies to hands 0 and 1 (the YouTube test above).
     }
 
     #[test]

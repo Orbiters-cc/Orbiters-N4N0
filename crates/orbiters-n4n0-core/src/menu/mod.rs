@@ -771,6 +771,112 @@ pub enum Target {
     MirrorStop,
 }
 
+/// Whether someone else's fingertip (the avatar's screen, everyone else's `FingerIndex`) may press `target` on `page` of the
+/// owner's menu. Others press by touching for what only shows: going back, closing, the pages that show nothing of the
+/// owner's (Home, YouTube's search and its results, Music, States, Tracking, Suggest features, More) and N4N0's light.
+/// Everything that acts for the owner is the owner's alone: what leaves the computer (a share, a comment, a call, an
+/// invite, a suggestion), what opens or writes something on the owner's computer (links, the clipboard, the QR code
+/// scanner, the microphone, the media keys and volume, a 3D picture, the mirror), the owner's saved settings and avatar
+/// (fast walk, Stay here, the assistant, the picture's choices, smoothing, states), what the owner is typing, and the
+/// pages that show the owner's lists (friends to call, History, Previous instances, World feedback's worlds). A target
+/// added later is the owner's until someone decides: this match has no catch-all arm.
+pub fn guest_may_press(target: Target, page: Page) -> bool {
+    match target {
+        // Navigation that only shows.
+        Target::Close | Target::Back => true,
+        Target::YouTube | Target::Music | Target::Light | Target::States | Target::Tracking | Target::Suggest | Target::More => true,
+        // Paging through what is already open, where that list is not the owner's.
+        Target::Previous | Target::Next => matches!(page, Page::Results | Page::States),
+        // YouTube's search: typed, asked and its suggestions (only the search field: the keyboard of a name, a comment or
+        // a suggestion types the owner's own text).
+        Target::Field | Target::Symbols | Target::Letters => true,
+        Target::Search | Target::Suggestion(_) | Target::Key(_) | Target::Space | Target::Backspace => page == Page::Search,
+        // N4N0's light: the avatar's parameter, seen by everyone, nothing leaves (Enzo's call, 2026-11-19 brief).
+        Target::LightSwitch | Target::LightColor(_) | Target::LightLevel(_) => true,
+        // Back out of the explicit warning: nothing is shared.
+        Target::CancelShare => true,
+        // A comment's card has nothing to press.
+        Target::CommentCard(_) => true,
+        // The owner's alone.
+        Target::Microphones
+        | Target::FastWalk
+        | Target::StayHere
+        | Target::Call
+        | Target::Photo
+        | Target::Copy(_)
+        | Target::Contact(_)
+        | Target::Answer
+        | Target::HangUp
+        | Target::Timer(_)
+        | Target::Length(_)
+        | Target::Take
+        | Target::TakeOf(_)
+        | Target::PhotoMode
+        | Target::MediaPrevious
+        | Target::MediaPlayPause
+        | Target::MediaNext
+        | Target::VolumeDown
+        | Target::VolumeUp
+        | Target::Mute
+        | Target::StateApply(_)
+        | Target::StateMark(_)
+        | Target::StateSave
+        | Target::Drop(_)
+        | Target::DraftName
+        | Target::DraftSize
+        | Target::DraftPose
+        | Target::DraftDefault
+        | Target::DraftSave
+        | Target::Done
+        | Target::TrackingSwitch
+        | Target::Smoothing(_)
+        | Target::SuggestType
+        | Target::SuggestTalk
+        | Target::SuggestSend
+        | Target::MismatchButtons
+        | Target::Assistant
+        | Target::WatchVideo
+        | Target::SaveVideo
+        | Target::CopyPlaying
+        | Target::DropPlaying
+        | Target::Timeline(_)
+        | Target::Seek(_)
+        | Target::TakeBack
+        | Target::Instances
+        | Target::InviteMe(_)
+        | Target::CopyFriendName
+        | Target::OpenFriendLink
+        | Target::InviteAgain
+        | Target::Qr
+        | Target::QrAgain
+        | Target::QrCopy
+        | Target::QrOpen
+        | Target::History
+        | Target::ShareLatest
+        | Target::ShareLatestTo
+        | Target::SharePublic(_)
+        | Target::ShareTo(_)
+        | Target::Friend(_)
+        | Target::FriendMark(_)
+        | Target::FindFriend
+        | Target::SendShare
+        | Target::ShareAnyway
+        | Target::WorldFeedback
+        | Target::Like
+        | Target::TopLabel(_)
+        | Target::Labels
+        | Target::Comments
+        | Target::WriteComment
+        | Target::LabelChip(_)
+        | Target::DeleteComment(_)
+        | Target::Mirror
+        | Target::MirrorAim
+        | Target::MirrorZoomIn
+        | Target::MirrorZoomOut
+        | Target::MirrorStop => false,
+    }
+}
+
 /// The timeline segment a target is (the segment, or the place over it), for a drag along the timeline.
 pub fn timeline_segment(target: Target) -> Option<u8> {
     match target {
@@ -3771,5 +3877,154 @@ mod tests {
         assert_eq!(ScreenPage::of(&old), ScreenPage::MoreQr);
         assert!(old.press(Target::WorldFeedback).is_empty());
         assert_ne!(old.page, Page::Feedback);
+    }
+
+    /// Every page, once (a page added later fails to compile here until it is listed).
+    fn every_page() -> Vec<Page> {
+        let all = [
+            Page::Home, Page::Search, Page::Results, Page::Call, Page::Photo, Page::Music, Page::Light, Page::States, Page::Card, Page::NewState,
+            Page::Type, Page::Tracking, Page::Suggest, Page::More, Page::Instances, Page::AddFriend, Page::Qr, Page::History, Page::ShareTo,
+            Page::Explicit, Page::Feedback, Page::FeedbackLabels, Page::Comments, Page::Mirror,
+        ];
+        for page in all {
+            match page {
+                Page::Home | Page::Search | Page::Results | Page::Call | Page::Photo | Page::Music | Page::Light | Page::States | Page::Card
+                | Page::NewState | Page::Type | Page::Tracking | Page::Suggest | Page::More | Page::Instances | Page::AddFriend | Page::Qr
+                | Page::History | Page::ShareTo | Page::Explicit | Page::Feedback | Page::FeedbackLabels | Page::Comments | Page::Mirror => {}
+            }
+        }
+        all.to_vec()
+    }
+
+    /// Each target's place in [`GUEST_TABLE`]: a target added later fails to compile here, then the table test fails until
+    /// the table has its row (someone decided whether others may press it).
+    fn ordinal(target: Target) -> usize {
+        match target {
+            Target::Microphones => 0, Target::Close => 1, Target::Back => 2, Target::FastWalk => 3, Target::StayHere => 4, Target::YouTube => 5,
+            Target::Call => 6, Target::Photo => 7, Target::Music => 8, Target::Light => 9, Target::Field => 10, Target::Search => 11,
+            Target::Suggestion(_) => 12, Target::Key(_) => 13, Target::Space => 14, Target::Backspace => 15, Target::Symbols => 16,
+            Target::Letters => 17, Target::Copy(_) => 18, Target::Previous => 19, Target::Next => 20, Target::Contact(_) => 21,
+            Target::Answer => 22, Target::HangUp => 23, Target::Timer(_) => 24, Target::Length(_) => 25, Target::Take => 26,
+            Target::TakeOf(_) => 27, Target::PhotoMode => 28, Target::MediaPrevious => 29, Target::MediaPlayPause => 30, Target::MediaNext => 31,
+            Target::VolumeDown => 32, Target::VolumeUp => 33, Target::Mute => 34, Target::LightSwitch => 35, Target::LightColor(_) => 36,
+            Target::LightLevel(_) => 37, Target::States => 38, Target::StateApply(_) => 39, Target::StateMark(_) => 40, Target::StateSave => 41,
+            Target::Drop(_) => 42, Target::DraftName => 43, Target::DraftSize => 44, Target::DraftPose => 45, Target::DraftDefault => 46,
+            Target::DraftSave => 47, Target::Done => 48, Target::Tracking => 49, Target::Suggest => 50, Target::TrackingSwitch => 51,
+            Target::Smoothing(_) => 52, Target::SuggestType => 53, Target::SuggestTalk => 54, Target::SuggestSend => 55,
+            Target::MismatchButtons => 56, Target::Assistant => 57, Target::WatchVideo => 58, Target::SaveVideo => 59, Target::CopyPlaying => 60,
+            Target::DropPlaying => 61, Target::Timeline(_) => 62, Target::Seek(_) => 63, Target::TakeBack => 64, Target::More => 65,
+            Target::Instances => 66, Target::InviteMe(_) => 67, Target::CopyFriendName => 68, Target::OpenFriendLink => 69,
+            Target::InviteAgain => 70, Target::Qr => 71, Target::QrAgain => 72, Target::QrCopy => 73, Target::QrOpen => 74, Target::History => 75,
+            Target::ShareLatest => 76, Target::ShareLatestTo => 77, Target::SharePublic(_) => 78, Target::ShareTo(_) => 79, Target::Friend(_) => 80,
+            Target::FriendMark(_) => 81, Target::FindFriend => 82, Target::SendShare => 83, Target::ShareAnyway => 84, Target::CancelShare => 85,
+            Target::WorldFeedback => 86, Target::Like => 87, Target::TopLabel(_) => 88, Target::Labels => 89, Target::Comments => 90,
+            Target::WriteComment => 91, Target::LabelChip(_) => 92, Target::CommentCard(_) => 93, Target::DeleteComment(_) => 94,
+            Target::Mirror => 95, Target::MirrorAim => 96, Target::MirrorZoomIn => 97, Target::MirrorZoomOut => 98, Target::MirrorStop => 99,
+        }
+    }
+
+    /// Where others may press each target: `Everywhere`, `Never` (the owner's alone), or on these pages only. The rule of
+    /// MENU-2 / MENU-7, pinned: changing [`guest_may_press`] means changing this table on purpose.
+    enum Guest {
+        Everywhere,
+        Never,
+        On(&'static [Page]),
+    }
+
+    const GUEST_TABLE: [(Target, Guest); 100] = {
+        use Guest::*;
+        [
+            (Target::Microphones, Never), (Target::Close, Everywhere), (Target::Back, Everywhere), (Target::FastWalk, Never),
+            (Target::StayHere, Never), (Target::YouTube, Everywhere), (Target::Call, Never), (Target::Photo, Never), (Target::Music, Everywhere),
+            (Target::Light, Everywhere), (Target::Field, Everywhere), (Target::Search, On(&[Page::Search])), (Target::Suggestion(1), On(&[Page::Search])),
+            (Target::Key('a'), On(&[Page::Search])), (Target::Space, On(&[Page::Search])), (Target::Backspace, On(&[Page::Search])),
+            (Target::Symbols, Everywhere), (Target::Letters, Everywhere), (Target::Copy(0), Never), (Target::Previous, On(&[Page::Results, Page::States])),
+            (Target::Next, On(&[Page::Results, Page::States])), (Target::Contact(0), Never), (Target::Answer, Never), (Target::HangUp, Never),
+            (Target::Timer(0), Never), (Target::Length(0), Never), (Target::Take, Never), (Target::TakeOf(PhotoMode::World), Never),
+            (Target::PhotoMode, Never), (Target::MediaPrevious, Never), (Target::MediaPlayPause, Never), (Target::MediaNext, Never),
+            (Target::VolumeDown, Never), (Target::VolumeUp, Never), (Target::Mute, Never), (Target::LightSwitch, Everywhere),
+            (Target::LightColor(2), Everywhere), (Target::LightLevel(1), Everywhere), (Target::States, Everywhere), (Target::StateApply(0), Never),
+            (Target::StateMark(0), Never), (Target::StateSave, Never), (Target::Drop(0), Never), (Target::DraftName, Never), (Target::DraftSize, Never),
+            (Target::DraftPose, Never), (Target::DraftDefault, Never), (Target::DraftSave, Never), (Target::Done, Never), (Target::Tracking, Everywhere),
+            (Target::Suggest, Everywhere), (Target::TrackingSwitch, Never), (Target::Smoothing(0), Never), (Target::SuggestType, Never),
+            (Target::SuggestTalk, Never), (Target::SuggestSend, Never), (Target::MismatchButtons, Never), (Target::Assistant, Never),
+            (Target::WatchVideo, Never), (Target::SaveVideo, Never), (Target::CopyPlaying, Never), (Target::DropPlaying, Never),
+            (Target::Timeline(3), Never), (Target::Seek(3), Never), (Target::TakeBack, Never), (Target::More, Everywhere), (Target::Instances, Never),
+            (Target::InviteMe(0), Never), (Target::CopyFriendName, Never), (Target::OpenFriendLink, Never), (Target::InviteAgain, Never),
+            (Target::Qr, Never), (Target::QrAgain, Never), (Target::QrCopy, Never), (Target::QrOpen, Never), (Target::History, Never),
+            (Target::ShareLatest, Never), (Target::ShareLatestTo, Never), (Target::SharePublic(0), Never), (Target::ShareTo(0), Never),
+            (Target::Friend(0), Never), (Target::FriendMark(0), Never), (Target::FindFriend, Never), (Target::SendShare, Never),
+            (Target::ShareAnyway, Never), (Target::CancelShare, Everywhere), (Target::WorldFeedback, Never), (Target::Like, Never),
+            (Target::TopLabel(0), Never), (Target::Labels, Never), (Target::Comments, Never), (Target::WriteComment, Never),
+            (Target::LabelChip(0), Never), (Target::CommentCard(0), Everywhere), (Target::DeleteComment(0), Never), (Target::Mirror, Never),
+            (Target::MirrorAim, Never), (Target::MirrorZoomIn, Never), (Target::MirrorZoomOut, Never), (Target::MirrorStop, Never),
+        ]
+    };
+
+    #[test]
+    fn others_press_only_what_the_guest_table_lets_them_on_every_page() {
+        // Every target has exactly one row.
+        let mut seen = [false; GUEST_TABLE.len()];
+        for (target, _) in &GUEST_TABLE {
+            let n = ordinal(*target);
+            assert!(!seen[n], "{target:?} has two rows");
+            seen[n] = true;
+        }
+        assert!(seen.iter().all(|s| *s), "a target has no row in the guest table");
+        for (target, rule) in &GUEST_TABLE {
+            for page in every_page() {
+                let want = match rule {
+                    Guest::Everywhere => true,
+                    Guest::Never => false,
+                    Guest::On(pages) => pages.contains(&page),
+                };
+                assert_eq!(guest_may_press(*target, page), want, "{target:?} on {page:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_guest_may_browse_and_go_back_but_not_act_for_the_owner() {
+        // What MENU-2 found a guest could do, two presses each: none of it is the guest's.
+        for (page, target) in [
+            (Page::Photo, Target::ShareLatest),
+            (Page::History, Target::SharePublic(0)),
+            (Page::Explicit, Target::ShareAnyway),
+            (Page::Comments, Target::DeleteComment(0)),
+            (Page::Type, Target::Done),
+            (Page::Type, Target::Key('x')),
+            (Page::Call, Target::Contact(0)),
+            (Page::Call, Target::Answer),
+            (Page::Instances, Target::InviteMe(0)),
+            (Page::Qr, Target::QrOpen),
+            (Page::More, Target::Qr),
+            (Page::Music, Target::MediaPlayPause),
+            (Page::Music, Target::VolumeUp),
+            (Page::Music, Target::Seek(4)),
+            (Page::Home, Target::FastWalk),
+            (Page::Home, Target::Assistant),
+            (Page::Suggest, Target::SuggestTalk),
+            (Page::States, Target::StateApply(0)),
+            (Page::Home, Target::Call),
+            (Page::Photo, Target::History),
+            (Page::More, Target::Instances),
+            (Page::History, Target::Next),
+            (Page::Feedback, Target::Next),
+        ] {
+            assert!(!guest_may_press(target, page), "{target:?} on {page:?} is the owner's");
+        }
+        for (page, target) in [
+            (Page::Home, Target::YouTube),
+            (Page::Search, Target::Key('a')),
+            (Page::Search, Target::Search),
+            (Page::Results, Target::Next),
+            (Page::Results, Target::Back),
+            (Page::Home, Target::Light),
+            (Page::Light, Target::LightSwitch),
+            (Page::Qr, Target::Back),
+            (Page::History, Target::Close),
+        ] {
+            assert!(guest_may_press(target, page), "{target:?} on {page:?} only shows");
+        }
     }
 }

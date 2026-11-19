@@ -981,7 +981,6 @@ impl Controller {
         if started.is_some_and(|t| t.elapsed() < STARTING_FOR) {
             return Notice::Error(tr("Starting VRChat…").into());
         }
-        }
         if !machine.installed() {
             return Notice::Error(tr("VRChat was not found on this computer. Install it from Steam, or start it once.").into());
         }

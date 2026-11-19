@@ -105,11 +105,22 @@ impl Progress {
     }
 }
 
-/// Makes sure nothing runs from `dir` any more. The app is asked to quit as its own Quit does, when it runs from
-/// there (an instance from elsewhere, a development build, is left alone; its files are not these). Past
-/// [`PATIENCE`] the window offers to close what is left, which `silent` does by itself.
-fn close_app(dir: &Path, progress: &Progress, silent: bool) -> anyhow::Result<()> {
-    if system::processes_in(dir).is_empty() {
+/// The programs of this install in `dir`: the `.exe` files the last install's record and the payload name, at their
+/// exact places. Only these are waited for or closed (PROJECTS-15): the folder may hold other programs of the person's.
+fn own_programs<'a>(dir: &Path, files: impl Iterator<Item = &'a str>) -> Vec<PathBuf> {
+    let mut programs: Vec<PathBuf> = files.filter(|f| f.to_ascii_lowercase().ends_with(".exe")).filter_map(|f| inside(dir, f)).collect();
+    programs.push(dir.join(orbiters_update::APP_EXE));
+    programs.sort();
+    programs.dedup();
+    programs
+}
+
+/// Makes sure none of this install's `programs` runs any more. The app is asked to quit as its own Quit does, when it
+/// runs from there (an instance from elsewhere, a development build, is left alone; its files are not these). Past
+/// [`PATIENCE`] the window offers to close what is left; `silent` (an automatic update, nobody to ask) closes nothing:
+/// the update waits for another time.
+fn close_app(dir: &Path, programs: &[PathBuf], progress: &Progress, silent: bool) -> anyhow::Result<()> {
+    if system::processes_of(programs).is_empty() {
         return Ok(());
     }
     progress.label(tr("Closing Orbiters - N4N0…"));
@@ -117,17 +128,106 @@ fn close_app(dir: &Path, progress: &Progress, silent: bool) -> anyhow::Result<()
         system::ask_app_to_quit();
     }
     let stop = || progress.forced() || progress.cancelled();
-    if !system::wait_for_folder(dir, PATIENCE, stop) {
+    if !system::wait_for_programs(programs, PATIENCE, stop) {
         if !silent {
             progress.stuck(true);
-            while !system::wait_for_folder(dir, Duration::from_secs(1), stop) && !stop() {}
+            while !system::wait_for_programs(programs, Duration::from_secs(1), stop) && !stop() {}
             progress.stuck(false);
+            anyhow::ensure!(!progress.cancelled(), "{}", tr("Cancelled: Orbiters - N4N0 was still running."));
+            system::terminate_programs(programs);
         }
-        anyhow::ensure!(!progress.cancelled(), "{}", tr("Cancelled: Orbiters - N4N0 was still running."));
-        system::terminate_folder(dir);
     }
-    anyhow::ensure!(system::processes_in(dir).is_empty(), "{}", orbiters_i18n::tr!("Orbiters - N4N0 is still running from {folder}.", folder = dir.display()));
+    anyhow::ensure!(system::processes_of(programs).is_empty(), "{}", orbiters_i18n::tr!("Orbiters - N4N0 is still running from {folder}.", folder = dir.display()));
     Ok(())
+}
+
+/// `relative` in `dir`, when nothing between them is a link or a junction (PROJECTS-42): a folder of the install
+/// redirected elsewhere would make an update or uninstall move or remove files outside the install folder.
+fn contained(dir: &Path, relative: &str) -> Option<PathBuf> {
+    use std::os::windows::fs::MetadataExt;
+    const REPARSE_POINT: u32 = 0x400;
+    let path = inside(dir, relative)?;
+    let mut at = dir.to_path_buf();
+    for part in Path::new(relative).components() {
+        at.push(part);
+        match std::fs::symlink_metadata(&at) {
+            Ok(m) if m.file_type().is_symlink() || m.file_attributes() & REPARSE_POINT != 0 => return None,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    Some(path)
+}
+
+/// The payload's files already in `dir` that are not this app's (PROJECTS-34): not in the last install's record, and not
+/// the payload's own bytes. An install would put them aside and then remove them.
+fn collisions(dir: &Path, index: &payload::Index, previous: Option<&InstallRecord>) -> Vec<String> {
+    use sha2::{Digest, Sha256};
+    let owned = |path: &str| previous.is_some_and(|r| r.files.iter().any(|f| f.eq_ignore_ascii_case(path)));
+    let same = |file: &Path, sha256: &str| {
+        let Ok(mut f) = std::fs::File::open(file) else { return false };
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut f, &mut hasher).is_ok() && format!("{:x}", hasher.finalize()) == sha256.to_ascii_lowercase()
+    };
+    index
+        .files
+        .iter()
+        .filter(|e| !owned(&e.path))
+        .filter(|e| inside(dir, &e.path).is_some_and(|dest| dest.exists() && !(dest.is_file() && same(&dest, &e.sha256))))
+        .map(|e| e.path.clone())
+        .collect()
+}
+
+/// The payload's and the last record's files reached through a link or a junction ([`contained`]).
+fn redirected<'a>(dir: &Path, paths: impl Iterator<Item = &'a str>) -> Vec<String> {
+    paths.filter(|p| inside(dir, p).is_some() && contained(dir, p).is_none()).map(str::to_string).collect()
+}
+
+/// What a cut install left (F15): files the last install had that are missing in `dir` and waiting in the backup folder
+/// go back first; then the backup folder (its other files may be the only copy of something) and a staging folder
+/// holding anything but payload files are kept under a name of their own instead of being removed.
+fn recover_leftovers(dir: &Path, staging: &Path, backup: &Path, index: &payload::Index, previous: Option<&InstallRecord>) {
+    let stamp = time::OffsetDateTime::now_utc().unix_timestamp();
+    if backup.is_dir() {
+        for path in previous.map(|r| r.files.as_slice()).unwrap_or_default() {
+            let (Some(dest), Some(from)) = (contained(dir, path), contained(backup, path)) else { continue };
+            if !dest.exists() && from.is_file() && make_parent(&dest).is_ok() {
+                let _ = rename(&from, &dest);
+            }
+        }
+        if std::fs::read_dir(backup).is_ok_and(|mut d| d.next().is_some()) && !files_only_of(backup, &[]) {
+            let _ = rename(backup, &dir.join(format!("{BACKUP}-{stamp}")));
+        } else {
+            remove_tree(backup);
+        }
+    }
+    if staging.is_dir() {
+        let payload: Vec<&str> = index.files.iter().map(|f| f.path.as_str()).collect();
+        if files_only_of(staging, &payload) {
+            remove_tree(staging);
+        } else {
+            let _ = rename(staging, &dir.join(format!("{STAGING}-{stamp}")));
+        }
+    }
+}
+
+/// Whether every file under `folder` is one of `paths` (relative, `/` between folders), with no link anywhere.
+fn files_only_of(folder: &Path, paths: &[&str]) -> bool {
+    fn walk(root: &Path, at: &Path, paths: &[&str]) -> bool {
+        let Ok(entries) = std::fs::read_dir(at) else { return false };
+        entries.flatten().all(|e| {
+            let Ok(m) = std::fs::symlink_metadata(e.path()) else { return false };
+            if m.file_type().is_symlink() {
+                false
+            } else if m.is_dir() {
+                walk(root, &e.path(), paths)
+            } else {
+                let rel = e.path().strip_prefix(root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+                paths.iter().any(|p| p.eq_ignore_ascii_case(&rel))
+            }
+        })
+    }
+    walk(folder, folder, paths)
 }
 
 /// Installs the payload with `options`. `fresh` is a choice the person just made (the setup's window); an update
@@ -145,9 +245,24 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
     std::fs::create_dir_all(dir).with_context(|| orbiters_i18n::tr!("{path} cannot be created", path = dir.display()))?;
     let staging = dir.join(STAGING);
     let backup = dir.join(BACKUP);
+    let previous = InstallRecord::read(dir);
+    // Nothing is changed when a file of the payload would replace one of the person's, or would be reached through a
+    // folder redirected elsewhere.
+    let taken = collisions(dir, &index, previous.as_ref());
+    anyhow::ensure!(
+        taken.is_empty(),
+        "{}",
+        tr!("These files are already in {folder} and are not Orbiters - N4N0's: {files}. Nothing was changed: choose another folder.", folder = dir.display(), files = taken.join(", "))
+    );
+    let new_and_old = index.files.iter().map(|f| f.path.as_str()).chain(previous.iter().flat_map(|r| r.files.iter().map(String::as_str)));
+    let linked = redirected(dir, new_and_old);
+    anyhow::ensure!(
+        linked.is_empty(),
+        "{}",
+        tr!("These files of {folder} are reached through a link to another folder: {files}. Nothing was changed.", folder = dir.display(), files = linked.join(", "))
+    );
     // What a cut install left.
-    remove_tree(&staging);
-    remove_tree(&backup);
+    recover_leftovers(dir, &staging, &backup, &index, previous.as_ref());
 
     progress.set(0.02, tr("Unpacking…"));
     let unpacked = payload::unpack(bytes, &staging, |done, total, file| {
@@ -157,13 +272,13 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
         remove_tree(&staging);
         return Err(e);
     }
-    if let Err(e) = close_app(dir, progress, silent) {
+    let programs = own_programs(dir, index.files.iter().map(|f| f.path.as_str()).chain(previous.iter().flat_map(|r| r.files.iter().map(String::as_str))));
+    if let Err(e) = close_app(dir, &programs, progress, silent) {
         remove_tree(&staging);
         return Err(e);
     }
 
     progress.set(0.82, tr("Putting the new version in place…"));
-    let previous = InstallRecord::read(dir);
     swap(dir, &staging, &backup, &index, previous.as_ref())?;
     let record = InstallRecord {
         product: PRODUCT.into(),
@@ -194,7 +309,7 @@ fn swap(dir: &Path, staging: &Path, backup: &Path, index: &payload::Index, previ
     let mut placed: Vec<&str> = Vec::new();
     let result = (|| -> anyhow::Result<()> {
         for &path in new.iter().chain(&gone) {
-            let (Some(dest), Some(to)) = (inside(dir, path), inside(backup, path)) else { continue };
+            let (Some(dest), Some(to)) = (contained(dir, path), contained(backup, path)) else { continue };
             if dest.is_file() {
                 make_parent(&to)?;
                 rename(&dest, &to).with_context(|| orbiters_i18n::tr!("{path} is in use by another program", path = dest.display()))?;
@@ -202,7 +317,9 @@ fn swap(dir: &Path, staging: &Path, backup: &Path, index: &payload::Index, previ
             }
         }
         for &path in &new {
-            let (Some(from), Some(dest)) = (inside(staging, path), inside(dir, path)) else { continue };
+            let (Some(from), Some(dest)) = (contained(staging, path), contained(dir, path)) else {
+                anyhow::bail!("{}", tr!("{path} is reached through a link to another folder", path = path));
+            };
             make_parent(&dest)?;
             rename(&from, &dest).with_context(|| orbiters_i18n::tr!("{path} cannot be written", path = dest.display()))?;
             placed.push(path);
@@ -210,16 +327,29 @@ fn swap(dir: &Path, staging: &Path, backup: &Path, index: &payload::Index, previ
         Ok(())
     })();
     if let Err(e) = result {
-        // As it was: the new files out, the old ones back.
+        // As it was: the new files out, the old ones back. Each move checked (F16): what could not be put back is named,
+        // and the backup folder then stays as it is.
+        let mut stuck = Vec::new();
         for &path in placed.iter().rev() {
             if let (Some(dest), Some(from)) = (inside(dir, path), inside(staging, path)) {
-                let _ = rename(&dest, &from);
+                if rename(&dest, &from).is_err() {
+                    stuck.push(path);
+                }
             }
         }
         for &path in aside.iter().rev() {
             if let (Some(to), Some(dest)) = (inside(backup, path), inside(dir, path)) {
-                let _ = rename(&to, &dest);
+                if rename(&to, &dest).is_err() {
+                    stuck.push(path);
+                }
             }
+        }
+        if !stuck.is_empty() {
+            return Err(e.context(tr!(
+                "The previous version could not be fully put back: {files}. Its files are kept in {folder}.",
+                files = stuck.join(", "),
+                folder = backup.display()
+            )));
         }
         remove_tree(staging);
         return Err(e.context(tr("The previous version was put back")));
@@ -286,7 +416,7 @@ const BOOSTER_PATIENCE: Duration = Duration::from_secs(120);
 pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: bool) -> anyhow::Result<()> {
     let record = InstallRecord::read(dir).with_context(|| tr!("Orbiters - N4N0 is not installed in {folder}.", folder = dir.display()))?;
     progress.set(0.05, tr("Closing Orbiters - N4N0…"));
-    close_app(dir, progress, silent)?;
+    close_app(dir, &own_programs(dir, record.files.iter().map(String::as_str)), progress, silent)?;
 
     finish_booster(progress, silent);
 
@@ -317,10 +447,15 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
     let mut failed = Vec::new();
     let count = record.files.len().max(1);
     for (i, path) in record.files.iter().enumerate() {
-        if let Some(file) = inside(dir, path) {
-            if file.is_file() && remove_file(&file).is_err() {
-                failed.push(file.display().to_string());
+        match contained(dir, path) {
+            Some(file) => {
+                if file.is_file() && remove_file(&file).is_err() {
+                    failed.push(file.display().to_string());
+                }
             }
+            // Reached through a link to another folder: never removed from there (PROJECTS-42).
+            None if inside(dir, path).is_some() => failed.push(dir.join(path).display().to_string()),
+            None => {}
         }
         progress.set(0.35 + 0.5 * (i + 1) as f32 / count as f32, tr!("Removing {path}", path = path));
     }
@@ -352,6 +487,9 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
         // Its frame logs, written at every level and Off by default: large, and nobody else's.
         if let Some(local) = dirs::data_local_dir() {
             orbiters_booster::log::remove_logs(&local.join("Orbiters").join("logs"));
+            // Everything else N4N0 keeps in the folder it shares with the Orbiters Unity tools (PRIV-6), by name.
+            let stems: Vec<String> = record.files.iter().filter_map(|f| f.strip_suffix(".exe")).filter(|s| !s.contains(['/', '\\'])).map(str::to_string).collect();
+            failed.extend(remove_own_data(&local.join("Orbiters"), &stems));
         }
         // The shared Orbiters folders, once nothing else of Orbiters' is left in them.
         for root in [dirs::config_dir(), dirs::data_local_dir()].into_iter().flatten() {
@@ -395,6 +533,112 @@ fn finish_booster(progress: &Progress, silent: bool) {
         store.remove_if_empty();
         booster::remove_restorer_copy();
     }
+}
+
+/// What N4N0 itself writes at the top of the `Orbiters` folder of `%LOCALAPPDATA%` it shares with the Orbiters Unity
+/// tools: the VRChat session (its cookies), the statistics' install id and queue, the menu reports, its SteamVR files,
+/// the VR tuning, and the Unity projects page's caches. The account the tools share, their avatar manifests, Mixer and
+/// the booster's journal (`finish_booster` decides on it) are not on it.
+const OWN_DATA: &[&str] = &[
+    "vrchat-session.bin",
+    "usage",
+    "menu-reports",
+    "SteamVR",
+    "orbit-vr-tune.json",
+    "unity-projects.json",
+    "project-sizes.json",
+    "hidden-projects.json",
+    "unity-cache-folders.json",
+    "unity-templates",
+    "package-icons",
+    "project-pictures",
+    "avatar-thumbnails",
+    "world-thumbnails",
+];
+
+/// What N4N0 writes in the shared `logs` folder: these names, `perf-report-*.json`, and its programs' panic logs
+/// (`<program>.log`, `<program>.old.log`). The booster's logs are removed by `orbiters_booster::log::remove_logs`.
+const OWN_LOGS: &[&str] = &[
+    "perf.jsonl",
+    "perf.jsonl.1",
+    "perf-old-publishing.flag",
+    "vr-test.log",
+    "vr-test.old.log",
+    "shares.log",
+    "shares.old.log",
+    "publishes.log",
+    "publishes.old.log",
+    "translate.log",
+    "camera-tiles.log",
+    "camera-events.jsonl",
+    "camera-truth.jsonl",
+    "camera-reader.json",
+    "camera-reader.png",
+    "overlay-stalls.log",
+    "overlay-worlds.jsonl",
+    "overlay-worlds.old.jsonl",
+    "walk-boost.log",
+    "walk-boost.previous.log",
+    "n4n0-pointer.log",
+    "n4n0-pointer.old.log",
+    "n4n0-pictures.log",
+    "n4n0-pictures.old.log",
+    "qr-test-sender.txt",
+    "fps-test-report.txt",
+    "mismatch-press.txt",
+    // Folders of pictures only N4N0 writes.
+    "camera-frames",
+    "vr-pictures",
+    "vr-test-frames",
+];
+
+/// Removes N4N0's own entries ([`OWN_DATA`], [`OWN_LOGS`], the panic logs of `programs`, the file stems of the
+/// install's programs) from `root` (the shared `%LOCALAPPDATA%\Orbiters`), each by name: never the shared folder itself,
+/// never anything through a link (a link is removed as a link). The paths that could not be removed.
+fn remove_own_data(root: &Path, programs: &[String]) -> Vec<String> {
+    let logs = root.join("logs");
+    let mut targets: Vec<PathBuf> = OWN_DATA.iter().map(|n| root.join(n)).collect();
+    targets.extend(OWN_LOGS.iter().map(|n| logs.join(n)));
+    for program in programs {
+        targets.push(logs.join(format!("{program}.log")));
+        targets.push(logs.join(format!("{program}.old.log")));
+    }
+    if let Ok(entries) = std::fs::read_dir(&logs) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("perf-report-") && name.ends_with(".json") {
+                targets.push(e.path());
+            }
+        }
+    }
+    let mut failed = Vec::new();
+    for path in targets {
+        if let Err(e) = remove_owned(&path) {
+            failed.push(format!("{} ({e})", path.display()));
+        }
+    }
+    // The logs folder once nothing is left in it (another tool's logs keep it).
+    let _ = std::fs::remove_dir(&logs);
+    failed
+}
+
+/// `path` removed: a link (or junction) as a link, never what it leads to; a folder with all in it, links inside removed
+/// as links (`remove_dir_all` does not follow them); nothing there is fine.
+fn remove_owned(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let link = meta.file_type().is_symlink() || meta.file_attributes() & 0x400 != 0;
+    // A junction (or a link to a folder) is a folder to Windows: removed with `remove_dir`, which takes the link only.
+    let folder = meta.is_dir() || meta.file_attributes() & 0x10 != 0;
+    retrying(|| match (link, folder) {
+        (true, true) => std::fs::remove_dir(path),
+        (true, false) | (false, false) => std::fs::remove_file(path),
+        (false, true) => std::fs::remove_dir_all(path),
+    })
 }
 
 /// What Orbiters - N4N0 keeps outside its install folder, its own only (`orbiters_core::paths`): settings
@@ -530,6 +774,148 @@ mod tests {
         assert_eq!(std::fs::read(dir.join(APP_EXE)).unwrap(), b"old");
         assert_eq!(std::fs::read(dir.join("b.dll")).unwrap(), b"old b");
         remove_tree(&dir);
+    }
+
+    /// PROJECTS-34: a file of the person's where the payload puts one of its own is never put aside and removed; the
+    /// app's own files (in the record, or the payload's very bytes) are not in the way.
+    #[test]
+    fn a_file_of_the_persons_in_the_payloads_place_stops_the_install_before_any_change() {
+        use sha2::{Digest, Sha256};
+        let dir = scratch("collide");
+        std::fs::write(dir.join("readme.txt"), b"the person's").unwrap();
+        std::fs::write(dir.join("same.dll"), b"payload bytes").unwrap();
+        std::fs::write(dir.join(APP_EXE), b"old app").unwrap();
+        let mut index = index(&[APP_EXE, "readme.txt", "same.dll", "new.dll"]);
+        index.files[2].sha256 = format!("{:x}", Sha256::digest(b"payload bytes"));
+        assert_eq!(collisions(&dir, &index, Some(&record(&[APP_EXE]))), ["readme.txt"]);
+        assert_eq!(collisions(&dir, &index, None), [APP_EXE, "readme.txt"], "a first install owns nothing there");
+        remove_tree(&dir);
+    }
+
+    fn junction(link: &Path, target: &Path) {
+        let ok = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(link).arg(target).output().unwrap().status.success();
+        assert!(ok, "mklink /J");
+    }
+
+    /// PROJECTS-42: a folder of the install that is a junction to another folder: an update moves nothing there and an
+    /// uninstall removes nothing there.
+    #[test]
+    fn files_reached_through_a_junction_are_never_moved_or_removed() {
+        let dir = scratch("junction");
+        let elsewhere = scratch("junction-target");
+        std::fs::write(elsewhere.join("b.dll"), b"someone else's").unwrap();
+        junction(&dir.join("sub"), &elsewhere);
+        assert!(contained(&dir, "sub/b.dll").is_none());
+        assert!(contained(&dir, APP_EXE).is_some());
+        assert_eq!(redirected(&dir, ["sub/b.dll", APP_EXE].into_iter()), ["sub/b.dll"]);
+        let (staging, backup) = (dir.join(STAGING), dir.join(BACKUP));
+        std::fs::create_dir_all(staging.join("sub")).unwrap();
+        std::fs::write(staging.join("sub/b.dll"), b"new").unwrap();
+        assert!(swap(&dir, &staging, &backup, &index(&["sub/b.dll"]), Some(&record(&["sub/b.dll"]))).is_err());
+        assert_eq!(std::fs::read(elsewhere.join("b.dll")).unwrap(), b"someone else's");
+        // (`uninstall` itself is not run here: it changes this computer's shortcuts, SteamVR and driver registrations.
+        // Its loop removes only what `contained` gives.)
+        let _ = std::fs::remove_dir(dir.join("sub"));
+        remove_tree(&dir);
+        remove_tree(&elsewhere);
+    }
+
+    /// F15: a cut install's backup is the only copy of what it moved aside: those files go back, and the rest is kept
+    /// under a name of its own, never removed.
+    #[test]
+    fn a_cut_install_leaves_nothing_lost() {
+        let dir = scratch("leftovers");
+        let (staging, backup) = (dir.join(STAGING), dir.join(BACKUP));
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join(APP_EXE), b"old app").unwrap();
+        std::fs::write(backup.join("other.txt"), b"unknown").unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join(APP_EXE), b"half").unwrap();
+        recover_leftovers(&dir, &staging, &backup, &index(&[APP_EXE]), Some(&record(&[APP_EXE])));
+        assert_eq!(std::fs::read(dir.join(APP_EXE)).unwrap(), b"old app");
+        assert!(!backup.exists() && !staging.exists(), "the staging folder held payload files only");
+        let kept: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".setup-old-")).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read(kept[0].path().join("other.txt")).unwrap(), b"unknown");
+        remove_tree(&dir);
+    }
+
+    /// PROJECTS-15: a program of someone else's running from the install folder (a folder in it) is neither waited for
+    /// nor closed, and an automatic update closes nothing at all.
+    #[test]
+    fn only_this_installs_programs_are_waited_for_and_none_closed_silently() {
+        let dir = scratch("programs");
+        std::fs::create_dir_all(dir.join("tools")).unwrap();
+        let ping = dir.join("tools/ping.exe");
+        std::fs::copy(r"C:\Windows\System32\PING.EXE", &ping).unwrap();
+        let mut other = std::process::Command::new(&ping).args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let programs = own_programs(&dir, [APP_EXE, "orbiters-capture.exe", "data.bin"].into_iter());
+        assert_eq!(programs, [dir.join("orbiters-capture.exe"), dir.join(APP_EXE)]);
+        let started = std::time::Instant::now();
+        close_app(&dir, &programs, &Progress::default(), true).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5), "not waited for");
+        assert!(other.try_wait().unwrap().is_none(), "still running");
+        // One of this install's own that will not quit: a silent update closes nothing, and says it.
+        let own = dir.join("orbiters-capture.exe");
+        std::fs::copy(&ping, &own).unwrap();
+        let mut mine = std::process::Command::new(&own).args(["-n", "60", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        assert!(close_app(&dir, &programs, &Progress::default(), true).is_err());
+        assert!(mine.try_wait().unwrap().is_none(), "not closed by an automatic update");
+        let _ = mine.kill();
+        let _ = other.kill();
+        let _ = (mine.wait(), other.wait());
+        remove_tree(&dir);
+    }
+
+    /// PRIV-6: the checked uninstall removes what N4N0 wrote in the shared Orbiters folder (the VRChat session, the
+    /// statistics' id, its logs and caches) and nothing of the Unity tools', nor anything a link leads to.
+    #[test]
+    fn removing_the_data_takes_n4n0s_own_files_and_nothing_else() {
+        let root = scratch("own-data");
+        let elsewhere = scratch("own-data-elsewhere");
+        std::fs::write(elsewhere.join("precious.txt"), b"not N4N0's").unwrap();
+        let write = |rel: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        };
+        for own in [
+            "vrchat-session.bin",
+            "usage/install-id",
+            "usage/waiting.jsonl",
+            "menu-reports/2026-11-19-a/report.json",
+            "orbit-vr-tune.json",
+            "unity-projects.json",
+            "project-pictures/a.jpg",
+            "avatar-thumbnails/direct/avtr_a.image",
+            "world-thumbnails/wrld_a.image",
+            "package-icons/0123.png",
+            "logs/perf.jsonl",
+            "logs/shares.log",
+            "logs/perf-report-20261119.json",
+            "logs/orbiters-desktop.log",
+            "logs/orbiters-desktop.old.log",
+            "logs/vr-test-frames/1.png",
+        ] {
+            write(own);
+        }
+        for theirs in ["account.json", "Avatars/avtr_a.json", "Mixer/inbox.json", "booster/journal.json", "logs/toolkit.log", "VCC/settings.json"] {
+            write(theirs);
+        }
+        // A link among N4N0's names: removed as a link, what it leads to stays.
+        std::fs::remove_dir_all(root.join("project-pictures")).unwrap();
+        junction(&root.join("project-pictures"), &elsewhere);
+        let failed = remove_own_data(&root, &["orbiters-desktop".into()]);
+        assert!(failed.is_empty(), "{failed:?}");
+        for gone in ["vrchat-session.bin", "usage", "menu-reports", "orbit-vr-tune.json", "unity-projects.json", "project-pictures", "avatar-thumbnails", "world-thumbnails", "package-icons", "logs/perf.jsonl", "logs/shares.log", "logs/perf-report-20261119.json", "logs/orbiters-desktop.log", "logs/orbiters-desktop.old.log", "logs/vr-test-frames"] {
+            assert!(std::fs::symlink_metadata(root.join(gone)).is_err(), "{gone} left");
+        }
+        for kept in ["account.json", "Avatars/avtr_a.json", "Mixer/inbox.json", "booster/journal.json", "logs/toolkit.log", "VCC/settings.json"] {
+            assert!(root.join(kept).is_file(), "{kept} removed");
+        }
+        assert_eq!(std::fs::read(elsewhere.join("precious.txt")).unwrap(), b"not N4N0's", "through a link");
+        remove_tree(&root);
+        remove_tree(&elsewhere);
     }
 
     #[test]

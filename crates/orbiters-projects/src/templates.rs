@@ -168,12 +168,46 @@ fn excluded(name: &str, depth: usize, dir: bool, keep: Keep) -> bool {
         _ => !dir && (n.ends_with(".csproj") || n.ends_with(".sln")),
     }
 }
+/// The file a copy keeps at the top of its folder until every file is in (PROJECTS-4): a copy stopped, failed or cut by
+/// a kill is then never taken for a whole project ([`crate::discovery::is_project`]). Nothing removes the folder.
+pub const INCOMPLETE: &str = ".orbiters-incomplete-copy";
+
 /// Copy into a newly reserved folder only. Reparse points are excluded even when Windows reports them as dirs.
 pub fn copy(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
     copy_keeping(source, destination, Keep::default(), cancel, progress)
 }
 /// [`copy`], taking along what `keep` asks for.
 pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
+    copy_keeping_then(source, destination, keep, cancel, progress, || {})
+}
+
+/// The folder this copy made, marked [`INCOMPLETE`] (so made by it), removed after a Stop (PROJECTS-4, Enzo
+/// 2026-11-19: "Yes"). Nothing else is removed: a folder without the marker, or a link, stays.
+fn discard_partial(destination: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(destination)?;
+    #[cfg(windows)]
+    let reparse = {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & 0x400 != 0
+    };
+    #[cfg(not(windows))]
+    let reparse = false;
+    if !meta.is_dir() || meta.file_type().is_symlink() || reparse || !destination.join(INCOMPLETE).is_file() {
+        return Err(std::io::Error::other(tr("it is not a copy this one made")));
+    }
+    std::fs::remove_dir_all(destination)
+}
+
+/// A Stop during the copy into `destination`: its folder goes, or says why it stayed.
+fn stopped(destination: &Path) -> anyhow::Error {
+    match discard_partial(destination) {
+        Ok(()) => anyhow::anyhow!("{}", tr("Copy stopped. The incomplete copy was removed.")),
+        Err(e) => anyhow::anyhow!("{}", tr!("Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.", path = destination.display(), why = e)),
+    }
+}
+
+/// [`copy_keeping`], running `made` once its folder exists (a test stops the copy there).
+fn copy_keeping_then(source: &Path, destination: &Path, keep: Keep, cancel: &AtomicBool, progress: &SharedProgress, made: impl FnOnce()) -> anyhow::Result<()> {
     if !source.is_dir() {
         bail!("{}", tr("The source folder no longer exists."));
     }
@@ -186,6 +220,8 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
     }
     anyhow::ensure!(!destination.exists(), "{}", tr("The destination already exists; choose a new project name."));
     let mut files = vec![];
+    // Folders too, empty ones included (PROJECTS-41): an empty asset folder has its .meta beside it.
+    let mut folders = vec![];
     for entry in walkdir::WalkDir::new(&source)
         .follow_links(true)
         .into_iter()
@@ -199,29 +235,45 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
         let e = entry?;
         if e.file_type().is_file() {
             files.push(e.path().to_path_buf());
+        } else if e.file_type().is_dir() && e.depth() > 0 {
+            folders.push(e.path().to_path_buf());
         }
     }
     std::fs::create_dir(destination).with_context(|| tr("The destination already exists or cannot be created; choose a new project name."))?;
+    let incomplete = destination.join(INCOMPLETE);
+    std::fs::write(&incomplete, b"")?;
+    for folder in &folders {
+        std::fs::create_dir_all(destination.join(folder.strip_prefix(&source)?))?;
+    }
+    made();
     progress.lock().unwrap().total = files.len();
+    // One buffer for every file (PROJECTS-6): most are a few KB.
+    let mut buffer = vec![0u8; 1024 * 1024];
     for (i, p) in files.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
-            bail!("{}", tr!("Copy cancelled. The incomplete folder was kept at {path} and was not registered.", path = destination.display()));
+            return Err(stopped(destination));
         }
         let rel = p.strip_prefix(&source)?;
         let dst = destination.join(rel);
         std::fs::create_dir_all(dst.parent().unwrap())?;
         let mut input = std::fs::File::open(p)?;
         let mut output = std::fs::File::create(&dst)?;
-        let mut buffer = vec![0u8; 1024 * 1024];
         loop {
             if cancel.load(Ordering::Relaxed) {
-                bail!("{}", tr!("Copy cancelled. The incomplete folder was kept at {path} and was not registered.", path = destination.display()));
+                // The file being written is let go first: Windows removes no file still open.
+                drop(output);
+                return Err(stopped(destination));
             }
             let n = input.read(&mut buffer)?;
             if n == 0 {
                 break;
             }
             output.write_all(&buffer[..n]).with_context(|| tr!("Could not copy {path}", path = rel.display()))?;
+        }
+        // The source's modification time: Unity compares it with what it recorded, and a copy with Library then has
+        // nothing to look at again. Where a disk cannot keep it, the copy is still whole.
+        if let Ok(modified) = input.metadata().and_then(|m| m.modified()) {
+            let _ = output.set_modified(modified);
         }
         // A new file is not executable here, and a copy must be usable: a package's tools, a plugin's programs.
         #[cfg(unix)]
@@ -236,6 +288,7 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
         }
         *progress.lock().unwrap() = Progress { copied: i + 1, total: files.len(), file: rel.display().to_string(), phase: String::from(mark("Copying project")) };
     }
+    std::fs::remove_file(&incomplete)?;
     Ok(())
 }
 /// A new project in `parent`/`name` from the template (or, with `duplicate`, the project) in `source`, its packages
@@ -296,7 +349,6 @@ async fn make(
         tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = required.saturating_sub(free))
     );
     copy_keeping(source, &destination, copy.unwrap_or_default(), cancel, progress)?;
-    if copy.is_some() { copy_local_packages(source, &destination, cancel, progress)?; }
     let version = destination.join("ProjectSettings/ProjectVersion.txt");
     if !version.is_file() {
         if vrc_get_vpm::version::UnityVersion::parse(unity).is_none() {
@@ -305,20 +357,24 @@ async fn make(
         std::fs::create_dir_all(version.parent().unwrap())?;
         std::fs::write(version, format!("m_EditorVersion: {unity}\n"))?;
     }
+    if cancel.load(Ordering::Relaxed) {
+        bail!("{}", tr("Cancelled before resolving. The folder was kept and was not registered."));
+    }
+    // Register the completed copy before any fallible restoration (AGENTS.md): from here on every failure leaves a
+    // project the gallery lists, and says where it is.
+    progress.lock().unwrap().phase = mark("Registering project").into();
+    crate::vpm::register(root, &destination, true).await
+        .with_context(|| tr!("The copy is at {path}, but registration failed", path = destination.display()))?;
+    let listed = || tr!("The copy is listed at {path}, but its local packages could not be copied", path = destination.display());
+    if copy.is_some() { copy_local_packages(source, &destination, cancel, progress).with_context(listed)?; }
     // A product GUID of its own; a template's product name always becomes the project's, a copy's when it was the
     // copied project's name.
     let path = destination.join("ProjectSettings/ProjectSettings.asset");
     if let Ok(s) = std::fs::read_to_string(&path) {
         let from = copy.map(|_| source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-        std::fs::write(&path, retarget(&s, name, from.as_deref()))?;
+        std::fs::write(&path, retarget(&s, name, from.as_deref()))
+            .with_context(|| tr!("The copy is listed at {path}, but its project settings could not be updated", path = destination.display()))?;
     }
-    if cancel.load(Ordering::Relaxed) {
-        bail!("{}", tr("Cancelled before resolving. The folder was kept and was not registered."));
-    }
-    // Register the completed copy before any optional restoration: a retained project must remain discoverable.
-    progress.lock().unwrap().phase = mark("Registering project").into();
-    crate::vpm::register(root, &destination, true).await
-        .with_context(|| tr!("The copy is at {path}, but registration failed", path = destination.display()))?;
     // Duplication preserves installed package contents and exact locked versions, including packages whose
     // repositories are no longer available. Resolution is needed only for genuinely missing packages/templates.
     if copy.is_none() || !installed_dependencies_complete(&destination)? {
@@ -380,6 +436,30 @@ fn copy_local_packages(source: &Path, destination: &Path, cancel: &AtomicBool, p
     }
     if changed { crate::write_json(&path, &manifest)?; }
     Ok(())
+}
+
+/// The Unity packages of `project` that only its Library holds (PROJECTS-22): those `Packages/packages-lock.json` takes
+/// from Git or from a registry other than Unity's, and that are not in `Packages/` itself. A copy made without Library
+/// has them only after Unity downloads them again from their source, so it is not "ready" while that is unsure.
+pub fn packages_only_in_library(project: &Path) -> Vec<String> {
+    let Ok(bytes) = std::fs::read(project.join("Packages/packages-lock.json")) else { return vec![] };
+    let Ok(lock) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return vec![] };
+    let mut names: Vec<String> = lock["dependencies"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(name, entry)| {
+            let from_elsewhere = match entry["source"].as_str() {
+                Some("git") => true,
+                Some("registry") => entry["url"].as_str().is_some_and(|u| !u.trim_end_matches('/').eq_ignore_ascii_case("https://packages.unity.com")),
+                _ => false,
+            };
+            from_elsewhere && !name.contains(['/', '\\']) && !project.join("Packages").join(name).is_dir()
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    names
 }
 
 /// Check every locked dependency, including transitive dependencies, against the copied package metadata.
@@ -563,6 +643,104 @@ mod tests {
         assert!(!installed_dependencies_complete(&copy).unwrap());
     }
 
+    /// A project on disk in `dir`: its version file and a `Packages/manifest.json` with `dependencies`.
+    fn project(dir: &Path, dependencies: serde_json::Value) {
+        std::fs::create_dir_all(dir.join("ProjectSettings")).unwrap();
+        std::fs::create_dir_all(dir.join("Assets")).unwrap();
+        std::fs::write(dir.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
+        std::fs::write(dir.join("Assets/a.txt"), "a").unwrap();
+        crate::write_json(&dir.join("Packages/manifest.json"), &serde_json::json!({ "dependencies": dependencies })).unwrap();
+    }
+    fn is_registered(rt: &tokio::runtime::Runtime, root: &Path, path: &Path) -> bool {
+        let wanted = crate::discovery::key(path);
+        rt.block_on(crate::vpm::registered(root)).unwrap().iter().any(|p| crate::discovery::key(p) == wanted)
+    }
+
+    #[test]
+    fn a_copy_that_fails_after_its_files_are_copied_is_listed_and_named() {
+        // PROJECTS-1: a failure in the steps after the copy (here its local packages) left the copy on disk, unregistered.
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        std::fs::create_dir_all(temp.path().join("External")).unwrap();
+        std::fs::write(temp.path().join("External/package.json"), "{}").unwrap();
+        project(&source, serde_json::json!({ "bad/name": "file:../../External" }));
+        let root = temp.path().join("vcc");
+        let rt = crate::runtime().unwrap();
+        let said = rt
+            .block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())))
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"))
+            .unwrap_err();
+        let copy = temp.path().join("Copy");
+        assert!(said.contains(&copy.display().to_string()), "{said}");
+        assert!(is_registered(&rt, &root, &copy), "the copy is in the gallery's list");
+    }
+
+    /// PROJECTS-4: a copy that stops halfway is not a project the gallery lists, and its folder is kept as it is.
+    #[cfg(windows)]
+    #[test]
+    fn a_copy_cut_halfway_is_never_taken_for_a_project() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        std::fs::create_dir_all(source.join("Zz")).unwrap();
+        std::fs::write(source.join("Zz/locked.bin"), "x").unwrap();
+        // Held by another program: the copy fails on it, after ProjectSettings is in.
+        let _held = std::fs::File::options().read(true).share_mode(0).open(source.join("Zz/locked.bin")).unwrap();
+        let copy = temp.path().join("Copy");
+        assert!(copy_keeping(&source, &copy, Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())).is_err());
+        assert!(copy.join("ProjectSettings/ProjectVersion.txt").is_file(), "kept as it is");
+        assert!(!crate::discovery::is_project(&copy));
+        drop(_held);
+        let whole = temp.path().join("Whole");
+        copy_keeping(&source, &whole, Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap();
+        assert!(crate::discovery::is_project(&whole) && !whole.join(INCOMPLETE).exists());
+    }
+
+    /// PROJECTS-4: Stop during the copy removes the folder that copy made, and only that one.
+    #[test]
+    fn stop_removes_the_incomplete_copy_and_nothing_else() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        let neighbour = temp.path().join("Neighbour");
+        std::fs::create_dir_all(&neighbour).unwrap();
+        std::fs::write(neighbour.join("mine.txt"), "mine").unwrap();
+        let cancel = AtomicBool::new(false);
+        let copy = temp.path().join("Copy");
+        let said = copy_keeping_then(&source, &copy, Keep::default(), &cancel, &Arc::new(Mutex::default()), || cancel.store(true, Ordering::Relaxed))
+            .unwrap_err()
+            .to_string();
+        assert!(said.contains("removed"), "{said}");
+        assert!(!copy.exists(), "the incomplete copy is gone");
+        assert!(source.join("Assets/a.txt").is_file() && neighbour.join("mine.txt").is_file());
+        // A folder without the marker is never removed.
+        std::fs::create_dir_all(&copy).unwrap();
+        assert!(discard_partial(&copy).is_err());
+        assert!(copy.is_dir());
+    }
+
+    #[test]
+    fn packages_kept_only_in_library_are_named() {
+        let temp = tempfile::tempdir().unwrap();
+        let p = temp.path();
+        std::fs::create_dir_all(p.join("Packages/com.me.embedded")).unwrap();
+        crate::write_json(
+            &p.join("Packages/packages-lock.json"),
+            &serde_json::json!({"dependencies": {
+                "com.unity.textmeshpro": {"version": "3.0.6", "source": "registry", "url": "https://packages.unity.com"},
+                "com.me.tool": {"version": "https://github.com/me/tool.git", "source": "git", "hash": "abc"},
+                "com.scoped.thing": {"version": "1.0.0", "source": "registry", "url": "https://npm.example.com"},
+                "com.me.embedded": {"version": "https://github.com/me/e.git", "source": "git"},
+                "com.unity.modules.ui": {"version": "1.0.0", "source": "builtin"}
+            }}),
+        )
+        .unwrap();
+        assert_eq!(packages_only_in_library(p), ["com.me.tool", "com.scoped.thing"]);
+        assert!(packages_only_in_library(&p.join("nothing")).is_empty());
+    }
+
     #[test]
     fn a_copy_leaves_out_what_unity_makes_again() {
         let temp = tempfile::tempdir().unwrap();
@@ -588,9 +766,14 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "x").unwrap();
         }
+        std::fs::create_dir_all(src.join("Assets/Empty")).unwrap();
+        std::fs::create_dir_all(src.join("Temp/EmptyToo")).unwrap();
         let progress: SharedProgress = Arc::new(Mutex::default());
         let dst = temp.path().join("Copy");
         copy(&src, &dst, &AtomicBool::new(false), &progress).unwrap();
+        assert!(dst.join("Assets/Empty").is_dir() && !dst.join("Temp").exists());
+        let time = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+        assert_eq!(time(&dst.join("Assets/a.txt")), time(&src.join("Assets/a.txt")), "times kept");
         let has = |f: &str| dst.join(f).exists();
         for kept in ["Assets/a.txt", "Assets/Library/kept.txt", "Assets/Tools/Temp/kept.txt", "Assets/Plugins/Tool.csproj", "ProjectSettings/ProjectVersion.txt"] {
             assert!(has(kept), "{kept}");
@@ -599,6 +782,8 @@ mod tests {
             assert!(!has(left), "{left}");
         }
         assert_eq!(progress.lock().unwrap().total, 5);
+        // An empty asset folder stays, beside its .meta (PROJECTS-41).
+        assert!(!has("Library") && has("Assets/Library"));
         let with = temp.path().join("With Library");
         copy_keeping(&src, &with, Keep { library: true }, &AtomicBool::new(false), &progress).unwrap();
         assert!(with.join("Library/ArtifactDB").is_file());

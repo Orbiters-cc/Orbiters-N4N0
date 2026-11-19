@@ -94,5 +94,15 @@
   "These package changes conflict with installed packages: {names}. No changes were applied.": "これらのパッケージの変更はインストール済みのパッケージと競合します：{names}。変更は適用されていません。",
   "No local disk has room: the Library and Unity's imports need {needed} bytes; the most any other disk has is {free} bytes ({disk}).": "空き容量のあるローカルディスクがありません。LibraryとUnityのインポートに{needed}バイト必要ですが、他のディスクで最も空いているのは{free}バイトです（{disk}）。",
   "Could not restore Library after a failed redirect. It is at {backup}, and a checked copy is at {copy}.": "リダイレクトに失敗した後、Libraryを元に戻せませんでした。元のLibraryは{backup}に、検証済みのコピーは{copy}にあります。",
-  "The plan conflicts again with: {names} (the repositories changed since it was made).": "プランは再び次と競合します：{names}（作成後にリポジトリが変更されました）。"
+  "The plan conflicts again with: {names} (the repositories changed since it was made).": "プランは再び次と競合します：{names}（作成後にリポジトリが変更されました）。",
+  "Could not keep a copy of {name} before changing it: nothing was changed": "変更する前に{name}のコピーを保存できませんでした。何も変更されていません",
+  "The copy is listed at {path}, but its local packages could not be copied": "コピーは{path}に一覧表示されていますが、ローカルパッケージをコピーできませんでした",
+  "The copy is listed at {path}, but its project settings could not be updated": "コピーは{path}に一覧表示されていますが、プロジェクト設定を更新できませんでした",
+  "The package list could not be put back ({why}): use Restore": "パッケージ一覧を元に戻せませんでした（{why}）。「復元」を使ってください",
+  "{name} is copied and listed, but Unity must download {packages} again when it first opens it": "{name}はコピーされ一覧に追加されましたが、最初に開くときにUnityが{packages}を再ダウンロードする必要があります",
+  "{path} is a link": "{path}はリンクです",
+  "{name} could not be put back: its folder as it was is kept at {path}": "{name}を元に戻せませんでした。元の状態のフォルダーは{path}に保存されています",
+  "Copy stopped. The incomplete copy was removed.": "コピーを停止しました。未完成のコピーは削除されました。",
+  "Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.": "コピーを停止しました。{path}の未完成のコピーを削除できませんでした（{why}）。プロジェクトとしては一覧に表示されません。",
+  "it is not a copy this one made": "このコピーで作成されたものではありません"
 }

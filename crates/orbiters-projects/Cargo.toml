@@ -17,6 +17,7 @@ vrc-get-vpm = { version = "=0.0.17", features = ["experimental-project-managemen
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "time", "io-util"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 indexmap = "2"
+futures = "0.3"
 url = "2"
 walkdir = "2"
 # Package icons (icons.rs): what websites serve, decoded and kept small.

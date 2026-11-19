@@ -33,24 +33,28 @@ fn key(path: &Path) -> String {
     path.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
-/// The processes whose program is in `dir` (or a folder in it), but this one: the app, its window and overlay, and the
-/// workers it started (the capture worker may still be saving a recording after the app quit).
-pub fn processes_in(dir: &Path) -> Vec<u32> {
-    running_from(dir).into_iter().map(|(pid, _)| pid).collect()
+/// The processes running one of `programs` (this install's own, by exact path: PROJECTS-15), but this one: the app, its
+/// window and overlay, and the workers it started (the capture worker may still be saving a recording after the app
+/// quit). A program of someone else's in the same folder, or in a folder in it, is not one of them.
+pub fn processes_of(programs: &[PathBuf]) -> Vec<u32> {
+    running_of(programs).into_iter().map(|(pid, _)| pid).collect()
 }
 
-/// Whether the app itself (`orbiters-desktop.exe`, the tray service, its window or overlay) runs from `dir`: the
-/// one a quit request reaches is then this install's.
+/// Whether the app itself (`orbiters-desktop.exe` at the top of `dir`: the tray service, its window or overlay) runs:
+/// the one a quit request reaches is then this install's.
 pub fn app_runs_from(dir: &Path) -> bool {
-    running_from(dir).iter().any(|(_, image)| image.file_name().is_some_and(|n| n.eq_ignore_ascii_case(APP_EXE)))
+    !running_of(&[dir.join(APP_EXE)]).is_empty()
 }
 
-/// The processes running from `dir`, with their programs.
-fn running_from(dir: &Path) -> Vec<(u32, PathBuf)> {
+/// The processes running one of `programs`, with their programs.
+fn running_of(programs: &[PathBuf]) -> Vec<(u32, PathBuf)> {
     use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
-    let prefix = format!("{}\\", key(dir));
+    let wanted: Vec<String> = programs.iter().map(|p| key(p)).collect();
     let me = std::process::id();
     let mut found = Vec::new();
+    if wanted.is_empty() {
+        return found;
+    }
     unsafe {
         let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return found };
         let snapshot = Owned(snapshot);
@@ -60,7 +64,7 @@ fn running_from(dir: &Path) -> Vec<(u32, PathBuf)> {
             let pid = entry.th32ProcessID;
             if pid != me && pid > 4 {
                 if let Some(image) = image_of(pid) {
-                    if key(&image).starts_with(&prefix) {
+                    if wanted.contains(&key(&image)) {
                         found.push((pid, image));
                     }
                 }
@@ -105,11 +109,11 @@ pub fn wait_for_exit(pid: u32, limit: Duration) -> bool {
     }
 }
 
-/// Waits for every process running from `dir` to end, up to `limit`; true once none is left. `stop` ends it early.
-pub fn wait_for_folder(dir: &Path, limit: Duration, stop: impl Fn() -> bool) -> bool {
+/// Waits for every process running one of `programs` to end, up to `limit`; true once none is left. `stop` ends it early.
+pub fn wait_for_programs(programs: &[PathBuf], limit: Duration, stop: impl Fn() -> bool) -> bool {
     let until = Instant::now() + limit;
     loop {
-        let running = processes_in(dir);
+        let running = processes_of(programs);
         if running.is_empty() {
             return true;
         }
@@ -124,12 +128,22 @@ pub fn wait_for_folder(dir: &Path, limit: Duration, stop: impl Fn() -> bool) -> 
     }
 }
 
-/// Ends every process running from `dir` (the person chose to close what would not close).
-pub fn terminate_folder(dir: &Path) {
-    for pid in processes_in(dir) {
+/// Ends the processes running one of `programs` (the person chose, in the window, to close what would not close). The
+/// program is checked again on the handle that ends it: a number reused by another process meanwhile is left alone.
+pub fn terminate_programs(programs: &[PathBuf]) {
+    let wanted: Vec<String> = programs.iter().map(|p| key(p)).collect();
+    for pid in processes_of(programs) {
         unsafe {
-            if let Ok(process) = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid) {
+            if let Ok(process) = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
                 let process = Owned(process);
+                let mut buf = vec![0u16; 32768];
+                let mut len = buf.len() as u32;
+                if QueryFullProcessImageNameW(process.0, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_err() {
+                    continue;
+                }
+                if !wanted.contains(&key(Path::new(&String::from_utf16_lossy(&buf[..len as usize])))) {
+                    continue;
+                }
                 let _ = TerminateProcess(process.0, 1);
                 WaitForSingleObject(process.0, 5000);
             }

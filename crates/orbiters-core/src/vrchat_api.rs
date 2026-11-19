@@ -623,6 +623,17 @@ fn retry_after(value: Option<&str>) -> Duration {
     Duration::from_secs(60)
 }
 
+/// The saved session's file at most (two cookies, sealed): a larger one is damaged, and is not read whole.
+const SESSION_MAX: usize = 64 * 1024;
+
+/// Up to `max + 1` bytes of the file at `path`: more than `max` says it is larger, without reading all of it.
+fn read_at_most(path: &std::path::Path, max: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take(max as u64 + 1).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// Reusable session, deliberately unrelated to the Orbiters client. The gate is checked on every request and cache read.
 pub struct Client {
     /// Shared with [`replace_image`]'s storage uploads, which run without the client locked.
@@ -711,12 +722,12 @@ impl Client {
     pub fn restore(&mut self) -> Result<bool> {
         self.permitted()?;
         let path = self.store.as_ref().ok_or(Error::Storage)?;
-        let bytes = match std::fs::read(path) {
+        let bytes = match read_at_most(path, SESSION_MAX) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(_) => return Err(Error::Storage),
         };
-        if bytes.len() > 64 * 1024 {
+        if bytes.len() > SESSION_MAX {
             return Err(Error::Storage);
         }
         let plain = crate::dpapi::crypt(&bytes, ENTROPY, false).map_err(|_| Error::Storage)?;
@@ -1987,6 +1998,20 @@ pub(crate) mod tests {
             assert_eq!(seen[2].cookie, "auth=session; twoFactorAuth=factor");
             assert!(seen[1].url.ends_with(&format!("/{}/verify", method.path())));
         }
+    }
+    #[test]
+    fn a_damaged_session_file_is_not_read_whole() {
+        let dir = std::env::temp_dir().join(format!("orbiters-session-size-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vrchat-session.bin");
+        std::fs::write(&path, vec![7u8; 3 * SESSION_MAX]).unwrap();
+        assert_eq!(read_at_most(&path, SESSION_MAX).unwrap().len(), SESSION_MAX + 1);
+        let (mut c, _) = mock(vec![]);
+        c.store = Some(path.clone());
+        assert_eq!(c.restore(), Err(Error::Storage));
+        std::fs::write(&path, b"small").unwrap();
+        assert_eq!(read_at_most(&path, SESSION_MAX).unwrap(), b"small");
+        let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
     fn a_saved_two_factor_cookie_that_no_longer_counts_does_not_swallow_the_code() {

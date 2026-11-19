@@ -15,10 +15,12 @@ static VRCHAT: AtomicU32 = AtomicU32::new(0);
 static THREAD: AtomicU32 = AtomicU32::new(0);
 static WANTED: AtomicBool = AtomicBool::new(false);
 /// Which key's down and up is whose while the hook is in place (only the hook's thread touches it).
+#[cfg_attr(not(windows), allow(dead_code))]
 static KEYS: Mutex<Owners> = Mutex::new(Owners::new());
 
 /// Whose each key is (OVERLAY-12): a key already down when the keyboard was taken stays VRChat's until it is let go (its repeats
 /// and its up reach VRChat: a W held to walk is not stuck walking), and an up is swallowed only for a down that was swallowed.
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Owners {
     /// Keys whose down the menu took.
@@ -27,6 +29,7 @@ struct Owners {
     held: [u64; 4],
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 impl Owners {
     const fn new() -> Self {
         Self { taken: [0; 4], held: [0; 4] }

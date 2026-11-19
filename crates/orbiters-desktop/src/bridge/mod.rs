@@ -343,6 +343,8 @@ pub struct Bridge {
     pub(crate) journal: Mutex<journal::Journal>,
     /// One launch of VRChat at a time on this computer: a new VRChat is told apart from the others by appearing after it.
     pub(crate) launching: Mutex<()>,
+    /// One open_session at a time: a second call for a profile whose start runs saw no session yet and launched again (BRIDGE-6).
+    pub(crate) opening: Mutex<()>,
     pub(crate) focus: Mutex<FocusTurn>,
     log: Mutex<VecDeque<LogLine>>,
     client: Mutex<Option<(String, Instant)>>,
@@ -379,6 +381,7 @@ impl Bridge {
             publish: Mutex::new(None),
             journal: Mutex::default(),
             launching: Mutex::new(()),
+            opening: Mutex::new(()),
             focus: Mutex::default(),
             log: Mutex::new(VecDeque::new()),
             client: Mutex::new(None),

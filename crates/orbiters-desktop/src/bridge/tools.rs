@@ -439,7 +439,17 @@ impl Bridge {
                 }
                 self.map_call(map, &s, args)
             }),
-            "open_session" => self.open_session(args, call),
+            "open_session" => {
+                let Ok(_one) = self.opening.try_lock() else {
+                    return Err(Failure::new(
+                        "busy",
+                        "Another open_session is starting a VRChat now.",
+                        "Wait for its answer (up to two minutes), then call list_sessions: the profile may be that session's already.",
+                    )
+                    .retry_after(30));
+                };
+                self.open_session(args, call)
+            }
             "list_sessions" => Ok(Answer::Data(self.list_sessions())),
             "close_session" => self.session_of(args, true).and_then(|s| self.exclusively(&s, || self.close_session(&s, call))),
             vrchat if VRCHAT_TOOLS.contains(&vrchat) => {

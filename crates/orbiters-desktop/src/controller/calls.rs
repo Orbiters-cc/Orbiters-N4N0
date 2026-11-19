@@ -749,6 +749,35 @@ impl super::Controller {
         });
     }
 
+    /// Signing out of Orbiters (PRIV-7): with the identity that leaves, while it is still there, the call under way is
+    /// ended on Orbiters and this computer leaves the callable list; the next tick, signed out, ends the call here. Sent
+    /// in the background (sign-out finishes offline too); nothing of the credential is kept for later.
+    pub(super) fn calls_depart(&self) {
+        let Some((api, token)) = self.account_api() else { return };
+        let (was_on, call_id) = {
+            let mut rt = self.calls.lock().unwrap();
+            let call_id = rt.call.as_ref().and_then(|c| c.id.clone());
+            let was_on = rt.available_sent.take().is_some();
+            rt.streaming = None;
+            rt.presence_sent = None;
+            rt.identity = None;
+            (was_on, call_id)
+        };
+        if !was_on && call_id.is_none() {
+            return;
+        }
+        let _ = std::thread::Builder::new().name("calls-depart".into()).spawn(move || {
+            let agent = orbiters_core::http_agent(Some(Duration::from_secs(2)), Some(Duration::from_secs(5)));
+            let auth = format!("Bearer {token}"); // i18n: not shown
+            if let Some(id) = call_id {
+                let _ = agent.post(&api.url(&format!("n4n0/calls/{id}/end"))).header("Authorization", &auth).send_json(json!({}));
+            }
+            if was_on {
+                let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call();
+            }
+        });
+    }
+
     /// Calls stop (the app quits): the call worker ends, the call under way ends for the friend too, and this
     /// computer leaves the callable list.
     pub(super) fn calls_stop(self: &Shared) {

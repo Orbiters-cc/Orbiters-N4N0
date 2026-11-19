@@ -339,6 +339,8 @@ impl Controller {
     /// Signs out of Orbiters in every tool (the saved account is removed, as in Unity).
     pub fn sign_out(&self) -> anyhow::Result<()> {
         let server = Server::current();
+        // Calls leave Orbiters with the account that leaves, before it is gone (PRIV-7).
+        self.calls_depart();
         account::remove(server)?;
         {
             let mut rt = self.account_runtime.lock().unwrap();

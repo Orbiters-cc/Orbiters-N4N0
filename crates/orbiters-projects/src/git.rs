@@ -142,6 +142,10 @@ pub fn config_is_inert(text: &str) -> bool {
         let rest = if let Some(head) = line.strip_prefix('[') {
             let Some(end) = head.find(']') else { return false };
             let inside = head[..end].trim();
+            // The old `[section.subsection]` spelling: not what a plain clone writes.
+            if inside.split_whitespace().next().is_some_and(|name| name.contains('.')) {
+                return false;
+            }
             section = match inside.split_once(char::is_whitespace) {
                 Some((name, sub)) => format!("{}.{}", name.to_ascii_lowercase(), sub.trim().trim_matches('"')),
                 None => inside.to_ascii_lowercase(),

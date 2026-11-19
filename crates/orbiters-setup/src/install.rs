@@ -741,7 +741,7 @@ mod tests {
         std::fs::copy(r"C:\Windows\System32\PING.EXE", &ping).unwrap();
         let mut other = std::process::Command::new(&ping).args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
         let programs = own_programs(&dir, [APP_EXE, "orbiters-capture.exe", "data.bin"].into_iter());
-        assert_eq!(programs, [dir.join(APP_EXE), dir.join("orbiters-capture.exe")]);
+        assert_eq!(programs, [dir.join("orbiters-capture.exe"), dir.join(APP_EXE)]);
         let started = std::time::Instant::now();
         close_app(&dir, &programs, &Progress::default(), true).unwrap();
         assert!(started.elapsed() < Duration::from_secs(5), "not waited for");

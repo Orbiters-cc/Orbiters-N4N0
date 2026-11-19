@@ -278,7 +278,9 @@ impl Prepared {
     /// Refuses when the session's result is no longer the one these parts were made from (reconstructed again
     /// meanwhile): called once everything to send is in hand, so that all of it comes from one result or none is sent.
     pub fn ensure_current(&self, session: &Path) -> anyhow::Result<()> {
-        anyhow::ensure!(crate::upload_prep::ResultIdentity::read(session) == self.identity, "{}", tr("It was reconstructed again while it was being prepared: share it again."));
+        let now = crate::upload_prep::ResultIdentity::read(session);
+        anyhow::ensure!(self.identity.complete && now.complete, "{}", tr("Its last reconstruction was only partly saved (a file was open in another program): reconstruct it again to share it."));
+        anyhow::ensure!(now == self.identity, "{}", tr("It was reconstructed again while it was being prepared: share it again."));
         Ok(())
     }
 }
@@ -305,6 +307,8 @@ const PREPARE_TRIES: usize = 3;
 /// stop it.
 pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions) -> anyhow::Result<Prepared> {
     let result = reconstruction::result_dir(session);
+    // A result left half replaced (some of its files were held) is no one result: nothing is prepared from it.
+    anyhow::ensure!(crate::upload_prep::ResultIdentity::read(session).complete, "{}", tr("Its last reconstruction was only partly saved (a file was open in another program): reconstruct it again to share it."));
     for _ in 0..PREPARE_TRIES {
         let before = orbiters_reconstruct::edit::generation(&result)?;
         let prepared = prepare_once(session, device)?;

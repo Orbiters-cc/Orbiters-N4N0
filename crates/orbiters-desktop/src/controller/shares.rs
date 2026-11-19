@@ -1884,6 +1884,21 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// night2 (the verifier): a result left half replaced (new splats beside the previous preview) passes every identity
+    /// check, since nothing changes any more: it is refused, nothing sent.
+    #[test]
+    fn a_half_replaced_result_is_not_sent() {
+        let (dir, session, records, mut entry) = uploaded_session("half", None);
+        entry.edits = Some(Ok(orbiters_reconstruct::edit::UNEDITED.into()));
+        let result = orbiters_core::reconstruction::result_dir(&session);
+        std::fs::write(result.join(orbiters_core::reconstruction::REPLACING_FILE), b"").unwrap();
+        let (api, seen) = stand_in(vec![("GET /captures/capture/3", 200, capture_at(3, 1))]);
+        let refused = update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &prepared).unwrap_err().to_string();
+        assert!(refused.contains("only partly saved"), "{refused}");
+        assert_eq!(requests(&seen), ["GET /captures/capture/3"], "nothing sent");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Edited again while its files were made: not sent (they would hold neither the edits before nor those after).
     #[test]
     fn edits_changed_while_prepared_are_not_sent() {

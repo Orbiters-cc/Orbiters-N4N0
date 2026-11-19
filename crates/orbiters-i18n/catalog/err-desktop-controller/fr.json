@@ -15,6 +15,7 @@
   "Its capture files are being deleted.": "Ses fichiers de capture sont en cours de suppression.",
   "Its splat edits changed while it was being prepared: share it again.": "Ses modifications de splats ont changé pendant la préparation : partage-la de nouveau.",
   "It was reconstructed again while it was being prepared: share it again.": "Elle a été reconstruite de nouveau pendant la préparation : partage-la de nouveau.",
+  "Its last reconstruction was only partly saved (a file was open in another program): reconstruct it again to share it.": "Sa dernière reconstruction n’a été enregistrée qu’en partie (un fichier était ouvert dans un autre programme) : reconstruis-la de nouveau pour la partager.",
   "Its splat edits changed while it was being prepared: update it again once they are done.": "Ses modifications de splats ont changé pendant la préparation : mets-la à jour de nouveau quand tu auras fini.",
   "Its splat edits changed while it was being prepared: upload it again.": "Ses modifications de splats ont changé pendant la préparation : téléverse-la de nouveau.",
   "Its splat edits kept changing while it was being prepared: share it again once they are done.": "Ses modifications de splats n’ont pas cessé de changer pendant la préparation : partage-la de nouveau quand tu auras fini.",

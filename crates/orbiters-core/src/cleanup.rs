@@ -210,21 +210,26 @@ pub fn drop_recording(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<
 fn trim(dir: &Path, takes: &dyn Fn(Part) -> bool, freed: &mut dyn FnMut(u64)) -> anyhow::Result<u64> {
     anyhow::ensure!(dir.join(MANIFEST_FILE).is_file(), "{}", tr!("{path} is not a session folder.", path = dir.display()));
     anyhow::ensure!(has_view(dir), "{}", tr("This session has no 3D view to keep: reconstruct it first."));
-    let (keyframes, going) = (dir.join(KEYFRAMES_DIR), dir.join(KEYFRAMES_GOING));
     let plan: Vec<PathBuf> = capture_files(dir).into_iter().filter(|e| takes(e.part)).map(|e| e.path).collect();
     check_plan(dir, &plan)?;
+    // Only what the plan holds moves: the keyframes folder as the listing spelt it (a `KEYFRAMES` folder that is not the
+    // capture's is never renamed through a case-insensitive lookup; night2, the verifier).
+    let named = |name: &str| plan.iter().find(|p| p.file_name().is_some_and(|n| n == name)).cloned();
+    let (keyframes, going) = (named(KEYFRAMES_DIR), dir.join(KEYFRAMES_GOING));
     let mut total = 0;
     let result = (|| {
-        if keyframes.is_dir() {
-            // What a deletion cut short left there goes first, to make room.
-            if std::fs::symlink_metadata(&going).is_ok() {
-                total += remove(&going, freed)?;
+        if let Some(keyframes) = keyframes.as_ref().filter(|k| std::fs::symlink_metadata(k).is_ok_and(|m| m.is_dir())) {
+            // What a deletion cut short left there goes first, to make room (the plan's own entry only).
+            if let Some(left) = named(KEYFRAMES_GOING) {
+                if std::fs::symlink_metadata(&left).is_ok() {
+                    total += remove(&left, freed)?;
+                }
             }
-            crate::rename_retrying(&keyframes, &going)?;
+            crate::rename_retrying(keyframes, &going)?;
         }
         for path in &plan {
             // The keyframes are deleted from where they wait; a leftover `keyframes.deleting` went above.
-            let path = if *path == keyframes { &going } else { path };
+            let path = if Some(path) == keyframes.as_ref() { &going } else { path };
             if std::fs::symlink_metadata(path).is_ok() {
                 total += remove(path, freed)?;
             }
@@ -236,26 +241,59 @@ fn trim(dir: &Path, takes: &dyn Fn(Part) -> bool, freed: &mut dyn FnMut(u64)) ->
 }
 
 /// Refuses a deletion `plan` (entries of the session folder `dir`) when an entry is, holds or lies inside one of the
-/// paths the 3D view reads (its result, manifest, frame records, thumbnails), compared as resolved paths: whatever the
-/// manifest names and whatever links the folder holds, the view a trim promises to keep is never on the list.
+/// paths the 3D view depends on, compared as resolved paths. What the view depends on is found, not listed: the session's
+/// manifest, frame records and thumbnails, and every entry of its result folder, each resolved (a sky map or a held-out
+/// folder that is a link protects what it leads to; night2, the verifier). An entry of the plan that is a link is
+/// removed as a link, never what it leads to (see [`remove`]): only where it is counts. A dependency that exists but
+/// cannot be resolved refuses the trim; one that is absent (an optional thumbnail, a dangling link) is nothing to keep.
 fn check_plan(dir: &Path, plan: &[PathBuf]) -> anyhow::Result<()> {
     let view = reconstruction::result_dir(dir);
-    let mut kept: Vec<PathBuf> = [view.clone(), view.join(reconstruction::PLY_FILE), view.join(reconstruction::REPORT_FILE)]
-        .into_iter()
-        .chain([MANIFEST_FILE, FRAMES_FILE, THUMBNAIL_FILE, crate::bundle::PICTURE_THUMBNAIL_FILE].map(|f| dir.join(f)))
-        .filter_map(|p| std::fs::canonicalize(p).ok())
-        .collect();
+    // The splats themselves, whatever name they resolve to (a link to `final.ply`, a stored `SPLATS.PLY`).
+    anyhow::ensure!(std::fs::metadata(view.join(reconstruction::PLY_FILE)).is_ok_and(|m| m.is_file()), "{}", tr("This session has no 3D view to keep: reconstruct it first."));
+    let mut kept = Vec::new();
+    for f in [MANIFEST_FILE, FRAMES_FILE, THUMBNAIL_FILE, crate::bundle::PICTURE_THUMBNAIL_FILE] {
+        keep_resolved(&dir.join(f), &mut kept)?;
+    }
+    keep_resolved(&view, &mut kept)?;
+    keep_view(&view, &mut kept)?;
     kept.sort();
     kept.dedup();
-    anyhow::ensure!(kept.iter().any(|k| k.ends_with(reconstruction::PLY_FILE)), "{}", tr("This session has no 3D view to keep: reconstruct it first."));
+    let here = std::fs::canonicalize(dir)?;
     for path in plan {
-        // Where the entry itself is (its folder resolved, a link not followed) and, when it resolves, what it leads to.
-        let at = std::fs::canonicalize(dir)?.join(path.file_name().unwrap_or_default());
-        let leads = std::fs::canonicalize(path).ok();
+        let at = here.join(path.file_name().unwrap_or_default());
+        let link = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+        let leads = if link { None } else { std::fs::canonicalize(path).ok() };
         for p in std::iter::once(&at).chain(leads.as_ref()) {
             if let Some(k) = kept.iter().find(|k| k.starts_with(p) || p.starts_with(k)) {
                 anyhow::bail!("{}", tr!("Nothing was deleted: {path} is part of the 3D view.", path = k.display()));
             }
+        }
+    }
+    Ok(())
+}
+
+/// `path` resolved, into `kept`; nothing when it is absent (or a link to nothing), an error when it exists and cannot be
+/// resolved (access denied, held by another program).
+fn keep_resolved(path: &Path, kept: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    if std::fs::symlink_metadata(path).is_err() {
+        return Ok(());
+    }
+    match std::fs::canonicalize(path) {
+        Ok(p) => kept.push(p),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => anyhow::bail!("{}", tr!("Nothing was deleted: {path} is part of the 3D view.", path = path.display())),
+    }
+    Ok(())
+}
+
+/// Every entry under the result folder `dir`, resolved (a link's target protected whole, never walked into).
+fn keep_view(dir: &Path, kept: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    for e in std::fs::read_dir(dir)? {
+        let e = e?;
+        let path = e.path();
+        keep_resolved(&path, kept)?;
+        if e.file_type()?.is_dir() {
+            keep_view(&path, kept)?;
         }
     }
     Ok(())
@@ -574,32 +612,92 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// A capture entry that leads into the view (a link or junction to the reconstruction) refuses the whole trim before
-    /// anything moves: the keyframes are still in place and the view whole.
+    /// A folder link at `link` leading to `target` (a junction on Windows, which needs no rights); made, or the test fails.
+    fn folder_link(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(link).arg(target).output().is_ok_and(|o| o.status.success());
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, link).is_ok();
+        assert!(made, "could not link {} to {}", link.display(), target.display());
+    }
+
+    /// Removes the link at `link` alone, never what it leads to.
+    fn unlink(link: &Path) {
+        fs::remove_dir(link).or_else(|_| fs::remove_file(link)).ok();
+    }
+
+    /// night2 (the verifier): a capture entry that is a link into the view goes as a link (what it leads to was never
+    /// deleted); the trim no longer refuses for good a session that only had such a link.
     #[test]
-    fn a_plan_that_reaches_the_view_deletes_nothing() {
+    fn a_link_into_the_view_goes_as_a_link() {
         let (root, dir) = session("as15-link", true);
         fs::remove_dir_all(dir.join("audio")).unwrap();
         let target = dir.join("reconstruction");
-        #[cfg(windows)]
-        let linked = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(dir.join("audio")).arg(&target).output().is_ok_and(|o| o.status.success());
-        #[cfg(unix)]
-        let linked = std::os::unix::fs::symlink(&target, dir.join("audio")).is_ok();
-        if !linked {
-            eprintln!("no link could be made here: test skipped");
-            fs::remove_dir_all(&root).ok();
-            return;
-        }
+        folder_link(&dir.join("audio"), &target);
         let before = bundle::folder_size(&target);
+        keep_only_view(&dir, &mut |_| {}).unwrap();
+        assert!(fs::symlink_metadata(dir.join("audio")).is_err(), "the link went");
+        assert_eq!(bundle::folder_size(&target), before);
+        assert!(has_view(&dir) && !dir.join("keyframes").exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// night2 (the verifier): a part of the view that is a link into the capture (here the held-out renders, as a sky map
+    /// linked to a file under depth/ would be) protects what it leads to: nothing is deleted, nothing moves.
+    #[test]
+    fn a_view_part_linked_into_the_capture_deletes_nothing() {
+        let (root, dir) = session("as15-viewlink", true);
+        let held_out = dir.join("reconstruction").join("held-out");
+        fs::remove_dir_all(&held_out).unwrap();
+        folder_link(&held_out, &dir.join("depth-raw"));
         let err = keep_only_view(&dir, &mut |_| {}).unwrap_err().to_string();
         assert!(err.starts_with("Nothing was deleted"), "{err}");
         assert!(dir.join("keyframes").is_dir() && !dir.join(KEYFRAMES_GOING).exists(), "nothing moved");
-        assert!(dir.join("depth").is_dir() && dir.join("colour.mkv").is_file());
-        assert_eq!(bundle::folder_size(&target), before);
-        assert!(drop_recording(&dir, &mut |_| {}).is_ok(), "the link is not on drop_recording's list");
-        assert!(has_view(&dir) && bundle::folder_size(&target) == before);
-        // The junction alone (never what it leads to), then the rest.
-        fs::remove_dir(dir.join("audio")).or_else(|_| fs::remove_file(dir.join("audio"))).ok();
+        assert!(held_out.join("000002.qoi").is_file(), "the view's renders still resolve");
+        assert!(drop_recording(&dir, &mut |_| {}).is_err(), "drop_recording takes depth-raw too");
+        assert!(held_out.join("000002.qoi").is_file());
+        // A sky map that is a file link into depth/ (where this system lets a test make one).
+        let sky = dir.join("reconstruction/sky.png");
+        fs::remove_file(&sky).unwrap();
+        #[cfg(windows)]
+        let file_linked = std::os::windows::fs::symlink_file(dir.join("depth/000001.d16"), &sky).is_ok();
+        #[cfg(unix)]
+        let file_linked = std::os::unix::fs::symlink(dir.join("depth/000001.d16"), &sky).is_ok();
+        unlink(&held_out);
+        fs::create_dir_all(&held_out).unwrap();
+        if file_linked {
+            assert!(keep_only_view(&dir, &mut |_| {}).is_err());
+            assert!(fs::read(&sky).is_ok_and(|b| b.len() == 300), "the sky still resolves");
+        } else {
+            eprintln!("no file link could be made here (Windows without the right): the sky case is covered by the folder link above");
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// night2 (the verifier): splats stored as `SPLATS.PLY` on a volume that ignores case are the view (it was refused
+    /// for good: their resolved name did not end in `splats.ply`).
+    #[cfg(windows)]
+    #[test]
+    fn splats_stored_under_another_spelling_keep_their_view() {
+        let (root, dir) = session("as15-spelling", true);
+        fs::rename(dir.join("reconstruction/splats.ply"), dir.join("reconstruction/SPLATS.PLY")).unwrap();
+        assert!(has_view(&dir));
+        keep_only_view(&dir, &mut |_| {}).unwrap();
+        assert!(dir.join("reconstruction/SPLATS.PLY").is_file() && !dir.join("keyframes").exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// night2 (the verifier): only what the plan lists moves: a `KEYFRAMES` folder that is not the capture's (its name
+    /// does not match) is not renamed through a lookup that ignores case.
+    #[cfg(windows)]
+    #[test]
+    fn only_the_listed_keyframes_move() {
+        let (root, dir) = session("as15-case", true);
+        fs::rename(dir.join("keyframes"), dir.join("KEYFRAMES")).unwrap();
+        keep_only_view(&dir, &mut |_| {}).unwrap();
+        let names: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.contains(&"KEYFRAMES".to_string()) && !names.iter().any(|n| n.eq_ignore_ascii_case(KEYFRAMES_GOING)), "{names:?}");
+        assert!(!dir.join("depth").exists(), "the rest of the capture still goes");
         fs::remove_dir_all(&root).ok();
     }
 

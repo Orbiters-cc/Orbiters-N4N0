@@ -771,16 +771,17 @@ impl Bridge {
             }
         }
         if let Some(why) = leave {
+            // Private instances only: before anybody can see or be told that it left (all of them wait for this lock), what
+            // it holds comes up and its window is asked to close. Only then is the leaving told.
+            self.release_session(s);
+            if let Some(window) = run.pid.and_then(|pid| s.game.window(pid)) {
+                let _ = s.game.close(&window);
+            }
             run.placed = None;
             run.event = Some(why.clone());
             run.left = true;
             run.leaving = true;
-            let pid = run.pid;
             drop(run);
-            self.release_session(s);
-            if let Some(window) = pid.and_then(|pid| s.game.window(pid)) {
-                let _ = s.game.close(&window);
-            }
             self.log(false, why);
             if settled {
                 s.game.hold_reconstructions(false);
@@ -798,13 +799,14 @@ impl Bridge {
             if run.going.take().is_some() {
                 settled = true;
             }
-            run.event = Some(why.into());
-            run.left = false;
-            drop(run);
+            // As for a leave: its input up and its window asked to close before anybody is told.
             self.release_session(s);
             if let Some(window) = s.game.window(pid) {
                 let _ = s.game.close(&window);
             }
+            run.event = Some(why.into());
+            run.left = false;
+            drop(run);
             self.log(false, why);
             if settled {
                 s.game.hold_reconstructions(false);

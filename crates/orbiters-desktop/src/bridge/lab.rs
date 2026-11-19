@@ -36,6 +36,8 @@ pub struct Behaviour {
     pub load: Duration,
     /// The game ends up in this instance instead of the one asked for (a public one, say).
     pub land_in: Option<String>,
+    /// How long asking the window to close takes (a busy computer), before it counts as asked.
+    pub close_takes: Duration,
     /// The game never reaches its world.
     pub never_arrives: bool,
     /// `launch` fails.
@@ -77,6 +79,7 @@ impl Default for Behaviour {
         Self {
             load: Duration::from_millis(200),
             land_in: None,
+            close_takes: Duration::ZERO,
             never_arrives: false,
             launch_fails: false,
             kit: true,
@@ -581,6 +584,8 @@ impl Game for LabGame {
     }
 
     fn close(&self, window: &GameWindow) -> Result<(), Failure> {
+        let takes = self.state.lock().unwrap().behaviour.close_takes;
+        std::thread::sleep(takes);
         self.state.lock().unwrap().closes += 1;
         super::win::close_window(window.handle)
     }

@@ -750,6 +750,19 @@ fn only_private_instances_of_ones_own_are_acted_in() {
 }
 
 #[test]
+fn a_start_landed_elsewhere_is_told_only_once_its_window_was_asked_to_close() {
+    // Found under load (done-integration.md): the start was marked failed before the window was closed, so the agent could be
+    // told while the game was still open in an instance that is not its own private one. A slow close makes it certain.
+    let (game, _bridge, _server, client) = lab("leave-order");
+    game.set_behaviour(|b| {
+        b.land_in = Some("12345~region(eu)".to_string());
+        b.close_takes = Duration::from_millis(600);
+    });
+    client.fails("go_to_world", json!({ "world_id": LAB_WORLD_A }), "landed_elsewhere");
+    assert!(game.closes() >= 1, "told before its window was asked to close");
+}
+
+#[test]
 fn a_vrchat_that_moves_from_its_private_instance_to_a_public_one_is_left_at_once() {
     let (game, _bridge, _server, client) = lab("moved");
     arrive(&client);

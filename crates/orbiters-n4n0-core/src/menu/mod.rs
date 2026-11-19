@@ -3374,6 +3374,8 @@ mod tests {
         let _ = menu.press(Target::Back);
         menu.set_call(Some(Call::Ringing { name: "Ana".into() }));
         assert_eq!(menu.page, Page::Call, "a ringing call opens the call page");
+        // (Half a second after it rang by itself: MENU-3.)
+        menu.unasked_at = None;
         assert_eq!(menu.press(Target::Answer), vec![Effect::Answer]);
         let _ = menu.press(Target::Back);
         let _ = menu.press(Target::Photo);
@@ -4276,6 +4278,7 @@ mod tests {
         assert!(menu.drain().is_empty(), "once");
         // Back from the scanner by a press: once, in the press' effects.
         menu.set_call(None);
+        menu.unasked_at = None;
         menu.page = Page::More;
         let _ = menu.press(Target::Qr);
         assert_eq!(menu.press(Target::Back), vec![Effect::QrScan(false)]);
@@ -4287,6 +4290,7 @@ mod tests {
             menu.typing = typing;
             menu.set_call(ringing());
             assert_eq!(menu.drain(), vec![Effect::Friends(false)], "{page:?}");
+            menu.unasked_at = None;
         }
         // Its own keyboard is still Share to …: nothing to forget going there and back.
         menu.set_call(None);

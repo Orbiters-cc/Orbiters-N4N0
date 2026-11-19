@@ -647,6 +647,14 @@ impl Controller {
         self.account_runtime.lock().unwrap().account = Some(Account { token: "fake".into(), user: None, username: Some("tester".into()), avatar_url: None });
         self.update(|s| { s.account.state = AccountState::SignedIn { username: "tester".into() }; s.account.development = Server::current() == Server::Development; });
     }
+
+    /// [`Self::test_account`] with the account's numeric id.
+    pub(super) fn test_account_with_user(&self, user: &str) {
+        self.test_account();
+        if let Some(account) = self.account_runtime.lock().unwrap().account.as_mut() {
+            account.user = Some(user.into());
+        }
+    }
 }
 
 /// Whether a read of the saved account is a re-check of the account already signed in on show (same token, same

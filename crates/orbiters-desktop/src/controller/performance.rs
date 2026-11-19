@@ -390,6 +390,9 @@ mod tests {
     #[test]
     fn a_minute_finished_after_off_is_not_kept() {
         let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings { world_performance: false, ..Default::default() });
+        // Signed in with a numeric id, so the minute reaches the switch check (signed out it is never kept anyway, CTL2-9).
+        ctl.test_account_with_user("424242");
+        assert!(ctl.performance_file().is_some(), "an account the waiting list is kept for");
         let m = Minute {
             start: 1_761_073_440,
             place: "wrld_a:1".into(),
@@ -402,7 +405,7 @@ mod tests {
         };
         ctl.performance_keep(m.finish().expect("a minute measured"));
         let rt = ctl.performance.lock().unwrap();
-        assert!(rt.pending.as_ref().is_none_or(Vec::is_empty), "not kept after Off");
+        assert!(rt.pending.as_ref().is_none_or(|(_, p)| p.is_empty()), "not kept after Off");
     }
 
     #[test]

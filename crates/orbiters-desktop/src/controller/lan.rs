@@ -101,6 +101,7 @@ impl super::Controller {
             self.lan.alive.store(false, Ordering::Relaxed);
             let service = self.osc.lock().unwrap().take();
             drop(service);
+            self.camera_route_changed();
             self.update_if(|s| {
                 let changed = s.lan != LanStatus::default();
                 *s.lan = LanStatus::default();
@@ -145,6 +146,7 @@ impl super::Controller {
             // outside the lock).
             let before = self.osc.lock().unwrap().take();
             drop(before);
+            self.camera_route_changed();
             match &wanted_service {
                 Some(next) => {
                     let vrchat = LanVrchat { ip: next.peer, name: next.asked.then(|| NO_NAME.to_string()), osc_port: choice.osc_port() };

@@ -865,6 +865,47 @@ pub(crate) fn write_record_for_test(file: &Path, path: &Path, item: Item) {
 fn read_records(path: &Path) -> Vec<Record> {
     std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
+
+/// The library moved (another sessions folder, another drive): a capture's upload record names the folder where it was.
+/// A record whose folder is gone is pointed at the folder of the same name in `sessions_dir`, when there is one, so that
+/// every path reading the records (N4N0's menu share, My World, the bridge's publish) still knows it uploaded and does
+/// not send it again (CTL2-11 k). Pictures, and folders of that name that are not there, are left as they are.
+/// How many records moved.
+pub(crate) fn follow_moved_sessions(records_file: &Path, sessions_dir: &Path) -> usize {
+    let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut records = read_records(records_file);
+    let mut moved = 0;
+    for record in records.iter_mut().filter(|r| r.uploaded.kind == Kind::Capture) {
+        if record.path.starts_with(sessions_dir) || record.path.is_dir() {
+            continue;
+        }
+        let Some(name) = record.path.file_name() else { continue };
+        let here = sessions_dir.join(name);
+        if here.join("manifest.json").is_file() {
+            record.path = here;
+            moved += 1;
+        }
+    }
+    if moved > 0 {
+        if let Ok(bytes) = serde_json::to_vec(&records) {
+            if let Err(e) = orbiters_core::write_atomic(records_file, &bytes) {
+                eprintln!("upload records: the moved library could not be noted: {e}");
+                return 0;
+            }
+        }
+    }
+    moved
+}
+
+/// [`follow_moved_sessions`] for the account signed in now, on `server`.
+pub(crate) fn follow_moved_library(server: Server, sessions_dir: &Path) {
+    if let Ok(file) = records_path(server) {
+        let moved = follow_moved_sessions(&file, sessions_dir);
+        if moved > 0 {
+            share_log(&format!("{moved} upload records follow the library to {}", sessions_dir.display())); // i18n: not shown
+        }
+    }
+}
 fn save_record(records: anyhow::Result<&Path>, entry: &Entry, item: &Item) -> anyhow::Result<()> {
     save_record_edits(records, entry, item, None)
 }
@@ -929,10 +970,15 @@ pub(crate) fn keep_picture_with(api: &Api, token: &str, records: &Path, dir: &Pa
 }
 /// Its upload is not on Orbiters any more (removed there): its record goes, so that a share uploads it again.
 fn forget_record(path: &Path, dir: &Path, id: u64) {
+    forget_record_of(path, dir, Kind::Capture, id);
+}
+
+/// [`forget_record`] for an upload of either kind (a capture or a picture).
+fn forget_record_of(path: &Path, dir: &Path, kind: Kind, id: u64) {
     let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
     let mut records = read_records(path);
     let before = records.len();
-    records.retain(|r| !(r.path == dir && r.uploaded.kind == Kind::Capture && r.uploaded.id == id));
+    records.retain(|r| !(r.path == dir && r.uploaded.kind == kind && r.uploaded.id == id));
     if records.len() != before {
         if let Ok(bytes) = serde_json::to_vec(&records) {
             let _ = orbiters_core::write_atomic(path, &bytes);
@@ -995,10 +1041,49 @@ fn step(steps: &mut Vec<String>, what: &str, at: &mut Instant) {
     steps.push(format!("{what} {:.2} s", at.elapsed().as_secs_f64()));
     *at = Instant::now();
 }
+/// Orbiters' own "not found" for an item (its JSON error, not a proxy's page): the item was removed there. The captures
+/// API gives an answer without a JSON error its general sentence (orbiters_core::shares `json`): that is no proof.
+fn removed_on_orbiters(e: &anyhow::Error) -> bool {
+    let general = tr("Orbiters could not complete the request");
+    e.downcast_ref::<orbiters_core::account::ApiError>().is_some_and(|a| a.status == 404 && !a.message.is_empty() && a.message != general)
+}
+
 /// [`share`] through `api` as `token`, this account's upload records in `records`, a capture's files made by `prepare`;
-/// what took how long in `steps`.
+/// what took how long in `steps`. One try ([`share_with_once`]); an item this computer's record says it uploaded, and that Orbiters answers it no longer has
+/// (removed on the website, another computer, moderation), loses that record and is uploaded again, once, as the person
+/// asked to share it. It stayed unshareable for good before: every share asked the dead id again (CTL2-4).
 #[allow(clippy::too_many_arguments)]
 fn share_with(
+    api: &Api,
+    token: &str,
+    records: anyhow::Result<PathBuf>,
+    entry: &Entry,
+    request: &shares::Share,
+    report: Report,
+    steps: &mut Vec<String>,
+    prepare: Prepare,
+) -> anyhow::Result<shares::Shared> {
+    let records = records.map_err(|e| e.to_string());
+    let again = || records.clone().map_err(anyhow::Error::msg);
+    let recorded = entry.local.as_ref().and_then(|l| records.as_ref().ok().and_then(|p| read_records(p).into_iter().find(|r| r.path == l.path())));
+    let result = share_with_once(api, token, again(), entry, request, report, steps, prepare);
+    let (Err(e), Some(record), Ok(file)) = (&result, recorded, records.as_ref()) else { return result };
+    // Only the id this computer's record named, and only when the entry had no other (a listed item is Orbiters' word).
+    let named = entry.remote.as_ref().is_none_or(|i| (i.kind, i.id) == (record.uploaded.kind, record.uploaded.id));
+    if !removed_on_orbiters(e) || !named {
+        return result;
+    }
+    let mut at = Instant::now();
+    step(steps, &format!("{:?} {} is not on Orbiters any more: its record goes and it is uploaded again", record.uploaded.kind, record.uploaded.id), &mut at); // i18n: not shown
+    forget_record_of(file, &record.path, record.uploaded.kind, record.uploaded.id);
+    let mut fresh = entry.clone();
+    fresh.remote = None;
+    share_with_once(api, token, again(), &fresh, request, report, steps, prepare)
+}
+
+/// One try of [`share_with`].
+#[allow(clippy::too_many_arguments)]
+fn share_with_once(
     api: &Api,
     token: &str,
     records: anyhow::Result<PathBuf>,
@@ -1034,6 +1119,9 @@ fn share_with(
         }
         known
     } else {
+        // The record of the upload must be writable before anything is sent: an upload whose record cannot be kept is
+        // sent again by every retry (CTL2-11 f).
+        records.as_ref().map_err(|e| anyhow::anyhow!("{e}"))?;
         anyhow::ensure!(!request.public || !entry.content.explicit || request.acknowledge_explicit, "{}", tr(shares::EXPLICIT_WARNING));
         let source_key = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("{}", tr("No local file to upload")))? {
             Local::Session(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or_else(|| anyhow::anyhow!("{}", tr("No capture folder name")))?,
@@ -2174,6 +2262,81 @@ pub(crate) mod tests {
         share_with(&api, "token", Ok(records.clone()), &entry, &public, &|_| {}, &mut Vec::new(), &prepared).unwrap();
         assert_eq!(requests(&seen), ["POST /captures/capture/6/share"], "its upload is not sent again");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// CTL2-4: an item this computer uploaded and that was removed on Orbiters (its share answers Orbiters' own 404)
+    /// loses its record and is uploaded again, once; the record then names the new item. A 404 that is not Orbiters'
+    /// (no JSON error) changes nothing.
+    #[test]
+    fn a_share_of_an_upload_removed_on_orbiters_uploads_it_again_once() {
+        let public = shares::Share { public: true, recipients: Vec::new(), ..Default::default() };
+        let gone = r#"{"error":"Capture not found"}"#.to_string();
+        let added = r#"{"type":"capture","id":9,"visibility":"public"}"#.to_string();
+        let (dir, _session, records, mut entry) = uploaded_session("removed", None);
+        entry.world_id = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd".into();
+        let (api, seen) = stand_in(vec![
+            ("POST /captures/capture/3/share", 404, gone),
+            ("POST /maps/worlds/", 200, added),
+            ("POST /captures/capture/9/share", 200, shared_item(Kind::Capture, 9)),
+        ]);
+        share_with(&api, "token", Ok(records.clone()), &entry, &public, &|_| {}, &mut Vec::new(), &prepared).unwrap();
+        let asked = requests(&seen);
+        assert_eq!(asked.len(), 3, "{asked:?}");
+        assert_eq!(asked[0], "POST /captures/capture/3/share");
+        assert!(asked[1].starts_with("POST /maps/worlds/"), "uploaded again: {asked:?}");
+        assert_eq!(asked[2], "POST /captures/capture/9/share");
+        assert_eq!(record_of(&records).map(|r| r.uploaded.id), Some(9), "the record names the new upload");
+        std::fs::remove_dir_all(dir).ok();
+
+        // A 404 from something in front of Orbiters (no JSON error): the record stays, nothing is uploaded.
+        let (dir, _session, records, mut entry) = uploaded_session("proxy", None);
+        entry.world_id = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd".into();
+        let (api, seen) = stand_in(vec![("POST /captures/capture/3/share", 404, "<html>Not Found</html>".into())]);
+        assert!(share_with(&api, "token", Ok(records.clone()), &entry, &public, &|_| {}, &mut Vec::new(), &prepared).is_err());
+        assert_eq!(requests(&seen), ["POST /captures/capture/3/share"]);
+        assert_eq!(record_of(&records).map(|r| r.uploaded.id), Some(3));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// CTL2-11 f: with no upload record possible (the account has no id), nothing is sent, so a retry sends nothing twice.
+    #[test]
+    fn no_upload_is_sent_when_its_record_cannot_be_kept() {
+        let public = shares::Share { public: true, recipients: Vec::new(), ..Default::default() };
+        let (dir, _session, records, mut entry) = uploaded_session("no-record", None);
+        std::fs::remove_file(&records).unwrap();
+        entry.world_id = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd".into();
+        let (api, seen) = stand_in(vec![]);
+        let refused = share_with(&api, "token", Err(anyhow::anyhow!("Orbiters did not identify this account")), &entry, &public, &|_| {}, &mut Vec::new(), &prepared).unwrap_err();
+        assert!(refused.to_string().contains("did not identify"), "{refused}");
+        assert!(requests(&seen).is_empty(), "nothing sent");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// CTL2-11 k: the library moved to another folder: a capture's record follows it to the folder of the same name, and
+    /// the rest stays as it was.
+    #[test]
+    fn upload_records_follow_a_moved_library() {
+        let root = std::env::temp_dir().join(format!("orbiters-moved-{}", uuid::Uuid::new_v4()));
+        let (old, new) = (root.join("old"), root.join("new"));
+        for name in ["Home 1", "Here still"] {
+            std::fs::create_dir_all(new.join(name)).unwrap();
+            std::fs::write(new.join(name).join("manifest.json"), b"{}").unwrap();
+        }
+        std::fs::create_dir_all(old.join("Here still")).unwrap();
+        let record = |path: PathBuf, kind: Kind, id: u64| Record { path, item: None, uploaded: Uploaded { kind, id, visibility: "private".into() }, edits: None };
+        let file = root.join("capture-uploads.json");
+        let records = vec![
+            record(old.join("Home 1"), Kind::Capture, 1),
+            record(old.join("Here still"), Kind::Capture, 2),
+            record(old.join("Nowhere"), Kind::Capture, 3),
+            record(old.join("Home 1"), Kind::Picture, 4),
+        ];
+        std::fs::write(&file, serde_json::to_vec(&records).unwrap()).unwrap();
+        assert_eq!(follow_moved_sessions(&file, &new), 1);
+        let now: Vec<PathBuf> = read_records(&file).into_iter().map(|r| r.path).collect();
+        assert_eq!(now, [new.join("Home 1"), old.join("Here still"), old.join("Nowhere"), old.join("Home 1")]);
+        assert_eq!(follow_moved_sessions(&file, &new), 0, "once");
+        std::fs::remove_dir_all(root).ok();
     }
 
     /// An item uploaded before (its record says so) is shared with one request: nothing sent again, nothing fetched.

@@ -77,19 +77,27 @@ struct Minute {
 #[derive(Default)]
 pub struct PerformanceRuntime {
     minute: Option<Minute>,
-    pending: Option<Vec<Sample>>,
+    /// What waits to be sent, read from (and kept in) the file of the account it was gathered as.
+    pending: Option<(PathBuf, Vec<Sample>)>,
     hardware: Hardware,
     last_sent: Option<Instant>,
 }
 
-fn pending_file() -> PathBuf {
+/// Where the summaries gathered before this version waited, for every account and environment at once (CTL2-9).
+fn legacy_pending_file() -> PathBuf {
     orbiters_core::paths::config_dir().join("world-performance-pending.json")
 }
 
+/// Where the summaries gathered as `user` on `server` wait, in `dir`: one file per account and environment, as the
+/// upload records are, so that what one member gathered is never sent as another, nor development's to production.
+fn pending_file_in(dir: &std::path::Path, server: orbiters_core::account::Server, user: &str) -> PathBuf {
+    let env = if server == orbiters_core::account::Server::Development { "dev" } else { "prod" };
+    dir.join(format!("world-performance-pending-{env}-{user}.json"))
+}
+
 /// What waits to be sent, as kept; a file that cannot be read is kept beside before the next save replaces it.
-fn read_pending() -> Vec<Sample> {
-    let path = pending_file();
-    let Ok(Some(text)) = orbiters_core::read_text(&path) else { return Vec::new() };
+fn read_pending(path: &std::path::Path) -> Vec<Sample> {
+    let Ok(Some(text)) = orbiters_core::read_text(path) else { return Vec::new() };
     serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).unwrap_or_else(|e| {
         eprintln!("world performance: {}: {e}; kept as {:?}", path.display(), orbiters_core::keep_aside(&path));
         Vec::new()
@@ -98,10 +106,37 @@ fn read_pending() -> Vec<Sample> {
 
 /// Writes what waits to be sent, whole or not at all (a crash mid-write would lose it all). Under the runtime's lock,
 /// so that an older list never lands after a newer one.
-fn keep_pending(pending: &[Sample]) {
-    if let Err(e) = orbiters_core::write_atomic(&pending_file(), serde_json::to_string(pending).unwrap_or_default().as_bytes()) {
+fn keep_pending(path: &std::path::Path, pending: &[Sample]) {
+    if let Err(e) = orbiters_core::write_atomic(path, serde_json::to_string(pending).unwrap_or_default().as_bytes()) {
         eprintln!("world performance: could not keep the summaries waiting: {e}");
     }
+}
+
+/// The runtime's waiting list for the file `path`, read when it was another's (an account switch). The first time an
+/// account's file is opened, a list of the version before (one file for all) becomes this account's when it is younger
+/// than a day, and goes either way.
+fn pending_for<'a>(rt: &'a mut PerformanceRuntime, path: &std::path::Path) -> &'a mut Vec<Sample> {
+    if rt.pending.as_ref().is_none_or(|(p, _)| p != path) {
+        let mut list = read_pending(path);
+        let legacy = legacy_pending_file();
+        if list.is_empty() {
+            let young = std::fs::metadata(&legacy).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age < Duration::from_secs(24 * 3600));
+            if young {
+                list = read_pending(&legacy);
+                keep_pending(path, &list);
+            }
+        }
+        let _ = std::fs::remove_file(&legacy);
+        rt.pending = Some((path.to_path_buf(), list));
+    }
+    &mut rt.pending.as_mut().expect("just set").1
+}
+
+/// Orbiters refused the batch for good (a 4xx that a retry does not change): it goes, or it would block every newer
+/// summary for a day. Not a sign-in, a rate or a time limit (401, 403, 408, 429), nor a failure to reach Orbiters, nor a
+/// 5xx: those wait for the next try.
+fn refused_for_good(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<orbiters_core::account::ApiError>().is_some_and(|e| (400..500).contains(&e.status) && !matches!(e.status, 401 | 403 | 408 | 429))
 }
 
 fn utc(unix: u64) -> String {
@@ -208,59 +243,82 @@ impl super::Controller {
     /// disk, and the minute being gathered too, so that turning it on later never sends what was gathered before.
     pub(super) fn performance_forget(&self) {
         let mut rt = self.performance.lock().unwrap();
-        rt.pending = Some(Vec::new());
+        rt.pending = None;
         rt.minute = None;
-        match std::fs::remove_file(pending_file()) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => eprintln!("world performance: the summaries waiting could not be removed: {e}"),
+        // Every account's waiting list on this computer, and the one of the version before.
+        let dir = orbiters_core::paths::config_dir();
+        let lists = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("world-performance-pending") && n.ends_with(".json"))
+        });
+        for path in lists {
+            if let Err(e) = std::fs::remove_file(&path) {
+                eprintln!("world performance: the summaries waiting could not be removed: {e}");
+            }
         }
     }
 
+    /// The waiting list's file of the account signed in now: `None` signed out (nothing is kept for nobody).
+    fn performance_file(&self) -> Option<PathBuf> {
+        let (server, _, user) = self.feedback_account()?;
+        let user = user.filter(|u| !u.is_empty() && u.chars().all(|c| c.is_ascii_digit()))?;
+        Some(pending_file_in(&orbiters_core::paths::config_dir(), server, &user))
+    }
+
     fn performance_keep(&self, sample: Sample) {
+        // Gathered signed out: sent as nobody's, so kept for nobody (it was sent later as whoever signed in, CTL2-9).
+        let Some(path) = self.performance_file() else { return };
         let mut rt = self.performance.lock().unwrap();
-        let pending = rt.pending.get_or_insert_with(read_pending);
+        let pending = pending_for(&mut rt, &path);
         pending.push(sample);
         if pending.len() > MAX_PENDING {
             let extra = pending.len() - MAX_PENDING;
             pending.drain(..extra);
         }
         let _ = std::fs::create_dir_all(orbiters_core::paths::config_dir());
-        keep_pending(pending);
+        keep_pending(&path, pending);
     }
 
     /// Sends what was gathered when it is time (or `now`), on a thread of its own.
     pub(super) fn performance_send_if_due(self: &Shared, now: bool) {
+        let Some(path) = self.performance_file() else { return };
         let batch = {
             let mut rt = self.performance.lock().unwrap();
+            pending_for(&mut rt, &path);
             // Asked with every chunk of frames: nothing is copied until it is time.
             let due = now || rt.last_sent.is_none_or(|t| t.elapsed() >= SEND_EVERY);
             // Orbiters refuses summaries without the headset's refresh rate: they wait until the overlay reported it.
-            if !due || rt.pending.as_ref().is_none_or(Vec::is_empty) || rt.hardware.refresh_hz.is_none() {
+            if !due || rt.pending.as_ref().is_none_or(|(_, p)| p.is_empty()) || rt.hardware.refresh_hz.is_none() {
                 return;
             }
             rt.last_sent = Some(Instant::now());
             let mut hardware = rt.hardware.clone();
             fill_host(&mut hardware);
             rt.hardware = hardware.clone();
-            let samples: Vec<Sample> = rt.pending.iter().flatten().take(MAX_PER_REQUEST).cloned().collect();
+            let samples: Vec<Sample> = rt.pending.iter().flat_map(|(_, p)| p.iter()).take(MAX_PER_REQUEST).cloned().collect();
             (samples, hardware)
         };
         let Some((api, token)) = self.account_api() else { return };
         let ctl = self.clone();
-        std::thread::spawn(move || match send(&api, &token, &batch.0, &batch.1) {
-            Ok(()) => {
-                let mut rt = ctl.performance.lock().unwrap();
-                // Turned off meanwhile: forgotten already, nothing to write back.
-                if !ctl.with_settings(|s| s.world_performance) {
+        std::thread::spawn(move || {
+            let sent = send(&api, &token, &batch.0, &batch.1);
+            match &sent {
+                Ok(()) => {}
+                Err(e) if refused_for_good(e) => eprintln!("world performance: {} summaries refused for good, dropped: {e:#}", batch.0.len()),
+                Err(e) => {
+                    eprintln!("world performance: {e:#}");
                     return;
                 }
-                if let Some(pending) = rt.pending.as_mut() {
-                    pending.retain(|s| !batch.0.contains(s));
-                    keep_pending(pending);
-                }
             }
-            Err(e) => eprintln!("world performance: {e:#}"),
+            let mut rt = ctl.performance.lock().unwrap();
+            // Turned off meanwhile: forgotten already, nothing to write back.
+            if !ctl.with_settings(|s| s.world_performance) {
+                return;
+            }
+            // Only from the list they were taken from (the account may have changed meanwhile).
+            if let Some((file, pending)) = rt.pending.as_mut().filter(|(file, _)| *file == path) {
+                pending.retain(|s| !batch.0.contains(s));
+                keep_pending(file, pending);
+            }
         });
     }
 }
@@ -287,6 +345,25 @@ fn send(api: &Api, token: &str, samples: &[Sample], hardware: &Hardware) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CTL2-9: a batch Orbiters refuses for good goes; a sign-in, rate or time limit, a 5xx or no answer waits; and each
+    /// account and environment has its own waiting list.
+    #[test]
+    fn a_refused_batch_goes_and_each_account_waits_apart() {
+        let api = |status: u16| anyhow::Error::from(orbiters_core::account::ApiError { status, message: "no".into(), code: None });
+        for status in [400, 404, 409, 413, 422] {
+            assert!(refused_for_good(&api(status)), "{status}");
+        }
+        for status in [401, 403, 408, 429, 500, 502, 503] {
+            assert!(!refused_for_good(&api(status)), "{status}");
+        }
+        assert!(!refused_for_good(&anyhow::anyhow!("connection refused")));
+        let dir = std::path::Path::new("cfg");
+        use orbiters_core::account::Server;
+        assert_eq!(pending_file_in(dir, Server::Production, "12"), dir.join("world-performance-pending-prod-12.json"));
+        assert_ne!(pending_file_in(dir, Server::Production, "12"), pending_file_in(dir, Server::Production, "13"));
+        assert_ne!(pending_file_in(dir, Server::Production, "12"), pending_file_in(dir, Server::Development, "12"));
+    }
 
     #[test]
     fn a_minute_sums_up_its_frames() {

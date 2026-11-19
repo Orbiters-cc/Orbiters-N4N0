@@ -170,8 +170,8 @@ impl Roster {
         self.facts.retain(|l, _| used.contains(l));
         for log in &used {
             let facts = self.facts.entry(log.clone()).or_default();
-            let text = read_from(log, facts.read_to, CHUNK);
-            facts.read_to += text.len() as u64;
+            let (text, consumed) = read_log_from(log, facts.read_to, CHUNK);
+            facts.read_to += consumed;
             facts.read(&text);
         }
         let mut runs: Vec<VrchatRun> = procs
@@ -191,16 +191,38 @@ impl Roster {
     }
 }
 
-fn read_from(path: &Path, from: u64, most: u64) -> String {
+/// A VRChat log's whole lines from byte `from`, at most `most` bytes of them, and how many bytes of the file they are.
+/// The bytes, not the text's length: a byte that is not UTF-8 becomes three bytes of text, and the next read started
+/// that much further, in the middle of a later line (C-6, CTL2-6). A line longer than `most` is passed over whole once it
+/// has ended (before, an empty read advanced nothing and the same bytes were read again on every look, for good).
+pub(super) fn read_log_from(path: &Path, from: u64, most: u64) -> (String, u64) {
     use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else { return (String::new(), 0) };
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return (String::new(), 0);
+    }
     let mut bytes = Vec::new();
-    if let Ok(mut file) = std::fs::File::open(path) {
-        if file.seek(SeekFrom::Start(from)).is_ok() {
-            let _ = file.take(most).read_to_end(&mut bytes);
+    let _ = (&mut file).take(most).read_to_end(&mut bytes);
+    if let Some(last) = bytes.iter().rposition(|b| *b == b'\n') {
+        let end = last + 1;
+        return (String::from_utf8_lossy(&bytes[..end]).into_owned(), end as u64);
+    }
+    if (bytes.len() as u64) < most {
+        // The line is still being written: read again from here next time.
+        return (String::new(), 0);
+    }
+    // One line longer than a read: its end is looked for, and the whole line passed over.
+    let mut skipped = bytes.len() as u64;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) | Err(_) => return (String::new(), 0),
+            Ok(n) => match buf[..n].iter().position(|b| *b == b'\n') {
+                Some(i) => return (String::new(), skipped + i as u64 + 1),
+                None => skipped += n as u64,
+            },
         }
     }
-    let end = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 /// What the interface shows of a VRChat (state.rs), from the roster's.
@@ -282,9 +304,10 @@ impl super::Controller {
             .as_ref()
             .filter(|t| t.osc_in != default_port || self.sides.lent().is_some())
             .and_then(|t| t.query.map(|q| (SocketAddr::from(([127, 0, 0, 1], t.osc_in)), q)));
-        // Before what is known of the camera is reset: an answer the keeper asked of the last VRChat is not shown now.
-        self.camera_route_changed();
+        // After the endpoint changed, before what is known of the camera is reset: an answer asked of the last VRChat,
+        // before or during the change, is not shown now (verify-controller, C-8).
         let _ = self.with_osc(|o| o.lend(route));
+        self.camera_route_changed();
         let heard = pid.and_then(|p| self.sides.camera_heard(p));
         {
             let mut osc = self.osc_values.lock().unwrap();
@@ -387,6 +410,28 @@ fn send_streaming(to: SocketAddr, on: bool) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C-6 / CTL2-6: the offset moves by the file's bytes (a byte that is not UTF-8 is one byte, not three of text), and a
+    /// line longer than a read is passed over once it ended, the next one read.
+    #[test]
+    fn the_log_is_read_on_in_file_bytes_and_past_an_overlong_line() {
+        let file = std::env::temp_dir().join(format!("orbiters-log-{}.txt", std::process::id()));
+        let mut bytes = b"name \xE9t\xE9\nnext line\npartial".to_vec();
+        std::fs::write(&file, &bytes).unwrap();
+        let (text, consumed) = read_log_from(&file, 0, 1 << 20);
+        assert_eq!(consumed, "name \u{e9}t\u{e9}\nnext line\n".len() as u64 - 2, "the bytes of the file, not of the text");
+        assert!(text.ends_with("next line\n"));
+        let (rest, more) = read_log_from(&file, consumed, 1 << 20);
+        assert_eq!((rest.as_str(), more), ("", 0), "a line still being written waits");
+        // A line longer than a read, then an ordinary one.
+        bytes = vec![b'x'; 100];
+        bytes.extend_from_slice(b"\nafter\n");
+        std::fs::write(&file, &bytes).unwrap();
+        let (skipped, past) = read_log_from(&file, 0, 16);
+        assert_eq!((skipped.as_str(), past), ("", 101));
+        assert_eq!(read_log_from(&file, past, 16), ("after\n".to_string(), 6));
+        let _ = std::fs::remove_file(&file);
+    }
 
     /// The heads of the two logs of 2026-11-15 13:48, as VRChat wrote them (abridged to what is read).
     const TOUR_LOG: &str = "2026.11.15 12:25:17 Debug      -  Launching with args: 4\n\

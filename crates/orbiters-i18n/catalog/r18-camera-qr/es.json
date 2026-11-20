@@ -4,9 +4,9 @@
   "A QR code is cut off at the top": "Un código QR está cortado arriba",
   "A QR code is cut off at the bottom": "Un código QR está cortado abajo",
   "A QR code is larger than the picture": "Un código QR no cabe en la imagen",
-  "Move the camera a little to the left, until all of the code shows in it.": "Mueve la cámara un poco a la izquierda, hasta que se vea todo el código en ella.",
-  "Move the camera a little to the right, until all of the code shows in it.": "Mueve la cámara un poco a la derecha, hasta que se vea todo el código en ella.",
-  "Move the camera a little up, until all of the code shows in it.": "Sube un poco la cámara, hasta que se vea todo el código en ella.",
-  "Move the camera a little down, until all of the code shows in it.": "Baja un poco la cámara, hasta que se vea todo el código en ella.",
-  "Move the camera back from the code, until all of it shows in it.": "Aleja la cámara del código, hasta que se vea entero en ella."
+  "Move the camera a little to the left until all of the code shows.": "Mueve la cámara un poco a la izquierda, hasta que se vea todo el código en ella.",
+  "Move the camera a little to the right until all of the code shows.": "Mueve la cámara un poco a la derecha, hasta que se vea todo el código en ella.",
+  "Move the camera a little up until all of the code shows.": "Sube un poco la cámara, hasta que se vea todo el código en ella.",
+  "Move the camera a little down until all of the code shows.": "Baja un poco la cámara, hasta que se vea todo el código en ella.",
+  "Move the camera back until all of the code shows.": "Aleja la cámara del código, hasta que se vea entero en ella."
 }

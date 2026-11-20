@@ -13,11 +13,12 @@ pub struct Proxy {
     stop: Arc<AtomicBool>,
 }
 impl Proxy {
+    #[cfg(test)]
     pub fn new() -> anyhow::Result<Self> {
         Self::with(false)
     }
     /// `loopback`: this computer's own address is let through too. Only this crate's tests ask it (a slow page served
-    /// from a test: Request 18's timeline); every engine of the app refuses it ([`Proxy::new`]).
+    /// from a test: Request 18's timeline); every engine of the app refuses it.
     pub(crate) fn with(loopback: bool) -> anyhow::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();

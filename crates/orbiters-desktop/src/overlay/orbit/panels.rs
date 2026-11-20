@@ -4495,11 +4495,11 @@ pub fn camera_words(facts: &Facts) -> Option<(String, String)> {
         CameraQr::Cut(side) => {
             use orbiters_n4n0::QrSide;
             return Some(match side {
-                Some(QrSide::Left) => (tr("A QR code is cut off on the left").into(), tr("Move the camera a little to the left, until all of the code shows in it.").into()),
-                Some(QrSide::Right) => (tr("A QR code is cut off on the right").into(), tr("Move the camera a little to the right, until all of the code shows in it.").into()),
-                Some(QrSide::Top) => (tr("A QR code is cut off at the top").into(), tr("Move the camera a little up, until all of the code shows in it.").into()),
-                Some(QrSide::Bottom) => (tr("A QR code is cut off at the bottom").into(), tr("Move the camera a little down, until all of the code shows in it.").into()),
-                Some(QrSide::Around) => (tr("A QR code is larger than the picture").into(), tr("Move the camera back from the code, until all of it shows in it.").into()),
+                Some(QrSide::Left) => (tr("A QR code is cut off on the left").into(), tr("Move the camera a little to the left until all of the code shows.").into()),
+                Some(QrSide::Right) => (tr("A QR code is cut off on the right").into(), tr("Move the camera a little to the right until all of the code shows.").into()),
+                Some(QrSide::Top) => (tr("A QR code is cut off at the top").into(), tr("Move the camera a little up until all of the code shows.").into()),
+                Some(QrSide::Bottom) => (tr("A QR code is cut off at the bottom").into(), tr("Move the camera a little down until all of the code shows.").into()),
+                Some(QrSide::Around) => (tr("A QR code is larger than the picture").into(), tr("Move the camera back until all of the code shows.").into()),
                 None => (tr("A QR code is cut by the edge").into(), tr("Move the camera so all of the code is in its picture.").into()),
             });
         }

@@ -11,6 +11,7 @@ mod hero;
 pub mod list;
 pub mod mine;
 mod modal;
+pub mod points;
 mod row;
 pub mod states;
 

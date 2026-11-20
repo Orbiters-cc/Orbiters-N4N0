@@ -95,6 +95,8 @@ pub enum Go {
     Projects,
     /// Settings, where the VRChat account is signed in (the launcher's "Sign in to VRChat").
     VrchatAccount,
+    /// Settings, where the Explorer points are with the Orbiters account (Home's points, REQUEST19 1).
+    ExplorerPoints,
 }
 
 impl Cx<'_> {

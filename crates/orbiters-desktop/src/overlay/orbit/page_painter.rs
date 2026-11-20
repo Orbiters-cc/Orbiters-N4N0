@@ -186,7 +186,7 @@ impl Engine {
             Scene::Native => request.pointer.and_then(|p| panels::hit(&items, p)).or(request.hover),
             Scene::Menu { menu, .. } => request.pointer.and_then(|p| {
                 let page = orbiters_n4n0_core::menu::layout::cached(orbiters_n4n0_core::menu::layout::ScreenPage::of(menu));
-                orbiters_n4n0_core::menu::layout::hit_pointable(page, menu, p.x, p.y).map(|(n, _)| n)
+                panels::history_sheet::menu_hit(menu, p).or_else(|| orbiters_n4n0_core::menu::layout::hit_pointable(page, menu, p.x, p.y).map(|(n, _)| n))
             }).or(request.hover),
             Scene::Worlds(scene) => { scene.point(request.pointer); None }
         };
@@ -198,6 +198,7 @@ impl Engine {
                 let view = super::View { menu, skin, picture: &picture, time: request.time, hover, pressed: request.pressed };
                 if *retro { super::menu_retro::draw(p, egui::Pos2::ZERO, &view); }
                 else { super::menu_ui::draw(p, egui::Pos2::ZERO, &view); }
+                panels::history_sheet::draw_on_menu(p, menu, hover, request.pressed);
                 if *cover { let title = menu.world_video.as_ref().map(|v| v.title.as_deref().map_or_else(|| v.url.clone(), panels::clean_title)); super::type_hint(p, title.as_deref()); }
             }
             Scene::Worlds(scene) => scene.draw(p),

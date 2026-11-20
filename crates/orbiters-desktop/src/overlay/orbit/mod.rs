@@ -990,6 +990,11 @@ pub struct Panels {
     /// The invite asked for last, and when; the result whose link was copied, and when.
     invited: Option<(String, Instant)>,
     copied: Option<(usize, Instant)>,
+    /// YouTube's History (REQUEST19 2): the window's Videos tab's store, read while its page shows; the row whose link was
+    /// copied, and when; the rows whose pictures were asked for last.
+    pub(super) history: panels::history_sheet::Store,
+    history_copied: Option<(usize, Instant)>,
+    history_asked: Option<Vec<String>>,
     /// A press on a list, which may yet be a drag; where the pointer is on the sheet; and what it turned out to press.
     drag: Option<Drag>,
     sheet_pointer: Option<Pos2>,
@@ -1116,6 +1121,9 @@ impl Panels {
             gallery_to: 0.0,
             videos_asked: None,
             videos_had: 0,
+            history: if cfg!(test) { panels::history_sheet::Store::default() } else { panels::history_sheet::Store::app() },
+            history_copied: None,
+            history_asked: None,
             talk_had: 0,
             talk_foot: 0.0,
             seeking: None,
@@ -1718,7 +1726,7 @@ impl Panels {
 
     /// What opens a screen of the sheet, for the way back. What brought them there is what brings them back: everything else about it is kept by [`Panels::keep_screen`].
     fn opens_a_screen(action: Action) -> bool {
-        matches!(action, Action::Worlds | Action::All | Action::Pictures | Action::Talk | Action::Settings | Action::Page(_) | Action::WorldInfo(_))
+        matches!(action, Action::Worlds | Action::All | Action::Pictures | Action::Talk | Action::Settings | Action::Page(_) | Action::WorldInfo(_) | Action::VideoHistory)
     }
 
     /// Before leaving a screen, or showing another of the same name: what it has.
@@ -2414,6 +2422,20 @@ impl Panels {
                 panel.dirty = panel.dirty || self.stage.host.dirty;
             }
         }
+        // YouTube's History (REQUEST19 2): its store read while its page shows, the pictures of the rows in view asked for
+        // (the menu's own cache, as YouTube's results' are).
+        if self.facts.sheet == Some(Sheet::VideoHistory) {
+            let read = self.history.follow(Instant::now());
+            let wanted = self.history.pictures_wanted(self.facts.gallery_scroll);
+            if self.history_asked.as_ref() != Some(&wanted) {
+                self.history_asked = Some(wanted.clone());
+                let host = &mut self.stage.host;
+                host.effects(vec![Effect::Thumbnails(wanted)], snap, &self.backend);
+            }
+            if let Some(panel) = self.takeover.as_mut() {
+                panel.dirty = panel.dirty || read || self.stage.host.dirty;
+            }
+        }
         // The conversation keeps its newest in view as it grows: at each new line, and as an answer arrives, unless the
         // person scrolled up to read.
         if self.facts.sheet == Some(Sheet::Talk) {
@@ -2582,6 +2604,13 @@ impl Panels {
                 Vec::new()
             },
             videos_for: menu.results_for.clone(),
+            history: if self.facts.sheet == Some(Sheet::VideoHistory) {
+                let copied = self.history_copied.filter(|(_, at)| at.elapsed() < Duration::from_secs(2)).map(|(i, _)| i);
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                self.history.facts(self.facts.gallery_scroll, copied, snap.vrchat.log_found, now, |id| self.stage.host.picture(id, false))
+            } else {
+                Default::default()
+            },
             // Switched off by the person: what Ask N4N0 shows is how to turn it on again, whatever else would stop it.
             talk: if self.assistant_now(snap) { talk_now(snap) } else { panels::TalkNow::AssistantOff },
             talk_auto: snap.n4n0.voice.automatic,
@@ -2640,7 +2669,7 @@ impl Panels {
             digits: self.open == Some(Around::Wheel) && self.takeover.is_none() && (snap.n4n0.desktop_mode || !snap.steamvr.running),
             beside_wing: self.open == Some(Around::QuickMenu) && self.list.iter().any(|p| Zone::WING.contains(&p.zone) || p.zone == Zone::QmStrip),
             worlds_visited: visited,
-            invite_said: matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::Results)).then(|| menu.notice.as_deref().map(|said| tr(said).to_string())).flatten(),
+            invite_said: matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::Results | Sheet::VideoHistory)).then(|| menu.notice.as_deref().map(|said| tr(said).to_string())).flatten(),
             note: self.facts.note.clone(),
             picture_wait: snap.n4n0.photo_wait,
             pointed: self.facts.pointed,
@@ -2782,7 +2811,8 @@ impl Panels {
                             }
                             let menu = self.stage.presented_scene.as_ref().and_then(|s| s.menu()).unwrap_or(&self.stage.host.menu);
                             let page = layout::cached(ScreenPage::of(menu));
-                            layout::hit_pointable(page, menu, p.x, p.y).map(|(element, _)| element)
+                            // YouTube's History, in the place of the menu's own Back on its search (REQUEST19 2).
+                            panels::history_sheet::menu_hit(menu, p).or_else(|| layout::hit_pointable(page, menu, p.x, p.y).map(|(element, _)| element))
                         }
                         Some(Sheet::Worlds) => {
                             worlds_hover = Some((p.x, p.y));
@@ -2838,7 +2868,9 @@ impl Panels {
             panel.shown = on_parts && !self.peek;
         }
         // The caption says what is pointed at.
-        let pointed = self.list.iter().find_map(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)).or_else(|| self.takeover.as_ref().filter(|_| matches!(sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)));
+        let pointed = self.list.iter().find_map(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)).or_else(|| self.takeover.as_ref().filter(|_| matches!(sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)))
+            // History on YouTube's search is an icon: the caption says what it is.
+            .or_else(|| (sheet == Some(Sheet::Menu) && self.takeover.as_ref().and_then(|p| p.hover) == Some(panels::history_sheet::ON_MENU)).then_some(Action::VideoHistory));
         if pointed != self.facts.pointed {
             self.facts.pointed = pointed;
             self.caption_dirty();
@@ -2891,6 +2923,13 @@ impl Panels {
                         return out;
                     }
                 }
+            }
+            // YouTube's History on its search (REQUEST19 2): not one of the menu's elements, the overlay's own.
+            Some(Sheet::Menu) if self.takeover.as_ref().and_then(|p| p.hover) == Some(panels::history_sheet::ON_MENU) => {
+                crate::usage::press(&usage_name(&Action::VideoHistory));
+                out.clicked = true;
+                self.act(Action::VideoHistory, snap, &mut out);
+                return out;
             }
             Some(Sheet::Menu) => {
                 if let Some(panel) = self.takeover.as_mut() {
@@ -2956,7 +2995,7 @@ impl Panels {
             return out;
         }
         // A list's own empty space can be dragged too.
-        if look.is_none() && self.facts.opened.is_none() && self.sheet_pointer.is_some() && matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::Talk)) {
+        if look.is_none() && self.facts.opened.is_none() && self.sheet_pointer.is_some() && matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::Talk | Sheet::VideoHistory)) {
             self.throw = 0.0;
             self.drag = Some(Drag::new(self.facts.gallery_scroll, None, false));
             return out;
@@ -3426,6 +3465,36 @@ impl Panels {
                 let effects = host.press(Target::Back);
                 host.effects(effects, snap, &self.backend);
             }
+            // YouTube's History (REQUEST19 2): its page from YouTube's; pressed there again, back to YouTube.
+            Action::VideoHistory if self.facts.sheet == Some(Sheet::VideoHistory) => self.go_back(snap, out),
+            Action::VideoHistory => {
+                self.open_sheet(Sheet::VideoHistory, mark("History"), snap);
+                self.history.look_now();
+                self.history_asked = None;
+            }
+            // A video of History, as a result of YouTube's: its link to the clipboard (for the world's player), or a card of it in
+            // the world, through N4N0's menu's own effects; said as the menu says them.
+            Action::HistoryCopy(i) => {
+                let shown = self.action_facts().history.rows.iter().find(|r| r.index == i).map(|r| r.url.clone());
+                let Some((link, title, _)) = self.history.video(i, shown.as_deref()) else { return };
+                self.history_copied = Some((i, Instant::now()));
+                let host = &mut self.stage.host;
+                let said = if host.menu.can_drop { mark("Link copied: paste it, or Drop it") } else { mark("Link copied: paste it in the video player") };
+                host.menu.notice = Some(said.into());
+                host.effects(vec![Effect::Copy { link, title }], snap, &self.backend);
+                if let Some(panel) = self.takeover.as_mut() {
+                    panel.dirty = true;
+                }
+            }
+            // Greyed where the avatar cannot drop a card: its caption says why, and nothing is sent.
+            Action::HistoryDrop(_) if !self.stage.host.menu.can_drop => {}
+            Action::HistoryDrop(i) => {
+                let shown = self.action_facts().history.rows.iter().find(|r| r.index == i).map(|r| r.url.clone());
+                let Some((link, title, video)) = self.history.video(i, shown.as_deref()) else { return };
+                let host = &mut self.stage.host;
+                host.menu.notice = Some(mark("Dropped: grab the card to copy its link").into());
+                host.effects(vec![Effect::Drop { link, title, video }], snap, &self.backend);
+            }
             Action::OpenApp => self.backend.show_window(),
             Action::AddKit => self.backend.show_page("projects"),
             Action::SeeInApp => {
@@ -3826,7 +3895,7 @@ impl Panels {
         page.shown_pixels = Some(frame.pixels.clone()); page.items.clone_from(&frame.items);
         page.hover = match &frame.scene {
             page_painter::Scene::Native => self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p)),
-            page_painter::Scene::Menu { menu, .. } => self.sheet_pointer.and_then(|p| layout::hit_pointable(layout::cached(ScreenPage::of(menu)), menu, p.x, p.y).map(|(n, _)| n)),
+            page_painter::Scene::Menu { menu, .. } => self.sheet_pointer.and_then(|p| panels::history_sheet::menu_hit(menu, p).or_else(|| layout::hit_pointable(layout::cached(ScreenPage::of(menu)), menu, p.x, p.y).map(|(n, _)| n))),
             page_painter::Scene::Worlds(_) => None,
         };
         page.painted = true; page.again = false; page.dirty |= first || page.hover != frame.hover || page.pressed != frame.pressed;
@@ -4135,6 +4204,7 @@ impl Panels {
                         } else {
                             menu_ui::draw(p, pos2(0.0, 0.0), &view);
                         }
+                        panels::history_sheet::draw_on_menu(p, &host.menu, hover, pressed);
                         if cover {
                             type_hint(p, world_video.as_deref());
                         }
@@ -4403,7 +4473,7 @@ impl Stage {
 }
 
 /// Over the keyboard of N4N0's search page on a desktop, where a real one is under the hands: what to do instead.
-fn type_hint(p: &egui::Painter, playing: Option<&str>) {
+pub(crate) fn type_hint(p: &egui::Painter, playing: Option<&str>) {
     use orbiters_ui::{icons, theme, widgets};
     let area = egui::Rect::from_min_max(pos2(0.0, KEYS_TOP), pos2(layout::WIDTH as f32, layout::HEIGHT as f32));
     p.rect_filled(area, 0.0, panels::look::OPAQUE);

@@ -116,6 +116,33 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
         home: None,
         library: None,
     });
+    // REQUEST19 1: the member's Explorer points on Home's profile card (made-up standings): a title on the way to the next,
+    // none yet, the top title, Orbiters not said yet, and signed out of Orbiters (no chip). Run with --width 1040 and
+    // --width 900 too, and --language fr / ja.
+    let signed_out = super::with_account(&base, crate::state::AccountState::SignedOut, None);
+    for (name, snapshot) in [
+        ("launcher-points", super::with_explorer_points(&base, 12.5)),
+        ("launcher-points-zero", super::with_explorer_points(&base, 0.0)),
+        ("launcher-points-top", super::with_explorer_points(&base, 1200.0)),
+        ("launcher-points-waiting", base.clone()),
+        ("launcher-points-signed-out", signed_out),
+        ("launcher-small-points", super::with_explorer_points(&base, 12.5)),
+    ] {
+        scenarios.push(Scenario {
+            name,
+            page: Page::Home,
+            snapshot,
+            frames: 100,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        });
+    }
     for name in NAMES {
         scenarios.push(Scenario {
             name,

@@ -1030,6 +1030,10 @@ pub struct Panels {
     show_keys: bool,
     /// What the service was last told of the sheet (open, dictation, keyboard).
     reported: Option<(bool, bool, bool)>,
+    /// The service's last request for N4N0's menu (`N4n0Status::menu_request`) seen here, and whether All tools (or a page of the menu
+    /// on the sheet) shows because of one: on the desktop it is N4N0's menu when the avatar's screen does not take it ([`Panels::serve_menu`]).
+    request_seen: Option<u32>,
+    serving: bool,
     /// What plays's picture as last made, by its name: panels make their own textures of it.
     art: Option<(String, ColorImage)>,
     /// The camera's tiles lie on its right ([`super::vr`]): what they say lines up on that side.
@@ -1147,6 +1151,8 @@ impl Panels {
             takeover_place: None,
             show_keys: false,
             reported: None,
+            request_seen: None,
+            serving: false,
             art: None,
             camera_right: false,
             stop_asked: None,
@@ -4119,12 +4125,7 @@ impl Panels {
     pub fn menu_turn(&mut self, snap: &Snapshot) {
         self.follow_mics(snap, 0.011);
         let on_sheet = self.facts.sheet == Some(Sheet::Menu);
-        let keyboard = (on_sheet && self.stage.host.menu.shows_keyboard()) || (self.facts.sheet == Some(Sheet::Worlds) && self.stage.worlds.as_ref().is_some_and(|w| w.typing()));
-        let state = (keyboard, false, keyboard);
-        if self.reported.unwrap_or((false, false, false)) != state {
-            self.reported = Some(state);
-            self.backend.n4n0(N4n0Command::MenuState { open: state.0, dictation: state.1, keyboard: state.2 });
-        }
+        self.report_menu();
         if let Some(worlds) = self.stage.worlds.as_mut().filter(|w| w.open) {
             worlds.keys(&snap.n4n0.keys);
         }
@@ -4133,6 +4134,50 @@ impl Panels {
         effects.extend(host.poll());
         if host.effects(effects, snap, &self.backend) && on_sheet {
             self.close_sheet();
+        }
+    }
+
+    /// The service asks for N4N0's menu (the Action Menu's Menu toggle, the wake word): in VRChat's desktop mode, when the avatar's
+    /// screen does not take it (none, or one hidden with N4N0's bot), it is All tools here, the desktop's N4N0 menu, on the sheet
+    /// beside VRChat's menu while one is open (the Action Menu that just asked, or the Quick Menu); a toggle closes it again. The
+    /// service is told it shows, as the SteamVR overlay's menu tells it in VR, so the Menu toggle stays on, and told it closed when
+    /// the sheet or VRChat's menu goes. Called every turn, with or without panels.
+    pub fn serve_menu(&mut self, snap: &Snapshot) {
+        let request = snap.n4n0.menu_request;
+        let asked = self.request_seen.is_some_and(|seen| seen != request);
+        self.request_seen = Some(request);
+        // One host at a time: in VRChat's desktop mode this, in VR the SteamVR overlay's menu (`overlay::menu`).
+        let desktop = snap.n4n0.desktop_mode;
+        let menu_sheet = |sheet: Option<Sheet>| matches!(sheet, Some(Sheet::All | Sheet::Menu | Sheet::Results));
+        if asked && desktop && !super::menu::on_avatar_screen(snap) {
+            if menu_sheet(self.facts.sheet) && snap.n4n0.menu_toggle {
+                self.close_sheet();
+            } else if menu_sheet(self.facts.sheet) {
+                self.serving = true;
+            } else if self.open.is_some() && self.takeover_place.is_some() {
+                self.open_sheet(Sheet::All, mark("All tools"), snap);
+                self.serving = menu_sheet(self.facts.sheet);
+            }
+        }
+        // The avatar's screen took N4N0's menu (its bot shown again with an older N4N0): the sheet that served it goes, the screen has it.
+        if self.serving && super::menu::on_avatar_screen(snap) && menu_sheet(self.facts.sheet) {
+            self.close_sheet();
+        }
+        if self.open.is_none() || !menu_sheet(self.facts.sheet) || !desktop || super::menu::on_avatar_screen(snap) {
+            self.serving = false;
+        }
+        self.report_menu();
+    }
+
+    /// Tells the service what N4N0's menu here is now (open, its keyboard), when that changed: open while it serves the service's request
+    /// ([`Panels::serve_menu`]) or its keyboard shows (keys then go to it).
+    fn report_menu(&mut self) {
+        let on_sheet = self.facts.sheet == Some(Sheet::Menu);
+        let keyboard = (on_sheet && self.stage.host.menu.shows_keyboard()) || (self.facts.sheet == Some(Sheet::Worlds) && self.stage.worlds.as_ref().is_some_and(|w| w.typing()));
+        let state = (keyboard || self.serving, false, keyboard);
+        if self.reported.unwrap_or((false, false, false)) != state {
+            self.reported = Some(state);
+            self.backend.n4n0(N4n0Command::MenuState { open: state.0, dictation: state.1, keyboard: state.2 });
         }
     }
 

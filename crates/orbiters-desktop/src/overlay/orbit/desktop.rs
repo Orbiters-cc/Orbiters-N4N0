@@ -175,6 +175,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 panels.set_open(None, Vec::new(), &snap);
                 windows.hide_all();
             }
+            // N4N0's menu here went with VRChat's window: the service hears it closed.
+            panels.serve_menu(&snap);
             keys.reset();
             beat(&mut meter, &backend, turn);
             std::thread::sleep(REST);
@@ -287,6 +289,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         panels.back_place = zones::place(Zone::SheetBack, size);
         panels.hint_place = zones::place(Zone::SheetHint, size);
         panels.set_open(open, places, &snap);
+        // The service's request for N4N0's menu, on the desktop with no avatar screen for it: All tools on the sheet (REQUEST15 item 3 fix B1).
+        panels.serve_menu(&snap);
         panels.follow_note(&snap);
         if panels.is_empty() {
             pointer.stop();

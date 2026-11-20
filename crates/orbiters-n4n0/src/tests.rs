@@ -612,6 +612,16 @@ fn testing_holds_a_state_then_plays_them_all() {
     let states: Vec<i32> =
         sent.iter().filter(|(a, _)| *a == parameter(params::STATE)).filter_map(|(_, v)| if let OscType::Int(i) = v { Some(*i) } else { None }).collect();
     assert_eq!(states, vec![0, 1], "idle, then listening two seconds later");
+    // No avatar whose Show N4N0 is known: nothing is written (REQUEST15 fix B3).
+    n.command(Command::ShowBot { on: false });
+    let sent = received(&vrchat, Duration::from_millis(300));
+    assert!(!sent.iter().any(|(a, _)| *a == parameter(params::VISIBLE)), "no avatar known: {sent:?}");
+    {
+        let mut rt = n.n4n0.lock().unwrap();
+        rt.avatar_id = Some("avtr_x".into());
+        rt.params.insert(params::VISIBLE.to_string());
+        rt.bot = Some(true);
+    }
     n.command(Command::ShowBot { on: false });
     let sent = received(&vrchat, Duration::from_millis(300));
     assert!(sent.contains(&(parameter(params::VISIBLE), OscType::Bool(false))));
@@ -1903,24 +1913,127 @@ fn hiding_the_bot_keeps_the_menu_on_a_screen_that_shows_without_it() {
         {
             let mut rt = n.n4n0.lock().unwrap();
             rt.screen_version = version;
+            rt.screen_version_seen = version;
             rt.bot = bot;
             rt.screen_place(false);
             assert_eq!(rt.screen.available, screen, "screen version {version:?}, bot {bot:?}");
         }
     }
     // VRChat says Show N4N0 changed (the Action Menu): recorded and shown on the page.
-    n.n4n0.lock().unwrap().screen_version = Some(contract::SCREEN_STAY_HERE);
+    {
+        let mut rt = n.n4n0.lock().unwrap();
+        rt.screen_version = Some(contract::SCREEN_STAY_HERE);
+        rt.screen_version_seen = Some(contract::SCREEN_STAY_HERE);
+    }
     n.on_parameter(params::VISIBLE, &OscValue::Bool(true));
     assert_eq!((t.view().bot, t.view().bot_keeps_menu), (Some(true), false), "an older screen hides with the bot");
     n.on_parameter(params::VISIBLE, &OscValue::Bool(false));
     assert_eq!(t.view().bot, Some(false));
-    n.n4n0.lock().unwrap().screen_version = Some(contract::SCREEN_WITHOUT_BOT);
+    {
+        let mut rt = n.n4n0.lock().unwrap();
+        rt.screen_version = Some(contract::SCREEN_WITHOUT_BOT);
+        rt.screen_version_seen = Some(contract::SCREEN_WITHOUT_BOT);
+    }
     n.publish();
     assert!(t.view().bot_keeps_menu);
     // An avatar without the screen: the menu is the overlay's, whatever the bot does.
     n.n4n0.lock().unwrap().screen_present = false;
     n.publish();
     assert!(t.view().bot_keeps_menu);
+}
+
+/// The runtime as an avatar with the screen of `version` (as the avatar says it), the bot shown, VRChat in desktop mode, no ears.
+fn on_screen_of(version: i32) -> (Arc<TestHost>, Shared) {
+    let (t, n) = n4n0(Settings::default());
+    {
+        let mut rt = n.n4n0.lock().unwrap();
+        rt.voice.installed = false;
+        rt.avatar_id = Some("avtr_x".into());
+        rt.screen_present = true;
+        rt.screen_sync = Some(8);
+        rt.vr_mode = Some(false);
+        rt.screen_version = Some(version);
+        rt.screen_version_seen = Some(version);
+        rt.bot = Some(true);
+        rt.screen_place(false);
+        assert!(rt.screen.available);
+    }
+    (t, n)
+}
+
+/// REQUEST15 fix B2: Show N4N0 changing while N4N0's menu is open never loses it. With an older N4N0 (screen 16) the screen hides with
+/// the bot: the menu goes to the overlay (asked to open, counted as shown, the Menu toggle left on); the bot shown again, the screen has
+/// it again. With screen 17 the screen keeps it and the overlay is never asked.
+#[test]
+fn an_open_menu_follows_show_n4n0_to_the_other_host() {
+    let (_t, n) = on_screen_of(contract::SCREEN_STAY_HERE);
+    n.menu_open(false);
+    assert!(menu_is_open(&n));
+    let asked = n.n4n0.lock().unwrap().screen.menu_request;
+    n.on_parameter(params::VISIBLE, &OscValue::Bool(false));
+    {
+        let rt = n.n4n0.lock().unwrap();
+        assert!(!rt.screen.available, "the older screen hides with the bot");
+        assert_eq!(rt.screen.menu_request, asked.wrapping_add(1), "the overlay is asked to open the menu");
+        assert!(!rt.screen.menu_toggle, "to open it, not to toggle it");
+        assert!(rt.screen.menu_shown(Instant::now()), "and the menu counts as shown meanwhile");
+    }
+    n.menu_overlay_state(true, false);
+    n.on_parameter(params::VISIBLE, &OscValue::Bool(true));
+    {
+        let rt = n.n4n0.lock().unwrap();
+        assert!(rt.screen.available && rt.screen.menu.open, "the bot back, the screen has the menu again");
+        assert!(rt.screen.menu_shown(Instant::now()));
+    }
+    // Closed, nothing opens anywhere when the bot comes and goes.
+    let (_t, n) = on_screen_of(contract::SCREEN_STAY_HERE);
+    let asked = n.n4n0.lock().unwrap().screen.menu_request;
+    n.on_parameter(params::VISIBLE, &OscValue::Bool(false));
+    assert_eq!(n.n4n0.lock().unwrap().screen.menu_request, asked, "no menu was open: none is asked for");
+    // Screen 17: it stays on the screen.
+    let (_t, n) = on_screen_of(contract::SCREEN_WITHOUT_BOT);
+    n.menu_open(false);
+    let asked = n.n4n0.lock().unwrap().screen.menu_request;
+    n.on_parameter(params::VISIBLE, &OscValue::Bool(false));
+    let rt = n.n4n0.lock().unwrap();
+    assert!(rt.screen.available && rt.screen.menu.open && rt.screen.menu_request == asked);
+}
+
+/// REQUEST15 fix B3: an avatar's look does not overwrite a newer Show N4N0, nor, with no tree read, one heard with the manifest's default;
+/// and only the avatar's own screen version (never the local manifest's) keeps the menu on a screen with the bot hidden.
+#[test]
+fn show_n4n0_and_the_screen_version_are_trusted_from_the_avatar() {
+    use crate::runtime::bot_after_look;
+    assert_eq!(bot_after_look(Some(false), Some(true), true, true), Some(false), "heard while the tree was read: that wins");
+    assert_eq!(bot_after_look(Some(false), Some(true), true, false), Some(true), "a tree read after: what VRChat holds");
+    assert_eq!(bot_after_look(Some(false), Some(true), false, false), Some(false), "no tree: what was heard, not the manifest's default");
+    assert_eq!(bot_after_look(None, Some(true), false, false), Some(true), "nothing heard: the default");
+    assert_eq!(bot_after_look(Some(true), None, true, false), None, "a read tree without it: none");
+
+    let (_t, n) = on_screen_of(contract::SCREEN_STAY_HERE);
+    let mut rt = n.n4n0.lock().unwrap();
+    // The local manifest says 17 (another upload), the avatar says nothing yet: the overlay.
+    rt.screen_version = Some(contract::SCREEN_WITHOUT_BOT);
+    rt.screen_version_seen = None;
+    rt.bot = Some(false);
+    rt.screen_place(false);
+    assert!(!rt.screen.available, "a version only the manifest gives is not trusted");
+    rt.screen_version_seen = Some(contract::SCREEN_WITHOUT_BOT);
+    rt.screen_place(false);
+    assert!(rt.screen.available, "the avatar's own 17 is");
+    drop(rt);
+
+    // From VRChat's tree: Show N4N0 off and screen 17 read with the avatar.
+    let mut tree = menu_tree("avtr_bot", true);
+    let parameters = &mut tree["CONTENTS"]["parameters"]["CONTENTS"];
+    parameters[params::VISIBLE.replace('/', "_")] = json!({ "FULL_PATH": format!("{PARAMETERS_PREFIX}{}", params::VISIBLE), "TYPE": "T", "VALUE": [false] });
+    parameters[params::SCREEN_VERSION.replace('/', "_")] =
+        json!({ "FULL_PATH": format!("{PARAMETERS_PREFIX}{}", params::SCREEN_VERSION), "TYPE": "i", "VALUE": [contract::SCREEN_WITHOUT_BOT] });
+    let (t, n, _input) = n4n0_on_avatar(tree);
+    let rt = n.n4n0.lock().unwrap();
+    assert_eq!((rt.bot, rt.screen_version_seen), (Some(false), Some(contract::SCREEN_WITHOUT_BOT)));
+    drop(rt);
+    t.shutdown(&n);
 }
 
 /// The stand-in mouse: the left button and VRChat in front as a test sets them, and how often it was read.

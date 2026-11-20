@@ -297,6 +297,11 @@ pub(crate) struct N4n0Runtime {
     test_afk: bool,
     /// The bot as the avatar holds it (`N4N0/Visible`, Show N4N0): `None` until known, or on an avatar without it.
     pub(crate) bot: Option<bool>,
+    /// Show N4N0 heard from VRChat or written here, counted: an avatar's look read before the last one does not overwrite it.
+    bot_heard: u64,
+    /// The screen's version as the avatar itself says it (`N4N0/Screen/Version` in VRChat's tree or sent), never the local manifest's
+    /// default: whether its menu shows with the bot hidden is trusted only from it ([`N4n0Runtime::screen_keeps_menu`]).
+    pub(crate) screen_version_seen: Option<i32>,
     /// The N4N0 thread ends (the app quits).
     stop: bool,
     /// N4N0's menu on the avatar's screen, and the overlay menu's requests (screen.rs).
@@ -477,6 +482,7 @@ impl N4n0Runtime {
         self.screen_replace = None;
         self.screen_thumbnail = None;
         self.screen_version = None;
+        self.screen_version_seen = None;
         self.bot = None;
         self.screen.menu.pages = Pages::Four;
         self.screen.pointing = false;
@@ -512,9 +518,10 @@ impl N4n0Runtime {
     }
 
     /// Whether the avatar's screen shows the menu as things stand: always with the bot shown; with it hidden, from screen
-    /// version [`contract::SCREEN_WITHOUT_BOT`] (an older screen hides with the bot).
+    /// version [`contract::SCREEN_WITHOUT_BOT`] as the avatar itself says it (an older screen hides with the bot, and a version
+    /// only the local manifest gives is not taken for it: the overlay then).
     pub(crate) fn screen_keeps_menu(&self) -> bool {
-        self.bot != Some(false) || self.screen_version.is_some_and(|v| v >= contract::SCREEN_WITHOUT_BOT)
+        self.bot != Some(false) || self.screen_version_seen.is_some_and(|v| v >= contract::SCREEN_WITHOUT_BOT)
     }
 
     /// `N4N0/Menu` to send, when the avatar's Menu toggle no longer says whether N4N0's menu shows (another trigger opened
@@ -605,7 +612,7 @@ impl N4n0Runtime {
             test_cycle: self.test_cycle.is_some(),
             test_afk: self.test_afk,
             bot: self.bot,
-            bot_keeps_menu: !self.screen_present || self.screen_version.is_some_and(|v| v >= contract::SCREEN_WITHOUT_BOT),
+            bot_keeps_menu: !self.screen_present || self.screen_version_seen.or(self.screen_version).is_some_and(|v| v >= contract::SCREEN_WITHOUT_BOT),
             test_pictures: self.screen.pictures_diagnostics,
             calls: Default::default(),
             screen: self.screen.available,
@@ -1306,6 +1313,7 @@ impl N4n0 {
             rt.screen_thumbnail = thumbnail_bytes(int_value(value), None);
         } else if name == params::SCREEN_VERSION {
             rt.screen_version = int_value(value);
+            rt.screen_version_seen = rt.screen_version;
             rt.screen.menu.pages = Pages::of_screen(rt.screen_version);
             rt.screen.pointing = pointing(rt.screen_version);
             rt.screen.place_sync = rt.screen_version.is_some_and(|v| v >= contract::SCREEN_STAY_HERE);
@@ -1313,6 +1321,30 @@ impl N4n0 {
             rt.screen_replace = Some(value.truthy());
         }
         rt.wake();
+    }
+
+    /// Show N4N0 is `on` now (the Action Menu, the app's own write, its echo): where N4N0's menu shows follows at once, and a menu open
+    /// on one host goes to the other (the avatar's screen hiding with an older N4N0's bot, or showing again): the owner never loses it.
+    /// Returns whether it changed.
+    pub(crate) fn set_bot(self: &Shared, on: bool) -> bool {
+        let settings = self.settings();
+        let steamvr = self.host.scene().steamvr;
+        let mut rt = self.n4n0.lock().unwrap();
+        rt.bot_heard = rt.bot_heard.wrapping_add(1);
+        if rt.bot == Some(on) {
+            return false;
+        }
+        let now = Instant::now();
+        let (on_screen, shown) = (rt.screen.available, rt.screen.menu_shown(now));
+        rt.bot = Some(on);
+        rt.screen_place(steamvr);
+        if shown && on_screen != rt.screen.available {
+            // The same avatar's menu changes host: it opens on the other (the screen's closed as it went; the overlay's closes itself
+            // once the screen has it). No listen starts: the owner had the menu already.
+            let _ = self.open_menu(&mut rt, false, &settings);
+        }
+        rt.wake();
+        true
     }
 
     /// N4N0's light as VRChat holds it (on the OSC receiving thread): the expressions menu's controls, or the app's own
@@ -1380,17 +1412,14 @@ impl N4n0 {
         // Show N4N0, from the Action Menu or the app's own write coming back: where the menu shows may follow.
         if name == params::VISIBLE {
             {
-                let mut rt = self.n4n0.lock().unwrap();
+                let rt = self.n4n0.lock().unwrap();
                 if !rt.params.is_empty() && !rt.params.contains(params::VISIBLE) {
                     return;
                 }
-                if rt.bot == Some(value.truthy()) {
-                    return;
-                }
-                rt.bot = Some(value.truthy());
-                rt.wake();
             }
-            self.publish();
+            if self.set_bot(value.truthy()) {
+                self.publish();
+            }
             return;
         }
         if Self::echo(name) || self.screen_parameter(name, value) {
@@ -1572,6 +1601,8 @@ impl N4n0 {
     /// avatar's parameters was not read (VRChat's OSCQuery not found yet, or late during a heavy load), which says
     /// nothing of the avatar: the panel stays as it was, and the tree is read again (`attempt`), longer apart each time.
     pub(crate) fn refresh_avatar(self: &Shared, id: Option<String>, carry: HashMap<String, OscValue>, attempt: u32) {
+        // Show N4N0 heard so far: one heard while this look is read is newer than what it reads.
+        let bot_heard = self.n4n0.lock().unwrap().bot_heard;
         let values = self.osc.vrchat_values();
         let id = id.or_else(|| {
             values.iter().find(|(a, _)| a == AVATAR_CHANGE).and_then(|(_, v)| match v {
@@ -1614,7 +1645,7 @@ impl N4n0 {
                 _ => default(params::LIGHT_LEVEL).unwrap_or(LIGHT_LEVEL_DEFAULT),
             },
         });
-        // Show N4N0 as VRChat holds it, else the manifest's default (on).
+        // Show N4N0 as VRChat holds it; with no tree read, as last heard for this avatar, else the manifest's default (on).
         let bot = if names.contains(params::VISIBLE) {
             value(params::VISIBLE).map(OscValue::truthy)
         } else if !known {
@@ -1622,6 +1653,8 @@ impl N4n0 {
         } else {
             None
         };
+        // The screen's version as the avatar says it: only a read tree says so (the manifest may be of another upload).
+        let version_seen = value(params::SCREEN_VERSION).and_then(int_value);
         let steamvr = self.host.scene().steamvr;
         let synced = names.iter().filter(|n| n.starts_with(params::TEXT_SYNC_PREFIX)).count();
         let sync = if contract::SYNC_COUNTS.contains(&synced) {
@@ -1694,7 +1727,11 @@ impl N4n0 {
                 rt.screen.pointing = pointing(screen_version);
                 rt.screen.place_sync = screen_version.is_some_and(|v| v >= contract::SCREEN_STAY_HERE);
                 rt.light = light;
-                rt.bot = bot;
+                // A Show N4N0 heard while this was read wins; a tree not read keeps what was heard of this avatar over the default.
+                rt.bot = bot_after_look(rt.bot, bot, known, rt.bot_heard != bot_heard);
+                if known {
+                    rt.screen_version_seen = version_seen;
+                }
                 if vr_mode.is_some() {
                     rt.vr_mode = vr_mode;
                 }
@@ -2221,13 +2258,19 @@ impl N4n0 {
                 rt.wake();
             }
             Command::ShowBot { on } => {
-                {
+                // Only for an avatar whose Show N4N0 is known now: not one loading, nor one without it.
+                let known = {
+                    let rt = self.n4n0.lock().unwrap();
+                    rt.bot.is_some() && rt.avatar_id.is_some() && (rt.params.is_empty() || rt.params.contains(params::VISIBLE))
+                };
+                if known {
+                    self.set_bot(on);
                     let mut rt = self.n4n0.lock().unwrap();
-                    rt.bot = Some(on);
                     rt.outbox.push((Instant::now(), (parameter(params::VISIBLE), OscType::Bool(on))));
                     rt.wake();
+                    drop(rt);
+                    self.publish();
                 }
-                self.publish();
             }
             Command::States { action, avatar } => self.states_action(action, avatar),
             Command::Drop { link, title, video } => self.card_drop(link, title, video),
@@ -2865,6 +2908,19 @@ impl N4n0 {
 /// before the parameter.
 pub(crate) fn screen_replace(tree: Option<bool>, manifest: Option<&AvatarManifest>) -> Option<bool> {
     tree.or_else(|| manifest.and_then(|m| m.parameter(params::SCREEN_REPLACE)).map(|p| p.default > 0.5))
+}
+
+/// Show N4N0 after an avatar's look (REQUEST15 item 3 fix B3): `current` as heard; `read` what the look found (VRChat's tree when it
+/// was read, `known`, else the manifest's default); `heard_since`: VRChat said it, or the app wrote it, while the look was read.
+/// What was heard since wins; a read tree says the rest; with none read, what was heard of this avatar wins over the default.
+pub(crate) fn bot_after_look(current: Option<bool>, read: Option<bool>, known: bool, heard_since: bool) -> Option<bool> {
+    if heard_since {
+        current
+    } else if known {
+        read
+    } else {
+        current.or(read)
+    }
 }
 
 /// `N4N0/Screen/ThumbnailBytes` as VRChat holds it (`tree`), else its default in the avatar's manifest, when it is one

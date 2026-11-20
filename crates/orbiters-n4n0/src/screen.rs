@@ -582,7 +582,7 @@ impl ScreenRuntime {
 
     /// Whether N4N0's menu shows: on the avatar's screen when it has one, else in the overlay (asked to open or close
     /// it, it counts as open or closed until it says, or does not answer in time).
-    fn menu_shown(&self, now: Instant) -> bool {
+    pub(crate) fn menu_shown(&self, now: Instant) -> bool {
         if self.available {
             self.menu.open
         } else {
@@ -1371,7 +1371,7 @@ pub fn photo_setting(length: PhotoLength) -> orbiters_core::settings::Photo3dLen
 }
 
 /// What opening N4N0's menu leaves to do once N4N0's lock is let go.
-enum Opened {
+pub(crate) enum Opened {
     /// It was open, and this closed it: the menu's effects.
     Closed(Vec<Effect>),
     /// It was open already.
@@ -1392,7 +1392,7 @@ impl N4n0 {
     }
 
     /// [`N4n0::menu_open`] under N4N0's lock.
-    fn open_menu(&self, rt: &mut N4n0Runtime, toggle: bool, settings: &orbiters_core::settings::Settings) -> Opened {
+    pub(crate) fn open_menu(&self, rt: &mut N4n0Runtime, toggle: bool, settings: &orbiters_core::settings::Settings) -> Opened {
         if rt.screen.available {
             if rt.screen.menu.open {
                 return if toggle { Opened::Closed(rt.screen.menu.close()) } else { Opened::Nothing };

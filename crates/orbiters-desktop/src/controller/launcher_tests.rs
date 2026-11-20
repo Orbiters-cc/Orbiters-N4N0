@@ -18,6 +18,17 @@ struct Pretend {
     profiles: Mutex<HashMap<u32, u32>>,
     /// Starts beside running VRChats (VRChat's own launcher), apart from Steam's.
     beside: Mutex<Vec<Vec<String>>>,
+    /// The controller, to ask at the very moment of a start whether its profile was already claimed.
+    ctl: Mutex<Option<std::sync::Weak<Controller>>>,
+    claimed_at_start: Mutex<Vec<bool>>,
+}
+impl Pretend {
+    fn note_claim(&self, args: &[String]) {
+        if let Some(c) = self.ctl.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade) {
+            let profile = orbiters_core::vrchat_launch::profile_of(args);
+            self.claimed_at_start.lock().unwrap().push(c.launcher_claimed(profile));
+        }
+    }
 }
 impl Machine for Pretend {
     fn running(&self) -> Vec<(u32, bool)> {
@@ -28,6 +39,9 @@ impl Machine for Pretend {
         self.running.lock().unwrap().iter().map(|(pid, d)| (*pid, *d, profiles.get(pid).copied().unwrap_or(0))).collect()
     }
     fn start_beside(&self, args: &[String]) -> Result<(), String> {
+        self.note_claim(args);
+        // A start takes a moment: another press arriving meanwhile must find the profile claimed.
+        std::thread::sleep(Duration::from_millis(5));
         self.beside.lock().unwrap().push(args.to_vec());
         Ok(())
     }
@@ -35,6 +49,7 @@ impl Machine for Pretend {
         self.installed
     }
     fn start(&self, args: &[String]) -> Result<(), String> {
+        self.note_claim(args);
         self.started.lock().unwrap().push(args.to_vec());
         Ok(())
     }
@@ -269,6 +284,21 @@ fn a_destination_outside_vrchats_grammar_starts_nothing() {
     assert!(machine.started.lock().unwrap().is_empty());
 }
 
+/// The VRChat just started came up (seen by a look of the game, which ends its start's claim) and was quit.
+fn ran_and_quit(machine: &Arc<Pretend>, c: &Shared) {
+    machine.running.lock().unwrap().push((99, false));
+    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 99, profile: 0, ..Default::default() }]);
+    c.launcher_game(machine.as_ref());
+    if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+        // A Mac looks at no VRChat process of this computer's here (`launcher_game`): the look that ends the claim is
+        // the platform's, stood in for.
+        c.launcher.lock().unwrap().starting.clear();
+    }
+    machine.running.lock().unwrap().clear();
+    c.update(|s| s.vrchat.runs.clear());
+    *c.launcher_started.lock().unwrap() = None;
+}
+
 #[test]
 fn desktop_after_vr_gets_the_window_vrchat_had_before() {
     let normal = SavedWindow { width: 1920, height: 1080, mode: 1 };
@@ -276,15 +306,16 @@ fn desktop_after_vr_gets_the_window_vrchat_had_before() {
     let c = controller(machine.clone());
     c.launcher_do(Action::Play { mode: LaunchMode::Vr, destination: None });
     assert_eq!(c.view().settings.launch.desktop_window, Some(normal), "kept before the tiny window replaces it");
-    // VRChat quit; its saved window is now the tiny one.
-    *c.launcher_started.lock().unwrap() = None;
+    // VRChat came up (a look saw it, which ends its start's claim on profile 0), then quit; its saved window is now the
+    // tiny one.
+    ran_and_quit(&machine, &c);
     *machine.window.lock().unwrap() = Some(SavedWindow { width: 100, height: 100, mode: 3 });
     c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None });
     let args = machine.started.lock().unwrap()[1].clone();
     let at = args.iter().position(|a| a == "-screen-width").expect("a size is asked for");
     assert_eq!(args[at..at + 6], ["-screen-width", "1920", "-screen-height", "1080", "-screen-fullscreen", "1"]);
     // A normal saved window: Desktop passes nothing.
-    *c.launcher_started.lock().unwrap() = None;
+    ran_and_quit(&machine, &c);
     *machine.window.lock().unwrap() = Some(normal);
     c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None });
     assert!(!machine.started.lock().unwrap()[2].contains(&"-screen-width".to_string()));
@@ -958,7 +989,7 @@ fn the_profile_choice_lists_used_running_and_starting_profiles_with_their_accoun
         driver: crate::state::VrchatDriverShown::Agent { session: "s1".into() },
         ..Default::default()
     }];
-    let got = game_profiles(&known, &[(10, false, 0), (12, true, 3)], &roster, Some((2, LaunchMode::Desktop)));
+    let got = game_profiles(&known, &[(10, false, 0), (12, true, 3)], &roster, &[(2, LaunchMode::Desktop)]);
     let shown: Vec<(u32, Option<&str>, Option<LaunchMode>, Option<LaunchMode>, bool)> = got.iter().map(|p| (p.profile, p.account.as_deref(), p.running, p.starting, p.assistant)).collect();
     assert_eq!(
         shown,
@@ -969,7 +1000,7 @@ fn the_profile_choice_lists_used_running_and_starting_profiles_with_their_accoun
             (3, None, Some(LaunchMode::Desktop), None, true),
         ]
     );
-    assert_eq!(game_profiles(&BTreeMap::new(), &[], &[], None).iter().map(|p| p.profile).collect::<Vec<_>>(), [0], "profile 0 always");
+    assert_eq!(game_profiles(&BTreeMap::new(), &[], &[], &[]).iter().map(|p| p.profile).collect::<Vec<_>>(), [0], "profile 0 always");
 }
 
 // --- REQUEST15 7b: the account's own profile, against recorded replies only (nothing reaches VRChat) ---
@@ -1048,4 +1079,62 @@ fn the_own_profile_and_pictures_are_read_for_the_card() {
     assert_eq!(c.view().launcher.me.as_ref().unwrap().look.icon, icons[0].url);
     let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
     assert_eq!(calls, ["GET /profile/usr_test?asSelf=true", "GET /files?tag=icon&n=100", "PUT /profile/usr_test"]);
+}
+
+// --- REQUEST15 fix B4: one VRChat per profile, whichever of Orbiters' starts asks ---
+
+fn running_profile_0() -> (Arc<Pretend>, Shared) {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    machine.running.lock().unwrap().push((10, false));
+    let c = controller(machine.clone());
+    *machine.ctl.lock().unwrap() = Some(Arc::downgrade(&c));
+    (machine, c)
+}
+
+#[test]
+fn a_start_claims_its_profile_before_it_starts_and_keeps_it_while_vrchat_is_slow() {
+    let (machine, c) = running_profile_0();
+    assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    assert_eq!(*machine.claimed_at_start.lock().unwrap(), [true], "claimed before the start, not after it");
+    // VRChat takes more than a minute (Easy Anti-Cheat, an update): the claim still holds, the next look keeps it.
+    for claim in c.launcher.lock().unwrap().starting.iter_mut() {
+        claim.at -= Duration::from_secs(70);
+    }
+    c.launcher_game(machine.as_ref());
+    assert!(c.launcher_claimed(1));
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Vr, profile: 1 }), Some(Notice::Error(_))));
+    assert_eq!(machine.beside.lock().unwrap().len(), 1, "never a second VRChat on profile 1");
+}
+
+#[test]
+fn presses_at_the_same_moment_start_one_vrchat_on_a_profile() {
+    let (machine, c) = running_profile_0();
+    let threads: Vec<_> = (0..8).map(|_| {
+        let c = c.clone();
+        std::thread::spawn(move || c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }))
+    }).collect();
+    threads.into_iter().for_each(|t| {
+        t.join().unwrap();
+    });
+    assert_eq!(machine.beside.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn the_bridge_and_go_there_claim_the_profiles_home_starts_on() {
+    // A bridge session holds profile 2 (its mark is put before its VRChat starts): Home never starts there.
+    let (machine, c) = running_profile_0();
+    c.sides.put(crate::bridge::sessions::SideMark { session: "p2-test".into(), profile: 2, osc_in: 9020, osc_out: 9021, pid: None, log: None, query: None });
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 2 }), Some(Notice::Error(_))));
+    assert!(machine.beside.lock().unwrap().is_empty());
+    // Another of Orbiters' starts (the bridge's main session, Go there) claimed profile 0 while none runs: Home's Play and
+    // profile choice both wait, whatever the clock of the last Play says.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    let claim = c.launcher_claim(0, LaunchMode::Vr).unwrap();
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Vr, destination: None }), Some(Notice::Error(_))));
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Vr, profile: 0 }), Some(Notice::Error(_))));
+    assert!(machine.started.lock().unwrap().is_empty());
+    // A start that failed gives its claim back.
+    c.launcher_unclaim(claim);
+    assert!(!c.launcher_claimed(0));
 }

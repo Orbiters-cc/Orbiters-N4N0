@@ -53,5 +53,6 @@
   "Pictures of your VRChat gallery.": "Les images de ta galerie VRChat.",
   "N4N0's features": "Les fonctions de N4N0",
   "As {account}": "En tant que {account}",
-  "On profile {n}": "Sur le profil {n}"
+  "On profile {n}": "Sur le profil {n}",
+  "The assistant's VRChat uses profile {n}: choose another profile.": "Le VRChat de l’assistant utilise le profil {n} : choisis un autre profil."
 }

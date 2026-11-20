@@ -327,13 +327,18 @@ impl Controller {
                         // The route decided once, from one look at the processes, is the one taken.
                         let processes = travel.running();
                         let chosen = super::travel::route(remote, &processes, &bridge, |p| travel.own_osc_ports(p));
-                        let went = if chosen == super::travel::Route::Start && started.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60)) {
-                            Err(super::travel::GoFailure::Invite(super::travel::Detour::Asked))
-                        } else {
-                            super::travel::go_on(travel.as_ref(), chosen, &processes, &bridge, &world, &instance)
+                        // A start claims profile 0 for itself, as Home's do (REQUEST15 fix B4).
+                        let start = chosen == super::travel::Route::Start;
+                        let claim = if start && !started.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60)) { Some(self.launcher_claim(0, self.view().settings.launch.last_mode)) } else { None };
+                        let went = match claim {
+                            Some(Err(_)) => Err(super::travel::GoFailure::Invite(super::travel::Detour::Asked)),
+                            None if start => Err(super::travel::GoFailure::Invite(super::travel::Detour::Asked)),
+                            _ => super::travel::go_on(travel.as_ref(), chosen, &processes, &bridge, &world, &instance),
                         };
                         if went == Ok(super::travel::Went::Started) {
                             *started = Some(std::time::Instant::now());
+                        } else if let Some(Ok(id)) = claim {
+                            self.launcher_unclaim(id);
                         }
                         drop(started);
                         match went {

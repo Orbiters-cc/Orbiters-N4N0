@@ -53,5 +53,6 @@
   "Pictures of your VRChat gallery.": "VRChatギャラリーの画像です。",
   "N4N0's features": "N4N0の機能",
   "As {account}": "{account}として",
-  "On profile {n}": "プロフィール{n}で"
+  "On profile {n}": "プロフィール{n}で",
+  "The assistant's VRChat uses profile {n}: choose another profile.": "アシスタントのVRChatがプロフィール{n}を使っています。別のプロフィールを選んでください。"
 }

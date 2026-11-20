@@ -747,6 +747,13 @@ impl Game for SideGame {
             *st = SideState { launched: Some((Instant::now(), SystemTime::now())), before: vrchat_pids(), last_picture, followed, account, ..Default::default() };
         }
         self.values.lock().unwrap().clone_from(&Latest::default());
+        // Never onto a profile Orbiters' Home (or Go there) is starting a VRChat on: checked under their start lock, which
+        // Home holds from its look at the bridge's sessions to its own claim (REQUEST15 fix B4).
+        let ctl = self.ctl()?;
+        let _started = ctl.launcher_started.lock().unwrap();
+        if ctl.launcher_claimed(self.profile) {
+            return Err(Failure::new("vrchat_starting", "Orbiters' Home is starting a VRChat on this profile.", "Use another profile.")); // i18n: not shown (an AI client reads it in the tool's answer)
+        }
         self.sides.launching(true);
         let started = win::start_vrchat_beside(&plan.args());
         if started.is_err() {

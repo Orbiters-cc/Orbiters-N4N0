@@ -56,5 +56,6 @@
   "On profile {n}": "En el perfil {n}",
   "The assistant's VRChat uses profile {n}: choose another profile.": "El VRChat del asistente usa el perfil {n}: elige otro perfil.",
   "A VRChat is starting and has not said its profile yet: try again in a moment.": "Un VRChat se está abriendo y aún no ha dicho su perfil: vuelve a intentarlo en un momento.",
-  "This picture is not one of your account's: open the list again and choose one.": "Esta imagen no es una de tu cuenta: vuelve a abrir la lista y elige una."
+  "This picture is not one of your account's: open the list again and choose one.": "Esta imagen no es una de tu cuenta: vuelve a abrir la lista y elige una.",
+  "VRChat was asked to start on profile {n} {m} min ago and has not shown up yet. If it is not coming, press Play again to start it anyway.": "Se pidió abrir VRChat en el perfil {n} hace {m} min y aún no aparece. Si no va a abrirse, pulsa Jugar otra vez para abrirlo de todos modos."
 }

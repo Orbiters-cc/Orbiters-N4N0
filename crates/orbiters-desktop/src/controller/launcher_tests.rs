@@ -1285,3 +1285,28 @@ fn a_look_across_an_old_vrchats_exit_never_ends_the_newer_claim() {
     c.launcher_retire_claims(&observed, &[(11, true, Some(1))]);
     assert!(!c.launcher_claimed(1));
 }
+
+// --- REQUEST15 second pass, blocker 6: a start that never showed is not retried behind the person's back ---
+
+#[test]
+fn a_start_not_seen_after_three_minutes_needs_the_persons_second_press() {
+    let (machine, c) = running_profile_0();
+    let claim = c.launcher_claim(1, LaunchMode::Desktop).unwrap();
+    for held in c.launcher.lock().unwrap().starting.iter_mut() {
+        held.at -= Duration::from_secs(200);
+    }
+    // A look past the claim's time keeps it (lapsed): it still bars its profile.
+    c.launcher_retire_claims(&[claim], &[(10, false, Some(0))]);
+    assert!(!c.launcher_claimed(1) && c.launcher.lock().unwrap().starting.len() == 1);
+    // Not for another profile.
+    assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 2 }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    c.launcher.lock().unwrap().starting.retain(|held| held.profile == 1);
+    // The bridge, which no person drives, never overrides it.
+    assert!(c.launcher_claim_unattended(1, LaunchMode::Desktop).is_err());
+    assert!(c.launcher_claim_unattended(1, LaunchMode::Desktop).is_err());
+    // The person: told first, nothing started; a second press goes.
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Error(t)) if t.contains('1')));
+    let before = machine.beside.lock().unwrap().len();
+    assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    assert_eq!(machine.beside.lock().unwrap().len(), before + 1);
+}

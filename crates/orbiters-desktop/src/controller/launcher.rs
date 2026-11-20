@@ -39,6 +39,10 @@ const STARTING_FOR: Duration = Duration::from_secs(60);
 /// How long a start's claim on its VRChat profile holds when no VRChat with that profile shows up: a slow start (Steam,
 /// Easy Anti-Cheat, an update) is still a start, so this is long; a VRChat seen on the profile ends the claim at once.
 const PROFILE_HELD: Duration = Duration::from_secs(180);
+/// A start past [`PROFILE_HELD`] whose VRChat was never seen is not forgotten: its profile takes no new start until the
+/// person, told so, presses again within [`CONFIRM_WITHIN`] (VRChat may still come: an update, a slow Steam), for this long.
+const PROFILE_LAPSED: Duration = Duration::from_secs(10 * 60);
+const CONFIRM_WITHIN: Duration = Duration::from_secs(20);
 /// The same on a Mac, where the person presses Play in Obelisk (its sign-in, an update check, Easy Anti-Cheat).
 const MAC_STARTING_FOR: Duration = Duration::from_secs(180);
 /// How long an action's outcome stays in the state (the page's "Sent", the error it took back).
@@ -379,6 +383,8 @@ pub(super) struct Claim {
     pub mode: LaunchMode,
     pub at: Instant,
     pub id: u64,
+    /// The person was told this start never showed: a press on its profile until then starts again.
+    pub confirm_by: Option<Instant>,
 }
 
 impl Claim {
@@ -386,9 +392,9 @@ impl Claim {
         self.at.elapsed() < PROFILE_HELD
     }
 
-    /// Kept at all (see [`Controller::launcher_claim`] for a claim past [`PROFILE_HELD`]).
+    /// Kept at all: holding, or lapsed (see [`Controller::launcher_claim`]).
     fn kept(&self) -> bool {
-        self.holds()
+        self.at.elapsed() < PROFILE_HELD + PROFILE_LAPSED
     }
 }
 
@@ -1336,6 +1342,16 @@ impl Controller {
     /// while another start holds any profile (one start at a time) or a VRChat bridge session holds this one. The claim
     /// keeps every other start of Orbiters off that profile until a VRChat on it is seen (REQUEST15 fix B4).
     pub(super) fn launcher_claim(&self, profile: u32, mode: LaunchMode) -> Result<u64, Notice> {
+        self.launcher_claim_as(profile, mode, true)
+    }
+
+    /// [`Self::launcher_claim`] for a start nobody pressed (the VRChat bridge's): a lapsed start on the profile is never
+    /// overridden by it.
+    pub(super) fn launcher_claim_unattended(&self, profile: u32, mode: LaunchMode) -> Result<u64, Notice> {
+        self.launcher_claim_as(profile, mode, false)
+    }
+
+    fn launcher_claim_as(&self, profile: u32, mode: LaunchMode, person: bool) -> Result<u64, Notice> {
         if self.sides.marks().iter().any(|m| m.profile == profile) {
             return Err(Notice::Error(tr!("The assistant's VRChat uses profile {n}: choose another profile.", n = profile)));
         }
@@ -1343,9 +1359,31 @@ impl Controller {
         if rt.starting.iter().any(Claim::holds) {
             return Err(Notice::Error(tr("Starting VRChat…").into()));
         }
+        // A start on this profile that never showed (past its time): not started again behind its back. The person is
+        // told once; a press again within a few seconds says it is not coming, and starts.
+        let now = Instant::now();
+        if let Some(lapsed) = rt.starting.iter_mut().find(|c| c.profile == profile && c.kept()) {
+            match lapsed.confirm_by {
+                Some(by) if person && now < by => {
+                    let id = lapsed.id;
+                    rt.starting.retain(|c| c.id != id);
+                }
+                _ => {
+                    if person {
+                        lapsed.confirm_by = Some(now + CONFIRM_WITHIN);
+                    }
+                    let minutes = (lapsed.at.elapsed().as_secs() / 60).max(1);
+                    return Err(Notice::Error(tr!(
+                        "VRChat was asked to start on profile {n} {m} min ago and has not shown up yet. If it is not coming, press Play again to start it anyway.",
+                        n = profile,
+                        m = minutes
+                    )));
+                }
+            }
+        }
         rt.claims_made += 1;
         let id = rt.claims_made;
-        rt.starting.push(Claim { profile, mode, at: Instant::now(), id });
+        rt.starting.push(Claim { profile, mode, at: now, id, confirm_by: None });
         Ok(id)
     }
 
@@ -1371,6 +1409,11 @@ impl Controller {
             let last = rt.claims_made;
             rt.starting.retain(|c| c.id != last);
         }
+    }
+
+    /// Whether a start holds `profile`, or one that never showed still bars it (lapsed, not yet confirmed by the person).
+    pub(super) fn launcher_profile_barred(&self, profile: u32) -> bool {
+        self.launcher.lock().unwrap().starting.iter().any(|c| c.kept() && c.profile == profile)
     }
 
     /// Whether a start holds `profile` now.

@@ -238,7 +238,7 @@ impl Game for RealGame {
         let profile = plan.profile.unwrap_or(0);
         let mode = if plan.vr { orbiters_core::launcher::LaunchMode::Vr } else { orbiters_core::launcher::LaunchMode::Desktop };
         let _started = ctl.launcher_started.lock().unwrap();
-        let claim = ctl.launcher_claim(profile, mode).map_err(|_| {
+        let claim = ctl.launcher_claim_unattended(profile, mode).map_err(|_| {
             Failure::new("vrchat_starting", "A VRChat is starting on this profile already (from Orbiters' Home).", "Wait a minute, then call get_state.") // i18n: not shown (an AI client reads it in the tool's answer)
         })?;
         let started = if sides_run {

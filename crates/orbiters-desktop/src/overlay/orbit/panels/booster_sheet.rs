@@ -216,36 +216,42 @@ fn test_buttons(b: &BoosterFacts) -> Vec<(BoosterPick, &'static str, &'static st
     row
 }
 
-/// A stop of the slider. The stops a level includes are partly filled, so that the row reads as how far it goes.
+/// A step of the slider (REQUEST15 4): the four cells are its columns, pressed or dragged across as before; the first
+/// draws the slider itself (`orbiters_ui::steps`: a track filled up to the thumb, the steps' names under their stops,
+/// the step's number in the thumb for a monochrome look), each one its own halo while the laser is on it.
 pub(super) fn draw_booster_cell(p: &Painter, rect: Rect, level: Level, facts: &Facts, hovered: bool, pressed: bool) {
     let b = &facts.booster;
     let shown = b.held.unwrap_or(b.level);
-    let chosen = shown == level;
-    let included = level < shown && level != Level::Off;
-    let fill = if chosen {
-        look::accent()
-    } else if pressed {
-        look::TILE_DOWN
-    } else if hovered {
-        look::TILE_HOVER
-    } else if included {
-        theme::mix(look::TILE, look::accent(), 0.32)
-    } else {
-        look::TILE
+    let at = Level::ALL.iter().position(|l| *l == shown).unwrap_or(0);
+    let i = Level::ALL.iter().position(|l| *l == level).unwrap_or(0);
+    let y = rect.top() + 34.0;
+    let look = orbiters_ui::steps::Look {
+        track: look::TILE,
+        fill: look::accent(),
+        thumb: Color32::WHITE,
+        accent: look::accent(),
+        label: look::MUTED,
+        label_on: look::LABEL,
+        font: look::font(20.0, weight::SEMIBOLD),
+        font_on: look::font(21.0, weight::BOLD),
+        track_h: 10.0,
+        thumb_r: 20.0,
+        stop_r: 6.0,
+        label_dy: 42.0,
+        numbered: true,
     };
-    p.rect_filled(rect, look::radius(14.0), fill);
-    let ink = if chosen { look::on_accent() } else { look::LABEL };
-    let font = look::font(23.0, weight::BOLD);
-    let name = fit(p, booster::level_name(level), &font, rect.width() - 24.0);
-    p.text(rect.center() + vec2(0.0, 8.0), Align2::CENTER_CENTER, name, font, ink);
-    // Off, then steps 1, 2 and 3: a slider in words too, for what colour cannot say in a monochrome look.
-    let step = match level {
-        Level::Off => "0",
-        Level::Background => "1",
-        Level::Picture => "2",
-        Level::Avatars => "3",
-    };
-    p.text(rect.center() - vec2(0.0, 24.0), Align2::CENTER_CENTER, step, look::font(15.0, weight::SEMIBOLD), if chosen { ink } else { look::MUTED });
+    if i == 0 {
+        // The stops at the cells' centres, wherever the sheet is drawn.
+        let step = cell_wide() + CELL_GAP;
+        let xs: Vec<f32> = (0..Level::ALL.len()).map(|k| rect.center().x + k as f32 * step).collect();
+        let names: Vec<&str> = Level::ALL.iter().map(|l| booster::level_name(*l)).collect();
+        orbiters_ui::steps::paint(p, &xs, y, at as f32, at, &names, None, 0.0, &look);
+    }
+    if (hovered || pressed) && i != at {
+        let c = pos2(rect.center().x, y);
+        p.circle_filled(c, look.thumb_r + if pressed { 4.0 } else { 9.0 }, theme::alpha(look::accent(), if pressed { 0.32 } else { 0.18 }));
+        p.circle_filled(c, look.stop_r + 2.0, look::LABEL);
+    }
 }
 
 /// Text wrapped in a width, at most so many rows; where it ended.

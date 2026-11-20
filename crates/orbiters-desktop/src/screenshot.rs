@@ -258,6 +258,10 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("orbit") {
         return orbit::shots(&out);
     }
+    // The FPS booster's sheet alone (REQUEST15 4).
+    if only.as_deref() == Some("orbit-booster") {
+        return orbit::booster_shots(&out);
+    }
     if only.as_deref() == Some("orbit-r15") {
         return orbit::r15_shots(&out);
     }

@@ -25,6 +25,7 @@ pub mod photo;
 pub mod popup;
 pub mod record;
 pub mod software;
+pub mod steps;
 pub mod text_audit;
 pub mod theme;
 pub mod toast;

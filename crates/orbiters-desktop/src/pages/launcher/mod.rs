@@ -9,11 +9,13 @@
 
 mod hero;
 pub mod list;
+pub mod mine;
 mod modal;
 mod row;
 pub mod states;
 
 pub use hero::hero;
+pub use mine::card as mine_card;
 
 use super::Cx;
 use egui::{pos2, vec2, Align2, Color32, Id, Key, LayerId, Order, Pos2, Rect, Sense, Ui, UiBuilder};
@@ -109,6 +111,12 @@ pub struct State {
     ctx: Option<egui::Context>,
     /// Data handed in from outside (pictures of the page): the snapshot's is then left alone.
     staged: bool,
+    /// The VRChat profile the person chose for the next Play, and a new one they added here (REQUEST15 7a).
+    chosen_profile: Option<u32>,
+    added_profile: Option<u32>,
+    /// The account's own profile card (REQUEST15 7b), and the picture lists it asked for in this run.
+    pub mine: mine::Mine,
+    mine_listed: Vec<orbiters_core::launcher::PictureKind>,
 }
 
 impl Default for State {
@@ -136,6 +144,10 @@ impl Default for State {
             scope: None,
             ctx: None,
             staged: false,
+            chosen_profile: None,
+            added_profile: None,
+            mine: mine::Mine::default(),
+            mine_listed: Vec::new(),
         }
     }
 }
@@ -193,6 +205,11 @@ impl State {
         self.dismissed.insert(id.to_string());
     }
 
+    /// Pictures of the page: the VRChat profile chosen for the next Play.
+    pub fn stand_in_profile(&mut self, profile: u32) {
+        self.chosen_profile = Some(profile);
+    }
+
     /// Opens a person's profile as if their row was pressed at `from`.
     pub fn open_profile(&mut self, ctx: &egui::Context, id: &str, from: Rect) {
         self.modal = Some(Modal { id: id.to_string(), from, opened: anim::time(ctx), closing: None });
@@ -216,9 +233,10 @@ impl State {
         !matches!(d.source, orbiters_core::launcher::Source::Nothing) || d.possible.play || d.game != orbiters_core::launcher::Game::NotRunning
     }
 
-    /// A friend's profile (or another of its windows) is open (`crate::window_rest`).
+    /// A friend's profile (or another of its windows) is open, or the account's own is being changed
+    /// (`crate::window_rest`).
     pub fn holds(&self) -> bool {
-        self.modal.is_some()
+        self.modal.is_some() || self.mine.editing.is_some()
     }
 
     /// A boop or request the service could not send: its "Sent" (shown at the press) is taken back; the toast says why.

@@ -43,6 +43,9 @@ pub struct LaunchSettings {
     /// VRChat's own saved desktop window, as it was before the last Play in VR left the tiny one as VRChat's saved size:
     /// what Play in Desktop asks for then (not a setting; written by Play).
     pub desktop_window: Option<SavedWindow>,
+    /// VRChat's profiles used on this computer and the account last seen signed in on each (from VRChat's logs), so
+    /// Home's profile choice says whose each one is (REQUEST15 7a; not a setting, written as they are seen).
+    pub profiles: std::collections::BTreeMap<u32, String>,
 }
 
 impl Default for LaunchSettings {
@@ -58,6 +61,7 @@ impl Default for LaunchSettings {
             window_height: 100,
             last_mode: LaunchMode::Vr,
             desktop_window: None,
+            profiles: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -164,6 +168,19 @@ pub fn arguments(mode: LaunchMode, settings: &LaunchSettings, destination: Optio
         }
     }
     out
+}
+
+/// The highest profile number Home offers (VRChat takes any; a person keeps a few accounts).
+pub const PROFILE_MAX: u32 = 15;
+
+/// What a start on `profile` adds: `--profile=N`, none for the default profile 0 (VRChat's own start without it).
+pub fn profile_arg(profile: u32) -> Option<String> {
+    (profile != 0).then(|| format!("--profile={}", profile.min(PROFILE_MAX)))
+}
+
+/// VRChat's `--profile` in a command line (0 without one).
+pub fn profile_of(args: &[String]) -> u32 {
+    args.iter().find_map(|a| a.strip_prefix("--profile=").and_then(|p| p.trim().parse().ok())).unwrap_or(0)
 }
 
 /// The Steam library folders that hold VRChat, from Steam's `steamapps/libraryfolders.vdf`.
@@ -331,6 +348,17 @@ mod tests {
 }"#;
         assert_eq!(libraries_with_vrchat(vdf), [PathBuf::from(r"G:\SteamLibrary")]);
         assert!(libraries_with_vrchat("garbage {").is_empty());
+    }
+
+    #[test]
+    fn a_profile_is_said_only_when_it_is_not_the_default() {
+        assert_eq!(profile_arg(0), None);
+        assert_eq!(profile_arg(2).as_deref(), Some("--profile=2"));
+        assert_eq!(profile_arg(99).as_deref(), Some("--profile=15"), "never past what Home offers");
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(profile_of(&args(&["VRChat.exe", "--no-vr", "--profile=3"])), 3);
+        assert_eq!(profile_of(&args(&["VRChat.exe", "--profile=x"])), 0);
+        assert_eq!(profile_of(&args(&["VRChat.exe"])), 0);
     }
 
     #[test]

@@ -307,6 +307,9 @@ pub struct CallsRuntime {
     identity: Option<(String, String)>,
     /// Whether this Orbiters account has N4N0 calls (`controller/calls_access.rs`).
     pub(super) access: super::calls_access::CallsAccess,
+    /// Tests: the credential installed when the calls last left an account (`None` inside: nobody was).
+    #[cfg(test)]
+    pub(super) left_with: Option<Option<String>>,
 }
 
 impl CallsRuntime {
@@ -845,10 +848,6 @@ impl super::Controller {
     /// Signing out of Orbiters (PRIV-7): with the identity that leaves, while it is still there, the call under way is
     /// ended on Orbiters and this computer leaves the callable list; the next tick, signed out, ends the call here. Sent
     /// in the background (sign-out finishes offline too); nothing of the credential is kept for later.
-    pub(super) fn calls_depart(&self) {
-        self.calls_leave(self.account_api().map(|(api, token)| (api.url(""), token)));
-    }
-
     /// The account calls were for leaves (signed out here or by another tool, another account, another environment).
     /// On this thread, at once, never waiting for the calls' thread: the call under way ends here and its media worker
     /// stops; nothing of it (the friend's name, its id, Hang up) or of the account (`calls_forget_account`) stays for the
@@ -856,6 +855,12 @@ impl super::Controller {
     /// callable) with the credential of the account that leaves only: the identity the calls' state was for, or else
     /// `fallback` (signed out before the calls' first look).
     pub(super) fn calls_leave(&self, fallback: Option<Stamp>) {
+        // Tests: whose credential was still installed when this ran (the leave goes before the next account's).
+        #[cfg(test)]
+        {
+            let installed = self.account_runtime.lock().unwrap().account.as_ref().map(|a| a.token.clone());
+            self.calls.lock().unwrap().left_with = Some(installed);
+        }
         let (stamp, closing, was_on, worker) = {
             let mut rt = self.calls.lock().unwrap();
             let stamp = rt.identity.take().or(fallback);
@@ -1934,7 +1939,7 @@ mod tests {
             rt.link = CallLink::NotLinked { account: "usr_a".into(), source: "VRCX".into() };
         }
         ctl.calls_publish(|_| {});
-        ctl.calls_depart();
+        ctl.leave_unless_same(None);
         {
             let rt = ctl.calls.lock().unwrap();
             assert!(rt.identity.is_none());
@@ -1986,7 +1991,7 @@ mod tests {
         ctl.calls_publish(|_| {});
         assert_eq!(ctl.snapshot.lock().unwrap().n4n0.calls.call.as_ref().map(|c| c.name.as_str()), Some("Kite"));
         let started = Instant::now();
-        ctl.calls_depart();
+        ctl.leave_unless_same(None);
         assert!(started.elapsed() < Duration::from_secs(3), "at once, not after the calls' thread or a request");
         {
             let rt = ctl.calls.lock().unwrap();
@@ -2032,6 +2037,59 @@ mod tests {
 
     fn in_a_call(ctl: &crate::controller::Shared) -> bool {
         ctl.calls.lock().unwrap().call.is_some() && ctl.snapshot.lock().unwrap().n4n0.calls.call.is_some()
+    }
+
+    /// Verify5 blocker: every path that changes the signed-in identity leaves BEFORE the next identity is installed: when
+    /// the account left, the credential still installed was A's, A's call (and its media) and A's friend's share offer
+    /// were gone, and Orbiters' check of B had not been asked yet. Paths that change nothing leave nothing.
+    #[test]
+    fn every_identity_change_leaves_before_the_next_identity_is_installed() {
+        use orbiters_core::account::{Account, Server};
+        let b = || Account { token: "orbit-b".into(), user: Some("2".into()), username: Some("B".into()), avatar_url: None, features: None };
+        let a_again = || Account { token: "orbit-a".into(), user: Some("1".into()), username: Some("A".into()), avatar_url: None, features: None };
+        // What each path does to a controller signed in as A, in a call, with a friend's offer on screen.
+        type Path = fn(&crate::controller::Shared, &dyn Fn() -> Account, &dyn Fn() -> Account);
+        let paths: Vec<(&str, Path, bool)> = vec![
+            ("another tool signs in as B (same server)", |ctl, b, _| reread(ctl, Server::Production, Ok(Some(b()))), true),
+            ("environment switch to a server with B saved", |ctl, b, _| reread(ctl, Server::Development, Ok(Some(b()))), true),
+            ("environment switch to a server with nobody saved", |ctl, _, _| reread(ctl, Server::Development, Ok(None)), true),
+            ("another tool signs out (the file is gone)", |ctl, _, _| reread(ctl, Server::Production, Ok(None)), true),
+            ("browser sign-in as B (the gate serve_sign_in calls before installing)", |ctl, b, _| {
+                assert!(ctl.leave_unless_same(Some((Server::Production, b().token.as_str()))));
+                ctl.account_runtime.lock().unwrap().account = Some(b());
+            }, true),
+            ("sign-out here, the file removed", |ctl, _, _| ctl.sign_out_with(Server::Production, || Ok(())).unwrap(), true),
+            ("the same credential read again", |ctl, _, a| reread(ctl, Server::Production, Ok(Some(a()))), false),
+            ("the file cannot be read for a moment", |ctl, _, _| reread(ctl, Server::Production, Err(anyhow::anyhow!("being written"))), false),
+            ("sign-out whose removal failed", |ctl, _, _| assert!(ctl.sign_out_with(Server::Production, || Err(anyhow::anyhow!("denied"))).is_err()), false),
+        ];
+        fn reread(ctl: &crate::controller::Shared, server: Server, saved: anyhow::Result<Option<Account>>) {
+            let checked = ctl.clone();
+            ctl.read_account_with(server, None, false, move || saved, move |_| {
+                // When Orbiters is asked about B, A has already left: nothing of A's call is held or shown.
+                let rt = checked.calls.lock().unwrap();
+                if rt.left_with.is_some() {
+                    assert!(rt.call.is_none(), "A's call ended before B was checked");
+                }
+                drop(rt);
+                Err(anyhow::anyhow!("offline in tests"))
+            });
+        }
+        for (name, path, leaves) in paths {
+            let ctl = signed_in_as_a_in_a_call();
+            ctl.shared_offer_on_screen(&format!("{}\n{}", Api::new(Server::Production).url(""), "orbit-a"));
+            assert!(ctl.snapshot.lock().unwrap().shared_view.offer.is_some());
+            path(&ctl, &b, &a_again);
+            let left_with = ctl.calls.lock().unwrap().left_with.clone();
+            if leaves {
+                assert_eq!(left_with, Some(Some("orbit-a".to_string())), "{name}: left while A was still installed");
+                assert!(!in_a_call(&ctl), "{name}: A's call ended here");
+                assert!(ctl.snapshot.lock().unwrap().shared_view.offer.is_none(), "{name}: A's friend's offer went");
+            } else {
+                assert_eq!(left_with, None, "{name}: nothing left");
+                assert!(in_a_call(&ctl), "{name}: the call goes on");
+            }
+        }
     }
 
     /// Verify5 (4): only a confirmed change of identity leaves. An account file that cannot be read for a moment, or a

@@ -772,6 +772,21 @@ impl Controller {
     }
 }
 
+/// Tests elsewhere (the account's paths): the shares signed in as `identity`, a friend's offer on screen.
+#[cfg(test)]
+impl Controller {
+    pub(super) fn shared_offer_on_screen(&self, identity: &str) {
+        {
+            let mut rt = self.shared_view.lock().unwrap();
+            rt.identity = Some(identity.to_string());
+            let offer = json!({ "v": 1, "share": "s_BBBBBBBBBBBBBBBBBBBBBB", "from": { "id": "c_AAAAAAAAAAAAAAAAAAAAAA", "name": "Alice" },
+                "capture": { "type": "capture", "id": 412, "revision": 77, "title": "The Black Cat" }, "expires_in": 30 });
+            let _ = rt.event("share_offer", &offer, now_ms());
+        }
+        self.shared_publish();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,7 +817,12 @@ mod tests {
         assert!(ctl.snapshot.lock().unwrap().shared_view.offer.is_none(), "the offer went on the same turn");
         // Signed out: the same, at once, before the shares' next turn.
         offer_up(&ctl);
-        ctl.calls_depart();
+        {
+            let mut rt = ctl.account_runtime.lock().unwrap();
+            rt.read = Some((orbiters_core::account::Server::Production, None));
+            rt.account = Some(orbiters_core::account::Account { token: "orbit-a".into(), user: None, username: None, avatar_url: None, features: None });
+        }
+        assert!(ctl.leave_unless_same(None));
         assert!(ctl.snapshot.lock().unwrap().shared_view.offer.is_none());
         assert!(ctl.shared_view.lock().unwrap().identity.is_none() && !ctl.shared_view.lock().unwrap().present);
         // Nothing to withdraw twice.

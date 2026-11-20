@@ -55,5 +55,6 @@
   "As {account}": "{account}として",
   "On profile {n}": "プロフィール{n}で",
   "The assistant's VRChat uses profile {n}: choose another profile.": "アシスタントのVRChatがプロフィール{n}を使っています。別のプロフィールを選んでください。",
-  "A VRChat is starting and has not said its profile yet: try again in a moment.": "起動中のVRChatのプロフィールがまだわかりません。少ししてからもう一度お試しください。"
+  "A VRChat is starting and has not said its profile yet: try again in a moment.": "起動中のVRChatのプロフィールがまだわかりません。少ししてからもう一度お試しください。",
+  "This picture is not one of your account's: open the list again and choose one.": "この画像はあなたのアカウントのものではありません。一覧を開き直して選んでください。"
 }

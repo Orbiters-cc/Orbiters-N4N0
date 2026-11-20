@@ -152,6 +152,26 @@ impl Controller {
             rt.mine_next = Some(Instant::now() + CHANGE_EVERY);
         }
         self.launcher_mine_saving(Some(&account), Saving::Saving(part), Some(now() + CHANGE_EVERY.as_secs() as i64));
+        // A picture goes only when it is one of this account's own files, as VRChat lists them now: never a URL that
+        // merely looks like one (another person's file on the same host, a list read for another account).
+        let own = match &edit {
+            ProfileEdit::Picture(url) if !url.is_empty() => Some(("icon", url.clone())),
+            ProfileEdit::Banner { choice: BannerChoice::Custom, custom, .. } => Some(("gallery", custom.clone())),
+            _ => None,
+        };
+        if let Some((tag, url)) = own {
+            let listed = send_as(&client, &account, |c| c.own_files(tag)).map(|files| files.iter().filter_map(own_picture).any(|p| p.url == url));
+            let why = match listed {
+                Ok(true) => None,
+                Ok(false) => Some(tr("This picture is not one of your account's: open the list again and choose one.").to_string()),
+                Err(Notice::Error(t) | Notice::Failed { text: t, .. }) => Some(t),
+                Err(_) => Some(tr("VRChat did not take the change. Try again in a moment.").to_string()),
+            };
+            if let Some(why) = why {
+                self.launcher_mine_saving(Some(&account), Saving::Failed(part, why), None);
+                return None;
+            }
+        }
         let sent = match &edit {
             ProfileEdit::Status(status) => send_as(&client, &account, |c| c.update_own_status(status_value(*status), None)),
             ProfileEdit::StatusText(t) => send_as(&client, &account, |c| c.update_own_status(None, Some(t))),

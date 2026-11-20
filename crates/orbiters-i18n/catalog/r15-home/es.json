@@ -55,5 +55,6 @@
   "As {account}": "Como {account}",
   "On profile {n}": "En el perfil {n}",
   "The assistant's VRChat uses profile {n}: choose another profile.": "El VRChat del asistente usa el perfil {n}: elige otro perfil.",
-  "A VRChat is starting and has not said its profile yet: try again in a moment.": "Un VRChat se está abriendo y aún no ha dicho su perfil: vuelve a intentarlo en un momento."
+  "A VRChat is starting and has not said its profile yet: try again in a moment.": "Un VRChat se está abriendo y aún no ha dicho su perfil: vuelve a intentarlo en un momento.",
+  "This picture is not one of your account's: open the list again and choose one.": "Esta imagen no es una de tu cuenta: vuelve a abrir la lista y elige una."
 }

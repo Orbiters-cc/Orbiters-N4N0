@@ -1068,6 +1068,8 @@ fn the_own_profile_and_pictures_are_read_for_the_card() {
     let (_, calls) = c.test_vrchat(vec![
         (200, json!({"id": "usr_test", "bio": "hello", "bannerType": "customImage", "bannerCustomUrl": "https://api.vrchat.cloud/api/1/file/file_b/1/file", "userIcon": "", "hasVrcPlus": true, "currentAvatarThumbnailImageUrl": "https://api.vrchat.cloud/avatar"})),
         (200, json!([{"id": "file_1", "versions": [{"version": 0}, {"version": 1, "file": {"url": "https://api.vrchat.cloud/api/1/file/file_1/1/file"}}]}, {"id": "file_2", "versions": []}])),
+        // Listed again right before the change: the picture must be the account's own now.
+        (200, json!([{"id": "file_1", "versions": [{"version": 1, "file": {"url": "https://api.vrchat.cloud/api/1/file/file_1/1/file"}}]}])),
         (200, json!({"id": "usr_test", "userIcon": "https://api.vrchat.cloud/api/1/file/file_1/1/file"})),
     ]);
     me_signed_in(&c);
@@ -1082,7 +1084,7 @@ fn the_own_profile_and_pictures_are_read_for_the_card() {
     assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Picture)));
     assert_eq!(c.view().launcher.me.as_ref().unwrap().look.icon, icons[0].url);
     let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
-    assert_eq!(calls, ["GET /profile/usr_test?asSelf=true", "GET /files?tag=icon&n=100", "PUT /profile/usr_test"]);
+    assert_eq!(calls, ["GET /profile/usr_test?asSelf=true", "GET /files?tag=icon&n=100", "GET /files?tag=icon&n=100", "PUT /profile/usr_test"]);
 }
 
 // --- REQUEST15 fix B4: one VRChat per profile, whichever of Orbiters' starts asks ---
@@ -1178,4 +1180,29 @@ fn an_answer_for_account_a_never_lands_on_bs_card() {
     assert!(c.view().launcher.mine.is_none(), "B's card has nothing of A's");
     assert!(c.launcher_mine_publish(Some("usr_b"), |m| m.bio = "B".into()));
     assert_eq!(c.view().launcher.mine.as_ref().unwrap().bio, "B");
+}
+
+// --- REQUEST15 fix SF-images: a picture is sent only when it is one of the account's own files right now ---
+
+#[test]
+fn a_picture_not_among_the_accounts_own_files_is_never_sent() {
+    use orbiters_core::launcher::{BannerChoice, ProfileEdit, ProfilePart, Saving};
+    let c = controller(Arc::new(Pretend::default()));
+    let mine_file = "https://api.vrchat.cloud/api/1/file/file_mine/1/file";
+    let theirs = "https://api.vrchat.cloud/api/1/file/file_someone_elses/1/file";
+    let (_, calls) = c.test_vrchat(vec![
+        (200, json!([{"id": "file_mine", "versions": [{"version": 1, "file": {"url": mine_file}}]}])),
+        (200, json!([{"id": "file_mine", "versions": [{"version": 1, "file": {"url": mine_file}}]}])),
+        (200, json!({"id": "usr_test", "bannerType": "customImage", "bannerCustomUrl": mine_file})),
+    ]);
+    me_signed_in(&c);
+    // Another person's file on the same host, as an icon: refused, nothing written.
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Picture(theirs.into()))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Picture, _))));
+    c.launcher.lock().unwrap().mine_next = None;
+    // The account's own gallery picture as the banner: listed, then sent.
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Banner { choice: BannerChoice::Custom, colour: None, custom: mine_file.into() })));
+    assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Banner)));
+    let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
+    assert_eq!(calls, ["GET /files?tag=icon&n=100", "GET /files?tag=gallery&n=100", "PUT /profile/usr_test"], "no PUT for the foreign picture");
 }

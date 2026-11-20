@@ -1163,3 +1163,19 @@ fn a_vrchat_not_yet_identified_is_not_profile_0_and_holds_play() {
     }
     assert!(machine.beside.lock().unwrap().is_empty() && machine.started.lock().unwrap().is_empty());
 }
+
+// --- REQUEST15 fix B3: what was read or sent for one account never lands on another's card ---
+
+#[test]
+fn an_answer_for_account_a_never_lands_on_bs_card() {
+    use orbiters_core::launcher::{OwnPicture, ProfilePart, Saving};
+    let c = controller(Arc::new(Pretend::default()));
+    c.update(|s| s.launcher.source = Source::SignedIn { user_id: "usr_b".into(), name: String::new() });
+    // A's picture list, or A's "saved", arriving after the switch to B.
+    let landed = c.launcher_mine_publish(Some("usr_a"), |m| m.icons = Some(vec![OwnPicture { id: "file_a".into(), url: "https://api.vrchat.cloud/api/1/file/file_a/1/file".into() }]));
+    assert!(!landed);
+    c.launcher_mine_saving(Some("usr_a"), Saving::Saved(ProfilePart::Bio), None);
+    assert!(c.view().launcher.mine.is_none(), "B's card has nothing of A's");
+    assert!(c.launcher_mine_publish(Some("usr_b"), |m| m.bio = "B".into()));
+    assert_eq!(c.view().launcher.mine.as_ref().unwrap().bio, "B");
+}

@@ -70,6 +70,8 @@ pub struct Mine {
     banner_tab: Option<BannerTab>,
     /// The account the profile was asked for (once per account and run).
     asked_for: Option<String>,
+    /// The account everything below was typed or chosen on: a switch to another drops all of it (REQUEST15 fix B3).
+    account: Option<String>,
     /// The last change pressed, the answers counted when it was pressed, and when: shown at once while VRChat answers,
     /// given back to its field when VRChat refuses it.
     pending: Option<(ProfileEdit, u64, f64)>,
@@ -146,6 +148,7 @@ fn failed_h(state: &State) -> f32 {
 
 /// The card, as Home's block `index`.
 pub fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
+    sync_account(state);
     if !state.shown() {
         return;
     }
@@ -172,6 +175,23 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     picker(ui, cx, state);
 }
 
+/// Another account on show (or none): what was typed, chosen or sent for the previous one is dropped, never saved to
+/// this one.
+pub(super) fn sync_account(state: &mut State) {
+    let now = signed_in(state);
+    if state.mine.account != now {
+        let asked_for = state.mine.asked_for.take().filter(|a| Some(a) == now.as_ref());
+        state.mine = Mine { account: now, asked_for, ..Mine::default() };
+        state.mine_listed.clear();
+    }
+}
+
+/// The change as it goes out: bound to the account it was made on, and only while that account's list is on show.
+fn bound(state: &State, edit: ProfileEdit) -> Option<Action> {
+    let account = state.mine.account.clone()?;
+    (signed_in(state).as_ref() == Some(&account)).then(|| Action::As { account, action: Box::new(Action::EditProfile(edit)) })
+}
+
 /// A press answered: the text goes back to its field when VRChat refused it.
 fn settle(state: &mut State, clock: f64) {
     let Some(mine) = state.data.mine.as_ref() else { return };
@@ -194,10 +214,18 @@ fn settle(state: &mut State, clock: f64) {
 
 /// Sends a change the person pressed, shown at once.
 fn send(state: &mut State, cx: &Cx, clock: f64, edit: ProfileEdit) {
+    let Some(action) = bound(state, edit.clone()) else {
+        // Typed on an account no longer on show: dropped.
+        state.mine = Mine { account: signed_in(state), ..Mine::default() };
+        return;
+    };
     let answered = state.data.mine.as_ref().map_or(0, |m| m.answered);
     state.mine.pending = Some((edit.clone(), answered, clock));
-    state.mine.last = Some(edit.clone());
-    state.act(cx, clock, Action::EditProfile(edit));
+    state.mine.last = Some(edit);
+    if !cx.ctl.launcher(action) {
+        // Never reached the service: nothing says it is on its way.
+        state.mine.pending = None;
+    }
 }
 
 /// The card without a VRChat sign-in: what it would do, and the way to sign in (pressed: true).
@@ -829,6 +857,31 @@ mod tests {
         settle(&mut state, 5.0);
         assert!(state.mine.editing.is_none() && state.mine.pending.is_none());
         assert_eq!(state.mine.saved_seen, Some((2, 5.0)), "Saved shows from now");
+    }
+
+    #[test]
+    fn a_draft_typed_on_one_account_is_dropped_when_another_shows() {
+        let mut data = sample();
+        data.source = Source::SignedIn { user_id: "usr_a".into(), name: String::new() };
+        let mut state = State { data: Arc::new(data.clone()), ..Default::default() };
+        sync_account(&mut state);
+        state.mine.editing = Some(Editing::Bio("written as A".into()));
+        state.mine.pending = Some((ProfileEdit::StatusText("A's".into()), 0, 1.0));
+        state.mine.last = Some(ProfileEdit::Picture("https://api.vrchat.cloud/api/1/file/file_a/1/file".into()));
+        state.mine.picker = Some((Picker::Picture, Rect::NOTHING, 1.0));
+        assert!(bound(&state, ProfileEdit::Bio("x".into())).is_some());
+        // The person signs in to B: the same frame, before the card can save anything.
+        data.source = Source::SignedIn { user_id: "usr_b".into(), name: String::new() };
+        state.data = Arc::new(data.clone());
+        assert_eq!(bound(&state, ProfileEdit::Bio("written as A".into())), None, "never labelled with B's account");
+        sync_account(&mut state);
+        assert!(state.mine.editing.is_none() && state.mine.pending.is_none() && state.mine.last.is_none() && state.mine.picker.is_none());
+        assert_eq!(state.mine.account.as_deref(), Some("usr_b"));
+        // Signed out: nothing is bound.
+        data.source = Source::Nothing;
+        state.data = Arc::new(data);
+        sync_account(&mut state);
+        assert_eq!(bound(&state, ProfileEdit::Bio("x".into())), None);
     }
 
     #[test]

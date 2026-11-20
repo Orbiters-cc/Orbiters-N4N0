@@ -23,7 +23,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 
 /// An Index-like headset: each eye's tangents (left, right, top, bottom), its picture, the lenses' distance.
-const LEFT_TANGENTS: [f32; 4] = [-1.39, 1.24, -1.47, 1.45];
+pub(super) const LEFT_TANGENTS: [f32; 4] = [-1.39, 1.24, -1.47, 1.45];
 const EYE_PIXELS: (u32, u32) = (1440, 1600);
 const IPD_M: f32 = 0.064;
 
@@ -494,7 +494,7 @@ impl TimingFeed {
     }
 }
 
-fn wide_cameras(views: &[Matrix34; 2], tangents: [[f32; 4]; 2], quality: Quality, independent: bool) -> [PlayCamera; 2] {
+pub(super) fn wide_cameras(views: &[Matrix34; 2], tangents: [[f32; 4]; 2], quality: Quality, independent: bool) -> [PlayCamera; 2] {
     if independent {
         [0, 1].map(|e| PlayCamera::wide(&views[e], tangents[e], WIDE_MARGIN, quality.wide_per_tan(), 3072))
     } else {
@@ -502,7 +502,7 @@ fn wide_cameras(views: &[Matrix34; 2], tangents: [[f32; 4]; 2], quality: Quality
     }
 }
 
-fn round2(v: f64) -> f64 {
+pub(super) fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
@@ -510,13 +510,13 @@ fn face_name(f: usize) -> &'static str {
     ["ahead", "right", "behind", "left", "up", "down"][f]
 }
 
-fn right_tangents() -> [f32; 4] {
+pub(super) fn right_tangents() -> [f32; 4] {
     // The right eye mirrors the left one.
     [-LEFT_TANGENTS[1], -LEFT_TANGENTS[0], LEFT_TANGENTS[2], LEFT_TANGENTS[3]]
 }
 
 /// Each eye's pose: half the lens distance to each side of the head.
-fn eye_views(head: &Matrix34) -> [Matrix34; 2] {
+pub(super) fn eye_views(head: &Matrix34) -> [Matrix34; 2] {
     [-1.0f32, 1.0].map(|side| {
         let mut eye = Matrix34::IDENTITY;
         eye.m[0][3] = side * IPD_M / 2.0;
@@ -525,7 +525,7 @@ fn eye_views(head: &Matrix34) -> [Matrix34; 2] {
 }
 
 /// `view` turned `yaw` (left, about +Y) then `pitch` (up, about its own +X), about its own position.
-fn turn(view: &Matrix34, yaw: f32, pitch: f32) -> Matrix34 {
+pub(super) fn turn(view: &Matrix34, yaw: f32, pitch: f32) -> Matrix34 {
     let (sy, cy) = yaw.sin_cos();
     let (sp, cp) = pitch.sin_cos();
     let yaw_m = Matrix34 { m: [[cy, 0.0, sy, 0.0], [0.0, 1.0, 0.0, 0.0], [-sy, 0.0, cy, 0.0]] };

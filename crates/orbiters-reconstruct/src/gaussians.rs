@@ -77,6 +77,15 @@ impl Gaussians {
         self.seen.reserve_exact(n);
     }
 
+    /// The bytes its vectors take on the heap: their room, not only what they hold (a vector grown by pushes has up to
+    /// twice the room it uses). What keeping a set in memory costs.
+    pub fn heap_bytes(&self) -> usize {
+        fn of<T>(v: &Vec<T>) -> usize {
+            v.capacity() * std::mem::size_of::<T>()
+        }
+        of(&self.means) + of(&self.log_scales) + of(&self.rotations) + of(&self.opacity_logits) + of(&self.colors) + of(&self.sky) + of(&self.filter_3d) + of(&self.seen)
+    }
+
     pub fn push(&mut self, mean: [f32; 3], log_scale: [f32; 3], rotation: [f32; 4], opacity_logit: f32, color: [f32; 3]) {
         self.means.push(mean);
         self.log_scales.push(log_scale);

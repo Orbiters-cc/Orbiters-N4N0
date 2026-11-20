@@ -45,6 +45,7 @@ crates/orbiters-web
 
 # Immutable paint data: texture names and internal cache keys.
 crates/orbiters-desktop/src/overlay/worlds/paint_snapshot.rs
+crates/orbiters-desktop/src/overlay/worlds/sequence.rs
 
 # Interaction regression fixtures and developer assertions only.
 crates/orbiters-desktop/src/overlay/orbit/flows.rs

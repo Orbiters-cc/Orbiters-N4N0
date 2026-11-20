@@ -119,6 +119,7 @@ fn main() -> anyhow::Result<()> {
         Some("--n4n0-menu") => overlay::menu_pages::run(&args[1..]),
         Some("--world-view") => overlay::worlds::shots::run(&args[1..]),
         Some("--world-timing") => overlay::worlds::timing_lab::run(&args[1..]),
+        Some("--world-sequence") => overlay::worlds::sequence::run(&args[1..]),
         Some("--n4n0-menu-strings") => overlay::menu_pages::run_strings(&args[1..]),
         Some("--prepare-upload") => upload_prep::run(&args[1..]),
         #[cfg(windows)]

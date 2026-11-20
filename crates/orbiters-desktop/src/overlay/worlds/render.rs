@@ -175,6 +175,11 @@ impl FaceRenderer {
         Ok(())
     }
 
+    /// The renderer's sort room (entries) and the splats its buffers hold ([`orbiters_reconstruct::gpu::Gpu::capacities`]).
+    pub fn capacities(&self) -> (usize, usize) {
+        self.gpu.capacities()
+    }
+
     /// What was just loaded shows with nothing around it, no sky and no background.
     pub fn make_transparent(&mut self) -> anyhow::Result<()> {
         self.gpu.set_sky(None)?;

@@ -7,7 +7,7 @@
 //! named for `userIcon` / `bannerCustomUrl` (its latest version's `file.url`) is VRCX's (EditProfileDialog.vue,
 //! GallerySelectDialog.vue), read 2026-11-20. Every call goes through the client's pacing and its 429 back-off.
 use super::*;
-use orbiters_core::launcher::{BannerChoice, MyProfile, OwnPicture, PictureKind, ProfileEdit, ProfilePart, Saving, Status, BIO_MAX, STATUS_TEXT_MAX};
+use orbiters_core::launcher::{BannerChoice, MyProfile, OwnPicture, PictureKind, ProfileEdit, Saving, Status, BIO_MAX, STATUS_TEXT_MAX};
 use serde_json::Value;
 
 /// VRChat refuses profile changes in quick succession (it does not say how quick): one every few seconds from here.
@@ -88,9 +88,24 @@ impl Controller {
         });
     }
 
-    fn launcher_mine_saving(&self, saving: Saving, next: Option<i64>) {
-        self.update(|s| {
-            let mine = s.launcher.mine.get_or_insert_with(MyProfile::default);
+    /// Changes the own profile on show, only while the list on show is `account`'s (`None`: no signed-in list): an answer
+    /// that comes back after the person switched accounts lands on nobody's card (REQUEST15 fix B3). Whether it landed.
+    pub(super) fn launcher_mine_publish(&self, account: Option<&str>, f: impl FnOnce(&mut MyProfile)) -> bool {
+        self.update_if(|s| {
+            let shown = match &s.launcher.source {
+                Source::SignedIn { user_id, .. } => Some(user_id.as_str()),
+                _ => None,
+            };
+            if shown != account {
+                return false;
+            }
+            f(s.launcher.mine.get_or_insert_with(MyProfile::default));
+            true
+        })
+    }
+
+    pub(super) fn launcher_mine_saving(&self, account: Option<&str>, saving: Saving, next: Option<i64>) {
+        self.launcher_mine_publish(account, |mine| {
             // Saving is no answer yet; Saved and Failed are.
             if !matches!(saving, Saving::Saving(_)) {
                 mine.answered += 1;
@@ -107,7 +122,7 @@ impl Controller {
     pub(super) fn launcher_edit_mine(self: &Shared, edit: ProfileEdit, account: Option<&str>) -> Option<Notice> {
         let part = edit.part();
         if self.launcher_client().is_none() {
-            self.launcher_mine_saving(Saving::Failed(part, tr("Sign in to VRChat in Settings to change your profile here.").into()), None);
+            self.launcher_mine_saving(account, Saving::Failed(part, tr("Sign in to VRChat in Settings to change your profile here.").into()), None);
             return None;
         }
         let (client, account) = match (self.launcher_sender(account), account) {
@@ -117,12 +132,12 @@ impl Controller {
                     Notice::Error(t) | Notice::Failed { text: t, .. } => t,
                     _ => tr("Sign in to VRChat in Settings to change your profile here.").to_string(),
                 };
-                self.launcher_mine_saving(Saving::Failed(part, text), None);
+                self.launcher_mine_saving(account, Saving::Failed(part, text), None);
                 return None;
             }
         };
         if let Some(why) = over_limit(&edit) {
-            self.launcher_mine_saving(Saving::Failed(part, why), None);
+            self.launcher_mine_saving(Some(&account), Saving::Failed(part, why), None);
             return None;
         }
         // One change at a time, a few seconds apart.
@@ -131,12 +146,32 @@ impl Controller {
             if let Some(at) = rt.mine_next.filter(|at| Instant::now() < *at) {
                 let left = at.saturating_duration_since(Instant::now()).as_secs().max(1);
                 drop(rt);
-                self.launcher_mine_saving(Saving::Failed(part, tr!("VRChat takes one change every few seconds: try again in {n} s.", n = left)), None);
+                self.launcher_mine_saving(Some(&account), Saving::Failed(part, tr!("VRChat takes one change every few seconds: try again in {n} s.", n = left)), None);
                 return None;
             }
             rt.mine_next = Some(Instant::now() + CHANGE_EVERY);
         }
-        self.launcher_mine_saving(Saving::Saving(part), Some(now() + CHANGE_EVERY.as_secs() as i64));
+        self.launcher_mine_saving(Some(&account), Saving::Saving(part), Some(now() + CHANGE_EVERY.as_secs() as i64));
+        // A picture goes only when it is one of this account's own files, as VRChat lists them now: never a URL that
+        // merely looks like one (another person's file on the same host, a list read for another account).
+        let own = match &edit {
+            ProfileEdit::Picture(url) if !url.is_empty() => Some(("icon", url.clone())),
+            ProfileEdit::Banner { choice: BannerChoice::Custom, custom, .. } => Some(("gallery", custom.clone())),
+            _ => None,
+        };
+        if let Some((tag, url)) = own {
+            let listed = send_as(&client, &account, |c| c.own_files(tag)).map(|files| files.iter().filter_map(own_picture).any(|p| p.url == url));
+            let why = match listed {
+                Ok(true) => None,
+                Ok(false) => Some(tr("This picture is not one of your account's: open the list again and choose one.").to_string()),
+                Err(Notice::Error(t) | Notice::Failed { text: t, .. }) => Some(t),
+                Err(_) => Some(tr("VRChat did not take the change. Try again in a moment.").to_string()),
+            };
+            if let Some(why) = why {
+                self.launcher_mine_saving(Some(&account), Saving::Failed(part, why), None);
+                return None;
+            }
+        }
         let sent = match &edit {
             ProfileEdit::Status(status) => send_as(&client, &account, |c| c.update_own_status(status_value(*status), None)),
             ProfileEdit::StatusText(t) => send_as(&client, &account, |c| c.update_own_status(None, Some(t))),
@@ -205,7 +240,7 @@ impl Controller {
                     Notice::Error(t) | Notice::Failed { text: t, .. } => t,
                     _ => tr("VRChat did not take the change. Try again in a moment.").to_string(),
                 };
-                self.launcher_mine_saving(Saving::Failed(part, text), None);
+                self.launcher_mine_saving(Some(&account), Saving::Failed(part, text), None);
             }
         }
         None
@@ -217,17 +252,18 @@ impl Controller {
             (Ok(client), Some(account)) => (client, account.to_string()),
             _ => return,
         };
-        self.update(|s| s.launcher.mine.get_or_insert_with(MyProfile::default).listing = Some(kind));
+        self.launcher_mine_publish(Some(&account), |mine| mine.listing = Some(kind));
         let tag = match kind {
             PictureKind::Icons => "icon",
             PictureKind::Gallery => "gallery",
         };
         let read = send_as(&client, &account, |c| c.own_files(tag));
-        self.update(|s| {
-            let mine = s.launcher.mine.get_or_insert_with(MyProfile::default);
+        // Only onto the card of the account it was read for (the person may have switched meanwhile).
+        self.launcher_mine_publish(Some(&account), |mine| {
             mine.listing = None;
             match read {
                 Ok(files) => {
+                    mine.list_failed = None;
                     let pictures: Vec<OwnPicture> = files.iter().filter_map(own_picture).collect();
                     match kind {
                         PictureKind::Icons => mine.icons = Some(pictures),
@@ -235,12 +271,13 @@ impl Controller {
                     }
                 }
                 Err(notice) => {
-                    let part = if kind == PictureKind::Icons { ProfilePart::Picture } else { ProfilePart::Banner };
+                    // A list that did not come is no change that failed: said in its chooser, whose Try again reads
+                    // the list again (never a profile change replayed).
                     let text = match notice {
                         Notice::Error(t) | Notice::Failed { text: t, .. } => t,
-                        _ => String::new(),
+                        _ => tr("VRChat could not be reached. Try again shortly.").to_string(),
                     };
-                    mine.saving = Some(Saving::Failed(part, text));
+                    mine.list_failed = Some((kind, text));
                 }
             }
         });

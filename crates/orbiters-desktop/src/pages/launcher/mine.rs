@@ -25,6 +25,8 @@ const BIO_LINE: f32 = 19.0;
 const BIO_ROWS_IDLE: usize = 3;
 const BIO_EDIT_H: f32 = 104.0;
 const BUTTONS_H: f32 = 34.0;
+/// The own profile not come (a read that failed): asked again after this.
+const READ_AGAIN: f64 = 60.0;
 /// How long "Saved" stays after VRChat took a change.
 const SAVED_FOR: f64 = 3.0;
 /// Colours offered for a colour banner.
@@ -68,17 +70,34 @@ pub struct Mine {
     pub editing: Option<Editing>,
     picker: Option<(Picker, Rect, f64)>,
     banner_tab: Option<BannerTab>,
-    /// The account the profile was asked for (once per account and run).
-    asked_for: Option<String>,
+    /// The account the profile was asked for, and when (asked again a minute later while it has not come).
+    asked_for: Option<(String, f64)>,
+    /// The account everything below was typed or chosen on: a switch to another drops all of it (REQUEST15 fix B3).
+    account: Option<String>,
     /// The last change pressed, the answers counted when it was pressed, and when: shown at once while VRChat answers,
     /// given back to its field when VRChat refuses it.
     pending: Option<(ProfileEdit, u64, f64)>,
     last: Option<ProfileEdit>,
+    /// The page of the chooser's pictures shown (three rows a page).
+    picker_page: usize,
     /// When the page first saw the last "Saved".
     saved_seen: Option<(u64, f64)>,
 }
 
 impl Mine {
+    /// Read again (the list's Read again): the profile and the lists are asked for anew.
+    pub fn read_again(&mut self) {
+        self.asked_for = None;
+    }
+
+    /// The change Try again sends: the last one pressed, only when it is the one that failed.
+    fn retry(&self, failed: Option<&Saving>) -> Option<ProfileEdit> {
+        match failed {
+            Some(Saving::Failed(part, _)) => self.last.clone().filter(|e| e.part() == *part),
+            _ => None,
+        }
+    }
+
     /// Pictures of the page: a text being typed.
     pub fn stand_in_editing(&mut self, editing: Editing) {
         self.editing = Some(editing);
@@ -146,14 +165,20 @@ fn failed_h(state: &State) -> f32 {
 
 /// The card, as Home's block `index`.
 pub fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
+    sync_account(state);
     if !state.shown() {
         return;
     }
     // The account's own profile is read once its list shows (a read; nothing is sent from it).
     if let Some(account) = signed_in(state) {
-        if state.data.mine.is_none() && state.mine.asked_for.as_deref() != Some(account.as_str()) {
-            state.mine.asked_for = Some(account);
-            state.act(cx, anim::time(ui.ctx()), Action::ReadMine);
+        let clock = anim::time(ui.ctx());
+        let due = match &state.mine.asked_for {
+            Some((asked, at)) => *asked != account || clock - at > READ_AGAIN,
+            None => true,
+        };
+        if state.data.mine.is_none() && due {
+            state.mine.asked_for = Some((account, clock));
+            state.act(cx, clock, Action::ReadMine);
         }
     }
     settle(state, anim::time(ui.ctx()));
@@ -170,6 +195,23 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         cx.go = Some(super::super::Go::VrchatAccount);
     }
     picker(ui, cx, state);
+}
+
+/// Another account on show (or none): what was typed, chosen or sent for the previous one is dropped, never saved to
+/// this one.
+pub(super) fn sync_account(state: &mut State) {
+    let now = signed_in(state);
+    if state.mine.account != now {
+        let asked_for = state.mine.asked_for.take().filter(|a| Some(&a.0) == now.as_ref());
+        state.mine = Mine { account: now, asked_for, ..Mine::default() };
+        state.mine_listed.clear();
+    }
+}
+
+/// The change as it goes out: bound to the account it was made on, and only while that account's list is on show.
+fn bound(state: &State, edit: ProfileEdit) -> Option<Action> {
+    let account = state.mine.account.clone()?;
+    (signed_in(state).as_ref() == Some(&account)).then(|| Action::As { account, action: Box::new(Action::EditProfile(edit)) })
 }
 
 /// A press answered: the text goes back to its field when VRChat refused it.
@@ -194,10 +236,18 @@ fn settle(state: &mut State, clock: f64) {
 
 /// Sends a change the person pressed, shown at once.
 fn send(state: &mut State, cx: &Cx, clock: f64, edit: ProfileEdit) {
+    let Some(action) = bound(state, edit.clone()) else {
+        // Typed on an account no longer on show: dropped.
+        state.mine = Mine { account: signed_in(state), ..Mine::default() };
+        return;
+    };
     let answered = state.data.mine.as_ref().map_or(0, |m| m.answered);
     state.mine.pending = Some((edit.clone(), answered, clock));
-    state.mine.last = Some(edit.clone());
-    state.act(cx, clock, Action::EditProfile(edit));
+    state.mine.last = Some(edit);
+    if !cx.ctl.launcher(action) {
+        // Never reached the service: nothing says it is on its way.
+        state.mine.pending = None;
+    }
 }
 
 /// The card without a VRChat sign-in: what it would do, and the way to sign in (pressed: true).
@@ -569,19 +619,23 @@ fn failed_line(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, why: &str, c
     let again = widgets::Button::new(tr("Try again")).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt("mine-again");
     let aw = again.desired_width(ui);
     let mut right = rect.right() - 4.0;
-    if state.mine.last.is_some() {
+    if let Some(edit) = state.mine.retry(state.data.mine.as_ref().and_then(|m| m.saving.as_ref())) {
         let br = Rect::from_min_size(pos2(right - aw, rect.center().y - 13.0), vec2(aw, 26.0));
         if again.show_at(ui, br).clicked() {
-            if let Some(edit) = state.mine.last.clone() {
-                state.mine.editing = None;
-                send(state, cx, clock, edit);
-            }
+            state.mine.editing = None;
+            send(state, cx, clock, edit);
         }
         right -= aw + 6.0;
     }
     let t = Txt::new(why, 12.5).color(theme::mix(theme::DANGER, theme::FG, 0.35));
     let r = widgets::text_truncated(&p, pos2(rect.left() + 30.0, rect.center().y), Align2::LEFT_CENTER, &t, right - rect.left() - 34.0);
     ui.interact(r.expand(4.0), Id::unique("mine-failed"), Sense::hover()).on_hover_text(why);
+}
+
+/// The pictures on page `page` of a chooser showing `per_page` at a time.
+fn page_of(count: usize, per_page: usize, page: usize) -> std::ops::Range<usize> {
+    let start = (page * per_page).min(count);
+    start..(start + per_page).min(count)
 }
 
 /// What a chooser says of what VRChat allows, in plain words.
@@ -739,8 +793,27 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 items.push((url.clone(), current));
             }
             let listing = mine.listing.is_some() || (wanted.is_some() && list.is_none());
-            for (i, (url, current)) in items.iter().enumerate().take(per_row * 3) {
-                let at = pos2(body.left() + (i % per_row) as f32 * (cell + gap), body.top() + (i / per_row) as f32 * (cell_h + gap));
+            // Three rows at a time, the others a page away (VRChat lists up to a hundred).
+            let per_page = per_row * 3;
+            let pages = items.len().div_ceil(per_page).max(1);
+            let page = state.mine.picker_page.min(pages - 1);
+            let shown = page_of(items.len(), per_page, page);
+            if pages > 1 {
+                let label = Txt::new(format!("{} / {pages}", page + 1), 12.0).color(theme::FG_3);
+                let y = inner.top() + 13.0;
+                let next = Rect::from_center_size(pos2(inner.right() - 48.0, y), vec2(26.0, 26.0));
+                let prev = next.translate(vec2(-64.0, 0.0));
+                widgets::text(&p, pos2((prev.right() + next.left()) * 0.5, y), Align2::CENTER_CENTER, &label);
+                if page > 0 && widgets::activated(&widgets::IconButton::new(icons::CARET_LEFT, orbiters_i18n::mark("Previous")).size(26.0, 13.0).id_salt("mine-page-prev").show_at(&mut over, prev)) {
+                    state.mine.picker_page = page - 1;
+                }
+                if page + 1 < pages && widgets::activated(&widgets::IconButton::new(icons::CARET_RIGHT, orbiters_i18n::mark("Next")).size(26.0, 13.0).id_salt("mine-page-next").show_at(&mut over, next)) {
+                    state.mine.picker_page = page + 1;
+                }
+            }
+            for (i, (url, current)) in items.iter().enumerate().skip(shown.start).take(shown.len()) {
+                let k = i - shown.start;
+                let at = pos2(body.left() + (k % per_row) as f32 * (cell + gap), body.top() + (k / per_row) as f32 * (cell_h + gap));
                 let r = Rect::from_min_size(at, vec2(cell, cell_h));
                 let tid = id.with(("thumb", i));
                 let resp = over.interact(r, tid, Sense::click());
@@ -778,14 +851,28 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 resp.on_hover_cursor(CursorIcon::PointingHand);
             }
             if listing {
-                let c = if items.is_empty() { body.center() } else { pos2(body.left() + (items.len() % per_row) as f32 * (cell + gap) + cell * 0.5, body.top() + cell_h * 0.5) };
+                let c = if shown.is_empty() { body.center() } else { pos2(body.left() + (shown.len() % per_row) as f32 * (cell + gap) + cell * 0.5, body.top() + cell_h * 0.5) };
                 feedback::spinner(&p, c, 9.0, 2.5, theme::FG_3);
                 ctx.request_repaint();
             }
         }
     }
-    // What VRChat allows, in plain words.
-    p.galley(pos2(inner.left(), body.bottom() + 12.0), note_galley, theme::FG_3);
+    // What VRChat allows, in plain words; or why the list did not come, with Try again (it reads the list again).
+    let failed_list = wanted.and_then(|w| mine.list_failed.clone().filter(|(k, _)| *k == w));
+    match failed_list {
+        Some((kind_failed, why)) => {
+            let at = pos2(inner.left(), body.bottom() + 12.0);
+            let again = widgets::Button::new(tr("Try again")).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt("mine-list-again");
+            let aw = again.desired_width(&over);
+            widgets::text_truncated(&p, pos2(at.x, at.y + 13.0), Align2::LEFT_CENTER, &Txt::new(why.as_str(), 12.0).color(theme::DANGER), inner.width() - aw - 8.0);
+            if again.show_at(&mut over, Rect::from_min_size(pos2(inner.right() - aw, at.y), vec2(aw, 26.0))).clicked() {
+                state.mine_listed.retain(|k| *k != kind_failed);
+                state.act(cx, clock, Action::ListPictures(kind_failed));
+                state.mine_listed.push(kind_failed);
+            }
+        }
+        None => p.galley(pos2(inner.left(), body.bottom() + 12.0), note_galley, theme::FG_3),
+    }
     if let Some(edit) = chosen {
         send(state, cx, clock, edit);
         closed = true;
@@ -795,6 +882,7 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if closed || outside || ctx.input(|i| i.key_pressed(Key::Escape)) {
         state.mine.picker = None;
         state.mine.banner_tab = None;
+        state.mine.picker_page = 0;
     }
 }
 
@@ -829,6 +917,51 @@ mod tests {
         settle(&mut state, 5.0);
         assert!(state.mine.editing.is_none() && state.mine.pending.is_none());
         assert_eq!(state.mine.saved_seen, Some((2, 5.0)), "Saved shows from now");
+    }
+
+    #[test]
+    fn a_draft_typed_on_one_account_is_dropped_when_another_shows() {
+        let mut data = sample();
+        data.source = Source::SignedIn { user_id: "usr_a".into(), name: String::new() };
+        let mut state = State { data: Arc::new(data.clone()), ..Default::default() };
+        sync_account(&mut state);
+        state.mine.editing = Some(Editing::Bio("written as A".into()));
+        state.mine.pending = Some((ProfileEdit::StatusText("A's".into()), 0, 1.0));
+        state.mine.last = Some(ProfileEdit::Picture("https://api.vrchat.cloud/api/1/file/file_a/1/file".into()));
+        state.mine.picker = Some((Picker::Picture, Rect::NOTHING, 1.0));
+        assert!(bound(&state, ProfileEdit::Bio("x".into())).is_some());
+        // The person signs in to B: the same frame, before the card can save anything.
+        data.source = Source::SignedIn { user_id: "usr_b".into(), name: String::new() };
+        state.data = Arc::new(data.clone());
+        assert_eq!(bound(&state, ProfileEdit::Bio("written as A".into())), None, "never labelled with B's account");
+        sync_account(&mut state);
+        assert!(state.mine.editing.is_none() && state.mine.pending.is_none() && state.mine.last.is_none() && state.mine.picker.is_none());
+        assert_eq!(state.mine.account.as_deref(), Some("usr_b"));
+        // Signed out: nothing is bound.
+        data.source = Source::Nothing;
+        state.data = Arc::new(data);
+        sync_account(&mut state);
+        assert_eq!(bound(&state, ProfileEdit::Bio("x".into())), None);
+    }
+
+    #[test]
+    fn try_again_sends_only_the_change_that_failed() {
+        let mut mine = Mine { last: Some(ProfileEdit::Bio("bio".into())), ..Mine::default() };
+        assert_eq!(mine.retry(Some(&Saving::Failed(ProfilePart::Bio, "no".into()))), Some(ProfileEdit::Bio("bio".into())));
+        assert_eq!(mine.retry(Some(&Saving::Failed(ProfilePart::Picture, "no".into()))), None, "a failed picture never replays the bio");
+        assert_eq!(mine.retry(Some(&Saving::Saved(ProfilePart::Bio))), None);
+        mine.last = None;
+        assert_eq!(mine.retry(Some(&Saving::Failed(ProfilePart::Bio, "no".into()))), None);
+    }
+
+    #[test]
+    fn every_listed_picture_is_on_a_page() {
+        // VRChat lists up to a hundred: each one is on exactly one page (the chooser showed the first 14 before).
+        let per_page = 15;
+        let pages = 101usize.div_ceil(per_page);
+        let shown: Vec<usize> = (0..pages).flat_map(|p| page_of(101, per_page, p)).collect();
+        assert_eq!(shown, (0..101).collect::<Vec<_>>());
+        assert!(page_of(3, per_page, 5).is_empty());
     }
 
     #[test]

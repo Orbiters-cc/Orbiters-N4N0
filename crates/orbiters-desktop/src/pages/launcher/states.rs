@@ -133,8 +133,8 @@ pub fn next_profile(offered: &[GameProfile], chosen: Option<u32>) -> u32 {
 
 /// A new profile's number: the first one past those offered.
 pub fn new_profile(offered: &[GameProfile]) -> Option<u32> {
-    let n = offered.iter().map(|p| p.profile + 1).max().unwrap_or(1);
-    (n <= orbiters_core::vrchat_launch::PROFILE_MAX).then_some(n)
+    // The first number Home offers that is not offered yet (a remembered 15 leaves 1 to 14 free).
+    (1..=orbiters_core::vrchat_launch::PROFILE_MAX).find(|n| !offered.iter().any(|p| p.profile == *n))
 }
 
 /// The Play buttons for a start on `profile`.
@@ -275,8 +275,12 @@ mod tests {
         let offered = profiles(&s, Some(1));
         assert_eq!(offered.iter().map(|p| p.profile).collect::<Vec<_>>(), [0, 1]);
         assert_eq!(new_profile(&offered), Some(2));
-        let last = [on(orbiters_core::vrchat_launch::PROFILE_MAX, None, None)];
-        assert_eq!(new_profile(&last), None, "no more than VRChat's profiles Home offers");
+        let last = [on(0, None, None), on(orbiters_core::vrchat_launch::PROFILE_MAX, None, None)];
+        assert_eq!(new_profile(&last), Some(1), "a remembered 15 leaves 1 free");
+        let all: Vec<GameProfile> = (0..=orbiters_core::vrchat_launch::PROFILE_MAX).map(|n| on(n, None, None)).collect();
+        assert_eq!(new_profile(&all), None, "no more than the profiles Home offers");
+        let gap = [on(0, None, None), on(1, None, None), on(3, None, None)];
+        assert_eq!(new_profile(&gap), Some(2));
         s.game = Game::NotInstalled;
         assert_eq!(play_on(&s, &offered, 0), PlayState::NotInstalled);
     }

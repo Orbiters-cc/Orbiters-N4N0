@@ -131,6 +131,15 @@ pub fn orbiters_notice() -> &'static str {
     tr("With Orbiters, the text you see in VR, other people's chat included, is sent to Orbiters to be translated.")
 }
 
+/// The same where it is said: on the desktop it is VRChat's window that is read (REQUEST15 item 2).
+pub fn orbiters_notice_on(desktop: bool) -> &'static str {
+    if desktop {
+        tr("With Orbiters, the text VRChat's window shows, other people's chat included, is sent to Orbiters to be translated.")
+    } else {
+        orbiters_notice()
+    }
+}
+
 pub(super) fn draw_translate(p: &Painter, facts: &Facts) {
     let rows = [
         (ROW_ON, tr("Translation"), tr("Text you see, in your language, where it is")),
@@ -157,7 +166,7 @@ pub(super) fn draw_translate(p: &Painter, facts: &Facts) {
         p.galley(pos2(X, y + 66.0), p.layout_job(job), look::MUTED);
     }
     if f.provider == TranslateProvider::Orbiters && !f.agreed {
-        let mut job = egui::text::LayoutJob::simple(orbiters_notice().to_string(), look::font(16.0, weight::MEDIUM), look::MUTED, 1000.0 - X - 240.0);
+        let mut job = egui::text::LayoutJob::simple(orbiters_notice_on(facts.desktop).to_string(), look::font(16.0, weight::MEDIUM), look::MUTED, 1000.0 - X - 240.0);
         job.wrap.max_rows = 3;
         p.galley(pos2(X, y + 72.0), p.layout_job(job), look::MUTED);
     }
@@ -167,12 +176,12 @@ pub(super) fn draw_target(p: &Painter, rect: Rect, facts: &Facts) {
     draw_stepper_name(p, rect, icons::GLOBE, target_name(&facts.translate.target));
 }
 
-pub(super) fn translate_caption(action: Action) -> Option<(String, String)> {
+pub(super) fn translate_caption(action: Action, desktop: bool) -> Option<(String, String)> {
     let (a, b) = match action {
         Action::Translate => (tr("Translation"), tr("Signs and chat in your language, laid over the text where it is.")),
         Action::Set(Pick::Translate(TranslatePick::Provider(TranslateProvider::ThisComputer))) => (tr("This computer"), tr("An AI app here (LM Studio, Ollama): nothing leaves your computer.")),
         Action::Set(Pick::Translate(TranslatePick::Provider(TranslateProvider::Address))) => (tr("AI server"), tr("An AI server on your network, at the address set in Orbiters' Settings.")),
-        Action::Set(Pick::Translate(TranslatePick::Provider(TranslateProvider::Orbiters))) => (tr("Orbiters"), orbiters_notice()),
+        Action::Set(Pick::Translate(TranslatePick::Provider(TranslateProvider::Orbiters))) => (tr("Orbiters"), orbiters_notice_on(desktop)),
         Action::Set(Pick::Translate(TranslatePick::Into(_))) => (tr("Into"), tr("The language translations are written in.")),
         _ => return None,
     };

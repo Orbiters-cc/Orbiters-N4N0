@@ -14,10 +14,22 @@ struct Pretend {
     installed: bool,
     started: Mutex<Vec<Vec<String>>>,
     window: Mutex<Option<SavedWindow>>,
+    /// Each running VRChat's `--profile` by process (0 when not said).
+    profiles: Mutex<HashMap<u32, u32>>,
+    /// Starts beside running VRChats (VRChat's own launcher), apart from Steam's.
+    beside: Mutex<Vec<Vec<String>>>,
 }
 impl Machine for Pretend {
     fn running(&self) -> Vec<(u32, bool)> {
         self.running.lock().unwrap().clone()
+    }
+    fn running_profiles(&self) -> Vec<(u32, bool, u32)> {
+        let profiles = self.profiles.lock().unwrap();
+        self.running.lock().unwrap().iter().map(|(pid, d)| (*pid, *d, profiles.get(pid).copied().unwrap_or(0))).collect()
+    }
+    fn start_beside(&self, args: &[String]) -> Result<(), String> {
+        self.beside.lock().unwrap().push(args.to_vec());
+        Ok(())
     }
     fn installed(&self) -> bool {
         self.installed
@@ -886,4 +898,154 @@ fn a_join_while_vrchat_is_starting_never_starts_a_second_one_when_the_processes_
     let _ = c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place) });
     assert_eq!(*flicker.started.lock().unwrap(), 0, "the route seen first (the person's VRChat) is the one taken: no start");
     let _ = *flicker.written.lock().unwrap();
+}
+
+#[test]
+fn a_second_vrchat_starts_on_a_free_profile_beside_the_first_and_never_on_a_running_one() {
+    // REQUEST15 7a. VRChat runs on profile 0 (in VR); nothing reaches a real VRChat: the pretend computer records.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    machine.running.lock().unwrap().push((10, false));
+    let c = controller(machine.clone());
+    let refused = c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 0 });
+    assert!(matches!(&refused, Some(Notice::Error(t)) if t.contains('0')), "never two on one profile: {refused:?}");
+    assert!(machine.beside.lock().unwrap().is_empty() && machine.started.lock().unwrap().is_empty());
+    assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    let beside = machine.beside.lock().unwrap().clone();
+    assert_eq!(beside.len(), 1, "through VRChat's own launcher, not Steam (which starts a game once)");
+    assert!(beside[0].contains(&"--profile=1".to_string()) && beside[0].contains(&"--no-vr".to_string()), "{:?}", beside[0]);
+    assert!(machine.started.lock().unwrap().is_empty());
+    assert_eq!(c.view().launcher.profiles.iter().find(|p| p.profile == 1).and_then(|p| p.starting), Some(LaunchMode::Desktop), "the chip says it is starting");
+    // While it starts, a third waits its turn.
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Vr, profile: 2 }), Some(Notice::Error(_))));
+    // It is up on profile 1: the start is over, and profile 1 is now refused too.
+    machine.running.lock().unwrap().push((11, true));
+    machine.profiles.lock().unwrap().insert(11, 1);
+    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 10, profile: 0, ..Default::default() }, crate::state::VrchatRunShown { pid: 11, profile: 1, account: Some("Sample Alt".into()), ..Default::default() }]);
+    c.launcher_game(machine.as_ref());
+    let profiles = c.view().launcher.profiles.clone();
+    assert_eq!(profiles.iter().map(|p| (p.profile, p.running, p.starting)).collect::<Vec<_>>(), [(0, Some(LaunchMode::Vr), None), (1, Some(LaunchMode::Desktop), None)]);
+    assert_eq!(c.view().settings.launch.profiles.get(&1).map(String::as_str), Some("Sample Alt"), "the account seen on it is remembered");
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Vr, profile: 1 }), Some(Notice::Error(_))));
+    assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Vr, profile: 2 }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    assert_eq!(machine.beside.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn the_first_vrchat_on_a_profile_goes_through_steam_with_that_profile() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Vr, profile: 2 }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    let started = machine.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].last().map(String::as_str), Some("--profile=2"));
+    assert!(!started[0].contains(&"--no-vr".to_string()));
+    assert_eq!(c.view().launcher.game, Game::Starting(LaunchMode::Vr));
+    // Profile 0 is VRChat's own start: no `--profile` at all.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 0 });
+    assert!(!machine.started.lock().unwrap()[0].iter().any(|a| a.starts_with("--profile")));
+    // Out of what Home offers: nothing starts.
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 99 }), Some(Notice::Error(_))));
+}
+
+#[test]
+fn the_profile_choice_lists_used_running_and_starting_profiles_with_their_accounts() {
+    let known: BTreeMap<u32, String> = [(1, "Sample Alt".to_string())].into();
+    let roster = [crate::state::VrchatRunShown { pid: 10, profile: 0, account: Some("Sample Me".into()), ..Default::default() }, crate::state::VrchatRunShown {
+        pid: 12,
+        profile: 3,
+        driver: crate::state::VrchatDriverShown::Agent { session: "s1".into() },
+        ..Default::default()
+    }];
+    let got = game_profiles(&known, &[(10, false, 0), (12, true, 3)], &roster, Some((2, LaunchMode::Desktop)));
+    let shown: Vec<(u32, Option<&str>, Option<LaunchMode>, Option<LaunchMode>, bool)> = got.iter().map(|p| (p.profile, p.account.as_deref(), p.running, p.starting, p.assistant)).collect();
+    assert_eq!(
+        shown,
+        [
+            (0, Some("Sample Me"), Some(LaunchMode::Vr), None, false),
+            (1, Some("Sample Alt"), None, None, false),
+            (2, None, None, Some(LaunchMode::Desktop), false),
+            (3, None, Some(LaunchMode::Desktop), None, true),
+        ]
+    );
+    assert_eq!(game_profiles(&BTreeMap::new(), &[], &[], None).iter().map(|p| p.profile).collect::<Vec<_>>(), [0], "profile 0 always");
+}
+
+// --- REQUEST15 7b: the account's own profile, against recorded replies only (nothing reaches VRChat) ---
+
+fn me_signed_in(c: &Shared) {
+    signed_in_list(c);
+    c.update(|s| s.launcher.me = Some(orbiters_core::launcher::Friend { id: "usr_test".into(), name: "Sample Me".into(), ..Default::default() }));
+}
+
+fn saving(c: &Shared) -> Option<orbiters_core::launcher::Saving> {
+    c.view().launcher.mine.as_ref().and_then(|m| m.saving.clone())
+}
+
+#[test]
+fn an_own_profile_change_goes_on_the_press_only_with_the_lists_account_within_vrchats_limits() {
+    use orbiters_core::launcher::{ProfileEdit, ProfilePart, Saving, Status};
+    let c = controller(Arc::new(Pretend::default()));
+    let (_, calls) = c.test_vrchat(vec![
+        (200, json!({"id": "usr_test", "status": "busy", "statusDescription": "in Unity"})),
+        (400, json!({"error": {"message": "Bio contains a disallowed word", "status_code": 400}})),
+        (200, json!({"id": "usr_test", "bio": "new bio"})),
+    ]);
+    me_signed_in(&c);
+    // A press on the list of the account: sent, and what VRChat answered shows.
+    assert_eq!(c.launcher_do(mine(Action::EditProfile(ProfileEdit::Status(Status::Busy)))), None);
+    assert_eq!(c.view().launcher.me.as_ref().unwrap().status, Status::Busy);
+    assert_eq!(c.view().launcher.me.as_ref().unwrap().status_text, "in Unity");
+    assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Status)));
+    // At once again: our own pace, nothing sent.
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::StatusText("afk".into()))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::StatusText, t)) if t.contains('s')), "{:?}", saving(&c));
+    c.launcher.lock().unwrap().mine_next = None;
+    // Past VRChat's limits: said, nothing sent.
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::StatusText("x".repeat(33)))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::StatusText, _))));
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Bio("x".repeat(513)))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Bio, _))));
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Status(Status::Offline))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Status, _))));
+    // Refused by VRChat: its words, and the bio is not changed.
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Bio("new bio".into()))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Bio, t)) if t.contains("disallowed")), "{:?}", saving(&c));
+    assert_ne!(c.view().launcher.mine.as_ref().unwrap().bio, "new bio");
+    c.launcher.lock().unwrap().mine_next = None;
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Bio("new bio".into()))));
+    assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Bio)));
+    assert_eq!(c.view().launcher.mine.as_ref().unwrap().bio, "new bio");
+    // Without the list's account, or on another account's list: nothing goes.
+    c.launcher.lock().unwrap().mine_next = None;
+    c.launcher_do(Action::EditProfile(ProfileEdit::Status(Status::JoinMe)));
+    c.launcher_do(Action::As { account: "usr_other".into(), action: Box::new(Action::EditProfile(ProfileEdit::Status(Status::JoinMe))) });
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Status, _))));
+    let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
+    assert_eq!(calls, ["PUT /users/usr_test", "PUT /profile/usr_test", "PUT /profile/usr_test"]);
+}
+
+#[test]
+fn the_own_profile_and_pictures_are_read_for_the_card() {
+    use orbiters_core::launcher::{BannerChoice, PictureKind, ProfileEdit, ProfilePart, Saving};
+    let c = controller(Arc::new(Pretend::default()));
+    let (_, calls) = c.test_vrchat(vec![
+        (200, json!({"id": "usr_test", "bio": "hello", "bannerType": "customImage", "bannerCustomUrl": "https://api.vrchat.cloud/api/1/file/file_b/1/file", "userIcon": "", "hasVrcPlus": true, "currentAvatarThumbnailImageUrl": "https://api.vrchat.cloud/avatar"})),
+        (200, json!([{"id": "file_1", "versions": [{"version": 0}, {"version": 1, "file": {"url": "https://api.vrchat.cloud/api/1/file/file_1/1/file"}}]}, {"id": "file_2", "versions": []}])),
+        (200, json!({"id": "usr_test", "userIcon": "https://api.vrchat.cloud/api/1/file/file_1/1/file"})),
+    ]);
+    me_signed_in(&c);
+    c.launcher_do(mine(Action::ReadMine));
+    let m = c.view().launcher.mine.clone().unwrap();
+    assert_eq!((m.bio.as_str(), m.banner, m.supporter, m.avatar_picture.as_str()), ("hello", BannerChoice::Custom, true, "https://api.vrchat.cloud/avatar"));
+    c.launcher_do(mine(Action::ListPictures(PictureKind::Icons)));
+    let icons = c.view().launcher.mine.clone().unwrap().icons.unwrap();
+    assert_eq!(icons.len(), 1, "a file with no version is no picture");
+    assert_eq!(icons[0].url, "https://api.vrchat.cloud/api/1/file/file_1/1/file");
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Picture(icons[0].url.clone()))));
+    assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Picture)));
+    assert_eq!(c.view().launcher.me.as_ref().unwrap().look.icon, icons[0].url);
+    let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
+    assert_eq!(calls, ["GET /profile/usr_test?asSelf=true", "GET /files?tag=icon&n=100", "PUT /profile/usr_test"]);
 }

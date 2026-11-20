@@ -113,7 +113,13 @@ pub fn builtins(cache: &Path) -> anyhow::Result<Vec<Template>> {
     if !path.join("ProjectSettings/ProjectVersion.txt").is_file() {
         copy(&avatar.path, &path, &AtomicBool::new(false), &Arc::new(Mutex::default()))?;
     }
-    crate::write_json(&path.join("Packages/vpm-manifest.json"), &serde_json::json!({"dependencies":{"com.vrchat.base":{"version":"3.x"}}}))?;
+    // Written when it is not this already (PROJECTS-24 a): every look at a project's packages lists the templates, and each
+    // wrote, flushed to disk and replaced the same file. The avatar template's manifest copied in first is replaced.
+    let manifest = path.join("Packages/vpm-manifest.json");
+    let base = serde_json::json!({"dependencies":{"com.vrchat.base":{"version":"3.x"}}});
+    if std::fs::read(&manifest).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok()).as_ref() != Some(&base) {
+        crate::write_json(&manifest, &base)?;
+    }
     out.push(Template {
         name: String::from(tr("VRChat Base Project")),
         path,
@@ -677,6 +683,25 @@ mod tests {
             let found = orbiters_i18n::in_language(language, || builtins(temp.path()).map(|all| all.len()));
             assert!(found.is_ok_and(|n| n >= 2), "{language:?}");
         }
+    }
+
+    /// PROJECTS-24 a: the base template's package list is written once, not again at every listing of the templates; one that
+    /// is not the base's (the avatar template's, copied in first, or changed since) is written.
+    #[test]
+    fn the_base_template_s_manifest_is_written_only_when_it_differs() {
+        let temp = tempfile::tempdir().unwrap();
+        builtins(temp.path()).unwrap();
+        let manifest = temp.path().join("base-2022.3.22f1/Packages/vpm-manifest.json");
+        let base: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        assert_eq!(base, serde_json::json!({"dependencies":{"com.vrchat.base":{"version":"3.x"}}}));
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options().write(true).open(&manifest).unwrap().set_modified(long_ago).unwrap();
+        builtins(temp.path()).unwrap();
+        assert_eq!(std::fs::metadata(&manifest).unwrap().modified().unwrap(), long_ago, "listed again: not written again");
+        std::fs::write(&manifest, r#"{"dependencies":{"com.vrchat.avatars":{"version":"3.x"}}}"#).unwrap();
+        builtins(temp.path()).unwrap();
+        let again: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        assert_eq!(again, base, "another one is replaced");
     }
 
     #[test]

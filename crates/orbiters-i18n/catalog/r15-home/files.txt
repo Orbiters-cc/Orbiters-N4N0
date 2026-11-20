@@ -1,0 +1,3 @@
+# Home's Play with VRChat's profiles, the account's own profile card, the compact features (REQUEST15 7, stream home).
+crates/orbiters-desktop/src/pages/launcher/mine.rs
+crates/orbiters-desktop/src/controller/launcher_mine.rs

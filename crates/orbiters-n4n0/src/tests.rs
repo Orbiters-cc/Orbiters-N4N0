@@ -612,9 +612,10 @@ fn testing_holds_a_state_then_plays_them_all() {
     let states: Vec<i32> =
         sent.iter().filter(|(a, _)| *a == parameter(params::STATE)).filter_map(|(_, v)| if let OscType::Int(i) = v { Some(*i) } else { None }).collect();
     assert_eq!(states, vec![0, 1], "idle, then listening two seconds later");
-    n.command(Command::TestVisible { on: false });
+    n.command(Command::ShowBot { on: false });
     let sent = received(&vrchat, Duration::from_millis(300));
     assert!(sent.contains(&(parameter(params::VISIBLE), OscType::Bool(false))));
+    assert_eq!(t.view().bot, Some(false), "the page shows the bot hidden at once");
     t.shutdown(&n);
 }
 
@@ -1878,6 +1879,48 @@ fn the_menu_shows_on_the_screen_in_desktop_mode_or_with_replace() {
     let old = AvatarManifest::parse(r#"{ "format": "orbiters.avatar", "version": 1, "avatar_id": "avtr_x" }"#).unwrap();
     assert_eq!(screen_replace(None, Some(&old)), None);
     assert_eq!(screen_replace(None, None), None);
+}
+
+/// Show N4N0 and the menu are two choices (contracts `SCREEN_WITHOUT_BOT`): the bot hidden, a screen of version 17 keeps
+/// the menu; an older screen hides with the bot, so the menu goes to the overlay meanwhile and comes back with the bot.
+#[test]
+fn hiding_the_bot_keeps_the_menu_on_a_screen_that_shows_without_it() {
+    let (t, n) = n4n0(Settings::default());
+    {
+        let mut rt = n.n4n0.lock().unwrap();
+        rt.screen_present = true;
+        rt.screen_sync = Some(8);
+        rt.vr_mode = Some(false);
+    }
+    for (version, bot, screen) in [
+        (Some(contract::SCREEN_WITHOUT_BOT), None, true),
+        (Some(contract::SCREEN_WITHOUT_BOT), Some(true), true),
+        (Some(contract::SCREEN_WITHOUT_BOT), Some(false), true),
+        (Some(contract::SCREEN_STAY_HERE), Some(true), true),
+        (Some(contract::SCREEN_STAY_HERE), Some(false), false),
+        (None, Some(false), false),
+    ] {
+        {
+            let mut rt = n.n4n0.lock().unwrap();
+            rt.screen_version = version;
+            rt.bot = bot;
+            rt.screen_place(false);
+            assert_eq!(rt.screen.available, screen, "screen version {version:?}, bot {bot:?}");
+        }
+    }
+    // VRChat says Show N4N0 changed (the Action Menu): recorded and shown on the page.
+    n.n4n0.lock().unwrap().screen_version = Some(contract::SCREEN_STAY_HERE);
+    n.on_parameter(params::VISIBLE, &OscValue::Bool(true));
+    assert_eq!((t.view().bot, t.view().bot_keeps_menu), (Some(true), false), "an older screen hides with the bot");
+    n.on_parameter(params::VISIBLE, &OscValue::Bool(false));
+    assert_eq!(t.view().bot, Some(false));
+    n.n4n0.lock().unwrap().screen_version = Some(contract::SCREEN_WITHOUT_BOT);
+    n.publish();
+    assert!(t.view().bot_keeps_menu);
+    // An avatar without the screen: the menu is the overlay's, whatever the bot does.
+    n.n4n0.lock().unwrap().screen_present = false;
+    n.publish();
+    assert!(t.view().bot_keeps_menu);
 }
 
 /// The stand-in mouse: the left button and VRChat in front as a test sets them, and how often it was read.

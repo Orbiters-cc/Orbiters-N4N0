@@ -1268,7 +1268,8 @@ pub(crate) mod tests {
         o.test_face = Some(N4n0Face::Annoyed);
         o.test_cycle = true;
         o.test_afk = true;
-        o.test_hidden = true;
+        o.bot = Some(false);
+        o.bot_keeps_menu = true;
         o.test_pictures = true;
         o.desktop_mode = true;
         o.menu_request = 4;

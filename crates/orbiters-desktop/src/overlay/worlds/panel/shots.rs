@@ -190,6 +190,15 @@ fn gradient(ctx: &egui::Context, name: &str, hue: f32, w: usize, h: usize) -> eg
 /// picture's corner, and whether the view is on the whole page; without, its picture and See it in 3D. As the sheet shows it, `px` pixels, premultiplied. The list is the stand-in captures', with the
 /// real worlds' names and pictures where `ORBIT_PANEL_WORLDS` gives them.
 pub fn side_live(px: [u32; 2], live: Option<(&egui::ColorImage, bool)>) -> anyhow::Result<Vec<u8>> {
+    side_with(px, live, false)
+}
+
+/// The same, its capture's 3D still coming: its picture, and what it says in its corner meanwhile (REQUEST15 item 6: it starts by itself as the world is chosen).
+pub fn side_loading(px: [u32; 2]) -> anyhow::Result<Vec<u8>> {
+    side_with(px, None, true)
+}
+
+fn side_with(px: [u32; 2], live: Option<(&egui::ColorImage, bool)>, loading: bool) -> anyhow::Result<Vec<u8>> {
     let mut entries = stand_ins()?;
     let real = real_worlds();
     as_the_real_worlds(&mut entries, &real);
@@ -208,7 +217,7 @@ pub fn side_live(px: [u32; 2], live: Option<(&egui::ColorImage, bool)>) -> anyho
     // Signed in to VRChat, as the live captures are: the same lists (Popular) and Invite me.
     let mut status = Status::default();
     status.list.vrchat = true;
-    let panel = Panel { on_sheet: true, section: Section::Captures, page: Page::Detail, selected: Some(10), live: live.as_ref().map(|(texture, full)| Live { id: 10, picture: Some(texture.id()), full: *full, ..Default::default() }), ..Default::default() };
+    let panel = Panel { on_sheet: true, section: Section::Captures, page: Page::Detail, selected: Some(10), live: live.as_ref().map(|(texture, full)| Live { id: 10, picture: Some(texture.id()), full: *full, ..Default::default() }).or(loading.then(|| Live { id: 10, ..Default::default() })), ..Default::default() };
     let d = Data { entries: &entries, picked: None, status: &status, feedback: &feedback, facts: &facts, thumb: &thumb, picture: &picture, now: 1_793_310_000 };
     for _ in 0..2 {
         canvas.paint(5.0, |p| panel.draw(p, &d, 5.0));

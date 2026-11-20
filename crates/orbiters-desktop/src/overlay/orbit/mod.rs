@@ -19,6 +19,8 @@ pub mod detect;
 #[cfg(windows)]
 pub mod desktop;
 #[cfg(windows)]
+pub mod desk_translate;
+#[cfg(windows)]
 pub mod paint_bench;
 pub mod panels;
 pub mod qm_buttons;

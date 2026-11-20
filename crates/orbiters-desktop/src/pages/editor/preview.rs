@@ -20,7 +20,9 @@ pub struct Ask {
 /// A preview made.
 pub struct Made {
     pub ask: Ask,
-    pub image: Rgba8,
+    /// As the interface's texture takes it, made on the preview's thread (PAGES-UI-17): the interface thread made it, a pass
+    /// over the whole picture and its size again in memory, at every preview of a slider's drag.
+    pub image: egui::ColorImage,
     /// Its luma histogram ([`orbiters_ui::photo::histogram`]), for the curves.
     pub histogram: Vec<u32>,
 }
@@ -109,12 +111,39 @@ fn run(shared: &Shared, ctx: &egui::Context, inputs: &[Rgba8], full: (u32, u32))
                 s.asked = None;
             }
             drop(s);
-            let image = image.to_rgba8();
-            let histogram = orbiters_ui::photo::histogram(&image, 64);
+            let rgba = image.to_rgba8();
+            let histogram = orbiters_ui::photo::histogram(&rgba, 64);
+            let image = egui::ColorImage::from_rgba_unmultiplied([rgba.width as usize, rgba.height as usize], &rgba.pixels);
+            drop(rgba);
             let mut s = shared.state.lock().unwrap_or_else(|e| e.into_inner());
             s.made = Some(Made { ask, image, histogram });
             drop(s);
             ctx.request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PAGES-UI-17: a preview comes as the texture's picture, of the size asked, with its histogram.
+    #[test]
+    fn a_preview_comes_as_the_texture_s_picture() {
+        let ctx = egui::Context::default();
+        let input = Rgba8 { width: 4, height: 2, pixels: [90u8, 120, 150, 255].repeat(8) };
+        let mut preview = Preview::start(&ctx, Arc::new(vec![input]), (4, 2));
+        preview.ask(Ask { edit: Edit::default(), stage: Stage::Full, size: (4, 2) });
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let made = loop {
+            if let Some(made) = preview.take() {
+                break made;
+            }
+            assert!(std::time::Instant::now() < until, "no preview came");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
+        assert_eq!(made.image.size, [4, 2]);
+        assert_eq!(made.image.pixels.len(), 8);
+        assert_eq!(made.histogram.len(), 64);
     }
 }

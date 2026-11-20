@@ -205,6 +205,22 @@ impl State {
         cx.ctl.clean_up(trim, delete);
     }
 
+    /// Reads the list again unless it was read for `key` (the library's version, the folder, the page's visit). The page's first
+    /// frame and Manage captures both asked: entering Manage read the whole folder a second time beside the first reading, which
+    /// ran to its end for nothing (PAGES-UI-15).
+    fn read_list_for(&mut self, ctx: &egui::Context, key: (u64, PathBuf, u64)) {
+        if self.loaded.as_ref() == Some(&key) {
+            return;
+        }
+        if self.loaded.as_ref().is_some_and(|k| k.1 != key.1) {
+            // Another folder: none of these pictures belong to it.
+            self.thumbs.clear();
+        }
+        let dir = key.1.clone();
+        self.loaded = Some(key);
+        self.list = Job::spawn(ctx, move || crate::worlds::sessions(&dir));
+    }
+
     /// A new list: the pictures of sessions that went away (trashed, moved) go with them.
     fn set_sessions(&mut self, list: Vec<SessionSummary>) {
         self.thumbs.retain(|dir, _| list.iter().any(|s| &s.dir == dir));
@@ -251,8 +267,7 @@ fn now_secs() -> u64 {
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if state.sessions.is_none() && !state.list.running() {
-        let dir = cx.snap.settings.sessions_dir.clone();
-        state.list = Job::spawn(ui.ctx(), move || crate::worlds::sessions(&dir));
+        state.read_list_for(ui.ctx(), (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit));
     }
     state.take_list(cx.snap.cleanup.as_ref(), anim::time(ui.ctx()));
     if !state.manage && state.detail.is_none() && state.storage.is_none() && state.viewer.is_none() {
@@ -277,16 +292,7 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
     // Reload when the library changes, the folder changes, or the page is entered again (sizes come from the
     // window's library cache: only sessions written since are walked again).
-    let key = (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit);
-    if state.loaded.as_ref() != Some(&key) {
-        if state.loaded.as_ref().is_some_and(|k| k.1 != key.1) {
-            // Another folder: none of these pictures belong to it.
-            state.thumbs.clear();
-        }
-        state.loaded = Some(key);
-        let dir = cx.snap.settings.sessions_dir.clone();
-        state.list = Job::spawn(&ctx, move || crate::worlds::sessions(&dir));
-    }
+    state.read_list_for(&ctx, (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit));
     let now = anim::time(&ctx);
     state.take_list(cx.snap.cleanup.as_ref(), now);
     // The service is done with a clean-up asked here (or turned it down): the library, read again, says how it went.
@@ -1426,5 +1432,28 @@ mod tests {
         }
         assert!(!state.pending.settled(None, 100.0), "that reading answered it: not read again");
         assert!(state.pending.is_empty());
+    }
+
+    /// PAGES-UI-15: the list read at the page's first frame is the one Manage captures shows, when nothing changed since; it is
+    /// read again for a new version of the library, another folder or another visit.
+    #[test]
+    fn manage_captures_does_not_read_the_list_a_second_time() {
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        let dir = std::env::temp_dir().join("orbiters-test-no-sessions-here");
+        state.read_list_for(&ctx, (1, dir.clone(), 1));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while state.sessions.is_none() {
+            assert!(std::time::Instant::now() < until);
+            state.take_list(None, 0.0);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        state.read_list_for(&ctx, (1, dir.clone(), 1));
+        assert!(!state.list.running(), "the same library, folder and visit: not read again");
+        for key in [(2, dir.clone(), 1), (2, dir.join("other"), 1), (2, dir.join("other"), 2)] {
+            state.read_list_for(&ctx, key.clone());
+            assert!(state.list.running(), "{key:?}: read again");
+            state.read_list_for(&ctx, key);
+        }
     }
 }

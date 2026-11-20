@@ -2,7 +2,8 @@
 //! notifications, invite requests, boops, the pipeline's token. Paths and bodies from the community OpenAPI spec
 //! (vrchatapi/specification, 2026-11-10): `getFriends`, `getFavoriteGroups`, `getFavorites`, `getPublicProfile`, `getUser`,
 //! `getMutuals`, `getNotifications`, `getNotificationV2s`, `deleteNotification` (hide), `requestInvite`, `boop`,
-//! `verifyAuthToken`, `getInventoryTemplate`. Every request goes through the client's pacing (one a second per family) and
+//! `verifyAuthToken`, `getInventoryTemplate`; for the account's own profile on Home (REQUEST15 7b) `updateUser` (status and
+//! its text), `updateProfile` (bio, icon, banner), `getPublicProfile` with `asSelf`, `getFiles` (icons, gallery). Every request goes through the client's pacing (one a second per family) and
 //! its 429 back-off; the answers are read by [`crate::launcher_feed`].
 use super::*;
 use serde_json::Value;
@@ -142,6 +143,49 @@ impl Client {
         v.get("imageUrl").and_then(Value::as_str).filter(|u| u.starts_with("https://")).map(str::to_string).ok_or(Error::InvalidResponse)
     }
 
+    /// The account's own profile as it sees it (`getPublicProfile` with `asSelf=true`): bio, icon, banner type, colour
+    /// and picture.
+    pub fn own_profile(&mut self) -> Result<Value> {
+        self.authenticated()?;
+        let me = self.own_id()?;
+        let r = self.get("users", &format!("/profile/{}?asSelf=true", encode(&me)))?;
+        json(&r.body)
+    }
+
+    /// Changes the account's own status and / or its text (`updateUser`, `PUT /users/{userId}`, `UpdateUserRequest`:
+    /// `status`, `statusDescription`). Returns VRChat's `CurrentUser`. Only ever the signed-in account's own.
+    pub fn update_own_status(&mut self, status: Option<&str>, text: Option<&str>) -> Result<Value> {
+        self.authenticated()?;
+        let me = self.own_id()?;
+        let body = own_status_body(status, text)?;
+        let r = self.request("users", "PUT", format!("{BASE}/users/{}", encode(&me)), None, Some(body))?;
+        json(&r.body)
+    }
+
+    /// Changes the account's own profile (`updateProfile`, `PUT /profile/{userId}`, `UpdateProfileRequest`): `body` from
+    /// [`own_profile_body`]. Returns VRChat's `PublicProfile`.
+    pub fn update_own_profile(&mut self, body: &Value) -> Result<Value> {
+        self.authenticated()?;
+        let me = self.own_id()?;
+        let r = self.request("users", "PUT", format!("{BASE}/profile/{}", encode(&me)), None, Some(body.to_string()))?;
+        json(&r.body)
+    }
+
+    /// The account's own files of a tag (`getFiles`, `GET /files?tag=icon|gallery&n=100`): its VRC+ icons, its gallery.
+    pub fn own_files(&mut self, tag: &str) -> Result<Vec<Value>> {
+        self.authenticated()?;
+        if !matches!(tag, "icon" | "gallery") {
+            return Err(Error::NotFound);
+        }
+        let r = self.get("files", &format!("/files?tag={tag}&n=100"))?;
+        list(&r.body)
+    }
+
+    fn own_id(&self) -> Result<String> {
+        // The signed-in account's own id, as VRChat gave it at the sign-in (the path is encoded all the same).
+        self.user.as_ref().map(|u| u.id.clone()).filter(|id| id.starts_with("usr_")).ok_or(Error::Unauthorized)
+    }
+
     /// The token the pipeline takes (`verifyAuthToken`, `GET /auth`): `wss://pipeline.vrchat.cloud/?authToken=<token>`.
     /// Never logged or shown.
     pub fn pipeline_token(&mut self) -> Result<Secret> {
@@ -151,6 +195,43 @@ impl Client {
         let token = v.get("token").and_then(Value::as_str).filter(|t| !t.is_empty() && v.get("ok").and_then(Value::as_bool) != Some(false));
         token.map(|t| Secret(t.to_string())).ok_or(Error::Unauthorized)
     }
+}
+
+/// The body of a status change: only VRChat's own statuses a person picks, and a text of at most
+/// [`crate::launcher::STATUS_TEXT_MAX`] characters.
+pub fn own_status_body(status: Option<&str>, text: Option<&str>) -> Result<String> {
+    let mut body = serde_json::Map::new();
+    if let Some(status) = status {
+        if !matches!(status, "join me" | "active" | "ask me" | "busy") {
+            return Err(Error::NotFound);
+        }
+        body.insert("status".into(), Value::String(status.into()));
+    }
+    if let Some(text) = text {
+        if text.chars().count() > crate::launcher::STATUS_TEXT_MAX {
+            return Err(Error::NotFound);
+        }
+        body.insert("statusDescription".into(), Value::String(text.into()));
+    }
+    if body.is_empty() {
+        return Err(Error::NotFound);
+    }
+    Ok(Value::Object(body).to_string())
+}
+
+/// The body of a profile change: a bio of at most [`crate::launcher::BIO_MAX`] characters, an icon of VRChat's own
+/// files (or none: the avatar's picture), a banner (its type, its colour as six hex digits, a gallery picture).
+pub fn own_profile_body(edit: &crate::launcher::ProfileEdit) -> Result<Value> {
+    use crate::launcher::{BannerChoice, ProfileEdit};
+    let vrchat_file = |url: &str| url.is_empty() || url.starts_with("https://api.vrchat.cloud/api/1/file/") && !url.contains(['"', ' ', '?', '#']);
+    Ok(match edit {
+        ProfileEdit::Bio(bio) if bio.chars().count() <= crate::launcher::BIO_MAX => serde_json::json!({ "bio": bio }),
+        ProfileEdit::Picture(url) if vrchat_file(url) => serde_json::json!({ "userIcon": url }),
+        ProfileEdit::Banner { choice: BannerChoice::Colour, colour: Some([r, g, b]), .. } => serde_json::json!({ "bannerType": "color", "bannerColor": format!("{r:02x}{g:02x}{b:02x}") }),
+        ProfileEdit::Banner { choice: BannerChoice::Avatar, .. } => serde_json::json!({ "bannerType": "avatarBanner" }),
+        ProfileEdit::Banner { choice: BannerChoice::Custom, custom, .. } if !custom.is_empty() && vrchat_file(custom) => serde_json::json!({ "bannerType": "customImage", "bannerCustomUrl": custom }),
+        _ => return Err(Error::NotFound),
+    })
 }
 
 /// The boop's body: only VRChat's default emoji ids (`default_…`, `DefaultEmojiID`) are sent; no emoji, `{}`.
@@ -253,6 +334,52 @@ mod tests {
                 ("PUT".into(), "/auth/user/notifications/not_1/hide".into(), None),
             ]
         );
+    }
+
+    #[test]
+    fn the_own_profile_goes_to_the_specs_paths_with_the_specs_bodies() {
+        use crate::launcher::{BannerChoice, ProfileEdit};
+        let (mut c, seen) = client(&[
+            (200, r#"{"id":"usr_test","bio":"hi","bannerType":"color"}"#),
+            (200, r#"{"id":"usr_test","status":"busy","statusDescription":"in Unity"}"#),
+            (200, r#"{"id":"usr_test","bio":"new"}"#),
+            (200, r#"{"id":"usr_test"}"#),
+            (200, r#"[{"id":"file_1","versions":[]}]"#),
+        ]);
+        assert_eq!(c.own_profile().unwrap()["bio"], "hi");
+        assert_eq!(c.update_own_status(Some("busy"), Some("in Unity")).unwrap()["status"], "busy");
+        assert_eq!(c.update_own_profile(&own_profile_body(&ProfileEdit::Bio("new".into())).unwrap()).unwrap()["bio"], "new");
+        let banner = own_profile_body(&ProfileEdit::Banner { choice: BannerChoice::Colour, colour: Some([60, 201, 44]), custom: String::new() }).unwrap();
+        c.update_own_profile(&banner).unwrap();
+        assert_eq!(c.own_files("icon").unwrap().len(), 1);
+        let got: Vec<(String, String, Option<String>)> = seen.lock().unwrap().iter().map(|(m, u, b)| (m.clone(), u.trim_start_matches(BASE).to_string(), b.clone())).collect();
+        assert_eq!(
+            got,
+            [
+                ("GET".into(), "/profile/usr_test?asSelf=true".into(), None),
+                ("PUT".into(), "/users/usr_test".into(), Some(r#"{"status":"busy","statusDescription":"in Unity"}"#.into())),
+                ("PUT".into(), "/profile/usr_test".into(), Some(r#"{"bio":"new"}"#.into())),
+                ("PUT".into(), "/profile/usr_test".into(), Some(r#"{"bannerColor":"3cc92c","bannerType":"color"}"#.into())),
+                ("GET".into(), "/files?tag=icon&n=100".into(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn nothing_past_vrchats_limits_or_outside_its_files_is_sent() {
+        use crate::launcher::{BannerChoice, ProfileEdit, BIO_MAX, STATUS_TEXT_MAX};
+        let (mut c, seen) = client(&[]);
+        assert_eq!(c.update_own_status(Some("offline"), None), Err(Error::NotFound), "not a status a person picks");
+        assert_eq!(c.update_own_status(None, Some(&"x".repeat(STATUS_TEXT_MAX + 1))), Err(Error::NotFound));
+        assert_eq!(c.update_own_status(None, None), Err(Error::NotFound));
+        assert_eq!(c.own_files("../auth"), Err(Error::NotFound));
+        assert!(seen.lock().unwrap().is_empty());
+        assert!(own_status_body(None, Some(&"é".repeat(STATUS_TEXT_MAX))).is_ok(), "characters, not bytes");
+        assert!(own_profile_body(&ProfileEdit::Bio("x".repeat(BIO_MAX + 1))).is_err());
+        assert!(own_profile_body(&ProfileEdit::Picture("https://evil.example/x.png".into())).is_err());
+        assert_eq!(own_profile_body(&ProfileEdit::Picture(String::new())).unwrap(), serde_json::json!({ "userIcon": "" }), "back to the avatar's picture");
+        assert!(own_profile_body(&ProfileEdit::Banner { choice: BannerChoice::Custom, colour: None, custom: String::new() }).is_err());
+        assert!(own_profile_body(&ProfileEdit::Banner { choice: BannerChoice::Colour, colour: None, custom: String::new() }).is_err());
     }
 
     #[test]

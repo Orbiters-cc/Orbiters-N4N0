@@ -39,8 +39,9 @@ const STARTING_FOR: Duration = Duration::from_secs(60);
 /// How long a start's claim on its VRChat profile holds when no VRChat with that profile shows up: a slow start (Steam,
 /// Easy Anti-Cheat, an update) is still a start, so this is long; a VRChat seen on the profile ends the claim at once.
 const PROFILE_HELD: Duration = Duration::from_secs(180);
-/// A start past [`PROFILE_HELD`] whose VRChat was never seen is not forgotten: its profile takes no new start until the
-/// person, told so, presses again within [`CONFIRM_WITHIN`] (VRChat may still come: an update, a slow Steam), for this long.
+/// A start past [`PROFILE_HELD`] whose VRChat was never seen is not forgotten: its profile takes no new start from a
+/// person until they, told so, press again within [`CONFIRM_WITHIN`] (VRChat may still come: a long Steam update), however
+/// long that is; a start nobody pressed (the bridge's) may take the profile after this long.
 const PROFILE_LAPSED: Duration = Duration::from_secs(10 * 60);
 const CONFIRM_WITHIN: Duration = Duration::from_secs(20);
 /// The same on a Mac, where the person presses Play in Obelisk (its sign-in, an update check, Easy Anti-Cheat).
@@ -444,7 +445,8 @@ impl Claim {
         self.at.elapsed() < PROFILE_HELD
     }
 
-    /// Kept at all: holding, or lapsed (see [`Controller::launcher_claim`]).
+    /// Still barring its profile to a start nobody pressed (the bridge's): holding, or lapsed for less than
+    /// [`PROFILE_LAPSED`]. A person is asked about it however old it is (see [`Controller::launcher_claim`]).
     fn kept(&self) -> bool {
         self.at.elapsed() < PROFILE_HELD + PROFILE_LAPSED
     }
@@ -1427,7 +1429,11 @@ impl Controller {
         // A start on this profile that never showed (past its time): not started again behind its back. The person is
         // told once; a press again within a few seconds says it is not coming, and starts.
         let now = Instant::now();
-        if let Some(lapsed) = rt.starting.iter_mut().find(|c| c.profile == profile && c.kept()) {
+        // Past its lapse, the bridge's start may take the profile; a person is always asked first.
+        if !person {
+            rt.starting.retain(|c| c.profile != profile || c.kept());
+        }
+        if let Some(lapsed) = rt.starting.iter_mut().find(|c| c.profile == profile) {
             match lapsed.confirm_by {
                 Some(by) if person && now < by => {
                     let id = lapsed.id;
@@ -1458,7 +1464,6 @@ impl Controller {
     pub(super) fn launcher_retire_claims(&self, observed: &[u64], runs: &[(u32, bool, Option<u32>)]) -> Vec<(u32, LaunchMode)> {
         let mut rt = self.launcher.lock().unwrap();
         rt.starting.retain(|c| !(observed.contains(&c.id) && runs.iter().any(|r| r.2 == Some(c.profile))));
-        rt.starting.retain(Claim::kept);
         rt.starting.iter().filter(|c| c.holds()).map(|c| (c.profile, c.mode)).collect()
     }
 

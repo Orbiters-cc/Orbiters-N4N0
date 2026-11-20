@@ -1432,3 +1432,21 @@ fn join_says_a_lapsed_start_and_go_there_never_arms_the_second_press() {
     assert_eq!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place) }), Some(Notice::Sent { to: W.into(), action: SentKind::Join }));
     assert_eq!(fake.started.lock().unwrap().len(), 1);
 }
+
+// --- REQUEST15 third pass, B6: a start that never showed is asked about however long a Steam update takes ---
+
+#[test]
+fn a_start_unseen_for_twenty_minutes_still_asks_the_person_before_another() {
+    let (machine, c) = running_profile_0();
+    c.launcher_claim(1, LaunchMode::Desktop).unwrap();
+    for held in c.launcher.lock().unwrap().starting.iter_mut() {
+        held.at -= Duration::from_secs(20 * 60);
+    }
+    // Looks go by; the claim is not dropped by its age.
+    c.launcher_retire_claims(&[], &[(10, false, Some(0))]);
+    c.launcher_game(machine.as_ref());
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Error(t)) if t.contains("press Play again")));
+    assert!(machine.beside.lock().unwrap().is_empty(), "no second start without the person's say");
+    // The bridge (nobody pressing) may take it after its lapse.
+    assert!(c.launcher_claim_unattended(1, LaunchMode::Desktop).is_ok());
+}

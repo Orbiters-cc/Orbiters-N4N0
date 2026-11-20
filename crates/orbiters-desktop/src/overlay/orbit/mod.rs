@@ -89,9 +89,14 @@ fn usage_name(action: &Action) -> String {
     crate::usage::stable_name(&format!("{action:?}"))
 }
 
-/// Whether the desktop's panels are wanted: VRChat runs without SteamVR, on this computer, and the setting says so.
+/// Whether the desktop's panels are wanted: VRChat runs without SteamVR, on this computer, and the settings say so: a menu around VRChat's, its camera's
+/// tiles, or translation (whose translations the desktop's process shows, menus or none: verify-r15).
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
-    orbiters_core::osc::VRCHAT_RUNS_HERE && snap.vrchat.running && !snap.vrchat.remote && !snap.steamvr.running && (snap.settings.orbit.any() || snap.settings.orbit.camera_tiles)
+    orbiters_core::osc::VRCHAT_RUNS_HERE
+        && snap.vrchat.running
+        && !snap.vrchat.remote
+        && !snap.steamvr.running
+        && (snap.settings.orbit.any() || snap.settings.orbit.camera_tiles || snap.settings.translate.enabled)
 }
 
 /// A part's appearing: a spring from nothing to its place, a little past it. Each turn moves the window or overlay and its alpha, no new picture.
@@ -1388,6 +1393,10 @@ impl Panels {
             self.stop_talking();
             self.facts.pointed = None;
             self.facts.sheet = None;
+            // The menu went: nothing of Worlds' page turns or loads behind it (the desktop's loop no longer calls `follow` with no menu up).
+            if let Some(worlds) = self.stage.worlds.as_mut() {
+                worlds.set_shown(false);
+            }
             // Whatever was held ends, done by nobody: a menu going away is no let-go (OVL2-17).
             self.cancel();
             self.stage.epoch = self.stage.epoch.wrapping_add(1);
@@ -2324,6 +2333,8 @@ impl Panels {
                     }
                 }
             }
+            // Shown or not: another tab, the sheet or the menu closed, and what turned on its side panel stops at once, not started again (verify-r15 B2).
+            worlds.set_shown(self.open.is_some() && self.facts.sheet == Some(Sheet::Worlds));
             worlds.update_alone(snap, &self.backend);
             if self.facts.sheet == Some(Sheet::Worlds) && !worlds.open {
                 self.close_sheet();
@@ -2460,7 +2471,8 @@ impl Panels {
                 provider: snap.settings.translate.provider,
                 target: crate::overlay::translate::target(&snap.settings),
                 keep_english: snap.settings.translate.keep_english,
-                agreed: snap.settings.translate.orbiters_agreed,
+                // The desktop reads VRChat's window: its own agreement (verify-r15 B7).
+                agreed: if self.facts.desktop { snap.settings.translate.orbiters_agreed_window } else { snap.settings.translate.orbiters_agreed },
                 status: (*snap.translate).clone(),
             },
             talk_lines: if self.facts.sheet == Some(Sheet::Talk) {
@@ -2965,6 +2977,7 @@ impl Panels {
                     TranslatePick::Provider(p) => serde_json::json!({ "translate": { "provider": p } }),
                     TranslatePick::Into(after) => serde_json::json!({ "translate": { "target": panels::target_after(&crate::overlay::translate::target(&snap.settings), after) } }),
                     TranslatePick::KeepEnglish(keep) => serde_json::json!({ "translate": { "keep_english": keep } }),
+                    TranslatePick::Agree if self.facts.desktop => serde_json::json!({ "translate": { "orbiters_agreed_window": true } }),
                     TranslatePick::Agree => serde_json::json!({ "translate": { "orbiters_agreed": true } }),
                 }
             }
@@ -4635,6 +4648,26 @@ fn note_words(text: &str) -> (String, String) {
         (tr("Open VRChat's camera first").into(), tr("Quick Menu, the camera icon, Stream Camera. Then press this again.").into())
     } else {
         (tr("3D picture").into(), tr(text).to_string())
+    }
+}
+
+#[cfg(test)]
+mod desktop_wanted_tests {
+    /// verify-r15: translation on keeps the desktop's process (which shows its translations) with every menu and the camera's tiles off; off, nothing does.
+    #[test]
+    fn translation_alone_keeps_the_desktop_s_process() {
+        let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
+        snap.vrchat.running = true;
+        snap.settings.orbit.camera_tiles = false;
+        snap.settings.orbit.wheel = false;
+        snap.settings.orbit.quick_menu = false;
+        let menus_off = !snap.settings.orbit.any();
+        snap.settings.translate.enabled = true;
+        if menus_off {
+            assert_eq!(super::wanted_on_desktop(&snap), orbiters_core::osc::VRCHAT_RUNS_HERE, "translation on, menus off");
+            snap.settings.translate.enabled = false;
+            assert!(!super::wanted_on_desktop(&snap), "nothing wanted");
+        }
     }
 }
 

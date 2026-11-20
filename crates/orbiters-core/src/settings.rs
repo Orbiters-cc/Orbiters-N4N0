@@ -165,11 +165,13 @@ pub struct TranslateSettings {
     pub keep_english: bool,
     /// The person read and accepted that, with Orbiters translating, the text seen in VR is sent to Orbiters.
     pub orbiters_agreed: bool,
+    /// The same for the desktop, where VRChat's window is read: asked on its own, as the agreement above named VR only (verify-r15 B7).
+    pub orbiters_agreed_window: bool,
 }
 
 impl Default for TranslateSettings {
     fn default() -> Self {
-        Self { enabled: false, target: None, provider: TranslateProvider::default(), server: String::new(), model: String::new(), keep_english: true, orbiters_agreed: false }
+        Self { enabled: false, target: None, provider: TranslateProvider::default(), server: String::new(), model: String::new(), keep_english: true, orbiters_agreed: false, orbiters_agreed_window: false }
     }
 }
 

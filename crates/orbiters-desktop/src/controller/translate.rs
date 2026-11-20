@@ -76,15 +76,22 @@ impl super::Controller {
         });
     }
 
-    /// A batch translated by Orbiters (blocking: called on a thread of its own).
-    pub fn translate_remote(self: &Shared, batch: &Batch) -> Answer {
+    /// A batch translated by Orbiters (blocking: called on a thread of its own). `window`: it comes from the desktop's translation, which reads VRChat's window.
+    pub fn translate_remote(self: &Shared, batch: &Batch, window: bool) -> Answer {
         let settings = self.view().settings.translate.clone();
-        if !settings.orbiters_agreed || settings.provider != orbiters_core::settings::TranslateProvider::Orbiters {
+        if !may_send(&settings, window) {
             return Err(Refused::NotAgreed);
         }
         let Some((api, token)) = self.account_api() else { return Err(Refused::SignedOut) };
         call(&api, &token, batch)
     }
+}
+
+/// Whether a batch may go to Orbiters now, as the settings are at this moment: translation on (a batch read before it was turned off goes nowhere), Orbiters
+/// chosen, and the agreement for where the text was read given: in VR, or VRChat's window on the desktop, each its own (verify-r15 B7).
+pub fn may_send(settings: &orbiters_core::settings::TranslateSettings, window: bool) -> bool {
+    let agreed = if window { settings.orbiters_agreed_window } else { settings.orbiters_agreed };
+    settings.enabled && agreed && settings.provider == orbiters_core::settings::TranslateProvider::Orbiters
 }
 
 /// One batch to Orbiters' route with `token` (the account's credential).
@@ -127,6 +134,20 @@ mod tests {
         let translations = answer.expect("translated");
         assert_eq!(translations.len(), 3);
         assert!(translations[0].to_lowercase().contains("west"), "{translations:?}");
+    }
+
+    /// verify-r15 B7: nothing goes to Orbiters once translation is off, nor from the desktop under the agreement given for VR alone.
+    #[test]
+    fn a_batch_goes_only_while_on_and_agreed_for_where_it_was_read() {
+        use orbiters_core::settings::{TranslateProvider, TranslateSettings};
+        let on = TranslateSettings { enabled: true, provider: TranslateProvider::Orbiters, orbiters_agreed: true, ..Default::default() };
+        assert!(may_send(&on, false), "VR, agreed for VR");
+        assert!(!may_send(&on, true), "the desktop: its own agreement first");
+        assert!(may_send(&TranslateSettings { orbiters_agreed_window: true, ..on.clone() }, true));
+        assert!(!may_send(&TranslateSettings { orbiters_agreed: false, orbiters_agreed_window: true, ..on.clone() }, false), "the desktop's agreement is not VR's");
+        assert!(!may_send(&TranslateSettings { enabled: false, orbiters_agreed_window: true, ..on.clone() }, false), "off: nothing");
+        assert!(!may_send(&TranslateSettings { enabled: false, orbiters_agreed_window: true, ..on.clone() }, true), "off: nothing");
+        assert!(!may_send(&TranslateSettings { provider: TranslateProvider::ThisComputer, orbiters_agreed_window: true, ..on }, true));
     }
 
     #[test]

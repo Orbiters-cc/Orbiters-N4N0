@@ -130,7 +130,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
             exclusive_said = (now_exclusive, Some(Instant::now()));
         }
-        let exclusive = found.is_some() && exclusive_said.0;
+        // The shell says someone is in exclusive full screen, for the whole system: VRChat only when it is the one in front (a game on another screen is not).
+        let exclusive = exclusive_said.0 && found.is_some_and(front_is);
         let status = OrbitStatus { note: exclusive.then(|| mark("VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.").to_string()), steamvr_overrides: None, camera_note: None, camera_provisional: false, camera_panel_seen_ns: panel_seen_ns, camera_scale_measured: false };
         if said.as_ref() != Some(&status) {
             backend.orbit_status(status.clone());
@@ -144,7 +145,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         crate::mismatch::note_change("window: VRChat on screen, its size, its keyboard", &mut noted.front, shown_on.map(|w| { let s = client_size(w); (s.x as i32, s.y as i32, keyboard) })); // i18n: not shown (a menu mismatch report's line)
         if let Some(game) = shown_on {
             // Laid again, in order, when the layer changes or another window came between VRChat's and ours.
-            let layer = (!keyboard && !stack::topmost(game)).then_some(game);
+            let layer = (!keyboard).then_some(game);
             let changed = stack::set(layer);
             if changed || layer.is_some_and(|g| !stack::holds(g, &shown_windows(&windows, &pointer, &corner, &pill, &translations))) {
                 // The translations lowest: they lie on VRChat's text, under anything of ours.
@@ -157,9 +158,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         // Over a menu of VRChat's or of ours nothing is read and no translation shows (the menus cover the view): as last turn found them.
         let covered = was_menu || !panels.is_empty();
-        translations.update(&snap, &backend, shown_on.map(|w| super::desk_translate::OnScreen { window: w, origin: client_origin(w), client: client_size(w) }), covered);
-        // The pointer over ours: VRChat's own shape in the accent chosen (REQUEST15 item 5).
-        cursor::follow(super::panels::look::accent());
+        translations.update(&snap, &backend, shown_on.map(|w| super::desk_translate::OnScreen { window: w, origin: client_origin(w), client: client_size(w), pid: snap.vrchat.pid.unwrap_or(0) }), covered);
         let Some(window) = shown_on else {
             corner.show(false, pos2(0.0, 0.0), vec2(0.0, 0.0), turn);
             // The parts of menus that closed are kept for a while; with the game behind another window nothing else comes by to let them go.
@@ -181,6 +180,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             std::thread::sleep(REST);
             continue;
         };
+        // The pointer over ours: VRChat's own shape in the accent chosen (REQUEST15 item 5), at the size of VRChat's screen's cursors.
+        // SAFETY: a plain query; a window gone answers 0, read as 96.
+        cursor::follow(super::panels::look::accent(), unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(window) });
         // VRChat's camera panel: for the person's own VRChat only, never one an agent drives through the bridge (its sessions' VRChats, the app's when the bridge
         // started it, one lent to the app for a picture): those are the agent's, and it clicks on that panel.
         let camera_wanted = camera_tools_here(&snap);
@@ -214,6 +216,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         let asked = (watcher.wants_frames() || camera_frames).then(|| Ask {
             window: window.0 as isize,
+            pid: snap.vrchat.pid.unwrap_or(0),
             client: client_size(window),
             menus: watcher.wants_frames(),
             menu_every: watcher.look_every(turn),
@@ -270,7 +273,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 ("window client size".to_owned(), format!("{} x {}", size.x, size.y)), // i18n: not shown (a menu mismatch report's line)
                 ("Left Alt held".to_owned(), alt_held().to_string()), // i18n: not shown (a menu mismatch report's line)
             ];
-            let picture = if crate::mismatch::switches(&snap.settings).picture { screen_picture(origin, size) } else { None };
+            // The screen's pixels over VRChat's window: only when nothing of another program lies on it (the corner can be pressed with another one in front),
+            // else no picture at all (verify-r15 B6).
+            let picture = if crate::mismatch::switches(&snap.settings).picture && !stack::covered(window, egui::Rect::from_min_size(origin, size)) { screen_picture(origin, size) } else { None };
             crate::mismatch::press(kind, crate::mismatch::Context { surface: "desktop".into(), state, ..Default::default() }, &snap.settings, snap.vrchat.world.log_file.clone(), picture);
         }
         let places = match (open, panel) {
@@ -581,8 +586,8 @@ impl Game {
         let pid = self.pid?;
         if let Some(h) = self.window {
             let hwnd = HWND(h as *mut _);
-            // SAFETY: plain queries; a handle gone only says no.
-            if unsafe { IsWindow(Some(hwnd)).as_bool() && !IsIconic(hwnd).as_bool() } {
+            // SAFETY: plain queries; a handle gone only says no. Still VRChat's: Windows may give a closed window's handle to another (verify-r15).
+            if unsafe { IsWindow(Some(hwnd)).as_bool() && !IsIconic(hwnd).as_bool() } && is_vrchat_window(hwnd, pid) {
                 return Some(hwnd);
             }
             self.window = None;
@@ -619,6 +624,25 @@ impl Game {
         self.window = search.found;
         self.window.map(|h| HWND(h as *mut _))
     }
+}
+
+/// Whether `hwnd` is VRChat's main window: of process `pid`, of Unity's window class. Asked again of a handle kept, and before a capture of it starts: a
+/// window that closed may have its handle given to another program's (verify-r15).
+pub(super) fn is_vrchat_window(hwnd: HWND, pid: u32) -> bool {
+    if hwnd.is_invalid() || pid == 0 {
+        return false;
+    }
+    let mut owner = 0u32;
+    let mut name = [0u16; 32];
+    // SAFETY: plain queries about a window; the buffer outlives the call; a window gone answers 0.
+    let n = unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return false;
+        }
+        GetWindowThreadProcessId(hwnd, Some(&mut owner));
+        GetClassNameW(hwnd, &mut name)
+    };
+    owner == pid && String::from_utf16_lossy(&name[..n.max(0) as usize]) == UNITY_CLASS
 }
 
 /// Esc and R pressed since the last look, with the game in front. `GetAsyncKeyState` is an ordinary query: it hooks nothing. A key going down is seen by its high bit
@@ -882,6 +906,8 @@ impl Drop for Capture {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Ask {
     window: isize,
+    /// VRChat's process: the window is asked again to be its own before its capture starts.
+    pid: u32,
     client: Vec2,
     menus: bool,
     menu_every: Duration,
@@ -942,7 +968,7 @@ impl Looker {
                             gpu = Gpu::new().map_err(|e| eprintln!("capture: {e}")).ok();
                         }
                         let window = HWND(ask.window as *mut _);
-                        capture = gpu.as_ref().and_then(|g| Capture::new(window, g).map_err(|e| eprintln!("capture: {e}")).ok()).map(|c| (ask.window, c));
+                        capture = gpu.as_ref().filter(|_| is_vrchat_window(window, ask.pid)).and_then(|g| Capture::new(window, g).map_err(|e| eprintln!("capture: {e}")).ok()).map(|c| (ask.window, c));
                         // A device lost (a driver's update, say) is made again next time.
                         if capture.is_none() {
                             gpu = None;
@@ -1271,6 +1297,16 @@ impl PanelWindow {
         self.stale = false;
     }
 
+    /// [`PanelWindow::place`] only when something changed: new pixels, not shown, moved or another alpha. A translation at rest is not given to Windows
+    /// again every turn (verify-r15). Says whether it was.
+    pub(crate) fn place_if_changed(&mut self, at: POINT, alpha: u8) -> bool {
+        if self.stale || !self.shown || self.at != at || self.alpha != alpha {
+            self.place(at, alpha);
+            return true;
+        }
+        false
+    }
+
     /// Its picture is on the screen: Windows took the last one and the window is visible (`crate::window_rest::card`).
     pub(crate) fn presented(&self) -> bool {
         // SAFETY: a plain query on a live window.
@@ -1427,12 +1463,20 @@ fn placed_at(panel: &Panel, origin: Pos2) -> (Zone, POINT, u8) {
 pub(crate) mod cursor {
     use super::*;
     use egui::Color32;
-    use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
-    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, GetSystemMetrics, HCURSOR, ICONINFO, SM_CXCURSOR};
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::sync::atomic::AtomicU64;
+    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, DestroyCursor, HCURSOR, ICONINFO, SM_CXCURSOR};
 
-    /// The cursor made for the accent now, and that accent (0xRRGGBB; all ones: none yet).
+    /// The cursor made for the accent and size now, and that accent and size (0xRRGGBB << 16 | side; all ones: none yet).
     static NOW: AtomicIsize = AtomicIsize::new(0);
-    static COLOUR: AtomicU32 = AtomicU32::new(u32::MAX);
+    static KEY: AtomicU64 = AtomicU64::new(u64::MAX);
+
+    /// Windows' cursor size, pixels, at `dpi` (96: 100 %).
+    pub(crate) fn side_for(dpi: u32) -> u32 {
+        // SAFETY: a plain query.
+        let side = unsafe { windows::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CXCURSOR, dpi.max(96)) };
+        (side.max(0) as u32).clamp(32, 256)
+    }
 
     /// The arrow in a box of 24 units: its tip at the top left (the hotspot), its two wings, the notch between them at its back. Two triangles, as it is not
     /// convex.
@@ -1462,18 +1506,27 @@ pub(crate) mod cursor {
         (h != 0).then_some(HCURSOR(h as *mut _))
     }
 
-    /// A turn: a cursor of the accent `colour` once, and again only when it changes (Settings, the look). The ones before are kept: a cursor may be shown
-    /// while it is replaced, and there are as many as colours chosen in a session.
-    pub(crate) fn follow(colour: Color32) {
-        let key = u32::from_be_bytes([0, colour.r(), colour.g(), colour.b()]);
-        if COLOUR.load(Ordering::Relaxed) == key {
+    /// A turn: a cursor of the accent `colour` at the size Windows gives cursors at `dpi` (VRChat's screen's) once, and again only when either changes. The one
+    /// replaced is destroyed (verify-r15: each change leaked one); a pointer over ours shows the new one first, so the old one is never destroyed while shown.
+    pub(crate) fn follow(colour: Color32, dpi: u32) {
+        let side = side_for(dpi);
+        let key = (u64::from(u32::from_be_bytes([0, colour.r(), colour.g(), colour.b()])) << 16) | u64::from(side);
+        if KEY.load(Ordering::Relaxed) == key {
             return;
         }
-        COLOUR.store(key, Ordering::Relaxed);
-        // SAFETY: a plain query.
-        let side = (unsafe { GetSystemMetrics(SM_CXCURSOR) }).clamp(32, 128) as u32;
-        if let Some(made) = make(side, colour) {
-            NOW.store(made.0 as isize, Ordering::Relaxed);
+        KEY.store(key, Ordering::Relaxed);
+        let Some(made) = make(side, colour) else { return };
+        let old = NOW.swap(made.0 as isize, Ordering::Relaxed);
+        if old != 0 {
+            let mut p = POINT::default();
+            // SAFETY: plain calls; `old` was made by `make` and is this process's alone; it is no longer handed out (NOW holds the new one).
+            unsafe {
+                let _ = GetCursorPos(&mut p);
+                if stack::ours(windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(p)) {
+                    windows::Win32::UI::WindowsAndMessaging::SetCursor(Some(made));
+                }
+                let _ = DestroyCursor(HCURSOR(old as *mut _));
+            }
         }
     }
 
@@ -1582,7 +1635,14 @@ pub(crate) mod stack {
         // SAFETY: plain calls on live windows; a window gone only fails.
         unsafe {
             match above() {
-                Some(game) if !topmost(game) => match over(game) {
+                // VRChat itself topmost (verify-r15): ours in its band, right under what covers it there, else on top of that band.
+                Some(game) if topmost(game) => {
+                    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+                    if let Some(cover) = over(game) {
+                        let _ = SetWindowPos(hwnd, Some(cover), 0, 0, 0, 0, flags);
+                    }
+                }
+                Some(game) => match over(game) {
                     // Right under what covers VRChat (a topmost window placed after an ordinary one is no longer topmost: Windows' own rule).
                     Some(cover) if !topmost(cover) => {
                         let _ = SetWindowPos(hwnd, Some(cover), 0, 0, 0, 0, flags);
@@ -1595,11 +1655,38 @@ pub(crate) mod stack {
                         let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, 0, 0, flags);
                     }
                 },
-                _ => {
+                None => {
                     let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
                 }
             }
         }
+    }
+
+    /// Whether a window of another program lies on any part of `client` (screen pixels) of `game`: one that shows, above it in Windows' order, not ours. A
+    /// picture of the screen there would hold that program's pixels.
+    pub(crate) fn covered(game: HWND, client: egui::Rect) -> bool {
+        use windows::Win32::Graphics::Dwm::DWMWA_CLOAKED;
+        // SAFETY: plain queries walking Windows' order.
+        let mut at = unsafe { GetWindow(game, GW_HWNDPREV) }.ok();
+        for _ in 0..4096 {
+            let Some(h) = at.filter(|h| !h.is_invalid()) else { return false };
+            let mut cloaked = 0u32;
+            let mut r = RECT::default();
+            // SAFETY: plain queries; the outputs and their sizes are passed.
+            let (visible, known) = unsafe {
+                let _ = DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, std::mem::size_of::<u32>() as u32);
+                (IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool(), DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut RECT as *mut _, std::mem::size_of::<RECT>() as u32).is_ok() || windows::Win32::UI::WindowsAndMessaging::GetWindowRect(h, &mut r).is_ok())
+            };
+            if visible && cloaked == 0 && known && !ours(h) {
+                let its = egui::Rect::from_min_max(pos2(r.left as f32, r.top as f32), pos2(r.right as f32, r.bottom as f32));
+                if its.intersects(client) && its.intersect(client).area() > 0.0 {
+                    return true;
+                }
+            }
+            // SAFETY: as above.
+            at = unsafe { GetWindow(h, GW_HWNDPREV) }.ok();
+        }
+        true
     }
 
     /// Whether every window of `shown` lies right above `game`, under anything else that shows: what ours keep while another program has the keyboard. Another
@@ -2135,9 +2222,18 @@ pub mod pointer {
     static REST_Y: AtomicI32 = AtomicI32::new(0);
     static EDGES: std::sync::Mutex<Option<Edges>> = std::sync::Mutex::new(None);
     static SET: AtomicBool = AtomicBool::new(false);
+    /// VRChat's window while the hook is set: the hook keeps nothing from anyone once it is not in front (verify-r15).
+    static GAME: AtomicI64 = AtomicI64::new(0);
+
+    /// Whether the hook may keep the mouse now: VRChat (or a window of ours) has the keyboard.
+    pub(super) fn takes_now(game: isize) -> bool {
+        // SAFETY: a plain query.
+        let front = unsafe { GetForegroundWindow() };
+        game != 0 && (front.0 as isize == game || stack::ours(front))
+    }
 
     unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0 && SET.load(Ordering::Relaxed) {
+        if code >= 0 && SET.load(Ordering::Relaxed) && takes_now(GAME.load(Ordering::Relaxed) as isize) {
             let message = wparam.0 as u32;
             // SAFETY: for WH_MOUSE_LL, lparam is a live MSLLHOOKSTRUCT.
             let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
@@ -2169,7 +2265,7 @@ pub mod pointer {
 
     /// Where it starts from the wheel's centre: on the first cell.
     const START: Vec2 = vec2(0.0, -140.0);
-    /// The pointer's picture, in pixels.
+    /// The pointer's picture, in pixels at 100 %.
     const PX: u32 = 24;
 
     #[derive(Default)]
@@ -2180,6 +2276,8 @@ pub mod pointer {
         at: Option<Pos2>,
         taken: (i64, i64),
         window: Option<PanelWindow>,
+        /// The accent and size its picture was made with: made again when either changes (verify-r15: it kept the first accent).
+        look: (u32, u32),
     }
 
     impl Pointer {
@@ -2203,7 +2301,7 @@ pub mod pointer {
                 let start = self.at.unwrap_or(origin + center.to_vec2() + START * radius / 100.0);
                 self.at = Some(start);
                 self.taken = (0, 0);
-                let _ = game;
+                GAME.store(game.0 as isize as i64, Ordering::Relaxed);
                 self.begin();
             }
             let (dx, dy) = (DX.load(Ordering::Relaxed), DY.load(Ordering::Relaxed));
@@ -2212,10 +2310,18 @@ pub mod pointer {
             let window = egui::Rect::from_min_size(origin, client);
             let at = (self.at.unwrap_or(origin) + moved).clamp(window.min, window.max);
             self.at = Some(at);
+            let accent = super::super::panels::look::accent();
+            // SAFETY: a plain query; a window gone answers 0.
+            let px = (PX * unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(game) }.max(96) / 96).clamp(PX, PX * 4);
+            let look = (u32::from_be_bytes([0, accent.r(), accent.g(), accent.b()]), px);
+            if self.look != look {
+                self.look = look;
+                self.window = None;
+            }
             if self.window.is_none() {
-                self.window = PanelWindow::new(PX, PX, false).map_err(|e| eprintln!("pointer window: {e}")).ok().map(|mut w| {
-                    let picture = picture();
-                    w.picture(&picture, [0, 0, PX, PX]);
+                self.window = PanelWindow::new(px, px, false).map_err(|e| eprintln!("pointer window: {e}")).ok().map(|mut w| {
+                    let picture = super::cursor::picture(px, px as f32 / PX as f32, accent);
+                    w.picture(&picture, [0, 0, px, px]);
                     w
                 });
             }
@@ -2314,10 +2420,7 @@ pub mod pointer {
         }
     }
 
-    /// The pointer's picture: the same arrow as Windows' pointer over ours ([`super::cursor`]), VRChat's shape in the accent chosen. RGBA premultiplied.
-    fn picture() -> Vec<u8> {
-        super::cursor::picture(PX, 1.0, super::super::panels::look::accent())
-    }
+
 }
 
 #[cfg(test)]
@@ -2909,7 +3012,7 @@ mod tests {
     #[test]
     fn asking_for_looks_never_waits_for_the_capture() {
         let looker = Looker::start();
-        let ask = Ask { window: 0x7fff_fff0, client: vec2(2560.0, 1440.0), menus: true, menu_every: Duration::ZERO, camera: true, shown: None, open: true };
+        let ask = Ask { window: 0x7fff_fff0, pid: 0, client: vec2(2560.0, 1440.0), menus: true, menu_every: Duration::ZERO, camera: true, shown: None, open: true };
         let mut slowest = Duration::ZERO;
         let began = Instant::now();
         while began.elapsed() < Duration::from_millis(400) {
@@ -3431,7 +3534,7 @@ mod tests {
     /// The window seen as on the screen: shown yes; minimised (Windows keeps it, iconic) or hidden no.
     #[test]
     fn a_minimised_or_hidden_vrchat_window_is_not_on_the_screen() {
-        use windows::Win32::UI::WindowsAndMessaging::{SW_RESTORE, SW_SHOWMINNOACTIVE};
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWMINNOACTIVE;
         let _alone = windows_alone();
         let client = vec2(320.0, 180.0);
         let game = StandIn::new(off_screen(client), client);
@@ -3440,7 +3543,7 @@ mod tests {
         let _ = unsafe { ShowWindow(game.0, SW_SHOWMINNOACTIVE) };
         assert!(!on_screen(game.0), "minimised");
         // SAFETY: as above.
-        let _ = unsafe { ShowWindow(game.0, SW_RESTORE) };
+        let _ = unsafe { ShowWindow(game.0, SW_SHOWNOACTIVATE) };
         assert!(on_screen(game.0), "back");
         // SAFETY: as above.
         let _ = unsafe { ShowWindow(game.0, SW_HIDE) };
@@ -3463,13 +3566,88 @@ mod tests {
         for side in [32, 48, 64] {
             assert!(cursor::make(side, accent).is_some(), "a cursor of {side} pixels");
         }
-        cursor::follow(accent);
+        cursor::follow(accent, 96);
         let first = cursor::current();
         assert!(first.is_some());
-        cursor::follow(accent);
+        cursor::follow(accent, 96);
         assert_eq!(cursor::current(), first, "the same accent: the same cursor");
-        cursor::follow(egui::Color32::from_rgb(10, 200, 120));
+        cursor::follow(egui::Color32::from_rgb(10, 200, 120), 96);
         assert_ne!(cursor::current(), first, "another accent: another cursor");
+        // verify-r15: the one replaced is destroyed, not leaked; a larger screen scale makes a larger one.
+        let mut info = windows::Win32::UI::WindowsAndMessaging::ICONINFO::default();
+        // SAFETY: a plain query about a cursor handle; one destroyed only fails.
+        assert!(unsafe { windows::Win32::UI::WindowsAndMessaging::GetIconInfo(windows::Win32::UI::WindowsAndMessaging::HICON(first.unwrap().0), &mut info) }.is_err(), "the replaced cursor is gone");
+        let second = cursor::current();
+        cursor::follow(egui::Color32::from_rgb(10, 200, 120), 192);
+        assert_ne!(cursor::current(), second, "another scale: another cursor");
+        assert!(cursor::side_for(192) > cursor::side_for(96), "larger at 200 %");
+    }
+
+    /// verify-r15: a kept window handle is VRChat's only while it is of VRChat's process and Unity's class: another window, or one that closed, is not.
+    #[test]
+    fn a_window_is_vrchat_s_only_while_its_process_and_class_say_so() {
+        let _alone = windows_alone();
+        unsafe extern "system" fn plain(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            // SAFETY: what the system passed on.
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        // SAFETY: plain Win32 calls on this test's own hidden window, destroyed below.
+        let unity = unsafe {
+            let module = GetModuleHandleW(None).unwrap_or_default();
+            RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(plain), hInstance: module.into(), lpszClassName: w!("UnityWndClass"), ..Default::default() });
+            CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, w!("UnityWndClass"), w!(""), WS_POPUP, 0, 0, 8, 8, None, None, None, None).expect("a window of Unity's class")
+        };
+        let me = std::process::id();
+        assert!(is_vrchat_window(unity, me), "its process, its class");
+        assert!(!is_vrchat_window(unity, me + 1), "another process's VRChat");
+        let other = StandIn::new(off_screen(vec2(8.0, 8.0)), vec2(8.0, 8.0));
+        assert!(!is_vrchat_window(other.0, me), "another class");
+        // SAFETY: made above.
+        let _ = unsafe { DestroyWindow(unity) };
+        assert!(!is_vrchat_window(unity, me), "closed");
+    }
+
+    /// verify-r15: VRChat's window topmost (its own setting, a tool's): with another program in front ours stay right above it, under a topmost window that
+    /// covers it, not over that one. And the Alt pointer's hook keeps nothing once VRChat is not in front.
+    #[test]
+    fn ours_stay_under_a_topmost_cover_of_a_topmost_vrchat() {
+        let _alone = windows_alone();
+        let client = vec2(320.0, 180.0);
+        let at = off_screen(client);
+        // SAFETY: a plain query.
+        let front = unsafe { GetForegroundWindow() };
+        let game = StandIn::new(at, client);
+        let cover = StandIn::new(at, client);
+        let flags = SWP_NOSIZE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE | SWP_NOACTIVATE;
+        // SAFETY: the test's own windows.
+        unsafe {
+            let _ = SetWindowPos(game.0, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+            let _ = SetWindowPos(cover.0, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+        }
+        stack::set(Some(game.0));
+        let mut ours = clear_window();
+        ours.place(at, 255);
+        assert_eq!(order(&[cover.0, ours.hwnd, game.0]), [cover.0, ours.hwnd, game.0], "under the cover, right above VRChat");
+        assert!(stack::holds(game.0, &[ours.hwnd]));
+        stack::set(None);
+        // SAFETY: a plain query.
+        assert_eq!(unsafe { GetForegroundWindow() }, front, "nothing took the keyboard");
+        assert!(!pointer::takes_now(game.0 .0 as isize), "VRChat not in front: the hook keeps nothing");
+        assert!(!pointer::takes_now(0));
+    }
+
+    /// verify-r15: a window at rest is not given to Windows again; moved, faded or repainted it is.
+    #[test]
+    fn a_window_at_rest_is_not_placed_again() {
+        let _alone = windows_alone();
+        let at = off_screen(vec2(8.0, 8.0));
+        let mut w = clear_window();
+        assert!(w.place_if_changed(at, 255), "first shown");
+        assert!(!w.place_if_changed(at, 255), "at rest");
+        assert!(w.place_if_changed(POINT { x: at.x + 1, y: at.y }, 255), "moved");
+        assert!(w.place_if_changed(POINT { x: at.x + 1, y: at.y }, 200), "faded");
+        w.picture(&[0u8; 8 * 8 * 4], [0, 0, 8, 8]);
+        assert!(w.place_if_changed(POINT { x: at.x + 1, y: at.y }, 200), "repainted");
     }
 
     /// Where real windows lie, by Windows' own order (top first), among `among`.
@@ -3486,11 +3664,11 @@ mod tests {
         let _alone = windows_alone();
         let client = vec2(320.0, 180.0);
         let at = off_screen(client);
+        // SAFETY: a plain query. Before any window is made: none of this test's may take the keyboard.
+        let front = unsafe { GetForegroundWindow() };
         let game = StandIn::new(at, client);
         // Another program's window over VRChat's (made after it, it lies above).
         let cover = StandIn::new(at, client);
-        // SAFETY: a plain query.
-        let front = unsafe { GetForegroundWindow() };
         assert!(stack::set(Some(game.0)), "the layer changes");
         let (mut low, mut high) = (clear_window(), clear_window());
         low.place(at, 255);
@@ -3529,6 +3707,27 @@ mod tests {
         assert_eq!(unsafe { GetForegroundWindow() }, front, "the focus stayed where it was");
         assert!(!stack::set(Some(game.0)), "no change: nothing laid again");
         stack::set(None);
+    }
+
+    /// verify-r15 B6: the menu mismatch report's picture of the screen is taken only when no window of another program lies on VRChat's window; ours may.
+    #[test]
+    fn a_report_s_picture_is_never_taken_through_another_program() {
+        let _alone = windows_alone();
+        let client = vec2(320.0, 180.0);
+        let at = off_screen(client);
+        let game = StandIn::new(at, client);
+        let rect = egui::Rect::from_min_size(pos2(at.x as f32, at.y as f32), client);
+        assert!(!stack::covered(game.0, rect), "nothing on it");
+        let mut ours = clear_window();
+        ours.place(at, 255);
+        assert!(!stack::covered(game.0, rect), "ours on it: the report shows them");
+        // Another program's window on a part of it.
+        let cover = StandIn::new(POINT { x: at.x + 200, y: at.y + 100 }, vec2(300.0, 200.0));
+        assert!(stack::covered(game.0, rect), "a browser over part of VRChat");
+        // Beside it, touching nothing.
+        // SAFETY: the test's own window.
+        let _ = unsafe { SetWindowPos(cover.0, None, at.x + 400, at.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER) };
+        assert!(!stack::covered(game.0, rect), "beside it: nothing of it in the picture");
     }
 
     /// With nothing ordinary over VRChat's window (the person clicked the desktop's background, or a window on another screen that lies lower), ours lie on top

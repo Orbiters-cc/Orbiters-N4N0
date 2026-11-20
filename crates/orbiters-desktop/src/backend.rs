@@ -453,7 +453,7 @@ impl Backend for Local {
     fn keep_window_open(&self, id: u64) { self.ctl.keep_window_open(id); }
     fn shared_view(&self, command: crate::ipc::SharedViewCommand) { self.ctl.shared_view(command); }
     fn translate_status(&self, status: crate::state::TranslateStatus) { self.ctl.set_translate_status(status); }
-    fn translate(&self, batch: orbiters_translate::provider::Batch) -> controller::translate::Answer { self.ctl.translate_remote(&batch) }
+    fn translate(&self, batch: orbiters_translate::provider::Batch) -> controller::translate::Answer { self.ctl.translate_remote(&batch, false) }
     fn switch_demo_avatar(&self) { self.ctl.switch_demo_avatar(); }
     fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         self.ctl.vrchat_data(scope, request)

@@ -56,6 +56,43 @@ fn the_qr_code_sheet_closed_or_left_stops_its_scan() {
     assert!(qr(&heard).ends_with(&[(true, MenuHolder::Panels), (false, MenuHolder::Panels)]), "{:?}", qr(&heard));
 }
 
+/// verify-r15 B2: on the desktop, the Worlds page left for another tab, or the menu closed, its capture stops turning and is not started again by the turns
+/// that follow (the Worlds' own page stays open behind the other tab); back on Worlds it turns again.
+#[test]
+fn a_world_s_capture_stops_behind_another_tab_and_with_the_menu() {
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::Worlds);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Worlds));
+    let gone = std::env::temp_dir().join(format!("orbiters-no-capture-flow-{}", std::process::id()));
+    let mut list = crate::overlay::worlds::catalog::parse(r#"{"previews":[{"slot":1,"key":1,"id":1,"worldId":"wrld_00000000-0000-4000-8000-000000000001","name":"W","author":"a","uploader":"b","view":{"position":[0,1,0],"target":[0,1,1]}}],"feedback":{}}"#).unwrap();
+    list[0].local = Some(gone);
+    person.panels.stage.worlds.as_mut().expect("Worlds' page").chosen_for_test(list, 1);
+    person.turns(2);
+    let turning = |p: &Person| p.panels.stage.worlds.as_ref().unwrap().turning_for_test();
+    assert_eq!(turning(&person), (Some(1), true), "its capture turns on its page");
+    person.press(Action::Page(Target::Instances));
+    for _ in 0..5 {
+        person.turn();
+        assert_eq!(turning(&person), (None, false), "nothing turns or reads behind Instances");
+    }
+    person.press(Action::Worlds);
+    person.turns(2);
+    let mut again = crate::overlay::worlds::catalog::parse(r#"{"previews":[{"slot":1,"key":1,"id":1,"worldId":"wrld_00000000-0000-4000-8000-000000000001","name":"W","author":"a","uploader":"b","view":{"position":[0,1,0],"target":[0,1,1]}}],"feedback":{}}"#).unwrap();
+    again[0].local = Some(std::env::temp_dir().join("orbiters-no-capture-flow-again"));
+    person.panels.stage.worlds.as_mut().unwrap().chosen_for_test(again, 1);
+    person.turns(2);
+    assert_eq!(turning(&person), (Some(1), true), "back on Worlds: it turns again");
+    person.around = None;
+    for _ in 0..3 {
+        person.turn();
+        assert_eq!(turning(&person), (None, false), "the menu closed: nothing turns behind it");
+        assert!(person.panels.stage.worlds.is_some());
+    }
+}
+
 /// OVL2-17: a menu going away under a held press does nothing: the list press is not run later, the held booster level and
 /// smoothing are not saved.
 #[test]

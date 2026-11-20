@@ -1,5 +1,5 @@
 //! `orbiters-desktop --world-sequence <out> [--sizes 300,2000,...] [--reference 300] [--batches 40] [--quality light|balanced|sharp]
-//! [--max-growth 1.3]`: what showing one 3D capture after another costs, measured without a headset (request 18: "when I switch from
+//! [--max-growth <ratio>]`: what showing one 3D capture after another costs, measured without a headset (request 18: "when I switch from
 //! maps to maps with the 3D capture showing for each of them, my FPS gets lower and lower").
 //!
 //! It goes through what the overlay's 3D view goes through for each capture (view.rs's render thread): one render device kept for
@@ -11,8 +11,10 @@
 //!
 //! After each capture shown: the batch's wall time (median and p95, the GPU waited for), the renderer's sort room and splat buffers
 //! ([`FaceRenderer::capacities`]), the graphics memory this process holds (DXGI), its private bytes and threads, the bytes the
-//! memory cache counts. `sequence.json` holds them all, and the run fails when the reference's batch grew past `--max-growth` or
-//! its sort room or graphics memory did not come back (a regression of request 18's fix).
+//! memory cache counts. `sequence.json` holds them all, and the run fails when the reference's sort room or graphics memory did not
+//! come back (a regression of request 18's fix), and with `--max-growth <ratio>` when its batch grew past that. Time is a threshold
+//! only when asked for: on a computer that builds and tests beside it (other GPU tests take no lock) a batch moved by half and more
+//! from run to run, the first showing's identical work included (night-1119/done-r18-capture-accumulation.md).
 
 use super::cache::{self, Key};
 use super::catalog::Capture;
@@ -65,7 +67,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         Some("sharp") => Quality::High,
         _ => Quality::Balanced,
     };
-    let max_growth = option("--max-growth").map(|g| g.parse::<f64>()).transpose()?.unwrap_or(1.3);
+    let max_growth = option("--max-growth").map(|g| g.parse::<f64>()).transpose()?;
 
     let mut bench = Bench::new(quality, batches)?;
     eprintln!("on {}, {} captures, reference {} splats, {} batches each at {}", bench.adapter, sizes.len(), reference, batches, quality.label());
@@ -119,13 +121,15 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "reference_gpu_mb_second": second_gpu,
         "reference_gpu_mb_last": last.gpu_mb,
         "max_growth": max_growth,
-        "passed": growth <= max_growth && sort_back && gpu_back,
+        "passed": max_growth.is_none_or(|m| growth <= m) && sort_back && gpu_back,
         "measurement": "real GPU, the overlay's FaceRenderer and batches on one device kept for every capture, made-up captures; batch wall time includes this debug or release build's CPU side; no SteamVR, no compositor",
         "steps": steps,
     });
     std::fs::write(out.join("sequence.json"), serde_json::to_string_pretty(&summary)?)?;
     eprintln!("reference batch (p10) {before:.2} ms before, {later_median:.2} ms median after the others ({growth:.2}x, worst {worst:.2}x); sort room {} -> at most {:?}; GPU {:?} / {:?} -> {:?} MB", first.sort_room, references.iter().map(|s| s.sort_room).max(), first.gpu_mb, second_gpu, last.gpu_mb); // i18n: not shown (a developer's bench)
-    anyhow::ensure!(growth <= max_growth, "the reference capture's batch grew {growth:.2}x after the others (more than {max_growth}x)"); // i18n: not shown (a developer's bench)
+    if let Some(max_growth) = max_growth {
+        anyhow::ensure!(growth <= max_growth, "the reference capture's batch grew {growth:.2}x after the others (more than {max_growth}x)"); // i18n: not shown (a developer's bench)
+    }
     anyhow::ensure!(sort_back, "the renderer kept a sort room larger than twice the {} entries the reference needed", first.sort_room); // i18n: not shown (a developer's bench)
     anyhow::ensure!(gpu_back, "the process kept {:?} MB of graphics memory against {:?} MB at the reference's second showing", last.gpu_mb, second_gpu); // i18n: not shown (a developer's bench)
     Ok(())

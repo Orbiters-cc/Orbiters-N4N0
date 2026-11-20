@@ -120,6 +120,13 @@ pub struct State {
     /// The account's own profile card (REQUEST15 7b), and the picture lists it asked for in this run.
     pub mine: mine::Mine,
     mine_listed: Vec<orbiters_core::launcher::PictureKind>,
+    /// Whose picture each address is (REQUEST17: one kept per person, the one before shown until a new one arrived),
+    /// for the data it was made from.
+    owners: HashMap<String, String>,
+    owners_for: Option<Arc<LauncherState>>,
+    /// The data and session the whole list's pictures were last handed to the background for, and what was handed.
+    warmed_for: Option<(Arc<LauncherState>, crate::controller::vrchat_data::Scope)>,
+    warmed: u64,
 }
 
 impl Default for State {
@@ -152,6 +159,10 @@ impl Default for State {
             login: None,
             mine: mine::Mine::default(),
             mine_listed: Vec::new(),
+            owners: HashMap::new(),
+            owners_for: None,
+            warmed_for: None,
+            warmed: 0,
         }
     }
 }
@@ -181,6 +192,72 @@ impl State {
             self.login = Some(cx.snap.vrchat_login.user.as_ref().map(|u| u.id.clone()));
         }
         self.mask_if_stale();
+        self.warm_pictures();
+    }
+
+    /// The people's pictures of the data, each address with whose it is: the account's own, invites and boops, then
+    /// the friends in the list's order (its sections, then anyone in none), each once. A person's picture is the one
+    /// their row shows; an invite's or a boop's other picture of someone on the list is nobody's (kept by its address:
+    /// one picture a person, two would replace each other at every look).
+    fn people_pictures(data: &LauncherState) -> Vec<(String, Option<String>)> {
+        let icons: HashMap<&str, &str> = data.friends.iter().chain(data.me.iter()).map(|f| (f.id.as_str(), f.look.icon.as_str())).collect();
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        let mut add = |url: &str, user: &str| {
+            let user = if icons.get(user).is_none_or(|icon| *icon == url) { user } else { "" };
+            if url.starts_with("https://") && seen.insert((url.to_string(), user.to_string())) {
+                out.push((url.to_string(), (!user.is_empty()).then(|| user.to_string())));
+            }
+        };
+        if let Some(me) = &data.me {
+            add(&me.look.icon, &me.id);
+        }
+        for i in &data.invites {
+            add(&i.from_icon, &i.from_id);
+        }
+        for b in &data.boops {
+            add(&b.from_icon, &b.from_id);
+        }
+        let by_id: HashMap<&str, &Friend> = data.friends.iter().map(|f| (f.id.as_str(), f)).collect();
+        for id in data.groups.iter().flat_map(|g| &g.members) {
+            if let Some(f) = by_id.get(id.as_str()) {
+                add(&f.look.icon, &f.id);
+            }
+        }
+        for f in &data.friends {
+            add(&f.look.icon, &f.id);
+        }
+        out
+    }
+
+    /// The whole list's pictures to the background (REQUEST17), when the list or the session changed: kept ones are
+    /// shown at once from then on, missing ones come from VRCX's or VRCNext's copies or, slowly, from VRChat.
+    fn warm_pictures(&mut self) {
+        let (Some(loader), Some(scope)) = (self.loader.as_ref(), self.scope.as_ref()) else { return };
+        if self.stale() || self.warmed_for.as_ref().is_some_and(|(d, s)| Arc::ptr_eq(d, &self.data) && s == scope) {
+            return;
+        }
+        self.warmed_for = Some((self.data.clone(), scope.clone()));
+        let items = Self::people_pictures(&self.data);
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (scope, &items).hash(&mut h);
+            h.finish()
+        };
+        if hash != self.warmed && !items.is_empty() {
+            self.warmed = hash;
+            loader.warm_profiles(scope, items);
+        }
+    }
+
+    /// Whose picture `url` is, in the data on show.
+    fn owner_of(&mut self, url: &str) -> Option<String> {
+        if !self.owners_for.as_ref().is_some_and(|d| Arc::ptr_eq(d, &self.data)) {
+            self.owners = Self::people_pictures(&self.data).into_iter().rev().filter_map(|(u, user)| Some((u, user?))).collect();
+            self.owners_for = Some(self.data.clone());
+        }
+        self.owners.get(url).cloned()
     }
 
     /// Whether the list on show is a VRChat account's that is no longer the one signed in (signed out, or another account
@@ -217,6 +294,11 @@ impl State {
     #[allow(dead_code)]
     pub fn wanted_pictures(&self) -> &[String] {
         &self.wanted
+    }
+
+    /// Pictures of the page: whether pictures asked of the loader are still being read.
+    pub fn stand_in_pictures_loading(&self) -> bool {
+        self.loader.as_ref().is_some_and(|l| l.loading())
     }
 
     /// Pictures of the page: a fixed clock, the search typed.
@@ -359,10 +441,11 @@ impl State {
         if let Some(found) = self.pictures.get(url) {
             return Some(found.clone());
         }
-        // Loaded on its own threads (three, newest first, kept in memory): never waits here.
+        // Loaded on its own threads (three, newest first, kept small on this computer): never waits here.
+        let user = if url.starts_with("https://") { self.owner_of(url) } else { None };
         if let (Some(loader), Some(scope), Some(ctx)) = (self.loader.as_mut(), self.scope.as_ref(), self.ctx.as_ref()) {
             if url.starts_with("https://") {
-                if let Some(t) = loader.get(ctx, &crate::worlds::Picture::Profile { scope: scope.clone(), url: url.to_string() }) {
+                if let Some(t) = loader.get(ctx, &crate::worlds::Picture::Profile { scope: scope.clone(), url: url.to_string(), user }) {
                     return Some(t);
                 }
             }

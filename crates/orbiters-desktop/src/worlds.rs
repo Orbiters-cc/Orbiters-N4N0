@@ -5,6 +5,7 @@
 //! disk so a library of 4K screenshots opens at once the second time.
 
 mod picture_cache;
+pub mod profile_pictures;
 
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use orbiters_contracts::qoi;
@@ -516,8 +517,9 @@ impl Infos {
 /// A picture to show.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Picture {
-    /// A session-scoped profile image. Never persisted in the public world image cache.
-    Profile { scope: crate::controller::vrchat_data::Scope, url: String },
+    /// A VRChat person's picture (`user`: theirs, a `usr_…` id, when known), read through the service with the session of
+    /// `scope`, kept small on this computer and completed from VRCX's and VRCNext's copies ([`profile_pictures`]).
+    Profile { scope: crate::controller::vrchat_data::Scope, url: String, user: Option<String> },
     /// A protected sharing-contract picture, fetched with the current environment's account on a loader thread.
     Capture { development: bool, id: u64, large: bool },
     /// A 3D capture's own picture on Orbiters (its item's `capture.pictureUrl`, which names its revision), its thumbnail
@@ -578,10 +580,13 @@ const FORGET_MISSING: f64 = 60.0;
 struct Kept {
     slot: Slot,
     used: f64,
+    /// Shown while it is not read yet: a person's picture before their new one ([`profile_pictures`]).
+    interim: Option<TextureHandle>,
 }
 
-/// A picture read by a loader: its image, or none; `Err` when its reading panicked.
-type Loaded = (Picture, Result<Option<ColorImage>, ()>);
+/// A picture read by a loader: its image, or none; `Err` when its reading panicked. `true`: only a stand-in shown until
+/// the picture itself arrives.
+type Loaded = (Picture, Result<Option<ColorImage>, ()>, bool);
 
 /// Bytes of picture textures kept (about ninety thumbnails, three screens of a world's pictures): those asked for
 /// most recently. The others are decoded again (from the small copies kept on disk) when they come back into view.
@@ -607,6 +612,8 @@ pub struct Pictures {
     stopped: Arc<std::sync::atomic::AtomicBool>,
     /// What the loaders start with (the interface they wake, where profile pictures are read), until they started.
     unstarted: Option<(egui::Context, Option<crate::backend::Ctl>)>,
+    /// Where profile pictures are read (the background's too).
+    backend: Option<crate::backend::Ctl>,
     /// The interface to wake when a picture that could not be read may be read again.
     wake: egui::Context,
 }
@@ -624,7 +631,8 @@ impl Pictures {
             frame: f64::NEG_INFINITY,
             frame_before: f64::NEG_INFINITY,
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            unstarted: Some((ctx.clone(), backend)),
+            unstarted: Some((ctx.clone(), backend.clone())),
+            backend,
             wake: ctx.clone(),
         }
     }
@@ -658,22 +666,39 @@ impl Pictures {
                         // A decoder that panics on a file of any origin ends this picture, not the loader (three
                         // such files stopped every picture of the page).
                         let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            if let Picture::Profile { scope, url } = &picture {
-                                use crate::controller::vrchat_data::{Request, Response};
-                                backend
-                                    .as_ref()
-                                    .and_then(|b| b.vrchat_data(scope.clone(), Request::Image { url: url.clone() }).ok())
-                                    .and_then(|r| if let Response::Image(bytes) = r { decode_image(&bytes) } else { None })
-                                    .map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
+                            if let Picture::Profile { scope, url, user } = &picture {
+                                // Kept, or VRCX's or VRCNext's copy: now. Else asked of VRChat; the answer comes later.
+                                let deliver = |image: Option<ColorImage>, interim: bool| {
+                                    done.lock().unwrap_or_else(|e| e.into_inner()).push((picture.clone(), Ok(image), interim));
+                                    ctx.request_repaint();
+                                };
+                                let reply: profile_pictures::Reply = {
+                                    let (done, ctx, picture) = (done.clone(), ctx.clone(), picture.clone());
+                                    Box::new(move |image| {
+                                        done.lock().unwrap_or_else(|e| e.into_inner()).push((picture, Ok(image), false));
+                                        ctx.request_repaint();
+                                    })
+                                };
+                                let via = backend.as_ref().map(|b| profile_fetch(b, scope));
+                                profile_pictures::Profiles::shared()
+                                    .load(url, user.as_deref(), via, |old| deliver(Some(old), true), reply)
+                                    .map(|image| Some(Some(image)))
+                                    .unwrap_or(None)
                             } else {
                                 // The environment of the moment, for each picture (one chosen since the loader started is
                                 // the one asked; CORE2-13).
                                 let (api, keep) = public_api();
-                                decode(&api, keep, &picture)
+                                Some(decode(&api, keep, &picture))
                             }
                         }))
                         .map_err(|_| ());
-                        done.lock().unwrap_or_else(|e| e.into_inner()).push((picture, image));
+                        // `None`: asked of VRChat, delivered when it comes.
+                        let image = match image {
+                            Ok(Some(image)) => Ok(image),
+                            Ok(None) => continue,
+                            Err(()) => Err(()),
+                        };
+                        done.lock().unwrap_or_else(|e| e.into_inner()).push((picture, image, false));
                         ctx.request_repaint();
                     }
                 })
@@ -698,15 +723,24 @@ impl Pictures {
         if now != self.frame {
             (self.frame_before, self.frame) = (self.frame, now);
         }
-        for (p, image) in std::mem::take(&mut *self.done.lock().unwrap_or_else(|e| e.into_inner())) {
+        for (p, image, interim) in std::mem::take(&mut *self.done.lock().unwrap_or_else(|e| e.into_inner())) {
             // One no longer wanted (scrolled past while it was decoded) is dropped.
             let Some(kept) = self.slots.get_mut(&p) else { continue };
+            if interim {
+                if let (Ok(Some(image)), Slot::Loading { .. }) = (image, &kept.slot) {
+                    kept.interim = Some(textures.load_texture(format!("picture-{:x}-before", key(&p)), image, TextureOptions::LINEAR));
+                }
+                continue;
+            }
             let tries = match kept.slot {
                 Slot::Loading { tries } => tries,
                 _ => 0,
             };
             kept.slot = match image {
-                Ok(Some(image)) => Slot::Ready(textures.load_texture(format!("picture-{:x}", key(&p)), image, TextureOptions::LINEAR)),
+                Ok(Some(image)) => {
+                    kept.interim = None;
+                    Slot::Ready(textures.load_texture(format!("picture-{:x}", key(&p)), image, TextureOptions::LINEAR))
+                }
                 Ok(None) => Slot::Missing { since: now, tries: tries.saturating_add(1).min(NEVER - 1) },
                 Err(()) => Slot::Missing { since: now, tries: NEVER },
             };
@@ -718,11 +752,12 @@ impl Pictures {
         match self.slots.get_mut(picture) {
             Some(kept) => {
                 kept.used = now;
+                let interim = kept.interim.clone();
                 match &kept.slot {
                     Slot::Ready(t) => Some(t.clone()),
                     &Slot::Missing { since, tries } => {
                         // Asked again (it is on screen): read again once its wait is over; woken then.
-                        let wait = retry_after(picture, tries)?;
+                        let Some(wait) = retry_after(picture, tries) else { return interim };
                         if now - since >= wait {
                             kept.slot = Slot::Loading { tries };
                             let (lock, ready) = &*self.queue;
@@ -731,28 +766,39 @@ impl Pictures {
                         } else {
                             self.wake.request_repaint_after(std::time::Duration::from_secs_f64(since + wait - now));
                         }
-                        None
+                        interim
                     }
                     Slot::Loading { .. } => {
-                        // (Not in the queue: a loader has it.)
+                        // (Not in the queue: a loader has it, or VRChat is being asked for it.)
                         let (lock, _) = &*self.queue;
                         let mut q = lock.lock().unwrap();
                         if let Some(i) = q.iter().position(|p| p == picture) {
                             let p = q.remove(i);
                             q.push(p);
+                        } else if let Picture::Profile { url, user, .. } = picture {
+                            profile_pictures::Profiles::shared().bump(url, user.as_deref());
                         }
-                        None
+                        interim
                     }
                 }
             }
             None => {
                 self.start();
-                self.slots.insert(picture.clone(), Kept { slot: Slot::Loading { tries: 0 }, used: now });
+                self.slots.insert(picture.clone(), Kept { slot: Slot::Loading { tries: 0 }, used: now, interim: None });
                 let (lock, ready) = &*self.queue;
                 lock.lock().unwrap().push(picture.clone());
                 ready.notify_one();
                 None
             }
+        }
+    }
+
+    /// The pictures of VRChat people a page will show (the whole friends list, in its order: `(address, usr_ id)`), read
+    /// with the session of `scope`: those not kept on this computer are completed from VRCX's and VRCNext's copies, and
+    /// the rest asked of VRChat in the background, slowly ([`profile_pictures::Profiles::warm`]).
+    pub fn warm_profiles(&self, scope: &crate::controller::vrchat_data::Scope, items: Vec<(String, Option<String>)>) {
+        if let Some(backend) = &self.backend {
+            profile_pictures::Profiles::shared().warm(items, profile_fetch(backend, scope));
         }
     }
 
@@ -778,9 +824,12 @@ impl Pictures {
             lock.lock().unwrap().retain(|p| slots.get(p).is_some_and(|k| !stale(k)));
         }
         self.slots.retain(|_, k| !stale(k));
-        let bytes = |k: &Kept| match &k.slot {
-            Slot::Ready(t) => t.byte_size(),
-            _ => 0,
+        let bytes = |k: &Kept| {
+            let shown = match &k.slot {
+                Slot::Ready(t) => t.byte_size(),
+                _ => 0,
+            };
+            shown + k.interim.as_ref().map_or(0, |t| t.byte_size())
         };
         let mut total: usize = self.slots.values().map(bytes).sum();
         if total <= KEEP_BYTES {
@@ -813,6 +862,17 @@ impl Drop for Pictures {
         self.stopped.store(true, std::sync::atomic::Ordering::Release);
         ready.notify_all();
     }
+}
+
+/// How a person's picture is asked of VRChat: through the service, with the session of `scope`.
+fn profile_fetch(backend: &crate::backend::Ctl, scope: &crate::controller::vrchat_data::Scope) -> profile_pictures::Fetch {
+    use crate::controller::vrchat_data::{Request, Response};
+    let (backend, scope) = (backend.clone(), scope.clone());
+    std::sync::Arc::new(move |url: &str| match backend.vrchat_data(scope.clone(), Request::Image { url: url.to_string() }) {
+        Ok(Response::Image(bytes)) => Ok(bytes),
+        Ok(_) => Err(String::new()),
+        Err(e) => Err(e),
+    })
 }
 
 /// A picture on this computer (a screenshot, from its kept thumbnail, or a session's thumbnail) decoded on the calling
@@ -1328,7 +1388,7 @@ pub(crate) mod tests {
         let shown: Vec<Picture> = (0..80).map(|i| Picture::Session(PathBuf::from(format!("Z:/orbiters-test/shown-{i}")))).collect();
         for (i, p) in shown.iter().enumerate() {
             let texture = textures.load_texture(format!("test-{i}"), egui::ColorImage::filled([560, 315], egui::Color32::GRAY), TextureOptions::LINEAR);
-            pictures.slots.insert(p.clone(), Kept { slot: Slot::Ready(texture), used: 0.0 });
+            pictures.slots.insert(p.clone(), Kept { slot: Slot::Ready(texture), used: 0.0, interim: None });
         }
         let frame = |pictures: &mut Pictures, now: f64, which: &[Picture]| which.iter().filter(|p| pictures.get_at(&textures, now, p).is_some()).count();
         assert_eq!(frame(&mut pictures, 10.0, &shown), 80);

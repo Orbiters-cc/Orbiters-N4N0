@@ -1297,6 +1297,16 @@ impl PanelWindow {
         self.stale = false;
     }
 
+    /// [`PanelWindow::place`] only when something changed: new pixels, not shown, moved or another alpha. A translation at rest is not given to Windows
+    /// again every turn (verify-r15). Says whether it was.
+    pub(crate) fn place_if_changed(&mut self, at: POINT, alpha: u8) -> bool {
+        if self.stale || !self.shown || self.at != at || self.alpha != alpha {
+            self.place(at, alpha);
+            return true;
+        }
+        false
+    }
+
     /// Its picture is on the screen: Windows took the last one and the window is visible (`crate::window_rest::card`).
     pub(crate) fn presented(&self) -> bool {
         // SAFETY: a plain query on a live window.
@@ -3624,6 +3634,20 @@ mod tests {
         assert_eq!(unsafe { GetForegroundWindow() }, front, "nothing took the keyboard");
         assert!(!pointer::takes_now(game.0 .0 as isize), "VRChat not in front: the hook keeps nothing");
         assert!(!pointer::takes_now(0));
+    }
+
+    /// verify-r15: a window at rest is not given to Windows again; moved, faded or repainted it is.
+    #[test]
+    fn a_window_at_rest_is_not_placed_again() {
+        let _alone = windows_alone();
+        let at = off_screen(vec2(8.0, 8.0));
+        let mut w = clear_window();
+        assert!(w.place_if_changed(at, 255), "first shown");
+        assert!(!w.place_if_changed(at, 255), "at rest");
+        assert!(w.place_if_changed(POINT { x: at.x + 1, y: at.y }, 255), "moved");
+        assert!(w.place_if_changed(POINT { x: at.x + 1, y: at.y }, 200), "faded");
+        w.picture(&[0u8; 8 * 8 * 4], [0, 0, 8, 8]);
+        assert!(w.place_if_changed(POINT { x: at.x + 1, y: at.y }, 200), "repainted");
     }
 
     /// Where real windows lie, by Windows' own order (top first), among `among`.

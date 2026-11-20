@@ -167,6 +167,56 @@ impl Signature {
     }
 }
 
+/// Whether the view moved since the last look, from the patches sampled between looks. Reset as a whole (a menu came and went, another window, another size):
+/// a reset with "moving" left set kept every look from happening, so the translations stayed hidden for good (verify-r15).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Motion {
+    /// The patches as the last look saw them; `None`: a look is due at once.
+    looked: Option<Signature>,
+    /// The patches last sampled.
+    previous: Option<Signature>,
+    moving: bool,
+}
+
+impl Motion {
+    /// A sample of the patches between looks. Moved from what the last look saw: moving. Moving, and the same twice in a row: still again, and a look is due.
+    pub(crate) fn sample(&mut self, now: Option<Signature>) {
+        if let (Some(then), Some(n)) = (&self.looked, &now) {
+            if then.moved(n) {
+                self.moving = true;
+            }
+        }
+        if self.moving && self.previous.as_ref().zip(now.as_ref()).is_some_and(|(p, n)| !p.moved(n)) {
+            self.moving = false;
+            self.looked = None;
+        }
+        self.previous = now;
+    }
+
+    /// A look was read: what it saw is what moves are measured from.
+    pub(crate) fn looked(&mut self, seen: Option<Signature>) {
+        self.looked = seen;
+    }
+
+    /// Everything known of the view forgotten: not moving, and a look due at once.
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(crate) fn moving(&self) -> bool {
+        self.moving
+    }
+
+    /// A look is due at once (nothing read since the view last changed).
+    pub(crate) fn needs_look(&self) -> bool {
+        self.looked.is_none()
+    }
+
+    pub(crate) fn last_sample(&self) -> Option<Signature> {
+        self.previous.clone()
+    }
+}
+
 // --------------------------------------------------------------------------------------------- VRChat's window, captured
 
 /// Windows Graphics Capture of VRChat's window, for the reading thread: a whole look, or its patches. Frames stay on the graphics card; only what is read comes
@@ -355,6 +405,8 @@ pub struct Host {
     last_turn: Option<Instant>,
     status_sent: Option<(Instant, TranslateStatus)>,
     remote_set: bool,
+    /// VRChat's window and its size the translations shown were placed in.
+    placed_in: Option<(isize, [u32; 2])>,
 }
 
 /// Where VRChat's window is this turn, for [`Host::update`].
@@ -399,7 +451,13 @@ impl Host {
             s.settings = Some((snap.settings.translate.clone(), vr_translate::target(&snap.settings)));
             (s.scene.take(), s.moving, s.status.clone())
         };
-        if let Some((scene, size)) = scene {
+        // A menu over the view, another window or another size: what showed was for a view that may not be there when it comes back (verify-r15).
+        let now_in = on.map(|o| (o.window.0 as isize, [o.client.x.max(0.0) as u32, o.client.y.max(0.0) as u32]));
+        if covered || now_in != self.placed_in {
+            self.clear();
+            self.placed_in = now_in;
+        }
+        if let Some((scene, size)) = scene.filter(|_| !covered) {
             self.place(&scene.quads, size, on);
         }
         // Nothing over a menu, nothing stale over a view that moved, nothing where VRChat's window is not.
@@ -492,7 +550,7 @@ impl Host {
             match on {
                 Some(o) if s.alpha > 0.0 => {
                     let at = POINT { x: (o.origin.x + s.rect.min.x) as i32, y: (o.origin.y + s.rect.min.y) as i32 };
-                    s.window.place(at, (s.alpha * 255.0).round() as u8);
+                    s.window.place_if_changed(at, (s.alpha * 255.0).round() as u8);
                 }
                 _ => s.window.hide(),
             }
@@ -539,6 +597,14 @@ fn follow_unless_stopped(
         return None;
     }
     Some(core.follow(now, look, lines, timings, gaze))
+}
+
+/// The view forgotten ([`Motion::reset`]), and the host told nothing moves (it shows nothing stale meanwhile: it cleared on what caused this).
+fn reset_motion(motion: &mut Motion, shared: &Mutex<Shared>) {
+    motion.reset();
+    let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+    s.moving = false;
+    s.scene = None;
 }
 
 fn set_state(shared: &Mutex<Shared>, state: TranslateState) {
@@ -593,9 +659,8 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
     let mut cost = Duration::from_millis(300);
     let mut last_look: Option<Instant> = None;
     let mut last_signature: Option<Instant> = None;
-    // The patches as the last look saw them, and as last seen: a change from the first is a move, the same twice a still view again.
-    let (mut looked, mut previous): (Option<Signature>, Option<Signature>) = (None, None);
-    let mut moving = false;
+    // Whether the view moved since the last look ([`Motion`]).
+    let mut motion = Motion::default();
     // Nothing new last time: a slower pace until something changes.
     let mut quiet = false;
     vr_translate::note("desktop reading started"); // i18n: not shown (a log's line)
@@ -646,8 +711,8 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
             }
             (settings, target) = (s, t);
         }
-        // Translations that came meanwhile show at once.
-        if let Some(scene) = core.poll(started.elapsed().as_secs_f64(), ([0.0; 3], [0.0, 0.0, -1.0])) {
+        // Translations that came meanwhile show at once; none from before a look is due again (they would lie where the view no longer has them).
+        if let Some(scene) = core.poll(started.elapsed().as_secs_f64(), ([0.0; 3], [0.0, 0.0, -1.0])).filter(|_| !motion.needs_look()) {
             let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
             let size = s.window.map(|(_, c)| c).unwrap_or([1, 1]);
             s.scene = Some((scene, size));
@@ -667,14 +732,14 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
                 s.status.state = TranslateState::Paused;
             }
             drop(s);
-            // Back from a menu, the view may have changed: a new look at once.
-            looked = None;
+            // Back from a menu, the view may have changed: all of it forgotten, a new look at once.
+            reset_motion(&mut motion, shared);
             std::thread::sleep(Duration::from_millis(60));
             continue;
         }
         if grab.as_ref().is_none_or(|g| g.window != hwnd) {
             grab = gpu.as_ref().and_then(|g| Grab::new(HWND(hwnd as *mut _), g).map_err(|e| eprintln!("desk translate: {e}")).ok()); // i18n: not shown (a log's line)
-            looked = None;
+            reset_motion(&mut motion, shared);
             if grab.is_none() {
                 std::thread::sleep(Duration::from_millis(500));
                 continue;
@@ -683,29 +748,17 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
         let Some(g) = grab.as_mut() else { continue };
         if !g.newest() {
             // Its size changed: what was read no longer lies where it was.
-            looked = None;
+            reset_motion(&mut motion, shared);
         }
         // Did the view move? Ten times a second, a few small patches.
         if last_signature.is_none_or(|t| t.elapsed() >= SIGNATURE_EVERY) {
             last_signature = Some(Instant::now());
-            let now = g.signature(client);
-            match (&looked, &now) {
-                (Some(then), Some(now_s)) if then.moved(now_s) => {
-                    moving = true;
-                    // Still again: the same twice in a row.
-                    if previous.as_ref().is_some_and(|p| !p.moved(now_s)) {
-                        moving = false;
-                        looked = None;
-                    }
-                }
-                _ => {}
-            }
-            previous = now;
-            shared.lock().unwrap_or_else(|e| e.into_inner()).moving = moving;
+            motion.sample(g.signature(client));
+            shared.lock().unwrap_or_else(|e| e.into_inner()).moving = motion.moving();
         }
         let pace = vr_translate::pace_for(cost, false, quiet);
-        let due = looked.is_none() || last_look.is_none_or(|t| t.elapsed() >= pace);
-        if moving || !due {
+        let due = motion.needs_look() || last_look.is_none_or(|t| t.elapsed() >= pace);
+        if motion.moving() || !due {
             std::thread::sleep(Duration::from_millis(30));
             continue;
         }
@@ -714,7 +767,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
             std::thread::sleep(Duration::from_millis(30));
             continue;
         };
-        looked = previous.clone().or_else(|| g.signature(client));
+        motion.looked(motion.last_sample().or_else(|| g.signature(client)));
         last_look = Some(began);
         looks += 1;
         let view = view(client);
@@ -868,6 +921,29 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(*asked.lock().unwrap() > 0);
+    }
+
+    /// verify-r15: the view moving, then a menu up and gone (or another window, another size): everything known of the view is forgotten together, so the next
+    /// look happens and the translations come back; moving left set with nothing to compare to kept them hidden for good.
+    #[test]
+    fn a_view_that_moved_then_a_menu_still_gets_its_look() {
+        let client = [1280u32, 720];
+        let scene = |dx: i32| move |x: u32, y: u32| -> u8 { let x = x as i32 + dx; (((x / 37 + y as i32 / 23) % 5) * 50 + (x % 7) * 3) as u8 };
+        let mut m = Motion::default();
+        assert!(m.needs_look());
+        m.looked(Some(signature(client, &scene(0))));
+        m.sample(Some(signature(client, &scene(0))));
+        assert!(!m.moving() && !m.needs_look(), "still");
+        m.sample(Some(signature(client, &scene(40))));
+        assert!(m.moving(), "turned");
+        // A menu opens while it turns: forgotten, and a look due when it goes.
+        m.reset();
+        assert!(!m.moving() && m.needs_look(), "never stuck moving");
+        m.looked(Some(signature(client, &scene(40))));
+        m.sample(Some(signature(client, &scene(80))));
+        assert!(m.moving());
+        m.sample(Some(signature(client, &scene(80))));
+        assert!(!m.moving() && m.needs_look(), "still again: a look at once");
     }
 
     /// The patches of an in-memory BGRA picture, as [`Grab::signature`] reads them from the capture.

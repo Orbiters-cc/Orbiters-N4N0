@@ -159,8 +159,6 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         // Over a menu of VRChat's or of ours nothing is read and no translation shows (the menus cover the view): as last turn found them.
         let covered = was_menu || !panels.is_empty();
         translations.update(&snap, &backend, shown_on.map(|w| super::desk_translate::OnScreen { window: w, origin: client_origin(w), client: client_size(w) }), covered);
-        // The pointer over ours: VRChat's own shape in the accent chosen (REQUEST15 item 5).
-        cursor::follow(super::panels::look::accent());
         let Some(window) = shown_on else {
             corner.show(false, pos2(0.0, 0.0), vec2(0.0, 0.0), turn);
             // The parts of menus that closed are kept for a while; with the game behind another window nothing else comes by to let them go.
@@ -182,6 +180,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             std::thread::sleep(REST);
             continue;
         };
+        // The pointer over ours: VRChat's own shape in the accent chosen (REQUEST15 item 5), at the size of VRChat's screen's cursors.
+        // SAFETY: a plain query; a window gone answers 0, read as 96.
+        cursor::follow(super::panels::look::accent(), unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(window) });
         // VRChat's camera panel: for the person's own VRChat only, never one an agent drives through the bridge (its sessions' VRChats, the app's when the bridge
         // started it, one lent to the app for a picture): those are the agent's, and it clicks on that panel.
         let camera_wanted = camera_tools_here(&snap);
@@ -1452,12 +1453,20 @@ fn placed_at(panel: &Panel, origin: Pos2) -> (Zone, POINT, u8) {
 pub(crate) mod cursor {
     use super::*;
     use egui::Color32;
-    use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
-    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, GetSystemMetrics, HCURSOR, ICONINFO, SM_CXCURSOR};
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::sync::atomic::AtomicU64;
+    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, DestroyCursor, HCURSOR, ICONINFO, SM_CXCURSOR};
 
-    /// The cursor made for the accent now, and that accent (0xRRGGBB; all ones: none yet).
+    /// The cursor made for the accent and size now, and that accent and size (0xRRGGBB << 16 | side; all ones: none yet).
     static NOW: AtomicIsize = AtomicIsize::new(0);
-    static COLOUR: AtomicU32 = AtomicU32::new(u32::MAX);
+    static KEY: AtomicU64 = AtomicU64::new(u64::MAX);
+
+    /// Windows' cursor size, pixels, at `dpi` (96: 100 %).
+    pub(crate) fn side_for(dpi: u32) -> u32 {
+        // SAFETY: a plain query.
+        let side = unsafe { windows::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CXCURSOR, dpi.max(96)) };
+        (side.max(0) as u32).clamp(32, 256)
+    }
 
     /// The arrow in a box of 24 units: its tip at the top left (the hotspot), its two wings, the notch between them at its back. Two triangles, as it is not
     /// convex.
@@ -1487,18 +1496,27 @@ pub(crate) mod cursor {
         (h != 0).then_some(HCURSOR(h as *mut _))
     }
 
-    /// A turn: a cursor of the accent `colour` once, and again only when it changes (Settings, the look). The ones before are kept: a cursor may be shown
-    /// while it is replaced, and there are as many as colours chosen in a session.
-    pub(crate) fn follow(colour: Color32) {
-        let key = u32::from_be_bytes([0, colour.r(), colour.g(), colour.b()]);
-        if COLOUR.load(Ordering::Relaxed) == key {
+    /// A turn: a cursor of the accent `colour` at the size Windows gives cursors at `dpi` (VRChat's screen's) once, and again only when either changes. The one
+    /// replaced is destroyed (verify-r15: each change leaked one); a pointer over ours shows the new one first, so the old one is never destroyed while shown.
+    pub(crate) fn follow(colour: Color32, dpi: u32) {
+        let side = side_for(dpi);
+        let key = (u64::from(u32::from_be_bytes([0, colour.r(), colour.g(), colour.b()])) << 16) | u64::from(side);
+        if KEY.load(Ordering::Relaxed) == key {
             return;
         }
-        COLOUR.store(key, Ordering::Relaxed);
-        // SAFETY: a plain query.
-        let side = (unsafe { GetSystemMetrics(SM_CXCURSOR) }).clamp(32, 128) as u32;
-        if let Some(made) = make(side, colour) {
-            NOW.store(made.0 as isize, Ordering::Relaxed);
+        KEY.store(key, Ordering::Relaxed);
+        let Some(made) = make(side, colour) else { return };
+        let old = NOW.swap(made.0 as isize, Ordering::Relaxed);
+        if old != 0 {
+            let mut p = POINT::default();
+            // SAFETY: plain calls; `old` was made by `make` and is this process's alone; it is no longer handed out (NOW holds the new one).
+            unsafe {
+                let _ = GetCursorPos(&mut p);
+                if stack::ours(windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(p)) {
+                    windows::Win32::UI::WindowsAndMessaging::SetCursor(Some(made));
+                }
+                let _ = DestroyCursor(HCURSOR(old as *mut _));
+            }
         }
     }
 
@@ -2237,7 +2255,7 @@ pub mod pointer {
 
     /// Where it starts from the wheel's centre: on the first cell.
     const START: Vec2 = vec2(0.0, -140.0);
-    /// The pointer's picture, in pixels.
+    /// The pointer's picture, in pixels at 100 %.
     const PX: u32 = 24;
 
     #[derive(Default)]
@@ -2248,6 +2266,8 @@ pub mod pointer {
         at: Option<Pos2>,
         taken: (i64, i64),
         window: Option<PanelWindow>,
+        /// The accent and size its picture was made with: made again when either changes (verify-r15: it kept the first accent).
+        look: (u32, u32),
     }
 
     impl Pointer {
@@ -2280,10 +2300,18 @@ pub mod pointer {
             let window = egui::Rect::from_min_size(origin, client);
             let at = (self.at.unwrap_or(origin) + moved).clamp(window.min, window.max);
             self.at = Some(at);
+            let accent = super::super::panels::look::accent();
+            // SAFETY: a plain query; a window gone answers 0.
+            let px = (PX * unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(game) }.max(96) / 96).clamp(PX, PX * 4);
+            let look = (u32::from_be_bytes([0, accent.r(), accent.g(), accent.b()]), px);
+            if self.look != look {
+                self.look = look;
+                self.window = None;
+            }
             if self.window.is_none() {
-                self.window = PanelWindow::new(PX, PX, false).map_err(|e| eprintln!("pointer window: {e}")).ok().map(|mut w| {
-                    let picture = picture();
-                    w.picture(&picture, [0, 0, PX, PX]);
+                self.window = PanelWindow::new(px, px, false).map_err(|e| eprintln!("pointer window: {e}")).ok().map(|mut w| {
+                    let picture = super::cursor::picture(px, px as f32 / PX as f32, accent);
+                    w.picture(&picture, [0, 0, px, px]);
                     w
                 });
             }
@@ -2382,10 +2410,7 @@ pub mod pointer {
         }
     }
 
-    /// The pointer's picture: the same arrow as Windows' pointer over ours ([`super::cursor`]), VRChat's shape in the accent chosen. RGBA premultiplied.
-    fn picture() -> Vec<u8> {
-        super::cursor::picture(PX, 1.0, super::super::panels::look::accent())
-    }
+
 }
 
 #[cfg(test)]
@@ -3531,13 +3556,21 @@ mod tests {
         for side in [32, 48, 64] {
             assert!(cursor::make(side, accent).is_some(), "a cursor of {side} pixels");
         }
-        cursor::follow(accent);
+        cursor::follow(accent, 96);
         let first = cursor::current();
         assert!(first.is_some());
-        cursor::follow(accent);
+        cursor::follow(accent, 96);
         assert_eq!(cursor::current(), first, "the same accent: the same cursor");
-        cursor::follow(egui::Color32::from_rgb(10, 200, 120));
+        cursor::follow(egui::Color32::from_rgb(10, 200, 120), 96);
         assert_ne!(cursor::current(), first, "another accent: another cursor");
+        // verify-r15: the one replaced is destroyed, not leaked; a larger screen scale makes a larger one.
+        let mut info = windows::Win32::UI::WindowsAndMessaging::ICONINFO::default();
+        // SAFETY: a plain query about a cursor handle; one destroyed only fails.
+        assert!(unsafe { windows::Win32::UI::WindowsAndMessaging::GetIconInfo(windows::Win32::UI::WindowsAndMessaging::HICON(first.unwrap().0), &mut info) }.is_err(), "the replaced cursor is gone");
+        let second = cursor::current();
+        cursor::follow(egui::Color32::from_rgb(10, 200, 120), 192);
+        assert_ne!(cursor::current(), second, "another scale: another cursor");
+        assert!(cursor::side_for(192) > cursor::side_for(96), "larger at 200 %");
     }
 
     /// verify-r15: a kept window handle is VRChat's only while it is of VRChat's process and Unity's class: another window, or one that closed, is not.

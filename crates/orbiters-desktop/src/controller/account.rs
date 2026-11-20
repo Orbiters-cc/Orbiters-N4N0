@@ -195,7 +195,8 @@ impl Controller {
         let mut features = None;
         let state = match answer {
             Ok(Check::Valid(current)) => {
-                features = Some((current.user.clone().or(saved.user.clone()), current.username.clone().or(saved.username.clone()), current.features.clone()));
+                // For the account as it is kept just below (its id as the server says it), with this credential.
+                features = Some((current.user.clone(), current.features.clone()));
                 let name = current.username.clone().or(saved.username.clone()).unwrap_or_default();
                 rt.account = Some(Account { token: saved.token.clone(), ..current });
                 AccountState::SignedIn { username: name }
@@ -211,8 +212,8 @@ impl Controller {
             }
         };
         drop(rt);
-        if let Some((user, username, features)) = features {
-            self.calls_access_checked(server, user, username, features.as_ref());
+        if let Some((user, features)) = features {
+            self.calls_access_checked(server, user.as_deref(), &saved.token, features.as_ref());
         }
         self.commit_account_check(generation, state);
     }

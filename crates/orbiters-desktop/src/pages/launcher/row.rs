@@ -698,6 +698,7 @@ mod tests {
     /// Nothing is sent from these pages' pictures of the list.
     struct Still;
     impl Backend for Still {
+        fn n4n0(&self, _command: crate::ipc::N4n0Command) {}
         fn view(&self) -> Arc<Snapshot> {
             Arc::new(Snapshot::new(Settings::default()))
         }

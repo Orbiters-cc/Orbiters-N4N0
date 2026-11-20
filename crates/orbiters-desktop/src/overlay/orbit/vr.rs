@@ -379,7 +379,7 @@ const SHEET_OVER_THE_TABS: f32 = 9.0;
 /// Where a part lies in a headset, from where it does on a screen. OWNER DECISION, DO NOT REMOVE: with a page up the Quick Menu's side tiles stay and are moved off it
 /// here, never hidden (Enzo asked repeatedly, latest 2026-11-13; AGENTS.md, "Owner decisions"; test `side_tiles_stay_beside_a_page`).
 pub fn clear_of_sheet(mut placed: Placed, sheet_up: bool) -> Placed {
-    if Zone::WING.contains(&placed.zone) || matches!(placed.zone, Zone::QmCaption | Zone::QmStop) {
+    if Zone::WING.contains(&placed.zone) || matches!(placed.zone, Zone::QmCaption | Zone::QmStop | Zone::QmShare) {
         let side = if placed.rect.center().x < 0.0 { -1.0 } else { 1.0 };
         placed.rect = placed.rect.translate(egui::vec2(side * if sheet_up { WING_OFF_A_SHEET } else { WING_OFF_ITS_PANEL }, 0.0));
     } else if matches!(placed.zone, Zone::Takeover | Zone::SheetBack | Zone::SheetPeek) {
@@ -596,7 +596,7 @@ impl Plane {
         let (x, y) = (c.x - way.x * back, c.y - way.y * back);
         // The wing turns towards who looks about its inner edge, as VRChat's own side panels do (round 10's judges: flat beside an angled My Profile, it read as
         // pasted in front rather than a neighbour).
-        if Zone::WING.contains(&placed.zone) || matches!(placed.zone, Zone::QmCaption | Zone::QmStop) {
+        if Zone::WING.contains(&placed.zone) || matches!(placed.zone, Zone::QmCaption | Zone::QmStop | Zone::QmShare) {
             let side = if x < 0.0 { -1.0 } else { 1.0 };
             let hinge = side * WING_HINGE;
             let out = x - hinge;

@@ -66,6 +66,74 @@ pub struct Status {
     pub offer: Option<Offer>,
     /// The signed-in member's points and title, once read.
     pub points: Option<Explorer>,
+    /// "Share 3D capture" on the Quick Menu's side tiles (REQUEST18 3), while it is offered ([`share_here`]).
+    #[serde(default)]
+    pub share_here: Option<ShareHere>,
+}
+
+/// The capture "Share 3D capture" offers (REQUEST18 3: "when a 3D capture have been done but none uploaded publicly, a
+/// button Share 3D capture on the side panel with a small thumbnail of the capture"): the world the person is in has a
+/// capture on this computer that can be shared, and none of this world's captures here was shared publicly by this account.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShareHere {
+    /// The capture: its folder (its thumbnail is there), as History names it.
+    pub key: String,
+    pub world_id: String,
+    pub world_name: String,
+    /// How its last share from the tile ended when it did not go (a failure, the daily limit, explicit content): said on
+    /// the tile until it is pressed again.
+    #[serde(default)]
+    pub last: Option<Step>,
+}
+
+/// One of this computer's captures of the world the person is in, as [`share_here`] weighs it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HereCapture {
+    pub key: String,
+    pub world_name: String,
+    /// When it was taken, Unix seconds.
+    pub taken: u64,
+    /// It has its 3D view, or what makes one (its frames, depth and keyframes are all still there).
+    pub shareable: bool,
+    /// This account's upload records say it is public on Orbiters.
+    pub public: bool,
+}
+
+/// What "Share 3D capture" offers in world `world_id`, from this computer's captures of it (REQUEST18 3). Nothing when no
+/// capture of it is here, nor when one of them is shared publicly already (by this account, as its upload records say,
+/// or by a share confirmed in this run); else the newest that can be shared.
+pub fn share_here(world_id: &str, captures: &[HereCapture], public_now: bool) -> Option<ShareHere> {
+    if public_now || captures.iter().any(|c| c.public) {
+        return None;
+    }
+    let newest = captures.iter().filter(|c| c.shareable).max_by_key(|c| c.taken)?;
+    Some(ShareHere { key: newest.key.clone(), world_id: world_id.to_string(), world_name: newest.world_name.clone(), last: None })
+}
+
+/// This computer's captures of world `world_id` in `sessions_dir`, and whether this account shared each publicly (`uploads`:
+/// its upload records). Only their manifests are read, not their files' sizes: it runs when the world changes, a capture is
+/// saved or a share ends.
+pub fn captures_of(sessions_dir: &Path, world_id: &str, uploads: &[(PathBuf, orbiters_core::shares::Item)]) -> Vec<HereCapture> {
+    let Ok(entries) = std::fs::read_dir(sessions_dir) else { return Vec::new() };
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut out = Vec::new();
+    for dir in entries.flatten().map(|e| e.path()).filter(|d| d.is_dir()) {
+        let Ok(manifest) = orbiters_core::bundle::read_manifest(&dir) else { continue };
+        let Some(world) = manifest.world.as_ref().filter(|w| w.id.as_deref() == Some(world_id)) else { continue };
+        let ready = orbiters_core::reconstruction::read_report(&dir).is_some();
+        let stats = &manifest.stats;
+        let makes_one = !orbiters_core::cleanup::trimmed(&dir) && stats.depth_frames > 0 && !(stats.frames > 0 && stats.keyframes == 0);
+        let folder = name(&dir);
+        let public = uploads.iter().any(|(path, item)| item.public && (*path == dir || name(path) == folder));
+        out.push(HereCapture {
+            key: dir.to_string_lossy().into_owned(),
+            world_name: world.name.clone().unwrap_or_default(),
+            taken: crate::controller::shares::unix(&manifest.created_utc),
+            shareable: ready || makes_one,
+            public,
+        });
+    }
+    out
 }
 
 /// "No 3D picture of this world yet", while it is up.
@@ -178,6 +246,9 @@ pub enum Command {
     ShareTo { offer: u64, recipients: Vec<(String, String)> },
     /// The buttons put away.
     OfferDismiss { offer: u64 },
+    /// "Share 3D capture" on the Quick Menu's side tiles (REQUEST18 3) for the capture `key` it offers: shared publicly
+    /// as "Share publicly" shares a picture, its question answered when `confirmed`.
+    ShareCapture { key: String, confirmed: bool },
 }
 
 /// A picture's identity from its folder's name (whichever way its path is written).
@@ -326,6 +397,11 @@ pub(super) struct ExplorerState {
     points_at: Option<(Instant, String)>,
     /// The overlay held the notice back at this time last.
     held: Option<Instant>,
+    /// What "Share 3D capture" was last looked for with (the world, the account, the captures and shares then), and when.
+    share_scan: Option<(String, Instant)>,
+    /// Worlds a public share was confirmed for in this run: the tile is not offered there again, whatever the records
+    /// say yet.
+    shared_worlds: std::collections::HashSet<String>,
 }
 
 /// The explorer's own thread: a look once a second while the service runs.
@@ -424,6 +500,8 @@ impl super::Controller {
                 s.people = None;
             }
         }
+        // "Share 3D capture": looked for again when what it depends on changed.
+        self.explorer_share_here(&mut s, &snap, &account);
         // The points: while signed in, now and then; gone at sign-out.
         if account.is_empty() {
             if status.points.is_some() {
@@ -531,8 +609,86 @@ impl super::Controller {
                 }
             }
             Command::SharePublic { offer, confirmed } => self.explorer_share(offer, true, Vec::new(), confirmed),
+            Command::ShareCapture { key, confirmed } => self.explorer_share_capture(key, confirmed),
             Command::ShareTo { offer, recipients } => self.explorer_share(offer, false, recipients, false),
         }
+    }
+
+    /// "Share 3D capture" (REQUEST18 3): the capture the tile offers now, and only it, becomes the offer (the one a picture
+    /// just taken has, kept when it is that capture) and is shared publicly through it: the same question the first time,
+    /// the same Photos & captures job, the same confirmation by Orbiters' answer. Not while another picture's share runs.
+    fn explorer_share_capture(self: &Shared, key: String, confirmed: bool) {
+        let status = self.explorer_status();
+        let Some(here) = status.share_here.filter(|h| offer_id(&h.key) == offer_id(&key)) else { return };
+        let id = offer_id(&here.key);
+        match status.offer.as_ref() {
+            Some(o) if o.id == id => {}
+            Some(o) if o.busy() => return,
+            _ => {
+                let would_earn = {
+                    let mut s = self.explorer.lock().unwrap();
+                    s.public = None;
+                    s.people = None;
+                    s.lookups.get(&here.world_id).filter(|(_, at)| at.elapsed() < LOOKUP_KEPT).and_then(|(l, _)| l.and_then(|l| l.next_earns))
+                };
+                let offer = Offer { id, key: here.key.clone(), world_id: here.world_id.clone(), would_earn, until_ms: now_ms() + OFFER_MS, public: Step::Idle, people: Step::Idle };
+                self.update(|st| st.explorer.offer = Some(offer.clone()));
+            }
+        }
+        // Pressed again: what it said last goes.
+        self.update_if(|st| match st.explorer.share_here.as_mut().filter(|h| h.last.is_some()) {
+            Some(h) => {
+                h.last = None;
+                true
+            }
+            None => false,
+        });
+        self.explorer_share(id, true, Vec::new(), confirmed);
+    }
+
+    /// What "Share 3D capture" offers, looked for again (on a thread) when the world, the account, a capture being made or
+    /// a share's end changed, and every five minutes; gone at once out of a world, signed out, or in another world.
+    fn explorer_share_here(self: &Shared, s: &mut ExplorerState, snap: &crate::state::Snapshot, account: &str) {
+        let world = s.here.as_ref().map(|h| h.0.clone()).filter(|_| !account.is_empty());
+        let shown = snap.explorer.share_here.as_ref();
+        if shown.is_some_and(|h| Some(&h.world_id) != world.as_ref() || s.shared_worlds.contains(&h.world_id)) {
+            self.update(|st| st.explorer.share_here = None);
+        }
+        let Some(world) = world else {
+            s.share_scan = None;
+            return;
+        };
+        let ended = snap.capture_shares.iter().filter(|j| j.outcome.is_some()).count();
+        let why = format!("{world} {account} {} {:?} {:?} {ended}", snap.settings.development, snap.capture.session_dir, snap.capture.state); // i18n: not shown (a key)
+        if s.share_scan.as_ref().is_some_and(|(was, at)| *was == why && at.elapsed() < Duration::from_secs(5 * 60)) {
+            return;
+        }
+        s.share_scan = Some((why, Instant::now()));
+        let public_now = s.shared_worlds.contains(&world);
+        let server = if snap.settings.development { Server::Development } else { Server::Production };
+        let sessions_dir = snap.settings.sessions_dir.clone();
+        let ctl = self.clone();
+        let _ = std::thread::Builder::new().name("share-here".into()).spawn(move || {
+            let uploads = crate::controller::shares::uploads(server);
+            let found = share_here(&world, &captures_of(&sessions_dir, &world, &uploads), public_now);
+            // Still in that world: else the next look is under way.
+            let here = ctl.explorer.lock().unwrap().here.as_ref().map(|h| h.0.clone());
+            if here.as_deref() != Some(world.as_str()) {
+                return;
+            }
+            ctl.update_if(|st| {
+                // The same capture keeps what its last share said.
+                let found = found.clone().map(|mut f| {
+                    f.last = st.explorer.share_here.as_ref().filter(|h| offer_id(&h.key) == offer_id(&f.key)).and_then(|h| h.last.clone());
+                    f
+                });
+                if st.explorer.share_here == found {
+                    return false;
+                }
+                st.explorer.share_here = found;
+                true
+            });
+        });
     }
 
     fn explorer_share(self: &Shared, offer: u64, public: bool, recipients: Vec<(String, String)>, confirmed: bool) {
@@ -683,6 +839,24 @@ impl super::Controller {
                         } else {
                             s.people = None;
                         }
+                    }
+                    // "Share 3D capture" for this capture: gone once it is public, else it says how it ended.
+                    if public && finished {
+                        if matches!(step, Step::Done(_)) {
+                            s.shared_worlds.insert(offer.world_id.clone());
+                        }
+                        let (key, done) = (offer.key.clone(), matches!(step, Step::Done(_)));
+                        self.update_if(|st| {
+                            if !st.explorer.share_here.as_ref().is_some_and(|h| offer_id(&h.key) == offer_id(&key)) {
+                                return false;
+                            }
+                            if done {
+                                st.explorer.share_here = None;
+                            } else if let Some(h) = st.explorer.share_here.as_mut() {
+                                h.last = Some(step.clone());
+                            }
+                            true
+                        });
                     }
                 }
             }
@@ -1010,5 +1184,69 @@ mod tests {
                 }
             });
         }
+    }
+
+    fn here(key: &str, taken: u64, shareable: bool, public: bool) -> HereCapture {
+        HereCapture { key: key.into(), world_name: "Sample world".into(), taken, shareable, public }
+    }
+
+    /// REQUEST18 3: "Share 3D capture" is offered where this computer has a capture of the world and none of its captures
+    /// is public: not without one, not once one is public; the newest that can be shared is the one offered.
+    #[test]
+    fn share_3d_capture_wants_a_capture_here_and_none_shared_publicly() {
+        // No capture of this world here: nothing.
+        assert_eq!(share_here("wrld_a", &[], false), None);
+        // Captures, none public: the newest that can be shared (one cut short, with nothing to make a view from, is passed by).
+        let some = [here("S/old", 10, true, false), here("S/new", 30, true, false), here("S/cut", 40, false, false)];
+        let offered = share_here("wrld_a", &some, false).expect("offered");
+        assert_eq!((offered.key.as_str(), offered.world_id.as_str(), offered.last.clone()), ("S/new", "wrld_a", None));
+        // One of them public already: nothing, whichever it is.
+        let one_public = [here("S/old", 10, true, true), here("S/new", 30, true, false)];
+        assert_eq!(share_here("wrld_a", &one_public, false), None);
+        // A public share confirmed in this run, before the records say it: nothing.
+        assert_eq!(share_here("wrld_a", &some, true), None);
+        // Only captures that cannot become a 3D view: nothing to share.
+        assert_eq!(share_here("wrld_a", &[here("S/cut", 40, false, false)], false), None);
+    }
+
+    /// What the tile weighs is read from the sessions' manifests and this account's upload records: only this world's
+    /// captures, public as the records say (by the folder, wherever the library was).
+    #[test]
+    fn captures_of_a_world_are_read_from_their_manifests_and_the_upload_records() {
+        use orbiters_core::contracts::manifest::{SessionManifest, WorldInfo, MANIFEST_FILE};
+        let root = std::env::temp_dir().join(format!("orbiters-share-here-{}", uuid::Uuid::new_v4().simple()));
+        let session = |name: &str, world: &str, created: &str, depth: u64, keyframes: bool| {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            if keyframes {
+                std::fs::create_dir_all(dir.join("keyframes")).unwrap();
+            }
+            let mut m = SessionManifest { format: "orbiters.session".into(), created_utc: created.into(), ..Default::default() };
+            m.world = Some(WorldInfo { id: Some(world.into()), name: Some("Sample world".into()), ..Default::default() });
+            m.stats.frames = 100;
+            m.stats.keyframes = 10;
+            m.stats.depth_frames = depth;
+            std::fs::write(dir.join(MANIFEST_FILE), serde_json::to_vec(&m).unwrap()).unwrap();
+            dir
+        };
+        let a = session("2026-11-20_10-00-00", "wrld_a", "2026-11-20T10:00:00Z", 100, true);
+        let b = session("2026-11-20_11-00-00", "wrld_a", "2026-11-20T11:00:00Z", 100, true);
+        session("2026-11-20_12-00-00", "wrld_b", "2026-11-20T12:00:00Z", 100, true);
+        let no_depth = session("2026-11-20_13-00-00", "wrld_a", "2026-11-20T13:00:00Z", 0, true);
+        let mut found = captures_of(&root, "wrld_a", &[]);
+        found.sort_by_key(|c| c.taken);
+        assert_eq!(found.iter().map(|c| (c.key.clone(), c.shareable, c.public)).collect::<Vec<_>>(), [
+            (a.to_string_lossy().into_owned(), true, false),
+            (b.to_string_lossy().into_owned(), true, false),
+            (no_depth.to_string_lossy().into_owned(), false, false),
+        ]);
+        assert_eq!(share_here("wrld_a", &found, false).map(|h| h.key), Some(b.to_string_lossy().into_owned()));
+        // Shared to friends only: still offered. Shared publicly (recorded where the library was before): not.
+        let friends = Item { id: 5, public: false, ..Default::default() };
+        assert!(share_here("wrld_a", &captures_of(&root, "wrld_a", &[(a.clone(), friends)]), false).is_some());
+        let elsewhere = std::path::PathBuf::from("D:/Old library").join(a.file_name().unwrap());
+        let public = Item { id: 6, public: true, ..Default::default() };
+        assert_eq!(share_here("wrld_a", &captures_of(&root, "wrld_a", &[(elsewhere, public)]), false), None);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

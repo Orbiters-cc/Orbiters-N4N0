@@ -183,6 +183,10 @@ pub enum Zone {
     /// While a recording runs: its clock and Stop, under the wheel and under the wing (Enzo, F13). Nothing here starts one.
     WheelStop,
     QmStop,
+    /// "Share 3D capture" under the wing's foot (REQUEST18 3), where Stop is while a recording runs (never both): the world
+    /// the person is in has a capture on this computer and none shared publicly. Its picture, its share's progress, and the
+    /// first time's question.
+    QmShare,
     /// Straight up, where the eyes go first: 3D world search.
     WheelWorlds,
     WheelYouTube,
@@ -223,6 +227,9 @@ pub enum Zone {
     Takeover,
 }
 
+/// The foot of "Share 3D capture" under the wing ([`Zone::QmShare`]): as low as a 16:9 window keeps it whole.
+pub const QM_SHARE_FOOT: f32 = 315.0;
+
 /// How far above its place the wing's caption lies in a headset, where the wing's name pill (with Hide tiles) is under it.
 pub const QM_CAPTION_OVER_THE_NAME: f32 = 34.0;
 
@@ -243,8 +250,8 @@ impl Zone {
         Zone::WheelStop,
     ];
     pub const WING: [Zone; 8] = [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying];
-    pub const QUICK_MENU: [Zone; 10] =
-        [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying, Zone::QmCaption, Zone::QmStop];
+    pub const QUICK_MENU: [Zone; 11] =
+        [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying, Zone::QmCaption, Zone::QmStop, Zone::QmShare];
 
     /// The zones around a menu.
     pub const CAMERA: [Zone; 12] = [
@@ -325,7 +332,7 @@ impl Zone {
     /// A part that shows only while it has something to do (a recording to stop, a code being looked for, a page opened, a button to offer): it joins the menu's
     /// parts and leaves them as that changes ([`super::Panels::set_open`]).
     pub fn only_while_needed(self) -> bool {
-        matches!(self, Zone::WheelStop | Zone::QmStop | Zone::CameraAct | Zone::CameraScan | Zone::CameraWebBar | Zone::CameraWeb | Zone::CameraShare | Zone::CameraShareDesk | Zone::CameraChooser)
+        matches!(self, Zone::WheelStop | Zone::QmStop | Zone::QmShare | Zone::CameraAct | Zone::CameraScan | Zone::CameraWebBar | Zone::CameraWeb | Zone::CameraShare | Zone::CameraShareDesk | Zone::CameraChooser)
     }
 
     /// Its place in the menu's units from the menu's centre, y down: around the wheel in hundredths of its radius (a 1280 x 720 window's pixels, nearly), around the Quick
@@ -397,6 +404,9 @@ impl Zone {
             Zone::WheelStop => r(-78.0, 188.0, 78.0, 228.0),
             // Under the wing's foot, as wide as it.
             Zone::QmStop => r(362.0, 213.0, 524.0, 249.0),
+            // The same place, as wide as the wing: its picture over its words, and room there for the first time's question
+            // and its two buttons; its foot over the window's at 16:9 (y 320 there).
+            Zone::QmShare => r(362.0, 213.0, 524.0, QM_SHARE_FOOT),
             // N4N0's pages' own shape, 704 wide.
             Zone::Takeover => r(-352.0, -196.0, 352.0, 200.0),
             _ => unreachable!("the rings' cells return above"),

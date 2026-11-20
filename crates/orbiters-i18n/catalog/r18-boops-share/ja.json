@@ -1,5 +1,8 @@
 {
   "Boops": "ブープ",
   "Invite requests": "招待リクエスト",
-  "Boops and invite requests": "ブープと招待リクエスト"
+  "Boops and invite requests": "ブープと招待リクエスト",
+  "Share 3D capture": "3Dキャプチャを共有",
+  "No 3D capture of this world is public yet: share yours, everyone on Orbiters sees it.": "このワールドの公開3Dキャプチャはまだありません。あなたのものを共有すると、Orbitersの全員が見られます。",
+  "Not shared: try again": "共有されませんでした：もう一度試す"
 }

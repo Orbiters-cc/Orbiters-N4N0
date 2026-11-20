@@ -22,6 +22,7 @@ use std::path::PathBuf;
 
 mod booster_sheet;
 pub mod share_sheet;
+pub mod share_here;
 pub use share_sheet::{ChooserRow, ChooserView, ShareView};
 pub use booster_sheet::{booster_level_at, BoosterFacts, BoosterPick};
 use booster_sheet::{booster_caption, booster_items, draw_booster, draw_booster_cell};
@@ -282,6 +283,11 @@ pub enum Action {
     ShareConfirm(u64),
     ShareCancelConfirm,
     ShareDismiss(u64),
+    /// "Share 3D capture" under the wing (REQUEST18 3) for the capture whose id it names, the first time's question answered
+    /// yes for it, or put away.
+    ShareHere(u64),
+    ShareHereYes(u64),
+    ShareHereNo,
     /// The friends' chooser: a friend (by their identity, `share_sheet::person_key`), a page on, Send for the picture, its
     /// close, its loading again.
     ChooserPerson(u64),
@@ -642,6 +648,8 @@ pub struct Facts {
     pub rec_stopping: bool,
     /// What the parts around VRChat's camera show.
     pub camera: CameraNow,
+    /// "Share 3D capture" under the wing (REQUEST18 3), while a capture of this world is here and none is public.
+    pub share_here: Option<share_here::ShareTile>,
     /// A 3D picture's timer, in seconds.
     pub timer: u32,
     /// A 3D picture's length (the Capture page's "Picture length"): on the camera's 3D tiles, where it changes too.
@@ -824,6 +832,8 @@ pub fn needed(zone: Zone, facts: &Facts) -> bool {
     let camera = &facts.camera;
     match zone {
         Zone::WheelStop | Zone::QmStop => stop_shown(facts),
+        // Where Stop is: never while a recording runs (the capture being made is not one to share yet).
+        Zone::QmShare => facts.share_here.is_some() && !stop_shown(facts),
         Zone::CameraAct => facts.no_kit && matches!(camera.demo, Some(DemoSwitch::Offered | DemoSwitch::Busy | DemoSwitch::Failed(_))),
         Zone::CameraScan => camera.qr != CameraQr::Off,
         Zone::CameraWebBar | Zone::CameraWeb => camera.web.is_some(),
@@ -964,6 +974,11 @@ pub enum Look {
     ShareSlot(bool),
     ShareDismiss,
     ShareQuestion,
+    /// "Share 3D capture" ([`share_here`]): the tile, its question, its two answers.
+    ShareHere,
+    ShareHereAsk,
+    ShareHereNo,
+    ShareHereYes,
     ShareCancel,
     ShareYes,
     ChooserBack,
@@ -1055,6 +1070,7 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         }
         Zone::WheelStop | Zone::QmStop if stop_shown(facts) => vec![Item { action: stop_action(facts), rect: whole, look: Look::Stop }],
         Zone::WheelStop | Zone::QmStop => Vec::new(),
+        Zone::QmShare => facts.share_here.as_ref().filter(|_| !stop_shown(facts)).map_or_else(Vec::new, |t| share_here::items(w, h, t)),
         Zone::WheelVeil => vec![Item { action: Action::Idle, rect: whole, look: Look::Blank }],
         Zone::WheelHide => vec![Item { action: Action::Hide, rect: whole, look: Look::HideWord }],
         // The wing's tiles, each a part of its own.
@@ -2450,7 +2466,8 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::ShareTo(_) => (tr(share_sheet::SHARE_TO).into(), tr(share_sheet::SHARE_TO_WHY).into()),
         Action::SharePublic(_) => (tr(share_sheet::SHARE_PUBLICLY).into(), tr(share_sheet::SHARE_PUBLICLY_WHY).into()),
         // Its question says it already.
-        Action::ShareConfirm(_) | Action::ShareCancelConfirm | Action::ShareDismiss(_) | Action::ChooserPerson(_) | Action::ChooserPage(_) | Action::ChooserSend(_) | Action::ChooserClose | Action::ChooserRetry => return None,
+        Action::ShareHere(_) => return share_here::caption(action, facts.share_here.as_ref()),
+        Action::ShareConfirm(_) | Action::ShareCancelConfirm | Action::ShareDismiss(_) | Action::ShareHereYes(_) | Action::ShareHereNo | Action::ChooserPerson(_) | Action::ChooserPage(_) | Action::ChooserSend(_) | Action::ChooserClose | Action::ChooserRetry => return None,
         Action::Peek => (tr("Hide Orbiters").into(), tr("Reach VRChat's own menus. Nothing here closes.").into()),
         Action::Worlds => (tr("Worlds in 3D").into(), tr("Search any world. See the ones captured in 3D.").into()),
         Action::Picture(mode) if facts.no_kit => (
@@ -3236,11 +3253,17 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             return;
         }
     }
+    if zone == Zone::QmShare {
+        if let Some(tile) = facts.share_here.as_ref() {
+            share_here::draw(p, item, tile, hovered, pressed);
+        }
+        return;
+    }
     let shape = shaped(zone, rect);
     match item.look {
         Look::Blank => {}
         // Drawn above ([`share_sheet::draw`]).
-        Look::ShareSlot(_) | Look::ShareDismiss | Look::ShareQuestion | Look::ShareCancel | Look::ShareYes | Look::ChooserBack | Look::ChooserRow(_) | Look::ChooserArrow(_) | Look::ChooserSend => {}
+        Look::ShareSlot(_) | Look::ShareDismiss | Look::ShareQuestion | Look::ShareCancel | Look::ShareYes | Look::ShareHere | Look::ShareHereAsk | Look::ShareHereNo | Look::ShareHereYes | Look::ChooserBack | Look::ChooserRow(_) | Look::ChooserArrow(_) | Look::ChooserSend => {}
         Look::Cell { icon, label, badge: has_badge } => {
             let (ring, center) = shape.ring.expect("a cell is on a ring");
             let waiting = zone == Zone::WheelPictures && facts.picture_wait.is_some();

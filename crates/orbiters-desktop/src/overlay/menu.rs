@@ -275,7 +275,8 @@ impl MenuOverlay {
             } else {
                 self.open(overlay, steamvr, snap);
             }
-        } else if asked && !on_avatar_screen(snap) {
+        } else if asked && !on_avatar_screen(snap) && !snap.n4n0.desktop_mode {
+            // (In VRChat's desktop mode the desktop's overlay serves it, All tools beside VRChat's menu: `orbit::Panels::serve_menu`.)
             let just_closed = self.closed_at.is_some_and(|t| t.elapsed() < TOGGLE_AFTER_CLOSE);
             if self.host.menu.open && snap.n4n0.menu_toggle {
                 self.close(overlay, snap, backend);

@@ -56,6 +56,57 @@ fn the_qr_code_sheet_closed_or_left_stops_its_scan() {
     assert!(qr(&heard).ends_with(&[(true, MenuHolder::Panels), (false, MenuHolder::Panels)]), "{:?}", qr(&heard));
 }
 
+/// REQUEST15 item 3 fix B1: in VRChat's desktop mode with no SteamVR, an avatar whose older N4N0 hides its screen with the bot has its menu
+/// asked for (the Action Menu's Menu toggle, VRChat's wheel open): All tools opens here and the service hears it shows, so the toggle stays on;
+/// a toggling request closes it, VRChat's menu going closes it, and an avatar whose screen takes the menu has nothing here.
+#[test]
+fn the_service_s_menu_request_opens_all_tools_on_the_desktop() {
+    use crate::ipc::N4n0Command;
+    let (mut person, heard) = Person::heard();
+    let opened = |heard: &Heard| heard.n4n0.lock().unwrap().iter().filter_map(|c| match c { N4n0Command::MenuState { open, .. } => Some(*open), _ => None }).collect::<Vec<_>>();
+    {
+        let snap = Arc::make_mut(&mut person.snap);
+        snap.n4n0.desktop_mode = true;
+        snap.steamvr.running = false;
+        snap.n4n0.screen = false;
+    }
+    person.around = Some(Around::Wheel);
+    person.turns(3);
+    assert_eq!(person.panels.facts.sheet, None, "nothing asked yet");
+    let ask = |person: &mut Person, toggle: bool| {
+        let snap = Arc::make_mut(&mut person.snap);
+        snap.n4n0.menu_request = snap.n4n0.menu_request.wrapping_add(1);
+        snap.n4n0.menu_toggle = toggle;
+        person.turns(2);
+    };
+    ask(&mut person, false);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::All), "the Menu toggle opens All tools beside VRChat's wheel");
+    assert_eq!(opened(&heard).last(), Some(&true), "and the service hears N4N0's menu shows: {:?}", opened(&heard));
+    ask(&mut person, true);
+    assert_eq!(person.panels.facts.sheet, None, "a toggling request closes it");
+    assert_eq!(opened(&heard).last(), Some(&false));
+    ask(&mut person, false);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::All));
+    person.around = None;
+    person.turns(2);
+    assert_eq!(opened(&heard).last(), Some(&false), "VRChat's menu closing closes N4N0's menu here");
+    // The avatar's screen takes the menu: nothing opens here.
+    person.around = Some(Around::Wheel);
+    Arc::make_mut(&mut person.snap).n4n0.screen = true;
+    person.turns(2);
+    ask(&mut person, false);
+    assert_eq!(person.panels.facts.sheet, None, "the avatar's screen shows it");
+    // In VR (SteamVR runs, VRChat in VR) the SteamVR overlay serves it, not this.
+    {
+        let snap = Arc::make_mut(&mut person.snap);
+        snap.n4n0.screen = false;
+        snap.n4n0.desktop_mode = false;
+        snap.steamvr.running = true;
+    }
+    ask(&mut person, false);
+    assert_eq!(person.panels.facts.sheet, None, "the SteamVR overlay's");
+}
+
 /// OVL2-17: a menu going away under a held press does nothing: the list press is not run later, the held booster level and
 /// smoothing are not saved.
 #[test]
@@ -339,6 +390,7 @@ fn turn_of(panels: &mut Panels, snap: &Snapshot, around: Option<Around>, library
     panels.takeover_place = Some(zones::in_units(Zone::Takeover));
     panels.back_place = Some(zones::in_units(Zone::SheetBack));
     panels.set_open(around, places, snap);
+    panels.serve_menu(snap);
     panels.follow(snap, library);
     panels.menu_turn(snap);
     panels.step_springs(0.011);

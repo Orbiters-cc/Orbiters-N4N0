@@ -270,6 +270,8 @@ pub struct CallsRuntime {
     /// The server (its API address) and the credential the state above is for: when either changes (an environment
     /// switch, another account), nothing of the other's is listed or callable any more.
     identity: Option<(String, String)>,
+    /// Whether this Orbiters account has N4N0 calls (`controller/calls_access.rs`).
+    pub(super) access: super::calls_access::CallsAccess,
 }
 
 impl CallsRuntime {
@@ -873,7 +875,12 @@ impl super::Controller {
 
     fn calls_tick(self: &Shared) {
         let settings = self.settings();
-        let on = settings.n4n0.enabled && settings.n4n0.calls;
+        // Whether this account has N4N0 calls, asked again when it is time to (whatever the setting: Call's tile shows it).
+        if let Some((api, token)) = self.calls_api() {
+            self.calls_access_refresh(&api, &token);
+        }
+        let open = self.calls_open();
+        let on = open && settings.n4n0.enabled && settings.n4n0.calls;
         // A phase that lasted too long ends.
         {
             let mut rt = self.calls.lock().unwrap();
@@ -905,7 +912,13 @@ impl super::Controller {
                     let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &format!("Bearer {token}")).call();
                 }
             }
-            let link = if !on { CallLink::Off } else { CallLink::SignedOut };
+            let link = if !open {
+                CallLink::ComingSoon
+            } else if !on {
+                CallLink::Off
+            } else {
+                CallLink::SignedOut
+            };
             self.calls_publish(|rt| {
                 rt.link = link.clone();
                 rt.contacts.clear();
@@ -973,6 +986,12 @@ impl super::Controller {
                         rt.friends_sent = None;
                     }
                     rt.link = CallLink::Linked { account: account.clone() };
+                }
+                // The account has not N4N0 calls (switched off since): closed here at once, the next look says so.
+                Err(e) if super::calls_access::not_enabled(&e) => {
+                    self.calls_access_refused();
+                    self.calls.lock().unwrap().presence_sent = Some(Instant::now());
+                    return;
                 }
                 Err(e) => {
                     let refused = not_linked(&e);
@@ -1092,6 +1111,10 @@ impl super::Controller {
         // The shared 3D view's events come on the same stream.
         if event.starts_with("share_") {
             self.shared_view_event(event, &v);
+            return;
+        }
+        // Nothing of a call reaches an account without N4N0 calls (Orbiters sends it none either).
+        if !self.calls_open() {
             return;
         }
         let mut rt = self.calls.lock().unwrap();
@@ -1252,6 +1275,11 @@ impl super::Controller {
                     let answer = match post(&api, &token, "n4n0/calls", &json!({ "contact": contact, "offer": offer })) {
                         Ok(v) => v["call"].as_str().filter(|id| !id.is_empty()).map(str::to_string).ok_or(Ending::Failed),
                         Err(e) if refused_as(&e, 409, "busy") => Err(Ending::Busy),
+                        Err(e) if super::calls_access::not_enabled(&e) => {
+                            self.calls_access_refused();
+                            self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
+                            Err(Ending::Failed)
+                        }
                         Err(e) => {
                             eprintln!("calls n4n0/calls: {e:#}");
                             self.notify(NoticeKind::Warning, tr!("Call: {message}", message = e));
@@ -1265,7 +1293,12 @@ impl super::Controller {
                 Signal::Answer { number, id, sdp } => {
                     if let Err(e) = post(&api, &token, &format!("n4n0/calls/{id}/answer"), &json!({ "answer": sdp })) {
                         eprintln!("calls answer: {e:#}");
-                        self.notify(NoticeKind::Warning, tr!("Call: {message}", message = e));
+                        if super::calls_access::not_enabled(&e) {
+                            self.calls_access_refused();
+                            self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
+                        } else {
+                            self.notify(NoticeKind::Warning, tr!("Call: {message}", message = e));
+                        }
                         let mut rt = self.calls.lock().unwrap();
                         let acts = rt.signal_failed(number);
                         self.calls_act(rt, acts);
@@ -1281,8 +1314,21 @@ impl super::Controller {
         }
     }
 
+    /// Says why calls cannot be used here when they are not open to this account (`controller/calls_access.rs`): every
+    /// way into a call asks this first. True when they are open.
+    fn calls_open_or_say(self: &Shared) -> bool {
+        if self.calls_open() {
+            return true;
+        }
+        self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
+        false
+    }
+
     /// Calls a contact (the window, the overlay or N4N0's menu).
     pub fn call_contact(self: &Shared, contact: String) {
+        if !self.calls_open_or_say() {
+            return;
+        }
         let (number, name) = {
             let mut rt = self.calls.lock().unwrap();
             let Some(name) = rt.contacts.iter().find(|c| c.id == contact).map(|c| c.name.clone()) else {
@@ -1299,7 +1345,12 @@ impl super::Controller {
         let ctl = self.clone();
         std::thread::spawn(move || {
             let servers = match ctl.calls_api() {
-                Some((api, token)) => ice_servers(&api, &token).map_err(|e| tr!("the call relay could not be reached: {error}", error = e)),
+                Some((api, token)) => ice_servers(&api, &token).map_err(|e| {
+                    if super::calls_access::not_enabled(&e) {
+                        ctl.calls_access_refused();
+                    }
+                    tr!("the call relay could not be reached: {error}", error = e)
+                }),
                 None => Err(tr("sign in to Orbiters to call.").to_string()),
             };
             let (mic, direct) = ctl.with_settings(|s| (s.n4n0.mic_device.clone(), s.n4n0.direct_calls));
@@ -1325,6 +1376,9 @@ impl super::Controller {
 
     /// Answers the ringing call.
     pub fn call_answer(self: &Shared) {
+        if !self.calls_open_or_say() {
+            return;
+        }
         let (mic, direct) = self.with_settings(|s| (s.n4n0.mic_device.clone(), s.n4n0.direct_calls));
         let mic = (!mic.is_empty()).then_some(mic);
         let mut rt = self.calls.lock().unwrap();
@@ -1367,6 +1421,13 @@ impl super::Controller {
 
     /// `N4N0/Call/Menu` pressed: the contacts on the panel, or off it.
     pub(super) fn calls_menu(self: &Shared) {
+        // Not open to this account: N4N0's panel says so, and no list opens.
+        if !self.calls_open() {
+            self.calls.lock().unwrap().menu_open = false;
+            // The panel's letters (no Japanese) and its width: the short words.
+            self.n4n0_say_quick(tr_latin(orbiters_n4n0_core::menu::CALLS_SOON_WHY));
+            return;
+        }
         let (open, text) = {
             let mut rt = self.calls.lock().unwrap();
             rt.menu_open = !rt.menu_open;
@@ -1383,6 +1444,9 @@ impl super::Controller {
 
     /// `N4N0/Call/Pick` moved.
     pub(super) fn calls_pick(self: &Shared, value: f32) {
+        if !self.calls_open() {
+            return;
+        }
         let text = {
             let mut rt = self.calls.lock().unwrap();
             let picked = pick(value, rt.contacts.len());
@@ -1402,6 +1466,10 @@ impl super::Controller {
 
     /// `N4N0/Call/Go` (or a touch while it rings): answers a ringing call, or calls the chosen contact.
     pub(super) fn calls_go(self: &Shared) -> bool {
+        // Not open to this account: the touch is N4N0's own (no call rings, no list is open).
+        if !self.calls_open() {
+            return false;
+        }
         let (ringing, chosen) = {
             let rt = self.calls.lock().unwrap();
             let ringing = rt.call.as_ref().is_some_and(Call::ringing_in);
@@ -1482,6 +1550,95 @@ mod tests {
         assert!(!not_linked(&e(401, None)) && !not_linked(&anyhow::anyhow!("offline")));
         assert!(refused_as(&e(409, Some("busy")), 409, "busy") && refused_as(&e(409, None), 409, "busy"));
         assert!(!refused_as(&e(409, Some("conflict")), 409, "busy"));
+    }
+
+    /// A controller signed in as account 42 (in memory only: no account file is read and nothing goes to a server, as the
+    /// account was never read for a server), whose session check said `allowed` of its N4N0 calls.
+    fn signed_in_controller(allowed: bool) -> crate::controller::Shared {
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        ctl.account_runtime.lock().unwrap().account =
+            Some(orbiters_core::account::Account { token: "orbit-test".into(), user: Some("42".into()), username: Some("Nova".into()), avatar_url: None, features: None });
+        ctl.update(|s| s.account.state = crate::state::AccountState::SignedIn { username: "Nova".into() });
+        let features = std::collections::BTreeMap::from([(orbiters_core::features::N4N0_CALLS.to_string(), allowed)]);
+        ctl.calls_access_checked(orbiters_core::account::Server::current(), Some("42".into()), Some("Nova".into()), Some(&features));
+        ctl
+    }
+
+    /// A friend's call rings, as the server's stream brings it (with a relay, so an answer goes to the worker at once).
+    fn ring(ctl: &crate::controller::Shared, id: &str) {
+        ctl.on_call_event("incoming", ringing(id));
+    }
+
+    fn ringing(id: &str) -> Value {
+        json!({ "call": id, "from": { "id": "c_9", "name": "Kite" }, "offer": "v=0", "ice_servers": [{ "urls": "turn:relay.example.invalid" }] })
+    }
+
+    /// Request15 10: every way into a call asks `Controller::calls_open` (`controller/calls_access.rs`). Without N4N0 calls none starts anything (calling
+    /// a friend from the window, the overlay or a menu, being rung, answering, the avatar's Call menu, pick and go), and
+    /// Call is published as "Coming soon"; with them each does what it did before.
+    #[test]
+    fn every_way_into_a_call_is_closed_without_the_feature_and_open_with_it() {
+        for allowed in [false, true] {
+            let ctl = signed_in_controller(allowed);
+            assert_eq!(ctl.calls_open(), allowed);
+            let friends = vec![crate::state::CallContact { id: "c_1".into(), name: "Ada".into() }, crate::state::CallContact { id: "c_2".into(), name: "Ben".into() }];
+            ctl.calls.lock().unwrap().contacts = friends;
+            // Calling a friend (the window's N4N0 page, the overlay's and the avatar's menus all end here).
+            ctl.call_contact("c_1".into());
+            assert_eq!(ctl.calls.lock().unwrap().numbered, u64::from(allowed), "a call was dialled: {allowed}");
+            ctl.calls.lock().unwrap().call = None;
+            // The avatar's Call menu, its pick and its go.
+            ctl.calls_menu();
+            assert_eq!(ctl.calls.lock().unwrap().menu_open, allowed, "the Call menu: {allowed}");
+            ctl.calls_pick(1.0);
+            assert_eq!(ctl.calls.lock().unwrap().picked, if allowed { 1 } else { 0 }, "pick: {allowed}");
+            ctl.calls.lock().unwrap().menu_open = false;
+            // Being rung.
+            ring(&ctl, "k_1");
+            assert_eq!(ctl.call_ringing_in(), allowed, "rung: {allowed}");
+            // Answering by touching N4N0, then by Answer: each on a call that rings (without the feature, one put there
+            // as if it had rung). The call worker is not beside the test program: it is asked for, and the call ends.
+            let rung_anyway = |ctl: &crate::controller::Shared, id: &str| {
+                if allowed {
+                    ring(ctl, id);
+                } else {
+                    let mut rt = ctl.calls.lock().unwrap();
+                    let _ = rt.server_event("incoming", &ringing(id), Instant::now());
+                }
+            };
+            ctl.calls.lock().unwrap().call = None;
+            rung_anyway(&ctl, "k_2");
+            let workers = ctl.calls.lock().unwrap().workers;
+            assert_eq!(ctl.calls_go(), allowed, "touching N4N0 answers: {allowed}");
+            assert_eq!(ctl.calls.lock().unwrap().workers > workers, allowed, "touching N4N0 asked the worker to answer: {allowed}");
+            ctl.calls.lock().unwrap().call = None;
+            rung_anyway(&ctl, "k_3");
+            let workers = ctl.calls.lock().unwrap().workers;
+            ctl.call_answer();
+            assert_eq!(ctl.calls.lock().unwrap().workers > workers, allowed, "Answer asked the worker to answer: {allowed}");
+            // What every surface reads: "Coming soon" without the feature.
+            ctl.calls.lock().unwrap().call = None;
+            ctl.calls_tick();
+            let link = ctl.snapshot.lock().unwrap().n4n0.calls.link.clone();
+            assert_eq!(link == crate::state::CallLink::ComingSoon, !allowed, "{link:?}");
+            assert!(ctl.snapshot.lock().unwrap().n4n0.calls.call.is_none() || allowed, "no call to show, so no \"Talk with N4N0?\" either");
+        }
+    }
+
+    /// Signed out, or the server's word not come yet: closed. A refusal of a call request closes calls at once.
+    #[test]
+    fn calls_close_when_signed_out_unknown_or_refused() {
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        assert!(!ctl.calls_open(), "nobody signed in");
+        ctl.calls_tick();
+        assert_eq!(ctl.snapshot.lock().unwrap().n4n0.calls.link, crate::state::CallLink::ComingSoon);
+        let ctl = signed_in_controller(true);
+        ctl.calls_access_refused();
+        assert!(!ctl.calls_open());
+        // A session check from an older server says nothing of features: what was known stays.
+        let ctl = signed_in_controller(true);
+        ctl.calls_access_checked(orbiters_core::account::Server::current(), Some("42".into()), None, None);
+        assert!(ctl.calls_open());
     }
 
     fn contacts(n: usize) -> Vec<CallContact> {

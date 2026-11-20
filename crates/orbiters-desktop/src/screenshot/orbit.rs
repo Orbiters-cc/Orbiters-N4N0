@@ -717,6 +717,10 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     qm_scene("orbit-qm-narrow", out, vec2(800.0, 800.0), &idle, None, None)?;
     qm_scene("orbit-sheet-all", out, hd, &Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
     qm_scene("orbit-sheet-all-vr", out, hd, &Facts { desktop: false, can_call: true, can_states: true, can_light: true, sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
+    // Request15 10: without N4N0 calls, Call greyed out as "Coming soon" on All tools; pointed at, the caption says why.
+    let soon = Facts { calls_soon: true, pointed: Some(Action::Page(Target::Call)), sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() };
+    qm_scene("orbit-sheet-all-calls-soon", out, hd, &soon, None, Some(Sheet::All))?;
+    qm_scene("orbit-sheet-all-vr-calls-soon", out, hd, &Facts { desktop: false, can_states: true, can_light: true, ..soon }, None, Some(Sheet::All))?;
     // What plays with its link known, then copied; the page of microphones, with made-up ones.
     qm_scene("orbit-sheet-all-link", out, hd, &Facts { desktop: false, can_states: true, can_copy_playing: true, can_drop_playing: true, playing_link_copied: true, sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
     // VR feedback F3: no link card on the avatar: Drop link greyed; pointed at, the head says why and what to do (no N4N0 at all, an N4N0 from before the card).

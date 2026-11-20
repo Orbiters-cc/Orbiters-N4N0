@@ -847,6 +847,20 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let path = out.join(format!("menu-{}-retro.png", page.name()));
         write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
         println!("{}", path.display());
+        // Request15 10: the Homes without N4N0 calls on the account: Call greyed out, "Coming soon", pointed at.
+        if matches!(page, ScreenPage::HomeTen | ScreenPage::HomeSimple) {
+            let mut soon = menu.clone();
+            soon.set_calls_soon(true);
+            let hover = layout::cached(page).elements.iter().position(|e| e.target == Target::Call);
+            for (retro, name) in [(false, format!("menu-{}-calls-soon.png", page.name())), (true, format!("menu-{}-calls-soon-retro.png", page.name()))] { // i18n: not shown (file names)
+                let pictures: &dyn Fn(&str) -> Option<TextureId> = if retro { &dotted } else { &picture };
+                let view = View { menu: &soon, hover, pressed: None, picture: pictures, time: 0.4, skin };
+                let rgba = paint(&mut canvas, |p| if retro { menu_retro::draw(p, pos2(0.0, 0.0), &view) } else { menu_ui::draw(p, pos2(0.0, 0.0), &view) });
+                let path = out.join(name);
+                write_png(&path, WIDTH, HEIGHT, &unpremultiply(&rgba))?;
+                println!("{}", path.display());
+            }
+        }
         // Orbiters Toolkit's pictures of the two looks, for the Look option on N4N0's card in My Avatar: the newest
         // Home, half size.
         if page == ScreenPage::HomeTen {

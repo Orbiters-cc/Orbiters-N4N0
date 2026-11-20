@@ -2179,6 +2179,8 @@ pub(crate) fn tick(
     }
     s.menu.fast_walk = walk;
     s.menu.countdown = s.photo_at.map(|at| at.saturating_duration_since(now).as_secs_f32().ceil() as u32);
+    // Calls not open to this account: Call greyed out on the avatar's screen too, "Coming soon".
+    s.menu.set_calls_soon(calls.coming_soon());
     let contacts = calls.menu_contacts();
     let (ready, note) = calls.menu_ready();
     if s.menu.contacts != contacts || s.menu.calls_ready != ready || s.menu.call_note != note {

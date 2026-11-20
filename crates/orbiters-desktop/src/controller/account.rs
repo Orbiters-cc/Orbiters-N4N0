@@ -31,9 +31,9 @@ fn refused_recheck(refusals: u32) -> Duration {
 #[derive(Default)]
 pub struct AccountRuntime {
     /// The signed-in account (with its credential), while one is saved for the current server.
-    account: Option<Account>,
+    pub(super) account: Option<Account>,
     /// The server and the account file's change time last read, to notice another tool signing in or out.
-    read: Option<(Server, Option<SystemTime>)>,
+    pub(super) read: Option<(Server, Option<SystemTime>)>,
     signing_in: Option<SignIn>,
     /// Bumped by every sign-in, cancel and sign-out, so an answer for an older attempt is dropped.
     generation: u64,
@@ -191,8 +191,11 @@ impl Controller {
         if rt.generation != generation || rt.account.as_ref().map(|a| &a.token) != Some(&saved.token) {
             return;
         }
+        // The account's features as the check says them (N4N0 calls), for once the lock is let go.
+        let mut features = None;
         let state = match answer {
             Ok(Check::Valid(current)) => {
+                features = Some((current.user.clone().or(saved.user.clone()), current.username.clone().or(saved.username.clone()), current.features.clone()));
                 let name = current.username.clone().or(saved.username.clone()).unwrap_or_default();
                 rt.account = Some(Account { token: saved.token.clone(), ..current });
                 AccountState::SignedIn { username: name }
@@ -208,6 +211,9 @@ impl Controller {
             }
         };
         drop(rt);
+        if let Some((user, username, features)) = features {
+            self.calls_access_checked(server, user, username, features.as_ref());
+        }
         self.commit_account_check(generation, state);
     }
 
@@ -432,7 +438,7 @@ impl Controller {
     pub(super) fn signed_in_for_test(&self, server: Server, user: &str) {
         let mut rt = self.account_runtime.lock().unwrap();
         rt.read = Some((server, None));
-        rt.account = Some(Account { token: format!("orbit-test-{user}"), user: Some(user.into()), username: Some(user.into()), avatar_url: None });
+        rt.account = Some(Account { token: format!("orbit-test-{user}"), user: Some(user.into()), username: Some(user.into()), avatar_url: None, features: None });
     }
 
     pub(super) fn feedback_account(&self) -> Option<(Server, Option<String>, Option<String>)> {
@@ -512,7 +518,7 @@ mod tests {
         let ctl = Controller::new(Settings::default());
         assert!(ctl.usage_stamp().is_none(), "nobody, not told");
         ctl.account_runtime.lock().unwrap().read = Some((Server::current(), None));
-        ctl.account_runtime.lock().unwrap().account = Some(Account { token: "orbit-secret".into(), user: Some("42".into()), username: Some("Enzo".into()), avatar_url: None });
+        ctl.account_runtime.lock().unwrap().account = Some(Account { token: "orbit-secret".into(), user: Some("42".into()), username: Some("Enzo".into()), avatar_url: None, features: None });
         ctl.update(|s| s.account.state = AccountState::SignedIn { username: "Enzo".into() });
         assert_eq!(ctl.usage_account().map(|s| (s.account, s.token)), Some(("42".into(), "orbit-secret".into())));
         assert!(ctl.usage_stamp().is_none(), "signed in, but the old notice only: nothing is linked to the account");
@@ -525,7 +531,7 @@ mod tests {
         }
         // An account file without an id: known here by its name, never by its credential.
         ctl.update(|s| s.account.state = AccountState::SignedIn { username: "Enzo".into() });
-        ctl.account_runtime.lock().unwrap().account = Some(Account { token: "orbit-secret".into(), user: None, username: Some(" Enzo ".into()), avatar_url: None });
+        ctl.account_runtime.lock().unwrap().account = Some(Account { token: "orbit-secret".into(), user: None, username: Some(" Enzo ".into()), avatar_url: None, features: None });
         assert_eq!(ctl.usage_stamp().account.as_deref(), Some("name:enzo"));
     }
 
@@ -535,7 +541,7 @@ mod tests {
     fn an_account_read_before_a_sign_out_is_not_installed_after_it() {
         let ctl = Controller::new(Settings::default());
         ctl.update(|s| s.account.state = AccountState::SignedIn { username: "old".into() });
-        let old = Account { token: "old-token".into(), user: Some("7".into()), username: Some("old".into()), avatar_url: None };
+        let old = Account { token: "old-token".into(), user: Some("7".into()), username: Some("old".into()), avatar_url: None, features: None };
         ctl.read_account_from(Server::Production, None, false, || {
             // Signed out while the file was being read: what `sign_out` does to the runtime and the snapshot.
             {
@@ -705,7 +711,7 @@ mod tests {
 impl Controller {
     pub(super) fn test_account(&self) {
         self.account_runtime.lock().unwrap().read = Some((Server::current(), None));
-        self.account_runtime.lock().unwrap().account = Some(Account { token: "fake".into(), user: None, username: Some("tester".into()), avatar_url: None });
+        self.account_runtime.lock().unwrap().account = Some(Account { token: "fake".into(), user: None, username: Some("tester".into()), avatar_url: None, features: None });
         self.update(|s| { s.account.state = AccountState::SignedIn { username: "tester".into() }; s.account.development = Server::current() == Server::Development; });
     }
 

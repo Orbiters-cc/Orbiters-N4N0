@@ -413,6 +413,11 @@ impl<P: Pictures> MenuHost<P> {
             _ => {}
         }
         let calls = &n4n0.calls;
+        // Calls not open to this account: Call greyed, "Coming soon" (before the contacts, which then mean nothing).
+        if m.calls_soon != calls.coming_soon() {
+            m.set_calls_soon(calls.coming_soon());
+            changed = true;
+        }
         let (ready, note) = calls.menu_ready();
         let same_contacts = m.contacts.len() == calls.contacts.len() && m.contacts.iter().zip(&calls.contacts).all(|(a, b)| a.id == b.id && a.name == b.name);
         if !same_contacts || m.calls_ready != ready || m.call_note != note {
@@ -932,6 +937,20 @@ mod tests {
         watcher.stand_in(playing(12));
         h.follow_media_at(asked + MEDIA_CATCHES_UP * 4);
         assert!(h.menu.media.as_ref().unwrap().playing && h.play_asked.is_none());
+    }
+
+    /// Request15 10: until the service says this account has N4N0 calls (what it starts with), Call is "Coming soon".
+    #[test]
+    fn call_is_coming_soon_until_the_service_says_otherwise() {
+        let mut h = host();
+        let settings = Settings::default();
+        h.open(&settings);
+        let mut n4n0 = N4n0Status::default();
+        h.follow(&n4n0, &settings);
+        assert!(h.menu.calls_soon && orbiters_n4n0_core::menu::layout::target_state(&h.menu, Target::Call).soon);
+        n4n0.calls = CallsStatus { link: CallLink::Linked { account: "usr_1".into() }, ..Default::default() }.into();
+        h.follow(&n4n0, &settings);
+        assert!(!h.menu.calls_soon && !orbiters_n4n0_core::menu::layout::target_state(&h.menu, Target::Call).unavailable);
     }
 
     #[test]

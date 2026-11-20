@@ -1754,6 +1754,7 @@ fn tile_note(menu: &Menu, tile: u8) -> String {
             0 => tr_ctx("panel", "Search videos").into(),
             _ => format!("\"{}\"", menu.results_for),
         },
+        2 if menu.calls_soon => tr(super::CALLS_SOON).into(),
         2 => match &menu.call {
             Some(Call::Ringing { name }) => tr!("{name} calls", name = name),
             Some(Call::Calling { .. }) => tr("Calling…").into(),
@@ -1915,6 +1916,8 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
         }
     }
     match content {
+        // Call pressed while it is not open here: said where Home says what to do.
+        Content::Status if menu.calls_soon && menu.notice.as_deref() == Some(super::CALLS_SOON_WHY) => tr(super::CALLS_SOON_WHY).into(),
         Content::Status => {
             if menu.assistant == Some(false) {
                 tr("Assistant off: tap the microphone to turn it on").into()
@@ -2609,12 +2612,15 @@ pub struct State {
     pub hidden: bool,
     /// Shown greyed out, not available now (fast walk in desktop mode): nothing happens on it.
     pub unavailable: bool,
+    /// Greyed out as not open yet, "Coming soon" (Call without N4N0 calls): unlike the others it takes a press, which says
+    /// why instead of opening anything.
+    pub soon: bool,
 }
 
 impl State {
     /// Whether a pointer hovers and presses it.
     pub fn pointable(self) -> bool {
-        !self.hidden && !self.unavailable
+        !self.hidden && (!self.unavailable || self.soon)
     }
 }
 
@@ -2719,7 +2725,8 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::DeleteComment(i) => !menu.page_comments().get(i as usize).is_some_and(|c| c.mine && c.id != 0),
         _ => false,
     };
-    let unavailable = match target {
+    let soon = target == Target::Call && menu.calls_soon;
+    let unavailable = soon || match target {
         Target::FastWalk => menu.desktop_mode,
         // A timer is counting: both stay, greyed out, over the line that counts (hiding them would empty the page).
         Target::TakeOf(_) => menu.countdown.is_some(),
@@ -2739,7 +2746,7 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::MirrorZoomOut => !menu.mirror.can_zoom_out(),
         _ => false,
     };
-    State { on: on && !unavailable, hidden, unavailable }
+    State { on: on && !unavailable, hidden, unavailable, soon }
 }
 
 /// Whether timeline segment `i` is lit: the music reached its start (and played on from there).

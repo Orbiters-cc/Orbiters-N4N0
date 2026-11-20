@@ -9,6 +9,9 @@ pub const VRCHAT_LOGIN: &str = "n4n0-vrchat-login";
 /// everybody else has no rule and is refused, which is what "owners only, for now" means, on production and on
 /// development alike. A rule on the server would widen it without a release of the app.
 pub const VRCHAT_BRIDGE: &str = "n4n0-vrchat-bridge";
+/// N4N0 calls (contracts `Docs/n4n0-calls.md`, "Who has calls"): off for everyone until an administrator switches an
+/// account on. Without it Call shows as "Coming soon" and the calls API refuses the account (`not_enabled`).
+pub const N4N0_CALLS: &str = "n4n0-calls";
 pub const REFRESH: Duration = Duration::from_secs(3 * 60 * 60);
 #[derive(Deserialize)]
 struct Reply {

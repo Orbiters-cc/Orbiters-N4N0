@@ -772,6 +772,22 @@ pub fn draw_back(p: &Painter, origin: Pos2, skin: &Skin) {
     widgets::text(p, pos2(centre, card.center().y + 106.0), Align2::CENTER_CENTER, &hint.txt);
 }
 
+/// "Coming soon" on a greyed-out element that is not open yet (Call without N4N0 calls): a quiet pill in its top right
+/// corner, over the veil, so the tile reads as on its way rather than broken. Pointed at, its edge lights: it takes a
+/// press, which says why.
+fn soon_badge(p: &Painter, r: Rect, pal: &Palette, hovered: bool) {
+    let label = orbiters_i18n::tr(orbiters_n4n0_core::menu::CALLS_SOON);
+    // Clear of the element's own name: in the corner, smaller than it.
+    let size = if r.height() < 90.0 { 13.0 } else { 14.5 };
+    let txt = fit(p, Txt::new(label, size).weight(weight::SEMIBOLD).color(pal.text), (r.width() * 0.5).max(60.0));
+    let pill = Rect::from_min_size(pos2(r.right() - txt.size.x - 24.0, r.top() + 7.0), vec2(txt.size.x + 16.0, txt.size.y + 6.0));
+    p.rect_filled(pill, theme::radius(pill.height() / 2.0), pal.raised);
+    if hovered {
+        p.rect_stroke(pill, theme::radius(pill.height() / 2.0), Stroke::new(1.5, pal.accent), StrokeKind::Inside);
+    }
+    widgets::text(p, pill.center(), Align2::CENTER_CENTER, &txt.txt);
+}
+
 /// The side of Orbiters - N4N0's icon on the back.
 const BACK_ICON: f32 = 132.0;
 
@@ -813,6 +829,9 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
         if state.unavailable {
             // Greyed out: the card shows through, as on the avatar's screen.
             p.rect_filled(r, radius, theme::alpha(pal.card, UNAVAILABLE_VEIL));
+            if state.soon {
+                soon_badge(p, r, pal, view.hover == Some(i));
+            }
         } else if view.pressed == Some(i) {
             p.rect_filled(r, radius, if matches!(e.look, Look::Accent | Look::Danger) { theme::black(0.16) } else { theme::white(0.12) });
         } else if view.hover == Some(i) {

@@ -321,6 +321,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
             let calls = &n4n0.calls;
             let calls_sub = match (&calls.call, &calls.link) {
+                // Not open to this Orbiters account yet: said, and nothing below can start one.
+                (_, CallLink::ComingSoon) => tr(CALLS_SOON_SUB).to_string(),
                 (Some(c), _) => call_line(c),
                 (None, CallLink::Linked { .. }) if calls.contacts.is_empty() => tr("No friend with Orbiters and N4N0 on right now").to_string(),
                 (None, CallLink::Linked { .. }) => tr_n("{count} friend can be called", "{count} friends can be called", calls.contacts.len() as u64),
@@ -336,10 +338,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     Some(tr("Your presence and your VRChat friends (as hashes, from VRCX and VRCNext) go to Orbiters, to find friends you can call. Calls go through Orbiters' relay: a friend never sees this computer's address.")),
                     48.0,
                     |ui| {
-                        apply |= widgets::toggle(ui, "n4n0-calls", &mut draft.n4n0.calls);
+                        // Greyed out while calls are not open to this account: the setting keeps what it was.
+                        let soon = calls.coming_soon();
+                        ui.add_enabled_ui(!soon, |ui| apply |= widgets::toggle(ui, "n4n0-calls", &mut draft.n4n0.calls));
                     },
                 );
-                if draft.n4n0.calls {
+                if calls.coming_soon() {
+                    widgets::separator(ui);
+                    widgets::field(ui, tr(orbiters_n4n0_core::menu::CALLS_SOON), Some(tr(CALLS_SOON_WHY_PAGE)), 0.0, |_| {});
+                } else if draft.n4n0.calls {
                     widgets::separator(ui);
                     widgets::field(
                         ui,
@@ -687,6 +694,10 @@ fn avatar_line(snap: &crate::state::Snapshot) -> String {
 }
 
 /// Where a call stands, in a few words.
+/// The Calls section's line, and what it says under the switch, while calls are not open to this account.
+const CALLS_SOON_SUB: &str = mark("Coming soon: calls aren't open for your account yet");
+const CALLS_SOON_WHY_PAGE: &str = mark("Calls between VRChat friends are on their way to Orbiters - N4N0. Your Orbiters account doesn't have them yet; they'll open here once it does.");
+
 fn call_line(call: &CallView) -> String {
     match call.phase {
         CallPhase::Calling => tr!("Calling {name}…", name = call.name),

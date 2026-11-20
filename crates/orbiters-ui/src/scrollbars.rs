@@ -144,13 +144,14 @@ mod tests {
         fn frame(&mut self, dt: f64, events: Vec<Event>) -> u8 {
             self.t += dt;
             let input = RawInput { time: Some(self.t), screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0))), events, ..Default::default() };
-            let out = self.ctx.run_ui(input, |ui| {
+            let mut out = self.ctx.run_ui(input, |ui| {
                 egui::ScrollArea::vertical().id_salt("list").auto_shrink([false, false]).show(ui, |ui| {
                     for i in 0..80 {
                         ui.label(format!("row {i}"));
                     }
                 });
             });
+            out.textures_delta.clear();
             self.repaint = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
             // The handle: the one filled rect along the right edge, thinner than the bar's track.
             let mut alpha = 0;

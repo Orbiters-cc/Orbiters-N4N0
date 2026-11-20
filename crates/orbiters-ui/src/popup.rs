@@ -362,9 +362,10 @@ mod tests {
         let mut dots = Vec::new();
         for f in 0..120 {
             let input = egui::RawInput { time: Some(f as f64 / 60.0), screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))), ..Default::default() };
-            let out = ctx.run_ui(input, |ui| {
+            let mut out = ctx.run_ui(input, |ui| {
                 list_from(ui.ctx(), id, anchor, f == 1, &items, Some(2), 300.0);
             });
+            out.textures_delta.clear();
             dots = circles(&out.shapes);
         }
         assert!(is_open(&ctx, id));

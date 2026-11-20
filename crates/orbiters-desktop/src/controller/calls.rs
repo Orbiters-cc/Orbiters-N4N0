@@ -2006,6 +2006,46 @@ mod tests {
         assert!(rt.signals.is_none(), "B's Hang up had nothing of A's call to send");
     }
 
+    /// A's account signed in on production, in a connected call with Kite (set up here, not with a server: no id yet,
+    /// so leaving tells no server anything), its calls' state stamped as the account's own.
+    fn signed_in_as_a_in_a_call() -> crate::controller::Shared {
+        let server = orbiters_core::account::Server::Production;
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        {
+            let mut rt = ctl.account_runtime.lock().unwrap();
+            rt.read = Some((server, None));
+            rt.account = Some(orbiters_core::account::Account { token: "orbit-a".into(), user: Some("1".into()), username: Some("A".into()), avatar_url: None, features: None });
+        }
+        ctl.update(|s| s.account.state = crate::state::AccountState::SignedIn { username: "A".into() });
+        {
+            let mut rt = ctl.calls.lock().unwrap();
+            rt.identity = Some((Api::new(server).url(""), "orbit-a".into()));
+            let mut call = Call::new(1, "c_1".into(), "Kite".into(), false, Instant::now());
+            call.phase = CallPhase::Connected;
+            call.connected_at = Some(1);
+            rt.call = Some(call);
+            rt.numbered = 1;
+        }
+        ctl.calls_publish(|_| {});
+        ctl
+    }
+
+    fn in_a_call(ctl: &crate::controller::Shared) -> bool {
+        ctl.calls.lock().unwrap().call.is_some() && ctl.snapshot.lock().unwrap().n4n0.calls.call.is_some()
+    }
+
+    /// Verify5 (4): only a confirmed change of identity leaves. An account file that cannot be read for a moment, or a
+    /// sign-out whose removal failed (the account stays signed in), leave a healthy call alone.
+    #[test]
+    fn a_transient_read_or_a_failed_sign_out_keeps_the_call() {
+        let ctl = signed_in_as_a_in_a_call();
+        ctl.read_account_from(orbiters_core::account::Server::Production, None, false, || Err(anyhow::anyhow!("being written")));
+        assert!(in_a_call(&ctl), "an unreadable file is not a sign-out");
+        assert_eq!(ctl.account_runtime.lock().unwrap().account.as_ref().map(|a| a.token.as_str()), Some("orbit-a"));
+        assert!(ctl.sign_out_with(orbiters_core::account::Server::Production, || Err(anyhow::anyhow!("access denied"))).is_err());
+        assert!(in_a_call(&ctl), "nothing was signed out");
+    }
+
     /// Verify2 blocker 3: the cleanup of a refusal touches only the state of the credential refused, in the same change.
     #[test]
     fn a_refusal_clears_only_the_state_of_its_own_credential() {

@@ -259,6 +259,25 @@ pub fn read(server: Server) -> Option<Account> {
     read_file(store(), &account_path(server)?)
 }
 
+/// The account signed in for `server`, telling "nobody" (no file, or an empty credential) from "could not be read now"
+/// (`Err`: the file is there but could not be read or opened, perhaps while another tool writes it). The app keeps the
+/// account it has on an `Err` and reads again; only `Ok(None)` is a sign-out.
+pub fn read_saved(server: Server) -> anyhow::Result<Option<Account>> {
+    let Some(path) = account_path(server) else { return Ok(None) };
+    read_file_checked(store(), &path)
+}
+
+fn read_file_checked(store: &dyn CredentialStore, path: &Path) -> anyhow::Result<Option<Account>> {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| tr!("could not read {path}", path = path.display())),
+    };
+    let json = store.open(&data)?;
+    let account: Account = serde_json::from_slice(&json)?;
+    Ok((!account.token.trim().is_empty()).then_some(account))
+}
+
 /// When the account file of `server` last changed (another tool signed in or out), or `None` without one.
 pub fn modified(server: Server) -> Option<std::time::SystemTime> {
     std::fs::metadata(account_path(server)?).ok()?.modified().ok()

@@ -391,8 +391,10 @@ fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>,
         }
     });
 
-    // Play in VR, Play in Desktop, or an invite received with both in it.
+    // Play in VR, Play in Desktop (always, with the VRChat profile they start on), an invite received with both in it;
+    // then the account's own profile, changed where it shows (REQUEST15 7).
     super::launcher::hero(ui, cx, launcher, 1);
+    super::launcher::mine_card(ui, cx, launcher, 3);
 
     // Until a VRChat on the network is connected, the first thing to do: most of what follows goes through it.
     if !orbiters_core::osc::VRCHAT_RUNS_HERE && !matches!(cx.snap.lan.link, crate::state::LanLink::Connected | crate::state::LanLink::Off) {
@@ -400,21 +402,45 @@ fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>,
     }
 
     let w = ui.available_width();
-    let cols = home_columns(w);
-    let card_w = (w - GAP * (cols - 1) as f32) / cols as f32;
-    let card_h = tile_height(card_w);
+    // With the launcher beside them (Play, the account's profile, friends), the features take a compact grid: they
+    // matter more in game and in the overlay than in this window (REQUEST15 7c). Alone on Home, their cards.
+    let compact = launcher.shown();
+    if compact {
+        let p = ui.painter().clone();
+        let (cap, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
+        widgets::text(&p, pos2(cap.left() + 2.0, cap.center().y), Align2::LEFT_CENTER, &Txt::caps(tr("N4N0's features")));
+        ui.add_space(-8.0);
+    }
+    let (cols, gap) = if compact { (compact_columns(w), COMPACT_GAP) } else { (home_columns(w), GAP) };
+    let card_w = (w - gap * (cols - 1) as f32) / cols as f32;
+    let card_h = if compact { COMPACT_H } else { tile_height(card_w) };
     // The features, then what N4N0 says in the rest of the last row (one place at least): the grid stays whole.
     let count = features().count();
     let cells = count + 1;
     let rows = cells.div_ceil(cols);
-    let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + GAP) - GAP), Sense::hover());
-    let cell = |i: usize| area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (card_h + GAP));
+    let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + gap) - gap), Sense::hover());
+    let cell = |i: usize| area.min + vec2((i % cols) as f32 * (card_w + gap), (i / cols) as f32 * (card_h + gap));
     for (i, tile) in features().enumerate() {
-        feature(ui, cx, i, tile, Rect::from_min_size(cell(i), vec2(card_w, card_h)), menu, copied, acts);
+        let rect = Rect::from_min_size(cell(i), vec2(card_w, card_h));
+        if compact {
+            feature_compact(ui, cx, i, tile, rect, menu, copied, acts);
+        } else {
+            feature(ui, cx, i, tile, rect, menu, copied, acts);
+        }
     }
     let span = cols - count % cols;
     let at = cell(count);
-    said(ui, cx, 1 + count, Rect::from_min_size(at, vec2(span as f32 * (card_w + GAP) - GAP, card_h)), menu);
+    said(ui, cx, 1 + count, Rect::from_min_size(at, vec2(span as f32 * (card_w + gap) - gap, card_h)), menu);
+}
+
+/// Home's compact features: their height, the room between them, the narrowest before a row takes one fewer.
+const COMPACT_H: f32 = 60.0;
+const COMPACT_GAP: f32 = 10.0;
+const COMPACT_MIN: f32 = 172.0;
+
+/// The compact grid's columns at `width`: as many as fit, two to six.
+fn compact_columns(width: f32) -> usize {
+    (((width + COMPACT_GAP) / (COMPACT_MIN + COMPACT_GAP)).floor() as usize).clamp(2, 6)
 }
 
 /// The narrowest a Home tile gets before the row takes one fewer, the widest before it takes one more past six, and
@@ -529,6 +555,96 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Tint), rec
     }
 }
 
+/// One of Home's features in the compact grid: its icon chip, its name over what it says now, and on the right its
+/// switch, its Copy link or the way in, as [`feature`] has them.
+#[allow(clippy::too_many_arguments)]
+fn feature_compact(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Tint), rect: Rect, menu: &Menu, copied: Option<&str>, acts: &mut Vec<Act>) {
+    let (target, icon, title, tint) = tile;
+    let title = menu_text(title);
+    let state = layout::target_state(menu, target);
+    let (rect, alpha) = super::entering(ui, cx, 1 + i, rect);
+    let ctx = ui.ctx().clone();
+    let id = Id::unique(("orbiters-home-feature", i));
+    let enabled = !state.unavailable;
+    let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
+    if enabled && widgets::pressed(&resp) {
+        acts.push(Act::Press(target));
+    }
+    let hover = anim::toggle(&ctx, id.with("hover"), enabled && resp.hovered(), Spring::SOFT);
+    let press = anim::toggle(&ctx, id.with("press"), enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
+    let resp = if enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
+    let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.03 * press));
+    let mut p = ui.painter().clone();
+    p.multiply_opacity(alpha * if enabled { 1.0 } else { 0.5 });
+    widgets::frame(&p, r, 14.0, theme::mix(theme::surface(), theme::INK_800, hover));
+    let switched = matches!(target, Target::FastWalk | Target::Light);
+    let color = match target {
+        Target::Light => menu.light.filter(|l| l.on).map(|l| menu_ui::tint(Tint::Light(l.color))),
+        _ if switched && !state.on => None,
+        _ => Some(menu_ui::tint(tint)),
+    };
+    let (bg, fg) = match color {
+        Some(c) => (theme::alpha(c, 0.12), c),
+        None => (theme::white(0.05), theme::FG_3),
+    };
+    let bg = anim::color(&ctx, id.with("chip-bg"), bg, Spring::SOFT);
+    let fg = anim::color(&ctx, id.with("chip-fg"), fg, Spring::SOFT);
+    let chip = Rect::from_min_size(pos2(r.left() + 12.0, r.center().y - 16.0), vec2(32.0, 32.0));
+    p.rect_filled(chip, theme::radius(10.0), bg);
+    widgets::icon(&p, chip.center(), menu_ui::glyph(icon), 15.0, fg);
+    let active = state.on
+        || match target {
+            Target::Call => menu.call.is_some(),
+            Target::Photo => menu.countdown.is_some(),
+            Target::Music => menu.media.as_ref().is_some_and(|m| m.playing && !m.title.is_empty()),
+            Target::States => menu.states.iter().any(|s| s.default),
+            Target::Qr => menu.qr.scanning(),
+            _ => false,
+        };
+    // On the right: a switch, the playing video's Copy link, or the way in.
+    let switch = match target {
+        Target::FastWalk => Some(Target::FastWalk),
+        Target::Light if menu.light.is_some() => Some(Target::LightSwitch),
+        _ => None,
+    };
+    let playing = match target {
+        Target::Music => menu.media.as_ref().and_then(|m| m.video.as_deref()),
+        _ => None,
+    };
+    let end = if switch.is_some() { 56.0 } else if playing.is_some() { 40.0 } else { 24.0 };
+    let x = chip.right() + 10.0;
+    let room = r.right() - end - x;
+    widgets::text_truncated(&p, pos2(x, r.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(title, 13.5).weight(weight::SEMIBOLD), room);
+    let note = Txt::new(layout::text(menu, Content::TileNote(layout::note_of(target))), 11.5).color(if active { theme::ACCENT } else { theme::FG_3 });
+    widgets::text_truncated(&p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &note, room);
+    resp.on_hover_text(title);
+    if let Some(video) = playing {
+        let (glyph, label) = if copied == Some(video) { (icons::CHECK, tr("Link copied")) } else { (icons::COPY, tr("Copy the video's link")) };
+        let br = Rect::from_center_size(pos2(r.right() - 24.0, r.center().y), Vec2::splat(32.0));
+        let mut bu = ui.new_child(UiBuilder::new().max_rect(br).id_salt(("orbiters-home-copy-playing", i)));
+        bu.multiply_opacity(alpha);
+        if IconButton::new(glyph, label).size(32.0, 15.0).id_salt("copy").show_at(&mut bu, br).clicked() {
+            acts.push(Act::Press(Target::CopyPlaying));
+        }
+        return;
+    }
+    match switch {
+        Some(switch) => {
+            let sr = Rect::from_min_size(pos2(r.right() - 12.0 - 48.0, r.center().y - 14.0), vec2(48.0, 28.0));
+            let mut su = ui.new_child(UiBuilder::new().max_rect(sr).id_salt(("orbiters-home-switch", i)));
+            su.multiply_opacity(alpha);
+            if !enabled {
+                su.disable();
+            }
+            let mut on = state.on;
+            if widgets::toggle(&mut su, "switch", &mut on) {
+                acts.push(Act::Press(switch));
+            }
+        }
+        None => widgets::icon(&p, pos2(r.right() - 16.0, r.center().y), icons::CARET_RIGHT, 14.0, theme::mix(theme::FG_4, theme::FG_2, hover)),
+    }
+}
+
 /// What N4N0 said last (or heard: the owner's own words), in the last row of the features: N4N0 beside its caption, the
 /// words under them.
 fn said(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, menu: &Menu) {
@@ -536,6 +652,24 @@ fn said(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, menu: &Menu) {
     let mut p = ui.painter().clone();
     p.multiply_opacity(alpha);
     widgets::frame(&p, r, theme::CARD_RADIUS, theme::surface());
+    if r.height() <= COMPACT_H + 0.5 {
+        // A compact grid's: N4N0, its caption and its words on one line.
+        let chip = Rect::from_min_size(pos2(r.left() + 12.0, r.center().y - 16.0), vec2(32.0, 32.0));
+        p.rect_filled(chip, theme::radius(10.0), theme::alpha(theme::ACCENT, 0.12));
+        n4n0_face(&p, chip.center(), 9.0);
+        let caption = match (&menu.heard, menu.heard_private) {
+            (None, _) => "N4N0",
+            (Some(_), true) => tr("You said"),
+            (Some(_), false) => tr("N4N0 says"),
+        };
+        widgets::text(&p, pos2(chip.right() + 12.0, r.center().y - 9.0), Align2::LEFT_CENTER, &Txt::caps(caption));
+        let (text, color) = match menu.heard.as_deref() {
+            Some(text) => (format!("“{text}”"), theme::FG_2),
+            None => (tr("Nothing said yet: N4N0's answers show here.").to_string(), theme::FG_3),
+        };
+        widgets::text_truncated(&p, pos2(chip.right() + 12.0, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(text, 12.5).color(color), r.right() - chip.right() - 24.0);
+        return;
+    }
     let chip = Rect::from_min_size(r.min + vec2(INSET, 22.0), vec2(36.0, 36.0));
     p.rect_filled(chip, theme::radius(11.0), theme::alpha(theme::ACCENT, 0.12));
     n4n0_face(&p, chip.center(), 10.0);
@@ -1610,6 +1744,27 @@ mod tests {
         let mut louder = playing(10);
         louder.volume = Some(Volume { percent: 45, muted: false });
         assert!(music_shown(&playing(10), false) != music_shown(&louder, false));
+    }
+
+    /// REQUEST15 7c: beside the launcher the features take half the room or less, and every one stays.
+    #[test]
+    fn beside_the_launcher_the_features_take_a_compact_grid() {
+        // The default window's page beside the friends column (1048 - 16 - 314 - 52), and the narrowest page.
+        for w in [666.0f32, 560.0] {
+            let count = features().count() + 1;
+            let big_cols = home_columns(w);
+            let big = count.div_ceil(big_cols) as f32 * (tile_height((w - GAP * (big_cols - 1) as f32) / big_cols as f32) + GAP);
+            let cols = compact_columns(w);
+            let small = count.div_ceil(cols) as f32 * (COMPACT_H + COMPACT_GAP);
+            assert!(small * 2.0 <= big + 1.0, "{w}: {small} against {big}");
+            assert!((w - COMPACT_GAP * (cols - 1) as f32) / cols as f32 >= COMPACT_MIN, "{w}: names stay readable");
+        }
+        let mut h = Harness::new();
+        let mut data = orbiters_core::launcher::LauncherState::default();
+        data.possible.play = true;
+        h.state.launcher_mut().set_data(std::sync::Arc::new(data));
+        h.settle();
+        assert!(h.state.launcher_mut().shown());
     }
 
     #[test]

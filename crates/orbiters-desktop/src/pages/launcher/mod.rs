@@ -109,6 +109,9 @@ pub struct State {
     ctx: Option<egui::Context>,
     /// Data handed in from outside (pictures of the page): the snapshot's is then left alone.
     staged: bool,
+    /// The VRChat profile the person chose for the next Play, and a new one they added here (REQUEST15 7a).
+    chosen_profile: Option<u32>,
+    added_profile: Option<u32>,
 }
 
 impl Default for State {
@@ -136,6 +139,8 @@ impl Default for State {
             scope: None,
             ctx: None,
             staged: false,
+            chosen_profile: None,
+            added_profile: None,
         }
     }
 }
@@ -191,6 +196,11 @@ impl State {
 
     pub fn stand_in_dismiss(&mut self, id: &str) {
         self.dismissed.insert(id.to_string());
+    }
+
+    /// Pictures of the page: the VRChat profile chosen for the next Play.
+    pub fn stand_in_profile(&mut self, profile: u32) {
+        self.chosen_profile = Some(profile);
     }
 
     /// Opens a person's profile as if their row was pressed at `from`.

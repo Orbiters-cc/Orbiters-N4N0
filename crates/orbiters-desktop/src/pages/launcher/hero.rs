@@ -1,9 +1,11 @@
-//! The top of Home: the two Play buttons, or a received invite's card with both Play buttons in it.
+//! The top of Home: the two Play buttons, always there (REQUEST15 7a), with the VRChat profile they start on under
+//! them (each profile its own account; one VRChat per profile, several side by side), then a received invite's card
+//! with both Play buttons in it.
 
 use super::states::{self, PlayState};
 use super::{access_name, cover_uv, region_tag, Cx, State};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, Sense, Ui};
-use orbiters_core::launcher::{Action, Invite, InviteKind, LaunchMode};
+use orbiters_core::launcher::{Action, GameProfile, Invite, InviteKind, LaunchMode};
 use orbiters_core::vrchat_launch::VR_HERE;
 use orbiters_i18n::tr;
 use orbiters_ui::anim::{self, Spring};
@@ -12,6 +14,10 @@ use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{paint, widgets};
 
 const PLAY_H: f32 = 84.0;
+/// The profile choice under the Play buttons: its chips' height, the room above it.
+const CHIP_H: f32 = 32.0;
+const CHIP_GAP: f32 = 8.0;
+const CHOICE_TOP: f32 = 12.0;
 const INVITE_H: f32 = 188.0;
 const LINE_H: f32 = 52.0;
 
@@ -20,10 +26,14 @@ fn invite(state: &State) -> Option<Invite> {
     state.data.invites.iter().find(|i| i.kind == InviteKind::Invite && !state.dismissed.contains(&i.id)).cloned()
 }
 
-/// Home's Play part as block `index`; nothing while there is nothing to play.
+/// Home's Play part as block `index`; nothing while there is nothing to play. On a PC the Play buttons stay whatever
+/// runs, with the profile choice; an invite's card follows them.
 pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     if !state.shown() {
         return;
+    }
+    if VR_HERE {
+        return hero_profiles(ui, cx, state, index);
     }
     let play = states::play(&state.data);
     let invite = invite(state);
@@ -31,7 +41,7 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         (Some(_), PlayState::Ready | PlayState::Starting(_) | PlayState::Running(_)) => INVITE_H,
         (_, PlayState::Ready | PlayState::Starting(_)) => PLAY_H,
         (_, PlayState::Running(_) | PlayState::NotInstalled | PlayState::NoEngine) => LINE_H,
-        (_, PlayState::Unavailable) => return,
+        (_, PlayState::Unavailable | PlayState::OtherStarting) => return,
     };
     super::super::block(ui, cx, index, height, |ui, rect| match (invite, play) {
         (Some(invite), PlayState::Ready | PlayState::Starting(_) | PlayState::Running(_)) => invite_card(ui, cx, state, rect, &invite, play),
@@ -91,6 +101,126 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     });
 }
 
+/// A profile's chip: its number and the account last seen on it, how it runs now.
+fn chip_label(p: &GameProfile) -> String {
+    match &p.account {
+        Some(name) if !name.is_empty() => format!("{} · {name}", p.profile),
+        _ => orbiters_i18n::tr!("Profile {n}", n = p.profile),
+    }
+}
+
+fn chip_icon(p: &GameProfile) -> (&'static str, egui::Color32) {
+    match (p.running, p.starting) {
+        (Some(LaunchMode::Vr), _) => (icons::VIRTUAL_REALITY, theme::ACCENT),
+        (Some(LaunchMode::Desktop), _) => (icons::DESKTOP, theme::ACCENT),
+        (None, Some(_)) => (icons::HOURGLASS_MEDIUM, theme::WARN),
+        (None, None) => (icons::USER, theme::FG_3),
+    }
+}
+
+/// What a chip says on hover.
+fn chip_hint(p: &GameProfile) -> String {
+    let whose = if p.assistant { tr("The assistant's VRChat runs on this profile.").to_string() } else { String::new() };
+    let state = match (p.running, p.starting) {
+        (Some(LaunchMode::Vr), _) => tr("VRChat runs on this profile, in VR."),
+        (Some(LaunchMode::Desktop), _) => tr("VRChat runs on this profile, on the desktop."),
+        (None, Some(_)) => tr("VRChat is starting on this profile."),
+        (None, None) => tr("Each VRChat profile keeps its own sign-in: start VRChat on it to use that account."),
+    };
+    if whose.is_empty() { state.to_string() } else { format!("{state} {whose}") }
+}
+
+/// The Play buttons and the profile choice (Windows).
+fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
+    let offered = states::profiles(&state.data, state.added_profile);
+    let next = states::next_profile(&offered, state.chosen_profile);
+    let play = states::play_on(&state.data, &offered, next);
+    let invite = invite(state);
+    match play {
+        PlayState::Unavailable => return,
+        PlayState::NotInstalled | PlayState::NoEngine => {
+            super::super::block(ui, cx, index, LINE_H, |ui, rect| {
+                let p = ui.painter();
+                widgets::frame(p, rect, 16.0, theme::surface_soft());
+                widgets::icon(p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, theme::WARN);
+                let line = tr("VRChat isn't installed on this computer: install it from Steam or the Meta app, then come back.");
+                widgets::text_truncated(p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), rect.width() - 60.0);
+            });
+            return;
+        }
+        _ => {}
+    }
+    // The chips, wrapped in rows when the page is narrow.
+    let caption = Txt::new(tr("VRChat profile"), 12.5).weight(weight::MEDIUM).color(theme::FG_3);
+    let caption_w = widgets::text_size(ui, &caption).x + 14.0;
+    let new = states::new_profile(&offered);
+    let new_label = tr("Another profile");
+    let mut widths: Vec<f32> = offered.iter().map(|p| widgets::Chip::new(&chip_label(p)).icon(chip_icon(p).0).selected(p.profile == next).width(ui)).collect();
+    if new.is_some() {
+        widths.push(widgets::Chip::new(new_label).icon(icons::PLUS).width(ui));
+    }
+    let room = ui.available_width() - caption_w;
+    let (places, chips_h) = widgets::flow(&widths, room.max(120.0), CHIP_H, CHIP_GAP);
+    let running_here = matches!(play, PlayState::Running(_));
+    // When the chosen profile runs: one line that says how to start one more.
+    let hint_h = if running_here { 22.0 } else { 0.0 };
+    let height = PLAY_H + CHOICE_TOP + chips_h.max(CHIP_H) + hint_h;
+    super::super::block(ui, cx, index, height, |ui, rect| {
+        let clock = anim::time(ui.ctx());
+        let row = Rect::from_min_size(rect.min, vec2(rect.width(), PLAY_H));
+        let gap = 12.0;
+        let w = (row.width() - gap) * 0.5;
+        let vr = Rect::from_min_size(row.min, vec2(w, row.height()));
+        let desk = Rect::from_min_size(pos2(vr.right() + gap, row.top()), vec2(w, row.height()));
+        for (r, mode) in [(vr, LaunchMode::Vr), (desk, LaunchMode::Desktop)] {
+            if play_button(ui, r, mode, play, true) {
+                state.act(cx, clock, Action::PlayOn { mode, profile: next });
+            }
+        }
+        // The profile choice.
+        let top = row.bottom() + CHOICE_TOP;
+        widgets::text(ui.painter(), pos2(rect.left() + 2.0, top + CHIP_H * 0.5), Align2::LEFT_CENTER, &caption);
+        let x0 = rect.left() + caption_w;
+        for (i, at) in places.iter().enumerate() {
+            let r = Rect::from_min_size(pos2(x0 + at.x, top + at.y), vec2(widths[i], CHIP_H));
+            match offered.get(i) {
+                Some(p) => {
+                    let label = chip_label(p);
+                    let (glyph, tone) = chip_icon(p);
+                    let chip = widgets::Chip::new(&label).icon(glyph).tone(tone).selected(p.profile == next).id_salt(("launcher-profile", p.profile));
+                    let got = chip.show_at(ui, r);
+                    if got.pressed {
+                        state.chosen_profile = Some(p.profile);
+                    }
+                    got.response.on_hover_text(chip_hint(p));
+                }
+                None => {
+                    let got = widgets::Chip::new(new_label).icon(icons::PLUS).id_salt("launcher-profile-new").show_at(ui, r);
+                    if got.pressed {
+                        state.added_profile = new;
+                        state.chosen_profile = new;
+                    }
+                    got.response.on_hover_text(tr("Start VRChat on a profile of its own, to sign in there with another account."));
+                }
+            }
+        }
+        if running_here {
+            let line = orbiters_i18n::tr!("VRChat runs on profile {n}: choose another profile to start one more.", n = next);
+            let y = top + chips_h.max(CHIP_H) + 4.0 + hint_h * 0.5;
+            widgets::text_truncated(ui.painter(), pos2(rect.left() + 2.0, y), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::FG_3), rect.width());
+        }
+    });
+    if let Some(invite) = invite {
+        // The Play buttons above start a VRChat of the chosen profile; the invite's own buttons go to its world.
+        let card_play = match states::play(&state.data) {
+            PlayState::Running(mode) => PlayState::Running(mode),
+            PlayState::Starting(mode) => PlayState::Starting(mode),
+            _ => PlayState::Ready,
+        };
+        super::super::block(ui, cx, index, INVITE_H, |ui, rect| invite_card(ui, cx, state, rect, &invite, card_play));
+    }
+}
+
 /// A big Play button: VR in Orbiters green, desktop in grey, an icon, a name and what it uses. While it starts, a
 /// turning ring and "Starting…"; the other one waits. Returns whether it was pressed.
 fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: bool) -> bool {
@@ -101,7 +231,9 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
         LaunchMode::Desktop => (tr("Play in Desktop"), tr("Keyboard and mouse, no headset"), icons::DESKTOP),
     };
     let starting = play == PlayState::Starting(mode);
-    let enabled = play == PlayState::Ready || (matches!(play, PlayState::Running(m) if m == mode));
+    // The big buttons stay while VRChat runs on the chosen profile: the one of its mode says so, neither starts a second.
+    let running = big && play == PlayState::Running(mode);
+    let enabled = play == PlayState::Ready || (!big && matches!(play, PlayState::Running(m) if m == mode));
     let id = Id::unique(("launcher-play", mode == LaunchMode::Vr, big));
     let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
     widgets::note_control(&ctx, label, rect, enabled);
@@ -110,12 +242,14 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
     let down = anim::toggle(&ctx, id.with("down"), enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.02 * down));
     let mut p = ui.painter().clone();
-    if !enabled && !starting {
+    if !enabled && !starting && !running {
         p.multiply_opacity(0.4);
     }
     // The one button of a Mac is the green one.
     let primary = mode == LaunchMode::Vr || !VR_HERE;
-    let (fill, fg, fg2) = if primary {
+    let (fill, fg, fg2) = if running {
+        (theme::alpha(theme::ACCENT, 0.14), theme::FG, theme::FG_2)
+    } else if primary {
         (theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover), theme::ON_ACCENT, theme::alpha(theme::ON_ACCENT, 0.72))
     } else {
         (theme::mix(theme::control(), theme::INK_600, hover), theme::FG, theme::FG_3)
@@ -133,6 +267,9 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
             paint::ring(&p, c, 12.0, 2.5, theme::alpha(fg, 0.25));
             paint::arc(&p, c, 12.0, t * 6.0, 1.9, 2.5, fg);
             ctx.request_repaint();
+        } else if running {
+            widgets::icon(&p, c, glyph, 24.0, theme::ACCENT);
+            widgets::status_dot(&p, c + vec2(17.0, 15.0), widgets::Tone::Ok, true);
         } else {
             widgets::icon(&p, c, glyph, 24.0, fg);
         }
@@ -141,6 +278,14 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
         let (title, sub) = match starting {
             true if !VR_HERE => (tr("Obelisk is open"), tr("Press Play on VRChat there")),
             true => (tr("Starting VRChat…"), sub),
+            false if running => (
+                match mode {
+                    LaunchMode::Vr => tr("VRChat is running in VR"),
+                    LaunchMode::Desktop => tr("VRChat is running on the desktop"),
+                },
+                tr("On the profile chosen below"),
+            ),
+            false if play == PlayState::OtherStarting => (label, tr("Wait for the VRChat starting now")),
             false => (label, sub),
         };
         let room = r.right() - x - 14.0;

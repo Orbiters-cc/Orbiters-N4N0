@@ -1,7 +1,7 @@
 //! What the request-invite and boop buttons say, and what the Play buttons can do, from the contract's state, what
 //! this page itself just sent, and the clock. Pure, so the states are tested without drawing.
 
-use orbiters_core::launcher::{Friend, Game, LaunchMode, LauncherState, Notice, Presence, SentKind, Source, Whereabouts};
+use orbiters_core::launcher::{Friend, Game, GameProfile, LaunchMode, LauncherState, Notice, Presence, SentKind, Source, Whereabouts};
 
 /// How long "Sent" shows after a press before the cool-down (or the plain button) is back.
 pub const SENT_FOR: f64 = 2.5;
@@ -91,6 +91,8 @@ pub enum PlayState {
     NoEngine,
     /// Nothing can start it here (it runs on another device, or the service has not said yet).
     Unavailable,
+    /// Another profile's VRChat is starting: one start at a time.
+    OtherStarting,
 }
 
 pub fn play(state: &LauncherState) -> PlayState {
@@ -102,6 +104,66 @@ pub fn play(state: &LauncherState) -> PlayState {
         Game::NotRunning if state.possible.play => PlayState::Ready,
         Game::NotRunning => PlayState::Unavailable,
     }
+}
+
+/// The profiles Home offers to start on: the service's list (profile 0 always, then those used before, running or
+/// starting), and a new one the person added here.
+pub fn profiles(state: &LauncherState, added: Option<u32>) -> Vec<GameProfile> {
+    let mut out = state.profiles.clone();
+    if out.is_empty() {
+        out.push(GameProfile::default());
+    }
+    if let Some(n) = added.filter(|n| !out.iter().any(|p| p.profile == *n)) {
+        out.push(GameProfile { profile: n, ..GameProfile::default() });
+        out.sort_by_key(|p| p.profile);
+    }
+    out
+}
+
+/// The profile the Play buttons start next: the one the person chose, else the first one used before on which no
+/// VRChat runs or starts (so a second VRChat is one press away for someone with several accounts), else profile 0.
+/// Someone who only ever used profile 0 keeps it: with VRChat running, the buttons say so instead of offering a new
+/// profile nobody asked for.
+pub fn next_profile(offered: &[GameProfile], chosen: Option<u32>) -> u32 {
+    if let Some(c) = chosen.filter(|c| offered.iter().any(|p| p.profile == *c)) {
+        return c;
+    }
+    offered.iter().find(|p| p.running.is_none() && p.starting.is_none()).or(offered.first()).map_or(0, |p| p.profile)
+}
+
+/// A new profile's number: the first one past those offered.
+pub fn new_profile(offered: &[GameProfile]) -> Option<u32> {
+    let n = offered.iter().map(|p| p.profile + 1).max().unwrap_or(1);
+    (n <= orbiters_core::vrchat_launch::PROFILE_MAX).then_some(n)
+}
+
+/// The Play buttons for a start on `profile`.
+pub fn play_on(state: &LauncherState, offered: &[GameProfile], profile: u32) -> PlayState {
+    match state.game {
+        Game::NotInstalled => return PlayState::NotInstalled,
+        Game::NoEngine => return PlayState::NoEngine,
+        _ => {}
+    }
+    if !state.possible.play {
+        return PlayState::Unavailable;
+    }
+    let this = offered.iter().find(|p| p.profile == profile);
+    if let Some(mode) = this.and_then(|p| p.running) {
+        return PlayState::Running(mode);
+    }
+    if let Some(mode) = this.and_then(|p| p.starting) {
+        return PlayState::Starting(mode);
+    }
+    if offered.iter().any(|p| p.starting.is_some()) {
+        return PlayState::OtherStarting;
+    }
+    // The first VRChat, started a moment ago and not yet tied to a profile.
+    if let Game::Starting(mode) = state.game {
+        if !offered.iter().any(|p| p.running.is_some()) {
+            return if profile == 0 { PlayState::Starting(mode) } else { PlayState::OtherStarting };
+        }
+    }
+    PlayState::Ready
 }
 
 /// Whether the list shows what is live or a copy, for the one line that says what needs the sign-in.
@@ -174,6 +236,49 @@ mod tests {
         assert_eq!(request(&s, &s.friends[0], None, 0.0, NOW), Reach::SignIn);
         assert_eq!(boop(&s, &s.friends[0], None, 0.0, NOW), Reach::SignIn);
         assert_eq!(play(&s), PlayState::Ready, "playing needs no sign-in");
+    }
+
+    fn on(profile: u32, running: Option<LaunchMode>, starting: Option<LaunchMode>) -> GameProfile {
+        GameProfile { profile, running, starting, ..GameProfile::default() }
+    }
+
+    #[test]
+    fn the_next_start_goes_to_a_free_profile_and_never_onto_a_running_one() {
+        // Someone who only ever used profile 0, VRChat running: the buttons stay on 0 and say it runs.
+        let only = [on(0, Some(LaunchMode::Vr), None)];
+        assert_eq!(next_profile(&only, None), 0);
+        let mut s = sample();
+        s.profiles = only.to_vec();
+        assert_eq!(play_on(&s, &only, 0), PlayState::Running(LaunchMode::Vr), "the Play buttons stay, saying it runs");
+        // Several accounts: the first free one is offered next.
+        let several = [on(0, Some(LaunchMode::Vr), None), on(1, None, None), on(2, None, None)];
+        assert_eq!(next_profile(&several, None), 1);
+        assert_eq!(next_profile(&several, Some(2)), 2, "the person's choice");
+        assert_eq!(next_profile(&several, Some(9)), 1, "a choice no longer offered is not kept");
+        s.profiles = several.to_vec();
+        assert_eq!(play_on(&s, &several, 1), PlayState::Ready, "a second VRChat, on profile 1");
+        assert_eq!(play_on(&s, &several, 0), PlayState::Running(LaunchMode::Vr));
+        // A start under way: that profile says so, the others wait their turn.
+        let starting = [on(0, Some(LaunchMode::Vr), None), on(1, None, Some(LaunchMode::Desktop)), on(2, None, None)];
+        assert_eq!(play_on(&s, &starting, 1), PlayState::Starting(LaunchMode::Desktop));
+        assert_eq!(play_on(&s, &starting, 2), PlayState::OtherStarting);
+        assert_eq!(next_profile(&starting, None), 2);
+    }
+
+    #[test]
+    fn a_new_profile_comes_after_the_ones_offered() {
+        let mut s = sample();
+        s.profiles.clear();
+        let offered = profiles(&s, None);
+        assert_eq!(offered.iter().map(|p| p.profile).collect::<Vec<_>>(), [0], "profile 0 always");
+        assert_eq!(new_profile(&offered), Some(1));
+        let offered = profiles(&s, Some(1));
+        assert_eq!(offered.iter().map(|p| p.profile).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(new_profile(&offered), Some(2));
+        let last = [on(orbiters_core::vrchat_launch::PROFILE_MAX, None, None)];
+        assert_eq!(new_profile(&last), None, "no more than VRChat's profiles Home offers");
+        s.game = Game::NotInstalled;
+        assert_eq!(play_on(&s, &offered, 0), PlayState::NotInstalled);
     }
 
     #[test]

@@ -276,11 +276,129 @@ pub enum Game {
     NoEngine,
 }
 
+/// One of VRChat's local profiles (`--profile=N`, REQUEST15 7a): each keeps its own signed-in account, so several
+/// VRChats run side by side only on different profiles.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GameProfile {
+    /// VRChat's `--profile` number (0: the default, a start without `--profile`).
+    pub profile: u32,
+    /// The account last seen signed in on it (its VRChat log said so), when known.
+    pub account: Option<String>,
+    /// A VRChat runs on it now, in this mode.
+    pub running: Option<LaunchMode>,
+    /// Started from here a moment ago and not yet seen running.
+    pub starting: Option<LaunchMode>,
+    /// The VRChat on it is the assistant's (the VRChat bridge's), not the person's.
+    pub assistant: bool,
+}
+
+/// What a status can be set to from here: VRChat's four ("offline" is not one a person picks).
+pub const SETTABLE_STATUSES: [Status; 4] = [Status::JoinMe, Status::Active, Status::AskMe, Status::Busy];
+/// VRChat's limits on the account's own words (its website and VRCX hold the same): status text, bio.
+pub const STATUS_TEXT_MAX: usize = 32;
+pub const BIO_MAX: usize = 512;
+
+/// The account's banner, as VRChat's profile has it (`bannerType`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum BannerChoice {
+    /// A colour (`bannerColor`, RGB).
+    #[default]
+    Colour,
+    /// The avatar's own picture.
+    Avatar,
+    /// A picture of the account's VRChat gallery (`bannerCustomUrl`).
+    Custom,
+}
+
+/// A picture of the account's own (an icon or a gallery picture uploaded in VRChat).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OwnPicture {
+    /// `file_…`.
+    pub id: String,
+    /// The file's latest version, as VRChat names it for `userIcon` / `bannerCustomUrl`.
+    pub url: String,
+}
+
+/// Which list of the account's own pictures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PictureKind {
+    /// VRChat's icons (`/files?tag=icon`): the profile picture.
+    Icons,
+    /// VRChat's gallery (`/files?tag=gallery`): the banner.
+    Gallery,
+}
+
+/// What of the account's own profile is being changed (one at a time; REQUEST15 7b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfilePart { Status, StatusText, Bio, Picture, Banner }
+
+/// A change of the account's own profile, sent only on the person's own press.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ProfileEdit {
+    Status(Status),
+    StatusText(String),
+    Bio(String),
+    /// A picture of [`PictureKind::Icons`] by its URL; empty: the avatar's picture again.
+    Picture(String),
+    Banner { choice: BannerChoice, colour: Option<[u8; 3]>, custom: String },
+}
+
+impl ProfileEdit {
+    pub fn part(&self) -> ProfilePart {
+        match self {
+            ProfileEdit::Status(_) => ProfilePart::Status,
+            ProfileEdit::StatusText(_) => ProfilePart::StatusText,
+            ProfileEdit::Bio(_) => ProfilePart::Bio,
+            ProfileEdit::Picture(_) => ProfilePart::Picture,
+            ProfileEdit::Banner { .. } => ProfilePart::Banner,
+        }
+    }
+}
+
+/// How the last change of a part went.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Saving {
+    Saving(ProfilePart),
+    Saved(ProfilePart),
+    /// Not changed at VRChat: why, in the page's language.
+    Failed(ProfilePart, String),
+}
+
+/// The account's own profile as Home's card edits it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MyProfile {
+    pub bio: String,
+    pub banner: BannerChoice,
+    pub banner_colour: Option<[u8; 3]>,
+    /// The gallery picture of [`BannerChoice::Custom`].
+    pub banner_custom: String,
+    /// The chosen icon (`userIcon`); empty: the avatar's picture shows.
+    pub icon: String,
+    /// The avatar's own picture (what shows without an icon, and the Avatar banner).
+    pub avatar_picture: String,
+    /// VRC+: own icons and gallery pictures are VRC+'s.
+    pub supporter: bool,
+    /// The account's icons and gallery pictures, once asked for (`None`: not read yet).
+    pub icons: Option<Vec<OwnPicture>>,
+    pub gallery: Option<Vec<OwnPicture>>,
+    /// Reading one of the lists now.
+    pub listing: Option<PictureKind>,
+    pub saving: Option<Saving>,
+    /// Another change is allowed from then on (Unix seconds): VRChat refuses changes in quick succession.
+    pub next_change_at: Option<i64>,
+}
+
 /// What the page sends.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Action {
     /// Start VRChat (or, when it runs, go to `destination`).
     Play { mode: LaunchMode, destination: Option<Place> },
+    /// Start a VRChat on this profile, beside any running on others; never a second one on the same profile.
+    PlayOn { mode: LaunchMode, profile: u32 },
+    /// Change the account's own profile (status, its text, bio, picture, banner) at VRChat.
+    EditProfile(ProfileEdit),
+    /// Read the account's own icons or gallery pictures, to choose among.
+    ListPictures(PictureKind),
     /// Accept an invite and play it in that mode (or send the running game there).
     AcceptInvite { invite: String, mode: LaunchMode },
     /// Hide an invite / request / boop here (and mark it seen at VRChat when signed in).
@@ -337,6 +455,12 @@ pub struct LauncherState {
     pub notice: Option<Notice>,
     /// Reading the friends for the first time.
     pub loading: bool,
+    /// VRChat's profiles on this computer: the ones running, starting or used before, by number.
+    #[serde(default)]
+    pub profiles: Vec<GameProfile>,
+    /// The signed-in account's own profile, for Home's card (`None` until read, and with no sign-in).
+    #[serde(default)]
+    pub mine: Option<MyProfile>,
 }
 
 impl LauncherState {
@@ -466,6 +590,18 @@ pub fn sample() -> LauncherState {
         game: Game::NotRunning,
         notice: None,
         loading: false,
+        profiles: vec![
+            GameProfile { profile: 0, account: Some("Sample Me".into()), ..GameProfile::default() },
+            GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },
+        ],
+        mine: Some(MyProfile {
+            bio: "Made-up account for drawing the page.
+Builds quiet worlds.".into(),
+            banner: BannerChoice::Colour,
+            banner_colour: Some([60, 90, 200]),
+            supporter: true,
+            ..MyProfile::default()
+        }),
     }
 }
 

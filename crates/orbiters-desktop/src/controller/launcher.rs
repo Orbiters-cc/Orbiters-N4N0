@@ -57,6 +57,15 @@ pub trait Machine: Send + Sync {
     fn installed(&self) -> bool;
     /// Starts VRChat with these arguments (after `-applaunch 438100`).
     fn start(&self, args: &[String]) -> Result<(), String>;
+    /// Starts one more VRChat beside those running, with these arguments (`--profile=N` among them): through VRChat's own
+    /// launcher, as the bridge does, since Steam starts a game once.
+    fn start_beside(&self, args: &[String]) -> Result<(), String> {
+        self.start(args)
+    }
+    /// The VRChats running here with their profile: process id, Desktop mode, `--profile` (0 without one).
+    fn running_profiles(&self) -> Vec<(u32, bool, u32)> {
+        self.running().into_iter().map(|(pid, desktop)| (pid, desktop, 0)).collect()
+    }
     /// The desktop window VRChat saved for its next start (Unity's `Screenmanager` values): width, height, fullscreen mode.
     fn saved_window(&self) -> Option<SavedWindow> {
         None
@@ -97,8 +106,8 @@ pub fn route(steam_has_vrchat: bool, launcher_registered: bool) -> Route {
 
 #[derive(Default)]
 pub struct RealMachine {
-    /// Each VRChat's Desktop mode, read once from its command line.
-    desktop: Mutex<HashMap<u32, bool>>,
+    /// Each VRChat's Desktop mode and profile, read once from its command line.
+    desktop: Mutex<HashMap<u32, (bool, u32)>>,
     /// The route, kept ten minutes (it reads the registry and Steam's library file).
     route: Mutex<Option<(Instant, Route)>>,
 }
@@ -186,6 +195,39 @@ impl Machine for MacMachine {
     }
 }
 
+/// The VRChats running (process, Desktop mode, profile): the profile as their own log said it when the roster knows the
+/// process, else as their command line does.
+fn runs_with_profiles(machine: &dyn Machine, roster: &[crate::state::VrchatRunShown]) -> Vec<(u32, bool, u32)> {
+    machine.running_profiles().into_iter().map(|(pid, desktop, profile)| (pid, desktop, roster.iter().find(|r| r.pid == pid).map_or(profile, |r| r.profile))).collect()
+}
+
+/// Home's profile choice: every profile used before (with the account last seen on it), running or starting now, by
+/// number; profile 0 always.
+pub fn game_profiles(
+    known: &BTreeMap<u32, String>,
+    runs: &[(u32, bool, u32)],
+    roster: &[crate::state::VrchatRunShown],
+    starting: Option<(u32, LaunchMode)>,
+) -> Vec<orbiters_core::launcher::GameProfile> {
+    let mut numbers: Vec<u32> = std::iter::once(0).chain(known.keys().copied()).chain(runs.iter().map(|r| r.2)).chain(starting.map(|s| s.0)).collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    numbers
+        .into_iter()
+        .map(|profile| {
+            let run = runs.iter().find(|r| r.2 == profile);
+            let shown = run.and_then(|r| roster.iter().find(|s| s.pid == r.0));
+            orbiters_core::launcher::GameProfile {
+                profile,
+                account: shown.and_then(|s| s.account.clone()).or_else(|| known.get(&profile).cloned()),
+                running: run.map(|r| if r.1 { LaunchMode::Desktop } else { LaunchMode::Vr }),
+                starting: starting.filter(|s| s.0 == profile && run.is_none()).map(|s| s.1),
+                assistant: shown.is_some_and(|s| s.driver != crate::state::VrchatDriverShown::Person),
+            }
+        })
+        .collect()
+}
+
 /// This computer's.
 fn real_machine() -> Arc<dyn Machine> {
     if cfg!(target_os = "macos") {
@@ -197,6 +239,10 @@ fn real_machine() -> Arc<dyn Machine> {
 
 impl Machine for RealMachine {
     fn running(&self) -> Vec<(u32, bool)> {
+        self.running_profiles().into_iter().map(|(pid, desktop, _)| (pid, desktop)).collect()
+    }
+
+    fn running_profiles(&self) -> Vec<(u32, bool, u32)> {
         // Names only (no process is opened for them); the command line is read for VRChat's processes alone, once each.
         let mut system = sysinfo::System::new();
         system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
@@ -207,11 +253,15 @@ impl Machine for RealMachine {
         if !unknown.is_empty() {
             system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&unknown), true, sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always));
             for pid in unknown {
-                let no_vr = system.process(pid).is_some_and(|p| p.cmd().iter().any(|a| a.to_string_lossy() == "--no-vr"));
-                desktop.insert(pid.as_u32(), no_vr);
+                let args: Vec<String> = system.process(pid).map(|p| p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect()).unwrap_or_default();
+                let no_vr = args.iter().any(|a| a == "--no-vr");
+                desktop.insert(pid.as_u32(), (no_vr, orbiters_core::vrchat_launch::profile_of(&args)));
             }
         }
-        pids.iter().map(|p| (p.as_u32(), desktop.get(&p.as_u32()).copied().unwrap_or(false))).collect()
+        pids.iter().map(|p| {
+            let (no_vr, profile) = desktop.get(&p.as_u32()).copied().unwrap_or((false, 0));
+            (p.as_u32(), no_vr, profile)
+        }).collect()
     }
 
     fn installed(&self) -> bool {
@@ -226,6 +276,11 @@ impl Machine for RealMachine {
             Route::Launcher => crate::bridge::win::start_vrchat_beside(args).map_err(|f| f.message),
             Route::NotInstalled => Err(tr("VRChat was not found on this computer. Install it from Steam, or start it once.").into()),
         }
+    }
+
+    fn start_beside(&self, args: &[String]) -> Result<(), String> {
+        // VRChat's own launch.exe with `--profile`: a process of its own every time (measured 2026-11-15, bridge).
+        crate::bridge::win::start_vrchat_beside(args).map_err(|f| f.message)
     }
 
     fn saved_window(&self) -> Option<SavedWindow> {
@@ -298,6 +353,8 @@ pub(super) struct Runtime {
     /// Where to go once the game the person starts by hand (a Mac) is up, since when it waits, and the account it was
     /// asked for (it goes to that account only).
     pending: Option<(Place, Instant, Option<String>)>,
+    /// The profile a start from Home's profile choice asked for, its mode and when: "starting" until seen running.
+    starting: Option<(u32, LaunchMode, Instant)>,
 }
 
 /// An invite accepted here, until VRChat is told to hide it (the account got there) or its card comes back.
@@ -344,6 +401,7 @@ impl Default for Runtime {
             game_checked: None,
             machine: real_machine(),
             pending: None,
+            starting: None,
         }
     }
 }
@@ -640,8 +698,25 @@ impl Controller {
         let here = if machine.by_hand() { !(remote && machine.engine_missing()) } else { orbiters_core::osc::VRCHAT_RUNS_HERE && !remote };
         // The watchers list every VRChat every 3 s already: the processes are looked at here only when they see one, or
         // while a start is under way (a Mac's game is looked for by its own scan).
-        let look = here && (machine.by_hand() || !view.vrchat.runs.is_empty() || view.vrchat.running || matches!(view.launcher.game, Game::Starting(_) | Game::Running(_)));
-        let running = if look { machine.running() } else { Vec::new() };
+        let starting_profile = self.launcher.lock().unwrap().starting.filter(|(.., at)| at.elapsed() < STARTING_FOR);
+        let look = here && (machine.by_hand() || !view.vrchat.runs.is_empty() || view.vrchat.running || starting_profile.is_some() || matches!(view.launcher.game, Game::Starting(_) | Game::Running(_)));
+        let runs = if look { runs_with_profiles(machine, &view.vrchat.runs) } else { Vec::new() };
+        // A start on a profile is over once a VRChat runs on it (or its minute passed).
+        let starting_profile = starting_profile.filter(|(profile, ..)| !runs.iter().any(|r| r.2 == *profile));
+        self.launcher.lock().unwrap().starting = starting_profile;
+        // The accounts seen on each profile are remembered, so the choice says whose each one is.
+        let learned: Vec<(u32, String)> = view
+            .vrchat
+            .runs
+            .iter()
+            .filter_map(|r| r.account.clone().filter(|a| !a.is_empty()).map(|a| (r.profile, a)))
+            .filter(|(p, a)| view.settings.launch.profiles.get(p) != Some(a) && *p <= orbiters_core::vrchat_launch::PROFILE_MAX)
+            .collect();
+        if !learned.is_empty() {
+            self.update_settings(|s| s.launch.profiles.extend(learned));
+        }
+        let profiles = if here && !machine.by_hand() { game_profiles(&self.view().settings.launch.profiles, &runs, &view.vrchat.runs, starting_profile.map(|(p, m, _)| (p, m))) } else { Vec::new() };
+        let running: Vec<(u32, bool)> = runs.iter().map(|r| (r.0, r.1)).collect();
         let game = match running.first() {
             Some((_, desktop)) => Game::Running(if *desktop { LaunchMode::Desktop } else { LaunchMode::Vr }),
             None if !here => Game::NotRunning,
@@ -658,7 +733,10 @@ impl Controller {
         }
         // Published only when something changed (this runs every few seconds).
         self.update_if(|s| {
-            let changed = s.launcher.game != game || s.launcher.possible.play != here;
+            let changed = s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles;
+            if s.launcher.profiles != profiles {
+                s.launcher.profiles = profiles;
+            }
             if s.launcher.game != game {
                 s.launcher.game = game;
             }
@@ -734,6 +812,11 @@ impl Controller {
         self.update_if(|s| {
             state.game = s.launcher.game.clone();
             state.possible.play = s.launcher.possible.play;
+            state.profiles = s.launcher.profiles.clone();
+            // The account's own profile is read on its own (`launcher_mine`): kept for the same account only.
+            if s.launcher.source == state.source {
+                state.mine = s.launcher.mine.clone();
+            }
             // An open profile stays only when the source is the same copy (never from a VRChat sign-in into a local one).
             let same_source = matches!((&s.launcher.source, &state.source), (Source::Database { app: a, .. }, Source::Database { app: b, .. }) if a == b);
             state.profile = s.launcher.profile.clone().filter(|p| same_source && state.friends.iter().any(|f| f.id == p.friend.id));
@@ -1015,6 +1098,9 @@ impl Controller {
         let account = account.as_deref();
         match action {
             Action::Play { mode, destination } => Some(self.launcher_play(mode, destination, account)),
+            Action::PlayOn { mode, profile } => Some(self.launcher_play_on(mode, profile)),
+            // The account's own profile: REQUEST15 7b.
+            Action::EditProfile(_) | Action::ListPictures(_) => None,
             Action::AcceptInvite { invite, mode } => {
                 // An invite is the account's whose list showed it: never accepted for another, nor with no sign-in.
                 let owner = match (self.launcher_sender(account), account) {
@@ -1176,6 +1262,79 @@ impl Controller {
                     });
                 }
                 Notice::Sent { to: destination.map(|p| p.world_id).unwrap_or_default(), action: SentKind::Launch }
+            }
+            Err(words) => Notice::Error(tr!("VRChat could not be started: {reason}", reason = words)),
+        }
+    }
+
+    /// Home's Play with a profile chosen (REQUEST15 7a): a VRChat on `profile`, beside the ones running on other profiles
+    /// (VRChat's own launcher with `--profile`), never a second one on the same profile. Through Steam when none runs.
+    fn launcher_play_on(self: &Shared, mode: LaunchMode, profile: u32) -> Notice {
+        if !self.view().launcher.possible.play {
+            return Notice::Error(tr("VRChat runs on another device: Play works on the computer that runs it.").into());
+        }
+        if profile > orbiters_core::vrchat_launch::PROFILE_MAX {
+            return Notice::Error(tr("VRChat does not know this profile.").into());
+        }
+        let machine = self.launcher.lock().unwrap().machine.clone();
+        if machine.by_hand() {
+            // A Mac: Obelisk runs one VRChat, on its own profile.
+            return if profile == 0 { self.launcher_play(mode, None, None) } else { Notice::Error(tr("On a Mac, VRChat runs one profile, through Obelisk.").into()) };
+        }
+        // The same start lock as Play: from the look at the running VRChats to the start, two presses start one.
+        let mut started = self.launcher_started.lock().unwrap();
+        let view = self.view();
+        let runs = runs_with_profiles(machine.as_ref(), &view.vrchat.runs);
+        if runs.iter().any(|r| r.2 == profile) {
+            return Notice::Error(tr!("VRChat already runs on profile {n}: choose another profile to start one more.", n = profile));
+        }
+        let starting = self.launcher.lock().unwrap().starting.filter(|(.., at)| at.elapsed() < STARTING_FOR);
+        if starting.is_some() || (runs.is_empty() && started.is_some_and(|t| t.elapsed() < STARTING_FOR)) {
+            return Notice::Error(tr("Starting VRChat…").into());
+        }
+        if !machine.installed() {
+            return Notice::Error(tr("VRChat was not found on this computer. Install it from Steam, or start it once.").into());
+        }
+        let settings = view.settings.launch.clone();
+        let mut args = orbiters_core::vrchat_launch::arguments(mode, &settings, None);
+        // VRChat's saved window is one for all its profiles: the same care as Play's.
+        let saved = machine.saved_window();
+        let mut keep_window = None;
+        match mode {
+            LaunchMode::Desktop => args.extend(desktop_window(saved, settings.desktop_window)),
+            LaunchMode::Vr if runs.is_empty() && settings.performance && settings.small_window_in_vr => {
+                keep_window = saved.filter(SavedWindow::normal).filter(|w| settings.desktop_window != Some(*w))
+            }
+            LaunchMode::Vr => {}
+        }
+        args.extend(orbiters_core::vrchat_launch::profile_arg(profile));
+        let result = if runs.is_empty() { machine.start(&args) } else { machine.start_beside(&args) };
+        match result {
+            Ok(()) => {
+                *started = Some(Instant::now());
+                drop(started);
+                self.launcher.lock().unwrap().starting = Some((profile, mode, Instant::now()));
+                self.update(|s| {
+                    if runs.is_empty() {
+                        s.launcher.game = Game::Starting(mode);
+                    }
+                    match s.launcher.profiles.iter_mut().find(|p| p.profile == profile) {
+                        Some(p) => p.starting = Some(mode),
+                        None => {
+                            s.launcher.profiles.push(orbiters_core::launcher::GameProfile { profile, starting: Some(mode), ..Default::default() });
+                            s.launcher.profiles.sort_by_key(|p| p.profile);
+                        }
+                    }
+                });
+                if settings.last_mode != mode || keep_window.is_some() {
+                    self.update_settings(|s| {
+                        s.launch.last_mode = mode;
+                        if keep_window.is_some() {
+                            s.launch.desktop_window = keep_window;
+                        }
+                    });
+                }
+                Notice::Sent { to: String::new(), action: SentKind::Launch }
             }
             Err(words) => Notice::Error(tr!("VRChat could not be started: {reason}", reason = words)),
         }

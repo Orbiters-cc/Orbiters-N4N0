@@ -89,14 +89,21 @@ fn usage_name(action: &Action) -> String {
     crate::usage::stable_name(&format!("{action:?}"))
 }
 
-/// Whether the desktop's panels are wanted: VRChat runs without SteamVR, on this computer, and the settings say so: a menu around VRChat's, its camera's
+/// Whether the desktop's panels are wanted: VRChat runs on this computer in desktop mode (without SteamVR, or with SteamVR running while VRChat
+/// says it is in desktop mode: the person is at the screen, verify2-r15 S5), and the settings say so: a menu around VRChat's, its camera's
 /// tiles, or translation (whose translations the desktop's process shows, menus or none: verify-r15).
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
     orbiters_core::osc::VRCHAT_RUNS_HERE
         && snap.vrchat.running
         && !snap.vrchat.remote
-        && !snap.steamvr.running
+        && (!snap.steamvr.running || snap.n4n0.desktop_mode)
         && (snap.settings.orbit.any() || snap.settings.orbit.camera_tiles || snap.settings.translate.enabled)
+}
+
+/// Whether the desktop's panels answer the service's request for N4N0's menu (All tools beside VRChat's menu, [`Panels::serve_menu`]): in
+/// VRChat's desktop mode; in VR the SteamVR overlay's menu does ([`super::menu::serves_menu_request`]).
+pub fn desktop_serves_menu_request(snap: &Snapshot) -> bool {
+    snap.n4n0.desktop_mode
 }
 
 /// A part's appearing: a spring from nothing to its place, a little past it. Each turn moves the window or overlay and its alpha, no new picture.
@@ -4147,7 +4154,7 @@ impl Panels {
         let asked = self.request_seen.is_some_and(|seen| seen != request);
         self.request_seen = Some(request);
         // One host at a time: in VRChat's desktop mode this, in VR the SteamVR overlay's menu (`overlay::menu`).
-        let desktop = snap.n4n0.desktop_mode;
+        let desktop = desktop_serves_menu_request(snap);
         let menu_sheet = |sheet: Option<Sheet>| matches!(sheet, Some(Sheet::All | Sheet::Menu | Sheet::Results));
         if asked && desktop && !super::menu::on_avatar_screen(snap) {
             if menu_sheet(self.facts.sheet) && snap.n4n0.menu_toggle {
@@ -4712,6 +4719,28 @@ mod desktop_wanted_tests {
             assert_eq!(super::wanted_on_desktop(&snap), orbiters_core::osc::VRCHAT_RUNS_HERE, "translation on, menus off");
             snap.settings.translate.enabled = false;
             assert!(!super::wanted_on_desktop(&snap), "nothing wanted");
+        }
+    }
+
+    /// verify2-r15 S5: the service's request for N4N0's menu has exactly one host whatever runs: VRChat in VR (SteamVR running), the SteamVR
+    /// overlay's menu; VRChat in desktop mode, with SteamVR running or not, the desktop's panels, whose process then runs.
+    #[test]
+    fn the_menu_request_has_one_host_by_vrchat_s_mode() {
+        if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+            return;
+        }
+        let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
+        snap.vrchat.running = true;
+        assert!(snap.settings.orbit.any(), "menus around VRChat's are on by default");
+        // (SteamVR running, VRChat's desktop mode); VRChat in VR needs SteamVR.
+        for (steamvr, desktop) in [(false, true), (true, true), (true, false)] {
+            snap.steamvr.running = steamvr;
+            snap.n4n0.desktop_mode = desktop;
+            // The SteamVR overlay's menu runs while SteamVR does; the desktop's process while it is wanted.
+            let vr_host = steamvr && crate::overlay::menu::serves_menu_request(&snap);
+            let desktop_host = super::wanted_on_desktop(&snap) && super::desktop_serves_menu_request(&snap);
+            assert!(vr_host != desktop_host, "SteamVR {steamvr}, desktop mode {desktop}: the SteamVR menu {vr_host}, the desktop's {desktop_host}");
+            assert_eq!(desktop_host, desktop, "the host follows VRChat's mode");
         }
     }
 }

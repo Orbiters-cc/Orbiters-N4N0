@@ -151,6 +151,19 @@ fn write_file(path: &PathBuf, all: &BTreeMap<String, Known>) -> anyhow::Result<(
     Ok(())
 }
 
+/// What a look at `/features/mine` decides: yes, no (the credential refused too), or nothing (`None`: out of reach, or
+/// the server could not read its rules, 503): calls then keep what they had.
+fn refresh_outcome(answer: anyhow::Result<bool>) -> Option<bool> {
+    match answer {
+        Ok(allowed) => Some(allowed),
+        Err(e) if e.downcast_ref::<ApiError>().is_some_and(|a| matches!(a.status, 401 | 403 | 404 | 425)) => Some(false),
+        Err(e) => {
+            eprintln!("calls access: {e:#}");
+            None
+        }
+    }
+}
+
 /// Orbiters refused a call request because the account has not N4N0 calls (403 `{"code": "not_enabled"}`; only with
 /// that code: another 403 is not about the feature).
 pub(super) fn not_enabled(e: &anyhow::Error) -> bool {
@@ -184,7 +197,8 @@ impl Controller {
     /// What the session check of `token` (on `server`, for account `user`) said of its features (`None`: nothing, an
     /// older server). Taken only while that is still the identity signed in.
     pub(super) fn calls_access_checked(&self, server: Server, user: Option<&str>, token: &str, features: Option<&BTreeMap<String, bool>>) {
-        let Some(allowed) = features.map(|f| f.get(N4N0_CALLS).copied().unwrap_or(false)) else { return };
+        // Not said (an older server, or the rules could not be read and the feature was left out): nothing changes.
+        let Some(allowed) = features.and_then(|f| f.get(N4N0_CALLS).copied()) else { return };
         let whose = Whose::of(server, user, token);
         if self.calls_identity().map(|(w, ..)| w).as_ref() != Some(&whose) {
             return;
@@ -231,15 +245,7 @@ impl Controller {
             }
             rt.access.asked = Some(now);
         }
-        let answer = match api.member_feature(&token, N4N0_CALLS) {
-            Ok(allowed) => allowed,
-            // The credential refused: no calls with it.
-            Err(e) if e.downcast_ref::<ApiError>().is_some_and(|a| matches!(a.status, 401 | 403 | 404 | 425)) => false,
-            Err(e) => {
-                eprintln!("calls access: {e:#}");
-                return;
-            }
-        };
+        let Some(answer) = refresh_outcome(api.member_feature(&token, N4N0_CALLS)) else { return };
         self.calls.lock().unwrap().access.heard(&whose, answer, &file);
     }
 }
@@ -341,6 +347,17 @@ pub(super) mod tests {
         assert!(access.open(&signed_in(), at + LAST_KNOWN_FOR.as_secs()), "signed in, this run's word stands");
         access.last_known = Some(Known { allowed: true, at: at + 2 * 24 * 3600 });
         assert!(!access.open(&offline(), at), "dated in the future");
+    }
+
+    /// Verify3 (fix2-3): a server that cannot read its rules says 503, and a session check leaves the feature out: neither is
+    /// a no, so a healthy call is never hung up for it.
+    #[test]
+    fn an_answer_that_is_not_known_keeps_what_calls_had() {
+        let api_error = |status: u16| anyhow::Error::from(ApiError { status, message: String::new(), code: None });
+        assert_eq!(refresh_outcome(Ok(true)), Some(true));
+        assert_eq!(refresh_outcome(Err(api_error(503))), None, "not known");
+        assert_eq!(refresh_outcome(Err(anyhow::anyhow!("offline"))), None);
+        assert_eq!(refresh_outcome(Err(api_error(401))), Some(false), "the credential refused");
     }
 
     #[test]

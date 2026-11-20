@@ -899,10 +899,30 @@ pub fn read_local(dir: &std::path::Path, progress: &Progress) -> anyhow::Result<
     Ok(Capture::new(g, sky, StartView { position: flip(v.position), target: flip(target), floor: Some(ground.floor), eye_height: Some(ground.eye_height) }))
 }
 
-/// The listing, read on a thread of its own when asked (at most once a minute).
-#[derive(Default)]
+/// The listing, read on a thread of its own when asked (at most once a minute). Clones share it.
+#[derive(Clone, Default)]
 pub struct Catalog {
     state: Arc<Mutex<Listed>>,
+}
+
+impl Catalog {
+    /// The one listing of this process: every panel of 3D worlds in it reads and refreshes the same, the sheet's and the headset's alike, so what one lists
+    /// the other may show (verify3-r15: each had its own, and the headset refused a Show from the sheet until its own was read). In tests, one per test's
+    /// thread, as tests run side by side.
+    pub fn of_process() -> Catalog {
+        #[cfg(not(test))]
+        {
+            static ONE: std::sync::OnceLock<Catalog> = std::sync::OnceLock::new();
+            ONE.get_or_init(Catalog::default).clone()
+        }
+        #[cfg(test)]
+        {
+            thread_local! {
+                static ONE: Catalog = Catalog::default();
+            }
+            ONE.with(Catalog::clone)
+        }
+    }
 }
 
 #[derive(Default)]

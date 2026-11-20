@@ -1385,3 +1385,91 @@ fn a_bio_is_never_saved_from_a_placeholder_profile() {
     let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
     assert_eq!(calls, ["GET /files?tag=icon&n=100", "GET /profile/usr_test?asSelf=true", "PUT /profile/usr_test"], "no PUT from the placeholder");
 }
+
+// --- REQUEST15 third pass, blocker 2: a list left on show after its account signed out accepts nothing ---
+
+#[test]
+fn after_a_sign_out_the_old_list_neither_keeps_a_dismissal_nor_opens_a_profile() {
+    let c = controller(Arc::new(Pretend::default()));
+    // A's list is on show, A's session is gone (signed out): the launcher has not looked again yet.
+    c.update(|s| {
+        s.launcher.source = Source::SignedIn { user_id: "usr_a".into(), name: String::new() };
+        s.launcher.boops = vec![orbiters_core::launcher::Boop { id: "not_boop_a".into(), from_id: A.into(), from_name: "Nova".into(), from_icon: String::new(), emoji: None, received_at: 1 }];
+        s.launcher.friends = vec![orbiters_core::launcher::Friend { id: A.into(), name: "Nova".into(), note: "A's private note".into(), ..Default::default() }];
+    });
+    let as_a = |action: Action| Action::As { account: "usr_a".into(), action: Box::new(action) };
+    c.launcher_do(as_a(Action::Dismiss { id: "not_boop_a".into() }));
+    assert_eq!(c.view().launcher.boops.len(), 1, "nothing of A's list changes");
+    assert!(c.launcher.lock().unwrap().dismissed.as_ref().is_none_or(|d| !d.contains_key("not_boop_a")), "no dismissal kept for 30 days");
+    c.launcher_do(as_a(Action::OpenProfile { id: A.into() }));
+    assert!(c.view().launcher.profile.is_none(), "A's note is not shown from the old row");
+}
+
+// --- REQUEST15 third pass, fix2 item 2: a start that never showed is said on Join too, and Go there arms nothing ---
+
+#[test]
+fn join_says_a_lapsed_start_and_go_there_never_arms_the_second_press() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    machine.running.lock().unwrap().push((20, false));
+    let c = controller(machine.clone());
+    // Only a bridge side session runs: a Join starts the person's own VRChat (profile 0) through travel.
+    let fake = Arc::new(super::super::travel::tests::Fake { running: vec![20], side_args: vec![20], ..Default::default() });
+    *c.travel.lock().unwrap() = Some(fake.clone() as Arc<dyn super::super::travel::Travel>);
+    let claim = c.launcher_claim(0, LaunchMode::Vr).unwrap();
+    for held in c.launcher.lock().unwrap().starting.iter_mut() {
+        held.at -= Duration::from_secs(200);
+    }
+    let _ = claim;
+    // Go there's own claim (unattended) is refused and arms nothing.
+    assert!(c.launcher_claim_unattended(0, LaunchMode::Vr).is_err());
+    assert!(c.launcher.lock().unwrap().starting.iter().all(|held| held.confirm_by.is_none()));
+    // Join: the person is told what the second press does, and nothing starts.
+    let place = launcher_feed::place(&format!("{W}:1~region(eu)"), "").unwrap();
+    let first = c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place.clone()) });
+    assert!(matches!(&first, Some(Notice::Error(t)) if t.contains("press Play again")), "{first:?}");
+    assert!(fake.started.lock().unwrap().is_empty());
+    // The second press, told, starts.
+    assert_eq!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place) }), Some(Notice::Sent { to: W.into(), action: SentKind::Join }));
+    assert_eq!(fake.started.lock().unwrap().len(), 1);
+}
+
+// --- REQUEST15 third pass, B6: a start that never showed is asked about however long a Steam update takes ---
+
+#[test]
+fn a_start_unseen_for_twenty_minutes_still_asks_the_person_before_another() {
+    let (machine, c) = running_profile_0();
+    c.launcher_claim(1, LaunchMode::Desktop).unwrap();
+    for held in c.launcher.lock().unwrap().starting.iter_mut() {
+        held.at -= Duration::from_secs(20 * 60);
+    }
+    // Looks go by; the claim is not dropped by its age.
+    c.launcher_retire_claims(&[], &[(10, false, Some(0))]);
+    c.launcher_game(machine.as_ref());
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Error(t)) if t.contains("press Play again")));
+    assert!(machine.beside.lock().unwrap().is_empty(), "no second start without the person's say");
+    // The bridge (nobody pressing) may take it after its lapse.
+    assert!(c.launcher_claim_unattended(1, LaunchMode::Desktop).is_ok());
+}
+
+// --- REQUEST15 third pass, S4: a VRChat that never says its profile does not hold Play for its whole life ---
+
+#[test]
+fn a_vrchat_that_never_says_its_profile_can_be_passed_by_the_persons_second_press() {
+    let (machine, c) = running_profile_0();
+    machine.running.lock().unwrap().push((11, true));
+    machine.unread.lock().unwrap().push(11);
+    // At first: wait, whatever the presses.
+    for _ in 0..2 {
+        assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Error(t)) if !t.contains("press Play again")));
+    }
+    // A minute and more, still not said: told, then a second press starts.
+    for since in c.launcher.lock().unwrap().unknown_since.values_mut() {
+        *since -= Duration::from_secs(90);
+    }
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Error(t)) if t.contains("press Play again")));
+    assert!(machine.beside.lock().unwrap().is_empty());
+    // A second press for another profile is not the confirmation of the first.
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 2 }), Some(Notice::Error(_))));
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 2 }), Some(Notice::Sent { .. })));
+    assert_eq!(machine.beside.lock().unwrap().len(), 1);
+}

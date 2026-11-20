@@ -580,3 +580,32 @@ pub(super) fn rail(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
         }
     }
 }
+
+/// In place of a list whose VRChat account is no longer signed in, until the service's next look replaces it: what
+/// happened, and nothing of the old list (REQUEST15 third pass, blocker 2).
+pub(super) fn put_away(ui: &mut Ui, state: &State, rect: Rect, side: super::Side) {
+    let p = ui.painter().clone();
+    widgets::frame(&p, rect, theme::CARD_RADIUS, column_fill());
+    paint::stroke_squircle(&p, rect, theme::squircle(theme::CARD_RADIUS), theme::hairline());
+    let signed_out = matches!(&state.login, Some(None));
+    let (glyph, title, body) = if signed_out {
+        (icons::SIGN_OUT, tr("Signed out of VRChat"), tr("The friends list was that account's: it is put away. Sign in again to see yours."))
+    } else {
+        (icons::USERS, tr("Another VRChat account"), tr("The friends list was the previous account's: it is put away until this account's is read."))
+    };
+    let c = pos2(rect.center().x, rect.top() + 64.0);
+    p.circle_filled(c, 24.0, theme::white(0.06));
+    widgets::icon(&p, c, glyph, 22.0, theme::FG_3);
+    if matches!(side, super::Side::Rail) {
+        // The rail: the sign alone, its words on hover.
+        ui.interact(Rect::from_center_size(c, vec2(48.0, 48.0)), Id::unique("launcher-put-away"), Sense::hover()).on_hover_text(format!("{title}\n{body}"));
+        return;
+    }
+    widgets::text(&p, pos2(rect.center().x, c.y + 44.0), Align2::CENTER_CENTER, &Txt::new(title, 15.0).weight(weight::SEMIBOLD));
+    let w = rect.width() - 48.0;
+    let mut job = Txt::new(body, 12.5).color(theme::FG_3).line_height(17.0).job(w);
+    // Each line centred under the title.
+    job.halign = egui::Align::Center;
+    let galley = p.layout_job(job);
+    p.galley(pos2(rect.center().x, c.y + 64.0), galley, theme::FG_3);
+}

@@ -9,7 +9,7 @@ use orbiters_core::launcher::*;
 
 const NOW: i64 = 1_795_000_000;
 
-pub(super) const NAMES: [&str; 23] = [
+pub(super) const NAMES: [&str; 25] = [
     "launcher-list",
     "launcher-invite",
     "launcher-hover",
@@ -34,6 +34,9 @@ pub(super) const NAMES: [&str; 23] = [
     "launcher-mine-gallery",
     "launcher-small-profiles",
     "launcher-small-mine",
+    // REQUEST15 third pass: signed out (or another account) with the old list still the data, a profile open before.
+    "launcher-stale",
+    "launcher-small-stale",
 ];
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
@@ -412,6 +415,8 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
         }
         "launcher-small-drawer" if f == 30 => state.open_drawer(ctx),
         "launcher-profiles" | "launcher-small-profiles" | "launcher-profile-starting" if f == 1 => state.stand_in_profile(1),
+        "launcher-stale" | "launcher-small-stale" if f == 10 => state.open_profile(ctx, nova, Rect::from_min_size(pos2(954.0, 348.0), vec2(306.0, 54.0))),
+        "launcher-stale" | "launcher-small-stale" if f == 40 => state.stand_in_login(None),
         "launcher-mine-status-text" if f == 1 => state.mine.stand_in_editing(Editing::StatusText("building a new world tonight".into())),
         "launcher-mine-bio" | "launcher-small-mine" if f == 1 => state.mine.stand_in_editing(Editing::Bio("Made-up account for drawing the page.\nBuilds quiet worlds, mostly at night. Say hi!".into())),
         "launcher-mine-failed" if f == 1 => state.mine.stand_in_last(ProfileEdit::StatusText("afk".into())),

@@ -760,6 +760,12 @@ impl View {
     }
 
     /// Fades the capture out, then lets go of it (and of the GPU's memory).
+    /// Tests: as if a capture showed around the person (no SteamVR to show one with).
+    #[cfg(test)]
+    pub(crate) fn showing_for_test(&mut self) {
+        self.phase = Phase::Shown { since: Instant::now() };
+    }
+
     /// Gone at the next update, without fading: what shows may no longer be the person's to see (verify2-r15 blocker 1).
     pub fn hide_now(&mut self) {
         if self.active() || matches!(self.phase, Phase::Leaving { .. }) {

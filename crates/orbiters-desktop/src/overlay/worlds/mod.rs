@@ -145,6 +145,10 @@ pub struct Worlds {
     captures: cache::Memory,
     /// On a screen: the capture turning on the side panel, its picture, the pointer on it, and whether it turns by itself.
     live: Option<(u64, super::orbit::sheet_view::SheetView)>,
+    /// What the side panel's capture is read with: told to stop when it is not wanted any more (verify-r15 B2).
+    live_progress: Option<Arc<catalog::Progress>>,
+    /// The Worlds page shows now in the desktop's menus: nothing turns on its side panel otherwise (verify-r15 B2).
+    on_sheet: bool,
     live_frame: Option<super::orbit::sheet_view::Frame>,
     live_texture: Option<egui::TextureHandle>,
     live_pointer: Option<(f32, f32)>,
@@ -363,6 +367,8 @@ impl Worlds {
             error: None,
             captures: cache::Memory::with_default_budget(),
             live: None,
+            live_progress: None,
+            on_sheet: false,
             live_frame: None,
             live_texture: None,
             live_pointer: None,
@@ -480,6 +486,8 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             error: None,
             captures: cache::Memory::with_default_budget(),
             live: None,
+            live_progress: None,
+            on_sheet: false,
             live_frame: None,
             live_texture: None,
             live_pointer: None,
@@ -653,7 +661,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     /// What turns on the side panel follows the page: nothing once it is not a world's page or the panel closed. On a screen a world with a 3D capture turns there as
     /// soon as it is chosen, where its picture is, with no button to press first (REQUEST15 item 6); one at a time, the one before going as another is chosen.
     fn follow_screen_live(&mut self) {
-        if self.panel.page != panel::Page::Detail || !self.open {
+        if self.panel.page != panel::Page::Detail || !self.open || !self.on_sheet {
             self.stop_live();
         } else if self.on_screen() {
             self.live_chosen();
@@ -682,12 +690,24 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         }
     }
 
-    /// Starts `entry` turning on the side panel. It reads what is on this computer, or what was downloaded before, as any showing of it does.
+    /// Whether the Worlds page shows in the desktop's menus now (its sheet open, the menu up). Not shown: what turns on its side panel stops, its reading too.
+    pub fn set_shown(&mut self, shown: bool) {
+        self.on_sheet = shown;
+        if !shown {
+            self.stop_live();
+        }
+    }
+
+    /// Starts `entry` turning on the side panel. It reads what is on this computer, or what was downloaded before, as any showing of it does. The one before
+    /// is told to stop first: one reading at a time, the latest chosen.
     fn start_live(&mut self, entry: &Entry) {
+        self.stop_live();
         let (source, from) = (self.source.clone(), entry.clone());
+        let progress = Arc::new(catalog::Progress::default());
+        self.live_progress = Some(progress.clone());
         let load = move || match &from.local {
-            Some(dir) => catalog::read_kept(&from, dir, &Default::default()),
-            None => source.download(&from, &Default::default()),
+            Some(dir) => catalog::read_kept(&from, dir, &progress),
+            None => source.download(&from, &progress),
         };
         self.live = Some((entry.id, super::orbit::sheet_view::SheetView::open_with(load, self.live_turns, 2)));
         self.live_frame = None;
@@ -705,6 +725,9 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
 
     /// What turns on the side panel goes, with all it holds.
     pub fn stop_live(&mut self) {
+        if let Some(progress) = self.live_progress.take() {
+            progress.stop.store(true, Ordering::Relaxed);
+        }
         if self.live.take().is_some() {
             self.live_frame = None;
             self.live_texture = None;
@@ -1001,6 +1024,21 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
 
     #[cfg(test)]
     pub fn draft_for_test(&self) -> &str { &self.panel.draft }
+
+    /// A test's world chosen: its page open on `id`, from `entries` as the listing.
+    #[cfg(test)]
+    pub(crate) fn chosen_for_test(&mut self, entries: Vec<Entry>, id: u64) {
+        self.listing_for_test(entries);
+        self.open = true;
+        self.panel.page = panel::Page::Detail;
+        self.panel.selected = Some(id);
+    }
+
+    /// The world whose capture turns on the side panel now, and whether something reads one.
+    #[cfg(test)]
+    pub(crate) fn turning_for_test(&self) -> (Option<u64>, bool) {
+        (self.live.as_ref().map(|(id, _)| *id), self.live_progress.is_some())
+    }
 
     /// Whether a read of the listing is under way, for the tests: what it brings replaces a listing put in meanwhile.
     #[cfg(test)]
@@ -2895,6 +2933,7 @@ mod carousel_tests {
         list[2].capture = false;
         worlds.listing_for_test(list);
         worlds.open = true;
+        worlds.set_shown(true);
         worlds.panel.page = panel::Page::Detail;
         worlds.panel.selected = Some(1);
         worlds.follow_screen_live();
@@ -2916,8 +2955,45 @@ mod carousel_tests {
         // In a headset the view is the overlay's own, around the person: nothing turns on the panel by itself.
         let mut sheet = on_a_sheet(1);
         sheet.open = true;
+        sheet.set_shown(true);
         sheet.follow_screen_live();
         assert_eq!(live(&sheet), (None, None));
+    }
+
+    /// verify-r15 B2: the Worlds page left for another tab, or the menu closed, its capture stops turning and its reading is told to stop, and nothing starts it
+    /// again turn after turn behind the other page; back on the page it turns again. Choosing another world stops the reading before.
+    #[test]
+    fn a_capture_stops_with_its_page_and_is_not_started_again_behind_another() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let mut worlds = Worlds::alone(ctx);
+        let gone = std::env::temp_dir().join(format!("orbiters-no-capture-b2-{}", std::process::id()));
+        let mut list = many(2);
+        for e in &mut list {
+            e.local = Some(gone.join(e.id.to_string()));
+        }
+        worlds.listing_for_test(list);
+        worlds.open = true;
+        worlds.panel.page = panel::Page::Detail;
+        worlds.panel.selected = Some(1);
+        worlds.set_shown(true);
+        worlds.follow_screen_live();
+        let first = worlds.live_progress.clone().expect("reading");
+        assert!(worlds.live.is_some());
+        worlds.panel.selected = Some(2);
+        worlds.follow_screen_live();
+        assert!(first.stop.load(Ordering::Relaxed), "the one before told to stop");
+        let second = worlds.live_progress.clone().expect("reading the next");
+        // Another tab: the page stays the Worlds' own detail behind it, as the orbit keeps it.
+        worlds.set_shown(false);
+        for _ in 0..5 {
+            worlds.follow_screen_live();
+            assert!(worlds.live.is_none() && worlds.live_progress.is_none(), "not started again behind another page");
+        }
+        assert!(second.stop.load(Ordering::Relaxed), "its reading told to stop");
+        worlds.set_shown(true);
+        worlds.follow_screen_live();
+        assert!(worlds.live.is_some(), "back on the page: it turns again");
     }
 
     /// verify-r15 B1: a capture shared with the player signed in only, open with its 3D turning, goes the moment another account signs in (or the player signs
@@ -2943,6 +3019,7 @@ mod carousel_tests {
         };
         worlds.follow_login(&signed_in("usr_a", "Alice", 1));
         worlds.open = true;
+        worlds.set_shown(true);
         worlds.panel.page = panel::Page::Detail;
         worlds.panel.selected = Some(1);
         worlds.keep_picked(&worlds.entries());

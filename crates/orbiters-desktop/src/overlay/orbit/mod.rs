@@ -1388,6 +1388,10 @@ impl Panels {
             self.stop_talking();
             self.facts.pointed = None;
             self.facts.sheet = None;
+            // The menu went: nothing of Worlds' page turns or loads behind it (the desktop's loop no longer calls `follow` with no menu up).
+            if let Some(worlds) = self.stage.worlds.as_mut() {
+                worlds.set_shown(false);
+            }
             // Whatever was held ends, done by nobody: a menu going away is no let-go (OVL2-17).
             self.cancel();
             self.stage.epoch = self.stage.epoch.wrapping_add(1);
@@ -2324,6 +2328,8 @@ impl Panels {
                     }
                 }
             }
+            // Shown or not: another tab, the sheet or the menu closed, and what turned on its side panel stops at once, not started again (verify-r15 B2).
+            worlds.set_shown(self.open.is_some() && self.facts.sheet == Some(Sheet::Worlds));
             worlds.update_alone(snap, &self.backend);
             if self.facts.sheet == Some(Sheet::Worlds) && !worlds.open {
                 self.close_sheet();

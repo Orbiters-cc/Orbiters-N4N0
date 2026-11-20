@@ -15,7 +15,7 @@ use orbiters_reconstruct::sky::SkyMap;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -424,6 +424,7 @@ impl Source {
             (Some(files), Some(slot)) => {
                 let name = key.file("pc");
                 let tree = self.fetch_kept(&format!("{files}public/vrchat/slots/{slot}/pc"), &name, progress)?;
+                progress.check()?;
                 let g = tree_leaves(&tree, entry.key).inspect_err(|_| self.forget(&name))?;
                 drop(tree);
                 let sky = entry.sky.then(|| self.fetch_kept(&format!("{files}public/vrchat/slots/{slot}/sky.jpg"), &key.file("sky"), &Progress::default()).ok()).flatten();
@@ -432,6 +433,7 @@ impl Source {
             _ => {
                 let name = key.file("splat");
                 let bytes = self.fetch_kept(&self.api.url(&format!("maps/previews/{}/splat", entry.id)), &name, progress)?;
+                progress.check()?;
                 let g = orbiters_reconstruct::web::read_splat(&bytes).inspect_err(|_| self.forget(&name))?;
                 drop(bytes);
                 let sky = entry
@@ -527,6 +529,7 @@ impl Source {
             }
             out.extend_from_slice(&buf[..n]);
             progress.read.store(out.len() as u64, Ordering::Relaxed);
+            progress.check()?;
         }
         Ok((Some(out), validators))
     }
@@ -538,11 +541,19 @@ pub struct Progress {
     pub read: AtomicU64,
     pub total: AtomicU64,
     pub stage: AtomicU64,
+    /// Whoever waits for it no longer does: the download stops at its next chunk, and nothing is decoded (verify-r15 B2).
+    pub stop: AtomicBool,
 }
 
 pub const STAGE_PREPARING: u64 = 1;
 
 impl Progress {
+    /// Not wanted any more: an error, at once, for the reading to end with.
+    pub fn check(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.stop.load(Ordering::Relaxed), "no longer wanted"); // i18n: not shown (a stopped load's reason, never drawn)
+        Ok(())
+    }
+
     /// 0 to 1 over the download (a capture's file is most of the wait).
     pub fn fraction(&self) -> f32 {
         let (read, total) = (self.read.load(Ordering::Relaxed), self.total.load(Ordering::Relaxed));
@@ -815,6 +826,22 @@ fn ceiling_in(heights: &[f32], camera: f32) -> Option<f32> {
     count.iter().enumerate().skip(from).find(|(_, c)| **c as f32 > under * 2.2).map(|(i, _)| i as f32 * LAYER)
 }
 
+#[cfg(test)]
+mod stop_tests {
+    /// verify-r15 B2: a reading no longer wanted ends before it reads or decodes anything.
+    #[test]
+    fn a_reading_no_longer_wanted_ends_at_once() {
+        let file = std::env::temp_dir().join(format!("orbiters-stopped-{}.splat", std::process::id()));
+        std::fs::write(&file, vec![0u8; 64]).unwrap();
+        let entry = super::parse(r#"{"previews":[{"slot":1,"key":1,"id":1,"worldId":"wrld_00000000-0000-4000-8000-000000000001","name":"W","author":"a","uploader":"b","view":{"position":[0,1,0],"target":[0,1,1]}}],"feedback":{}}"#).unwrap().remove(0);
+        let progress = super::Progress::default();
+        progress.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = super::read_kept(&entry, &file, &progress).err().expect("stopped");
+        assert!(err.to_string().contains("no longer wanted"), "{err:#}");
+        let _ = std::fs::remove_file(&file);
+    }
+}
+
 /// What a kept entry's `local` path holds, as the 3D view takes it: a friend's shared capture file ([`Entry::shared`]),
 /// or a session of this computer ([`read_local`]).
 pub fn read_kept(entry: &Entry, path: &std::path::Path, progress: &Progress) -> anyhow::Result<Capture> {
@@ -822,7 +849,9 @@ pub fn read_kept(entry: &Entry, path: &std::path::Path, progress: &Progress) -> 
         return read_local(path, progress);
     }
     progress.stage.store(STAGE_PREPARING, Ordering::Relaxed);
+    progress.check()?;
     let bytes = std::fs::read(path)?;
+    progress.check()?;
     let g = orbiters_reconstruct::web::read_splat(&bytes)?;
     Ok(Capture::new(g, None, entry.view))
 }
@@ -832,7 +861,9 @@ pub fn read_local(dir: &std::path::Path, progress: &Progress) -> anyhow::Result<
     use orbiters_core::reconstruction;
     progress.stage.store(STAGE_PREPARING, Ordering::Relaxed);
     let result = reconstruction::result_dir(dir);
+    progress.check()?;
     let (mut g, _, found) = orbiters_reconstruct::edit::read_for_view(&result.join(reconstruction::PLY_FILE))?;
+    progress.check()?;
     // Edits of an earlier reconstruction are no edits of this one.
     if let orbiters_reconstruct::edit::Found::Current(edit) = &found {
         orbiters_reconstruct::edit::apply(&mut g, edit);

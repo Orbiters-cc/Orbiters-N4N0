@@ -30,6 +30,7 @@ pub fn my_profile(v: &Value, kept: Option<&MyProfile>) -> MyProfile {
     };
     let kept = kept.cloned().unwrap_or_default();
     MyProfile {
+        loaded: true,
         bio: text(v, "bio"),
         banner,
         banner_colour: launcher_feed::colour(&text(v, "bannerColor")),
@@ -136,6 +137,12 @@ impl Controller {
                 return None;
             }
         };
+        // A bio is only ever changed from the one VRChat gave: never from a placeholder whose empty bio would replace the
+        // account's real one (REQUEST15 second pass, S6).
+        if matches!(edit, ProfileEdit::Bio(_)) && !self.view().launcher.mine.as_ref().is_some_and(|m| m.loaded) {
+            self.launcher_mine_saving(Some(&account), Saving::Failed(part, tr("Your profile has not been read yet, so your bio is not known here: press Read again first.").into()), None);
+            return None;
+        }
         if let Some(why) = over_limit(&edit) {
             self.launcher_mine_saving(Some(&account), Saving::Failed(part, why), None);
             return None;

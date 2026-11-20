@@ -56,5 +56,9 @@
   "On profile {n}": "プロフィール{n}で",
   "The assistant's VRChat uses profile {n}: choose another profile.": "アシスタントのVRChatがプロフィール{n}を使っています。別のプロフィールを選んでください。",
   "A VRChat is starting and has not said its profile yet: try again in a moment.": "起動中のVRChatのプロフィールがまだわかりません。少ししてからもう一度お試しください。",
-  "This picture is not one of your account's: open the list again and choose one.": "この画像はあなたのアカウントのものではありません。一覧を開き直して選んでください。"
+  "This picture is not one of your account's: open the list again and choose one.": "この画像はあなたのアカウントのものではありません。一覧を開き直して選んでください。",
+  "VRChat was asked to start on profile {n} {m} min ago and has not shown up yet. If it is not coming, press Play again to start it anyway.": "{m}分前にプロフィール{n}でVRChatの起動を頼みましたが、まだ表示されていません。起動していない場合は、もう一度プレイを押すと起動します。",
+  "A VRChat has not said its profile yet: Play waits until it does.": "VRChatのプロフィールがまだわかりません。わかるまでプレイは待ちます。",
+  "Your profile has not been read yet, so your bio is not known here: press Read again first.": "プロフィールをまだ読み込んでいないため、ここでは自己紹介がわかりません。先に「再読み込み」を押してください。",
+  "Your bio shows once your profile is read. Read again in the friends list asks VRChat now.": "プロフィールを読み込むと自己紹介が表示されます。フレンドリストの「再読み込み」でVRChatにすぐ問い合わせます。"
 }

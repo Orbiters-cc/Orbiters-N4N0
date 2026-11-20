@@ -114,6 +114,9 @@ pub struct State {
     /// The VRChat profile the person chose for the next Play, and a new one they added here (REQUEST15 7a).
     chosen_profile: Option<u32>,
     added_profile: Option<u32>,
+    /// The VRChat account the sign-in says is signed in now (`None` inside: none), once the page is wired to the service:
+    /// the own-profile card shows only while it is the launcher's account too (REQUEST15 second pass, blocker 3).
+    login: Option<Option<String>>,
     /// The account's own profile card (REQUEST15 7b), and the picture lists it asked for in this run.
     pub mine: mine::Mine,
     mine_listed: Vec<orbiters_core::launcher::PictureKind>,
@@ -146,6 +149,7 @@ impl Default for State {
             staged: false,
             chosen_profile: None,
             added_profile: None,
+            login: None,
             mine: mine::Mine::default(),
             mine_listed: Vec::new(),
         }
@@ -172,6 +176,10 @@ impl State {
             self.ctx = Some(ctx.clone());
         }
         self.scope = Some(crate::controller::vrchat_data::Scope::of(cx.snap));
+        // The service's sign-in, against the service's list; data handed in for pictures of the page is its own.
+        if !self.staged {
+            self.login = Some(cx.snap.vrchat_login.user.as_ref().map(|u| u.id.clone()));
+        }
     }
 
     /// A picture by its URL, once loaded.

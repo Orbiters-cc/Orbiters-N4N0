@@ -364,7 +364,7 @@ impl Worlds {
             paint_fixture: None, snapshot_mode: false, presented_paint: None, pressed_paint: None,
             open: false,
             panel: Panel::default(),
-            catalog: Catalog::default(),
+            catalog: Catalog::of_process(),
             source: Source::current(),
             view: View::new(key),
             download: None,
@@ -485,7 +485,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             paint_fixture: None, snapshot_mode: false, presented_paint: None, pressed_paint: None,
             open: false,
             panel: { let mut panel = Panel::default(); panel.on_sheet = true; panel },
-            catalog: Catalog::default(),
+            catalog: Catalog::of_process(),
             source: Source::current(),
             view: View::new("cc.orbiters.desktop.orbit"),
             download: None,
@@ -1224,6 +1224,11 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 self.panel.dirty = true;
             }
         }
+    }
+
+    /// The capture `id` as a Show asks for it (from the list shown, or the one kept, a sheet's relayed one included), when it may show now.
+    fn showable(&self, id: u64, entries: &[Entry]) -> Option<Entry> {
+        entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)).filter(|e| e.capture && self.allowed(e)).cloned()
     }
 
     /// The listing's captures this player may see.
@@ -2325,7 +2330,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             crate::usage::press(&crate::usage::stable_name(&format!("WorldPanel({action:?})")));
             match action {
                 Action::Show(id) => {
-                    let Some(entry) = entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)).filter(|e| e.capture && self.allowed(e)).cloned() else {
+                    let Some(entry) = self.showable(id, entries) else {
                         continue;
                     };
                     // Enzo: nothing showing, and one opened from the start: its hint again, even if an earlier one was zoomed by accident.
@@ -3215,6 +3220,41 @@ mod carousel_tests {
         // Shown again by any way (a relayed Show): refused for Bob.
         worlds.picked = Some(private.clone());
         assert!(!worlds.allowed(&private) && worlds.picked().is_none());
+    }
+
+    /// verify3-r15 (introduced by fix2): a public capture chosen on the sheet in VR is shown by the headset's own 3D worlds the first time, its listing
+    /// being the one the sheet read: one listing for both. Before, the headset's own was empty until it read it, and refused the Show.
+    #[test]
+    fn a_show_from_the_sheet_is_shown_by_the_headset_s_worlds_the_first_time() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        // The headset's 3D worlds (its constructor takes SteamVR; it reads the same listing as this one) and the sheet's panel, made as the overlay makes them.
+        let mut own = Worlds::alone(ctx.clone());
+        let mut sheet = Worlds::alone(ctx);
+        // Only the sheet's listing was read (the sheet opened first).
+        let list = many(3);
+        sheet.listing_for_test(list.clone());
+        sheet.relay_to(Status { headset: true, ..Default::default() });
+        let public = list[1].clone();
+        // The sheet asks; the headset's worlds hear it.
+        own.from_elsewhere(vec![Relayed::Show(public.clone())]);
+        assert!(own.deferred.iter().any(|a| matches!(a, Action::Show(id) if *id == public.id)));
+        let entries = own.entries();
+        assert_eq!(own.showable(public.id, &entries).map(|e| e.id), Some(public.id), "shown the first time");
+        // A capture the listing does not have is still refused.
+        let mut stranger = public.clone();
+        stranger.id = 999;
+        own.picked = Some(stranger.clone());
+        assert!(own.showable(999, &entries).is_none());
+        let _ = &mut sheet;
+    }
+
+    /// The process's listing is one: what one handle lists, another reads.
+    #[test]
+    fn the_process_has_one_listing() {
+        let (a, b) = (Catalog::of_process(), Catalog::of_process());
+        a.put_for_test(many(2));
+        assert!(b.entry(2).is_some(), "the same listing");
     }
 
     /// verify3-r15 blocker 1: Alice's private capture A shows around her; she asks for B, not downloaded yet; B's download fails; then the listing takes A

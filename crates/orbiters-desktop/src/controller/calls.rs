@@ -60,6 +60,8 @@ struct Worker {
     stdin: ChildStdin,
     /// Which worker this is: the end of an earlier one's output says nothing about the calls of this one.
     number: u64,
+    /// Ended by its own handle (`end_now`): its drop only waits for the process, never writes to it.
+    ended: bool,
 }
 
 impl Worker {
@@ -91,7 +93,7 @@ impl Worker {
         std::thread::Builder::new().name("call-stderr".into()).spawn(move || {
             crate::worker::pipe_lines(stderr, |line| eprintln!("call: {}", line.strip_prefix("call: ").unwrap_or(&line)));
         })?;
-        Ok(Self { child, stdin, number })
+        Ok(Self { child, stdin, number, ended: false })
     }
 
     fn send(&mut self, command: &CallCommand) -> std::io::Result<()> {
@@ -100,8 +102,22 @@ impl Worker {
     }
 }
 
+impl Worker {
+    /// Ends the worker at once, by its own process handle, without writing to it (a write to a worker that stopped
+    /// reading could block): its media stops now. The process is waited for on a thread of its own.
+    fn end_now(mut self) {
+        let _ = self.child.kill();
+        self.ended = true;
+        let _ = std::thread::Builder::new().name("call-worker-end".into()).spawn(move || drop(self));
+    }
+}
+
 impl Drop for Worker {
     fn drop(&mut self) {
+        if self.ended {
+            let _ = self.child.wait();
+            return;
+        }
         let _ = self.send(&CallCommand::Quit);
         for _ in 0..20 {
             if matches!(self.child.try_wait(), Ok(Some(_))) {
@@ -879,8 +895,10 @@ impl super::Controller {
         };
         // A friend's name calling this account, on a toast: gone now, not at the end of its time.
         self.retract_notices(shown);
-        // The worker's end waits a moment for its process: not under the lock.
-        drop(worker);
+        // Ended by its own handle, never waiting on it here (this may be a service's command handler).
+        if let Some(worker) = worker {
+            worker.end_now();
+        }
         self.calls_forget_account();
         self.shared_depart();
         if let Some((base, token)) = stamp {
@@ -1997,7 +2015,7 @@ mod tests {
                 use std::os::windows::process::CommandExt;
                 let mut child = Command::new("cmd").args(["/C", "more"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000).spawn().unwrap();
                 let stdin = child.stdin.take().unwrap();
-                rt.worker = Some(Worker { child, stdin, number: 1 });
+                rt.worker = Some(Worker { child, stdin, number: 1, ended: false });
             }
         }
         ctl.calls_publish(|_| {});
@@ -2118,6 +2136,44 @@ mod tests {
         assert!(calling(&ctl), "the toast names the friend calling");
         assert!(ctl.leave_unless_same(None));
         assert!(!calling(&ctl), "gone with the account");
+    }
+
+    /// Verify5 (4): a media worker that stopped reading its commands (its pipe full) never stalls a departure: the leave
+    /// returns at once and the worker is ended by its own handle.
+    #[cfg(windows)]
+    #[test]
+    fn a_stuck_worker_never_stalls_a_departure() {
+        use std::io::Write as _;
+        use std::os::windows::io::AsHandle;
+        use std::os::windows::process::CommandExt;
+        let ctl = signed_in_as_a_in_a_call();
+        // A process that never reads its standard input, and that input filled until a write would block.
+        let mut child = Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000).spawn().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut filler = std::fs::File::from(stdin.as_handle().try_clone_to_owned().unwrap());
+        let (full_tx, full_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let chunk = vec![b'x'; 4096];
+            loop {
+                let _ = full_tx.send(());
+                if filler.write_all(&chunk).is_err() {
+                    let _ = full_tx.send(());
+                    break;
+                }
+            }
+        });
+        // Until the filler blocks (no word from it for a moment).
+        while full_rx.recv_timeout(Duration::from_millis(300)).is_ok() {}
+        ctl.calls.lock().unwrap().worker = Some(Worker { child, stdin, number: 1, ended: false });
+        let (done_tx, done_rx) = mpsc::channel();
+        let leaving = ctl.clone();
+        std::thread::spawn(move || {
+            leaving.leave_unless_same(None);
+            let _ = done_tx.send(());
+        });
+        assert!(done_rx.recv_timeout(Duration::from_secs(3)).is_ok(), "the departure did not wait on the worker");
+        // Ended by its own handle: the filler's write fails once the process is gone.
+        assert!(full_rx.recv_timeout(Duration::from_secs(5)).is_ok(), "the worker's process ended");
     }
 
     /// Verify5 (4): only a confirmed change of identity leaves. An account file that cannot be read for a moment, or a

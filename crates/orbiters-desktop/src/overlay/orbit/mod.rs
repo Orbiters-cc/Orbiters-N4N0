@@ -96,7 +96,20 @@ pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
         && snap.vrchat.running
         && !snap.vrchat.remote
         && !snap.steamvr.running
-        && (snap.settings.orbit.any() || snap.settings.orbit.camera_tiles || snap.settings.translate.enabled)
+        && (snap.settings.orbit.any() || snap.settings.orbit.camera_tiles || desk_translate_reads(&snap.settings.translate))
+}
+
+/// Whether the desktop reads VRChat's window for translation ([`desk_translate::reads_window`]); false where there is no desktop process (macOS).
+pub fn desk_translate_reads(settings: &orbiters_core::settings::TranslateSettings) -> bool {
+    #[cfg(windows)]
+    {
+        desk_translate::reads_window(settings)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = settings;
+        false
+    }
 }
 
 /// A part's appearing: a spring from nothing to its place, a little past it. Each turn moves the window or overlay and its alpha, no new picture.
@@ -2473,7 +2486,8 @@ impl Panels {
             smoothing_held: self.smoothing_held,
             booster: if self.facts.sheet == Some(Sheet::Booster) { panels::BoosterFacts::of(snap, self.booster_details, self.booster_asking, self.booster_held) } else { Default::default() },
             translate: panels::TranslateFacts {
-                enabled: snap.settings.translate.enabled,
+                // On the desktop it is on once turned on there (verify2-r15 S3).
+                enabled: snap.settings.translate.enabled && (!self.facts.desktop || snap.settings.translate.window_on),
                 provider: snap.settings.translate.provider,
                 target: crate::overlay::translate::target(&snap.settings),
                 keep_english: snap.settings.translate.keep_english,
@@ -2979,6 +2993,8 @@ impl Panels {
             panels::Pick::Translate(pick) => {
                 use panels::TranslatePick;
                 match pick {
+                    // On the desktop, On is also the desktop's own: VRChat's window is read from then on (verify2-r15 S3).
+                    TranslatePick::On(on) if self.facts.desktop => serde_json::json!({ "translate": { "enabled": on, "window_on": on } }),
                     TranslatePick::On(on) => serde_json::json!({ "translate": { "enabled": on } }),
                     TranslatePick::Provider(p) => serde_json::json!({ "translate": { "provider": p } }),
                     TranslatePick::Into(after) => serde_json::json!({ "translate": { "target": panels::target_after(&crate::overlay::translate::target(&snap.settings), after) } }),
@@ -4708,6 +4724,7 @@ mod desktop_wanted_tests {
         snap.settings.orbit.quick_menu = false;
         let menus_off = !snap.settings.orbit.any();
         snap.settings.translate.enabled = true;
+        snap.settings.translate.window_on = true;
         if menus_off {
             assert_eq!(super::wanted_on_desktop(&snap), orbiters_core::osc::VRCHAT_RUNS_HERE, "translation on, menus off");
             snap.settings.translate.enabled = false;

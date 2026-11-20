@@ -46,6 +46,12 @@ const AREA_PCT: [u32; 4] = [2, 7, 96, 89];
 const ZOOM_FROM: u32 = 1500;
 const ZOOM_SIDE: u32 = 960;
 
+/// Whether VRChat's window is read at all: translation on, and turned on on the desktop itself (`window_on`), whoever translates: nothing is read or sent
+/// before (verify2-r15 S3).
+pub(crate) fn reads_window(settings: &TranslateSettings) -> bool {
+    settings.enabled && settings.window_on && orbiters_core::osc::VRCHAT_RUNS_HERE
+}
+
 /// The view a picture of `size` pixels is read through: an eye at the origin looking along -Z, VRChat's field of view, square pixels.
 pub(crate) fn view(size: [u32; 2]) -> EyeView {
     let ty = (VERTICAL_FOV_DEG.to_radians() / 2.0).tan();
@@ -446,7 +452,7 @@ impl Host {
     /// ours is up. Never waits.
     pub fn update(&mut self, snap: &Snapshot, backend: &Ctl, on: Option<OnScreen>, covered: bool) {
         self.retired.retain(|t| !t.is_finished());
-        let wanted = snap.settings.translate.enabled && orbiters_core::osc::VRCHAT_RUNS_HERE;
+        let wanted = reads_window(&snap.settings.translate);
         if !wanted {
             if self.thread.is_some() {
                 self.stop_thread();
@@ -1005,6 +1011,19 @@ mod tests {
         let last = out.len() - 4;
         assert_eq!(&out[last..], &[0, 0, 0, 0], "clear is clear, its colour gone");
         assert!(out.chunks_exact(4).all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]), "premultiplied");
+    }
+
+    /// verify2-r15 S3: translation turned on by VR or an older version reads nothing of VRChat's window, whoever translates (an AI server on the network
+    /// included), until it is turned on on the desktop.
+    #[test]
+    fn nothing_is_read_before_it_is_turned_on_on_the_desktop() {
+        use orbiters_core::settings::TranslateProvider;
+        for provider in [TranslateProvider::ThisComputer, TranslateProvider::Address, TranslateProvider::Orbiters] {
+            let upgraded = TranslateSettings { enabled: true, provider, server: "http://192.168.1.20:1234".into(), orbiters_agreed: true, ..Default::default() };
+            assert!(!reads_window(&upgraded), "{provider:?}: on for VR only");
+            assert_eq!(reads_window(&TranslateSettings { window_on: true, ..upgraded.clone() }), orbiters_core::osc::VRCHAT_RUNS_HERE, "{provider:?}: on on the desktop");
+            assert!(!reads_window(&TranslateSettings { enabled: false, window_on: true, ..upgraded }), "{provider:?}: off");
+        }
     }
 
     /// REQUEST15 item 2: the view a picture is read through puts a pixel's ray back on that pixel.

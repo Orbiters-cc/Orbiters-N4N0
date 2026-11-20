@@ -168,6 +168,30 @@ fn all_tools_gives_n4n0_s_menu_back_to_the_avatar_s_screen() {
     assert_eq!(opened(&heard).last(), Some(&false), "and the service hears this one closed");
 }
 
+/// verify2-r15 S3: on the desktop, Translation's On turns on the reading of VRChat's window too, and Off turns it off; in a headset, On is translation's alone.
+#[test]
+fn the_desktop_s_translation_on_is_the_desktop_s_own() {
+    use super::panels::{Pick, TranslatePick};
+    let (mut person, heard) = Person::heard();
+    person.around = Some(Around::QuickMenu);
+    person.turns(2);
+    // The desktop's menus (as `facts_of` says with VRChat in desktop mode).
+    person.panels.facts.desktop = true;
+    let snap = person.snap.clone();
+    person.panels.set(Pick::Translate(TranslatePick::On(true)), &snap);
+    person.panels.set(Pick::Translate(TranslatePick::On(false)), &snap);
+    let patches = heard.patches.lock().unwrap().clone();
+    let on: Vec<_> = patches.iter().filter_map(|p| p.get("translate")).collect();
+    assert_eq!(on.len(), 2, "{patches:?}");
+    assert_eq!(on[0]["enabled"], true);
+    assert_eq!(on[0]["window_on"], true, "on on the desktop: VRChat's window is read");
+    assert_eq!(on[1]["window_on"], false, "off: no longer");
+    person.panels.facts.desktop = false;
+    person.panels.set(Pick::Translate(TranslatePick::On(true)), &snap);
+    let last = heard.patches.lock().unwrap().last().cloned().unwrap();
+    assert!(last["translate"].get("window_on").is_none(), "in a headset: the desktop's own is not turned on");
+}
+
 /// OVL2-17: a menu going away under a held press does nothing: the list press is not run later, the held booster level and
 /// smoothing are not saved.
 #[test]

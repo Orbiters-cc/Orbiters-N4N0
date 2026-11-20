@@ -2537,7 +2537,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     }
 
     /// What a picture of the page is kept under: the page, and the account it was painted for (a page cached for the one before is never shown again, B1).
-    pub(crate) fn paint_key(&self) -> String { format!("{} account {}", self.panel.paint_key(), self.accounts) } // i18n: not shown (render cache identity)
+    pub(crate) fn paint_key(&self) -> String { paint_snapshot::page_key(&self.panel, self.accounts) }
 
     /// A world's page on the Map explorer, once fetched (asked for the first time).
     fn facts_for(&mut self, world_id: &str) {

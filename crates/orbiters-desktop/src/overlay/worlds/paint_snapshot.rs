@@ -1,6 +1,12 @@
 //! Immutable draw and interaction data for the CPU page worker.
 use super::*;
 
+/// What a picture of the page is kept and matched under: the page, and the account generation it was painted for. The worker's frames and the live page
+/// compute it the same way, here (verify-r15 B1).
+pub(crate) fn page_key(panel: &panel::Panel, accounts: u64) -> String {
+    format!("{} account {accounts}", panel.paint_key()) // i18n: not shown (render cache identity)
+}
+
 #[derive(Clone)]
 pub(crate) struct PaintSnapshot {
     pub(crate) panel: panel::Panel,
@@ -9,6 +15,8 @@ pub(crate) struct PaintSnapshot {
     facts: Arc<HashMap<String, panel::Facts>>,
     thumbs: HashMap<u64, TextureId>, pictures: HashMap<(u64, bool), TextureId>,
     pub(crate) time: f64, now: u64,
+    /// The account generation it was made for ([`Worlds::paint_key`]).
+    accounts: u64,
 }
 impl PaintSnapshot {
     fn with_data<T>(&self, f: impl FnOnce(&panel::Panel, &panel::Data<'_>) -> T) -> T {
@@ -20,12 +28,13 @@ impl PaintSnapshot {
     pub(crate) fn draw(&self, p: &egui::Painter) { self.with_data(|panel, d| panel.draw(p, d, self.time)); }
     pub(crate) fn hit(&self, at: Option<(f32, f32)>) -> Option<panel::Target> { at.and_then(|(x, y)| self.with_data(|panel, d| panel.hit(d, x, y))) }
     pub(crate) fn point(&mut self, at: Option<egui::Pos2>) { self.panel.hover = self.hit(at.map(|p| (p.x, p.y))); }
-    pub(crate) fn key(&self) -> String { self.panel.paint_key() }
+    pub(crate) fn key(&self) -> String { page_key(&self.panel, self.accounts) }
     pub(crate) fn hole(&self) -> Option<egui::Rect> { self.panel.hole(&self.status) }
     #[cfg(test)]
     pub(super) fn target_for_test(&self, target: panel::Target) -> Option<egui::Pos2> { self.with_data(|panel, d| panel.targets(d).into_iter().find(|(t, _)| *t == target).map(|(_, r)| r.center())) }
     pub(super) fn compatible(&self, live: &Worlds, entries: &[Entry], status: &panel::Status, picked: Option<&Entry>, target: panel::Target) -> bool {
-        if !self.panel.same_input(&live.panel, target) || self.picked.as_ref().map(|e| (e.id, &e.world_id)) != picked.map(|e| (e.id, &e.world_id)) { return false; }
+        // Painted for the account before: nothing on it is pressed for this one (verify-r15 B1).
+        if self.accounts != live.accounts || !self.panel.same_input(&live.panel, target) || self.picked.as_ref().map(|e| (e.id, &e.world_id)) != picked.map(|e| (e.id, &e.world_id)) { return false; }
         // Opening the composer needs no feedback read (F6), but its shown sign-in
         // meaning must still match the live account. Sending/deleting stays guarded.
         if target == panel::Target::WriteComment { return self.feedback.signed_in == live.feedback.signed_in; }
@@ -109,14 +118,14 @@ impl Worlds {
         if let Some(fixture) = &self.paint_fixture {
             status.fetching = false; status.listing_error = None; status.list.loading = false; status.list.more = false; status.list.error = None;
             let mut panel = self.panel.clone(); panel.moves = false;
-            return PaintSnapshot { panel, entries: entries.into(), picked: self.picked().cloned(), status, feedback: self.feedback.clone(), facts: Arc::new(self.facts.clone()), thumbs: fixture.thumbs.iter().map(|(id, tex)| (*id, tex.id())).collect(), pictures: HashMap::new(), time: 1.0, now: fixture.now };
+            return PaintSnapshot { panel, entries: entries.into(), picked: self.picked().cloned(), status, feedback: self.feedback.clone(), facts: Arc::new(self.facts.clone()), thumbs: fixture.thumbs.iter().map(|(id, tex)| (*id, tex.id())).collect(), pictures: HashMap::new(), time: 1.0, now: fixture.now, accounts: self.accounts };
         }
         if self.panel.sort == panel::Sort::Smooth { for e in entries.iter().filter(|e| e.capture) { self.facts_for(&e.world_id); } }
         let visible = self.visible(&entries, &status);
         for v in &visible { if v.page { self.facts_for(&v.world); } }
         let thumbs = self.thumbnails(&visible);
         let pictures = self.world_pictures(&entries);
-        PaintSnapshot { panel: self.panel.clone(), entries: entries.into(), picked: self.picked().cloned(), status, feedback: self.feedback.clone(), facts: Arc::new(self.facts.clone()), thumbs, pictures, time: self.time(), now: unix_now() }
+        PaintSnapshot { panel: self.panel.clone(), entries: entries.into(), picked: self.picked().cloned(), status, feedback: self.feedback.clone(), facts: Arc::new(self.facts.clone()), thumbs, pictures, time: self.time(), now: unix_now(), accounts: self.accounts }
     }
 }
 

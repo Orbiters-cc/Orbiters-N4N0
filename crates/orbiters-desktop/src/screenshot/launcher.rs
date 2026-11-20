@@ -96,12 +96,12 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
         });
     }
     // REQUEST17: the list's pictures are VRChat addresses (made up) kept on this computer from an earlier run: read from
-    // that cache by the loader, no network, on screen within the first frames (printed; `--sequence 8` writes each).
+    // that cache by the loader, no network, on screen within frames of being asked (the frames are printed).
     scenarios.push(Scenario {
         name: "launcher-pictures-cached",
         page: Page::Home,
         snapshot: base.clone(),
-        frames: 8,
+        frames: 100,
         splash: false,
         open_detail: false,
         toasts: vec![],
@@ -434,15 +434,19 @@ fn keep_pictures(data: &mut LauncherState) {
     }
 }
 
-/// Says (once) on which frame every picture the page asked for was on screen, and how long after the first frame.
+/// Says (once) from which frame the page asked for pictures and on which frame every one was on screen, and how long
+/// that took in real time.
 fn pictures_on_screen(state: &crate::pages::launcher::State, f: u32) {
     use std::sync::{Mutex, OnceLock};
-    static SEEN: OnceLock<Mutex<(Option<std::time::Instant>, bool)>> = OnceLock::new();
+    static SEEN: OnceLock<Mutex<(Option<(u32, std::time::Instant)>, bool)>> = OnceLock::new();
     let mut seen = SEEN.get_or_init(Mutex::default).lock().unwrap_or_else(|e| e.into_inner());
-    let started = *seen.0.get_or_insert_with(std::time::Instant::now);
-    if !seen.1 && !state.stand_in_pictures_loading() {
+    let loading = state.stand_in_pictures_loading();
+    if loading && seen.0.is_none() {
+        seen.0 = Some((f, std::time::Instant::now()));
+    }
+    if let (Some((asked, at)), false, false) = (seen.0, seen.1, loading) {
         seen.1 = true;
-        println!("launcher-pictures-cached: every picture asked for was on screen at frame {f} ({} ms after frame 1)", started.elapsed().as_millis());
+        println!("launcher-pictures-cached: pictures asked on frame {asked}, every one on screen on frame {f} ({} ms later)", at.elapsed().as_millis());
     }
 }
 

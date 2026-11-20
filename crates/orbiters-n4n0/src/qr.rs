@@ -232,7 +232,7 @@ impl crate::N4n0 {
             // A code in view not read: said in the note while it looks (nothing said of what it holds).
             QrSeen::Glimpse(glimpse) => {
                 let note = match glimpse {
-                    Some(crate::platform::QrGlimpse::Cut) => latin(|| tr("A QR code is cut by the camera's edge: bring all of it into the picture").to_string()),
+                    Some(crate::platform::QrGlimpse::Cut(_)) => latin(|| tr("A QR code is cut by the camera's edge: bring all of it into the picture").to_string()),
                     Some(crate::platform::QrGlimpse::Unclear) => latin(|| tr("A QR code is in view: hold the camera still, a little closer").to_string()),
                     None => String::new(),
                 };

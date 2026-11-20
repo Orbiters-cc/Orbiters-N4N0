@@ -789,8 +789,8 @@ pub enum CameraQr {
     Looking,
     /// VRChat's camera sends no picture to read: how to make it.
     NoPicture(String),
-    /// Looking, and a code is in view: part of it outside the camera's picture.
-    Cut,
+    /// Looking, and a code is in view: part of it outside the camera's picture, off this side when known.
+    Cut(Option<orbiters_n4n0::QrSide>),
     /// Looking, and a code is in view that could not be read yet.
     Unclear,
     /// Looking: a code was read that holds no web link.
@@ -4490,7 +4490,19 @@ pub fn camera_words(facts: &Facts) -> Option<(String, String)> {
         CameraQr::NoPicture(how) => return Some((tr("VRChat's camera sends no picture to read").into(), how.clone())),
         CameraQr::Looking if facts.desktop => return Some((tr("Looking for a QR code…").into(), tr("Point the camera at it. Its page opens in your browser.").into())),
         CameraQr::Looking => return Some((tr("Looking for a QR code…").into(), tr("Point the camera at it. Its page opens above the camera.").into())),
-        CameraQr::Cut => return Some((tr("A QR code is cut by the edge").into(), tr("Move the camera so all of the code is in its picture.").into())),
+        // Which way to move it, from where the code runs off the camera's picture (Request 18: Enzo saw a whole code in the world
+        // while the camera's picture held a slice of it, and "cut by the edge" did not say what to do).
+        CameraQr::Cut(side) => {
+            use orbiters_n4n0::QrSide;
+            return Some(match side {
+                Some(QrSide::Left) => (tr("A QR code is cut off on the left").into(), tr("Move the camera a little to the left, until all of the code shows in it.").into()),
+                Some(QrSide::Right) => (tr("A QR code is cut off on the right").into(), tr("Move the camera a little to the right, until all of the code shows in it.").into()),
+                Some(QrSide::Top) => (tr("A QR code is cut off at the top").into(), tr("Move the camera a little up, until all of the code shows in it.").into()),
+                Some(QrSide::Bottom) => (tr("A QR code is cut off at the bottom").into(), tr("Move the camera a little down, until all of the code shows in it.").into()),
+                Some(QrSide::Around) => (tr("A QR code is larger than the picture").into(), tr("Move the camera back from the code, until all of it shows in it.").into()),
+                None => (tr("A QR code is cut by the edge").into(), tr("Move the camera so all of the code is in its picture.").into()),
+            });
+        }
         CameraQr::Unclear => return Some((tr("A QR code is in view").into(), tr("Hold the camera still and a little closer, facing the code.").into())),
         CameraQr::NotALink => return Some((tr("This code holds no web page").into(), tr("Only codes with a web link open here. Still looking…").into())),
         CameraQr::Off => {}

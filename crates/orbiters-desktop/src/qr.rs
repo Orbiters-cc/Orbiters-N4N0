@@ -6,7 +6,7 @@
 //! N4N0 decides what opens. What it saw is noted in `vr-test.log` every ten seconds while it looks.
 
 pub use orbiters_qr::{grey, Pixels, View, MOST_WIDTH};
-use orbiters_n4n0::{QrEvents, QrGlimpse, QrScan, QrSeen};
+use orbiters_n4n0::{QrEvents, QrGlimpse, QrScan, QrSeen, QrSide};
 use orbiters_i18n::tr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,19 +46,28 @@ impl Glimpses {
     /// A look at the whole picture saw `seen`: what is to be said now, when it changed.
     pub fn look(&mut self, seen: Option<orbiters_qr::Glimpse>) -> Option<Option<QrGlimpse>> {
         let seen = seen.map(|g| match g {
-            orbiters_qr::Glimpse::Cut => QrGlimpse::Cut,
+            orbiters_qr::Glimpse::Cut(side) => QrGlimpse::Cut(side.map(|s| match s {
+                orbiters_qr::Side::Left => QrSide::Left,
+                orbiters_qr::Side::Right => QrSide::Right,
+                orbiters_qr::Side::Top => QrSide::Top,
+                orbiters_qr::Side::Bottom => QrSide::Bottom,
+                orbiters_qr::Side::Around => QrSide::Around,
+            })),
             orbiters_qr::Glimpse::Unclear => QrGlimpse::Unclear,
         });
         self.recent.rotate_right(1);
         self.recent[0] = seen;
-        let counted = |g: QrGlimpse| self.recent.iter().filter(|r| **r == Some(g)).count();
+        let cuts = self.recent.iter().filter(|r| matches!(r, Some(QrGlimpse::Cut(_)))).count();
+        // The side said stays while a recent look still saw it there (a code at a corner is not said to swap sides); else the
+        // latest look's.
+        let cut = || self.said.filter(|s| matches!(s, QrGlimpse::Cut(_)) && self.recent.contains(&Some(*s))).or_else(|| self.recent.iter().flatten().find(|r| matches!(r, QrGlimpse::Cut(_))).copied());
         let now = if self.recent[0].is_none() && self.recent[1].is_none() {
             None
-        } else if counted(QrGlimpse::Cut) >= 2 {
-            Some(QrGlimpse::Cut)
+        } else if cuts >= 2 {
+            cut()
         } else if self.recent.iter().filter(|r| r.is_some()).count() >= 2 {
             // Cut once, unclear once: seen, whichever it is.
-            Some(if counted(QrGlimpse::Cut) > 0 && self.said == Some(QrGlimpse::Cut) { QrGlimpse::Cut } else { QrGlimpse::Unclear })
+            if cuts > 0 && matches!(self.said, Some(QrGlimpse::Cut(_))) { cut() } else { Some(QrGlimpse::Unclear) }
         } else {
             self.said
         };
@@ -283,7 +292,7 @@ impl Note {
         self.slowest = self.slowest.max(took);
         self.read += !reading.codes.is_empty() as u32;
         match reading.glimpse {
-            Some(orbiters_qr::Glimpse::Cut) => self.cut += 1,
+            Some(orbiters_qr::Glimpse::Cut(_)) => self.cut += 1,
             Some(orbiters_qr::Glimpse::Unclear) => self.unclear += 1,
             None => {}
         }
@@ -537,7 +546,7 @@ mod tests {
         let copy = looks.copy(&frame);
         let reading = looks.read(&copy);
         assert!(reading.codes.is_empty());
-        assert_eq!(reading.glimpse, Some(orbiters_qr::Glimpse::Cut));
+        assert_eq!(reading.glimpse, Some(orbiters_qr::Glimpse::Cut(Some(orbiters_qr::Side::Right))), "cut off the right side, said so");
     }
 
     /// What is said of a glimpsed code: only once two of three looks saw it, unsaid after two looks without, at once when a
@@ -546,9 +555,11 @@ mod tests {
     fn a_glimpse_is_said_when_it_holds() {
         use orbiters_qr::Glimpse;
         let mut said = Glimpses::default();
-        assert_eq!(said.look(Some(Glimpse::Cut)), None, "one look is not enough");
-        assert_eq!(said.look(Some(Glimpse::Cut)), Some(Some(QrGlimpse::Cut)));
-        assert_eq!(said.look(Some(Glimpse::Cut)), None, "said once");
+        let left = Glimpse::Cut(Some(orbiters_qr::Side::Left));
+        assert_eq!(said.look(Some(left)), None, "one look is not enough");
+        assert_eq!(said.look(Some(left)), Some(Some(QrGlimpse::Cut(Some(QrSide::Left)))));
+        assert_eq!(said.look(Some(left)), None, "said once");
+        assert_eq!(said.look(Some(Glimpse::Cut(Some(orbiters_qr::Side::Top)))), None, "the side said stays while a recent look saw it there");
         assert_eq!(said.look(None), None, "one look without: still there");
         assert_eq!(said.look(None), Some(None), "two: gone");
         assert_eq!(said.look(Some(Glimpse::Unclear)), None);

@@ -7,6 +7,13 @@
 //!
 //! Cost (measured by `tests::cost`, release build, one core): see the report `done6-qr.md`; a look at a picture with no
 //! code runs every pass and is the dearest case.
+//!
+//! Request 18 (Enzo, 2026-11-20): codes in a world "pretty simple and easy to scan" were seen for 25 s and not read (his
+//! log: "glimpsed ... unclear 30" a look after another). `rqrr` (a port of quirc) fits a code's grid from its three finders
+//! and one alignment pattern: a poster seen at an angle, dots for modules, rounded finders or a logo over the alignment
+//! pattern leave it nothing it can fit. [`Pass::Zxing`] reads with ZXing's QR reader (`rxing`, its Rust port, Apache-2.0):
+//! a local (block) binarisation, a finder search that takes rounded and dotted finders, a perspective grid from every
+//! alignment pattern it finds, and both polarities.
 
 /// A grey copy is at most this wide (and as many rows as keep the picture's shape).
 pub const MOST_WIDTH: usize = 960;
@@ -58,11 +65,22 @@ pub fn grey(frame: &Pixels<'_>, view: View) -> (usize, usize, Vec<u8>) {
     (gw, gh, out)
 }
 
+/// The side of the picture a cut code runs off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    /// Off two opposite sides: larger than the picture (the camera is too close to it).
+    Around,
+}
+
 /// A code in view that could not be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Glimpse {
-    /// Part of it is outside the picture: nothing can read it until all of it is in.
-    Cut,
+    /// Part of it is outside the picture: nothing can read it until all of it is in. The side it runs off, when known.
+    Cut(Option<Side>),
     /// All of it seems in the picture, but it could not be read (too small, blurred, at too steep an angle).
     Unclear,
 }
@@ -90,10 +108,31 @@ pub enum Pass {
     Square,
     /// [`Pass::Square`]'s light modules taken as the dark ones.
     SquareInverted,
+    /// ZXing's reader (`rxing`): its own block binarisation, rounded and dotted finders, perspective, both polarities.
+    Zxing,
 }
 
-/// The passes, in the order [`read`] tries them.
-pub const PASSES: [Pass; 4] = [Pass::Rows, Pass::RowsInverted, Pass::Square, Pass::SquareInverted];
+/// The passes, in the order [`read`] tries them: ZXing's first (it reads nearly every code the others read and many they
+/// do not), then the rest for what it misses.
+pub const PASSES: [Pass; 5] = [Pass::Zxing, Pass::Rows, Pass::RowsInverted, Pass::Square, Pass::SquareInverted];
+
+/// The passes of 0.3.8-dev.1, before ZXing's (the comparisons of Request 18).
+pub const PASSES_BEFORE_ZXING: [Pass; 4] = [Pass::Rows, Pass::RowsInverted, Pass::Square, Pass::SquareInverted];
+
+/// ZXing's QR reader on a grey picture: the code's text, if it read one.
+fn zxing(width: usize, height: usize, grey: &[u8]) -> Option<String> {
+    use rxing::{common::HybridBinarizer, BinaryBitmap, DecodeHints, Luma8Source, Reader};
+    let source = Luma8Source::new_with_slice(&grey[..width * height], width as u32, height as u32).ok()?;
+    let mut bitmap = BinaryBitmap::new(HybridBinarizer::new(source));
+    let hints = DecodeHints { TryHarder: Some(true), AlsoInverted: Some(true), ..Default::default() };
+    // zxing-cpp's detector first (rounded and dotted finders, a grid from every alignment pattern), then ZXing's own.
+    rxing::qrcode::cpp_port::QrReader
+        .decode_with_hints(&mut bitmap, &hints)
+        .or_else(|_| rxing::qrcode::QRCodeReader::new().decode_with_hints(&mut bitmap, &hints))
+        .ok()
+        .map(|r| r.getText().to_string())
+        .filter(|t| !t.is_empty())
+}
 
 /// The codes in a grey picture (`width` × `height`, one byte a pixel), and when there are none whether one is in view.
 /// `edges`: the picture's sides are the camera picture's own (a whole frame, not its middle), so a code running into them
@@ -124,6 +163,7 @@ pub fn read_with(width: usize, height: usize, grey: &[u8], edges: bool, passes: 
                 let dark = if pass == Pass::Square { -1 } else { 1 };
                 decode!(rqrr::PreparedImage::prepare_from_bitmap(width, height, |x, y| c[y * width + x] == dark))
             }
+            Pass::Zxing => zxing(width, height, grey).into_iter().collect(),
         };
         if !codes.is_empty() {
             return Reading { codes, glimpse: None, near: None };
@@ -134,7 +174,8 @@ pub fn read_with(width: usize, height: usize, grey: &[u8], edges: bool, passes: 
     // What the person is told rests on finders clearly seen (on two rows or more, a pixel and a half a module or more):
     // a world's specks are not a code.
     let clear = |f: &&Finder| f.hits >= 2 && f.module >= 1.5;
-    let seen = all.iter().filter_map(|(dark, fs)| glimpse(width, height, &classes, *dark, edges, &fs.iter().filter(clear).copied().collect::<Vec<_>>())).min_by_key(|(g, _)| *g as u8);
+    let rank = |g: &Glimpse| matches!(g, Glimpse::Unclear) as u8;
+    let seen = all.iter().filter_map(|(dark, fs)| glimpse(width, height, &classes, *dark, edges, &fs.iter().filter(clear).copied().collect::<Vec<_>>())).min_by_key(|(g, _)| rank(g));
     // Where to look closer may rest on any: a look wasted costs a third of a second, a small code missed costs the code.
     let near = seen.map(|(_, near)| near).or_else(|| all.iter().find_map(|(dark, fs)| glimpse(width, height, &classes, *dark, edges, fs)).map(|(_, near)| near));
     Reading { codes: Vec::new(), glimpse: seen.map(|(g, _)| g), near }
@@ -388,9 +429,10 @@ fn glimpse(w: usize, h: usize, classes: &[i8], dark: i8, edges: bool, finders: &
             // A third that goes with both: three corners of one code.
             if let Some(c) = (0..finders.len()).filter(|&k| k != i && k != j).map(|k| &finders[k]).find(|c| pair(a, c) && pair(b, c)) {
                 let n = near(&[a, b, c]);
-                // Wholly in view (the finders are a code's outermost parts), else cut.
-                let inside = n.x0 >= 3.5 * n.module && n.y0 >= 3.5 * n.module && n.x1 <= w as f32 - 3.5 * n.module && n.y1 <= h as f32 - 3.5 * n.module;
-                return Some((if inside || !edges { Glimpse::Unclear } else { Glimpse::Cut }, n));
+                // Wholly in view (the finders are a code's outermost parts: 3.5 modules past their middles), else cut, and where.
+                let reach = 3.5 * n.module;
+                let side = cut_side(w, h, &[(n.x0 - reach, n.y0 - reach), (n.x1 + reach, n.y1 + reach)]);
+                return Some((match side { Some(side) if edges => Glimpse::Cut(Some(side)), _ => Glimpse::Unclear }, n));
             }
             // Two only: they are two corners of a square code, along a side (the code on either hand) or across it. The
             // square whose inside looks like a code's (dark and light modules mixed) is taken; none: not a code. Cut when
@@ -406,10 +448,15 @@ fn glimpse(w: usize, h: usize, classes: &[i8], dark: i8, edges: bool, finders: &
             let Some(square) = squares.iter().filter_map(|q| code_like(w, h, classes, dark, q).map(|score| (score, q))).max_by(|x, y| x.0.total_cmp(&y.0)).map(|(_, q)| q) else {
                 continue;
             };
-            let edge = 3.5 * module;
-            let off = |&(x, y): &(f32, f32)| x < edge || y < edge || x > w as f32 - edge || y > h as f32 - edge;
-            let seen = if edges && square.iter().any(off) { Glimpse::Cut } else { Glimpse::Unclear };
-            if best.is_none_or(|(g, _)| seen == Glimpse::Cut && g != Glimpse::Cut) {
+            // The square's corners are finder middles: the code reaches 3.5 modules past them, outwards from its middle.
+            let (cx, cy) = (square.iter().map(|c| c.0).sum::<f32>() / 4.0, square.iter().map(|c| c.1).sum::<f32>() / 4.0);
+            let reach = 3.5 * module;
+            let outer: Vec<(f32, f32)> = square.iter().map(|&(x, y)| (x + reach * (x - cx).signum(), y + reach * (y - cy).signum())).collect();
+            let seen = match cut_side(w, h, &outer) {
+                Some(side) if edges => Glimpse::Cut(Some(side)),
+                _ => Glimpse::Unclear,
+            };
+            if best.is_none_or(|(g, _)| matches!(seen, Glimpse::Cut(_)) && !matches!(g, Glimpse::Cut(_))) {
                 let n = near(&[a, b]);
                 let (xs, ys) = (square.map(|c| c.0), square.map(|c| c.1));
                 let clamp = |v: f32, most: usize| v.clamp(0.0, most as f32);
@@ -435,14 +482,49 @@ fn glimpse(w: usize, h: usize, classes: &[i8], dark: i8, edges: bool, finders: &
             code_like(w, h, classes, dark, &q).is_some()
         });
         if let Some((u, v)) = quadrant {
-            let reach = 25.0 * f.module;
-            let near_edge = f.x < reach || f.y < reach || f.x > w as f32 - reach || f.y > h as f32 - reach;
+            // The other two finders are not seen: the smallest code they could make (21 modules, finders 14 apart) is
+            // cut where even it would run off the picture; one that would fit whole is only not clear (a finder alone in
+            // the middle of the picture is no cut code: Request 18, "cut by the edge" said of a code whole in view).
             let (x1, y1) = (f.x + u * side, f.y + v * side);
+            let reach = 3.5 * f.module;
+            let outer = [(f.x - u * reach, f.y - v * reach), (x1 + u * reach, y1 + v * reach)];
             let n = Near { x0: f.x.min(x1).max(0.0), y0: f.y.min(y1).max(0.0), x1: f.x.max(x1).min(w as f32), y1: f.y.max(y1).min(h as f32), module: f.module };
-            return Some((if edges && near_edge { Glimpse::Cut } else { Glimpse::Unclear }, n));
+            let mut side = cut_side(w, h, &outer);
+            // A larger code: its texture goes on past the smallest code's square, up to the picture's side, within as far as
+            // the largest code VRChat's posters carry would reach (25 modules).
+            if side.is_none() {
+                let edge_x = if u > 0.0 { w as f32 - 1.0 } else { 0.0 };
+                let edge_y = if v > 0.0 { h as f32 - 1.0 } else { 0.0 };
+                let gap_x = (edge_x - x1) * u;
+                let gap_y = (edge_y - y1) * v;
+                let strip_x = [(x1, f.y), (edge_x, f.y), (edge_x, y1), (x1, y1)];
+                let strip_y = [(f.x, y1), (x1, y1), (x1, edge_y), (f.x, edge_y)];
+                let continues = |gap: f32, strip: &[(f32, f32); 4]| gap > f.module && gap < 25.0 * f.module && code_like(w, h, classes, dark, strip).is_some();
+                side = if continues(gap_x, &strip_x) {
+                    Some(if u > 0.0 { Side::Right } else { Side::Left })
+                } else if continues(gap_y, &strip_y) {
+                    Some(if v > 0.0 { Side::Bottom } else { Side::Top })
+                } else {
+                    None
+                };
+            }
+            return Some((match side { Some(side) if edges => Glimpse::Cut(Some(side)), _ => Glimpse::Unclear }, n));
         }
     }
     None
+}
+
+/// Which side of a `w` × `h` picture points (a code's outer corners) run off, if any: the side they run furthest past, or
+/// [`Side::Around`] when they run off two opposite sides.
+pub fn cut_side(w: usize, h: usize, points: &[(f32, f32)]) -> Option<Side> {
+    let (w, h) = (w as f32, h as f32);
+    let past = |f: &dyn Fn(&(f32, f32)) -> f32| points.iter().map(f).fold(0.0f32, f32::max);
+    let (left, right) = (past(&|p| -p.0), past(&|p| p.0 - w));
+    let (top, bottom) = (past(&|p| -p.1), past(&|p| p.1 - h));
+    if (left > 0.0 && right > 0.0) || (top > 0.0 && bottom > 0.0) {
+        return Some(Side::Around);
+    }
+    [(left, Side::Left), (right, Side::Right), (top, Side::Top), (bottom, Side::Bottom)].into_iter().filter(|(d, _)| *d > 0.0).max_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, s)| s)
 }
 
 /// How much the inside of the square with corners `q` (finder middles, in turn) looks like a code's: dark and light
@@ -510,6 +592,8 @@ pub struct Grey {
 #[derive(Default)]
 pub struct Looks {
     count: u64,
+    /// The passes each look tries ([`PASSES`] when none are said).
+    passes: Option<&'static [Pass]>,
     /// Where the last whole look, and the last middle one, glimpsed a code, in the frame's pixels.
     near_whole: Option<Near>,
     near_middle: Option<Near>,
@@ -518,6 +602,11 @@ pub struct Looks {
 }
 
 impl Looks {
+    /// Looks that try only `passes` (comparisons).
+    pub fn with_passes(passes: &'static [Pass]) -> Self {
+        Self { passes: Some(passes), ..Default::default() }
+    }
+
     /// The next look.
     pub fn next_look(&self) -> Look {
         match self.count % 3 {
@@ -541,7 +630,7 @@ impl Looks {
     /// Reads a copy made by [`Looks::copy`].
     pub fn read(&mut self, copy: &Grey) -> Reading {
         self.count += 1;
-        let reading = read(copy.width, copy.height, &copy.grey, copy.look == Look::Whole);
+        let reading = read_with(copy.width, copy.height, &copy.grey, copy.look == Look::Whole, self.passes.unwrap_or(&PASSES));
         let (fw, fh) = copy.frame;
         // From the copy's pixels to the frame's.
         let to_frame = |near: Near, x: f32, y: f32, step: f32| Near { x0: x + near.x0 * step, y0: y + near.y0 * step, x1: x + near.x1 * step, y1: y + near.y1 * step, module: near.module * step };

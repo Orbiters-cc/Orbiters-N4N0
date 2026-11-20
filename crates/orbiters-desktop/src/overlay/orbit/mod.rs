@@ -2035,7 +2035,7 @@ impl Panels {
             Qr::Looking => panels::CameraQr::Looking,
             Qr::NoStream => panels::CameraQr::NoPicture(orbiters_i18n::tr(&orbiters_n4n0_core::qr::no_camera_note(snap.camera_open_said)).to_string()),
             Qr::Error(why) => panels::CameraQr::NoPicture(orbiters_i18n::tr(why).to_string()),
-            Qr::Seen(orbiters_n4n0::QrGlimpse::Cut) => panels::CameraQr::Cut,
+            Qr::Seen(orbiters_n4n0::QrGlimpse::Cut(side)) => panels::CameraQr::Cut(*side),
             Qr::Seen(orbiters_n4n0::QrGlimpse::Unclear) => panels::CameraQr::Unclear,
             Qr::NotALink => panels::CameraQr::NotALink,
             // Found: its page opens over the camera, and the scan stops.

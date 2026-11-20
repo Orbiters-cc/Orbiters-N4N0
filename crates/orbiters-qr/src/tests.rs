@@ -3,8 +3,12 @@
 //! cut by the picture's edge), drawn into frames as large as VRChat's stream camera sends (1920 × 1080) over a busy
 //! poster-like world and read through the scanner's own grey copies (the whole picture, then its middle).
 //!
-//! `cargo test -p orbiters-qr --release -- --nocapture` prints the recognition rate of each kind of code before (`rqrr`
-//! alone, as 0.3.5-dev.56 read) and after ([`read`]), and what a look costs. `QR_SAMPLES=<folder>` saves a frame of each.
+//! `cargo test -p orbiters-qr --release -- --nocapture` prints the recognition rate of each kind of code before (the
+//! reader of 0.3.8-dev.1: `rqrr`'s four passes, [`PASSES_BEFORE_ZXING`]) and after ([`read`], ZXing's pass first), and
+//! what a look costs. `QR_SAMPLES=<folder>` saves a frame of each.
+//!
+//! Request 18 added the codes Enzo's 2026-11-20 session did not read: dots for modules and rounded finders (5-qr-a), posters
+//! seen at a steep angle, frames softened and blocky as the camera's stream is, and his two pictures of them.
 
 use super::*;
 use std::time::Instant;
@@ -104,6 +108,36 @@ impl Canvas {
         }
     }
 
+    /// What the camera's stream does to a picture (VRChat's camera through Spout, then the grey copy): softened, its colour
+    /// averaged over blocks of 8 × 8 pixels about each pixel's brightness (as a video encoder keeps brightness and halves
+    /// colour), steps of brightness in 6 levels, a little noise.
+    fn stream(&mut self, x0: usize, y0: usize, x1: usize, y1: usize, rng: &mut Rng) {
+        self.blur(x0, y0, x1, y1, 1);
+        let luma = |p: Rgb| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+        for by in (y0..y1).step_by(8) {
+            for bx in (x0..x1).step_by(8) {
+                let (ex, ey) = ((bx + 8).min(x1), (by + 8).min(y1));
+                let mut mean = [0.0f32; 3];
+                let mut count = 0.0;
+                for y in by..ey {
+                    for x in bx..ex {
+                        let p = self.px[y * W + x];
+                        mean = [mean[0] + p[0], mean[1] + p[1], mean[2] + p[2]];
+                        count += 1.0;
+                    }
+                }
+                let mean = mean.map(|v| v / count);
+                let mean_luma = luma(mean);
+                for y in by..ey {
+                    for x in bx..ex {
+                        let l = ((luma(self.px[y * W + x]) / 6.0).round() * 6.0 + rng.range(-5.0, 5.0)).clamp(0.0, 255.0);
+                        self.px[y * W + x] = mean.map(|c| (c + l - mean_luma).clamp(0.0, 255.0));
+                    }
+                }
+            }
+        }
+    }
+
     /// As Spout lends it: BGRA.
     fn bgra(&self) -> Vec<u8> {
         self.px.iter().flat_map(|p| [p[2].clamp(0.0, 255.0) as u8, p[1].clamp(0.0, 255.0) as u8, p[0].clamp(0.0, 255.0) as u8, 255]).collect()
@@ -132,6 +166,10 @@ struct Style {
     roll: f32,
     blur: usize,
     centre: (f32, f32),
+    /// Dots for modules and rounded finders, as code generators style them.
+    dots: bool,
+    /// The stream's softness and blocks (8 × 8 averaging of the colours over a softened picture) and its noise.
+    stream: bool,
 }
 
 /// A 3 × 3 homography from 4 points to 4 points.
@@ -209,6 +247,24 @@ fn draw(canvas: &mut Canvas, style: &Style, rng: &mut Rng) {
             let k = ((u * 0.7).floor() as usize * 31 + (v * 0.7).floor() as usize * 17) % palette.len();
             return Some(palette[k]);
         }
+        if style.dots {
+            // Finders: rounded squares (a ring 7 across, a core 3 across); other modules: dots.
+            let (fu, fv) = (u - style.quiet, v - style.quiet);
+            let finder = [(0.0, 0.0), (n as f32 - 7.0, 0.0), (0.0, n as f32 - 7.0)].into_iter().find(|(x, y)| (*x..*x + 7.0).contains(&fu) && (*y..*y + 7.0).contains(&fv));
+            let ink = |dark: bool| Some(if dark { style.on } else { style.off });
+            if let Some((x, y)) = finder {
+                let (lx, ly) = (fu - x - 3.5, fv - y - 3.5);
+                // Inside a rounded square of half side `half` and corner radius `r`.
+                let inside = |half: f32, r: f32| {
+                    let (qx, qy) = (lx.abs() - (half - r), ly.abs() - (half - r));
+                    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) <= r
+                };
+                return ink((inside(3.5, 1.6) && !inside(2.5, 1.0)) || inside(1.5, 0.7));
+            }
+            let dark = colors[my as usize * n + mx as usize] == qrcode::Color::Dark;
+            let (cx, cy) = (fu - mx as f32 - 0.5, fv - my as f32 - 0.5);
+            return ink(dark && cx.hypot(cy) <= 0.42);
+        }
         if colors[my as usize * n + mx as usize] == qrcode::Color::Dark {
             let t = v / side;
             Some(style.on_bottom.map_or(style.on, |b| [style.on[0] + (b[0] - style.on[0]) * t, style.on[1] + (b[1] - style.on[1]) * t, style.on[2] + (b[2] - style.on[2]) * t]))
@@ -235,6 +291,9 @@ fn draw(canvas: &mut Canvas, style: &Style, rng: &mut Rng) {
     }
     let margin = style.blur * 3;
     canvas.blur(x0.saturating_sub(margin), y0.saturating_sub(margin), (x1 + margin).min(W), (y1 + margin).min(H), style.blur);
+    if style.stream {
+        canvas.stream(x0.saturating_sub(16), y0.saturating_sub(16), (x1 + 16).min(W), (y1 + 16).min(H), rng);
+    }
 }
 
 /// The kinds of code in the set.
@@ -251,11 +310,19 @@ enum Kind {
     Small,
     SmallMiddle,
     PosterMix,
+    /// Dots for modules, rounded finders.
+    Dots,
+    /// Enzo's 5-qr-a: dots and rounded finders, a logo, dark modules on a yellow-green card, at an angle, through the stream.
+    DotsPoster,
+    /// A poster seen at a steep angle (50 to 62 degrees), as a camera held beside it sees it.
+    Steep,
+    /// A plain or negative code through the stream's softness and blocks.
+    Stream,
     Cut,
     Nothing,
 }
 
-const KINDS: [Kind; 13] = [
+const KINDS: [Kind; 17] = [
     Kind::Plain,
     Kind::Logo,
     Kind::ColourLogo,
@@ -267,6 +334,10 @@ const KINDS: [Kind; 13] = [
     Kind::Small,
     Kind::SmallMiddle,
     Kind::PosterMix,
+    Kind::Dots,
+    Kind::DotsPoster,
+    Kind::Steep,
+    Kind::Stream,
     Kind::Cut,
     Kind::Nothing,
 ];
@@ -306,6 +377,8 @@ fn style(kind: Kind, rng: &mut Rng) -> Style {
         roll: rng.range(-10.0, 10.0),
         blur: 0,
         centre: (rng.range(500.0, 1420.0), rng.range(330.0, 750.0)),
+        dots: false,
+        stream: false,
     };
     match kind {
         Kind::Plain | Kind::Nothing => {}
@@ -366,6 +439,35 @@ fn style(kind: Kind, rng: &mut Rng) -> Style {
             s.blur = rng.pick(&[0, 1]);
             s.module = rng.range(5.0, 9.0);
         }
+        Kind::Dots => {
+            s.dots = true;
+            s.module = rng.range(5.0, 9.0);
+        }
+        Kind::DotsPoster => {
+            s.dots = true;
+            s.high = true;
+            s.logo = rng.range(0.15, 0.22);
+            s.on = [rng.range(30.0, 70.0), rng.range(10.0, 40.0), rng.range(60.0, 110.0)];
+            s.off = [rng.range(170.0, 210.0), rng.range(220.0, 245.0), rng.range(20.0, 70.0)];
+            s.yaw = rng.range(15.0, 35.0) * if rng.f() < 0.5 { -1.0 } else { 1.0 };
+            s.pitch = rng.range(-20.0, 20.0);
+            s.roll = rng.range(-15.0, 15.0);
+            s.module = rng.range(5.0, 9.0);
+            s.stream = true;
+        }
+        Kind::Steep => {
+            s.yaw = rng.range(50.0, 62.0) * if rng.f() < 0.5 { -1.0 } else { 1.0 };
+            s.pitch = rng.range(-15.0, 15.0);
+            s.module = rng.range(7.0, 11.0);
+        }
+        Kind::Stream => {
+            if rng.f() < 0.5 {
+                let (dark, light) = pair(rng, 0.45);
+                (s.on, s.off) = (light, dark);
+            }
+            s.module = rng.range(4.0, 7.0);
+            s.stream = true;
+        }
         Kind::Cut => {
             // A third of it outside the picture, on any side.
             s.module = rng.range(6.0, 10.0);
@@ -386,20 +488,19 @@ fn style(kind: Kind, rng: &mut Rng) -> Style {
 /// What the scanner read from a frame, before and after: (before, after, glimpse of the whole picture after).
 fn look(bgra: &[u8]) -> (Vec<String>, Vec<String>, Option<Glimpse>) {
     let frame = Pixels { width: W, height: H, stride: W * 4, data: bgra, bgra: true };
-    let (ww, wh, whole) = grey(&frame, View::Whole);
-    let (mw, mh, middle) = grey(&frame, View::Middle);
-    // 0.3.5-dev.56: rqrr on the whole picture one look, on its middle the next.
-    let mut before = read_with(ww, wh, &whole, true, &[Pass::Rows]).codes;
-    before.extend(read_with(mw, mh, &middle, false, &[Pass::Rows]).codes);
-    // Now: the scanner's three looks of a second.
-    let mut looks = Looks::default();
-    let mut after = Vec::new();
-    for _ in 0..3 {
-        let copy = looks.copy(&frame);
-        after.extend(looks.read(&copy).codes);
-    }
-    after.dedup();
-    (before, after, looks.glimpse)
+    // The scanner's three looks of a second, with 0.3.8-dev.1's passes (before) and now's (after).
+    let three = |mut looks: Looks| {
+        let mut codes = Vec::new();
+        for _ in 0..3 {
+            let copy = looks.copy(&frame);
+            codes.extend(looks.read(&copy).codes);
+        }
+        codes.dedup();
+        (codes, looks.glimpse)
+    };
+    let (before, _) = three(Looks::with_passes(&PASSES_BEFORE_ZXING));
+    let (after, glimpse) = three(Looks::default());
+    (before, after, glimpse)
 }
 
 fn save(path: &std::path::Path, bgra: &[u8]) {
@@ -417,6 +518,8 @@ struct Tally {
     before: u32,
     after: u32,
     cut: u32,
+    /// Cut codes said cut off the side they were placed past.
+    cut_side_right: u32,
     unclear: u32,
     wrong: u32,
 }
@@ -446,7 +549,10 @@ fn run_set() -> Vec<(Kind, Tally)> {
                 }
             }
             let (before, after, glimpse) = look(&bgra);
-            let failed = !after.contains(&s.text) && kind != Kind::Cut && kind != Kind::Nothing || (kind == Kind::Nothing && glimpse.is_some()) || (kind == Kind::Cut && glimpse != Some(Glimpse::Cut));
+            // A cut code is said cut, off the side it was placed past.
+            // (`style` puts a cut code's middle within about 120 pixels of the side it runs past.)
+            let placed_side = if s.centre.0 < 150.0 { Side::Left } else if s.centre.0 > W as f32 - 150.0 { Side::Right } else if s.centre.1 < 150.0 { Side::Top } else { Side::Bottom };
+            let failed = !after.contains(&s.text) && kind != Kind::Cut && kind != Kind::Nothing || (kind == Kind::Nothing && glimpse.is_some()) || (kind == Kind::Cut && glimpse != Some(Glimpse::Cut(Some(placed_side))));
             if failed && std::env::var_os("QR_DEBUG").is_some() {
                 let frame = Pixels { width: W, height: H, stride: W * 4, data: &bgra, bgra: true };
                 let (ww, wh, whole) = grey(&frame, View::Whole);
@@ -469,20 +575,24 @@ fn run_set() -> Vec<(Kind, Tally)> {
             tally.wrong += after.iter().any(|c| *c != s.text) as u32;
             if after.is_empty() {
                 match glimpse {
-                    Some(Glimpse::Cut) => tally.cut += 1,
+                    Some(Glimpse::Cut(side)) => {
+                        tally.cut += 1;
+                        tally.cut_side_right += (kind == Kind::Cut && side == Some(placed_side)) as u32;
+                    }
                     Some(Glimpse::Unclear) => tally.unclear += 1,
                     None => {}
                 }
             }
         }
         println!(
-            "{kind:?}: {} frames, read before {} ({:.0} %), after {} ({:.0} %); not read but seen: cut {}, unclear {}; wrong text {}",
+            "{kind:?}: {} frames, read before {} ({:.0} %), after {} ({:.0} %); not read but seen: cut {} (its side right {}), unclear {}; wrong text {}",
             tally.cases,
             tally.before,
             100.0 * tally.before as f32 / tally.cases as f32,
             tally.after,
             100.0 * tally.after as f32 / tally.cases as f32,
             tally.cut,
+            tally.cut_side_right,
             tally.unclear,
             tally.wrong
         );
@@ -504,14 +614,17 @@ fn the_test_set_is_read() {
     // Nothing is ever read wrong, and a frame with no code reads none.
     assert!(set.iter().all(|(_, t)| t.wrong == 0), "a wrong text was read");
     assert_eq!(get(Kind::Nothing).after, 0);
-    // A code in negative was never read before; it must be now.
-    assert_eq!(get(Kind::Negative).before, 0, "rqrr alone reads no code in negative");
-    // Measured 2026-11-15: every kind of code below is read in every frame but one: a logo over 28 % of the code's side
-    // that `rqrr`'s decoder cannot correct (OpenCV's reader reads that frame).
-    for kind in [Kind::Plain, Kind::ColourLogo, Kind::Negative, Kind::NegativeGradientPicture, Kind::LowContrast, Kind::Angle, Kind::Blur, Kind::PosterMix] {
+    // Every kind of code below is read in every frame (2026-11-15: all but one Logo frame, which ZXing reads).
+    for kind in [Kind::Plain, Kind::Logo, Kind::ColourLogo, Kind::Negative, Kind::NegativeGradientPicture, Kind::LowContrast, Kind::Angle, Kind::Blur, Kind::PosterMix, Kind::Dots, Kind::Stream] {
         assert_eq!(get(kind).after, PER_KIND, "{kind:?}: {:?}", get(kind));
     }
-    assert!(get(Kind::Logo).after + 1 >= PER_KIND, "{:?}", get(Kind::Logo));
+    // Request 18: Enzo's kind of poster (dots, rounded finders, a logo, an angle, the stream) and steep angles.
+    for kind in [Kind::DotsPoster, Kind::Steep] {
+        assert!(get(kind).after * 12 >= PER_KIND * 11, "{kind:?}: {:?}", get(kind));
+        assert!(get(kind).after >= get(kind).before, "{kind:?} is read no less often than by 0.3.8-dev.1: {:?}", get(kind));
+    }
+    // Measured 2026-11-20: dots and rounded finders were never read before (0 of 12), Enzo's kind of poster 4 of 12.
+    assert!(get(Kind::Dots).before < get(Kind::Dots).after && get(Kind::DotsPoster).before < get(Kind::DotsPoster).after);
     // Small codes (1.3 to 1.8 pixels a module in the whole picture's grey copy) are read in a closer look where they
     // were glimpsed; tinier ones in the middle (1.6 to 2.4 pixels a module in the camera's full frame) only half the time.
     assert!(get(Kind::Small).after * 4 >= PER_KIND * 3, "{:?}", get(Kind::Small));
@@ -522,6 +635,7 @@ fn the_test_set_is_read() {
     assert_eq!(cut.after, 0);
     assert_eq!(cut.cut + cut.unclear, PER_KIND, "every cut code is seen: {cut:?}");
     assert!(cut.cut * 4 >= PER_KIND * 3, "cut codes said cut: {cut:?}");
+    assert_eq!(cut.cut_side_right, cut.cut, "each said cut off the side it runs past: {cut:?}");
     // A world with no code shows none, not even a glimpse of one.
     assert_eq!(get(Kind::Nothing).cut + get(Kind::Nothing).unclear, 0, "{:?}", get(Kind::Nothing));
 }
@@ -538,14 +652,20 @@ fn load_png(path: &std::path::Path) -> (usize, usize, Vec<Rgb>) {
 }
 
 /// Enzo's codes, cut from his pictures of the headset (Virtual Desktop's compression and the panel's scaling make them far
-/// blurrier than the camera's own frames), enlarged into a stream frame to about the size they had there.
+/// blurrier than the camera's own frames), enlarged into a stream frame to about the size they had there. shot4 and shot5
+/// are the two of Request 18 (2026-11-20, 5-qr-a and 5-qr-b): shot5 is shot1's poster again (his log: 25 s of looks before
+/// it was read); shot4, dots and rounded finders round a logo, was never read (nor by OpenCV's reader from his picture).
 #[test]
 fn enzos_codes() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
     let mut results = Vec::new();
-    for name in ["shot1", "shot2", "shot3"] {
+    for name in ["shot1", "shot2", "shot3", "shot4", "shot5"] {
         let (cw, ch, crop) = load_png(&dir.join(format!("{name}.png")));
-        for scale in [3.0f32, 4.5, 6.0, 8.0] {
+        for scale in [3.0f32, 4.5, 6.0, 7.0, 8.0] {
+            // Larger than the frame: not a size the camera saw it at.
+            if (cw.max(ch) as f32 * scale) as usize >= H {
+                continue;
+            }
             let mut canvas = Canvas { px: vec![crop[0]; W * H] };
             let (ow, oh) = ((cw as f32 * scale) as usize, (ch as f32 * scale) as usize);
             let (x0, y0) = ((W - ow) / 2, (H - oh) / 2);
@@ -568,12 +688,22 @@ fn enzos_codes() {
             results.push((name, scale, before, after, glimpse));
         }
     }
-    // Read before: nothing (nor OpenCV's reader, tried on the same pictures).
-    assert!(results.iter().all(|(_, _, before, _, _)| before.is_empty()), "{results:?}");
-    // shot1, never read in his headset, is read from his picture of it now.
-    assert!(results.iter().any(|(n, _, _, after, _)| *n == "shot1" && after.iter().any(|c| c == "https://qrco.de/bdeKjG")), "{results:?}");
-    // shot2 too, larger: it was at the edge of the camera's picture and is the blurriest of the three.
-    assert!(results.iter().any(|(n, _, _, after, _)| *n == "shot2" && after.iter().any(|c| c == "https://linktr.ee/the_real_nagia")), "{results:?}");
+    let reads = |shot: &str, after: bool| results.iter().filter(|(n, _, before_codes, after_codes, _)| *n == shot && !(if after { after_codes } else { before_codes }).is_empty()).count();
+    for shot in ["shot1", "shot2", "shot3", "shot4", "shot5"] {
+        println!("{shot}: read at {} sizes before, {} after", reads(shot, false), reads(shot, true));
+        assert!(reads(shot, true) >= reads(shot, false), "{shot} is read no less often: {results:?}");
+    }
+    // Nothing is read wrong.
+    let known = ["https://qrco.de/bdeKjG", "https://linktr.ee/the_real_nagia"];
+    for (n, _, _, after, _) in &results {
+        if matches!(*n, "shot1" | "shot5") {
+            assert!(after.iter().all(|c| c == known[0]), "{n}: {after:?}");
+        }
+    }
+    // shot1 and shot2 are read from his pictures of them; shot4, never read in his headset, is now.
+    for (shot, text) in [("shot1", known[0]), ("shot2", known[1]), ("shot4", "https://udexreal.com/discount/Popcorn")] {
+        assert!(results.iter().any(|(n, _, _, after, _)| *n == shot && after.iter().any(|c| c == text)), "{shot}: {results:?}");
+    }
 }
 
 /// What a look costs: the dearest case is a picture with no code (every pass runs, then the finders are looked for).
@@ -599,9 +729,16 @@ fn cost() {
         let t = Instant::now();
         for _ in 0..rounds {
             let (w, h, g) = grey(&frame, View::Whole);
-            std::hint::black_box(read_with(w, h, &g, true, &[Pass::Rows]));
+            std::hint::black_box(read_with(w, h, &g, true, &PASSES_BEFORE_ZXING));
         }
         let before = t.elapsed().as_secs_f64() * 1000.0 / rounds as f64;
+        let t = Instant::now();
+        for _ in 0..rounds {
+            let (w, h, g) = grey(&frame, View::Whole);
+            std::hint::black_box(read_with(w, h, &g, true, &[Pass::Zxing]));
+        }
+        let zxing = t.elapsed().as_secs_f64() * 1000.0 / rounds as f64;
+        println!("  ZXing's pass alone, grey copy included: {zxing:.1} ms");
         let t = Instant::now();
         for _ in 0..rounds {
             std::hint::black_box(grey(&frame, View::Whole));

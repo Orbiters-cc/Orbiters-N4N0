@@ -1,0 +1,12 @@
+{
+  "A QR code is cut off on the left": "QRコードの左側が切れています",
+  "A QR code is cut off on the right": "QRコードの右側が切れています",
+  "A QR code is cut off at the top": "QRコードの上側が切れています",
+  "A QR code is cut off at the bottom": "QRコードの下側が切れています",
+  "A QR code is larger than the picture": "QRコードが画面に収まっていません",
+  "Move the camera a little to the left, until all of the code shows in it.": "コード全体が映るまで、カメラを少し左に動かしてください。",
+  "Move the camera a little to the right, until all of the code shows in it.": "コード全体が映るまで、カメラを少し右に動かしてください。",
+  "Move the camera a little up, until all of the code shows in it.": "コード全体が映るまで、カメラを少し上に動かしてください。",
+  "Move the camera a little down, until all of the code shows in it.": "コード全体が映るまで、カメラを少し下に動かしてください。",
+  "Move the camera back from the code, until all of it shows in it.": "コード全体が映るまで、カメラをコードから離してください。"
+}

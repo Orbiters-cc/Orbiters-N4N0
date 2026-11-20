@@ -1036,7 +1036,7 @@ pub(super) fn camera_shots(out: &Path) -> anyhow::Result<()> {
         ("orbit-camera-demo-done", Facts { camera: CameraNow { demo: Some(DemoSwitch::Done), ..idle.camera.clone() }, ..idle.clone() }, false),
         ("orbit-camera-qr-looking", camera(&|c| c.qr = CameraQr::Looking), false),
         ("orbit-camera-qr-no-picture", camera(&|c| c.qr = CameraQr::NoPicture(orbiters_i18n::tr(&orbiters_n4n0_core::qr::no_camera_note(Some(true))).into())), false),
-        ("orbit-camera-qr-cut", camera(&|c| c.qr = CameraQr::Cut), false),
+        ("orbit-camera-qr-cut", camera(&|c| c.qr = CameraQr::Cut(Some(orbiters_n4n0::QrSide::Left))), false),
         ("orbit-camera-qr-unclear", camera(&|c| c.qr = CameraQr::Unclear), false),
         ("orbit-camera-qr-not-a-link", camera(&|c| c.qr = CameraQr::NotALink), false),
         ("orbit-camera-web-loading", camera(&|c| c.web = page(WebState::Loading)), false),

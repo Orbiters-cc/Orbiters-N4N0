@@ -130,15 +130,62 @@ impl Controller {
     /// Reads the saved account for `server` and asks Orbiters whether it still works. `again_refused`: asking again
     /// about a credential that was refused, which shows as refused until an answer says otherwise.
     fn read_account(self: &Shared, server: Server, modified: Option<SystemTime>, again_refused: bool) {
-        self.read_account_from(server, modified, again_refused, || account::read(server));
+        self.read_account_from(server, modified, again_refused, || account::read_saved(server));
     }
 
     /// [`Controller::read_account`] with the saved account read by `read` (tests: no file of the person's).
-    fn read_account_from(self: &Shared, server: Server, modified: Option<SystemTime>, again_refused: bool, read: impl FnOnce() -> Option<Account>) {
+    pub(super) fn read_account_from(self: &Shared, server: Server, modified: Option<SystemTime>, again_refused: bool, read: impl FnOnce() -> anyhow::Result<Option<Account>>) {
+        self.read_account_with(server, modified, again_refused, read, |token| Api::new(server).check(token));
+    }
+
+    /// The one gate every change of the signed-in identity (the server and the credential) goes through, BEFORE the new
+    /// one is installed: the account file read (another tool signed in or out, the environment switched), a browser
+    /// sign-in, a sign-out. When `next` is not the identity installed now, the account installed now leaves first
+    /// (`calls_leave`: its call ends here, its media stops, nothing of it or of its shares stays shown), with its own
+    /// credential for what Orbiters hears. The same identity read again (a same-credential refresh) leaves nothing.
+    /// True when the account left.
+    pub(super) fn leave_unless_same(&self, next: Option<(Server, &str)>) -> bool {
+        let held = {
+            let rt = self.account_runtime.lock().unwrap();
+            rt.account.as_ref().map(|a| (rt.read.map_or_else(Server::current, |(s, _)| s), a.token.clone()))
+        };
+        let Some((server, token)) = held else { return false };
+        if next.is_some_and(|(s, t)| s == server && t == token) {
+            return false;
+        }
+        self.calls_leave(Some((Api::new(server).url(""), token)));
+        true
+    }
+
+    /// [`Controller::read_account_from`] with Orbiters' check of the credential done by `check` (tests: no server).
+    pub(super) fn read_account_with(
+        self: &Shared,
+        server: Server,
+        modified: Option<SystemTime>,
+        again_refused: bool,
+        read: impl FnOnce() -> anyhow::Result<Option<Account>>,
+        check: impl FnOnce(&str) -> anyhow::Result<Check>,
+    ) {
         // The generation before the file is read: a sign-out (or a sign-in) between the read and its use makes what was
         // read stale, and it is not installed (verify-controller, C-7).
         let before = self.account_runtime.lock().unwrap().generation;
-        let saved = read();
+        let saved = match read() {
+            Ok(saved) => saved,
+            // Could not be read now (another tool writing it): nothing changes, it is read again when the file does.
+            Err(e) => {
+                eprintln!("account file: {e:#}");
+                let mut rt = self.account_runtime.lock().unwrap();
+                if rt.generation == before {
+                    rt.read = Some((server, modified));
+                }
+                return;
+            }
+        };
+        // Another account, another environment, or nobody: the account installed now leaves before the new one is put in
+        // its place (and before "Checking" shows its name).
+        if self.account_runtime.lock().unwrap().generation == before {
+            self.leave_unless_same(saved.as_ref().map(|a| (server, a.token.as_str())));
+        }
         let previous_token;
         let (generation, refusals) = {
             let mut rt = self.account_runtime.lock().unwrap();
@@ -156,8 +203,6 @@ impl Controller {
         let development = server == Server::Development;
         let current = || self.account_generation.load(std::sync::atomic::Ordering::SeqCst) == generation;
         let Some(saved) = saved else {
-            // Signed out (here or by another tool): calls and shares let go of the account at once.
-            self.calls_leave(None);
             self.update_if(|s| {
                 if !current() {
                     return false;
@@ -187,7 +232,7 @@ impl Controller {
                 true
             });
         }
-        let answer = Api::new(server).check(&saved.token);
+        let answer = check(&saved.token);
         let mut rt = self.account_runtime.lock().unwrap();
         // Signed in or out meanwhile: that newer state wins.
         if rt.generation != generation || rt.account.as_ref().map(|a| &a.token) != Some(&saved.token) {
@@ -309,6 +354,12 @@ impl Controller {
     fn serve_sign_in(self: &Shared, api: &Api, server: Server, callback: Callback, link: account::Link, generation: u64, stop: &AtomicBool) {
         let served = callback.serve(stop, Instant::now() + LINK_LIFETIME, |code| {
             let exchange = api.exchange_link(&link.exchange_token, code);
+            // The account signed in before leaves first, before B is installed (unless this sign-in was cancelled).
+            if let Exchange::Done(account) = &exchange {
+                if self.account_runtime.lock().unwrap().generation == generation {
+                    self.leave_unless_same(Some((server, account.token.as_str())));
+                }
+            }
             let mut rt = self.account_runtime.lock().unwrap();
             if rt.generation != generation {
                 // Cancelled while Orbiters answered: nothing is kept.
@@ -404,9 +455,15 @@ impl Controller {
     /// Signs out of Orbiters in every tool (the saved account is removed, as in Unity).
     pub fn sign_out(&self) -> anyhow::Result<()> {
         let server = Server::current();
-        // Calls leave Orbiters with the account that leaves, before it is gone (PRIV-7).
-        self.calls_depart();
-        account::remove(server)?;
+        self.sign_out_with(server, || account::remove(server))
+    }
+
+    /// [`Controller::sign_out`] with the saved account removed by `remove` (tests: no file of the person's). Only once it
+    /// is removed does the account leave: a removal that failed signs nothing out, and a call goes on.
+    pub(super) fn sign_out_with(&self, server: Server, remove: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+        remove()?;
+        // The account leaves before it is gone from the runtime (its credential for what Orbiters hears, PRIV-7).
+        self.leave_unless_same(None);
         {
             let mut rt = self.account_runtime.lock().unwrap();
             rt.generation += 1;
@@ -558,7 +615,7 @@ mod tests {
                 rt.account = None;
             }
             ctl.update(|s| s.account.state = AccountState::SignedOut);
-            Some(old)
+            Ok(Some(old))
         });
         assert!(ctl.account_runtime.lock().unwrap().account.is_none(), "no credential of the account that left");
         assert_eq!(ctl.view().account.state, AccountState::SignedOut);

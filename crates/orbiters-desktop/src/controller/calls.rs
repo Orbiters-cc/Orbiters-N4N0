@@ -60,6 +60,8 @@ struct Worker {
     stdin: ChildStdin,
     /// Which worker this is: the end of an earlier one's output says nothing about the calls of this one.
     number: u64,
+    /// Ended by its own handle (`end_now`): its drop only waits for the process, never writes to it.
+    ended: bool,
 }
 
 impl Worker {
@@ -91,7 +93,7 @@ impl Worker {
         std::thread::Builder::new().name("call-stderr".into()).spawn(move || {
             crate::worker::pipe_lines(stderr, |line| eprintln!("call: {}", line.strip_prefix("call: ").unwrap_or(&line)));
         })?;
-        Ok(Self { child, stdin, number })
+        Ok(Self { child, stdin, number, ended: false })
     }
 
     fn send(&mut self, command: &CallCommand) -> std::io::Result<()> {
@@ -100,8 +102,22 @@ impl Worker {
     }
 }
 
+impl Worker {
+    /// Ends the worker at once, by its own process handle, without writing to it (a write to a worker that stopped
+    /// reading could block): its media stops now. The process is waited for on a thread of its own.
+    fn end_now(mut self) {
+        let _ = self.child.kill();
+        self.ended = true;
+        let _ = std::thread::Builder::new().name("call-worker-end".into()).spawn(move || drop(self));
+    }
+}
+
 impl Drop for Worker {
     fn drop(&mut self) {
+        if self.ended {
+            let _ = self.child.wait();
+            return;
+        }
         let _ = self.send(&CallCommand::Quit);
         for _ in 0..20 {
             if matches!(self.child.try_wait(), Ok(Some(_))) {
@@ -307,6 +323,12 @@ pub struct CallsRuntime {
     identity: Option<(String, String)>,
     /// Whether this Orbiters account has N4N0 calls (`controller/calls_access.rs`).
     pub(super) access: super::calls_access::CallsAccess,
+    /// The toasts calls posted (a friend's name calling, a call's failure), most recent last: taken back when the account
+    /// leaves.
+    notices_shown: Vec<String>,
+    /// Tests: the credential installed when the calls last left an account (`None` inside: nobody was).
+    #[cfg(test)]
+    pub(super) left_with: Option<Option<String>>,
 }
 
 impl CallsRuntime {
@@ -845,10 +867,6 @@ impl super::Controller {
     /// Signing out of Orbiters (PRIV-7): with the identity that leaves, while it is still there, the call under way is
     /// ended on Orbiters and this computer leaves the callable list; the next tick, signed out, ends the call here. Sent
     /// in the background (sign-out finishes offline too); nothing of the credential is kept for later.
-    pub(super) fn calls_depart(&self) {
-        self.calls_leave(self.account_api().map(|(api, token)| (api.url(""), token)));
-    }
-
     /// The account calls were for leaves (signed out here or by another tool, another account, another environment).
     /// On this thread, at once, never waiting for the calls' thread: the call under way ends here and its media worker
     /// stops; nothing of it (the friend's name, its id, Hang up) or of the account (`calls_forget_account`) stays for the
@@ -856,8 +874,15 @@ impl super::Controller {
     /// callable) with the credential of the account that leaves only: the identity the calls' state was for, or else
     /// `fallback` (signed out before the calls' first look).
     pub(super) fn calls_leave(&self, fallback: Option<Stamp>) {
-        let (stamp, closing, was_on, worker) = {
+        // Tests: whose credential was still installed when this ran (the leave goes before the next account's).
+        #[cfg(test)]
+        {
+            let installed = self.account_runtime.lock().unwrap().account.as_ref().map(|a| a.token.clone());
+            self.calls.lock().unwrap().left_with = Some(installed);
+        }
+        let (stamp, closing, was_on, worker, shown) = {
             let mut rt = self.calls.lock().unwrap();
+            let shown = std::mem::take(&mut rt.notices_shown);
             let stamp = rt.identity.take().or(fallback);
             let call = rt.call.take();
             let closing = call.as_ref().and_then(|c| c.id.clone().map(|id| (id, c.ringing_in())));
@@ -866,10 +891,14 @@ impl super::Controller {
             rt.presence_sent = None;
             // Its queued requests go with it (their stamp would not match the next account's anyway).
             rt.signals = None;
-            (stamp, closing, was_on, rt.worker.take())
+            (stamp, closing, was_on, rt.worker.take(), shown)
         };
-        // The worker's end waits a moment for its process: not under the lock.
-        drop(worker);
+        // A friend's name calling this account, on a toast: gone now, not at the end of its time.
+        self.retract_notices(shown);
+        // Ended by its own handle, never waiting on it here (this may be a service's command handler).
+        if let Some(worker) = worker {
+            worker.end_now();
+        }
         self.calls_forget_account();
         self.shared_depart();
         if let Some((base, token)) = stamp {
@@ -1318,6 +1347,12 @@ impl super::Controller {
             self.n4n0_say(&text);
         }
         for (kind, message) in notices {
+            {
+                let mut rt = self.calls.lock().unwrap();
+                rt.notices_shown.push(message.clone());
+                let excess = rt.notices_shown.len().saturating_sub(8);
+                rt.notices_shown.drain(..excess);
+            }
             self.notify(kind, message);
         }
         if publish {
@@ -1934,7 +1969,7 @@ mod tests {
             rt.link = CallLink::NotLinked { account: "usr_a".into(), source: "VRCX".into() };
         }
         ctl.calls_publish(|_| {});
-        ctl.calls_depart();
+        ctl.leave_unless_same(None);
         {
             let rt = ctl.calls.lock().unwrap();
             assert!(rt.identity.is_none());
@@ -1980,13 +2015,13 @@ mod tests {
                 use std::os::windows::process::CommandExt;
                 let mut child = Command::new("cmd").args(["/C", "more"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000).spawn().unwrap();
                 let stdin = child.stdin.take().unwrap();
-                rt.worker = Some(Worker { child, stdin, number: 1 });
+                rt.worker = Some(Worker { child, stdin, number: 1, ended: false });
             }
         }
         ctl.calls_publish(|_| {});
         assert_eq!(ctl.snapshot.lock().unwrap().n4n0.calls.call.as_ref().map(|c| c.name.as_str()), Some("Kite"));
         let started = Instant::now();
-        ctl.calls_depart();
+        ctl.leave_unless_same(None);
         assert!(started.elapsed() < Duration::from_secs(3), "at once, not after the calls' thread or a request");
         {
             let rt = ctl.calls.lock().unwrap();
@@ -2004,6 +2039,153 @@ mod tests {
         let rt = ctl.calls.lock().unwrap();
         assert!(rt.call.is_none() && rt.identity.as_ref().is_some_and(|i| i.1 == "orbit-b"));
         assert!(rt.signals.is_none(), "B's Hang up had nothing of A's call to send");
+    }
+
+    /// A's account signed in on production, in a connected call with Kite (set up here, not with a server: no id yet,
+    /// so leaving tells no server anything), its calls' state stamped as the account's own.
+    fn signed_in_as_a_in_a_call() -> crate::controller::Shared {
+        let server = orbiters_core::account::Server::Production;
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        {
+            let mut rt = ctl.account_runtime.lock().unwrap();
+            rt.read = Some((server, None));
+            rt.account = Some(orbiters_core::account::Account { token: "orbit-a".into(), user: Some("1".into()), username: Some("A".into()), avatar_url: None, features: None });
+        }
+        ctl.update(|s| s.account.state = crate::state::AccountState::SignedIn { username: "A".into() });
+        {
+            let mut rt = ctl.calls.lock().unwrap();
+            rt.identity = Some((Api::new(server).url(""), "orbit-a".into()));
+            let mut call = Call::new(1, "c_1".into(), "Kite".into(), false, Instant::now());
+            call.phase = CallPhase::Connected;
+            call.connected_at = Some(1);
+            rt.call = Some(call);
+            rt.numbered = 1;
+        }
+        ctl.calls_publish(|_| {});
+        ctl
+    }
+
+    fn in_a_call(ctl: &crate::controller::Shared) -> bool {
+        ctl.calls.lock().unwrap().call.is_some() && ctl.snapshot.lock().unwrap().n4n0.calls.call.is_some()
+    }
+
+    /// Verify5 blocker: every path that changes the signed-in identity leaves BEFORE the next identity is installed: when
+    /// the account left, the credential still installed was A's, A's call (and its media) and A's friend's share offer
+    /// were gone, and Orbiters' check of B had not been asked yet. Paths that change nothing leave nothing.
+    #[test]
+    fn every_identity_change_leaves_before_the_next_identity_is_installed() {
+        use orbiters_core::account::{Account, Server};
+        let b = || Account { token: "orbit-b".into(), user: Some("2".into()), username: Some("B".into()), avatar_url: None, features: None };
+        let a_again = || Account { token: "orbit-a".into(), user: Some("1".into()), username: Some("A".into()), avatar_url: None, features: None };
+        // What each path does to a controller signed in as A, in a call, with a friend's offer on screen.
+        type Path = fn(&crate::controller::Shared, &dyn Fn() -> Account, &dyn Fn() -> Account);
+        let paths: Vec<(&str, Path, bool)> = vec![
+            ("another tool signs in as B (same server)", |ctl, b, _| reread(ctl, Server::Production, Ok(Some(b()))), true),
+            ("environment switch to a server with B saved", |ctl, b, _| reread(ctl, Server::Development, Ok(Some(b()))), true),
+            ("environment switch to a server with nobody saved", |ctl, _, _| reread(ctl, Server::Development, Ok(None)), true),
+            ("another tool signs out (the file is gone)", |ctl, _, _| reread(ctl, Server::Production, Ok(None)), true),
+            ("browser sign-in as B (the gate serve_sign_in calls before installing)", |ctl, b, _| {
+                assert!(ctl.leave_unless_same(Some((Server::Production, b().token.as_str()))));
+                ctl.account_runtime.lock().unwrap().account = Some(b());
+            }, true),
+            ("sign-out here, the file removed", |ctl, _, _| ctl.sign_out_with(Server::Production, || Ok(())).unwrap(), true),
+            ("the same credential read again", |ctl, _, a| reread(ctl, Server::Production, Ok(Some(a()))), false),
+            ("the file cannot be read for a moment", |ctl, _, _| reread(ctl, Server::Production, Err(anyhow::anyhow!("being written"))), false),
+            ("sign-out whose removal failed", |ctl, _, _| assert!(ctl.sign_out_with(Server::Production, || Err(anyhow::anyhow!("denied"))).is_err()), false),
+        ];
+        fn reread(ctl: &crate::controller::Shared, server: Server, saved: anyhow::Result<Option<Account>>) {
+            let checked = ctl.clone();
+            ctl.read_account_with(server, None, false, move || saved, move |_| {
+                // When Orbiters is asked about B, A has already left: nothing of A's call is held or shown.
+                let rt = checked.calls.lock().unwrap();
+                if rt.left_with.is_some() {
+                    assert!(rt.call.is_none(), "A's call ended before B was checked");
+                }
+                drop(rt);
+                Err(anyhow::anyhow!("offline in tests"))
+            });
+        }
+        for (name, path, leaves) in paths {
+            let ctl = signed_in_as_a_in_a_call();
+            ctl.shared_offer_on_screen(&format!("{}\n{}", Api::new(Server::Production).url(""), "orbit-a"));
+            assert!(ctl.snapshot.lock().unwrap().shared_view.offer.is_some());
+            path(&ctl, &b, &a_again);
+            let left_with = ctl.calls.lock().unwrap().left_with.clone();
+            if leaves {
+                assert_eq!(left_with, Some(Some("orbit-a".to_string())), "{name}: left while A was still installed");
+                assert!(!in_a_call(&ctl), "{name}: A's call ended here");
+                assert!(ctl.snapshot.lock().unwrap().shared_view.offer.is_none(), "{name}: A's friend's offer went");
+            } else {
+                assert_eq!(left_with, None, "{name}: nothing left");
+                assert!(in_a_call(&ctl), "{name}: the call goes on");
+            }
+        }
+    }
+
+    /// Verify5 (2): a friend calling just before a sign-out: the toast naming them goes with the account, not at the end
+    /// of its 4.2 seconds.
+    #[test]
+    fn a_callers_name_on_a_toast_goes_when_the_account_leaves() {
+        let ctl = signed_in_controller(true);
+        ctl.account_runtime.lock().unwrap().read = Some((orbiters_core::account::Server::current(), None));
+        ctl.calls.lock().unwrap().identity = Some(("http://127.0.0.1:1/".into(), "orbit-test".into()));
+        ring(&ctl, "k_1");
+        let calling = |ctl: &crate::controller::Shared| {
+            ctl.notices.lock().unwrap().iter().any(|n| matches!(n, crate::controller::Notice::Toast { message, .. } if message.contains("Kite")))
+        };
+        assert!(calling(&ctl), "the toast names the friend calling");
+        assert!(ctl.leave_unless_same(None));
+        assert!(!calling(&ctl), "gone with the account");
+    }
+
+    /// Verify5 (4): a media worker that stopped reading its commands (its pipe full) never stalls a departure: the leave
+    /// returns at once and the worker is ended by its own handle.
+    #[cfg(windows)]
+    #[test]
+    fn a_stuck_worker_never_stalls_a_departure() {
+        use std::io::Write as _;
+        use std::os::windows::io::AsHandle;
+        use std::os::windows::process::CommandExt;
+        let ctl = signed_in_as_a_in_a_call();
+        // A process that never reads its standard input, and that input filled until a write would block.
+        let mut child = Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000).spawn().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut filler = std::fs::File::from(stdin.as_handle().try_clone_to_owned().unwrap());
+        let (full_tx, full_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let chunk = vec![b'x'; 4096];
+            loop {
+                let _ = full_tx.send(());
+                if filler.write_all(&chunk).is_err() {
+                    let _ = full_tx.send(());
+                    break;
+                }
+            }
+        });
+        // Until the filler blocks (no word from it for a moment).
+        while full_rx.recv_timeout(Duration::from_millis(300)).is_ok() {}
+        ctl.calls.lock().unwrap().worker = Some(Worker { child, stdin, number: 1, ended: false });
+        let (done_tx, done_rx) = mpsc::channel();
+        let leaving = ctl.clone();
+        std::thread::spawn(move || {
+            leaving.leave_unless_same(None);
+            let _ = done_tx.send(());
+        });
+        assert!(done_rx.recv_timeout(Duration::from_secs(3)).is_ok(), "the departure did not wait on the worker");
+        // Ended by its own handle: the filler's write fails once the process is gone.
+        assert!(full_rx.recv_timeout(Duration::from_secs(5)).is_ok(), "the worker's process ended");
+    }
+
+    /// Verify5 (4): only a confirmed change of identity leaves. An account file that cannot be read for a moment, or a
+    /// sign-out whose removal failed (the account stays signed in), leave a healthy call alone.
+    #[test]
+    fn a_transient_read_or_a_failed_sign_out_keeps_the_call() {
+        let ctl = signed_in_as_a_in_a_call();
+        ctl.read_account_from(orbiters_core::account::Server::Production, None, false, || Err(anyhow::anyhow!("being written")));
+        assert!(in_a_call(&ctl), "an unreadable file is not a sign-out");
+        assert_eq!(ctl.account_runtime.lock().unwrap().account.as_ref().map(|a| a.token.as_str()), Some("orbit-a"));
+        assert!(ctl.sign_out_with(orbiters_core::account::Server::Production, || Err(anyhow::anyhow!("access denied"))).is_err());
+        assert!(in_a_call(&ctl), "nothing was signed out");
     }
 
     /// Verify2 blocker 3: the cleanup of a refusal touches only the state of the credential refused, in the same change.

@@ -410,12 +410,17 @@ impl SharedRuntime {
 /// The shares' presence withdrawn with the credential of `stamp` (`SharedRuntime::identity`: the API's address, a line
 /// break, the credential), on a thread of its own: the identity that leaves is not the one the queue sends with.
 fn shared_withdraw_as(stamp: &str) {
-    let Some((base, token)) = stamp.split_once('\n').map(|(b, t)| (b.to_string(), t.to_string())) else { return };
+    let Some((base, token)) = credential_of(stamp) else { return };
     let _ = std::thread::Builder::new().name("shared-view-leave".into()).spawn(move || {
         let api = Api::at(&base);
         let agent = orbiters_core::http_agent(Some(Duration::from_secs(3)), Some(Duration::from_secs(5)));
         let _ = agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call();
     });
+}
+
+/// The API's address and the credential a stamp (`SharedRuntime::identity`) names.
+fn credential_of(stamp: &str) -> Option<(String, String)> {
+    stamp.split_once('\n').map(|(b, t)| (b.to_string(), t.to_string()))
 }
 
 /// The capture's start view from its item (`GET /captures/capture/:id`).
@@ -605,15 +610,22 @@ impl Controller {
             let before = std::mem::replace(&mut rt.identity, now);
             let owed = rt.withdraw().is_some();
             let forgot = rt.forget();
-            (before.filter(|_| owed), forgot)
-        };
-        if let Some(stamp) = &departed {
-            shared_withdraw_as(stamp);
-            #[cfg(test)]
-            {
-                self.shared_view.lock().unwrap().left = Some(stamp.clone());
+            let departed = before.filter(|_| owed);
+            // Behind whatever of that identity is already queued or on its way (a presence update): the requests' thread
+            // sends in order, so Orbiters hears the withdrawal last and the presence stays withdrawn. Without a queue,
+            // nothing of it can be on its way: sent at once.
+            if let Some(stamp) = &departed {
+                let queued = rt.requests.as_ref().is_some_and(|tx| tx.send((stamp.clone(), Request::Withdraw)).is_ok());
+                if !queued {
+                    shared_withdraw_as(stamp);
+                }
+                #[cfg(test)]
+                {
+                    rt.left = Some(stamp.clone());
+                }
             }
-        }
+            (departed, forgot)
+        };
         if forgot || departed.is_some() {
             self.shared_publish();
         }
@@ -679,7 +691,13 @@ impl Controller {
                 }
                 other => other,
             };
-            let Some((_, api, token)) = self.shared_identity_now().filter(|(now, ..)| *now == stamp) else { continue };
+            // A withdrawal goes with the credential of the identity it is for (one leaving, too); anything else only with
+            // the identity signed in now.
+            let credential = match &request {
+                Request::Withdraw => credential_of(&stamp).map(|(base, token)| (Api::at(&base), token)),
+                _ => self.shared_identity_now().filter(|(now, ..)| *now == stamp).map(|(_, api, token)| (api, token)),
+            };
+            let Some((api, token)) = credential else { continue };
             match request {
                 Request::Presence { vrchat_id, here } => {
                     match api
@@ -772,6 +790,21 @@ impl Controller {
     }
 }
 
+/// Tests elsewhere (the account's paths): the shares signed in as `identity`, a friend's offer on screen.
+#[cfg(test)]
+impl Controller {
+    pub(super) fn shared_offer_on_screen(&self, identity: &str) {
+        {
+            let mut rt = self.shared_view.lock().unwrap();
+            rt.identity = Some(identity.to_string());
+            let offer = json!({ "v": 1, "share": "s_BBBBBBBBBBBBBBBBBBBBBB", "from": { "id": "c_AAAAAAAAAAAAAAAAAAAAAA", "name": "Alice" },
+                "capture": { "type": "capture", "id": 412, "revision": 77, "title": "The Black Cat" }, "expires_in": 30 });
+            let _ = rt.event("share_offer", &offer, now_ms());
+        }
+        self.shared_publish();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,11 +835,37 @@ mod tests {
         assert!(ctl.snapshot.lock().unwrap().shared_view.offer.is_none(), "the offer went on the same turn");
         // Signed out: the same, at once, before the shares' next turn.
         offer_up(&ctl);
-        ctl.calls_depart();
+        {
+            let mut rt = ctl.account_runtime.lock().unwrap();
+            rt.read = Some((orbiters_core::account::Server::Production, None));
+            rt.account = Some(orbiters_core::account::Account { token: "orbit-a".into(), user: None, username: None, avatar_url: None, features: None });
+        }
+        assert!(ctl.leave_unless_same(None));
         assert!(ctl.snapshot.lock().unwrap().shared_view.offer.is_none());
         assert!(ctl.shared_view.lock().unwrap().identity.is_none() && !ctl.shared_view.lock().unwrap().present);
         // Nothing to withdraw twice.
         assert_eq!(ctl.shared_identity_to(None), None);
+    }
+
+    /// Verify5 (3): a presence update already queued (or on its way) for the identity that leaves, then the withdrawal:
+    /// both go through the one requests' thread, the withdrawal after it, so Orbiters' last word is the withdrawal. The
+    /// withdrawal carries the leaving identity's own credential, as the thread sends it.
+    #[test]
+    fn the_withdrawal_goes_after_a_presence_update_on_its_way() {
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        let a = "http://127.0.0.1:1/\norbit-a".to_string();
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut rt = ctl.shared_view.lock().unwrap();
+            rt.identity = Some(a.clone());
+            rt.present = true;
+            rt.requests = Some(tx);
+        }
+        ctl.shared_act(ctl.shared_view.lock().unwrap(), Acts { requests: vec![Request::Presence { vrchat_id: "usr_a".into(), here: vec![] }], ..Default::default() });
+        ctl.shared_identity_to(None);
+        let order: Vec<(String, Request)> = rx.try_iter().collect();
+        assert_eq!(order, vec![(a.clone(), Request::Presence { vrchat_id: "usr_a".into(), here: vec![] }), (a.clone(), Request::Withdraw)]);
+        assert_eq!(credential_of(&a), Some(("http://127.0.0.1:1/".to_string(), "orbit-a".to_string())));
     }
 
     /// Verify4 should-fix: N4N0 switched off while in an instance: the shares' own turn withdraws the presence as the

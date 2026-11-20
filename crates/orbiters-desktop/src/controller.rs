@@ -32,6 +32,8 @@ pub use orbiters_n4n0::NoticeKind;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Notice {
     Toast { kind: NoticeKind, message: String },
+    /// Toasts with these messages go at once (posted for an account that left: a friend's name calling it).
+    Retract { messages: Vec<String> },
     SessionSaved { reason: String, frames: u64, keyframes: u64, depth_frames: u64 },
 }
 
@@ -814,6 +816,19 @@ impl Controller {
             self.publish();
         }
         changed
+    }
+
+    /// Takes back toasts posted earlier with these messages: those still waiting for a window are dropped, the windows
+    /// showing them let them go now.
+    pub(crate) fn retract_notices(&self, messages: Vec<String>) {
+        if messages.is_empty() {
+            return;
+        }
+        self.notices.lock().unwrap().retain(|n| !matches!(n, Notice::Toast { message, .. } if messages.contains(message)));
+        self.broadcast(|| ToClient::Notice { notice: Notice::Retract { messages: messages.clone() } });
+        if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
+            orbiters_ui::anim::request_frame(ctx);
+        }
     }
 
     pub fn notify(&self, kind: NoticeKind, message: impl Into<String>) {

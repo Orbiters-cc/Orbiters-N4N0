@@ -1128,10 +1128,10 @@ fn accessories(facts: &Facts) -> Vec<(Action, &'static str, &'static str)> {
         small.push((Action::Page(Target::Call), icons::PHONE, tr_ctx("voice call", "Call")));
     }
     small.push((Action::Page(Target::WorldFeedback), icons::HEART, tr("World feedback")));
-    small.push((Action::Page(Target::Qr), icons::QR_CODE, tr("QR code")));
+    // No QR code here (REQUEST15 item 2): reading one needs VRChat's camera open already, so it is a tile beside the camera, and only there.
     small.push((Action::Page(Target::Suggest), icons::CHAT_TEARDROP_TEXT, tr("Suggest")));
-    // What the headset shows is read on this computer: SteamVR here, in VR.
-    if orbiters_core::osc::VRCHAT_RUNS_HERE && !facts.desktop {
+    // What the headset shows, or VRChat's window on the desktop (REQUEST15 item 2), is read on this computer.
+    if orbiters_core::osc::VRCHAT_RUNS_HERE {
         small.push((Action::Translate, icons::GLOBE, tr("Translation")));
     }
     if orbiters_core::osc::VRCHAT_RUNS_HERE {
@@ -2434,7 +2434,7 @@ pub fn hit(items: &[Item], p: Pos2) -> Option<usize> {
 
 /// What the caption says of what is pointed at, in words for someone who has never seen any of this: a title and what it does.
 pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
-    if let Some(said) = settings_caption(action).or_else(|| tracking_caption(action)).or_else(|| booster_caption(action)).or_else(|| translate_caption(action)) {
+    if let Some(said) = settings_caption(action).or_else(|| tracking_caption(action)).or_else(|| booster_caption(action)).or_else(|| translate_caption(action, facts.desktop)) {
         return Some(said);
     }
     let (a, b): (String, String) = match action {
@@ -5342,6 +5342,20 @@ mod tests {
         }
     }
 
+    /// REQUEST15 item 2: Translation is in All tools on the desktop too (VRChat's window is read there), and the QR code is not, on the desktop or in a
+    /// headset: reading one needs VRChat's camera open already, so it is the camera's own tile, which stays.
+    #[test]
+    fn all_tools_has_translation_on_the_desktop_and_no_qr_code() {
+        let actions = |f: &Facts| sheet_items(Sheet::All, f).iter().map(|i| i.action).collect::<Vec<_>>();
+        for desktop in [true, false] {
+            let got = actions(&Facts { desktop, sheet: Some(Sheet::All), ..facts() });
+            assert_eq!(got.contains(&Action::Translate), orbiters_core::osc::VRCHAT_RUNS_HERE, "desktop {desktop}");
+            assert!(!got.contains(&Action::Page(Target::Qr)), "desktop {desktop}");
+        }
+        let camera: Vec<Action> = items(Zone::CameraQr, Zone::CameraQr.units().size(), &facts()).into_iter().map(|i| i.action).collect();
+        assert!(camera.contains(&Action::CameraQr), "beside VRChat's camera it stays");
+    }
+
     /// `items` without the assistant's switch and the band round it, once it is checked that they lie on Ask N4N0's tile alone, the switch
     /// last and so the one a press there takes.
     fn apart_from_assistant_switch(items: Vec<Item>) -> Vec<Item> {
@@ -5601,7 +5615,8 @@ mod tests {
         let facts = Facts { desktop: true, ..facts() };
         assert!(area(&facts, "Worlds in 3D") > area(&facts, "YouTube"), "the first thing of all");
         for main in ["YouTube", "Instances", "Pictures"] {
-            for accessory in ["QR code", "Suggest", "World feedback", "Open Orbiters", "Ask N4N0"] {
+            // No QR code among them since REQUEST15 (a tile beside VRChat's camera alone).
+            for accessory in ["Settings", "Suggest", "World feedback", "Open Orbiters", "Ask N4N0"] {
                 assert!(area(&facts, main) > area(&facts, accessory) * 1.1, "{main} against {accessory}");
             }
         }

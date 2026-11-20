@@ -101,6 +101,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut noted = MismatchNoted::default();
     // The performance self-check (`perf`): this loop's cost, to the service every ten seconds.
     let mut meter = crate::perf::TurnMeter::new("orbit-desktop", Instant::now());
+    // Translation on the desktop (REQUEST15 item 2): its reading thread while it is on, and its translations over VRChat's window.
+    let mut translations = super::desk_translate::Host::default();
     loop {
         let turn = Instant::now();
         let dt = turn.duration_since(last_turn).as_secs_f32();
@@ -144,13 +146,18 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             // Laid again, in order, when the layer changes or another window came between VRChat's and ours.
             let layer = (!keyboard && !stack::topmost(game)).then_some(game);
             let changed = stack::set(layer);
-            if changed || layer.is_some_and(|g| !stack::holds(g, &shown_windows(&windows, &pointer, &corner, &pill))) {
+            if changed || layer.is_some_and(|g| !stack::holds(g, &shown_windows(&windows, &pointer, &corner, &pill, &translations))) {
+                // The translations lowest: they lie on VRChat's text, under anything of ours.
+                translations.raise();
                 windows.raise_all();
                 pill.raise();
                 pointer.raise();
                 corner.raise();
             }
         }
+        // Over a menu of VRChat's or of ours nothing is read and no translation shows (the menus cover the view): as last turn found them.
+        let covered = was_menu || !panels.is_empty();
+        translations.update(&snap, &backend, shown_on.map(|w| super::desk_translate::OnScreen { window: w, origin: client_origin(w), client: client_size(w) }), covered);
         let Some(window) = shown_on else {
             corner.show(false, pos2(0.0, 0.0), vec2(0.0, 0.0), turn);
             // The parts of menus that closed are kept for a while; with the game behind another window nothing else comes by to let them go.
@@ -514,8 +521,8 @@ fn front_is(game: HWND) -> bool {
 }
 
 /// Every window of ours that shows: what must lie right above VRChat's while another program has the keyboard.
-fn shown_windows(windows: &Windows, pointer: &pointer::Pointer, corner: &Corner, pill: &Pill) -> Vec<HWND> {
-    let mut all: Vec<HWND> = windows.list.values().filter(|w| w.shown).map(|w| w.hwnd).collect();
+fn shown_windows(windows: &Windows, pointer: &pointer::Pointer, corner: &Corner, pill: &Pill, translations: &super::desk_translate::Host) -> Vec<HWND> {
+    let mut all: Vec<HWND> = windows.list.values().filter(|w| w.shown).map(|w| w.hwnd).chain(translations.windows().map(|w| w.hwnd)).collect();
     all.extend([pointer.window(), corner.window.as_ref(), pill.window.as_ref()].into_iter().flatten().filter(|w| w.shown).map(|w| w.hwnd));
     all
 }
@@ -706,14 +713,14 @@ struct Looked {
 
 /// The Direct3D device captures use, kept for as long as the process lasts: it holds nothing and does nothing between captures.
 #[derive(Clone)]
-struct Gpu {
-    device: ID3D11Device,
-    context: ID3D11DeviceContext,
-    winrt: IDirect3DDevice,
+pub(super) struct Gpu {
+    pub(super) device: ID3D11Device,
+    pub(super) context: ID3D11DeviceContext,
+    pub(super) winrt: IDirect3DDevice,
 }
 
 impl Gpu {
-    fn new() -> Result<Self, String> {
+    pub(super) fn new() -> Result<Self, String> {
         let text = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
         let (mut device, mut context): (Option<ID3D11Device>, Option<ID3D11DeviceContext>) = (None, None);
         // SAFETY: the outputs are valid.
@@ -729,7 +736,7 @@ impl Gpu {
 
 /// The box (left, top, right, bottom) of a part at `[x0, y0, width, height]` of the client area, which lies at `offset` in the frame,
 /// when the whole of it is inside a frame of `frame` pixels; `None` otherwise (and on an overflow).
-fn source_box([x0, y0, width, height]: [u32; 4], offset: (u32, u32), frame: (u32, u32)) -> Option<[u32; 4]> {
+pub(super) fn source_box([x0, y0, width, height]: [u32; 4], offset: (u32, u32), frame: (u32, u32)) -> Option<[u32; 4]> {
     let left = x0.checked_add(offset.0)?;
     let top = y0.checked_add(offset.1)?;
     let right = left.checked_add(width)?;
@@ -1069,7 +1076,7 @@ impl CameraLog {
 }
 
 /// Where the client area's corner is in the frames of Windows Graphics Capture (the window's visual bounds).
-fn client_in_frame(window: HWND) -> (u32, u32) {
+pub(super) fn client_in_frame(window: HWND) -> (u32, u32) {
     let (mut corner, mut bounds) = (POINT::default(), RECT::default());
     // SAFETY: the outputs and their sizes are passed; a window gone only fails.
     let known = unsafe {
@@ -1263,11 +1270,16 @@ impl PanelWindow {
     }
 
     /// Above every other window of ours, in the layer this thread's windows lie in now ([`stack`]).
-    fn raise(&self) {
+    pub(crate) fn raise(&self) {
         stack::lay(self.hwnd);
     }
 
-    fn hide(&mut self) {
+    /// Its size in pixels.
+    pub(crate) fn size(&self) -> [u32; 2] {
+        [self.size.cx.max(0) as u32, self.size.cy.max(0) as u32]
+    }
+
+    pub(crate) fn hide(&mut self) {
         if self.shown {
             // SAFETY: a live window.
             unsafe {

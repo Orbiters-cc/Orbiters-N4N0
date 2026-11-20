@@ -158,6 +158,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         // Over a menu of VRChat's or of ours nothing is read and no translation shows (the menus cover the view): as last turn found them.
         let covered = was_menu || !panels.is_empty();
         translations.update(&snap, &backend, shown_on.map(|w| super::desk_translate::OnScreen { window: w, origin: client_origin(w), client: client_size(w) }), covered);
+        // The pointer over ours: VRChat's own shape in the accent chosen (REQUEST15 item 5).
+        cursor::follow(super::panels::look::accent());
         let Some(window) = shown_on else {
             corner.show(false, pos2(0.0, 0.0), vec2(0.0, 0.0), turn);
             // The parts of menus that closed are kept for a while; with the game behind another window nothing else comes by to let them go.
@@ -1109,6 +1111,12 @@ static WHEEL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        // Over ours, the pointer VRChat shows on the desktop, in the accent chosen (REQUEST15 item 5); Windows' arrow until it is made.
+        windows::Win32::UI::WindowsAndMessaging::WM_SETCURSOR if (lparam.0 & 0xffff) as u32 == windows::Win32::UI::WindowsAndMessaging::HTCLIENT && cursor::current().is_some() => {
+            // SAFETY: a cursor made by `cursor::follow`, never destroyed while the process lives.
+            unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursor(cursor::current()) };
+            LRESULT(1)
+        }
         windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL => {
             WHEEL.fetch_add(((wparam.0 >> 16) & 0xffff) as u16 as i16 as i32, std::sync::atomic::Ordering::Relaxed);
             LRESULT(0)
@@ -1409,6 +1417,94 @@ fn placed_at(panel: &Panel, origin: Pos2) -> (Zone, POINT, u8) {
     let way = panel.zone.ring().map_or((rect.center() - center).normalized(), |ring| zones::polar(1.0, ring.middle()));
     let at = origin + rect.min.to_vec2() + way * panel.outward() * unit;
     (panel.zone, POINT { x: at.x.round() as i32, y: at.y.round() as i32 }, (panel.appear.alpha() * 255.0) as u8)
+}
+
+// --------------------------------------------------------------------------------------------- the pointer over ours
+
+/// The pointer over ours on the desktop (REQUEST15 item 5): VRChat draws its own pointer on the desktop, a small slanted arrowhead with a notch at its back, and
+/// hides Windows'; over a window of ours Windows' white arrow showed instead, from another program. This is that shape (drawn here, not VRChat's picture), of
+/// the same size, in the accent the person chose, with a thin dark edge so that it reads on anything.
+pub(crate) mod cursor {
+    use super::*;
+    use egui::Color32;
+    use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, GetSystemMetrics, HCURSOR, ICONINFO, SM_CXCURSOR};
+
+    /// The cursor made for the accent now, and that accent (0xRRGGBB; all ones: none yet).
+    static NOW: AtomicIsize = AtomicIsize::new(0);
+    static COLOUR: AtomicU32 = AtomicU32::new(u32::MAX);
+
+    /// The arrow in a box of 24 units: its tip at the top left (the hotspot), its two wings, the notch between them at its back. Two triangles, as it is not
+    /// convex.
+    pub(crate) const TIP: Pos2 = pos2(2.0, 2.0);
+    const WING_RIGHT: Pos2 = pos2(19.5, 9.0);
+    const NOTCH: Pos2 = pos2(10.6, 10.6);
+    const WING_DOWN: Pos2 = pos2(9.0, 19.5);
+
+    /// The arrow in a square of `px` pixels at `scale` (1.0: the 24 units' box), RGBA premultiplied.
+    pub(crate) fn picture(px: u32, scale: f32, colour: Color32) -> Vec<u8> {
+        let mut canvas = crate::overlay::Canvas::new(px, px);
+        canvas.paint(0.0, |p| {
+            let at = |q: Pos2| pos2(q.x * scale, q.y * scale);
+            let outline = vec![at(TIP), at(WING_RIGHT), at(NOTCH), at(WING_DOWN)];
+            // The dark edge first, half of it outside the arrow, then the arrow over it.
+            p.add(egui::Shape::closed_line(outline, egui::Stroke::new(2.4 * scale, Color32::from_black_alpha(200))));
+            for tri in [[TIP, WING_RIGHT, NOTCH], [TIP, NOTCH, WING_DOWN]] {
+                p.add(egui::Shape::convex_polygon(tri.iter().map(|q| at(*q)).collect(), colour, egui::Stroke::NONE));
+            }
+        });
+        canvas.pixels().to_vec()
+    }
+
+    /// The cursor for the accent now, when one was made.
+    pub(crate) fn current() -> Option<HCURSOR> {
+        let h = NOW.load(Ordering::Relaxed);
+        (h != 0).then_some(HCURSOR(h as *mut _))
+    }
+
+    /// A turn: a cursor of the accent `colour` once, and again only when it changes (Settings, the look). The ones before are kept: a cursor may be shown
+    /// while it is replaced, and there are as many as colours chosen in a session.
+    pub(crate) fn follow(colour: Color32) {
+        let key = u32::from_be_bytes([0, colour.r(), colour.g(), colour.b()]);
+        if COLOUR.load(Ordering::Relaxed) == key {
+            return;
+        }
+        COLOUR.store(key, Ordering::Relaxed);
+        // SAFETY: a plain query.
+        let side = (unsafe { GetSystemMetrics(SM_CXCURSOR) }).clamp(32, 128) as u32;
+        if let Some(made) = make(side, colour) {
+            NOW.store(made.0 as isize, Ordering::Relaxed);
+        }
+    }
+
+    /// A cursor of `side` pixels: the arrow about as large as VRChat's on a screen (21 pixels from its tip at Windows' usual 32), its hotspot on the tip.
+    pub(crate) fn make(side: u32, colour: Color32) -> Option<HCURSOR> {
+        let scale = side as f32 / 28.0;
+        let premultiplied = picture(side, scale, colour);
+        // A cursor's colours are straight, not premultiplied, in BGRA rows from the top.
+        let mut bgra = Vec::with_capacity(premultiplied.len());
+        for p in premultiplied.chunks_exact(4) {
+            let a = p[3];
+            let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 };
+            bgra.extend_from_slice(&[un(p[2]), un(p[1]), un(p[0]), a]);
+        }
+        // SAFETY: plain GDI calls; the bitmaps made here are deleted before returning (the cursor keeps its own copies).
+        unsafe {
+            let header = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: side as i32, biHeight: -(side as i32), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() };
+            let info = BITMAPINFO { bmiHeader: header, ..Default::default() };
+            let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+            let colour_bitmap = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+            std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, bgra.len());
+            let mask_bits = vec![0u8; (side as usize).div_ceil(16) * 2 * side as usize];
+            let mask = windows::Win32::Graphics::Gdi::CreateBitmap(side as i32, side as i32, 1, 1, Some(mask_bits.as_ptr() as *const _));
+            let hot = (TIP.x * scale).round() as u32;
+            let icon = ICONINFO { fIcon: false.into(), xHotspot: hot, yHotspot: hot, hbmMask: mask, hbmColor: colour_bitmap };
+            let made = CreateIconIndirect(&icon).ok();
+            let _ = DeleteObject(colour_bitmap.into());
+            let _ = DeleteObject(mask.into());
+            made.map(|i| HCURSOR(i.0))
+        }
+    }
 }
 
 // --------------------------------------------------------------------------------------------- where ours lie among other programs' windows
@@ -2218,14 +2314,9 @@ pub mod pointer {
         }
     }
 
-    /// The pointer's picture: the accent's arrow on a dark edge, so that it reads on anything. RGBA premultiplied.
+    /// The pointer's picture: the same arrow as Windows' pointer over ours ([`super::cursor`]), VRChat's shape in the accent chosen. RGBA premultiplied.
     fn picture() -> Vec<u8> {
-        let mut canvas = crate::overlay::Canvas::new(PX, PX);
-        canvas.paint(0.0, |p| {
-            let body = [pos2(2.0, 1.0), pos2(2.0, 18.0), pos2(7.0, 13.5), pos2(13.5, 13.5)];
-            p.add(egui::Shape::convex_polygon(body.to_vec(), orbiters_ui::theme::ACCENT, egui::Stroke::new(1.4, orbiters_ui::theme::INK_950)));
-        });
-        canvas.pixels().to_vec()
+        super::cursor::picture(PX, 1.0, super::super::panels::look::accent())
     }
 }
 
@@ -3354,6 +3445,31 @@ mod tests {
         // SAFETY: as above.
         let _ = unsafe { ShowWindow(game.0, SW_HIDE) };
         assert!(!on_screen(game.0), "hidden");
+    }
+
+    /// REQUEST15 item 5: the pointer over ours is VRChat's desktop arrow (its tip the hotspot, a notch at its back) in the accent chosen, a cursor of Windows'
+    /// at its usual sizes, made again only when the accent changes.
+    #[test]
+    fn the_pointer_over_ours_is_vrchat_s_arrow_in_the_accent() {
+        let accent = egui::Color32::from_rgb(220, 60, 140);
+        let px = cursor::picture(24, 1.0, accent);
+        let at = |x: usize, y: usize| -> [u8; 4] { let i = (y * 24 + x) * 4; [px[i], px[i + 1], px[i + 2], px[i + 3]] };
+        let near = |a: [u8; 4], b: [u8; 4]| a.iter().zip(b).all(|(x, y)| (*x as i32 - y as i32).abs() <= 3);
+        assert!(near(at(9, 6), [220, 60, 140, 255]), "the accent inside it: {:?}", at(9, 6));
+        assert!(near(at(8, 12), [220, 60, 140, 255]), "both wings: {:?}", at(8, 12));
+        for (x, y) in [(17, 17), (23, 0), (0, 23), (14, 14)] {
+            assert_eq!(at(x, y)[3], 0, "clear behind its notch and round it at {x},{y}");
+        }
+        for side in [32, 48, 64] {
+            assert!(cursor::make(side, accent).is_some(), "a cursor of {side} pixels");
+        }
+        cursor::follow(accent);
+        let first = cursor::current();
+        assert!(first.is_some());
+        cursor::follow(accent);
+        assert_eq!(cursor::current(), first, "the same accent: the same cursor");
+        cursor::follow(egui::Color32::from_rgb(10, 200, 120));
+        assert_ne!(cursor::current(), first, "another accent: another cursor");
     }
 
     /// Where real windows lie, by Windows' own order (top first), among `among`.

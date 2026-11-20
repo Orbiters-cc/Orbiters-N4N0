@@ -1712,6 +1712,8 @@ pub(super) fn r15_shots(out: &Path) -> anyhow::Result<()> {
     over_the_game("r15-world-side-loading", out, client, &ground, &worlds, crate::overlay::worlds::panel::side_loading)?;
     let frame = stand_in(4);
     over_the_game("r15-world-side-live", out, client, &ground, &worlds, |px| crate::overlay::worlds::panel::side_live(px, Some((&frame, false))))?;
+    #[cfg(windows)]
+    r15_more(out, client, &ground, &idle)?;
     Ok(())
 }
 
@@ -1727,7 +1729,141 @@ fn r15_ground(client: Vec2) -> image::RgbaImage {
             p.rect_filled(egui::Rect::from_min_size(pos2(0.0, t * client.y), vec2(client.x, client.y / rows as f32 + 1.0)), 0.0, c);
         }
     });
-    stand_in_menu(Around::QuickMenu, client, &mut canvas);
-    let pixels: Vec<u8> = canvas.pixels().chunks_exact(4).flat_map(|c| [c[0], c[1], c[2], 255]).collect();
+    let sky = canvas.pixels().to_vec();
+    let mut menu = Canvas::new(w, h);
+    stand_in_menu(Around::QuickMenu, client, &mut menu);
+    let mut pixels = sky;
+    blit(&mut pixels, w, menu.pixels(), [w, h], pos2(0.0, 0.0));
+    let pixels: Vec<u8> = pixels.chunks_exact(4).flat_map(|c| [c[0], c[1], c[2], 255]).collect();
     image::RgbaImage::from_raw(w, h, pixels).expect("its size")
+}
+
+/// `--only orbit-r15`, the rest: All tools on the desktop (Translation in it, no QR code), Translation's sheet on the desktop, the pointer over ours, and
+/// translations laid over a stand-in of VRChat's window by the desktop's own placing (REQUEST15 items 2 and 5). The translator is a stand-in (no network);
+/// the lines' boxes are where their letters were drawn (no text reader).
+#[cfg(windows)]
+fn r15_more(out: &Path, client: Vec2, ground: &image::RgbaImage, idle: &Facts) -> anyhow::Result<()> {
+    use crate::state::{TranslateState, TranslateStatus};
+    use panels::{Sheet, TranslateFacts};
+    let all = Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), beside_wing: true, ..idle.clone() };
+    over_the_game("r15-all-tools", out, client, ground, &all, |px| Ok(sheet_picture(Sheet::All, &all, px)))?;
+    let status = TranslateStatus { state: TranslateState::Looking, shown: 3, lines: 4, ..Default::default() };
+    let translate = Facts {
+        sheet: Some(Sheet::Translate),
+        sheet_title: "Translation".into(),
+        beside_wing: true,
+        translate: TranslateFacts { enabled: true, provider: orbiters_core::settings::TranslateProvider::Orbiters, target: "en".into(), keep_english: true, agreed: false, status },
+        ..idle.clone()
+    };
+    over_the_game("r15-translate-sheet", out, client, ground, &translate, |px| Ok(sheet_picture(Sheet::Translate, &translate, px)))?;
+    r15_cursor(out, client)?;
+    r15_translations(out)?;
+    Ok(())
+}
+
+/// The Quick Menu's tiles over the stand-in window, the pointer on All tools as Windows shows it at 1 to 1, and four times larger in the corner.
+#[cfg(windows)]
+fn r15_cursor(out: &Path, client: Vec2) -> anyhow::Result<()> {
+    let (w, h) = (client.x as u32, client.y as u32);
+    let ground = r15_ground(client);
+    let mut image = ground.as_raw().clone();
+    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, ..Default::default() };
+    let mut on = None;
+    for placed in zones::layout(Around::QuickMenu, client) {
+        let (pixels, px) = picture(&placed, &idle, None, None);
+        blit(&mut image, w, &pixels, px, placed.rect.min);
+        if matches!(placed.zone, Zone::WingAll) {
+            on = Some(placed.rect.center());
+        }
+    }
+    let accent = panels::look::accent();
+    let side = 32;
+    let arrow = crate::overlay::orbit::desktop::cursor::picture(side, side as f32 / 28.0, accent);
+    let at = on.unwrap_or(pos2(client.x / 2.0, client.y / 2.0));
+    blit(&mut image, w, &arrow, [side, side], at);
+    let big = 4;
+    let large: Vec<u8> = (0..side * big).flat_map(|y| (0..side * big).flat_map(move |x| { let i = (((y / big) * side + x / big) * 4) as usize; [i, i + 1, i + 2, i + 3] })).map(|i| arrow[i]).collect();
+    blit(&mut image, w, &large, [side * big, side * big], pos2(40.0, 40.0));
+    let path = out.join("r15-cursor.png");
+    save_png(&path, &over_ground(&image, w, h))?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+/// A stand-in translator: the signs' words in English, known in advance.
+#[cfg(windows)]
+struct Signs;
+#[cfg(windows)]
+impl orbiters_translate::provider::Translator for Signs {
+    fn translate(&mut self, batch: &orbiters_translate::provider::Batch) -> Result<Vec<String>, orbiters_translate::provider::Failure> {
+        let english = |t: &str| match t {
+            "出口はこちらです" => "Exit this way",
+            "欢迎来到我们的世界" => "Welcome to our world",
+            "Добро пожаловать" => "Welcome",
+            _ => "?",
+        };
+        Ok(batch.lines.iter().map(|l| english(&l.text).to_string()).collect())
+    }
+}
+
+/// Signs in three languages on a stand-in of VRChat's window, and the same with the translations the desktop lays over them, side by side.
+#[cfg(windows)]
+fn r15_translations(out: &Path) -> anyhow::Result<()> {
+    use crate::overlay::orbit::desk_translate::{scaled_premultiplied, screen_rect, view};
+    use orbiters_translate::core::{Core, Reader};
+    use orbiters_translate::ocr::{Line, TextBox};
+    use orbiters_translate::picture::{draw_text, Text};
+    let size = [1280u32, 720];
+    let signs = [("出口はこちらです", [140.0, 150.0], 46.0), ("欢迎来到我们的世界", [520.0, 330.0], 40.0), ("Добро пожаловать", [260.0, 520.0], 38.0)];
+    let texts: Vec<Text> = signs.iter().map(|(t, at, s)| Text { text: t.to_string(), at: *at, size: *s, colour: [238, 232, 214] }).collect();
+    let frame = draw_text(size[0], size[1], [46, 38, 64], &texts);
+    // Each line's box: the bright letters drawn there.
+    let lines: Vec<Line> = signs
+        .iter()
+        .map(|(t, at, s)| {
+            let (x0, y0) = (at[0] as u32, at[1] as u32);
+            let (mut min, mut max) = (pos2(f32::MAX, f32::MAX), pos2(f32::MIN, f32::MIN));
+            for y in y0..(y0 + (*s as u32) * 2).min(size[1]) {
+                for x in x0..size[0] {
+                    let i = ((y * size[0] + x) * 4) as usize;
+                    if frame.rgba[i] as u32 + frame.rgba[i + 1] as u32 + frame.rgba[i + 2] as u32 > 450 {
+                        min = min.min(pos2(x as f32, y as f32));
+                        max = max.max(pos2(x as f32 + 1.0, y as f32 + 1.0));
+                    }
+                }
+            }
+            let boxed = TextBox { corners: [[min.x, min.y], [max.x, min.y], [max.x, max.y], [min.x, max.y]], score: 0.9, vertical: false };
+            Line { boxed, text: t.to_string(), confidence: 0.95, reader: orbiters_translate::ocr::Reader::Main, glyphs: Vec::new() }
+        })
+        .collect();
+    let v = view(size);
+    let rgba = orbiters_translate::ocr::Rgba { width: size[0], height: size[1], pixels: &frame.rgba };
+    let pair = orbiters_translate::place::Pair { pictures: [rgba, rgba], from: [[0, 0]; 2], views: [v, v] };
+    let look = orbiters_translate::pipeline::Look { pair, area: [0, 0, size[0], size[1]], shown: &[], zoom: None };
+    let mut core = Core::new(None, Box::new(Signs), Reader { target: "en".into(), reads: vec!["en".into()] });
+    let mut quads = Vec::new();
+    for k in 0..400 {
+        let scene = core.follow(k as f64 * 0.05, &look, lines.clone(), Default::default(), ([0.0; 3], [0.0, 0.0, -1.0]));
+        if scene.quads.len() == lines.len() {
+            quads = scene.quads;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    anyhow::ensure!(quads.len() == lines.len(), "the stand-in translations never came");
+    let (w, h) = (size[0] * 2 + 20, size[1]);
+    let mut image = vec![0u8; (w * h * 4) as usize];
+    let opaque: Vec<u8> = frame.rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2], 255]).collect();
+    blit(&mut image, w, &opaque, size, pos2(0.0, 0.0));
+    blit(&mut image, w, &opaque, size, pos2(size[0] as f32 + 20.0, 0.0));
+    for q in &quads {
+        let Some(r) = screen_rect(q, size) else { continue };
+        let px = [r.width().round().max(1.0) as u32, r.height().round().max(1.0) as u32];
+        let pixels = scaled_premultiplied(&q.picture.rgba, q.picture.width, q.picture.height, px);
+        blit(&mut image, w, &pixels, px, pos2(size[0] as f32 + 20.0 + r.min.x.round(), r.min.y.round()));
+    }
+    let path = out.join("r15-desk-translate.png");
+    save_png(&path, &over_ground(&image, w, h))?;
+    println!("{}", path.display());
+    Ok(())
 }

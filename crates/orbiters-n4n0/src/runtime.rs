@@ -1333,6 +1333,11 @@ impl N4n0 {
         let settings = self.settings();
         let steamvr = self.host.scene().steamvr;
         let mut rt = self.n4n0.lock().unwrap();
+        self.set_bot_in(&mut rt, on, steamvr, &settings)
+    }
+
+    /// [`N4n0::set_bot`] under N4N0's lock.
+    fn set_bot_in(&self, rt: &mut N4n0Runtime, on: bool, steamvr: bool, settings: &orbiters_core::settings::Settings) -> bool {
         rt.bot_heard = rt.bot_heard.wrapping_add(1);
         if rt.bot == Some(on) {
             return false;
@@ -1344,7 +1349,7 @@ impl N4n0 {
         if shown && on_screen != rt.screen.available {
             // The same avatar's menu changes host: it opens on the other (the screen's closed as it went; the overlay's closes itself
             // once the screen has it). No listen starts: the owner had the menu already.
-            let _ = self.open_menu(&mut rt, false, &settings);
+            let _ = self.open_menu(rt, false, settings);
         }
         rt.wake();
         true
@@ -2264,15 +2269,15 @@ impl N4n0 {
                 rt.screen.pictures_diagnostics = on;
                 rt.wake();
             }
-            Command::ShowBot { on } => {
-                // Only for an avatar whose Show N4N0 is known now: not one loading, nor one without it.
-                let known = {
-                    let rt = self.n4n0.lock().unwrap();
-                    rt.bot.is_some() && rt.avatar_id.is_some() && (rt.params.is_empty() || rt.params.contains(params::VISIBLE))
-                };
-                if known {
-                    self.set_bot(on);
-                    let mut rt = self.n4n0.lock().unwrap();
+            Command::ShowBot { on, avatar } => {
+                let settings = self.settings();
+                let steamvr = self.host.scene().steamvr;
+                // Checked, changed and written in one turn of N4N0's lock: only for the avatar it was asked for, worn now, whose Show N4N0
+                // is known (not one loading, nor one without it); an avatar change can come in no gap between them (verify2-r15 S5).
+                let mut rt = self.n4n0.lock().unwrap();
+                let worn = rt.avatar_id.is_some() && (avatar.is_none() || rt.avatar_id == avatar);
+                if worn && rt.bot.is_some() && (rt.params.is_empty() || rt.params.contains(params::VISIBLE)) {
+                    self.set_bot_in(&mut rt, on, steamvr, &settings);
                     rt.outbox.push((Instant::now(), (parameter(params::VISIBLE), OscType::Bool(on))));
                     rt.wake();
                     drop(rt);

@@ -671,7 +671,7 @@ fn testing_holds_a_state_then_plays_them_all() {
         sent.iter().filter(|(a, _)| *a == parameter(params::STATE)).filter_map(|(_, v)| if let OscType::Int(i) = v { Some(*i) } else { None }).collect();
     assert_eq!(states, vec![0, 1], "idle, then listening two seconds later");
     // No avatar whose Show N4N0 is known: nothing is written (REQUEST15 fix B3).
-    n.command(Command::ShowBot { on: false });
+    n.command(Command::ShowBot { on: false, avatar: None });
     let sent = received(&vrchat, Duration::from_millis(300));
     assert!(!sent.iter().any(|(a, _)| *a == parameter(params::VISIBLE)), "no avatar known: {sent:?}");
     {
@@ -680,7 +680,12 @@ fn testing_holds_a_state_then_plays_them_all() {
         rt.params.insert(params::VISIBLE.to_string());
         rt.bot = Some(true);
     }
-    n.command(Command::ShowBot { on: false });
+    // Asked for another avatar than the one worn now (it changed since the page showed it): nothing (verify2-r15 S5).
+    n.command(Command::ShowBot { on: false, avatar: Some("avtr_before".into()) });
+    let sent = received(&vrchat, Duration::from_millis(300));
+    assert!(!sent.iter().any(|(a, _)| *a == parameter(params::VISIBLE)), "another avatar's: {sent:?}");
+    assert_eq!(n.n4n0.lock().unwrap().bot, Some(true), "left as it is");
+    n.command(Command::ShowBot { on: false, avatar: Some("avtr_x".into()) });
     let sent = received(&vrchat, Duration::from_millis(300));
     assert!(sent.contains(&(parameter(params::VISIBLE), OscType::Bool(false))));
     assert_eq!(t.view().bot, Some(false), "the page shows the bot hidden at once");

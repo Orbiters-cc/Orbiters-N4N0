@@ -168,7 +168,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(ui, tr("Show N4N0"), Some(bot_line), 48.0, |ui| {
                     ui.add_enabled_ui(n4n0.prop_sync.is_some(), |ui| {
                         if widgets::toggle(ui, "n4n0-bot", &mut bot) {
-                            cx.ctl.n4n0(N4n0Command::ShowBot { on: bot });
+                            cx.ctl.n4n0(N4n0Command::ShowBot { on: bot, avatar: n4n0.avatar_id.clone() });
                         }
                     });
                 });

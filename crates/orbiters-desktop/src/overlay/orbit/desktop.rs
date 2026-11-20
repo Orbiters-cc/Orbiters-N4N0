@@ -270,7 +270,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 ("window client size".to_owned(), format!("{} x {}", size.x, size.y)), // i18n: not shown (a menu mismatch report's line)
                 ("Left Alt held".to_owned(), alt_held().to_string()), // i18n: not shown (a menu mismatch report's line)
             ];
-            let picture = if crate::mismatch::switches(&snap.settings).picture { screen_picture(origin, size) } else { None };
+            // The screen's pixels over VRChat's window: only when nothing of another program lies on it (the corner can be pressed with another one in front),
+            // else no picture at all (verify-r15 B6).
+            let picture = if crate::mismatch::switches(&snap.settings).picture && !stack::covered(window, egui::Rect::from_min_size(origin, size)) { screen_picture(origin, size) } else { None };
             crate::mismatch::press(kind, crate::mismatch::Context { surface: "desktop".into(), state, ..Default::default() }, &snap.settings, snap.vrchat.world.log_file.clone(), picture);
         }
         let places = match (open, panel) {
@@ -1600,6 +1602,33 @@ pub(crate) mod stack {
                 }
             }
         }
+    }
+
+    /// Whether a window of another program lies on any part of `client` (screen pixels) of `game`: one that shows, above it in Windows' order, not ours. A
+    /// picture of the screen there would hold that program's pixels.
+    pub(crate) fn covered(game: HWND, client: egui::Rect) -> bool {
+        use windows::Win32::Graphics::Dwm::DWMWA_CLOAKED;
+        // SAFETY: plain queries walking Windows' order.
+        let mut at = unsafe { GetWindow(game, GW_HWNDPREV) }.ok();
+        for _ in 0..4096 {
+            let Some(h) = at.filter(|h| !h.is_invalid()) else { return false };
+            let mut cloaked = 0u32;
+            let mut r = RECT::default();
+            // SAFETY: plain queries; the outputs and their sizes are passed.
+            let (visible, known) = unsafe {
+                let _ = DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, std::mem::size_of::<u32>() as u32);
+                (IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool(), DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut RECT as *mut _, std::mem::size_of::<RECT>() as u32).is_ok() || windows::Win32::UI::WindowsAndMessaging::GetWindowRect(h, &mut r).is_ok())
+            };
+            if visible && cloaked == 0 && known && !ours(h) {
+                let its = egui::Rect::from_min_max(pos2(r.left as f32, r.top as f32), pos2(r.right as f32, r.bottom as f32));
+                if its.intersects(client) && its.intersect(client).area() > 0.0 {
+                    return true;
+                }
+            }
+            // SAFETY: as above.
+            at = unsafe { GetWindow(h, GW_HWNDPREV) }.ok();
+        }
+        true
     }
 
     /// Whether every window of `shown` lies right above `game`, under anything else that shows: what ours keep while another program has the keyboard. Another
@@ -3529,6 +3558,27 @@ mod tests {
         assert_eq!(unsafe { GetForegroundWindow() }, front, "the focus stayed where it was");
         assert!(!stack::set(Some(game.0)), "no change: nothing laid again");
         stack::set(None);
+    }
+
+    /// verify-r15 B6: the menu mismatch report's picture of the screen is taken only when no window of another program lies on VRChat's window; ours may.
+    #[test]
+    fn a_report_s_picture_is_never_taken_through_another_program() {
+        let _alone = windows_alone();
+        let client = vec2(320.0, 180.0);
+        let at = off_screen(client);
+        let game = StandIn::new(at, client);
+        let rect = egui::Rect::from_min_size(pos2(at.x as f32, at.y as f32), client);
+        assert!(!stack::covered(game.0, rect), "nothing on it");
+        let mut ours = clear_window();
+        ours.place(at, 255);
+        assert!(!stack::covered(game.0, rect), "ours on it: the report shows them");
+        // Another program's window on a part of it.
+        let cover = StandIn::new(POINT { x: at.x + 200, y: at.y + 100 }, vec2(300.0, 200.0));
+        assert!(stack::covered(game.0, rect), "a browser over part of VRChat");
+        // Beside it, touching nothing.
+        // SAFETY: the test's own window.
+        let _ = unsafe { SetWindowPos(cover.0, None, at.x + 400, at.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER) };
+        assert!(!stack::covered(game.0, rect), "beside it: nothing of it in the picture");
     }
 
     /// With nothing ordinary over VRChat's window (the person clicked the desktop's background, or a window on another screen that lies lower), ours lie on top

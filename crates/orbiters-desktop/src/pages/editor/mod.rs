@@ -489,7 +489,7 @@ impl Editor {
             }
         }
         if let Some(made) = self.preview.as_ref().and_then(Preview::take) {
-            let img = egui::ColorImage::from_rgba_unmultiplied([made.image.width as usize, made.image.height as usize], &made.image.pixels);
+            let img = made.image;
             match self.texture.as_mut() {
                 Some(t) => t.set(img, egui::TextureOptions::LINEAR),
                 None => self.texture = Some(ctx.load_texture(format!("photo-editor-{:?}", self.id), img, egui::TextureOptions::LINEAR)),

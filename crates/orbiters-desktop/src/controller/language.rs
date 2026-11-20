@@ -54,7 +54,8 @@ impl Controller {
     }
 
     fn language_turn(self: &Shared, token: &mut Option<String>, tried: &mut Option<Instant>, told: &mut bool) {
-        let settings = self.settings();
+        // The two fields asked, not a copy of every setting once a second (LIGHT-DESKTOP-15).
+        let (language, unsent) = self.with_settings(|s| (s.language.clone(), s.language_unsent));
         let account = self.language_account();
         let signed_in = account.as_ref().map(Option::is_some);
         let now_token = account.as_ref().and_then(|a| a.as_ref().map(|(_, t)| t.clone()));
@@ -62,7 +63,7 @@ impl Controller {
         if account.is_some() {
             *token = now_token;
         }
-        let what = due(signed_in, settings.language.as_deref(), settings.language_unsent, new_account, tried.map(|t| t.elapsed()));
+        let what = due(signed_in, language.as_deref(), unsent, new_account, tried.map(|t| t.elapsed()));
         let Some(Some((api, credential))) = account else {
             if what == Due::Forget {
                 self.update_settings(|s| {
@@ -96,7 +97,7 @@ impl Controller {
                 match api.language(&credential) {
                     Ok(answer) => {
                         let answer = answer.map(|l| l.tag().to_string());
-                        if answer != settings.language {
+                        if answer != language {
                             self.update_settings(|s| {
                                 if !s.language_unsent {
                                     s.language = answer;

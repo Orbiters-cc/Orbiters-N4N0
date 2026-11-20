@@ -580,9 +580,9 @@ unsafe fn run_sta(
                 if !drawn.replace(true) {
                     s.note(format!("first picture {width} x {height} after {} ms", since(&started))); // i18n: not shown (a log's line)
                 }
-                if s.frame.as_ref().is_none_or(|f| f.rgba.as_ref() != rgba.as_slice()) {
+                if s.frame.as_ref().is_none_or(|f| f.rgba.as_slice() != rgba.as_slice()) {
                     seq += 1;
-                    s.frame = Some(Frame { width, height, rgba: rgba.into(), sequence: seq });
+                    s.frame = Some(Frame { width, height, rgba: Arc::new(rgba), sequence: seq });
                 }
             }
         }

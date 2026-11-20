@@ -26,7 +26,9 @@ pub struct State {
 pub struct Frame {
     pub width: u32,
     pub height: u32,
-    pub rgba: Arc<[u8]>,
+    /// The decoded picture itself, shared (CORE-11): an `Arc<[u8]>` made from it copied every changed picture (3 MB at the
+    /// camera page's 820 x 940, up to 40 a second).
+    pub rgba: Arc<Vec<u8>>,
     pub sequence: u64,
 }
 #[derive(Clone, Debug)]

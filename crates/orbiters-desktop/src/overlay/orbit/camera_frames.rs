@@ -159,10 +159,12 @@ const LOOK_WHOLE_EVERY: Duration = Duration::from_millis(250);
 /// How many errors in a row before the eye is given up, until the camera opens again.
 const EYE_TRIES: u32 = 8;
 
-/// One look on a picture read: `area` is where it is in the whole.
-fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f32; 2], whole: [usize; 2], last: Option<Found>, seen: &Mutex<Looks>, health: &Mutex<Health>, source: Source, at: Instant, right: Option<RightSeen>) -> Option<Found> {
+/// One look on a picture read: `area` is where it is in the whole. `logged` is the reader's own (LIGHT-VR-18): a new one each look
+/// logged every fit's landmarks, ten a second, where twice a second was meant.
+#[allow(clippy::too_many_arguments)]
+fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f32; 2], whole: [usize; 2], last: Option<Found>, seen: &Mutex<Looks>, health: &Mutex<Health>, source: Source, at: Instant, right: Option<RightSeen>, logged: &mut Option<Instant>) -> Option<Found> {
     let found = found_in(pixels, width, height, stride, offset, whole, last);
-    told(found, whole, seen, health, source, at, right, &mut None);
+    told(found, whole, seen, health, source, at, right, logged);
     found
 }
 
@@ -410,6 +412,7 @@ fn run_on_window(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>,
     let told = |what: &dyn Fn(&mut Health)| what(&mut health.lock().unwrap_or_else(|e| e.into_inner()));
     told(&|h| h.source = Some(Source::Window));
     let mut said = false;
+    let mut logged = None;
     while !stop.load(Ordering::Relaxed) {
         // VRChat may not be there, or its window may go: looked for again.
         match imp::Frames::open() {
@@ -426,7 +429,7 @@ fn run_on_window(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>,
                             if keep_frames {
                                 keep(game, client[0] as usize, client[1] as usize, stride, Source::Window, kept);
                             }
-                            last = looked(game, client[0] as usize, client[1] as usize, stride, [0.0, 0.0], [client[0] as usize, client[1] as usize], last, seen, health, Source::Window, began, None);
+                            last = looked(game, client[0] as usize, client[1] as usize, stride, [0.0, 0.0], [client[0] as usize, client[1] as usize], last, seen, health, Source::Window, began, None, &mut logged);
                         }
                     }
                     std::thread::sleep(LOOK_EVERY.saturating_sub(began.elapsed()));
@@ -445,6 +448,29 @@ fn run_on_window(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>,
 
 #[cfg(test)]
 mod tests {
+    /// LIGHT-VR-18: the window's looks, 100 ms apart, log their landmarks at most twice a second, as the eye's do; every fit is
+    /// still counted and handed on.
+    #[test]
+    fn the_window_s_looks_log_their_landmarks_at_most_twice_a_second() {
+        use super::*;
+        let image = image::open(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/camera-headset-1.png")).expect("the picture").to_rgba8();
+        let (w, h) = (image.width() as usize, image.height() as usize);
+        let (seen, health) = (Mutex::new(Looks::default()), Mutex::new(Health::default()));
+        let mut logged = None;
+        // Around where the last look found it, as the window's reader goes on.
+        let last = camera_track::find(&image, w, h, w * 4);
+        assert!(last.is_some(), "the panel is in the picture");
+        let first = looked(&image, w, h, w * 4, [0.0, 0.0], [w, h], last, &seen, &health, Source::Window, Instant::now(), None, &mut logged);
+        assert!(first.is_some(), "the panel is found");
+        assert!(logged.is_some(), "its landmarks logged, and the reader knows when");
+        // Logged a moment ago (here: a time no look reaches, a fit in a debug build can take half a second): not logged again.
+        let moment = Instant::now() + Duration::from_secs(3600);
+        logged = Some(moment);
+        assert!(looked(&image, w, h, w * 4, [0.0, 0.0], [w, h], first, &seen, &health, Source::Window, Instant::now(), None, &mut logged).is_some());
+        assert_eq!(logged, Some(moment), "the next look, within half a second, is not logged");
+        assert_eq!(health.lock().unwrap().finds, 2, "and both fits are counted");
+    }
+
     #[test]
     fn slow_refinement_cannot_erase_or_starve_pickup_pixels() {
         use super::*;

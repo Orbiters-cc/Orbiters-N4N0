@@ -452,7 +452,9 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
     let mut complete = true;
     let assets = project.join("Assets");
     let mut scenes = vec![];
-    let mut prefabs = HashMap::new();
+    // Prefabs' .meta files, read only when a scene that is read again places a prefab (PROJECTS-8): every scan read all of them,
+    // thousands in an avatar project, though the scenes' cache answered for every scene.
+    let mut prefab_metas = vec![];
     // Pictures' .meta files, read only when a scene names a My World thumbnail.
     let mut pictures = vec![];
     for entry in walkdir::WalkDir::new(&assets).follow_links(false).into_iter().filter_entry(|e| {
@@ -478,15 +480,10 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
             pictures.push(p.to_path_buf());
         }
         if p.to_string_lossy().ends_with(".prefab.meta") {
-            if let Ok(s) = std::fs::read_to_string(p) {
-                if let Some(g) = s.lines().find_map(|l| l.strip_prefix("guid: ")) {
-                    prefabs.insert(g.to_string(), p.with_extension(""));
-                }
-            } else {
-                complete = false;
-            }
+            prefab_metas.push(p.to_path_buf());
         }
     }
+    let mut prefabs: Option<HashMap<String, PathBuf>> = None;
     let mut out = vec![];
     let mut prefab_models: HashMap<PathBuf, Option<Model>> = HashMap::new();
     let mut picture_guids: Option<HashMap<String, PathBuf>> = None;
@@ -531,7 +528,21 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
             dependencies.push((t.clone(), crate::discovery::fingerprint(t)));
         }
         for d in model.docs.iter().filter(|d| d.kind == 1001) {
-            let Some(source) = value(d, "m_SourcePrefab").and_then(|s| guid(&s)).and_then(|g| prefabs.get(&g)) else { continue };
+            let Some(g) = value(d, "m_SourcePrefab").and_then(|s| guid(&s)) else { continue };
+            let prefabs = prefabs.get_or_insert_with(|| {
+                let mut found = HashMap::new();
+                for meta in &prefab_metas {
+                    if let Ok(s) = std::fs::read_to_string(meta) {
+                        if let Some(g) = s.lines().find_map(|l| l.strip_prefix("guid: ")) {
+                            found.insert(g.to_string(), meta.with_extension(""));
+                        }
+                    } else {
+                        complete = false;
+                    }
+                }
+                found
+            });
+            let Some(source) = prefabs.get(&g) else { continue };
             dependencies.push((source.clone(), crate::discovery::fingerprint(source)));
             let prefab = prefab_models.entry(source.clone()).or_insert_with(|| match read_file_looking(source, true) {
                 Ok(ReadFile::Yaml(model, blueprint)) => blueprint.then_some(model),
@@ -858,6 +869,25 @@ mod read_completeness_tests {
     /// list, which discovery put in place of the project's own. Wherever the bytes are: in what is read, in a document
     /// that is not, past what is looked at of a mesh's line, and at the file's end inside a character (a scene caught
     /// half written).
+    /// PROJECTS-8: prefabs' .meta files are read only for a scene that places a prefab and is read again: one that cannot be read
+    /// leaves a scan of scenes without prefabs complete, and the scene's cache answering, nothing of them is read.
+    #[test]
+    fn prefabs_are_looked_up_only_for_a_scene_that_places_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Assets")).unwrap();
+        std::fs::write(dir.path().join("Assets").join("Avatar.unity"), scene_with("Fox", AVATAR)).unwrap();
+        // Not text: it cannot be read as a .meta file.
+        std::fs::write(dir.path().join("Assets").join("Broken.prefab.meta"), b"guid: \xff\xfe\n").unwrap();
+        let mut cache = SceneCache::default();
+        let (known, complete) = in_project_checked(dir.path(), &mut cache);
+        assert!(complete, "no scene places a prefab: the prefab's .meta is not read");
+        assert_eq!(known.len(), 1);
+        // A scene that places a prefab: the .meta files are read, and the one that cannot be leaves the scan incomplete.
+        std::fs::write(dir.path().join("Assets").join("Placed.unity"), "%YAML 1.1\n--- !u!1001 &100\nPrefabInstance:\n  m_SourcePrefab: {fileID: 100100000, guid: 0123456789abcdef0123456789abcdef, type: 3}\n").unwrap();
+        let (_, complete) = in_project_checked(dir.path(), &mut cache);
+        assert!(!complete);
+    }
+
     #[test]
     fn a_damaged_scene_leaves_the_scan_incomplete() {
         let dir = tempfile::tempdir().unwrap();

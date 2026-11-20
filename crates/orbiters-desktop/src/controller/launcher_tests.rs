@@ -971,3 +971,81 @@ fn the_profile_choice_lists_used_running_and_starting_profiles_with_their_accoun
     );
     assert_eq!(game_profiles(&BTreeMap::new(), &[], &[], None).iter().map(|p| p.profile).collect::<Vec<_>>(), [0], "profile 0 always");
 }
+
+// --- REQUEST15 7b: the account's own profile, against recorded replies only (nothing reaches VRChat) ---
+
+fn me_signed_in(c: &Shared) {
+    signed_in_list(c);
+    c.update(|s| s.launcher.me = Some(orbiters_core::launcher::Friend { id: "usr_test".into(), name: "Sample Me".into(), ..Default::default() }));
+}
+
+fn saving(c: &Shared) -> Option<orbiters_core::launcher::Saving> {
+    c.view().launcher.mine.as_ref().and_then(|m| m.saving.clone())
+}
+
+#[test]
+fn an_own_profile_change_goes_on_the_press_only_with_the_lists_account_within_vrchats_limits() {
+    use orbiters_core::launcher::{ProfileEdit, ProfilePart, Saving, Status};
+    let c = controller(Arc::new(Pretend::default()));
+    let (_, calls) = c.test_vrchat(vec![
+        (200, json!({"id": "usr_test", "status": "busy", "statusDescription": "in Unity"})),
+        (400, json!({"error": {"message": "Bio contains a disallowed word", "status_code": 400}})),
+        (200, json!({"id": "usr_test", "bio": "new bio"})),
+    ]);
+    me_signed_in(&c);
+    // A press on the list of the account: sent, and what VRChat answered shows.
+    assert_eq!(c.launcher_do(mine(Action::EditProfile(ProfileEdit::Status(Status::Busy)))), None);
+    assert_eq!(c.view().launcher.me.as_ref().unwrap().status, Status::Busy);
+    assert_eq!(c.view().launcher.me.as_ref().unwrap().status_text, "in Unity");
+    assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Status)));
+    // At once again: our own pace, nothing sent.
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::StatusText("afk".into()))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::StatusText, t)) if t.contains('s')), "{:?}", saving(&c));
+    c.launcher.lock().unwrap().mine_next = None;
+    // Past VRChat's limits: said, nothing sent.
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::StatusText("x".repeat(33)))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::StatusText, _))));
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Bio("x".repeat(513)))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Bio, _))));
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Status(Status::Offline))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Status, _))));
+    // Refused by VRChat: its words, and the bio is not changed.
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Bio("new bio".into()))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Bio, t)) if t.contains("disallowed")), "{:?}", saving(&c));
+    assert_ne!(c.view().launcher.mine.as_ref().unwrap().bio, "new bio");
+    c.launcher.lock().unwrap().mine_next = None;
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Bio("new bio".into()))));
+    assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Bio)));
+    assert_eq!(c.view().launcher.mine.as_ref().unwrap().bio, "new bio");
+    // Without the list's account, or on another account's list: nothing goes.
+    c.launcher.lock().unwrap().mine_next = None;
+    c.launcher_do(Action::EditProfile(ProfileEdit::Status(Status::JoinMe)));
+    c.launcher_do(Action::As { account: "usr_other".into(), action: Box::new(Action::EditProfile(ProfileEdit::Status(Status::JoinMe))) });
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Status, _))));
+    let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
+    assert_eq!(calls, ["PUT /users/usr_test", "PUT /profile/usr_test", "PUT /profile/usr_test"]);
+}
+
+#[test]
+fn the_own_profile_and_pictures_are_read_for_the_card() {
+    use orbiters_core::launcher::{BannerChoice, PictureKind, ProfileEdit, ProfilePart, Saving};
+    let c = controller(Arc::new(Pretend::default()));
+    let (_, calls) = c.test_vrchat(vec![
+        (200, json!({"id": "usr_test", "bio": "hello", "bannerType": "customImage", "bannerCustomUrl": "https://api.vrchat.cloud/api/1/file/file_b/1/file", "userIcon": "", "hasVrcPlus": true, "currentAvatarThumbnailImageUrl": "https://api.vrchat.cloud/avatar"})),
+        (200, json!([{"id": "file_1", "versions": [{"version": 0}, {"version": 1, "file": {"url": "https://api.vrchat.cloud/api/1/file/file_1/1/file"}}]}, {"id": "file_2", "versions": []}])),
+        (200, json!({"id": "usr_test", "userIcon": "https://api.vrchat.cloud/api/1/file/file_1/1/file"})),
+    ]);
+    me_signed_in(&c);
+    c.launcher_do(mine(Action::ReadMine));
+    let m = c.view().launcher.mine.clone().unwrap();
+    assert_eq!((m.bio.as_str(), m.banner, m.supporter, m.avatar_picture.as_str()), ("hello", BannerChoice::Custom, true, "https://api.vrchat.cloud/avatar"));
+    c.launcher_do(mine(Action::ListPictures(PictureKind::Icons)));
+    let icons = c.view().launcher.mine.clone().unwrap().icons.unwrap();
+    assert_eq!(icons.len(), 1, "a file with no version is no picture");
+    assert_eq!(icons[0].url, "https://api.vrchat.cloud/api/1/file/file_1/1/file");
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Picture(icons[0].url.clone()))));
+    assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Picture)));
+    assert_eq!(c.view().launcher.me.as_ref().unwrap().look.icon, icons[0].url);
+    let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
+    assert_eq!(calls, ["GET /profile/usr_test?asSelf=true", "GET /files?tag=icon&n=100", "PUT /profile/usr_test"]);
+}

@@ -355,6 +355,8 @@ pub(super) struct Runtime {
     pending: Option<(Place, Instant, Option<String>)>,
     /// The profile a start from Home's profile choice asked for, its mode and when: "starting" until seen running.
     starting: Option<(u32, LaunchMode, Instant)>,
+    /// The account's own profile changes no sooner than this ([`mine::CHANGE_EVERY`] apart).
+    mine_next: Option<Instant>,
 }
 
 /// An invite accepted here, until VRChat is told to hide it (the account got there) or its card comes back.
@@ -402,6 +404,7 @@ impl Default for Runtime {
             machine: real_machine(),
             pending: None,
             starting: None,
+            mine_next: None,
         }
     }
 }
@@ -621,7 +624,7 @@ impl Controller {
             self.update_if(|s| {
                 let other = matches!(&s.launcher.source, Source::SignedIn { user_id, .. } if Some(user_id) != account.as_ref());
                 if other {
-                    let blank = LauncherState { game: s.launcher.game.clone(), possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, loading: true, ..LauncherState::default() };
+                    let blank = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, loading: true, ..LauncherState::default() };
                     *s.launcher = blank;
                     return true;
                 }
@@ -1100,7 +1103,17 @@ impl Controller {
             Action::Play { mode, destination } => Some(self.launcher_play(mode, destination, account)),
             Action::PlayOn { mode, profile } => Some(self.launcher_play_on(mode, profile)),
             // The account's own profile: REQUEST15 7b.
-            Action::EditProfile(_) | Action::ListPictures(_) => None,
+            Action::EditProfile(edit) => self.launcher_edit_mine(edit, account),
+            Action::ListPictures(kind) => {
+                self.launcher_list_pictures(kind, account);
+                None
+            }
+            Action::ReadMine => {
+                if let (Ok(client), Some(account)) = (self.launcher_sender(account), account) {
+                    self.launcher_read_mine(&client, account);
+                }
+                None
+            }
             Action::AcceptInvite { invite, mode } => {
                 // An invite is the account's whose list showed it: never accepted for another, nor with no sign-in.
                 let owner = match (self.launcher_sender(account), account) {
@@ -1682,6 +1695,9 @@ fn apply_pictures(pictures: &HashMap<String, Option<String>>, d: &Decorations, l
     look.icon_frame = get(&d.icon_frame);
     look.nameplate = get(&d.nameplate);
 }
+
+#[path = "launcher_mine.rs"]
+mod mine;
 
 #[cfg(test)]
 #[path = "launcher_tests.rs"]

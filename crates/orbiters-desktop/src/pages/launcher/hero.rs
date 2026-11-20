@@ -48,7 +48,7 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         (_, PlayState::Ready | PlayState::Starting(_)) => {
             if !VR_HERE {
                 // A Mac: one button, the desktop game.
-                if play_button(ui, rect, LaunchMode::Desktop, play, true) {
+                if play_button(ui, rect, LaunchMode::Desktop, play, true, None) {
                     state.act(cx, anim::time(ui.ctx()), Action::Play { mode: LaunchMode::Desktop, destination: None });
                 }
                 return;
@@ -57,10 +57,10 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             let w = (rect.width() - gap) * 0.5;
             let vr = Rect::from_min_size(rect.min, vec2(w, rect.height()));
             let desk = Rect::from_min_size(pos2(vr.right() + gap, rect.top()), vec2(w, rect.height()));
-            if play_button(ui, vr, LaunchMode::Vr, play, true) {
+            if play_button(ui, vr, LaunchMode::Vr, play, true, None) {
                 state.act(cx, anim::time(ui.ctx()), Action::Play { mode: LaunchMode::Vr, destination: None });
             }
-            if play_button(ui, desk, LaunchMode::Desktop, play, true) {
+            if play_button(ui, desk, LaunchMode::Desktop, play, true, None) {
                 state.act(cx, anim::time(ui.ctx()), Action::Play { mode: LaunchMode::Desktop, destination: None });
             }
         }
@@ -172,8 +172,13 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         let w = (row.width() - gap) * 0.5;
         let vr = Rect::from_min_size(row.min, vec2(w, row.height()));
         let desk = Rect::from_min_size(pos2(vr.right() + gap, row.top()), vec2(w, row.height()));
+        // With several profiles, the buttons say whose VRChat they start.
+        let whose = (offered.len() > 1).then(|| match offered.iter().find(|p| p.profile == next).and_then(|p| p.account.clone()).filter(|a| !a.is_empty()) {
+            Some(account) => orbiters_i18n::tr!("As {account}", account = account),
+            None => orbiters_i18n::tr!("On profile {n}", n = next),
+        });
         for (r, mode) in [(vr, LaunchMode::Vr), (desk, LaunchMode::Desktop)] {
-            if play_button(ui, r, mode, play, true) {
+            if play_button(ui, r, mode, play, true, whose.as_deref()) {
                 state.act(cx, clock, Action::PlayOn { mode, profile: next });
             }
         }
@@ -217,13 +222,13 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             PlayState::Starting(mode) => PlayState::Starting(mode),
             _ => PlayState::Ready,
         };
-        super::super::block(ui, cx, index, INVITE_H, |ui, rect| invite_card(ui, cx, state, rect, &invite, card_play));
+        super::super::block(ui, cx, index + 1, INVITE_H, |ui, rect| invite_card(ui, cx, state, rect, &invite, card_play));
     }
 }
 
 /// A big Play button: VR in Orbiters green, desktop in grey, an icon, a name and what it uses. While it starts, a
 /// turning ring and "Starting…"; the other one waits. Returns whether it was pressed.
-fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: bool) -> bool {
+fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: bool, whose: Option<&str>) -> bool {
     let ctx = ui.ctx().clone();
     let (label, sub, glyph) = match mode {
         LaunchMode::Vr => (tr("Play in VR"), tr("With your headset, through SteamVR"), icons::VIRTUAL_REALITY),
@@ -287,6 +292,10 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
             ),
             false if play == PlayState::OtherStarting => (label, tr("Wait for the VRChat starting now")),
             false => (label, sub),
+        };
+        let sub: &str = match (whose, starting, running) {
+            (Some(w), false, false) if play != PlayState::OtherStarting => w,
+            _ => sub,
         };
         let room = r.right() - x - 14.0;
         // What it uses, when it fits whole; the name alone otherwise.
@@ -397,16 +406,16 @@ fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Inv
             let gap = 10.0;
             let bw = ((right - x - gap) * 0.5).min(220.0);
             if !VR_HERE {
-                if play_button(ui, Rect::from_min_size(pos2(x, by), vec2(bw, bh)), LaunchMode::Desktop, play, false) {
+                if play_button(ui, Rect::from_min_size(pos2(x, by), vec2(bw, bh)), LaunchMode::Desktop, play, false, None) {
                     state.act(cx, clock, Action::AcceptInvite { invite: invite.id.clone(), mode: LaunchMode::Desktop });
                 }
             } else {
             let vr = Rect::from_min_size(pos2(x, by), vec2(bw, bh));
             let desk = Rect::from_min_size(pos2(vr.right() + gap, by), vec2(bw, bh));
-            if play_button(ui, vr, LaunchMode::Vr, play, false) {
+            if play_button(ui, vr, LaunchMode::Vr, play, false, None) {
                 state.act(cx, clock, Action::AcceptInvite { invite: invite.id.clone(), mode: LaunchMode::Vr });
             }
-            if play_button(ui, desk, LaunchMode::Desktop, play, false) {
+            if play_button(ui, desk, LaunchMode::Desktop, play, false, None) {
                 state.act(cx, clock, Action::AcceptInvite { invite: invite.id.clone(), mode: LaunchMode::Desktop });
             }
             }

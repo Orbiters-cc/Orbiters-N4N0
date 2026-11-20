@@ -4,12 +4,37 @@
 use super::{Page, Scenario};
 use crate::app::App;
 use egui::{pos2, vec2, Color32, ColorImage, Rect, TextureOptions};
+use crate::pages::launcher::mine::Editing;
 use orbiters_core::launcher::*;
 
 const NOW: i64 = 1_795_000_000;
 
-pub(super) const NAMES: [&str; 11] =
-    ["launcher-list", "launcher-invite", "launcher-hover", "launcher-modal", "launcher-database", "launcher-starting", "launcher-no-engine", "launcher-not-installed", "launcher-small", "launcher-small-drawer", "launcher-small-modal"];
+pub(super) const NAMES: [&str; 23] = [
+    "launcher-list",
+    "launcher-invite",
+    "launcher-hover",
+    "launcher-modal",
+    "launcher-database",
+    "launcher-starting",
+    "launcher-no-engine",
+    "launcher-not-installed",
+    "launcher-small",
+    "launcher-small-drawer",
+    "launcher-small-modal",
+    // REQUEST15 7: the Play buttons with VRChat's profiles, the account's own profile changed where it shows.
+    "launcher-running-one",
+    "launcher-profiles",
+    "launcher-profile-starting",
+    "launcher-mine-status-text",
+    "launcher-mine-bio",
+    "launcher-mine-saved",
+    "launcher-mine-failed",
+    "launcher-mine-banner",
+    "launcher-mine-icons",
+    "launcher-mine-gallery",
+    "launcher-small-profiles",
+    "launcher-small-mine",
+];
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
     let base = scenarios[0].snapshot.clone();
@@ -167,6 +192,43 @@ fn data(name: &str) -> LauncherState {
     if name == "launcher-not-installed" {
         s.game = Game::NotInstalled;
     }
+    // VRChat's profiles (REQUEST15 7a): one running, or a second account beside it.
+    let profile = |profile: u32, account: &str, running: Option<LaunchMode>, starting: Option<LaunchMode>| GameProfile { profile, account: Some(account.into()), running, starting, assistant: false };
+    match name {
+        "launcher-running-one" => {
+            s.game = Game::Running(LaunchMode::Vr);
+            s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None)];
+        }
+        "launcher-profiles" | "launcher-small-profiles" => {
+            s.game = Game::Running(LaunchMode::Vr);
+            s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None), profile(1, "Sample Alt", None, None), profile(2, "Sample Builder", None, None)];
+        }
+        "launcher-profile-starting" => {
+            s.game = Game::Running(LaunchMode::Vr);
+            s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None), profile(1, "Sample Alt", None, Some(LaunchMode::Desktop))];
+        }
+        _ => {}
+    }
+    // The account's own profile (REQUEST15 7b): pictures to choose among, what VRChat answered.
+    if let Some(mine) = s.mine.as_mut() {
+        mine.avatar_picture = "sample://icon/60".into();
+        mine.icons = Some((70..76).map(|n| OwnPicture { id: format!("file_{n}"), url: format!("sample://icon/{n}") }).collect());
+        mine.gallery = Some((0..5).map(|n| OwnPicture { id: format!("file_g{n}"), url: format!("sample://world/{n}") }).collect());
+        match name {
+            "launcher-mine-saved" => {
+                mine.saving = Some(Saving::Saved(ProfilePart::Bio));
+                mine.answered = 1;
+            }
+            "launcher-mine-failed" => {
+                mine.saving = Some(Saving::Failed(ProfilePart::StatusText, orbiters_i18n::tr!("VRChat is rate limiting requests. Try again in {seconds} seconds.", seconds = 30)));
+                mine.answered = 1;
+            }
+            _ => {}
+        }
+    }
+    if name.starts_with("launcher-mine") || name == "launcher-small-mine" {
+        s.invites.clear();
+    }
     if name == "launcher-database" {
         // A VRCX copy: who and what was last known, nothing live.
         s.source = Source::Database { app: DatabaseApp::Vrcx, read_at: NOW - 420 };
@@ -297,6 +359,10 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
                 urls.push(p.world_picture.clone());
             }
         }
+        if let Some(mine) = &data.mine {
+            urls.push(mine.avatar_picture.clone());
+            urls.extend(mine.icons.iter().flatten().chain(mine.gallery.iter().flatten()).map(|p| p.url.clone()));
+        }
         urls.push("sample://world/2".into());
         urls.sort();
         urls.dedup();
@@ -328,6 +394,13 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
             state.open_profile(ctx, nova, Rect::from_min_size(pos2(954.0, 348.0), vec2(306.0, 54.0)));
         }
         "launcher-small-drawer" if f == 30 => state.open_drawer(ctx),
+        "launcher-profiles" | "launcher-small-profiles" if f == 1 => state.stand_in_profile(1),
+        "launcher-mine-status-text" if f == 1 => state.mine.stand_in_editing(Editing::StatusText("building a new world tonight".into())),
+        "launcher-mine-bio" | "launcher-small-mine" if f == 1 => state.mine.stand_in_editing(Editing::Bio("Made-up account for drawing the page.\nBuilds quiet worlds, mostly at night. Say hi!".into())),
+        "launcher-mine-failed" if f == 1 => state.mine.stand_in_last(ProfileEdit::StatusText("afk".into())),
+        "launcher-mine-banner" if f == 30 => state.mine.stand_in_picker(true, false, Rect::NOTHING, t),
+        "launcher-mine-gallery" if f == 30 => state.mine.stand_in_picker(true, true, Rect::NOTHING, t),
+        "launcher-mine-icons" if f == 30 => state.mine.stand_in_picker(false, false, Rect::NOTHING, t),
         _ => {}
     }
 }

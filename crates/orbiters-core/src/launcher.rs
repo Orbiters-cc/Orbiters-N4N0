@@ -386,6 +386,8 @@ pub struct MyProfile {
     pub saving: Option<Saving>,
     /// Another change is allowed from then on (Unix seconds): VRChat refuses changes in quick succession.
     pub next_change_at: Option<i64>,
+    /// How many changes were answered (saved or not) so far: the page knows when its own press is answered.
+    pub answered: u64,
 }
 
 /// What the page sends.
@@ -399,6 +401,8 @@ pub enum Action {
     EditProfile(ProfileEdit),
     /// Read the account's own icons or gallery pictures, to choose among.
     ListPictures(PictureKind),
+    /// Read the account's own profile (bio, icon, banner) for Home's card.
+    ReadMine,
     /// Accept an invite and play it in that mode (or send the running game there).
     AcceptInvite { invite: String, mode: LaunchMode },
     /// Hide an invite / request / boop here (and mark it seen at VRChat when signed in).

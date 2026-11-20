@@ -26,6 +26,8 @@ const ASK_EVERY: Duration = Duration::from_secs(15 * 60);
 const ASK_AGAIN: Duration = Duration::from_secs(30);
 /// How old a remembered yes may be and still open calls while Orbiters cannot be reached.
 const LAST_KNOWN_FOR: Duration = Duration::from_secs(24 * 60 * 60);
+/// How far in the future a remembered answer's time may be (this computer's clock moving back a little).
+const CLOCK_SLACK: u64 = 5 * 60;
 /// What a way into a call that is closed says (a notice, N4N0's panel).
 pub(super) const CALLS_SOON_TOLD: &str = orbiters_i18n::mark("Calls are coming soon to Orbiters - N4N0. They aren't open for your account yet.");
 /// What the server last said, per server and account (`{"production/42": {"allowed": true, "at": 1795000000}}`), in the
@@ -100,10 +102,11 @@ impl CallsAccess {
         }
         match state {
             AccountState::SignedIn { .. } => self.heard == Some(true),
-            AccountState::Checking { .. } | AccountState::Offline { .. } => match self.heard {
-                Some(heard) => heard,
-                None => self.last_known.is_some_and(|k| k.allowed && now.saturating_sub(k.at) < LAST_KNOWN_FOR.as_secs()),
-            },
+            // Every yes counts offline only while it is younger than LAST_KNOWN_FOR, one heard in this run too (it is the
+            // last known one: `heard` keeps both), and never one dated in the future.
+            AccountState::Checking { .. } | AccountState::Offline { .. } => {
+                self.last_known.is_some_and(|k| k.allowed && k.at <= now.saturating_add(CLOCK_SLACK) && now.saturating_sub(k.at) < LAST_KNOWN_FOR.as_secs())
+            }
             _ => false,
         }
     }
@@ -201,13 +204,12 @@ impl Controller {
             return false;
         }
         let file = self.calls_access_file();
-        let menu_was_open = {
+        {
             let mut rt = self.calls.lock().unwrap();
             rt.access.follow(Some(whose.clone()), &file);
             rt.access.heard(&whose, false, &file);
-            std::mem::take(&mut rt.menu_open)
-        };
-        self.calls_closed_here(menu_was_open);
+        }
+        self.calls_closed_here(token);
         true
     }
 
@@ -323,6 +325,22 @@ pub(super) mod tests {
         let mut old = CallsAccess::default();
         old.follow(Some(whose("42")), &path);
         assert!(!old.open(&offline(), unix_now()), "an old file's yes has no time: nothing");
+    }
+
+    /// Verify2 S7: offline, every yes is bounded: one heard in this run expires like a remembered one, and a time in the
+    /// future counts as nothing.
+    #[test]
+    fn every_offline_yes_expires_and_none_comes_from_the_future() {
+        let path = file("bounded");
+        let mut access = CallsAccess::default();
+        access.follow(Some(whose("42")), &path);
+        access.heard(&whose("42"), true, &path);
+        let at = access.last_known.unwrap().at;
+        assert!(access.open(&offline(), at + 3600));
+        assert!(!access.open(&offline(), at + LAST_KNOWN_FOR.as_secs()), "heard in this run, a day ago: no more");
+        assert!(access.open(&signed_in(), at + LAST_KNOWN_FOR.as_secs()), "signed in, this run's word stands");
+        access.last_known = Some(Known { allowed: true, at: at + 2 * 24 * 3600 });
+        assert!(!access.open(&offline(), at), "dated in the future");
     }
 
     #[test]

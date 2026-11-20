@@ -203,6 +203,11 @@ impl Ending {
     }
 }
 
+/// Who a request about calls is made for: the API's address and the credential, as `CallsRuntime::identity` holds them.
+/// Stamped on a request, a queued signal or a stream when it is made; what comes back, or is sent later, for another
+/// stamp than the identity signed in then is dropped (an account switched meanwhile).
+type Stamp = (String, String);
+
 /// What asking for the relay servers gave.
 #[derive(Debug)]
 enum Relays {
@@ -281,7 +286,7 @@ pub struct CallsRuntime {
     /// The last number given to a worker.
     workers: u64,
     /// The thread that sends the requests about calls.
-    signals: Option<mpsc::Sender<Signal>>,
+    signals: Option<mpsc::Sender<(Stamp, Signal)>>,
     /// One client for Orbiters while the server stays the same: its connections are kept between requests.
     client: Option<Api>,
     /// Direct calls are allowed (the N4N0 setting, read before each offer and answer). Off, calls go through the relay
@@ -921,7 +926,17 @@ impl super::Controller {
             closing
         };
         old_server_leaves(Api::at(&base), old_token, closing, available);
+        // What was read for the account before goes with it: this computer's VRChat account and friends are read again
+        // for the new one before anything is reported for it, and N4N0's call menu closes.
+        let menu_was_open = std::mem::take(&mut self.calls.lock().unwrap().menu_open);
+        if menu_was_open {
+            self.n4n0_command(crate::ipc::N4n0Command::HidePanel);
+        }
         self.calls_publish(|rt| {
+            rt.local = LocalVrchat::default();
+            rt.local_read = None;
+            rt.friend_hashes.clear();
+            rt.friends_digest = 0;
             rt.contacts.clear();
             rt.contacts_read = None;
             rt.presence_sent = None;
@@ -932,6 +947,19 @@ impl super::Controller {
             rt.stream_failures = 0;
             rt.stream_retry_at = None;
         });
+    }
+
+    /// The account signed in changed (read again, signed in, another environment): the calls' state follows it now,
+    /// not at the next look, so nothing of the account before is shown or sent for the new one.
+    pub(super) fn calls_account_changed(self: &Shared) {
+        if let Some((api, token)) = self.account_api() {
+            self.calls_follow_identity(&api, &token);
+        }
+    }
+
+    /// Whether `stamp` is the identity signed in now (its server's address and its credential).
+    pub(super) fn calls_current(&self, stamp: &Stamp) -> bool {
+        self.calls_identity().is_some_and(|(_, api, token)| api.url("") == stamp.0 && token == stamp.1)
     }
 
     /// The API and credential for calls (signed in), through the client kept for the server.
@@ -1029,6 +1057,8 @@ impl super::Controller {
             let due = rt.presence_sent.is_none_or(|t| t.elapsed() >= PRESENCE_EVERY) || rt.available_sent != Some(available) || changed;
             (due, changed.then(|| (rt.friend_hashes.clone(), rt.friends_digest)))
         };
+        // What this look sends and reads is for this identity only (an account switch meanwhile drops the answers).
+        let stamp: Stamp = (api.url(""), token.clone());
         if due {
             let mut body = json!({ "available": available, "vrchat_id": account });
             if let Some((hashes, _)) = &friends {
@@ -1043,9 +1073,15 @@ impl super::Controller {
                 .build()
                 .header("Authorization", &format!("Bearer {token}"))
                 .send_json(&body);
+            if !self.calls_current(&stamp) {
+                return;
+            }
             match answer.map_err(anyhow::Error::from).and_then(Api::json::<Value>) {
                 Ok(v) => {
                     let mut rt = self.calls.lock().unwrap();
+                    if rt.identity.as_ref() != Some(&stamp) {
+                        return;
+                    }
                     rt.presence_sent = Some(Instant::now());
                     rt.available_sent = Some(available);
                     if let Some((_, digest)) = friends {
@@ -1065,6 +1101,9 @@ impl super::Controller {
                 Err(e) => {
                     let refused = not_linked(&e);
                     let mut rt = self.calls.lock().unwrap();
+                    if rt.identity.as_ref() != Some(&stamp) {
+                        return;
+                    }
                     rt.presence_sent = Some(Instant::now());
                     if refused {
                         rt.link = CallLink::NotLinked { account: account.clone(), source: source.name().to_string() };
@@ -1096,9 +1135,9 @@ impl super::Controller {
                         .as_array()
                         .map(|a| a.iter().filter_map(|c| Some(CallContact { id: c["id"].as_str()?.to_string(), name: c["name"].as_str()?.to_string() })).collect())
                         .unwrap_or_default();
-                    let mut rt = self.calls.lock().unwrap();
-                    rt.contacts = contacts;
-                    rt.contacts_read = Some(Instant::now());
+                    if !self.calls_take_contacts(&stamp, contacts) {
+                        return;
+                    }
                 }
                 Err(e) => {
                     // Asked again after the usual wait, not at every tick (verify A, contacts refused).
@@ -1179,6 +1218,10 @@ impl super::Controller {
                 continue;
             }
             if let Some((event, data)) = sse.line(&String::from_utf8_lossy(&line)) {
+                // A stream of the account before (switched since): it ends here, its events reach nobody.
+                if !self.calls_current(&(api.url(""), token.to_string())) {
+                    break;
+                }
                 let value: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
                 self.on_call_event(&event, value, token);
             }
@@ -1189,6 +1232,11 @@ impl super::Controller {
     /// One event of the server's stream.
     /// One event of the stream opened with credential `token`.
     fn on_call_event(self: &Shared, event: &str, v: Value, token: &str) {
+        // Only for the credential signed in now: an event of the account before reaches nobody (the shared 3D view's
+        // neither).
+        if self.calls_identity().is_none_or(|(_, _, current)| current != token) {
+            return;
+        }
         // Orbiters closed calls for this credential (the feature switched off): closed here at once.
         if event == "calls_closed" {
             self.calls_access_denied(token);
@@ -1312,12 +1360,14 @@ impl super::Controller {
         if rt.stop {
             return;
         }
+        // Stamped with the identity the call state is for: sent with that credential or not at all.
+        let Some(stamp) = rt.identity.clone() else { return };
         let signal = match &rt.signals {
-            Some(tx) => match tx.send(signal) {
+            Some(tx) => match tx.send((stamp, signal)) {
                 Ok(()) => return,
                 Err(mpsc::SendError(s)) => s,
             },
-            None => signal,
+            None => (stamp, signal),
         };
         let (tx, rx) = mpsc::channel();
         let ctl = self.clone();
@@ -1328,24 +1378,28 @@ impl super::Controller {
     }
 
     /// The requests about calls, in order; a call's candidates that come within [`BATCH`] go in one request.
-    fn calls_signals(self: &Shared, rx: mpsc::Receiver<Signal>) {
-        let mut carried: Option<Signal> = None;
+    fn calls_signals(self: &Shared, rx: mpsc::Receiver<(Stamp, Signal)>) {
+        let mut carried: Option<(Stamp, Signal)> = None;
         loop {
-            let signal = match carried.take() {
+            let (stamp, signal) = match carried.take() {
                 Some(s) => s,
                 None => match rx.recv() {
                     Ok(s) => s,
                     Err(_) => return,
                 },
             };
-            // Signed out: nothing can be sent (and the call cannot go on either).
-            let Some((api, token)) = self.calls_api() else { continue };
+            // Made for another identity than the one signed in now (an account switch while it waited): dropped. Signed
+            // out: nothing can be sent (and the call cannot go on either).
+            if !self.calls_current(&stamp) {
+                continue;
+            }
+            let Some((api, token)) = self.calls_api().filter(|(api, token)| api.url("") == stamp.0 && *token == stamp.1) else { continue };
             match signal {
                 Signal::Candidates { id, mut candidates } => {
                     let until = Instant::now() + BATCH;
                     loop {
                         match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
-                            Ok(Signal::Candidates { id: more_id, candidates: more }) if more_id == id => candidates.extend(more),
+                            Ok((more_stamp, Signal::Candidates { id: more_id, candidates: more })) if more_id == id && more_stamp == stamp => candidates.extend(more),
                             Ok(other) => {
                                 carried = Some(other);
                                 break;
@@ -1570,24 +1624,43 @@ impl super::Controller {
     /// Calls were closed for this account (`calls_access_denied`): a call under way ends (the other side is told), the
     /// friends to call go, and everything shows "Coming soon" now rather than at the next look; N4N0's call menu, when
     /// it was open on the panel, goes too.
-    pub(super) fn calls_closed_here(self: &Shared, menu_was_open: bool) {
-        {
+    /// Only the state of credential `token` is cleared, in one change under the lock: if the calls' state is already
+    /// another account's (switched since the refusal was received), nothing of it is touched.
+    pub(super) fn calls_closed_here(self: &Shared, token: &str) {
+        let menu_was_open = {
             let mut rt = self.calls.lock().unwrap();
-            if rt.call.is_some() {
-                let acts = rt.hang_up();
-                self.calls_act(rt, acts);
+            if rt.identity.as_ref().is_some_and(|(_, held)| held != token) {
+                return;
             }
-        }
-        if menu_was_open {
-            self.n4n0_command(crate::ipc::N4n0Command::HidePanel);
-        }
-        self.calls_publish(|rt| {
+            let menu_was_open = std::mem::take(&mut rt.menu_open);
+            let acts = if rt.call.is_some() { rt.hang_up() } else { Acts::default() };
             rt.link = CallLink::ComingSoon;
             rt.contacts.clear();
             rt.contacts_read = None;
             rt.available_sent = None;
             rt.presence_sent = None;
-        });
+            self.calls_act(rt, acts);
+            menu_was_open
+        };
+        if menu_was_open {
+            self.n4n0_command(crate::ipc::N4n0Command::HidePanel);
+        }
+        self.calls_publish(|_| {});
+    }
+
+    /// Friends to call read with `stamp`: shown only while that is still the identity signed in, and the one the calls'
+    /// state is for (checked under the lock they are stored under). True when they were taken.
+    fn calls_take_contacts(self: &Shared, stamp: &Stamp, contacts: Vec<CallContact>) -> bool {
+        if !self.calls_current(stamp) {
+            return false;
+        }
+        let mut rt = self.calls.lock().unwrap();
+        if rt.identity.as_ref() != Some(stamp) {
+            return false;
+        }
+        rt.contacts = contacts;
+        rt.contacts_read = Some(Instant::now());
+        true
     }
 
     fn calls_publish(self: &Shared, change: impl FnOnce(&mut CallsRuntime)) {
@@ -1773,6 +1846,77 @@ mod tests {
         assert!(!ctl.calls_open());
         let rt = ctl.calls.lock().unwrap();
         assert!(rt.contacts.is_empty() && !rt.menu_open && rt.call.is_none(), "nothing of calls is left");
+    }
+
+    /// Verify2 blocker 3: an account switch while requests, events and signals of the account before are on their way.
+    /// Its signal was stamped with its identity when made (and is dropped when dequeued under another), its contacts
+    /// reply and its stream's events reach nobody, the calls' state follows the new account at once (what was read for
+    /// the account before, friends, and N4N0's call menu go), and the new account's own data is taken.
+    #[test]
+    fn an_account_switch_drops_what_was_on_its_way_for_the_account_before() {
+        let server = orbiters_core::account::Server::current();
+        let base = Api::new(server).url("");
+        let a: Stamp = (base.clone(), "orbit-test".into());
+        let b: Stamp = (base, "orbit-b".into());
+        let ctl = signed_in_controller(true);
+        ctl.account_runtime.lock().unwrap().read = Some((server, None));
+        ctl.calls.lock().unwrap().identity = Some(a.clone());
+        // A signal made for A: queued with A's stamp.
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut rt = ctl.calls.lock().unwrap();
+            rt.signals = Some(tx);
+            ctl.calls_signal(&mut rt, Signal::Close { id: "k_1".into(), decline: false });
+        }
+        assert_eq!(rx.try_recv().unwrap().0, a);
+        {
+            let mut rt = ctl.calls.lock().unwrap();
+            rt.local_read = Some(Instant::now());
+            rt.friend_hashes = vec!["a-friend".into()];
+            rt.menu_open = true;
+            rt.contacts = contacts(1);
+        }
+        // B signs in (with calls).
+        ctl.account_runtime.lock().unwrap().account =
+            Some(orbiters_core::account::Account { token: "orbit-b".into(), user: Some("43".into()), username: Some("B".into()), avatar_url: None, features: None });
+        let yes = std::collections::BTreeMap::from([(orbiters_core::features::N4N0_CALLS.to_string(), true)]);
+        ctl.calls_access_checked(server, Some("43"), "orbit-b", Some(&yes));
+        assert!(!ctl.calls_current(&a) && ctl.calls_current(&b), "A's queued signal is dropped when dequeued");
+        // Before the calls' state followed: A's contacts reply and A's stream event reach nobody.
+        assert!(!ctl.calls_take_contacts(&a, contacts(3)));
+        ctl.on_call_event("incoming", ringing("k_9"), "orbit-test");
+        assert!(!ctl.call_ringing_in(), "A's ring never reaches B");
+        // The switch is followed at once: nothing read for A is kept for B.
+        ctl.calls_account_changed();
+        {
+            let rt = ctl.calls.lock().unwrap();
+            assert_eq!(rt.identity.as_ref(), Some(&b));
+            assert!(rt.local_read.is_none() && rt.friend_hashes.is_empty(), "this computer's VRChat friends are read again for B");
+            assert!(rt.contacts.is_empty() && !rt.menu_open);
+        }
+        // A's late refusal leaves B's state alone; B's own data is taken.
+        assert!(ctl.calls_take_contacts(&b, contacts(2)));
+        assert!(!ctl.calls_access_denied("orbit-test"));
+        assert_eq!(ctl.calls.lock().unwrap().contacts.len(), 2);
+        ring(&ctl, "k_10");
+        ctl.on_call_event("incoming", ringing("k_10"), "orbit-b");
+        assert!(ctl.call_ringing_in(), "B's own ring");
+    }
+
+    /// Verify2 blocker 3: the cleanup of a refusal touches only the state of the credential refused, in the same change.
+    #[test]
+    fn a_refusal_clears_only_the_state_of_its_own_credential() {
+        let ctl = signed_in_controller(true);
+        {
+            let mut rt = ctl.calls.lock().unwrap();
+            rt.identity = Some(("http://127.0.0.1:1/".into(), "orbit-other".into()));
+            rt.contacts = contacts(2);
+            rt.menu_open = true;
+        }
+        assert!(ctl.calls_access_denied("orbit-test"), "this credential's calls close");
+        let rt = ctl.calls.lock().unwrap();
+        assert_eq!(rt.contacts.len(), 2, "the state held for another credential is not touched");
+        assert!(rt.menu_open);
     }
 
     /// Signed out, or the server's word not come yet: closed. A refusal of a call request closes calls at once.

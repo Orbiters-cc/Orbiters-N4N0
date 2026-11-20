@@ -130,7 +130,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
             exclusive_said = (now_exclusive, Some(Instant::now()));
         }
-        let exclusive = found.is_some() && exclusive_said.0;
+        // The shell says someone is in exclusive full screen, for the whole system: VRChat only when it is the one in front (a game on another screen is not).
+        let exclusive = exclusive_said.0 && found.is_some_and(front_is);
         let status = OrbitStatus { note: exclusive.then(|| mark("VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.").to_string()), steamvr_overrides: None, camera_note: None, camera_provisional: false, camera_panel_seen_ns: panel_seen_ns, camera_scale_measured: false };
         if said.as_ref() != Some(&status) {
             backend.orbit_status(status.clone());
@@ -144,7 +145,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         crate::mismatch::note_change("window: VRChat on screen, its size, its keyboard", &mut noted.front, shown_on.map(|w| { let s = client_size(w); (s.x as i32, s.y as i32, keyboard) })); // i18n: not shown (a menu mismatch report's line)
         if let Some(game) = shown_on {
             // Laid again, in order, when the layer changes or another window came between VRChat's and ours.
-            let layer = (!keyboard && !stack::topmost(game)).then_some(game);
+            let layer = (!keyboard).then_some(game);
             let changed = stack::set(layer);
             if changed || layer.is_some_and(|g| !stack::holds(g, &shown_windows(&windows, &pointer, &corner, &pill, &translations))) {
                 // The translations lowest: they lie on VRChat's text, under anything of ours.
@@ -1606,7 +1607,14 @@ pub(crate) mod stack {
         // SAFETY: plain calls on live windows; a window gone only fails.
         unsafe {
             match above() {
-                Some(game) if !topmost(game) => match over(game) {
+                // VRChat itself topmost (verify-r15): ours in its band, right under what covers it there, else on top of that band.
+                Some(game) if topmost(game) => {
+                    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+                    if let Some(cover) = over(game) {
+                        let _ = SetWindowPos(hwnd, Some(cover), 0, 0, 0, 0, flags);
+                    }
+                }
+                Some(game) => match over(game) {
                     // Right under what covers VRChat (a topmost window placed after an ordinary one is no longer topmost: Windows' own rule).
                     Some(cover) if !topmost(cover) => {
                         let _ = SetWindowPos(hwnd, Some(cover), 0, 0, 0, 0, flags);
@@ -1619,7 +1627,7 @@ pub(crate) mod stack {
                         let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, 0, 0, flags);
                     }
                 },
-                _ => {
+                None => {
                     let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
                 }
             }
@@ -2186,9 +2194,18 @@ pub mod pointer {
     static REST_Y: AtomicI32 = AtomicI32::new(0);
     static EDGES: std::sync::Mutex<Option<Edges>> = std::sync::Mutex::new(None);
     static SET: AtomicBool = AtomicBool::new(false);
+    /// VRChat's window while the hook is set: the hook keeps nothing from anyone once it is not in front (verify-r15).
+    static GAME: AtomicI64 = AtomicI64::new(0);
+
+    /// Whether the hook may keep the mouse now: VRChat (or a window of ours) has the keyboard.
+    pub(super) fn takes_now(game: isize) -> bool {
+        // SAFETY: a plain query.
+        let front = unsafe { GetForegroundWindow() };
+        game != 0 && (front.0 as isize == game || stack::ours(front))
+    }
 
     unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0 && SET.load(Ordering::Relaxed) {
+        if code >= 0 && SET.load(Ordering::Relaxed) && takes_now(GAME.load(Ordering::Relaxed) as isize) {
             let message = wparam.0 as u32;
             // SAFETY: for WH_MOUSE_LL, lparam is a live MSLLHOOKSTRUCT.
             let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
@@ -2254,7 +2271,7 @@ pub mod pointer {
                 let start = self.at.unwrap_or(origin + center.to_vec2() + START * radius / 100.0);
                 self.at = Some(start);
                 self.taken = (0, 0);
-                let _ = game;
+                GAME.store(game.0 as isize as i64, Ordering::Relaxed);
                 self.begin();
             }
             let (dx, dy) = (DX.load(Ordering::Relaxed), DY.load(Ordering::Relaxed));
@@ -3482,7 +3499,7 @@ mod tests {
     /// The window seen as on the screen: shown yes; minimised (Windows keeps it, iconic) or hidden no.
     #[test]
     fn a_minimised_or_hidden_vrchat_window_is_not_on_the_screen() {
-        use windows::Win32::UI::WindowsAndMessaging::{SW_RESTORE, SW_SHOWMINNOACTIVE};
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWMINNOACTIVE;
         let _alone = windows_alone();
         let client = vec2(320.0, 180.0);
         let game = StandIn::new(off_screen(client), client);
@@ -3491,7 +3508,7 @@ mod tests {
         let _ = unsafe { ShowWindow(game.0, SW_SHOWMINNOACTIVE) };
         assert!(!on_screen(game.0), "minimised");
         // SAFETY: as above.
-        let _ = unsafe { ShowWindow(game.0, SW_RESTORE) };
+        let _ = unsafe { ShowWindow(game.0, SW_SHOWNOACTIVATE) };
         assert!(on_screen(game.0), "back");
         // SAFETY: as above.
         let _ = unsafe { ShowWindow(game.0, SW_HIDE) };
@@ -3547,6 +3564,35 @@ mod tests {
         assert!(!is_vrchat_window(unity, me), "closed");
     }
 
+    /// verify-r15: VRChat's window topmost (its own setting, a tool's): with another program in front ours stay right above it, under a topmost window that
+    /// covers it, not over that one. And the Alt pointer's hook keeps nothing once VRChat is not in front.
+    #[test]
+    fn ours_stay_under_a_topmost_cover_of_a_topmost_vrchat() {
+        let _alone = windows_alone();
+        let client = vec2(320.0, 180.0);
+        let at = off_screen(client);
+        // SAFETY: a plain query.
+        let front = unsafe { GetForegroundWindow() };
+        let game = StandIn::new(at, client);
+        let cover = StandIn::new(at, client);
+        let flags = SWP_NOSIZE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE | SWP_NOACTIVATE;
+        // SAFETY: the test's own windows.
+        unsafe {
+            let _ = SetWindowPos(game.0, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+            let _ = SetWindowPos(cover.0, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+        }
+        stack::set(Some(game.0));
+        let mut ours = clear_window();
+        ours.place(at, 255);
+        assert_eq!(order(&[cover.0, ours.hwnd, game.0]), [cover.0, ours.hwnd, game.0], "under the cover, right above VRChat");
+        assert!(stack::holds(game.0, &[ours.hwnd]));
+        stack::set(None);
+        // SAFETY: a plain query.
+        assert_eq!(unsafe { GetForegroundWindow() }, front, "nothing took the keyboard");
+        assert!(!pointer::takes_now(game.0 .0 as isize), "VRChat not in front: the hook keeps nothing");
+        assert!(!pointer::takes_now(0));
+    }
+
     /// Where real windows lie, by Windows' own order (top first), among `among`.
     fn order(among: &[HWND]) -> Vec<HWND> {
         from_the_top(among)
@@ -3561,11 +3607,11 @@ mod tests {
         let _alone = windows_alone();
         let client = vec2(320.0, 180.0);
         let at = off_screen(client);
+        // SAFETY: a plain query. Before any window is made: none of this test's may take the keyboard.
+        let front = unsafe { GetForegroundWindow() };
         let game = StandIn::new(at, client);
         // Another program's window over VRChat's (made after it, it lies above).
         let cover = StandIn::new(at, client);
-        // SAFETY: a plain query.
-        let front = unsafe { GetForegroundWindow() };
         assert!(stack::set(Some(game.0)), "the layer changes");
         let (mut low, mut high) = (clear_window(), clear_window());
         low.place(at, 255);

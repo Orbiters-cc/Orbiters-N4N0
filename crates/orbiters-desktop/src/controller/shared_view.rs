@@ -104,6 +104,9 @@ pub struct SharedRuntime {
     present: bool,
     /// The credential it is for: another one forgets everything of the last.
     identity: Option<String>,
+    /// Tests: the identity whose presence was last withdrawn on its way out.
+    #[cfg(test)]
+    left: Option<String>,
     /// The requests' thread: each request goes with the identity (`identity` above) it was made under.
     requests: Option<mpsc::Sender<(String, Request)>>,
 }
@@ -498,17 +501,10 @@ impl Controller {
         let account = settings.n4n0.enabled.then(|| self.account_api()).flatten();
         let snap = self.view();
         let world = &snap.vrchat.world;
-        // Another account (or none): nothing of the last one's shares is kept.
+        // Another account (or none, N4N0 switched off): nothing of the last one's shares is kept, and Orbiters hears that
+        // it left with its own credential.
         let identity = account.as_ref().map(|(api, token)| format!("{}\n{token}", api.url("")));
-        let forgot = {
-            let mut rt = self.shared_view.lock().unwrap();
-            let changed = rt.identity != identity;
-            rt.identity = identity;
-            changed && rt.forget()
-        };
-        if forgot {
-            self.shared_publish();
-        }
+        self.shared_identity_to(identity);
         let in_world = snap.vrchat.running && world.in_world && world.instance.is_some();
         let request = {
             let account_id = in_world.then(|| account.as_ref().and_then(|_| self.local_vrchat_account(world))).flatten();
@@ -613,6 +609,10 @@ impl Controller {
         };
         if let Some(stamp) = &departed {
             shared_withdraw_as(stamp);
+            #[cfg(test)]
+            {
+                self.shared_view.lock().unwrap().left = Some(stamp.clone());
+            }
         }
         if forgot || departed.is_some() {
             self.shared_publish();
@@ -796,6 +796,10 @@ mod tests {
             ctl.shared_publish();
             assert!(ctl.snapshot.lock().unwrap().shared_view.offer.is_some(), "A's friend's offer on screen");
         };
+        // N4N0 switched off (what the shares' turn does): A's presence is withdrawn with A's credential.
+        offer_up(&ctl);
+        assert_eq!(ctl.shared_identity_to(None), Some(a.clone()), "withdrawn as A");
+        assert!(ctl.snapshot.lock().unwrap().shared_view.offer.is_none(), "the offer went on the same turn");
         // Signed out: the same, at once, before the shares' next turn.
         offer_up(&ctl);
         ctl.calls_depart();
@@ -803,6 +807,23 @@ mod tests {
         assert!(ctl.shared_view.lock().unwrap().identity.is_none() && !ctl.shared_view.lock().unwrap().present);
         // Nothing to withdraw twice.
         assert_eq!(ctl.shared_identity_to(None), None);
+    }
+
+    /// Verify4 should-fix: N4N0 switched off while in an instance: the shares' own turn withdraws the presence as the
+    /// identity that leaves (it used to empty its identity first, and the queue then dropped the withdrawal).
+    #[test]
+    fn switching_n4n0_off_withdraws_the_presence_on_the_shares_turn() {
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        let a = "http://127.0.0.1:1/\norbit-a".to_string();
+        {
+            let mut rt = ctl.shared_view.lock().unwrap();
+            rt.identity = Some(a.clone());
+            rt.present = true;
+        }
+        ctl.shared_tick();
+        let rt = ctl.shared_view.lock().unwrap();
+        assert_eq!(rt.left.as_deref(), Some(a.as_str()), "withdrawn with A's credential");
+        assert!(rt.identity.is_none() && !rt.present);
     }
 
     /// Verify3 blocker 2: the shared 3D view's requests go with the identity they were made under, and what comes back

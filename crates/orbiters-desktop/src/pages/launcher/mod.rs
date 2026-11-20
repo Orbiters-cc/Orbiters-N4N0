@@ -88,7 +88,7 @@ pub struct State {
     keys: Vec<String>,
     tops: Vec<f32>,
     /// The data the rows were made for (held, so that its address is never handed to a newer state), the search, the folds.
-    made_for: Option<(Arc<LauncherState>, String, u64)>,
+    made_for: Option<(Arc<LauncherState>, String, u64, u64)>,
     folds: u64,
     /// The row at the list's top and how far into it, kept across refreshes.
     anchor: Option<(String, f32)>,
@@ -470,12 +470,19 @@ impl State {
             self.folded_read = true;
             self.folded = load_folded();
         }
-        if self.made_for.as_ref().is_some_and(|(data, query, folds)| Arc::ptr_eq(data, &self.data) && *query == self.query && *folds == self.folds) {
+        // What was put away (its received rows go), whatever the order the set gives it in.
+        let put_away = self.dismissed.iter().fold(self.dismissed.len() as u64, |sum, id| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            id.hash(&mut h);
+            sum.wrapping_add(h.finish())
+        });
+        if self.made_for.as_ref().is_some_and(|(data, query, folds, away)| Arc::ptr_eq(data, &self.data) && *query == self.query && *folds == self.folds && *away == put_away) {
             return None;
         }
         let same_search = self.made_for.as_ref().is_some_and(|m| m.1 == self.query);
-        self.made_for = Some((self.data.clone(), self.query.clone(), self.folds));
-        self.rows = list::rows(&self.data, &self.query, &self.folded);
+        self.made_for = Some((self.data.clone(), self.query.clone(), self.folds, put_away));
+        self.rows = list::with_received(&self.data, &self.query, &self.folded, &self.dismissed);
         self.keys = self.rows.iter().map(|r| r.key(&self.data)).collect();
         self.tops = list::tops(&self.rows);
         // A new search starts at the top; new data keeps the row in view.
@@ -753,8 +760,7 @@ fn column(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer: bool)
     }
     // The one line about what needs the sign-in.
     y = row::sign_in_note(&mut ui, cx, state, inner, y);
-    // Boops and requests received.
-    y = row::received(&mut ui, cx, state, inner, y, clock);
+    // Boops and requests received are the list's first rows: one list, one scroll (REQUEST18 1).
 
     let list_rect = Rect::from_min_max(pos2(rect.left() + 4.0, y), pos2(rect.right() - 4.0, rect.bottom() - 6.0));
     if list_rect.height() > 20.0 {

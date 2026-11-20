@@ -67,6 +67,10 @@ fn picture(placed: &Placed, facts: &Facts, hover: Option<usize>, pressed: Option
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
     facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
+    // "Share 3D capture"'s thumbnail: a stand-in picture.
+    if let Some(tile) = facts.share_here.as_mut() {
+        tile.picture = textures.get(1).map(|t| t.id());
+    }
     // A page shown over the camera: a stand-in of what it drew.
     if let Some(web) = facts.camera.web.as_mut().filter(|w| w.state == panels::WebState::Shown) {
         web.picture = textures.first().map(|t| t.id());
@@ -1890,6 +1894,97 @@ fn r15_translations(out: &Path) -> anyhow::Result<()> {
         blit(&mut image, w, &pixels, px, pos2(size[0] as f32 + 20.0 + r.min.x.round(), r.min.y.round()));
     }
     let path = out.join("r15-desk-translate.png");
+    save_png(&path, &over_ground(&image, w, h))?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+/// `--only r18-share` (REQUEST18 3): "Share 3D capture" under the Quick Menu's side tiles, made-up capture and stand-in
+/// picture only: without it, offered, pointed, the first time's question, its share making the 3D view and sending, and
+/// stopped; on a screen (1280 x 720 and 1920 x 1080, around a stand-in of the Quick Menu) and in a headset (the parts where
+/// `vr::quick_menu_places` lays them, seen straight on).
+pub(super) fn r18_share_shots(out: &Path) -> anyhow::Result<()> {
+    use panels::share_here::{ShareTile, TileState};
+    use panels::Action;
+    let desk = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, music: Some(("Sample Artist - Sample Song".into(), true)), ..Default::default() };
+    let vr = Facts { desktop: false, vr_close: true, can_call: true, can_states: true, can_light: true, ..desk.clone() };
+    let tile = |state: TileState| Some(ShareTile { id: 7, state, picture: None });
+    let states: Vec<(&str, Option<ShareTile>, Option<Action>)> = vec![
+        ("without", None, None),
+        ("ready", tile(TileState::Ready), None),
+        ("pointed", tile(TileState::Ready), Some(Action::ShareHere(7))),
+        ("asking", tile(TileState::Asking), Some(Action::ShareHereYes(7))),
+        ("making", tile(TileState::Busy { making: true, sent: None }), None),
+        ("sending", tile(TileState::Busy { making: false, sent: Some(0.42) }), None),
+        ("failed", tile(TileState::Failed(orbiters_i18n::tr("Sign in to Orbiters in Settings first.").into())), None),
+        ("limited", tile(TileState::Limited), None),
+    ];
+    let pointed_item = |facts: &Facts, zone: Zone, logical: Vec2| facts.pointed.and_then(|a| panels::items(zone, logical, facts).iter().position(|i| i.action == a));
+    for (state, share, pointed) in &states {
+        for (form, base) in [("desk", &desk), ("vr", &vr)] {
+            let facts = Facts { share_here: share.clone(), pointed: *pointed, ..base.clone() };
+            if form == "desk" {
+                for (size, client) in [("720", vec2(1280.0, 720.0)), ("1080", vec2(1920.0, 1080.0))] {
+                    let (w, h) = (client.x as u32, client.y as u32);
+                    let mut ground = Canvas::new(w, h);
+                    stand_in_menu(Around::QuickMenu, client, &mut ground);
+                    let mut image = ground.pixels().to_vec();
+                    for placed in zones::layout(Around::QuickMenu, client) {
+                        if placed.zone.only_while_needed() && !panels::needed(placed.zone, &facts) {
+                            continue;
+                        }
+                        let hovered = pointed_item(&facts, placed.zone, placed.logical());
+                        let (pixels, px) = picture(&placed, &facts, hovered, None);
+                        blit(&mut image, w, &pixels, px, placed.rect.min);
+                    }
+                    let path = out.join(format!("r18-share-desk-{size}-{state}.png"));
+                    save_png(&path, &over_ground(&image, w, h))?;
+                    println!("{}", path.display());
+                }
+            } else {
+                vr_wing_flat(&format!("r18-share-vr-{state}"), out, &facts, |zone, logical| pointed_item(&facts, zone, logical))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The Quick Menu (a stand-in) and its side tiles where a headset has them on the left hand's menu (`vr::quick_menu_places`,
+/// the wing on the right), seen straight on at 1.6 pixels a unit, with what is pointed lit.
+fn vr_wing_flat(name: &str, out: &Path, facts: &Facts, pointed: impl Fn(Zone, Vec2) -> Option<usize>) -> anyhow::Result<()> {
+    use crate::overlay::orbit::vr;
+    let k = 1.6;
+    let parts: Vec<Placed> = vr::quick_menu_places(0)
+        .into_iter()
+        .map(|p| vr::clear_of_sheet(p, false))
+        .filter(|p| !p.zone.only_while_needed() || panels::needed(p.zone, facts))
+        .collect();
+    let menu = [(-188.0, -204.0, 188.0, 204.0), (-351.0, -150.0, 351.0, 186.0)];
+    let mut bounds = egui::Rect::from_min_max(pos2(-352.0, -240.0), pos2(352.0, 243.0));
+    for p in &parts {
+        bounds = bounds.union(p.rect);
+    }
+    let bounds = bounds.expand(24.0);
+    let to = |r: egui::Rect| egui::Rect::from_min_max(((r.min - bounds.min) * k).to_pos2().round(), ((r.max - bounds.min) * k).to_pos2().round());
+    let (w, h) = ((bounds.width() * k).ceil() as u32, (bounds.height() * k).ceil() as u32);
+    let mut ground = Canvas::new(w, h);
+    ground.paint(0.0, |p| {
+        for (i, (a, b, c, d)) in menu.iter().enumerate() {
+            let fill = if i == 0 { Color32::from_rgb(22, 34, 43) } else { Color32::from_rgb(25, 34, 42) };
+            p.rect_filled(to(egui::Rect::from_min_max(pos2(*a, *b), pos2(*c, *d))), 8.0, fill);
+        }
+        for x in zones::QM_ICONS_X {
+            p.circle_filled(to(egui::Rect::from_center_size(pos2(x, zones::QM_ICONS_Y), Vec2::splat(26.0))).center(), 13.0 * k, Color32::from_rgb(30, 90, 95));
+        }
+    });
+    let mut image = ground.pixels().to_vec();
+    for placed in parts {
+        let at = Placed { zone: placed.zone, rect: to(placed.rect), center: pos2(0.0, 0.0), unit: k };
+        let hovered = pointed(placed.zone, at.logical());
+        let (pixels, px) = picture(&at, facts, hovered, None);
+        blit(&mut image, w, &pixels, px, at.rect.min);
+    }
+    let path = out.join(format!("{name}.png"));
     save_png(&path, &over_ground(&image, w, h))?;
     println!("{}", path.display());
     Ok(())

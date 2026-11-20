@@ -1,15 +1,20 @@
 //! The friends list as rows, without drawing: the sections in the contract's order (the account's favourite groups,
 //! then in game, on the website, offline), each one a header and its people unless folded; a search keeps the people
 //! it finds in every section they are in, opens the folded ones and drops the sections left empty. Only the rows in
-//! view are drawn ([`visible`]); a refresh keeps the first row in view where it was ([`anchored`]).
+//! view are drawn ([`visible`]); a refresh keeps the first row in view where it was ([`anchored`]). The boops and invite
+//! requests received come first, rows of the same list ([`with_received`]): one list, one scroll (REQUEST18 1).
 
-use orbiters_core::launcher::{Friend, FriendGroup, GroupKind, LauncherState, Whereabouts};
+use orbiters_core::launcher::{Friend, FriendGroup, GroupKind, InviteKind, LauncherState, Whereabouts};
 use std::collections::HashSet;
 use std::ops::Range;
 
 /// A section's header and a person's row.
 pub const HEADER_H: f32 = 34.0;
 pub const PERSON_H: f32 = 58.0;
+/// The heading over two or more received rows (what they are, how many), and one received row (a boop, an invite request)
+/// with the gap under it.
+pub const GOT_HEAD_H: f32 = 28.0;
+pub const GOT_H: f32 = 54.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Row {
@@ -30,6 +35,10 @@ pub enum Row {
         /// Index in [`LauncherState::friends`].
         friend: usize,
     },
+    /// Over two or more received rows: how many, and how many of them are boops.
+    GotHead { count: usize, boops: usize },
+    /// A boop or an invite request received, by its notification id.
+    Got { id: String },
 }
 
 impl Row {
@@ -37,6 +46,8 @@ impl Row {
         match self {
             Row::Header { .. } => HEADER_H,
             Row::Person { .. } => PERSON_H,
+            Row::GotHead { .. } => GOT_HEAD_H,
+            Row::Got { .. } => GOT_H,
         }
     }
 
@@ -46,6 +57,8 @@ impl Row {
         match self {
             Row::Header { group, .. } => format!("h:{group}"),
             Row::Person { group, friend } => format!("p:{group}:{}", state.friends.get(*friend).map_or("", |f| f.id.as_str())),
+            Row::GotHead { .. } => "gh".into(),
+            Row::Got { id } => format!("g:{id}"),
         }
     }
 }
@@ -83,6 +96,35 @@ pub fn rows(state: &LauncherState, query: &str, folded: &HashSet<String>) -> Vec
             out.extend(found.into_iter().map(|friend| Row::Person { group: group.id.clone(), friend }));
         }
     }
+    out
+}
+
+/// The boops and invite requests received and not put away, newest first, by id, with whether each is a boop: every one,
+/// never a count of the rest. While a search is typed, those from someone it finds.
+pub fn received(state: &LauncherState, dismissed: &HashSet<String>, query: &str) -> Vec<(String, bool)> {
+    let query = query.trim().to_lowercase();
+    let found = |name: &str| query.is_empty() || name.to_lowercase().contains(&query);
+    let mut got: Vec<(i64, String, bool)> = Vec::new();
+    for b in state.boops.iter().filter(|b| !dismissed.contains(&b.id) && found(&b.from_name)) {
+        got.push((b.received_at, b.id.clone(), true));
+    }
+    for i in state.invites.iter().filter(|i| i.kind == InviteKind::Request && !dismissed.contains(&i.id) && found(&i.from_name)) {
+        got.push((i.received_at, i.id.clone(), false));
+    }
+    got.sort_by_key(|g| std::cmp::Reverse(g.0));
+    got.into_iter().map(|(_, id, boop)| (id, boop)).collect()
+}
+
+/// The whole list (REQUEST18 1, Enzo: "the whole thing is scrollable", never a scrolling frame inside it): what was
+/// received first, every one a row (under a heading when there are two or more), then the sections and their people.
+pub fn with_received(state: &LauncherState, query: &str, folded: &HashSet<String>, dismissed: &HashSet<String>) -> Vec<Row> {
+    let got = received(state, dismissed, query);
+    let mut out = Vec::with_capacity(got.len() + 1);
+    if got.len() > 1 {
+        out.push(Row::GotHead { count: got.len(), boops: got.iter().filter(|g| g.1).count() });
+    }
+    out.extend(got.into_iter().map(|(id, _)| Row::Got { id }));
+    out.extend(rows(state, query, folded));
     out
 }
 
@@ -148,6 +190,8 @@ mod tests {
             .map(|r| match r {
                 Row::Header { group, count, .. } => format!("[{group} {count}]"),
                 Row::Person { friend, .. } => state.friends[*friend].name.clone(),
+                Row::GotHead { count, .. } => format!("<{count} received>"),
+                Row::Got { id } => format!("<{id}>"),
             })
             .collect()
     }
@@ -201,6 +245,38 @@ mod tests {
         assert!(people(&rows(&state, "unity", &folded), &state).contains(&"Orbit Tester".to_string()));
         assert!(people(&rows(&state, "meetup", &folded), &state).contains(&"Pixel Fox".to_string()));
         assert!(rows(&state, "nobody by this name", &folded).is_empty());
+    }
+
+    /// REQUEST18 1: every boop and invite request received is a row of the one list, newest first, before the sections;
+    /// what was put away is not; a search keeps those from someone it finds.
+    #[test]
+    fn what_was_received_is_the_first_rows_of_the_one_list() {
+        let mut state = sample();
+        let from = state.friends[2].clone();
+        // Newer than the sample's invite request, which comes after them.
+        let newest = state.invites.iter().map(|i| i.received_at).max().unwrap_or(0) + 1_000;
+        state.boops = (0..30)
+            .map(|i| orbiters_core::launcher::Boop { id: format!("not_boop_{i:02}"), from_id: from.id.clone(), from_name: from.name.clone(), from_icon: String::new(), emoji: None, received_at: newest - i })
+            .collect();
+        let requests = state.invites.iter().filter(|i| i.kind == InviteKind::Request).count();
+        assert!(requests > 0, "the sample has an invite request");
+        let dismissed: HashSet<String> = ["not_boop_05".to_string()].into();
+        let all = with_received(&state, "", &HashSet::new(), &dismissed);
+        let got = 29 + requests;
+        assert_eq!(all[0], Row::GotHead { count: got, boops: 29 });
+        assert!(all[1..=got].iter().all(|r| matches!(r, Row::Got { .. })), "every one a row, none folded into a count");
+        assert!(!all.contains(&Row::Got { id: "not_boop_05".into() }), "put away");
+        assert_eq!(all[1], Row::Got { id: "not_boop_00".into() }, "the newest first");
+        // Then the sections, as they are without anything received: one list.
+        assert_eq!(all[got + 1..], rows(&state, "", &HashSet::new())[..]);
+        let t = tops(&all);
+        assert_eq!(t[got + 1], GOT_HEAD_H + got as f32 * GOT_H, "the friends start right under the last received row");
+        // One received: its row alone, no heading. A search: those from whom it finds.
+        state.boops.truncate(1);
+        state.invites.retain(|i| i.kind != InviteKind::Request);
+        assert_eq!(with_received(&state, "", &HashSet::new(), &HashSet::new())[0], Row::Got { id: "not_boop_00".into() });
+        assert!(matches!(with_received(&state, &from.name.to_uppercase(), &HashSet::new(), &HashSet::new())[0], Row::Got { .. }));
+        assert!(!with_received(&state, "nobody by this name", &HashSet::new(), &HashSet::new()).iter().any(|r| matches!(r, Row::Got { .. })));
     }
 
     /// 400 friends: only the rows in the view are drawn, whatever the scroll.

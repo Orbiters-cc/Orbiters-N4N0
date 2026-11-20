@@ -183,6 +183,10 @@ pub enum Zone {
     /// While a recording runs: its clock and Stop, under the wheel and under the wing (Enzo, F13). Nothing here starts one.
     WheelStop,
     QmStop,
+    /// "Share 3D capture" under the wing's foot (REQUEST18 3), where Stop is while a recording runs (never both): the world
+    /// the person is in has a capture on this computer and none shared publicly. Its picture, its share's progress, and the
+    /// first time's question.
+    QmShare,
     /// Straight up, where the eyes go first: 3D world search.
     WheelWorlds,
     WheelYouTube,
@@ -223,6 +227,9 @@ pub enum Zone {
     Takeover,
 }
 
+/// The foot of "Share 3D capture" under the wing ([`Zone::QmShare`]): as low as a 16:9 window keeps it whole.
+pub const QM_SHARE_FOOT: f32 = 315.0;
+
 /// How far above its place the wing's caption lies in a headset, where the wing's name pill (with Hide tiles) is under it.
 pub const QM_CAPTION_OVER_THE_NAME: f32 = 34.0;
 
@@ -243,8 +250,8 @@ impl Zone {
         Zone::WheelStop,
     ];
     pub const WING: [Zone; 8] = [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying];
-    pub const QUICK_MENU: [Zone; 10] =
-        [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying, Zone::QmCaption, Zone::QmStop];
+    pub const QUICK_MENU: [Zone; 11] =
+        [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying, Zone::QmCaption, Zone::QmStop, Zone::QmShare];
 
     /// The zones around a menu.
     pub const CAMERA: [Zone; 12] = [
@@ -325,7 +332,7 @@ impl Zone {
     /// A part that shows only while it has something to do (a recording to stop, a code being looked for, a page opened, a button to offer): it joins the menu's
     /// parts and leaves them as that changes ([`super::Panels::set_open`]).
     pub fn only_while_needed(self) -> bool {
-        matches!(self, Zone::WheelStop | Zone::QmStop | Zone::CameraAct | Zone::CameraScan | Zone::CameraWebBar | Zone::CameraWeb | Zone::CameraShare | Zone::CameraShareDesk | Zone::CameraChooser)
+        matches!(self, Zone::WheelStop | Zone::QmStop | Zone::QmShare | Zone::CameraAct | Zone::CameraScan | Zone::CameraWebBar | Zone::CameraWeb | Zone::CameraShare | Zone::CameraShareDesk | Zone::CameraChooser)
     }
 
     /// Its place in the menu's units from the menu's centre, y down: around the wheel in hundredths of its radius (a 1280 x 720 window's pixels, nearly), around the Quick
@@ -397,6 +404,9 @@ impl Zone {
             Zone::WheelStop => r(-78.0, 188.0, 78.0, 228.0),
             // Under the wing's foot, as wide as it.
             Zone::QmStop => r(362.0, 213.0, 524.0, 249.0),
+            // The same place, as wide as the wing: its picture over its words, and room there for the first time's question
+            // and its two buttons; its foot over the window's at 16:9 (y 320 there).
+            Zone::QmShare => r(362.0, 213.0, 524.0, QM_SHARE_FOOT),
             // N4N0's pages' own shape, 704 wide.
             Zone::Takeover => r(-352.0, -196.0, 352.0, 200.0),
             _ => unreachable!("the rings' cells return above"),
@@ -786,6 +796,28 @@ mod tests {
         let narrow = layout(Around::QuickMenu, vec2(1000.0, 900.0));
         assert!(narrow.iter().any(|p| p.zone == Zone::QmStrip) && narrow.iter().any(|p| p.zone == Zone::QmCaption));
         assert!(!layout(Around::QuickMenu, vec2(1920.0, 1080.0)).iter().any(|p| p.zone == Zone::QmStrip));
+    }
+
+    /// REQUEST18 3: "Share 3D capture" lies under the wing's foot, where its Stop is, on none of VRChat's panels and none of
+    /// the wing's tiles; wherever the wing docks, it fits whole (the window's foot at 16:9 included).
+    #[test]
+    fn share_3d_capture_fits_under_the_wing_wherever_it_docks() {
+        let share = Zone::QmShare.units();
+        for k in [Rect::from_min_max(pos2(-188.0, -204.0), pos2(188.0, 204.0)), Rect::from_min_max(pos2(-351.0, -150.0), pos2(351.0, 186.0)), Rect::from_min_max(pos2(-242.0, 204.0), pos2(242.0, 262.0))] {
+            assert!(!share.intersects(k), "on {k:?}");
+        }
+        for zone in Zone::WING {
+            assert!(!share.intersects(zone.units()), "on the wing's {zone:?}");
+        }
+        assert_eq!((share.left(), share.right(), share.top()), (Zone::QmStop.units().left(), Zone::QmStop.units().right(), Zone::QmStop.units().top()));
+        assert!(Zone::QmShare.only_while_needed() && Zone::around(Around::QuickMenu).contains(&Zone::QmShare));
+        for (w, h) in SIZES {
+            let around = layout(Around::QuickMenu, vec2(w, h));
+            if around.iter().any(|p| p.zone == Zone::WingPlaying) {
+                let placed = around.iter().find(|p| p.zone == Zone::QmShare).unwrap_or_else(|| panic!("{w}x{h}: no room for it"));
+                assert!(placed.rect.bottom() <= h && placed.rect.right() <= w, "{w}x{h}");
+            }
+        }
     }
 
     #[test]

@@ -271,6 +271,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("orbit-camera") {
         return orbit::camera_shots(&out);
     }
+    if only.as_deref() == Some("r18-share") {
+        return orbit::r18_share_shots(&out);
+    }
     if only.as_deref() == Some("explorer") {
         return orbit::explorer_shots(&out);
     }

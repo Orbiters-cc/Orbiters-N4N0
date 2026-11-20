@@ -97,82 +97,75 @@ pub(super) fn sign_in_note(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: R
     y + h + 10.0
 }
 
-/// Boops and invite requests received, newest first: two at most, then how many more.
-pub(super) fn received(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: Rect, mut y: f32, clock: f64) -> f32 {
-    enum Got {
-        Boop { id: String, from: String, name: String, icon: String, at: i64 },
-        Request { id: String, name: String, icon: String, at: i64 },
+/// What was received, as its row draws it.
+enum Got {
+    Boop { id: String, from: String, name: String, icon: String, at: i64 },
+    Request { id: String, name: String, icon: String, at: i64 },
+}
+
+/// The boop or invite request `id` received.
+fn got(state: &State, id: &str) -> Option<Got> {
+    if let Some(b) = state.data.boops.iter().find(|b| b.id == id) {
+        return Some(Got::Boop { id: b.id.clone(), from: b.from_id.clone(), name: b.from_name.clone(), icon: b.from_icon.clone(), at: b.received_at });
     }
-    let mut got: Vec<Got> = Vec::new();
-    for b in state.data.boops.iter().filter(|b| !state.dismissed.contains(&b.id)) {
-        got.push(Got::Boop { id: b.id.clone(), from: b.from_id.clone(), name: b.from_name.clone(), icon: b.from_icon.clone(), at: b.received_at });
+    state.data.invites.iter().find(|i| i.id == id && i.kind == InviteKind::Request).map(|i| Got::Request { id: i.id.clone(), name: i.from_name.clone(), icon: i.from_icon.clone(), at: i.received_at })
+}
+
+/// Over two or more received rows, as a section's header says its name and count: what they are, how many.
+fn got_head(ui: &Ui, rect: Rect, count: usize, boops: usize) {
+    let title = match boops {
+        b if b == count => tr("Boops"),
+        0 => tr("Invite requests"),
+        _ => tr("Boops and invite requests"),
+    };
+    let p = ui.painter();
+    let cy = rect.center().y + 1.0;
+    widgets::icon(p, pos2(rect.left() + 16.0, cy), icons::HAND_WAVING, 13.0, theme::ACCENT);
+    let t = widgets::text_truncated(p, pos2(rect.left() + 29.0, cy), Align2::LEFT_CENTER, &Txt::new(title, 12.5).weight(weight::SEMIBOLD), rect.width() - 80.0);
+    widgets::text(p, pos2(t.right() + 7.0, cy), Align2::LEFT_CENTER, &Txt::new(count.to_string(), 11.5).weight(weight::MEDIUM).color(theme::FG_4));
+}
+
+/// One received row at `rect`: who, what and when; Boop back on a boop; its put-away cross.
+fn got_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, g: &Got, clock: f64, now: i64) {
+    let p = ui.painter().clone();
+    let accent = matches!(g, Got::Boop { .. });
+    widgets::frame(&p, rect, 14.0, if accent { theme::alpha(theme::ACCENT, 0.09) } else { theme::surface_soft() });
+    let (name, icon, at, id) = match g {
+        Got::Boop { name, icon, at, id, .. } | Got::Request { name, icon, at, id } => (name.clone(), icon.clone(), *at, id.clone()),
+    };
+    let pic = Rect::from_center_size(pos2(rect.left() + 24.0, rect.center().y), vec2(30.0, 30.0));
+    let texture = state.picture(&icon);
+    widgets::avatar(&p, pic, texture.as_ref(), &name);
+    if accent {
+        // A little hand on the picture's corner says what this is at a glance.
+        let c = pic.right_bottom() - vec2(3.0, 3.0);
+        p.circle_filled(c, 9.0, theme::INK_900);
+        widgets::icon(&p, c, icons::HAND_WAVING, 11.0, theme::ACCENT);
     }
-    for i in state.data.invites.iter().filter(|i| i.kind == InviteKind::Request && !state.dismissed.contains(&i.id)) {
-        got.push(Got::Request { id: i.id.clone(), name: i.from_name.clone(), icon: i.from_icon.clone(), at: i.received_at });
+    let what = if accent { tr("booped you") } else { tr("asks for an invite") };
+    let x = pic.right() + 10.0;
+    // Boop back as wide as its words in the language.
+    let back_w = pill_width(ui, tr("Boop back")).max(92.0);
+    let room = rect.right() - x - if accent { back_w + 46.0 } else { 40.0 };
+    widgets::text_truncated(&p, pos2(x, rect.center().y - 8.0), Align2::LEFT_CENTER, &Txt::new(&name, 13.0).weight(weight::SEMIBOLD), room);
+    let when = super::super::ago(ui.ctx(), at.max(0) as u64, now.max(0) as u64);
+    widgets::text_truncated(&p, pos2(x, rect.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(format!("{what} · {when}"), 11.5).color(theme::FG_3), room);
+    let close = Rect::from_center_size(pos2(rect.right() - 20.0, rect.center().y), vec2(28.0, 28.0));
+    if widgets::activated(&widgets::IconButton::new(icons::X, orbiters_i18n::mark("Dismiss")).size(28.0, 13.0).id_salt(("launcher-got-x", &id)).show_at(ui, close)) {
+        state.act(cx, clock, Action::Dismiss { id: id.clone() });
     }
-    got.sort_by_key(|g| std::cmp::Reverse(match g {
-        Got::Boop { at, .. } | Got::Request { at, .. } => *at,
-    }));
-    let more = got.len().saturating_sub(2);
-    let now = state.now();
-    for (n, g) in got.into_iter().take(2).enumerate() {
-        let rect = Rect::from_min_size(pos2(inner.left() + 2.0, y), vec2(inner.width() - 4.0, 48.0));
-        let (enter, dy) = widgets::entrance(ui, Id::unique(("launcher-got", n, match &g {
-            Got::Boop { id, .. } | Got::Request { id, .. } => id.clone(),
-        })), 0.0, 0);
-        let rect = rect.translate(vec2(0.0, dy * 0.4));
-        let mut p = ui.painter().clone();
-        p.multiply_opacity(enter);
-        let accent = matches!(g, Got::Boop { .. });
-        widgets::frame(&p, rect, 14.0, if accent { theme::alpha(theme::ACCENT, 0.09) } else { theme::surface_soft() });
-        let (name, icon, at, id) = match &g {
-            Got::Boop { name, icon, at, id, .. } | Got::Request { name, icon, at, id } => (name.clone(), icon.clone(), *at, id.clone()),
+    if let Got::Boop { from, .. } = g {
+        let friend = state.data.friend(from).cloned();
+        let reach = match &friend {
+            Some(f) => states::boop(&state.data, f, state.booped.get(from).map(|b| b.0), clock, now),
+            None if state.data.possible.boop => Reach::Ready,
+            None => Reach::SignIn,
         };
-        let pic = Rect::from_center_size(pos2(rect.left() + 24.0, rect.center().y), vec2(30.0, 30.0));
-        let texture = state.picture(&icon);
-        widgets::avatar(&p, pic, texture.as_ref(), &name);
-        if accent {
-            // A little hand on the picture's corner says what this is at a glance.
-            let c = pic.right_bottom() - vec2(3.0, 3.0);
-            p.circle_filled(c, 9.0, theme::INK_900);
-            widgets::icon(&p, c, icons::HAND_WAVING, 11.0, theme::ACCENT);
-        }
-        let what = if accent { tr("booped you") } else { tr("asks for an invite") };
-        let x = pic.right() + 10.0;
-        // Boop back as wide as its words in the language.
-        let back_w = pill_width(ui, tr("Boop back")).max(92.0);
-        let room = rect.right() - x - if accent { back_w + 46.0 } else { 40.0 };
-        widgets::text_truncated(&p, pos2(x, rect.center().y - 8.0), Align2::LEFT_CENTER, &Txt::new(&name, 13.0).weight(weight::SEMIBOLD), room);
-        let when = super::super::ago(ui.ctx(), at.max(0) as u64, now.max(0) as u64);
-        widgets::text_truncated(&p, pos2(x, rect.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(format!("{what} · {when}"), 11.5).color(theme::FG_3), room);
-        let close = Rect::from_center_size(pos2(rect.right() - 20.0, rect.center().y), vec2(28.0, 28.0));
-        if widgets::activated(&widgets::IconButton::new(icons::X, orbiters_i18n::mark("Dismiss")).size(28.0, 13.0).id_salt(("launcher-got-x", &id)).show_at(ui, close)) {
+        let at = Rect::from_min_size(pos2(close.left() - 4.0 - back_w, rect.center().y - 15.0), vec2(back_w, 30.0));
+        if reach_pill(ui, at, ("launcher-boop-back", from.as_str()), reach, icons::HAND_WAVING, tr("Boop back"), state.booped.get(from).map(|b| b.0), clock) {
+            state.act(cx, clock, Action::Boop { to: from.clone(), emoji: None });
             state.act(cx, clock, Action::Dismiss { id: id.clone() });
         }
-        if let Got::Boop { from, .. } = &g {
-            let friend = state.data.friend(from).cloned();
-            let reach = match &friend {
-                Some(f) => states::boop(&state.data, f, state.booped.get(from).map(|b| b.0), clock, now),
-                None if state.data.possible.boop => Reach::Ready,
-                None => Reach::SignIn,
-            };
-            let at = Rect::from_min_size(pos2(close.left() - 4.0 - back_w, rect.center().y - 15.0), vec2(back_w, 30.0));
-            if reach_pill(ui, at, ("launcher-boop-back", from.as_str()), reach, icons::HAND_WAVING, tr("Boop back"), state.booped.get(from).map(|b| b.0), clock) {
-                state.act(cx, clock, Action::Boop { to: from.clone(), emoji: None });
-                state.act(cx, clock, Action::Dismiss { id: id.clone() });
-            }
-        }
-        y += 48.0 + 6.0;
-    }
-    if more > 0 {
-        let t = orbiters_i18n::tr!("{n} more", n = more);
-        widgets::text(ui.painter(), pos2(inner.left() + 10.0, y + 6.0), Align2::LEFT_CENTER, &Txt::new(t, 11.5).color(theme::FG_4));
-        y += 18.0;
-    }
-    if y > inner.top() {
-        y + 4.0
-    } else {
-        y
     }
 }
 
@@ -327,6 +320,14 @@ pub(super) fn list(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, cloc
             match row {
                 Row::Header { group, kind, name, count, online, folded } => header(ui, state, r, &group, kind, &name, count, online, folded),
                 Row::Person { group, friend } => person(ui, cx, state, r, &group, friend, clock),
+                Row::GotHead { count, boops } => got_head(ui, r, count, boops),
+                // As wide as a person's card, the gap under it.
+                Row::Got { id } => {
+                    if let Some(g) = got(state, &id) {
+                        let now = state.now();
+                        got_row(ui, cx, state, Rect::from_min_size(r.min + vec2(4.0, 2.0), vec2(r.width() - 8.0, list::GOT_H - 6.0)), &g, clock, now);
+                    }
+                }
             }
         }
     });
@@ -608,4 +609,112 @@ pub(super) fn put_away(ui: &mut Ui, state: &State, rect: Rect, side: super::Side
     job.halign = egui::Align::Center;
     let galley = p.layout_job(job);
     p.galley(pos2(rect.center().x, c.y + 64.0), galley, theme::FG_3);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{Backend, Ctl};
+    use crate::state::Snapshot;
+    use orbiters_core::launcher::Boop;
+    use orbiters_core::settings::Settings;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    /// Nothing is sent from these pictures of the list.
+    struct Still;
+    impl Backend for Still {
+        fn n4n0(&self, _command: crate::ipc::N4n0Command) {}
+        fn view(&self) -> Arc<Snapshot> {
+            Arc::new(Snapshot::new(Settings::default()))
+        }
+        fn take_notices(&self) -> Vec<crate::controller::Notice> {
+            Vec::new()
+        }
+        fn library_version(&self) -> u64 {
+            0
+        }
+        fn attach(&self, _ctx: &egui::Context) {}
+        fn start_capture(&self) {}
+        fn stop_capture(&self) {}
+        fn pause_capture(&self, _paused: bool) {}
+        fn start_test_capture(&self) {}
+        fn import_raw_capture(&self, _dir: PathBuf) {}
+        fn patch_settings(&self, _patch: serde_json::Value) {}
+        fn trash_session(&self, _dir: PathBuf) {}
+        fn clean_up(&self, _trim: Vec<PathBuf>, _delete: Vec<PathBuf>) {}
+        fn reconstruct(&self, _dir: PathBuf) {}
+        fn stop_reconstruction(&self) {}
+        fn unqueue_reconstruction(&self, _dir: PathBuf) {}
+        fn send_to_mixer(&self, _dir: PathBuf, _title: String) {}
+        fn sign_in(&self) {}
+        fn reopen_sign_in(&self) {}
+        fn cancel_sign_in(&self) {}
+        fn sign_out(&self) {}
+        fn request_worker_log(&self) {}
+        fn worker_log(&self) -> Option<Vec<String>> {
+            None
+        }
+        fn upload_pictures(&self, _world_id: String, _world_name: String, _paths: Vec<PathBuf>) {}
+        fn upload_preview(&self, _world_id: String, _world_name: String, _session: PathBuf) {}
+        fn request_maps(&self) {}
+        fn maps(&self) -> Option<crate::state::MapsMine> {
+            None
+        }
+        fn calibrated(&self, _calibration: orbiters_contracts::performance::calibration::Calibration) {}
+        fn frames(&self, _chunk: crate::state::FrameChunk) {}
+        fn headset(&self, _in_use: bool) {}
+        fn walk_boost(&self, _strength: f32) {}
+        fn osc_reconnect(&self) {}
+        fn updates(&self, _action: crate::ipc::UpdateAction) {}
+        fn quit(&self) {}
+    }
+
+    /// REQUEST18 1, Enzo: "the whole thing is scrollable … intricated scrollable frames are terrible experience". Thirty
+    /// boops (made up, from the sample's made-up people) in the friends column of a 780 high window: the column has one
+    /// scroll area, its list; the newest boops' rows are its first rows, and one turn of the wheel over the list takes them
+    /// out of view with the rest of it, the friends following.
+    #[test]
+    fn boops_are_rows_of_the_one_scrolling_list() {
+        let mut data = orbiters_core::launcher::sample();
+        data.possible.boop = true;
+        let from = data.friends[3].clone();
+        data.boops = (0..30)
+            .map(|i| Boop { id: format!("not_boop_{i:02}"), from_id: format!("usr_sample_boop_{i:02}"), from_name: from.name.clone(), from_icon: String::new(), emoji: None, received_at: 1_000 - i as i64 })
+            .collect();
+        let mut state = State { data: Arc::new(data), ..Default::default() };
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: Ctl = Arc::new(Still);
+        let snap = Snapshot::new(Settings::default());
+        let mut toasts = orbiters_ui::toast::Toasts::default();
+        let column = Rect::from_min_size(pos2(0.0, 0.0), vec2(380.0, 780.0));
+        let mut frame = |state: &mut State, n: u32, events: Vec<egui::Event>| {
+            for i in 0..n {
+                let input = egui::RawInput {
+                    screen_rect: Some(column),
+                    time: Some(ctx.input(|x| x.time) + 1.0 / 60.0),
+                    events: if i == 0 { events.clone() } else { Vec::new() },
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| {
+                    let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                    super::super::side_panel(ui, &mut cx, state, column, super::super::Side::Column(column.width()));
+                });
+                // Nothing paints these frames.
+                output.textures_delta.clear();
+            }
+        };
+        let drawn = |state: &State, i: usize| ctx.read_response(Id::unique(("launcher-boop-back", state.data.boops[i].from_id.as_str()))).is_some();
+        frame(&mut state, 30, Vec::new());
+        assert_eq!(ctx.data(|d| d.count::<egui::scroll_area::State>()), 1, "one scroll area in the column: the list");
+        assert!(drawn(&state, 0) && drawn(&state, 1), "the newest boops are the list's first rows, each with its Boop back");
+        assert!(!drawn(&state, 29), "the oldest further down the same list, out of view");
+        assert_eq!(state.rows[0], Row::GotHead { count: 31, boops: 30 }, "every boop, and the sample's invite request");
+        let list_at = pos2(190.0, 500.0);
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -(list::GOT_HEAD_H + 31.0 * list::GOT_H)), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE, source: egui::MouseWheelSource::Wheel };
+        frame(&mut state, 90, vec![egui::Event::PointerMoved(list_at), wheel]);
+        assert!((0..30).all(|i| !drawn(&state, i)), "scrolled past the boops: none left in view");
+        assert_eq!(ctx.data(|d| d.count::<egui::scroll_area::State>()), 1, "still one scroll area");
+    }
 }

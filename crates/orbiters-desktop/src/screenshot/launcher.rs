@@ -9,7 +9,7 @@ use orbiters_core::launcher::*;
 
 const NOW: i64 = 1_795_000_000;
 
-pub(super) const NAMES: [&str; 26] = [
+pub(super) const NAMES: [&str; 28] = [
     "launcher-list",
     "launcher-invite",
     "launcher-hover",
@@ -39,6 +39,10 @@ pub(super) const NAMES: [&str; 26] = [
     "launcher-small-stale",
     // Request16 1: the status list open under its pill, each row's dot in its status's colour.
     "launcher-mine-status",
+    // REQUEST18 1: every boop received is a row of the friends' one list, before the friends: six; thirty (and an invite
+    // request), at the list's top ("launcher-boops-30-scrolled": the same list scrolled past them).
+    "launcher-boops-6",
+    "launcher-boops-30",
 ];
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
@@ -79,7 +83,8 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
     });
     // Request16 3: scrollbars show only while scrolling. Home and the friends list half a second after a turn of the wheel over each (their bars up); run with
     // `--extend 90 --sequence 90` to see them fade once the wheel stops. "launcher-list" is the same page at rest, no bar.
-    for (name, pointer, scroll) in [("launcher-scrolled", pos2(560.0, 520.0), 400.0), ("launcher-friends-scrolled", pos2(1100.0, 560.0), 400.0)] {
+    // REQUEST18 1: the friends' list with thirty boops at its top, scrolled past them by one turn of the wheel over it.
+    for (name, pointer, scroll) in [("launcher-scrolled", pos2(560.0, 520.0), 400.0), ("launcher-friends-scrolled", pos2(1100.0, 560.0), 400.0), ("launcher-boops-30-scrolled", pos2(1100.0, 560.0), 1720.0)] {
         scenarios.push(Scenario {
             name,
             page: Page::Home,
@@ -236,6 +241,18 @@ fn more_people(state: &mut LauncherState) {
 fn data(name: &str) -> LauncherState {
     let mut s = sample();
     more_people(&mut s);
+    if let Some(n) = name.strip_prefix("launcher-boops-").and_then(|n| n.split('-').next()).and_then(|n| n.parse::<usize>().ok()) {
+        // Made-up people of the list, newest first, a few minutes apart.
+        s.boops = (0..n)
+            .map(|i| {
+                let f = &s.friends[(i * 7 + 3) % s.friends.len()];
+                orbiters_core::launcher::Boop { id: format!("not_boop_{i:02}"), from_id: f.id.clone(), from_name: f.name.clone(), from_icon: f.look.icon.clone(), emoji: None, received_at: NOW - 40 - i as i64 * 170 }
+            })
+            .collect();
+        if n < 10 {
+            s.invites.retain(|i| i.kind != InviteKind::Request);
+        }
+    }
     if name == "launcher-starting" {
         // A Mac has the desktop game alone (its one button says that Obelisk is open).
         s.game = Game::Starting(if orbiters_core::vrchat_launch::VR_HERE { LaunchMode::Vr } else { LaunchMode::Desktop });

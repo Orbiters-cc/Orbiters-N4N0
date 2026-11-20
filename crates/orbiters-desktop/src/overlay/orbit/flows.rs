@@ -1637,6 +1637,55 @@ fn ask_streamed_snapshot_marks_the_page_for_repaint() {
     }
 }
 
+/// REQUEST18 3: "Share 3D capture" under the wing is there while the service offers a capture of this world (none of its
+/// captures public), and never while a recording runs. Its first press only asks (publishing is the person's decision, as
+/// "Share publicly" beside the camera asks the first time); Cancel puts the question away with nothing sent; Yes asks the
+/// explorer to share that capture, the question answered. Asked before, one press shares. No capture offered: no tile.
+#[test]
+fn share_3d_capture_asks_first_then_shares_through_the_explorer() {
+    use super::panels::share_here::TileState;
+    use crate::controller::explorer::{offer_id, Command, ShareHere};
+    let (mut person, heard) = Person::heard();
+    let key = "C:/Sessions/2026-11-20_10-00-00".to_string();
+    let id = offer_id(&key);
+    let set = |person: &mut Person, heard: &Heard, change: &dyn Fn(&mut Snapshot)| {
+        change(Arc::make_mut(&mut person.snap));
+        *heard.shown.lock().unwrap() = Some(person.snap.clone());
+        person.turns(2);
+    };
+    set(&mut person, &heard, &|snap| {
+        snap.explorer.share_here = Some(ShareHere { key: key.clone(), world_id: "wrld_sample".into(), world_name: "Sample world".into(), last: None });
+        snap.settings.explorer.public_confirmed = false;
+    });
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    let tile = |person: &Person| person.panels.list.iter().any(|p| p.zone == Zone::QmShare);
+    let state = |person: &Person| person.panels.facts.share_here.as_ref().map(|t| t.state.clone());
+    let sent = |heard: &Heard| heard.explorer.lock().unwrap().clone();
+    assert!(tile(&person), "offered: the tile is under the wing");
+    person.press(Action::ShareHere(id));
+    assert_eq!(state(&person), Some(TileState::Asking));
+    assert!(sent(&heard).is_empty(), "the first press asks: nothing is shared");
+    person.press(Action::ShareHereNo);
+    assert_eq!(state(&person), Some(TileState::Ready));
+    assert!(sent(&heard).is_empty(), "put away: nothing is shared");
+    person.press(Action::ShareHere(id));
+    person.press(Action::ShareHereYes(id));
+    assert_eq!(sent(&heard), [Command::ShareCapture { key: key.clone(), confirmed: true }], "yes: shared, the question answered");
+    // Asked once already: one press shares.
+    set(&mut person, &heard, &|snap| snap.settings.explorer.public_confirmed = true);
+    person.press(Action::ShareHere(id));
+    assert_eq!(sent(&heard).last(), Some(&Command::ShareCapture { key: key.clone(), confirmed: false }));
+    // While a recording runs: not there (Stop is in its place).
+    set(&mut person, &heard, &|snap| snap.capture.state = crate::state::CaptureState::Recording);
+    assert!(!tile(&person), "not while recording");
+    set(&mut person, &heard, &|snap| snap.capture.state = crate::state::CaptureState::Idle);
+    assert!(tile(&person));
+    // Nothing offered (no capture here, or one public already): gone.
+    set(&mut person, &heard, &|snap| snap.explorer.share_here = None);
+    assert!(!tile(&person), "no capture to offer: no tile");
+}
+
 /// A backend that keeps what the menus asked of it (N4N0's commands, sign-ins), and is otherwise the screenshots' still one.
 #[derive(Default)]
 struct Heard {
@@ -1647,6 +1696,9 @@ struct Heard {
     camera: std::sync::Mutex<Vec<String>>,
     /// The settings' changes asked for, in order.
     patches: std::sync::Mutex<Vec<serde_json::Value>>,
+    /// What the explorer was asked (shares), in order; the service's snapshot as it says it, when a test sets one.
+    explorer: std::sync::Mutex<Vec<crate::controller::explorer::Command>>,
+    shown: std::sync::Mutex<Option<Arc<Snapshot>>>,
 }
 
 impl Heard {
@@ -1665,8 +1717,11 @@ impl crate::backend::Backend for Heard {
     fn booster(&self, command: crate::booster::Command) {
         self.boosters.lock().unwrap().push(format!("{command:?}"));
     }
+    fn explorer(&self, command: crate::controller::explorer::Command) {
+        self.explorer.lock().unwrap().push(command);
+    }
     fn view(&self) -> Arc<Snapshot> {
-        Arc::new(crate::state::Snapshot::new(Settings::default()))
+        self.shown.lock().unwrap().clone().unwrap_or_else(|| Arc::new(crate::state::Snapshot::new(Settings::default())))
     }
     fn take_notices(&self) -> Vec<crate::controller::Notice> {
         Vec::new()

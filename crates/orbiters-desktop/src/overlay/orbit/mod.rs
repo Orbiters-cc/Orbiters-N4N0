@@ -80,6 +80,7 @@ fn commits_on_release(action: Action) -> bool {
     matches!(
         action,
         Action::ShareTo(_) | Action::SharePublic(_) | Action::ShareConfirm(_) | Action::ShareCancelConfirm | Action::ShareDismiss(_)
+            | Action::ShareHere(_) | Action::ShareHereYes(_) | Action::ShareHereNo
             | Action::ChooserPerson(_) | Action::ChooserPage(_) | Action::ChooserSend(_) | Action::ChooserClose | Action::ChooserRetry
     )
 }
@@ -1068,6 +1069,11 @@ pub struct Panels {
     share: camera_share::CameraShare,
     /// A share button pressed: it acts when let go on it, never when its part went away under the trigger.
     share_held: Option<Action>,
+    /// "Share 3D capture" (REQUEST18 3): the first time's question up on its tile, for the capture it names; that capture's
+    /// thumbnail (its folder, and the picture once read), and the read under way.
+    share_asking: Option<u64>,
+    share_thumb: Option<(String, Option<ColorImage>)>,
+    share_thumb_coming: Option<mpsc::Receiver<(String, Option<ColorImage>)>>,
     web_for: Option<u64>,
     /// An engine started ahead while the camera looks for a code, and when one was last started (Request 18: a code's page opens without the engine's
     /// start, which took 9 to 30 s in Enzo's headset session).
@@ -1186,6 +1192,9 @@ impl Panels {
             web: None,
             share: Default::default(),
             share_held: None,
+            share_asking: None,
+            share_thumb: None,
+            share_thumb_coming: None,
             web_for: None,
             web_spare: None,
             web_spare_at: None,
@@ -1367,7 +1376,8 @@ impl Panels {
     /// shown there. Its pictures of the gallery go as they went (they are let go with the sheet); what plays's stays, so that the part need not paint for it again.
     fn rest(&mut self, mut panel: Panel) {
         let art = self.art.as_ref().map(|(key, _)| key.as_str());
-        panel.pictures.retain(|key, _| panel.zone != Zone::Takeover && art == Some(key.as_str()));
+        let thumb = self.share_thumb.as_ref().map(|(key, _)| key.as_str());
+        panel.pictures.retain(|key, _| panel.zone != Zone::Takeover && (art == Some(key.as_str()) || thumb == Some(key.as_str())));
         self.rested.retain(|r| r.panel.zone != panel.zone);
         self.rested.push(Rested { panel, since: Instant::now() });
         self.hold_at_most(RESTS_HOLD);
@@ -1425,6 +1435,7 @@ impl Panels {
                 }
             }
             self.peek = false;
+            self.share_asking = None;
             self.stop_talking();
             self.facts.pointed = None;
             self.facts.sheet = None;
@@ -2126,6 +2137,41 @@ impl Panels {
         }
     }
 
+    fn share_here_dirty(&mut self) {
+        for panel in self.list.iter_mut().filter(|p| p.zone == Zone::QmShare) {
+            panel.dirty = true;
+        }
+    }
+
+    /// "Share 3D capture": its question goes with its capture; its capture's thumbnail read (off this thread) when another
+    /// capture is offered, and painted again when it comes.
+    fn follow_share_here(&mut self, snap: &Snapshot) {
+        let key = snap.explorer.share_here.as_ref().map(|h| h.key.clone());
+        if self.share_asking.is_some() && key.as_deref().map(crate::controller::explorer::offer_id) != self.share_asking {
+            self.share_asking = None;
+        }
+        if self.share_thumb.as_ref().map(|t| &t.0) != key.as_ref() {
+            self.share_thumb = key.clone().map(|k| (k, None));
+            self.share_thumb_coming = key.map(|key| {
+                let (tx, rx) = mpsc::channel();
+                let _ = std::thread::Builder::new().name("share-here-picture".into()).spawn(move || {
+                    let picture = orbiters_core::bundle::read_thumbnail(std::path::Path::new(&key))
+                        .map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba));
+                    let _ = tx.send((key, picture));
+                });
+                rx
+            });
+            self.share_here_dirty();
+        }
+        if let Some(Ok((key, picture))) = self.share_thumb_coming.as_ref().map(|rx| rx.try_recv()) {
+            self.share_thumb_coming = None;
+            if let Some(thumb) = self.share_thumb.as_mut().filter(|t| t.0 == key) {
+                thumb.1 = picture;
+                self.share_here_dirty();
+            }
+        }
+    }
+
     /// Whether the laser is on the page over the camera: the stick scrolls it then.
     pub fn web_pointed(&self) -> bool {
         self.web.as_ref().is_some_and(camera_web::CameraWeb::pointed)
@@ -2139,6 +2185,7 @@ impl Panels {
         if self.share.follow(snap) {
             self.camera_dirty();
         }
+        self.follow_share_here(snap);
         // A code found beside the camera: its page opens over the camera, once for each scan, and the camera stops looking (Enzo, F17).
         if let crate::controller::camera_tools::Qr::Found { url } = &snap.camera_tools.qr {
             if self.web_for != Some(snap.camera_tools.qr_generation) {
@@ -2434,6 +2481,8 @@ impl Panels {
             rec_starting: live && snap.capture.state == CaptureState::Starting,
             rec_stopping: live && (snap.capture.state == CaptureState::Stopping || (self.stop_asked.is_some_and(|at| at.elapsed() < STOP_SAID_FOR) && snap.capture.state != CaptureState::Idle)),
             camera: self.camera_now(snap),
+            // Its picture is added per part, in `paint`, as what plays's is.
+            share_here: panels::share_here::tile(&snap.explorer, self.share_asking),
             recording_seconds: recording.then(|| snap.capture.stats.as_ref().map_or(0, |s| s.elapsed_s as u32)),
             capture_busy: !matches!(snap.capture.state, CaptureState::Idle),
             countdown: snap.n4n0.photo_countdown,
@@ -3437,6 +3486,30 @@ impl Panels {
                 self.share.confirm(id, &self.backend);
                 self.camera_dirty();
             }
+            // "Share 3D capture" (REQUEST18 3): for the capture offered now only. Public and irreversible in practice: asked the
+            // first time, as "Share publicly" is beside the camera, and shared through the same flow.
+            Action::ShareHere(id) => {
+                if let Some(here) = snap.explorer.share_here.as_ref().filter(|h| crate::controller::explorer::offer_id(&h.key) == id) {
+                    if snap.settings.explorer.public_confirmed {
+                        self.backend.explorer(crate::controller::explorer::Command::ShareCapture { key: here.key.clone(), confirmed: false });
+                    } else {
+                        self.share_asking = Some(id);
+                    }
+                }
+                self.share_here_dirty();
+            }
+            Action::ShareHereYes(id) => {
+                if self.share_asking.take() == Some(id) {
+                    if let Some(here) = snap.explorer.share_here.as_ref().filter(|h| crate::controller::explorer::offer_id(&h.key) == id) {
+                        self.backend.explorer(crate::controller::explorer::Command::ShareCapture { key: here.key.clone(), confirmed: true });
+                    }
+                }
+                self.share_here_dirty();
+            }
+            Action::ShareHereNo => {
+                self.share_asking = None;
+                self.share_here_dirty();
+            }
             Action::ShareCancelConfirm => {
                 self.share.confirming = None;
                 self.camera_dirty();
@@ -3823,6 +3896,9 @@ impl Panels {
                     facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| panel.canvas.textures.load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
                 }
             }
+            if let (Zone::QmShare, Some((key, Some(image))), Some(tile)) = (panel.zone, &self.share_thumb, facts.share_here.as_mut()) {
+                tile.picture = Some(panel.pictures.entry(key.clone()).or_insert_with(|| panel.canvas.textures.load_texture("share-here", image.clone(), TextureOptions::LINEAR)).id());
+            }
             let spec = Self::paint_spec(panel);
             panel.dirty = false;
             self.stage.painter.submit_part(page_painter::PartRequest { spec, facts, time, language: orbiters_i18n::language() });
@@ -3950,6 +4026,10 @@ impl Panels {
                     let ctx = panel.canvas.ctx();
                     facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| ctx.load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
                 }
+            }
+            if let (Zone::QmShare, Some((key, Some(image))), Some(tile)) = (panel.zone, &self.share_thumb, facts.share_here.as_mut()) {
+                let ctx = panel.canvas.ctx();
+                tile.picture = Some(panel.pictures.entry(key.clone()).or_insert_with(|| ctx.load_texture("share-here", image.clone(), TextureOptions::LINEAR)).id());
             }
             orbiters_ui::anim::set_live(panel.canvas.ctx(), live);
             let (zone, size, hover, pressed) = (panel.zone, panel.logical, panel.hover, panel.pressed);

@@ -52,6 +52,9 @@ pub(super) fn me(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer
         let refresh = Rect::from_center_size(pos2(x, rect.center().y), vec2(32.0, 32.0));
         if widgets::activated(&widgets::IconButton::new(icons::ARROW_CLOCKWISE, orbiters_i18n::mark("Read again")).size(32.0, 15.0).id_salt("launcher-refresh").show_at(ui, refresh)) {
             state.act(cx, clock, Action::Refresh);
+            // The own profile and its lists are read again too.
+            state.mine.read_again();
+            state.mine_listed.clear();
         }
     }
 }

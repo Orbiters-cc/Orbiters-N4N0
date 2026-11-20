@@ -830,7 +830,7 @@ impl Controller {
             self.update_if(|s| {
                 let signed = matches!(s.launcher.source, Source::SignedIn { .. });
                 if signed {
-                    let kept = LauncherState { game: s.launcher.game.clone(), possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, ..LauncherState::default() };
+                    let kept = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, ..LauncherState::default() };
                     *s.launcher = kept;
                 }
                 signed
@@ -925,6 +925,12 @@ impl Controller {
         self.update_if(|s| {
             state.game = s.launcher.game.clone();
             state.possible.play = s.launcher.possible.play;
+            // VRChat's profiles on this computer are the game's, not the account's; the own profile, card lists and all,
+            // stays for the same account (it is read on its own, `launcher_mine`): a scheduled read never erases them.
+            state.profiles = s.launcher.profiles.clone();
+            if s.launcher.source == state.source {
+                state.mine = s.launcher.mine.clone();
+            }
             // An open profile stays only when the list on show was this same account's, and the person is in it.
             let same_account = s.launcher.source == state.source;
             state.profile = s.launcher.profile.clone().filter(|p| same_account && (state.friends.iter().any(|f| f.id == p.friend.id) || state.me.as_ref().is_some_and(|m| m.id == p.friend.id)));

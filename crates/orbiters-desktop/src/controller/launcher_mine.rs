@@ -263,6 +263,7 @@ impl Controller {
             mine.listing = None;
             match read {
                 Ok(files) => {
+                    mine.list_failed = None;
                     let pictures: Vec<OwnPicture> = files.iter().filter_map(own_picture).collect();
                     match kind {
                         PictureKind::Icons => mine.icons = Some(pictures),
@@ -270,12 +271,13 @@ impl Controller {
                     }
                 }
                 Err(notice) => {
-                    let part = if kind == PictureKind::Icons { ProfilePart::Picture } else { ProfilePart::Banner };
+                    // A list that did not come is no change that failed: said in its chooser, whose Try again reads
+                    // the list again (never a profile change replayed).
                     let text = match notice {
                         Notice::Error(t) | Notice::Failed { text: t, .. } => t,
-                        _ => String::new(),
+                        _ => tr("VRChat could not be reached. Try again shortly.").to_string(),
                     };
-                    mine.saving = Some(Saving::Failed(part, text));
+                    mine.list_failed = Some((kind, text));
                 }
             }
         });

@@ -25,6 +25,8 @@ const BIO_LINE: f32 = 19.0;
 const BIO_ROWS_IDLE: usize = 3;
 const BIO_EDIT_H: f32 = 104.0;
 const BUTTONS_H: f32 = 34.0;
+/// The own profile not come (a read that failed): asked again after this.
+const READ_AGAIN: f64 = 60.0;
 /// How long "Saved" stays after VRChat took a change.
 const SAVED_FOR: f64 = 3.0;
 /// Colours offered for a colour banner.
@@ -68,8 +70,8 @@ pub struct Mine {
     pub editing: Option<Editing>,
     picker: Option<(Picker, Rect, f64)>,
     banner_tab: Option<BannerTab>,
-    /// The account the profile was asked for (once per account and run).
-    asked_for: Option<String>,
+    /// The account the profile was asked for, and when (asked again a minute later while it has not come).
+    asked_for: Option<(String, f64)>,
     /// The account everything below was typed or chosen on: a switch to another drops all of it (REQUEST15 fix B3).
     account: Option<String>,
     /// The last change pressed, the answers counted when it was pressed, and when: shown at once while VRChat answers,
@@ -81,6 +83,19 @@ pub struct Mine {
 }
 
 impl Mine {
+    /// Read again (the list's Read again): the profile and the lists are asked for anew.
+    pub fn read_again(&mut self) {
+        self.asked_for = None;
+    }
+
+    /// The change Try again sends: the last one pressed, only when it is the one that failed.
+    fn retry(&self, failed: Option<&Saving>) -> Option<ProfileEdit> {
+        match failed {
+            Some(Saving::Failed(part, _)) => self.last.clone().filter(|e| e.part() == *part),
+            _ => None,
+        }
+    }
+
     /// Pictures of the page: a text being typed.
     pub fn stand_in_editing(&mut self, editing: Editing) {
         self.editing = Some(editing);
@@ -154,9 +169,14 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     }
     // The account's own profile is read once its list shows (a read; nothing is sent from it).
     if let Some(account) = signed_in(state) {
-        if state.data.mine.is_none() && state.mine.asked_for.as_deref() != Some(account.as_str()) {
-            state.mine.asked_for = Some(account);
-            state.act(cx, anim::time(ui.ctx()), Action::ReadMine);
+        let clock = anim::time(ui.ctx());
+        let due = match &state.mine.asked_for {
+            Some((asked, at)) => *asked != account || clock - at > READ_AGAIN,
+            None => true,
+        };
+        if state.data.mine.is_none() && due {
+            state.mine.asked_for = Some((account, clock));
+            state.act(cx, clock, Action::ReadMine);
         }
     }
     settle(state, anim::time(ui.ctx()));
@@ -180,7 +200,7 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
 pub(super) fn sync_account(state: &mut State) {
     let now = signed_in(state);
     if state.mine.account != now {
-        let asked_for = state.mine.asked_for.take().filter(|a| Some(a) == now.as_ref());
+        let asked_for = state.mine.asked_for.take().filter(|a| Some(&a.0) == now.as_ref());
         state.mine = Mine { account: now, asked_for, ..Mine::default() };
         state.mine_listed.clear();
     }
@@ -597,13 +617,11 @@ fn failed_line(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, why: &str, c
     let again = widgets::Button::new(tr("Try again")).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt("mine-again");
     let aw = again.desired_width(ui);
     let mut right = rect.right() - 4.0;
-    if state.mine.last.is_some() {
+    if let Some(edit) = state.mine.retry(state.data.mine.as_ref().and_then(|m| m.saving.as_ref())) {
         let br = Rect::from_min_size(pos2(right - aw, rect.center().y - 13.0), vec2(aw, 26.0));
         if again.show_at(ui, br).clicked() {
-            if let Some(edit) = state.mine.last.clone() {
-                state.mine.editing = None;
-                send(state, cx, clock, edit);
-            }
+            state.mine.editing = None;
+            send(state, cx, clock, edit);
         }
         right -= aw + 6.0;
     }
@@ -812,8 +830,22 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             }
         }
     }
-    // What VRChat allows, in plain words.
-    p.galley(pos2(inner.left(), body.bottom() + 12.0), note_galley, theme::FG_3);
+    // What VRChat allows, in plain words; or why the list did not come, with Try again (it reads the list again).
+    let failed_list = wanted.and_then(|w| mine.list_failed.clone().filter(|(k, _)| *k == w));
+    match failed_list {
+        Some((kind_failed, why)) => {
+            let at = pos2(inner.left(), body.bottom() + 12.0);
+            let again = widgets::Button::new(tr("Try again")).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt("mine-list-again");
+            let aw = again.desired_width(&over);
+            widgets::text_truncated(&p, pos2(at.x, at.y + 13.0), Align2::LEFT_CENTER, &Txt::new(why.as_str(), 12.0).color(theme::DANGER), inner.width() - aw - 8.0);
+            if again.show_at(&mut over, Rect::from_min_size(pos2(inner.right() - aw, at.y), vec2(aw, 26.0))).clicked() {
+                state.mine_listed.retain(|k| *k != kind_failed);
+                state.act(cx, clock, Action::ListPictures(kind_failed));
+                state.mine_listed.push(kind_failed);
+            }
+        }
+        None => p.galley(pos2(inner.left(), body.bottom() + 12.0), note_galley, theme::FG_3),
+    }
     if let Some(edit) = chosen {
         send(state, cx, clock, edit);
         closed = true;
@@ -882,6 +914,16 @@ mod tests {
         state.data = Arc::new(data);
         sync_account(&mut state);
         assert_eq!(bound(&state, ProfileEdit::Bio("x".into())), None);
+    }
+
+    #[test]
+    fn try_again_sends_only_the_change_that_failed() {
+        let mut mine = Mine { last: Some(ProfileEdit::Bio("bio".into())), ..Mine::default() };
+        assert_eq!(mine.retry(Some(&Saving::Failed(ProfilePart::Bio, "no".into()))), Some(ProfileEdit::Bio("bio".into())));
+        assert_eq!(mine.retry(Some(&Saving::Failed(ProfilePart::Picture, "no".into()))), None, "a failed picture never replays the bio");
+        assert_eq!(mine.retry(Some(&Saving::Saved(ProfilePart::Bio))), None);
+        mine.last = None;
+        assert_eq!(mine.retry(Some(&Saving::Failed(ProfilePart::Bio, "no".into()))), None);
     }
 
     #[test]

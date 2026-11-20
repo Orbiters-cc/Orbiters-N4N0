@@ -1206,3 +1206,37 @@ fn a_picture_not_among_the_accounts_own_files_is_never_sent() {
     let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
     assert_eq!(calls, ["GET /files?tag=icon&n=100", "GET /files?tag=gallery&n=100", "PUT /profile/usr_test"], "no PUT for the foreign picture");
 }
+
+// --- REQUEST15 fix SF-refresh: a scheduled read keeps the own profile and VRChat's profiles; a list failure is no change ---
+
+#[test]
+fn a_full_read_keeps_the_own_profile_and_the_game_profiles() {
+    use orbiters_core::launcher::{GameProfile, MyProfile};
+    let c = controller(Arc::new(Pretend::default()));
+    me_signed_in(&c);
+    c.update(|s| {
+        s.launcher.mine = Some(MyProfile { bio: "kept".into(), ..MyProfile::default() });
+        s.launcher.profiles = vec![GameProfile { profile: 1, running: Some(LaunchMode::Vr), ..GameProfile::default() }];
+    });
+    let same = LauncherState { source: c.view().launcher.source.clone(), ..LauncherState::default() };
+    c.launcher_commit_read(same);
+    assert_eq!(c.view().launcher.mine.as_ref().map(|m| m.bio.as_str()), Some("kept"));
+    assert_eq!(c.view().launcher.profiles.len(), 1);
+    // Another account's read: its own profile is not the previous one's; the computer's profiles stay.
+    c.launcher_commit_read(LauncherState { source: Source::SignedIn { user_id: "usr_other".into(), name: String::new() }, ..LauncherState::default() });
+    assert!(c.view().launcher.mine.is_none());
+    assert_eq!(c.view().launcher.profiles.len(), 1);
+}
+
+#[test]
+fn a_list_that_did_not_come_is_said_in_its_chooser_not_as_a_failed_change() {
+    use orbiters_core::launcher::PictureKind;
+    let c = controller(Arc::new(Pretend::default()));
+    let _ = c.test_vrchat(vec![(503, json!({}))]);
+    me_signed_in(&c);
+    c.launcher_do(mine(Action::ListPictures(PictureKind::Gallery)));
+    let m = c.view().launcher.mine.clone().unwrap();
+    assert!(m.saving.is_none(), "no change failed");
+    assert!(matches!(m.list_failed, Some((PictureKind::Gallery, _))));
+    assert!(m.listing.is_none());
+}

@@ -232,12 +232,25 @@ impl Game for RealGame {
     fn launch(&self, plan: &LaunchPlan) -> Result<(), Failure> {
         // Beside the bridge's side sessions, Steam would start nothing (a game runs once there): VRChat's own launcher, with
         // the default profile named so that a running VRChat is never handed the link instead.
-        let sides_run = self.ctl().is_ok_and(|ctl| !ctl.sides.side_pids().is_empty());
-        if sides_run {
-            let plan = LaunchPlan { profile: Some(plan.profile.unwrap_or(0)), ..plan.clone() };
-            return win::start_vrchat_beside(&plan.args());
+        let ctl = self.ctl()?;
+        let sides_run = !ctl.sides.side_pids().is_empty();
+        // Claimed like Home's starts, under the same lock: never a second VRChat on a profile one is starting on.
+        let profile = plan.profile.unwrap_or(0);
+        let mode = if plan.vr { orbiters_core::launcher::LaunchMode::Vr } else { orbiters_core::launcher::LaunchMode::Desktop };
+        let _started = ctl.launcher_started.lock().unwrap();
+        let claim = ctl.launcher_claim(profile, mode).map_err(|_| {
+            Failure::new("vrchat_starting", "A VRChat is starting on this profile already (from Orbiters' Home).", "Wait a minute, then call get_state.") // i18n: not shown (an AI client reads it in the tool's answer)
+        })?;
+        let started = if sides_run {
+            let plan = LaunchPlan { profile: Some(profile), ..plan.clone() };
+            win::start_vrchat_beside(&plan.args())
+        } else {
+            win::start_vrchat(&plan.args())
+        };
+        if started.is_err() {
+            ctl.launcher_unclaim(claim);
         }
-        win::start_vrchat(&plan.args())
+        started
     }
 
     fn window(&self, pid: u32) -> Option<GameWindow> {

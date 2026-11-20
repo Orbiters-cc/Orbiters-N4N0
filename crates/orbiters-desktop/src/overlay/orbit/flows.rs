@@ -56,6 +56,118 @@ fn the_qr_code_sheet_closed_or_left_stops_its_scan() {
     assert!(qr(&heard).ends_with(&[(true, MenuHolder::Panels), (false, MenuHolder::Panels)]), "{:?}", qr(&heard));
 }
 
+/// verify-r15 B2: on the desktop, the Worlds page left for another tab, or the menu closed, its capture stops turning and is not started again by the turns
+/// that follow (the Worlds' own page stays open behind the other tab); back on Worlds it turns again.
+#[test]
+fn a_world_s_capture_stops_behind_another_tab_and_with_the_menu() {
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::Worlds);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Worlds));
+    let gone = std::env::temp_dir().join(format!("orbiters-no-capture-flow-{}", std::process::id()));
+    let mut list = crate::overlay::worlds::catalog::parse(r#"{"previews":[{"slot":1,"key":1,"id":1,"worldId":"wrld_00000000-0000-4000-8000-000000000001","name":"W","author":"a","uploader":"b","view":{"position":[0,1,0],"target":[0,1,1]}}],"feedback":{}}"#).unwrap();
+    list[0].local = Some(gone);
+    person.panels.stage.worlds.as_mut().expect("Worlds' page").chosen_for_test(list, 1);
+    person.turns(2);
+    let turning = |p: &Person| p.panels.stage.worlds.as_ref().unwrap().turning_for_test();
+    assert_eq!(turning(&person), (Some(1), true), "its capture turns on its page");
+    person.press(Action::Page(Target::Instances));
+    for _ in 0..5 {
+        person.turn();
+        assert_eq!(turning(&person), (None, false), "nothing turns or reads behind Instances");
+    }
+    person.press(Action::Worlds);
+    person.turns(2);
+    let mut again = crate::overlay::worlds::catalog::parse(r#"{"previews":[{"slot":1,"key":1,"id":1,"worldId":"wrld_00000000-0000-4000-8000-000000000001","name":"W","author":"a","uploader":"b","view":{"position":[0,1,0],"target":[0,1,1]}}],"feedback":{}}"#).unwrap();
+    again[0].local = Some(std::env::temp_dir().join("orbiters-no-capture-flow-again"));
+    person.panels.stage.worlds.as_mut().unwrap().chosen_for_test(again, 1);
+    person.turns(2);
+    assert_eq!(turning(&person), (Some(1), true), "back on Worlds: it turns again");
+    person.around = None;
+    for _ in 0..3 {
+        person.turn();
+        assert_eq!(turning(&person), (None, false), "the menu closed: nothing turns behind it");
+        assert!(person.panels.stage.worlds.is_some());
+    }
+}
+
+/// REQUEST15 item 3 fix B1: in VRChat's desktop mode with no SteamVR, an avatar whose older N4N0 hides its screen with the bot has its menu
+/// asked for (the Action Menu's Menu toggle, VRChat's wheel open): All tools opens here and the service hears it shows, so the toggle stays on;
+/// a toggling request closes it, VRChat's menu going closes it, and an avatar whose screen takes the menu has nothing here.
+#[test]
+fn the_service_s_menu_request_opens_all_tools_on_the_desktop() {
+    use crate::ipc::N4n0Command;
+    let (mut person, heard) = Person::heard();
+    let opened = |heard: &Heard| heard.n4n0.lock().unwrap().iter().filter_map(|c| match c { N4n0Command::MenuState { open, .. } => Some(*open), _ => None }).collect::<Vec<_>>();
+    {
+        let snap = Arc::make_mut(&mut person.snap);
+        snap.n4n0.desktop_mode = true;
+        snap.steamvr.running = false;
+        snap.n4n0.screen = false;
+    }
+    person.around = Some(Around::Wheel);
+    person.turns(3);
+    assert_eq!(person.panels.facts.sheet, None, "nothing asked yet");
+    let ask = |person: &mut Person, toggle: bool| {
+        let snap = Arc::make_mut(&mut person.snap);
+        snap.n4n0.menu_request = snap.n4n0.menu_request.wrapping_add(1);
+        snap.n4n0.menu_toggle = toggle;
+        person.turns(2);
+    };
+    ask(&mut person, false);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::All), "the Menu toggle opens All tools beside VRChat's wheel");
+    assert_eq!(opened(&heard).last(), Some(&true), "and the service hears N4N0's menu shows: {:?}", opened(&heard));
+    ask(&mut person, true);
+    assert_eq!(person.panels.facts.sheet, None, "a toggling request closes it");
+    assert_eq!(opened(&heard).last(), Some(&false));
+    ask(&mut person, false);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::All));
+    person.around = None;
+    person.turns(2);
+    assert_eq!(opened(&heard).last(), Some(&false), "VRChat's menu closing closes N4N0's menu here");
+    // The avatar's screen takes the menu: nothing opens here.
+    person.around = Some(Around::Wheel);
+    Arc::make_mut(&mut person.snap).n4n0.screen = true;
+    person.turns(2);
+    ask(&mut person, false);
+    assert_eq!(person.panels.facts.sheet, None, "the avatar's screen shows it");
+    // In VR (SteamVR runs, VRChat in VR) the SteamVR overlay serves it, not this.
+    {
+        let snap = Arc::make_mut(&mut person.snap);
+        snap.n4n0.screen = false;
+        snap.n4n0.desktop_mode = false;
+        snap.steamvr.running = true;
+    }
+    ask(&mut person, false);
+    assert_eq!(person.panels.facts.sheet, None, "the SteamVR overlay's");
+}
+
+/// REQUEST15 fix B2: All tools serving N4N0's menu on the desktop, and the avatar's screen taking the menu back (its older N4N0's bot shown
+/// again, the service opening the menu there): the sheet goes and the service hears it closed here, so only the screen has the menu.
+#[test]
+fn all_tools_gives_n4n0_s_menu_back_to_the_avatar_s_screen() {
+    use crate::ipc::N4n0Command;
+    let (mut person, heard) = Person::heard();
+    let opened = |heard: &Heard| heard.n4n0.lock().unwrap().iter().filter_map(|c| match c { N4n0Command::MenuState { open, .. } => Some(*open), _ => None }).collect::<Vec<_>>();
+    {
+        let snap = Arc::make_mut(&mut person.snap);
+        snap.n4n0.desktop_mode = true;
+        snap.n4n0.screen = false;
+    }
+    person.around = Some(Around::Wheel);
+    person.turns(2);
+    let snap = Arc::make_mut(&mut person.snap);
+    snap.n4n0.menu_request = snap.n4n0.menu_request.wrapping_add(1);
+    person.turns(2);
+    assert_eq!((person.panels.facts.sheet, opened(&heard).last().copied()), (Some(Sheet::All), Some(true)));
+    Arc::make_mut(&mut person.snap).n4n0.screen = true;
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, None, "the screen has the menu now");
+    assert_eq!(opened(&heard).last(), Some(&false), "and the service hears this one closed");
+}
+
 /// OVL2-17: a menu going away under a held press does nothing: the list press is not run later, the held booster level and
 /// smoothing are not saved.
 #[test]
@@ -339,6 +451,7 @@ fn turn_of(panels: &mut Panels, snap: &Snapshot, around: Option<Around>, library
     panels.takeover_place = Some(zones::in_units(Zone::Takeover));
     panels.back_place = Some(zones::in_units(Zone::SheetBack));
     panels.set_open(around, places, snap);
+    panels.serve_menu(snap);
     panels.follow(snap, library);
     panels.menu_turn(snap);
     panels.step_springs(0.011);

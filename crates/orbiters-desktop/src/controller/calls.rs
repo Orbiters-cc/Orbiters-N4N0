@@ -203,6 +203,36 @@ impl Ending {
     }
 }
 
+/// What asking for the relay servers gave.
+#[derive(Debug)]
+enum Relays {
+    Got(Vec<IceServer>),
+    /// Orbiters refused: the account has not N4N0 calls (`not_enabled`). Final: nothing of the call goes on.
+    Denied,
+    Failed(String),
+}
+
+impl super::Controller {
+    /// This side's relay servers, with the credential of the identity signed in; a `not_enabled` refusal closes calls
+    /// for that credential.
+    fn relays(self: &Shared) -> Relays {
+        let Some((api, token)) = self.calls_api() else { return Relays::Failed(tr("sign in to Orbiters to call.").to_string()) };
+        match ice_servers(&api, &token) {
+            Ok(servers) => Relays::Got(servers),
+            Err(e) if super::calls_access::not_enabled(&e) => {
+                self.calls_access_denied(&token);
+                Relays::Denied
+            }
+            Err(e) => Relays::Failed(tr!("the call relay could not be reached: {error}", error = e)),
+        }
+    }
+
+    /// Whether calls are still open to `whose`, the identity a press was made with.
+    fn calls_still_open_to(self: &Shared, whose: &Option<super::calls_access::Whose>) -> bool {
+        whose.is_some() && self.calls_identity().map(|(w, ..)| w) == *whose && self.calls_open()
+    }
+}
+
 /// A request to Orbiters about a call, sent in order by one thread.
 #[derive(Debug, PartialEq)]
 enum Signal {
@@ -294,6 +324,47 @@ impl CallsRuntime {
     fn offer(&mut self, number: u64, ice_servers: Vec<IceServer>, mic: Option<String>) -> Option<CallCommand> {
         let c = self.current(number).filter(|c| !c.incoming && c.phase == CallPhase::Calling && c.worker.is_none())?;
         Some(CallCommand::Offer { call: number, ice_servers, mic, muted: c.muted, relay_only: !self.direct })
+    }
+
+    /// Our call `number` once its relay servers were asked for (`open`: calls are still open to the identity it was
+    /// dialled with; `signed_in`: a direct call can still be signalled). Refused (`not_enabled`) or closed meanwhile, it
+    /// ends: no worker starts, even for a direct call. Without relays, only a direct call goes on (without servers).
+    fn dial_with_relays(&mut self, number: u64, relays: Relays, open: bool, signed_in: bool, mic: Option<String>) -> Acts {
+        let fail = |rt: &mut Self, notice: Option<(NoticeKind, String)>| {
+            let mut acts = if rt.current(number).is_some() { rt.finish(Ending::Failed, true) } else { Acts::default() };
+            acts.notice = notice;
+            acts
+        };
+        match relays {
+            Relays::Denied => fail(self, Some((NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD).to_string()))),
+            _ if !open => fail(self, None),
+            Relays::Got(servers) => Acts { worker: self.offer(number, servers, mic).into_iter().collect(), ..Default::default() },
+            Relays::Failed(e) if self.direct && signed_in => {
+                eprintln!("calls ice-servers: {e}");
+                Acts { worker: self.offer(number, Vec::new(), mic).into_iter().collect(), ..Default::default() }
+            }
+            Relays::Failed(e) => fail(self, Some((NoticeKind::Warning, tr!("Call: {message}", message = e)))),
+        }
+    }
+
+    /// The press on Answer for ringing call `number`, once this side's relay servers were asked for. Only that call, still
+    /// ringing, is answered, and only while calls are still open to the identity it was pressed with (`open`); a refusal
+    /// declines it. Without relays it is answered as it came.
+    fn answer_with_relays(&mut self, number: u64, relays: Relays, open: bool, mic: Option<String>, now: Instant) -> Acts {
+        if self.call.as_ref().filter(|c| c.ringing_in()).map(|c| c.number) != Some(number) {
+            return Acts::default();
+        }
+        match relays {
+            Relays::Denied => return self.hang_up(),
+            _ if !open => return self.hang_up(),
+            Relays::Got(servers) => {
+                if let Some((_, offered)) = self.call.as_mut().and_then(|c| c.offer.as_mut()) {
+                    *offered = servers;
+                }
+            }
+            Relays::Failed(e) => eprintln!("calls ice-servers: {e}"),
+        }
+        self.answer(mic, now)
     }
 
     /// The ringing call is answered here: the worker takes it, with the caller's candidates that came meanwhile.
@@ -876,9 +947,7 @@ impl super::Controller {
     fn calls_tick(self: &Shared) {
         let settings = self.settings();
         // Whether this account has N4N0 calls, asked again when it is time to (whatever the setting: Call's tile shows it).
-        if let Some((api, token)) = self.calls_api() {
-            self.calls_access_refresh(&api, &token);
-        }
+        self.calls_access_refresh();
         let open = self.calls_open();
         let on = open && settings.n4n0.enabled && settings.n4n0.calls;
         // A phase that lasted too long ends.
@@ -989,8 +1058,8 @@ impl super::Controller {
                 }
                 // The account has not N4N0 calls (switched off since): closed here at once, the next look says so.
                 Err(e) if super::calls_access::not_enabled(&e) => {
-                    self.calls_access_refused();
                     self.calls.lock().unwrap().presence_sent = Some(Instant::now());
+                    self.calls_access_denied(&token);
                     return;
                 }
                 Err(e) => {
@@ -1021,14 +1090,25 @@ impl super::Controller {
                 .build()
                 .header("Authorization", &format!("Bearer {token}"))
                 .call();
-            if let Ok(v) = answer.map_err(anyhow::Error::from).and_then(Api::json::<Value>) {
-                let contacts: Vec<CallContact> = v["contacts"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|c| Some(CallContact { id: c["id"].as_str()?.to_string(), name: c["name"].as_str()?.to_string() })).collect())
-                    .unwrap_or_default();
-                let mut rt = self.calls.lock().unwrap();
-                rt.contacts = contacts;
-                rt.contacts_read = Some(Instant::now());
+            match answer.map_err(anyhow::Error::from).and_then(Api::json::<Value>) {
+                Ok(v) => {
+                    let contacts: Vec<CallContact> = v["contacts"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(|c| Some(CallContact { id: c["id"].as_str()?.to_string(), name: c["name"].as_str()?.to_string() })).collect())
+                        .unwrap_or_default();
+                    let mut rt = self.calls.lock().unwrap();
+                    rt.contacts = contacts;
+                    rt.contacts_read = Some(Instant::now());
+                }
+                Err(e) => {
+                    // Asked again after the usual wait, not at every tick (verify A, contacts refused).
+                    self.calls.lock().unwrap().contacts_read = Some(Instant::now());
+                    if super::calls_access::not_enabled(&e) {
+                        self.calls_access_denied(&token);
+                        return;
+                    }
+                    eprintln!("calls contacts: {e:#}");
+                }
             }
         }
         self.calls_publish(|_| {});
@@ -1100,14 +1180,20 @@ impl super::Controller {
             }
             if let Some((event, data)) = sse.line(&String::from_utf8_lossy(&line)) {
                 let value: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
-                self.on_call_event(&event, value);
+                self.on_call_event(&event, value, token);
             }
         }
         Ok(delivered)
     }
 
     /// One event of the server's stream.
-    fn on_call_event(self: &Shared, event: &str, v: Value) {
+    /// One event of the stream opened with credential `token`.
+    fn on_call_event(self: &Shared, event: &str, v: Value, token: &str) {
+        // Orbiters closed calls for this credential (the feature switched off): closed here at once.
+        if event == "calls_closed" {
+            self.calls_access_denied(token);
+            return;
+        }
         // The shared 3D view's events come on the same stream.
         if event.starts_with("share_") {
             self.shared_view_event(event, &v);
@@ -1269,6 +1355,9 @@ impl super::Controller {
                     }
                     if let Err(e) = post(&api, &token, &format!("n4n0/calls/{id}/candidates"), &json!({ "candidates": candidates })) {
                         eprintln!("calls candidates: {e:#}");
+                        if super::calls_access::not_enabled(&e) {
+                            self.calls_access_denied(&token);
+                        }
                     }
                 }
                 Signal::Create { number, contact, offer } => {
@@ -1276,8 +1365,9 @@ impl super::Controller {
                         Ok(v) => v["call"].as_str().filter(|id| !id.is_empty()).map(str::to_string).ok_or(Ending::Failed),
                         Err(e) if refused_as(&e, 409, "busy") => Err(Ending::Busy),
                         Err(e) if super::calls_access::not_enabled(&e) => {
-                            self.calls_access_refused();
-                            self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
+                            if self.calls_access_denied(&token) {
+                                self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
+                            }
                             Err(Ending::Failed)
                         }
                         Err(e) => {
@@ -1294,8 +1384,9 @@ impl super::Controller {
                     if let Err(e) = post(&api, &token, &format!("n4n0/calls/{id}/answer"), &json!({ "answer": sdp })) {
                         eprintln!("calls answer: {e:#}");
                         if super::calls_access::not_enabled(&e) {
-                            self.calls_access_refused();
-                            self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
+                            if self.calls_access_denied(&token) {
+                                self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
+                            }
                         } else {
                             self.notify(NoticeKind::Warning, tr!("Call: {message}", message = e));
                         }
@@ -1342,34 +1433,18 @@ impl super::Controller {
         };
         self.calls_publish(|_| {});
         self.n4n0_say(&fill(tr_latin("Calling {name}…"), &[("name", &name)]));
+        let whose = self.calls_identity().map(|(w, ..)| w);
         let ctl = self.clone();
         std::thread::spawn(move || {
-            let servers = match ctl.calls_api() {
-                Some((api, token)) => ice_servers(&api, &token).map_err(|e| {
-                    if super::calls_access::not_enabled(&e) {
-                        ctl.calls_access_refused();
-                    }
-                    tr!("the call relay could not be reached: {error}", error = e)
-                }),
-                None => Err(tr("sign in to Orbiters to call.").to_string()),
-            };
+            let relays = ctl.relays();
+            // Checked again once the relays came: the same identity, calls still open to it.
+            let open = ctl.calls_still_open_to(&whose);
+            let signed_in = ctl.account_api().is_some();
             let (mic, direct) = ctl.with_settings(|s| (s.n4n0.mic_device.clone(), s.n4n0.direct_calls));
             let mic = (!mic.is_empty()).then_some(mic);
             let mut rt = ctl.calls.lock().unwrap();
             rt.direct = direct;
-            let acts = match servers {
-                Ok(servers) => Acts { worker: rt.offer(number, servers, mic).into_iter().collect(), ..Default::default() },
-                // Without the relay, a call through it cannot be made (a direct one can, without servers).
-                Err(e) if rt.direct && ctl.account_api().is_some() => {
-                    eprintln!("calls ice-servers: {e}");
-                    Acts { worker: rt.offer(number, Vec::new(), mic).into_iter().collect(), ..Default::default() }
-                }
-                Err(e) => {
-                    let mut acts = if rt.current(number).is_some() { rt.finish(Ending::Failed, true) } else { Acts::default() };
-                    acts.notice = Some((NoticeKind::Warning, tr!("Call: {message}", message = e)));
-                    acts
-                }
-            };
+            let acts = rt.dial_with_relays(number, relays, open, signed_in, mic);
             ctl.calls_act(rt, acts);
         });
     }
@@ -1386,16 +1461,16 @@ impl super::Controller {
         let without_relays = rt.call.as_ref().filter(|c| c.ringing_in()).and_then(|c| c.offer.as_ref()).is_some_and(|(_, servers)| servers.is_empty());
         if without_relays && !direct {
             // The call came without relay servers: this side asks for its own first (not on this thread, which may
-            // be the one OSC arrives on).
+            // be the one OSC arrives on). The answer is for this call, pressed by this identity.
+            let number = rt.call.as_ref().map(|c| c.number).unwrap_or_default();
             drop(rt);
+            let whose = self.calls_identity().map(|(w, ..)| w);
             let ctl = self.clone();
             std::thread::spawn(move || {
-                let servers = ctl.calls_api().and_then(|(api, token)| ice_servers(&api, &token).map_err(|e| eprintln!("calls ice-servers: {e:#}")).ok());
+                let relays = ctl.relays();
+                let open = ctl.calls_still_open_to(&whose);
                 let mut rt = ctl.calls.lock().unwrap();
-                if let Some((_, offered)) = rt.call.as_mut().filter(|c| c.ringing_in()).and_then(|c| c.offer.as_mut()) {
-                    *offered = servers.unwrap_or_default();
-                }
-                let acts = rt.answer(mic, Instant::now());
+                let acts = rt.answer_with_relays(number, relays, open, mic, Instant::now());
                 ctl.calls_act(rt, acts);
             });
             return;
@@ -1492,6 +1567,29 @@ impl super::Controller {
         self.calls.lock().unwrap().call.as_ref().is_some_and(Call::ringing_in)
     }
 
+    /// Calls were closed for this account (`calls_access_denied`): a call under way ends (the other side is told), the
+    /// friends to call go, and everything shows "Coming soon" now rather than at the next look; N4N0's call menu, when
+    /// it was open on the panel, goes too.
+    pub(super) fn calls_closed_here(self: &Shared, menu_was_open: bool) {
+        {
+            let mut rt = self.calls.lock().unwrap();
+            if rt.call.is_some() {
+                let acts = rt.hang_up();
+                self.calls_act(rt, acts);
+            }
+        }
+        if menu_was_open {
+            self.n4n0_command(crate::ipc::N4n0Command::HidePanel);
+        }
+        self.calls_publish(|rt| {
+            rt.link = CallLink::ComingSoon;
+            rt.contacts.clear();
+            rt.contacts_read = None;
+            rt.available_sent = None;
+            rt.presence_sent = None;
+        });
+    }
+
     fn calls_publish(self: &Shared, change: impl FnOnce(&mut CallsRuntime)) {
         let status = {
             let mut rt = self.calls.lock().unwrap();
@@ -1560,13 +1658,13 @@ mod tests {
             Some(orbiters_core::account::Account { token: "orbit-test".into(), user: Some("42".into()), username: Some("Nova".into()), avatar_url: None, features: None });
         ctl.update(|s| s.account.state = crate::state::AccountState::SignedIn { username: "Nova".into() });
         let features = std::collections::BTreeMap::from([(orbiters_core::features::N4N0_CALLS.to_string(), allowed)]);
-        ctl.calls_access_checked(orbiters_core::account::Server::current(), Some("42".into()), Some("Nova".into()), Some(&features));
+        ctl.calls_access_checked(orbiters_core::account::Server::current(), Some("42"), "orbit-test", Some(&features));
         ctl
     }
 
     /// A friend's call rings, as the server's stream brings it (with a relay, so an answer goes to the worker at once).
     fn ring(ctl: &crate::controller::Shared, id: &str) {
-        ctl.on_call_event("incoming", ringing(id));
+        ctl.on_call_event("incoming", ringing(id), "orbit-test");
     }
 
     fn ringing(id: &str) -> Value {
@@ -1596,8 +1694,8 @@ mod tests {
             // Being rung.
             ring(&ctl, "k_1");
             assert_eq!(ctl.call_ringing_in(), allowed, "rung: {allowed}");
-            // Answering by touching N4N0, then by Answer: each on a call that rings (without the feature, one put there
-            // as if it had rung). The call worker is not beside the test program: it is asked for, and the call ends.
+            // Answering by the avatar's Call/Go, then by Answer (a press, or touching N4N0, which sends Answer): each on a
+            // call that rings (without the feature, one put there as if it had rung). The call worker is not beside the test program: it is asked for, and the call ends.
             let rung_anyway = |ctl: &crate::controller::Shared, id: &str| {
                 if allowed {
                     ring(ctl, id);
@@ -1609,8 +1707,8 @@ mod tests {
             ctl.calls.lock().unwrap().call = None;
             rung_anyway(&ctl, "k_2");
             let workers = ctl.calls.lock().unwrap().workers;
-            assert_eq!(ctl.calls_go(), allowed, "touching N4N0 answers: {allowed}");
-            assert_eq!(ctl.calls.lock().unwrap().workers > workers, allowed, "touching N4N0 asked the worker to answer: {allowed}");
+            assert_eq!(ctl.calls_go(), allowed, "Call/Go answers: {allowed}");
+            assert_eq!(ctl.calls.lock().unwrap().workers > workers, allowed, "Call/Go asked the worker to answer: {allowed}");
             ctl.calls.lock().unwrap().call = None;
             rung_anyway(&ctl, "k_3");
             let workers = ctl.calls.lock().unwrap().workers;
@@ -1625,6 +1723,58 @@ mod tests {
         }
     }
 
+    /// Verify A2: an answer or a refusal comes back for the credential it was asked with. After another account signed in
+    /// (account switch while it was on its way), it never opens nor closes the new account's calls.
+    #[test]
+    fn answers_for_the_account_before_a_switch_never_touch_the_next_one() {
+        let server = orbiters_core::account::Server::current();
+        let yes = std::collections::BTreeMap::from([(orbiters_core::features::N4N0_CALLS.to_string(), true)]);
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        let sign_in = |user: &str, token: &str| {
+            ctl.account_runtime.lock().unwrap().account =
+                Some(orbiters_core::account::Account { token: token.into(), user: Some(user.into()), username: Some(user.into()), avatar_url: None, features: None });
+        };
+        ctl.update(|s| s.account.state = crate::state::AccountState::SignedIn { username: "B".into() });
+        // B signed in, without calls; A's yes (asked before the switch) arrives: B stays closed.
+        sign_in("2", "orbit-b");
+        ctl.calls_access_checked(server, Some("1"), "orbit-a", Some(&yes));
+        assert!(!ctl.calls_open(), "A's yes is not B's");
+        // B has calls; A's refusal arrives late: B stays open.
+        ctl.calls_access_checked(server, Some("2"), "orbit-b", Some(&yes));
+        assert!(ctl.calls_open());
+        assert!(!ctl.calls_access_denied("orbit-a"), "A's refusal is not B's");
+        assert!(ctl.calls_open());
+        // B's own refusal closes B, and clears what was shown.
+        ctl.calls.lock().unwrap().contacts = vec![crate::state::CallContact { id: "c_1".into(), name: "Ada".into() }];
+        assert!(ctl.calls_access_denied("orbit-b"));
+        assert!(!ctl.calls_open());
+        assert!(ctl.calls.lock().unwrap().contacts.is_empty());
+        assert_eq!(ctl.snapshot.lock().unwrap().n4n0.calls.link, crate::state::CallLink::ComingSoon);
+        // An account without an id: told apart by its credential, never sharing another's answer.
+        ctl.account_runtime.lock().unwrap().account =
+            Some(orbiters_core::account::Account { token: "orbit-c".into(), user: None, username: Some("".into()), avatar_url: None, features: None });
+        assert!(!ctl.calls_open());
+        ctl.calls_access_checked(server, None, "orbit-d", Some(&yes));
+        assert!(!ctl.calls_open(), "another credential without an id is another identity");
+    }
+
+    /// Verify A, should-fix: Orbiters closing calls (`calls_closed` on the stream of this credential) closes them here at
+    /// once, with the friends to call and N4N0's call menu; one for another credential does nothing.
+    #[test]
+    fn calls_closed_on_the_stream_closes_calls_for_that_credential_only() {
+        let ctl = signed_in_controller(true);
+        ctl.calls.lock().unwrap().contacts = contacts(2);
+        ctl.calls.lock().unwrap().menu_open = true;
+        ctl.on_call_event("calls_closed", json!({ "code": "not_enabled" }), "orbit-someone-else");
+        assert!(ctl.calls_open(), "another credential's stream");
+        ring(&ctl, "k_1");
+        assert!(ctl.call_ringing_in());
+        ctl.on_call_event("calls_closed", json!({ "code": "not_enabled" }), "orbit-test");
+        assert!(!ctl.calls_open());
+        let rt = ctl.calls.lock().unwrap();
+        assert!(rt.contacts.is_empty() && !rt.menu_open && rt.call.is_none(), "nothing of calls is left");
+    }
+
     /// Signed out, or the server's word not come yet: closed. A refusal of a call request closes calls at once.
     #[test]
     fn calls_close_when_signed_out_unknown_or_refused() {
@@ -1633,12 +1783,55 @@ mod tests {
         ctl.calls_tick();
         assert_eq!(ctl.snapshot.lock().unwrap().n4n0.calls.link, crate::state::CallLink::ComingSoon);
         let ctl = signed_in_controller(true);
-        ctl.calls_access_refused();
+        assert!(ctl.calls_access_denied("orbit-test"));
         assert!(!ctl.calls_open());
         // A session check from an older server says nothing of features: what was known stays.
         let ctl = signed_in_controller(true);
-        ctl.calls_access_checked(orbiters_core::account::Server::current(), Some("42".into()), None, None);
+        ctl.calls_access_checked(orbiters_core::account::Server::current(), Some("42"), "orbit-test", None);
         assert!(ctl.calls_open());
+    }
+
+    /// Verify A3: a relay refusal is final, even for a direct call: no worker starts, the call ends, and it says why. A
+    /// failure that is not a refusal still lets a direct call go on; calls closed meanwhile end it.
+    #[test]
+    fn a_relay_refusal_never_starts_a_worker() {
+        let mut rt = CallsRuntime { direct: true, ..Default::default() };
+        let number = rt.dial("c_1", "Ada", Instant::now()).unwrap();
+        let acts = rt.dial_with_relays(number, Relays::Denied, true, true, None);
+        assert!(acts.worker.is_empty(), "no offer: {:?}", acts.worker);
+        assert!(rt.call.is_none());
+        assert!(acts.notice.is_some_and(|(_, text)| text.contains("coming soon")));
+        let number = rt.dial("c_1", "Ada", Instant::now()).unwrap();
+        assert!(rt.dial_with_relays(number, Relays::Got(Vec::new()), false, true, None).worker.is_empty(), "closed meanwhile");
+        let number = rt.dial("c_1", "Ada", Instant::now()).unwrap();
+        let acts = rt.dial_with_relays(number, Relays::Failed("offline".into()), true, true, None);
+        assert!(matches!(acts.worker.as_slice(), [CallCommand::Offer { .. }]), "a direct call without relays");
+    }
+
+    /// Verify A3: an answer that waited for the relays is for the call that was pressed. Another call ringing by then is
+    /// not answered without its own press; a refusal declines the pressed one.
+    #[test]
+    fn a_delayed_answer_acts_only_on_the_call_pressed() {
+        let now = Instant::now();
+        let mut rt = CallsRuntime::default();
+        let _ = incoming(&mut rt, "k_1", now);
+        let pressed = rt.call.as_ref().unwrap().number;
+        // That call ended while the relays were asked for, and another one rings now.
+        let _ = rt.finish(Ending::Missed, false);
+        let _ = incoming(&mut rt, "k_2", now);
+        let acts = rt.answer_with_relays(pressed, Relays::Got(Vec::new()), true, None, now);
+        assert!(acts.worker.is_empty() && rt.call.as_ref().is_some_and(Call::ringing_in), "k_2 still rings, unanswered");
+        // The pressed call itself: answered; refused, declined.
+        let k2 = rt.call.as_ref().unwrap().number;
+        let refused = rt.answer_with_relays(k2, Relays::Denied, true, None, now);
+        assert!(refused.worker.is_empty() && rt.call.is_none());
+        assert!(matches!(refused.signals.as_slice(), [Signal::Close { decline: true, .. }]));
+        let _ = incoming(&mut rt, "k_3", now);
+        let k3 = rt.call.as_ref().unwrap().number;
+        assert!(rt.answer_with_relays(k3, Relays::Got(Vec::new()), false, None, now).worker.is_empty(), "closed meanwhile: declined");
+        let _ = incoming(&mut rt, "k_4", now);
+        let k4 = rt.call.as_ref().unwrap().number;
+        assert!(matches!(rt.answer_with_relays(k4, Relays::Got(Vec::new()), true, None, now).worker.as_slice(), [CallCommand::Answer { .. }]));
     }
 
     fn contacts(n: usize) -> Vec<CallContact> {

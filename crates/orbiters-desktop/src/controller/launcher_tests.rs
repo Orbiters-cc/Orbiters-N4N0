@@ -18,16 +18,33 @@ struct Pretend {
     profiles: Mutex<HashMap<u32, u32>>,
     /// Starts beside running VRChats (VRChat's own launcher), apart from Steam's.
     beside: Mutex<Vec<Vec<String>>>,
+    /// The controller, to ask at the very moment of a start whether its profile was already claimed.
+    ctl: Mutex<Option<std::sync::Weak<Controller>>>,
+    claimed_at_start: Mutex<Vec<bool>>,
+    /// Processes whose command line could not be read.
+    unread: Mutex<Vec<u32>>,
+}
+impl Pretend {
+    fn note_claim(&self, args: &[String]) {
+        if let Some(c) = self.ctl.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade) {
+            let profile = orbiters_core::vrchat_launch::profile_of(args);
+            self.claimed_at_start.lock().unwrap().push(c.launcher_claimed(profile));
+        }
+    }
 }
 impl Machine for Pretend {
     fn running(&self) -> Vec<(u32, bool)> {
         self.running.lock().unwrap().clone()
     }
-    fn running_profiles(&self) -> Vec<(u32, bool, u32)> {
+    fn running_profiles(&self) -> Vec<(u32, bool, Option<u32>)> {
         let profiles = self.profiles.lock().unwrap();
-        self.running.lock().unwrap().iter().map(|(pid, d)| (*pid, *d, profiles.get(pid).copied().unwrap_or(0))).collect()
+        let unread = self.unread.lock().unwrap();
+        self.running.lock().unwrap().iter().map(|(pid, d)| (*pid, *d, (!unread.contains(pid)).then(|| profiles.get(pid).copied().unwrap_or(0)))).collect()
     }
     fn start_beside(&self, args: &[String]) -> Result<(), String> {
+        self.note_claim(args);
+        // A start takes a moment: another press arriving meanwhile must find the profile claimed.
+        std::thread::sleep(Duration::from_millis(5));
         self.beside.lock().unwrap().push(args.to_vec());
         Ok(())
     }
@@ -35,6 +52,7 @@ impl Machine for Pretend {
         self.installed
     }
     fn start(&self, args: &[String]) -> Result<(), String> {
+        self.note_claim(args);
         self.started.lock().unwrap().push(args.to_vec());
         Ok(())
     }
@@ -269,6 +287,21 @@ fn a_destination_outside_vrchats_grammar_starts_nothing() {
     assert!(machine.started.lock().unwrap().is_empty());
 }
 
+/// The VRChat just started came up (seen by a look of the game, which ends its start's claim) and was quit.
+fn ran_and_quit(machine: &Arc<Pretend>, c: &Shared) {
+    machine.running.lock().unwrap().push((99, false));
+    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 99, profile: 0, ..Default::default() }]);
+    c.launcher_game(machine.as_ref());
+    if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+        // A Mac looks at no VRChat process of this computer's here (`launcher_game`): the look that ends the claim is
+        // the platform's, stood in for.
+        c.launcher.lock().unwrap().starting.clear();
+    }
+    machine.running.lock().unwrap().clear();
+    c.update(|s| s.vrchat.runs.clear());
+    *c.launcher_started.lock().unwrap() = None;
+}
+
 #[test]
 fn desktop_after_vr_gets_the_window_vrchat_had_before() {
     let normal = SavedWindow { width: 1920, height: 1080, mode: 1 };
@@ -276,15 +309,16 @@ fn desktop_after_vr_gets_the_window_vrchat_had_before() {
     let c = controller(machine.clone());
     c.launcher_do(Action::Play { mode: LaunchMode::Vr, destination: None });
     assert_eq!(c.view().settings.launch.desktop_window, Some(normal), "kept before the tiny window replaces it");
-    // VRChat quit; its saved window is now the tiny one.
-    *c.launcher_started.lock().unwrap() = None;
+    // VRChat came up (a look saw it, which ends its start's claim on profile 0), then quit; its saved window is now the
+    // tiny one.
+    ran_and_quit(&machine, &c);
     *machine.window.lock().unwrap() = Some(SavedWindow { width: 100, height: 100, mode: 3 });
     c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None });
     let args = machine.started.lock().unwrap()[1].clone();
     let at = args.iter().position(|a| a == "-screen-width").expect("a size is asked for");
     assert_eq!(args[at..at + 6], ["-screen-width", "1920", "-screen-height", "1080", "-screen-fullscreen", "1"]);
     // A normal saved window: Desktop passes nothing.
-    *c.launcher_started.lock().unwrap() = None;
+    ran_and_quit(&machine, &c);
     *machine.window.lock().unwrap() = Some(normal);
     c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None });
     assert!(!machine.started.lock().unwrap()[2].contains(&"-screen-width".to_string()));
@@ -900,6 +934,9 @@ fn a_join_while_vrchat_is_starting_never_starts_a_second_one_when_the_processes_
     let _ = *flicker.written.lock().unwrap();
 }
 
+// Reads this computer's VRChats through the roster and `launcher_game`, which a Mac does not (VRChat is Obelisk's there,
+// and Home starts no second profile): Windows only.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_second_vrchat_starts_on_a_free_profile_beside_the_first_and_never_on_a_running_one() {
     // REQUEST15 7a. VRChat runs on profile 0 (in VR); nothing reaches a real VRChat: the pretend computer records.
@@ -920,7 +957,7 @@ fn a_second_vrchat_starts_on_a_free_profile_beside_the_first_and_never_on_a_runn
     // It is up on profile 1: the start is over, and profile 1 is now refused too.
     machine.running.lock().unwrap().push((11, true));
     machine.profiles.lock().unwrap().insert(11, 1);
-    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 10, profile: 0, ..Default::default() }, crate::state::VrchatRunShown { pid: 11, profile: 1, account: Some("Sample Alt".into()), ..Default::default() }]);
+    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 10, profile: 0, profile_known: true, ..Default::default() }, crate::state::VrchatRunShown { pid: 11, profile: 1, profile_known: true, account: Some("Sample Alt".into()), ..Default::default() }]);
     c.launcher_game(machine.as_ref());
     let profiles = c.view().launcher.profiles.clone();
     assert_eq!(profiles.iter().map(|p| (p.profile, p.running, p.starting)).collect::<Vec<_>>(), [(0, Some(LaunchMode::Vr), None), (1, Some(LaunchMode::Desktop), None)]);
@@ -952,13 +989,14 @@ fn the_first_vrchat_on_a_profile_goes_through_steam_with_that_profile() {
 #[test]
 fn the_profile_choice_lists_used_running_and_starting_profiles_with_their_accounts() {
     let known: BTreeMap<u32, String> = [(1, "Sample Alt".to_string())].into();
-    let roster = [crate::state::VrchatRunShown { pid: 10, profile: 0, account: Some("Sample Me".into()), ..Default::default() }, crate::state::VrchatRunShown {
+    let roster = [crate::state::VrchatRunShown { pid: 10, profile: 0, profile_known: true, account: Some("Sample Me".into()), ..Default::default() }, crate::state::VrchatRunShown {
         pid: 12,
         profile: 3,
+        profile_known: true,
         driver: crate::state::VrchatDriverShown::Agent { session: "s1".into() },
         ..Default::default()
     }];
-    let got = game_profiles(&known, &[(10, false, 0), (12, true, 3)], &roster, Some((2, LaunchMode::Desktop)));
+    let got = game_profiles(&known, &[(10, false, Some(0)), (12, true, Some(3))], &roster, &[(2, LaunchMode::Desktop)]);
     let shown: Vec<(u32, Option<&str>, Option<LaunchMode>, Option<LaunchMode>, bool)> = got.iter().map(|p| (p.profile, p.account.as_deref(), p.running, p.starting, p.assistant)).collect();
     assert_eq!(
         shown,
@@ -969,7 +1007,7 @@ fn the_profile_choice_lists_used_running_and_starting_profiles_with_their_accoun
             (3, None, Some(LaunchMode::Desktop), None, true),
         ]
     );
-    assert_eq!(game_profiles(&BTreeMap::new(), &[], &[], None).iter().map(|p| p.profile).collect::<Vec<_>>(), [0], "profile 0 always");
+    assert_eq!(game_profiles(&BTreeMap::new(), &[], &[], &[]).iter().map(|p| p.profile).collect::<Vec<_>>(), [0], "profile 0 always");
 }
 
 // --- REQUEST15 7b: the account's own profile, against recorded replies only (nothing reaches VRChat) ---
@@ -1021,7 +1059,9 @@ fn an_own_profile_change_goes_on_the_press_only_with_the_lists_account_within_vr
     c.launcher.lock().unwrap().mine_next = None;
     c.launcher_do(Action::EditProfile(ProfileEdit::Status(Status::JoinMe)));
     c.launcher_do(Action::As { account: "usr_other".into(), action: Box::new(Action::EditProfile(ProfileEdit::Status(Status::JoinMe))) });
-    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Status, _))));
+    // Neither press is this account's: nothing of theirs lands on this card either (REQUEST15 fix B3).
+    assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Bio)));
+    assert_eq!(c.view().launcher.me.as_ref().unwrap().status, Status::Busy);
     let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
     assert_eq!(calls, ["PUT /users/usr_test", "PUT /profile/usr_test", "PUT /profile/usr_test"]);
 }
@@ -1033,6 +1073,8 @@ fn the_own_profile_and_pictures_are_read_for_the_card() {
     let (_, calls) = c.test_vrchat(vec![
         (200, json!({"id": "usr_test", "bio": "hello", "bannerType": "customImage", "bannerCustomUrl": "https://api.vrchat.cloud/api/1/file/file_b/1/file", "userIcon": "", "hasVrcPlus": true, "currentAvatarThumbnailImageUrl": "https://api.vrchat.cloud/avatar"})),
         (200, json!([{"id": "file_1", "versions": [{"version": 0}, {"version": 1, "file": {"url": "https://api.vrchat.cloud/api/1/file/file_1/1/file"}}]}, {"id": "file_2", "versions": []}])),
+        // Listed again right before the change: the picture must be the account's own now.
+        (200, json!([{"id": "file_1", "versions": [{"version": 1, "file": {"url": "https://api.vrchat.cloud/api/1/file/file_1/1/file"}}]}])),
         (200, json!({"id": "usr_test", "userIcon": "https://api.vrchat.cloud/api/1/file/file_1/1/file"})),
     ]);
     me_signed_in(&c);
@@ -1047,5 +1089,162 @@ fn the_own_profile_and_pictures_are_read_for_the_card() {
     assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Picture)));
     assert_eq!(c.view().launcher.me.as_ref().unwrap().look.icon, icons[0].url);
     let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
-    assert_eq!(calls, ["GET /profile/usr_test?asSelf=true", "GET /files?tag=icon&n=100", "PUT /profile/usr_test"]);
+    assert_eq!(calls, ["GET /profile/usr_test?asSelf=true", "GET /files?tag=icon&n=100", "GET /files?tag=icon&n=100", "PUT /profile/usr_test"]);
+}
+
+// --- REQUEST15 fix B4: one VRChat per profile, whichever of Orbiters' starts asks ---
+
+fn running_profile_0() -> (Arc<Pretend>, Shared) {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    machine.running.lock().unwrap().push((10, false));
+    let c = controller(machine.clone());
+    *machine.ctl.lock().unwrap() = Some(Arc::downgrade(&c));
+    (machine, c)
+}
+
+#[test]
+fn a_start_claims_its_profile_before_it_starts_and_keeps_it_while_vrchat_is_slow() {
+    let (machine, c) = running_profile_0();
+    assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    assert_eq!(*machine.claimed_at_start.lock().unwrap(), [true], "claimed before the start, not after it");
+    // VRChat takes more than a minute (Easy Anti-Cheat, an update): the claim still holds, the next look keeps it.
+    for claim in c.launcher.lock().unwrap().starting.iter_mut() {
+        claim.at -= Duration::from_secs(70);
+    }
+    c.launcher_game(machine.as_ref());
+    assert!(c.launcher_claimed(1));
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Vr, profile: 1 }), Some(Notice::Error(_))));
+    assert_eq!(machine.beside.lock().unwrap().len(), 1, "never a second VRChat on profile 1");
+}
+
+#[test]
+fn presses_at_the_same_moment_start_one_vrchat_on_a_profile() {
+    let (machine, c) = running_profile_0();
+    let threads: Vec<_> = (0..8).map(|_| {
+        let c = c.clone();
+        std::thread::spawn(move || c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }))
+    }).collect();
+    threads.into_iter().for_each(|t| {
+        t.join().unwrap();
+    });
+    assert_eq!(machine.beside.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn the_bridge_and_go_there_claim_the_profiles_home_starts_on() {
+    // A bridge session holds profile 2 (its mark is put before its VRChat starts): Home never starts there.
+    let (machine, c) = running_profile_0();
+    c.sides.put(crate::bridge::sessions::SideMark { session: "p2-test".into(), profile: 2, osc_in: 9020, osc_out: 9021, pid: None, log: None, query: None });
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 2 }), Some(Notice::Error(_))));
+    assert!(machine.beside.lock().unwrap().is_empty());
+    // Another of Orbiters' starts (the bridge's main session, Go there) claimed profile 0 while none runs: Home's Play and
+    // profile choice both wait, whatever the clock of the last Play says.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    let claim = c.launcher_claim(0, LaunchMode::Vr).unwrap();
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Vr, destination: None }), Some(Notice::Error(_))));
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Vr, profile: 0 }), Some(Notice::Error(_))));
+    assert!(machine.started.lock().unwrap().is_empty());
+    // A start that failed gives its claim back.
+    c.launcher_unclaim(claim);
+    assert!(!c.launcher_claimed(0));
+}
+
+// --- REQUEST15 fix B5: a VRChat whose profile is not known yet is never taken for profile 0 ---
+
+// Reads this computer's VRChats through the roster and `launcher_game`, which a Mac does not (VRChat is Obelisk's there,
+// and Home starts no second profile): Windows only.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_vrchat_not_yet_identified_is_not_profile_0_and_holds_play() {
+    // Profile 1 started outside Orbiters: in the roster before its log said its arguments (the roster's 0 means "not
+    // known" then), while its command line says --profile=1.
+    let (machine, c) = running_profile_0();
+    machine.running.lock().unwrap().push((11, true));
+    machine.profiles.lock().unwrap().insert(11, 1);
+    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 10, profile: 0, profile_known: true, ..Default::default() }, crate::state::VrchatRunShown { pid: 11, profile: 0, profile_known: false, ..Default::default() }]);
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Vr, profile: 1 }), Some(Notice::Error(_))), "its command line says profile 1");
+    c.launcher_game(machine.as_ref());
+    assert!(c.view().launcher.profiles.iter().any(|p| p.profile == 1 && p.running.is_some()));
+    // Neither its log nor its command line said anything yet: no profile may be started until it does.
+    machine.unread.lock().unwrap().push(11);
+    for profile in [1, 2] {
+        assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Vr, profile }), Some(Notice::Error(_))), "{profile}");
+    }
+    assert!(machine.beside.lock().unwrap().is_empty() && machine.started.lock().unwrap().is_empty());
+}
+
+// --- REQUEST15 fix B3: what was read or sent for one account never lands on another's card ---
+
+#[test]
+fn an_answer_for_account_a_never_lands_on_bs_card() {
+    use orbiters_core::launcher::{OwnPicture, ProfilePart, Saving};
+    let c = controller(Arc::new(Pretend::default()));
+    c.update(|s| s.launcher.source = Source::SignedIn { user_id: "usr_b".into(), name: String::new() });
+    // A's picture list, or A's "saved", arriving after the switch to B.
+    let landed = c.launcher_mine_publish(Some("usr_a"), |m| m.icons = Some(vec![OwnPicture { id: "file_a".into(), url: "https://api.vrchat.cloud/api/1/file/file_a/1/file".into() }]));
+    assert!(!landed);
+    c.launcher_mine_saving(Some("usr_a"), Saving::Saved(ProfilePart::Bio), None);
+    assert!(c.view().launcher.mine.is_none(), "B's card has nothing of A's");
+    assert!(c.launcher_mine_publish(Some("usr_b"), |m| m.bio = "B".into()));
+    assert_eq!(c.view().launcher.mine.as_ref().unwrap().bio, "B");
+}
+
+// --- REQUEST15 fix SF-images: a picture is sent only when it is one of the account's own files right now ---
+
+#[test]
+fn a_picture_not_among_the_accounts_own_files_is_never_sent() {
+    use orbiters_core::launcher::{BannerChoice, ProfileEdit, ProfilePart, Saving};
+    let c = controller(Arc::new(Pretend::default()));
+    let mine_file = "https://api.vrchat.cloud/api/1/file/file_mine/1/file";
+    let theirs = "https://api.vrchat.cloud/api/1/file/file_someone_elses/1/file";
+    let (_, calls) = c.test_vrchat(vec![
+        (200, json!([{"id": "file_mine", "versions": [{"version": 1, "file": {"url": mine_file}}]}])),
+        (200, json!([{"id": "file_mine", "versions": [{"version": 1, "file": {"url": mine_file}}]}])),
+        (200, json!({"id": "usr_test", "bannerType": "customImage", "bannerCustomUrl": mine_file})),
+    ]);
+    me_signed_in(&c);
+    // Another person's file on the same host, as an icon: refused, nothing written.
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Picture(theirs.into()))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Picture, _))));
+    c.launcher.lock().unwrap().mine_next = None;
+    // The account's own gallery picture as the banner: listed, then sent.
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Banner { choice: BannerChoice::Custom, colour: None, custom: mine_file.into() })));
+    assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Banner)));
+    let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
+    assert_eq!(calls, ["GET /files?tag=icon&n=100", "GET /files?tag=gallery&n=100", "PUT /profile/usr_test"], "no PUT for the foreign picture");
+}
+
+// --- REQUEST15 fix SF-refresh: a scheduled read keeps the own profile and VRChat's profiles; a list failure is no change ---
+
+#[test]
+fn a_full_read_keeps_the_own_profile_and_the_game_profiles() {
+    use orbiters_core::launcher::{GameProfile, MyProfile};
+    let c = controller(Arc::new(Pretend::default()));
+    me_signed_in(&c);
+    c.update(|s| {
+        s.launcher.mine = Some(MyProfile { bio: "kept".into(), ..MyProfile::default() });
+        s.launcher.profiles = vec![GameProfile { profile: 1, running: Some(LaunchMode::Vr), ..GameProfile::default() }];
+    });
+    let same = LauncherState { source: c.view().launcher.source.clone(), ..LauncherState::default() };
+    c.launcher_commit_read(same);
+    assert_eq!(c.view().launcher.mine.as_ref().map(|m| m.bio.as_str()), Some("kept"));
+    assert_eq!(c.view().launcher.profiles.len(), 1);
+    // Another account's read: its own profile is not the previous one's; the computer's profiles stay.
+    c.launcher_commit_read(LauncherState { source: Source::SignedIn { user_id: "usr_other".into(), name: String::new() }, ..LauncherState::default() });
+    assert!(c.view().launcher.mine.is_none());
+    assert_eq!(c.view().launcher.profiles.len(), 1);
+}
+
+#[test]
+fn a_list_that_did_not_come_is_said_in_its_chooser_not_as_a_failed_change() {
+    use orbiters_core::launcher::PictureKind;
+    let c = controller(Arc::new(Pretend::default()));
+    let _ = c.test_vrchat(vec![(503, json!({}))]);
+    me_signed_in(&c);
+    c.launcher_do(mine(Action::ListPictures(PictureKind::Gallery)));
+    let m = c.view().launcher.mine.clone().unwrap();
+    assert!(m.saving.is_none(), "no change failed");
+    assert!(matches!(m.list_failed, Some((PictureKind::Gallery, _))));
+    assert!(m.listing.is_none());
 }

@@ -522,7 +522,8 @@ impl Service {
                 if let Some(mailbox) = mailbox {
                     let ctl = ctl.clone();
                     std::thread::spawn(move || {
-                        let result = ctl.translate_remote(&batch);
+                        // From the desktop's panels it was read in VRChat's window: that agreement, not VR's.
+                        let result = ctl.translate_remote(&batch, role == Role::Orbit);
                         mailbox.post(ToClient::Translated { id, result });
                     });
                 }

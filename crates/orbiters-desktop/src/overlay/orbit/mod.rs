@@ -89,9 +89,14 @@ fn usage_name(action: &Action) -> String {
     crate::usage::stable_name(&format!("{action:?}"))
 }
 
-/// Whether the desktop's panels are wanted: VRChat runs without SteamVR, on this computer, and the setting says so.
+/// Whether the desktop's panels are wanted: VRChat runs without SteamVR, on this computer, and the settings say so: a menu around VRChat's, its camera's
+/// tiles, or translation (whose translations the desktop's process shows, menus or none: verify-r15).
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
-    orbiters_core::osc::VRCHAT_RUNS_HERE && snap.vrchat.running && !snap.vrchat.remote && !snap.steamvr.running && (snap.settings.orbit.any() || snap.settings.orbit.camera_tiles)
+    orbiters_core::osc::VRCHAT_RUNS_HERE
+        && snap.vrchat.running
+        && !snap.vrchat.remote
+        && !snap.steamvr.running
+        && (snap.settings.orbit.any() || snap.settings.orbit.camera_tiles || snap.settings.translate.enabled)
 }
 
 /// A part's appearing: a spring from nothing to its place, a little past it. Each turn moves the window or overlay and its alpha, no new picture.
@@ -1025,6 +1030,10 @@ pub struct Panels {
     show_keys: bool,
     /// What the service was last told of the sheet (open, dictation, keyboard).
     reported: Option<(bool, bool, bool)>,
+    /// The service's last request for N4N0's menu (`N4n0Status::menu_request`) seen here, and whether All tools (or a page of the menu
+    /// on the sheet) shows because of one: on the desktop it is N4N0's menu when the avatar's screen does not take it ([`Panels::serve_menu`]).
+    request_seen: Option<u32>,
+    serving: bool,
     /// What plays's picture as last made, by its name: panels make their own textures of it.
     art: Option<(String, ColorImage)>,
     /// The camera's tiles lie on its right ([`super::vr`]): what they say lines up on that side.
@@ -1142,6 +1151,8 @@ impl Panels {
             takeover_place: None,
             show_keys: false,
             reported: None,
+            request_seen: None,
+            serving: false,
             art: None,
             camera_right: false,
             stop_asked: None,
@@ -1388,6 +1399,10 @@ impl Panels {
             self.stop_talking();
             self.facts.pointed = None;
             self.facts.sheet = None;
+            // The menu went: nothing of Worlds' page turns or loads behind it (the desktop's loop no longer calls `follow` with no menu up).
+            if let Some(worlds) = self.stage.worlds.as_mut() {
+                worlds.set_shown(false);
+            }
             // Whatever was held ends, done by nobody: a menu going away is no let-go (OVL2-17).
             self.cancel();
             self.stage.epoch = self.stage.epoch.wrapping_add(1);
@@ -2324,6 +2339,8 @@ impl Panels {
                     }
                 }
             }
+            // Shown or not: another tab, the sheet or the menu closed, and what turned on its side panel stops at once, not started again (verify-r15 B2).
+            worlds.set_shown(self.open.is_some() && self.facts.sheet == Some(Sheet::Worlds));
             worlds.update_alone(snap, &self.backend);
             if self.facts.sheet == Some(Sheet::Worlds) && !worlds.open {
                 self.close_sheet();
@@ -2460,7 +2477,8 @@ impl Panels {
                 provider: snap.settings.translate.provider,
                 target: crate::overlay::translate::target(&snap.settings),
                 keep_english: snap.settings.translate.keep_english,
-                agreed: snap.settings.translate.orbiters_agreed,
+                // The desktop reads VRChat's window: its own agreement (verify-r15 B7).
+                agreed: if self.facts.desktop { snap.settings.translate.orbiters_agreed_window } else { snap.settings.translate.orbiters_agreed },
                 status: (*snap.translate).clone(),
             },
             talk_lines: if self.facts.sheet == Some(Sheet::Talk) {
@@ -2965,6 +2983,7 @@ impl Panels {
                     TranslatePick::Provider(p) => serde_json::json!({ "translate": { "provider": p } }),
                     TranslatePick::Into(after) => serde_json::json!({ "translate": { "target": panels::target_after(&crate::overlay::translate::target(&snap.settings), after) } }),
                     TranslatePick::KeepEnglish(keep) => serde_json::json!({ "translate": { "keep_english": keep } }),
+                    TranslatePick::Agree if self.facts.desktop => serde_json::json!({ "translate": { "orbiters_agreed_window": true } }),
                     TranslatePick::Agree => serde_json::json!({ "translate": { "orbiters_agreed": true } }),
                 }
             }
@@ -4106,12 +4125,7 @@ impl Panels {
     pub fn menu_turn(&mut self, snap: &Snapshot) {
         self.follow_mics(snap, 0.011);
         let on_sheet = self.facts.sheet == Some(Sheet::Menu);
-        let keyboard = (on_sheet && self.stage.host.menu.shows_keyboard()) || (self.facts.sheet == Some(Sheet::Worlds) && self.stage.worlds.as_ref().is_some_and(|w| w.typing()));
-        let state = (keyboard, false, keyboard);
-        if self.reported.unwrap_or((false, false, false)) != state {
-            self.reported = Some(state);
-            self.backend.n4n0(N4n0Command::MenuState { open: state.0, dictation: state.1, keyboard: state.2 });
-        }
+        self.report_menu();
         if let Some(worlds) = self.stage.worlds.as_mut().filter(|w| w.open) {
             worlds.keys(&snap.n4n0.keys);
         }
@@ -4120,6 +4134,50 @@ impl Panels {
         effects.extend(host.poll());
         if host.effects(effects, snap, &self.backend) && on_sheet {
             self.close_sheet();
+        }
+    }
+
+    /// The service asks for N4N0's menu (the Action Menu's Menu toggle, the wake word): in VRChat's desktop mode, when the avatar's
+    /// screen does not take it (none, or one hidden with N4N0's bot), it is All tools here, the desktop's N4N0 menu, on the sheet
+    /// beside VRChat's menu while one is open (the Action Menu that just asked, or the Quick Menu); a toggle closes it again. The
+    /// service is told it shows, as the SteamVR overlay's menu tells it in VR, so the Menu toggle stays on, and told it closed when
+    /// the sheet or VRChat's menu goes. Called every turn, with or without panels.
+    pub fn serve_menu(&mut self, snap: &Snapshot) {
+        let request = snap.n4n0.menu_request;
+        let asked = self.request_seen.is_some_and(|seen| seen != request);
+        self.request_seen = Some(request);
+        // One host at a time: in VRChat's desktop mode this, in VR the SteamVR overlay's menu (`overlay::menu`).
+        let desktop = snap.n4n0.desktop_mode;
+        let menu_sheet = |sheet: Option<Sheet>| matches!(sheet, Some(Sheet::All | Sheet::Menu | Sheet::Results));
+        if asked && desktop && !super::menu::on_avatar_screen(snap) {
+            if menu_sheet(self.facts.sheet) && snap.n4n0.menu_toggle {
+                self.close_sheet();
+            } else if menu_sheet(self.facts.sheet) {
+                self.serving = true;
+            } else if self.open.is_some() && self.takeover_place.is_some() {
+                self.open_sheet(Sheet::All, mark("All tools"), snap);
+                self.serving = menu_sheet(self.facts.sheet);
+            }
+        }
+        // The avatar's screen took N4N0's menu (its bot shown again with an older N4N0): the sheet that served it goes, the screen has it.
+        if self.serving && super::menu::on_avatar_screen(snap) && menu_sheet(self.facts.sheet) {
+            self.close_sheet();
+        }
+        if self.open.is_none() || !menu_sheet(self.facts.sheet) || !desktop || super::menu::on_avatar_screen(snap) {
+            self.serving = false;
+        }
+        self.report_menu();
+    }
+
+    /// Tells the service what N4N0's menu here is now (open, its keyboard), when that changed: open while it serves the service's request
+    /// ([`Panels::serve_menu`]) or its keyboard shows (keys then go to it).
+    fn report_menu(&mut self) {
+        let on_sheet = self.facts.sheet == Some(Sheet::Menu);
+        let keyboard = (on_sheet && self.stage.host.menu.shows_keyboard()) || (self.facts.sheet == Some(Sheet::Worlds) && self.stage.worlds.as_ref().is_some_and(|w| w.typing()));
+        let state = (keyboard || self.serving, false, keyboard);
+        if self.reported.unwrap_or((false, false, false)) != state {
+            self.reported = Some(state);
+            self.backend.n4n0(N4n0Command::MenuState { open: state.0, dictation: state.1, keyboard: state.2 });
         }
     }
 
@@ -4635,6 +4693,26 @@ fn note_words(text: &str) -> (String, String) {
         (tr("Open VRChat's camera first").into(), tr("Quick Menu, the camera icon, Stream Camera. Then press this again.").into())
     } else {
         (tr("3D picture").into(), tr(text).to_string())
+    }
+}
+
+#[cfg(test)]
+mod desktop_wanted_tests {
+    /// verify-r15: translation on keeps the desktop's process (which shows its translations) with every menu and the camera's tiles off; off, nothing does.
+    #[test]
+    fn translation_alone_keeps_the_desktop_s_process() {
+        let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
+        snap.vrchat.running = true;
+        snap.settings.orbit.camera_tiles = false;
+        snap.settings.orbit.wheel = false;
+        snap.settings.orbit.quick_menu = false;
+        let menus_off = !snap.settings.orbit.any();
+        snap.settings.translate.enabled = true;
+        if menus_off {
+            assert_eq!(super::wanted_on_desktop(&snap), orbiters_core::osc::VRCHAT_RUNS_HERE, "translation on, menus off");
+            snap.settings.translate.enabled = false;
+            assert!(!super::wanted_on_desktop(&snap), "nothing wanted");
+        }
     }
 }
 

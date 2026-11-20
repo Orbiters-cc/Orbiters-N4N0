@@ -116,6 +116,9 @@ pub struct VrchatRunShown {
     pub pid: u32,
     /// VRChat's profile (`--profile`): each holds its own account.
     pub profile: u32,
+    /// Whether `profile` is known (its log said its arguments); until then it says 0 and means "not known yet".
+    #[serde(default)]
+    pub profile_known: bool,
     /// The account signed in, once its log said.
     pub account: Option<String>,
     pub world: Option<String>,

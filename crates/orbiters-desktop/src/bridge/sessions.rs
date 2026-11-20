@@ -105,6 +105,8 @@ pub struct VrchatRun {
     pub started_s: u64,
     /// VRChat's `--profile` (0 without one).
     pub profile: u32,
+    /// Whether `profile` is known: its log said its arguments, or the bridge started it on that profile.
+    pub profile_known: bool,
     pub log: Option<PathBuf>,
     /// Where it takes OSC input: its `--osc` in port, or VRChat's default.
     pub osc_in: u16,
@@ -283,6 +285,7 @@ impl Sides {
                     pid,
                     started_s: 0,
                     profile: mark.profile,
+                    profile_known: true,
                     log: mark.log.clone(),
                     osc_in: mark.osc_in,
                     query: mark.query,

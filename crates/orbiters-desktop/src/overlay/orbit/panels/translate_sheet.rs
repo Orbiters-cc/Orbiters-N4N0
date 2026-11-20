@@ -131,6 +131,11 @@ pub fn orbiters_notice() -> &'static str {
     tr("With Orbiters, the text you see in VR, other people's chat included, is sent to Orbiters to be translated.")
 }
 
+/// The notice of the app's own Settings, which agrees for both: VR, and VRChat's window on the desktop.
+pub fn orbiters_notice_both() -> &'static str {
+    tr("With Orbiters, the text you see in VR or in VRChat's window, other people's chat included, is sent to Orbiters to be translated.")
+}
+
 /// The same where it is said: on the desktop it is VRChat's window that is read (REQUEST15 item 2).
 pub fn orbiters_notice_on(desktop: bool) -> &'static str {
     if desktop {

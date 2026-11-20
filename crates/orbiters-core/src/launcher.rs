@@ -383,6 +383,9 @@ pub struct MyProfile {
     pub gallery: Option<Vec<OwnPicture>>,
     /// Reading one of the lists now.
     pub listing: Option<PictureKind>,
+    /// A list that could not be read, and why (said in its chooser, with its own Try again).
+    #[serde(default)]
+    pub list_failed: Option<(PictureKind, String)>,
     pub saving: Option<Saving>,
     /// Another change is allowed from then on (Unix seconds): VRChat refuses changes in quick succession.
     pub next_change_at: Option<i64>,

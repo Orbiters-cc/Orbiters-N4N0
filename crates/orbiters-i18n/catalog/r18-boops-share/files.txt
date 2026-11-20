@@ -1,0 +1,3 @@
+# REQUEST18 items 1 and 3 (stream r18-boops-share, 2026-11-20): every received boop and invite request in the friends
+# list's block (pages/launcher/row.rs, area launcher-ui), and the Quick Menu's "Share 3D capture" tile (overlay/orbit,
+# area orbit). Kept here so that areas translated side by side never edit the same file. Covers no file of its own.

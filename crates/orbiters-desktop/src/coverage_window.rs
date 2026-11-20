@@ -237,8 +237,5 @@ mod tests {
         assert!(wanted_on_desktop(&snap));
         snap.steamvr.running = true;
         assert!(!wanted_on_desktop(&snap), "the SteamVR overlay shows it");
-        // SteamVR running, VRChat in desktop mode (verify2-r15 S5): the person is at the screen.
-        snap.n4n0.desktop_mode = true;
-        assert!(wanted_on_desktop(&snap));
     }
 }

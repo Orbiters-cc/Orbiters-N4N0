@@ -2404,6 +2404,7 @@ impl Panels {
             // The length just chosen here, until the settings say it back.
             length: self.length_held.filter(|(_, at)| at.elapsed() < LENGTH_HELD_FOR).map_or(snap.settings.photo_3d, |(length, _)| length),
             can_call: menu.calls_ready,
+            calls_soon: menu.calls_soon,
             mics: self.facts.mics.clone(),
             mic_choices: self.facts.mic_choices.clone(),
             voice_on: self.facts.voice_on,
@@ -3149,6 +3150,14 @@ impl Panels {
             Action::CameraQr => {
                 self.backend.camera_qr(self.facts.camera.qr == panels::CameraQr::Off);
                 self.camera_dirty();
+            }
+            // Call while calls are not open to this account: the caption's note says why for a few seconds, nothing opens.
+            Action::Page(Target::Call) if self.facts.calls_soon => {
+                self.facts.note = Some((tr!("{tool} · Coming soon", tool = tr_ctx("voice call", "Call")), tr(panels::CALLS_SOON_WHY).to_string()));
+                self.note.until = Some(Instant::now() + NOTE_FOR);
+                for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+                    panel.dirty = true;
+                }
             }
             Action::Page(target) => self.open_page(target, snap),
             // A previous instance's world: its page on the 3D worlds sheet (F10). Nothing is sent to VRChat: only the chips invite.

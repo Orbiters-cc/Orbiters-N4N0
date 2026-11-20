@@ -437,7 +437,11 @@ pub struct CallsStatus {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CallLink {
+    /// The Orbiters account has not N4N0 calls (`orbiters_core::features::N4N0_CALLS`), or that is not known yet (signed
+    /// out, offline with nothing known, before the first look): every way into a call is closed, and Call shows greyed
+    /// out as "Coming soon" wherever it is. What the service starts with.
     #[default]
+    ComingSoon,
     Off,
     SignedOut,
     /// Neither VRCX, VRCNext nor VRChat's log says which VRChat account is used here.
@@ -481,11 +485,20 @@ pub struct CallView {
     pub remote_level: f32,
 }
 
+/// What Call says where it is greyed out, on its tile and when pressed (the shared menu's words).
+pub use orbiters_n4n0_core::menu::{CALLS_SOON, CALLS_SOON_WHY};
+
 impl CallsStatus {
+    /// Call is greyed out as "Coming soon" ([`CallLink::ComingSoon`]): nothing about calls can be used.
+    pub fn coming_soon(&self) -> bool {
+        self.link == CallLink::ComingSoon
+    }
+
     /// Whether N4N0's menu can call friends here and, when not, what it says instead.
     pub fn menu_ready(&self) -> (bool, &'static str) {
         match &self.link {
             CallLink::Linked { .. } => (true, ""),
+            CallLink::ComingSoon => (false, CALLS_SOON_WHY),
             // Kept as English: the menu draws what it holds through `tr`, so the note follows the language.
             CallLink::Off => (false, mark("Calls are off: Orbiters - N4N0 › N4N0 › Calls")),
             CallLink::SignedOut => (false, mark("Sign in to Orbiters to call friends")),

@@ -499,6 +499,7 @@ mod burst;
 #[cfg(all(test, windows))]
 mod pause_tests;
 mod calls;
+mod calls_access;
 mod cleanup;
 mod dolly;
 pub(crate) mod hide_self;

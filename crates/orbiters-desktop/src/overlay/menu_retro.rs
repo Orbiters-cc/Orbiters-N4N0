@@ -594,6 +594,16 @@ pub fn draw(p: &Painter, origin: Pos2, view: &View) {
         if state.unavailable {
             p.rect_filled(r, 0.0, pal.bg.gamma_multiply(0.6));
             hatch(p, r, 12.0, Stroke::new(1.0, pal.grid));
+            // Not open yet (Call without N4N0 calls): said in its corner, in the terminal's own letters.
+            if state.soon {
+                let label = orbiters_i18n::tr(orbiters_n4n0_core::menu::CALLS_SOON).to_uppercase();
+                let txt = Txt::new(label, if r.height() < 90.0 { 14.0 } else { 16.0 }).mono().color(pal.hot);
+                let at = pos2(r.right() - 12.0, r.top() + 18.0);
+                widgets::text_truncated(p, at, Align2::RIGHT_CENTER, &txt, r.width() * 0.6);
+                if view.hover == Some(i) {
+                    panel(p, r.expand(3.0), if r.height() < 64.0 { 8.0 } else { 15.0 }, pal.line.gamma_multiply(0.10), Stroke::new(2.5, pal.hot));
+                }
+            }
         } else if !down && view.hover == Some(i) {
             panel(p, r.expand(3.0), if r.height() < 64.0 { 8.0 } else { 15.0 }, pal.line.gamma_multiply(0.10), Stroke::new(2.5, pal.hot));
         }

@@ -29,6 +29,9 @@ pub const RESULTS_PER_PAGE: usize = 5;
 pub const SUGGESTIONS: usize = 5;
 /// Contacts on a page of the call list.
 pub const CONTACTS_PER_PAGE: usize = 5;
+/// What Call says while it is greyed out ([`Menu::calls_soon`]): on its tile, and when it is pressed.
+pub const CALLS_SOON: &str = mark("Coming soon");
+pub const CALLS_SOON_WHY: &str = mark("Calls are coming soon, not open yet");
 /// Characters the search field holds (the screen's field shows them all).
 pub const QUERY_MAX: usize = 40;
 /// The 3D picture's timer choices, in seconds (0: at once).
@@ -1097,6 +1100,9 @@ pub struct Menu {
     pub contacts: Vec<Contact>,
     pub contact_page: usize,
     pub call: Option<Call>,
+    /// The Orbiters account has not N4N0 calls (or that is not known yet): Call is greyed out, "Coming soon", and opens
+    /// nothing; pressed, it says so ([`CALLS_SOON_WHY`]). The host's service is what refuses the calls themselves.
+    pub calls_soon: bool,
     /// Calls are available (signed in, VRChat account linked); otherwise `call_note` says why.
     pub calls_ready: bool,
     pub call_note: String,
@@ -1565,6 +1571,11 @@ impl Menu {
             }
             Target::YouTube => {
                 self.go(Page::Search);
+                Vec::new()
+            }
+            // Not open to this account: said where the press was, nothing opens.
+            Target::Call if self.calls_soon => {
+                self.notice = Some(CALLS_SOON_WHY.into());
                 Vec::new()
             }
             Target::Call => {
@@ -2491,6 +2502,21 @@ impl Menu {
         &self.contacts[start..(start + CONTACTS_PER_PAGE).min(self.contacts.len())]
     }
 
+    /// Calls became open to this account, or closed ([`Menu::calls_soon`]). Closed, the call page shows no more (a page of
+    /// friends to call open from before goes back to Home) and nothing of a call is kept.
+    pub fn set_calls_soon(&mut self, soon: bool) {
+        if self.calls_soon == soon {
+            return;
+        }
+        self.calls_soon = soon;
+        if soon {
+            self.call = None;
+            if self.page == Page::Call {
+                self.go(Page::Home);
+            }
+        }
+    }
+
     /// The friends who can be called changed.
     pub fn set_contacts(&mut self, contacts: Vec<Contact>, ready: bool, note: &str) {
         let before = self.keys(Rows::Contacts);
@@ -2980,8 +3006,9 @@ impl Menu {
         }
     }
 
-    /// A call started, changed or ended. A ringing call opens the call page.
+    /// A call started, changed or ended. A ringing call opens the call page (never while calls are not open here).
     pub fn set_call(&mut self, call: Option<Call>) {
+        let call = call.filter(|_| !self.calls_soon);
         if matches!(call, Some(Call::Ringing { .. })) && self.open && !matches!(self.call, Some(Call::Ringing { .. })) {
             self.go_unasked(Page::Call);
         }
@@ -3408,6 +3435,34 @@ mod tests {
         assert_eq!(pieces("abcdefghijklmnopqrstuvwxyz", 10), vec!["abcdefghij"]);
         assert!(pieces("  ", 10).is_empty());
         assert!(reading_time("one two") >= Duration::from_millis(2500));
+    }
+
+    /// Request15 10: without N4N0 calls Call is greyed out, says "Coming soon", still takes a press, which says why and
+    /// opens nothing; no call shows; a page of friends to call open from before goes. With them: as before.
+    #[test]
+    fn call_is_coming_soon_without_the_feature() {
+        let mut menu = Menu::new(KeyboardLayout::Azerty, 3, PhotoLength::Quick);
+        menu.open();
+        menu.set_contacts(vec![Contact { id: "u1".into(), name: "Ada".into() }], true, "");
+        let _ = menu.press(Target::Call);
+        assert_eq!(menu.page, Page::Call);
+        menu.set_calls_soon(true);
+        assert_eq!(menu.page, Page::Home, "the call page goes");
+        let state = layout::target_state(&menu, Target::Call);
+        assert!(state.unavailable && state.soon && !state.on && state.pointable(), "greyed, yet it takes a press: {state:?}");
+        assert_eq!(layout::text(&menu, layout::Content::TileNote(layout::note_of(Target::Call))), "Coming soon");
+        assert!(menu.press(Target::Call).is_empty());
+        assert_eq!(menu.page, Page::Home, "nothing opens");
+        assert_eq!(layout::text(&menu, layout::Content::Status), "Calls are coming soon, not open yet");
+        menu.set_call(Some(Call::Ringing { name: "Ada".into() }));
+        assert!(menu.call.is_none() && menu.page == Page::Home, "no call rings here");
+        // Only Call: the rest stays as it was.
+        assert!(!layout::target_state(&menu, Target::YouTube).unavailable && !layout::target_state(&menu, Target::FastWalk).soon);
+        menu.set_calls_soon(false);
+        let state = layout::target_state(&menu, Target::Call);
+        assert!(!state.unavailable && !state.soon);
+        let _ = menu.press(Target::Call);
+        assert_eq!(menu.page, Page::Call, "open again");
     }
 
     #[test]

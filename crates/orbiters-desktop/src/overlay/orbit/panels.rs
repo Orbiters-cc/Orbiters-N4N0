@@ -734,6 +734,8 @@ pub struct Facts {
     pub drop_why: DropWhy,
     pub playing_link_copied: bool,
     pub can_call: bool,
+    /// Calls are not open to this Orbiters account (N4N0 calls): Call stays on All tools, greyed out, "Coming soon".
+    pub calls_soon: bool,
     pub can_states: bool,
     pub can_light: bool,
     /// In VR, a close on the sheet and the wing.
@@ -1124,7 +1126,7 @@ fn accessories(facts: &Facts) -> Vec<(Action, &'static str, &'static str)> {
         small.push((Action::FastWalk, icons::PERSON_SIMPLE_RUN, tr("Fast walk")));
         small.push((Action::Page(Target::Tracking), icons::VIRTUAL_REALITY, tr("Smooth tracking")));
     }
-    if facts.can_call {
+    if facts.can_call || facts.calls_soon {
         small.push((Action::Page(Target::Call), icons::PHONE, tr_ctx("voice call", "Call")));
     }
     small.push((Action::Page(Target::WorldFeedback), icons::HEART, tr("World feedback")));
@@ -2077,6 +2079,10 @@ pub fn split_source(title: &str, by: &str) -> (Option<String>, String) {
     (None, title.to_string())
 }
 
+/// What Call's caption says under its name, and the note a press on it shows, while calls are not open to this account
+/// (short: a headset's head has less room).
+pub const CALLS_SOON_WHY: &str = mark("Calls aren't open for your account yet.");
+
 /// What an accessory of All tools does, in a few words for its tile: its caption says the whole of it.
 fn tile_line(action: Action, facts: &Facts) -> Option<String> {
     let line = match action {
@@ -2087,6 +2093,7 @@ fn tile_line(action: Action, facts: &Facts) -> Option<String> {
         Action::FastWalk if facts.fast_walk => return None,
         Action::FastWalk => tr("Walk faster than VRChat lets you."),
         Action::Page(Target::Tracking) => tr("Steadier headset and trackers"),
+        Action::Page(Target::Call) if facts.calls_soon => tr(orbiters_n4n0_core::menu::CALLS_SOON),
         Action::Page(Target::Call) => tr("Talk with a friend, anywhere"),
         Action::Page(Target::WorldFeedback) => tr("Like, label, comment"),
         Action::Page(Target::Qr) => tr("Open a link shown in the world"),
@@ -2501,6 +2508,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Page(Target::Instances) => (tr("Instances").into(), tr("Where you were lately. Go back with an invite.").into()),
         Action::Page(Target::History) => (tr("Your captures").into(), tr("Your 3D pictures and scenes: see them, share them.").into()),
         Action::Page(Target::YouTube) => ("YouTube".into(), tr("Find a video, and put its link in the world's video player.").into()),
+        Action::Page(Target::Call) if facts.calls_soon => (tr!("{tool} · Coming soon", tool = tr_ctx("voice call", "Call")), tr(CALLS_SOON_WHY).into()),
         Action::Page(Target::Call) => (tr_ctx("voice call", "Call").into(), tr("Talk with a friend, wherever they are in VRChat.").into()),
         Action::Page(Target::Music) => (tr("Now playing").into(), tr("What your computer plays, and its volume.").into()),
         Action::Page(Target::Light) => (tr_ctx("lamp", "Light").into(), tr("N4N0 as a light that follows you.").into()),
@@ -3309,6 +3317,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             hero_body(p, body, item.action, line, facts);
         }
         Look::Small { icon, label, tint } => {
+            // Call while calls are not open to this account: greyed out, its line saying "Coming soon" (it still takes a
+            // press, which says why).
+            let soon = item.action == Action::Page(Target::Call) && facts.calls_soon;
+            let tint = if soon { theme::FG_4 } else { tint };
+            let name_ink = if soon { theme::mix(look::MUTED, Color32::WHITE, 0.35) } else { Color32::WHITE };
             let on = item.action == Action::FastWalk && facts.fast_walk;
             // Ask N4N0's: room left for the assistant's switch on its corner, and grey while the assistant is off.
             let switch_room = if item.action == Action::Talk && facts.n4n0 { assistant_switch_rect(rect).width() + 2.0 } else { 0.0 };
@@ -3322,15 +3335,23 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             // before its name, on one line.
             if rect.height() < 70.0 {
                 widgets::icon(p, pos2(rect.left() + 22.0, rect.center().y), icon, 24.0, tint);
-                let (label, font) = fitted(p, label, 16.5, weight::BOLD, rect.width() - 48.0 - switch_room, 12.5);
-                p.text(pos2(rect.left() + 40.0, rect.center().y), Align2::LEFT_CENTER, label, font, Color32::WHITE);
+                let shown = if soon { tr!("{tool} · Coming soon", tool = label) } else { label.to_string() };
+                let (label, font) = fitted(p, &shown, 16.5, weight::BOLD, rect.width() - 48.0 - switch_room, 12.5);
+                p.text(pos2(rect.left() + 40.0, rect.center().y), Align2::LEFT_CENTER, label, font, name_ink);
                 return;
             }
             // Many of them, in a headset: its icon over its name.
             if rect.width() < 200.0 {
                 widgets::icon(p, pos2(rect.center().x, rect.top() + 28.0), icon, 30.0, tint);
-                let (label, font) = fitted(p, label, 16.5, weight::BOLD, rect.width() - 14.0, 13.5);
-                p.text(pos2(rect.center().x, rect.bottom() - 21.0), Align2::CENTER_CENTER, label, font, Color32::WHITE);
+                let (name, font) = fitted(p, label, 16.5, weight::BOLD, rect.width() - 14.0, 13.5);
+                if soon {
+                    // Its name, and under it what it is waiting for.
+                    p.text(pos2(rect.center().x, rect.bottom() - 32.0), Align2::CENTER_CENTER, name, font, name_ink);
+                    let (line, font) = fitted(p, tr(orbiters_n4n0_core::menu::CALLS_SOON), 13.5, weight::SEMIBOLD, rect.width() - 14.0, 11.0);
+                    p.text(pos2(rect.center().x, rect.bottom() - 13.0), Align2::CENTER_CENTER, line, font, Color32::WHITE);
+                } else {
+                    p.text(pos2(rect.center().x, rect.bottom() - 21.0), Align2::CENTER_CENTER, name, font, name_ink);
+                }
                 return;
             }
             let chip = Rect::from_min_size(pos2(rect.left() + 12.0, rect.top() + 12.0), Vec2::splat(40.0));
@@ -3346,11 +3367,12 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let (label, font) = fitted(p, label, 21.5, weight::BOLD, room, 16.0);
             match said {
                 Some(said) => {
-                    p.text(pos2(x, rect.top() + 22.0), Align2::LEFT_CENTER, label, font, Color32::WHITE);
+                    p.text(pos2(x, rect.top() + 22.0), Align2::LEFT_CENTER, label, font, name_ink);
                     // Smaller than its name and quieter, and never past the tile's foot (Enzo, 2026-11-10: at the name's size it ran over the tile and was cut). As many
                     // whole lines as the tile holds, by what they measure. Not under 12 px at 1280 x 720 either (round 18's judges), which the taller rows make room for.
                     let top = rect.top() + 34.0;
-                    let ink = theme::mix(look::MUTED, Color32::WHITE, 0.55);
+                    // "Coming soon" reads at once over the greyed tile.
+                    let ink = if soon { Color32::WHITE } else { theme::mix(look::MUTED, Color32::WHITE, 0.55) };
                     let lines = |rows: usize| {
                         let mut job = egui::text::LayoutJob::simple(said.clone(), look::font(17.5, weight::MEDIUM), ink, room);
                         job.wrap.max_rows = rows;
@@ -3362,7 +3384,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                     p.galley(pos2(x, top), galley, ink);
                 }
                 None => {
-                    p.text(pos2(x, chip.center().y), Align2::LEFT_CENTER, label, font, Color32::WHITE);
+                    p.text(pos2(x, chip.center().y), Align2::LEFT_CENTER, label, font, name_ink);
                 }
             }
         }
@@ -5300,6 +5322,22 @@ mod tests {
         // And the two choices are a hover away on the wheel, whose second ring holds them.
         let bloom: Vec<Action> = zones::Group::Pictures.cells().iter().flat_map(|z| items(*z, z.units().size(), &facts())).map(|i| i.action).collect();
         assert!(bloom.contains(&Action::Picture(PhotoMode::People)) && bloom.contains(&Action::Picture(PhotoMode::World)) && !bloom.contains(&Action::Record), "a recording starts beside the camera alone");
+    }
+
+    /// Request15 10: without N4N0 calls, Call stays on All tools (on the desktop and in a headset, linked or not), its
+    /// line and caption say it is coming soon, and its press says why (`Overlay::press`); with them, as before.
+    #[test]
+    fn call_shows_as_coming_soon_on_all_tools_without_the_feature() {
+        for desktop in [true, false] {
+            let soon = Facts { desktop, calls_soon: true, sheet: Some(Sheet::All), ..facts() };
+            let call = sheet_items(Sheet::All, &soon).into_iter().find(|i| i.action == Action::Page(Target::Call));
+            assert!(matches!(call.map(|i| i.look), Some(Look::Small { label: "Call", .. })), "desktop {desktop}");
+            assert_eq!(tile_line(Action::Page(Target::Call), &soon).as_deref(), Some("Coming soon"));
+            assert_eq!(caption(Action::Page(Target::Call), &soon).map(|c| c.1).as_deref(), Some(CALLS_SOON_WHY));
+            let open = Facts { can_call: true, ..soon.clone() };
+            let open = Facts { calls_soon: false, ..open };
+            assert_eq!(tile_line(Action::Page(Target::Call), &open).as_deref(), Some("Talk with a friend, anywhere"));
+        }
     }
 
     #[test]

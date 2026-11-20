@@ -526,6 +526,21 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
+            // Request15 10: the account has not N4N0 calls: Call greyed out, "Coming soon", and a press says why.
+            name: "home-calls-soon",
+            page: Page::Home,
+            snapshot: without_calls(&home),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![(toast::Kind::Info, "Calls are coming soon to Orbiters - N4N0. They aren't open for your account yet.")],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
             name: "network-looking",
             page: Page::Home,
             snapshot: network_snapshot(&home, crate::state::LanLink::Looking),
@@ -654,7 +669,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         Scenario {
             name: "home-call",
             page: Page::Home,
-            snapshot: home.clone(),
+            // The account has N4N0 calls: the page of friends to call.
+            snapshot: with_calls(&home, false),
             frames: 90,
             splash: false,
             open_detail: false,
@@ -1075,6 +1091,21 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             toasts: vec![],
             pointer: None,
             scroll: 1060.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            // Request15 10: the same section for an account without N4N0 calls: "Coming soon", nothing to start.
+            name: "n4n0-calls-soon",
+            page: Page::N4n0,
+            snapshot: without_calls(&n4n0_busy),
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 1900.0,
             world: None,
             home: None,
             library: None,
@@ -3898,6 +3929,13 @@ fn with_share_offer(snap: &Snapshot) -> Snapshot {
         offer: Some(crate::state::ShareOffer { id: 1, from: "Nova Fox".into(), title: "The Black Cat".into(), until_ms: now + 600_000, for_ms: 800_000 }),
         ..Default::default()
     });
+    s
+}
+
+/// The account without N4N0 calls (`n4n0-calls`): what the service publishes then.
+fn without_calls(snap: &Snapshot) -> Snapshot {
+    let mut s = snap.clone();
+    s.n4n0.calls.set(orbiters_n4n0::status::CallsStatus::default());
     s
 }
 

@@ -166,6 +166,11 @@ pub struct Account {
     pub username: Option<String>,
     #[serde(default, rename = "avatarUrl")]
     pub avatar_url: Option<String>,
+    /// The account's features as the server's session check says them (`GET /unity-wizard/token`, `features`), each on
+    /// or off: what this app shows or greys out (`orbiters_core::features`). `None`: the server said nothing of them (an
+    /// older one, or an account read from the file, which never keeps them). The server's routes still decide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<std::collections::BTreeMap<String, bool>>,
 }
 
 /// Without the credential: an account printed in a log or a test's failure shows who, never the token.
@@ -176,6 +181,7 @@ impl std::fmt::Debug for Account {
             .field("user", &self.user)
             .field("username", &self.username)
             .field("avatar_url", &self.avatar_url)
+            .field("features", &self.features)
             .finish()
     }
 }
@@ -909,6 +915,7 @@ mod tests {
             user: Some("42".into()),
             username: Some("Example".into()),
             avatar_url: None,
+            features: None,
         };
         write_file(&UnityStore, &path, &account).unwrap();
         assert_eq!(read_file(&UnityStore, &path), Some(account.clone()));
@@ -967,7 +974,7 @@ mod tests {
         let store = Sealed { dir: dir.clone(), key: 0x5a };
         let path = store.path(Server::Production).unwrap();
         assert_eq!(path, dir.join("account.dat"));
-        let account = Account { token: "orbit-phone".into(), user: Some("7".into()), username: Some("Quest".into()), avatar_url: None };
+        let account = Account { token: "orbit-phone".into(), user: Some("7".into()), username: Some("Quest".into()), avatar_url: None, features: None };
         write_file(&store, &path, &account).unwrap();
         let raw = std::fs::read(&path).unwrap();
         assert!(raw.starts_with(b"SEALED") && !String::from_utf8_lossy(&raw).contains("orbit-phone"), "only sealed bytes on disk");

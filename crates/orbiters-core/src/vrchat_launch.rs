@@ -18,6 +18,24 @@ pub const VR_HERE: bool = !cfg!(target_os = "macos");
 /// Steam's id of VRChat.
 pub const STEAM_APP: &str = "438100";
 
+/// The profiles map with its numbers read from text keys. JSON writes a map's keys as text, and a message that is read
+/// in two steps (a tagged one, as the service's are for the window and the overlay) hands those keys over as text:
+/// read plainly as numbers they are refused ("invalid type: string \"0\", expected u32"), which ended the overlay and
+/// the window at every start once a profile had been seen (0.3.6). A key that is not a profile's number is dropped.
+mod profile_keys {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S: Serializer>(map: &BTreeMap<u32, String>, to: S) -> Result<S::Ok, S::Error> {
+        map.iter().map(|(profile, account)| (profile.to_string(), account)).collect::<BTreeMap<_, _>>().serialize(to)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(from: D) -> Result<BTreeMap<u32, String>, D::Error> {
+        let read = BTreeMap::<String, String>::deserialize(from)?;
+        Ok(read.into_iter().filter_map(|(profile, account)| Some((profile.trim().parse().ok()?, account))).collect())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LaunchSettings {
@@ -45,6 +63,7 @@ pub struct LaunchSettings {
     pub desktop_window: Option<SavedWindow>,
     /// VRChat's profiles used on this computer and the account last seen signed in on each (from VRChat's logs), so
     /// Home's profile choice says whose each one is (REQUEST15 7a; not a setting, written as they are seen).
+    #[serde(with = "profile_keys")]
     pub profiles: std::collections::BTreeMap<u32, String>,
 }
 
@@ -359,6 +378,24 @@ mod tests {
         assert_eq!(profile_of(&args(&["VRChat.exe", "--no-vr", "--profile=3"])), 3);
         assert_eq!(profile_of(&args(&["VRChat.exe", "--profile=x"])), 0);
         assert_eq!(profile_of(&args(&["VRChat.exe"])), 0);
+    }
+
+    /// The service's messages are tagged, so what they carry is read from kept values, where a map's keys are text.
+    #[test]
+    fn the_profiles_seen_survive_a_tagged_message() {
+        #[derive(Serialize, Deserialize)]
+        #[serde(tag = "event", rename_all = "snake_case")]
+        enum Message {
+            State { launch: LaunchSettings },
+        }
+        let mut launch = LaunchSettings::default();
+        launch.profiles = [(0, "Sample Me".to_string()), (3, "Sample Alt".to_string())].into();
+        let text = serde_json::to_string(&Message::State { launch: launch.clone() }).unwrap();
+        assert!(text.contains(r#""profiles":{"0":"Sample Me","3":"Sample Alt"}"#), "the file's form is unchanged: {text}");
+        let Message::State { launch: back } = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, launch);
+        let odd: LaunchSettings = serde_json::from_str(r#"{"profiles": {"2": "Sample Alt", "x": "nobody"}}"#).unwrap();
+        assert_eq!(odd.profiles, [(2, "Sample Alt".to_string())].into(), "a key that is no number is dropped, the rest kept");
     }
 
     #[test]

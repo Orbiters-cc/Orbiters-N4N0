@@ -158,7 +158,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         // Over a menu of VRChat's or of ours nothing is read and no translation shows (the menus cover the view): as last turn found them.
         let covered = was_menu || !panels.is_empty();
-        translations.update(&snap, &backend, shown_on.map(|w| super::desk_translate::OnScreen { window: w, origin: client_origin(w), client: client_size(w) }), covered);
+        translations.update(&snap, &backend, shown_on.map(|w| super::desk_translate::OnScreen { window: w, origin: client_origin(w), client: client_size(w), pid: snap.vrchat.pid.unwrap_or(0) }), covered);
         let Some(window) = shown_on else {
             corner.show(false, pos2(0.0, 0.0), vec2(0.0, 0.0), turn);
             // The parts of menus that closed are kept for a while; with the game behind another window nothing else comes by to let them go.
@@ -3012,7 +3012,7 @@ mod tests {
     #[test]
     fn asking_for_looks_never_waits_for_the_capture() {
         let looker = Looker::start();
-        let ask = Ask { window: 0x7fff_fff0, client: vec2(2560.0, 1440.0), menus: true, menu_every: Duration::ZERO, camera: true, shown: None, open: true };
+        let ask = Ask { window: 0x7fff_fff0, pid: 0, client: vec2(2560.0, 1440.0), menus: true, menu_every: Duration::ZERO, camera: true, shown: None, open: true };
         let mut slowest = Duration::ZERO;
         let began = Instant::now();
         while began.elapsed() < Duration::from_millis(400) {

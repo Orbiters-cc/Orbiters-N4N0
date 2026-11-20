@@ -370,8 +370,9 @@ impl Drop for Grab {
 /// What the loop and the reading thread share.
 #[derive(Default)]
 struct Shared {
-    /// VRChat's window and its client area's size, while it is on the screen; `None` otherwise.
+    /// VRChat's window and its client area's size, while it is on the screen; `None` otherwise. With VRChat's process, asked again before a capture starts.
     window: Option<(isize, [u32; 2])>,
+    pid: u32,
     /// A menu (VRChat's or ours) covers the view: no reading, nothing shown.
     paused: bool,
     settings: Option<(TranslateSettings, String)>,
@@ -416,6 +417,8 @@ pub struct OnScreen {
     /// Its client area's corner on the screen, and its size.
     pub origin: Pos2,
     pub client: Vec2,
+    /// VRChat's process.
+    pub pid: u32,
 }
 
 impl Host {
@@ -447,6 +450,7 @@ impl Host {
         let (scene, moving, status) = {
             let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             s.window = on.map(|o| (o.window.0 as isize, [o.client.x.max(0.0) as u32, o.client.y.max(0.0) as u32]));
+            s.pid = on.map_or(0, |o| o.pid);
             s.paused = covered;
             s.settings = Some((snap.settings.translate.clone(), vr_translate::target(&snap.settings)));
             (s.scene.take(), s.moving, s.status.clone())
@@ -665,9 +669,9 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
     let mut quiet = false;
     vr_translate::note("desktop reading started"); // i18n: not shown (a log's line)
     while !stop.load(Ordering::Relaxed) {
-        let (window, paused, now_settings) = {
+        let (window, paused, now_settings, pid) = {
             let s = shared.lock().unwrap_or_else(|e| e.into_inner());
-            (s.window, s.paused, s.settings.clone())
+            (s.window, s.paused, s.settings.clone(), s.pid)
         };
         core.save_cache(false);
         // Settings changed: another translator, another language.
@@ -738,7 +742,8 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
             continue;
         }
         if grab.as_ref().is_none_or(|g| g.window != hwnd) {
-            grab = gpu.as_ref().and_then(|g| Grab::new(HWND(hwnd as *mut _), g).map_err(|e| eprintln!("desk translate: {e}")).ok()); // i18n: not shown (a log's line)
+            // Still VRChat's: a closed window's handle may be another program's now (verify-r15).
+            grab = gpu.as_ref().filter(|_| super::desktop::is_vrchat_window(HWND(hwnd as *mut _), pid)).and_then(|g| Grab::new(HWND(hwnd as *mut _), g).map_err(|e| eprintln!("desk translate: {e}")).ok()); // i18n: not shown (a log's line)
             reset_motion(&mut motion, shared);
             if grab.is_none() {
                 std::thread::sleep(Duration::from_millis(500));

@@ -876,9 +876,7 @@ impl super::Controller {
     fn calls_tick(self: &Shared) {
         let settings = self.settings();
         // Whether this account has N4N0 calls, asked again when it is time to (whatever the setting: Call's tile shows it).
-        if let Some((api, token)) = self.calls_api() {
-            self.calls_access_refresh(&api, &token);
-        }
+        self.calls_access_refresh();
         let open = self.calls_open();
         let on = open && settings.n4n0.enabled && settings.n4n0.calls;
         // A phase that lasted too long ends.
@@ -989,8 +987,8 @@ impl super::Controller {
                 }
                 // The account has not N4N0 calls (switched off since): closed here at once, the next look says so.
                 Err(e) if super::calls_access::not_enabled(&e) => {
-                    self.calls_access_refused();
                     self.calls.lock().unwrap().presence_sent = Some(Instant::now());
+                    self.calls_access_denied(&token);
                     return;
                 }
                 Err(e) => {
@@ -1276,8 +1274,9 @@ impl super::Controller {
                         Ok(v) => v["call"].as_str().filter(|id| !id.is_empty()).map(str::to_string).ok_or(Ending::Failed),
                         Err(e) if refused_as(&e, 409, "busy") => Err(Ending::Busy),
                         Err(e) if super::calls_access::not_enabled(&e) => {
-                            self.calls_access_refused();
-                            self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
+                            if self.calls_access_denied(&token) {
+                                self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
+                            }
                             Err(Ending::Failed)
                         }
                         Err(e) => {
@@ -1294,8 +1293,9 @@ impl super::Controller {
                     if let Err(e) = post(&api, &token, &format!("n4n0/calls/{id}/answer"), &json!({ "answer": sdp })) {
                         eprintln!("calls answer: {e:#}");
                         if super::calls_access::not_enabled(&e) {
-                            self.calls_access_refused();
-                            self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
+                            if self.calls_access_denied(&token) {
+                                self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
+                            }
                         } else {
                             self.notify(NoticeKind::Warning, tr!("Call: {message}", message = e));
                         }
@@ -1347,7 +1347,7 @@ impl super::Controller {
             let servers = match ctl.calls_api() {
                 Some((api, token)) => ice_servers(&api, &token).map_err(|e| {
                     if super::calls_access::not_enabled(&e) {
-                        ctl.calls_access_refused();
+                        ctl.calls_access_denied(&token);
                     }
                     tr!("the call relay could not be reached: {error}", error = e)
                 }),
@@ -1492,6 +1492,29 @@ impl super::Controller {
         self.calls.lock().unwrap().call.as_ref().is_some_and(Call::ringing_in)
     }
 
+    /// Calls were closed for this account (`calls_access_denied`): a call under way ends (the other side is told), the
+    /// friends to call go, and everything shows "Coming soon" now rather than at the next look; N4N0's call menu, when
+    /// it was open on the panel, goes too.
+    pub(super) fn calls_closed_here(self: &Shared, menu_was_open: bool) {
+        {
+            let mut rt = self.calls.lock().unwrap();
+            if rt.call.is_some() {
+                let acts = rt.hang_up();
+                self.calls_act(rt, acts);
+            }
+        }
+        if menu_was_open {
+            self.n4n0_command(crate::ipc::N4n0Command::HidePanel);
+        }
+        self.calls_publish(|rt| {
+            rt.link = CallLink::ComingSoon;
+            rt.contacts.clear();
+            rt.contacts_read = None;
+            rt.available_sent = None;
+            rt.presence_sent = None;
+        });
+    }
+
     fn calls_publish(self: &Shared, change: impl FnOnce(&mut CallsRuntime)) {
         let status = {
             let mut rt = self.calls.lock().unwrap();
@@ -1560,7 +1583,7 @@ mod tests {
             Some(orbiters_core::account::Account { token: "orbit-test".into(), user: Some("42".into()), username: Some("Nova".into()), avatar_url: None, features: None });
         ctl.update(|s| s.account.state = crate::state::AccountState::SignedIn { username: "Nova".into() });
         let features = std::collections::BTreeMap::from([(orbiters_core::features::N4N0_CALLS.to_string(), allowed)]);
-        ctl.calls_access_checked(orbiters_core::account::Server::current(), Some("42".into()), Some("Nova".into()), Some(&features));
+        ctl.calls_access_checked(orbiters_core::account::Server::current(), Some("42"), "orbit-test", Some(&features));
         ctl
     }
 
@@ -1596,8 +1619,8 @@ mod tests {
             // Being rung.
             ring(&ctl, "k_1");
             assert_eq!(ctl.call_ringing_in(), allowed, "rung: {allowed}");
-            // Answering by touching N4N0, then by Answer: each on a call that rings (without the feature, one put there
-            // as if it had rung). The call worker is not beside the test program: it is asked for, and the call ends.
+            // Answering by the avatar's Call/Go, then by Answer (a press, or touching N4N0, which sends Answer): each on a
+            // call that rings (without the feature, one put there as if it had rung). The call worker is not beside the test program: it is asked for, and the call ends.
             let rung_anyway = |ctl: &crate::controller::Shared, id: &str| {
                 if allowed {
                     ring(ctl, id);
@@ -1609,8 +1632,8 @@ mod tests {
             ctl.calls.lock().unwrap().call = None;
             rung_anyway(&ctl, "k_2");
             let workers = ctl.calls.lock().unwrap().workers;
-            assert_eq!(ctl.calls_go(), allowed, "touching N4N0 answers: {allowed}");
-            assert_eq!(ctl.calls.lock().unwrap().workers > workers, allowed, "touching N4N0 asked the worker to answer: {allowed}");
+            assert_eq!(ctl.calls_go(), allowed, "Call/Go answers: {allowed}");
+            assert_eq!(ctl.calls.lock().unwrap().workers > workers, allowed, "Call/Go asked the worker to answer: {allowed}");
             ctl.calls.lock().unwrap().call = None;
             rung_anyway(&ctl, "k_3");
             let workers = ctl.calls.lock().unwrap().workers;
@@ -1625,6 +1648,41 @@ mod tests {
         }
     }
 
+    /// Verify A2: an answer or a refusal comes back for the credential it was asked with. After another account signed in
+    /// (account switch while it was on its way), it never opens nor closes the new account's calls.
+    #[test]
+    fn answers_for_the_account_before_a_switch_never_touch_the_next_one() {
+        let server = orbiters_core::account::Server::current();
+        let yes = std::collections::BTreeMap::from([(orbiters_core::features::N4N0_CALLS.to_string(), true)]);
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        let sign_in = |user: &str, token: &str| {
+            ctl.account_runtime.lock().unwrap().account =
+                Some(orbiters_core::account::Account { token: token.into(), user: Some(user.into()), username: Some(user.into()), avatar_url: None, features: None });
+        };
+        ctl.update(|s| s.account.state = crate::state::AccountState::SignedIn { username: "B".into() });
+        // B signed in, without calls; A's yes (asked before the switch) arrives: B stays closed.
+        sign_in("2", "orbit-b");
+        ctl.calls_access_checked(server, Some("1"), "orbit-a", Some(&yes));
+        assert!(!ctl.calls_open(), "A's yes is not B's");
+        // B has calls; A's refusal arrives late: B stays open.
+        ctl.calls_access_checked(server, Some("2"), "orbit-b", Some(&yes));
+        assert!(ctl.calls_open());
+        assert!(!ctl.calls_access_denied("orbit-a"), "A's refusal is not B's");
+        assert!(ctl.calls_open());
+        // B's own refusal closes B, and clears what was shown.
+        ctl.calls.lock().unwrap().contacts = vec![crate::state::CallContact { id: "c_1".into(), name: "Ada".into() }];
+        assert!(ctl.calls_access_denied("orbit-b"));
+        assert!(!ctl.calls_open());
+        assert!(ctl.calls.lock().unwrap().contacts.is_empty());
+        assert_eq!(ctl.snapshot.lock().unwrap().n4n0.calls.link, crate::state::CallLink::ComingSoon);
+        // An account without an id: told apart by its credential, never sharing another's answer.
+        ctl.account_runtime.lock().unwrap().account =
+            Some(orbiters_core::account::Account { token: "orbit-c".into(), user: None, username: Some("".into()), avatar_url: None, features: None });
+        assert!(!ctl.calls_open());
+        ctl.calls_access_checked(server, None, "orbit-d", Some(&yes));
+        assert!(!ctl.calls_open(), "another credential without an id is another identity");
+    }
+
     /// Signed out, or the server's word not come yet: closed. A refusal of a call request closes calls at once.
     #[test]
     fn calls_close_when_signed_out_unknown_or_refused() {
@@ -1633,11 +1691,11 @@ mod tests {
         ctl.calls_tick();
         assert_eq!(ctl.snapshot.lock().unwrap().n4n0.calls.link, crate::state::CallLink::ComingSoon);
         let ctl = signed_in_controller(true);
-        ctl.calls_access_refused();
+        assert!(ctl.calls_access_denied("orbit-test"));
         assert!(!ctl.calls_open());
         // A session check from an older server says nothing of features: what was known stays.
         let ctl = signed_in_controller(true);
-        ctl.calls_access_checked(orbiters_core::account::Server::current(), Some("42".into()), None, None);
+        ctl.calls_access_checked(orbiters_core::account::Server::current(), Some("42"), "orbit-test", None);
         assert!(ctl.calls_open());
     }
 

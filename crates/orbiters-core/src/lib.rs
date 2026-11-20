@@ -23,6 +23,7 @@ mod launcher_live;
 pub mod maps;
 pub mod obelisk;
 pub mod osc;
+pub mod picture_sources;
 pub mod pipeline;
 pub mod panic_log;
 pub mod paths;

@@ -156,6 +156,8 @@ impl Controller {
         let development = server == Server::Development;
         let current = || self.account_generation.load(std::sync::atomic::Ordering::SeqCst) == generation;
         let Some(saved) = saved else {
+            // Signed out (here or by another tool): calls and shares let go of the account at once.
+            self.calls_leave(None);
             self.update_if(|s| {
                 if !current() {
                     return false;

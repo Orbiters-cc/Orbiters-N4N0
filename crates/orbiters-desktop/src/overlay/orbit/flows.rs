@@ -161,7 +161,10 @@ impl Person {
         loop {
             let moving: Vec<Zone> = self.panels.all().filter(|p| !p.appear.settled()).map(|p| p.zone).collect();
             let unpainted: Vec<Zone> = self.panels.all().filter(|p| !p.painted).map(|p| p.zone).collect();
-            let reading = self.panels.recents.rx.is_some();
+            // The list is taken only on a sheet that shows it (Photos & captures, All tools): one still being read when another sheet was pressed waits there for
+            // the gallery's next showing, and is not what a part at rest waits for. On a loaded machine the list thread answered after the press, and the test
+            // waited its whole clock for it.
+            let reading = self.panels.recents.rx.is_some() && matches!(self.panels.facts.sheet, Some(Sheet::Pictures | Sheet::All));
             if moving.is_empty() && unpainted.is_empty() && !reading {
                 return;
             }
@@ -609,6 +612,40 @@ fn with_nothing_changing_no_part_is_painted() {
         person.snap = Arc::new(snap);
         assert!(!due(&mut person).is_empty(), "{around:?} {sheets:?}: a countdown");
     }
+}
+
+/// The flaky one above under load: All tools asks for the gallery's list, and Settings is pressed before the list thread answers (a
+/// slow machine, here a list that waits). The list is taken only on a sheet that shows it, so the Settings sheet is at rest with it
+/// pending; it was waited for until the clock ran out. The list is taken on the next showing of All tools.
+#[test]
+fn a_list_still_read_when_another_sheet_is_pressed_does_not_keep_the_menu_from_rest() {
+    static LET_GO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    fn slow(_: &std::path::Path, _: &[std::path::PathBuf]) -> Vec<super::LoadedRecent> {
+        let began = Instant::now();
+        while !LET_GO.load(std::sync::atomic::Ordering::SeqCst) && began.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Vec::new()
+    }
+    LET_GO.store(false, std::sync::atomic::Ordering::SeqCst);
+    let mut person = Person::with_a_song();
+    person.panels.recents.lister = Some(slow);
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::All);
+    assert!(person.panels.recents.rx.is_some(), "All tools asked for the list");
+    person.press(Action::Settings);
+    person.turns(3);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Settings));
+    let began = Instant::now();
+    person.turns_until_at_rest("Settings, the list still being read");
+    assert!(began.elapsed() < Duration::from_secs(60), "at rest without the list: {:?}", began.elapsed());
+    assert!(person.panels.recents.rx.is_some(), "the list is still pending: nothing took it on Settings");
+    LET_GO.store(true, std::sync::atomic::Ordering::SeqCst);
+    person.panels.close_sheet();
+    person.turns(3);
+    person.press(Action::All);
+    person.turns_until("the list taken on All tools", |p| p.panels.recents.rx.is_none());
 }
 
 /// What plays's picture arriving after its name (it is read apart, and can be large) is painted on All tools too. Only the parts around the menu were marked for it, and the

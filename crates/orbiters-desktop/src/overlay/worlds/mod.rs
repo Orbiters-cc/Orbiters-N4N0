@@ -711,9 +711,11 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         let (source, from) = (self.source.clone(), entry.clone());
         let progress = Arc::new(catalog::Progress::default());
         self.live_progress = Some(progress.clone());
-        let load = move || match &from.local {
-            Some(dir) => catalog::read_kept(&from, dir, &progress),
-            None => source.download(&from, &progress),
+        let load = move || {
+            one_load_at_a_time(&progress, || match &from.local {
+                Some(dir) => catalog::read_kept(&from, dir, &progress),
+                None => source.download(&from, &progress),
+            })
         };
         self.live = Some((entry.id, super::orbit::sheet_view::SheetView::open_with(load, self.live_turns, 2)));
         self.live_frame = None;
@@ -2796,6 +2798,65 @@ fn forget_eye_frames_in(dir: &std::path::Path) -> Vec<String> {
         }
     }
     problems
+}
+
+/// The side panel's captures are read one at a time: chosen quickly one after another, each waits for the one before, which was told to stop and ends at
+/// its next chunk, and gives up at once if it was told to stop meanwhile. However fast worlds are flipped, at most one download or decode runs, for the
+/// latest chosen (verify2-r15 S4).
+static SIDE_LOADS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn one_load_at_a_time<T>(progress: &Progress, load: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    progress.check()?;
+    let _turn = SIDE_LOADS.lock().unwrap_or_else(|e| e.into_inner());
+    progress.check()?;
+    load()
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// verify2-r15 S4: worlds chosen quickly one after another: one reading runs at a time, and those told to stop while they waited never run.
+    #[test]
+    fn rapid_choices_read_one_at_a_time_and_only_the_last() {
+        let (running, most, ran) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let first = Arc::new(Progress::default());
+        let (held, hold) = (std::sync::mpsc::channel::<()>(), std::sync::mpsc::channel::<()>());
+        let reader = |p: Arc<Progress>, wait: Option<std::sync::mpsc::Receiver<()>>, started: Option<std::sync::mpsc::Sender<()>>| {
+            let (running, most, ran) = (running.clone(), most.clone(), ran.clone());
+            std::thread::spawn(move || {
+                one_load_at_a_time(&p, || {
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    most.fetch_max(now, Ordering::SeqCst);
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    if let Some(s) = started {
+                        let _ = s.send(());
+                    }
+                    if let Some(w) = wait {
+                        let _ = w.recv();
+                    }
+                    running.fetch_sub(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+        };
+        let a = reader(first.clone(), Some(hold.1), Some(held.0));
+        held.1.recv().unwrap();
+        // Four more chosen while the first reads; each told to stop as the next is chosen, the last one wanted.
+        let later: Vec<Arc<Progress>> = (0..4).map(|_| Arc::new(Progress::default())).collect();
+        let threads: Vec<_> = later.iter().map(|p| reader(p.clone(), None, None)).collect();
+        first.stop.store(true, Ordering::SeqCst);
+        for p in &later[..3] {
+            p.stop.store(true, Ordering::SeqCst);
+        }
+        hold.0.send(()).unwrap();
+        let _ = a.join().unwrap();
+        let results: Vec<bool> = threads.into_iter().map(|t| t.join().unwrap().is_ok()).collect();
+        assert_eq!(most.load(Ordering::SeqCst), 1, "never two at once");
+        assert_eq!(results, [false, false, false, true], "those told to stop never read; the last one does");
+        assert_eq!(ran.load(Ordering::SeqCst), 2, "the first (already reading) and the last");
+    }
 }
 
 /// Those a release build kept before it stopped (PRIV-5) go, once, when they are not wanted.

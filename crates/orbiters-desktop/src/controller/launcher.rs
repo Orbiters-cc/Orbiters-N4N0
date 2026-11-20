@@ -114,8 +114,8 @@ pub fn route(steam_has_vrchat: bool, launcher_registered: bool) -> Route {
 
 #[derive(Default)]
 pub struct RealMachine {
-    /// Each VRChat's Desktop mode and profile, read once from its command line (`None`: it could not be read).
-    desktop: Mutex<HashMap<u32, (bool, Option<u32>)>>,
+    /// Each VRChat's Desktop mode and profile from its command line, by process and start time.
+    desktop: Mutex<CmdLines>,
     /// The route, kept ten minutes (it reads the registry and Steam's library file).
     route: Mutex<Option<(Instant, Route)>>,
 }
@@ -203,6 +203,54 @@ impl Machine for MacMachine {
     }
 }
 
+/// How often, and how many times, a VRChat's command line Windows would not give is asked again.
+const CMD_RETRY: Duration = Duration::from_secs(10);
+const CMD_TRIES: u32 = 6;
+
+/// What each VRChat process's command line said (REQUEST15 second pass, S4): kept by process id and start time (a reused
+/// id is read anew); an unreadable one is asked again every [`CMD_RETRY`], [`CMD_TRIES`] times, not cached for the life
+/// of the process (its log may still say its profile through the roster).
+#[derive(Default)]
+pub struct CmdLines {
+    seen: HashMap<u32, CmdLine>,
+}
+
+#[derive(Clone, Copy)]
+struct CmdLine {
+    start: u64,
+    no_vr: bool,
+    profile: Option<u32>,
+    tries: u32,
+    next: Instant,
+}
+
+impl CmdLines {
+    /// Forgets the processes not in `alive` (id, start time); the ones whose command line is to be read now.
+    pub fn due(&mut self, alive: &[(u32, u64)], now: Instant) -> Vec<u32> {
+        self.seen.retain(|pid, line| alive.iter().any(|(p, s)| p == pid && *s == line.start));
+        alive
+            .iter()
+            .filter(|(pid, _)| match self.seen.get(pid) {
+                None => true,
+                Some(line) => line.profile.is_none() && line.tries < CMD_TRIES && now >= line.next,
+            })
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
+
+    /// What one read of `pid`'s command line gave (empty: Windows would not say).
+    pub fn record(&mut self, pid: u32, start: u64, args: &[String], now: Instant) {
+        let tries = self.seen.get(&pid).filter(|l| l.start == start).map_or(0, |l| l.tries) + 1;
+        let profile = (!args.is_empty()).then(|| orbiters_core::vrchat_launch::profile_of(args));
+        self.seen.insert(pid, CmdLine { start, no_vr: args.iter().any(|a| a == "--no-vr"), profile, tries, next: now + CMD_RETRY });
+    }
+
+    /// Desktop mode and profile of `pid` as read (`None`: not known).
+    pub fn get(&self, pid: u32) -> (bool, Option<u32>) {
+        self.seen.get(&pid).map_or((false, None), |l| (l.no_vr, l.profile))
+    }
+}
+
 /// The VRChats running (process, Desktop mode, profile): the profile as their own log said it once the roster read its
 /// arguments, else as their command line says it, else unknown (`None`): a VRChat whose log has not said its arguments
 /// yet is never taken for profile 0 (REQUEST15 fix B5).
@@ -256,26 +304,30 @@ impl Machine for RealMachine {
     }
 
     fn running_profiles(&self) -> Vec<(u32, bool, Option<u32>)> {
-        // Names only (no process is opened for them); the command line is read for VRChat's processes alone, once each.
+        // Names and start times only (no process is opened for them); the command line is read for VRChat's processes
+        // alone: once each, and again a few times while Windows would not give it.
         let mut system = sysinfo::System::new();
         system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-        let pids: Vec<sysinfo::Pid> = system.processes().values().filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat")).map(|p| p.pid()).collect();
-        let mut desktop = self.desktop.lock().unwrap();
-        desktop.retain(|pid, _| pids.iter().any(|p| p.as_u32() == *pid));
-        let unknown: Vec<sysinfo::Pid> = pids.iter().copied().filter(|p| !desktop.contains_key(&p.as_u32())).collect();
-        if !unknown.is_empty() {
-            system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&unknown), true, sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always));
-            for pid in unknown {
+        let alive: Vec<(u32, u64)> = system
+            .processes()
+            .values()
+            .filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat"))
+            .map(|p| (p.pid().as_u32(), p.start_time()))
+            .collect();
+        let mut lines = self.desktop.lock().unwrap();
+        let now = Instant::now();
+        let due: Vec<sysinfo::Pid> = lines.due(&alive, now).into_iter().map(sysinfo::Pid::from_u32).collect();
+        if !due.is_empty() {
+            system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&due), true, sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always));
+            for pid in due {
                 let args: Vec<String> = system.process(pid).map(|p| p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect()).unwrap_or_default();
-                let no_vr = args.iter().any(|a| a == "--no-vr");
-                // An empty command line is one Windows would not give: its profile is unknown, never taken for 0.
-                let profile = (!args.is_empty()).then(|| orbiters_core::vrchat_launch::profile_of(&args));
-                desktop.insert(pid.as_u32(), (no_vr, profile));
+                let start = alive.iter().find(|(p, _)| *p == pid.as_u32()).map_or(0, |(_, s)| *s);
+                lines.record(pid.as_u32(), start, &args, now);
             }
         }
-        pids.iter().map(|p| {
-            let (no_vr, profile) = desktop.get(&p.as_u32()).copied().unwrap_or((false, None));
-            (p.as_u32(), no_vr, profile)
+        alive.iter().map(|(pid, _)| {
+            let (no_vr, profile) = lines.get(*pid);
+            (*pid, no_vr, profile)
         }).collect()
     }
 
@@ -664,7 +716,7 @@ impl Controller {
             self.update_if(|s| {
                 let other = matches!(&s.launcher.source, Source::SignedIn { user_id, .. } if Some(user_id) != account.as_ref());
                 if other {
-                    let blank = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, loading: true, ..LauncherState::default() };
+                    let blank = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), unresolved: s.launcher.unresolved, possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, loading: true, ..LauncherState::default() };
                     *s.launcher = blank;
                     return true;
                 }
@@ -752,6 +804,8 @@ impl Controller {
             .vrchat
             .runs
             .iter()
+            // Only a profile its log confirmed: until then the roster's 0 means "not known".
+            .filter(|r| r.profile_known)
             .filter_map(|r| r.account.clone().filter(|a| !a.is_empty()).map(|a| (r.profile, a)))
             .filter(|(p, a)| view.settings.launch.profiles.get(p) != Some(a) && *p <= orbiters_core::vrchat_launch::PROFILE_MAX)
             .collect();
@@ -776,7 +830,9 @@ impl Controller {
         }
         // Published only when something changed (this runs every few seconds).
         self.update_if(|s| {
-            let changed = s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles;
+            let unresolved = runs.iter().filter(|r| r.2.is_none()).count() as u32;
+            let changed = s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles || s.launcher.unresolved != unresolved;
+            s.launcher.unresolved = unresolved;
             if s.launcher.profiles != profiles {
                 s.launcher.profiles = profiles;
             }
@@ -837,7 +893,7 @@ impl Controller {
             self.update_if(|s| {
                 let signed = matches!(s.launcher.source, Source::SignedIn { .. });
                 if signed {
-                    let kept = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, ..LauncherState::default() };
+                    let kept = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), unresolved: s.launcher.unresolved, possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, ..LauncherState::default() };
                     *s.launcher = kept;
                 }
                 signed
@@ -856,6 +912,7 @@ impl Controller {
             state.game = s.launcher.game.clone();
             state.possible.play = s.launcher.possible.play;
             state.profiles = s.launcher.profiles.clone();
+            state.unresolved = s.launcher.unresolved;
             // The account's own profile is read on its own (`launcher_mine`): kept for the same account only.
             if s.launcher.source == state.source {
                 state.mine = s.launcher.mine.clone();
@@ -935,6 +992,7 @@ impl Controller {
             // VRChat's profiles on this computer are the game's, not the account's; the own profile, card lists and all,
             // stays for the same account (it is read on its own, `launcher_mine`): a scheduled read never erases them.
             state.profiles = s.launcher.profiles.clone();
+            state.unresolved = s.launcher.unresolved;
             if s.launcher.source == state.source {
                 state.mine = s.launcher.mine.clone();
             }

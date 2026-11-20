@@ -465,6 +465,10 @@ pub struct LauncherState {
     /// VRChat's profiles on this computer: the ones running, starting or used before, by number.
     #[serde(default)]
     pub profiles: Vec<GameProfile>,
+    /// VRChats running here whose profile is not known yet (neither their log nor their command line said it): Play
+    /// waits for them, and Home says so.
+    #[serde(default)]
+    pub unresolved: u32,
     /// The signed-in account's own profile, for Home's card (`None` until read, and with no sign-in).
     #[serde(default)]
     pub mine: Option<MyProfile>,
@@ -597,6 +601,7 @@ pub fn sample() -> LauncherState {
         game: Game::NotRunning,
         notice: None,
         loading: false,
+        unresolved: 0,
         profiles: vec![
             GameProfile { profile: 0, account: Some("Sample Me".into()), ..GameProfile::default() },
             GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },

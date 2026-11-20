@@ -1310,3 +1310,46 @@ fn a_start_not_seen_after_three_minutes_needs_the_persons_second_press() {
     assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
     assert_eq!(machine.beside.lock().unwrap().len(), before + 1);
 }
+
+// --- REQUEST15 second pass, S4: unreadable command lines are asked again; only confirmed profiles are labelled ---
+
+#[test]
+fn an_unreadable_command_line_is_asked_again_a_few_times_and_a_reused_id_anew() {
+    let mut lines = CmdLines::default();
+    let t0 = Instant::now();
+    assert_eq!(lines.due(&[(11, 500)], t0), [11]);
+    lines.record(11, 500, &[], t0);
+    assert_eq!(lines.get(11), (false, None));
+    assert!(lines.due(&[(11, 500)], t0 + Duration::from_secs(1)).is_empty(), "not at every look");
+    let mut at = t0;
+    for _ in 1..CMD_TRIES {
+        at += CMD_RETRY;
+        assert_eq!(lines.due(&[(11, 500)], at), [11]);
+        lines.record(11, 500, &[], at);
+    }
+    assert!(lines.due(&[(11, 500)], at + CMD_RETRY).is_empty(), "a bounded number of tries");
+    // The same id for another process (another start time): read anew, and its profile is known.
+    assert_eq!(lines.due(&[(11, 900)], at), [11]);
+    lines.record(11, 900, &["VRChat.exe".into(), "--profile=2".into(), "--no-vr".into()], at);
+    assert_eq!(lines.get(11), (true, Some(2)));
+    assert!(lines.due(&[(11, 900)], at + CMD_RETRY * 3).is_empty(), "a known one is not read again");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn only_a_confirmed_profile_is_labelled_and_an_unresolved_vrchat_is_said() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    machine.running.lock().unwrap().push((11, true));
+    machine.unread.lock().unwrap().push(11);
+    let c = controller(machine.clone());
+    // In the roster before its log said its arguments: profile 0 there means "not known".
+    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 11, profile: 0, profile_known: false, account: Some("Sample Alt".into()), ..Default::default() }]);
+    c.launcher_game(machine.as_ref());
+    assert!(c.view().settings.launch.profiles.get(&0).is_none(), "no label from an unconfirmed profile");
+    assert_eq!(c.view().launcher.unresolved, 1);
+    // Its log says profile 1: labelled there, and nothing is unresolved.
+    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 11, profile: 1, profile_known: true, account: Some("Sample Alt".into()), ..Default::default() }]);
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().settings.launch.profiles.get(&1).map(String::as_str), Some("Sample Alt"));
+    assert_eq!(c.view().launcher.unresolved, 0);
+}

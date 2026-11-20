@@ -1181,6 +1181,13 @@ impl Gpu {
         3 * PACKED * 4 + 16 * 4 + 2 * 4 + GRAD2D * sums + 8 * 4 + 4
     }
 
+    /// What this device keeps allocated for its views: the radix sort's room (entries) and the Gaussians its set's
+    /// buffers hold. A viewer's frames sort over the first (the sort's histograms are laid out by it), and both stay
+    /// allocated until the device goes: the overlay's 3D view measures them per capture shown (`--world-sequence`).
+    pub fn capacities(&self) -> (usize, usize) {
+        (self.sort.as_ref().map_or(0, |s| s.cap), self.splats.as_ref().map_or(0, |s| s.cap))
+    }
+
     /// Whether this device projects as a viewer does (shaders/project.wgsl: the guards, the confidence, the far field,
     /// the marks): a renderer always, a training device while its guards are on.
     fn shows_as_a_viewer(&self) -> bool {

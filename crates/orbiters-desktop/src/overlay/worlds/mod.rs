@@ -35,6 +35,7 @@ pub mod panel;
 pub mod opening;
 pub mod pacing;
 pub mod render;
+pub mod sequence;
 pub mod shots;
 pub mod stereo;
 pub mod timing_lab;

@@ -277,6 +277,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("explorer") {
         return orbit::explorer_shots(&out);
     }
+    if only.as_deref() == Some("r19-history") {
+        return orbit::r19_history_shots(&out);
+    }
     if let Some(refs) = only.as_deref().and_then(|o| o.strip_prefix("orbit-vr=")) {
         return orbit::vr_shots(&out, std::path::Path::new(refs));
     }

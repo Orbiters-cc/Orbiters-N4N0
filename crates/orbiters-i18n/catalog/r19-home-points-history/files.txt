@@ -2,3 +2,4 @@
 # (pages/launcher/points.rs), and the overlay's History page of the videos played in worlds, reached from its YouTube page
 # (overlay/orbit/panels/history_sheet.rs). Kept here so that areas translated side by side never edit the same file.
 crates/orbiters-desktop/src/pages/launcher/points.rs
+crates/orbiters-desktop/src/overlay/orbit/panels/history_sheet.rs

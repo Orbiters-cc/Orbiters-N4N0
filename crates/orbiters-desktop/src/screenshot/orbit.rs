@@ -1989,3 +1989,119 @@ fn vr_wing_flat(name: &str, out: &Path, facts: &Facts, pointed: impl Fn(Zone, Ve
     println!("{}", path.display());
     Ok(())
 }
+
+/// `--only r19-history`: REQUEST19 2, made-up videos only. YouTube's page with History in its head (its search, as N4N0's menu
+/// draws it on the sheet, and its results), and History's page: many videos (some with no picture yet, some without a title,
+/// long titles), scrolled down, empty, VRChat not found, still reading; each on a screen beside the Quick Menu (`-desk`) and
+/// as a headset lays the sheet (`-vr`, flat).
+pub(super) fn r19_history_shots(out: &Path) -> anyhow::Result<()> {
+    use panels::history_sheet::{self, HistoryFacts, HistoryState, Store};
+    use panels::{Action, Sheet};
+    let hd = vec2(1280.0, 720.0);
+    let now = 1_800_000_000u64;
+    let desk = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), beside_wing: true, ..Default::default() };
+    let vr = Facts { desktop: false, vr_close: true, beside_wing: false, can_call: true, can_states: true, can_light: true, ..desk.clone() };
+    let mut store = Store::default();
+    store.stand_in(history_sheet::sample(240, now));
+    let history = |scroll: f32, copied: Option<usize>| store.facts(scroll, copied, true, now + 30, |_| None);
+    let videos: Vec<panels::VideoTile> = [("Rain on a forest cabin, 8 hours", "Quiet Hours", "8:00:12"), ("Lo-fi beats for late-night worlds", "Night Radio", "1:12:03"), ("Why VR worlds feel so big", "Spatial Notes", "14:21"), ("A walk through a rainy city at night", "Wander", "22:09")]
+        .iter()
+        .map(|(title, channel, duration)| panels::VideoTile { id: String::new(), title: title.to_string(), channel: channel.to_string(), duration: Some(duration.to_string()), picture: None })
+        .collect();
+    for (form, base) in [("desk", &desk), ("vr", &vr)] {
+        // YouTube's search, History in its head beside the close; History pointed at.
+        let search = Facts { sheet: Some(Sheet::Menu), sheet_title: "YouTube".into(), ..base.clone() };
+        r19_scene(&format!("r19-youtube-search-{form}"), out, hd, &search, None, true)?;
+        let pointed = Facts { pointed: Some(Action::VideoHistory), ..search.clone() };
+        r19_scene(&format!("r19-youtube-search-history-pointed-{form}"), out, hd, &pointed, Some(Action::VideoHistory), true)?;
+        let results = Facts { sheet: Some(Sheet::Results), sheet_title: "YouTube".into(), videos: videos.clone(), videos_for: "rain sounds".into(), ..base.clone() };
+        r19_scene(&format!("r19-youtube-results-{form}"), out, hd, &results, None, false)?;
+        // History: many, the second's link just copied; scrolled far down; at its end.
+        let page = Facts { sheet: Some(Sheet::VideoHistory), sheet_title: "History".into(), history: history(0.0, Some(1)), ..base.clone() };
+        r19_scene(&format!("r19-history-{form}"), out, hd, &page, None, false)?;
+        let scroll = 41.0 * 128.0;
+        r19_scene(&format!("r19-history-scrolled-{form}"), out, hd, &Facts { gallery_scroll: scroll, history: history(scroll, None), ..page.clone() }, None, false)?;
+        let end = panels::max_scroll(Sheet::VideoHistory, &page);
+        r19_scene(&format!("r19-history-end-{form}"), out, hd, &Facts { gallery_scroll: end, history: history(end, None), ..page.clone() }, None, false)?;
+        r19_scene(&format!("r19-history-pointed-{form}"), out, hd, &Facts { pointed: Some(Action::HistoryDrop(2)), ..page.clone() }, Some(Action::HistoryDrop(2)), false)?;
+        // Nothing yet, VRChat not found, still being read.
+        let empty = HistoryFacts { state: HistoryState::Ready, log_found: true, ..Default::default() };
+        r19_scene(&format!("r19-history-empty-{form}"), out, hd, &Facts { history: empty.clone(), ..page.clone() }, None, false)?;
+        r19_scene(&format!("r19-history-no-vrchat-{form}"), out, hd, &Facts { history: HistoryFacts { log_found: false, ..empty }, ..page.clone() }, None, false)?;
+        r19_scene(&format!("r19-history-reading-{form}"), out, hd, &Facts { history: HistoryFacts::default(), ..page.clone() }, None, false)?;
+    }
+    Ok(())
+}
+
+/// The sheet over the Quick Menu (a stand-in) as `qm_scene` lays it, its head and its page, what does `pointed` lit; `menu`: the
+/// page is N4N0's menu's YouTube search as the sheet draws it (its own Back hidden, the head has it), else the sheet's own.
+fn r19_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, pointed: Option<panels::Action>, menu: bool) -> anyhow::Result<()> {
+    let (w, h) = (client.x as u32, client.y as u32);
+    let mut ground = Canvas::new(w, h);
+    stand_in_menu(Around::QuickMenu, client, &mut ground);
+    let mut image = ground.pixels().to_vec();
+    let back = zones::place(Zone::SheetBack, client).expect("it fits");
+    let hover = pointed.and_then(|a| panels::items(Zone::SheetBack, back.logical(), facts).iter().position(|i| i.action == a));
+    let (pixels, px) = picture(&back, facts, hover, None);
+    blit(&mut image, w, &pixels, px, back.rect.min);
+    let page = zones::place(Zone::Takeover, client).expect("it fits");
+    let page_px = [page.rect.width() as u32, page.rect.height() as u32];
+    let pixels = if menu { youtube_search_picture(facts, page_px) } else { r19_sheet_picture(facts, pointed, page_px) };
+    blit(&mut image, w, &pixels, page_px, page.rect.min);
+    let path = out.join(format!("{name}.png"));
+    save_png(&path, &over_ground(&image, w, h))?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+/// A native sheet with what does `pointed` lit (History's rows get stand-in pictures, every sixth none, as if not fetched yet).
+fn r19_sheet_picture(facts: &Facts, pointed: Option<panels::Action>, px: [u32; 2]) -> Vec<u8> {
+    let sheet = facts.sheet.expect("a sheet");
+    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / 1024.0).in_orbit_look();
+    let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
+    let mut facts = facts.clone();
+    for (n, video) in facts.videos.iter_mut().enumerate() {
+        video.picture = Some(textures[n % textures.len()].id());
+    }
+    for row in facts.history.rows.iter_mut().filter(|r| r.youtube && r.index % 6 != 5) {
+        row.picture = Some(textures[row.index % textures.len()].id());
+    }
+    let hover = pointed.and_then(|a| panels::sheet_items(sheet, &facts).iter().position(|i| i.action == a));
+    for _ in 0..2 {
+        canvas.paint(0.0, |p| panels::paint_sheet(p, sheet, &facts, hover, None));
+    }
+    let from = canvas.pixels().to_vec();
+    let mut out = from.clone();
+    panels::finish_picture(&mut out, &from, px, px[0] as f32 / 1024.0, [0, 0, px[0], px[1]]);
+    panels::cut_page_corners(&mut out, px, [0, 0, px[0], px[1]]);
+    out
+}
+
+/// N4N0's menu's YouTube search as the sheet draws it: something typed, its suggestions, its keys (on a screen, the note to
+/// type on the keyboard over them).
+fn youtube_search_picture(facts: &Facts, px: [u32; 2]) -> Vec<u8> {
+    use orbiters_n4n0_core::menu::Target;
+    let mut menu = orbiters_n4n0_core::menu::Menu::new(orbiters_n4n0_core::menu::KeyboardLayout::Qwerty, 5, orbiters_n4n0_core::menu::PhotoLength::Standard);
+    menu.open();
+    menu.back_on_the_sheet = true;
+    let _ = menu.press(Target::YouTube);
+    let _ = menu.type_text("rain sou");
+    menu.suggestions_arrived(1, "rain sou", vec!["rain sounds".into(), "rain sounds for sleeping".into(), "rain sounds 10 hours".into(), "rain sounds and thunder".into(), "rain sounds on a tent".into()]);
+    let skin = crate::overlay::orbit::page_skin(facts.orbit.accent);
+    let none = |_: &str| -> Option<egui::TextureId> { None };
+    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / 1024.0).in_orbit_look();
+    for _ in 0..2 {
+        canvas.paint(0.4, |p| {
+            let view = crate::overlay::menu_ui::View { menu: &menu, hover: None, pressed: None, picture: &none, time: 0.4, skin: &skin };
+            crate::overlay::menu_ui::draw(p, pos2(0.0, 0.0), &view);
+            if facts.desktop {
+                crate::overlay::orbit::type_hint(p, None);
+            }
+        });
+    }
+    let from = canvas.pixels().to_vec();
+    let mut out = from.clone();
+    panels::finish_picture(&mut out, &from, px, px[0] as f32 / 1024.0, [0, 0, px[0], px[1]]);
+    panels::cut_page_corners(&mut out, px, [0, 0, px[0], px[1]]);
+    out
+}

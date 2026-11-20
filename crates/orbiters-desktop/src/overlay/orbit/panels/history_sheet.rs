@@ -357,6 +357,29 @@ impl Store {
     }
 }
 
+/// Made-up videos for tests and the screenshot review: `n` of them a minute apart, the latest "Sample video {n-1}", some
+/// played more than once, every fifth with no title (a stream's link), every seventh in a long title.
+pub fn sample(n: usize, latest: u64) -> History {
+    let mut h = History::default();
+    h.videos = (0..n)
+        .map(|i| Played {
+            url: if i % 5 == 4 { format!("https://stream.example.invalid/live/sample-{i}.m3u8") } else { format!("https://youtu.be/sample{i:05}") },
+            title: match i {
+                _ if i % 5 == 4 => None,
+                _ if i % 7 == 3 => Some(format!("Sample video {i}: a very long title that a world's player shows whole, with a subtitle and the names of everyone in it")),
+                _ => Some(format!("Sample video {i}")),
+            },
+            channel: (i % 5 != 4).then(|| ["Quiet Hours", "Night Radio", "Spatial Notes"][i % 3].to_string()),
+            world: Some(["Sample Lounge", "Midnight Rooftop", "Quiet Café"][i % 3].to_string()),
+            first: latest - 60 * (n - 1 - i) as u64,
+            last: latest - 60 * (n - 1 - i) as u64,
+            plays: 1 + (i % 4 == 0) as u32 * 2,
+            ..Played::default()
+        })
+        .collect();
+    h
+}
+
 /// The videos, the latest played first (the window's tab's order).
 fn latest_first(history: History) -> Vec<Played> {
     let mut videos = history.videos;

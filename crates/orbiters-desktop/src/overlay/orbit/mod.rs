@@ -4460,7 +4460,7 @@ impl Stage {
 }
 
 /// Over the keyboard of N4N0's search page on a desktop, where a real one is under the hands: what to do instead.
-fn type_hint(p: &egui::Painter, playing: Option<&str>) {
+pub(crate) fn type_hint(p: &egui::Painter, playing: Option<&str>) {
     use orbiters_ui::{icons, theme, widgets};
     let area = egui::Rect::from_min_max(pos2(0.0, KEYS_TOP), pos2(layout::WIDTH as f32, layout::HEIGHT as f32));
     p.rect_filled(area, 0.0, panels::look::OPAQUE);

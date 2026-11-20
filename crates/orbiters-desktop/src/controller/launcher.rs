@@ -430,7 +430,7 @@ pub(super) struct Runtime {
     /// VRChats whose profile is not known, since when (by process id), and a press on a profile told about them that a
     /// second press within [`CONFIRM_WITHIN`] confirms (REQUEST15 third pass, S4).
     unknown_since: HashMap<u32, Instant>,
-    unknown_confirm: Option<(u32, Instant)>,
+    unknown_confirm: Option<(u32, Instant, Vec<u32>)>,
     /// The account's own profile changes no sooner than this ([`mine::CHANGE_EVERY`] apart).
     mine_next: Option<Instant>,
 }
@@ -1536,15 +1536,20 @@ impl Controller {
             let now = Instant::now();
             let mut rt = self.launcher.lock().unwrap();
             rt.unknown_since.retain(|pid, _| unknown.contains(pid));
-            let oldest = unknown.iter().map(|pid| *rt.unknown_since.entry(*pid).or_insert(now)).min().unwrap_or(now);
-            if now.duration_since(oldest) < UNKNOWN_WAIT {
+            // Every unknown one must have had its minute: a VRChat starting now is not passed because an older one
+            // never said its profile (REQUEST15 fourth pass).
+            let newest = unknown.iter().map(|pid| *rt.unknown_since.entry(*pid).or_insert(now)).max().unwrap_or(now);
+            if now.duration_since(newest) < UNKNOWN_WAIT {
                 return Notice::Error(tr("A VRChat is starting and has not said its profile yet: try again in a moment.").into());
             }
-            match rt.unknown_confirm {
-                Some((p, by)) if p == profile && now < by => rt.unknown_confirm = None,
+            // The confirmation is for these very VRChats: another one appearing (or one going) asks again.
+            let mut set = unknown.clone();
+            set.sort_unstable();
+            match &rt.unknown_confirm {
+                Some((p, by, seen)) if *p == profile && now < *by && *seen == set => rt.unknown_confirm = None,
                 _ => {
-                    rt.unknown_confirm = Some((profile, now + CONFIRM_WITHIN));
-                    let minutes = (now.duration_since(oldest).as_secs() / 60).max(1);
+                    rt.unknown_confirm = Some((profile, now + CONFIRM_WITHIN, set));
+                    let minutes = (now.duration_since(newest).as_secs() / 60).max(1);
                     return Notice::Error(tr!(
                         "A VRChat running for {m} min has not said its profile. If it is not on profile {n}, press Play again to start anyway.",
                         m = minutes,

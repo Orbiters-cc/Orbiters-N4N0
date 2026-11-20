@@ -296,8 +296,12 @@ impl State {
     /// [`Self::act`] with the sending given: shows the press, sends it bound to the account on show, and takes the
     /// press back when it never reached the service.
     fn press(&mut self, clock: f64, action: Action, send: impl FnOnce(Action) -> bool) {
-        // A list whose account is gone takes no press at all.
+        // A list whose account is gone takes no press of its own; the Play buttons and the profile chips, which are
+        // this computer's and not the list's, still start VRChat (sent bound to no account: nothing of the old list goes).
         if self.stale() {
+            if local_play(&action) {
+                send(action);
+            }
             return;
         }
         self.note(clock, &action);
@@ -567,6 +571,11 @@ pub(super) fn backdrop(p: &egui::Painter, rect: Rect, radius: f32, state: &mut S
     }
 }
 
+/// A press that needs nothing of the account's list: Play with no destination, Play on a profile, a Mac's Obelisk.
+fn local_play(action: &Action) -> bool {
+    matches!(action, Action::Play { destination: None, .. } | Action::PlayOn { .. } | Action::OpenEngine)
+}
+
 /// The column (or the rail) beside Home's content, at `rect`.
 pub fn side_panel(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, side: Side) {
     state.wanted.clear();
@@ -741,6 +750,30 @@ mod tests {
             true
         });
         assert!(sent.is_empty() && state.dismissed.is_empty(), "no press of the old list goes");
+        // The Play buttons and the profile chips are this computer's: they still start VRChat, bound to no account.
+        let place = orbiters_core::launcher::Place {
+            world_id: "wrld_00000000-0000-4000-8000-000000000001".into(),
+            world_name: String::new(),
+            world_picture: String::new(),
+            instance_id: "1".into(),
+            access: orbiters_core::launcher::InstanceAccess::Public,
+            region: String::new(),
+        };
+        for action in [
+            Action::Play { mode: orbiters_core::launcher::LaunchMode::Vr, destination: None },
+            Action::PlayOn { mode: orbiters_core::launcher::LaunchMode::Desktop, profile: 1 },
+            Action::Play { mode: orbiters_core::launcher::LaunchMode::Vr, destination: Some(place) },
+        ] {
+            state.press(1.0, action, |a| {
+                sent.push(a);
+                true
+            });
+        }
+        assert_eq!(
+            sent,
+            [Action::Play { mode: orbiters_core::launcher::LaunchMode::Vr, destination: None }, Action::PlayOn { mode: orbiters_core::launcher::LaunchMode::Desktop, profile: 1 }],
+            "a destination of the old list (a friend's room) does not go"
+        );
         assert!(state.picture("https://api.vrchat.cloud/api/1/file/file_x/1/file").is_none() && state.wanted.is_empty(), "no picture of it is asked for");
         // Another account signed in, the old list still there: the same.
         state.login = Some(Some("usr_b".into()));

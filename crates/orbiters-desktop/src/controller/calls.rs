@@ -846,33 +846,35 @@ impl super::Controller {
     /// ended on Orbiters and this computer leaves the callable list; the next tick, signed out, ends the call here. Sent
     /// in the background (sign-out finishes offline too); nothing of the credential is kept for later.
     pub(super) fn calls_depart(&self) {
-        let account = self.account_api();
-        let (was_on, call_id) = {
+        self.calls_leave(self.account_api().map(|(api, token)| (api.url(""), token)));
+    }
+
+    /// The account calls were for leaves (signed out here or by another tool, another account, another environment).
+    /// On this thread, at once, never waiting for the calls' thread: the call under way ends here and its media worker
+    /// stops; nothing of it (the friend's name, its id, Hang up) or of the account (`calls_forget_account`) stays for the
+    /// next one; the shared 3D view lets go of the account too. Orbiters hears it (the call ended, this computer no longer
+    /// callable) with the credential of the account that leaves only: the identity the calls' state was for, or else
+    /// `fallback` (signed out before the calls' first look).
+    pub(super) fn calls_leave(&self, fallback: Option<Stamp>) {
+        let (stamp, closing, was_on, worker) = {
             let mut rt = self.calls.lock().unwrap();
-            let call_id = rt.call.as_ref().and_then(|c| c.id.clone());
+            let stamp = rt.identity.take().or(fallback);
+            let call = rt.call.take();
+            let closing = call.as_ref().and_then(|c| c.id.clone().map(|id| (id, c.ringing_in())));
             let was_on = rt.available_sent.take().is_some();
             rt.streaming = None;
             rt.presence_sent = None;
-            rt.identity = None;
-            (was_on, call_id)
+            // Its queued requests go with it (their stamp would not match the next account's anyway).
+            rt.signals = None;
+            (stamp, closing, was_on, rt.worker.take())
         };
-        // Nothing read or shown for the account that leaves stays for the next one (verify3): this computer's VRChat
-        // account and friends are read again, friends to call and the link screen go, N4N0's call menu closes.
+        // The worker's end waits a moment for its process: not under the lock.
+        drop(worker);
         self.calls_forget_account();
-        let Some((api, token)) = account else { return };
-        if !was_on && call_id.is_none() {
-            return;
+        self.shared_depart();
+        if let Some((base, token)) = stamp {
+            old_server_leaves(Api::at(&base), token, closing, was_on);
         }
-        let _ = std::thread::Builder::new().name("calls-depart".into()).spawn(move || {
-            let agent = orbiters_core::http_agent(Some(Duration::from_secs(2)), Some(Duration::from_secs(5)));
-            let auth = format!("Bearer {token}"); // i18n: not shown
-            if let Some(id) = call_id {
-                let _ = agent.post(&api.url(&format!("n4n0/calls/{id}/end"))).header("Authorization", &auth).send_json(json!({}));
-            }
-            if was_on {
-                let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call();
-            }
-        });
     }
 
     /// Calls stop (the app quits): the call worker ends, the call under way ends for the friend too, and this
@@ -910,32 +912,20 @@ impl super::Controller {
     /// forgotten, so that no contact of one environment or account can be called in the other (audit F25).
     fn calls_follow_identity(self: &Shared, api: &Api, token: &str) {
         let now = (api.url(""), token.to_string());
-        let old = {
-            let mut rt = self.calls.lock().unwrap();
-            match rt.identity.replace(now.clone()) {
-                Some(old) if old == now => return,
-                Some(old) => Some((old, rt.available_sent.is_some())),
-                None => None,
+        let held = self.calls.lock().unwrap().identity.clone();
+        match held {
+            Some(held) if held == now => return,
+            // Another account: the one before leaves first (its call ends here at once and on the server it was made on,
+            // with the credential it was made with: never as a hang-up of the new account, PRIV-7/CORE2-3).
+            Some(_) => self.calls_leave(None),
+            // From nobody (after a sign-out, or at start): nothing to tell any server, but nothing read before stays.
+            None => {
+                let call = self.calls.lock().unwrap().call.take();
+                drop(call);
+                self.calls_forget_account();
             }
-        };
-        // From nobody (after a sign-out, or at start): nothing to tell any server, but nothing read before stays.
-        let Some(((base, old_token), available)) = old else {
-            self.calls_forget_account();
-            return;
-        };
-        // The call under way ends here at once, and on the server it was made on, with the credential it was made with:
-        // never as a hang-up of the new account on the new server (verifier, PRIV-7/CORE2-3).
-        let closing = {
-            let mut rt = self.calls.lock().unwrap();
-            let closing = rt.call.as_ref().and_then(|c| c.id.clone().map(|id| (id, c.ringing_in())));
-            if let Some(ending) = rt.call.as_ref().map(|c| if c.ringing_in() { Ending::DeclinedHere } else { Ending::Ended }) {
-                let acts = rt.finish(ending, false);
-                self.calls_act(rt, acts);
-            }
-            closing
-        };
-        old_server_leaves(Api::at(&base), old_token, closing, available);
-        self.calls_forget_account();
+        }
+        self.calls.lock().unwrap().identity = Some(now);
     }
 
     /// What was read and shown for an account goes with it (another account, or none): this computer's VRChat account
@@ -967,8 +957,13 @@ impl super::Controller {
     /// The account signed in changed (read again, signed in, another environment): the calls' state follows it now,
     /// not at the next look, so nothing of the account before is shown or sent for the new one.
     pub(super) fn calls_account_changed(self: &Shared) {
-        if let Some((api, token)) = self.account_api() {
-            self.calls_follow_identity(&api, &token);
+        match self.account_api() {
+            Some((api, token)) => {
+                self.calls_follow_identity(&api, &token);
+                self.shared_follow_account();
+            }
+            // Signed out by another tool: the account leaves as it does here.
+            None => self.calls_leave(None),
         }
     }
 
@@ -1956,6 +1951,59 @@ mod tests {
         let rt = ctl.calls.lock().unwrap();
         assert_eq!(rt.identity.as_ref().map(|i| i.1.as_str()), Some("orbit-b"));
         assert!(rt.local_read.is_none(), "B's first presence reads this computer's VRChat account again");
+    }
+
+    /// Verify4: a connected call at sign-out ends here at once, on the signing-out thread: the call goes, its media worker
+    /// stops, its signals' queue goes, and the published state no longer names the friend. B, signing in next, sees
+    /// nothing of it and has nothing of it to hang up.
+    #[test]
+    fn a_connected_call_ends_here_at_sign_out_and_nothing_of_it_reaches_b() {
+        let server = orbiters_core::account::Server::current();
+        let ctl = signed_in_controller(true);
+        ctl.account_runtime.lock().unwrap().read = Some((server, None));
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut rt = ctl.calls.lock().unwrap();
+            // The identity the call was made under (a server address nothing listens on: its end goes nowhere).
+            rt.identity = Some(("http://127.0.0.1:1/".into(), "orbit-test".into()));
+            rt.signals = Some(tx);
+            let mut call = Call::new(1, "c_1".into(), "Kite".into(), false, Instant::now());
+            call.id = Some("k_a".into());
+            call.phase = CallPhase::Connected;
+            call.connected_at = Some(1);
+            call.open = true;
+            rt.call = Some(call);
+            rt.numbered = 1;
+            // A stand-in for the call worker: a process reading its commands until it is told to quit or is ended.
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let mut child = Command::new("cmd").args(["/C", "more"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000).spawn().unwrap();
+                let stdin = child.stdin.take().unwrap();
+                rt.worker = Some(Worker { child, stdin, number: 1 });
+            }
+        }
+        ctl.calls_publish(|_| {});
+        assert_eq!(ctl.snapshot.lock().unwrap().n4n0.calls.call.as_ref().map(|c| c.name.as_str()), Some("Kite"));
+        let started = Instant::now();
+        ctl.calls_depart();
+        assert!(started.elapsed() < Duration::from_secs(3), "at once, not after the calls' thread or a request");
+        {
+            let rt = ctl.calls.lock().unwrap();
+            assert!(rt.call.is_none(), "the call ended here");
+            assert!(rt.worker.is_none(), "its media worker stopped");
+            assert!(rt.signals.is_none(), "its queued signals went");
+        }
+        assert!(ctl.snapshot.lock().unwrap().n4n0.calls.call.is_none(), "nobody's name is shown any more");
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err(), "nothing of it goes through the queue");
+        // B signs in: nothing of A's call to see or hang up.
+        ctl.account_runtime.lock().unwrap().account =
+            Some(orbiters_core::account::Account { token: "orbit-b".into(), user: Some("43".into()), username: Some("B".into()), avatar_url: None, features: None });
+        ctl.calls_account_changed();
+        ctl.call_end();
+        let rt = ctl.calls.lock().unwrap();
+        assert!(rt.call.is_none() && rt.identity.as_ref().is_some_and(|i| i.1 == "orbit-b"));
+        assert!(rt.signals.is_none(), "B's Hang up had nothing of A's call to send");
     }
 
     /// Verify2 blocker 3: the cleanup of a refusal touches only the state of the credential refused, in the same change.

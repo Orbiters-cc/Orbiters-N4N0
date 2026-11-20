@@ -90,7 +90,7 @@ impl super::Controller {
 /// Whether a batch may go to Orbiters now, as the settings are at this moment: translation on (a batch read before it was turned off goes nowhere), Orbiters
 /// chosen, and the agreement for where the text was read given: in VR, or VRChat's window on the desktop, each its own (verify-r15 B7).
 pub fn may_send(settings: &orbiters_core::settings::TranslateSettings, window: bool) -> bool {
-    let agreed = if window { settings.orbiters_agreed_window } else { settings.orbiters_agreed };
+    let agreed = if window { settings.orbiters_agreed_window && settings.window_on } else { settings.orbiters_agreed };
     settings.enabled && agreed && settings.provider == orbiters_core::settings::TranslateProvider::Orbiters
 }
 
@@ -143,7 +143,8 @@ mod tests {
         let on = TranslateSettings { enabled: true, provider: TranslateProvider::Orbiters, orbiters_agreed: true, ..Default::default() };
         assert!(may_send(&on, false), "VR, agreed for VR");
         assert!(!may_send(&on, true), "the desktop: its own agreement first");
-        assert!(may_send(&TranslateSettings { orbiters_agreed_window: true, ..on.clone() }, true));
+        assert!(may_send(&TranslateSettings { orbiters_agreed_window: true, window_on: true, ..on.clone() }, true));
+        assert!(!may_send(&TranslateSettings { orbiters_agreed_window: true, ..on.clone() }, true), "verify2-r15 S3: not turned on on the desktop");
         assert!(!may_send(&TranslateSettings { orbiters_agreed: false, orbiters_agreed_window: true, ..on.clone() }, false), "the desktop's agreement is not VR's");
         assert!(!may_send(&TranslateSettings { enabled: false, orbiters_agreed_window: true, ..on.clone() }, false), "off: nothing");
         assert!(!may_send(&TranslateSettings { enabled: false, orbiters_agreed_window: true, ..on.clone() }, true), "off: nothing");

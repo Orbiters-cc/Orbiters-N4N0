@@ -419,6 +419,10 @@ impl Source {
     /// Downloads `entry`'s splats and sky map (or takes the files kept on disk), `progress` counting bytes (and their
     /// total once known).
     pub fn download(&self, entry: &Entry, progress: &Progress) -> anyhow::Result<Capture> {
+        // Tests never reach the network or this computer's kept files through here (memory: tests never touch real folders).
+        if cfg!(test) {
+            anyhow::bail!("no download in tests"); // i18n: not shown (a test's refusal)
+        }
         let key = super::cache::Key::of(entry);
         let (g, sky) = match (&self.files, entry.slot) {
             (Some(files), Some(slot)) => {
@@ -427,7 +431,8 @@ impl Source {
                 progress.check()?;
                 let g = tree_leaves(&tree, entry.key).inspect_err(|_| self.forget(&name))?;
                 drop(tree);
-                let sky = entry.sky.then(|| self.fetch_kept(&format!("{files}public/vrchat/slots/{slot}/sky.jpg"), &key.file("sky"), &Progress::default()).ok()).flatten();
+                progress.check()?;
+                let sky = entry.sky.then(|| self.fetch_kept(&format!("{files}public/vrchat/slots/{slot}/sky.jpg"), &key.file("sky"), &progress.linked()).ok()).flatten();
                 (g, sky)
             }
             _ => {
@@ -438,12 +443,13 @@ impl Source {
                 drop(bytes);
                 let sky = entry
                     .sky
-                    .then(|| self.fetch_kept(&self.api.url(&format!("maps/previews/{}/sky.jpg", entry.id)), &key.file("sky"), &Progress::default()).ok())
+                    .then(|| self.fetch_kept(&self.api.url(&format!("maps/previews/{}/sky.jpg", entry.id)), &key.file("sky"), &progress.linked()).ok())
                     .flatten();
                 (g, sky)
             }
         };
         progress.stage.store(STAGE_PREPARING, Ordering::Relaxed);
+        progress.check()?;
         let sky = sky.and_then(|bytes| sky_map(&bytes).map_err(|e| eprintln!("3D worlds: sky map of {}: {e:#}", entry.name)).ok());
         Ok(Capture::new(g, sky, entry.view))
     }
@@ -541,13 +547,18 @@ pub struct Progress {
     pub read: AtomicU64,
     pub total: AtomicU64,
     pub stage: AtomicU64,
-    /// Whoever waits for it no longer does: the download stops at its next chunk, and nothing is decoded (verify-r15 B2).
-    pub stop: AtomicBool,
+    /// Whoever waits for it no longer does: the download stops at its next chunk, and nothing is decoded (verify-r15 B2). Shared with [`Progress::linked`].
+    pub stop: Arc<AtomicBool>,
 }
 
 pub const STAGE_PREPARING: u64 = 1;
 
 impl Progress {
+    /// Another count told to stop with this one: a capture's sky, read beside its splats (verify2-r15 S4).
+    pub fn linked(&self) -> Progress {
+        Progress { stop: self.stop.clone(), ..Default::default() }
+    }
+
     /// Not wanted any more: an error, at once, for the reading to end with.
     pub fn check(&self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.stop.load(Ordering::Relaxed), "no longer wanted"); // i18n: not shown (a stopped load's reason, never drawn)
@@ -828,6 +839,16 @@ fn ceiling_in(heights: &[f32], camera: f32) -> Option<f32> {
 
 #[cfg(test)]
 mod stop_tests {
+    /// verify2-r15 S4: a capture's sky is read with a count told to stop with its splats'.
+    #[test]
+    fn a_sky_stops_with_its_capture() {
+        let progress = super::Progress::default();
+        let sky = progress.linked();
+        assert!(sky.check().is_ok());
+        progress.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(sky.check().is_err(), "the sky stops with it");
+    }
+
     /// verify-r15 B2: a reading no longer wanted ends before it reads or decodes anything.
     #[test]
     fn a_reading_no_longer_wanted_ends_at_once() {
@@ -932,6 +953,12 @@ impl Catalog {
         s.entries = entries;
         s.fetched = Some(Instant::now());
         s.version += 1;
+    }
+
+    /// The listing's entry of this id now, if it lists one (its revision, who it is shared with), without copying the rest.
+    pub fn entry(&self, id: u64) -> Option<Entry> {
+        let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        s.entries.iter().find(|e| e.id == id).cloned()
     }
 
     /// The entries, whether a read is under way, the last error, and the answer's number.

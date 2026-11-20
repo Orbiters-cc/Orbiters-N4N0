@@ -167,11 +167,14 @@ pub struct TranslateSettings {
     pub orbiters_agreed: bool,
     /// The same for the desktop, where VRChat's window is read: asked on its own, as the agreement above named VR only (verify-r15 B7).
     pub orbiters_agreed_window: bool,
+    /// Translation reads VRChat's window on the desktop: turned on there, on the desktop's own Translation page, not by `enabled` alone, which VR or an
+    /// older version may have turned on. Off, nothing of VRChat's window is read or sent anywhere, whoever translates (verify2-r15 S3).
+    pub window_on: bool,
 }
 
 impl Default for TranslateSettings {
     fn default() -> Self {
-        Self { enabled: false, target: None, provider: TranslateProvider::default(), server: String::new(), model: String::new(), keep_english: true, orbiters_agreed: false, orbiters_agreed_window: false }
+        Self { enabled: false, target: None, provider: TranslateProvider::default(), server: String::new(), model: String::new(), keep_english: true, orbiters_agreed: false, orbiters_agreed_window: false, window_on: false }
     }
 }
 

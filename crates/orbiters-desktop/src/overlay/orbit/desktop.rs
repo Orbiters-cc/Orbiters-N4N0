@@ -275,9 +275,14 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 ("window client size".to_owned(), format!("{} x {}", size.x, size.y)), // i18n: not shown (a menu mismatch report's line)
                 ("Left Alt held".to_owned(), alt_held().to_string()), // i18n: not shown (a menu mismatch report's line)
             ];
-            // The screen's pixels over VRChat's window: only when nothing of another program lies on it (the corner can be pressed with another one in front),
-            // else no picture at all (verify-r15 B6).
-            let picture = if crate::mismatch::switches(&snap.settings).picture && !stack::covered(window, egui::Rect::from_min_size(origin, size)) { screen_picture(origin, size) } else { None };
+            // VRChat's own frame with ours laid over it: never the screen, which may hold another program's window or a notification by then
+            // (verify2-r15 blocker 2). No frame within half a second: no picture.
+            let picture = if crate::mismatch::switches(&snap.settings).picture {
+                let ours: Vec<&PanelWindow> = windows.list.values().chain(corner.window.as_ref()).chain(pill.window.as_ref()).chain(pointer.window()).chain(translations.windows()).collect();
+                report_picture(window, origin, size, &ours)
+            } else {
+                None
+            };
             crate::mismatch::press(kind, crate::mismatch::Context { surface: "desktop".into(), state, ..Default::default() }, &snap.settings, snap.vrchat.world.log_file.clone(), picture);
         }
         let places = match (open, panel) {
@@ -1322,6 +1327,13 @@ impl PanelWindow {
         stack::lay(self.hwnd);
     }
 
+    /// Its pixels as Windows has them: premultiplied BGRA rows of its width, from the top.
+    pub(crate) fn bgra(&self) -> &[u8] {
+        let (w, h) = (self.size.cx.max(0) as usize, self.size.cy.max(0) as usize);
+        // SAFETY: the DIB section holds w x h 32-bit pixels for as long as the window lives.
+        unsafe { std::slice::from_raw_parts(self.bits, w * h * 4) }
+    }
+
     /// Its size in pixels.
     pub(crate) fn size(&self) -> [u32; 2] {
         [self.size.cx.max(0) as u32, self.size.cy.max(0) as u32]
@@ -1666,33 +1678,6 @@ pub(crate) mod stack {
         }
     }
 
-    /// Whether a window of another program lies on any part of `client` (screen pixels) of `game`: one that shows, above it in Windows' order, not ours. A
-    /// picture of the screen there would hold that program's pixels.
-    pub(crate) fn covered(game: HWND, client: egui::Rect) -> bool {
-        use windows::Win32::Graphics::Dwm::DWMWA_CLOAKED;
-        // SAFETY: plain queries walking Windows' order.
-        let mut at = unsafe { GetWindow(game, GW_HWNDPREV) }.ok();
-        for _ in 0..4096 {
-            let Some(h) = at.filter(|h| !h.is_invalid()) else { return false };
-            let mut cloaked = 0u32;
-            let mut r = RECT::default();
-            // SAFETY: plain queries; the outputs and their sizes are passed.
-            let (visible, known) = unsafe {
-                let _ = DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, std::mem::size_of::<u32>() as u32);
-                (IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool(), DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut RECT as *mut _, std::mem::size_of::<RECT>() as u32).is_ok() || windows::Win32::UI::WindowsAndMessaging::GetWindowRect(h, &mut r).is_ok())
-            };
-            if visible && cloaked == 0 && known && !ours(h) {
-                let its = egui::Rect::from_min_max(pos2(r.left as f32, r.top as f32), pos2(r.right as f32, r.bottom as f32));
-                if its.intersects(client) && its.intersect(client).area() > 0.0 {
-                    return true;
-                }
-            }
-            // SAFETY: as above.
-            at = unsafe { GetWindow(h, GW_HWNDPREV) }.ok();
-        }
-        true
-    }
-
     /// Whether every window of `shown` lies right above `game`, under anything else that shows: what ours keep while another program has the keyboard. Another
     /// window put between them (one shown later, not brought in front) is what breaks it.
     pub(crate) fn holds(game: HWND, shown: &[HWND]) -> bool {
@@ -1910,35 +1895,47 @@ pub(crate) fn paint_corner(p: &egui::Painter, noted: Option<crate::mismatch::Kin
     }
 }
 
-/// What VRChat's window shows now, as the screen has it (ours over it included), made small: the picture of a menu mismatch report.
-fn screen_picture(origin: Pos2, client: Vec2) -> Option<crate::mismatch::Picture> {
-    use windows::Win32::Graphics::Gdi::{BitBlt, CAPTUREBLT, SRCCOPY};
-    let (w, h) = (client.x as i32, client.y as i32);
-    if w <= 0 || h <= 0 {
-        return None;
+/// What VRChat's window shows now, made small for a menu mismatch report: VRChat's own frame ([`super::desk_translate::frame_of`]: its pixels only), with
+/// `ours` laid over it where they lie, as the person saw them. Never a copy of the screen, where another program's window or a notification may lie by the
+/// time it is taken (verify2-r15 blocker 2).
+fn report_picture(window: HWND, origin: Pos2, client: Vec2, ours: &[&PanelWindow]) -> Option<crate::mismatch::Picture> {
+    let size = [client.x.max(0.0) as u32, client.y.max(0.0) as u32];
+    let frame = super::desk_translate::frame_of(window, size, Duration::from_millis(500))?;
+    composed(frame, size, ours, origin)
+}
+
+/// VRChat's frame `rgba` of `size`, ours laid over it, made small: nothing else goes in.
+fn composed(mut rgba: Vec<u8>, size: [u32; 2], ours: &[&PanelWindow], origin: Pos2) -> Option<crate::mismatch::Picture> {
+    for w in ours.iter().filter(|w| w.shown) {
+        lay_over(&mut rgba, size, w, origin);
     }
-    // SAFETY: plain GDI calls; every handle made here is released before returning.
-    unsafe {
-        let screen = GetDC(None);
-        let dc = CreateCompatibleDC(Some(screen));
-        let header = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() };
-        let bmi = BITMAPINFO { bmiHeader: header, ..Default::default() };
-        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        let bitmap = CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok();
-        let mut out = None;
-        if let Some(bitmap) = bitmap {
-            let old = SelectObject(dc, bitmap.into());
-            if BitBlt(dc, 0, 0, w, h, Some(screen), origin.x as i32, origin.y as i32, SRCCOPY | CAPTUREBLT).is_ok() {
-                let bgra = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize);
-                let rgba: Vec<u8> = bgra.chunks_exact(4).flat_map(|c| [c[2], c[1], c[0], 255]).collect();
-                out = crate::mismatch::Picture::small(w as u32, h as u32, &rgba);
-            }
-            SelectObject(dc, old);
-            let _ = DeleteObject(bitmap.into());
+    crate::mismatch::Picture::small(size[0], size[1], &rgba)
+}
+
+/// `w`'s pixels (premultiplied BGRA, at its alpha) over `rgba`, a client area of `size` whose corner is at `origin` on the screen.
+fn lay_over(rgba: &mut [u8], size: [u32; 2], w: &PanelWindow, origin: Pos2) {
+    let [ww, wh] = w.size();
+    let bgra = w.bgra();
+    let (ox, oy) = (w.at.x - origin.x as i32, w.at.y - origin.y as i32);
+    let alpha = w.alpha as u32;
+    for y in 0..wh as i32 {
+        let ty = oy + y;
+        if ty < 0 || ty >= size[1] as i32 {
+            continue;
         }
-        let _ = DeleteDC(dc);
-        ReleaseDC(None, screen);
-        out
+        for x in 0..ww as i32 {
+            let tx = ox + x;
+            if tx < 0 || tx >= size[0] as i32 {
+                continue;
+            }
+            let s = ((y as u32 * ww + x as u32) * 4) as usize;
+            let d = ((ty as u32 * size[0] + tx as u32) * 4) as usize;
+            let a = bgra[s + 3] as u32 * alpha / 255;
+            for (c, from) in [(0usize, 2usize), (1, 1), (2, 0)] {
+                let src = bgra[s + from] as u32 * alpha / 255;
+                rgba[d + c] = (src + rgba[d + c] as u32 * (255 - a) / 255).min(255) as u8;
+            }
+        }
     }
 }
 
@@ -3713,27 +3710,76 @@ mod tests {
         stack::set(None);
     }
 
-    /// verify-r15 B6: the menu mismatch report's picture of the screen is taken only when no window of another program lies on VRChat's window; ours may.
+    /// A test window of `class` filled with `colour` (its class's background), shown without taking the keyboard.
+    struct Painted(HWND);
+
+    impl Painted {
+        fn new(class: windows::core::PCWSTR, colour: u32, at: POINT, size: Vec2) -> Self {
+            use windows::Win32::Graphics::Gdi::{CreateSolidBrush, HBRUSH};
+            unsafe extern "system" fn plain(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+                // SAFETY: what the system passed on.
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+            // SAFETY: plain Win32 calls; the window is destroyed on drop (the class and its brush last the process, as a test's).
+            unsafe {
+                let module = GetModuleHandleW(None).unwrap_or_default();
+                let brush: HBRUSH = CreateSolidBrush(COLORREF(colour));
+                RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(plain), hInstance: module.into(), lpszClassName: class, hbrBackground: brush, ..Default::default() });
+                let hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, class, w!(""), WS_POPUP, at.x, at.y, size.x as i32, size.y as i32, None, None, None, None).expect("a painted window");
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                let _ = windows::Win32::Graphics::Gdi::UpdateWindow(hwnd);
+                Self(hwnd)
+            }
+        }
+    }
+
+    impl Drop for Painted {
+        fn drop(&mut self) {
+            // SAFETY: made in `new`, destroyed once.
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    /// verify2-r15 blocker 2: a report's picture is VRChat's own frame with ours over it. Another program's window lying over VRChat (as a notification
+    /// would) is in none of it: the picture is made of the frame and our windows' own pixels, never of the screen.
     #[test]
-    fn a_report_s_picture_is_never_taken_through_another_program() {
+    fn a_report_s_picture_holds_vrchat_and_ours_and_nothing_else() {
+        let _alone = windows_alone();
+        let client = vec2(320.0, 180.0);
+        let size = [320u32, 180];
+        let at = off_screen(client);
+        // Another program's window, blue, over a third of VRChat's place on the screen, as a notification coming would be.
+        let cover = Painted::new(w!("OrbitersTestCoverBlue"), 0x00C8_2010, POINT { x: at.x + 100, y: at.y + 40 }, vec2(160.0, 100.0));
+        // VRChat's own frame: red. Ours: green, in its corner.
+        let frame = [200u8, 32, 0, 255].repeat((size[0] * size[1]) as usize);
+        let mut ours = PanelWindow::new(16, 16, false).expect("a window");
+        ours.picture(&[20u8, 200, 40, 255].repeat(16 * 16), [0, 0, 16, 16]);
+        ours.place(POINT { x: at.x + 8, y: at.y + 8 }, 255);
+        let origin = pos2(at.x as f32, at.y as f32);
+        let picture = composed(frame, size, &[&ours], origin).expect("a picture");
+        let px = |x: u32, y: u32| { let i = ((y * picture.width + x) * 4) as usize; [picture.rgba[i], picture.rgba[i + 1], picture.rgba[i + 2]] };
+        let blue = |p: [u8; 3]| p[2] > 150 && p[0] < 80;
+        assert!((0..picture.height).all(|y| (0..picture.width).all(|x| !blue(px(x, y)))), "nothing of the other program's window");
+        let (sx, sy) = (picture.width as f32 / client.x, picture.height as f32 / client.y);
+        let at_px = |x: f32, y: f32| px((x * sx) as u32, (y * sy) as u32);
+        assert!(at_px(180.0, 90.0)[0] > 150, "VRChat where the other window lies over it: {:?}", at_px(180.0, 90.0));
+        assert!(at_px(14.0, 14.0)[1] > 150, "ours where they lie: {:?}", at_px(14.0, 14.0));
+        drop(cover);
+    }
+
+    /// verify2-r15 blocker 2: no frame of VRChat's own (minimised, hidden, or none in time): no picture at all, never a copy of the screen instead.
+    #[test]
+    fn no_frame_of_vrchat_s_own_means_no_picture() {
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWMINNOACTIVE;
         let _alone = windows_alone();
         let client = vec2(320.0, 180.0);
         let at = off_screen(client);
-        let game = StandIn::new(at, client);
-        let rect = egui::Rect::from_min_size(pos2(at.x as f32, at.y as f32), client);
-        assert!(!stack::covered(game.0, rect), "nothing on it");
-        let mut ours = clear_window();
-        ours.place(at, 255);
-        assert!(!stack::covered(game.0, rect), "ours on it: the report shows them");
-        // Another program's window on a part of it.
-        let cover = StandIn::new(POINT { x: at.x + 200, y: at.y + 100 }, vec2(300.0, 200.0));
-        assert!(stack::covered(game.0, rect), "a browser over part of VRChat");
-        // Beside it, touching nothing.
+        let game = Painted::new(w!("OrbitersTestGameRed"), 0x0000_20C8, at, client);
         // SAFETY: the test's own window.
-        let _ = unsafe { SetWindowPos(cover.0, None, at.x + 400, at.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER) };
-        assert!(!stack::covered(game.0, rect), "beside it: nothing of it in the picture");
+        let _ = unsafe { ShowWindow(game.0, SW_SHOWMINNOACTIVE) };
+        assert!(report_picture(game.0, pos2(at.x as f32, at.y as f32), client, &[]).is_none(), "minimised: nothing");
+        assert!(report_picture(HWND(std::ptr::null_mut()), pos2(0.0, 0.0), client, &[]).is_none(), "no window: nothing");
     }
-
     /// With nothing ordinary over VRChat's window (the person clicked the desktop's background, or a window on another screen that lies lower), ours lie on top
     /// of the ordinary windows, which is right above VRChat, and still under every topmost window.
     #[test]

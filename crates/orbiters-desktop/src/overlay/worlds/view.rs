@@ -760,6 +760,15 @@ impl View {
     }
 
     /// Fades the capture out, then lets go of it (and of the GPU's memory).
+    /// Gone at the next update, without fading: what shows may no longer be the person's to see (verify2-r15 blocker 1).
+    pub fn hide_now(&mut self) {
+        if self.active() || matches!(self.phase, Phase::Leaving { .. }) {
+            self.trace.flush(Instant::now(), &self.pacer, true);
+            let long_ago = Instant::now().checked_sub(FADE_OUT * 2).unwrap_or_else(Instant::now);
+            self.phase = Phase::Leaving { since: long_ago };
+        }
+    }
+
     pub fn hide(&mut self) {
         if self.active() {
             self.trace.flush(Instant::now(), &self.pacer, true);
@@ -1417,6 +1426,25 @@ fn tracked_head(steamvr: &vr::Client, seconds: f32) -> Pose {
 
 #[cfg(test)]
 mod tests {
+    /// verify2-r15 blocker 1: a capture around the person no longer the person's to see goes at the next update, not after a fade that still draws it.
+    #[test]
+    fn a_view_hidden_now_is_gone_at_the_next_update() {
+        let mut view = super::View::new("test");
+        view.phase = super::Phase::Shown { since: std::time::Instant::now() };
+        assert!(view.active());
+        view.hide_now();
+        assert!(!view.active(), "nothing new drawn");
+        match view.phase {
+            super::Phase::Leaving { since } => assert!(since.elapsed() >= super::FADE_OUT, "its fade already over: let go at the next update"),
+            _ => panic!("not leaving"),
+        }
+        // A plain hide still fades, as it did.
+        let mut faded = super::View::new("test2");
+        faded.phase = super::Phase::Shown { since: std::time::Instant::now() };
+        faded.hide();
+        assert!(matches!(faded.phase, super::Phase::Leaving { since } if since.elapsed() < super::FADE_OUT));
+    }
+
     /// light-vr A: a cube switch with a refused face keeps the cube showing, three times in a row at most; a whole one goes at once.
     #[test]
     fn a_refused_face_holds_a_cube_switch_back_a_few_times_at_most() {

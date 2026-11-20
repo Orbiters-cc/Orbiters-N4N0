@@ -423,6 +423,9 @@ pub const CAMERA_GAP: f32 = 18.0;
 const CAMERA_TILE: [f32; 2] = [92.0, 60.0];
 /// The column's outer edge.
 pub const CAMERA_COLUMN_OUT: f32 = -CAMERA_HALF[0] - CAMERA_GAP - CAMERA_TILE[0];
+/// VRChat's row of buttons under its picture, in the panel's units, measured on Enzo's headset pictures of 2026-11-20 (Request 18; within about 10
+/// units): how far it reaches left of the middle, how far its arrow reaches right of it, and its lower edge.
+pub const VRCHAT_CAMERA_ROW: [f32; 3] = [180.0, 225.0, 160.0];
 /// The line under VRChat's row of buttons (from, to).
 const CAMERA_UNDER: [f32; 2] = [166.0, 226.0];
 /// The share row's line (from, to): right under VRChat's row of buttons, where the caption is the rest of the time

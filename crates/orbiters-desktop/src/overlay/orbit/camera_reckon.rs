@@ -12,6 +12,11 @@
 //!   was let go. A grip pressed by the other hand while one holds it, within reach, takes it over (Enzo, 2026-11-16: "if we grab it with hand A,
 //!   and while still grabbed we try to grab it with hand B, it should be transferred to hand B"); the first hand's grip, still held, does not take
 //!   it back until it is let go and pressed again. Both grips pressed in the same frame: the right hand takes it. Its camera modes do not move it.
+//! - **Measured, for the avatar worn** (Request 18). [`FROM_WRIST`] and [`PANEL_WIDTH_M`] were fitted in the sandbox, with its avatar and its
+//!   person's height; in Enzo's headset (2026-11-20, his pictures 4 and 6) the tools stood 4 to 7 cm low and 1 to 3 cm in, about a tenth too large:
+//!   where the panel opens from VRChat's wrist, and how large it is in the room, change with the avatar's size against the person's. So at each
+//!   opening the picture reader looks at the panel lying where it opened; two sightings with both eyes that agree ([`Fit::agrees`]) re-lay it
+//!   ([`Reckon::reanchor`]) and the offset and width they give ([`Fit::from_sighting`]) are kept for the next openings ([`Fit::load`]).
 //! - **Close.** Its X closes it; VRChat's laser is the one measured on Touch controllers ([`space::vrchat_touch_laser`]). A trigger pressed while
 //!   that laser is on the X is seen here ([`Reckon::step`]), with no overlay over VRChat's button, so VRChat gets its click whole.
 
@@ -147,16 +152,25 @@ pub fn facing(at: [f32; 3], eye: [f32; 3]) -> Matrix34 {
 
 /// Whether a grip of `hand` (0 left, 1 right) with its controller at `pose` takes the panel, as VRChat decides it.
 pub fn within_grab(panel: &Matrix34, pose: &Matrix34, hand: usize) -> bool {
+    within_grab_scaled(panel, pose, hand, 1.0)
+}
+
+/// [`within_grab`] for a panel `scale` times the sandbox's: its box scales with it.
+pub fn within_grab_scaled(panel: &Matrix34, pose: &Matrix34, hand: usize, scale: f32) -> bool {
     let point = [if hand == 0 { -GRAB_POINT[0] } else { GRAB_POINT[0] }, GRAB_POINT[1], GRAB_POINT[2]];
-    within_reach(panel, add(column(pose, 3), turn(pose, point)), GRAB_REACH_M)
+    within_reach_scaled(panel, add(column(pose, 3), turn(pose, point)), GRAB_REACH_M, scale)
 }
 
 /// Whether a point is within `reach` of the panel's grab box.
 pub fn within_reach(panel: &Matrix34, point: [f32; 3], reach: f32) -> bool {
+    within_reach_scaled(panel, point, reach, 1.0)
+}
+
+fn within_reach_scaled(panel: &Matrix34, point: [f32; 3], reach: f32, scale: f32) -> bool {
     let p = undone(panel);
     let at = add(turn(&p, point), column(&p, 3));
     let out = |v: f32, lo: f32, hi: f32| (lo - v).max(v - hi).max(0.0);
-    let d = [out(at[0], GRAB_BOX[0], GRAB_BOX[1]), out(at[1], GRAB_BOX[2], GRAB_BOX[3]), at[2]];
+    let d = [out(at[0], GRAB_BOX[0] * scale, GRAB_BOX[1] * scale), out(at[1], GRAB_BOX[2] * scale, GRAB_BOX[3] * scale), at[2]];
     dot(d, d).sqrt() <= reach
 }
 
@@ -195,6 +209,78 @@ pub fn on_close(panel: &Matrix34, panel_unit: f32, hand: &Matrix34) -> bool {
     laser_spot(panel, panel_unit, o, d).is_some_and(|s| (s[0] - CLOSE_AT[0]).hypot(s[1] - CLOSE_AT[1]) <= CLOSE_RADIUS)
 }
 
+/// Where VRChat's panel opens from its left wrist, and how wide it is: the sandbox's ([`Fit::SANDBOX`]) or what the picture measured for the avatar worn.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Fit {
+    /// From VRChat's left wrist to the panel's middle, in the wrist's frame (metres).
+    pub from_wrist: [f32; 3],
+    /// The panel's width in the room (metres).
+    pub width_m: f32,
+}
+
+/// Two sightings agree when they give offsets this near (metres) and widths within this share.
+pub const FIT_AGREE_M: f32 = 0.012;
+pub const FIT_AGREE_WIDTH: f32 = 0.04;
+/// A measure further than this from the sandbox's, or a width outside these, is a misreading, not the panel.
+pub const FIT_MOST_OFF_M: f32 = 0.25;
+pub const FIT_WIDTHS_M: [f32; 2] = [0.15, 0.5];
+
+impl Fit {
+    pub const SANDBOX: Fit = Fit { from_wrist: FROM_WRIST, width_m: PANEL_WIDTH_M };
+
+    /// What a sighting of the panel lying where it opened (`seen`, `width_m` measured with both eyes) says of this fit, from VRChat's wrist at the
+    /// opening. None when it is too far from anything VRChat does (a misreading).
+    pub fn from_sighting(wrist: &Matrix34, seen: &Matrix34, width_m: f32) -> Option<Fit> {
+        let w = undone(wrist);
+        let from_wrist = add(turn(&w, column(seen, 3)), column(&w, 3));
+        let off = sub(from_wrist, FROM_WRIST);
+        (dot(off, off).sqrt() <= FIT_MOST_OFF_M && (FIT_WIDTHS_M[0]..=FIT_WIDTHS_M[1]).contains(&width_m)).then_some(Fit { from_wrist, width_m })
+    }
+
+    /// Whether two measures are of the same panel.
+    pub fn agrees(&self, other: &Fit) -> bool {
+        let d = sub(self.from_wrist, other.from_wrist);
+        dot(d, d).sqrt() <= FIT_AGREE_M && (self.width_m / other.width_m - 1.0).abs() <= FIT_AGREE_WIDTH
+    }
+
+    /// The mean of two that agree.
+    pub fn mean(&self, other: &Fit) -> Fit {
+        Fit { from_wrist: std::array::from_fn(|i| (self.from_wrist[i] + other.from_wrist[i]) / 2.0), width_m: (self.width_m + other.width_m) / 2.0 }
+    }
+
+    /// Where the panel opens by this fit: from VRChat's wrist, facing the head, its long side level.
+    pub fn opening(&self, head: &Matrix34, wrist: &Matrix34) -> Matrix34 {
+        facing(add(column(wrist, 3), turn(wrist, self.from_wrist)), column(head, 3))
+    }
+
+    /// The panel's unit (its picture is [`PANEL_SIZE`] units across).
+    pub fn unit(&self) -> f32 {
+        self.width_m / PANEL_SIZE[0]
+    }
+
+    fn file() -> std::path::PathBuf {
+        orbiters_core::paths::local_data_root().join("camera-panel-fit.json")
+    }
+
+    /// The fit measured at an earlier opening, if any.
+    pub fn load() -> Option<Fit> {
+        let fit: Fit = serde_json::from_str(&std::fs::read_to_string(Self::file()).ok()?).ok()?;
+        Fit::from_parts(fit.from_wrist, fit.width_m)
+    }
+
+    fn from_parts(from_wrist: [f32; 3], width_m: f32) -> Option<Fit> {
+        let off = sub(from_wrist, FROM_WRIST);
+        (from_wrist.iter().all(|v| v.is_finite()) && dot(off, off).sqrt() <= FIT_MOST_OFF_M && (FIT_WIDTHS_M[0]..=FIT_WIDTHS_M[1]).contains(&width_m)).then_some(Fit { from_wrist, width_m })
+    }
+
+    /// Kept for the next openings.
+    pub fn save(&self) {
+        if let Err(e) = serde_json::to_string_pretty(self).map_err(|e| e.to_string()).and_then(|text| std::fs::write(Self::file(), text).map_err(|e| e.to_string())) {
+            eprintln!("{}: {e}", Self::file().display());
+        }
+    }
+}
+
 /// What a step says happened.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Happened {
@@ -215,6 +301,10 @@ pub struct Happened {
 pub struct Reckon {
     /// In the room, or in the holding hand's frame while held.
     at: Option<Matrix34>,
+    /// Its width against the sandbox's (1 there): VRChat's grab box and X scale with it.
+    scale: f32,
+    /// A hand took it since it opened.
+    taken_since_open: bool,
     held: Option<usize>,
     /// Where it was last shown, in the room.
     last: Option<Matrix34>,
@@ -227,9 +317,48 @@ impl Reckon {
     /// The camera opened: lay the panel where VRChat does. Nothing until the head and the left controller are tracked.
     /// `wrist`: VRChat's own left wrist when it said it lately ([`left_wrist`]); the controller's pose otherwise.
     pub fn open(&mut self, head: &Matrix34, left: &Matrix34, wrist: Option<&Matrix34>) -> Matrix34 {
-        let panel = wrist.map_or_else(|| opening(head, left), |wrist| opening_by_wrist(head, wrist));
-        *self = Self { at: Some(panel), grips: self.grips, triggers: self.triggers, ..Self::default() };
+        self.open_fitted(head, left, wrist, &Fit::SANDBOX)
+    }
+
+    /// [`Reckon::open`] by `fit` (measured for the avatar worn) where VRChat said its wrist.
+    pub fn open_fitted(&mut self, head: &Matrix34, left: &Matrix34, wrist: Option<&Matrix34>, fit: &Fit) -> Matrix34 {
+        let (panel, scale) = match wrist {
+            Some(wrist) => (fit.opening(head, wrist), fit.width_m / PANEL_WIDTH_M),
+            None => (opening(head, left), 1.0),
+        };
+        *self = Self { at: Some(panel), scale, grips: self.grips, triggers: self.triggers, ..Self::default() };
         panel
+    }
+
+    /// The picture saw the panel at `frame`, `width_m` wide, while it lies where it opened: laid there. Not while a hand has it, nor once one took it
+    /// (where it lies then is the hand's doing, not the opening's). Whether it was.
+    pub fn reanchor(&mut self, frame: Matrix34, width_m: f32) -> bool {
+        if self.at.is_none() || self.held.is_some() || self.taken_since_open {
+            return false;
+        }
+        self.at = Some(frame);
+        self.last = Some(frame);
+        self.scale = width_m / PANEL_WIDTH_M;
+        true
+    }
+
+    /// Where it lies in the room, while no hand has it.
+    pub fn lying(&self) -> Option<Matrix34> {
+        self.at.filter(|_| self.held.is_none())
+    }
+
+    /// Whether a hand took it since it opened.
+    pub fn taken_since_open(&self) -> bool {
+        self.taken_since_open
+    }
+
+    /// One of its units in metres (its picture is [`PANEL_SIZE`] units across).
+    pub fn unit(&self) -> f32 {
+        PANEL_WIDTH_M * self.scale() / PANEL_SIZE[0]
+    }
+
+    fn scale(&self) -> f32 {
+        if self.scale > 0.0 { self.scale } else { 1.0 }
     }
     pub fn opened(&self) -> bool {
         self.at.is_some() || self.closed
@@ -279,7 +408,7 @@ impl Reckon {
             } else if pressed {
                 // The other hand takes it over while this one still holds it (Enzo, 2026-11-16, in his headset). This hand's grip, still held,
                 // is no new press: it gets it back only by letting go and pressing again. Out of reach, the press does nothing.
-                match hands[other].filter(|pose| within_grab(&room, pose, other)) {
+                match hands[other].filter(|pose| within_grab_scaled(&room, pose, other, self.scale())) {
                     Some(pose) => {
                         self.held = Some(other);
                         self.at = Some(then(&undone(&pose), &room));
@@ -295,7 +424,8 @@ impl Reckon {
             // with the other, and stayed so until the camera was reopened (Enzo: "on our camera overlay it does grab the overlay").
             for hand in [1, 0] {
                 if grips[hand] && !was_grips[hand] {
-                    if let Some(pose) = hands[hand].filter(|pose| within_grab(&room, pose, hand)) {
+                    if let Some(pose) = hands[hand].filter(|pose| within_grab_scaled(&room, pose, hand, self.scale())) {
+                        self.taken_since_open = true;
                         self.held = Some(hand);
                         self.at = Some(then(&undone(&pose), &room));
                         happened.taken = Some(hand);
@@ -309,7 +439,7 @@ impl Reckon {
             (_, Some(at)) => at,
             _ => room,
         };
-        let unit = PANEL_WIDTH_M / PANEL_SIZE[0];
+        let unit = self.unit();
         for hand in 0..2 {
             if triggers[hand] && !was_triggers[hand] && self.held != Some(hand) {
                 if let Some(pose) = hands[hand] {
@@ -601,6 +731,72 @@ mod tests {
             let by_controller = apart(&opening(&head, &m(&open["left"])), &truth);
             assert!(by_controller <= if name == "spawn4-w3" { 0.025 } else { 0.015 }, "{name}: controller rule {:.1} mm", by_controller * 1000.0);
         }
+    }
+
+    /// Request 18: what one opening's sighting measures (the offset from VRChat's wrist, the width) lays the panel right at the next openings, from
+    /// wherever the wrist is then: the sandbox's real opens (m3), one measured, the others predicted from it within what the sandbox's own fit does.
+    /// A panel measured larger than the sandbox's (an avatar small against its person) moves and grows the parts with it; a misreading is refused.
+    #[test]
+    fn a_measured_fit_lays_the_next_openings() {
+        let data = recorded();
+        let opens = data["wrist_opens"].as_array().unwrap();
+        let wrist_of = |open: &Value| {
+            let v: Vec<f32> = open["wrist"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            unity_pose(v.try_into().unwrap())
+        };
+        let first = &opens[0];
+        let fit = Fit::from_sighting(&wrist_of(first), &m(&first["panel"]), PANEL_WIDTH_M).unwrap();
+        assert!(fit.agrees(&Fit::SANDBOX), "the sandbox's own opens give the sandbox's fit: {fit:?}");
+        for open in opens.iter().skip(1) {
+            let name = open["name"].as_str().unwrap();
+            let e = apart(&fit.opening(&m(&open["head"]), &wrist_of(open)), &m(&open["panel"]));
+            assert!(e <= if name == "spawn4-w3" { 0.03 } else { 0.015 }, "{name}: {:.1} mm", e * 1000.0);
+        }
+        // Another avatar: VRChat lays its panel 5 cm lower and 2 cm in, from its wrist, 10 % smaller. Measured once, the next opening is there.
+        let truth = Fit { from_wrist: [FROM_WRIST[0] + 0.02, FROM_WRIST[1] - 0.05, FROM_WRIST[2]], width_m: PANEL_WIDTH_M * 0.9 };
+        let (head, wrist) = (m(&first["head"]), wrist_of(first));
+        let seen = truth.opening(&head, &wrist);
+        let measured = Fit::from_sighting(&wrist, &seen, truth.width_m).unwrap();
+        assert!(measured.agrees(&truth) && !measured.agrees(&Fit::SANDBOX), "{measured:?}");
+        let mut reckon = Reckon::default();
+        let other = &opens[3];
+        let laid = reckon.open_fitted(&m(&other["head"]), &m(&other["left"]), Some(&wrist_of(other)), &measured);
+        assert!(apart(&laid, &truth.opening(&m(&other["head"]), &wrist_of(other))) < 0.001);
+        assert!((reckon.unit() - truth.width_m / PANEL_SIZE[0]).abs() < 1e-6, "its unit follows its width");
+        // A sighting 40 cm off, or 1 m wide, is no panel of VRChat's.
+        let far = Matrix34 { m: std::array::from_fn(|i| { let mut r = seen.m[i]; r[3] += if i == 0 { 0.4 } else { 0.0 }; r }) };
+        assert!(Fit::from_sighting(&wrist, &far, PANEL_WIDTH_M).is_none());
+        assert!(Fit::from_sighting(&wrist, &seen, 1.0).is_none());
+    }
+
+    /// Request 18: a sighting re-lays the panel only while it lies where it opened: not while a hand has it, nor after one took it.
+    #[test]
+    fn a_sighting_re_lays_the_panel_only_where_it_opened() {
+        let data = recorded();
+        // A grab VRChat took (its panel moved).
+        let grab = data["grabs"].as_array().unwrap().iter().find(|g| g["after"].as_array().is_some_and(|_| apart(&m(&g["after"]), &m(&g["before"])) > 0.02)).unwrap();
+        let before = m(&grab["before"]);
+        let side = if grab["hand"] == "left" { 0 } else { 1 };
+        let mut reckon = Reckon::lying_at(before);
+        let moved = Matrix34 { m: std::array::from_fn(|i| { let mut r = before.m[i]; r[3] += if i == 1 { -0.05 } else { 0.0 }; r }) };
+        assert!(reckon.reanchor(moved, PANEL_WIDTH_M * 1.1));
+        let (now, _) = reckon.step([None, None], [false; 2], [false; 2]);
+        assert!(apart(&now.unwrap(), &moved) < 1e-6);
+        assert!((reckon.unit() - PANEL_WIDTH_M * 1.1 / PANEL_SIZE[0]).abs() < 1e-6);
+        // Taken: no more re-laying from the opening's sightings.
+        let mut reckon = Reckon::lying_at(before);
+        let mut hands = [None; 2];
+        hands[side] = Some(at(&grab["at_grip"]));
+        reckon.step(hands, [false; 2], [false; 2]);
+        assert!(!reckon.taken_since_open());
+        let mut grips = [false; 2];
+        grips[side] = true;
+        let (_, happened) = reckon.step(hands, grips, [false; 2]);
+        assert_eq!(happened.taken, Some(side));
+        assert!(!reckon.reanchor(moved, PANEL_WIDTH_M), "held");
+        let (_, happened) = reckon.step(hands, [false; 2], [false; 2]);
+        assert_eq!(happened.let_go, Some(side));
+        assert!(reckon.taken_since_open() && !reckon.reanchor(moved, PANEL_WIDTH_M), "let go where the hand left it: not the opening's");
     }
 
     /// m3's grips, with the controller where SteamVR had it (the sandbox commanded it 12 cm off, by the standing offset): the same rule as m1's.

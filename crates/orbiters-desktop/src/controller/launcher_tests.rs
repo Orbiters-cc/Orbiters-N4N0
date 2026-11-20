@@ -934,6 +934,9 @@ fn a_join_while_vrchat_is_starting_never_starts_a_second_one_when_the_processes_
     let _ = *flicker.written.lock().unwrap();
 }
 
+// Reads this computer's VRChats through the roster and `launcher_game`, which a Mac does not (VRChat is Obelisk's there,
+// and Home starts no second profile): Windows only.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_second_vrchat_starts_on_a_free_profile_beside_the_first_and_never_on_a_running_one() {
     // REQUEST15 7a. VRChat runs on profile 0 (in VR); nothing reaches a real VRChat: the pretend computer records.
@@ -1147,6 +1150,9 @@ fn the_bridge_and_go_there_claim_the_profiles_home_starts_on() {
 
 // --- REQUEST15 fix B5: a VRChat whose profile is not known yet is never taken for profile 0 ---
 
+// Reads this computer's VRChats through the roster and `launcher_game`, which a Mac does not (VRChat is Obelisk's there,
+// and Home starts no second profile): Windows only.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_vrchat_not_yet_identified_is_not_profile_0_and_holds_play() {
     // Profile 1 started outside Orbiters: in the roster before its log said its arguments (the roster's 0 means "not

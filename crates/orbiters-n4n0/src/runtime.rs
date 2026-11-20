@@ -278,7 +278,7 @@ pub(crate) struct N4n0Runtime {
     pub(crate) screen_replace: Option<bool>,
     screen_thumbnail: Option<usize>,
     /// The screen's version (`N4N0/Screen/Version`; older screens lack it): from 3, Home has six tiles.
-    screen_version: Option<i32>,
+    pub(crate) screen_version: Option<i32>,
     /// `/avatar/eyeheight`, metres.
     eye_height: Option<f32>,
     /// N4N0's light (the Light option), as the avatar holds it: `None` when its N4N0 has none.

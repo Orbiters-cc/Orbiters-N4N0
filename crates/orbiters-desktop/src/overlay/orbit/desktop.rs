@@ -101,6 +101,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut noted = MismatchNoted::default();
     // The performance self-check (`perf`): this loop's cost, to the service every ten seconds.
     let mut meter = crate::perf::TurnMeter::new("orbit-desktop", Instant::now());
+    // Translation on the desktop (REQUEST15 item 2): its reading thread while it is on, and its translations over VRChat's window.
+    let mut translations = super::desk_translate::Host::default();
     loop {
         let turn = Instant::now();
         let dt = turn.duration_since(last_turn).as_secs_f32();
@@ -134,10 +136,31 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             backend.orbit_status(status.clone());
             said = Some(status);
         }
-        // Only with VRChat itself in front, or a panel's window: anything else in front and it all goes at once.
-        let in_front = found.filter(|h| !exclusive && foreground_is(*h, &windows));
-        crate::mismatch::note_change("window: VRChat in front, its size", &mut noted.front, in_front.map(|w| { let s = client_size(w); (s.x as i32, s.y as i32) })); // i18n: not shown (a menu mismatch report's line)
-        let Some(window) = in_front else {
+        // As long as VRChat's window is on the screen, whoever has the keyboard (REQUEST15 item 1: they all went the moment another program had it). With
+        // another program in front, ours lie right above VRChat's window, so whatever covers it covers them; its keys are not read.
+        let presence = found.map_or(Presence::of(false, false, exclusive, false), |h| Presence::of(true, on_screen(h), exclusive, front_is(h)));
+        let shown_on = found.filter(|_| presence.show);
+        let keyboard = presence.keyboard;
+        crate::mismatch::note_change("window: VRChat on screen, its size, its keyboard", &mut noted.front, shown_on.map(|w| { let s = client_size(w); (s.x as i32, s.y as i32, keyboard) })); // i18n: not shown (a menu mismatch report's line)
+        if let Some(game) = shown_on {
+            // Laid again, in order, when the layer changes or another window came between VRChat's and ours.
+            let layer = (!keyboard && !stack::topmost(game)).then_some(game);
+            let changed = stack::set(layer);
+            if changed || layer.is_some_and(|g| !stack::holds(g, &shown_windows(&windows, &pointer, &corner, &pill, &translations))) {
+                // The translations lowest: they lie on VRChat's text, under anything of ours.
+                translations.raise();
+                windows.raise_all();
+                pill.raise();
+                pointer.raise();
+                corner.raise();
+            }
+        }
+        // Over a menu of VRChat's or of ours nothing is read and no translation shows (the menus cover the view): as last turn found them.
+        let covered = was_menu || !panels.is_empty();
+        translations.update(&snap, &backend, shown_on.map(|w| super::desk_translate::OnScreen { window: w, origin: client_origin(w), client: client_size(w) }), covered);
+        // The pointer over ours: VRChat's own shape in the accent chosen (REQUEST15 item 5).
+        cursor::follow(super::panels::look::accent());
+        let Some(window) = shown_on else {
             corner.show(false, pos2(0.0, 0.0), vec2(0.0, 0.0), turn);
             // The parts of menus that closed are kept for a while; with the game behind another window nothing else comes by to let them go.
             panels.let_go(turn);
@@ -168,7 +191,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         crate::mismatch::note_change("vrchat: camera open (OSC)", &mut noted.camera, snap.camera_open_said); // i18n: not shown (a menu mismatch report's line)
         // VRChat's window of another size: its camera panel's place goes with it now, not two looks later.
         camera.follow_size(client_size(window));
-        if let Some(key) = keys.pressed() {
+        // Another program's keyboard: what is typed there is never a key of ours (R typed in a chat is not VRChat's R).
+        if let Some(key) = if keyboard { keys.pressed() } else { keys.reset(); None } {
             crate::mismatch::note("input: key", || format!("{key:?}")); // i18n: not shown (a menu mismatch report's line)
             watcher.pressed(key, turn);
             if key == MenuKey::Esc {
@@ -227,7 +251,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let origin = client_origin(window);
         // The menu mismatch corner: shown, its clicks and keys, a report for a press. Never anything more.
         corner.show(mismatch_on, origin, size, turn);
-        let mut asked = corner.keyed().filter(|_| mismatch_on);
+        let mut asked = corner.keyed().filter(|_| mismatch_on && keyboard);
         for down in corner_clicks {
             if down && asked.is_none() {
                 asked = corner.clicked(cursor_at());
@@ -275,21 +299,24 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         // The pointer: Windows' with the Quick Menu; ours while Alt is held with the wheel, which holds Windows'. A sheet opened from the wheel keeps it, with no key held.
         let cursor = cursor_at();
         let sheet_on_wheel = open == Some(Around::Wheel) && panels.sheet_open();
-        pointer.follow(open == Some(Around::Wheel) && (alt_held() || sheet_on_wheel), origin, size, window, sheet_on_wheel);
+        // Only while VRChat has the keyboard: the hook keeps the mouse from every program, and Alt held in another one is that one's.
+        pointer.follow(keyboard && open == Some(Around::Wheel) && (alt_held() || sheet_on_wheel), origin, size, window, sheet_on_wheel);
         // With no key held, the scroll wheel picks a cell (VRChat's wheel has no use for it), and the next click opens it.
-        scroller.follow(SCROLL_TO_PICK && open == Some(Around::Wheel) && !pointer.active() && !panels.sheet_open());
+        scroller.follow(SCROLL_TO_PICK && keyboard && open == Some(Around::Wheel) && !pointer.active() && !panels.sheet_open());
         let scrolled = scroller.lit();
         // Over VRChat's wheel while Alt points at ours, or while a 3D picture waits. VRChat lights the slice its own pointer last reached, and nothing from here can
         // unlight it (the movement is held from it, not undone): two things looked chosen (round 14's judges). While Alt is held its clicks are ours, so its wheel is
         // shown stepped back, still in view (round 13's judges: an opaque disc hid it all); while a 3D picture waits, an opaque disc says what waits.
         let _ = scrolled;
         panels.set_pointing((pointer.active() || panels.picture_waiting()) && !panels.sheet_open(), !snap.settings.reduce_motion);
-        panels.set_key_caps(alt_held());
+        panels.set_key_caps(keyboard && alt_held());
         let at = pointer.at().unwrap_or(pos2(cursor.0 as f32, cursor.1 as f32));
         let on = match scrolled {
             Some(cell) => panels.cell_point(cell),
             None => (open != Some(Around::Wheel) || pointer.at().is_some()).then(|| hit(&panels, at - origin.to_vec2())).flatten(),
         };
+        // With another program in front, a part of ours it covers is not pointed at through it: only where Windows' pointer is over ours or VRChat's own window.
+        let on = on.filter(|_| keyboard || pointer.at().is_some() || seen_at(cursor, window));
         panels.hover(on);
         // With the wheel open, the mouse is VRChat's until Alt is held: what nobody can guess is said in the caption.
         hints.follow(open, pointer.active());
@@ -302,7 +329,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         if wheel != 0 {
             panels.wheel(wheel as f32 / 120.0);
         }
-        if let Some(cell) = keys.digit(open == Some(Around::Wheel) && !panels.sheet_open()) {
+        if let Some(cell) = keys.digit(keyboard && open == Some(Around::Wheel) && !panels.sheet_open()) {
             if panels.press_cell(cell, &snap).clicked {
                 clicks.play();
             }
@@ -445,6 +472,13 @@ fn hit(panels: &Panels, p: Pos2) -> Option<(usize, Pos2)> {
     })
 }
 
+/// Whether the screen's point `at` shows ours or VRChat's window, nothing that covers them: Windows' own hit testing.
+fn seen_at(at: (i32, i32), game: HWND) -> bool {
+    // SAFETY: a plain query.
+    let under = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(POINT { x: at.0, y: at.1 }) };
+    under == game || stack::ours(under)
+}
+
 fn alt_held() -> bool {
     // SAFETY: a plain query.
     unsafe { GetAsyncKeyState(VK_LMENU.0 as i32) as u16 & 0x8000 != 0 }
@@ -481,10 +515,18 @@ fn client_origin(window: HWND) -> Pos2 {
     pos2(p.x as f32, p.y as f32)
 }
 
-fn foreground_is(game: HWND, windows: &Windows) -> bool {
+/// Whether the keyboard is VRChat's: its window in front, or one of ours (which never take the focus, but a click could leave one there).
+fn front_is(game: HWND) -> bool {
     // SAFETY: a plain query.
     let front = unsafe { GetForegroundWindow() };
-    front == game || windows.owns(front)
+    front == game || stack::ours(front)
+}
+
+/// Every window of ours that shows: what must lie right above VRChat's while another program has the keyboard.
+fn shown_windows(windows: &Windows, pointer: &pointer::Pointer, corner: &Corner, pill: &Pill, translations: &super::desk_translate::Host) -> Vec<HWND> {
+    let mut all: Vec<HWND> = windows.list.values().filter(|w| w.shown).map(|w| w.hwnd).chain(translations.windows().map(|w| w.hwnd)).collect();
+    all.extend([pointer.window(), corner.window.as_ref(), pill.window.as_ref()].into_iter().flatten().filter(|w| w.shown).map(|w| w.hwnd));
+    all
 }
 
 fn pump() {
@@ -673,14 +715,14 @@ struct Looked {
 
 /// The Direct3D device captures use, kept for as long as the process lasts: it holds nothing and does nothing between captures.
 #[derive(Clone)]
-struct Gpu {
-    device: ID3D11Device,
-    context: ID3D11DeviceContext,
-    winrt: IDirect3DDevice,
+pub(super) struct Gpu {
+    pub(super) device: ID3D11Device,
+    pub(super) context: ID3D11DeviceContext,
+    pub(super) winrt: IDirect3DDevice,
 }
 
 impl Gpu {
-    fn new() -> Result<Self, String> {
+    pub(super) fn new() -> Result<Self, String> {
         let text = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
         let (mut device, mut context): (Option<ID3D11Device>, Option<ID3D11DeviceContext>) = (None, None);
         // SAFETY: the outputs are valid.
@@ -696,7 +738,7 @@ impl Gpu {
 
 /// The box (left, top, right, bottom) of a part at `[x0, y0, width, height]` of the client area, which lies at `offset` in the frame,
 /// when the whole of it is inside a frame of `frame` pixels; `None` otherwise (and on an overflow).
-fn source_box([x0, y0, width, height]: [u32; 4], offset: (u32, u32), frame: (u32, u32)) -> Option<[u32; 4]> {
+pub(super) fn source_box([x0, y0, width, height]: [u32; 4], offset: (u32, u32), frame: (u32, u32)) -> Option<[u32; 4]> {
     let left = x0.checked_add(offset.0)?;
     let top = y0.checked_add(offset.1)?;
     let right = left.checked_add(width)?;
@@ -1036,7 +1078,7 @@ impl CameraLog {
 }
 
 /// Where the client area's corner is in the frames of Windows Graphics Capture (the window's visual bounds).
-fn client_in_frame(window: HWND) -> (u32, u32) {
+pub(super) fn client_in_frame(window: HWND) -> (u32, u32) {
     let (mut corner, mut bounds) = (POINT::default(), RECT::default());
     // SAFETY: the outputs and their sizes are passed; a window gone only fails.
     let known = unsafe {
@@ -1069,6 +1111,12 @@ static WHEEL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        // Over ours, the pointer VRChat shows on the desktop, in the accent chosen (REQUEST15 item 5); Windows' arrow until it is made.
+        windows::Win32::UI::WindowsAndMessaging::WM_SETCURSOR if (lparam.0 & 0xffff) as u32 == windows::Win32::UI::WindowsAndMessaging::HTCLIENT && cursor::current().is_some() => {
+            // SAFETY: a cursor made by `cursor::follow`, never destroyed while the process lives.
+            unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursor(cursor::current()) };
+            LRESULT(1)
+        }
         windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL => {
             WHEEL.fetch_add(((wparam.0 >> 16) & 0xffff) as u16 as i16 as i32, std::sync::atomic::Ordering::Relaxed);
             LRESULT(0)
@@ -1190,7 +1238,8 @@ impl PanelWindow {
         }
     }
 
-    /// Puts the window where it goes, at this alpha, and shows it (above everything: VRChat's a window among others, and what it has it may come above again).
+    /// Puts the window where it goes, at this alpha, and shows it: above everything while VRChat has the keyboard (VRChat's a window among others, and what it has
+    /// it may come above again), right above VRChat's window while another program has it ([`stack`]).
     pub(crate) fn place(&mut self, at: POINT, alpha: u8) {
         let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8 };
         let origin = POINT { x: 0, y: 0 };
@@ -1213,7 +1262,7 @@ impl PanelWindow {
             }
             if !self.shown {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-                let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOSIZE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                stack::lay(self.hwnd);
             }
         }
         self.shown = true;
@@ -1228,15 +1277,17 @@ impl PanelWindow {
         self.shown && !self.stale && unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(self.hwnd) }.as_bool()
     }
 
-    /// Above every other window of ours.
-    fn raise(&self) {
-        // SAFETY: a live window.
-        unsafe {
-            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOSIZE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-        }
+    /// Above every other window of ours, in the layer this thread's windows lie in now ([`stack`]).
+    pub(crate) fn raise(&self) {
+        stack::lay(self.hwnd);
     }
 
-    fn hide(&mut self) {
+    /// Its size in pixels.
+    pub(crate) fn size(&self) -> [u32; 2] {
+        [self.size.cx.max(0) as u32, self.size.cy.max(0) as u32]
+    }
+
+    pub(crate) fn hide(&mut self) {
         if self.shown {
             // SAFETY: a live window.
             unsafe {
@@ -1267,16 +1318,23 @@ struct Windows {
     list: HashMap<Zone, PanelWindow>,
     /// Pictures put in windows so far: what the log counts.
     painted: u64,
+    /// The zones showing, in the order they lie, bottom first.
+    order: Vec<Zone>,
 }
 
 impl Windows {
-    fn owns(&self, hwnd: HWND) -> bool {
-        self.list.values().any(|w| w.hwnd == hwnd)
-    }
-
     fn hide_all(&mut self) {
         for w in self.list.values_mut() {
             w.hide();
+        }
+    }
+
+    /// Every one showing laid again in the order they lie, bottom first: where ours lie changed ([`stack`]).
+    fn raise_all(&self) {
+        for zone in &self.order {
+            if let Some(w) = self.list.get(zone).filter(|w| w.shown) {
+                w.raise();
+            }
         }
     }
 
@@ -1311,6 +1369,7 @@ impl Windows {
         }
         let showing: Vec<(Zone, POINT, u8)> = panels.all().filter(|p| p.painted && p.shown).map(|p| placed_at(p, origin)).collect();
         let came_up = place_in_order(&mut self.list, &showing);
+        self.order = showing.iter().map(|(z, _, _)| *z).collect();
         for (zone, window) in &mut self.list {
             if !showing.iter().any(|(z, _, _)| z == zone) {
                 window.hide();
@@ -1358,6 +1417,247 @@ fn placed_at(panel: &Panel, origin: Pos2) -> (Zone, POINT, u8) {
     let way = panel.zone.ring().map_or((rect.center() - center).normalized(), |ring| zones::polar(1.0, ring.middle()));
     let at = origin + rect.min.to_vec2() + way * panel.outward() * unit;
     (panel.zone, POINT { x: at.x.round() as i32, y: at.y.round() as i32 }, (panel.appear.alpha() * 255.0) as u8)
+}
+
+// --------------------------------------------------------------------------------------------- the pointer over ours
+
+/// The pointer over ours on the desktop (REQUEST15 item 5): VRChat draws its own pointer on the desktop, a small slanted arrowhead with a notch at its back, and
+/// hides Windows'; over a window of ours Windows' white arrow showed instead, from another program. This is that shape (drawn here, not VRChat's picture), of
+/// the same size, in the accent the person chose, with a thin dark edge so that it reads on anything.
+pub(crate) mod cursor {
+    use super::*;
+    use egui::Color32;
+    use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, GetSystemMetrics, HCURSOR, ICONINFO, SM_CXCURSOR};
+
+    /// The cursor made for the accent now, and that accent (0xRRGGBB; all ones: none yet).
+    static NOW: AtomicIsize = AtomicIsize::new(0);
+    static COLOUR: AtomicU32 = AtomicU32::new(u32::MAX);
+
+    /// The arrow in a box of 24 units: its tip at the top left (the hotspot), its two wings, the notch between them at its back. Two triangles, as it is not
+    /// convex.
+    pub(crate) const TIP: Pos2 = pos2(2.0, 2.0);
+    const WING_RIGHT: Pos2 = pos2(19.5, 9.0);
+    const NOTCH: Pos2 = pos2(10.6, 10.6);
+    const WING_DOWN: Pos2 = pos2(9.0, 19.5);
+
+    /// The arrow in a square of `px` pixels at `scale` (1.0: the 24 units' box), RGBA premultiplied.
+    pub(crate) fn picture(px: u32, scale: f32, colour: Color32) -> Vec<u8> {
+        let mut canvas = crate::overlay::Canvas::new(px, px);
+        canvas.paint(0.0, |p| {
+            let at = |q: Pos2| pos2(q.x * scale, q.y * scale);
+            let outline = vec![at(TIP), at(WING_RIGHT), at(NOTCH), at(WING_DOWN)];
+            // The dark edge first, half of it outside the arrow, then the arrow over it.
+            p.add(egui::Shape::closed_line(outline, egui::Stroke::new(2.4 * scale, Color32::from_black_alpha(200))));
+            for tri in [[TIP, WING_RIGHT, NOTCH], [TIP, NOTCH, WING_DOWN]] {
+                p.add(egui::Shape::convex_polygon(tri.iter().map(|q| at(*q)).collect(), colour, egui::Stroke::NONE));
+            }
+        });
+        canvas.pixels().to_vec()
+    }
+
+    /// The cursor for the accent now, when one was made.
+    pub(crate) fn current() -> Option<HCURSOR> {
+        let h = NOW.load(Ordering::Relaxed);
+        (h != 0).then_some(HCURSOR(h as *mut _))
+    }
+
+    /// A turn: a cursor of the accent `colour` once, and again only when it changes (Settings, the look). The ones before are kept: a cursor may be shown
+    /// while it is replaced, and there are as many as colours chosen in a session.
+    pub(crate) fn follow(colour: Color32) {
+        let key = u32::from_be_bytes([0, colour.r(), colour.g(), colour.b()]);
+        if COLOUR.load(Ordering::Relaxed) == key {
+            return;
+        }
+        COLOUR.store(key, Ordering::Relaxed);
+        // SAFETY: a plain query.
+        let side = (unsafe { GetSystemMetrics(SM_CXCURSOR) }).clamp(32, 128) as u32;
+        if let Some(made) = make(side, colour) {
+            NOW.store(made.0 as isize, Ordering::Relaxed);
+        }
+    }
+
+    /// A cursor of `side` pixels: the arrow about as large as VRChat's on a screen (21 pixels from its tip at Windows' usual 32), its hotspot on the tip.
+    pub(crate) fn make(side: u32, colour: Color32) -> Option<HCURSOR> {
+        let scale = side as f32 / 28.0;
+        let premultiplied = picture(side, scale, colour);
+        // A cursor's colours are straight, not premultiplied, in BGRA rows from the top.
+        let mut bgra = Vec::with_capacity(premultiplied.len());
+        for p in premultiplied.chunks_exact(4) {
+            let a = p[3];
+            let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 };
+            bgra.extend_from_slice(&[un(p[2]), un(p[1]), un(p[0]), a]);
+        }
+        // SAFETY: plain GDI calls; the bitmaps made here are deleted before returning (the cursor keeps its own copies).
+        unsafe {
+            let header = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: side as i32, biHeight: -(side as i32), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() };
+            let info = BITMAPINFO { bmiHeader: header, ..Default::default() };
+            let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+            let colour_bitmap = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+            std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, bgra.len());
+            let mask_bits = vec![0u8; (side as usize).div_ceil(16) * 2 * side as usize];
+            let mask = windows::Win32::Graphics::Gdi::CreateBitmap(side as i32, side as i32, 1, 1, Some(mask_bits.as_ptr() as *const _));
+            let hot = (TIP.x * scale).round() as u32;
+            let icon = ICONINFO { fIcon: false.into(), xHotspot: hot, yHotspot: hot, hbmMask: mask, hbmColor: colour_bitmap };
+            let made = CreateIconIndirect(&icon).ok();
+            let _ = DeleteObject(colour_bitmap.into());
+            let _ = DeleteObject(mask.into());
+            made.map(|i| HCURSOR(i.0))
+        }
+    }
+}
+
+// --------------------------------------------------------------------------------------------- where ours lie among other programs' windows
+
+/// Where the windows of ours lie among the other programs' (REQUEST15 item 1). While VRChat has the keyboard they are topmost, as they always were (VRChat brought
+/// in front again never lands on them). While another program has it, VRChat's window is still on the screen beside or under it, and ours stay with it: no longer
+/// topmost, right above VRChat's window, so that whatever covers VRChat covers them too, as if they were part of it. They never take the focus either way.
+pub(crate) mod stack {
+    use super::*;
+    use std::cell::Cell;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GetWindowLongPtrW, IsWindowVisible, GWL_EXSTYLE, GW_HWNDPREV, HWND_NOTOPMOST, HWND_TOP, SWP_NOMOVE};
+
+    thread_local! {
+        /// The window ours lie right above, or 0: topmost. Each thread's windows by their own (a test's windows are its thread's).
+        static ABOVE: Cell<isize> = const { Cell::new(0) };
+    }
+
+    /// How ours lie from now on: right above `game`, or topmost with `None`. Says whether that changed (then every window of ours showing is laid again, in order).
+    pub(crate) fn set(game: Option<HWND>) -> bool {
+        let new = game.map_or(0, |h| h.0 as isize);
+        ABOVE.with(|a| a.replace(new)) != new
+    }
+
+    /// Where they lie now: right above that window, or topmost.
+    pub(crate) fn above() -> Option<HWND> {
+        let a = ABOVE.with(Cell::get);
+        (a != 0).then_some(HWND(a as *mut _))
+    }
+
+    fn flags() -> windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS {
+        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+    }
+
+    pub(super) fn topmost(hwnd: HWND) -> bool {
+        // SAFETY: a plain query; a window gone answers 0.
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+        style & WS_EX_TOPMOST.0 as isize != 0
+    }
+
+    /// A window of ours: one of this process's panel windows (the class every one of them has). Any other window of this process (a test's stand-in) is not.
+    pub(crate) fn ours(hwnd: HWND) -> bool {
+        if hwnd.is_invalid() {
+            return false;
+        }
+        let mut pid = 0u32;
+        let mut name = [0u16; 32];
+        // SAFETY: plain queries about a window; the buffer outlives the call.
+        let n = unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            GetClassNameW(hwnd, &mut name)
+        };
+        pid == std::process::id() && String::from_utf16_lossy(&name[..n.max(0) as usize]) == "OrbitersOrbitPanel"
+    }
+
+    /// The first window above `game` in Windows' order that shows and is not ours: what lies over VRChat's window, which ours go right under. `None`: nothing but ours.
+    pub(crate) fn over(game: HWND) -> Option<HWND> {
+        // SAFETY: plain queries walking Windows' order; a window gone ends the walk.
+        let mut at = unsafe { GetWindow(game, GW_HWNDPREV) }.ok();
+        // Bounded: Windows' order can change under the walk.
+        for _ in 0..4096 {
+            let h = at.filter(|h| !h.is_invalid())?;
+            // SAFETY: a plain query.
+            if unsafe { IsWindowVisible(h) }.as_bool() && !ours(h) {
+                return Some(h);
+            }
+            // SAFETY: as above.
+            at = unsafe { GetWindow(h, GW_HWNDPREV) }.ok();
+        }
+        None
+    }
+
+    /// Puts `hwnd` on top of ours, in the layer they lie in now: topmost; or right above VRChat's window, under whatever lies over it.
+    pub(crate) fn lay(hwnd: HWND) {
+        let flags = flags();
+        // SAFETY: plain calls on live windows; a window gone only fails.
+        unsafe {
+            match above() {
+                Some(game) if !topmost(game) => match over(game) {
+                    // Right under what covers VRChat (a topmost window placed after an ordinary one is no longer topmost: Windows' own rule).
+                    Some(cover) if !topmost(cover) => {
+                        let _ = SetWindowPos(hwnd, Some(cover), 0, 0, 0, 0, flags);
+                    }
+                    // Nothing ordinary over VRChat: the top of the ordinary windows, which is right above it. Under every topmost one (the taskbar, a pinned player).
+                    _ => {
+                        if topmost(hwnd) {
+                            let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+                        }
+                        let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, 0, 0, flags);
+                    }
+                },
+                _ => {
+                    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+                }
+            }
+        }
+    }
+
+    /// Whether every window of `shown` lies right above `game`, under anything else that shows: what ours keep while another program has the keyboard. Another
+    /// window put between them (one shown later, not brought in front) is what breaks it.
+    pub(crate) fn holds(game: HWND, shown: &[HWND]) -> bool {
+        if shown.is_empty() {
+            return true;
+        }
+        let mut seen = 0;
+        // SAFETY: plain queries walking Windows' order.
+        let mut at = unsafe { GetWindow(game, GW_HWNDPREV) }.ok();
+        for _ in 0..4096 {
+            let Some(h) = at.filter(|h| !h.is_invalid()) else { break };
+            if shown.contains(&h) {
+                seen += 1;
+                if seen == shown.len() {
+                    return true;
+                }
+            // SAFETY: a plain query.
+            } else if unsafe { IsWindowVisible(h) }.as_bool() && !ours(h) {
+                return false;
+            }
+            // SAFETY: as above.
+            at = unsafe { GetWindow(h, GW_HWNDPREV) }.ok();
+        }
+        seen == shown.len()
+    }
+}
+
+/// Whether VRChat's window `game` shows on the screen: visible, not minimised (found windows never are, [`Game::find`]) and not cloaked (on another virtual
+/// desktop, or being put away). Whatever has the keyboard.
+fn on_screen(game: HWND) -> bool {
+    use windows::Win32::Graphics::Dwm::DWMWA_CLOAKED;
+    let mut cloaked = 0u32;
+    // SAFETY: plain queries; the output and its size are passed.
+    unsafe {
+        let visible = windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(game).as_bool() && !IsIconic(game).as_bool();
+        let _ = DwmGetWindowAttribute(game, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, std::mem::size_of::<u32>() as u32);
+        visible && cloaked == 0
+    }
+}
+
+/// What the loop decides from VRChat's window and the keyboard's owner, each turn (REQUEST15 item 1): whether ours show at all, and whether VRChat has the keyboard.
+/// Before, ours went the moment another program had the keyboard (`in_front` = VRChat in front): now they stay as long as VRChat's window is on the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Presence {
+    /// Ours show: VRChat's window is there, not minimised, not hidden, not in exclusive full screen.
+    pub(crate) show: bool,
+    /// The keyboard is VRChat's (or a window of ours has it): the keys of ours (Esc and R for its menus, 1 to 6 on the ring, Left Alt, Alt+F7 to F9) are read, the
+    /// pointer's hook may take the mouse, and ours are topmost. Otherwise none of that: what is typed is for the program in front.
+    pub(crate) keyboard: bool,
+}
+
+impl Presence {
+    pub(crate) fn of(found: bool, on_screen: bool, exclusive: bool, front_is_game_or_ours: bool) -> Self {
+        let show = found && on_screen && !exclusive;
+        Self { show, keyboard: show && front_is_game_or_ours }
+    }
 }
 
 // --------------------------------------------------------------------------------------------- the menu mismatch corner
@@ -1554,7 +1854,7 @@ fn screen_picture(origin: Pos2, client: Vec2) -> Option<crate::mismatch::Picture
 /// What the desktop's loop last noted for the menu mismatch reports, to note only changes.
 #[derive(Default)]
 struct MismatchNoted {
-    front: Option<Option<(i32, i32)>>,
+    front: Option<Option<(i32, i32, bool)>>,
     alt: Option<bool>,
     look: Option<(Option<Around>, bool)>,
     seen: Option<Seen>,
@@ -1575,6 +1875,12 @@ struct Pill {
 }
 
 impl Pill {
+    fn raise(&self) {
+        if let Some(w) = self.window.as_ref().filter(|w| w.shown) {
+            w.raise();
+        }
+    }
+
     /// The caption's size, in its units, and how far under the window's top.
     const SIZE: Vec2 = vec2(560.0, 56.0);
     const TOP: f32 = 96.0;
@@ -1968,6 +2274,10 @@ pub mod pointer {
             }
         }
 
+        pub(super) fn window(&self) -> Option<&PanelWindow> {
+            self.window.as_ref()
+        }
+
         /// Back above every window of ours, as what it points at must never cover it.
         pub fn raise(&self) {
             if let Some(w) = self.window.as_ref().filter(|w| w.shown) {
@@ -2004,14 +2314,9 @@ pub mod pointer {
         }
     }
 
-    /// The pointer's picture: the accent's arrow on a dark edge, so that it reads on anything. RGBA premultiplied.
+    /// The pointer's picture: the same arrow as Windows' pointer over ours ([`super::cursor`]), VRChat's shape in the accent chosen. RGBA premultiplied.
     fn picture() -> Vec<u8> {
-        let mut canvas = crate::overlay::Canvas::new(PX, PX);
-        canvas.paint(0.0, |p| {
-            let body = [pos2(2.0, 1.0), pos2(2.0, 18.0), pos2(7.0, 13.5), pos2(13.5, 13.5)];
-            p.add(egui::Shape::convex_polygon(body.to_vec(), orbiters_ui::theme::ACCENT, egui::Stroke::new(1.4, orbiters_ui::theme::INK_950)));
-        });
-        canvas.pixels().to_vec()
+        super::cursor::picture(PX, 1.0, super::super::panels::look::accent())
     }
 }
 
@@ -3109,5 +3414,136 @@ mod tests {
             wrong.extend(found);
         }
         assert!(wrong.is_empty(), "{} things wrong:\n{}", wrong.len(), wrong.join("\n"));
+    }
+
+    /// REQUEST15 item 1: ours stay while VRChat's window is on the screen, whoever has the keyboard; they go when it is minimised, hidden, closed or in exclusive
+    /// full screen; the keys of ours are read only while VRChat has the keyboard. Before, `in_front` hid everything the moment another program was in front.
+    #[test]
+    fn ours_stay_while_vrchat_shows_whoever_has_the_keyboard() {
+        let other_program_in_front = Presence::of(true, true, false, false);
+        assert_eq!(other_program_in_front, Presence { show: true, keyboard: false }, "shown, but nothing typed elsewhere is ours");
+        assert_eq!(Presence::of(true, true, false, true), Presence { show: true, keyboard: true }, "VRChat in front: as ever");
+        assert_eq!(Presence::of(true, false, false, true), Presence { show: false, keyboard: false }, "minimised or hidden: gone");
+        assert_eq!(Presence::of(false, false, false, false), Presence { show: false, keyboard: false }, "closed: gone");
+        assert_eq!(Presence::of(true, true, true, true), Presence { show: false, keyboard: false }, "exclusive full screen: gone");
+    }
+
+    /// The window seen as on the screen: shown yes; minimised (Windows keeps it, iconic) or hidden no.
+    #[test]
+    fn a_minimised_or_hidden_vrchat_window_is_not_on_the_screen() {
+        use windows::Win32::UI::WindowsAndMessaging::{SW_RESTORE, SW_SHOWMINNOACTIVE};
+        let _alone = windows_alone();
+        let client = vec2(320.0, 180.0);
+        let game = StandIn::new(off_screen(client), client);
+        assert!(on_screen(game.0), "shown");
+        // SAFETY: plain calls on the test's own window.
+        let _ = unsafe { ShowWindow(game.0, SW_SHOWMINNOACTIVE) };
+        assert!(!on_screen(game.0), "minimised");
+        // SAFETY: as above.
+        let _ = unsafe { ShowWindow(game.0, SW_RESTORE) };
+        assert!(on_screen(game.0), "back");
+        // SAFETY: as above.
+        let _ = unsafe { ShowWindow(game.0, SW_HIDE) };
+        assert!(!on_screen(game.0), "hidden");
+    }
+
+    /// REQUEST15 item 5: the pointer over ours is VRChat's desktop arrow (its tip the hotspot, a notch at its back) in the accent chosen, a cursor of Windows'
+    /// at its usual sizes, made again only when the accent changes.
+    #[test]
+    fn the_pointer_over_ours_is_vrchat_s_arrow_in_the_accent() {
+        let accent = egui::Color32::from_rgb(220, 60, 140);
+        let px = cursor::picture(24, 1.0, accent);
+        let at = |x: usize, y: usize| -> [u8; 4] { let i = (y * 24 + x) * 4; [px[i], px[i + 1], px[i + 2], px[i + 3]] };
+        let near = |a: [u8; 4], b: [u8; 4]| a.iter().zip(b).all(|(x, y)| (*x as i32 - y as i32).abs() <= 3);
+        assert!(near(at(9, 6), [220, 60, 140, 255]), "the accent inside it: {:?}", at(9, 6));
+        assert!(near(at(8, 12), [220, 60, 140, 255]), "both wings: {:?}", at(8, 12));
+        for (x, y) in [(17, 17), (23, 0), (0, 23), (14, 14)] {
+            assert_eq!(at(x, y)[3], 0, "clear behind its notch and round it at {x},{y}");
+        }
+        for side in [32, 48, 64] {
+            assert!(cursor::make(side, accent).is_some(), "a cursor of {side} pixels");
+        }
+        cursor::follow(accent);
+        let first = cursor::current();
+        assert!(first.is_some());
+        cursor::follow(accent);
+        assert_eq!(cursor::current(), first, "the same accent: the same cursor");
+        cursor::follow(egui::Color32::from_rgb(10, 200, 120));
+        assert_ne!(cursor::current(), first, "another accent: another cursor");
+    }
+
+    /// Where real windows lie, by Windows' own order (top first), among `among`.
+    fn order(among: &[HWND]) -> Vec<HWND> {
+        from_the_top(among)
+    }
+
+    /// REQUEST15 item 1: while another program has the keyboard, ours lie right above VRChat's window and under the window that covers it (they do not float over
+    /// other programs), are not topmost, and take no focus; with VRChat's keyboard again they are topmost, in the order they had. A window that comes between
+    /// VRChat's and ours is seen ([`stack::holds`]) and ours are laid again.
+    #[test]
+    fn ours_lie_right_above_vrchat_and_under_what_covers_it() {
+        use windows::Win32::UI::WindowsAndMessaging::{HWND_TOP, SWP_NOMOVE};
+        let _alone = windows_alone();
+        let client = vec2(320.0, 180.0);
+        let at = off_screen(client);
+        let game = StandIn::new(at, client);
+        // Another program's window over VRChat's (made after it, it lies above).
+        let cover = StandIn::new(at, client);
+        // SAFETY: a plain query.
+        let front = unsafe { GetForegroundWindow() };
+        assert!(stack::set(Some(game.0)), "the layer changes");
+        let (mut low, mut high) = (clear_window(), clear_window());
+        low.place(at, 255);
+        high.place(at, 255);
+        let all = [cover.0, high.hwnd, low.hwnd, game.0];
+        assert_eq!(order(&all), all, "cover, then ours in their order, then VRChat");
+        assert!(!stack::topmost(low.hwnd) && !stack::topmost(high.hwnd), "not topmost while another program has the keyboard");
+        assert!(stack::holds(game.0, &[low.hwnd, high.hwnd]));
+        assert_eq!(stack::over(game.0), Some(cover.0), "what covers VRChat, ours skipped");
+        // VRChat brought above ours (clicked, then another program in front again before our next turn): seen, and laid again.
+        // SAFETY: the test's own window.
+        let _ = unsafe { SetWindowPos(game.0, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE) };
+        assert!(!stack::holds(game.0, &[low.hwnd, high.hwnd]), "VRChat over ours is seen");
+        low.raise();
+        high.raise();
+        assert!(stack::holds(game.0, &[low.hwnd, high.hwnd]));
+        // VRChat now lies over the cover: ours right above it, in their order.
+        assert_eq!(order(&all), [high.hwnd, low.hwnd, game.0, cover.0]);
+        // VRChat's keyboard again: topmost, over the cover, same order.
+        assert!(stack::set(None));
+        low.raise();
+        high.raise();
+        assert_eq!(order(&all)[..2], [high.hwnd, low.hwnd], "topmost, above everything");
+        assert!(stack::topmost(low.hwnd) && stack::topmost(high.hwnd));
+        assert!(!stack::holds(game.0, &[low.hwnd, high.hwnd]), "the cover lies between: not right above VRChat");
+        // And back, the other program brought in front again: a topmost window laid after an ordinary one is ordinary again.
+        // SAFETY: the test's own window.
+        let _ = unsafe { SetWindowPos(cover.0, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE) };
+        assert!(stack::set(Some(game.0)));
+        low.raise();
+        high.raise();
+        assert!(!stack::topmost(low.hwnd) && stack::holds(game.0, &[low.hwnd, high.hwnd]));
+        assert_eq!(order(&all), all, "the cover covers ours again");
+        // Nothing of all that took the keyboard.
+        // SAFETY: a plain query.
+        assert_eq!(unsafe { GetForegroundWindow() }, front, "the focus stayed where it was");
+        assert!(!stack::set(Some(game.0)), "no change: nothing laid again");
+        stack::set(None);
+    }
+
+    /// With nothing ordinary over VRChat's window (the person clicked the desktop's background, or a window on another screen that lies lower), ours lie on top
+    /// of the ordinary windows, which is right above VRChat, and still under every topmost window.
+    #[test]
+    fn with_nothing_over_vrchat_ours_lie_right_above_it() {
+        let _alone = windows_alone();
+        let client = vec2(320.0, 180.0);
+        let at = off_screen(client);
+        let game = StandIn::new(at, client);
+        stack::set(Some(game.0));
+        let mut ours = clear_window();
+        ours.place(at, 255);
+        assert!(!stack::topmost(ours.hwnd));
+        assert!(stack::holds(game.0, &[ours.hwnd]), "right above VRChat");
+        stack::set(None);
     }
 }

@@ -250,8 +250,9 @@ fn style(style: &mut Style) {
         dormant_background_opacity: 0.0,
         active_background_opacity: 0.0,
         interact_background_opacity: 0.0,
-        dormant_handle_opacity: 0.6,
-        active_handle_opacity: 0.9,
+        // Hidden at rest (Request16 3): over its area while something scrolls (`crate::scrollbars` sets `active` each frame) and on its own track.
+        dormant_handle_opacity: 0.0,
+        active_handle_opacity: 0.0,
         interact_handle_opacity: 1.0,
         ..ScrollStyle::floating()
     };

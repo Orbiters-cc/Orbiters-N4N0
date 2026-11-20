@@ -109,6 +109,11 @@ impl Mine {
     }
 
     /// Pictures of the page: the banner's chooser (on its gallery) or the picture's, opened from `anchor` at `clock`.
+    /// Pictures of the page: the status list open under its pill.
+    pub fn stand_in_status_list(&mut self, ctx: &egui::Context) {
+        popup::open(ctx, status_list_id());
+    }
+
     pub fn stand_in_picker(&mut self, banner: bool, gallery: bool, anchor: Rect, clock: f64) {
         self.picker = Some((if banner { Picker::Banner } else { Picker::Picture }, anchor, clock));
         self.banner_tab = gallery.then_some(BannerTab::Gallery);
@@ -390,17 +395,16 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
     let status_rect = Rect::from_min_size(pos2(name_r.right() + 12.0, name_y - 14.0), vec2(sw, 28.0));
     let status_id = Id::unique("mine-status");
     let status_resp = ui.interact(status_rect, status_id, Sense::click());
-    let sh = anim::toggle(&ctx, status_id.with("hover"), status_resp.hovered() || popup::is_open(&ctx, status_id.with("list")), Spring::SNAPPY);
+    let sh = anim::toggle(&ctx, status_id.with("hover"), status_resp.hovered() || popup::is_open(&ctx, status_list_id()), Spring::SNAPPY);
     p.rect_filled(status_rect, theme::radius(14.0), theme::mix(theme::alpha(status_color(status), 0.14), theme::alpha(status_color(status), 0.26), sh));
     p.circle_filled(pos2(status_rect.left() + 15.0, status_rect.center().y), 4.5, status_color(status));
     widgets::text(&p, pos2(status_rect.left() + 26.0, status_rect.center().y), Align2::LEFT_CENTER, &st);
     widgets::icon(&p, pos2(status_rect.right() - 13.0, status_rect.center().y), icons::CARET_DOWN, 11.0, theme::FG_2);
     widgets::note_control(&ctx, status_label, status_rect, true);
-    let details = [tr("Friends join you without asking"), tr("Friends can join you"), tr("Friends ask before they join"), tr("No invites and no requests")];
-    let items: Vec<popup::Item> = SETTABLE_STATUSES.iter().zip(details).map(|(s, d)| popup::Item::new(status_name(*s)).detail(d).icon(icons::CIRCLE)).collect();
+    let items = status_items();
     let selected = SETTABLE_STATUSES.iter().position(|s| *s == status);
     let pressed = widgets::activated(&status_resp);
-    if let Some(i) = popup::list_from(&ctx, status_id.with("list"), status_rect, pressed, &items, selected, 300.0) {
+    if let Some(i) = popup::list_from(&ctx, status_list_id(), status_rect, pressed, &items, selected, popup::list_width(ui, &items).max(300.0)) {
         let chosen = SETTABLE_STATUSES[i];
         if chosen != me.status {
             send(state, cx, clock, ProfileEdit::Status(chosen));
@@ -596,6 +600,17 @@ fn bio_editor(ui: &mut Ui, rect: Rect, draft: &mut String) -> Option<bool> {
     } else {
         None
     }
+}
+
+fn status_list_id() -> Id {
+    Id::unique("mine-status").with("list")
+}
+
+/// The status list's rows: each status's name, what it means, and its dot in its own colour ([`status_color`], as on the pill, the
+/// picture's corner and the friends list).
+fn status_items() -> Vec<popup::Item<'static>> {
+    let details = [tr("Friends join you without asking"), tr("Friends can join you"), tr("Friends ask before they join"), tr("No invites and no requests")];
+    SETTABLE_STATUSES.iter().zip(details).map(|(s, d)| popup::Item::new(status_name(*s)).detail(d).dot(status_color(*s))).collect()
 }
 
 /// Saving…, Saved, or why a change did not go, with Try again.
@@ -908,6 +923,21 @@ mod tests {
     use super::*;
     use orbiters_core::launcher::sample;
     use std::sync::Arc;
+
+    /// Request16 1: the status list's rows showed an empty grey ring. Each row's dot is filled in its status's colour, the one the pill, the
+    /// picture's corner and the friends list show.
+    #[test]
+    fn the_status_rows_dots_are_their_statuses_colours() {
+        let items = status_items();
+        assert_eq!(items.len(), SETTABLE_STATUSES.len());
+        for (item, status) in items.iter().zip(SETTABLE_STATUSES) {
+            assert_eq!(item.label, status_name(status));
+            assert_eq!(item.dot, Some(status_color(status)), "{status:?}");
+            assert!(item.glyph.is_none(), "{status:?}: no outline glyph beside its dot");
+        }
+        let colours: std::collections::HashSet<_> = items.iter().filter_map(|i| i.dot).map(|c| c.to_array()).collect();
+        assert_eq!(colours.len(), items.len(), "four different colours");
+    }
 
     #[test]
     fn a_refused_text_goes_back_to_its_field_and_a_saved_one_closes_it() {

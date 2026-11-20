@@ -5019,20 +5019,45 @@ pub fn draw_words(p: &Painter, rect: Rect, first: &str, second: &str) {
     draw_words_marked(p, rect, first, second, false);
 }
 
-/// Its words on the wing: as wide as the wing is, right over its name, as high as they take.
-/// `named`: the wing's own name over what it says, in one box (on a screen, where no pill of its own is under it).
-fn draw_words_left(p: &Painter, rect: Rect, first: &str, second: &str, named: bool) {
-    let room = rect.width() - 20.0;
+/// How high the wing's caption may be, in the menu's units: its card at its tallest (the name's row, two lines of what it is, three of what it says, its padding)
+/// in every language, with a little room. The zone is this high ([`super::zones::Zone::units`]); the test
+/// `tests::the_wings_caption_shows_whole_in_every_language` measures the card against it.
+pub const WING_WORDS_HIGH: f32 = 142.0;
+
+/// The name's row over a named caption (mark, "Orbiters", the beta's chip and the line under them).
+const WING_NAME_ROW: f32 = 26.0;
+
+/// The wing's caption laid out `room` wide: what it is (up to two lines), what it says (up to three) and the card's height. Where the card would be higher than
+/// `high` (a panel smaller than its zone), what it says gives up lines first, then what it is: the card stays whole, its rounded top and padding inside its panel.
+fn words_left_layout(p: &Painter, room: f32, high: f32, first: &str, second: &str, named: bool) -> (std::sync::Arc<egui::Galley>, std::sync::Arc<egui::Galley>, f32) {
     let lines = |words: &str, font: FontId, ink: Color32, rows: usize| {
         let mut job = egui::text::LayoutJob::simple(words.to_string(), font, ink, room);
         job.wrap.max_rows = rows;
         job.wrap.overflow_character = Some('\u{2026}');
         p.layout_job(job)
     };
-    // At 13 px and more on a 1280 x 720 screen (round 15's judges found it smaller).
-    let (big, small) = (lines(first, look::font(15.0, weight::BOLD), look::LABEL, 2), lines(second, look::font(13.5, weight::MEDIUM), look::MUTED, 3));
-    let head = if named { 26.0 } else { 0.0 };
-    let high = head + big.size().y + if second.is_empty() { 0.0 } else { small.size().y + 2.0 } + 14.0;
+    let head = if named { WING_NAME_ROW } else { 0.0 };
+    let (mut big_rows, mut small_rows) = (2, 3);
+    loop {
+        // At 13 px and more on a 1280 x 720 screen (round 15's judges found it smaller).
+        let (big, small) = (lines(first, look::font(15.0, weight::BOLD), look::LABEL, big_rows), lines(second, look::font(13.5, weight::MEDIUM), look::MUTED, small_rows));
+        let card = head + big.size().y + if second.is_empty() { 0.0 } else { small.size().y + 2.0 } + 14.0;
+        if card <= high || (big_rows, small_rows) == (1, 1) {
+            return (big, small, card.min(high));
+        }
+        if small_rows > 1 && !second.is_empty() {
+            small_rows -= 1;
+        } else {
+            (big_rows, small_rows) = (1, 1);
+        }
+    }
+}
+
+/// Its words on the wing: as wide as the wing is, right over its name, as high as they take.
+/// `named`: the wing's own name over what it says, in one box (on a screen, where no pill of its own is under it).
+fn draw_words_left(p: &Painter, rect: Rect, first: &str, second: &str, named: bool) {
+    let (big, small, high) = words_left_layout(p, rect.width() - 20.0, rect.height(), first, second, named);
+    let head = if named { WING_NAME_ROW } else { 0.0 };
     let pill = Rect::from_min_max(pos2(rect.left(), rect.bottom() - high), rect.max);
     p.rect_filled(pill, look::radius(12.0), look::PANEL);
     if named {
@@ -5226,6 +5251,47 @@ mod tests {
             }
             // Something is painted: the pill.
             assert!(pixels.chunks_exact(4).any(|p| p[3] > 200), "the pill shows");
+        }
+    }
+
+    /// Request16 2 (Enzo's picture: "The upper part of this frame is cutout"): the wing's caption on a screen, with the name's row over "Your tools" and its
+    /// three-line hint, lost its top: the card is laid from the panel's foot as high as its words take, and the panel was lower than that. Painted as the overlay
+    /// paints it, in every language, on a screen (the name's row) and in a headset (the beta's row under it), with what it says at the Quick Menu's first openings
+    /// and with the longest words it can hold: the panel's top row is clear (the card's rounded top and its padding are inside), and the card's first row is
+    /// rounded (its corners clear), so nothing of it is cut.
+    #[test]
+    fn the_wings_caption_shows_whole_in_every_language() {
+        use crate::overlay::orbit::zones::Zone;
+        let screen = Zone::QmCaption.units().size();
+        // In a headset the zone carries the beta's row at its foot too (`vr::quick_menu_places`).
+        let headset = screen + vec2(0.0, BETA_ROW);
+        let hints: [(&'static str, &'static str); 3] = [
+            ("Your tools", "Worlds in 3D, videos, instances and 3D pictures."),
+            // The longest a caption can be: two lines of what it is, three of what it says, cut with an ellipsis.
+            (
+                "Worlds in 3D, videos, instances and 3D pictures, all in one place",
+                "Worlds in 3D, videos, instances and 3D pictures. Worlds in 3D, videos, instances and 3D pictures. Worlds in 3D, videos, instances and 3D pictures.",
+            ),
+            ("Your tools", ""),
+        ];
+        for language in orbiters_i18n::Language::ALL {
+            orbiters_i18n::in_language(language, || {
+                for (desktop, size) in [(true, screen), (false, headset)] {
+                    for hint in hints {
+                        let facts = Facts { desktop, n4n0: true, hint: Some(hint), ..Default::default() };
+                        let (w, h) = (size.x as u32, size.y as u32);
+                        let mut canvas = crate::overlay::Canvas::new(w, h);
+                        let pixels = canvas.paint(0.0, |p| paint(p, Zone::QmCaption, size, &facts, None, None)).to_vec();
+                        let alpha = |x: u32, y: u32| pixels[((y * w + x) * 4 + 3) as usize];
+                        let said = format!("{language:?}, desktop {desktop}, {:?}", hint.0);
+                        assert!((0..w).all(|x| alpha(x, 0) == 0), "{said}: the card reaches the panel's top, cut there");
+                        let top = (0..h).find(|y| (0..w).any(|x| alpha(x, *y) > 200)).expect("the card shows");
+                        // Its first row is the card's rounded top: clear at both ends, solid in its middle.
+                        assert!(alpha(1, top) < 128 && alpha(w - 2, top) < 128, "{said}: the card's top at row {top} is not rounded (cut)");
+                        assert!(alpha(w / 2, top + 1) > 200, "{said}: the card's top edge");
+                    }
+                }
+            });
         }
     }
 

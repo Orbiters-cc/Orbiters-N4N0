@@ -8,7 +8,7 @@ use crate::anim::{self, Spring};
 use crate::theme::{self, weight, Txt};
 use crate::widgets::{self, icon, note_control, text, text_truncated};
 use crate::{icons, morph};
-use egui::{pos2, vec2, Align2, CursorIcon, Id, Order, Rect, Sense, Ui};
+use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Order, Rect, Sense, Ui};
 
 /// One row of a list.
 #[derive(Clone, Copy, Debug)]
@@ -17,6 +17,8 @@ pub struct Item<'a> {
     /// A quieter second label on the right (a version's channel, a shortcut).
     pub detail: Option<&'a str>,
     pub glyph: Option<&'a str>,
+    /// A dot filled in this colour where the icon goes: what the row stands for is a colour (a status), as it shows elsewhere.
+    pub dot: Option<Color32>,
     /// Red, for destructive actions.
     pub danger: bool,
     /// Shown dim and takes no press: what cannot be done now, its [`Item::detail`] saying why.
@@ -25,7 +27,7 @@ pub struct Item<'a> {
 
 impl<'a> Item<'a> {
     pub fn new(label: &'a str) -> Self {
-        Self { label, detail: None, glyph: None, danger: false, disabled: false }
+        Self { label, detail: None, glyph: None, dot: None, danger: false, disabled: false }
     }
 
     pub fn detail(mut self, d: &'a str) -> Self {
@@ -35,6 +37,12 @@ impl<'a> Item<'a> {
 
     pub fn icon(mut self, glyph: &'a str) -> Self {
         self.glyph = Some(glyph);
+        self
+    }
+
+    /// A dot of `color` in the icon's place (in place of any icon).
+    pub fn dot(mut self, color: Color32) -> Self {
+        self.dot = Some(color);
         self
     }
 
@@ -52,6 +60,8 @@ impl<'a> Item<'a> {
 const ROW_H: f32 = 34.0;
 const PAD: f32 = 6.0;
 const MAX_LIST_H: f32 = 300.0;
+/// A row's dot ([`Item::dot`]): the size of the status dot on the pill that opens a status list.
+const DOT_RADIUS: f32 = 4.5;
 
 fn open_id(id: Id) -> Id {
     id.with("popup-open")
@@ -64,6 +74,11 @@ pub fn is_open(ctx: &egui::Context, id: Id) -> bool {
 
 fn set_open(ctx: &egui::Context, id: Id, open: bool) {
     ctx.data_mut(|d| d.insert_temp(open_id(id), open));
+}
+
+/// Opens the list of the control `id` as a press on it would (a picture of the interface with that list open).
+pub fn open(ctx: &egui::Context, id: Id) {
+    set_open(ctx, id, true);
 }
 
 /// Whether any list opened from a control is open (a dialog leaves Escape to it).
@@ -174,6 +189,22 @@ pub fn list_from(ctx: &egui::Context, id: Id, anchor: Rect, pressed: bool, items
     list(ctx, id, anchor, items, selected, width, false)
 }
 
+/// How wide a list of `items` must be for every row to show whole: its icon or dot, its label (as bold as a chosen one), its detail and the tick of a chosen
+/// row, with the row's and the list's margins ([`list`]).
+pub fn list_width(ui: &Ui, items: &[Item<'_>]) -> f32 {
+    let lead = if items.iter().any(|i| i.glyph.is_some() || i.dot.is_some()) { 26.0 } else { 0.0 };
+    items
+        .iter()
+        .map(|i| {
+            let label = widgets::text_size(ui, &Txt::new(i.label, 13.0).weight(weight::SEMIBOLD)).x;
+            let detail = i.detail.map_or(0.0, |d| widgets::text_size(ui, &Txt::new(d, 11.5)).x + 10.0);
+            // The row's left margin and lead, a gap between label and detail, the tick's column and the right margin.
+            2.0 * PAD + 10.0 + lead + label + 12.0 + detail + 22.0 + 10.0
+        })
+        .fold(0.0, f32::max)
+        .ceil()
+}
+
 fn menu_width(ui: &Ui, items: &[Item<'_>]) -> f32 {
     let label = items.iter().map(|i| widgets::text_size(ui, &Txt::new(i.label, 13.0)).x).fold(0.0, f32::max);
     let detail = items.iter().filter_map(|i| i.detail).map(|d| widgets::text_size(ui, &Txt::new(d, 11.5)).x + 10.0).fold(0.0, f32::max);
@@ -282,7 +313,11 @@ fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected:
                     theme::mix(theme::FG_2, theme::FG, hover)
                 };
                 let mut x = r.left() + 10.0;
-                if let Some(g) = item.glyph {
+                if let Some(color) = item.dot {
+                    // Its own colour whatever the row's state; dimmed with it when it takes no press.
+                    p.circle_filled(pos2(x + 8.0, r.center().y), DOT_RADIUS, if item.disabled { theme::alpha(color, 0.45) } else { color });
+                    x += 26.0;
+                } else if let Some(g) = item.glyph {
                     icon(p, pos2(x + 8.0, r.center().y), g, 15.0, fg);
                     x += 26.0;
                 }
@@ -311,4 +346,92 @@ fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected:
         }
     }
     picked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::epaint::{CircleShape, ClippedShape, Shape};
+
+    fn circles(shapes: &[ClippedShape]) -> Vec<CircleShape> {
+        fn walk(shape: &Shape, out: &mut Vec<CircleShape>) {
+            match shape {
+                Shape::Circle(c) => out.push(*c),
+                Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|s| walk(&s.shape, &mut out));
+        out
+    }
+
+    /// Request16 1: the status list in French cut "Rejoins-moi" and "Demande-moi" to an ellipsis at its fixed width. A list [`list_width`] wide shows every
+    /// row whole: no label or detail is cut.
+    #[test]
+    fn a_list_as_wide_as_its_rows_cuts_none() {
+        let ctx = egui::Context::default();
+        crate::install(&ctx);
+        let id = Id::unique("a-wide-list");
+        let rows = [
+            ("Rejoins-moi", "Tes amis te rejoignent sans demander"),
+            ("En ligne", "Tes amis peuvent te rejoindre"),
+            ("Demande-moi", "Tes amis demandent avant de venir"),
+            ("Occupé", "Ni invitations ni demandes"),
+        ];
+        let items: Vec<Item> = rows.into_iter().map(|(l, d)| Item::new(l).detail(d).dot(theme::ACCENT)).collect();
+        let anchor = Rect::from_min_size(pos2(40.0, 40.0), vec2(110.0, 28.0));
+        let mut cut = Vec::new();
+        let mut texts = 0;
+        for f in 0..120 {
+            let input = egui::RawInput { time: Some(f as f64 / 60.0), screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 600.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                let width = list_width(ui, &items);
+                list_from(ui.ctx(), id, anchor, f == 1, &items, Some(2), width);
+            });
+            out.textures_delta.clear();
+            fn walk(shape: &Shape, cut: &mut Vec<String>, texts: &mut usize) {
+                match shape {
+                    Shape::Text(t) => {
+                        *texts += 1;
+                        if t.galley.elided {
+                            cut.push(t.galley.text().to_string());
+                        }
+                    }
+                    Shape::Vec(v) => v.iter().for_each(|s| walk(s, cut, texts)),
+                    _ => {}
+                }
+            }
+            (cut, texts) = (Vec::new(), 0);
+            out.shapes.iter().for_each(|s| walk(&s.shape, &mut cut, &mut texts));
+        }
+        assert!(texts >= 8, "the rows' texts are drawn ({texts})");
+        assert!(cut.is_empty(), "cut: {cut:?}");
+    }
+
+    /// Request16 1: a row with a dot shows it filled in its own colour once the list is open (it was an outline glyph in the row's grey).
+    #[test]
+    fn a_rows_dot_is_filled_in_its_colour() {
+        let ctx = egui::Context::default();
+        crate::install(&ctx);
+        let id = Id::unique("a-status-list");
+        let colours = [theme::BLUE, theme::ACCENT, theme::WARN, theme::DANGER];
+        let items: Vec<Item> = ["Join me", "Online", "Ask me", "Busy"].into_iter().zip(colours).map(|(l, c)| Item::new(l).detail("what it means").dot(c)).collect();
+        let anchor = Rect::from_min_size(pos2(40.0, 40.0), vec2(110.0, 28.0));
+        let mut dots = Vec::new();
+        for f in 0..120 {
+            let input = egui::RawInput { time: Some(f as f64 / 60.0), screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                list_from(ui.ctx(), id, anchor, f == 1, &items, Some(2), 300.0);
+            });
+            out.textures_delta.clear();
+            dots = circles(&out.shapes);
+        }
+        assert!(is_open(&ctx, id));
+        for c in colours {
+            assert!(dots.iter().any(|d| d.fill == c && d.radius == DOT_RADIUS), "a dot filled in {c:?} among {dots:?}");
+        }
+        // Filled, not rings.
+        assert!(dots.iter().all(|d| d.stroke.is_empty()));
+    }
 }

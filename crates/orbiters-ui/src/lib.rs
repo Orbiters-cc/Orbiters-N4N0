@@ -24,6 +24,7 @@ pub mod paint;
 pub mod photo;
 pub mod popup;
 pub mod record;
+pub mod scrollbars;
 pub mod software;
 pub mod steps;
 pub mod text_audit;
@@ -40,6 +41,7 @@ pub use egui_wgpu;
 pub fn install(ctx: &egui::Context) {
     fonts::install(ctx);
     theme::apply(ctx);
+    scrollbars::install(ctx);
 }
 
 /// What a renderer draws into, for paint callbacks that build their own pipelines (kept in its callback resources).

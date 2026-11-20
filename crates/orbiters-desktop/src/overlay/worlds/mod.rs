@@ -594,9 +594,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.go_arrived(&snap.vrchat.world);
         self.live_turns = !snap.settings.reduce_motion;
         // What turns on the side panel: its newest picture, or that it cannot.
-        if self.panel.page != panel::Page::Detail || !self.open {
-            self.stop_live();
-        }
+        self.follow_screen_live();
         if let Some((_, view)) = &self.live {
             let failed = matches!(view.state(), super::orbit::sheet_view::ViewState::Failed(_));
             let frame = view.take_frame();
@@ -658,6 +656,38 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         if self.prepared_for.as_ref() != Some(&key) {
             self.prepared_for = Some(key);
             self.relayed.push(Relayed::Prepare(near));
+        }
+    }
+
+    /// What turns on the side panel follows the page: nothing once it is not a world's page or the panel closed. On a screen a world with a 3D capture turns there as
+    /// soon as it is chosen, where its picture is, with no button to press first (REQUEST15 item 6); one at a time, the one before going as another is chosen.
+    fn follow_screen_live(&mut self) {
+        if self.panel.page != panel::Page::Detail || !self.open {
+            self.stop_live();
+        } else if self.on_screen() {
+            self.live_chosen();
+        }
+    }
+
+    /// This panel is on a screen (the desktop's overlay), not on a sheet in a headset: nothing shows around anyone, captures turn on the panel.
+    fn on_screen(&self) -> bool {
+        match &self.relay {
+            Some(view) => !view.headset,
+            None => self.alone,
+        }
+    }
+
+    /// The world chosen turning on the side panel when it has a 3D capture; else nothing turns there, and its picture stays. Started without waiting: its capture
+    /// is read on a thread of its own ([`super::orbit::sheet_view::SheetView::open_with`]), and its picture shows meanwhile.
+    fn live_chosen(&mut self) {
+        let Some(id) = self.panel.selected else { return };
+        if self.live.as_ref().is_some_and(|(live, _)| *live == id) {
+            return;
+        }
+        let entries = self.entries();
+        match entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)).filter(|e| e.capture).cloned() {
+            Some(entry) => self.start_live(&entry),
+            None => self.stop_live(),
         }
     }
 
@@ -2828,6 +2858,47 @@ mod carousel_tests {
         let mut own = Worlds::alone(egui::Context::default());
         own.from_elsewhere(vec![Relayed::Prepare(many(3))]);
         assert_eq!(own.prepare.iter().map(|e| e.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    /// REQUEST15 item 6: on a screen, choosing a world with a 3D capture starts its view turning in the side panel at once, without a See it in 3D; one at a time,
+    /// the one before let go as another is chosen, all of it gone with the page; a world without one keeps its picture; in a headset nothing starts by itself.
+    #[test]
+    fn on_a_screen_the_chosen_world_turns_in_its_panel_one_at_a_time() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let mut worlds = Worlds::alone(ctx);
+        // Kept here, in a folder that is not there: no download, and the view says it cannot show rather than wait for the network.
+        let gone = std::env::temp_dir().join(format!("orbiters-no-capture-{}", std::process::id()));
+        let mut list = many(3);
+        for e in &mut list {
+            e.local = Some(gone.join(e.id.to_string()));
+        }
+        list[2].capture = false;
+        worlds.listing_for_test(list);
+        worlds.open = true;
+        worlds.panel.page = panel::Page::Detail;
+        worlds.panel.selected = Some(1);
+        worlds.follow_screen_live();
+        let live = |w: &Worlds| (w.live.as_ref().map(|(id, _)| *id), w.panel.live.as_ref().map(|l| l.id));
+        assert_eq!(live(&worlds), (Some(1), Some(1)), "turning at once, no button pressed");
+        worlds.follow_screen_live();
+        assert_eq!(live(&worlds), (Some(1), Some(1)), "not started again every turn");
+        worlds.panel.selected = Some(2);
+        worlds.follow_screen_live();
+        assert_eq!(live(&worlds), (Some(2), Some(2)), "the next one, the one before let go");
+        worlds.panel.selected = Some(3);
+        worlds.follow_screen_live();
+        assert_eq!(live(&worlds), (None, None), "no capture: its picture stays, nothing turns");
+        worlds.panel.selected = Some(1);
+        worlds.follow_screen_live();
+        worlds.panel.page = panel::Page::Browse;
+        worlds.follow_screen_live();
+        assert_eq!(live(&worlds), (None, None), "gone with the page");
+        // In a headset the view is the overlay's own, around the person: nothing turns on the panel by itself.
+        let mut sheet = on_a_sheet(1);
+        sheet.open = true;
+        sheet.follow_screen_live();
+        assert_eq!(live(&sheet), (None, None));
     }
 
     /// K-small-stick: a laser on the capture lying in the hole is where the stick moves in it; the sheet's panel says so for the loop to take the stick.

@@ -208,6 +208,17 @@ pub fn listing_versions(listing: &serde_json::Value) -> HashMap<String, Vec<Stri
         .unwrap_or_default()
 }
 
+/// [`find`]'s reader of Known repositories, reading each listing once (PROJECTS-24 b): a listing (up to 32 MB) was downloaded again for
+/// every missing package it might hold. A listing that could not be read is not asked again in the same lookup either.
+fn once_per_url(read: impl Fn(&str) -> Option<serde_json::Value>) -> impl Fn(&str, &str) -> Option<Vec<String>> {
+    let read_already = std::cell::RefCell::new(HashMap::<String, Option<HashMap<String, Vec<String>>>>::new());
+    move |url: &str, package: &str| {
+        let mut read_already = read_already.borrow_mut();
+        let versions = read_already.entry(url.to_string()).or_insert_with(|| read(url).map(|l| listing_versions(&l)));
+        versions.as_ref().map(|v| v.get(package).cloned().unwrap_or_default())
+    }
+}
+
 fn read_listing(url: &str) -> Option<serde_json::Value> {
     let api = Api::at("https://orbiters.cc/");
     let response = api.agent().get(url).call().ok()?;
@@ -249,7 +260,7 @@ pub async fn lookup(root: &Path, server: Server, missing: &[Missing]) -> anyhow:
         get("vpm/known").ok().and_then(|v| serde_json::from_value(v["repositories"].clone()).ok()).unwrap_or_default();
     let mut sources = catalog.as_ref().map(|c| known_sources(c, &repositories)).unwrap_or_default();
     sources.extend(turned_off(root).await);
-    let read = |url: &str, package: &str| read_listing(url).map(|l| listing_versions(&l).remove(package).unwrap_or_default());
+    let read = once_per_url(read_listing);
     let mut found = find(missing, &sources, read);
     if !found.not_provided.is_empty() {
         let listings: Vec<crate::network::Listing> =
@@ -352,6 +363,29 @@ mod tests {
         let additions = found.additions();
         assert_eq!(additions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Known two", "Known one", "Mine"]);
         assert!(!found.complete());
+    }
+
+    /// PROJECTS-24 b: two packages missing from one Known repository read its listing once, whatever it holds or whether it could be read.
+    #[test]
+    fn a_known_repository_s_listing_is_read_once_per_lookup() {
+        let sources = [source("Known", Kind::Known, &[("a.b", &["2.0.0"]), ("c.d", &["2.0.0"])])];
+        let missing = [Missing { name: "a.b".into(), range: "=1.0.0".into() }, Missing { name: "c.d".into(), range: "=1.0.0".into() }];
+        let reads = std::cell::Cell::new(0);
+        let listing = serde_json::json!({"packages": {"a.b": {"versions": {"1.0.0": {}, "2.0.0": {}}}, "c.d": {"versions": {"1.0.0": {}}}}});
+        let found = find(&missing, &sources, once_per_url(|url| {
+            assert_eq!(url, "https://known.example/index.json");
+            reads.set(reads.get() + 1);
+            Some(listing.clone())
+        }));
+        assert_eq!(reads.get(), 1);
+        assert_eq!(found.found.iter().map(|f| (f.package.name.as_str(), f.version.as_str())).collect::<Vec<_>>(), [("a.b", "1.0.0"), ("c.d", "1.0.0")]);
+        reads.set(0);
+        let found = find(&missing, &sources, once_per_url(|_| {
+            reads.set(reads.get() + 1);
+            None
+        }));
+        assert_eq!(reads.get(), 1, "unreadable: not asked again");
+        assert_eq!(found.not_listed.len(), 2);
     }
 
     #[test]

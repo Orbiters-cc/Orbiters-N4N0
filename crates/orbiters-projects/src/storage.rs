@@ -77,11 +77,36 @@ impl Health {
 }
 
 pub fn matches_disk_error(log: &str, project: &Path) -> bool {
-    let path = project.to_string_lossy().replace('\\', "/").to_lowercase();
-    log.lines().any(|line| {
-        let line = line.replace('\\', "/").to_lowercase();
-        (line.contains("enospc") || line.contains("no space left on device")) && line.contains(&format!("{path}/"))
-    })
+    // The whole text made comparable once, and the project's folder once (PROJECTS-24 c): it was two strings a line and a third for the
+    // folder, some 20 000 lines of a 1 MiB log every 3 s. Lower case is a character's own here (a line's end is not a letter).
+    let folder = format!("{}/", project.to_string_lossy().replace('\\', "/").to_lowercase());
+    let log = log.replace('\\', "/").to_lowercase();
+    log.lines().any(|line| (line.contains("enospc") || line.contains("no space left on device")) && line.contains(&folder))
+}
+
+/// Whether Unity's log (its last 1 MiB) says `project`'s disk was full. The answer is kept while the log keeps its length and time
+/// (PROJECTS-24 c): a project's panel asks every 3 s, and the log changes only while Unity writes to it.
+fn disk_error_in_log(log: Option<PathBuf>, project: &Path) -> bool {
+    type Answer = (PathBuf, u64, std::time::SystemTime, PathBuf, bool);
+    static LAST: Mutex<Option<Answer>> = Mutex::new(None);
+    let Some(mut file) = log.as_ref().and_then(|p| std::fs::File::open(p).ok()) else { return false };
+    let log = log.unwrap_or_default();
+    let meta = file.metadata().ok();
+    let len = meta.as_ref().map_or(0, |m| m.len());
+    let modified = meta.and_then(|m| m.modified().ok());
+    if let (Some(modified), Some((l, n, m, p, answer))) = (modified, &*LAST.lock().unwrap_or_else(|e| e.into_inner())) {
+        if *l == log && *n == len && *m == modified && p == project {
+            return *answer;
+        }
+    }
+    let mut text = Vec::new();
+    let _ = file.seek(SeekFrom::Start(len.saturating_sub(1024 * 1024)));
+    let _ = file.take(1024 * 1024).read_to_end(&mut text);
+    let answer = matches_disk_error(&String::from_utf8_lossy(&text), project);
+    if let Some(modified) = modified {
+        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some((log, len, modified, project.to_path_buf(), answer));
+    }
+    answer
 }
 
 /// The disk a path really is on, through links: "H:\".
@@ -109,16 +134,9 @@ fn disk_of(path: &Path) -> Option<PathBuf> {
 pub fn inspect(project: &Path) -> Health {
     let library = project.join("Library");
     let location = if library.is_dir() { &library } else { project };
-    let log = crate::editor_log();
-    let mut text = Vec::new();
-    if let Some(mut file) = log.and_then(|p| std::fs::File::open(p).ok()) {
-        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-        let _ = file.seek(SeekFrom::Start(len.saturating_sub(1024 * 1024)));
-        let _ = file.take(1024 * 1024).read_to_end(&mut text);
-    }
     Health {
         free: crate::size::free_space(location),
-        disk_error: matches_disk_error(&String::from_utf8_lossy(&text), project),
+        disk_error: disk_error_in_log(crate::editor_log(), project),
         open: crate::unity_open(project),
         disk: disk_of(location),
     }
@@ -1530,6 +1548,30 @@ mod tests {
         assert!(matches_disk_error(log, Path::new("H:/Projects/Avatar")));
         assert!(!matches_disk_error(log, Path::new("H:/Projects/Avatar copy")));
         assert!(!matches_disk_error("missing dependency", Path::new("H:/Projects/Avatar")));
+    }
+
+    /// PROJECTS-24 c: Unity's log is read again when it changes (its length or its time), not at each look while it stays the same.
+    #[test]
+    fn unitys_log_is_read_again_only_when_it_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("Editor.log");
+        let project = temp.path().join("Avatar");
+        let full = format!("ENOSPC: no space left on device, open '{}/Library/a'\n", project.to_string_lossy());
+        let quiet = "x".repeat(full.len());
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        let set_time = || std::fs::File::options().write(true).open(&log).unwrap().set_modified(long_ago).unwrap();
+        std::fs::write(&log, &quiet).unwrap();
+        set_time();
+        assert!(!disk_error_in_log(Some(log.clone()), &project));
+        // The same length and time: the answer kept (the file is not read; here it says otherwise, which only a read would see).
+        std::fs::write(&log, &full).unwrap();
+        set_time();
+        assert!(!disk_error_in_log(Some(log.clone()), &project), "unchanged by its length and time: not read again");
+        // Unity writes on: read again.
+        std::fs::write(&log, format!("{full}more\n")).unwrap();
+        assert!(disk_error_in_log(Some(log.clone()), &project));
+        assert!(!disk_error_in_log(Some(log.clone()), &temp.path().join("Avatar copy")), "another project is another answer");
+        assert!(!disk_error_in_log(None, &project));
     }
 
     #[test]

@@ -547,7 +547,7 @@ impl TranslateHost {
 }
 
 /// A line in `translate.log` beside the app's other logs: how reading goes (never what was read).
-fn note(line: &str) {
+pub(crate) fn note(line: &str) {
     super::vr_log::append("translate.log", Some(super::vr_log::ROTATE_AT), format!("{} {line}\n", orbiters_core::now_utc_iso()));
 }
 
@@ -589,7 +589,7 @@ fn set_status(shared: &Mutex<Shared>, state: TranslateState) {
 }
 
 /// Lowers this thread's priority: reading text must never take time from VRChat.
-fn lower_priority() {
+pub(crate) fn lower_priority() {
     #[cfg(windows)]
     // SAFETY: the calling thread's own pseudo handle.
     unsafe {
@@ -599,7 +599,7 @@ fn lower_priority() {
 }
 
 /// The translator the settings ask for, with what Settings says of it.
-fn translator(settings: &TranslateSettings, backend_lan: &mut LanFound) -> Result<Box<dyn Translator>, TranslateState> {
+pub(crate) fn translator(settings: &TranslateSettings, backend_lan: &mut LanFound) -> Result<Box<dyn Translator>, TranslateState> {
     match settings.provider {
         TranslateProvider::Orbiters => {
             if !settings.orbiters_agreed {
@@ -644,10 +644,10 @@ fn translator(settings: &TranslateSettings, backend_lan: &mut LanFound) -> Resul
 }
 
 #[derive(Default)]
-struct LanFound {
-    found: Option<(String, Vec<String>)>,
+pub(crate) struct LanFound {
+    pub(crate) found: Option<(String, Vec<String>)>,
     /// The model asked.
-    model: Option<String>,
+    pub(crate) model: Option<String>,
 }
 
 /// How the overlay reaches Orbiters' translation service (through the desktop service, which holds the account's
@@ -655,7 +655,7 @@ struct LanFound {
 pub type RemoteFn = Arc<dyn Fn(&provider::Batch) -> Result<Vec<String>, Failure> + Send + Sync>;
 pub static REMOTE: Mutex<Option<RemoteFn>> = Mutex::new(None);
 
-fn failure_state(f: &Failure) -> TranslateState {
+pub(crate) fn failure_state(f: &Failure) -> TranslateState {
     use orbiters_i18n::mark;
     let (key, detail) = match f {
         Failure::Unreachable(d) => (mark("The AI server does not answer."), Some(d.clone())),
@@ -755,7 +755,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
 /// Where translations are kept between sessions (a development build in the VR sandbox keeps them in its logs folder:
 /// a test build never writes the person's own files).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn kept_translations() -> std::path::PathBuf {
+pub(crate) fn kept_translations() -> std::path::PathBuf {
     if cfg!(debug_assertions) {
         if let Some(dir) = std::env::var_os("ORBITERS_SANDBOX_LOGS").filter(|d| !d.is_empty()) {
             return std::path::PathBuf::from(dir).join("translations.jsonl");
@@ -766,7 +766,7 @@ fn kept_translations() -> std::path::PathBuf {
 
 /// The core's lines for translate.log, and the times of the lines shown for the first time.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn take_logs(core: &mut Core) {
+pub(crate) fn take_logs(core: &mut Core) {
     for line in core.log.drain(..) {
         note(&line);
     }
@@ -814,7 +814,7 @@ fn chains_line(chains: &[orbiters_translate::core::Chain]) -> Option<String> {
 /// frames late for the processor or dropped, [`FrameLoad::busy`]) and while nothing changes (the last look found no
 /// new line and the head kept still).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn pace_for(cost: Duration, busy: bool, idle: bool) -> Duration {
+pub(crate) fn pace_for(cost: Duration, busy: bool, idle: bool) -> Duration {
     let pace = (cost * 3 / 2).clamp(Duration::from_millis(300), Duration::from_millis(1500));
     let pace = if busy { (pace * 2).clamp(Duration::from_secs(1), Duration::from_secs(3)) } else { pace };
     if idle {
@@ -1087,7 +1087,7 @@ fn run(shared: &Mutex<Shared>, _stop: &AtomicBool, _from: ()) {
 }
 
 /// A flag that follows `stop` for a thread that outlives this borrow: set when `stop` is, checked by the download.
-fn stop_flag(stop: &AtomicBool) -> Arc<AtomicBool> {
+pub(crate) fn stop_flag(stop: &AtomicBool) -> Arc<AtomicBool> {
     // The reading thread's own flag is borrowed; the download keeps its own, set once the reading thread ends.
     let flag = Arc::new(AtomicBool::new(stop.load(Ordering::Relaxed)));
     STOPS.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&flag));
@@ -1097,7 +1097,7 @@ fn stop_flag(stop: &AtomicBool) -> Arc<AtomicBool> {
 /// Downloads to stop when translation stops.
 static STOPS: Mutex<Vec<std::sync::Weak<AtomicBool>>> = Mutex::new(Vec::new());
 
-fn stop_downloads() {
+pub(crate) fn stop_downloads() {
     for flag in STOPS.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
         if let Some(f) = flag.upgrade() {
             f.store(true, Ordering::Relaxed);
@@ -1106,7 +1106,7 @@ fn stop_downloads() {
 }
 
 /// No translator yet: every batch waits.
-struct Nobody;
+pub(crate) struct Nobody;
 impl Translator for Nobody {
     fn translate(&mut self, _batch: &provider::Batch) -> Result<Vec<String>, Failure> {
         std::thread::sleep(Duration::from_millis(200));

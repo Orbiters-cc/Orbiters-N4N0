@@ -1,0 +1,3 @@
+# N4N0's bot and its menu as two choices (REQUEST15 item 3, stream r15-asset, 2026-11-20): Show N4N0 on the N4N0 page
+# (pages/n4n0.rs, area pages-settings). Kept here so that areas translated side by side never edit the same file. Covers no
+# file of its own.

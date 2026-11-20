@@ -1,0 +1,2 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+crates/orbiters-desktop/src/overlay/orbit/desk_translate.rs

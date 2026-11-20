@@ -599,6 +599,11 @@ pub struct Pictures {
     done: Arc<Mutex<Vec<Loaded>>>,
     /// When the pictures were last trimmed to [`KEEP_BYTES`] (egui's clock).
     trimmed: f64,
+    /// The clock of the frame asking now, and of the frame before it: what that one asked for is on screen. Trimming
+    /// runs at a frame's first ask, before its other pictures were asked; after the window stood still (no frame drawn)
+    /// for more than a second, "asked in the last second" protected none of them (PAGES-UI-5).
+    frame: f64,
+    frame_before: f64,
     stopped: Arc<std::sync::atomic::AtomicBool>,
     /// What the loaders start with (the interface they wake, where profile pictures are read), until they started.
     unstarted: Option<(egui::Context, Option<crate::backend::Ctl>)>,
@@ -616,6 +621,8 @@ impl Pictures {
             queue: Arc::default(),
             done: Arc::default(),
             trimmed: f64::NEG_INFINITY,
+            frame: f64::NEG_INFINITY,
+            frame_before: f64::NEG_INFINITY,
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unstarted: Some((ctx.clone(), backend)),
             wake: ctx.clone(),
@@ -688,6 +695,9 @@ impl Pictures {
     }
 
     pub(crate) fn get_at(&mut self, textures: &crate::overlay::PaintTextures, now: f64, picture: &Picture) -> Option<TextureHandle> {
+        if now != self.frame {
+            (self.frame_before, self.frame) = (self.frame, now);
+        }
         for (p, image) in std::mem::take(&mut *self.done.lock().unwrap_or_else(|e| e.into_inner())) {
             // One no longer wanted (scrolled past while it was decoded) is dropped.
             let Some(kept) = self.slots.get_mut(&p) else { continue };
@@ -754,7 +764,9 @@ impl Pictures {
     /// Requests nobody repeated for [`STALE_REQUEST`] leave the queue, and the textures asked for longest ago go
     /// beyond [`KEEP_BYTES`] (a big library browsed end to end would otherwise keep hundreds).
     fn trim(&mut self, now: f64) {
-        let stale = |k: &Kept| match k.slot {
+        // What the frame before asked for is on screen, however long ago that frame was drawn.
+        let shown = self.frame_before;
+        let stale = |k: &Kept| k.used < shown && match k.slot {
             Slot::Loading { .. } => now - k.used > STALE_REQUEST,
             // Not read, and nobody asks any more: forgotten (a page browsed end to end kept every one).
             Slot::Missing { .. } => now - k.used > FORGET_MISSING,
@@ -774,9 +786,9 @@ impl Pictures {
         if total <= KEEP_BYTES {
             return;
         }
-        // What was on screen in the last second stays, whatever it weighs.
+        // What was on screen in the last second, or in the frame before, stays, whatever it weighs.
         let mut old: Vec<(f64, Picture, usize)> =
-            self.slots.iter().filter(|(_, k)| matches!(k.slot, Slot::Ready(_)) && k.used < now - 1.0).map(|(p, k)| (k.used, p.clone(), bytes(k))).collect();
+            self.slots.iter().filter(|(_, k)| matches!(k.slot, Slot::Ready(_)) && k.used < now - 1.0 && k.used < shown).map(|(p, k)| (k.used, p.clone(), bytes(k))).collect();
         old.sort_by(|a, b| a.0.total_cmp(&b.0));
         for (_, p, size) in old {
             if total <= KEEP_BYTES {
@@ -1298,9 +1310,36 @@ pub(crate) mod tests {
         pictures.get_at(&textures, 91.0, &picture);
         assert_eq!(slot(&pictures), "loading 2");
         settle(&mut pictures, 91.0, "missing 3");
-        // Nobody asks for it any more: forgotten at a later trim.
+        // Nobody asks for it any more (a frame passed without it): forgotten at a later trim.
+        pictures.get_at(&textures, 199.0, &Picture::Session(PathBuf::from("Z:/orbiters-test/another")));
         pictures.get_at(&textures, 200.0, &Picture::Session(PathBuf::from("Z:/orbiters-test/another")));
         assert_eq!(slot(&pictures), "none");
+    }
+
+    /// Night PAGES-UI-5: a big window shows more than [`KEEP_BYTES`] of thumbnails; it stands still five seconds (no frame), and
+    /// the next frame's first ask trimmed the others it was about to ask for (all "older than a second"): they flashed their
+    /// shimmer and were decoded again. What the frame before asked for stays; what no frame asks for any more still goes.
+    #[test]
+    fn a_trim_after_the_window_stood_still_keeps_the_pictures_on_screen() {
+        let ctx = egui::Context::default();
+        let textures = crate::overlay::PaintTextures::of(&ctx);
+        let mut pictures = Pictures::new(&ctx);
+        // 80 thumbnails of 560 x 315 (0.7 MB each): 56 MB, over the 48 MB kept.
+        let shown: Vec<Picture> = (0..80).map(|i| Picture::Session(PathBuf::from(format!("Z:/orbiters-test/shown-{i}")))).collect();
+        for (i, p) in shown.iter().enumerate() {
+            let texture = textures.load_texture(format!("test-{i}"), egui::ColorImage::filled([560, 315], egui::Color32::GRAY), TextureOptions::LINEAR);
+            pictures.slots.insert(p.clone(), Kept { slot: Slot::Ready(texture), used: 0.0 });
+        }
+        let frame = |pictures: &mut Pictures, now: f64, which: &[Picture]| which.iter().filter(|p| pictures.get_at(&textures, now, p).is_some()).count();
+        assert_eq!(frame(&mut pictures, 10.0, &shown), 80);
+        assert_eq!(frame(&mut pictures, 15.0, &shown), 80, "every picture on screen is still there after the pause");
+        // Scrolled away from the first 60: they go, down to the budget, at the next trims.
+        let rest = &shown[60..];
+        frame(&mut pictures, 20.0, rest);
+        frame(&mut pictures, 25.0, rest);
+        let total: usize = pictures.slots.values().map(|k| if let Slot::Ready(t) = &k.slot { t.byte_size() } else { 0 }).sum();
+        assert!(total <= KEEP_BYTES, "{total} bytes kept");
+        assert_eq!(frame(&mut pictures, 25.0, rest), 20);
     }
 
     /// Every picture window started three loader threads that its first frame threw away (the window makes its set

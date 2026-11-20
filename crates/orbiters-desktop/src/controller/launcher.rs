@@ -39,6 +39,10 @@ const STARTING_FOR: Duration = Duration::from_secs(60);
 /// How long a start's claim on its VRChat profile holds when no VRChat with that profile shows up: a slow start (Steam,
 /// Easy Anti-Cheat, an update) is still a start, so this is long; a VRChat seen on the profile ends the claim at once.
 const PROFILE_HELD: Duration = Duration::from_secs(180);
+/// A start past [`PROFILE_HELD`] whose VRChat was never seen is not forgotten: its profile takes no new start until the
+/// person, told so, presses again within [`CONFIRM_WITHIN`] (VRChat may still come: an update, a slow Steam), for this long.
+const PROFILE_LAPSED: Duration = Duration::from_secs(10 * 60);
+const CONFIRM_WITHIN: Duration = Duration::from_secs(20);
 /// The same on a Mac, where the person presses Play in Obelisk (its sign-in, an update check, Easy Anti-Cheat).
 const MAC_STARTING_FOR: Duration = Duration::from_secs(180);
 /// How long an action's outcome stays in the state (the page's "Sent", the error it took back).
@@ -110,8 +114,8 @@ pub fn route(steam_has_vrchat: bool, launcher_registered: bool) -> Route {
 
 #[derive(Default)]
 pub struct RealMachine {
-    /// Each VRChat's Desktop mode and profile, read once from its command line (`None`: it could not be read).
-    desktop: Mutex<HashMap<u32, (bool, Option<u32>)>>,
+    /// Each VRChat's Desktop mode and profile from its command line, by process and start time.
+    desktop: Mutex<CmdLines>,
     /// The route, kept ten minutes (it reads the registry and Steam's library file).
     route: Mutex<Option<(Instant, Route)>>,
 }
@@ -199,6 +203,54 @@ impl Machine for MacMachine {
     }
 }
 
+/// How often, and how many times, a VRChat's command line Windows would not give is asked again.
+const CMD_RETRY: Duration = Duration::from_secs(10);
+const CMD_TRIES: u32 = 6;
+
+/// What each VRChat process's command line said (REQUEST15 second pass, S4): kept by process id and start time (a reused
+/// id is read anew); an unreadable one is asked again every [`CMD_RETRY`], [`CMD_TRIES`] times, not cached for the life
+/// of the process (its log may still say its profile through the roster).
+#[derive(Default)]
+pub struct CmdLines {
+    seen: HashMap<u32, CmdLine>,
+}
+
+#[derive(Clone, Copy)]
+struct CmdLine {
+    start: u64,
+    no_vr: bool,
+    profile: Option<u32>,
+    tries: u32,
+    next: Instant,
+}
+
+impl CmdLines {
+    /// Forgets the processes not in `alive` (id, start time); the ones whose command line is to be read now.
+    pub fn due(&mut self, alive: &[(u32, u64)], now: Instant) -> Vec<u32> {
+        self.seen.retain(|pid, line| alive.iter().any(|(p, s)| p == pid && *s == line.start));
+        alive
+            .iter()
+            .filter(|(pid, _)| match self.seen.get(pid) {
+                None => true,
+                Some(line) => line.profile.is_none() && line.tries < CMD_TRIES && now >= line.next,
+            })
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
+
+    /// What one read of `pid`'s command line gave (empty: Windows would not say).
+    pub fn record(&mut self, pid: u32, start: u64, args: &[String], now: Instant) {
+        let tries = self.seen.get(&pid).filter(|l| l.start == start).map_or(0, |l| l.tries) + 1;
+        let profile = (!args.is_empty()).then(|| orbiters_core::vrchat_launch::profile_of(args));
+        self.seen.insert(pid, CmdLine { start, no_vr: args.iter().any(|a| a == "--no-vr"), profile, tries, next: now + CMD_RETRY });
+    }
+
+    /// Desktop mode and profile of `pid` as read (`None`: not known).
+    pub fn get(&self, pid: u32) -> (bool, Option<u32>) {
+        self.seen.get(&pid).map_or((false, None), |l| (l.no_vr, l.profile))
+    }
+}
+
 /// The VRChats running (process, Desktop mode, profile): the profile as their own log said it once the roster read its
 /// arguments, else as their command line says it, else unknown (`None`): a VRChat whose log has not said its arguments
 /// yet is never taken for profile 0 (REQUEST15 fix B5).
@@ -252,26 +304,30 @@ impl Machine for RealMachine {
     }
 
     fn running_profiles(&self) -> Vec<(u32, bool, Option<u32>)> {
-        // Names only (no process is opened for them); the command line is read for VRChat's processes alone, once each.
+        // Names and start times only (no process is opened for them); the command line is read for VRChat's processes
+        // alone: once each, and again a few times while Windows would not give it.
         let mut system = sysinfo::System::new();
         system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-        let pids: Vec<sysinfo::Pid> = system.processes().values().filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat")).map(|p| p.pid()).collect();
-        let mut desktop = self.desktop.lock().unwrap();
-        desktop.retain(|pid, _| pids.iter().any(|p| p.as_u32() == *pid));
-        let unknown: Vec<sysinfo::Pid> = pids.iter().copied().filter(|p| !desktop.contains_key(&p.as_u32())).collect();
-        if !unknown.is_empty() {
-            system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&unknown), true, sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always));
-            for pid in unknown {
+        let alive: Vec<(u32, u64)> = system
+            .processes()
+            .values()
+            .filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat"))
+            .map(|p| (p.pid().as_u32(), p.start_time()))
+            .collect();
+        let mut lines = self.desktop.lock().unwrap();
+        let now = Instant::now();
+        let due: Vec<sysinfo::Pid> = lines.due(&alive, now).into_iter().map(sysinfo::Pid::from_u32).collect();
+        if !due.is_empty() {
+            system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&due), true, sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always));
+            for pid in due {
                 let args: Vec<String> = system.process(pid).map(|p| p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect()).unwrap_or_default();
-                let no_vr = args.iter().any(|a| a == "--no-vr");
-                // An empty command line is one Windows would not give: its profile is unknown, never taken for 0.
-                let profile = (!args.is_empty()).then(|| orbiters_core::vrchat_launch::profile_of(&args));
-                desktop.insert(pid.as_u32(), (no_vr, profile));
+                let start = alive.iter().find(|(p, _)| *p == pid.as_u32()).map_or(0, |(_, s)| *s);
+                lines.record(pid.as_u32(), start, &args, now);
             }
         }
-        pids.iter().map(|p| {
-            let (no_vr, profile) = desktop.get(&p.as_u32()).copied().unwrap_or((false, None));
-            (p.as_u32(), no_vr, profile)
+        alive.iter().map(|(pid, _)| {
+            let (no_vr, profile) = lines.get(*pid);
+            (*pid, no_vr, profile)
         }).collect()
     }
 
@@ -379,11 +435,18 @@ pub(super) struct Claim {
     pub mode: LaunchMode,
     pub at: Instant,
     pub id: u64,
+    /// The person was told this start never showed: a press on its profile until then starts again.
+    pub confirm_by: Option<Instant>,
 }
 
 impl Claim {
     fn holds(&self) -> bool {
         self.at.elapsed() < PROFILE_HELD
+    }
+
+    /// Kept at all: holding, or lapsed (see [`Controller::launcher_claim`]).
+    fn kept(&self) -> bool {
+        self.at.elapsed() < PROFILE_HELD + PROFILE_LAPSED
     }
 }
 
@@ -653,7 +716,7 @@ impl Controller {
             self.update_if(|s| {
                 let other = matches!(&s.launcher.source, Source::SignedIn { user_id, .. } if Some(user_id) != account.as_ref());
                 if other {
-                    let blank = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, loading: true, ..LauncherState::default() };
+                    let blank = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), unresolved: s.launcher.unresolved, possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, loading: true, ..LauncherState::default() };
                     *s.launcher = blank;
                     return true;
                 }
@@ -730,21 +793,19 @@ impl Controller {
         let here = if machine.by_hand() { !(remote && machine.engine_missing()) } else { orbiters_core::osc::VRCHAT_RUNS_HERE && !remote };
         // The watchers list every VRChat every 3 s already: the processes are looked at here only when they see one, or
         // while a start is under way (a Mac's game is looked for by its own scan).
-        let claimed = self.launcher.lock().unwrap().starting.iter().any(Claim::holds);
+        // The claims as they are before this look at the processes: only these may be ended by what it sees.
+        let observed: Vec<u64> = self.launcher.lock().unwrap().starting.iter().map(|c| c.id).collect();
+        let claimed = !observed.is_empty();
         let look = here && (machine.by_hand() || !view.vrchat.runs.is_empty() || view.vrchat.running || claimed || matches!(view.launcher.game, Game::Starting(_) | Game::Running(_)));
         let runs = if look { runs_with_profiles(machine, &view.vrchat.runs) } else { Vec::new() };
-        // A claim ends once a VRChat runs on its profile (or its time passed), in one go under the lock: a claim made
-        // meanwhile by another start is never dropped by this look, which did not see it.
-        let claims: Vec<(u32, LaunchMode)> = {
-            let mut rt = self.launcher.lock().unwrap();
-            rt.starting.retain(|c| c.holds() && !runs.iter().any(|r| r.2 == Some(c.profile)));
-            rt.starting.iter().map(|c| (c.profile, c.mode)).collect()
-        };
+        let claims = self.launcher_retire_claims(&observed, &runs);
         // The accounts seen on each profile are remembered, so the choice says whose each one is.
         let learned: Vec<(u32, String)> = view
             .vrchat
             .runs
             .iter()
+            // Only a profile its log confirmed: until then the roster's 0 means "not known".
+            .filter(|r| r.profile_known)
             .filter_map(|r| r.account.clone().filter(|a| !a.is_empty()).map(|a| (r.profile, a)))
             .filter(|(p, a)| view.settings.launch.profiles.get(p) != Some(a) && *p <= orbiters_core::vrchat_launch::PROFILE_MAX)
             .collect();
@@ -769,7 +830,9 @@ impl Controller {
         }
         // Published only when something changed (this runs every few seconds).
         self.update_if(|s| {
-            let changed = s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles;
+            let unresolved = runs.iter().filter(|r| r.2.is_none()).count() as u32;
+            let changed = s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles || s.launcher.unresolved != unresolved;
+            s.launcher.unresolved = unresolved;
             if s.launcher.profiles != profiles {
                 s.launcher.profiles = profiles;
             }
@@ -830,7 +893,7 @@ impl Controller {
             self.update_if(|s| {
                 let signed = matches!(s.launcher.source, Source::SignedIn { .. });
                 if signed {
-                    let kept = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, ..LauncherState::default() };
+                    let kept = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), unresolved: s.launcher.unresolved, possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, ..LauncherState::default() };
                     *s.launcher = kept;
                 }
                 signed
@@ -849,6 +912,7 @@ impl Controller {
             state.game = s.launcher.game.clone();
             state.possible.play = s.launcher.possible.play;
             state.profiles = s.launcher.profiles.clone();
+            state.unresolved = s.launcher.unresolved;
             // The account's own profile is read on its own (`launcher_mine`): kept for the same account only.
             if s.launcher.source == state.source {
                 state.mine = s.launcher.mine.clone();
@@ -928,6 +992,7 @@ impl Controller {
             // VRChat's profiles on this computer are the game's, not the account's; the own profile, card lists and all,
             // stays for the same account (it is read on its own, `launcher_mine`): a scheduled read never erases them.
             state.profiles = s.launcher.profiles.clone();
+            state.unresolved = s.launcher.unresolved;
             if s.launcher.source == state.source {
                 state.mine = s.launcher.mine.clone();
             }
@@ -1281,7 +1346,7 @@ impl Controller {
         if machine.by_hand() {
             return self.launcher_play_by_hand(machine.as_ref(), destination, account, &mut started);
         }
-        if started.is_some_and(|t| t.elapsed() < STARTING_FOR) || self.launcher_claimed(0) {
+        if started.is_some_and(|t| t.elapsed() < STARTING_FOR) {
             return Notice::Error(tr("Starting VRChat…").into());
         }
         if !machine.installed() {
@@ -1303,8 +1368,12 @@ impl Controller {
         if scoped && self.launcher_sender(account).is_err() {
             return changed_account();
         }
-        // Claimed before the start, under the start lock: no other start can take profile 0 meanwhile.
-        let claim = self.launcher_claim(0, mode);
+        // Claimed before the start, under the start lock: no other start can take profile 0 meanwhile. A refused claim
+        // (another start under way, on any profile) starts nothing (REQUEST15 second pass, blocker 6).
+        let claim = match self.launcher_claim(0, mode) {
+            Ok(id) => id,
+            Err(notice) => return notice,
+        };
         match machine.start(&args) {
             Ok(()) => {
                 *started = Some(Instant::now());
@@ -1321,9 +1390,7 @@ impl Controller {
                 Notice::Sent { to: destination.map(|p| p.world_id).unwrap_or_default(), action: SentKind::Launch }
             }
             Err(words) => {
-                if let Ok(id) = claim {
-                    self.launcher_unclaim(id);
-                }
+                self.launcher_unclaim(claim);
                 Notice::Error(tr!("VRChat could not be started: {reason}", reason = words))
             }
         }
@@ -1333,6 +1400,16 @@ impl Controller {
     /// while another start holds any profile (one start at a time) or a VRChat bridge session holds this one. The claim
     /// keeps every other start of Orbiters off that profile until a VRChat on it is seen (REQUEST15 fix B4).
     pub(super) fn launcher_claim(&self, profile: u32, mode: LaunchMode) -> Result<u64, Notice> {
+        self.launcher_claim_as(profile, mode, true)
+    }
+
+    /// [`Self::launcher_claim`] for a start nobody pressed (the VRChat bridge's): a lapsed start on the profile is never
+    /// overridden by it.
+    pub(super) fn launcher_claim_unattended(&self, profile: u32, mode: LaunchMode) -> Result<u64, Notice> {
+        self.launcher_claim_as(profile, mode, false)
+    }
+
+    fn launcher_claim_as(&self, profile: u32, mode: LaunchMode, person: bool) -> Result<u64, Notice> {
         if self.sides.marks().iter().any(|m| m.profile == profile) {
             return Err(Notice::Error(tr!("The assistant's VRChat uses profile {n}: choose another profile.", n = profile)));
         }
@@ -1340,10 +1417,42 @@ impl Controller {
         if rt.starting.iter().any(Claim::holds) {
             return Err(Notice::Error(tr("Starting VRChat…").into()));
         }
+        // A start on this profile that never showed (past its time): not started again behind its back. The person is
+        // told once; a press again within a few seconds says it is not coming, and starts.
+        let now = Instant::now();
+        if let Some(lapsed) = rt.starting.iter_mut().find(|c| c.profile == profile && c.kept()) {
+            match lapsed.confirm_by {
+                Some(by) if person && now < by => {
+                    let id = lapsed.id;
+                    rt.starting.retain(|c| c.id != id);
+                }
+                _ => {
+                    if person {
+                        lapsed.confirm_by = Some(now + CONFIRM_WITHIN);
+                    }
+                    let minutes = (lapsed.at.elapsed().as_secs() / 60).max(1);
+                    return Err(Notice::Error(tr!(
+                        "VRChat was asked to start on profile {n} {m} min ago and has not shown up yet. If it is not coming, press Play again to start it anyway.",
+                        n = profile,
+                        m = minutes
+                    )));
+                }
+            }
+        }
         rt.claims_made += 1;
         let id = rt.claims_made;
-        rt.starting.push(Claim { profile, mode, at: Instant::now(), id });
+        rt.starting.push(Claim { profile, mode, at: now, id, confirm_by: None });
         Ok(id)
+    }
+
+    /// Ends the claims of `observed` (those that existed before the look that read `runs`) whose profile `runs` shows
+    /// running. A claim made after that look (a start while an old VRChat of the same profile was quitting) is never
+    /// ended by it (REQUEST15 second pass, blocker 6). Returns the claims still holding, for the profile choice.
+    pub(super) fn launcher_retire_claims(&self, observed: &[u64], runs: &[(u32, bool, Option<u32>)]) -> Vec<(u32, LaunchMode)> {
+        let mut rt = self.launcher.lock().unwrap();
+        rt.starting.retain(|c| !(observed.contains(&c.id) && runs.iter().any(|r| r.2 == Some(c.profile))));
+        rt.starting.retain(Claim::kept);
+        rt.starting.iter().filter(|c| c.holds()).map(|c| (c.profile, c.mode)).collect()
     }
 
     /// A start that did not happen gives its claim back.
@@ -1358,6 +1467,11 @@ impl Controller {
             let last = rt.claims_made;
             rt.starting.retain(|c| c.id != last);
         }
+    }
+
+    /// Whether a start holds `profile`, or one that never showed still bars it (lapsed, not yet confirmed by the person).
+    pub(super) fn launcher_profile_barred(&self, profile: u32) -> bool {
+        self.launcher.lock().unwrap().starting.iter().any(|c| c.kept() && c.profile == profile)
     }
 
     /// Whether a start holds `profile` now.

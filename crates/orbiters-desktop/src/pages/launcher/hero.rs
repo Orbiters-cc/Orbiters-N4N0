@@ -162,8 +162,10 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     let room = ui.available_width() - caption_w;
     let (places, chips_h) = widgets::flow(&widths, room.max(120.0), CHIP_H, CHIP_GAP);
     let running_here = matches!(play, PlayState::Running(_));
-    // When the chosen profile runs: one line that says how to start one more.
-    let hint_h = if running_here { 22.0 } else { 0.0 };
+    // A VRChat whose profile is not known yet holds every start: said, rather than a Play that only answers no.
+    let unresolved = state.data.unresolved > 0;
+    // When the chosen profile runs, or a VRChat has not said its profile: one line that says why.
+    let hint_h = if running_here || unresolved { 22.0 } else { 0.0 };
     let height = PLAY_H + CHOICE_TOP + chips_h.max(CHIP_H) + hint_h;
     super::super::block(ui, cx, index, height, |ui, rect| {
         let clock = anim::time(ui.ctx());
@@ -211,8 +213,12 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
                 }
             }
         }
-        if running_here {
-            let line = orbiters_i18n::tr!("VRChat runs on profile {n}: choose another profile to start one more.", n = next);
+        if running_here || unresolved {
+            let line = if unresolved {
+                tr("A VRChat has not said its profile yet: Play waits until it does.").to_string()
+            } else {
+                orbiters_i18n::tr!("VRChat runs on profile {n}: choose another profile to start one more.", n = next)
+            };
             let y = top + chips_h.max(CHIP_H) + 4.0 + hint_h * 0.5;
             widgets::text_truncated(ui.painter(), pos2(rect.left() + 2.0, y), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::FG_3), rect.width());
         }

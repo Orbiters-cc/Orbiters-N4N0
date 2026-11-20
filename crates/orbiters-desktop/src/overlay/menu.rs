@@ -79,6 +79,13 @@ pub fn on_avatar_screen(snap: &Snapshot) -> bool {
     snap.n4n0.screen && snap.settings.orbit.display != orbiters_core::settings::MenuDisplay::Floating
 }
 
+/// Whether this SteamVR overlay's menu answers the service's request for N4N0's menu: while VRChat is in VR. In VRChat's desktop mode the
+/// desktop's overlay answers it ([`crate::overlay::orbit::desktop_serves_menu_request`]), with SteamVR running or not: one host, chosen
+/// by VRChat's own mode (verify2-r15 S5).
+pub fn serves_menu_request(snap: &Snapshot) -> bool {
+    !snap.n4n0.desktop_mode
+}
+
 /// A toggling request this soon after the menu closed is the close it meant, already done.
 const TOGGLE_AFTER_CLOSE: Duration = Duration::from_millis(500);
 
@@ -275,7 +282,7 @@ impl MenuOverlay {
             } else {
                 self.open(overlay, steamvr, snap);
             }
-        } else if asked && !on_avatar_screen(snap) && !snap.n4n0.desktop_mode {
+        } else if asked && !on_avatar_screen(snap) && serves_menu_request(snap) {
             // (In VRChat's desktop mode the desktop's overlay serves it, All tools beside VRChat's menu: `orbit::Panels::serve_menu`.)
             let just_closed = self.closed_at.is_some_and(|t| t.elapsed() < TOGGLE_AFTER_CLOSE);
             if self.host.menu.open && snap.n4n0.menu_toggle {

@@ -367,6 +367,10 @@ pub enum Saving {
 /// The account's own profile as Home's card edits it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MyProfile {
+    /// Read from VRChat (`launcher_mine`): until then the card holds a placeholder (made by a list or a change) whose
+    /// empty bio is not the account's, and no bio can be saved from it.
+    #[serde(default)]
+    pub loaded: bool,
     pub bio: String,
     pub banner: BannerChoice,
     pub banner_colour: Option<[u8; 3]>,
@@ -465,6 +469,10 @@ pub struct LauncherState {
     /// VRChat's profiles on this computer: the ones running, starting or used before, by number.
     #[serde(default)]
     pub profiles: Vec<GameProfile>,
+    /// VRChats running here whose profile is not known yet (neither their log nor their command line said it): Play
+    /// waits for them, and Home says so.
+    #[serde(default)]
+    pub unresolved: u32,
     /// The signed-in account's own profile, for Home's card (`None` until read, and with no sign-in).
     #[serde(default)]
     pub mine: Option<MyProfile>,
@@ -597,11 +605,13 @@ pub fn sample() -> LauncherState {
         game: Game::NotRunning,
         notice: None,
         loading: false,
+        unresolved: 0,
         profiles: vec![
             GameProfile { profile: 0, account: Some("Sample Me".into()), ..GameProfile::default() },
             GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },
         ],
         mine: Some(MyProfile {
+            loaded: true,
             bio: "Made-up account for drawing the page.
 Builds quiet worlds.".into(),
             banner: BannerChoice::Colour,

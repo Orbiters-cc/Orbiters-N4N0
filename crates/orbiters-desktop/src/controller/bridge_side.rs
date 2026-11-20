@@ -751,7 +751,7 @@ impl Game for SideGame {
         // Home holds from its look at the bridge's sessions to its own claim (REQUEST15 fix B4).
         let ctl = self.ctl()?;
         let _started = ctl.launcher_started.lock().unwrap();
-        if ctl.launcher_claimed(self.profile) {
+        if ctl.launcher_profile_barred(self.profile) {
             return Err(Failure::new("vrchat_starting", "Orbiters' Home is starting a VRChat on this profile.", "Use another profile.")); // i18n: not shown (an AI client reads it in the tool's answer)
         }
         self.sides.launching(true);

@@ -119,9 +119,14 @@ fn shown_mine(state: &State) -> Option<MyProfile> {
     state.data.mine.clone()
 }
 
+/// The account whose card this is: the launcher's signed-in account, and only while the sign-in says the same. Signing
+/// out (or into another account) masks the card at once, before the launcher's next look replaces its list.
 fn signed_in(state: &State) -> Option<String> {
     match &state.data.source {
-        Source::SignedIn { user_id, .. } if !user_id.is_empty() => Some(user_id.clone()),
+        Source::SignedIn { user_id, .. } if !user_id.is_empty() => match &state.login {
+            Some(login) if login.as_deref() != Some(user_id.as_str()) => None,
+            _ => Some(user_id.clone()),
+        },
         _ => None,
     }
 }
@@ -172,11 +177,7 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     // The account's own profile is read once its list shows (a read; nothing is sent from it).
     if let Some(account) = signed_in(state) {
         let clock = anim::time(ui.ctx());
-        let due = match &state.mine.asked_for {
-            Some((asked, at)) => *asked != account || clock - at > READ_AGAIN,
-            None => true,
-        };
-        if state.data.mine.is_none() && due {
+        if read_due(state, &account, clock) {
             state.mine.asked_for = Some((account, clock));
             state.act(cx, clock, Action::ReadMine);
         }
@@ -195,6 +196,17 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         cx.go = Some(super::super::Go::VrchatAccount);
     }
     picker(ui, cx, state);
+}
+
+/// Whether the own profile is to be asked for now: until VRChat gave it (a placeholder made by a picture list or a change
+/// is not it), once, then a minute after each try, or at once after Read again.
+fn read_due(state: &State, account: &str, clock: f64) -> bool {
+    let loaded = state.data.mine.as_ref().is_some_and(|m| m.loaded);
+    let asked = match &state.mine.asked_for {
+        Some((asked, at)) => asked == account && clock - at <= READ_AGAIN,
+        None => false,
+    };
+    !loaded && !asked
 }
 
 /// Another account on show (or none): what was typed, chosen or sent for the previous one is dropped, never saved to
@@ -461,6 +473,11 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
                 (Some(false), ..) | (_, _, true) => state.mine.editing = None,
                 _ => state.mine.editing = Some(Editing::Bio(draft)),
             }
+        }
+        _ if !mine.loaded => {
+            // Not read yet (or the read failed): its bio is not known, so it is not offered for editing.
+            let line = Txt::new(tr("Your bio shows once your profile is read. Read again in the friends list asks VRChat now."), 13.0).color(theme::FG_4);
+            widgets::text_truncated(&p, pos2(bio_rect.left() + 8.0, bio_rect.top() + 6.0 + BIO_LINE * 0.5), Align2::LEFT_CENTER, &line, bio_rect.width() - 16.0);
         }
         _ => {
             let empty = shown_bio.trim().is_empty();
@@ -962,6 +979,43 @@ mod tests {
         let shown: Vec<usize> = (0..pages).flat_map(|p| page_of(101, per_page, p)).collect();
         assert_eq!(shown, (0..101).collect::<Vec<_>>());
         assert!(page_of(3, per_page, 5).is_empty());
+    }
+
+    #[test]
+    fn a_placeholder_profile_is_read_again_and_read_again_asks_at_once() {
+        let mut data = sample();
+        data.source = Source::SignedIn { user_id: "usr_a".into(), name: String::new() };
+        // A picture list came before the profile could be read: a placeholder, not the account's profile.
+        data.mine = Some(MyProfile { loaded: false, ..MyProfile::default() });
+        let mut state = State { data: Arc::new(data.clone()), ..Default::default() };
+        assert!(read_due(&state, "usr_a", 0.0), "a placeholder does not stop the read");
+        state.mine.asked_for = Some(("usr_a".into(), 0.0));
+        assert!(!read_due(&state, "usr_a", 30.0));
+        assert!(read_due(&state, "usr_a", 61.0), "a minute after a try that brought nothing");
+        state.mine.read_again();
+        assert!(read_due(&state, "usr_a", 31.0), "Read again asks at once");
+        data.mine = Some(MyProfile { loaded: true, ..MyProfile::default() });
+        state.data = Arc::new(data);
+        assert!(!read_due(&state, "usr_a", 500.0));
+    }
+
+    #[test]
+    fn signing_out_masks_the_card_before_the_list_is_replaced() {
+        let mut data = sample();
+        data.source = Source::SignedIn { user_id: "usr_a".into(), name: String::new() };
+        let mut state = State { data: Arc::new(data), login: Some(Some("usr_a".into())), ..Default::default() };
+        sync_account(&mut state);
+        state.mine.editing = Some(Editing::Bio("A's words".into()));
+        assert_eq!(signed_in(&state).as_deref(), Some("usr_a"));
+        // Signed out: the launcher still shows A's list for a moment; the card is no longer A's.
+        state.login = Some(None);
+        assert_eq!(signed_in(&state), None);
+        assert_eq!(bound(&state, ProfileEdit::Bio("A's words".into())), None, "nothing goes");
+        sync_account(&mut state);
+        assert!(state.mine.editing.is_none(), "A's draft is gone at once");
+        // Another account signed in, A's list still on show: the same.
+        state.login = Some(Some("usr_b".into()));
+        assert_eq!(signed_in(&state), None);
     }
 
     #[test]

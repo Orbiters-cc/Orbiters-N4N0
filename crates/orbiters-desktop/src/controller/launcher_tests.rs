@@ -1015,6 +1015,8 @@ fn the_profile_choice_lists_used_running_and_starting_profiles_with_their_accoun
 fn me_signed_in(c: &Shared) {
     signed_in_list(c);
     c.update(|s| s.launcher.me = Some(orbiters_core::launcher::Friend { id: "usr_test".into(), name: "Sample Me".into(), ..Default::default() }));
+    // Its own profile as VRChat gave it (a bio is only changed from that one).
+    c.update(|s| s.launcher.mine = Some(orbiters_core::launcher::MyProfile { loaded: true, ..Default::default() }));
 }
 
 fn saving(c: &Shared) -> Option<orbiters_core::launcher::Saving> {
@@ -1247,4 +1249,139 @@ fn a_list_that_did_not_come_is_said_in_its_chooser_not_as_a_failed_change() {
     assert!(m.saving.is_none(), "no change failed");
     assert!(matches!(m.list_failed, Some((PictureKind::Gallery, _))));
     assert!(m.listing.is_none());
+}
+
+// --- REQUEST15 second pass, blocker 6: every start needs its claim ---
+
+#[test]
+fn play_and_join_start_nothing_while_another_profile_is_still_starting() {
+    // Profile 1 asked for with no VRChat running (through Steam); a minute later its process is still not there.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    *c.launcher_started.lock().unwrap() = Some(Instant::now() - Duration::from_secs(70));
+    // Play, and Join with a destination (the same path while nothing runs): the claim is refused, nothing starts.
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Vr, destination: None }), Some(Notice::Error(_))));
+    let place = launcher_feed::place(&format!("{W}:1~region(eu)"), "").unwrap();
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place) }), Some(Notice::Error(_))));
+    assert_eq!(machine.started.lock().unwrap().len(), 1, "only profile 1's start");
+}
+
+// --- REQUEST15 second pass, blocker 6: a look ends only the claims it saw ---
+
+#[test]
+fn a_look_across_an_old_vrchats_exit_never_ends_the_newer_claim() {
+    // A look starts: no claim yet, and it sees the old VRChat of profile 1, still quitting.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    let observed: Vec<u64> = c.launcher.lock().unwrap().starting.iter().map(|claim| claim.id).collect();
+    let seen = vec![(10, true, Some(1))];
+    // The old VRChat is gone; the person starts profile 1 again, which claims it.
+    let claim = c.launcher_claim(1, LaunchMode::Desktop).unwrap();
+    // The look ends: what it saw of profile 1 was the old process, before the claim.
+    c.launcher_retire_claims(&observed, &seen);
+    assert!(c.launcher_claimed(1), "the newer claim stays until a look made after it sees profile 1");
+    // The next look, made after the claim, sees the new VRChat on profile 1: the claim ends.
+    let observed: Vec<u64> = c.launcher.lock().unwrap().starting.iter().map(|claim| claim.id).collect();
+    assert_eq!(observed, [claim]);
+    c.launcher_retire_claims(&observed, &[(11, true, Some(1))]);
+    assert!(!c.launcher_claimed(1));
+}
+
+// --- REQUEST15 second pass, blocker 6: a start that never showed is not retried behind the person's back ---
+
+#[test]
+fn a_start_not_seen_after_three_minutes_needs_the_persons_second_press() {
+    let (machine, c) = running_profile_0();
+    let claim = c.launcher_claim(1, LaunchMode::Desktop).unwrap();
+    for held in c.launcher.lock().unwrap().starting.iter_mut() {
+        held.at -= Duration::from_secs(200);
+    }
+    // A look past the claim's time keeps it (lapsed): it still bars its profile.
+    c.launcher_retire_claims(&[claim], &[(10, false, Some(0))]);
+    assert!(!c.launcher_claimed(1) && c.launcher.lock().unwrap().starting.len() == 1);
+    // Not for another profile.
+    assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 2 }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    c.launcher.lock().unwrap().starting.retain(|held| held.profile == 1);
+    // The bridge, which no person drives, never overrides it.
+    assert!(c.launcher_claim_unattended(1, LaunchMode::Desktop).is_err());
+    assert!(c.launcher_claim_unattended(1, LaunchMode::Desktop).is_err());
+    // The person: told first, nothing started; a second press goes.
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Error(t)) if t.contains('1')));
+    let before = machine.beside.lock().unwrap().len();
+    assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    assert_eq!(machine.beside.lock().unwrap().len(), before + 1);
+}
+
+// --- REQUEST15 second pass, S4: unreadable command lines are asked again; only confirmed profiles are labelled ---
+
+#[test]
+fn an_unreadable_command_line_is_asked_again_a_few_times_and_a_reused_id_anew() {
+    let mut lines = CmdLines::default();
+    let t0 = Instant::now();
+    assert_eq!(lines.due(&[(11, 500)], t0), [11]);
+    lines.record(11, 500, &[], t0);
+    assert_eq!(lines.get(11), (false, None));
+    assert!(lines.due(&[(11, 500)], t0 + Duration::from_secs(1)).is_empty(), "not at every look");
+    let mut at = t0;
+    for _ in 1..CMD_TRIES {
+        at += CMD_RETRY;
+        assert_eq!(lines.due(&[(11, 500)], at), [11]);
+        lines.record(11, 500, &[], at);
+    }
+    assert!(lines.due(&[(11, 500)], at + CMD_RETRY).is_empty(), "a bounded number of tries");
+    // The same id for another process (another start time): read anew, and its profile is known.
+    assert_eq!(lines.due(&[(11, 900)], at), [11]);
+    lines.record(11, 900, &["VRChat.exe".into(), "--profile=2".into(), "--no-vr".into()], at);
+    assert_eq!(lines.get(11), (true, Some(2)));
+    assert!(lines.due(&[(11, 900)], at + CMD_RETRY * 3).is_empty(), "a known one is not read again");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn only_a_confirmed_profile_is_labelled_and_an_unresolved_vrchat_is_said() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    machine.running.lock().unwrap().push((11, true));
+    machine.unread.lock().unwrap().push(11);
+    let c = controller(machine.clone());
+    // In the roster before its log said its arguments: profile 0 there means "not known".
+    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 11, profile: 0, profile_known: false, account: Some("Sample Alt".into()), ..Default::default() }]);
+    c.launcher_game(machine.as_ref());
+    assert!(c.view().settings.launch.profiles.get(&0).is_none(), "no label from an unconfirmed profile");
+    assert_eq!(c.view().launcher.unresolved, 1);
+    // Its log says profile 1: labelled there, and nothing is unresolved.
+    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 11, profile: 1, profile_known: true, account: Some("Sample Alt".into()), ..Default::default() }]);
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().settings.launch.profiles.get(&1).map(String::as_str), Some("Sample Alt"));
+    assert_eq!(c.view().launcher.unresolved, 0);
+}
+
+// --- REQUEST15 second pass, S6: a placeholder's empty bio is never saved over the account's ---
+
+#[test]
+fn a_bio_is_never_saved_from_a_placeholder_profile() {
+    use orbiters_core::launcher::{PictureKind, ProfileEdit, ProfilePart, Saving};
+    let c = controller(Arc::new(Pretend::default()));
+    let (_, calls) = c.test_vrchat(vec![
+        (200, json!([])),
+        (200, json!({"id": "usr_test", "bio": "the real bio"})),
+        (200, json!({"id": "usr_test", "bio": "new"})),
+    ]);
+    me_signed_in(&c);
+    // The profile's first read failed (nothing in the state); a picture list made a placeholder.
+    c.update(|s| s.launcher.mine = None);
+    c.launcher_do(mine(Action::ListPictures(PictureKind::Icons)));
+    let placeholder = c.view().launcher.mine.clone().unwrap();
+    assert!(!placeholder.loaded && placeholder.bio.is_empty());
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Bio(String::new()))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Bio, _))), "no bio from a placeholder");
+    // Read again: the real profile replaces the placeholder, its lists kept.
+    c.launcher_do(mine(Action::ReadMine));
+    let read = c.view().launcher.mine.clone().unwrap();
+    assert!(read.loaded && read.bio == "the real bio" && read.icons.is_some());
+    c.launcher.lock().unwrap().mine_next = None;
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Bio("new".into()))));
+    assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Bio)));
+    let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
+    assert_eq!(calls, ["GET /files?tag=icon&n=100", "GET /profile/usr_test?asSelf=true", "PUT /profile/usr_test"], "no PUT from the placeholder");
 }

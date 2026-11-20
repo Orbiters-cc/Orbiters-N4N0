@@ -106,6 +106,9 @@ pub enum Command {
     /// stays another choice.
     ShowBot {
         on: bool,
+        /// The avatar it was asked for (the page's): another one worn by then is left as it is (verify2-r15 S5).
+        #[serde(default)]
+        avatar: Option<String>,
     },
     /// Testing: the avatar's screen shows the full pictures' diagnostics (contracts `Docs/n4n0-picture.md`, Diagnostics).
     TestPictures {

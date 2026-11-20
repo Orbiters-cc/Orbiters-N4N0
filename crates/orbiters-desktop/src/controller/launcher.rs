@@ -385,6 +385,11 @@ impl Claim {
     fn holds(&self) -> bool {
         self.at.elapsed() < PROFILE_HELD
     }
+
+    /// Kept at all (see [`Controller::launcher_claim`] for a claim past [`PROFILE_HELD`]).
+    fn kept(&self) -> bool {
+        self.holds()
+    }
 }
 
 /// An invite accepted here, until VRChat is told to hide it (the account got there) or its card comes back.
@@ -730,16 +735,12 @@ impl Controller {
         let here = if machine.by_hand() { !(remote && machine.engine_missing()) } else { orbiters_core::osc::VRCHAT_RUNS_HERE && !remote };
         // The watchers list every VRChat every 3 s already: the processes are looked at here only when they see one, or
         // while a start is under way (a Mac's game is looked for by its own scan).
-        let claimed = self.launcher.lock().unwrap().starting.iter().any(Claim::holds);
+        // The claims as they are before this look at the processes: only these may be ended by what it sees.
+        let observed: Vec<u64> = self.launcher.lock().unwrap().starting.iter().map(|c| c.id).collect();
+        let claimed = !observed.is_empty();
         let look = here && (machine.by_hand() || !view.vrchat.runs.is_empty() || view.vrchat.running || claimed || matches!(view.launcher.game, Game::Starting(_) | Game::Running(_)));
         let runs = if look { runs_with_profiles(machine, &view.vrchat.runs) } else { Vec::new() };
-        // A claim ends once a VRChat runs on its profile (or its time passed), in one go under the lock: a claim made
-        // meanwhile by another start is never dropped by this look, which did not see it.
-        let claims: Vec<(u32, LaunchMode)> = {
-            let mut rt = self.launcher.lock().unwrap();
-            rt.starting.retain(|c| c.holds() && !runs.iter().any(|r| r.2 == Some(c.profile)));
-            rt.starting.iter().map(|c| (c.profile, c.mode)).collect()
-        };
+        let claims = self.launcher_retire_claims(&observed, &runs);
         // The accounts seen on each profile are remembered, so the choice says whose each one is.
         let learned: Vec<(u32, String)> = view
             .vrchat
@@ -1346,6 +1347,16 @@ impl Controller {
         let id = rt.claims_made;
         rt.starting.push(Claim { profile, mode, at: Instant::now(), id });
         Ok(id)
+    }
+
+    /// Ends the claims of `observed` (those that existed before the look that read `runs`) whose profile `runs` shows
+    /// running. A claim made after that look (a start while an old VRChat of the same profile was quitting) is never
+    /// ended by it (REQUEST15 second pass, blocker 6). Returns the claims still holding, for the profile choice.
+    pub(super) fn launcher_retire_claims(&self, observed: &[u64], runs: &[(u32, bool, Option<u32>)]) -> Vec<(u32, LaunchMode)> {
+        let mut rt = self.launcher.lock().unwrap();
+        rt.starting.retain(|c| !(observed.contains(&c.id) && runs.iter().any(|r| r.2 == Some(c.profile))));
+        rt.starting.retain(Claim::kept);
+        rt.starting.iter().filter(|c| c.holds()).map(|c| (c.profile, c.mode)).collect()
     }
 
     /// A start that did not happen gives its claim back.

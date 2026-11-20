@@ -1264,3 +1264,24 @@ fn play_and_join_start_nothing_while_another_profile_is_still_starting() {
     assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place) }), Some(Notice::Error(_))));
     assert_eq!(machine.started.lock().unwrap().len(), 1, "only profile 1's start");
 }
+
+// --- REQUEST15 second pass, blocker 6: a look ends only the claims it saw ---
+
+#[test]
+fn a_look_across_an_old_vrchats_exit_never_ends_the_newer_claim() {
+    // A look starts: no claim yet, and it sees the old VRChat of profile 1, still quitting.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    let observed: Vec<u64> = c.launcher.lock().unwrap().starting.iter().map(|claim| claim.id).collect();
+    let seen = vec![(10, true, Some(1))];
+    // The old VRChat is gone; the person starts profile 1 again, which claims it.
+    let claim = c.launcher_claim(1, LaunchMode::Desktop).unwrap();
+    // The look ends: what it saw of profile 1 was the old process, before the claim.
+    c.launcher_retire_claims(&observed, &seen);
+    assert!(c.launcher_claimed(1), "the newer claim stays until a look made after it sees profile 1");
+    // The next look, made after the claim, sees the new VRChat on profile 1: the claim ends.
+    let observed: Vec<u64> = c.launcher.lock().unwrap().starting.iter().map(|claim| claim.id).collect();
+    assert_eq!(observed, [claim]);
+    c.launcher_retire_claims(&observed, &[(11, true, Some(1))]);
+    assert!(!c.launcher_claimed(1));
+}

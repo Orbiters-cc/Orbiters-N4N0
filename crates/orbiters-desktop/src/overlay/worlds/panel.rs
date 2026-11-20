@@ -17,7 +17,7 @@ mod pages;
 mod shots;
 
 pub use bar::{bar_hit, bar_press, draw_bar, BAR_PX};
-pub use shots::{shots, side_live, side_small};
+pub use shots::{shots, side_live, side_loading, side_small};
 
 use super::catalog::Entry;
 pub use super::finder::Section;
@@ -910,19 +910,22 @@ fn draw_full_button(p: &Painter, rect: Rect, full: bool, hovered: bool, pressed:
 
 fn draw_live(p: &Painter, hero: Rect, live: &Live, named: Option<&str>) {
     let corner = CornerRadius::same(14);
-    let say = |p: &Painter, words: &str| {
+    // In its picture's bottom left corner, the picture itself in view: on a screen it starts by itself each time a world is chosen (REQUEST15 item 6), so what it
+    // says while it comes is a small word over the picture, not a box over its middle.
+    let say = |p: &Painter, words: &str, dot: Color32| {
         let txt = orbit_look::txt(words, 15.0).weight(weight::SEMIBOLD).color(Color32::WHITE);
-        let galley = p.layout_job(txt.job_truncated(hero.width() - 40.0));
-        let pill = Rect::from_center_size(hero.center(), galley.size() + vec2(26.0, 14.0));
-        p.rect_filled(pill, CornerRadius::same(14), theme::black(0.82));
-        p.galley(pill.min + vec2(13.0, 7.0), galley, Color32::WHITE);
+        let galley = p.layout_job(txt.job_truncated(hero.width() - 64.0));
+        let pill = Rect::from_min_size(pos2(hero.left() + 12.0, hero.bottom() - 12.0 - galley.size().y - 12.0), galley.size() + vec2(40.0, 12.0));
+        p.rect_filled(pill, CornerRadius::same((pill.height() / 2.0) as u8), theme::black(0.72));
+        p.circle_filled(pos2(pill.left() + 15.0, pill.center().y), 4.5, dot);
+        p.galley(pos2(pill.left() + 28.0, pill.min.y + 6.0), galley, Color32::WHITE);
     };
     if live.failed {
-        say(p, tr("Its 3D cannot show here. It can in Orbiters."));
+        say(p, tr("Its 3D cannot show here. It can in Orbiters."), theme::WARN);
         return;
     }
     let Some(id) = live.picture else {
-        say(p, tr("Getting its 3D ready…"));
+        say(p, tr("Getting its 3D ready…"), orbit_look::accent());
         return;
     };
     p.rect_filled(hero, corner, Color32::from_rgb(15, 17, 21));
@@ -1489,9 +1492,7 @@ impl Panel {
                         out.push((Target::Join, if vr { VR_GO_HALF } else { SHOW_WHOLE }));
                     }
                 } else if !status.headset {
-                    if !live_here && !current {
-                        out.push((Target::Show, SHOW_WHOLE));
-                    }
+                    // On a screen its capture turns where its picture is as soon as it is chosen (REQUEST15 item 6): no See it in 3D.
                 } else if current {
                     // The other way to see it: the sheet's head, or N4N0's bar, hides it.
                     // Both ways stay, the one it is in lit.
@@ -3472,9 +3473,9 @@ mod tests {
         let status = Status::default();
         let d = data(&entries, &status, &feedback, &facts);
         let mut panel = Panel { page: Page::Detail, selected: Some(1), ..Default::default() };
-        assert_eq!(panel.press(Target::Show, &d, 1.0), [Action::Show(1)]);
         let has = |panel: &Panel, t: Target| panel.targets(&d).iter().any(|(x, _)| *x == t);
-        assert!(has(&panel, Target::Show) && !has(&panel, Target::Hero));
+        // REQUEST15 item 6: no See it in 3D on a screen; the capture turns there by itself (`Worlds::follow_screen_live`).
+        assert!(!has(&panel, Target::Show) && !has(&panel, Target::Hero));
         panel.live = Some(Live { id: 1, ..Default::default() });
         assert!(!has(&panel, Target::Show) && has(&panel, Target::Hero));
         // Its close stays on top of it.
@@ -3786,7 +3787,7 @@ mod tests {
         assert_eq!(panel.press(Target::Other, &d, 1.0), [Action::Show(4)]);
         assert_eq!(panel.selected, Some(4));
         let targets: Vec<Target> = panel.targets(&d).into_iter().map(|(t, _)| t).collect();
-        assert!(targets.contains(&Target::Show), "not the one around you: Show around me");
+        assert!(!targets.contains(&Target::Show), "on a screen no See it in 3D: its capture turns in the panel by itself (REQUEST15 item 6)");
         assert_eq!(panel.press(Target::Other, &d, 2.0), Vec::<Action>::new(), "back to the one shown: nothing to download");
         assert_eq!(panel.selected, Some(1));
     }

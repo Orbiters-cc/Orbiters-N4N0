@@ -1700,3 +1700,34 @@ pub(super) fn explorer_shots(out: &Path) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// `--only orbit-r15`: REQUEST15's desktop states, over a stand-in of VRChat's window (no real frame, picture, name or capture): a world's side panel with its
+/// capture's 3D coming and turning where its picture is (item 6; the "3D" there is a stand-in picture, the view itself is the app's own).
+pub(super) fn r15_shots(out: &Path) -> anyhow::Result<()> {
+    use panels::Sheet;
+    let client = vec2(1920.0, 1080.0);
+    let ground = r15_ground(client);
+    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, ..Default::default() };
+    let worlds = Facts { sheet: Some(Sheet::Worlds), sheet_title: "Worlds in 3D".into(), beside_wing: true, ..idle.clone() };
+    over_the_game("r15-world-side-loading", out, client, &ground, &worlds, crate::overlay::worlds::panel::side_loading)?;
+    let frame = stand_in(4);
+    over_the_game("r15-world-side-live", out, client, &ground, &worlds, |px| crate::overlay::worlds::panel::side_live(px, Some((&frame, false))))?;
+    Ok(())
+}
+
+/// A stand-in of VRChat's window behind ours: a dark evening sky over a floor, and VRChat's Quick Menu as [`stand_in_menu`] draws it.
+fn r15_ground(client: Vec2) -> image::RgbaImage {
+    let (w, h) = (client.x as u32, client.y as u32);
+    let mut canvas = Canvas::new(w, h);
+    canvas.paint(0.0, |p| {
+        let rows = 48;
+        for i in 0..rows {
+            let t = i as f32 / rows as f32;
+            let c = Color32::from_rgb((28.0 + 30.0 * t) as u8, (18.0 + 10.0 * t) as u8, (52.0 + 20.0 * t) as u8);
+            p.rect_filled(egui::Rect::from_min_size(pos2(0.0, t * client.y), vec2(client.x, client.y / rows as f32 + 1.0)), 0.0, c);
+        }
+    });
+    stand_in_menu(Around::QuickMenu, client, &mut canvas);
+    let pixels: Vec<u8> = canvas.pixels().chunks_exact(4).flat_map(|c| [c[0], c[1], c[2], 255]).collect();
+    image::RgbaImage::from_raw(w, h, pixels).expect("its size")
+}

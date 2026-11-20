@@ -173,6 +173,7 @@ pub fn paint_chip_with(p: &Painter, pointed: bool, lit: bool, glyph: &str) {
 pub struct HideChip {
     handle: vr::OverlayHandle,
     canvas: Canvas,
+    presented: crate::overlay::presented::Presented,
     /// What its round shows: the X, or the share chip's people ([`Self::share`]).
     glyph: &'static str,
     /// Lit: the share chip while it shares.
@@ -193,7 +194,7 @@ impl HideChip {
         let _ = overlay.set_width_in_meters(handle, CHIP_WIDTH_M);
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, 3);
-        Ok(Self { handle, canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]), glyph: icons::X, lit: false, shown: None, drawn_in: language() })
+        Ok(Self { handle, canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]), presented: Default::default(), glyph: icons::X, lit: false, shown: None, drawn_in: language() })
     }
 
     /// The share chip: "look at it with a friend here" (`controller/shared_view.rs`), the X's twin on the capture's
@@ -203,7 +204,7 @@ impl HideChip {
         let _ = overlay.set_width_in_meters(handle, CHIP_WIDTH_M);
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, 3);
-        Ok(Self { handle, canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]), glyph: icons::USERS, lit: false, shown: None, drawn_in: language() })
+        Ok(Self { handle, canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]), presented: Default::default(), glyph: icons::USERS, lit: false, shown: None, drawn_in: language() })
     }
 
     /// Lit (it shares) or not: drawn again when that changes.
@@ -216,7 +217,13 @@ impl HideChip {
     }
 
     /// Where it shows, and whether a hand points at it; or nowhere.
+    /// A press decided from its place, taken only while SteamVR shows its current picture.
+    pub(super) fn press(&self, pressed: bool) -> bool {
+        self.presented.press(pressed)
+    }
+
     pub(super) fn update(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, at: Option<(vr::Matrix34, bool)>) {
+        self.presented.hand_over(None, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), CHIP_PX[0], CHIP_PX[1], r));
         let Some((place, pointed)) = at else {
             if self.shown.take().is_some() {
                 let _ = overlay.hide(self.handle);
@@ -233,9 +240,8 @@ impl HideChip {
             for _ in 0..2 {
                 self.canvas.paint(0.0, |p| paint_chip_with(p, pointed, lit, glyph));
             }
-            if let Some(changed) = self.canvas.damage() {
-                presenter.show_part(overlay, self.handle, self.canvas.pixels(), CHIP_PX[0], CHIP_PX[1], changed);
-            }
+            let damage = self.canvas.damage();
+            self.presented.hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), CHIP_PX[0], CHIP_PX[1], r));
         }
         let _ = overlay.set_transform_absolute(self.handle, &chip_quad(&place));
         if self.shown.is_none() {
@@ -312,6 +318,7 @@ pub struct SmallHint {
     stick_shown: bool,
     stick_faces: Option<V3>,
     canvas: Canvas,
+    presented: crate::overlay::presented::Presented,
     born: Instant,
     painted: Option<Instant>,
     shown: Option<Stage>,
@@ -335,11 +342,12 @@ impl SmallHint {
         let _ = overlay.set_flag(stick, vr::overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_flag(stick, vr::overlay_flag::SIDE_BY_SIDE_PARALLEL, true);
         let _ = overlay.set_sort_order(stick, 3);
-        Ok(Self { stick, stick_drawn: None, stick_shown: false, stick_faces: None, handle, canvas: Canvas::new(PX[0], PX[1]), born: Instant::now(), painted: None, shown: None, drawn_in: language() })
+        Ok(Self { stick, stick_drawn: None, stick_shown: false, stick_faces: None, handle, canvas: Canvas::new(PX[0], PX[1]), presented: Default::default(), born: Instant::now(), painted: None, shown: None, drawn_in: language() })
     }
 
     /// Shows what is wanted, above where what it speaks of is and how far that reaches, facing `head`; or nothing.
     pub(super) fn update(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, head: &vr::Matrix34, eyes: [V3; 2], wanted: Option<(Stage, V3, f32)>, moves: bool) {
+        self.presented.hand_over(None, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX[0], PX[1], r));
         let Some((stage, at, radius)) = wanted else {
             if self.shown.take().is_some() {
                 let _ = overlay.hide(self.handle);
@@ -363,9 +371,8 @@ impl SmallHint {
             // With Reduce motion it stands still, pushed up.
             let seconds = if moves { self.born.elapsed().as_secs_f32() } else { CYCLE_S * 0.25 };
             self.canvas.paint(seconds as f64, |p| paint(p, stage, seconds));
-            if let Some(changed) = self.canvas.damage() {
-                presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX[0], PX[1], changed);
-            }
+            let damage = self.canvas.damage();
+            self.presented.hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX[0], PX[1], r));
         }
         let place = facing(hint_place(at, radius, stereo::position(head)), stereo::position(head));
         let _ = overlay.set_transform_absolute(self.handle, &place);

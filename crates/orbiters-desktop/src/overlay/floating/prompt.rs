@@ -20,6 +20,7 @@ const STEPS: f32 = 60.0;
 pub struct Prompt {
     handle: vr::OverlayHandle,
     canvas: Canvas,
+    presented: crate::overlay::presented::Presented,
     /// Its picture's size and its width in the play space, as its face takes ([`Face::size`]).
     px: [u32; 2],
     width_m: f32,
@@ -78,7 +79,7 @@ impl Prompt {
         let _ = overlay.set_width_in_meters(handle, VR_WIDTH_M);
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, SORT_ORDER);
-        Ok(Self { handle, canvas: Canvas::new(VR_PX[0], VR_PX[1]), px: VR_PX, width_m: VR_WIDTH_M, placed: None, pressed: None, visible: false, drawn: None, drawn_with: None, evidence: Evidence::default() })
+        Ok(Self { handle, canvas: Canvas::new(VR_PX[0], VR_PX[1]), presented: Default::default(), px: VR_PX, width_m: VR_WIDTH_M, placed: None, pressed: None, visible: false, drawn: None, drawn_with: None, evidence: Evidence::default() })
     }
 
     /// At the size `face` takes (before [`Prompt::place`]): another size is a new picture, placed again.
@@ -142,6 +143,11 @@ impl Prompt {
         self.visible && self.placed.is_some_and(|(placed, _)| placed == id) && self.evidence.confirms()
     }
 
+    /// The band's picture that shows is of what it offers now (it may be pointed at and pressed).
+    pub fn current(&self) -> bool {
+        self.presented.current()
+    }
+
     /// Pressed: it goes now.
     pub fn pressed(&mut self, overlay: &vr::Overlay, id: u64) {
         self.pressed = Some(id);
@@ -169,7 +175,7 @@ impl Prompt {
         let px = self.px;
         let changed = if first { Some([0, 0, px[0], px[1]]) } else { self.canvas.damage() };
         if let Some(changed) = changed {
-            if !presenter.show_part(overlay, self.handle, self.canvas.pixels(), px[0], px[1], changed) {
+            if !self.presented.hand_over(Some(changed), std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), px[0], px[1], r)) {
                 // Refused: the band does not show this picture; painted whole again next turn.
                 self.evidence.pictured = false;
                 self.drawn = None;
@@ -198,7 +204,7 @@ impl Prompt {
         if let Some(changed) = changed {
             // Refused: this face is not shown; painted whole again next turn (as the offers' own picture). It is never
             // the countdown's evidence: that is only the countdown's own picture.
-            if !presenter.show_part(overlay, self.handle, self.canvas.pixels(), px[0], px[1], changed) {
+            if !self.presented.hand_over(Some(changed), std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), px[0], px[1], r)) {
                 self.drawn_with = None;
                 return;
             }

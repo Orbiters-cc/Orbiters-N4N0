@@ -17,6 +17,7 @@ pub mod slots;
 mod booster;
 pub mod calibration;
 pub mod coverage;
+pub(crate) mod presented;
 pub mod eye_picture;
 pub mod floating;
 mod frames;
@@ -537,6 +538,9 @@ struct World {
     mirror_canvas: Canvas,
     /// One canvas per target: what changed is counted from each one's own last picture.
     target_canvases: [Canvas; 2],
+    /// What of the mirror's and the targets' pictures SteamVR has taken.
+    mirror_presented: crate::overlay::presented::Presented,
+    targets_presented: [crate::overlay::presented::Presented; 2],
     /// The frame they were placed for (placed again when a new calibration starts).
     placed: Option<[f32; 3]>,
     shown: bool,
@@ -562,6 +566,8 @@ impl World {
             targets,
             mirror_canvas: Canvas::new(MIRROR_PX[0], MIRROR_PX[1]),
             target_canvases: [Canvas::new(TARGET_PX, TARGET_PX), Canvas::new(TARGET_PX, TARGET_PX)],
+            mirror_presented: Default::default(),
+            targets_presented: Default::default(),
             placed: None,
             shown: false,
             last_paint: None,
@@ -587,6 +593,12 @@ impl World {
             self.placed = Some(frame.origin);
         }
         // About 30 pictures a second.
+        // What SteamVR did not take is handed over again.
+        self.mirror_presented.hand_over(None, std::time::Instant::now(), |r| presenter.show_part(overlay, self.mirror, self.mirror_canvas.pixels(), MIRROR_PX[0], MIRROR_PX[1], r));
+        for i in 0..2 {
+            let canvas = &self.target_canvases[i];
+            self.targets_presented[i].hand_over(None, std::time::Instant::now(), |r| presenter.show_part(overlay, self.targets[i], canvas.pixels(), TARGET_PX, TARGET_PX, r));
+        }
         if self.last_paint.is_some_and(|t| t.elapsed() < Duration::from_millis(33)) {
             return;
         }
@@ -597,16 +609,15 @@ impl World {
             self.target_canvases.iter_mut().for_each(Canvas::invalidate);
         }
         self.mirror_canvas.paint(now, |p| calibration::paint_mirror(p, cal, now));
-        if let Some(changed) = self.mirror_canvas.damage() {
-            presenter.show_part(overlay, self.mirror, self.mirror_canvas.pixels(), MIRROR_PX[0], MIRROR_PX[1], changed);
-        }
+        let damage = self.mirror_canvas.damage();
+        self.mirror_presented.hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(overlay, self.mirror, self.mirror_canvas.pixels(), MIRROR_PX[0], MIRROR_PX[1], r));
         for (i, label) in ["L", "R"].into_iter().enumerate() {
             let on = cal.hand_on_target(i);
             let canvas = &mut self.target_canvases[i];
             canvas.paint(now, |p| calibration::paint_target(p, label, on, now));
-            if let Some(changed) = canvas.damage() {
-                presenter.show_part(overlay, self.targets[i], canvas.pixels(), TARGET_PX, TARGET_PX, changed);
-            }
+            let damage = canvas.damage();
+            let handle = self.targets[i];
+            self.targets_presented[i].hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(overlay, handle, canvas.pixels(), TARGET_PX, TARGET_PX, r));
         }
         if !self.shown {
             for h in [self.mirror, self.targets[0], self.targets[1]] {
@@ -866,6 +877,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let mut stick_take = actions::StickTake::default();
     let mut painter = painter();
     let mut presenter = Presenter::new(&steamvr);
+    // What of the dashboard tab's picture SteamVR has taken: its laser's events are taken only while its picture is current.
+    let mut tab_presented = crate::overlay::presented::Presented::default();
     if let Some(icon) = thumbnail() {
         presenter.show(&overlay, thumb, &icon, 128, 128);
     }
@@ -956,6 +969,9 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         }
         // Laser-pointer input: SteamVR's mouse coordinates start at the bottom left.
         while let Some(e) = overlay.poll_event(main) {
+            if !tab_presented.admits(e.event_type) {
+                continue;
+            }
             let at = |x: f32, y: f32| pos2(x, HEIGHT as f32 - y);
             match e.event_type {
                 vr::event::MOUSE_MOVE => {
@@ -1297,6 +1313,9 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         // booster paces them.
         let min_frame = booster::panel_pace();
         let due = next_frame.is_some_and(|f| f <= Instant::now()) && last_frame.is_none_or(|f| f.elapsed() >= min_frame);
+        if visible {
+            tab_presented.hand_over(None, std::time::Instant::now(), |r| presenter.show_part(&overlay, main, painter.pixels(), WIDTH, HEIGHT, r));
+        }
         if visible && due {
             last_frame = Some(Instant::now());
             orbiters_ui::anim::set_live(&ctx, !snap.settings.reduce_motion);
@@ -1316,9 +1335,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             let primitives = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
             // Only what changed is painted, and only that part sent; a frame like the last one costs no upload.
             painter.paint(&primitives, full.pixels_per_point, orbiters_ui::theme::INK_950);
-            if let Some(changed) = painter.damage() {
-                presenter.show_part(&overlay, main, painter.pixels(), WIDTH, HEIGHT, changed);
-            }
+            let damage = painter.damage();
+            tab_presented.hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(&overlay, main, painter.pixels(), WIDTH, HEIGHT, r));
             painter.free_textures(&mut full.textures_delta);
             // egui says when the next frame is due (animations, springs; `Duration::MAX`: nothing to repaint). A
             // calibration under way shows its progress on whichever tab is up.

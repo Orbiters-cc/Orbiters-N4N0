@@ -380,7 +380,13 @@ impl Floating {
                     strip: strip.map(|q| (watch_hand, q)),
                     prompt,
                 };
-                let outcome = self.input.step(&head, hands, &targets);
+                let mut outcome = self.input.step(&head, hands, &targets);
+                withhold(&mut outcome, Current {
+                    bar: self.panel.bar_current(),
+                    watch: self.watch.current(),
+                    strip: self.strip.as_ref().is_none_or(|s| s.current()),
+                    prompt: self.prompt.as_ref().is_none_or(|p| p.current()),
+                });
                 self.lasers_for(cx.overlay, cx.presenter, &outcome, &hands, &devices, &head, &targets);
                 outcome
             }
@@ -589,9 +595,76 @@ pub fn notice_release(down: &mut Option<u64>, shown: Option<u64>, pulled: bool, 
     on.then_some(id)
 }
 
+/// Which of the floating pieces show a picture of their current layout ([`crate::overlay::presented::Presented::current`]).
+#[derive(Clone, Copy, Debug)]
+struct Current {
+    bar: bool,
+    watch: bool,
+    strip: bool,
+    prompt: bool,
+}
+
+/// Takes out of a turn's outcome the pointing and pressing on a piece whose picture SteamVR has not taken yet (verify2: its
+/// controls are the new picture's, what shows is the old one). The panel itself takes its egui events through the same rule.
+fn withhold(outcome: &mut Outcome, current: Current) {
+    if !current.bar {
+        outcome.bar_hover = None;
+        outcome.bar_press = None;
+    }
+    if !current.watch {
+        outcome.watch_hover = false;
+        outcome.watch_press = false;
+    }
+    if !current.strip {
+        outcome.strip_hover = None;
+        outcome.strip_press = None;
+    }
+    if !current.prompt {
+        outcome.prompt_hover = false;
+        outcome.prompt_press = false;
+        outcome.prompt_at = None;
+        outcome.prompt_release = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// verify2: the bar, the watch, the strip and the band are neither pointed at nor pressed while their picture is not the
+    /// current one; each piece on its own, the others untouched.
+    #[test]
+    fn a_floating_piece_behind_its_picture_is_not_pressed() {
+        let all = Outcome {
+            bar_hover: Some([0.5, 0.5]),
+            bar_press: Some([0.5, 0.5]),
+            watch_hover: true,
+            watch_press: true,
+            strip_hover: Some([0.5, 0.5]),
+            strip_press: Some([0.5, 0.5]),
+            prompt_hover: true,
+            prompt_press: true,
+            prompt_at: Some([0.5, 0.5]),
+            prompt_release: Some([0.5, 0.5]),
+            ..Default::default()
+        };
+        let every = Current { bar: true, watch: true, strip: true, prompt: true };
+        let mut kept = all;
+        withhold(&mut kept, every);
+        assert_eq!(kept, all, "all current: nothing withheld");
+        let mut o = all;
+        withhold(&mut o, Current { bar: false, ..every });
+        assert!(o.bar_hover.is_none() && o.bar_press.is_none() && o.watch_press && o.prompt_press);
+        let mut o = all;
+        withhold(&mut o, Current { watch: false, ..every });
+        assert!(!o.watch_hover && !o.watch_press && o.bar_press.is_some());
+        let mut o = all;
+        withhold(&mut o, Current { strip: false, ..every });
+        assert!(o.strip_hover.is_none() && o.strip_press.is_none() && o.watch_press);
+        let mut o = all;
+        withhold(&mut o, Current { prompt: false, ..every });
+        assert!(!o.prompt_hover && !o.prompt_press && o.prompt_at.is_none() && o.prompt_release.is_none() && o.strip_press.is_some());
+    }
 
     /// Every kind of offer on the band in turn (night4/window and explorer-app together): one at a time in the band's
     /// order, each under an id of its own, Keep open counted only while it shows, the world notice only when the band is

@@ -151,6 +151,7 @@ pub struct Worlds {
     live_turns: bool,
     chip: vr::OverlayHandle,
     chip_canvas: Canvas,
+    chip_presented: crate::overlay::presented::Presented,
     chip_shown: bool,
     chip_hover: bool,
     chip_pressed: bool,
@@ -159,6 +160,7 @@ pub struct Worlds {
     chip_placed: Option<Matrix34>,
     bar: vr::OverlayHandle,
     bar_canvas: Canvas,
+    bar_presented: crate::overlay::presented::Presented,
     bar_shown: bool,
     bar_hover: Option<Target>,
     bar_pressed: Option<Target>,
@@ -365,6 +367,7 @@ impl Worlds {
             live_turns: true,
             chip,
             chip_canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]),
+            chip_presented: Default::default(),
             chip_shown: false,
             chip_hover: false,
             chip_pressed: false,
@@ -372,6 +375,7 @@ impl Worlds {
             chip_placed: None,
             bar,
             bar_canvas: Canvas::new(BAR_PX[0], BAR_PX[1]),
+            bar_presented: Default::default(),
             bar_shown: false,
             bar_hover: None,
             bar_pressed: None,
@@ -479,6 +483,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             live_turns: true,
             chip: 0,
             chip_canvas: Canvas::new(1, 1),
+            chip_presented: Default::default(),
             chip_shown: false,
             chip_hover: false,
             chip_pressed: false,
@@ -486,6 +491,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             chip_placed: None,
             bar: 0,
             bar_canvas: Canvas::new(1, 1),
+            bar_presented: Default::default(),
             bar_shown: false,
             bar_hover: None,
             bar_pressed: None,
@@ -1316,7 +1322,8 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         if let Some(chip) = self.hide_chip.as_mut() {
             chip.update(overlay, presenter, wanted.map(|(place, pointed, _)| (place, pointed)));
         }
-        if wanted.is_some_and(|(_, _, pressed)| pressed) {
+        // Not pressed while SteamVR shows an older picture of it.
+        if wanted.is_some_and(|(_, _, pressed)| self.hide_chip.as_ref().is_some_and(|c| c.press(pressed))) {
             self.deferred.push(Action::Hide);
         }
     }
@@ -1446,6 +1453,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             chip.set_lit(lit);
             chip.update(overlay, presenter, wanted.map(|(place, pointed, _)| (place, pointed)));
         }
+        let pressed = self.shared.chip.as_ref().is_some_and(|c| c.press(pressed));
         if let (true, Some((_, key)), Some(s)) = (pressed, own, small) {
             let capture = self.current.as_ref().map_or(0, |e| e.id);
             let ms = crate::wake_offer::now_ms();
@@ -1787,8 +1795,9 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     fn update_chip(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, menu_at: Option<&Matrix34>) -> (bool, bool) {
         let show = menu_at.is_some() && !self.open && self.current.is_none();
         let (mut opened, mut clicked) = (false, false);
+        self.chip_presented.hand_over(None, std::time::Instant::now(), |r| presenter.show_part(overlay, self.chip, self.chip_canvas.pixels(), CHIP_PX[0], CHIP_PX[1], r));
         while let Some(e) = overlay.poll_event(self.chip) {
-            if !show {
+            if !show || !self.chip_presented.admits(e.event_type) {
                 continue;
             }
             match e.event_type {
@@ -1833,9 +1842,8 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             let time = self.time();
             let (hover, pressed) = look;
             self.chip_canvas.paint(time, |p| panel::draw_chip(p, &Status::default(), None, hover, pressed, time));
-            if let Some(changed) = self.chip_canvas.damage() {
-                presenter.show_part(overlay, self.chip, self.chip_canvas.pixels(), CHIP_PX[0], CHIP_PX[1], changed);
-            }
+            let damage = self.chip_canvas.damage();
+            self.chip_presented.hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(overlay, self.chip, self.chip_canvas.pixels(), CHIP_PX[0], CHIP_PX[1], r));
         }
         if !self.chip_shown {
             let _ = overlay.show(self.chip);
@@ -1848,8 +1856,9 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     fn update_bar(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, menu_at: Option<&Matrix34>) -> (bool, bool) {
         let show = menu_at.is_some() && self.current.is_some();
         let mut clicked = false;
+        self.bar_presented.hand_over(None, std::time::Instant::now(), |r| presenter.show_part(overlay, self.bar, self.bar_canvas.pixels(), BAR_PX[0], BAR_PX[1], r));
         while let Some(e) = overlay.poll_event(self.bar) {
-            if !show {
+            if !show || !self.bar_presented.admits(e.event_type) {
                 continue;
             }
             match e.event_type {
@@ -1915,9 +1924,8 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             let name = self.current.as_ref().map(|e| e.name.clone());
             let (hover, pressed) = (self.bar_hover, self.bar_pressed);
             self.bar_canvas.paint(time, |p| panel::draw_bar(p, &status, name.as_deref(), hover, pressed, time));
-            if let Some(changed) = self.bar_canvas.damage() {
-                presenter.show_part(overlay, self.bar, self.bar_canvas.pixels(), BAR_PX[0], BAR_PX[1], changed);
-            }
+            let damage = self.bar_canvas.damage();
+            self.bar_presented.hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(overlay, self.bar, self.bar_canvas.pixels(), BAR_PX[0], BAR_PX[1], r));
         }
         if !self.bar_shown {
             let _ = overlay.show(self.bar);

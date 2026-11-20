@@ -59,6 +59,7 @@ const PAD: f32 = 10.0;
 pub struct Strip {
     handle: vr::OverlayHandle,
     canvas: Canvas,
+    presented: crate::overlay::presented::Presented,
     /// The controller it is on, and where on it SteamVR was last told.
     on: Option<(u32, Matrix34)>,
     visible: bool,
@@ -73,7 +74,7 @@ impl Strip {
         let _ = overlay.set_width_in_meters(handle, WIDTH_M);
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, SORT_ORDER);
-        Ok(Self { handle, canvas: Canvas::new(PX[0], PX[1]), on: None, visible: false, drawn: None, noted: None })
+        Ok(Self { handle, canvas: Canvas::new(PX[0], PX[1]), presented: Default::default(), on: None, visible: false, drawn: None, noted: None })
     }
 
     pub fn destroy(&self, overlay: &vr::Overlay) {
@@ -115,6 +116,7 @@ impl Strip {
         if !self.visible {
             return;
         }
+        self.presented.hand_over(None, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX[0], PX[1], r));
         let noted = self.noted.filter(|(_, at)| now.duration_since(*at) < NOTED).map(|(k, _)| k);
         let look = (hover, noted, orbiters_i18n::language());
         if self.drawn == Some(look) {
@@ -124,10 +126,13 @@ impl Strip {
             self.canvas.paint(0.0, |p| paint(p, hover, noted));
         }
         let changed = if self.drawn.is_none() { Some([0, 0, PX[0], PX[1]]) } else { self.canvas.damage() };
-        if let Some(changed) = changed {
-            presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX[0], PX[1], changed);
-        }
+        self.presented.hand_over(changed, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX[0], PX[1], r));
         self.drawn = Some(look);
+    }
+
+    /// The strip's picture that shows is of its current rows (they may be pressed).
+    pub fn current(&self) -> bool {
+        self.presented.current()
     }
 }
 

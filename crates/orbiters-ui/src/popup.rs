@@ -189,6 +189,22 @@ pub fn list_from(ctx: &egui::Context, id: Id, anchor: Rect, pressed: bool, items
     list(ctx, id, anchor, items, selected, width, false)
 }
 
+/// How wide a list of `items` must be for every row to show whole: its icon or dot, its label (as bold as a chosen one), its detail and the tick of a chosen
+/// row, with the row's and the list's margins ([`list`]).
+pub fn list_width(ui: &Ui, items: &[Item<'_>]) -> f32 {
+    let lead = if items.iter().any(|i| i.glyph.is_some() || i.dot.is_some()) { 26.0 } else { 0.0 };
+    items
+        .iter()
+        .map(|i| {
+            let label = widgets::text_size(ui, &Txt::new(i.label, 13.0).weight(weight::SEMIBOLD)).x;
+            let detail = i.detail.map_or(0.0, |d| widgets::text_size(ui, &Txt::new(d, 11.5)).x + 10.0);
+            // The row's left margin and lead, a gap between label and detail, the tick's column and the right margin.
+            2.0 * PAD + 10.0 + lead + label + 12.0 + detail + 22.0 + 10.0
+        })
+        .fold(0.0, f32::max)
+        .ceil()
+}
+
 fn menu_width(ui: &Ui, items: &[Item<'_>]) -> f32 {
     let label = items.iter().map(|i| widgets::text_size(ui, &Txt::new(i.label, 13.0)).x).fold(0.0, f32::max);
     let detail = items.iter().filter_map(|i| i.detail).map(|d| widgets::text_size(ui, &Txt::new(d, 11.5)).x + 10.0).fold(0.0, f32::max);
@@ -348,6 +364,49 @@ mod tests {
         let mut out = Vec::new();
         shapes.iter().for_each(|s| walk(&s.shape, &mut out));
         out
+    }
+
+    /// Request16 1: the status list in French cut "Rejoins-moi" and "Demande-moi" to an ellipsis at its fixed width. A list [`list_width`] wide shows every
+    /// row whole: no label or detail is cut.
+    #[test]
+    fn a_list_as_wide_as_its_rows_cuts_none() {
+        let ctx = egui::Context::default();
+        crate::install(&ctx);
+        let id = Id::unique("a-wide-list");
+        let rows = [
+            ("Rejoins-moi", "Tes amis te rejoignent sans demander"),
+            ("En ligne", "Tes amis peuvent te rejoindre"),
+            ("Demande-moi", "Tes amis demandent avant de venir"),
+            ("Occupé", "Ni invitations ni demandes"),
+        ];
+        let items: Vec<Item> = rows.into_iter().map(|(l, d)| Item::new(l).detail(d).dot(theme::ACCENT)).collect();
+        let anchor = Rect::from_min_size(pos2(40.0, 40.0), vec2(110.0, 28.0));
+        let mut cut = Vec::new();
+        let mut texts = 0;
+        for f in 0..120 {
+            let input = egui::RawInput { time: Some(f as f64 / 60.0), screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 600.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                let width = list_width(ui, &items);
+                list_from(ui.ctx(), id, anchor, f == 1, &items, Some(2), width);
+            });
+            out.textures_delta.clear();
+            fn walk(shape: &Shape, cut: &mut Vec<String>, texts: &mut usize) {
+                match shape {
+                    Shape::Text(t) => {
+                        *texts += 1;
+                        if t.galley.elided {
+                            cut.push(t.galley.text().to_string());
+                        }
+                    }
+                    Shape::Vec(v) => v.iter().for_each(|s| walk(s, cut, texts)),
+                    _ => {}
+                }
+            }
+            (cut, texts) = (Vec::new(), 0);
+            out.shapes.iter().for_each(|s| walk(&s.shape, &mut cut, &mut texts));
+        }
+        assert!(texts >= 8, "the rows' texts are drawn ({texts})");
+        assert!(cut.is_empty(), "cut: {cut:?}");
     }
 
     /// Request16 1: a row with a dot shows it filled in its own colour once the list is open (it was an outline glyph in the row's grey).

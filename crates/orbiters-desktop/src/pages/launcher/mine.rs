@@ -404,7 +404,7 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
     let items = status_items();
     let selected = SETTABLE_STATUSES.iter().position(|s| *s == status);
     let pressed = widgets::activated(&status_resp);
-    if let Some(i) = popup::list_from(&ctx, status_list_id(), status_rect, pressed, &items, selected, 300.0) {
+    if let Some(i) = popup::list_from(&ctx, status_list_id(), status_rect, pressed, &items, selected, popup::list_width(ui, &items).max(300.0)) {
         let chosen = SETTABLE_STATUSES[i];
         if chosen != me.status {
             send(state, cx, clock, ProfileEdit::Status(chosen));

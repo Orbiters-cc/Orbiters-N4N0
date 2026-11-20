@@ -1385,3 +1385,22 @@ fn a_bio_is_never_saved_from_a_placeholder_profile() {
     let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
     assert_eq!(calls, ["GET /files?tag=icon&n=100", "GET /profile/usr_test?asSelf=true", "PUT /profile/usr_test"], "no PUT from the placeholder");
 }
+
+// --- REQUEST15 third pass, blocker 2: a list left on show after its account signed out accepts nothing ---
+
+#[test]
+fn after_a_sign_out_the_old_list_neither_keeps_a_dismissal_nor_opens_a_profile() {
+    let c = controller(Arc::new(Pretend::default()));
+    // A's list is on show, A's session is gone (signed out): the launcher has not looked again yet.
+    c.update(|s| {
+        s.launcher.source = Source::SignedIn { user_id: "usr_a".into(), name: String::new() };
+        s.launcher.boops = vec![orbiters_core::launcher::Boop { id: "not_boop_a".into(), from_id: A.into(), from_name: "Nova".into(), from_icon: String::new(), emoji: None, received_at: 1 }];
+        s.launcher.friends = vec![orbiters_core::launcher::Friend { id: A.into(), name: "Nova".into(), note: "A's private note".into(), ..Default::default() }];
+    });
+    let as_a = |action: Action| Action::As { account: "usr_a".into(), action: Box::new(action) };
+    c.launcher_do(as_a(Action::Dismiss { id: "not_boop_a".into() }));
+    assert_eq!(c.view().launcher.boops.len(), 1, "nothing of A's list changes");
+    assert!(c.launcher.lock().unwrap().dismissed.as_ref().is_none_or(|d| !d.contains_key("not_boop_a")), "no dismissal kept for 30 days");
+    c.launcher_do(as_a(Action::OpenProfile { id: A.into() }));
+    assert!(c.view().launcher.profile.is_none(), "A's note is not shown from the old row");
+}

@@ -1689,6 +1689,11 @@ impl Controller {
         if shown.is_some() && shown.as_deref() != account {
             return;
         }
+        // A signed-in list's dismissal is kept (30 days) only while that account is still the one signed in: a list left on
+        // show for a moment after a sign-out or a switch changes nothing (REQUEST15 third pass, blocker 2).
+        if shown.is_some() && !self.launcher_live(account) {
+            return;
+        }
         let was_invite = self.view().launcher.invites.iter().any(|i| i.id == id);
         if self.view().launcher.boops.iter().any(|b| b.id == id) {
             // VRChat lists a boop again at each full read: remembered here, so that it does not come back.
@@ -1708,6 +1713,12 @@ impl Controller {
                 let _ = send_as(&client, account, |c| c.hide_notification(id));
             }
         }
+    }
+
+    /// Whether `account` is the one signed in right now (the session, not the list on show).
+    fn launcher_live(&self, account: Option<&str>) -> bool {
+        let live = self.launcher_client().and_then(|c| c.lock().unwrap().signed_in_user_id().map(str::to_owned));
+        account.is_some() && live.as_deref() == account
     }
 
     fn launcher_send(&self, boop: bool, to: &str, emoji: Option<&str>, account: Option<&str>) -> Notice {
@@ -1766,6 +1777,11 @@ impl Controller {
                 _ => None,
             };
             if shown != account {
+                return;
+            }
+            // A signed-in list's profile opens only while its account is still signed in: nothing of the row (its note)
+            // is shown from a list whose session ended (REQUEST15 third pass, blocker 2).
+            if shown.is_some() && client_account.as_deref() != account {
                 return;
             }
             let Some(friend) = view.launcher.friend(id).cloned().or_else(|| view.launcher.me.clone().filter(|m| m.id == id)) else { return };

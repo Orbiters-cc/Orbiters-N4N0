@@ -66,10 +66,21 @@ pub enum QrSeen {
 /// A QR code seen but not read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum QrGlimpse {
-    /// Part of it is outside the camera's picture: nothing can read it until all of it is in.
-    Cut,
+    /// Part of it is outside the camera's picture: nothing can read it until all of it is in. The side it runs off, when known.
+    Cut(Option<QrSide>),
     /// All of it seems in the picture but it could not be read yet (small, blurred, at a steep angle).
     Unclear,
+}
+
+/// The side of the camera's picture a cut code runs off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum QrSide {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    /// Off two opposite sides: larger than the picture.
+    Around,
 }
 
 /// What a QR code scanner tells N4N0 ([`QrSeen`]); never called once the scan was dropped and its thread saw it.

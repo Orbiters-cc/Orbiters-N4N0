@@ -54,8 +54,10 @@ Get-ChildItem -LiteralPath $root -Directory | ForEach-Object {
         } catch { }
     }
 }
-RetryCleanup
+# Ready first: cleaning other, older sessions (a browser query each) is no reason for this page to wait (Request 18: about 1 s a closed page,
+# far more beside VRChat). The loop below cleans them.
 [IO.File]::WriteAllText((Join-Path $owned 'ready'),'')
+RetryCleanup
 while (!$owner.HasExited -and !(Test-Path -LiteralPath (Join-Path $owned 'done'))) {
     RetryCleanup
     Start-Sleep -Milliseconds 100

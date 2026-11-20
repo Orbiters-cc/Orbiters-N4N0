@@ -1,0 +1,1 @@
+# Request 18 (camera alignment, QR reading, the code's page): its texts live in files other areas cover; this area only holds their translations.

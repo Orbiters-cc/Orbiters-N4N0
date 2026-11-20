@@ -1321,6 +1321,65 @@ fn the_camera_s_qr_code_looks_around_the_camera_and_opens_no_page() {
     assert!(!person.panels.all().any(|p| p.zone == Zone::CameraScan), "the corners stayed");
 }
 
+/// Request 18 (Enzo: "the page linked by the QR code often takes a while to load"): while the camera looks for a code in a headset an engine is started
+/// ahead and the code's page opens in it; the same code read again keeps its page as it is; the camera no longer looking keeps no engine; on the desktop
+/// (pages open in the browser) none is started.
+#[test]
+fn an_engine_waits_while_the_camera_looks_and_the_same_code_keeps_its_page() {
+    use crate::controller::camera_tools::Qr;
+    let mut person = Person::new();
+    person.around = Some(Around::Camera);
+    let set = |person: &mut Person, change: &dyn Fn(&mut Snapshot)| {
+        let mut snap = (*person.snap).clone();
+        change(&mut snap);
+        person.snap = Arc::new(snap);
+    };
+    person.turns(2);
+    assert!(person.panels.web_spare.is_none(), "nothing looks: no engine");
+    set(&mut person, &|s| {
+        s.camera_open_said = Some(true);
+        s.camera_tools.qr = Qr::Looking;
+        s.camera_tools.qr_generation = 1;
+    });
+    person.turns(2);
+    assert!(person.panels.web_spare.is_some(), "an engine waits while the camera looks");
+    let link = "https://linktr.ee/someone";
+    set(&mut person, &|s| {
+        s.camera_tools.qr = Qr::Found { url: link.into() };
+        s.camera_tools.qr_generation = 2;
+    });
+    person.turns(2);
+    assert!(person.panels.web_spare.is_none(), "the page took it");
+    assert_eq!(person.panels.web.as_ref().map(|w| w.asked.as_str()), Some(link));
+    // The page as the person left it (here: named), then the same code read by a new scan: kept.
+    person.panels.web.as_mut().unwrap().title = "Someone's links".into();
+    set(&mut person, &|s| s.camera_tools.qr = Qr::Looking);
+    person.turns(2);
+    assert!(person.panels.web_spare.is_some(), "looking again: an engine waits again");
+    set(&mut person, &|s| {
+        s.camera_tools.qr = Qr::Found { url: link.into() };
+        s.camera_tools.qr_generation = 3;
+    });
+    person.turns(2);
+    assert_eq!(person.panels.web.as_ref().map(|w| w.title.as_str()), Some("Someone's links"), "the same link keeps its page");
+    // Another link opens anew.
+    set(&mut person, &|s| {
+        s.camera_tools.qr = Qr::Found { url: "https://orbiters.cc/w/another".into() };
+        s.camera_tools.qr_generation = 4;
+    });
+    person.turns(2);
+    assert_eq!(person.panels.web.as_ref().map(|w| (w.asked.as_str(), w.title.as_str())), Some(("https://orbiters.cc/w/another", "")));
+    // Off: no engine kept.
+    set(&mut person, &|s| s.camera_tools.qr = Qr::Off);
+    person.turns(2);
+    assert!(person.panels.web_spare.is_none());
+    // On the desktop a code's page opens in the browser: no engine is started for it.
+    person.panels.facts.desktop = true;
+    set(&mut person, &|s| s.camera_tools.qr = Qr::Looking);
+    person.turns(2);
+    assert!(person.panels.web_spare.is_none(), "no engine on the desktop");
+}
+
 /// Enzo (F17): a code found beside the camera opens its page over the camera, once for that scan, with its bar; closed, it does not come back for the same code;
 /// VRChat's camera closing takes it away.
 #[test]

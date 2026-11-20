@@ -630,7 +630,9 @@ const CAMERA_PAGE_STANDS: f32 = 1.4;
 /// The camera's column, and what it says under the camera, moved out by what the fit is unsure of beyond the 10 units its gap already allowed for it
 /// (camera-core's clearance is measured from that older gap). The scanning corners and the page stay on the camera.
 pub fn camera_column_out(places: &mut [Placed], clearance: f32, right: bool) {
-    let out = (clearance + 10.0 - zones::CAMERA_GAP).max(0.0) * if right { 1.0 } else { -1.0 };
+    // On the right, VRChat's arrow beyond its row of buttons reaches past its picture (Request 18): the column stands clear of it too.
+    let arrow = if right { (zones::VRCHAT_CAMERA_ROW[1] - zones::CAMERA_HALF[0] - zones::CAMERA_GAP + 8.0).max(0.0) } else { 0.0 };
+    let out = ((clearance + 10.0 - zones::CAMERA_GAP).max(0.0) + arrow) * if right { 1.0 } else { -1.0 };
     for placed in places.iter_mut().filter(|p| matches!(p.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraRecord | Zone::CameraQr | Zone::CameraCaption | Zone::CameraAct | Zone::CameraShare)) {
         placed.rect = placed.rect.translate(egui::vec2(out, 0.0));
     }
@@ -685,6 +687,40 @@ fn laser_on(quads: &[(Quad, Placed)], origin: V3, direction: V3) -> Option<(usiz
         }
     }
     best
+}
+
+/// How long the picture reader looks at VRChat's camera panel after it opened, to measure where it lies (Request 18). The tools show once it is measured,
+/// at once where an earlier opening measured it, and after this at the latest (the reckoning's own guess): never at a place known wrong for long.
+pub const MEASURE_FOR: Duration = Duration::from_millis(2500);
+/// How long it is read at most: a measure that comes after the tools showed at the guess still lays them right (once, while the panel lies where it
+/// opened).
+pub const LOOK_FOR: Duration = Duration::from_secs(8);
+
+/// One opening's measuring of the panel by the picture (Request 18).
+#[derive(Clone, Debug, Default)]
+pub struct Measuring {
+    /// When it opened, and VRChat's left wrist then (no measuring without it: the fit is from the wrist).
+    pub opened: Option<Instant>,
+    pub wrist: Option<Matrix34>,
+    /// Laid by a fit an earlier opening measured: shown at once.
+    pub kept: bool,
+    /// What each sighting so far measured, the last one taken, and whether two agreed.
+    pub seen: Vec<super::camera_reckon::Fit>,
+    pub last: Option<Instant>,
+    pub measured: bool,
+}
+
+impl Measuring {
+    /// Whether the picture is still to be read for it.
+    pub fn looking(&self) -> bool {
+        !self.measured && self.opened.is_none_or(|at| at.elapsed() < LOOK_FOR)
+    }
+
+    /// Whether the tools show: laid by a kept fit, measured now, waited [`MEASURE_FOR`], or the panel taken by a hand (no more measuring then), or
+    /// the picture cannot be read.
+    pub fn shown(&self, taken: bool, unreadable: bool) -> bool {
+        self.kept || self.measured || taken || unreadable || self.opened.is_some_and(|at| at.elapsed() >= MEASURE_FOR)
+    }
 }
 
 pub struct Cx<'a, 'o> {
@@ -941,8 +977,14 @@ impl OrbitVr {
             self.camera_grab_clicks = Some(clicks);
             if let (Some(head), Some(left)) = (head, hands[0]) {
                 let wrist = super::camera_reckon::left_wrist(Duration::from_millis(500));
-                let panel = self.camera_reckon.open(&head, &left, wrist.as_ref());
-                super::super::vr_log::line(&format!("camera reckon: opened by the left hand ({}), panel {panel:?}", if wrist.is_some() { "VRChat's wrist" } else { "controller" })); // i18n: not shown (diagnostics)
+                if !self.camera_fit_read {
+                    self.camera_fit_read = true;
+                    self.camera_fit = super::camera_reckon::Fit::load();
+                }
+                let fit = self.camera_fit.unwrap_or(super::camera_reckon::Fit::SANDBOX);
+                let panel = self.camera_reckon.open_fitted(&head, &left, wrist.as_ref(), &fit);
+                self.camera_measuring = Measuring { opened: Some(Instant::now()), wrist, kept: self.camera_fit.is_some() && wrist.is_some(), ..Default::default() };
+                super::super::vr_log::line(&format!("camera reckon: opened by the left hand ({}), {} {fit:?}, panel {panel:?}", if wrist.is_some() { "VRChat's wrist" } else { "controller" }, if self.camera_measuring.kept { "by the fit measured at an earlier opening" } else { "by the sandbox's fit, to be measured by the picture" })); // i18n: not shown (diagnostics)
             }
         }
         let held = self.camera_reckon.held_hand();
@@ -953,6 +995,7 @@ impl OrbitVr {
         let grips = self.camera_grips.step(pulls, self.camera_grab_clicks.unwrap_or([None; 2]), clicked);
         // As the tiles read them (`orbit_triggers`): `Actions::triggers` is only refreshed by the floating panel's input (sandbox m4: no press seen).
         let triggers = if input_read { actions.orbit_triggers(steamvr, self.block.blocked()) } else { [false; 2] };
+        self.camera_measure();
         let (frame, happened) = self.camera_reckon.step(hands, grips, triggers);
         if happened != Default::default() {
             super::super::vr_log::line(&format!("camera reckon: {happened:?}, grips {grips:?}, pulls {pulls:?}, triggers {triggers:?}, predicted {:.1} ms", prediction * 1000.0)); // i18n: not shown (diagnostics)
@@ -981,10 +1024,48 @@ impl OrbitVr {
             }
         }
         let frame = frame?;
+        // Not shown at a place not known yet (Request 18: shown at the sandbox's guess, the tools stood beside nothing of VRChat's).
+        let unreadable = self.camera_watch.as_ref().is_some_and(|watch| watch.problem().is_some());
+        if !self.camera_measuring.shown(self.camera_reckon.taken_since_open(), unreadable) {
+            return None;
+        }
+        let unit = self.camera_reckon.unit();
         self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
         self.camera_looks = self.camera_looks.max(CAMERA_LOOKS_TO_SHOW);
-        self.camera_measured_width = Some(PANEL_WIDTH_M);
-        Some(Plane { frame, unit: PANEL_WIDTH_M / camera_track::PANEL_SIZE[0] })
+        self.camera_measured_width = Some(unit * camera_track::PANEL_SIZE[0]);
+        let _ = PANEL_WIDTH_M;
+        Some(Plane { frame, unit })
+    }
+
+    /// While the panel lies where it opened, each new sighting with both eyes measures where VRChat laid it from its wrist; two that agree re-lay it there
+    /// and are kept for the next openings (Request 18).
+    fn camera_measure(&mut self) {
+        use super::camera_reckon::Fit;
+        let m = &self.camera_measuring;
+        let (Some(opened), Some(wrist), Some((at, seen, unit))) = (m.opened, m.wrist, self.camera_stereo_sighting) else { return };
+        if m.measured || at <= opened || m.last == Some(at) || self.camera_reckon.taken_since_open() || self.camera_reckon.held_hand().is_some() {
+            return;
+        }
+        self.camera_measuring.last = Some(at);
+        let Some(fit) = Fit::from_sighting(&wrist, &seen, unit * camera_track::PANEL_SIZE[0]) else {
+            super::super::vr_log::line(&format!("camera reckon: a sighting too far from any VRChat panel, left aside: {seen:?}")); // i18n: not shown (diagnostics)
+            return;
+        };
+        let Some(agreed) = self.camera_measuring.seen.iter().find(|f| f.agrees(&fit)).map(|f| f.mean(&fit)) else {
+            self.camera_measuring.seen.push(fit);
+            return;
+        };
+        let laid = self.camera_reckon.lying();
+        if self.camera_reckon.reanchor(seen, agreed.width_m) {
+            let off = laid.map(|laid| {
+                let back = super::camera_reckon::undone(&laid);
+                std::array::from_fn::<f32, 3, _>(|i| (back.m[i][0] * seen.m[0][3] + back.m[i][1] * seen.m[1][3] + back.m[i][2] * seen.m[2][3] + back.m[i][3]) * 1000.0)
+            });
+            super::super::vr_log::line(&format!("camera reckon: measured by the picture at this opening: {off:?} mm from where it was laid (its right, up, towards the eyes), {:.3} m wide (the sandbox's {:.3}); kept for the next openings: {agreed:?}", agreed.width_m, super::camera_reckon::PANEL_WIDTH_M)); // i18n: not shown (diagnostics)
+            self.camera_measuring.measured = true;
+            self.camera_fit = Some(agreed);
+            agreed.save();
+        }
     }
 
     /// Where VRChat's camera panel is now, while it is being watched and was seen.
@@ -1107,6 +1188,9 @@ impl OrbitVr {
                 self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
                 self.camera_seen = Some(now);
                 self.camera_sighting = Some((seen.at, frame));
+                if accepted.width_from == camera_track::WidthFrom::Stereo {
+                    self.camera_stereo_sighting = Some((seen.at, frame, unit));
+                }
 
                 if self.camera_stereo_recent() {
                     if let Some(hand)=self.camera_follow.observe_grab(frame,unit,captured_hands,observed_grips) {
@@ -1495,6 +1579,12 @@ pub struct OrbitVr {
     camera_reckon_logged: super::super::vr_log::Every,
     /// The last panel the picture reader placed, and when: in the sandbox, what the reckoning is checked against.
     camera_sighting: Option<(Instant, Matrix34)>,
+    /// The last one placed with both eyes (its width measured): when, where and its unit. What measures the panel at an opening (Request 18).
+    camera_stereo_sighting: Option<(Instant, Matrix34, f32)>,
+    /// What the picture measured of VRChat's panel at an earlier opening (read once from its file), and this opening's measuring.
+    camera_fit: Option<super::camera_reckon::Fit>,
+    camera_fit_read: bool,
+    camera_measuring: Measuring,
     camera_epoch: Instant,
     camera_side: camera_track::Side,
     hole_logged: super::super::vr_log::Every,
@@ -1589,6 +1679,10 @@ impl OrbitVr {
             camera_grips: Default::default(),
             camera_reckon_logged: Default::default(),
             camera_sighting: None,
+            camera_stereo_sighting: None,
+            camera_fit: None,
+            camera_fit_read: false,
+            camera_measuring: Measuring::default(),
             camera_epoch: now,
             camera_side: Default::default(),
             hole_logged: Default::default(),
@@ -1813,7 +1907,13 @@ impl OrbitVr {
         // The picture is read only when the person turned that on; in the sandbox it is read anyway, as the ground truth the reckoning is
         // measured against (camera-truth.jsonl), and the reckoning still places the tools.
         let camera_sandbox = cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some();
-        let camera_read = camera_wanted && (settings.camera_pattern || camera_sandbox);
+        if !camera_wanted || camera_just_opened {
+            self.camera_measuring = Measuring::default();
+            self.camera_stereo_sighting = None;
+        }
+        // At each opening the picture is read a moment, to measure where VRChat laid its panel (Request 18).
+        let camera_measure = camera_wanted && !settings.camera_pattern && self.camera_measuring.looking();
+        let camera_read = camera_wanted && (settings.camera_pattern || camera_sandbox || camera_measure);
         self.camera_retired.retain_mut(|watch| {
             if watch.finished() { watch.finish(); false } else { true }
         });
@@ -1850,8 +1950,13 @@ impl OrbitVr {
         let camera_plane = if settings.camera_pattern {
             self.camera_turn(cx.steamvr, &*cx.actions, cx.input_read, cx.prediction, now, dt, false)
         } else {
-            if camera_sandbox {
+            if camera_sandbox || camera_measure {
+                // Read for its sightings only: the side and the gap of the tools stay the reckoning's.
+                let (side, clearance) = (self.camera_side, self.camera_clearance);
                 let _ = self.camera_turn(cx.steamvr, &*cx.actions, cx.input_read, cx.prediction, now, dt, true);
+                if !camera_sandbox {
+                    (self.camera_side, self.camera_clearance) = (side, clearance);
+                }
             }
             self.camera_reckon_turn(cx.steamvr, &*cx.actions, cx.input_read, cx.prediction, camera_wanted, camera_sandbox)
         };
@@ -3211,6 +3316,67 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Request 18: however large VRChat's panel is in the room (it opens as large as the avatar worn against its person makes it: measured 0.22 to 0.36 m
+    /// here) and however it is held, the camera's tools lie in its plane beside it, scaled with it, and none covers its picture or its row of buttons
+    /// (Take Photo, Timed, Camera Mode... and its arrow), on either side.
+    #[test]
+    fn the_camera_tools_stand_beside_the_panel_at_every_size() {
+        let picture = egui::Rect::from_min_max(egui::pos2(-zones::CAMERA_HALF[0], -zones::CAMERA_HALF[1]), egui::pos2(zones::CAMERA_HALF[0], zones::CAMERA_HALF[1]));
+        let held = [
+            ("upright", [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.2, -0.4]),
+            ("flat", [1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, -0.4]),
+            ("tilted back", [1.0, 0.0, 0.0], [0.0, 0.6, -0.8], [0.0, 1.1, -0.4]),
+            ("rolled", [0.94, 0.34, 0.0], [-0.34, 0.94, 0.0], [0.3, 1.2, -0.4]),
+            ("as Enzo opened it", [0.9633582, -0.0, 0.26821783], [0.18101123, 0.7379398, -0.6501382], [-1.0868047, 0.8105331, -0.49716535]),
+        ];
+        for width in [0.22, 0.26, super::super::camera_reckon::PANEL_WIDTH_M, 0.32, 0.36] {
+            let unit = width / camera_track::PANEL_SIZE[0];
+            for (name, x, y, at) in held {
+                let plane = Plane { frame: space::from_axes(x, y, space::cross(x, y), at), unit };
+                let back = space::inverse(&plane.frame);
+                for right in [false, true] {
+                    // VRChat's row of buttons under its picture and its arrow beyond it on the right, whichever side our tools are on.
+                    let row = egui::Rect::from_min_max(egui::pos2(-zones::VRCHAT_CAMERA_ROW[0], zones::CAMERA_HALF[1]), egui::pos2(zones::VRCHAT_CAMERA_ROW[1], zones::VRCHAT_CAMERA_ROW[2]));
+                    let mut places: Vec<Placed> = Zone::CAMERA.iter().map(|z| zones::in_units(*z)).map(|p| if right { p.mirrored() } else { p }).collect();
+                    camera_column_out(&mut places, 10.0, right);
+                    for placed in places.iter().filter(|p| !matches!(p.zone, Zone::CameraScan | Zone::CameraWeb | Zone::CameraWebBar | Zone::CameraChooser | Zone::CameraShareDesk)) {
+                        let quad = plane.camera_quad(placed);
+                        assert!((quad.width - placed.rect.width() * unit).abs() < 1e-6 && (quad.height - placed.rect.height() * unit).abs() < 1e-6, "{name}: scales with the panel");
+                        let corners: Vec<egui::Pos2> = [(-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)]
+                            .into_iter()
+                            .map(|(u, v)| {
+                                let local = space::apply(&back, space::apply(&quad.transform, [u * quad.width, v * quad.height, 0.0]));
+                                assert!(local[2].abs() < 1e-4, "{name}: {:?} out of the panel's plane", placed.zone);
+                                egui::pos2(local[0] / unit, -local[1] / unit)
+                            })
+                            .collect();
+                        let r = egui::Rect::from_points(&corners).shrink(0.01);
+                        assert!(!r.intersects(picture), "{name}, {width} m, right {right}: {:?} covers the picture ({r:?})", placed.zone);
+                        assert!(!r.intersects(row), "{name}, {width} m, right {right}: {:?} covers VRChat's row of buttons ({r:?})", placed.zone);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Request 18: the tools show only where the panel is known: laid by a fit measured at an earlier opening (at once), measured now, or after
+    /// [`MEASURE_FOR`] at the latest; a hand taking the panel ends the measuring.
+    #[test]
+    fn the_camera_tools_wait_for_the_panel_to_be_measured() {
+        let now = Instant::now();
+        let fresh = Measuring { opened: Some(now), wrist: Some(space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0])), ..Default::default() };
+        assert!(fresh.looking() && !fresh.shown(false, false), "not shown at a guess");
+        assert!(fresh.shown(true, false), "taken by a hand: shown where it goes");
+        assert!(fresh.shown(false, true), "the picture cannot be read: shown at the guess");
+        assert!(Measuring { kept: true, ..fresh.clone() }.shown(false, false), "a fit kept from an earlier opening: at once");
+        let measured = Measuring { measured: true, ..fresh.clone() };
+        assert!(measured.shown(false, false) && !measured.looking());
+        let waited = Measuring { opened: now.checked_sub(MEASURE_FOR), ..fresh.clone() };
+        assert!(waited.shown(false, false) && waited.looking(), "shown at the guess, still read to lay it right");
+        let done = Measuring { opened: now.checked_sub(LOOK_FOR), ..fresh };
+        assert!(!done.looking(), "the picture is read a few seconds at most");
     }
 
     /// Enzo (F17): the page a code opened lies over the camera's top edge and never in front of the camera: in its plane over a camera held upright, stood up over

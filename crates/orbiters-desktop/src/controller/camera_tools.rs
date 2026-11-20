@@ -204,13 +204,13 @@ mod tests {
     fn a_glimpsed_code_is_said_until_it_is_read_or_gone() {
         use orbiters_n4n0::{QrGlimpse, QrSeen};
         let mut state = Qr::Looking;
-        scan_event(&mut state, QrSeen::Glimpse(Some(QrGlimpse::Cut)));
-        assert_eq!(state, Qr::Seen(QrGlimpse::Cut));
+        scan_event(&mut state, QrSeen::Glimpse(Some(QrGlimpse::Cut(None))));
+        assert_eq!(state, Qr::Seen(QrGlimpse::Cut(None)));
         scan_event(&mut state, QrSeen::Glimpse(Some(QrGlimpse::Unclear)));
         assert_eq!(state, Qr::Seen(QrGlimpse::Unclear));
         scan_event(&mut state, QrSeen::Glimpse(None));
         assert_eq!(state, Qr::Looking);
-        scan_event(&mut state, QrSeen::Glimpse(Some(QrGlimpse::Cut)));
+        scan_event(&mut state, QrSeen::Glimpse(Some(QrGlimpse::Cut(None))));
         scan_event(&mut state, QrSeen::Code("https://vrcidlinker.com/".into()));
         assert_eq!(state, Qr::Found { url: "https://vrcidlinker.com/".into() });
         scan_event(&mut state, QrSeen::Glimpse(Some(QrGlimpse::Unclear)));

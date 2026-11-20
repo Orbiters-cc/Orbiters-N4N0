@@ -8,6 +8,15 @@
 //! Never without an end (K-qr-page, 2026-11-15: Enzo's first page stayed on "Opening the page..." for good): the page shows as soon as there is a picture of
 //! it; with none after [`SLOW_AFTER`] it says so, with Try again beside Open in browser and the close; a failure says so with the same ways out. What the
 //! engine did is noted in `vr-test.log` ("camera page: ...").
+//!
+//! Fast (Request 18, Enzo: "the page linked by the QR code often takes a while to load, drastically optimize that"). His log of 2026-11-20 had 9 to 12 s
+//! between a code read and its page's navigation, one page 30 s and then "Operation aborted": the engine (a private profile with its cleaning watcher, a
+//! browser, a page) was started only once a code was read, and that start was not even in the times noted. Now:
+//! - an engine is started ahead ([`Spare`]) while the camera looks for a code, and a code's link goes to it the turn it is read;
+//! - the page shows from its first paint (its document committed), not from its content read or its load;
+//! - the same link read again while its page is open keeps that page, and one closed lately shows its last picture at once (not pressable) while its
+//!   page opens anew;
+//! - the time from the code read to the first picture is noted, and whether the engine was ready, started ahead or started then.
 
 use super::panels::{web_host, WebPage, WebState};
 use egui::{ColorImage, Pos2, Vec2};
@@ -22,10 +31,78 @@ pub const SLOW_AFTER: std::time::Duration = std::time::Duration::from_secs(12);
 const GLIDE_FROM: f32 = 400.0;
 const GLIDE_EASE: f32 = 5.0;
 
+/// A page's picture is remembered this long after its page closed: the same code read again shows it at once.
+pub const REMEMBERED_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// An engine started ahead of a link while the camera looks for a code (Request 18): a code read goes to it at once. One at a time; one that failed is
+/// started again at most every [`SPARE_AGAIN_AFTER`].
+pub struct Spare {
+    #[cfg(all(windows, not(test)))]
+    page: orbiters_web::WebPage,
+    started: std::time::Instant,
+}
+
+/// How long after a spare engine was started another may be (one that failed, or was used).
+pub const SPARE_AGAIN_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl Spare {
+    /// An engine started now, with no page; none where there is no engine (macOS).
+    pub fn start() -> Option<Self> {
+        #[cfg(all(windows, not(test)))]
+        {
+            match orbiters_web::WebPage::new(PAGE_PX[0], PAGE_PX[1]) {
+                Ok(page) => {
+                    super::super::vr_log::line("camera page: an engine is started ahead, for the code the camera looks for"); // i18n: not shown (a log's line)
+                    Some(Self { page, started: std::time::Instant::now() })
+                }
+                Err(e) => {
+                    super::super::vr_log::line(&format!("camera page: no engine could be started ahead: {e:#}")); // i18n: not shown (a log's line)
+                    None
+                }
+            }
+        }
+        // Tests drive what shows with no browser of their own.
+        #[cfg(test)]
+        {
+            Some(Self { started: std::time::Instant::now() })
+        }
+        #[cfg(all(not(windows), not(test)))]
+        {
+            None
+        }
+    }
+
+    /// Whether its engine failed or closed: no use for a link.
+    pub fn failed(&mut self) -> bool {
+        #[cfg(all(windows, not(test)))]
+        {
+            return self.page.poll().is_some_and(|(state, _, _)| matches!(state.load, orbiters_web::Load::Failed(_) | orbiters_web::Load::Closed));
+        }
+        #[allow(unreachable_code)]
+        false
+    }
+
+    /// How it stands, for the log: ready, or started this long ago.
+    fn standing(&self) -> String {
+        #[cfg(all(windows, not(test)))]
+        if self.page.ready() {
+            return format!("an engine started ahead and ready ({} ms before)", self.started.elapsed().as_millis()); // i18n: not shown (a log's line)
+        }
+        format!("an engine started ahead {} ms before, still starting", self.started.elapsed().as_millis()) // i18n: not shown (a log's line)
+    }
+}
+
 /// One page, opened from one code.
 pub struct CameraWeb {
     #[cfg(windows)]
     page: Option<orbiters_web::WebPage>,
+    /// The link the code held, as read (what a code read again is compared with; [`CameraWeb::url`] follows redirects).
+    pub asked: String,
+    /// What opened it, for the log: an engine started ahead, or one started for it.
+    engine: String,
+    /// A live picture of the page came; and whether what shows is a picture remembered from the last time it was open (not pressable).
+    live: bool,
+    remembered: bool,
     pub url: String,
     pub title: String,
     pub state: WebState,
@@ -59,20 +136,41 @@ pub enum Input {
 }
 
 impl CameraWeb {
-    /// Opens `url` in a page of its own.
+    /// Opens `url` in a page of its own, with an engine started for it.
     pub fn open(url: &str) -> Self {
+        Self::open_with(url, None, None)
+    }
+
+    /// Opens `url` in `spare`'s engine when there is one (started ahead: Request 18), else in one started now; showing `remembered` (the last
+    /// picture of the same link's page, closed lately) until a live picture comes.
+    pub fn open_with(url: &str, spare: Option<Spare>, remembered: Option<ColorImage>) -> Self {
         // Changed only where an engine opens (Windows, outside tests).
         #[allow(unused_mut)]
         let mut web = Self::idle(url);
+        web.engine = spare.as_ref().map_or_else(|| "an engine started for it".to_string(), Spare::standing); // i18n: not shown (a log's line)
+        if let Some(picture) = remembered {
+            web.frame = Some(picture);
+            web.fresh = true;
+            web.remembered = true;
+        }
+        super::super::vr_log::line(&format!("camera page: {} read, opening it in {}{}", web_host(url), web.engine, if web.frame.is_some() { ", its last picture shown meanwhile" } else { "" })); // i18n: not shown (a log's line)
         // Tests drive what shows around it, with no browser of their own (camera-web proves the engine).
         #[cfg(all(windows, not(test)))]
-        match orbiters_web::WebPage::new(PAGE_PX[0], PAGE_PX[1]).and_then(|page| page.navigate(url).map(|_| page)) {
-            Ok(page) => web.page = Some(page),
-            Err(e) => {
-                super::super::vr_log::line(&format!("camera page: could not open: {e:#}")); // i18n: not shown (a log's line)
-                web.state = WebState::Failed(e.to_string());
+        {
+            let page = match spare {
+                Some(spare) => Ok(spare.page),
+                None => orbiters_web::WebPage::new(PAGE_PX[0], PAGE_PX[1]),
+            };
+            match page.and_then(|page| page.navigate(url).map(|_| page)) {
+                Ok(page) => web.page = Some(page),
+                Err(e) => {
+                    super::super::vr_log::line(&format!("camera page: could not open: {e:#}")); // i18n: not shown (a log's line)
+                    web.state = WebState::Failed(e.to_string());
+                }
             }
         }
+        #[cfg(test)]
+        let _ = spare;
         #[cfg(not(windows))]
         {
             web.state = WebState::Failed(String::new());
@@ -80,11 +178,25 @@ impl CameraWeb {
         web
     }
 
+    /// Its last live picture and the link it was opened for, to show at once if the same code is read again ([`REMEMBERED_FOR`]).
+    pub fn last_picture(&self) -> Option<(String, ColorImage)> {
+        self.frame.as_ref().filter(|_| self.live).map(|f| (self.asked.clone(), f.clone()))
+    }
+
+    /// Whether it failed (a link read again opens it anew then).
+    pub fn failed(&self) -> bool {
+        matches!(self.state, WebState::Failed(_))
+    }
+
     /// A page with no engine yet: what [`CameraWeb::open`] starts from (and tests drive).
     pub(super) fn idle(url: &str) -> Self {
         Self {
             #[cfg(windows)]
             page: None,
+            asked: url.to_string(),
+            engine: String::new(),
+            live: false,
+            remembered: false,
             url: url.to_string(),
             title: String::new(),
             state: WebState::Loading,
@@ -126,7 +238,9 @@ impl CameraWeb {
         if let Some((state, frame, fresh)) = self.page.as_mut().and_then(|page| page.poll()) {
             self.busy = state.load == orbiters_web::Load::Loading;
             let load = match state.load {
-                orbiters_web::Load::Loading => WebState::Loading,
+                // Still loading: what `settle` made of it stands (Slow said once, not undone and said again each turn: his log
+                // of 2026-11-20 had "no picture ... after 12 s" 1,589 times, and every turn repainted the page's parts).
+                orbiters_web::Load::Loading => loading(&self.state),
                 orbiters_web::Load::Loaded => WebState::Shown,
                 orbiters_web::Load::Failed(why) => {
                     if !matches!(self.state, WebState::Failed(_)) {
@@ -144,6 +258,11 @@ impl CameraWeb {
             }
             match frame {
                 Some(frame) if fresh => {
+                    self.remembered = false;
+                    if !self.live {
+                        self.live = true;
+                        super::super::vr_log::line(&format!("camera page: first picture of {} {} ms after its code was read ({})", web_host(&self.url), self.opened.elapsed().as_millis(), self.engine)); // i18n: not shown (a log's line)
+                    }
                     if let Some((what, at)) = self.awaiting.take() {
                         super::super::vr_log::line(&format!("camera page: a {what} showed on the page {} ms after it was sent", at.elapsed().as_millis())); // i18n: not shown (a log's line)
                     }
@@ -151,8 +270,8 @@ impl CameraWeb {
                     self.fresh = true;
                     changed = true;
                 }
-                // A navigation cleared it.
-                None if self.frame.is_some() && fresh => {
+                // A navigation cleared it (a remembered picture stays until the live one comes).
+                None if self.frame.is_some() && fresh && !self.remembered => {
                     self.frame = None;
                     changed = true;
                 }
@@ -235,8 +354,11 @@ impl CameraWeb {
         }
     }
 
-    /// Pressed where the laser is.
+    /// Pressed where the laser is. Not on a remembered picture: the page under it is not there yet.
     pub fn press(&mut self) {
+        if self.remembered {
+            return;
+        }
         if let Some(p) = self.at {
             self.held = Some((p, p, false));
             self.speed = 0.0;
@@ -308,6 +430,14 @@ impl CameraWeb {
     }
 }
 
+/// What a page still loading shows: what it showed (the page itself, or slow), else that it opens.
+fn loading(now: &WebState) -> WebState {
+    match now {
+        WebState::Slow | WebState::Shown => now.clone(),
+        _ => WebState::Loading,
+    }
+}
+
 impl Drop for CameraWeb {
     fn drop(&mut self) {
         // Signals the engine and returns at once: it cleans its private profile up on its own thread.
@@ -363,6 +493,40 @@ mod tests {
         assert_eq!(web.state, WebState::Loading);
         assert!(web.frame.is_none());
         assert_eq!(web.url, "https://vrcidlinker.com/");
+    }
+
+    /// Request 18: a page slow to give a picture is said slow once and stays so while it loads (his log had the line 1,589 times: the engine's
+    /// "loading" undid "slow" every turn, and `settle` said it again).
+    #[test]
+    fn a_slow_page_is_said_slow_once() {
+        assert_eq!(loading(&WebState::Slow), WebState::Slow);
+        assert_eq!(loading(&WebState::Loading), WebState::Loading);
+        assert_eq!(loading(&WebState::Shown), WebState::Shown);
+        let mut web = CameraWeb::idle("https://store.steampowered.com/");
+        web.opened = std::time::Instant::now() - SLOW_AFTER;
+        assert!(web.settle());
+        web.state = loading(&web.state);
+        assert!(!web.settle(), "nothing changed, nothing said again");
+        assert_eq!(web.state, WebState::Slow);
+    }
+
+    /// Request 18: a link read again within [`REMEMBERED_FOR`] of its page closing shows that page's last picture at once, not pressable, until the live
+    /// page's first picture replaces it.
+    #[test]
+    fn a_page_closed_lately_shows_its_last_picture_at_once() {
+        let mut shown = CameraWeb::idle("https://linktr.ee/someone");
+        shown.frame = Some(ColorImage::filled([4, 4], egui::Color32::RED));
+        assert_eq!(shown.last_picture(), None, "only a live picture is remembered");
+        shown.live = true;
+        let (link, picture) = shown.last_picture().unwrap();
+        assert_eq!(link, "https://linktr.ee/someone");
+        let mut again = CameraWeb::open_with(&link, Spare::start(), Some(picture));
+        assert!(again.frame.is_some() && again.fresh, "shown at once");
+        assert!(again.settle());
+        assert_eq!(again.state, WebState::Shown);
+        again.point(Some((Pos2::new(10.0, 10.0), Vec2::new(410.0, 470.0))));
+        again.press();
+        assert!(again.held.is_none(), "a remembered picture is not the page: no press");
     }
 
     /// K-qr-page: a slide moves the page as the laser moves (one scroll a turn), and let go while moving it glides on, slowing

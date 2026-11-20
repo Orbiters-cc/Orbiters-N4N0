@@ -7,6 +7,8 @@ publish.workspace = true
 
 [dependencies]
 rqrr = { version = "0.11", default-features = false }
+# ZXing's QR reader (Apache-2.0): Request 18, codes rqrr could not fit a grid to.
+rxing = { version = "0.9.4", default-features = false, features = ["qrcode", "decoders", "encoding_rs"] }
 
 [dev-dependencies]
 qrcode = { version = "0.14", default-features = false }

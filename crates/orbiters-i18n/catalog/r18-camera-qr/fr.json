@@ -1,0 +1,12 @@
+{
+  "A QR code is cut off on the left": "Un QR code est coupé à gauche",
+  "A QR code is cut off on the right": "Un QR code est coupé à droite",
+  "A QR code is cut off at the top": "Un QR code est coupé en haut",
+  "A QR code is cut off at the bottom": "Un QR code est coupé en bas",
+  "A QR code is larger than the picture": "Un QR code dépasse de l'image",
+  "Move the camera a little to the left until all of the code shows.": "Déplace un peu la caméra vers la gauche, jusqu'à voir tout le code dedans.",
+  "Move the camera a little to the right until all of the code shows.": "Déplace un peu la caméra vers la droite, jusqu'à voir tout le code dedans.",
+  "Move the camera a little up until all of the code shows.": "Monte un peu la caméra, jusqu'à voir tout le code dedans.",
+  "Move the camera a little down until all of the code shows.": "Descends un peu la caméra, jusqu'à voir tout le code dedans.",
+  "Move the camera back until all of the code shows.": "Éloigne la caméra du code, jusqu'à le voir en entier dedans."
+}

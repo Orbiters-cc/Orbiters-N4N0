@@ -1069,6 +1069,12 @@ pub struct Panels {
     /// A share button pressed: it acts when let go on it, never when its part went away under the trigger.
     share_held: Option<Action>,
     web_for: Option<u64>,
+    /// An engine started ahead while the camera looks for a code, and when one was last started (Request 18: a code's page opens without the engine's
+    /// start, which took 9 to 30 s in Enzo's headset session).
+    web_spare: Option<camera_web::Spare>,
+    web_spare_at: Option<Instant>,
+    /// The last pictures of pages closed lately, by the link their code held: the same code read again shows its page at once.
+    web_remembered: Vec<(String, egui::ColorImage, Instant)>,
     /// When the demo avatar was put on: said for a moment.
     demo_done: Option<Instant>,
     /// The links the desktop sent to the browser, in tests.
@@ -1181,6 +1187,9 @@ impl Panels {
             share: Default::default(),
             share_held: None,
             web_for: None,
+            web_spare: None,
+            web_spare_at: None,
+            web_remembered: Vec::new(),
             demo_done: None,
             #[cfg(test)]
             opened_in_browser: Vec::new(),
@@ -2035,7 +2044,7 @@ impl Panels {
             Qr::Looking => panels::CameraQr::Looking,
             Qr::NoStream => panels::CameraQr::NoPicture(orbiters_i18n::tr(&orbiters_n4n0_core::qr::no_camera_note(snap.camera_open_said)).to_string()),
             Qr::Error(why) => panels::CameraQr::NoPicture(orbiters_i18n::tr(why).to_string()),
-            Qr::Seen(orbiters_n4n0::QrGlimpse::Cut) => panels::CameraQr::Cut,
+            Qr::Seen(orbiters_n4n0::QrGlimpse::Cut(side)) => panels::CameraQr::Cut(*side),
             Qr::Seen(orbiters_n4n0::QrGlimpse::Unclear) => panels::CameraQr::Unclear,
             Qr::NotALink => panels::CameraQr::NotALink,
             // Found: its page opens over the camera, and the scan stops.
@@ -2070,6 +2079,36 @@ impl Panels {
                     eprintln!("orbit: the code's page did not open: {e}"); // i18n: not shown (a log's line)
                 }
             });
+        }
+    }
+
+    /// The page over the camera goes: its last picture is remembered a while for the same code read again ([`camera_web::REMEMBERED_FOR`]).
+    fn close_web(&mut self) {
+        if let Some((link, picture)) = self.web.take().and_then(|web| web.last_picture()) {
+            self.web_remembered.retain(|(l, _, at)| *l != link && at.elapsed() < camera_web::REMEMBERED_FOR);
+            self.web_remembered.push((link, picture, Instant::now()));
+            // A few pages' pictures at most (3 MB each).
+            if self.web_remembered.len() > 3 {
+                self.web_remembered.remove(0);
+            }
+        }
+    }
+
+    /// While the camera looks for a code in a headset, an engine waits for its link (Request 18); it goes when the camera stops looking (an idle browser
+    /// is not kept for nothing). One that failed is started again at most every [`camera_web::SPARE_AGAIN_AFTER`].
+    fn keep_spare_web(&mut self, snap: &Snapshot) {
+        use crate::controller::camera_tools::Qr;
+        let looking = !self.facts.desktop && snap.camera_open_said == Some(true) && matches!(snap.camera_tools.qr, Qr::Looking | Qr::Seen(_) | Qr::NotALink);
+        if !looking {
+            self.web_spare = None;
+            return;
+        }
+        if self.web_spare.as_mut().is_some_and(camera_web::Spare::failed) {
+            self.web_spare = None;
+        }
+        if self.web_spare.is_none() && self.web_spare_at.is_none_or(|at| at.elapsed() >= camera_web::SPARE_AGAIN_AFTER) {
+            self.web_spare_at = Some(Instant::now());
+            self.web_spare = camera_web::Spare::start();
         }
     }
 
@@ -2108,8 +2147,18 @@ impl Panels {
                     // On the desktop there is no room over the camera, whose picture nothing may cover (L-desk-camera): the page opens in the person's browser,
                     // as any link does on a computer.
                     self.open_in_browser(url);
+                } else if self.web.as_ref().is_some_and(|web| web.asked == *url && !web.failed()) {
+                    // The same code read again while its page is open: that page stays as it is.
+                    super::vr_log::line(&format!("camera page: {} read again, its page kept", panels::web_host(url))); // i18n: not shown (a log's line)
                 } else {
-                    self.web = Some(camera_web::CameraWeb::open(url));
+                    self.close_web();
+                    let remembered = self.web_remembered.iter().find(|(link, _, at)| link == url && at.elapsed() < camera_web::REMEMBERED_FOR).map(|(_, picture, _)| picture.clone());
+                    let spare = self.web_spare.take();
+                    // Used, not failed: the next scan may start another at once.
+                    if spare.is_some() {
+                        self.web_spare_at = None;
+                    }
+                    self.web = Some(camera_web::CameraWeb::open_with(url, spare, remembered));
                 }
                 self.backend.camera_qr(false);
                 self.camera_dirty();
@@ -2117,9 +2166,10 @@ impl Panels {
         }
         // VRChat's camera closed: its page goes with it.
         if self.web.is_some() && snap.camera_open_said == Some(false) {
-            self.web = None;
+            self.close_web();
             self.camera_dirty();
         }
+        self.keep_spare_web(snap);
         if self.web.as_mut().is_some_and(camera_web::CameraWeb::turn) {
             for panel in self.list.iter_mut().filter(|p| matches!(p.zone, Zone::CameraWeb | Zone::CameraWebBar)) {
                 panel.dirty = true;
@@ -3373,7 +3423,7 @@ impl Panels {
                 } else {
                     self.share.confirming = None;
                     // A code's page takes the same place: the chooser takes it.
-                    self.web = None;
+                    self.close_web();
                     self.share.chooser = Some(camera_share::Chooser::open(id, &self.backend, snap));
                 }
                 self.camera_dirty();
@@ -3459,7 +3509,7 @@ impl Panels {
             }
             Action::WebClose => {
                 if !self.web_picture_is_current() { return; }
-                self.web = None;
+                self.close_web();
                 self.camera_dirty();
             }
             Action::WebPage => {

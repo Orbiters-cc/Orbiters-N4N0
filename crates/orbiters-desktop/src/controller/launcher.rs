@@ -1314,8 +1314,15 @@ impl Controller {
             // The route is decided once, from one look at the processes, and that route is the one taken.
             let processes = travel.running();
             let chosen = super::travel::route(false, &processes, &bridge, |p| travel.own_osc_ports(p));
-            if chosen == super::travel::Route::Start && (started.is_some_and(|t| t.elapsed() < STARTING_FOR) || self.launcher_claim(0, mode).is_err()) {
-                return Notice::Error(tr("Starting VRChat…").into());
+            if chosen == super::travel::Route::Start {
+                if started.is_some_and(|t| t.elapsed() < STARTING_FOR) {
+                    return Notice::Error(tr("Starting VRChat…").into());
+                }
+                // The claim's own words: a start that never showed asks for a second press, and that is said here
+                // (REQUEST15 third pass: it was turned into "Starting VRChat…" while it armed the second press).
+                if let Err(notice) = self.launcher_claim(0, mode) {
+                    return notice;
+                }
             }
             if scoped && self.launcher_sender(account).is_err() {
                 self.launcher_unclaim_last_if(chosen == super::travel::Route::Start);

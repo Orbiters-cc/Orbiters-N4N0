@@ -1404,3 +1404,31 @@ fn after_a_sign_out_the_old_list_neither_keeps_a_dismissal_nor_opens_a_profile()
     c.launcher_do(as_a(Action::OpenProfile { id: A.into() }));
     assert!(c.view().launcher.profile.is_none(), "A's note is not shown from the old row");
 }
+
+// --- REQUEST15 third pass, fix2 item 2: a start that never showed is said on Join too, and Go there arms nothing ---
+
+#[test]
+fn join_says_a_lapsed_start_and_go_there_never_arms_the_second_press() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    machine.running.lock().unwrap().push((20, false));
+    let c = controller(machine.clone());
+    // Only a bridge side session runs: a Join starts the person's own VRChat (profile 0) through travel.
+    let fake = Arc::new(super::super::travel::tests::Fake { running: vec![20], side_args: vec![20], ..Default::default() });
+    *c.travel.lock().unwrap() = Some(fake.clone() as Arc<dyn super::super::travel::Travel>);
+    let claim = c.launcher_claim(0, LaunchMode::Vr).unwrap();
+    for held in c.launcher.lock().unwrap().starting.iter_mut() {
+        held.at -= Duration::from_secs(200);
+    }
+    let _ = claim;
+    // Go there's own claim (unattended) is refused and arms nothing.
+    assert!(c.launcher_claim_unattended(0, LaunchMode::Vr).is_err());
+    assert!(c.launcher.lock().unwrap().starting.iter().all(|held| held.confirm_by.is_none()));
+    // Join: the person is told what the second press does, and nothing starts.
+    let place = launcher_feed::place(&format!("{W}:1~region(eu)"), "").unwrap();
+    let first = c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place.clone()) });
+    assert!(matches!(&first, Some(Notice::Error(t)) if t.contains("press Play again")), "{first:?}");
+    assert!(fake.started.lock().unwrap().is_empty());
+    // The second press, told, starts.
+    assert_eq!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place) }), Some(Notice::Sent { to: W.into(), action: SentKind::Join }));
+    assert_eq!(fake.started.lock().unwrap().len(), 1);
+}

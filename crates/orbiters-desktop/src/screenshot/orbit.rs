@@ -1711,6 +1711,23 @@ pub(super) fn explorer_shots(out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `--only orbit-caption` (Request16 2): the wing's caption with what it says at the Quick Menu's first openings ("Your tools" and its line), in each of the five
+/// languages, on a 1280 x 720 and a 1920 x 1080 window: the whole card shows, its rounded top and its padding over the logo's row.
+pub(super) fn caption_shots(out: &Path) -> anyhow::Result<()> {
+    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), ..Default::default() };
+    let hint = Facts { hint: Some(("Your tools", "Worlds in 3D, videos, instances and 3D pictures.")), ..idle };
+    for language in orbiters_i18n::Language::ALL {
+        let tag = language.tag().to_ascii_lowercase();
+        orbiters_ui::fonts::prefer_language(language.tag());
+        orbiters_i18n::in_language(language, || -> anyhow::Result<()> {
+            qm_scene(&format!("orbit-caption-{tag}"), out, vec2(1280.0, 720.0), &hint, None, None)?;
+            qm_scene(&format!("orbit-caption-{tag}-1080"), out, vec2(1920.0, 1080.0), &hint, None, None)
+        })?;
+    }
+    orbiters_ui::fonts::prefer_language("en");
+    Ok(())
+}
+
 /// `--only orbit-r15`: REQUEST15's desktop states, over a stand-in of VRChat's window (no real frame, picture, name or capture): a world's side panel with its
 /// capture's 3D coming and turning where its picture is (item 6; the "3D" there is a stand-in picture, the view itself is the app's own).
 pub(super) fn r15_shots(out: &Path) -> anyhow::Result<()> {

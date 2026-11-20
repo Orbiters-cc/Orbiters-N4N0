@@ -361,7 +361,10 @@ impl Zone {
             Zone::QmStrip => r(-300.0, 266.0, 300.0, 318.0),
             // On the wing, as wide as it, right over its name: its words wrap, and it is as high as they take.
             // Its foot where the wing's name pill is: on a screen the name heads it (the pill is not there); a headset keeps it above that pill ([`QM_CAPTION_OVER_THE_NAME`]).
-            Zone::QmCaption => r(362.0, -228.0, 524.0, -120.0),
+            // As high as its card can be (Request16 2: at 108 the card with the name's row and a three-line hint lost its top, the panel ending under it): the name's
+            // row, two lines of what it is and three of what it says, in any of the five languages ([`super::panels::WING_WORDS_HIGH`]). The card is laid from the
+            // foot, so a shorter one sits where it did; what is over it is clear and takes no press.
+            Zone::QmCaption => r(362.0, -120.0 - super::panels::WING_WORDS_HIGH, 524.0, -120.0),
             // The Quick Menu's panels and the FPS line over them, ending where its main panel ends: its tab row and badge stay VRChat's.
             // Clear of what VRChat has over its menu, down over its main panel's foot.
             Zone::SheetBack => r(-352.0, -240.0, 352.0, 205.5),

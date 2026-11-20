@@ -65,6 +65,9 @@ pub(crate) enum Command {
 pub(crate) struct Shared {
     state: State,
     frame: Option<Frame>,
+    /// The engine is up (its private profile, browser and page made) and takes a navigation at once: from then on a link
+    /// opens in the time its site takes, not the engine's start too (Request 18).
+    ready: bool,
     /// What happened, in order, for the overlay's log (a few lines a page; never what the page holds).
     notes: Vec<String>,
 }
@@ -87,14 +90,22 @@ pub struct WebPage {
 }
 impl WebPage {
     pub fn new(width: u32, height: u32) -> anyhow::Result<Self> {
+        Self::start(width, height, false)
+    }
+    /// An engine whose pages may reach this computer's own address: this crate's tests only (a slow page they serve).
+    #[cfg(test)]
+    pub(crate) fn new_reaching_loopback(width: u32, height: u32) -> anyhow::Result<Self> {
+        Self::start(width, height, true)
+    }
+    fn start(width: u32, height: u32, loopback: bool) -> anyhow::Result<Self> {
         size(width, height)?;
         let (tx, rx) = mpsc::sync_channel(64);
-        let shared = Arc::new(Mutex::new(Shared { state: State { load: Load::Loading, url: String::new(), title: String::new() }, frame: None, notes: Vec::new() }));
+        let shared = Arc::new(Mutex::new(Shared { state: State { load: Load::Loading, url: String::new(), title: String::new() }, frame: None, ready: false, notes: Vec::new() }));
         let s = shared.clone();
         let closed = Arc::new(AtomicBool::new(false));
         let closing = closed.clone();
         std::thread::Builder::new().name("camera-web".into()).spawn(move || {
-            if let Err(e) = engine::run(width, height, rx, s.clone(), closing) {
+            if let Err(e) = engine::run(width, height, rx, s.clone(), closing, loopback) {
                 let mut s = s.lock().unwrap();
                 s.note(format!("engine stopped: {e:#}")); // i18n: not shown (a log's line)
                 s.state.load = Load::Failed(display_text(&format!("{e:#}"), 1024));
@@ -129,6 +140,11 @@ impl WebPage {
         let changed = seq != self.seen;
         self.seen = seq;
         Some((s.state.clone(), s.frame.clone(), changed))
+    }
+    /// Whether the engine is up and a navigation starts at once (started ahead of a link: Request 18). False while it
+    /// starts, and once it failed or closed.
+    pub fn ready(&self) -> bool {
+        self.shared.try_lock().is_ok_and(|s| s.ready && !matches!(s.state.load, Load::Failed(_) | Load::Closed))
     }
     /// What the engine noted since the last call (when it started, loaded, first drew; what failed), for a log.
     pub fn notes(&self) -> Vec<String> {
@@ -226,6 +242,93 @@ mod live_review_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+    /// A page of this computer's own (served by the test) whose words show at once and whose last picture takes `slow`:
+    /// its load event waits for that picture. Returns its address.
+    fn slow_page(slow: Duration) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut request = Vec::new();
+                    let mut b = [0u8; 1024];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut b) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&b[..n]),
+                        }
+                    }
+                    let first = String::from_utf8_lossy(&request).lines().next().unwrap_or_default().to_string();
+                    let (kind, body): (&str, Vec<u8>) = if first.contains("/slow.png") {
+                        std::thread::sleep(slow);
+                        ("image/png", Vec::new())
+                    } else {
+                        ("text/html", b"<!doctype html><body style='margin:0;background:#2a6'><h1 style='font:72px sans-serif;color:#fff;margin:40px'>First paint</h1><img src='/slow.png' width=10 height=10></body>".to_vec())
+                    };
+                    let _ = write!(stream, "HTTP/1.0 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    let _ = stream.write_all(&body);
+                });
+            }
+        });
+        format!("http://{address}/")
+    }
+
+    /// From a navigation asked at `from`: when its first picture showed and when it was loaded (ms).
+    fn timeline(page: &mut WebPage, from: Instant) -> (u128, u128) {
+        let (mut first, mut loaded) = (None, None);
+        while first.is_none() || loaded.is_none() {
+            if let Some((s, f, _)) = page.poll() {
+                if let Load::Failed(e) = &s.load {
+                    panic!("browser: {e}");
+                }
+                if f.is_some() && first.is_none() {
+                    first = Some(from.elapsed().as_millis());
+                }
+                if s.load == Load::Loaded && loaded.is_none() {
+                    loaded = Some(from.elapsed().as_millis());
+                }
+            }
+            assert!(from.elapsed() < Duration::from_secs(40), "no picture or no load: {first:?} {loaded:?}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        (first.unwrap(), loaded.unwrap())
+    }
+
+    /// Request 18 (Enzo: "the page linked by the QR code often takes a while to load"): a page shows at its first paint, not
+    /// at its load event (here 4 s later, a slow picture); an engine started ahead (while the camera looks for a code) shows
+    /// a link's page without the engine's own start, which a cold one pays after the code is read.
+    #[test]
+    fn a_slow_page_shows_at_its_first_paint_and_a_warm_engine_skips_its_start() {
+        let url = slow_page(Duration::from_secs(4));
+        // Cold, as 0.3.8-dev.1 opened every link: the engine starts when the code is read.
+        let read = Instant::now();
+        let mut cold = WebPage::new_reaching_loopback(820, 940).unwrap();
+        cold.navigate(&url).unwrap();
+        let (cold_first, cold_loaded) = timeline(&mut cold, read);
+        // Warm: started ahead; the code is read once it is ready.
+        let mut warm = WebPage::new_reaching_loopback(820, 940).unwrap();
+        let started = Instant::now();
+        while !warm.ready() {
+            assert!(started.elapsed() < Duration::from_secs(40), "the engine never got ready");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let ready_after = started.elapsed().as_millis();
+        let read = Instant::now();
+        warm.navigate(&url).unwrap();
+        let (warm_first, warm_loaded) = timeline(&mut warm, read);
+        let notes = warm.notes();
+        println!("cold engine: first picture {cold_first} ms after the code was read, loaded {cold_loaded} ms");
+        println!("warm engine (ready {ready_after} ms after it was started): first picture {warm_first} ms after the code was read, loaded {warm_loaded} ms");
+        println!("warm engine's notes: {notes:?}");
+        assert!(warm_loaded >= 3900, "the slow picture holds the load event: {warm_loaded} ms");
+        assert!(warm_first + 2500 < warm_loaded, "the page shows at its first paint, seconds before its load event: {warm_first} vs {warm_loaded} ms");
+        assert!(warm_first + 300 < cold_first, "a warm engine saves its start: {warm_first} vs {cold_first} ms");
+        cold.close();
+        warm.close();
+    }
+
     #[test]
     fn runtime_hostile_title_subresources_resize_and_async_failure() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

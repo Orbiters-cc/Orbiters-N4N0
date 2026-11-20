@@ -109,7 +109,10 @@ impl Drop for Resources {
         }
     }
 }
-pub fn run(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Shared>>, closed: Arc<AtomicBool>) -> anyhow::Result<()> {
+pub fn run(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Shared>>, closed: Arc<AtomicBool>, loopback: bool) -> anyhow::Result<()> {
+    // How long the engine's start takes, part by part (Request 18: Enzo's pages waited 9 to 12 s for it, and one 30 s, before
+    // the first "opening" line, which counts from the navigation only).
+    let begun = Instant::now();
     let profile = match lifetime::Profile::new(&closed) {
         Ok(p) => p,
         Err(_) if closed.load(Ordering::Relaxed) => {
@@ -118,10 +121,11 @@ pub fn run(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Shared>>, cl
         }
         Err(e) => return Err(e),
     };
-    let proxy = network::Proxy::new()?;
+    shared.lock().unwrap().note(format!("engine: private profile ready after {} ms", begun.elapsed().as_millis())); // i18n: not shown (a log's line)
+    let proxy = network::Proxy::with(loopback)?;
     let result = unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
-        let result = run_sta(w, h, rx, shared.clone(), closed.clone(), &profile, proxy.port);
+        let result = run_sta(w, h, rx, shared.clone(), closed.clone(), &profile, proxy.port, begun);
         CoUninitialize();
         result
     };
@@ -142,6 +146,7 @@ unsafe fn run_sta(
     closed: Arc<AtomicBool>,
     profile: &lifetime::Profile,
     proxy_port: u16,
+    begun: Instant,
 ) -> anyhow::Result<()> {
     let mut resources = Resources { controller: None, hwnd: None };
     let path = wide(&profile.path.to_string_lossy());
@@ -162,6 +167,7 @@ unsafe fn run_sta(
     let env = pump_wait(&envrx, &closed, Duration::from_secs(15))
         .map_err(|e| anyhow::anyhow!("WebView2 runtime unavailable or startup failed: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("environment missing"))?;
+    shared.lock().unwrap().note(format!("engine: browser started after {} ms", begun.elapsed().as_millis())); // i18n: not shown (a log's line)
     let env7: ICoreWebView2Environment7 = env.cast()?;
     let actual = string(|p| env7.UserDataFolder(p))?;
     verify_profile(std::path::Path::new(&actual), &profile.path)?;
@@ -304,7 +310,28 @@ unsafe fn run_sta(
         })),
         &mut token,
     )?;
-    // The page's pictures from the moment its content is read, not from its load event: a page whose last picture or
+    // The page's pictures from the moment its document is committed (Request 18): it paints as it reads, before its whole
+    // content is read (a page whose scripts hold DOMContentLoaded showed nothing for as long). Pictures of a blank page
+    // before it first paints are left out below.
+    let nav = navigation.clone();
+    let live = active.clone();
+    let at = started.clone();
+    let s = shared.clone();
+    web.add_ContentLoading(
+        &ContentLoadingEventHandler::create(Box::new(move |_, args| {
+            if let Some(a) = args {
+                let mut id = 0;
+                a.NavigationId(&mut id)?;
+                if id == *nav.borrow() {
+                    *live.borrow_mut() = true;
+                    s.lock().unwrap().note(format!("committed after {} ms", since(&at))); // i18n: not shown (a log's line)
+                }
+            }
+            Ok(())
+        })),
+        &mut token,
+    )?;
+    // And at the latest from the moment its content is read, not from its load event: a page whose last picture or
     // tracker never finishes loading showed nothing, "Opening the page..." for as long as it took (linktr.ee: 16 s).
     let web2: ICoreWebView2_2 = web.cast()?;
     let s = shared.clone();
@@ -458,6 +485,11 @@ unsafe fn run_sta(
         &mut token,
     )?;
     cdp(&web, "Page.setInterceptFileChooserDialog", serde_json::json!({"enabled":true}), &closed)?;
+    {
+        let mut s = shared.lock().unwrap();
+        s.ready = true;
+        s.note(format!("engine ready after {} ms", begun.elapsed().as_millis())); // i18n: not shown (a log's line)
+    }
     let mut capturing = false;
     let mut last = Instant::now() - Duration::from_secs(1);
     let mut seq = 0;
@@ -577,6 +609,11 @@ unsafe fn run_sta(
                     continue;
                 }
                 let mut s = shared.lock().unwrap();
+                // A blank page (one flat colour) before the page is loaded is the moment between its commit and its first
+                // paint: not shown, the panel goes on saying it opens.
+                if !drawn.get() && s.state.load != Load::Loaded && flat(&rgba) {
+                    continue;
+                }
                 if !drawn.replace(true) {
                     s.note(format!("first picture {width} x {height} after {} ms", since(&started))); // i18n: not shown (a log's line)
                 }
@@ -591,6 +628,16 @@ unsafe fn run_sta(
     // Close runs unconditionally through Resources, even if CDP or a browser process failed.
     Ok(())
 }
+/// Whether a picture (RGBA) is one flat colour: a page not painted yet. 24 x 24 points of it, within 3 levels of the first.
+fn flat(rgba: &[u8]) -> bool {
+    let n = rgba.len() / 4;
+    if n == 0 {
+        return true;
+    }
+    let first = &rgba[..3];
+    (0..576).map(|k| (k * (n - 1) / 575) * 4).all(|i| rgba[i..i + 3].iter().zip(first).all(|(a, b)| a.abs_diff(*b) <= 3))
+}
+
 /// `Page.screencastFrame`'s parameters: the picture (JPEG in base64) and the id to acknowledge it with.
 #[derive(serde::Deserialize)]
 struct Cast<'a> {
@@ -618,6 +665,19 @@ mod tests {
         assert!(super::verify_profile(external.path(), owned.path()).is_err());
         assert!(external.path().exists());
         assert!(super::verify_profile(owned.path(), owned.path()).is_ok());
+    }
+    #[test]
+    fn a_blank_picture_is_flat_and_a_painted_one_is_not() {
+        let mut picture = vec![255u8; 64 * 64 * 4];
+        assert!(super::flat(&picture));
+        picture[40 * 64 * 4 + 20 * 4] = 0;
+        picture[40 * 64 * 4 + 20 * 4 + 1] = 0;
+        // One point the 24 x 24 grid may not land on: a painted page has far more than one dark pixel.
+        for i in (0..picture.len()).step_by(4 * 7) {
+            picture[i] = 30;
+        }
+        assert!(!super::flat(&picture));
+        assert!(super::flat(&[]));
     }
     #[test]
     fn delayed_navigation_frames_are_rejected_and_any_size_is_shown() {

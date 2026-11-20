@@ -14,6 +14,11 @@ pub struct Proxy {
 }
 impl Proxy {
     pub fn new() -> anyhow::Result<Self> {
+        Self::with(false)
+    }
+    /// `loopback`: this computer's own address is let through too. Only this crate's tests ask it (a slow page served
+    /// from a test: Request 18's timeline); every engine of the app refuses it ([`Proxy::new`]).
+    pub(crate) fn with(loopback: bool) -> anyhow::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
@@ -35,7 +40,7 @@ impl Proxy {
                     let count = count.clone();
                     let flag = flag.clone();
                     std::thread::spawn(move || {
-                        let _ = serve(s, flag);
+                        let _ = serve(s, flag, loopback);
                         count.fetch_sub(1, Ordering::Relaxed);
                     });
                 } else {
@@ -75,9 +80,9 @@ fn public(ip: IpAddr) -> bool {
         }
     }
 }
-fn connect(host: &str, port: u16) -> anyhow::Result<TcpStream> {
+fn connect(host: &str, port: u16, loopback: bool) -> anyhow::Result<TcpStream> {
     let addresses: Vec<_> = (host, port).to_socket_addrs()?.collect();
-    anyhow::ensure!(!addresses.is_empty() && addresses.iter().all(|a| public(a.ip())), "private network destination denied");
+    anyhow::ensure!(!addresses.is_empty() && addresses.iter().all(|a| public(a.ip()) || (loopback && a.ip().is_loopback())), "private network destination denied");
     for a in addresses {
         if let Ok(s) = TcpStream::connect_timeout(&a, Duration::from_secs(3)) {
             return Ok(s);
@@ -85,7 +90,7 @@ fn connect(host: &str, port: u16) -> anyhow::Result<TcpStream> {
     }
     anyhow::bail!("destination unavailable")
 }
-fn serve(mut client: TcpStream, stop: Arc<AtomicBool>) -> anyhow::Result<()> {
+fn serve(mut client: TcpStream, stop: Arc<AtomicBool>, loopback: bool) -> anyhow::Result<()> {
     client.set_read_timeout(Some(Duration::from_secs(3)))?;
     client.set_write_timeout(Some(Duration::from_secs(3)))?;
     let mut header = Vec::new();
@@ -103,7 +108,7 @@ fn serve(mut client: TcpStream, stop: Arc<AtomicBool>) -> anyhow::Result<()> {
     let u = url::Url::parse(&if tunnel { format!("https://{}/", parts[1]) } else { parts[1].to_owned() })?;
     anyhow::ensure!(matches!(u.scheme(), "http" | "https" | "ws" | "wss") && u.username().is_empty() && u.password().is_none(), "proxy scheme denied");
     let mut upstream =
-        match connect(u.host_str().ok_or_else(|| anyhow::anyhow!("missing host"))?.trim_matches(['[', ']']), u.port_or_known_default().unwrap_or(443)) {
+        match connect(u.host_str().ok_or_else(|| anyhow::anyhow!("missing host"))?.trim_matches(['[', ']']), u.port_or_known_default().unwrap_or(443), loopback) {
             Ok(s) => s,
             Err(e) => {
                 client.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")?;

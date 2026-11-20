@@ -1,5 +1,6 @@
 //! The FPS booster on the Settings page: the same stops, the same words and the same state as the overlay's sheet, in the
-//! Settings' palette. Four stops are a segmented control, as they are not a continuous range.
+//! Settings' palette. The four steps are a slider (REQUEST15 4: "make the booster steps look like a slider"): a track,
+//! the steps' names under their stops, dragged, pressed or keyed, landing on a step (`orbiters_ui::steps`).
 
 use super::{section, Cx};
 use crate::booster::{self, Command};
@@ -12,7 +13,7 @@ use orbiters_core::settings::Settings;
 use orbiters_i18n::tr;
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, weight, Txt};
-use orbiters_ui::widgets::{self, Button, SegOption, Size, Variant};
+use orbiters_ui::widgets::{self, Button, Size, Variant};
 
 #[derive(Default)]
 pub struct State {
@@ -43,9 +44,10 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut S
     let ctl = cx.ctl;
     section(ui, cx, index, icons::GAUGE, tr("FPS booster"), Some(tr("Spend what helps your frames. Shows what it really gains.")), |ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
-        let options: Vec<SegOption<Level>> = Level::ALL.into_iter().map(|level| SegOption::new(level, booster::level_name(level))).collect();
+        let steps: Vec<(Level, &str)> = Level::ALL.into_iter().map(|level| (level, booster::level_name(level))).collect();
         let mut level = draft.booster.level;
-        if widgets::segmented(ui, "booster-level", &mut level, &options, false) {
+        let width = ui.available_width().min(560.0);
+        if orbiters_ui::steps::slider(ui, "booster-level", &mut level, &steps, width) {
             if level == Level::Avatars && !draft.booster.avatars_told {
                 state.asking = true;
             } else {

@@ -1517,6 +1517,12 @@ fn sample_comparison(verdict: orbiters_booster::trial::Verdict) -> orbiters_boos
     }
 }
 
+/// The FPS booster's sheet alone (`--only orbit-booster`).
+pub fn booster_shots(out: &Path) -> anyhow::Result<()> {
+    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), ..Default::default() };
+    booster_scenes(out, vec2(1280.0, 720.0), &idle)
+}
+
 fn booster_scenes(out: &std::path::Path, size: egui::Vec2, idle: &Facts) -> anyhow::Result<()> {
     use orbiters_booster::engine::Line;
     use orbiters_booster::trial::Verdict;

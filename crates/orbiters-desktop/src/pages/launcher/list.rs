@@ -253,8 +253,10 @@ mod tests {
     fn what_was_received_is_the_first_rows_of_the_one_list() {
         let mut state = sample();
         let from = state.friends[2].clone();
+        // Newer than the sample's invite request, which comes after them.
+        let newest = state.invites.iter().map(|i| i.received_at).max().unwrap_or(0) + 1_000;
         state.boops = (0..30)
-            .map(|i| orbiters_core::launcher::Boop { id: format!("not_boop_{i:02}"), from_id: from.id.clone(), from_name: from.name.clone(), from_icon: String::new(), emoji: None, received_at: 1_000 - i })
+            .map(|i| orbiters_core::launcher::Boop { id: format!("not_boop_{i:02}"), from_id: from.id.clone(), from_name: from.name.clone(), from_icon: String::new(), emoji: None, received_at: newest - i })
             .collect();
         let requests = state.invites.iter().filter(|i| i.kind == InviteKind::Request).count();
         assert!(requests > 0, "the sample has an invite request");

@@ -697,10 +697,12 @@ mod tests {
                     events: if i == 0 { events.clone() } else { Vec::new() },
                     ..Default::default()
                 };
-                let _ = ctx.run_ui(input, |ui| {
+                let mut output = ctx.run_ui(input, |ui| {
                     let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
                     super::super::side_panel(ui, &mut cx, state, column, super::super::Side::Column(column.width()));
                 });
+                // Nothing paints these frames.
+                output.textures_delta.clear();
             }
         };
         let drawn = |state: &State, i: usize| ctx.read_response(Id::unique(("launcher-boop-back", state.data.boops[i].from_id.as_str()))).is_some();

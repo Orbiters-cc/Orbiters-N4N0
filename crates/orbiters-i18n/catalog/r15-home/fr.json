@@ -60,5 +60,9 @@
   "VRChat was asked to start on profile {n} {m} min ago and has not shown up yet. If it is not coming, press Play again to start it anyway.": "VRChat devait démarrer sur le profil {n} il y a {m} min et n’est pas encore apparu. S’il ne vient pas, appuie encore sur Jouer pour le lancer quand même.",
   "A VRChat has not said its profile yet: Play waits until it does.": "Un VRChat n’a pas encore dit son profil : Jouer attend qu’il le dise.",
   "Your profile has not been read yet, so your bio is not known here: press Read again first.": "Ton profil n’a pas encore été lu, donc ta bio n’est pas connue ici : appuie d’abord sur Relire.",
-  "Your bio shows once your profile is read. Read again in the friends list asks VRChat now.": "Ta bio s’affiche une fois ton profil lu. Relire, dans la liste d’amis, le demande à VRChat tout de suite."
+  "Your bio shows once your profile is read. Read again in the friends list asks VRChat now.": "Ta bio s’affiche une fois ton profil lu. Relire, dans la liste d’amis, le demande à VRChat tout de suite.",
+  "Signed out of VRChat": "Déconnecté de VRChat",
+  "The friends list was that account's: it is put away. Sign in again to see yours.": "La liste d’amis était celle de ce compte : elle est rangée. Reconnecte-toi pour voir la tienne.",
+  "Another VRChat account": "Un autre compte VRChat",
+  "The friends list was the previous account's: it is put away until this account's is read.": "La liste d’amis était celle du compte précédent : elle est rangée jusqu’à ce que celle de ce compte soit lue."
 }

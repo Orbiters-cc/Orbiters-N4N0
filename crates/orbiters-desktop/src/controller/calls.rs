@@ -1090,14 +1090,25 @@ impl super::Controller {
                 .build()
                 .header("Authorization", &format!("Bearer {token}"))
                 .call();
-            if let Ok(v) = answer.map_err(anyhow::Error::from).and_then(Api::json::<Value>) {
-                let contacts: Vec<CallContact> = v["contacts"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|c| Some(CallContact { id: c["id"].as_str()?.to_string(), name: c["name"].as_str()?.to_string() })).collect())
-                    .unwrap_or_default();
-                let mut rt = self.calls.lock().unwrap();
-                rt.contacts = contacts;
-                rt.contacts_read = Some(Instant::now());
+            match answer.map_err(anyhow::Error::from).and_then(Api::json::<Value>) {
+                Ok(v) => {
+                    let contacts: Vec<CallContact> = v["contacts"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(|c| Some(CallContact { id: c["id"].as_str()?.to_string(), name: c["name"].as_str()?.to_string() })).collect())
+                        .unwrap_or_default();
+                    let mut rt = self.calls.lock().unwrap();
+                    rt.contacts = contacts;
+                    rt.contacts_read = Some(Instant::now());
+                }
+                Err(e) => {
+                    // Asked again after the usual wait, not at every tick (verify A, contacts refused).
+                    self.calls.lock().unwrap().contacts_read = Some(Instant::now());
+                    if super::calls_access::not_enabled(&e) {
+                        self.calls_access_denied(&token);
+                        return;
+                    }
+                    eprintln!("calls contacts: {e:#}");
+                }
             }
         }
         self.calls_publish(|_| {});
@@ -1169,14 +1180,20 @@ impl super::Controller {
             }
             if let Some((event, data)) = sse.line(&String::from_utf8_lossy(&line)) {
                 let value: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
-                self.on_call_event(&event, value);
+                self.on_call_event(&event, value, token);
             }
         }
         Ok(delivered)
     }
 
     /// One event of the server's stream.
-    fn on_call_event(self: &Shared, event: &str, v: Value) {
+    /// One event of the stream opened with credential `token`.
+    fn on_call_event(self: &Shared, event: &str, v: Value, token: &str) {
+        // Orbiters closed calls for this credential (the feature switched off): closed here at once.
+        if event == "calls_closed" {
+            self.calls_access_denied(token);
+            return;
+        }
         // The shared 3D view's events come on the same stream.
         if event.starts_with("share_") {
             self.shared_view_event(event, &v);
@@ -1338,6 +1355,9 @@ impl super::Controller {
                     }
                     if let Err(e) = post(&api, &token, &format!("n4n0/calls/{id}/candidates"), &json!({ "candidates": candidates })) {
                         eprintln!("calls candidates: {e:#}");
+                        if super::calls_access::not_enabled(&e) {
+                            self.calls_access_denied(&token);
+                        }
                     }
                 }
                 Signal::Create { number, contact, offer } => {
@@ -1644,7 +1664,7 @@ mod tests {
 
     /// A friend's call rings, as the server's stream brings it (with a relay, so an answer goes to the worker at once).
     fn ring(ctl: &crate::controller::Shared, id: &str) {
-        ctl.on_call_event("incoming", ringing(id));
+        ctl.on_call_event("incoming", ringing(id), "orbit-test");
     }
 
     fn ringing(id: &str) -> Value {
@@ -1736,6 +1756,23 @@ mod tests {
         assert!(!ctl.calls_open());
         ctl.calls_access_checked(server, None, "orbit-d", Some(&yes));
         assert!(!ctl.calls_open(), "another credential without an id is another identity");
+    }
+
+    /// Verify A, should-fix: Orbiters closing calls (`calls_closed` on the stream of this credential) closes them here at
+    /// once, with the friends to call and N4N0's call menu; one for another credential does nothing.
+    #[test]
+    fn calls_closed_on_the_stream_closes_calls_for_that_credential_only() {
+        let ctl = signed_in_controller(true);
+        ctl.calls.lock().unwrap().contacts = contacts(2);
+        ctl.calls.lock().unwrap().menu_open = true;
+        ctl.on_call_event("calls_closed", json!({ "code": "not_enabled" }), "orbit-someone-else");
+        assert!(ctl.calls_open(), "another credential's stream");
+        ring(&ctl, "k_1");
+        assert!(ctl.call_ringing_in());
+        ctl.on_call_event("calls_closed", json!({ "code": "not_enabled" }), "orbit-test");
+        assert!(!ctl.calls_open());
+        let rt = ctl.calls.lock().unwrap();
+        assert!(rt.contacts.is_empty() && !rt.menu_open && rt.call.is_none(), "nothing of calls is left");
     }
 
     /// Signed out, or the server's word not come yet: closed. A refusal of a call request closes calls at once.

@@ -58,5 +58,7 @@
   "A VRChat is starting and has not said its profile yet: try again in a moment.": "Um VRChat está abrindo e ainda não disse o perfil: tente de novo daqui a pouco.",
   "This picture is not one of your account's: open the list again and choose one.": "Esta imagem não é da sua conta: abra a lista de novo e escolha uma.",
   "VRChat was asked to start on profile {n} {m} min ago and has not shown up yet. If it is not coming, press Play again to start it anyway.": "O VRChat foi aberto no perfil {n} há {m} min e ainda não apareceu. Se não estiver vindo, aperte Jogar de novo para abrir mesmo assim.",
-  "A VRChat has not said its profile yet: Play waits until it does.": "Um VRChat ainda não disse o perfil: Jogar espera até ele dizer."
+  "A VRChat has not said its profile yet: Play waits until it does.": "Um VRChat ainda não disse o perfil: Jogar espera até ele dizer.",
+  "Your profile has not been read yet, so your bio is not known here: press Read again first.": "Seu perfil ainda não foi lido, então sua bio não é conhecida aqui: aperte Ler de novo primeiro.",
+  "Your bio shows once your profile is read. Read again in the friends list asks VRChat now.": "Sua bio aparece quando seu perfil é lido. Ler de novo, na lista de amigos, pede ao VRChat agora."
 }

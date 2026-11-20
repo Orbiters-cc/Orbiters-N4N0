@@ -1015,6 +1015,8 @@ fn the_profile_choice_lists_used_running_and_starting_profiles_with_their_accoun
 fn me_signed_in(c: &Shared) {
     signed_in_list(c);
     c.update(|s| s.launcher.me = Some(orbiters_core::launcher::Friend { id: "usr_test".into(), name: "Sample Me".into(), ..Default::default() }));
+    // Its own profile as VRChat gave it (a bio is only changed from that one).
+    c.update(|s| s.launcher.mine = Some(orbiters_core::launcher::MyProfile { loaded: true, ..Default::default() }));
 }
 
 fn saving(c: &Shared) -> Option<orbiters_core::launcher::Saving> {
@@ -1352,4 +1354,34 @@ fn only_a_confirmed_profile_is_labelled_and_an_unresolved_vrchat_is_said() {
     c.launcher_game(machine.as_ref());
     assert_eq!(c.view().settings.launch.profiles.get(&1).map(String::as_str), Some("Sample Alt"));
     assert_eq!(c.view().launcher.unresolved, 0);
+}
+
+// --- REQUEST15 second pass, S6: a placeholder's empty bio is never saved over the account's ---
+
+#[test]
+fn a_bio_is_never_saved_from_a_placeholder_profile() {
+    use orbiters_core::launcher::{PictureKind, ProfileEdit, ProfilePart, Saving};
+    let c = controller(Arc::new(Pretend::default()));
+    let (_, calls) = c.test_vrchat(vec![
+        (200, json!([])),
+        (200, json!({"id": "usr_test", "bio": "the real bio"})),
+        (200, json!({"id": "usr_test", "bio": "new"})),
+    ]);
+    me_signed_in(&c);
+    // The profile's first read failed (nothing in the state); a picture list made a placeholder.
+    c.update(|s| s.launcher.mine = None);
+    c.launcher_do(mine(Action::ListPictures(PictureKind::Icons)));
+    let placeholder = c.view().launcher.mine.clone().unwrap();
+    assert!(!placeholder.loaded && placeholder.bio.is_empty());
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Bio(String::new()))));
+    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Bio, _))), "no bio from a placeholder");
+    // Read again: the real profile replaces the placeholder, its lists kept.
+    c.launcher_do(mine(Action::ReadMine));
+    let read = c.view().launcher.mine.clone().unwrap();
+    assert!(read.loaded && read.bio == "the real bio" && read.icons.is_some());
+    c.launcher.lock().unwrap().mine_next = None;
+    c.launcher_do(mine(Action::EditProfile(ProfileEdit::Bio("new".into()))));
+    assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Bio)));
+    let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
+    assert_eq!(calls, ["GET /files?tag=icon&n=100", "GET /profile/usr_test?asSelf=true", "PUT /profile/usr_test"], "no PUT from the placeholder");
 }

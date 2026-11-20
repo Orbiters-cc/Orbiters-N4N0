@@ -367,6 +367,10 @@ pub enum Saving {
 /// The account's own profile as Home's card edits it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MyProfile {
+    /// Read from VRChat (`launcher_mine`): until then the card holds a placeholder (made by a list or a change) whose
+    /// empty bio is not the account's, and no bio can be saved from it.
+    #[serde(default)]
+    pub loaded: bool,
     pub bio: String,
     pub banner: BannerChoice,
     pub banner_colour: Option<[u8; 3]>,

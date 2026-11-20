@@ -1450,3 +1450,26 @@ fn a_start_unseen_for_twenty_minutes_still_asks_the_person_before_another() {
     // The bridge (nobody pressing) may take it after its lapse.
     assert!(c.launcher_claim_unattended(1, LaunchMode::Desktop).is_ok());
 }
+
+// --- REQUEST15 third pass, S4: a VRChat that never says its profile does not hold Play for its whole life ---
+
+#[test]
+fn a_vrchat_that_never_says_its_profile_can_be_passed_by_the_persons_second_press() {
+    let (machine, c) = running_profile_0();
+    machine.running.lock().unwrap().push((11, true));
+    machine.unread.lock().unwrap().push(11);
+    // At first: wait, whatever the presses.
+    for _ in 0..2 {
+        assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Error(t)) if !t.contains("press Play again")));
+    }
+    // A minute and more, still not said: told, then a second press starts.
+    for since in c.launcher.lock().unwrap().unknown_since.values_mut() {
+        *since -= Duration::from_secs(90);
+    }
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Error(t)) if t.contains("press Play again")));
+    assert!(machine.beside.lock().unwrap().is_empty());
+    // A second press for another profile is not the confirmation of the first.
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 2 }), Some(Notice::Error(_))));
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 2 }), Some(Notice::Sent { .. })));
+    assert_eq!(machine.beside.lock().unwrap().len(), 1);
+}

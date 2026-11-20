@@ -44,6 +44,8 @@ const PROFILE_HELD: Duration = Duration::from_secs(180);
 /// long that is; a start nobody pressed (the bridge's) may take the profile after this long.
 const PROFILE_LAPSED: Duration = Duration::from_secs(10 * 60);
 const CONFIRM_WITHIN: Duration = Duration::from_secs(20);
+/// How long a VRChat whose profile is not known holds every start before the person may override it.
+const UNKNOWN_WAIT: Duration = Duration::from_secs(60);
 /// The same on a Mac, where the person presses Play in Obelisk (its sign-in, an update check, Easy Anti-Cheat).
 const MAC_STARTING_FOR: Duration = Duration::from_secs(180);
 /// How long an action's outcome stays in the state (the page's "Sent", the error it took back).
@@ -425,6 +427,10 @@ pub(super) struct Runtime {
     /// profile from before the start until a VRChat on it is seen, or [`PROFILE_HELD`] passed (REQUEST15 fix B4).
     starting: Vec<Claim>,
     claims_made: u64,
+    /// VRChats whose profile is not known, since when (by process id), and a press on a profile told about them that a
+    /// second press within [`CONFIRM_WITHIN`] confirms (REQUEST15 third pass, S4).
+    unknown_since: HashMap<u32, Instant>,
+    unknown_confirm: Option<(u32, Instant)>,
     /// The account's own profile changes no sooner than this ([`mine::CHANGE_EVERY`] apart).
     mine_next: Option<Instant>,
 }
@@ -499,6 +505,8 @@ impl Default for Runtime {
             starting: Vec::new(),
             claims_made: 0,
             mine_next: None,
+            unknown_since: HashMap::new(),
+            unknown_confirm: None,
         }
     }
 }
@@ -801,6 +809,14 @@ impl Controller {
         let look = here && (machine.by_hand() || !view.vrchat.runs.is_empty() || view.vrchat.running || claimed || matches!(view.launcher.game, Game::Starting(_) | Game::Running(_)));
         let runs = if look { runs_with_profiles(machine, &view.vrchat.runs) } else { Vec::new() };
         let claims = self.launcher_retire_claims(&observed, &runs);
+        {
+            let mut rt = self.launcher.lock().unwrap();
+            let unknown: Vec<u32> = runs.iter().filter(|r| r.2.is_none()).map(|r| r.0).collect();
+            rt.unknown_since.retain(|pid, _| unknown.contains(pid));
+            for pid in unknown {
+                rt.unknown_since.entry(pid).or_insert_with(Instant::now);
+            }
+        }
         // The accounts seen on each profile are remembered, so the choice says whose each one is.
         let learned: Vec<(u32, String)> = view
             .vrchat
@@ -1512,9 +1528,30 @@ impl Controller {
         if runs.iter().any(|r| r.2 == Some(profile)) {
             return Notice::Error(tr!("VRChat already runs on profile {n}: choose another profile to start one more.", n = profile));
         }
-        // A VRChat whose profile is not known yet could be on this one: wait until it says (a few seconds).
-        if runs.iter().any(|r| r.2.is_none()) {
-            return Notice::Error(tr("A VRChat is starting and has not said its profile yet: try again in a moment.").into());
+        // A VRChat whose profile is not known yet could be on this one: wait until it says (a few seconds). One that has
+        // still not said after a minute (its log never named it) does not hold Play for its whole life: the person is
+        // told, and a second press starts anyway.
+        let unknown: Vec<u32> = runs.iter().filter(|r| r.2.is_none()).map(|r| r.0).collect();
+        if !unknown.is_empty() {
+            let now = Instant::now();
+            let mut rt = self.launcher.lock().unwrap();
+            rt.unknown_since.retain(|pid, _| unknown.contains(pid));
+            let oldest = unknown.iter().map(|pid| *rt.unknown_since.entry(*pid).or_insert(now)).min().unwrap_or(now);
+            if now.duration_since(oldest) < UNKNOWN_WAIT {
+                return Notice::Error(tr("A VRChat is starting and has not said its profile yet: try again in a moment.").into());
+            }
+            match rt.unknown_confirm {
+                Some((p, by)) if p == profile && now < by => rt.unknown_confirm = None,
+                _ => {
+                    rt.unknown_confirm = Some((profile, now + CONFIRM_WITHIN));
+                    let minutes = (now.duration_since(oldest).as_secs() / 60).max(1);
+                    return Notice::Error(tr!(
+                        "A VRChat running for {m} min has not said its profile. If it is not on profile {n}, press Play again to start anyway.",
+                        m = minutes,
+                        n = profile
+                    ));
+                }
+            }
         }
         if runs.is_empty() && started.is_some_and(|t| t.elapsed() < STARTING_FOR) {
             return Notice::Error(tr("Starting VRChat…").into());

@@ -64,5 +64,6 @@
   "Signed out of VRChat": "VRChatからサインアウトしました",
   "The friends list was that account's: it is put away. Sign in again to see yours.": "フレンドリストはそのアカウントのものなので、しまいました。もう一度サインインすると表示されます。",
   "Another VRChat account": "別のVRChatアカウント",
-  "The friends list was the previous account's: it is put away until this account's is read.": "フレンドリストは前のアカウントのものなので、このアカウントのリストを読み込むまでしまいました。"
+  "The friends list was the previous account's: it is put away until this account's is read.": "フレンドリストは前のアカウントのものなので、このアカウントのリストを読み込むまでしまいました。",
+  "A VRChat running for {m} min has not said its profile. If it is not on profile {n}, press Play again to start anyway.": "{m}分前から動いているVRChatのプロフィールがわかりません。プロフィール{n}でなければ、もう一度プレイを押すと起動します。"
 }

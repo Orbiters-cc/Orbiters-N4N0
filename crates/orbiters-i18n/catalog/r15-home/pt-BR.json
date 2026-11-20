@@ -64,5 +64,6 @@
   "Signed out of VRChat": "Você saiu do VRChat",
   "The friends list was that account's: it is put away. Sign in again to see yours.": "A lista de amigos era daquela conta: foi guardada. Entre de novo para ver a sua.",
   "Another VRChat account": "Outra conta do VRChat",
-  "The friends list was the previous account's: it is put away until this account's is read.": "A lista de amigos era da conta anterior: foi guardada até a desta conta ser lida."
+  "The friends list was the previous account's: it is put away until this account's is read.": "A lista de amigos era da conta anterior: foi guardada até a desta conta ser lida.",
+  "A VRChat running for {m} min has not said its profile. If it is not on profile {n}, press Play again to start anyway.": "Um VRChat aberto há {m} min não disse o perfil. Se ele não estiver no perfil {n}, aperte Jogar de novo para abrir mesmo assim."
 }

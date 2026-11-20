@@ -39,6 +39,10 @@ pub(super) const NAMES: [&str; 26] = [
     "launcher-small-stale",
     // Request16 1: the status list open under its pill, each row's dot in its status's colour.
     "launcher-mine-status",
+    // REQUEST18 1: every boop received has its row: six, all shown; thirty (and an invite request), the block at its share of
+    // the column and scrolling inside, the friends still under it.
+    "launcher-boops-6",
+    "launcher-boops-30",
 ];
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
@@ -236,6 +240,18 @@ fn more_people(state: &mut LauncherState) {
 fn data(name: &str) -> LauncherState {
     let mut s = sample();
     more_people(&mut s);
+    if let Some(n) = name.strip_prefix("launcher-boops-").and_then(|n| n.parse::<usize>().ok()) {
+        // Made-up people of the list, newest first, a few minutes apart.
+        s.boops = (0..n)
+            .map(|i| {
+                let f = &s.friends[(i * 7 + 3) % s.friends.len()];
+                orbiters_core::launcher::Boop { id: format!("not_boop_{i:02}"), from_id: f.id.clone(), from_name: f.name.clone(), from_icon: f.look.icon.clone(), emoji: None, received_at: NOW - 40 - i as i64 * 170 }
+            })
+            .collect();
+        if n < 10 {
+            s.invites.retain(|i| i.kind != InviteKind::Request);
+        }
+    }
     if name == "launcher-starting" {
         // A Mac has the desktop game alone (its one button says that Obelisk is open).
         s.game = Game::Starting(if orbiters_core::vrchat_launch::VR_HERE { LaunchMode::Vr } else { LaunchMode::Desktop });

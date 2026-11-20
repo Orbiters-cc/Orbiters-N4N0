@@ -795,6 +795,28 @@ mod tests {
         assert!(!layout(Around::QuickMenu, vec2(1920.0, 1080.0)).iter().any(|p| p.zone == Zone::QmStrip));
     }
 
+    /// REQUEST18 3: "Share 3D capture" lies under the wing's foot, where its Stop is, on none of VRChat's panels and none of
+    /// the wing's tiles; wherever the wing docks, it fits whole (the window's foot at 16:9 included).
+    #[test]
+    fn share_3d_capture_fits_under_the_wing_wherever_it_docks() {
+        let share = Zone::QmShare.units();
+        for k in [Rect::from_min_max(pos2(-188.0, -204.0), pos2(188.0, 204.0)), Rect::from_min_max(pos2(-351.0, -150.0), pos2(351.0, 186.0)), Rect::from_min_max(pos2(-242.0, 204.0), pos2(242.0, 262.0))] {
+            assert!(!share.intersects(k), "on {k:?}");
+        }
+        for zone in Zone::WING {
+            assert!(!share.intersects(zone.units()), "on the wing's {zone:?}");
+        }
+        assert_eq!((share.left(), share.right(), share.top()), (Zone::QmStop.units().left(), Zone::QmStop.units().right(), Zone::QmStop.units().top()));
+        assert!(Zone::QmShare.only_while_needed() && Zone::around(Around::QuickMenu).contains(&Zone::QmShare));
+        for (w, h) in SIZES {
+            let around = layout(Around::QuickMenu, vec2(w, h));
+            if around.iter().any(|p| p.zone == Zone::WingPlaying) {
+                let placed = around.iter().find(|p| p.zone == Zone::QmShare).unwrap_or_else(|| panic!("{w}x{h}: no room for it"));
+                assert!(placed.rect.bottom() <= h && placed.rect.right() <= w, "{w}x{h}");
+            }
+        }
+    }
+
     #[test]
     fn the_whole_ring_fits_every_window_from_square_up_and_narrower_shows_whole_cells_only() {
         for (w, h) in SIZES {

@@ -21,8 +21,11 @@ const CHOICE_TOP: f32 = 12.0;
 const INVITE_H: f32 = 188.0;
 const LINE_H: f32 = 52.0;
 
-/// The invite to show: the newest one not put away.
+/// The invite to show: the newest one not put away; none of a list whose account is gone.
 fn invite(state: &State) -> Option<Invite> {
+    if state.stale() {
+        return None;
+    }
     state.data.invites.iter().find(|i| i.kind == InviteKind::Invite && !state.dismissed.contains(&i.id)).cloned()
 }
 

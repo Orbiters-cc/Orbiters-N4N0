@@ -39,10 +39,13 @@ const STARTING_FOR: Duration = Duration::from_secs(60);
 /// How long a start's claim on its VRChat profile holds when no VRChat with that profile shows up: a slow start (Steam,
 /// Easy Anti-Cheat, an update) is still a start, so this is long; a VRChat seen on the profile ends the claim at once.
 const PROFILE_HELD: Duration = Duration::from_secs(180);
-/// A start past [`PROFILE_HELD`] whose VRChat was never seen is not forgotten: its profile takes no new start until the
-/// person, told so, presses again within [`CONFIRM_WITHIN`] (VRChat may still come: an update, a slow Steam), for this long.
+/// A start past [`PROFILE_HELD`] whose VRChat was never seen is not forgotten: its profile takes no new start from a
+/// person until they, told so, press again within [`CONFIRM_WITHIN`] (VRChat may still come: a long Steam update), however
+/// long that is; a start nobody pressed (the bridge's) may take the profile after this long.
 const PROFILE_LAPSED: Duration = Duration::from_secs(10 * 60);
 const CONFIRM_WITHIN: Duration = Duration::from_secs(20);
+/// How long a VRChat whose profile is not known holds every start before the person may override it.
+const UNKNOWN_WAIT: Duration = Duration::from_secs(60);
 /// The same on a Mac, where the person presses Play in Obelisk (its sign-in, an update check, Easy Anti-Cheat).
 const MAC_STARTING_FOR: Duration = Duration::from_secs(180);
 /// How long an action's outcome stays in the state (the page's "Sent", the error it took back).
@@ -424,6 +427,10 @@ pub(super) struct Runtime {
     /// profile from before the start until a VRChat on it is seen, or [`PROFILE_HELD`] passed (REQUEST15 fix B4).
     starting: Vec<Claim>,
     claims_made: u64,
+    /// VRChats whose profile is not known, since when (by process id), and a press on a profile told about them that a
+    /// second press within [`CONFIRM_WITHIN`] confirms (REQUEST15 third pass, S4).
+    unknown_since: HashMap<u32, Instant>,
+    unknown_confirm: Option<(u32, Instant)>,
     /// The account's own profile changes no sooner than this ([`mine::CHANGE_EVERY`] apart).
     mine_next: Option<Instant>,
 }
@@ -444,7 +451,8 @@ impl Claim {
         self.at.elapsed() < PROFILE_HELD
     }
 
-    /// Kept at all: holding, or lapsed (see [`Controller::launcher_claim`]).
+    /// Still barring its profile to a start nobody pressed (the bridge's): holding, or lapsed for less than
+    /// [`PROFILE_LAPSED`]. A person is asked about it however old it is (see [`Controller::launcher_claim`]).
     fn kept(&self) -> bool {
         self.at.elapsed() < PROFILE_HELD + PROFILE_LAPSED
     }
@@ -497,6 +505,8 @@ impl Default for Runtime {
             starting: Vec::new(),
             claims_made: 0,
             mine_next: None,
+            unknown_since: HashMap::new(),
+            unknown_confirm: None,
         }
     }
 }
@@ -799,6 +809,14 @@ impl Controller {
         let look = here && (machine.by_hand() || !view.vrchat.runs.is_empty() || view.vrchat.running || claimed || matches!(view.launcher.game, Game::Starting(_) | Game::Running(_)));
         let runs = if look { runs_with_profiles(machine, &view.vrchat.runs) } else { Vec::new() };
         let claims = self.launcher_retire_claims(&observed, &runs);
+        {
+            let mut rt = self.launcher.lock().unwrap();
+            let unknown: Vec<u32> = runs.iter().filter(|r| r.2.is_none()).map(|r| r.0).collect();
+            rt.unknown_since.retain(|pid, _| unknown.contains(pid));
+            for pid in unknown {
+                rt.unknown_since.entry(pid).or_insert_with(Instant::now);
+            }
+        }
         // The accounts seen on each profile are remembered, so the choice says whose each one is.
         let learned: Vec<(u32, String)> = view
             .vrchat
@@ -1314,8 +1332,15 @@ impl Controller {
             // The route is decided once, from one look at the processes, and that route is the one taken.
             let processes = travel.running();
             let chosen = super::travel::route(false, &processes, &bridge, |p| travel.own_osc_ports(p));
-            if chosen == super::travel::Route::Start && (started.is_some_and(|t| t.elapsed() < STARTING_FOR) || self.launcher_claim(0, mode).is_err()) {
-                return Notice::Error(tr("Starting VRChat…").into());
+            if chosen == super::travel::Route::Start {
+                if started.is_some_and(|t| t.elapsed() < STARTING_FOR) {
+                    return Notice::Error(tr("Starting VRChat…").into());
+                }
+                // The claim's own words: a start that never showed asks for a second press, and that is said here
+                // (REQUEST15 third pass: it was turned into "Starting VRChat…" while it armed the second press).
+                if let Err(notice) = self.launcher_claim(0, mode) {
+                    return notice;
+                }
             }
             if scoped && self.launcher_sender(account).is_err() {
                 self.launcher_unclaim_last_if(chosen == super::travel::Route::Start);
@@ -1420,7 +1445,11 @@ impl Controller {
         // A start on this profile that never showed (past its time): not started again behind its back. The person is
         // told once; a press again within a few seconds says it is not coming, and starts.
         let now = Instant::now();
-        if let Some(lapsed) = rt.starting.iter_mut().find(|c| c.profile == profile && c.kept()) {
+        // Past its lapse, the bridge's start may take the profile; a person is always asked first.
+        if !person {
+            rt.starting.retain(|c| c.profile != profile || c.kept());
+        }
+        if let Some(lapsed) = rt.starting.iter_mut().find(|c| c.profile == profile) {
             match lapsed.confirm_by {
                 Some(by) if person && now < by => {
                     let id = lapsed.id;
@@ -1451,7 +1480,6 @@ impl Controller {
     pub(super) fn launcher_retire_claims(&self, observed: &[u64], runs: &[(u32, bool, Option<u32>)]) -> Vec<(u32, LaunchMode)> {
         let mut rt = self.launcher.lock().unwrap();
         rt.starting.retain(|c| !(observed.contains(&c.id) && runs.iter().any(|r| r.2 == Some(c.profile))));
-        rt.starting.retain(Claim::kept);
         rt.starting.iter().filter(|c| c.holds()).map(|c| (c.profile, c.mode)).collect()
     }
 
@@ -1500,9 +1528,30 @@ impl Controller {
         if runs.iter().any(|r| r.2 == Some(profile)) {
             return Notice::Error(tr!("VRChat already runs on profile {n}: choose another profile to start one more.", n = profile));
         }
-        // A VRChat whose profile is not known yet could be on this one: wait until it says (a few seconds).
-        if runs.iter().any(|r| r.2.is_none()) {
-            return Notice::Error(tr("A VRChat is starting and has not said its profile yet: try again in a moment.").into());
+        // A VRChat whose profile is not known yet could be on this one: wait until it says (a few seconds). One that has
+        // still not said after a minute (its log never named it) does not hold Play for its whole life: the person is
+        // told, and a second press starts anyway.
+        let unknown: Vec<u32> = runs.iter().filter(|r| r.2.is_none()).map(|r| r.0).collect();
+        if !unknown.is_empty() {
+            let now = Instant::now();
+            let mut rt = self.launcher.lock().unwrap();
+            rt.unknown_since.retain(|pid, _| unknown.contains(pid));
+            let oldest = unknown.iter().map(|pid| *rt.unknown_since.entry(*pid).or_insert(now)).min().unwrap_or(now);
+            if now.duration_since(oldest) < UNKNOWN_WAIT {
+                return Notice::Error(tr("A VRChat is starting and has not said its profile yet: try again in a moment.").into());
+            }
+            match rt.unknown_confirm {
+                Some((p, by)) if p == profile && now < by => rt.unknown_confirm = None,
+                _ => {
+                    rt.unknown_confirm = Some((profile, now + CONFIRM_WITHIN));
+                    let minutes = (now.duration_since(oldest).as_secs() / 60).max(1);
+                    return Notice::Error(tr!(
+                        "A VRChat running for {m} min has not said its profile. If it is not on profile {n}, press Play again to start anyway.",
+                        m = minutes,
+                        n = profile
+                    ));
+                }
+            }
         }
         if runs.is_empty() && started.is_some_and(|t| t.elapsed() < STARTING_FOR) {
             return Notice::Error(tr("Starting VRChat…").into());
@@ -1689,6 +1738,11 @@ impl Controller {
         if shown.is_some() && shown.as_deref() != account {
             return;
         }
+        // A signed-in list's dismissal is kept (30 days) only while that account is still the one signed in: a list left on
+        // show for a moment after a sign-out or a switch changes nothing (REQUEST15 third pass, blocker 2).
+        if shown.is_some() && !self.launcher_live(account) {
+            return;
+        }
         let was_invite = self.view().launcher.invites.iter().any(|i| i.id == id);
         if self.view().launcher.boops.iter().any(|b| b.id == id) {
             // VRChat lists a boop again at each full read: remembered here, so that it does not come back.
@@ -1708,6 +1762,12 @@ impl Controller {
                 let _ = send_as(&client, account, |c| c.hide_notification(id));
             }
         }
+    }
+
+    /// Whether `account` is the one signed in right now (the session, not the list on show).
+    fn launcher_live(&self, account: Option<&str>) -> bool {
+        let live = self.launcher_client().and_then(|c| c.lock().unwrap().signed_in_user_id().map(str::to_owned));
+        account.is_some() && live.as_deref() == account
     }
 
     fn launcher_send(&self, boop: bool, to: &str, emoji: Option<&str>, account: Option<&str>) -> Notice {
@@ -1766,6 +1826,11 @@ impl Controller {
                 _ => None,
             };
             if shown != account {
+                return;
+            }
+            // A signed-in list's profile opens only while its account is still signed in: nothing of the row (its note)
+            // is shown from a list whose session ended (REQUEST15 third pass, blocker 2).
+            if shown.is_some() && client_account.as_deref() != account {
                 return;
             }
             let Some(friend) = view.launcher.friend(id).cloned().or_else(|| view.launcher.me.clone().filter(|m| m.id == id)) else { return };

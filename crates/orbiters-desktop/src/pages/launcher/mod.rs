@@ -180,6 +180,32 @@ impl State {
         if !self.staged {
             self.login = Some(cx.snap.vrchat_login.user.as_ref().map(|u| u.id.clone()));
         }
+        self.mask_if_stale();
+    }
+
+    /// Whether the list on show is a VRChat account's that is no longer the one signed in (signed out, or another account
+    /// signed in), before the service's next look replaces it (REQUEST15 third pass, blocker 2): nothing of it is shown,
+    /// pressed, opened or loaded meanwhile.
+    pub fn stale(&self) -> bool {
+        match (&self.data.source, &self.login) {
+            (orbiters_core::launcher::Source::SignedIn { user_id, .. }, Some(login)) => login.as_deref() != Some(user_id.as_str()),
+            _ => false,
+        }
+    }
+
+    /// The same frame the list goes stale: its profile window and its drawer close, what was asked for it is dropped.
+    fn mask_if_stale(&mut self) {
+        if self.stale() {
+            self.modal = None;
+            self.drawer = None;
+            self.wanted.clear();
+        }
+    }
+
+    /// Pictures of the page: the VRChat account signed in now (`None`: signed out), against the list handed in.
+    pub fn stand_in_login(&mut self, account: Option<String>) {
+        self.login = Some(account);
+        self.mask_if_stale();
     }
 
     /// A picture by its URL, once loaded.
@@ -270,6 +296,10 @@ impl State {
     /// [`Self::act`] with the sending given: shows the press, sends it bound to the account on show, and takes the
     /// press back when it never reached the service.
     fn press(&mut self, clock: f64, action: Action, send: impl FnOnce(Action) -> bool) {
+        // A list whose account is gone takes no press at all.
+        if self.stale() {
+            return;
+        }
         self.note(clock, &action);
         if !send(self.as_shown(action.clone())) {
             // Never reached the service: nothing went, so nothing says it did.
@@ -318,7 +348,8 @@ impl State {
     }
 
     fn picture(&mut self, url: &str) -> Option<egui::TextureHandle> {
-        if url.is_empty() {
+        // Nothing of a list whose account is gone is asked for (a picture would be read with the session of now).
+        if url.is_empty() || self.stale() {
             return None;
         }
         if let Some(found) = self.pictures.get(url) {
@@ -539,6 +570,9 @@ pub(super) fn backdrop(p: &egui::Painter, rect: Rect, radius: f32, state: &mut S
 /// The column (or the rail) beside Home's content, at `rect`.
 pub fn side_panel(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, side: Side) {
     state.wanted.clear();
+    if state.stale() {
+        return row::put_away(ui, state, rect, side);
+    }
     match side {
         Side::Column(_) => column(ui, cx, state, rect, false),
         Side::Rail => row::rail(ui, cx, state, rect),
@@ -547,6 +581,9 @@ pub fn side_panel(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, side:
 
 /// What floats over the page: the drawer of a narrow window, then the profile modal. Call after everything else.
 pub fn over_page(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
+    if state.stale() {
+        return;
+    }
     let ctx = ui.ctx().clone();
     let clock = anim::time(&ctx);
     if let Some(since) = state.drawer {
@@ -678,6 +715,39 @@ mod tests {
         });
         assert!(state.requested.contains_key(&to));
         assert_eq!(sent, Some(Action::As { account: "usr_a".into(), action: Box::new(Action::RequestInvite { to }) }), "bound to the list's account");
+    }
+
+    #[test]
+    fn a_list_whose_account_signed_out_is_put_away_on_the_same_frame() {
+        let mut data = orbiters_core::launcher::sample();
+        data.source = orbiters_core::launcher::Source::SignedIn { user_id: "usr_a".into(), name: String::new() };
+        let friend = data.friends[0].clone();
+        let mut state = State { data: Arc::new(data), login: Some(Some("usr_a".into())), ..Default::default() };
+        assert!(!state.stale());
+        state.modal = Some(Modal { id: friend.id.clone(), from: Rect::NOTHING, opened: 0.0, closing: None });
+        state.drawer = Some(0.0);
+        // Signed out: the service has not looked again yet, A's list is still the data.
+        state.login = Some(None);
+        assert!(state.stale());
+        state.mask_if_stale();
+        assert!(state.modal.is_none() && state.drawer.is_none(), "A's profile window (and its note) closes at once");
+        let mut sent = Vec::new();
+        state.press(1.0, Action::Dismiss { id: "not_boop_a".into() }, |a| {
+            sent.push(a);
+            true
+        });
+        state.press(1.0, Action::OpenProfile { id: friend.id.clone() }, |a| {
+            sent.push(a);
+            true
+        });
+        assert!(sent.is_empty() && state.dismissed.is_empty(), "no press of the old list goes");
+        assert!(state.picture("https://api.vrchat.cloud/api/1/file/file_x/1/file").is_none() && state.wanted.is_empty(), "no picture of it is asked for");
+        // Another account signed in, the old list still there: the same.
+        state.login = Some(Some("usr_b".into()));
+        assert!(state.stale());
+        // Unwired (pictures of the page, tests) or a local copy: never stale.
+        state.login = None;
+        assert!(!state.stale());
     }
 
     #[test]

@@ -82,6 +82,8 @@ pub struct Mine {
     picker_page: usize,
     /// When the page first saw the last "Saved".
     saved_seen: Option<(u64, f64)>,
+    /// The Explorer points' chip was pressed: to Settings after this frame.
+    go_points: bool,
 }
 
 impl Mine {
@@ -199,6 +201,9 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     });
     if go {
         cx.go = Some(super::super::Go::VrchatAccount);
+    }
+    if std::mem::take(&mut state.mine.go_points) {
+        cx.go = Some(super::super::Go::ExplorerPoints);
     }
     picker(ui, cx, state);
 }
@@ -350,6 +355,13 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
         None => {}
     }
     banner_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Choose your banner: a colour, your avatar's picture or one of your gallery"));
+    // The member's Explorer points on the banner's other side (REQUEST19 1), over it: pressed, Settings where they live.
+    if let Some(chip) = super::points::chip(cx.snap) {
+        let at = pos2(banner.left() + 12.0, change_rect.center().y - 17.0);
+        if super::points::draw(ui, at, change_rect.left() - 12.0 - at.x, &chip) {
+            state.mine.go_points = true;
+        }
+    }
 
     // The picture, over the banner's edge, pressed to choose another.
     let pic = Rect::from_min_size(pos2(rect.left() + PAD, banner.bottom() - ICON * 0.5), vec2(ICON, ICON));

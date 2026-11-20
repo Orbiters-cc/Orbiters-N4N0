@@ -119,9 +119,14 @@ fn shown_mine(state: &State) -> Option<MyProfile> {
     state.data.mine.clone()
 }
 
+/// The account whose card this is: the launcher's signed-in account, and only while the sign-in says the same. Signing
+/// out (or into another account) masks the card at once, before the launcher's next look replaces its list.
 fn signed_in(state: &State) -> Option<String> {
     match &state.data.source {
-        Source::SignedIn { user_id, .. } if !user_id.is_empty() => Some(user_id.clone()),
+        Source::SignedIn { user_id, .. } if !user_id.is_empty() => match &state.login {
+            Some(login) if login.as_deref() != Some(user_id.as_str()) => None,
+            _ => Some(user_id.clone()),
+        },
         _ => None,
     }
 }
@@ -992,6 +997,25 @@ mod tests {
         data.mine = Some(MyProfile { loaded: true, ..MyProfile::default() });
         state.data = Arc::new(data);
         assert!(!read_due(&state, "usr_a", 500.0));
+    }
+
+    #[test]
+    fn signing_out_masks_the_card_before_the_list_is_replaced() {
+        let mut data = sample();
+        data.source = Source::SignedIn { user_id: "usr_a".into(), name: String::new() };
+        let mut state = State { data: Arc::new(data), login: Some(Some("usr_a".into())), ..Default::default() };
+        sync_account(&mut state);
+        state.mine.editing = Some(Editing::Bio("A's words".into()));
+        assert_eq!(signed_in(&state).as_deref(), Some("usr_a"));
+        // Signed out: the launcher still shows A's list for a moment; the card is no longer A's.
+        state.login = Some(None);
+        assert_eq!(signed_in(&state), None);
+        assert_eq!(bound(&state, ProfileEdit::Bio("A's words".into())), None, "nothing goes");
+        sync_account(&mut state);
+        assert!(state.mine.editing.is_none(), "A's draft is gone at once");
+        // Another account signed in, A's list still on show: the same.
+        state.login = Some(Some("usr_b".into()));
+        assert_eq!(signed_in(&state), None);
     }
 
     #[test]

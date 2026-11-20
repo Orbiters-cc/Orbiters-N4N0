@@ -1,7 +1,9 @@
 //! History (REQUEST19 2: "the Video tab content to be a new page in the overlay accessible from the youtube page on a icon
 //! button History"): every video the worlds' players played in VRChat, the latest first, as the window's Videos tab lists
 //! them, from the same store (`orbiters_core::video_history`, which the tray service keeps from VRChat's logs). Reached from
-//! YouTube's page by the History button in its head, beside its close; Back (the head's, or the page's own "YouTube") goes back.
+//! YouTube's page by its round History button in the page's own head row, before what is searched: on its search, in the place
+//! N4N0's menu keeps for its own Back (which the sheet's head has instead, so it is empty there), and on its results before the
+//! search's field, the same place. Back (the head's, or this page's own "YouTube" in that same place) goes back.
 //!
 //! In the overlay's own design, not a smaller copy of the window's: one video a row across the whole page, as YouTube's
 //! results are, its picture, its title on two lines, where and when it played, and the two buttons a result has: Copy link
@@ -23,6 +25,11 @@ const PICTURE: f32 = 184.0;
 const ACTION_W: f32 = 184.0;
 /// The page's own way back, at its top left.
 const BACK: Rect = Rect { min: Pos2 { x: 24.0, y: 8.0 }, max: Pos2 { x: 224.0, y: 52.0 } };
+/// History's button on YouTube's results, before the search's field; on YouTube's search, the place N4N0's menu keeps for its
+/// round Back, empty on the sheet (`Menu::back_on_the_sheet`), and the hover N4N0's page is given while it is pointed at.
+pub const RESULTS_BUTTON: Rect = Rect { min: Pos2 { x: 24.0, y: 8.0 }, max: Pos2 { x: 68.0, y: 52.0 } };
+pub const SEARCH_BUTTON: Rect = Rect { min: Pos2 { x: 32.0, y: 24.0 }, max: Pos2 { x: 88.0, y: 80.0 } };
+pub const ON_MENU: usize = usize::MAX;
 /// How often the store's file is looked at while the page shows.
 const LOOK_EVERY: Duration = Duration::from_secs(5);
 
@@ -93,7 +100,7 @@ pub fn items(facts: &Facts) -> Vec<Item> {
     let mut out = Vec::new();
     for row in &facts.history.rows {
         let rect = row_rect(row.index, facts.gallery_scroll);
-        if rect.bottom() < TOP || rect.top() > 576.0 {
+        if rect.bottom() < TOP || rect.top() >= 576.0 {
             continue;
         }
         out.push(Item { action: Action::HistoryCopy(row.index), rect, look: Look::HistoryRow(row.index) });
@@ -223,14 +230,29 @@ pub fn draw_item(p: &Painter, item: &Item, facts: &Facts, hovered: bool, pressed
     }
 }
 
-/// The History button in YouTube's head: round as its neighbours, the clock turning back; lit while the page is open.
-pub fn draw_head_button(p: &Painter, rect: Rect, open: bool, hovered: bool, pressed: bool) {
-    let fill = if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else if open { look::ACCENT_SOFT } else { look::TILE };
+/// History's button: round as the menu's own Back it stands in for, the clock turning back, an outline that says it is pressable.
+pub fn draw_round_button(p: &Painter, rect: Rect, hovered: bool, pressed: bool) {
+    let fill = if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE };
     p.circle_filled(rect.center(), rect.width() / 2.0, fill);
-    if open {
-        p.circle_stroke(rect.center(), rect.width() / 2.0 - 0.75, Stroke::new(1.5, look::accent()));
+    p.circle_stroke(rect.center(), rect.width() / 2.0 - 0.75, Stroke::new(1.0, Color32::from_white_alpha(if hovered { 110 } else { 44 })));
+    widgets::icon(p, rect.center(), icons::CLOCK_COUNTER_CLOCKWISE, rect.width() * 0.52, look::LABEL);
+}
+
+/// N4N0's menu on the sheet shows YouTube's search, where History has the place of the menu's own Back.
+pub fn on_search(menu: &orbiters_n4n0_core::menu::Menu) -> bool {
+    menu.page == orbiters_n4n0_core::menu::Page::Search && menu.back_on_the_sheet
+}
+
+/// What is at `p` on N4N0's menu's page on the sheet, for History: [`ON_MENU`] on its button, none elsewhere (the menu's own).
+pub fn menu_hit(menu: &orbiters_n4n0_core::menu::Menu, p: Pos2) -> Option<usize> {
+    (on_search(menu) && SEARCH_BUTTON.contains(p)).then_some(ON_MENU)
+}
+
+/// History's button over N4N0's menu's YouTube search, as the sheet draws the page.
+pub fn draw_on_menu(p: &Painter, menu: &orbiters_n4n0_core::menu::Menu, hover: Option<usize>, pressed: Option<usize>) {
+    if on_search(menu) {
+        draw_round_button(p, SEARCH_BUTTON, hover == Some(ON_MENU), pressed == Some(ON_MENU));
     }
-    widgets::icon(p, rect.center(), icons::CLOCK_COUNTER_CLOCKWISE, rect.width() * 0.56, if open { look::accent() } else { look::LABEL });
 }
 
 /// What the caption says of the page's parts.
@@ -423,7 +445,7 @@ mod tests {
         assert_eq!(facts.history.rows[1].title, "Sample video 1999");
         let laid = items(&facts);
         assert!(laid.iter().any(|i| i.action == Action::Back), "the page's own way back");
-        assert!(laid.iter().all(|i| i.rect.top() < 576.0 && (i.rect.bottom() > TOP || i.action == Action::Back)));
+        assert!(laid.iter().filter(|i| matches!(i.look, Look::HistoryRow(_))).all(|i| i.rect.top() < 576.0 && i.rect.bottom() > TOP), "rows in view only");
         let end = max_scroll(&facts);
         let at_end = Facts { gallery_scroll: end, history: store.facts(end, None, true, 1_800_000_100, |_| None), ..facts.clone() };
         let last = items(&at_end).into_iter().filter(|i| matches!(i.look, Look::HistoryRow(_))).map(|i| (i.look, i.rect)).last().unwrap();

@@ -2811,7 +2811,8 @@ impl Panels {
                             }
                             let menu = self.stage.presented_scene.as_ref().and_then(|s| s.menu()).unwrap_or(&self.stage.host.menu);
                             let page = layout::cached(ScreenPage::of(menu));
-                            layout::hit_pointable(page, menu, p.x, p.y).map(|(element, _)| element)
+                            // YouTube's History, in the place of the menu's own Back on its search (REQUEST19 2).
+                            panels::history_sheet::menu_hit(menu, p).or_else(|| layout::hit_pointable(page, menu, p.x, p.y).map(|(element, _)| element))
                         }
                         Some(Sheet::Worlds) => {
                             worlds_hover = Some((p.x, p.y));
@@ -2867,7 +2868,9 @@ impl Panels {
             panel.shown = on_parts && !self.peek;
         }
         // The caption says what is pointed at.
-        let pointed = self.list.iter().find_map(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)).or_else(|| self.takeover.as_ref().filter(|_| matches!(sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)));
+        let pointed = self.list.iter().find_map(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)).or_else(|| self.takeover.as_ref().filter(|_| matches!(sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)))
+            // History on YouTube's search is an icon: the caption says what it is.
+            .or_else(|| (sheet == Some(Sheet::Menu) && self.takeover.as_ref().and_then(|p| p.hover) == Some(panels::history_sheet::ON_MENU)).then_some(Action::VideoHistory));
         if pointed != self.facts.pointed {
             self.facts.pointed = pointed;
             self.caption_dirty();
@@ -2920,6 +2923,13 @@ impl Panels {
                         return out;
                     }
                 }
+            }
+            // YouTube's History on its search (REQUEST19 2): not one of the menu's elements, the overlay's own.
+            Some(Sheet::Menu) if self.takeover.as_ref().and_then(|p| p.hover) == Some(panels::history_sheet::ON_MENU) => {
+                crate::usage::press(&usage_name(&Action::VideoHistory));
+                out.clicked = true;
+                self.act(Action::VideoHistory, snap, &mut out);
+                return out;
             }
             Some(Sheet::Menu) => {
                 if let Some(panel) = self.takeover.as_mut() {
@@ -3883,7 +3893,7 @@ impl Panels {
         page.shown_pixels = Some(frame.pixels.clone()); page.items.clone_from(&frame.items);
         page.hover = match &frame.scene {
             page_painter::Scene::Native => self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p)),
-            page_painter::Scene::Menu { menu, .. } => self.sheet_pointer.and_then(|p| layout::hit_pointable(layout::cached(ScreenPage::of(menu)), menu, p.x, p.y).map(|(n, _)| n)),
+            page_painter::Scene::Menu { menu, .. } => self.sheet_pointer.and_then(|p| panels::history_sheet::menu_hit(menu, p).or_else(|| layout::hit_pointable(layout::cached(ScreenPage::of(menu)), menu, p.x, p.y).map(|(n, _)| n))),
             page_painter::Scene::Worlds(_) => None,
         };
         page.painted = true; page.again = false; page.dirty |= first || page.hover != frame.hover || page.pressed != frame.pressed;
@@ -4192,6 +4202,7 @@ impl Panels {
                         } else {
                             menu_ui::draw(p, pos2(0.0, 0.0), &view);
                         }
+                        panels::history_sheet::draw_on_menu(p, &host.menu, hover, pressed);
                         if cover {
                             type_hint(p, world_video.as_deref());
                         }

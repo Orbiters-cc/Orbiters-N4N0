@@ -1184,14 +1184,27 @@ fn the_song_s_picture_disappearing_paints_all_tools_again() {
 }
 
 
-/// REQUEST19 2: YouTube's page has History in its head (on its search and on its results, nowhere else); it opens the page of
-/// the videos played in worlds with YouTube's tab still lit; a video there is copied and dropped through N4N0's menu's own
-/// commands, as a result is; and Back, History pressed again, or the page's own way back each return to YouTube as it was.
+/// REQUEST19 2: YouTube's page has History in its own head row (on its search in the place of the menu's own Back, on its
+/// results before the search; nowhere else); it opens the page of the videos played in worlds with YouTube's tab still lit; a
+/// video there is copied and dropped through N4N0's menu's own commands, as a result is; and the head's Back or the page's own
+/// way back return to YouTube as it was.
 #[test]
 fn youtube_s_history_opens_plays_again_and_goes_back() {
-    use super::panels::history_sheet;
+    use super::panels::{history_sheet, Look};
     use crate::ipc::N4n0Command;
     use orbiters_n4n0_core::menu::Page;
+    // Points at the takeover's page at `at` (its units), presses and lets go, a turn each.
+    fn press_page_at(person: &mut Person, at: egui::Pos2) {
+        let page = person.panels.all().count() - 1;
+        person.panels.hover(Some((page, at)));
+        person.turn();
+        let snap = person.snap.clone();
+        person.panels.press(&snap);
+        person.turn();
+        person.panels.release();
+        person.panels.hover(None);
+        person.turns(3);
+    }
     let (mut person, heard) = Person::heard();
     person.around = Some(Around::QuickMenu);
     person.turns(3);
@@ -1199,58 +1212,55 @@ fn youtube_s_history_opens_plays_again_and_goes_back() {
     assert!(person.find(Action::VideoHistory).is_none(), "no History with no page up");
     person.press(Action::Page(Target::YouTube));
     person.turns(2);
-    assert_eq!((person.panels.facts.sheet, person.panels.facts.sheet_title.as_str()), (Some(Sheet::Menu), "YouTube"));
-    assert!(person.find(Action::VideoHistory).is_some(), "History in YouTube's head");
-    person.press(Action::VideoHistory);
-    person.turns(2);
+    assert_eq!((person.panels.facts.sheet, person.panels.facts.sheet_title.as_str(), person.panels.stage.host.menu.page), (Some(Sheet::Menu), "YouTube", Page::Search));
+    assert!(history_sheet::on_search(&person.panels.stage.host.menu), "History where the menu's own Back would be");
+    // Pointed at, the caption names it; pressed, its page.
+    let page = person.panels.all().count() - 1;
+    person.panels.hover(Some((page, history_sheet::SEARCH_BUTTON.center())));
+    person.turn();
+    assert_eq!(person.panels.facts.pointed, Some(Action::VideoHistory), "the caption says what the icon is");
+    person.panels.hover(None);
+    person.turn();
+    press_page_at(&mut person, history_sheet::SEARCH_BUTTON.center());
     assert_eq!(person.panels.facts.sheet, Some(Sheet::VideoHistory));
     assert!(super::panels::tab_lit(&person.panels.facts, Action::Page(Target::YouTube)), "YouTube's tab stays lit on its History");
     let h = &person.panels.facts.history;
     assert_eq!(h.count, 40);
-    assert_eq!(h.rows.first().map(|r| r.title.as_str()), Some("Sample video 39"), "the latest first");
+    assert_eq!(h.rows.first().map(|r| (r.title.as_str(), r.link_only)), Some(("stream.example.invalid/live/sample-39.m3u8", true)), "the latest first, a stream by its link");
     // Played again: its link to the clipboard, for the world's player.
     heard.n4n0.lock().unwrap().clear();
     person.press(Action::HistoryCopy(0));
     person.turns(1);
-    assert!(heard.n4n0.lock().unwrap().iter().any(|c| matches!(c, N4n0Command::CopyText { text } if text == "https://youtu.be/sample00039")), "{:?}", heard.said());
+    assert!(heard.n4n0.lock().unwrap().iter().any(|c| matches!(c, N4n0Command::CopyText { text } if text == "https://stream.example.invalid/live/sample-39.m3u8")), "{:?}", heard.said());
     assert_eq!(person.panels.facts.history.copied, Some(0), "the row says Copied");
     // Drop in world: nothing where the avatar cannot drop a card, a card where it can.
-    person.panels.stage.host.menu.can_drop = false;
+    let can_drop = |person: &mut Person, can: bool| {
+        let mut snap = (*person.snap).clone();
+        snap.n4n0.can_drop = can;
+        person.snap = Arc::new(snap);
+        person.turns(2);
+    };
+    can_drop(&mut person, false);
     person.press(Action::HistoryDrop(1));
     assert!(!heard.n4n0.lock().unwrap().iter().any(|c| matches!(c, N4n0Command::Drop { .. })));
-    person.panels.stage.host.menu.can_drop = true;
+    can_drop(&mut person, true);
     person.press(Action::HistoryDrop(1));
     assert!(heard.n4n0.lock().unwrap().iter().any(|c| matches!(c, N4n0Command::Drop { link, video, .. } if link == "https://youtu.be/sample00038" && video.as_deref() == Some("sample00038"))), "{:?}", heard.said());
     // Back to YouTube by the head's Back.
     person.press(Action::Back);
     person.turns(2);
     assert_eq!((person.panels.facts.sheet, person.panels.facts.sheet_title.as_str()), (Some(Sheet::Menu), "YouTube"), "back on YouTube's search");
-    // History pressed again on its own page goes back too.
-    person.press(Action::VideoHistory);
-    person.turns(2);
-    assert_eq!(person.panels.facts.sheet, Some(Sheet::VideoHistory));
-    person.press(Action::VideoHistory);
-    person.turns(2);
-    assert_eq!(person.panels.facts.sheet, Some(Sheet::Menu), "History pressed again: back");
-    // From YouTube's results: there and back, the results kept.
+    // From YouTube's results: History before the search, there and back by the page's own way back, the results kept.
     person.panels.stage.host.menu.results = crate::overlay::menu_pages::sample_videos();
     person.panels.stage.host.menu.page = Page::Results;
     person.turns(2);
     assert_eq!(person.panels.facts.sheet, Some(Sheet::Results));
-    assert!(person.find(Action::VideoHistory).is_some(), "History on the results' head too");
+    assert!(!history_sheet::on_search(&person.panels.stage.host.menu));
     person.press(Action::VideoHistory);
     person.turns(2);
     assert_eq!(person.panels.facts.sheet, Some(Sheet::VideoHistory));
-    let page_back = person.panels.takeover.as_ref().and_then(|p| p.items.iter().find(|i| i.look == super::panels::Look::HistoryBack).map(|i| i.rect));
-    assert!(page_back.is_some(), "the page's own way back to YouTube");
-    // Its page is the last part: pointed at there, not at the head's Back.
-    let sheet_part = person.panels.all().count() - 1;
-    person.panels.hover(Some((sheet_part, page_back.unwrap().center())));
-    person.turn();
-    person.panels.press(&person.snap.clone());
-    person.turn();
-    person.panels.release();
-    person.turns(3);
+    let page_back = person.panels.takeover.as_ref().and_then(|p| p.items.iter().find(|i| i.look == Look::HistoryBack).map(|i| i.rect)).expect("the page's own way back to YouTube");
+    press_page_at(&mut person, page_back.center());
     assert_eq!(person.panels.facts.sheet, Some(Sheet::Results), "the page's own way back: YouTube's results, as they were");
     assert_eq!(person.panels.stage.host.menu.results.len(), crate::overlay::menu_pages::sample_videos().len());
     // Other pages have no History.

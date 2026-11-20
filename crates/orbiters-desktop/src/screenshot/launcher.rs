@@ -127,7 +127,6 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
         ("launcher-points-waiting", base.clone()),
         ("launcher-points-signed-out", signed_out),
         ("launcher-small-points", super::with_explorer_points(&base, 12.5)),
-        ("launcher-points-hover", super::with_explorer_points(&base, 12.5)),
     ] {
         scenarios.push(Scenario {
             name,
@@ -137,7 +136,7 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
             splash: false,
             open_detail: false,
             toasts: vec![],
-            pointer: (name == "launcher-points-hover").then_some(pos2(340.0, 312.0)),
+            pointer: None,
             scroll: 0.0,
             world: None,
             home: None,

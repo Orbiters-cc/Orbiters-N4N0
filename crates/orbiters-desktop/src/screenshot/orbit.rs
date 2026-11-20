@@ -2009,13 +2009,14 @@ pub(super) fn r19_history_shots(out: &Path) -> anyhow::Result<()> {
         .map(|(title, channel, duration)| panels::VideoTile { id: String::new(), title: title.to_string(), channel: channel.to_string(), duration: Some(duration.to_string()), picture: None })
         .collect();
     for (form, base) in [("desk", &desk), ("vr", &vr)] {
-        // YouTube's search, History in its head beside the close; History pointed at.
+        // YouTube's search, History in the page's own head row where the menu's Back is on the avatar's screen; History pointed at.
         let search = Facts { sheet: Some(Sheet::Menu), sheet_title: "YouTube".into(), ..base.clone() };
         r19_scene(&format!("r19-youtube-search-{form}"), out, hd, &search, None, true)?;
         let pointed = Facts { pointed: Some(Action::VideoHistory), ..search.clone() };
         r19_scene(&format!("r19-youtube-search-history-pointed-{form}"), out, hd, &pointed, Some(Action::VideoHistory), true)?;
         let results = Facts { sheet: Some(Sheet::Results), sheet_title: "YouTube".into(), videos: videos.clone(), videos_for: "rain sounds".into(), ..base.clone() };
         r19_scene(&format!("r19-youtube-results-{form}"), out, hd, &results, None, false)?;
+        r19_scene(&format!("r19-youtube-results-history-pointed-{form}"), out, hd, &results, Some(Action::VideoHistory), false)?;
         // History: many, the second's link just copied; scrolled far down; at its end.
         let page = Facts { sheet: Some(Sheet::VideoHistory), sheet_title: "History".into(), history: history(0.0, Some(1)), ..base.clone() };
         r19_scene(&format!("r19-history-{form}"), out, hd, &page, None, false)?;
@@ -2024,6 +2025,8 @@ pub(super) fn r19_history_shots(out: &Path) -> anyhow::Result<()> {
         let end = panels::max_scroll(Sheet::VideoHistory, &page);
         r19_scene(&format!("r19-history-end-{form}"), out, hd, &Facts { gallery_scroll: end, history: history(end, None), ..page.clone() }, None, false)?;
         r19_scene(&format!("r19-history-pointed-{form}"), out, hd, &Facts { pointed: Some(Action::HistoryDrop(2)), ..page.clone() }, Some(Action::HistoryDrop(2)), false)?;
+        // An avatar with no N4N0: Drop in world greyed (its caption says why).
+        r19_scene(&format!("r19-history-no-drop-{form}"), out, hd, &Facts { drop_why: panels::DropWhy::NoN4n0, ..page.clone() }, None, false)?;
         // Nothing yet, VRChat not found, still being read.
         let empty = HistoryFacts { state: HistoryState::Ready, log_found: true, ..Default::default() };
         r19_scene(&format!("r19-history-empty-{form}"), out, hd, &Facts { history: empty.clone(), ..page.clone() }, None, false)?;
@@ -2046,7 +2049,7 @@ fn r19_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, pointed: Optio
     blit(&mut image, w, &pixels, px, back.rect.min);
     let page = zones::place(Zone::Takeover, client).expect("it fits");
     let page_px = [page.rect.width() as u32, page.rect.height() as u32];
-    let pixels = if menu { youtube_search_picture(facts, page_px) } else { r19_sheet_picture(facts, pointed, page_px) };
+    let pixels = if menu { youtube_search_picture(facts, pointed.is_some(), page_px) } else { r19_sheet_picture(facts, pointed, page_px) };
     blit(&mut image, w, &pixels, page_px, page.rect.min);
     let path = out.join(format!("{name}.png"));
     save_png(&path, &over_ground(&image, w, h))?;
@@ -2079,7 +2082,7 @@ fn r19_sheet_picture(facts: &Facts, pointed: Option<panels::Action>, px: [u32; 2
 
 /// N4N0's menu's YouTube search as the sheet draws it: something typed, its suggestions, its keys (on a screen, the note to
 /// type on the keyboard over them).
-fn youtube_search_picture(facts: &Facts, px: [u32; 2]) -> Vec<u8> {
+fn youtube_search_picture(facts: &Facts, history_pointed: bool, px: [u32; 2]) -> Vec<u8> {
     use orbiters_n4n0_core::menu::Target;
     let mut menu = orbiters_n4n0_core::menu::Menu::new(orbiters_n4n0_core::menu::KeyboardLayout::Qwerty, 5, orbiters_n4n0_core::menu::PhotoLength::Standard);
     menu.open();
@@ -2094,6 +2097,8 @@ fn youtube_search_picture(facts: &Facts, px: [u32; 2]) -> Vec<u8> {
         canvas.paint(0.4, |p| {
             let view = crate::overlay::menu_ui::View { menu: &menu, hover: None, pressed: None, picture: &none, time: 0.4, skin: &skin };
             crate::overlay::menu_ui::draw(p, pos2(0.0, 0.0), &view);
+            let hover = history_pointed.then_some(panels::history_sheet::ON_MENU);
+            panels::history_sheet::draw_on_menu(p, &menu, hover, None);
             if facts.desktop {
                 crate::overlay::orbit::type_hint(p, None);
             }

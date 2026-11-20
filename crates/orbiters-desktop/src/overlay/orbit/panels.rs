@@ -916,9 +916,9 @@ pub enum Look {
     /// A small button on a YouTube result: its link, the `n`-th's, or dropping it.
     VideoCopy(usize),
     VideoDrop,
-    /// YouTube's History button in the head, and History's page: its way back, a video's row, its Copy link and Drop in world
-    /// ([`history_sheet`]).
-    HeadHistory,
+    /// YouTube's History button (on its results, before the search; on its search N4N0's menu's page has it), and History's
+    /// page: its way back, a video's row, its Copy link and Drop in world ([`history_sheet`]).
+    HistoryButton,
     HistoryBack,
     HistoryRow(usize),
     HistoryCopy(usize),
@@ -1133,9 +1133,6 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
             if let Some(rect) = head.small_view {
                 out.push(Item { action: Action::SmallView(!facts.view_small), rect, look: Look::SmallView });
             }
-            if let Some(rect) = head.history {
-                out.push(Item { action: Action::VideoHistory, rect, look: Look::HeadHistory });
-            }
             // What plays, where the head has room for it beside its tabs (All tools has it on its page).
             if let Some(at) = head.transport {
                 let b = HEAD_TRANSPORT;
@@ -1312,8 +1309,6 @@ pub struct Head {
     pub stop: Option<Rect>,
     /// Where what plays's three buttons start, when the head shows them.
     pub transport: Option<f32>,
-    /// YouTube's History (REQUEST19 2), on YouTube's page and on History's own.
-    pub history: Option<Rect>,
     pub tabs: Vec<Item>,
     /// Where the page's name starts (its mark first), when no tab is the page's, and where whatever is said in the head must end.
     pub title_x: f32,
@@ -1377,17 +1372,11 @@ pub fn head(facts: &Facts, w: f32) -> Head {
         end = rect.left() - 6.0;
         rect
     });
-    // YouTube's History, beside the head's other round buttons (REQUEST19 2), as the page's own control: it is no tab.
-    let history = youtube_page(facts).then(|| {
-        let rect = r(end - b, top, b, b);
-        end = rect.left() - gap;
-        rect
-    });
     end -= 6.0;
     let start = back.right() + 6.0;
     // All tools has the tools as large tiles right under its head: its name after the Back.
     if facts.sheet == Some(Sheet::All) {
-        return Head { back, close, peek, hide_view, small_view, stop, transport: None, history, tabs: Vec::new(), title_x: back.right() + 8.0, end };
+        return Head { back, close, peek, hide_view, small_view, stop, transport: None, tabs: Vec::new(), title_x: back.right() + 8.0, end };
     }
     // ONE row of tabs on every page (Enzo, 2026-11-13: "the page tabs at the top doesn't look the same depending on which page we are on (e.g. youtube vs settings),
     // unify them"). Until then a page's name, what plays, a status or the pointer each chose between names with icons, names alone and icons alone. Now the row is
@@ -1398,16 +1387,7 @@ pub fn head(facts: &Facts, w: f32) -> Head {
     let row_end = peek.left() - head_gap(facts);
     let tabs = tab_row(facts, start, row_end, head_condensed(facts));
     let title_x = tabs.last().map_or(start, |t| t.rect.right() + 6.0);
-    Head { back, close, peek, hide_view, small_view, stop, transport: None, history, tabs, title_x, end }
-}
-
-/// The page up is YouTube's (its search or its results) or its History: the head has History's button.
-pub fn youtube_page(facts: &Facts) -> bool {
-    match facts.sheet {
-        Some(Sheet::Results | Sheet::VideoHistory) => true,
-        Some(Sheet::Menu) => facts.sheet_title == "YouTube",
-        _ => false,
-    }
+    Head { back, close, peek, hide_view, small_view, stop, transport: None, tabs, title_x, end }
 }
 
 /// Whether the head holds more than its tabs, Back, its close and the way to VRChat's menus: what is running, the same on every page.
@@ -1646,7 +1626,9 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                 out.push(Item { action: Action::Video(i), rect: r(x, middle - 43.0, RESULT_ACTION_W, 40.0), look: Look::VideoCopy(i) });
                 out.push(Item { action: Action::VideoDrop(i), rect: r(x, middle + 3.0, RESULT_ACTION_W, 40.0), look: Look::VideoDrop });
             }
-            out.push(Item { action: Action::ResultsBack, rect: r(24.0, 8.0, 500.0, 44.0), look: Look::Back });
+            // History before what was searched, where YouTube's search has it beside its field (REQUEST19 2).
+            out.push(Item { action: Action::VideoHistory, rect: history_sheet::RESULTS_BUTTON, look: Look::HistoryButton });
+            out.push(Item { action: Action::ResultsBack, rect: r(history_sheet::RESULTS_BUTTON.right() + 8.0, 8.0, 448.0, 44.0), look: Look::Back });
             out
         }
         Sheet::Talk => {
@@ -3944,7 +3926,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let (words, font) = fitted(p, tr("Drop in world"), 16.0, weight::SEMIBOLD, rect.width() - 24.0, 13.5);
             clip.text(rect.center(), Align2::CENTER_CENTER, words, font, look::LABEL);
         }
-        Look::HeadHistory => history_sheet::draw_head_button(p, rect, facts.sheet == Some(Sheet::VideoHistory), hovered, pressed),
+        Look::HistoryButton => history_sheet::draw_round_button(p, rect, hovered, pressed),
         Look::HistoryBack | Look::HistoryRow(_) | Look::HistoryCopy(_) | Look::HistoryDrop(_) => history_sheet::draw_item(p, item, facts, hovered, pressed),
         Look::Back => {
             // What was searched, as a field: it can be changed from here.
@@ -5682,7 +5664,7 @@ mod tests {
         let pages: Vec<(Sheet, &str)> = vec![
             (Sheet::Worlds, "Worlds"), (Sheet::Results, "YouTube"), (Sheet::Menu, "YouTube"), (Sheet::Instances, "Instances"), (Sheet::Pictures, "Pictures"),
             (Sheet::Talk, "Ask N4N0"), (Sheet::Settings, "Settings"), (Sheet::Tracking, "Smooth tracking"), (Sheet::Mics, "Microphones"), (Sheet::Booster, "Boost FPS"),
-            (Sheet::Menu, "Saved looks"), (Sheet::Menu, "QR code"),
+            (Sheet::Menu, "Saved looks"), (Sheet::Menu, "QR code"), (Sheet::VideoHistory, "History"),
         ];
         let size = Zone::SheetBack.units().size();
         for language in Language::ALL {

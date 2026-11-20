@@ -404,6 +404,17 @@ impl SharedRuntime {
     }
 }
 
+/// The shares' presence withdrawn with the credential of `stamp` (`SharedRuntime::identity`: the API's address, a line
+/// break, the credential), on a thread of its own: the identity that leaves is not the one the queue sends with.
+fn shared_withdraw_as(stamp: &str) {
+    let Some((base, token)) = stamp.split_once('\n').map(|(b, t)| (b.to_string(), t.to_string())) else { return };
+    let _ = std::thread::Builder::new().name("shared-view-leave".into()).spawn(move || {
+        let api = Api::at(&base);
+        let agent = orbiters_core::http_agent(Some(Duration::from_secs(3)), Some(Duration::from_secs(5)));
+        let _ = agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call();
+    });
+}
+
 /// The capture's start view from its item (`GET /captures/capture/:id`).
 fn start_of(item: &Value) -> Option<ShareStart> {
     let view = &item["capture"]["view"];
@@ -585,6 +596,44 @@ impl Controller {
         }
     }
 
+    /// The identity of the shares becomes `now` (`None`: nobody, or N4N0 off). When it changes, the one before leaves:
+    /// its presence is withdrawn with its own credential (kept for that: the queue would drop it, as it sends a request
+    /// only with the identity signed in now), and everything shown of its shares goes on the same turn. The withdrawal
+    /// sent, the identity it was for.
+    pub(super) fn shared_identity_to(&self, now: Option<String>) -> Option<String> {
+        let (departed, forgot) = {
+            let mut rt = self.shared_view.lock().unwrap();
+            if rt.identity == now {
+                return None;
+            }
+            let before = std::mem::replace(&mut rt.identity, now);
+            let owed = rt.withdraw().is_some();
+            let forgot = rt.forget();
+            (before.filter(|_| owed), forgot)
+        };
+        if let Some(stamp) = &departed {
+            shared_withdraw_as(stamp);
+        }
+        if forgot || departed.is_some() {
+            self.shared_publish();
+        }
+        departed
+    }
+
+    /// The account leaves (signed out, another account): the shares let go of it at once, not at their next turn.
+    pub(super) fn shared_depart(&self) {
+        self.shared_identity_to(None);
+    }
+
+    /// The account signed in changed: the shares follow it now (another account's shares are not shown a moment longer).
+    pub(super) fn shared_follow_account(&self) {
+        let now = self.shared_identity_now().map(|(now, ..)| now);
+        let held = self.shared_view.lock().unwrap().identity.clone();
+        if held.is_some() && held != now {
+            self.shared_identity_to(None);
+        }
+    }
+
     /// The identity signed in now, as `SharedRuntime::identity` writes it (N4N0 on, signed in), with its API and credential.
     fn shared_identity_now(&self) -> Option<(String, Api, String)> {
         if !self.settings().n4n0.enabled {
@@ -717,7 +766,7 @@ impl Controller {
         }
     }
 
-    fn shared_publish(self: &Shared) {
+    fn shared_publish(&self) {
         let status = self.shared_view.lock().unwrap().status();
         self.update_if(|s| s.shared_view.set(status));
     }
@@ -726,6 +775,35 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verify4: the shares let go of an account on the same turn it leaves (a friend's offer on screen goes), and Orbiters
+    /// hears the presence withdrawn with the credential of the identity that left, also when N4N0 is switched off in an
+    /// instance (the identity becomes nobody before the withdrawal is made).
+    #[test]
+    fn the_shares_let_go_at_once_and_withdraw_with_the_departing_credential() {
+        let mut settings = orbiters_core::settings::Settings::default();
+        settings.n4n0.enabled = true;
+        let ctl = crate::controller::Controller::new(settings);
+        // A server address nothing listens on: the withdrawal goes nowhere.
+        let a = "http://127.0.0.1:1/\norbit-a".to_string();
+        let offer_up = |ctl: &crate::controller::Shared| {
+            {
+                let mut rt = ctl.shared_view.lock().unwrap();
+                rt.identity = Some(a.clone());
+                rt.present = true;
+                let _ = rt.event("share_offer", &offer_event(SHARE), now_ms());
+            }
+            ctl.shared_publish();
+            assert!(ctl.snapshot.lock().unwrap().shared_view.offer.is_some(), "A's friend's offer on screen");
+        };
+        // Signed out: the same, at once, before the shares' next turn.
+        offer_up(&ctl);
+        ctl.calls_depart();
+        assert!(ctl.snapshot.lock().unwrap().shared_view.offer.is_none());
+        assert!(ctl.shared_view.lock().unwrap().identity.is_none() && !ctl.shared_view.lock().unwrap().present);
+        // Nothing to withdraw twice.
+        assert_eq!(ctl.shared_identity_to(None), None);
+    }
 
     /// Verify3 blocker 2: the shared 3D view's requests go with the identity they were made under, and what comes back
     /// is taken only while that identity is the one signed in and the one the state is for: a presence answer (friends'

@@ -299,6 +299,8 @@ pub(crate) struct N4n0Runtime {
     pub(crate) bot: Option<bool>,
     /// Show N4N0 heard from VRChat or written here, counted: an avatar's look read before the last one does not overwrite it.
     bot_heard: u64,
+    /// `N4N0/Screen/Version` heard from VRChat, counted the same way: a look read across a newer one keeps the newer (verify2-r15 S5).
+    version_heard: u64,
     /// The screen's version as the avatar itself says it (`N4N0/Screen/Version` in VRChat's tree or sent), never the local manifest's
     /// default: whether its menu shows with the bot hidden is trusted only from it ([`N4n0Runtime::screen_keeps_menu`]).
     pub(crate) screen_version_seen: Option<i32>,
@@ -1314,6 +1316,7 @@ impl N4n0 {
         } else if name == params::SCREEN_VERSION {
             rt.screen_version = int_value(value);
             rt.screen_version_seen = rt.screen_version;
+            rt.version_heard = rt.version_heard.wrapping_add(1);
             rt.screen.menu.pages = Pages::of_screen(rt.screen_version);
             rt.screen.pointing = pointing(rt.screen_version);
             rt.screen.place_sync = rt.screen_version.is_some_and(|v| v >= contract::SCREEN_STAY_HERE);
@@ -1602,7 +1605,10 @@ impl N4n0 {
     /// nothing of the avatar: the panel stays as it was, and the tree is read again (`attempt`), longer apart each time.
     pub(crate) fn refresh_avatar(self: &Shared, id: Option<String>, carry: HashMap<String, OscValue>, attempt: u32) {
         // Show N4N0 heard so far: one heard while this look is read is newer than what it reads.
-        let bot_heard = self.n4n0.lock().unwrap().bot_heard;
+        let (bot_heard, version_heard) = {
+            let rt = self.n4n0.lock().unwrap();
+            (rt.bot_heard, rt.version_heard)
+        };
         let values = self.osc.vrchat_values();
         let id = id.or_else(|| {
             values.iter().find(|(a, _)| a == AVATAR_CHANGE).and_then(|(_, v)| match v {
@@ -1722,16 +1728,17 @@ impl N4n0 {
                 rt.screen_replace = replace;
                 rt.screen.menu.pinned = pinned;
                 rt.screen_thumbnail = thumbnail;
-                rt.screen_version = screen_version;
-                rt.screen.menu.pages = Pages::of_screen(screen_version);
-                rt.screen.pointing = pointing(screen_version);
-                rt.screen.place_sync = screen_version.is_some_and(|v| v >= contract::SCREEN_STAY_HERE);
+                // A version VRChat said while this was read is newer than what was read: it stays, with what follows from it.
+                if rt.version_heard == version_heard {
+                    rt.screen_version = screen_version;
+                    rt.screen.menu.pages = Pages::of_screen(screen_version);
+                    rt.screen.pointing = pointing(screen_version);
+                    rt.screen.place_sync = screen_version.is_some_and(|v| v >= contract::SCREEN_STAY_HERE);
+                }
                 rt.light = light;
                 // A Show N4N0 heard while this was read wins; a tree not read keeps what was heard of this avatar over the default.
                 rt.bot = bot_after_look(rt.bot, bot, known, rt.bot_heard != bot_heard);
-                if known {
-                    rt.screen_version_seen = version_seen;
-                }
+                rt.screen_version_seen = after_look(rt.screen_version_seen, version_seen.filter(|_| known), known, rt.version_heard != version_heard);
                 if vr_mode.is_some() {
                     rt.vr_mode = vr_mode;
                 }
@@ -2914,6 +2921,11 @@ pub(crate) fn screen_replace(tree: Option<bool>, manifest: Option<&AvatarManifes
 /// was read, `known`, else the manifest's default); `heard_since`: VRChat said it, or the app wrote it, while the look was read.
 /// What was heard since wins; a read tree says the rest; with none read, what was heard of this avatar wins over the default.
 pub(crate) fn bot_after_look(current: Option<bool>, read: Option<bool>, known: bool, heard_since: bool) -> Option<bool> {
+    after_look(current, read, known, heard_since)
+}
+
+/// What an avatar's look leaves of a value VRChat also says on its own (Show N4N0, the screen's version): [`bot_after_look`]'s rule for any.
+pub(crate) fn after_look<T: Copy>(current: Option<T>, read: Option<T>, known: bool, heard_since: bool) -> Option<T> {
     if heard_since {
         current
     } else if known {

@@ -520,6 +520,64 @@ fn vrchat(tree: serde_json::Value) -> (UdpSocket, SocketAddr) {
     (input, addr)
 }
 
+/// [`vrchat`], whose OSCQuery service answers `tree` only after `delay`: what VRChat says over OSC meanwhile is newer than the tree.
+fn slow_vrchat(tree: serde_json::Value, delay: Duration) -> (UdpSocket, SocketAddr) {
+    let input = UdpSocket::bind("127.0.0.1:0").unwrap();
+    input.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    let query = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = query.local_addr().unwrap();
+    let body = tree.to_string();
+    std::thread::spawn(move || {
+        for stream in query.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            std::thread::sleep(delay);
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()); // i18n: not shown
+            let _ = stream.write_all(format!("{head}{body}").as_bytes());
+        }
+    });
+    (input, addr)
+}
+
+/// verify2-r15 S5: Show N4N0 and the screen's version VRChat says while an avatar's look is being read are newer than what the look reads:
+/// the look keeps them (here the tree, read slowly, still says the bot shown and screen 16; VRChat said off and 17 meanwhile).
+#[test]
+fn what_vrchat_says_during_a_look_beats_what_the_look_read() {
+    let mut tree = menu_tree("avtr_slow", true);
+    let parameters = &mut tree["CONTENTS"]["parameters"]["CONTENTS"];
+    parameters[params::VISIBLE.replace('/', "_")] = json!({ "FULL_PATH": format!("{PARAMETERS_PREFIX}{}", params::VISIBLE), "TYPE": "T", "VALUE": [true] });
+    parameters[params::SCREEN_VERSION.replace('/', "_")] =
+        json!({ "FULL_PATH": format!("{PARAMETERS_PREFIX}{}", params::SCREEN_VERSION), "TYPE": "i", "VALUE": [contract::SCREEN_STAY_HERE] });
+    let (input, query) = slow_vrchat(tree, Duration::from_millis(600));
+    let mut settings = Settings::default();
+    settings.osc.vrchat_port = input.local_addr().unwrap().port();
+    let (t, n) = n4n0(settings);
+    t.start_osc();
+    t.set_vrchat_query(query);
+    n.start();
+    let looking = {
+        let n = n.clone();
+        std::thread::spawn(move || n.refresh_avatar(Some("avtr_slow".into()), HashMap::new(), 0))
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    n.on_parameter(params::SCREEN_VERSION, &OscValue::Int(contract::SCREEN_WITHOUT_BOT));
+    n.on_parameter(params::VISIBLE, &OscValue::Bool(false));
+    looking.join().unwrap();
+    {
+        let rt = n.n4n0.lock().unwrap();
+        assert_eq!(rt.avatar_id.as_deref(), Some("avtr_slow"), "the look was applied");
+        assert_eq!(rt.bot, Some(false), "Show N4N0 said during the look");
+        assert_eq!((rt.screen_version, rt.screen_version_seen), (Some(contract::SCREEN_WITHOUT_BOT), Some(contract::SCREEN_WITHOUT_BOT)), "the version said during the look");
+    }
+    // A look read after them takes what VRChat holds.
+    n.refresh_avatar(Some("avtr_slow".into()), HashMap::new(), 0);
+    let rt = n.n4n0.lock().unwrap();
+    assert_eq!((rt.bot, rt.screen_version_seen), (Some(true), Some(contract::SCREEN_STAY_HERE)));
+    drop(rt);
+    t.shutdown(&n);
+}
+
 /// VRChat's tree for an avatar with the N4N0 prop (8 sync values) and a Hoodie toggle.
 fn avatar_tree(id: &str) -> serde_json::Value {
     let mut parameters = serde_json::Map::new();

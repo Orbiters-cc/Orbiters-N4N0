@@ -39,7 +39,8 @@ pub(super) const NAMES: [&str; 23] = [
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
     let base = scenarios[0].snapshot.clone();
     // Settings' Play VRChat card (its launch options), scrolled to.
-    for (name, scroll) in [("launcher-settings", 1500.0), ("launcher-settings-2", 2000.0)] {
+    // REQUEST15 4: the FPS booster's slider in Settings (scrolled down to its card).
+    for (name, scroll) in [("launcher-settings", 1500.0), ("launcher-settings-2", 2000.0), ("launcher-settings-booster-a", 5000.0), ("launcher-settings-booster-b", 6200.0), ("launcher-settings-booster-c", 7400.0)] {
         scenarios.push(Scenario {
             name,
             page: Page::Settings,
@@ -394,7 +395,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
             state.open_profile(ctx, nova, Rect::from_min_size(pos2(954.0, 348.0), vec2(306.0, 54.0)));
         }
         "launcher-small-drawer" if f == 30 => state.open_drawer(ctx),
-        "launcher-profiles" | "launcher-small-profiles" if f == 1 => state.stand_in_profile(1),
+        "launcher-profiles" | "launcher-small-profiles" | "launcher-profile-starting" if f == 1 => state.stand_in_profile(1),
         "launcher-mine-status-text" if f == 1 => state.mine.stand_in_editing(Editing::StatusText("building a new world tonight".into())),
         "launcher-mine-bio" | "launcher-small-mine" if f == 1 => state.mine.stand_in_editing(Editing::Bio("Made-up account for drawing the page.\nBuilds quiet worlds, mostly at night. Say hi!".into())),
         "launcher-mine-failed" if f == 1 => state.mine.stand_in_last(ProfileEdit::StatusText("afk".into())),

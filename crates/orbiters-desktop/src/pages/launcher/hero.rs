@@ -179,6 +179,8 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         });
         for (r, mode) in [(vr, LaunchMode::Vr), (desk, LaunchMode::Desktop)] {
             if play_button(ui, r, mode, play, true, whose.as_deref()) {
+                // The choice stays on the profile just started, so the buttons say it starts, then runs.
+                state.chosen_profile = Some(next);
                 state.act(cx, clock, Action::PlayOn { mode, profile: next });
             }
         }

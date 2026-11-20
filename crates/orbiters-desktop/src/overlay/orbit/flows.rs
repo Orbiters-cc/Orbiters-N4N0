@@ -1430,6 +1430,8 @@ fn write_a_comment_opens_its_keyboard_on_the_sheet_in_vr() {
         person.turns(2);
         assert_eq!(person.panels.facts.sheet, Some(Sheet::Worlds));
         let entry = crate::overlay::worlds::catalog::parse(LISTING).unwrap().remove(0);
+        // Listed, as a capture shown around the person is (verify2-r15 blocker 1: one the listing does not have shows nowhere).
+        person.panels.stage.worlds.as_ref().unwrap().listing_for_test(vec![entry.clone()]);
         person.panels.stage.worlds.as_mut().unwrap().pick_for_test(entry);
         let docked = Status { headset: true, small: true, small_docked: true, shown: true, current: Some(7), ..Default::default() };
         let _ = person.panels.world_relay(docked.clone());

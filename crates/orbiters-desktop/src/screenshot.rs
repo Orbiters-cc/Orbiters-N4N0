@@ -1115,6 +1115,48 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             home: None,
             library: None,
         },
+        // Show N4N0 off (REQUEST15 item 3): the bot hidden, its menu still on the avatar's screen; then an avatar whose
+        // older N4N0 hides its screen with the bot, so the menu goes to the overlay meanwhile.
+        Scenario {
+            name: "n4n0-bot-hidden",
+            page: Page::N4n0,
+            snapshot: {
+                let mut s = n4n0_busy.clone();
+                s.n4n0.screen = true;
+                s.n4n0.bot = Some(false);
+                s.n4n0.bot_keeps_menu = true;
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 560.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "n4n0-bot-older-screen",
+            page: Page::N4n0,
+            snapshot: {
+                let mut s = n4n0_busy.clone();
+                s.n4n0.screen = true;
+                s.n4n0.bot = Some(false);
+                s.n4n0.bot_keeps_menu = false;
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 560.0,
+            world: None,
+            home: None,
+            library: None,
+        },
         Scenario {
             name: "n4n0-testing",
             page: Page::N4n0,
@@ -3387,6 +3429,8 @@ fn n4n0_snapshot(base: &Snapshot) -> Snapshot {
     let o = &mut s.n4n0;
     o.avatar_id = Some("avtr_7f3c2b1e-0d4a-4a7b-9c55-1f0e9a2b6c11".into());
     o.prop_sync = Some(8);
+    o.bot = Some(true);
+    o.bot_keeps_menu = true;
     o.manifest = true;
     o.controls = 42;
     o.face = N4n0Face::Talking;

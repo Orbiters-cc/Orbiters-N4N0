@@ -199,9 +199,13 @@ pub struct N4n0Status {
     pub test_cycle: bool,
     #[serde(default)]
     pub test_afk: bool,
-    /// Testing: all of N4N0 is hidden (`N4N0/Visible` sent false).
+    /// The bot as the avatar holds it (`N4N0/Visible`, Show N4N0): `None` until known, or without it.
     #[serde(default)]
-    pub test_hidden: bool,
+    pub bot: Option<bool>,
+    /// Hiding the bot leaves the menu on the avatar's screen (screen version 17, or no screen: the menu is the overlay's).
+    /// An older screen hides with the bot, and the menu goes to the overlay meanwhile.
+    #[serde(default)]
+    pub bot_keeps_menu: bool,
     /// Testing: the avatar's screen shows the full pictures' diagnostics.
     #[serde(default)]
     pub test_pictures: bool,
@@ -294,7 +298,7 @@ pub struct N4n0Status {
 orbiters_core::parts!(N4n0Status {
     plain: [
         avatar_id, prop_sync, manifest, controls, face, panel, listening, thinking, afk, confirmations, quota, voice, test_face, test_cycle, test_afk,
-        test_hidden, test_pictures, screen, screen_open, desktop_mode, menu_request, menu_toggle, dictation, photo_countdown, photo_wait, light, states,
+        bot, bot_keeps_menu, test_pictures, screen, screen_open, desktop_mode, menu_request, menu_toggle, dictation, photo_countdown, photo_wait, light, states,
         can_drop, card, tracking, tracking_note, suggestion, versions, keys, world_video, photo_note, invite, qr, feedback, input_params, mirror,
     ],
     slices: [lines, videos, resources, calls, captures, friends],

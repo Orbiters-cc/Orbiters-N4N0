@@ -176,7 +176,10 @@ impl State {
             self.ctx = Some(ctx.clone());
         }
         self.scope = Some(crate::controller::vrchat_data::Scope::of(cx.snap));
-        self.login = Some(cx.snap.vrchat_login.user.as_ref().map(|u| u.id.clone()));
+        // The service's sign-in, against the service's list; data handed in for pictures of the page is its own.
+        if !self.staged {
+            self.login = Some(cx.snap.vrchat_login.user.as_ref().map(|u| u.id.clone()));
+        }
     }
 
     /// A picture by its URL, once loaded.

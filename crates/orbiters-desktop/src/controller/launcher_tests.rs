@@ -1059,7 +1059,9 @@ fn an_own_profile_change_goes_on_the_press_only_with_the_lists_account_within_vr
     c.launcher.lock().unwrap().mine_next = None;
     c.launcher_do(Action::EditProfile(ProfileEdit::Status(Status::JoinMe)));
     c.launcher_do(Action::As { account: "usr_other".into(), action: Box::new(Action::EditProfile(ProfileEdit::Status(Status::JoinMe))) });
-    assert!(matches!(saving(&c), Some(Saving::Failed(ProfilePart::Status, _))));
+    // Neither press is this account's: nothing of theirs lands on this card either (REQUEST15 fix B3).
+    assert_eq!(saving(&c), Some(Saving::Saved(ProfilePart::Bio)));
+    assert_eq!(c.view().launcher.me.as_ref().unwrap().status, Status::Busy);
     let calls: Vec<String> = calls.lock().unwrap().iter().map(|(m, u)| format!("{m} {}", u.trim_start_matches("https://api.vrchat.cloud/api/1"))).collect();
     assert_eq!(calls, ["PUT /users/usr_test", "PUT /profile/usr_test", "PUT /profile/usr_test"]);
 }

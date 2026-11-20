@@ -7,7 +7,7 @@
 //! named for `userIcon` / `bannerCustomUrl` (its latest version's `file.url`) is VRCX's (EditProfileDialog.vue,
 //! GallerySelectDialog.vue), read 2026-11-20. Every call goes through the client's pacing and its 429 back-off.
 use super::*;
-use orbiters_core::launcher::{BannerChoice, MyProfile, OwnPicture, PictureKind, ProfileEdit, ProfilePart, Saving, Status, BIO_MAX, STATUS_TEXT_MAX};
+use orbiters_core::launcher::{BannerChoice, MyProfile, OwnPicture, PictureKind, ProfileEdit, Saving, Status, BIO_MAX, STATUS_TEXT_MAX};
 use serde_json::Value;
 
 /// VRChat refuses profile changes in quick succession (it does not say how quick): one every few seconds from here.

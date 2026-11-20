@@ -7,7 +7,7 @@
 //!
 //! [`Zone::QmShare`]: super::Zone::QmShare
 
-use super::share_sheet::{ASK_PUBLIC, MAKING, SHARING, YES_PUBLIC};
+use super::share_sheet::{ASK_PUBLIC, MAKING, SHARE_PUBLICLY_WHY, SHARING, YES_PUBLIC};
 use super::{cover_uv, fitted, keep_colour, look, tile_back, Action, Item, Look};
 use crate::controller::explorer::{self as ex, Status, Step};
 use egui::epaint::RectShape;
@@ -17,7 +17,6 @@ use orbiters_ui::theme::{self, weight};
 use orbiters_ui::{icons, widgets};
 
 pub const SHARE_3D_CAPTURE: &str = mark("Share 3D capture");
-pub const SHARE_3D_CAPTURE_WHY: &str = mark("No 3D capture of this world is public yet: share yours, everyone on Orbiters sees it.");
 pub const NOT_SHARED: &str = mark("Not shared: try again");
 
 /// What the tile shows.
@@ -142,10 +141,12 @@ pub fn draw(p: &Painter, item: &Item, tile: &ShareTile, hovered: bool, pressed: 
                     widgets::icon(p, picture.center(), icons::CUBE, 22.0, look::MUTED);
                 }
             }
-            // A capture in 3D, said as the gallery's tiles say it.
-            let chip = Rect::from_min_size(picture.min + vec2(5.0, 5.0), vec2(22.0, 14.0));
-            p.rect_filled(chip, look::radius(7.0), look::accent());
-            p.text(chip.center(), Align2::CENTER_CENTER, "3D", look::font(9.0, weight::BOLD), look::on_accent());
+            // A capture in 3D, said as the gallery's tiles say it (not under the words of a share that stopped).
+            if reason(&tile.state).is_none() {
+                let chip = Rect::from_min_size(picture.min + vec2(5.0, 5.0), vec2(22.0, 14.0));
+                p.rect_filled(chip, look::radius(7.0), look::accent());
+                p.text(chip.center(), Align2::CENTER_CENTER, "3D", look::font(9.0, weight::BOLD), look::on_accent());
+            }
             // While it goes: the picture dimmed, its files' share along its foot.
             if let TileState::Busy { sent, .. } = tile.state {
                 p.rect_filled(picture, look::radius(6.0), Color32::from_black_alpha(120));
@@ -199,7 +200,8 @@ pub fn caption(action: Action, tile: Option<&ShareTile>) -> Option<(String, Stri
     match action {
         Action::ShareHere(_) => Some(match tile.map(|t| &t.state) {
             Some(TileState::Failed(why)) => (tr(NOT_SHARED).into(), why.clone()),
-            _ => (tr(SHARE_3D_CAPTURE).into(), tr(SHARE_3D_CAPTURE_WHY).into()),
+            // What sharing publicly means, in the words "Share publicly" has beside the camera: whole in the wing's caption.
+            _ => (tr(SHARE_3D_CAPTURE).into(), tr(SHARE_PUBLICLY_WHY).into()),
         }),
         _ => None,
     }

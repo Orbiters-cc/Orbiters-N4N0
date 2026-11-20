@@ -648,10 +648,13 @@ fn feature_compact(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Ti
     let end = if switch.is_some() { 56.0 } else if playing.is_some() { 40.0 } else if soon.is_some() { soon_w + 18.0 } else { 24.0 };
     let x = chip.right() + 10.0;
     let room = r.right() - end - x;
-    widgets::text_truncated(&p, pos2(x, r.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(title, 13.5).weight(weight::SEMIBOLD), room);
-    let note = if state.soon { tr(CALLS_SOON_NOTE).to_string() } else { layout::text(menu, Content::TileNote(layout::note_of(target))) };
-    let note = Txt::new(note, 11.5).color(if active { theme::ACCENT } else { theme::FG_3 });
-    widgets::text_truncated(&p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &note, room);
+    // Not open yet: its name alone, beside the pill that says so (a second line would be cut there).
+    let title_y = if state.soon { r.center().y } else { r.center().y - 9.0 };
+    widgets::text_truncated(&p, pos2(x, title_y), Align2::LEFT_CENTER, &Txt::new(title, 13.5).weight(weight::SEMIBOLD), room);
+    if !state.soon {
+        let note = Txt::new(layout::text(menu, Content::TileNote(layout::note_of(target))), 11.5).color(if active { theme::ACCENT } else { theme::FG_3 });
+        widgets::text_truncated(&p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &note, room);
+    }
     resp.on_hover_text(title);
     if let Some(txt) = soon {
         let size = p.layout_job(txt.job(f32::INFINITY)).size();

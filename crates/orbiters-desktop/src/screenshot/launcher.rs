@@ -56,6 +56,22 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
             library: None,
         });
     }
+    // Request15 10: Home beside the launcher (its compact features) for an account without N4N0 calls: Call greyed out,
+    // "Coming soon", a press told (run with --width 1040 --height 700 too).
+    scenarios.push(Scenario {
+        name: "launcher-calls-soon",
+        page: Page::Home,
+        snapshot: super::without_calls(&base),
+        frames: 100,
+        splash: false,
+        open_detail: false,
+        toasts: vec![(super::toast::Kind::Info, "Calls are coming soon to Orbiters - N4N0. They aren't open for your account yet.")],
+        pointer: None,
+        scroll: 0.0,
+        world: None,
+        home: None,
+        library: None,
+    });
     for name in NAMES {
         scenarios.push(Scenario {
             name,

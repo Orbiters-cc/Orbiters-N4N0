@@ -619,6 +619,7 @@ fn testing_holds_a_state_then_plays_them_all() {
     {
         let mut rt = n.n4n0.lock().unwrap();
         rt.avatar_id = Some("avtr_x".into());
+        rt.params.insert(params::VISIBLE.to_string());
         rt.bot = Some(true);
     }
     n.command(Command::ShowBot { on: false });

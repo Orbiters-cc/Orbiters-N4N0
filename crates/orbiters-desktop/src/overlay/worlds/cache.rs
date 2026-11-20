@@ -45,13 +45,12 @@ impl Key {
     }
 }
 
-/// The bytes a ready capture holds.
+/// The bytes a ready capture holds in memory: every vector's room, what the splats keep for viewers (`seen`) too. Counting only the
+/// splats' lengths, the budget saw 38 % of what the captures took: the owner's overlay held 4.1 GB under a 1.28 GB budget (request 18).
 pub fn capture_bytes(c: &Capture) -> u64 {
-    let g = &c.gaussians;
-    let splats = g.means.len() * 12 + g.log_scales.len() * 12 + g.rotations.len() * 16 + g.opacity_logits.len() * 4 + g.colors.len() * 12;
-    let extra = g.sky.len() + g.filter_3d.len() * 4 + c.distances.len() * 4;
-    let sky = c.sky.as_ref().map_or(0, |s| s.rgb.len() * 12);
-    (splats + extra + sky) as u64
+    let distances = c.distances.capacity() * std::mem::size_of::<f32>();
+    let sky = c.sky.as_ref().map_or(0, |s| s.rgb.capacity() * std::mem::size_of::<[f32; 3]>());
+    (c.gaussians.heap_bytes() + distances + sky + std::mem::size_of::<Capture>()) as u64
 }
 
 struct Kept {
@@ -289,8 +288,8 @@ mod tests {
     #[test]
     fn memory_lets_go_of_the_least_lately_shown_but_never_the_one_on_screen() {
         let one = capture_bytes(&capture(1000));
-        // Each splat's 56 bytes and its distance, and what the splats keep besides.
-        assert!((1000 * 60..1000 * 70).contains(&one), "{one}");
+        // Each splat's 56 bytes, what the splats keep for viewers (25) and its distance (4).
+        assert!((1000 * 85..1000 * 87).contains(&one), "{one}");
         // Room for three.
         let mut m = Memory::new(one * 3);
         for id in 1..=3 {
@@ -313,6 +312,25 @@ mod tests {
         m.put(key(6), capture(10), Some(&key(6)));
         assert_eq!((m.items.len(), m.bytes()), (1, capture_bytes(&capture(10))));
         assert!(m.get(&key(9)).is_none());
+    }
+
+    /// Request 18: the budget counts what a capture takes, the room of its vectors too; a capture made from splats pushed one by one
+    /// holds no more room than it uses.
+    #[test]
+    fn the_budget_counts_what_a_capture_takes() {
+        let mut pushed = Gaussians::default();
+        for i in 0..5000 {
+            pushed.push([i as f32, 1.6, 0.0], [-2.0; 3], [1.0, 0.0, 0.0, 0.0], 0.0, [0.5; 3]);
+        }
+        assert!(pushed.means.capacity() > pushed.len(), "pushed one by one, a vector has room over");
+        let view = StartView { position: [0.0, 1.6, 0.0], target: [0.0, 1.6, -1.0], floor: None, eye_height: None };
+        let mut c = Capture::new(pushed, None, view);
+        assert_eq!(c.gaussians.means.capacity(), c.gaussians.len(), "the capture's own vectors are exactly as long as needed");
+        let exact = capture_bytes(&c);
+        assert!(exact >= 5000 * 85, "{exact}");
+        // Room over is counted.
+        c.gaussians.seen.reserve_exact(5000);
+        assert!(capture_bytes(&c) >= exact + 5000 * std::mem::size_of::<orbiters_reconstruct::gaussians::Seen>() as u64);
     }
 
     #[test]

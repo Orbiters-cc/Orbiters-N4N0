@@ -389,6 +389,12 @@ impl ViewerBuffers {
     }
 }
 
+/// The most Gaussians a viewer's buffers keep for a set of `n` ([`Gpu::upload`]): twice that (a set about as large reuses them),
+/// and never fewer than a small set's.
+fn viewer_room(n: usize) -> usize {
+    n.saturating_mul(2).max(1 << 16)
+}
+
 #[cfg(test)]
 impl SplatBuffers {
     /// The bytes these buffers take on the device.
@@ -1596,6 +1602,18 @@ impl Gpu {
         // Counts of the previous set say nothing about this one.
         self.wait_readbacks();
         self.estimates.clear();
+        if self.k.training.is_none() {
+            // A viewer's new set (the overlay's 3D view loads every capture shown on one device): the room the sets before
+            // it needed goes with them. Kept, the sort stayed the largest set's ever shown and every later frame sorted over
+            // it (the histograms and their scans are laid out by the room, not the count: request 18, "my FPS gets lower
+            // and lower" from capture to capture), and the set's buffers stayed the largest set's. This set's first frame
+            // sizes its own sort (it waits for its count, as the first frame of a set always did).
+            self.sort = None;
+            if self.splats.as_ref().is_some_and(|s| s.cap > viewer_room(g.len())) {
+                self.splats = None;
+            }
+            self.forget_binds();
+        }
         self.upload_with_moments(g, None);
     }
 
@@ -1775,6 +1793,8 @@ impl Gpu {
     /// Buffers for at least `n` Gaussians (or the room [`Gpu::reserve`] asked for), else half again. A renderer keeps
     /// no room to spare (a viewer loads once) and no training buffers; a training device none of a viewer's unless
     /// it shows as one, and no gradients until a step asks for them alone.
+    /// A training device's buffers, or a viewer's for a set of `n` (exactly `n`: a new set larger than half of that
+    /// reuses them, a smaller one gets its own, [`Gpu::upload`]).
     fn splat_buffers(&self, n: usize) -> SplatBuffers {
         let slot_bytes = self.k.training.as_ref().map(|t| t.sums.slot_bytes());
         let cap = match slot_bytes {
@@ -3518,6 +3538,42 @@ mod tests {
         assert!(centre(&mut viewer)[2] > 0.8);
         viewer.upload(&g);
         assert!((centre(&mut viewer)[0] - plain[0]).abs() < 1e-4);
+    }
+
+    /// Request 18: a viewer that shows one set after another (the overlay's 3D view keeps one device for every capture) sorts a
+    /// set's views in that set's room and holds that set's buffers, not the largest set's it ever showed; what it draws is the same.
+    #[test]
+    fn a_viewer_sizes_its_sort_and_buffers_by_the_set_it_shows() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut viewer = Gpu::renderer(gpu.device.clone(), gpu.queue.clone());
+        let cam = Camera::look([0.0; 3], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.0, 128, 96);
+        let set = |n: usize, size: f32| {
+            let mut g = Gaussians::default();
+            for i in 0..n {
+                let a = i as f32 * 0.618;
+                g.push([a.sin() * 1.5, (a * 1.7).cos(), 3.0 + (i % 7) as f32 * 0.1], [size.ln(); 3], [1.0, 0.0, 0.0, 0.0], crate::gaussians::logit(0.6), [0.5, 0.3, 0.2]);
+            }
+            g
+        };
+        let (small, large) = (set(2_000, 0.05), set(200_000, 0.2));
+        let frames = |viewer: &mut Gpu| {
+            // The first frame of a set waits for its count and sizes the sort; the next ones go without waiting.
+            (0..3).map(|_| crate::train::render(viewer, &cam, [0.0; 3]).expect("render")).last().expect("drawn")
+        };
+        viewer.upload(&small);
+        let first = frames(&mut viewer);
+        let (sort_small, _) = viewer.capacities();
+        viewer.upload(&large);
+        frames(&mut viewer);
+        let (sort_large, splats_large) = viewer.capacities();
+        assert!(sort_large > 4 * sort_small && splats_large >= large.len(), "the large set's room: {sort_large} against {sort_small}");
+        viewer.upload(&small);
+        let again = frames(&mut viewer);
+        let (sort_again, splats_again) = viewer.capacities();
+        assert!(sort_again <= sort_small, "the small set sorted in the large one's room: {sort_again} against {sort_small}");
+        assert!(splats_again <= viewer_room(small.len()), "the large set's buffers stayed: {splats_again}");
+        let worst = first.iter().zip(&again).flat_map(|(a, b)| a.iter().zip(b).map(|(x, y)| (x - y).abs())).fold(0.0f32, f32::max);
+        assert!(worst < 1e-4, "the small set drew {worst} apart from its first showing");
     }
 
     /// A viewer's far field fogs a splat beyond the depth frames' reach towards the horizon's colour, or crops it,

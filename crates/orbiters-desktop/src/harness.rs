@@ -6,7 +6,7 @@ use crate::link_smoke::Scratch;
 
 pub const PRIVATE: &[&str] = &[
     "--screenshot", "--gpu-bench", "--idle-frames", "--publish-cost", "--link-smoke",
-    "--orbit-bench", "--orbit-paint-bench", "--n4n0-menu", "--world-view", "--world-timing",
+    "--orbit-bench", "--orbit-paint-bench", "--n4n0-menu", "--world-view", "--world-timing", "--world-sequence",
     "--n4n0-menu-strings", "--eye-picture", "--bridge-lab",
 ];
 

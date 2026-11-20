@@ -650,7 +650,10 @@ impl Capture {
         let distance = |i: usize| stereo::length(stereo::sub(g.means[i], eye));
         let mut order: Vec<(f32, usize)> = (0..g.len()).filter(|&i| g.is_finite(i)).map(|i| (distance(i), i)).collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Exactly as many as kept: pushed one by one, its vectors would hold up to twice that (request 18: the captures kept in
+        // memory took 2.6 times what the cache counted).
         let mut sorted = Gaussians::default();
+        sorted.reserve_exact(order.len());
         for &(_, i) in &order {
             sorted.push(g.means[i], g.log_scales[i], g.rotations[i], g.opacity_logits[i], g.colors[i]);
         }
@@ -747,7 +750,10 @@ impl Capture {
         let kept: Vec<usize> = (0..g.len()).filter(|&i| g.is_finite(i) && keep[i]).collect();
         let mut order: Vec<(f32, usize)> = kept.into_iter().map(|i| (across(i), i)).collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Exactly as many as kept: pushed one by one, its vectors would hold up to twice that (request 18: the captures kept in
+        // memory took 2.6 times what the cache counted).
         let mut sorted = Gaussians::default();
+        sorted.reserve_exact(order.len());
         for &(_, i) in &order {
             sorted.push(g.means[i], g.log_scales[i], g.rotations[i], g.opacity_logits[i], g.colors[i]);
         }

@@ -102,8 +102,9 @@ pub enum Command {
     },
     /// Testing: acts as if the owner touched N4N0.
     TestTouch,
-    /// Testing: shows or hides all of N4N0 (`N4N0/Visible`).
-    TestVisible {
+    /// Shows or hides the bot (`N4N0/Visible`, Show N4N0 in the avatar's Action Menu); from screen version 17 its menu
+    /// stays another choice.
+    ShowBot {
         on: bool,
     },
     /// Testing: the avatar's screen shows the full pictures' diagnostics (contracts `Docs/n4n0-picture.md`, Diagnostics).

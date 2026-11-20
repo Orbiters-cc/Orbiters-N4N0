@@ -291,11 +291,12 @@ pub(crate) struct N4n0Runtime {
     wake: Arc<Condvar>,
     woken: bool,
     /// Testing (the N4N0 page): the state N4N0 is held in, when every state began to show in turn, the owner acted as
-    /// away, all of N4N0 hidden.
+    /// away.
     pub(crate) test_face: Option<N4n0Face>,
     test_cycle: Option<Instant>,
     test_afk: bool,
-    test_hidden: bool,
+    /// The bot as the avatar holds it (`N4N0/Visible`, Show N4N0): `None` until known, or on an avatar without it.
+    pub(crate) bot: Option<bool>,
     /// The N4N0 thread ends (the app quits).
     stop: bool,
     /// N4N0's menu on the avatar's screen, and the overlay menu's requests (screen.rs).
@@ -476,6 +477,7 @@ impl N4n0Runtime {
         self.screen_replace = None;
         self.screen_thumbnail = None;
         self.screen_version = None;
+        self.bot = None;
         self.screen.menu.pages = Pages::Four;
         self.screen.pointing = false;
         self.screen.place_sync = false;
@@ -492,7 +494,8 @@ impl N4n0Runtime {
     /// overlay: without the parameter, it does.
     pub(crate) fn screen_place(&mut self, steamvr: bool) {
         let desktop = self.vr_mode.map_or(!steamvr, |vr| !vr);
-        let shows = self.screen_present && (desktop || self.screen_replace.unwrap_or(true));
+        // A screen from before the menu without the bot hides with the bot: its menu then goes to the overlay.
+        let shows = self.screen_present && (desktop || self.screen_replace.unwrap_or(true)) && self.screen_keeps_menu();
         let thumbnail = self.screen_thumbnail.unwrap_or(contract::thumbnail::SIZES[0]);
         let fits = self.screen_sync.is_some_and(|n| orbiters_n4n0_core::menu::screen::fits(n, thumbnail));
         let used = shows && fits;
@@ -506,6 +509,12 @@ impl N4n0Runtime {
         // Screens of version 8 show full pictures (contracts Docs/n4n0-picture.md).
         self.screen.set_full_pictures(present && self.screen_version.is_some_and(|v| v >= contract::SCREEN_FULL_PICTURES), self.screen_version);
         self.screen.menu.desktop_mode = desktop;
+    }
+
+    /// Whether the avatar's screen shows the menu as things stand: always with the bot shown; with it hidden, from screen
+    /// version [`contract::SCREEN_WITHOUT_BOT`] (an older screen hides with the bot).
+    pub(crate) fn screen_keeps_menu(&self) -> bool {
+        self.bot != Some(false) || self.screen_version.is_some_and(|v| v >= contract::SCREEN_WITHOUT_BOT)
     }
 
     /// `N4N0/Menu` to send, when the avatar's Menu toggle no longer says whether N4N0's menu shows (another trigger opened
@@ -595,7 +604,8 @@ impl N4n0Runtime {
             test_face: self.test_face,
             test_cycle: self.test_cycle.is_some(),
             test_afk: self.test_afk,
-            test_hidden: self.test_hidden,
+            bot: self.bot,
+            bot_keeps_menu: !self.screen_present || self.screen_version.is_some_and(|v| v >= contract::SCREEN_WITHOUT_BOT),
             test_pictures: self.screen.pictures_diagnostics,
             calls: Default::default(),
             screen: self.screen.available,
@@ -1367,6 +1377,22 @@ impl N4n0 {
             self.light_parameter(name, value);
             return;
         }
+        // Show N4N0, from the Action Menu or the app's own write coming back: where the menu shows may follow.
+        if name == params::VISIBLE {
+            {
+                let mut rt = self.n4n0.lock().unwrap();
+                if !rt.params.is_empty() && !rt.params.contains(params::VISIBLE) {
+                    return;
+                }
+                if rt.bot == Some(value.truthy()) {
+                    return;
+                }
+                rt.bot = Some(value.truthy());
+                rt.wake();
+            }
+            self.publish();
+            return;
+        }
         if Self::echo(name) || self.screen_parameter(name, value) {
             return;
         }
@@ -1588,6 +1614,14 @@ impl N4n0 {
                 _ => default(params::LIGHT_LEVEL).unwrap_or(LIGHT_LEVEL_DEFAULT),
             },
         });
+        // Show N4N0 as VRChat holds it, else the manifest's default (on).
+        let bot = if names.contains(params::VISIBLE) {
+            value(params::VISIBLE).map(OscValue::truthy)
+        } else if !known {
+            default(params::VISIBLE).map(|d| d > 0.5)
+        } else {
+            None
+        };
         let steamvr = self.host.scene().steamvr;
         let synced = names.iter().filter(|n| n.starts_with(params::TEXT_SYNC_PREFIX)).count();
         let sync = if contract::SYNC_COUNTS.contains(&synced) {
@@ -1660,6 +1694,7 @@ impl N4n0 {
                 rt.screen.pointing = pointing(screen_version);
                 rt.screen.place_sync = screen_version.is_some_and(|v| v >= contract::SCREEN_STAY_HERE);
                 rt.light = light;
+                rt.bot = bot;
                 if vr_mode.is_some() {
                     rt.vr_mode = vr_mode;
                 }
@@ -2185,10 +2220,14 @@ impl N4n0 {
                 rt.screen.pictures_diagnostics = on;
                 rt.wake();
             }
-            Command::TestVisible { on } => {
-                let mut rt = self.n4n0.lock().unwrap();
-                rt.test_hidden = !on;
-                rt.outbox.push((Instant::now(), (parameter(params::VISIBLE), OscType::Bool(on))));
+            Command::ShowBot { on } => {
+                {
+                    let mut rt = self.n4n0.lock().unwrap();
+                    rt.bot = Some(on);
+                    rt.outbox.push((Instant::now(), (parameter(params::VISIBLE), OscType::Bool(on))));
+                    rt.wake();
+                }
+                self.publish();
             }
             Command::States { action, avatar } => self.states_action(action, avatar),
             Command::Drop { link, title, video } => self.card_drop(link, title, video),

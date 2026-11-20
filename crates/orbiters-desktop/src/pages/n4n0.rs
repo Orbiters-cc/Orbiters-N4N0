@@ -158,6 +158,21 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
                 ui.add_space(12.0);
                 widgets::separator(ui);
+                // The bot and the menu are two choices (screen version 17); an older screen hides with the bot.
+                let bot_line = if n4n0.bot_keeps_menu || n4n0.prop_sync.is_none() {
+                    tr("The bot beside your head, its beams and its panel, for everyone around. Off, N4N0's menu still opens, before your eyes as ever. Show N4N0 in your Action Menu does the same.")
+                } else {
+                    tr("The bot beside your head, its beams and its panel. This avatar's N4N0 hides its menu screen with it: while the bot is off, the menu opens in Orbiters' overlay. Update N4N0 in My Avatar and upload the avatar again to keep the menu on the avatar without the bot.")
+                };
+                let mut bot = n4n0.bot.unwrap_or(true);
+                widgets::field(ui, tr("Show N4N0"), Some(bot_line), 48.0, |ui| {
+                    ui.add_enabled_ui(n4n0.prop_sync.is_some(), |ui| {
+                        if widgets::toggle(ui, "n4n0-bot", &mut bot) {
+                            cx.ctl.n4n0(N4n0Command::ShowBot { on: bot });
+                        }
+                    });
+                });
+                widgets::separator(ui);
                 let menu = if n4n0.avatar_id.is_none() {
                     tr("N4N0 looks at your avatar once VRChat loads it.").to_string()
                 } else if n4n0.manifest {
@@ -601,13 +616,6 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(ui, tr("Act as away"), Some(tr("The sleeping N4N0 and your AFK message, as when VRChat says you are away.")), 48.0, |ui| {
                     if widgets::toggle(ui, "n4n0-test-afk", &mut away) {
                         cx.ctl.n4n0(N4n0Command::TestAfk { on: away });
-                    }
-                });
-                widgets::separator(ui);
-                let mut shown = !n4n0.test_hidden;
-                widgets::field(ui, tr("Show N4N0"), Some(tr("Off hides all of N4N0 and its panel (N4N0/Visible), like Show N4N0 in its menu.")), 48.0, |ui| {
-                    if widgets::toggle(ui, "n4n0-test-visible", &mut shown) {
-                        cx.ctl.n4n0(N4n0Command::TestVisible { on: shown });
                     }
                 });
                 widgets::separator(ui);

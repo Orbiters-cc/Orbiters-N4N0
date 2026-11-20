@@ -216,6 +216,8 @@ impl Controller {
             self.calls_access_checked(server, user.as_deref(), &saved.token, features.as_ref());
         }
         self.commit_account_check(generation, state);
+        // Calls follow the account read now at once (another tool signed in as someone else).
+        self.calls_account_changed();
     }
 
     /// Shows what a check of the saved account found, unless a sign-in, its cancel or a sign-out came since it was
@@ -325,6 +327,8 @@ impl Controller {
                     if let Err(e) = saved {
                         self.notify(NoticeKind::Warning, tr!("Signed in, but the Unity tools will not share it: {error}", error = e));
                     }
+                    // Calls follow the account signed in now at once.
+                    self.calls_account_changed();
                     // Shown only if no sign-out or cancel came since the lock above (verify-controller): under the
                     // snapshot's lock, against the generation those bump before they publish.
                     if self.commit_account_check(generation, AccountState::SignedIn { username: name.clone() }) {

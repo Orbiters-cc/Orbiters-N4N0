@@ -201,13 +201,12 @@ impl Controller {
             return false;
         }
         let file = self.calls_access_file();
-        let menu_was_open = {
+        {
             let mut rt = self.calls.lock().unwrap();
             rt.access.follow(Some(whose.clone()), &file);
             rt.access.heard(&whose, false, &file);
-            std::mem::take(&mut rt.menu_open)
-        };
-        self.calls_closed_here(menu_was_open);
+        }
+        self.calls_closed_here(token);
         true
     }
 

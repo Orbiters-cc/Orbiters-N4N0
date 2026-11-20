@@ -77,6 +77,24 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
         home: None,
         library: None,
     });
+    // Request16 3: scrollbars show only while scrolling. Home and the friends list half a second after a turn of the wheel over each (their bars up); run with
+    // `--extend 90 --sequence 90` to see them fade once the wheel stops. "launcher-list" is the same page at rest, no bar.
+    for (name, pointer, scroll) in [("launcher-scrolled", pos2(560.0, 520.0), 400.0), ("launcher-friends-scrolled", pos2(1100.0, 560.0), 400.0)] {
+        scenarios.push(Scenario {
+            name,
+            page: Page::Home,
+            snapshot: base.clone(),
+            frames: 100,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: Some(pointer),
+            scroll,
+            world: None,
+            home: None,
+            library: None,
+        });
+    }
     for name in NAMES {
         scenarios.push(Scenario {
             name,

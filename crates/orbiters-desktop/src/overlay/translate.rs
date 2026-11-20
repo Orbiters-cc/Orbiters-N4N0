@@ -599,10 +599,11 @@ pub(crate) fn lower_priority() {
 }
 
 /// The translator the settings ask for, with what Settings says of it.
-pub(crate) fn translator(settings: &TranslateSettings, backend_lan: &mut LanFound) -> Result<Box<dyn Translator>, TranslateState> {
+/// `window`: for the desktop's translation, which reads VRChat's window and has an agreement of its own for Orbiters (verify-r15 B7).
+pub(crate) fn translator(settings: &TranslateSettings, backend_lan: &mut LanFound, window: bool) -> Result<Box<dyn Translator>, TranslateState> {
     match settings.provider {
         TranslateProvider::Orbiters => {
-            if !settings.orbiters_agreed {
+            if !(if window { settings.orbiters_agreed_window } else { settings.orbiters_agreed }) {
                 return Err(TranslateState::NeedsAgreement);
             }
             let remote = REMOTE.lock().unwrap_or_else(|e| e.into_inner()).clone().ok_or(TranslateState::Problem { key: orbiters_i18n::mark("Orbiters - N4N0's service is not reachable.").into(), detail: None })?;
@@ -714,7 +715,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
     };
     let reader_of = |s: &TranslateSettings, target: &str| Reader { target: target.to_string(), reads: if s.keep_english { vec!["en".to_string()] } else { vec![] } };
     let mut lan = LanFound::default();
-    let (mut core, mut translator_state) = match translator(&settings, &mut lan) {
+    let (mut core, mut translator_state) = match translator(&settings, &mut lan, false) {
         Ok(t) => (Core::new(Some(engine), t, reader_of(&settings, &target)), None),
         Err(state) => (Core::new(Some(engine), Box::new(Nobody), reader_of(&settings, &target)), Some(state)),
     };
@@ -907,7 +908,7 @@ fn reading(
             let retry = translator_state.is_some() && (translator_checked.elapsed() > Duration::from_secs(15) || (downloaded && translator_state == Some(TranslateState::NoLocalTranslator)));
             if translator_changed || retry {
                 translator_checked = Instant::now();
-                match translator(&s, lan) {
+                match translator(&s, lan, false) {
                     Ok(t) => {
                         lock().set_translator(t);
                         translator_state = None;
@@ -1026,6 +1027,10 @@ fn reading(
             }
             None => Err(anyhow::anyhow!("the text reader is not loaded")), // i18n: not shown (log detail)
         };
+        // Turned off during the read: what it found is never asked for (verify-r15 B7).
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         let now = started.elapsed().as_secs_f64() - began.elapsed().as_secs_f64() - EYE_AGE.as_secs_f64();
         let step = step.map(|(lines, timings)| {
             let mut c = lock();

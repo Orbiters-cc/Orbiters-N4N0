@@ -524,6 +524,23 @@ impl Drop for Host {
     }
 }
 
+/// What a look read, followed (and so asked of the translator) only while translation is still wanted: turned off during the read, nothing is. `None` then.
+#[allow(clippy::too_many_arguments)]
+fn follow_unless_stopped(
+    core: &mut Core,
+    stop: &AtomicBool,
+    now: f64,
+    look: &orbiters_translate::pipeline::Look,
+    lines: Vec<orbiters_translate::ocr::Line>,
+    timings: orbiters_translate::pipeline::Timings,
+    gaze: ([f32; 3], [f32; 3]),
+) -> Option<orbiters_translate::core::Scene> {
+    if stop.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(core.follow(now, look, lines, timings, gaze))
+}
+
 fn set_state(shared: &Mutex<Shared>, state: TranslateState) {
     shared.lock().unwrap_or_else(|e| e.into_inner()).status.state = state;
 }
@@ -560,7 +577,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
     };
     let reader_of = |s: &TranslateSettings, target: &str| Reader { target: target.to_string(), reads: if s.keep_english { vec!["en".to_string()] } else { vec![] } };
     let mut lan = LanFound::default();
-    let (mut core, mut translator_state) = match vr_translate::translator(&settings, &mut lan) {
+    let (mut core, mut translator_state) = match vr_translate::translator(&settings, &mut lan, true) {
         Ok(t) => (Core::new(Some(engine), t, reader_of(&settings, &target)), None),
         Err(state) => (Core::new(Some(engine), Box::new(Nobody), reader_of(&settings, &target)), Some(state)),
     };
@@ -590,7 +607,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
         core.save_cache(false);
         // Settings changed: another translator, another language.
         if let Some((s, t)) = now_settings {
-            let translator_changed = s.provider != settings.provider || s.server != settings.server || s.model != settings.model || s.orbiters_agreed != settings.orbiters_agreed;
+            let translator_changed = s.provider != settings.provider || s.server != settings.server || s.model != settings.model || s.orbiters_agreed != settings.orbiters_agreed || s.orbiters_agreed_window != settings.orbiters_agreed_window;
             if translator_state == Some(TranslateState::NoLocalTranslator) && s.provider == TranslateProvider::ThisComputer {
                 let mut f = fetching.lock().unwrap_or_else(|e| e.into_inner());
                 if f.is_none() {
@@ -613,7 +630,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
             let retry = translator_state.is_some() && (translator_checked.elapsed() > Duration::from_secs(15) || (downloaded && translator_state == Some(TranslateState::NoLocalTranslator)));
             if translator_changed || retry {
                 translator_checked = Instant::now();
-                match vr_translate::translator(&s, &mut lan) {
+                match vr_translate::translator(&s, &mut lan, true) {
                     Ok(tr) => {
                         core.set_translator(tr);
                         translator_state = None;
@@ -720,7 +737,8 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
         match read {
             Ok((lines, timings)) => {
                 let before = core.tracker.tracks.iter().map(|t| t.id).max().unwrap_or(0);
-                let scene = core.follow(now, &look, lines, timings, gaze);
+                // Turned off during the read: what it found is never followed, nor asked for (verify-r15 B7).
+                let Some(scene) = follow_unless_stopped(&mut core, stop, now, &look, lines, timings, gaze) else { break };
                 quiet = !core.tracker.tracks.iter().any(|t| t.id > before);
                 let fetch = fetching.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 s.status.state = match (&translator_state, &scene.activity) {
@@ -811,6 +829,45 @@ mod tests {
             assert!((r.center().y - b.center().y).abs() < b.height() * 0.5, "{text}: at its height ({r:?} for {b:?})");
             assert!(r.height() > b.height() * 0.6 && r.height() < b.height() * 2.5, "{text}: about as tall as its letters ({r:?} for {b:?})");
         }
+    }
+
+    /// verify-r15 B7: translation turned off while a look was being read: what it read is not followed, and no line of it reaches the translator.
+    #[test]
+    fn a_look_read_after_off_asks_for_nothing() {
+        struct Counting(Arc<Mutex<usize>>);
+        impl Translator for Counting {
+            fn translate(&mut self, batch: &Batch) -> Result<Vec<String>, Failure> {
+                *self.0.lock().unwrap() += batch.lines.len();
+                Ok(batch.lines.iter().map(|l| l.text.clone()).collect())
+            }
+        }
+        let size = [640u32, 360];
+        let picture = draw_text(size[0], size[1], [235, 228, 210], &[Text { text: "出口はこちらです".into(), at: [100.0, 100.0], size: 40.0, colour: [20, 20, 20] }]);
+        let b = ink(&picture.rgba, size[0]);
+        let boxed = TextBox { corners: [[b.min.x, b.min.y], [b.max.x, b.min.y], [b.max.x, b.max.y], [b.min.x, b.max.y]], score: 0.9, vertical: false };
+        let line = Line { boxed, text: "出口はこちらです".into(), confidence: 0.95, reader: orbiters_translate::ocr::Reader::Main, glyphs: Vec::new() };
+        let v = view(size);
+        let rgba = orbiters_translate::ocr::Rgba { width: size[0], height: size[1], pixels: &picture.rgba };
+        let look = Look { pair: orbiters_translate::place::Pair { pictures: [rgba, rgba], from: [[0, 0]; 2], views: [v, v] }, area: [0, 0, size[0], size[1]], shown: &[], zoom: None };
+        let asked = Arc::new(Mutex::new(0));
+        let mut core = Core::new(None, Box::new(Counting(asked.clone())), Reader { target: "en".into(), reads: vec![] });
+        let stop = AtomicBool::new(true);
+        for k in 0..20 {
+            assert!(follow_unless_stopped(&mut core, &stop, k as f64 * 0.05, &look, vec![line.clone()], Timings::default(), ([0.0; 3], [0.0, 0.0, -1.0])).is_none());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(*asked.lock().unwrap(), 0, "nothing asked after Off");
+        assert!(core.tracker.tracks.is_empty(), "nothing followed");
+        // Still on, the same look is followed and asked for: the test sees what it says it does.
+        stop.store(false, Ordering::Relaxed);
+        for k in 0..200 {
+            let _ = follow_unless_stopped(&mut core, &stop, 2.0 + k as f64 * 0.05, &look, vec![line.clone()], Timings::default(), ([0.0; 3], [0.0, 0.0, -1.0]));
+            if *asked.lock().unwrap() > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(*asked.lock().unwrap() > 0);
     }
 
     /// The patches of an in-memory BGRA picture, as [`Grab::signature`] reads them from the capture.

@@ -2465,7 +2465,8 @@ impl Panels {
                 provider: snap.settings.translate.provider,
                 target: crate::overlay::translate::target(&snap.settings),
                 keep_english: snap.settings.translate.keep_english,
-                agreed: snap.settings.translate.orbiters_agreed,
+                // The desktop reads VRChat's window: its own agreement (verify-r15 B7).
+                agreed: if self.facts.desktop { snap.settings.translate.orbiters_agreed_window } else { snap.settings.translate.orbiters_agreed },
                 status: (*snap.translate).clone(),
             },
             talk_lines: if self.facts.sheet == Some(Sheet::Talk) {
@@ -2970,6 +2971,7 @@ impl Panels {
                     TranslatePick::Provider(p) => serde_json::json!({ "translate": { "provider": p } }),
                     TranslatePick::Into(after) => serde_json::json!({ "translate": { "target": panels::target_after(&crate::overlay::translate::target(&snap.settings), after) } }),
                     TranslatePick::KeepEnglish(keep) => serde_json::json!({ "translate": { "keep_english": keep } }),
+                    TranslatePick::Agree if self.facts.desktop => serde_json::json!({ "translate": { "orbiters_agreed_window": true } }),
                     TranslatePick::Agree => serde_json::json!({ "translate": { "orbiters_agreed": true } }),
                 }
             }

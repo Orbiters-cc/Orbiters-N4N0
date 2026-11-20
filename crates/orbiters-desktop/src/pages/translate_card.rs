@@ -2,7 +2,7 @@
 //! Translation sheet, plus what needs a keyboard there (an AI server's address, the model to ask).
 
 use super::{section, Cx};
-use crate::overlay::orbit::panels::{orbiters_notice, small_model_advice, status_words, target_name, TranslateFacts, TARGETS};
+use crate::overlay::orbit::panels::{orbiters_notice_both, small_model_advice, status_words, target_name, TranslateFacts, TARGETS};
 use egui::{vec2, Sense, Ui};
 use orbiters_core::settings::{Settings, TranslateProvider};
 use orbiters_i18n::tr;
@@ -70,9 +70,12 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
                 });
             }
             TranslateProvider::Orbiters => {
-                wrapped(ui, orbiters_notice(), 13.0, if t.orbiters_agreed { theme::FG_2 } else { theme::FG }, !t.orbiters_agreed);
-                if !t.orbiters_agreed && Button::new(tr("I agree")).size(Size::Sm).id_salt("translate-agree").show(ui).clicked() {
+                // Here one agreement covers both places the text is read (verify-r15 B7): VR, and VRChat's window on the desktop, each asked for until then.
+                let agreed = t.orbiters_agreed && t.orbiters_agreed_window;
+                wrapped(ui, orbiters_notice_both(), 13.0, if agreed { theme::FG_2 } else { theme::FG }, !agreed);
+                if !agreed && Button::new(tr("I agree")).size(Size::Sm).id_salt("translate-agree").show(ui).clicked() {
                     t.orbiters_agreed = true;
+                    t.orbiters_agreed_window = true;
                     changed = true;
                 }
             }

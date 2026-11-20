@@ -78,6 +78,8 @@ pub struct Mine {
     /// given back to its field when VRChat refuses it.
     pending: Option<(ProfileEdit, u64, f64)>,
     last: Option<ProfileEdit>,
+    /// The page of the chooser's pictures shown (three rows a page).
+    picker_page: usize,
     /// When the page first saw the last "Saved".
     saved_seen: Option<(u64, f64)>,
 }
@@ -630,6 +632,12 @@ fn failed_line(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, why: &str, c
     ui.interact(r.expand(4.0), Id::unique("mine-failed"), Sense::hover()).on_hover_text(why);
 }
 
+/// The pictures on page `page` of a chooser showing `per_page` at a time.
+fn page_of(count: usize, per_page: usize, page: usize) -> std::ops::Range<usize> {
+    let start = (page * per_page).min(count);
+    start..(start + per_page).min(count)
+}
+
 /// What a chooser says of what VRChat allows, in plain words.
 fn picker_note(kind: Picker, tab: BannerTab, mine: &MyProfile, list: Option<&Vec<OwnPicture>>) -> &'static str {
     match (kind, tab) {
@@ -785,8 +793,27 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 items.push((url.clone(), current));
             }
             let listing = mine.listing.is_some() || (wanted.is_some() && list.is_none());
-            for (i, (url, current)) in items.iter().enumerate().take(per_row * 3) {
-                let at = pos2(body.left() + (i % per_row) as f32 * (cell + gap), body.top() + (i / per_row) as f32 * (cell_h + gap));
+            // Three rows at a time, the others a page away (VRChat lists up to a hundred).
+            let per_page = per_row * 3;
+            let pages = items.len().div_ceil(per_page).max(1);
+            let page = state.mine.picker_page.min(pages - 1);
+            let shown = page_of(items.len(), per_page, page);
+            if pages > 1 {
+                let label = Txt::new(format!("{} / {pages}", page + 1), 12.0).color(theme::FG_3);
+                let y = inner.top() + 13.0;
+                let next = Rect::from_center_size(pos2(inner.right() - 48.0, y), vec2(26.0, 26.0));
+                let prev = next.translate(vec2(-64.0, 0.0));
+                widgets::text(&p, pos2((prev.right() + next.left()) * 0.5, y), Align2::CENTER_CENTER, &label);
+                if page > 0 && widgets::activated(&widgets::IconButton::new(icons::CARET_LEFT, orbiters_i18n::mark("Previous")).size(26.0, 13.0).id_salt("mine-page-prev").show_at(&mut over, prev)) {
+                    state.mine.picker_page = page - 1;
+                }
+                if page + 1 < pages && widgets::activated(&widgets::IconButton::new(icons::CARET_RIGHT, orbiters_i18n::mark("Next")).size(26.0, 13.0).id_salt("mine-page-next").show_at(&mut over, next)) {
+                    state.mine.picker_page = page + 1;
+                }
+            }
+            for (i, (url, current)) in items.iter().enumerate().skip(shown.start).take(shown.len()) {
+                let k = i - shown.start;
+                let at = pos2(body.left() + (k % per_row) as f32 * (cell + gap), body.top() + (k / per_row) as f32 * (cell_h + gap));
                 let r = Rect::from_min_size(at, vec2(cell, cell_h));
                 let tid = id.with(("thumb", i));
                 let resp = over.interact(r, tid, Sense::click());
@@ -824,7 +851,7 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 resp.on_hover_cursor(CursorIcon::PointingHand);
             }
             if listing {
-                let c = if items.is_empty() { body.center() } else { pos2(body.left() + (items.len() % per_row) as f32 * (cell + gap) + cell * 0.5, body.top() + cell_h * 0.5) };
+                let c = if shown.is_empty() { body.center() } else { pos2(body.left() + (shown.len() % per_row) as f32 * (cell + gap) + cell * 0.5, body.top() + cell_h * 0.5) };
                 feedback::spinner(&p, c, 9.0, 2.5, theme::FG_3);
                 ctx.request_repaint();
             }
@@ -855,6 +882,7 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if closed || outside || ctx.input(|i| i.key_pressed(Key::Escape)) {
         state.mine.picker = None;
         state.mine.banner_tab = None;
+        state.mine.picker_page = 0;
     }
 }
 
@@ -924,6 +952,16 @@ mod tests {
         assert_eq!(mine.retry(Some(&Saving::Saved(ProfilePart::Bio))), None);
         mine.last = None;
         assert_eq!(mine.retry(Some(&Saving::Failed(ProfilePart::Bio, "no".into()))), None);
+    }
+
+    #[test]
+    fn every_listed_picture_is_on_a_page() {
+        // VRChat lists up to a hundred: each one is on exactly one page (the chooser showed the first 14 before).
+        let per_page = 15;
+        let pages = 101usize.div_ceil(per_page);
+        let shown: Vec<usize> = (0..pages).flat_map(|p| page_of(101, per_page, p)).collect();
+        assert_eq!(shown, (0..101).collect::<Vec<_>>());
+        assert!(page_of(3, per_page, 5).is_empty());
     }
 
     #[test]

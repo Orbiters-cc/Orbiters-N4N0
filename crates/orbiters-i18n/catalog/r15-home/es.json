@@ -58,12 +58,12 @@
   "A VRChat is starting and has not said its profile yet: try again in a moment.": "Un VRChat se está abriendo y aún no ha dicho su perfil: vuelve a intentarlo en un momento.",
   "This picture is not one of your account's: open the list again and choose one.": "Esta imagen no es una de tu cuenta: vuelve a abrir la lista y elige una.",
   "VRChat was asked to start on profile {n} {m} min ago and has not shown up yet. If it is not coming, press Play again to start it anyway.": "Se pidió abrir VRChat en el perfil {n} hace {m} min y aún no aparece. Si no va a abrirse, pulsa Jugar otra vez para abrirlo de todos modos.",
-  "A VRChat has not said its profile yet: Play waits until it does.": "Un VRChat aún no ha dicho su perfil: Jugar espera hasta que lo diga.",
   "Your profile has not been read yet, so your bio is not known here: press Read again first.": "Tu perfil aún no se ha leído, así que tu biografía no se conoce aquí: pulsa Leer de nuevo primero.",
   "Your bio shows once your profile is read. Read again in the friends list asks VRChat now.": "Tu biografía aparece cuando se lee tu perfil. Leer de nuevo, en la lista de amigos, se lo pide a VRChat ahora.",
   "Signed out of VRChat": "Sesión de VRChat cerrada",
   "The friends list was that account's: it is put away. Sign in again to see yours.": "La lista de amigos era de esa cuenta: se ha guardado. Vuelve a iniciar sesión para ver la tuya.",
   "Another VRChat account": "Otra cuenta de VRChat",
   "The friends list was the previous account's: it is put away until this account's is read.": "La lista de amigos era de la cuenta anterior: se ha guardado hasta que se lea la de esta cuenta.",
-  "A VRChat running for {m} min has not said its profile. If it is not on profile {n}, press Play again to start anyway.": "Un VRChat abierto desde hace {m} min no ha dicho su perfil. Si no está en el perfil {n}, pulsa Jugar otra vez para abrir de todos modos."
+  "A VRChat running for {m} min has not said its profile. If it is not on profile {n}, press Play again to start anyway.": "Un VRChat abierto desde hace {m} min no ha dicho su perfil. Si no está en el perfil {n}, pulsa Jugar otra vez para abrir de todos modos.",
+  "A VRChat has not said its profile yet: Play waits a minute for it, then asks you before it starts another.": "Un VRChat aún no ha dicho su perfil: Jugar lo espera un minuto y luego te pregunta antes de abrir otro."
 }

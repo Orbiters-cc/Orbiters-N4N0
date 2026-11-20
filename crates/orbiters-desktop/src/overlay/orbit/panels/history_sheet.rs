@@ -53,6 +53,8 @@ pub enum HistoryState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HistoryRow {
     pub index: usize,
+    /// Its link: what a press on the row copies or drops, as shown when it was pressed (the file may be read again meanwhile).
+    pub url: String,
     pub title: String,
     /// The title is the link: no title was found for it.
     pub link_only: bool,
@@ -355,6 +357,7 @@ impl Store {
                 let title = v.title.clone().filter(|t| !t.trim().is_empty());
                 HistoryRow {
                     index,
+                    url: v.url.clone(),
                     link_only: title.is_none(),
                     title: title.unwrap_or_else(|| short_link(&v.url)),
                     meta,
@@ -372,9 +375,16 @@ impl Store {
         self.videos.as_ref().map_or_else(Vec::new, |videos| shown(scroll, videos.len()).filter_map(|i| videos[i].youtube()).collect())
     }
 
-    /// The video at `index`: its link, its title (or its link), YouTube's id.
-    pub fn video(&self, index: usize) -> Option<(String, String, Option<String>)> {
-        let v = self.videos.as_ref()?.get(index)?;
+    /// The video at `index`: its link, its title (or its link), YouTube's id. `shown`: the link that row showed when it was
+    /// pressed; the history read again since may have another video there, and then that one is looked for by its link.
+    pub fn video(&self, index: usize, shown: Option<&str>) -> Option<(String, String, Option<String>)> {
+        let videos = self.videos.as_ref()?;
+        let v = match (videos.get(index), shown) {
+            (Some(v), Some(url)) if v.url != url => videos.iter().find(|v| v.url == url)?,
+            (Some(v), _) => v,
+            (None, Some(url)) => videos.iter().find(|v| v.url == url)?,
+            (None, None) => return None,
+        };
         Some((v.url.clone(), v.title.clone().unwrap_or_else(|| short_link(&v.url)), v.youtube()))
     }
 }
@@ -388,11 +398,11 @@ pub fn sample(n: usize, latest: u64) -> History {
             url: if i % 5 == 4 { format!("https://stream.example.invalid/live/sample-{i}.m3u8") } else { format!("https://youtu.be/sample{i:05}") },
             title: match i {
                 _ if i % 5 == 4 => None,
-                _ if i % 7 == 3 => Some(format!("Sample video {i}: a very long title that a world's player shows whole, with a subtitle and the names of everyone in it")),
-                _ => Some(format!("Sample video {i}")),
+                _ if i % 7 == 3 => Some(format!("Sample video {i}: a very long title that a world's player shows whole, with a subtitle and the names of everyone in it")), // i18n: not shown (made-up videos)
+                _ => Some(format!("Sample video {i}")), // i18n: not shown (made-up videos)
             },
-            channel: (i % 5 != 4).then(|| ["Quiet Hours", "Night Radio", "Spatial Notes"][i % 3].to_string()),
-            world: Some(["Sample Lounge", "Midnight Rooftop", "Quiet Café"][i % 3].to_string()),
+            channel: (i % 5 != 4).then(|| ["Quiet Hours", "Night Radio", "Spatial Notes"][i % 3].to_string()), // i18n: not shown (made-up videos)
+            world: Some(["Sample Lounge", "Midnight Rooftop", "Quiet Café"][i % 3].to_string()), // i18n: not shown (made-up videos)
             first: latest - 60 * (n - 1 - i) as u64,
             last: latest - 60 * (n - 1 - i) as u64,
             plays: 1 + (i % 4 == 0) as u32 * 2,
@@ -451,7 +461,10 @@ mod tests {
         let last = items(&at_end).into_iter().filter(|i| matches!(i.look, Look::HistoryRow(_))).map(|i| (i.look, i.rect)).last().unwrap();
         assert_eq!(last.0, Look::HistoryRow(2000), "scrolled to its end, the oldest is the last row");
         assert!(last.1.bottom() <= 576.0, "and wholly on the page: {:?}", last.1);
-        assert_eq!(store.video(1), Some(("https://youtu.be/sample01999".into(), "Sample video 1999".into(), Some("sample01999".into()))));
+        assert_eq!(store.video(1, None), Some(("https://youtu.be/sample01999".into(), "Sample video 1999".into(), Some("sample01999".into()))));
+        // Pressed on a row that showed another video than the one now there (the file read again in between): that video.
+        assert_eq!(store.video(1, Some("https://youtu.be/sample00007")).map(|v| v.0), Some("https://youtu.be/sample00007".into()));
+        assert_eq!(store.video(1, Some("https://gone.example.invalid/")), None, "gone since: nothing");
     }
 
     /// Empty, not read yet, or never read from a file: what the page says.

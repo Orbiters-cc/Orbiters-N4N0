@@ -3475,7 +3475,8 @@ impl Panels {
             // A video of History, as a result of YouTube's: its link to the clipboard (for the world's player), or a card of it in
             // the world, through N4N0's menu's own effects; said as the menu says them.
             Action::HistoryCopy(i) => {
-                let Some((link, title, _)) = self.history.video(i) else { return };
+                let shown = self.action_facts().history.rows.iter().find(|r| r.index == i).map(|r| r.url.clone());
+                let Some((link, title, _)) = self.history.video(i, shown.as_deref()) else { return };
                 self.history_copied = Some((i, Instant::now()));
                 let host = &mut self.stage.host;
                 let said = if host.menu.can_drop { mark("Link copied: paste it, or Drop it") } else { mark("Link copied: paste it in the video player") };
@@ -3488,7 +3489,8 @@ impl Panels {
             // Greyed where the avatar cannot drop a card: its caption says why, and nothing is sent.
             Action::HistoryDrop(_) if !self.stage.host.menu.can_drop => {}
             Action::HistoryDrop(i) => {
-                let Some((link, title, video)) = self.history.video(i) else { return };
+                let shown = self.action_facts().history.rows.iter().find(|r| r.index == i).map(|r| r.url.clone());
+                let Some((link, title, video)) = self.history.video(i, shown.as_deref()) else { return };
                 let host = &mut self.stage.host;
                 host.menu.notice = Some(mark("Dropped: grab the card to copy its link").into());
                 host.effects(vec![Effect::Drop { link, title, video }], snap, &self.backend);

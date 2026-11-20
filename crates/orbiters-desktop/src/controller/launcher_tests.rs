@@ -1248,3 +1248,19 @@ fn a_list_that_did_not_come_is_said_in_its_chooser_not_as_a_failed_change() {
     assert!(matches!(m.list_failed, Some((PictureKind::Gallery, _))));
     assert!(m.listing.is_none());
 }
+
+// --- REQUEST15 second pass, blocker 6: every start needs its claim ---
+
+#[test]
+fn play_and_join_start_nothing_while_another_profile_is_still_starting() {
+    // Profile 1 asked for with no VRChat running (through Steam); a minute later its process is still not there.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch }));
+    *c.launcher_started.lock().unwrap() = Some(Instant::now() - Duration::from_secs(70));
+    // Play, and Join with a destination (the same path while nothing runs): the claim is refused, nothing starts.
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Vr, destination: None }), Some(Notice::Error(_))));
+    let place = launcher_feed::place(&format!("{W}:1~region(eu)"), "").unwrap();
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place) }), Some(Notice::Error(_))));
+    assert_eq!(machine.started.lock().unwrap().len(), 1, "only profile 1's start");
+}

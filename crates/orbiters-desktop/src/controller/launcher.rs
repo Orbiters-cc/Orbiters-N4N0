@@ -1281,7 +1281,7 @@ impl Controller {
         if machine.by_hand() {
             return self.launcher_play_by_hand(machine.as_ref(), destination, account, &mut started);
         }
-        if started.is_some_and(|t| t.elapsed() < STARTING_FOR) || self.launcher_claimed(0) {
+        if started.is_some_and(|t| t.elapsed() < STARTING_FOR) {
             return Notice::Error(tr("Starting VRChat…").into());
         }
         if !machine.installed() {
@@ -1303,8 +1303,12 @@ impl Controller {
         if scoped && self.launcher_sender(account).is_err() {
             return changed_account();
         }
-        // Claimed before the start, under the start lock: no other start can take profile 0 meanwhile.
-        let claim = self.launcher_claim(0, mode);
+        // Claimed before the start, under the start lock: no other start can take profile 0 meanwhile. A refused claim
+        // (another start under way, on any profile) starts nothing (REQUEST15 second pass, blocker 6).
+        let claim = match self.launcher_claim(0, mode) {
+            Ok(id) => id,
+            Err(notice) => return notice,
+        };
         match machine.start(&args) {
             Ok(()) => {
                 *started = Some(Instant::now());
@@ -1321,9 +1325,7 @@ impl Controller {
                 Notice::Sent { to: destination.map(|p| p.world_id).unwrap_or_default(), action: SentKind::Launch }
             }
             Err(words) => {
-                if let Ok(id) = claim {
-                    self.launcher_unclaim(id);
-                }
+                self.launcher_unclaim(claim);
                 Notice::Error(tr!("VRChat could not be started: {reason}", reason = words))
             }
         }

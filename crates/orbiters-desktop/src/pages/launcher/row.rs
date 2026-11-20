@@ -97,119 +97,37 @@ pub(super) fn sign_in_note(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: R
     y + h + 10.0
 }
 
-/// One received row (a boop, an invite request) and the gap under it.
-pub(super) const GOT_ROW: f32 = 54.0;
-/// The heading over two or more of them: what they are and how many.
-pub(super) const GOT_HEAD: f32 = 28.0;
-/// The block takes at most this share of the column's room under its top (REQUEST18 1: "the more the better")…
-pub(super) const GOT_SHARE: f32 = 0.65;
-/// …and always leaves the friends' list under it this much: a section's header and a couple of people.
-pub(super) const LIST_KEEPS: f32 = 140.0;
-
-/// What was received, newest first.
+/// What was received, as its row draws it.
 enum Got {
     Boop { id: String, from: String, name: String, icon: String, at: i64 },
     Request { id: String, name: String, icon: String, at: i64 },
 }
 
-impl Got {
-    fn id(&self) -> &str {
-        match self {
-            Got::Boop { id, .. } | Got::Request { id, .. } => id,
-        }
+/// The boop or invite request `id` received.
+fn got(state: &State, id: &str) -> Option<Got> {
+    if let Some(b) = state.data.boops.iter().find(|b| b.id == id) {
+        return Some(Got::Boop { id: b.id.clone(), from: b.from_id.clone(), name: b.from_name.clone(), icon: b.from_icon.clone(), at: b.received_at });
     }
+    state.data.invites.iter().find(|i| i.id == id && i.kind == InviteKind::Request).map(|i| Got::Request { id: i.id.clone(), name: i.from_name.clone(), icon: i.from_icon.clone(), at: i.received_at })
 }
 
-/// Every boop and invite request received and not put away, newest first: all of them, never a count of the rest.
-fn got(state: &State) -> Vec<Got> {
-    let mut got: Vec<Got> = Vec::new();
-    for b in state.data.boops.iter().filter(|b| !state.dismissed.contains(&b.id)) {
-        got.push(Got::Boop { id: b.id.clone(), from: b.from_id.clone(), name: b.from_name.clone(), icon: b.from_icon.clone(), at: b.received_at });
-    }
-    for i in state.data.invites.iter().filter(|i| i.kind == InviteKind::Request && !state.dismissed.contains(&i.id)) {
-        got.push(Got::Request { id: i.id.clone(), name: i.from_name.clone(), icon: i.from_icon.clone(), at: i.received_at });
-    }
-    got.sort_by_key(|g| std::cmp::Reverse(match g {
-        Got::Boop { at, .. } | Got::Request { at, .. } => *at,
-    }));
-    got
-}
-
-/// How tall the block of `n` received rows is with `room` from its top to the column's foot, and whether its rows scroll
-/// inside it (REQUEST18 1: every boop shows, the more the better). All of them, with a heading over two or more, while they
-/// fit in [`GOT_SHARE`] of the room and leave the list [`LIST_KEEPS`]; past that the block stops there and its rows scroll,
-/// the next one cut by its foot as a list that goes on is. Never less than a row and a half.
-pub(super) fn received_height(n: usize, room: f32) -> (f32, bool) {
-    if n == 0 {
-        return (0.0, false);
-    }
-    let head = if n > 1 { GOT_HEAD } else { 0.0 };
-    let all = head + n as f32 * GOT_ROW;
-    let most = (room * GOT_SHARE).min(room - LIST_KEEPS).max(head + 1.5 * GOT_ROW).floor();
-    if all <= most {
-        (all, false)
-    } else {
-        (most, true)
-    }
-}
-
-/// Boops and invite requests received, newest first: every one, under a heading that counts them; the block grows with
-/// them up to its share of the column ([`received_height`]) and scrolls inside past that, the friends' list staying under it.
-pub(super) fn received(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: Rect, mut y: f32, clock: f64) -> f32 {
-    let got = got(state);
-    let n = got.len();
-    let (tall, scrolls) = received_height(n, inner.bottom() - y);
-    if n > 1 {
-        let boops = got.iter().filter(|g| matches!(g, Got::Boop { .. })).count();
-        let title = match boops {
-            b if b == n => tr("Boops"),
-            0 => tr("Invite requests"),
-            _ => tr("Boops and invite requests"),
-        };
-        let p = ui.painter();
-        let cy = y + GOT_HEAD / 2.0;
-        widgets::icon(p, pos2(inner.left() + 14.0, cy), icons::HAND_WAVING, 13.0, theme::ACCENT);
-        let t = widgets::text_truncated(p, pos2(inner.left() + 27.0, cy), Align2::LEFT_CENTER, &Txt::new(title, 12.5).weight(weight::SEMIBOLD), inner.width() - 80.0);
-        widgets::text(p, pos2(t.right() + 7.0, cy), Align2::LEFT_CENTER, &Txt::new(n.to_string(), 11.5).weight(weight::MEDIUM).color(theme::FG_4));
-    }
-    let head = if n > 1 { GOT_HEAD } else { 0.0 };
-    let rows = Rect::from_min_max(pos2(inner.left(), y + head), pos2(inner.right(), y + tall));
-    let now = state.now();
-    if scrolls {
-        let mut child = ui.new_child(UiBuilder::new().max_rect(rows).id_salt("launcher-got"));
-        child.set_clip_rect(rows.intersect(ui.clip_rect()));
-        egui::ScrollArea::vertical().id_salt("launcher-got-scroll").auto_shrink([false, false]).show_viewport(&mut child, |ui, viewport| {
-            let width = ui.available_width();
-            ui.set_min_size(vec2(width, n as f32 * GOT_ROW));
-            let origin = ui.max_rect().min;
-            for (i, g) in got.iter().enumerate() {
-                let top = i as f32 * GOT_ROW;
-                if top + GOT_ROW < viewport.min.y || top > viewport.max.y {
-                    continue;
-                }
-                got_row(ui, cx, state, Rect::from_min_size(origin + vec2(2.0, top), vec2(width - 4.0, 48.0)), i, g, clock, now);
-            }
-        });
-    } else {
-        for (i, g) in got.iter().enumerate() {
-            got_row(ui, cx, state, Rect::from_min_size(pos2(inner.left() + 2.0, rows.top() + i as f32 * GOT_ROW), vec2(inner.width() - 4.0, 48.0)), i, g, clock, now);
-        }
-    }
-    y += tall;
-    if y > inner.top() {
-        y + 4.0
-    } else {
-        y
-    }
+/// Over two or more received rows, as a section's header says its name and count: what they are, how many.
+fn got_head(ui: &Ui, rect: Rect, count: usize, boops: usize) {
+    let title = match boops {
+        b if b == count => tr("Boops"),
+        0 => tr("Invite requests"),
+        _ => tr("Boops and invite requests"),
+    };
+    let p = ui.painter();
+    let cy = rect.center().y + 1.0;
+    widgets::icon(p, pos2(rect.left() + 16.0, cy), icons::HAND_WAVING, 13.0, theme::ACCENT);
+    let t = widgets::text_truncated(p, pos2(rect.left() + 29.0, cy), Align2::LEFT_CENTER, &Txt::new(title, 12.5).weight(weight::SEMIBOLD), rect.width() - 80.0);
+    widgets::text(p, pos2(t.right() + 7.0, cy), Align2::LEFT_CENTER, &Txt::new(count.to_string(), 11.5).weight(weight::MEDIUM).color(theme::FG_4));
 }
 
 /// One received row at `rect`: who, what and when; Boop back on a boop; its put-away cross.
-#[allow(clippy::too_many_arguments)]
-fn got_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, n: usize, g: &Got, clock: f64, now: i64) {
-    let (enter, dy) = widgets::entrance(ui, Id::unique(("launcher-got", n, g.id().to_string())), 0.0, 0);
-    let rect = rect.translate(vec2(0.0, dy * 0.4));
-    let mut p = ui.painter().clone();
-    p.multiply_opacity(enter);
+fn got_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, g: &Got, clock: f64, now: i64) {
+    let p = ui.painter().clone();
     let accent = matches!(g, Got::Boop { .. });
     widgets::frame(&p, rect, 14.0, if accent { theme::alpha(theme::ACCENT, 0.09) } else { theme::surface_soft() });
     let (name, icon, at, id) = match g {
@@ -402,6 +320,14 @@ pub(super) fn list(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, cloc
             match row {
                 Row::Header { group, kind, name, count, online, folded } => header(ui, state, r, &group, kind, &name, count, online, folded),
                 Row::Person { group, friend } => person(ui, cx, state, r, &group, friend, clock),
+                Row::GotHead { count, boops } => got_head(ui, r, count, boops),
+                // As wide as a person's card, the gap under it.
+                Row::Got { id } => {
+                    if let Some(g) = got(state, &id) {
+                        let now = state.now();
+                        got_row(ui, cx, state, Rect::from_min_size(r.min + vec2(4.0, 2.0), vec2(r.width() - 8.0, list::GOT_H - 6.0)), &g, clock, now);
+                    }
+                }
             }
         }
     });
@@ -690,12 +616,12 @@ mod tests {
     use super::*;
     use crate::backend::{Backend, Ctl};
     use crate::state::Snapshot;
-    use orbiters_core::launcher::{Boop, LauncherState};
+    use orbiters_core::launcher::Boop;
     use orbiters_core::settings::Settings;
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    /// Nothing is sent from these pages' pictures of the list.
+    /// Nothing is sent from these pictures of the list.
     struct Still;
     impl Backend for Still {
         fn n4n0(&self, _command: crate::ipc::N4n0Command) {}
@@ -744,101 +670,49 @@ mod tests {
         fn quit(&self) {}
     }
 
-    /// `n` made-up boops from made-up people who are not in the list (so each can be booped back), newest first.
-    fn booped(n: usize) -> State {
-        let mut data = LauncherState::default();
+    /// REQUEST18 1, Enzo: "the whole thing is scrollable … intricated scrollable frames are terrible experience". Thirty
+    /// boops (made up, from the sample's made-up people) in the friends column of a 780 high window: the column has one
+    /// scroll area, its list; the newest boops' rows are its first rows, and one turn of the wheel over the list takes them
+    /// out of view with the rest of it, the friends following.
+    #[test]
+    fn boops_are_rows_of_the_one_scrolling_list() {
+        let mut data = orbiters_core::launcher::sample();
         data.possible.boop = true;
-        data.boops = (0..n)
-            .map(|i| Boop {
-                id: format!("not_boop_{i:02}"),
-                from_id: format!("usr_sample_{i:02}"),
-                from_name: format!("Sample {i:02}"),
-                from_icon: String::new(),
-                emoji: None,
-                received_at: 1_000 - i as i64,
-            })
+        let from = data.friends[3].clone();
+        data.boops = (0..30)
+            .map(|i| Boop { id: format!("not_boop_{i:02}"), from_id: format!("usr_sample_boop_{i:02}"), from_name: from.name.clone(), from_icon: String::new(), emoji: None, received_at: 1_000 - i as i64 })
             .collect();
-        State { data: Arc::new(data), ..Default::default() }
-    }
-
-    /// The block drawn from `top` in a column whose inner part is 360 wide and ends at `foot`: where the list starts, and which
-    /// boops' Boop back got drawn (an answer to the pointer), with their rects.
-    fn draw(state: &mut State, top: f32, foot: f32) -> (f32, Vec<(usize, Rect)>) {
+        let mut state = State { data: Arc::new(data), ..Default::default() };
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);
         let ctl: Ctl = Arc::new(Still);
         let snap = Snapshot::new(Settings::default());
         let mut toasts = orbiters_ui::toast::Toasts::default();
-        let inner = Rect::from_min_max(pos2(10.0, 0.0), pos2(370.0, foot));
-        let mut y = 0.0;
-        for frame in 0..3 {
-            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(380.0, foot + 10.0))), time: Some(frame as f64 / 60.0), ..Default::default() };
-            let _ = ctx.run_ui(input, |ui| {
-                let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
-                y = received(ui, &mut cx, state, inner, top, 0.0);
-            });
-        }
-        let drawn = state
-            .data
-            .boops
-            .iter()
-            .enumerate()
-            .filter_map(|(i, b)| ctx.read_response(Id::unique(("launcher-boop-back", b.from_id.as_str()))).map(|r| (i, r.rect)))
-            .collect();
-        (y, drawn)
-    }
-
-    /// REQUEST18 1: every pending boop is a row, not two and "4 more"; newest first.
-    #[test]
-    fn every_boop_received_has_its_row() {
-        let state = booped(30);
-        let rows = got(&state);
-        assert_eq!(rows.len(), 30, "none folded into a count");
-        assert_eq!(rows[0].id(), "not_boop_00");
-        assert_eq!(rows[29].id(), "not_boop_29");
-        // Six in a column of the default window (its block starts about 190 down a 780-high column): all six drawn, each with
-        // its own Boop back, one under the other, and the list starts under the last.
-        let mut six = booped(6);
-        let (list_at, drawn) = draw(&mut six, 190.0, 770.0);
-        assert_eq!(drawn.iter().map(|d| d.0).collect::<Vec<_>>(), (0..6).collect::<Vec<_>>(), "Boop back on every row");
-        assert!(drawn.windows(2).all(|w| w[1].1.top() >= w[0].1.bottom()), "{drawn:?}");
-        assert_eq!(list_at, 190.0 + GOT_HEAD + 6.0 * GOT_ROW + 4.0);
-        assert!(drawn.iter().all(|d| d.1.bottom() <= list_at));
-    }
-
-    /// REQUEST18 1: the block grows with what was received, and past its share of the column its rows scroll inside it,
-    /// the friends' list keeping its room under it.
-    #[test]
-    fn the_received_block_grows_up_to_its_share_and_scrolls_past_it() {
-        // Nothing: nothing taken. One: the row alone, no heading. A few: all of them with their heading.
-        assert_eq!(received_height(0, 580.0), (0.0, false));
-        assert_eq!(received_height(1, 580.0), (GOT_ROW, false));
-        assert_eq!(received_height(6, 580.0), (GOT_HEAD + 6.0 * GOT_ROW, false));
-        for room in [300.0, 450.0, 580.0, 900.0, 1400.0] {
-            for n in 1..60 {
-                let (tall, scrolls) = received_height(n, room);
-                let all = if n > 1 { GOT_HEAD } else { 0.0 } + n as f32 * GOT_ROW;
-                assert_eq!(scrolls, tall < all, "{n} in {room}");
-                assert!(tall <= all);
-                if scrolls {
-                    assert!(tall <= (room * GOT_SHARE).max(GOT_HEAD + 1.5 * GOT_ROW), "{n} in {room}: {tall} is more than its share");
-                    assert!(tall >= GOT_HEAD + 1.5 * GOT_ROW, "{n} in {room}: a row and a half at least");
-                }
-                if room >= 500.0 {
-                    assert!(room - tall >= LIST_KEEPS, "{n} in {room}: the list keeps its room");
-                    // Well over half of the column when there are many: the more the better.
-                    assert!(!scrolls || tall >= room * 0.5, "{n} in {room}");
-                }
+        let column = Rect::from_min_size(pos2(0.0, 0.0), vec2(380.0, 780.0));
+        let mut frame = |state: &mut State, n: u32, events: Vec<egui::Event>| {
+            for i in 0..n {
+                let input = egui::RawInput {
+                    screen_rect: Some(column),
+                    time: Some(ctx.input(|x| x.time) + 1.0 / 60.0),
+                    events: if i == 0 { events.clone() } else { Vec::new() },
+                    ..Default::default()
+                };
+                let _ = ctx.run_ui(input, |ui| {
+                    let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                    super::super::side_panel(ui, &mut cx, state, column, super::super::Side::Column(column.width()));
+                });
             }
-        }
-        // Thirty in the default window's column: the block stops at its share, the first rows drawn whole inside it, the next
-        // cut by its foot, and the list starts under it.
-        let mut thirty = booped(30);
-        let (list_at, drawn) = draw(&mut thirty, 190.0, 770.0);
-        let (tall, scrolls) = received_height(30, 770.0 - 190.0);
-        assert!(scrolls);
-        assert_eq!(list_at, 190.0 + tall + 4.0);
-        assert!(drawn.len() >= 6 && drawn.len() < 30, "the rows in view: {}", drawn.len());
-        assert_eq!(drawn[0].0, 0, "the newest first");
+        };
+        let drawn = |state: &State, i: usize| ctx.read_response(Id::unique(("launcher-boop-back", state.data.boops[i].from_id.as_str()))).is_some();
+        frame(&mut state, 30, Vec::new());
+        assert_eq!(ctx.data(|d| d.count::<egui::scroll_area::State>()), 1, "one scroll area in the column: the list");
+        assert!(drawn(&state, 0) && drawn(&state, 1), "the newest boops are the list's first rows, each with its Boop back");
+        assert!(!drawn(&state, 29), "the oldest further down the same list, out of view");
+        assert_eq!(state.rows[0], Row::GotHead { count: 31, boops: 30 }, "every boop, and the sample's invite request");
+        let list_at = pos2(190.0, 500.0);
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -(list::GOT_HEAD_H + 31.0 * list::GOT_H)), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE, source: egui::MouseWheelSource::Wheel };
+        frame(&mut state, 90, vec![egui::Event::PointerMoved(list_at), wheel]);
+        assert!((0..30).all(|i| !drawn(&state, i)), "scrolled past the boops: none left in view");
+        assert_eq!(ctx.data(|d| d.count::<egui::scroll_area::State>()), 1, "still one scroll area");
     }
 }

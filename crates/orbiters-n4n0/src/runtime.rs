@@ -1315,6 +1315,29 @@ impl N4n0 {
         rt.wake();
     }
 
+    /// Show N4N0 is `on` now (the Action Menu, the app's own write, its echo): where N4N0's menu shows follows at once, and a menu open
+    /// on one host goes to the other (the avatar's screen hiding with an older N4N0's bot, or showing again): the owner never loses it.
+    /// Returns whether it changed.
+    pub(crate) fn set_bot(self: &Shared, on: bool) -> bool {
+        let settings = self.settings();
+        let steamvr = self.host.scene().steamvr;
+        let mut rt = self.n4n0.lock().unwrap();
+        if rt.bot == Some(on) {
+            return false;
+        }
+        let now = Instant::now();
+        let (on_screen, shown) = (rt.screen.available, rt.screen.menu_shown(now));
+        rt.bot = Some(on);
+        rt.screen_place(steamvr);
+        if shown && on_screen != rt.screen.available {
+            // The same avatar's menu changes host: it opens on the other (the screen's closed as it went; the overlay's closes itself
+            // once the screen has it). No listen starts: the owner had the menu already.
+            let _ = self.open_menu(&mut rt, false, &settings);
+        }
+        rt.wake();
+        true
+    }
+
     /// N4N0's light as VRChat holds it (on the OSC receiving thread): the expressions menu's controls, or the app's own
     /// writes coming back. N4N0's menus show it.
     fn light_parameter(self: &Shared, name: &str, value: &OscValue) {
@@ -1380,17 +1403,14 @@ impl N4n0 {
         // Show N4N0, from the Action Menu or the app's own write coming back: where the menu shows may follow.
         if name == params::VISIBLE {
             {
-                let mut rt = self.n4n0.lock().unwrap();
+                let rt = self.n4n0.lock().unwrap();
                 if !rt.params.is_empty() && !rt.params.contains(params::VISIBLE) {
                     return;
                 }
-                if rt.bot == Some(value.truthy()) {
-                    return;
-                }
-                rt.bot = Some(value.truthy());
-                rt.wake();
             }
-            self.publish();
+            if self.set_bot(value.truthy()) {
+                self.publish();
+            }
             return;
         }
         if Self::echo(name) || self.screen_parameter(name, value) {
@@ -1622,6 +1642,7 @@ impl N4n0 {
         } else {
             None
         };
+
         let steamvr = self.host.scene().steamvr;
         let synced = names.iter().filter(|n| n.starts_with(params::TEXT_SYNC_PREFIX)).count();
         let sync = if contract::SYNC_COUNTS.contains(&synced) {
@@ -2221,12 +2242,11 @@ impl N4n0 {
                 rt.wake();
             }
             Command::ShowBot { on } => {
-                {
-                    let mut rt = self.n4n0.lock().unwrap();
-                    rt.bot = Some(on);
-                    rt.outbox.push((Instant::now(), (parameter(params::VISIBLE), OscType::Bool(on))));
-                    rt.wake();
-                }
+                self.set_bot(on);
+                let mut rt = self.n4n0.lock().unwrap();
+                rt.outbox.push((Instant::now(), (parameter(params::VISIBLE), OscType::Bool(on))));
+                rt.wake();
+                drop(rt);
                 self.publish();
             }
             Command::States { action, avatar } => self.states_action(action, avatar),

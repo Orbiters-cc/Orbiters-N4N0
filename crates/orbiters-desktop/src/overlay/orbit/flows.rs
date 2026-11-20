@@ -107,6 +107,30 @@ fn the_service_s_menu_request_opens_all_tools_on_the_desktop() {
     assert_eq!(person.panels.facts.sheet, None, "the SteamVR overlay's");
 }
 
+/// REQUEST15 fix B2: All tools serving N4N0's menu on the desktop, and the avatar's screen taking the menu back (its older N4N0's bot shown
+/// again, the service opening the menu there): the sheet goes and the service hears it closed here, so only the screen has the menu.
+#[test]
+fn all_tools_gives_n4n0_s_menu_back_to_the_avatar_s_screen() {
+    use crate::ipc::N4n0Command;
+    let (mut person, heard) = Person::heard();
+    let opened = |heard: &Heard| heard.n4n0.lock().unwrap().iter().filter_map(|c| match c { N4n0Command::MenuState { open, .. } => Some(*open), _ => None }).collect::<Vec<_>>();
+    {
+        let snap = Arc::make_mut(&mut person.snap);
+        snap.n4n0.desktop_mode = true;
+        snap.n4n0.screen = false;
+    }
+    person.around = Some(Around::Wheel);
+    person.turns(2);
+    let snap = Arc::make_mut(&mut person.snap);
+    snap.n4n0.menu_request = snap.n4n0.menu_request.wrapping_add(1);
+    person.turns(2);
+    assert_eq!((person.panels.facts.sheet, opened(&heard).last().copied()), (Some(Sheet::All), Some(true)));
+    Arc::make_mut(&mut person.snap).n4n0.screen = true;
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, None, "the screen has the menu now");
+    assert_eq!(opened(&heard).last(), Some(&false), "and the service hears this one closed");
+}
+
 /// OVL2-17: a menu going away under a held press does nothing: the list press is not run later, the held booster level and
 /// smoothing are not saved.
 #[test]

@@ -4146,6 +4146,10 @@ impl Panels {
                 self.serving = menu_sheet(self.facts.sheet);
             }
         }
+        // The avatar's screen took N4N0's menu (its bot shown again with an older N4N0): the sheet that served it goes, the screen has it.
+        if self.serving && super::menu::on_avatar_screen(snap) && menu_sheet(self.facts.sheet) {
+            self.close_sheet();
+        }
         if self.open.is_none() || !menu_sheet(self.facts.sheet) || !desktop || super::menu::on_avatar_screen(snap) {
             self.serving = false;
         }

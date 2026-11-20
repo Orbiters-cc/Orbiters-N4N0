@@ -5331,6 +5331,10 @@ mod tests {
         for desktop in [true, false] {
             let soon = Facts { desktop, calls_soon: true, sheet: Some(Sheet::All), ..facts() };
             let call = sheet_items(Sheet::All, &soon).into_iter().find(|i| i.action == Action::Page(Target::Call));
+            // Beside it, REQUEST15 item 2 stays as merged: Translation on the desktop too, no QR code tile.
+            let names: Vec<Action> = sheet_items(Sheet::All, &soon).into_iter().map(|i| i.action).collect();
+            assert_eq!(names.contains(&Action::Translate), orbiters_core::osc::VRCHAT_RUNS_HERE, "desktop {desktop}");
+            assert!(!names.contains(&Action::Page(Target::Qr)), "desktop {desktop}");
             assert!(matches!(call.map(|i| i.look), Some(Look::Small { label: "Call", .. })), "desktop {desktop}");
             assert_eq!(tile_line(Action::Page(Target::Call), &soon).as_deref(), Some("Coming soon"));
             assert_eq!(caption(Action::Page(Target::Call), &soon).map(|c| c.1).as_deref(), Some(CALLS_SOON_WHY));

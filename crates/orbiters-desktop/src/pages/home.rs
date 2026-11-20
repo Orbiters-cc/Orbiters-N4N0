@@ -595,7 +595,8 @@ fn feature_compact(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Ti
     let (rect, alpha) = super::entering(ui, cx, 1 + i, rect);
     let ctx = ui.ctx().clone();
     let id = Id::unique(("orbiters-home-feature", i));
-    let enabled = !state.unavailable;
+    // "Coming soon" (Call without N4N0 calls) stays greyed but takes a click, which says why.
+    let enabled = state.pointable();
     let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
     if enabled && widgets::pressed(&resp) {
         acts.push(Act::Press(target));
@@ -605,7 +606,7 @@ fn feature_compact(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Ti
     let resp = if enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.03 * press));
     let mut p = ui.painter().clone();
-    p.multiply_opacity(alpha * if enabled { 1.0 } else { 0.5 });
+    p.multiply_opacity(alpha * if state.unavailable { 0.5 } else { 1.0 });
     widgets::frame(&p, r, 14.0, theme::mix(theme::surface(), theme::INK_800, hover));
     let switched = matches!(target, Target::FastWalk | Target::Light);
     let color = match target {
@@ -641,13 +642,29 @@ fn feature_compact(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Ti
         Target::Music => menu.media.as_ref().and_then(|m| m.video.as_deref()),
         _ => None,
     };
-    let end = if switch.is_some() { 56.0 } else if playing.is_some() { 40.0 } else { 24.0 };
+    // Not open yet: a "Coming soon" pill where the way in would be.
+    let soon = state.soon.then(|| Txt::new(tr(orbiters_n4n0_core::menu::CALLS_SOON), 11.0).weight(weight::SEMIBOLD).color(theme::FG_2));
+    let soon_w = soon.as_ref().map_or(0.0, |t| p.layout_job(t.job(f32::INFINITY)).size().x + 16.0);
+    let end = if switch.is_some() { 56.0 } else if playing.is_some() { 40.0 } else if soon.is_some() { soon_w + 18.0 } else { 24.0 };
     let x = chip.right() + 10.0;
     let room = r.right() - end - x;
     widgets::text_truncated(&p, pos2(x, r.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(title, 13.5).weight(weight::SEMIBOLD), room);
-    let note = Txt::new(layout::text(menu, Content::TileNote(layout::note_of(target))), 11.5).color(if active { theme::ACCENT } else { theme::FG_3 });
+    let note = if state.soon { tr(CALLS_SOON_NOTE).to_string() } else { layout::text(menu, Content::TileNote(layout::note_of(target))) };
+    let note = Txt::new(note, 11.5).color(if active { theme::ACCENT } else { theme::FG_3 });
     widgets::text_truncated(&p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &note, room);
     resp.on_hover_text(title);
+    if let Some(txt) = soon {
+        let size = p.layout_job(txt.job(f32::INFINITY)).size();
+        let pill = Rect::from_min_size(pos2(r.right() - 12.0 - size.x - 16.0, r.center().y - size.y / 2.0 - 4.0), vec2(size.x + 16.0, size.y + 8.0));
+        let mut pp = ui.painter().clone();
+        pp.multiply_opacity(alpha);
+        pp.rect_filled(pill, theme::radius(pill.height() / 2.0), theme::INK_800);
+        if hover > 0.01 {
+            pp.rect_stroke(pill, theme::radius(pill.height() / 2.0), Stroke::new(1.0, theme::alpha(theme::ACCENT, hover)), egui::StrokeKind::Inside);
+        }
+        widgets::text(&pp, pill.center(), Align2::CENTER_CENTER, &txt);
+        return;
+    }
     if let Some(video) = playing {
         let (glyph, label) = if copied == Some(video) { (icons::CHECK, tr("Link copied")) } else { (icons::COPY, tr("Copy the video's link")) };
         let br = Rect::from_center_size(pos2(r.right() - 24.0, r.center().y), Vec2::splat(32.0));

@@ -9,7 +9,7 @@ use orbiters_core::launcher::*;
 
 const NOW: i64 = 1_795_000_000;
 
-pub(super) const NAMES: [&str; 27] = [
+pub(super) const NAMES: [&str; 26] = [
     "launcher-list",
     "launcher-invite",
     "launcher-hover",
@@ -39,9 +39,6 @@ pub(super) const NAMES: [&str; 27] = [
     "launcher-small-stale",
     // Request16 1: the status list open under its pill, each row's dot in its status's colour.
     "launcher-mine-status",
-    // REQUEST17: the list's pictures are VRChat addresses (made up) kept on this computer from an earlier run: read from
-    // that cache by the loader, no network, on screen within the first frames (the frame is printed).
-    "launcher-pictures-cached",
 ];
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
@@ -98,6 +95,22 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
             library: None,
         });
     }
+    // REQUEST17: the list's pictures are VRChat addresses (made up) kept on this computer from an earlier run: read from
+    // that cache by the loader, no network, on screen within the first frames (printed; `--sequence 8` writes each).
+    scenarios.push(Scenario {
+        name: "launcher-pictures-cached",
+        page: Page::Home,
+        snapshot: base.clone(),
+        frames: 8,
+        splash: false,
+        open_detail: false,
+        toasts: vec![],
+        pointer: None,
+        scroll: 0.0,
+        world: None,
+        home: None,
+        library: None,
+    });
     for name in NAMES {
         scenarios.push(Scenario {
             name,

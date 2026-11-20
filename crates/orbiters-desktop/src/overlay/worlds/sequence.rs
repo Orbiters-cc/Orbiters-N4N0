@@ -37,6 +37,9 @@ pub struct Shown {
     pub splats: usize,
     pub load_ms: f64,
     pub cube_ms: f64,
+    /// The fast end of its batches: a build or anything else on the computer only ever adds time, so this is what the renderer
+    /// itself costs.
+    pub batch_ms_p10: f64,
     pub batch_ms_p50: f64,
     pub batch_ms_p95: f64,
     pub sort_room: usize,
@@ -83,11 +86,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     let references: Vec<&Shown> = steps.iter().filter(|s| s.what == "reference").collect();
     let last = references.last().copied().expect("shown first");
-    // The reference before anything larger showed: the faster of its first two showings (the first is the device's first work, and a
-    // build on the same computer can slow a batch), against the median of its showings after the first capture: what it costs from
-    // world to world once others showed.
-    let before = references.iter().take(2).map(|s| s.batch_ms_p50).fold(f64::MAX, f64::min).max(0.01);
-    let mut later: Vec<f64> = references.iter().skip(2).map(|s| s.batch_ms_p50).collect();
+    // The reference before anything larger showed: the faster of its first two showings (the first is the device's first work), against
+    // the median of its showings after the first capture: what it costs from world to world once others showed. Each showing by the fast
+    // end of its batches (p10): a build on the same computer slows a debug build's batches by a third and more, never speeds them.
+    let before = references.iter().take(2).map(|s| s.batch_ms_p10).fold(f64::MAX, f64::min).max(0.01);
+    let mut later: Vec<f64> = references.iter().skip(2).map(|s| s.batch_ms_p10).collect();
     later.sort_by(f64::total_cmp);
     let later_median = later.get(later.len() / 2).copied().unwrap_or(before);
     let growth = later_median / before;
@@ -105,9 +108,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "quality": quality.label(),
         "batches_per_capture": batches,
         "reference_splats": reference,
-        "reference_batch_ms_p50_before": round2(before),
-        "reference_batch_ms_p50_later_median": round2(later_median),
-        "reference_batch_ms_p50_later_worst": round2(worst * before),
+        "reference_batch_ms_p10_before": round2(before),
+        "reference_batch_ms_p10_later_median": round2(later_median),
+        "reference_batch_ms_p10_later_worst": round2(worst * before),
         "reference_growth": round2(growth),
         "reference_growth_worst": round2(worst),
         "reference_sort_room_first": first.sort_room,
@@ -121,7 +124,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "steps": steps,
     });
     std::fs::write(out.join("sequence.json"), serde_json::to_string_pretty(&summary)?)?;
-    eprintln!("reference batch {before:.2} ms before, {later_median:.2} ms median after the others ({growth:.2}x, worst {worst:.2}x); sort room {} -> at most {:?}; GPU {:?} / {:?} -> {:?} MB", first.sort_room, references.iter().map(|s| s.sort_room).max(), first.gpu_mb, second_gpu, last.gpu_mb); // i18n: not shown (a developer's bench)
+    eprintln!("reference batch (p10) {before:.2} ms before, {later_median:.2} ms median after the others ({growth:.2}x, worst {worst:.2}x); sort room {} -> at most {:?}; GPU {:?} / {:?} -> {:?} MB", first.sort_room, references.iter().map(|s| s.sort_room).max(), first.gpu_mb, second_gpu, last.gpu_mb); // i18n: not shown (a developer's bench)
     anyhow::ensure!(growth <= max_growth, "the reference capture's batch grew {growth:.2}x after the others (more than {max_growth}x)"); // i18n: not shown (a developer's bench)
     anyhow::ensure!(sort_back, "the renderer kept a sort room larger than twice the {} entries the reference needed", first.sort_room); // i18n: not shown (a developer's bench)
     anyhow::ensure!(gpu_back, "the process kept {:?} MB of graphics memory against {:?} MB at the reference's second showing", last.gpu_mb, second_gpu); // i18n: not shown (a developer's bench)
@@ -138,11 +141,12 @@ pub const GPU_SLACK_MB: f64 = 96.0;
 
 fn line(s: &Shown) -> String {
     format!(
-        "{:<12} {:>8} splats  load {:>7.1} ms  cube {:>7.1} ms  batch p50 {:>6.2} p95 {:>6.2} ms  sort room {:>10}  splat room {:>9}  gpu {:>7} MB  private {:>7} MB  threads {:>3}  cache {:>7.1} MB",
+        "{:<12} {:>8} splats  load {:>7.1} ms  cube {:>7.1} ms  batch p10 {:>6.2} p50 {:>6.2} p95 {:>6.2} ms  sort room {:>10}  splat room {:>9}  gpu {:>7} MB  private {:>7} MB  threads {:>3}  cache {:>7.1} MB",
         s.what,
         s.splats,
         s.load_ms,
         s.cube_ms,
+        s.batch_ms_p10,
         s.batch_ms_p50,
         s.batch_ms_p95,
         s.sort_room,
@@ -225,6 +229,7 @@ impl Bench {
             splats: count,
             load_ms: round2(load_ms),
             cube_ms: round2(cube_ms),
+            batch_ms_p10: round2(times[times.len() / 10]),
             batch_ms_p50: round2(times[times.len() / 2]),
             batch_ms_p95: round2(times[(times.len() * 95 / 100).min(times.len() - 1)]),
             sort_room,

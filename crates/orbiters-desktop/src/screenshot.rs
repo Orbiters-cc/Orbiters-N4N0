@@ -157,7 +157,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
 fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     let out =
-        PathBuf::from(args.first().context("usage: --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]")?);
+        PathBuf::from(args.first().context("usage: --screenshot <out folder> [--real-data] [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]")?);
     let (sessions, raw) = crate::harness::screenshot_library().context("screenshots require library inputs from the harness bootstrap")?;
     let mut settings = Settings { picture_folders, sessions_dir: sessions.clone(), raw_captures_dir: raw.clone(), ..Settings::default() };
     // The usage statistics' notice was closed: it shows in its own scene ("usage-notice") alone.
@@ -174,6 +174,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            // Taken by the harness's start (`harness::REAL_DATA`).
+            "--real-data" => {}
             "--sessions" => settings.sessions_dir = PathBuf::from(it.next().context("--sessions <folder>")?),
             "--raw" => settings.raw_captures_dir = PathBuf::from(it.next().context("--raw <folder>")?),
             "--scale" => scale = it.next().context("--scale <factor>")?.parse()?,

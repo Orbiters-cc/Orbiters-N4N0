@@ -28,9 +28,67 @@ pub fn set_roots(roots: Roots) -> anyhow::Result<()> {
     ROOTS.set(roots).map_err(|_| anyhow::anyhow!("the app's folders were given already")) // i18n: not shown (a mistake in the program's start-up; the screenshot tool, run by developers, is the only one that passes it on)
 }
 
-/// The folders the app gave, when it gave some.
+/// The folders the app gave, when it gave some. In a test build (this crate's tests, or a crate whose tests enable
+/// `test-support`) there are always some: a temporary folder of the test process ([`test_roots`]), so that no test
+/// reads or writes the person's own settings, logs, caches or captures (night6).
 pub fn roots() -> Option<&'static Roots> {
-    ROOTS.get()
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        Some(ROOTS.get().unwrap_or_else(test_roots))
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        ROOTS.get()
+    }
+}
+
+/// Test builds: this process's own folders under the system's temporary folder (`orbiters-tests-<pid>`), made at the
+/// first ask. Folders of earlier test processes older than a day are removed then.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_roots() -> &'static Roots {
+    static TEST: OnceLock<Roots> = OnceLock::new();
+    TEST.get_or_init(|| {
+        let temp = std::env::temp_dir();
+        if let Ok(entries) = std::fs::read_dir(&temp) {
+            let day = std::time::Duration::from_secs(24 * 3600);
+            for e in entries.flatten() {
+                let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age > day);
+                if old && e.file_name().to_string_lossy().starts_with("orbiters-tests-") {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
+        let root = temp.join(format!("orbiters-tests-{}", std::process::id()));
+        let roots = Roots { config: root.join("config"), local_data: root.join("local"), cache: root.join("cache"), documents: root.join("documents") };
+        for dir in [&roots.config, &roots.local_data, &roots.cache, &roots.documents] {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        roots
+    })
+}
+
+static REAL_DATA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The screenshot harness's `--real-data`: with the app's folders given (a harness run), VRChat's own folders (its
+/// pictures, its logs and settings) are still read in place. Off by default: they then come from the given folders.
+pub fn allow_real_data() {
+    REAL_DATA.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Where the folders of other programs this app reads (VRChat's logs and pictures) are looked for: the person's own,
+/// or, when the app's folders were given (a harness, a test), under them (`local/LocalLow`, `documents/Pictures`),
+/// unless [`allow_real_data`] said otherwise.
+pub fn others_folders_in_roots() -> Option<&'static Roots> {
+    roots().filter(|_| !REAL_DATA.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The person's pictures folder (`Pictures`), or `documents/Pictures` under the given folders
+/// ([`others_folders_in_roots`]).
+pub fn pictures_dir() -> Option<PathBuf> {
+    match others_folders_in_roots() {
+        Some(r) => Some(r.documents.join("Pictures")),
+        None => dirs::picture_dir(),
+    }
 }
 
 /// A folder for when the system names none: never a relative path, which would land wherever the app was started
@@ -156,6 +214,12 @@ pub fn models_dir() -> PathBuf {
     local_data_root().join("Models")
 }
 
+/// The settings file of an app given no folders (the installed desktop app's): for comparing with what another
+/// program computes (the installer's setup), never to read or write in a test.
+pub fn platform_settings_file() -> PathBuf {
+    config_dir_in(None).join("settings.json")
+}
+
 pub fn settings_file() -> PathBuf {
     config_dir().join("settings.json")
 }
@@ -216,6 +280,10 @@ fn local_low() -> Option<PathBuf> {
 
 /// VRChat's log folder on this machine, when it exists.
 pub fn vrchat_log_dir() -> Option<PathBuf> {
+    // A harness or a test: never the person's own VRChat folder.
+    if let Some(r) = others_folders_in_roots() {
+        return Some(r.local_data.join("LocalLow").join("VRChat").join("VRChat")).filter(|p| p.is_dir());
+    }
     let mut candidates = Vec::new();
     #[cfg(windows)]
     candidates.extend(local_low().map(|low| low.join("VRChat").join("VRChat")));
@@ -241,7 +309,9 @@ mod tests {
         for dir in [config_dir(), documents_root(), default_sessions_dir(), local_data_root()] {
             assert!(dir.is_absolute(), "{}", dir.display());
         }
-        assert!(logs_dir().starts_with(local_data_root()) && cache_dir().starts_with(local_data_root()));
+        assert!(logs_dir().starts_with(local_data_root()));
+        // The desktop's cache is in its data folder (in a test build the test's own folders are given apart).
+        assert!(cache_dir_in(None).starts_with(local_data_root_in(None)));
         #[cfg(windows)]
         assert!(local_low().is_some_and(|low| low.ends_with("LocalLow")));
     }
@@ -255,9 +325,49 @@ mod tests {
         assert_eq!(local_data_root_in(Some(&given)), files.join("data"));
         assert_eq!(cache_dir_in(Some(&given)), files.join("cache"));
         assert_eq!(documents_root_in(Some(&given)), files.join("documents"));
-        // None given (the desktop): the platform's, as before.
-        assert_eq!(config_dir_in(None), config_dir());
-        assert_eq!(cache_dir_in(None), local_data_root().join("Desktop").join("cache"));
-        assert!(roots().is_none(), "the desktop gives none");
+        // None given (the desktop): the platform's, as before (computed, never touched here).
+        assert_eq!(cache_dir_in(None), local_data_root_in(None).join("Desktop").join("cache"));
+        assert!(config_dir_in(None).is_absolute());
+    }
+
+    /// Night6: in a test build every per-user folder is the test process's own: settings, logs, caches, captures,
+    /// VRChat's pictures and logs. A path that resolves to the person's own folders fails this test.
+    #[test]
+    fn tests_never_resolve_the_persons_folders() {
+        let root = test_roots().config.parent().unwrap().to_path_buf();
+        assert!(root.starts_with(std::env::temp_dir()), "{}", root.display());
+        let real: Vec<PathBuf> = [
+            dirs::config_dir().map(|d| d.join("Orbiters")),
+            dirs::data_local_dir().map(|d| d.join("Orbiters")),
+            dirs::document_dir().map(|d| d.join("Orbiters")),
+            dirs::picture_dir(),
+            dirs::home_dir().map(|h| h.join("Orbiters")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let mut ours = vec![
+            config_dir(),
+            settings_file(),
+            local_data_root(),
+            logs_dir(),
+            cache_dir(),
+            models_dir(),
+            avatars_dir(),
+            shared_with_unity_root(),
+            mixer_inbox_dir(),
+            documents_root(),
+            default_sessions_dir(),
+            default_raw_captures_dir(),
+            pictures_dir().expect("a pictures folder"),
+            crate::settings::Settings::default().sessions_dir,
+            crate::settings::Settings::default().raw_captures_dir,
+        ];
+        ours.extend(vrchat_log_dir());
+        ours.extend(crate::visited::screenshot_dirs_with(&[]));
+        for p in ours {
+            assert!(p.starts_with(&root), "not the test's own: {}", p.display());
+            assert!(!real.iter().any(|r| p.starts_with(r)), "the person's own: {}", p.display());
+        }
     }
 }

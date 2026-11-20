@@ -211,6 +211,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_setup_leaves_its_choice_where_the_app_reads_its_settings() {
-        assert_eq!(orbiters_update::app_settings_file(), Some(orbiters_core::paths::settings_file()));
+        // The installed app's file, computed (a test's own settings are elsewhere, night6).
+        assert_eq!(orbiters_update::app_settings_file(), Some(orbiters_core::paths::platform_settings_file()));
     }
 }

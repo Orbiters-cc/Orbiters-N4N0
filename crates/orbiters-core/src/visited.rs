@@ -473,7 +473,7 @@ pub fn screenshot_dirs_with(extra: &[PathBuf]) -> Vec<PathBuf> {
             found.push(c);
         }
     }
-    if let Some(p) = dirs::picture_dir().map(|p| p.join("VRChat")) {
+    if let Some(p) = crate::paths::pictures_dir().map(|p| p.join("VRChat")) {
         if !found.contains(&p) {
             found.push(p);
         }

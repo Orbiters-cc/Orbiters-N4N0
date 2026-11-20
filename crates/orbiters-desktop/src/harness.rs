@@ -18,11 +18,18 @@ pub fn screenshot_library() -> Option<&'static (std::path::PathBuf, std::path::P
     SCREENSHOT_LIBRARY.get()
 }
 
+/// `--screenshot <out> --real-data`: the scenes that show the person's own captures, pictures and VRChat's folders
+/// read them in place (and copy the small settings and caches into the private folders). Off by default: a run then
+/// reads a fixture pack (`ORBITERS_HARNESS_FIXTURES`) or nothing of the person's, and writes only under `<out>`.
+pub const REAL_DATA: &str = "--real-data";
+
 /// Production subprocesses/control commands, not developer harnesses. They must retain normal installed behavior.
 #[cfg(test)]
 const RUNTIME: &[&str] = &[
     "--window", "--overlay", "--orbit-desktop", "--prepare-upload", "--apply-update",
     "--bridge-shot", "--bridge-guard", "--quit", "--hidden",
+    // Repairs the pictures of the person's own captures (controller::picture_repair), on purpose in place.
+    "--repair-capture-pictures",
 ];
 
 /// Runs once in main. Holding the returned guard through dispatch also cleans up early errors and panics.
@@ -36,20 +43,38 @@ pub fn prepare(args: &[String]) -> anyhow::Result<Option<Scratch>> {
     }
     if !PRIVATE.contains(&mode) { return Ok(None); }
     let keep = args.iter().any(|a| a == "--keep") || (mode == "--screenshot" && std::env::var_os("ORBITERS_SCREENSHOT_KEEP_SANDBOX").is_some());
-    let scratch = Scratch::new("orbiters-harness", keep)?;
+    // Screenshots: their private folders under the output folder, so that the run writes nowhere else (night6).
+    let real = mode == "--screenshot" && args.iter().any(|a| a == REAL_DATA);
+    let scratch = match (mode == "--screenshot").then(|| args.get(1)).flatten() {
+        Some(out) => {
+            std::fs::create_dir_all(out)?;
+            Scratch::new_in(Path::new(out), ".orbiters-harness", keep)?
+        }
+        None => Scratch::new("orbiters-harness", keep)?,
+    };
     let seed = std::env::var_os("ORBITERS_HARNESS_FIXTURES");
     if mode == "--screenshot" {
-        let library = seed.as_ref().map_or_else(
-            || (orbiters_core::paths::default_sessions_dir(), orbiters_core::paths::default_raw_captures_dir()),
-            |p| (Path::new(p).join("documents/Sessions"), Path::new(p).join("documents/Raw captures")),
-        );
+        // The capture library: a fixture pack's, the person's own only with `--real-data` (read in place, never
+        // written), else the private folders' (empty).
+        let library = match (seed.as_ref(), real) {
+            (Some(p), _) => (Path::new(p).join("documents/Sessions"), Path::new(p).join("documents/Raw captures")),
+            (None, true) => (orbiters_core::paths::default_sessions_dir(), orbiters_core::paths::default_raw_captures_dir()),
+            (None, false) => (scratch.path.join("documents/Sessions"), scratch.path.join("documents/Raw captures")),
+        };
         SCREENSHOT_LIBRARY.set(library).map_err(|_| anyhow::anyhow!("screenshot inputs were given already"))?;
-        seed_screenshot(seed.as_deref().map(Path::new), &scratch.path)?;
+        // The person's settings folder, caches and Unity data are copied in only with `--real-data`.
+        if seed.is_some() || real {
+            seed_screenshot(seed.as_deref().map(Path::new), &scratch.path)?;
+        }
         orbiters_core::bundle::disable_thumbnail_cache_writes();
     } else if let Some(seed) = seed {
         seed_fixtures(Path::new(&seed), &scratch.path)?;
     }
     crate::link_smoke::sandbox(&scratch.path)?;
+    if real {
+        // VRChat's own pictures and logs, read in place.
+        orbiters_core::paths::allow_real_data();
+    }
     if keep { eprintln!("harness data kept at {}", scratch.path.display()); }
     Ok(Some(scratch))
 }
@@ -106,6 +131,10 @@ fn seed_screenshot(seed: Option<&Path>, root: &Path) -> anyhow::Result<()> {
     if let Some(app) = vcc_app {
         copies.push((app.join("WebApp/Dist/template-covers"), root.join("local/VCC-app/WebApp/Dist/template-covers")));
     }
+    // A fixture pack's VRChat pictures (`documents/Pictures/VRChat`): where the private folders have VRChat's.
+    if let Some(seed) = seed {
+        copies.push((seed.join("documents/Pictures"), root.join("documents/Pictures")));
+    }
     copies.retain(|(from, _)| from.exists());
     for (from, to) in copies { copy_tree(&from, &to)?; }
     Ok(())
@@ -155,7 +184,7 @@ mod tests {
     #[test]
     fn every_dispatch_switch_has_an_isolation_policy() {
         const READS_IN_PLACE: &[(&str, &str)] = &[
-            ("--screenshot", "reads the capture library (Sessions, Raw captures) and VRChat's pictures in place"),
+            ("--screenshot", "with --real-data only: reads the capture library (Sessions, Raw captures) and VRChat's pictures in place"),
         ];
         assert_eq!(READS_IN_PLACE.len(), 1);
         assert!(READS_IN_PLACE.iter().all(|(mode, why)| PRIVATE.contains(mode) && !why.is_empty()));
@@ -170,6 +199,42 @@ mod tests {
         assert!(dispatch.contains("Some(orbiters_booster::system::RESTORE_ARGUMENT)"), "the production RunOnce restore remains explicit");
         for source in [include_str!("screenshot.rs"), include_str!("idle_frames.rs"), include_str!("controller/publish_cost.rs"), include_str!("overlay/orbit/paint_bench.rs")] {
             assert!(!source.contains("paths::set_roots("), "harnesses consume the startup roots rather than replacing them");
+        }
+    }
+
+    /// Night6: every per-user folder a desktop test can reach is the test process's own (`paths::test_roots`, under
+    /// the system's temporary folder): settings, logs (perf's), caches (the editor's, the drag's), captures, Unity's
+    /// project data, VRChat's pictures and logs. A path that resolves to the person's own folders fails this test.
+    #[test]
+    fn a_test_never_resolves_the_persons_folders() {
+        let root = orbiters_core::paths::test_roots().config.parent().unwrap().to_path_buf();
+        let real: Vec<std::path::PathBuf> = [
+            dirs::config_dir().map(|d| d.join("Orbiters")),
+            dirs::data_local_dir().map(|d| d.join("Orbiters")),
+            dirs::document_dir().map(|d| d.join("Orbiters")),
+            dirs::picture_dir(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let settings = orbiters_core::settings::Settings::load();
+        let mut ours = vec![
+            orbiters_core::paths::settings_file(),
+            orbiters_core::paths::logs_dir(),
+            orbiters_core::paths::cache_dir(),
+            crate::pages::cache_root(),
+            settings.sessions_dir,
+            settings.raw_captures_dir,
+            orbiters_core::settings::Settings::default().sessions_dir,
+            orbiters_projects::data_dir(),
+            orbiters_projects::vcc_dir(),
+        ];
+        ours.extend(orbiters_projects::hub_data_dir());
+        ours.extend(orbiters_core::paths::vrchat_log_dir());
+        ours.extend(orbiters_core::visited::screenshot_dirs());
+        for p in ours {
+            assert!(p.starts_with(&root), "not the test's own: {}", p.display());
+            assert!(!real.iter().any(|r| p.starts_with(r)), "the person's own: {}", p.display());
         }
     }
 

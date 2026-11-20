@@ -46,7 +46,11 @@ pub(crate) struct Scratch {
 
 impl Scratch {
     pub(crate) fn new(name: &str, keep: bool) -> anyhow::Result<Self> {
-        let path = std::env::temp_dir().join(format!("{name}-{}", uuid::Uuid::new_v4()));
+        Self::new_in(&std::env::temp_dir(), name, keep)
+    }
+    /// In `dir` (a screenshot run's output folder).
+    pub(crate) fn new_in(dir: &std::path::Path, name: &str, keep: bool) -> anyhow::Result<Self> {
+        let path = dir.join(format!("{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path)?;
         Ok(Self { path, keep })
     }

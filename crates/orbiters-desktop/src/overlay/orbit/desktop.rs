@@ -214,6 +214,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         let asked = (watcher.wants_frames() || camera_frames).then(|| Ask {
             window: window.0 as isize,
+            pid: snap.vrchat.pid.unwrap_or(0),
             client: client_size(window),
             menus: watcher.wants_frames(),
             menu_every: watcher.look_every(turn),
@@ -583,8 +584,8 @@ impl Game {
         let pid = self.pid?;
         if let Some(h) = self.window {
             let hwnd = HWND(h as *mut _);
-            // SAFETY: plain queries; a handle gone only says no.
-            if unsafe { IsWindow(Some(hwnd)).as_bool() && !IsIconic(hwnd).as_bool() } {
+            // SAFETY: plain queries; a handle gone only says no. Still VRChat's: Windows may give a closed window's handle to another (verify-r15).
+            if unsafe { IsWindow(Some(hwnd)).as_bool() && !IsIconic(hwnd).as_bool() } && is_vrchat_window(hwnd, pid) {
                 return Some(hwnd);
             }
             self.window = None;
@@ -621,6 +622,25 @@ impl Game {
         self.window = search.found;
         self.window.map(|h| HWND(h as *mut _))
     }
+}
+
+/// Whether `hwnd` is VRChat's main window: of process `pid`, of Unity's window class. Asked again of a handle kept, and before a capture of it starts: a
+/// window that closed may have its handle given to another program's (verify-r15).
+pub(super) fn is_vrchat_window(hwnd: HWND, pid: u32) -> bool {
+    if hwnd.is_invalid() || pid == 0 {
+        return false;
+    }
+    let mut owner = 0u32;
+    let mut name = [0u16; 32];
+    // SAFETY: plain queries about a window; the buffer outlives the call; a window gone answers 0.
+    let n = unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return false;
+        }
+        GetWindowThreadProcessId(hwnd, Some(&mut owner));
+        GetClassNameW(hwnd, &mut name)
+    };
+    owner == pid && String::from_utf16_lossy(&name[..n.max(0) as usize]) == UNITY_CLASS
 }
 
 /// Esc and R pressed since the last look, with the game in front. `GetAsyncKeyState` is an ordinary query: it hooks nothing. A key going down is seen by its high bit
@@ -884,6 +904,8 @@ impl Drop for Capture {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Ask {
     window: isize,
+    /// VRChat's process: the window is asked again to be its own before its capture starts.
+    pid: u32,
     client: Vec2,
     menus: bool,
     menu_every: Duration,
@@ -944,7 +966,7 @@ impl Looker {
                             gpu = Gpu::new().map_err(|e| eprintln!("capture: {e}")).ok();
                         }
                         let window = HWND(ask.window as *mut _);
-                        capture = gpu.as_ref().and_then(|g| Capture::new(window, g).map_err(|e| eprintln!("capture: {e}")).ok()).map(|c| (ask.window, c));
+                        capture = gpu.as_ref().filter(|_| is_vrchat_window(window, ask.pid)).and_then(|g| Capture::new(window, g).map_err(|e| eprintln!("capture: {e}")).ok()).map(|c| (ask.window, c));
                         // A device lost (a driver's update, say) is made again next time.
                         if capture.is_none() {
                             gpu = None;
@@ -3499,6 +3521,30 @@ mod tests {
         assert_eq!(cursor::current(), first, "the same accent: the same cursor");
         cursor::follow(egui::Color32::from_rgb(10, 200, 120));
         assert_ne!(cursor::current(), first, "another accent: another cursor");
+    }
+
+    /// verify-r15: a kept window handle is VRChat's only while it is of VRChat's process and Unity's class: another window, or one that closed, is not.
+    #[test]
+    fn a_window_is_vrchat_s_only_while_its_process_and_class_say_so() {
+        let _alone = windows_alone();
+        unsafe extern "system" fn plain(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            // SAFETY: what the system passed on.
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        // SAFETY: plain Win32 calls on this test's own hidden window, destroyed below.
+        let unity = unsafe {
+            let module = GetModuleHandleW(None).unwrap_or_default();
+            RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(plain), hInstance: module.into(), lpszClassName: w!("UnityWndClass"), ..Default::default() });
+            CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, w!("UnityWndClass"), w!(""), WS_POPUP, 0, 0, 8, 8, None, None, None, None).expect("a window of Unity's class")
+        };
+        let me = std::process::id();
+        assert!(is_vrchat_window(unity, me), "its process, its class");
+        assert!(!is_vrchat_window(unity, me + 1), "another process's VRChat");
+        let other = StandIn::new(off_screen(vec2(8.0, 8.0)), vec2(8.0, 8.0));
+        assert!(!is_vrchat_window(other.0, me), "another class");
+        // SAFETY: made above.
+        let _ = unsafe { DestroyWindow(unity) };
+        assert!(!is_vrchat_window(unity, me), "closed");
     }
 
     /// Where real windows lie, by Windows' own order (top first), among `among`.

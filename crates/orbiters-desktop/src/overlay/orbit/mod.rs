@@ -89,9 +89,14 @@ fn usage_name(action: &Action) -> String {
     crate::usage::stable_name(&format!("{action:?}"))
 }
 
-/// Whether the desktop's panels are wanted: VRChat runs without SteamVR, on this computer, and the setting says so.
+/// Whether the desktop's panels are wanted: VRChat runs without SteamVR, on this computer, and the settings say so: a menu around VRChat's, its camera's
+/// tiles, or translation (whose translations the desktop's process shows, menus or none: verify-r15).
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
-    orbiters_core::osc::VRCHAT_RUNS_HERE && snap.vrchat.running && !snap.vrchat.remote && !snap.steamvr.running && (snap.settings.orbit.any() || snap.settings.orbit.camera_tiles)
+    orbiters_core::osc::VRCHAT_RUNS_HERE
+        && snap.vrchat.running
+        && !snap.vrchat.remote
+        && !snap.steamvr.running
+        && (snap.settings.orbit.any() || snap.settings.orbit.camera_tiles || snap.settings.translate.enabled)
 }
 
 /// A part's appearing: a spring from nothing to its place, a little past it. Each turn moves the window or overlay and its alpha, no new picture.
@@ -4634,6 +4639,26 @@ fn note_words(text: &str) -> (String, String) {
         (tr("Open VRChat's camera first").into(), tr("Quick Menu, the camera icon, Stream Camera. Then press this again.").into())
     } else {
         (tr("3D picture").into(), tr(text).to_string())
+    }
+}
+
+#[cfg(test)]
+mod desktop_wanted_tests {
+    /// verify-r15: translation on keeps the desktop's process (which shows its translations) with every menu and the camera's tiles off; off, nothing does.
+    #[test]
+    fn translation_alone_keeps_the_desktop_s_process() {
+        let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
+        snap.vrchat.running = true;
+        snap.settings.orbit.camera_tiles = false;
+        snap.settings.orbit.wheel = false;
+        snap.settings.orbit.quick_menu = false;
+        let menus_off = !snap.settings.orbit.any();
+        snap.settings.translate.enabled = true;
+        if menus_off {
+            assert_eq!(super::wanted_on_desktop(&snap), orbiters_core::osc::VRCHAT_RUNS_HERE, "translation on, menus off");
+            snap.settings.translate.enabled = false;
+            assert!(!super::wanted_on_desktop(&snap), "nothing wanted");
+        }
     }
 }
 

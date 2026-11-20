@@ -358,6 +358,26 @@ impl Grab {
     }
 }
 
+/// VRChat's window's client area as its own frame shows it (Windows Graphics Capture: its pixels only, whatever lies over it), RGBA, once a frame comes
+/// within `wait`; `None` otherwise. For a report's picture (verify2-r15 blocker 2).
+pub(super) fn frame_of(window: HWND, client: [u32; 2], wait: Duration) -> Option<Vec<u8>> {
+    if client[0] == 0 || client[1] == 0 {
+        return None;
+    }
+    let gpu = Gpu::new().ok()?;
+    let mut grab = Grab::new(window, &gpu).ok()?;
+    let until = Instant::now() + wait;
+    while Instant::now() < until {
+        if grab.newest() && grab.frame.is_some() {
+            if let Some(rgba) = grab.picture(client) {
+                return Some(rgba);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    None
+}
+
 impl Drop for Grab {
     fn drop(&mut self) {
         let _ = self.session.Close();

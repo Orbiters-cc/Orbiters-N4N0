@@ -1473,3 +1473,38 @@ fn a_vrchat_that_never_says_its_profile_can_be_passed_by_the_persons_second_pres
     assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 2 }), Some(Notice::Sent { .. })));
     assert_eq!(machine.beside.lock().unwrap().len(), 1);
 }
+
+// --- REQUEST15 fourth pass: the override waits for the newest unknown VRChat, and is asked again when the set changes ---
+
+#[test]
+fn a_newly_starting_unknown_vrchat_is_not_passed_because_an_older_one_never_spoke() {
+    let (machine, c) = running_profile_0();
+    machine.running.lock().unwrap().push((11, true));
+    machine.unread.lock().unwrap().push(11);
+    // The first unknown VRChat looked at a minute and a half ago.
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Error(_))));
+    for since in c.launcher.lock().unwrap().unknown_since.values_mut() {
+        *since -= Duration::from_secs(90);
+    }
+    // A second one starts now, profile not yet said: only the wait, never the override.
+    machine.running.lock().unwrap().push((12, true));
+    machine.unread.lock().unwrap().push(12);
+    for _ in 0..2 {
+        let notice = c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 });
+        assert!(matches!(&notice, Some(Notice::Error(t)) if !t.contains("press Play again")), "{notice:?}");
+    }
+    assert!(machine.beside.lock().unwrap().is_empty());
+    // Both had their minute: told; then a third VRChat appears before the second press: told again, nothing starts.
+    for since in c.launcher.lock().unwrap().unknown_since.values_mut() {
+        *since -= Duration::from_secs(90);
+    }
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Error(t)) if t.contains("press Play again")));
+    machine.running.lock().unwrap().push((13, true));
+    machine.unread.lock().unwrap().push(13);
+    c.launcher.lock().unwrap().unknown_since.insert(13, Instant::now() - Duration::from_secs(90));
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Error(t)) if t.contains("press Play again")), "another VRChat: asked again");
+    assert!(machine.beside.lock().unwrap().is_empty());
+    // The same three, pressed again: starts.
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Sent { .. })));
+    assert_eq!(machine.beside.lock().unwrap().len(), 1);
+}

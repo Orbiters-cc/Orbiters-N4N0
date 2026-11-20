@@ -218,7 +218,7 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         }
         if running_here || unresolved {
             let line = if unresolved {
-                tr("A VRChat has not said its profile yet: Play waits until it does.").to_string()
+                tr("A VRChat has not said its profile yet: Play waits a minute for it, then asks you before it starts another.").to_string()
             } else {
                 orbiters_i18n::tr!("VRChat runs on profile {n}: choose another profile to start one more.", n = next)
             };

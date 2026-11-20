@@ -23,6 +23,8 @@ use std::path::PathBuf;
 mod booster_sheet;
 pub mod share_sheet;
 pub mod share_here;
+pub mod history_sheet;
+pub use history_sheet::HistoryFacts;
 pub use share_sheet::{ChooserRow, ChooserView, ShareView};
 pub use booster_sheet::{booster_level_at, BoosterFacts, BoosterPick};
 use booster_sheet::{booster_caption, booster_items, draw_booster, draw_booster_cell};
@@ -259,6 +261,11 @@ pub enum Action {
     VideoDrop(usize),
     /// Back to searching.
     ResultsBack,
+    /// YouTube's History (REQUEST19 2): the page of the videos played in worlds, or back from it while it shows.
+    VideoHistory,
+    /// A video of History, the `n`-th, the latest first: its link to the clipboard; a card of it dropped in the world.
+    HistoryCopy(usize),
+    HistoryDrop(usize),
     /// Invites the person to a world's instance: the group's, and which of its visits.
     Invite(usize, usize),
     /// A world of the Instances sheet (its row): its page, as the 3D worlds sheet shows a world (Enzo, VR feedback F10). Never an invite.
@@ -324,6 +331,8 @@ pub enum Sheet {
     Booster,
     /// Live translation: on or off, who translates, into what.
     Translate,
+    /// The videos the worlds' players played (REQUEST19 2), from YouTube's page: the window's Videos tab's list.
+    VideoHistory,
 }
 
 /// What can be chosen on the sheet of settings.
@@ -676,6 +685,8 @@ pub struct Facts {
     /// YouTube's results, and what was searched.
     pub videos: Vec<VideoTile>,
     pub videos_for: String,
+    /// History's page (REQUEST19 2): the videos played in worlds, those in view.
+    pub history: HistoryFacts,
     /// Talking with N4N0: where it stands, the conversation (whether the person said it, what was said), what N4N0 says right now, and how to call it by name when that is on.
     pub talk: TalkNow,
     /// Listening by itself (it hears when the person starts and stops), or by the button (F24).
@@ -905,6 +916,13 @@ pub enum Look {
     /// A small button on a YouTube result: its link, the `n`-th's, or dropping it.
     VideoCopy(usize),
     VideoDrop,
+    /// YouTube's History button in the head, and History's page: its way back, a video's row, its Copy link and Drop in world
+    /// ([`history_sheet`]).
+    HeadHistory,
+    HistoryBack,
+    HistoryRow(usize),
+    HistoryCopy(usize),
+    HistoryDrop(usize),
     /// Where in what plays this is, to press and drag along when the app lets it.
     Timeline,
     /// The bar that shows where in a list this is, and takes the pointer.
@@ -1115,6 +1133,9 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
             if let Some(rect) = head.small_view {
                 out.push(Item { action: Action::SmallView(!facts.view_small), rect, look: Look::SmallView });
             }
+            if let Some(rect) = head.history {
+                out.push(Item { action: Action::VideoHistory, rect, look: Look::HeadHistory });
+            }
             // What plays, where the head has room for it beside its tabs (All tools has it on its page).
             if let Some(at) = head.transport {
                 let b = HEAD_TRANSPORT;
@@ -1291,6 +1312,8 @@ pub struct Head {
     pub stop: Option<Rect>,
     /// Where what plays's three buttons start, when the head shows them.
     pub transport: Option<f32>,
+    /// YouTube's History (REQUEST19 2), on YouTube's page and on History's own.
+    pub history: Option<Rect>,
     pub tabs: Vec<Item>,
     /// Where the page's name starts (its mark first), when no tab is the page's, and where whatever is said in the head must end.
     pub title_x: f32,
@@ -1321,7 +1344,7 @@ const HEAD_TOOLS: [(Action, &str, &str); 6] = [
 pub fn tool_is_open(facts: &Facts, action: Action) -> bool {
     match (facts.sheet, action) {
         (Some(Sheet::Worlds), Action::Worlds) | (Some(Sheet::All), Action::All) | (Some(Sheet::Pictures), Action::Pictures) | (Some(Sheet::Talk), Action::Talk) => true,
-        (Some(Sheet::Instances), Action::Page(Target::Instances)) | (Some(Sheet::Results), Action::Page(Target::YouTube)) => true,
+        (Some(Sheet::Instances), Action::Page(Target::Instances)) | (Some(Sheet::Results | Sheet::VideoHistory), Action::Page(Target::YouTube)) => true,
         (Some(Sheet::Menu), Action::Page(Target::YouTube)) => facts.sheet_title == "YouTube",
         _ => false,
     }
@@ -1354,11 +1377,17 @@ pub fn head(facts: &Facts, w: f32) -> Head {
         end = rect.left() - 6.0;
         rect
     });
+    // YouTube's History, beside the head's other round buttons (REQUEST19 2), as the page's own control: it is no tab.
+    let history = youtube_page(facts).then(|| {
+        let rect = r(end - b, top, b, b);
+        end = rect.left() - gap;
+        rect
+    });
     end -= 6.0;
     let start = back.right() + 6.0;
     // All tools has the tools as large tiles right under its head: its name after the Back.
     if facts.sheet == Some(Sheet::All) {
-        return Head { back, close, peek, hide_view, small_view, stop, transport: None, tabs: Vec::new(), title_x: back.right() + 8.0, end };
+        return Head { back, close, peek, hide_view, small_view, stop, transport: None, history, tabs: Vec::new(), title_x: back.right() + 8.0, end };
     }
     // ONE row of tabs on every page (Enzo, 2026-11-13: "the page tabs at the top doesn't look the same depending on which page we are on (e.g. youtube vs settings),
     // unify them"). Until then a page's name, what plays, a status or the pointer each chose between names with icons, names alone and icons alone. Now the row is
@@ -1369,7 +1398,16 @@ pub fn head(facts: &Facts, w: f32) -> Head {
     let row_end = peek.left() - head_gap(facts);
     let tabs = tab_row(facts, start, row_end, head_condensed(facts));
     let title_x = tabs.last().map_or(start, |t| t.rect.right() + 6.0);
-    Head { back, close, peek, hide_view, small_view, stop, transport: None, tabs, title_x, end }
+    Head { back, close, peek, hide_view, small_view, stop, transport: None, history, tabs, title_x, end }
+}
+
+/// The page up is YouTube's (its search or its results) or its History: the head has History's button.
+pub fn youtube_page(facts: &Facts) -> bool {
+    match facts.sheet {
+        Some(Sheet::Results | Sheet::VideoHistory) => true,
+        Some(Sheet::Menu) => facts.sheet_title == "YouTube",
+        _ => false,
+    }
 }
 
 /// Whether the head holds more than its tabs, Back, its close and the way to VRChat's menus: what is running, the same on every page.
@@ -1715,6 +1753,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
         Sheet::Mics => mic_items(facts),
         Sheet::Booster => booster_items(facts),
         Sheet::Translate => translate_items(facts),
+        Sheet::VideoHistory => history_sheet::items(facts),
         Sheet::Menu | Sheet::Worlds => Vec::new(),
     }
 }
@@ -1964,6 +2003,7 @@ pub fn snap_scroll(sheet: Sheet, facts: &Facts, to: f32) -> f32 {
             let (_, _, height, _) = video_grid();
             nearest(&mut (0..facts.videos.len()).map(|i| i as f32 * (height + 12.0)))
         }
+        Sheet::VideoHistory => nearest(&mut history_sheet::row_tops(facts)),
         _ => to,
     }
 }
@@ -1979,6 +2019,7 @@ pub fn max_scroll(sheet: Sheet, facts: &Facts) -> f32 {
             let (columns, _, height, top) = video_grid();
             (top + facts.videos.len().div_ceil(columns) as f32 * (height + 12.0) + 8.0 - 576.0).max(0.0)
         }
+        Sheet::VideoHistory => history_sheet::max_scroll(facts),
         Sheet::Talk => (TALK_TOP + facts.talk_lines.iter().map(|(_, t)| talk_line_height(t)).sum::<f32>() + facts.talk_heard.as_deref().map_or(0.0, talk_line_height) + 8.0 - 576.0).max(0.0),
         _ => 0.0,
     }
@@ -1991,6 +2032,7 @@ pub fn scroll_bar(sheet: Sheet, facts: &Facts) -> Option<(f32, f32, f32)> {
         let top = match sheet {
             Sheet::Pictures => GALLERY_TOP,
             Sheet::Results => RESULTS_TOP,
+            Sheet::VideoHistory => history_sheet::TOP,
             Sheet::Talk => TALK_TOP,
             _ => 8.0,
         };
@@ -2006,7 +2048,8 @@ pub fn scroll_from_bar(sheet: Sheet, facts: &Facts, y: f32) -> f32 {
 
 /// Whether a press on this is the start of a drag as much as a press: what lies in a list that scrolls. It only acts if let go without moving.
 pub fn scrolls_with_a_drag(sheet: Sheet, look: &Look) -> bool {
-    matches!(sheet, Sheet::Pictures | Sheet::Instances | Sheet::Results) && matches!(look, Look::Capture(_) | Look::Visit(_) | Look::Chip { .. } | Look::Video(_) | Look::VideoDrop | Look::VideoCopy(_))
+    matches!(sheet, Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::VideoHistory)
+        && matches!(look, Look::Capture(_) | Look::Visit(_) | Look::Chip { .. } | Look::Video(_) | Look::VideoDrop | Look::VideoCopy(_) | Look::HistoryRow(_) | Look::HistoryCopy(_) | Look::HistoryDrop(_))
 }
 
 /// Where what plays's timeline lies on its panel, tall enough for a laser to find.
@@ -2406,6 +2449,7 @@ fn sheet_how(facts: &Facts) -> Option<String> {
         },
         Sheet::Instances => tr("Press a time to be invited back to that visit.").to_string(),
         Sheet::Results => tr("Drop in world puts a card there that anyone can take.").to_string(),
+        Sheet::VideoHistory => tr("Press a video to copy its link, for the world's player.").to_string(),
         Sheet::Talk => tr("N4N0 answers aloud and here, in the conversation.").to_string(),
         Sheet::All => tr("Point at a tile to read what it does.").to_string(),
         _ => return None,
@@ -2419,6 +2463,7 @@ fn sheet_says(facts: &Facts) -> &'static str {
         Some(Sheet::Pictures) => tr("Your pictures and 3D captures."),
         Some(Sheet::Instances) => tr("Where you were lately. Go back with an invite."),
         Some(Sheet::Results) => tr("Copy a link for the world's player, or drop it in the world."),
+        Some(Sheet::VideoHistory) => tr(history_sheet::OPEN_WHY),
         Some(Sheet::Talk) => tr("Press the button, and ask N4N0 anything."),
         Some(Sheet::Settings) => tr("How these menus lie, move, sound and look."),
         Some(Sheet::Tracking) => tr("Less jitter, a little more lag, in milliseconds."),
@@ -2436,7 +2481,7 @@ fn sheet_mark(facts: &Facts) -> (&'static str, Color32) {
         Some(Sheet::Worlds) => (icons::GLOBE_HEMISPHERE_WEST, tool_tint(Action::Worlds)),
         Some(Sheet::Pictures) => (icons::IMAGES, tool_tint(Action::Pictures)),
         Some(Sheet::Instances) => (icons::CLOCK, tool_tint(Action::Page(Target::Instances))),
-        Some(Sheet::Results) => (icons::YOUTUBE_LOGO, tool_tint(Action::Page(Target::YouTube))),
+        Some(Sheet::Results | Sheet::VideoHistory) => (icons::YOUTUBE_LOGO, tool_tint(Action::Page(Target::YouTube))),
         Some(Sheet::Talk) => (icons::MICROPHONE, look::LABEL),
         Some(Sheet::Settings) => (icons::GEAR_SIX, look::LABEL),
         Some(Sheet::Mics) => (icons::MICROPHONE, look::LABEL),
@@ -2575,6 +2620,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Video(i) => (facts.videos.get(i).map_or(String::new(), |v| v.title.clone()), tr("Press to copy its link, for the world's video player.").into()),
         Action::VideoDrop(_) => (tr("Drop in world").into(), tr("Puts a card with the link in front of you, for anyone to grab.").into()),
         Action::ResultsBack => (tr("Search again").into(), tr("Back to the search, to change what you looked for.").into()),
+        Action::VideoHistory | Action::HistoryCopy(_) | Action::HistoryDrop(_) => return history_sheet::caption(action, facts),
         Action::Talk if facts.n4n0 && facts.assistant_off => (tr("Ask N4N0").into(), tr("Its assistant is off: open it to turn it back on.").into()),
         Action::Talk if facts.n4n0 => (tr("Ask N4N0").into(), tr("Your assistant in VRChat: talk to it, and see all it said.").into()),
         Action::AssistantSwitch if !facts.assistant_off => (tr("Assistant on").into(), tr("Press to turn it off: N4N0 stops listening and answering.").into()),
@@ -2912,7 +2958,7 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
     }
     // A list goes on under its foot: it fades there, and is not cut.
     if zone == Zone::Takeover && facts.opened.is_none() {
-        if let Some(sheet) = facts.sheet.filter(|s| matches!(s, Sheet::Pictures | Sheet::Instances | Sheet::Results)) {
+        if let Some(sheet) = facts.sheet.filter(|s| matches!(s, Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::VideoHistory)) {
             if facts.gallery_scroll < max_scroll(sheet, facts) - 1.0 {
                 let foot = Rect::from_min_max(pos2(0.0, 576.0 - 56.0), pos2(1024.0 - SCROLL_BAR_GRAB, 576.0));
                 orbiters_ui::paint::fill_gradient(p, &[foot.left_top(), foot.right_top(), foot.right_bottom(), foot.left_bottom()], &orbiters_ui::paint::Gradient::vertical(foot, &[(0.0, Color32::TRANSPARENT), (1.0, look::OPAQUE)]));
@@ -2954,6 +3000,9 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     }
     if sheet == Sheet::Translate {
         draw_translate(p, facts);
+    }
+    if sheet == Sheet::VideoHistory {
+        history_sheet::draw_page(p, facts);
     }
     if sheet == Sheet::Instances && facts.worlds_visited.is_empty() {
         widgets::icon(p, page.center() - vec2(0.0, 30.0), icons::CLOCK, 54.0, look::MUTED);
@@ -3238,7 +3287,7 @@ fn is_selected(item: &Item, facts: &Facts) -> bool {
         (_, Action::Pictures) if facts.picture_wait.is_some() => true,
         (Some(Sheet::Worlds), Action::Worlds) | (Some(Sheet::All), Action::All) | (Some(Sheet::Pictures), Action::Pictures) => true,
         (Some(Sheet::Menu), Action::Page(Target::YouTube)) => facts.sheet_title == "YouTube",
-        (Some(Sheet::Instances), Action::Page(Target::Instances)) | (Some(Sheet::Results), Action::Page(Target::YouTube)) => true,
+        (Some(Sheet::Instances), Action::Page(Target::Instances)) | (Some(Sheet::Results | Sheet::VideoHistory), Action::Page(Target::YouTube)) => true,
         _ => false,
     }
 }
@@ -3895,6 +3944,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let (words, font) = fitted(p, tr("Drop in world"), 16.0, weight::SEMIBOLD, rect.width() - 24.0, 13.5);
             clip.text(rect.center(), Align2::CENTER_CENTER, words, font, look::LABEL);
         }
+        Look::HeadHistory => history_sheet::draw_head_button(p, rect, facts.sheet == Some(Sheet::VideoHistory), hovered, pressed),
+        Look::HistoryBack | Look::HistoryRow(_) | Look::HistoryCopy(_) | Look::HistoryDrop(_) => history_sheet::draw_item(p, item, facts, hovered, pressed),
         Look::Back => {
             // What was searched, as a field: it can be changed from here.
             let radius = look::radius(rect.height() / 2.0);

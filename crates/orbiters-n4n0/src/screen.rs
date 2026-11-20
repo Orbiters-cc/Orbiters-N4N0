@@ -1371,7 +1371,7 @@ pub fn photo_setting(length: PhotoLength) -> orbiters_core::settings::Photo3dLen
 }
 
 /// What opening N4N0's menu leaves to do once N4N0's lock is let go.
-enum Opened {
+pub(crate) enum Opened {
     /// It was open, and this closed it: the menu's effects.
     Closed(Vec<Effect>),
     /// It was open already.

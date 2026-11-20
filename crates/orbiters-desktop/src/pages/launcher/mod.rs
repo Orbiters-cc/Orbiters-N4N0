@@ -292,6 +292,11 @@ impl State {
         &self.wanted
     }
 
+    /// Pictures of the page: whether pictures asked of the loader are still being read.
+    pub fn stand_in_pictures_loading(&self) -> bool {
+        self.loader.as_ref().is_some_and(|l| l.loading())
+    }
+
     /// Pictures of the page: a fixed clock, the search typed.
     pub fn stand_in(&mut self, now: i64, query: &str) {
         self.now_fixed = Some(now);

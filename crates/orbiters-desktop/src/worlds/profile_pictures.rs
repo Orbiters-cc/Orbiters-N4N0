@@ -63,8 +63,7 @@ fn digest(text: &str) -> String {
 pub fn small(bytes: &[u8]) -> Option<RgbaImage> {
     // A JPEG cut short decodes to a grey bottom without an error: one without its end marker is not taken.
     if bytes.starts_with(&[0xFF, 0xD8]) {
-        let end = bytes.iter().rposition(|b| !matches!(b, 0 | b' ' | b'	' | b'
-' | b'')).map_or(0, |i| i + 1);
+        let end = bytes.iter().rposition(|b| !matches!(b, 0 | b' ' | b'\t' | b'\n' | b'\r')).map_or(0, |i| i + 1);
         if !bytes[..end].ends_with(&[0xFF, 0xD9]) {
             return None;
         }
@@ -522,6 +521,11 @@ impl Profiles {
         let image = small(&bytes)?;
         self.store.put(user, url, &image);
         Some(image)
+    }
+
+    /// Keeps `image` as the picture at `url` of `user` (pictures of the page: a cache filled with made-up people).
+    pub fn keep(&self, url: &str, user: Option<&str>, image: &RgbaImage) -> bool {
+        self.store.put(user, url, image)
     }
 
     /// A page asked again for a picture being asked of VRChat: it is on screen.

@@ -1388,7 +1388,7 @@ pub(crate) mod tests {
         let shown: Vec<Picture> = (0..80).map(|i| Picture::Session(PathBuf::from(format!("Z:/orbiters-test/shown-{i}")))).collect();
         for (i, p) in shown.iter().enumerate() {
             let texture = textures.load_texture(format!("test-{i}"), egui::ColorImage::filled([560, 315], egui::Color32::GRAY), TextureOptions::LINEAR);
-            pictures.slots.insert(p.clone(), Kept { slot: Slot::Ready(texture), used: 0.0 });
+            pictures.slots.insert(p.clone(), Kept { slot: Slot::Ready(texture), used: 0.0, interim: None });
         }
         let frame = |pictures: &mut Pictures, now: f64, which: &[Picture]| which.iter().filter(|p| pictures.get_at(&textures, now, p).is_some()).count();
         assert_eq!(frame(&mut pictures, 10.0, &shown), 80);

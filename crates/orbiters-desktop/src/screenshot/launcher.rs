@@ -9,7 +9,7 @@ use orbiters_core::launcher::*;
 
 const NOW: i64 = 1_795_000_000;
 
-pub(super) const NAMES: [&str; 26] = [
+pub(super) const NAMES: [&str; 27] = [
     "launcher-list",
     "launcher-invite",
     "launcher-hover",
@@ -39,6 +39,9 @@ pub(super) const NAMES: [&str; 26] = [
     "launcher-small-stale",
     // Request16 1: the status list open under its pill, each row's dot in its status's colour.
     "launcher-mine-status",
+    // REQUEST17: the list's pictures are VRChat addresses (made up) kept on this computer from an earlier run: read from
+    // that cache by the loader, no network, on screen within the first frames (the frame is printed).
+    "launcher-pictures-cached",
 ];
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
@@ -384,14 +387,66 @@ fn picture(url: &str) -> ColorImage {
     ColorImage::new([w, h], pixels)
 }
 
+/// A made-up VRChat address for a `sample://icon/N` picture.
+fn vrchat_address(sample: &str) -> String {
+    let n: u64 = sample.rsplit('/').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    format!("https://api.vrchat.cloud/api/1/file/file_00000000-0000-4000-8000-{:012}/1/file", 7000 + n)
+}
+
+/// The people's pictures become VRChat addresses, each kept in this run's cache folder (as a run before would have left
+/// it): the page reads them from there.
+fn keep_pictures(data: &mut LauncherState) {
+    let keep = |sample: &str, user: &str| -> String {
+        let url = vrchat_address(sample);
+        let c = picture(sample);
+        let rgba: Vec<u8> = c.pixels.iter().flat_map(|p| p.to_array()).collect();
+        let image = image::RgbaImage::from_raw(c.size[0] as u32, c.size[1] as u32, rgba).expect("a made-up picture");
+        crate::worlds::profile_pictures::Profiles::shared().keep(&url, Some(user), &image);
+        url
+    };
+    for f in data.friends.iter_mut().chain(data.me.iter_mut()) {
+        if f.look.icon.starts_with("sample://icon/") {
+            f.look.icon = keep(&f.look.icon, &f.id);
+        }
+    }
+    for i in &mut data.invites {
+        if i.from_icon.starts_with("sample://icon/") {
+            i.from_icon = keep(&i.from_icon, &i.from_id);
+        }
+    }
+    for b in &mut data.boops {
+        if b.from_icon.starts_with("sample://icon/") {
+            b.from_icon = keep(&b.from_icon, &b.from_id);
+        }
+    }
+}
+
+/// Says (once) on which frame every picture the page asked for was on screen, and how long after the first frame.
+fn pictures_on_screen(state: &crate::pages::launcher::State, f: u32) {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<(Option<std::time::Instant>, bool)>> = OnceLock::new();
+    let mut seen = SEEN.get_or_init(Mutex::default).lock().unwrap_or_else(|e| e.into_inner());
+    let started = *seen.0.get_or_insert_with(std::time::Instant::now);
+    if !seen.1 && !state.stand_in_pictures_loading() {
+        seen.1 = true;
+        println!("launcher-pictures-cached: every picture asked for was on screen at frame {f} ({} ms after frame 1)", started.elapsed().as_millis());
+    }
+}
+
 /// What happens on frame `f` (of `frames`) of a launcher scenario.
 pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, frames: u32, t: f64) {
     if !name.starts_with("launcher-") {
         return;
     }
     let state = app.home_mut().launcher_mut();
+    if name == "launcher-pictures-cached" && f > 0 {
+        pictures_on_screen(state, f);
+    }
     if f == 0 {
-        let data = data(name);
+        let mut data = data(name);
+        if name == "launcher-pictures-cached" {
+            keep_pictures(&mut data);
+        }
         let mut urls: Vec<String> = Vec::new();
         for fr in data.friends.iter().chain(data.me.iter()) {
             urls.extend([fr.look.icon.clone(), fr.look.banner.clone(), fr.look.nameplate.clone(), fr.look.icon_frame.clone()]);

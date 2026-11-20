@@ -611,6 +611,7 @@ pub fn sample() -> LauncherState {
             GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },
         ],
         mine: Some(MyProfile {
+            loaded: true,
             bio: "Made-up account for drawing the page.
 Builds quiet worlds.".into(),
             banner: BannerChoice::Colour,

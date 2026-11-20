@@ -104,7 +104,8 @@ pub struct SharedRuntime {
     present: bool,
     /// The credential it is for: another one forgets everything of the last.
     identity: Option<String>,
-    requests: Option<mpsc::Sender<Request>>,
+    /// The requests' thread: each request goes with the identity (`identity` above) it was made under.
+    requests: Option<mpsc::Sender<(String, Request)>>,
 }
 
 fn now_ms() -> u64 {
@@ -558,6 +559,9 @@ impl Controller {
 
     fn shared_act(self: &Shared, mut rt: MutexGuard<'_, SharedRuntime>, acts: Acts) {
         for request in acts.requests {
+            // Stamped with the identity it is made under; nobody signed in: nothing to send (verify3).
+            let Some(stamp) = rt.identity.clone() else { continue };
+            let request = (stamp, request);
             let request = match &rt.requests {
                 Some(tx) => match tx.send(request) {
                     Ok(()) => continue,
@@ -581,11 +585,30 @@ impl Controller {
         }
     }
 
-    /// The requests, in order. A state is skipped when a newer one for the same share already waits.
-    fn shared_requests(self: &Shared, rx: mpsc::Receiver<Request>) {
-        let mut carried: Option<Request> = None;
+    /// The identity signed in now, as `SharedRuntime::identity` writes it (N4N0 on, signed in), with its API and credential.
+    fn shared_identity_now(&self) -> Option<(String, Api, String)> {
+        if !self.settings().n4n0.enabled {
+            return None;
+        }
+        self.account_api().map(|(api, token)| (format!("{}\n{token}", api.url("")), api, token))
+    }
+
+    /// The shares' state, to take what came back for `stamp`: only while that is still the identity signed in, and the
+    /// one the state is for (an account switched meanwhile: dropped).
+    fn shared_for(&self, stamp: &str) -> Option<MutexGuard<'_, SharedRuntime>> {
+        if self.shared_identity_now().is_none_or(|(now, ..)| now != stamp) {
+            return None;
+        }
+        let rt = self.shared_view.lock().unwrap();
+        (rt.identity.as_deref() == Some(stamp)).then_some(rt)
+    }
+
+    /// The requests, in order. A state is skipped when a newer one for the same share already waits. Each goes with the
+    /// credential of the identity it was made under, or not at all; what comes back is taken only for that identity.
+    fn shared_requests(self: &Shared, rx: mpsc::Receiver<(String, Request)>) {
+        let mut carried: Option<(String, Request)> = None;
         loop {
-            let request = match carried.take() {
+            let (stamp, request) = match carried.take() {
                 Some(r) => r,
                 None => match rx.recv() {
                     Ok(r) => r,
@@ -596,7 +619,7 @@ impl Controller {
                 Request::State { share, mut state } => {
                     while let Ok(next) = rx.try_recv() {
                         match next {
-                            Request::State { share: s, state: newer } if s == share => state = newer,
+                            (s_stamp, Request::State { share: s, state: newer }) if s == share && s_stamp == stamp => state = newer,
                             other => {
                                 carried = Some(other);
                                 break;
@@ -607,7 +630,7 @@ impl Controller {
                 }
                 other => other,
             };
-            let Some((api, token)) = self.account_api() else { continue };
+            let Some((_, api, token)) = self.shared_identity_now().filter(|(now, ..)| *now == stamp) else { continue };
             match request {
                 Request::Presence { vrchat_id, here } => {
                     match api
@@ -626,7 +649,7 @@ impl Controller {
                                 .as_array()
                                 .map(|a| a.iter().filter_map(|c| Some(CallContact { id: c["id"].as_str().filter(|id| sv::contact_id(id))?.to_string(), name: c["name"].as_str()?.to_string() })).collect())
                                 .unwrap_or_default();
-                            let mut rt = self.shared_view.lock().unwrap();
+                            let Some(mut rt) = self.shared_for(&stamp) else { continue };
                             rt.targets = targets;
                             rt.backoff_until = None;
                             drop(rt);
@@ -634,7 +657,7 @@ impl Controller {
                         }
                         Err(e) => {
                             eprintln!("shared view presence: {e:#}");
-                            let mut rt = self.shared_view.lock().unwrap();
+                            let Some(mut rt) = self.shared_for(&stamp) else { continue };
                             rt.backoff_until = Some(Instant::now() + PRESENCE_BACKOFF);
                             rt.here_sent = None;
                             rt.targets.clear();
@@ -656,7 +679,7 @@ impl Controller {
                             Err(code_of(&e))
                         }
                     };
-                    let mut rt = self.shared_view.lock().unwrap();
+                    let Some(mut rt) = self.shared_for(&stamp) else { continue };
                     let acts = rt.offered(number, answer);
                     self.shared_act(rt, acts);
                 }
@@ -670,7 +693,7 @@ impl Controller {
                         continue;
                     }
                     let answer = answer.map(|v| serde_json::from_value::<ViewState>(v["state_now"].clone()).ok()).map_err(|e| eprintln!("shared view accept: {e:#}"));
-                    let mut rt = self.shared_view.lock().unwrap();
+                    let Some(mut rt) = self.shared_for(&stamp) else { continue };
                     let acts = rt.accepted(number, answer);
                     self.shared_act(rt, acts);
                 }
@@ -686,7 +709,7 @@ impl Controller {
                 }
                 Request::Fetch { number, capture } => {
                     let answer = fetch(&api, &token, &capture);
-                    let mut rt = self.shared_view.lock().unwrap();
+                    let Some(mut rt) = self.shared_for(&stamp) else { continue };
                     let acts = rt.fetched(number, answer);
                     self.shared_act(rt, acts);
                 }
@@ -703,6 +726,41 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verify3 blocker 2: the shared 3D view's requests go with the identity they were made under, and what comes back
+    /// is taken only while that identity is the one signed in and the one the state is for: a presence answer (friends'
+    /// names to show a view to) of account A never reaches B, and a queued request of A is never sent with B's credential.
+    #[test]
+    fn shared_requests_and_replies_are_bound_to_their_identity() {
+        let mut settings = orbiters_core::settings::Settings::default();
+        settings.n4n0.enabled = true;
+        let ctl = crate::controller::Controller::new(settings);
+        let server = orbiters_core::account::Server::current();
+        let sign_in = |token: &str| {
+            let mut rt = ctl.account_runtime.lock().unwrap();
+            rt.read = Some((server, None));
+            rt.account = Some(orbiters_core::account::Account { token: token.into(), user: None, username: None, avatar_url: None, features: None });
+        };
+        sign_in("orbit-a");
+        let a = format!("{}\n{}", Api::new(server).url(""), "orbit-a");
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut rt = ctl.shared_view.lock().unwrap();
+            rt.identity = Some(a.clone());
+            rt.requests = Some(tx);
+        }
+        ctl.shared_act(ctl.shared_view.lock().unwrap(), Acts { requests: vec![Request::Withdraw], ..Default::default() });
+        assert_eq!(rx.try_recv().unwrap(), (a.clone(), Request::Withdraw), "stamped with A when made");
+        assert!(ctl.shared_for(&a).is_some(), "A's answer, A signed in: taken");
+        // B signs in: A's queued request has no credential to go with, A's answers are dropped.
+        sign_in("orbit-b");
+        assert!(ctl.shared_identity_now().is_some_and(|(now, ..)| now != a));
+        assert!(ctl.shared_for(&a).is_none(), "A's answer never lands in B's state");
+        // Signed out entirely: nothing is stamped, nothing goes.
+        ctl.shared_view.lock().unwrap().identity = None;
+        ctl.shared_act(ctl.shared_view.lock().unwrap(), Acts { requests: vec![Request::Withdraw], ..Default::default() });
+        assert!(rx.try_recv().is_err());
+    }
 
     const ALICE: &str = "c_AAAAAAAAAAAAAAAAAAAAAA";
     const SHARE: &str = "s_BBBBBBBBBBBBBBBBBBBBBB";

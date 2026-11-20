@@ -846,7 +846,7 @@ impl super::Controller {
     /// ended on Orbiters and this computer leaves the callable list; the next tick, signed out, ends the call here. Sent
     /// in the background (sign-out finishes offline too); nothing of the credential is kept for later.
     pub(super) fn calls_depart(&self) {
-        let Some((api, token)) = self.account_api() else { return };
+        let account = self.account_api();
         let (was_on, call_id) = {
             let mut rt = self.calls.lock().unwrap();
             let call_id = rt.call.as_ref().and_then(|c| c.id.clone());
@@ -856,6 +856,10 @@ impl super::Controller {
             rt.identity = None;
             (was_on, call_id)
         };
+        // Nothing read or shown for the account that leaves stays for the next one (verify3): this computer's VRChat
+        // account and friends are read again, friends to call and the link screen go, N4N0's call menu closes.
+        self.calls_forget_account();
+        let Some((api, token)) = account else { return };
         if !was_on && call_id.is_none() {
             return;
         }
@@ -909,11 +913,16 @@ impl super::Controller {
         let old = {
             let mut rt = self.calls.lock().unwrap();
             match rt.identity.replace(now.clone()) {
-                Some(old) if old != now => Some((old, rt.available_sent.is_some())),
-                _ => None,
+                Some(old) if old == now => return,
+                Some(old) => Some((old, rt.available_sent.is_some())),
+                None => None,
             }
         };
-        let Some(((base, old_token), available)) = old else { return };
+        // From nobody (after a sign-out, or at start): nothing to tell any server, but nothing read before stays.
+        let Some(((base, old_token), available)) = old else {
+            self.calls_forget_account();
+            return;
+        };
         // The call under way ends here at once, and on the server it was made on, with the credential it was made with:
         // never as a hang-up of the new account on the new server (verifier, PRIV-7/CORE2-3).
         let closing = {
@@ -926,11 +935,16 @@ impl super::Controller {
             closing
         };
         old_server_leaves(Api::at(&base), old_token, closing, available);
-        // What was read for the account before goes with it: this computer's VRChat account and friends are read again
-        // for the new one before anything is reported for it, and N4N0's call menu closes.
+        self.calls_forget_account();
+    }
+
+    /// What was read and shown for an account goes with it (another account, or none): this computer's VRChat account
+    /// and friends are read again before anything is reported for the next one, the friends to call and the link screen
+    /// go, and N4N0's call menu closes. Published at once.
+    pub(super) fn calls_forget_account(&self) {
         let menu_was_open = std::mem::take(&mut self.calls.lock().unwrap().menu_open);
         if menu_was_open {
-            self.n4n0_command(crate::ipc::N4n0Command::HidePanel);
+            self.n4n0.command(crate::ipc::N4n0Command::HidePanel);
         }
         self.calls_publish(|rt| {
             rt.local = LocalVrchat::default();
@@ -946,6 +960,7 @@ impl super::Controller {
             rt.streaming = None;
             rt.stream_failures = 0;
             rt.stream_retry_at = None;
+            rt.picked = 0;
         });
     }
 
@@ -1663,7 +1678,7 @@ impl super::Controller {
         true
     }
 
-    fn calls_publish(self: &Shared, change: impl FnOnce(&mut CallsRuntime)) {
+    fn calls_publish(&self, change: impl FnOnce(&mut CallsRuntime)) {
         let status = {
             let mut rt = self.calls.lock().unwrap();
             change(&mut rt);
@@ -1901,6 +1916,46 @@ mod tests {
         ring(&ctl, "k_10");
         ctl.on_call_event("incoming", ringing("k_10"), "orbit-b");
         assert!(ctl.call_ringing_in(), "B's own ring");
+    }
+
+    /// Verify3 blocker 2: an explicit sign-out, then a sign-in as B. Nothing read or shown for A survives the sign-out
+    /// (this computer's VRChat account A's link screen named, friend hashes, the read's time, friends to call, N4N0's call
+    /// menu), and B's first look starts from nothing.
+    #[test]
+    fn a_sign_out_then_a_sign_in_as_b_keeps_nothing_of_a() {
+        let server = orbiters_core::account::Server::current();
+        let ctl = signed_in_controller(true);
+        ctl.account_runtime.lock().unwrap().read = Some((server, None));
+        let a: Stamp = (Api::new(server).url(""), "orbit-test".into());
+        {
+            let mut rt = ctl.calls.lock().unwrap();
+            rt.identity = Some(a);
+            rt.local = LocalVrchat { account: Some(("usr_a".into(), vrchat_accounts::Source::Vrcx)), ..Default::default() };
+            rt.local_read = Some(Instant::now());
+            rt.friend_hashes = vec!["a-friend".into()];
+            rt.friends_digest = 7;
+            rt.contacts = contacts(2);
+            rt.menu_open = true;
+            rt.link = CallLink::NotLinked { account: "usr_a".into(), source: "VRCX".into() };
+        }
+        ctl.calls_publish(|_| {});
+        ctl.calls_depart();
+        {
+            let rt = ctl.calls.lock().unwrap();
+            assert!(rt.identity.is_none());
+            assert!(rt.local.account.is_none() && rt.local_read.is_none() && rt.friend_hashes.is_empty() && rt.friends_digest == 0, "A's VRChat read goes");
+            assert!(rt.contacts.is_empty() && !rt.menu_open);
+        }
+        let shown = ctl.snapshot.lock().unwrap().n4n0.calls.clone();
+        assert!(!matches!(shown.link, CallLink::NotLinked { .. }) && shown.contacts.is_empty(), "published at once: {:?}", shown.link);
+        // B signs in: from nobody, the state follows B and still holds nothing of A.
+        ctl.account_runtime.lock().unwrap().account =
+            Some(orbiters_core::account::Account { token: "orbit-b".into(), user: Some("43".into()), username: Some("B".into()), avatar_url: None, features: None });
+        ctl.calls.lock().unwrap().local_read = Some(Instant::now());
+        ctl.calls_account_changed();
+        let rt = ctl.calls.lock().unwrap();
+        assert_eq!(rt.identity.as_ref().map(|i| i.1.as_str()), Some("orbit-b"));
+        assert!(rt.local_read.is_none(), "B's first presence reads this computer's VRChat account again");
     }
 
     /// Verify2 blocker 3: the cleanup of a refusal touches only the state of the credential refused, in the same change.

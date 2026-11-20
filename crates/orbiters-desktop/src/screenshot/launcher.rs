@@ -9,7 +9,7 @@ use orbiters_core::launcher::*;
 
 const NOW: i64 = 1_795_000_000;
 
-pub(super) const NAMES: [&str; 25] = [
+pub(super) const NAMES: [&str; 26] = [
     "launcher-list",
     "launcher-invite",
     "launcher-hover",
@@ -37,6 +37,8 @@ pub(super) const NAMES: [&str; 25] = [
     // REQUEST15 third pass: signed out (or another account) with the old list still the data, a profile open before.
     "launcher-stale",
     "launcher-small-stale",
+    // Request16 1: the status list open under its pill, each row's dot in its status's colour.
+    "launcher-mine-status",
 ];
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
@@ -422,6 +424,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
         "launcher-mine-failed" if f == 1 => state.mine.stand_in_last(ProfileEdit::StatusText("afk".into())),
         "launcher-mine-banner" if f == 30 => state.mine.stand_in_picker(true, false, Rect::NOTHING, t),
         "launcher-mine-gallery" if f == 30 => state.mine.stand_in_picker(true, true, Rect::NOTHING, t),
+        "launcher-mine-status" if f == 30 => state.mine.stand_in_status_list(ctx),
         "launcher-mine-icons" if f == 30 => state.mine.stand_in_picker(false, false, Rect::NOTHING, t),
         _ => {}
     }

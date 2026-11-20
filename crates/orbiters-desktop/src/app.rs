@@ -199,6 +199,7 @@ impl App {
                     };
                     self.toasts.push(ctx, kind, message);
                 }
+                Notice::Retract { messages } => self.toasts.retract(ctx, &messages),
                 Notice::SessionSaved { reason, frames, keyframes, depth_frames } => {
                     // A part the recording goes on after (a new world, a new resolution) is no end to tell of.
                     if reason != "restarted" && reason != "resized" {

@@ -66,6 +66,15 @@ impl Toasts {
         ctx.request_repaint();
     }
 
+    /// Lets the toasts with one of these messages go now (they were about something that ended: an account that left).
+    pub fn retract(&mut self, ctx: &Context, messages: &[String]) {
+        let now = anim::time(ctx);
+        for t in self.items.iter_mut().filter(|t| t.leaving.is_none() && messages.contains(&t.message)) {
+            t.leaving = Some(now);
+        }
+        ctx.request_repaint();
+    }
+
     pub fn show(&mut self, ctx: &Context) {
         let now = anim::time(ctx);
         for t in &mut self.items {

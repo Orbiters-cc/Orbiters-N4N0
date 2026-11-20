@@ -307,6 +307,9 @@ pub struct CallsRuntime {
     identity: Option<(String, String)>,
     /// Whether this Orbiters account has N4N0 calls (`controller/calls_access.rs`).
     pub(super) access: super::calls_access::CallsAccess,
+    /// The toasts calls posted (a friend's name calling, a call's failure), most recent last: taken back when the account
+    /// leaves.
+    notices_shown: Vec<String>,
     /// Tests: the credential installed when the calls last left an account (`None` inside: nobody was).
     #[cfg(test)]
     pub(super) left_with: Option<Option<String>>,
@@ -861,8 +864,9 @@ impl super::Controller {
             let installed = self.account_runtime.lock().unwrap().account.as_ref().map(|a| a.token.clone());
             self.calls.lock().unwrap().left_with = Some(installed);
         }
-        let (stamp, closing, was_on, worker) = {
+        let (stamp, closing, was_on, worker, shown) = {
             let mut rt = self.calls.lock().unwrap();
+            let shown = std::mem::take(&mut rt.notices_shown);
             let stamp = rt.identity.take().or(fallback);
             let call = rt.call.take();
             let closing = call.as_ref().and_then(|c| c.id.clone().map(|id| (id, c.ringing_in())));
@@ -871,8 +875,10 @@ impl super::Controller {
             rt.presence_sent = None;
             // Its queued requests go with it (their stamp would not match the next account's anyway).
             rt.signals = None;
-            (stamp, closing, was_on, rt.worker.take())
+            (stamp, closing, was_on, rt.worker.take(), shown)
         };
+        // A friend's name calling this account, on a toast: gone now, not at the end of its time.
+        self.retract_notices(shown);
         // The worker's end waits a moment for its process: not under the lock.
         drop(worker);
         self.calls_forget_account();
@@ -1323,6 +1329,12 @@ impl super::Controller {
             self.n4n0_say(&text);
         }
         for (kind, message) in notices {
+            {
+                let mut rt = self.calls.lock().unwrap();
+                rt.notices_shown.push(message.clone());
+                let excess = rt.notices_shown.len().saturating_sub(8);
+                rt.notices_shown.drain(..excess);
+            }
             self.notify(kind, message);
         }
         if publish {
@@ -2090,6 +2102,22 @@ mod tests {
                 assert!(in_a_call(&ctl), "{name}: the call goes on");
             }
         }
+    }
+
+    /// Verify5 (2): a friend calling just before a sign-out: the toast naming them goes with the account, not at the end
+    /// of its 4.2 seconds.
+    #[test]
+    fn a_callers_name_on_a_toast_goes_when_the_account_leaves() {
+        let ctl = signed_in_controller(true);
+        ctl.account_runtime.lock().unwrap().read = Some((orbiters_core::account::Server::current(), None));
+        ctl.calls.lock().unwrap().identity = Some(("http://127.0.0.1:1/".into(), "orbit-test".into()));
+        ring(&ctl, "k_1");
+        let calling = |ctl: &crate::controller::Shared| {
+            ctl.notices.lock().unwrap().iter().any(|n| matches!(n, crate::controller::Notice::Toast { message, .. } if message.contains("Kite")))
+        };
+        assert!(calling(&ctl), "the toast names the friend calling");
+        assert!(ctl.leave_unless_same(None));
+        assert!(!calling(&ctl), "gone with the account");
     }
 
     /// Verify5 (4): only a confirmed change of identity leaves. An account file that cannot be read for a moment, or a

@@ -136,7 +136,7 @@ pub fn slider<T: Copy + PartialEq>(ui: &mut Ui, id_salt: impl egui::AsIdSalt, va
     let held_id = id.with("held");
     let ctx = ui.ctx().clone();
     let mut changed = false;
-    let mut set = |i: usize, value: &mut T| {
+    let set = |i: usize, value: &mut T| {
         if steps[i].0 != *value {
             *value = steps[i].0;
             note_press(steps[i].1);

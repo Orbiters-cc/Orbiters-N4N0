@@ -40,7 +40,7 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
     let base = scenarios[0].snapshot.clone();
     // Settings' Play VRChat card (its launch options), scrolled to.
     // REQUEST15 4: the FPS booster's slider in Settings (scrolled down to its card).
-    for (name, scroll) in [("launcher-settings", 1500.0), ("launcher-settings-2", 2000.0), ("launcher-settings-booster-a", 5000.0), ("launcher-settings-booster-b", 6200.0), ("launcher-settings-booster-c", 7400.0)] {
+    for (name, scroll) in [("launcher-settings", 1500.0), ("launcher-settings-2", 2000.0), ("launcher-settings-booster", 820.0)] {
         scenarios.push(Scenario {
             name,
             page: Page::Settings,

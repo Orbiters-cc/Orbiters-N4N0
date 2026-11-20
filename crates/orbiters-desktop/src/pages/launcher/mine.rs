@@ -473,7 +473,6 @@ fn text_editor(ui: &mut Ui, id: Id, rect: Rect, draft: &mut String, hint: &str, 
             .text_color(theme::FG)
             .hint_text(egui::RichText::new(hint).color(theme::FG_4).font(font))
             .desired_width(field.width())
-            .vertical_align(egui::Align::Center)
             .min_size(field.size()),
     );
     if !resp.has_focus() && !resp.lost_focus() && ui.ctx().memory(|m| m.focused().is_none()) {

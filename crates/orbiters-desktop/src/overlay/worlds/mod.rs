@@ -140,6 +140,9 @@ pub struct Worlds {
     download: Option<Download>,
     /// The capture shown, or on its way (its entry).
     current: Option<Entry>,
+    /// The capture the view around the person displays now, which `current` (the one asked for) is not until its download came: checked on its own
+    /// (verify3-r15 blocker 1: a failed replacement left the displayed one unchecked).
+    shown: Option<Entry>,
     error: Option<String>,
     /// Captures shown lately, ready to show again.
     captures: cache::Memory,
@@ -361,11 +364,12 @@ impl Worlds {
             paint_fixture: None, snapshot_mode: false, presented_paint: None, pressed_paint: None,
             open: false,
             panel: Panel::default(),
-            catalog: Catalog::default(),
+            catalog: Catalog::of_process(),
             source: Source::current(),
             view: View::new(key),
             download: None,
             current: None,
+            shown: None,
             error: None,
             captures: cache::Memory::with_default_budget(),
             live: None,
@@ -481,11 +485,12 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             paint_fixture: None, snapshot_mode: false, presented_paint: None, pressed_paint: None,
             open: false,
             panel: { let mut panel = Panel::default(); panel.on_sheet = true; panel },
-            catalog: Catalog::default(),
+            catalog: Catalog::of_process(),
             source: Source::current(),
             view: View::new("cc.orbiters.desktop.orbit"),
             download: None,
             current: None,
+            shown: None,
             error: None,
             captures: cache::Memory::with_default_budget(),
             live: None,
@@ -1171,7 +1176,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.switch = None;
         self.prepare.clear();
         self.prepared_for = None;
-        if self.current.take().is_some() || self.view.active() {
+        if self.current.take().is_some() | self.shown.take().is_some() || self.view.active() {
             self.view.hide_now();
         }
         self.panel.dirty = true;
@@ -1180,9 +1185,21 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     /// Everything shown or on its way checked again, each turn: the listing read again may have taken a capture from this player, or replaced it with another
     /// upload. The 3D view around the person, its download and switch, what turns on the side panel, the page open.
     fn revalidate(&mut self) {
-        if let Some(current) = self.current.clone() {
-            if !self.allowed(&current) {
+        // What the person sees around them: gone at once when it is not theirs to see any more, whatever was asked for since.
+        if let Some(shown) = self.shown.clone() {
+            if !self.allowed(&shown) {
                 self.drop_view();
+            }
+        }
+        // What was asked for and is not shown yet: that request ends; what shows stays (it was checked just above).
+        if let Some(current) = self.current.clone().filter(|c| self.shown.as_ref().is_none_or(|s| s.id != c.id || cache::Key::of(s) != cache::Key::of(c))) {
+            if !self.allowed(&current) {
+                if let Some(d) = self.download.take() {
+                    d.progress.stop.store(true, Ordering::Relaxed);
+                }
+                self.switch = None;
+                self.current = self.shown.clone();
+                self.panel.dirty = true;
             }
         }
         if let Some(id) = self.preparing.as_ref().map(|d| d.id) {
@@ -1207,6 +1224,11 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 self.panel.dirty = true;
             }
         }
+    }
+
+    /// The capture `id` as a Show asks for it (from the list shown, or the one kept, a sheet's relayed one included), when it may show now.
+    fn showable(&self, id: u64, entries: &[Entry]) -> Option<Entry> {
+        entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)).filter(|e| e.capture && self.allowed(e)).cloned()
     }
 
     /// The listing's captures this player may see.
@@ -1934,6 +1956,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         if let Some((capture, _)) = self.switch.take_if(|(_, at)| Instant::now() >= *at) {
             if self.current.as_ref().is_some_and(|e| self.allowed(e)) {
                 self.view.show(overlay, steamvr, capture);
+                self.shown = self.current.clone();
             }
         }
         self.prepare_ahead();
@@ -1946,6 +1969,9 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             // Hidden (or failed): nothing is current any more.
             self.current = None;
             self.panel.dirty = true;
+        }
+        if !self.view.active() && self.switch.is_none() {
+            self.shown = None;
         }
         self.ask_feedback();
         self.follow_go();
@@ -2169,10 +2195,18 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     }
 
     fn finish_download(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client) {
-        let Some(d) = &self.download else { return };
+        if let Some(capture) = self.settle_download() {
+            self.view.show(overlay, steamvr, capture);
+        }
+    }
+
+    /// The download asked for ended: kept, and to be shown (returned) only while it is still the one asked for and the person's to see; it is then what
+    /// displays. Failed, the request ends and what was displayed before is what is current again (verify3-r15 blocker 1).
+    fn settle_download(&mut self) -> Option<Arc<Capture>> {
+        let d = self.download.as_ref()?;
         let answer = match d.answer.try_recv() {
             Ok(a) => a,
-            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Empty) => return None,
             Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("{}", tr("the download stopped"))),
         };
         let (id, key) = (d.id, d.key.clone());
@@ -2185,14 +2219,18 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 let capture = Arc::new(capture);
                 self.captures.put(key.clone(), capture.clone(), current.then_some(&key));
                 if current {
-                    self.view.show(overlay, steamvr, capture);
+                    self.shown = self.current.clone();
+                    return Some(capture);
                 }
+                None
             }
             Err(e) if current => {
                 eprintln!("3D worlds: {e:#}");
                 self.error = Some(short_error(&e));
+                self.current = self.shown.clone();
+                None
             }
-            Err(_) => {}
+            Err(_) => None,
         }
     }
 
@@ -2292,7 +2330,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             crate::usage::press(&crate::usage::stable_name(&format!("WorldPanel({action:?})")));
             match action {
                 Action::Show(id) => {
-                    let Some(entry) = entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)).filter(|e| e.capture && self.allowed(e)).cloned() else {
+                    let Some(entry) = self.showable(id, entries) else {
                         continue;
                     };
                     // Enzo: nothing showing, and one opened from the start: its hint again, even if an earlier one was zoomed by accident.
@@ -2313,8 +2351,9 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                             self.switch = Some((capture, Instant::now() + SWITCH_AFTER));
                             continue;
                         }
-                        self.current = Some(entry);
+                        self.current = Some(entry.clone());
                         self.view.show(overlay, steamvr, capture);
+                        self.shown = Some(entry);
                         continue;
                     }
                     self.asked_at = Some((id, Instant::now(), false));
@@ -3181,6 +3220,92 @@ mod carousel_tests {
         // Shown again by any way (a relayed Show): refused for Bob.
         worlds.picked = Some(private.clone());
         assert!(!worlds.allowed(&private) && worlds.picked().is_none());
+    }
+
+    /// verify3-r15 (introduced by fix2): a public capture chosen on the sheet in VR is shown by the headset's own 3D worlds the first time, its listing
+    /// being the one the sheet read: one listing for both. Before, the headset's own was empty until it read it, and refused the Show.
+    #[test]
+    fn a_show_from_the_sheet_is_shown_by_the_headset_s_worlds_the_first_time() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        // The headset's 3D worlds (its constructor takes SteamVR; it reads the same listing as this one) and the sheet's panel, made as the overlay makes them.
+        let mut own = Worlds::alone(ctx.clone());
+        let mut sheet = Worlds::alone(ctx);
+        // Only the sheet's listing was read (the sheet opened first).
+        let list = many(3);
+        sheet.listing_for_test(list.clone());
+        sheet.relay_to(Status { headset: true, ..Default::default() });
+        let public = list[1].clone();
+        // The sheet asks; the headset's worlds hear it.
+        own.from_elsewhere(vec![Relayed::Show(public.clone())]);
+        assert!(own.deferred.iter().any(|a| matches!(a, Action::Show(id) if *id == public.id)));
+        let entries = own.entries();
+        assert_eq!(own.showable(public.id, &entries).map(|e| e.id), Some(public.id), "shown the first time");
+        // A capture the listing does not have is still refused.
+        let mut stranger = public.clone();
+        stranger.id = 999;
+        own.picked = Some(stranger.clone());
+        assert!(own.showable(999, &entries).is_none());
+        let _ = &mut sheet;
+    }
+
+    /// The process's listing is one: what one handle lists, another reads.
+    #[test]
+    fn the_process_has_one_listing() {
+        let (a, b) = (Catalog::of_process(), Catalog::of_process());
+        a.put_for_test(many(2));
+        assert!(b.entry(2).is_some(), "the same listing");
+    }
+
+    /// verify3-r15 blocker 1: Alice's private capture A shows around her; she asks for B, not downloaded yet; B's download fails; then the listing takes A
+    /// from her. A, still displayed, goes at once: the check is of what is displayed, not of what was last asked for.
+    #[test]
+    fn a_displayed_capture_is_checked_after_a_failed_replacement() {
+        let (mut worlds, list) = alice_only();
+        worlds.follow_login(&signed_in_as("usr_a", "Alice", 1));
+        let (a, b) = (list[0].clone(), list[1].clone());
+        // A displayed, as `act` leaves it once its capture is shown.
+        worlds.view.showing_for_test();
+        worlds.current = Some(a.clone());
+        worlds.shown = Some(a.clone());
+        // B asked for: not cached, its download on its way; A still displays.
+        let (tx, rx) = std::sync::mpsc::channel();
+        worlds.current = Some(b.clone());
+        worlds.download = Some(Download { id: b.id, key: cache::Key::of(&b), progress: Arc::new(Progress::default()), answer: rx });
+        // B fails.
+        tx.send(Err(anyhow::anyhow!("unreachable"))).unwrap();
+        assert!(worlds.settle_download().is_none(), "nothing to show");
+        assert_eq!(worlds.shown.as_ref().map(|e| e.id), Some(a.id), "A still displays");
+        assert_eq!(worlds.current.as_ref().map(|e| e.id), Some(a.id), "the request ended: what is current is what displays");
+        assert!(worlds.view.active());
+        // The listing takes A from Alice.
+        let mut taken = list.clone();
+        taken[0].only_for = Some(vec!["Carol".into()]);
+        worlds.listing_for_test(taken);
+        worlds.revalidate();
+        assert!(worlds.shown.is_none() && worlds.current.is_none(), "nothing of A kept");
+        assert!(!worlds.view.active(), "A's pixels go at once");
+    }
+
+    /// verify3-r15 blocker 1: what was asked for and is no longer allowed ends as a request; what displays (still allowed) stays.
+    #[test]
+    fn a_request_no_longer_allowed_ends_and_what_shows_stays() {
+        let (mut worlds, list) = alice_only();
+        worlds.follow_login(&signed_in_as("usr_a", "Alice", 1));
+        let (a, b) = (list[1].clone(), list[0].clone());
+        worlds.view.showing_for_test();
+        worlds.current = Some(b.clone());
+        worlds.shown = Some(a.clone());
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let progress = Arc::new(Progress::default());
+        worlds.download = Some(Download { id: b.id, key: cache::Key::of(&b), progress: progress.clone(), answer: rx });
+        let mut taken = list.clone();
+        taken[0].only_for = Some(vec!["Carol".into()]);
+        worlds.listing_for_test(taken);
+        worlds.revalidate();
+        assert!(progress.stop.load(Ordering::Relaxed) && worlds.download.is_none(), "B's download stopped");
+        assert_eq!(worlds.current.as_ref().map(|e| e.id), Some(a.id));
+        assert!(worlds.view.active(), "A, public, still shows");
     }
 
     /// verify2-r15 blocker 1: the same account, the listing read again: Alice's capture now shared with someone else only, or replaced by another upload.

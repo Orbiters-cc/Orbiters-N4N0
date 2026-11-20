@@ -157,7 +157,7 @@ fn vrcnext_index(root: &Path) -> HashMap<(String, u32), String> {
         let id_ok = (entity.starts_with("usr_") || entity.starts_with("avtr_"))
             && entity.len() <= 80
             && entity.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        if !matches!(sub, "Users" | "Avatars") || !id_ok {
+        if !matches!(sub, "Users" | "Avatars") || !id_ok { // i18n: not shown (VRCNext's folder names)
             continue;
         }
         if let Some(found) = vrchat_file(&url) {

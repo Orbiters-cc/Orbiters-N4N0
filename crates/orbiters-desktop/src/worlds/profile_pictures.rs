@@ -6,7 +6,7 @@
 //!   shows is the profile's 104-point picture), as PNG, in `<cache>/profile-pictures/`: `u-<usr id>.pic` for a person's
 //!   picture (one file each: a new picture replaces the old one), `k-<digest>.pic` for one that is nobody's. Each file
 //!   names the picture it holds (the VRChat file and version, or a digest of another address; never the address).
-//!   224 friends cost about 5 MB. The folder is capped at [`CAP_BYTES`]: past it, the files used longest ago go.
+//!   A photo-like picture is about 20-35 KB: 224 friends cost about 5 to 8 MB. The folder is capped at [`CAP_BYTES`]: past it, the files used longest ago go.
 //! - **Shown at once.** A picture kept is read and decoded on a loader thread, without the network. A person whose
 //!   picture changed (another file or version in VRChat's address) shows the picture kept until the new one arrived.
 //! - **Completed from VRCX and VRCNext** ([`orbiters_core::picture_sources`]), when they keep exactly that picture,

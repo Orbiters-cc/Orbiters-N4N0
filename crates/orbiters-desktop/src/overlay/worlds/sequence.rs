@@ -239,10 +239,6 @@ impl Bench {
         #[cfg(not(windows))]
         None
     }
-
-    pub fn capacities(&self) -> (usize, usize) {
-        self.renderer.capacities()
-    }
 }
 
 /// A made-up capture of `splats` splats, the same for the same `seed`: a room's floor, walls and ceiling around its start view, and things

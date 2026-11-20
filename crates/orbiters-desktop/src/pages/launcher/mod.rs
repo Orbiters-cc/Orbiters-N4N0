@@ -196,11 +196,15 @@ impl State {
     }
 
     /// The people's pictures of the data, each address with whose it is: the account's own, invites and boops, then
-    /// the friends in the list's order (its sections, then anyone in none), each once.
+    /// the friends in the list's order (its sections, then anyone in none), each once. A person's picture is the one
+    /// their row shows; an invite's or a boop's other picture of someone on the list is nobody's (kept by its address:
+    /// one picture a person, two would replace each other at every look).
     fn people_pictures(data: &LauncherState) -> Vec<(String, Option<String>)> {
+        let icons: HashMap<&str, &str> = data.friends.iter().chain(data.me.iter()).map(|f| (f.id.as_str(), f.look.icon.as_str())).collect();
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         let mut add = |url: &str, user: &str| {
+            let user = if icons.get(user).is_none_or(|icon| *icon == url) { user } else { "" };
             if url.starts_with("https://") && seen.insert((url.to_string(), user.to_string())) {
                 out.push((url.to_string(), (!user.is_empty()).then(|| user.to_string())));
             }

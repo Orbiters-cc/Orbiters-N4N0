@@ -159,13 +159,15 @@ impl Store {
     /// Keeps `image` as the picture at `url` for `user`, replacing what was kept for them.
     pub fn put(&self, user: Option<&str>, url: &str, image: &RgbaImage) -> bool {
         let key = picture_key(url);
-        let mut bytes = Vec::with_capacity(16 << 10);
+        let mut png = Vec::with_capacity(16 << 10);
+        if image::DynamicImage::ImageRgba8(image.clone()).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).is_err() {
+            return false;
+        }
+        let mut bytes = Vec::with_capacity(png.len() + key.len() + 10);
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&(key.len() as u16).to_le_bytes());
         bytes.extend_from_slice(key.as_bytes());
-        if image::DynamicImage::ImageRgba8(image.clone()).write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).is_err() {
-            return false;
-        }
+        bytes.extend_from_slice(&png);
         let path = self.file(user, &key);
         let written = std::fs::create_dir_all(&self.dir).is_ok() && orbiters_core::write_atomic(&path, &bytes).is_ok();
         if written {

@@ -1495,7 +1495,9 @@ impl Dialog {
             .iter()
             .map(|(id, _)| {
                 let url = self.friends_list.iter().find(|f| &f.id == id).and_then(|f| f.image.clone())?;
-                self.pictures.get(ui.ctx(), &crate::worlds::Picture::Profile { scope: crate::controller::vrchat_data::Scope::of(cx.snap), url, user: Some(id.clone()) })
+                // Kept by its address (`user: None`): this list's picture of someone may not be the one the friends list
+                // keeps for them, and a person has one picture kept.
+                self.pictures.get(ui.ctx(), &crate::worlds::Picture::Profile { scope: crate::controller::vrchat_data::Scope::of(cx.snap), url, user: None })
             })
             .collect();
         for ((id, name), tex) in names.iter().zip(&pictures) {
@@ -1640,7 +1642,7 @@ impl Dialog {
             let matches = found_friends(&self.friends_list, &q);
             let pictures: Vec<Option<egui::TextureHandle>> = matches
                 .iter()
-                .map(|f| f.image.as_ref().and_then(|url| self.pictures.get(&ctx, &crate::worlds::Picture::Profile { scope: scope.clone(), url: url.clone(), user: Some(f.id.clone()) })))
+                .map(|f| f.image.as_ref().and_then(|url| self.pictures.get(&ctx, &crate::worlds::Picture::Profile { scope: scope.clone(), url: url.clone(), user: None })))
                 .collect();
             let chips: Vec<Chip> = matches
                 .iter()

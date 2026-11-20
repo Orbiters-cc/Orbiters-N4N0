@@ -21,6 +21,8 @@ struct Pretend {
     /// The controller, to ask at the very moment of a start whether its profile was already claimed.
     ctl: Mutex<Option<std::sync::Weak<Controller>>>,
     claimed_at_start: Mutex<Vec<bool>>,
+    /// Processes whose command line could not be read.
+    unread: Mutex<Vec<u32>>,
 }
 impl Pretend {
     fn note_claim(&self, args: &[String]) {
@@ -34,9 +36,10 @@ impl Machine for Pretend {
     fn running(&self) -> Vec<(u32, bool)> {
         self.running.lock().unwrap().clone()
     }
-    fn running_profiles(&self) -> Vec<(u32, bool, u32)> {
+    fn running_profiles(&self) -> Vec<(u32, bool, Option<u32>)> {
         let profiles = self.profiles.lock().unwrap();
-        self.running.lock().unwrap().iter().map(|(pid, d)| (*pid, *d, profiles.get(pid).copied().unwrap_or(0))).collect()
+        let unread = self.unread.lock().unwrap();
+        self.running.lock().unwrap().iter().map(|(pid, d)| (*pid, *d, (!unread.contains(pid)).then(|| profiles.get(pid).copied().unwrap_or(0)))).collect()
     }
     fn start_beside(&self, args: &[String]) -> Result<(), String> {
         self.note_claim(args);
@@ -951,7 +954,7 @@ fn a_second_vrchat_starts_on_a_free_profile_beside_the_first_and_never_on_a_runn
     // It is up on profile 1: the start is over, and profile 1 is now refused too.
     machine.running.lock().unwrap().push((11, true));
     machine.profiles.lock().unwrap().insert(11, 1);
-    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 10, profile: 0, ..Default::default() }, crate::state::VrchatRunShown { pid: 11, profile: 1, account: Some("Sample Alt".into()), ..Default::default() }]);
+    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 10, profile: 0, profile_known: true, ..Default::default() }, crate::state::VrchatRunShown { pid: 11, profile: 1, profile_known: true, account: Some("Sample Alt".into()), ..Default::default() }]);
     c.launcher_game(machine.as_ref());
     let profiles = c.view().launcher.profiles.clone();
     assert_eq!(profiles.iter().map(|p| (p.profile, p.running, p.starting)).collect::<Vec<_>>(), [(0, Some(LaunchMode::Vr), None), (1, Some(LaunchMode::Desktop), None)]);
@@ -983,13 +986,14 @@ fn the_first_vrchat_on_a_profile_goes_through_steam_with_that_profile() {
 #[test]
 fn the_profile_choice_lists_used_running_and_starting_profiles_with_their_accounts() {
     let known: BTreeMap<u32, String> = [(1, "Sample Alt".to_string())].into();
-    let roster = [crate::state::VrchatRunShown { pid: 10, profile: 0, account: Some("Sample Me".into()), ..Default::default() }, crate::state::VrchatRunShown {
+    let roster = [crate::state::VrchatRunShown { pid: 10, profile: 0, profile_known: true, account: Some("Sample Me".into()), ..Default::default() }, crate::state::VrchatRunShown {
         pid: 12,
         profile: 3,
+        profile_known: true,
         driver: crate::state::VrchatDriverShown::Agent { session: "s1".into() },
         ..Default::default()
     }];
-    let got = game_profiles(&known, &[(10, false, 0), (12, true, 3)], &roster, &[(2, LaunchMode::Desktop)]);
+    let got = game_profiles(&known, &[(10, false, Some(0)), (12, true, Some(3))], &roster, &[(2, LaunchMode::Desktop)]);
     let shown: Vec<(u32, Option<&str>, Option<LaunchMode>, Option<LaunchMode>, bool)> = got.iter().map(|p| (p.profile, p.account.as_deref(), p.running, p.starting, p.assistant)).collect();
     assert_eq!(
         shown,
@@ -1137,4 +1141,25 @@ fn the_bridge_and_go_there_claim_the_profiles_home_starts_on() {
     // A start that failed gives its claim back.
     c.launcher_unclaim(claim);
     assert!(!c.launcher_claimed(0));
+}
+
+// --- REQUEST15 fix B5: a VRChat whose profile is not known yet is never taken for profile 0 ---
+
+#[test]
+fn a_vrchat_not_yet_identified_is_not_profile_0_and_holds_play() {
+    // Profile 1 started outside Orbiters: in the roster before its log said its arguments (the roster's 0 means "not
+    // known" then), while its command line says --profile=1.
+    let (machine, c) = running_profile_0();
+    machine.running.lock().unwrap().push((11, true));
+    machine.profiles.lock().unwrap().insert(11, 1);
+    c.update(|s| s.vrchat.runs = vec![crate::state::VrchatRunShown { pid: 10, profile: 0, profile_known: true, ..Default::default() }, crate::state::VrchatRunShown { pid: 11, profile: 0, profile_known: false, ..Default::default() }]);
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Vr, profile: 1 }), Some(Notice::Error(_))), "its command line says profile 1");
+    c.launcher_game(machine.as_ref());
+    assert!(c.view().launcher.profiles.iter().any(|p| p.profile == 1 && p.running.is_some()));
+    // Neither its log nor its command line said anything yet: no profile may be started until it does.
+    machine.unread.lock().unwrap().push(11);
+    for profile in [1, 2] {
+        assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Vr, profile }), Some(Notice::Error(_))), "{profile}");
+    }
+    assert!(machine.beside.lock().unwrap().is_empty() && machine.started.lock().unwrap().is_empty());
 }

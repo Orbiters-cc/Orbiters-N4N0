@@ -65,9 +65,10 @@ pub trait Machine: Send + Sync {
     fn start_beside(&self, args: &[String]) -> Result<(), String> {
         self.start(args)
     }
-    /// The VRChats running here with their profile: process id, Desktop mode, `--profile` (0 without one).
-    fn running_profiles(&self) -> Vec<(u32, bool, u32)> {
-        self.running().into_iter().map(|(pid, desktop)| (pid, desktop, 0)).collect()
+    /// The VRChats running here with their profile: process id, Desktop mode, `--profile` (0 without one) as its command
+    /// line says it; `None` when its command line could not be read (the profile is not known).
+    fn running_profiles(&self) -> Vec<(u32, bool, Option<u32>)> {
+        self.running().into_iter().map(|(pid, desktop)| (pid, desktop, None)).collect()
     }
     /// The desktop window VRChat saved for its next start (Unity's `Screenmanager` values): width, height, fullscreen mode.
     fn saved_window(&self) -> Option<SavedWindow> {
@@ -109,8 +110,8 @@ pub fn route(steam_has_vrchat: bool, launcher_registered: bool) -> Route {
 
 #[derive(Default)]
 pub struct RealMachine {
-    /// Each VRChat's Desktop mode and profile, read once from its command line.
-    desktop: Mutex<HashMap<u32, (bool, u32)>>,
+    /// Each VRChat's Desktop mode and profile, read once from its command line (`None`: it could not be read).
+    desktop: Mutex<HashMap<u32, (bool, Option<u32>)>>,
     /// The route, kept ten minutes (it reads the registry and Steam's library file).
     route: Mutex<Option<(Instant, Route)>>,
 }
@@ -198,27 +199,32 @@ impl Machine for MacMachine {
     }
 }
 
-/// The VRChats running (process, Desktop mode, profile): the profile as their own log said it when the roster knows the
-/// process, else as their command line does.
-fn runs_with_profiles(machine: &dyn Machine, roster: &[crate::state::VrchatRunShown]) -> Vec<(u32, bool, u32)> {
-    machine.running_profiles().into_iter().map(|(pid, desktop, profile)| (pid, desktop, roster.iter().find(|r| r.pid == pid).map_or(profile, |r| r.profile))).collect()
+/// The VRChats running (process, Desktop mode, profile): the profile as their own log said it once the roster read its
+/// arguments, else as their command line says it, else unknown (`None`): a VRChat whose log has not said its arguments
+/// yet is never taken for profile 0 (REQUEST15 fix B5).
+fn runs_with_profiles(machine: &dyn Machine, roster: &[crate::state::VrchatRunShown]) -> Vec<(u32, bool, Option<u32>)> {
+    machine
+        .running_profiles()
+        .into_iter()
+        .map(|(pid, desktop, profile)| (pid, desktop, roster.iter().find(|r| r.pid == pid && r.profile_known).map(|r| r.profile).or(profile)))
+        .collect()
 }
 
 /// Home's profile choice: every profile used before (with the account last seen on it), running or starting now, by
 /// number; profile 0 always.
 pub fn game_profiles(
     known: &BTreeMap<u32, String>,
-    runs: &[(u32, bool, u32)],
+    runs: &[(u32, bool, Option<u32>)],
     roster: &[crate::state::VrchatRunShown],
     starting: &[(u32, LaunchMode)],
 ) -> Vec<orbiters_core::launcher::GameProfile> {
-    let mut numbers: Vec<u32> = std::iter::once(0).chain(known.keys().copied()).chain(runs.iter().map(|r| r.2)).chain(starting.iter().map(|s| s.0)).collect();
+    let mut numbers: Vec<u32> = std::iter::once(0).chain(known.keys().copied()).chain(runs.iter().filter_map(|r| r.2)).chain(starting.iter().map(|s| s.0)).collect();
     numbers.sort_unstable();
     numbers.dedup();
     numbers
         .into_iter()
         .map(|profile| {
-            let run = runs.iter().find(|r| r.2 == profile);
+            let run = runs.iter().find(|r| r.2 == Some(profile));
             let shown = run.and_then(|r| roster.iter().find(|s| s.pid == r.0));
             orbiters_core::launcher::GameProfile {
                 profile,
@@ -245,7 +251,7 @@ impl Machine for RealMachine {
         self.running_profiles().into_iter().map(|(pid, desktop, _)| (pid, desktop)).collect()
     }
 
-    fn running_profiles(&self) -> Vec<(u32, bool, u32)> {
+    fn running_profiles(&self) -> Vec<(u32, bool, Option<u32>)> {
         // Names only (no process is opened for them); the command line is read for VRChat's processes alone, once each.
         let mut system = sysinfo::System::new();
         system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
@@ -258,11 +264,13 @@ impl Machine for RealMachine {
             for pid in unknown {
                 let args: Vec<String> = system.process(pid).map(|p| p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect()).unwrap_or_default();
                 let no_vr = args.iter().any(|a| a == "--no-vr");
-                desktop.insert(pid.as_u32(), (no_vr, orbiters_core::vrchat_launch::profile_of(&args)));
+                // An empty command line is one Windows would not give: its profile is unknown, never taken for 0.
+                let profile = (!args.is_empty()).then(|| orbiters_core::vrchat_launch::profile_of(&args));
+                desktop.insert(pid.as_u32(), (no_vr, profile));
             }
         }
         pids.iter().map(|p| {
-            let (no_vr, profile) = desktop.get(&p.as_u32()).copied().unwrap_or((false, 0));
+            let (no_vr, profile) = desktop.get(&p.as_u32()).copied().unwrap_or((false, None));
             (p.as_u32(), no_vr, profile)
         }).collect()
     }
@@ -729,7 +737,7 @@ impl Controller {
         // meanwhile by another start is never dropped by this look, which did not see it.
         let claims: Vec<(u32, LaunchMode)> = {
             let mut rt = self.launcher.lock().unwrap();
-            rt.starting.retain(|c| c.holds() && !runs.iter().any(|r| r.2 == c.profile));
+            rt.starting.retain(|c| c.holds() && !runs.iter().any(|r| r.2 == Some(c.profile)));
             rt.starting.iter().map(|c| (c.profile, c.mode)).collect()
         };
         // The accounts seen on each profile are remembered, so the choice says whose each one is.
@@ -1369,8 +1377,12 @@ impl Controller {
         let mut started = self.launcher_started.lock().unwrap();
         let view = self.view();
         let runs = runs_with_profiles(machine.as_ref(), &view.vrchat.runs);
-        if runs.iter().any(|r| r.2 == profile) {
+        if runs.iter().any(|r| r.2 == Some(profile)) {
             return Notice::Error(tr!("VRChat already runs on profile {n}: choose another profile to start one more.", n = profile));
+        }
+        // A VRChat whose profile is not known yet could be on this one: wait until it says (a few seconds).
+        if runs.iter().any(|r| r.2.is_none()) {
+            return Notice::Error(tr("A VRChat is starting and has not said its profile yet: try again in a moment.").into());
         }
         if runs.is_empty() && started.is_some_and(|t| t.elapsed() < STARTING_FOR) {
             return Notice::Error(tr("Starting VRChat…").into());

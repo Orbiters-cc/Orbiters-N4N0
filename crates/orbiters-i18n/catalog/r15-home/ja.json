@@ -54,5 +54,6 @@
   "N4N0's features": "N4N0の機能",
   "As {account}": "{account}として",
   "On profile {n}": "プロフィール{n}で",
-  "The assistant's VRChat uses profile {n}: choose another profile.": "アシスタントのVRChatがプロフィール{n}を使っています。別のプロフィールを選んでください。"
+  "The assistant's VRChat uses profile {n}: choose another profile.": "アシスタントのVRChatがプロフィール{n}を使っています。別のプロフィールを選んでください。",
+  "A VRChat is starting and has not said its profile yet: try again in a moment.": "起動中のVRChatのプロフィールがまだわかりません。少ししてからもう一度お試しください。"
 }

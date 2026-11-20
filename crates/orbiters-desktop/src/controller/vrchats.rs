@@ -120,6 +120,7 @@ pub(crate) fn run_of(pid: u32, started_s: u64, log: Option<&Path>, facts: Option
         pid,
         started_s,
         profile,
+        profile_known: facts.args.is_some(),
         log: log.map(Path::to_path_buf),
         osc_in: osc.map(|o| o.0).or(facts.osc_in).unwrap_or(sessions::VRCHAT_OSC_IN),
         query: facts.query.map(|p| SocketAddr::from(([127, 0, 0, 1], p))),
@@ -231,6 +232,7 @@ pub(crate) fn shown(run: &VrchatRun, target: Option<u32>, chosen: Option<u32>) -
     VrchatRunShown {
         pid: run.pid,
         profile: run.profile,
+        profile_known: run.profile_known,
         account: run.account.as_ref().map(|(_, name)| name.clone()),
         world: run.world.clone(),
         desktop: run.desktop,

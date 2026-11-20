@@ -349,8 +349,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     let vrchats = |target: u32, chosen: bool, own_camera: bool, tour: crate::state::VrchatDriverShown| {
         use crate::state::{VrchatDriverShown, VrchatRunShown};
         let mut s = idle.clone();
-        let own = VrchatRunShown { pid: 37076, profile: 0, account: Some("blackorbit".into()), world: Some("FRONTLINE KIZUNA".into()), desktop: Some(true), camera: Some(own_camera), driver: VrchatDriverShown::Person, target: target == 37076, chosen: false };
-        let tour = VrchatRunShown { pid: 8244, profile: 1, account: Some("Orbiters".into()), world: Some("Audience Anarchy".into()), desktop: Some(true), camera: Some(!own_camera || target == 8244), driver: tour, target: target == 8244, chosen };
+        let own = VrchatRunShown { pid: 37076, profile: 0, profile_known: true, account: Some("blackorbit".into()), world: Some("FRONTLINE KIZUNA".into()), desktop: Some(true), camera: Some(own_camera), driver: VrchatDriverShown::Person, target: target == 37076, chosen: false };
+        let tour = VrchatRunShown { pid: 8244, profile: 1, profile_known: true, account: Some("Orbiters".into()), world: Some("Audience Anarchy".into()), desktop: Some(true), camera: Some(!own_camera || target == 8244), driver: tour, target: target == 8244, chosen };
         s.vrchat.runs = vec![tour, own];
         let world = if target == 8244 { ("wrld_81800175-2fdb-4e77-b602-c7fa35f33c0c", "Audience Anarchy") } else { ("wrld_a51861e9-85a8-43da-85a3-854a184b2fc1", "FRONTLINE KIZUNA") };
         s.vrchat.world.world_id = Some(world.0.into());

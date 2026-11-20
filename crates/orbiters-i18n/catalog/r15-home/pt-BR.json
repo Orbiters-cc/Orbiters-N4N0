@@ -54,5 +54,6 @@
   "N4N0's features": "Recursos do N4N0",
   "As {account}": "Como {account}",
   "On profile {n}": "No perfil {n}",
-  "The assistant's VRChat uses profile {n}: choose another profile.": "O VRChat do assistente usa o perfil {n}: escolha outro perfil."
+  "The assistant's VRChat uses profile {n}: choose another profile.": "O VRChat do assistente usa o perfil {n}: escolha outro perfil.",
+  "A VRChat is starting and has not said its profile yet: try again in a moment.": "Um VRChat está abrindo e ainda não disse o perfil: tente de novo daqui a pouco."
 }

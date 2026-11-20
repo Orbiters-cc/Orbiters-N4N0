@@ -4164,6 +4164,7 @@ mod tests {
             pid,
             started_s: u64::from(pid),
             profile,
+            profile_known: true,
             log: None,
             osc_in,
             query: None,

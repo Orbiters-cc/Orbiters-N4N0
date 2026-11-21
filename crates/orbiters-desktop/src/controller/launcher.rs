@@ -165,6 +165,7 @@ impl MacMachine {
 impl Machine for MacMachine {
     fn running(&self) -> Vec<(u32, bool)> {
         let install = orbiters_core::obelisk::vrchat_install(&orbiters_core::obelisk::library(&self.home));
+        let recorded = orbiters_core::obelisk::session_games(&orbiters_core::obelisk::library(&self.home));
         let mut system = sysinfo::System::new();
         system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::OnlyIfNotSet));
         let mut found: Vec<u32> = system
@@ -172,7 +173,8 @@ impl Machine for MacMachine {
             .values()
             .filter(|p| {
                 let command: Vec<String> = p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect();
-                orbiters_core::obelisk::is_vrchat_process(&command, install.as_deref())
+                // What Obelisk itself records as its running VRChat, or a process whose command line is the game's.
+                recorded.contains(&p.pid().as_u32()) || orbiters_core::obelisk::is_vrchat_process(&command, install.as_deref())
             })
             .map(|p| p.pid().as_u32())
             .collect();

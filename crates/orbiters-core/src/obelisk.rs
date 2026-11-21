@@ -117,6 +117,24 @@ pub fn is_vrchat_process(command: &[String], install: Option<&Path>) -> bool {
     })
 }
 
+/// The process of the VRChat that one of Obelisk's session records (`SteamSessions/<id>.v2.json`, which its supervisor
+/// keeps while a Steam game runs: read from Obelisk 0.6.4's) says is running: Steam's VRChat, not finished, with the
+/// game's process named. The caller checks that the process still lives (a record outlives a crash).
+pub fn session_game(record: &str) -> Option<u32> {
+    let record: serde_json::Value = serde_json::from_str(record).ok()?;
+    let app = record.get("store")?.get("app_id")?.as_u64()?;
+    if app.to_string() != crate::vrchat_launch::STEAM_APP || record.get("phase").and_then(serde_json::Value::as_str) == Some("Finished") {
+        return None;
+    }
+    record.get("game")?.get("pid")?.as_u64().and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 1)
+}
+
+/// The processes Obelisk's session records in `library` name as a running VRChat.
+pub fn session_games(library: &Path) -> Vec<u32> {
+    let Ok(files) = std::fs::read_dir(library.join("SteamSessions")) else { return Vec::new() };
+    files.flatten().filter(|f| f.file_name().to_string_lossy().ends_with(".v2.json")).filter_map(|f| std::fs::read_to_string(f.path()).ok()).filter_map(|text| session_game(&text)).collect()
+}
+
 /// What a Mac has of what VRChat needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
@@ -217,6 +235,17 @@ mod tests {
         std::fs::remove_file(library.join("steam-installations-42.json")).unwrap();
         std::fs::write(library.join("steam-installations-42.incomplete.json"), &receipt).unwrap();
         assert_eq!(engine(home.path()), Engine::NoVrchat, "still downloading");
+    }
+
+    #[test]
+    fn a_session_record_names_the_running_vrchat() {
+        let record = |app: u32, phase: &str, game: &str| format!(r#"{{"version":2,"id":"f2766c7f","account_id":"1","store":{{"app_id":{app},"host":"running"}},"phase":"{phase}","supervisor":{{"pid":48097,"uid":501}},"game":{game},"starting":null,"socket":"/tmp/x/control"}}"#);
+        assert_eq!(session_game(&record(438100, "Running", r#"{"pid":48200,"uid":501,"executable":"/x/wine"}"#)), Some(48200));
+        assert_eq!(session_game(&record(438100, "Finished", r#"{"pid":48200,"uid":501}"#)), None, "as Obelisk leaves it once the game closed");
+        assert_eq!(session_game(&record(438100, "Running", "null")), None, "not started yet");
+        assert_eq!(session_game(&record(252950, "Running", r#"{"pid":48200,"uid":501}"#)), None, "another game");
+        assert_eq!(session_game(r#"{"version":2,"id":"f2766c7f"}"#), None, "the pointer to the last session");
+        assert_eq!(session_game("not json"), None);
     }
 
     #[test]

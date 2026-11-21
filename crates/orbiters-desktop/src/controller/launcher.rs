@@ -12,7 +12,7 @@
 //!   for another program to press its Play. N4N0 opens Obelisk and says to press Play there; it sees the game once
 //!   it runs, and a destination is an invite to oneself (kept until the game is up when it was not).
 use super::{Controller, Shared};
-use orbiters_core::launcher::{Action, Game, Invite, LaunchMode, LauncherState, Notice, Place, Possible, Profile, SentKind, Source, Whereabouts};
+use orbiters_core::launcher::{Action, EngineSetup, Game, Invite, LaunchMode, LauncherState, Notice, Place, Possible, Profile, SentKind, Source, Whereabouts};
 use orbiters_core::launcher_feed::{self, Cooldowns, Decorations};
 use orbiters_core::vrchat_api::{Client, Error};
 use orbiters_core::vrchat_launch::{desktop_window, SavedWindow};
@@ -59,6 +59,8 @@ const RESYNC_AFTER: Duration = Duration::from_secs(5 * 60);
 /// card comes back (and VRChat still has the invite).
 const ARRIVE_WITHIN: Duration = Duration::from_secs(10 * 60);
 const PENDING_FOR: Duration = Duration::from_secs(10 * 60);
+/// How long a Play asked for before VRChat was in Obelisk waits for it (its sign-in to Steam, then gigabytes to download).
+const PLAY_WHEN_READY_FOR: Duration = Duration::from_secs(60 * 60);
 
 /// The game on this computer, real or a test's.
 pub trait Machine: Send + Sync {
@@ -93,6 +95,11 @@ pub trait Machine: Send + Sync {
     /// Opens what runs VRChat here, or where it is got (`Action::OpenEngine`).
     fn open_engine(&self) -> Result<(), String> {
         Ok(())
+    }
+    /// Downloads, checks and installs what runs VRChat here (`Action::InstallEngine`); `progress` hears each step and
+    /// `stop` ends it early.
+    fn install_engine(&self, _progress: &dyn Fn(EngineSetup), _stop: &AtomicBool) -> Result<(), String> {
+        Err(tr("VRChat could not be started: nothing to install on this computer.").into())
     }
 }
 
@@ -188,6 +195,10 @@ impl Machine for MacMachine {
 
     fn start(&self, _args: &[String]) -> Result<(), String> {
         self.open_engine()
+    }
+
+    fn install_engine(&self, progress: &dyn Fn(EngineSetup), stop: &AtomicBool) -> Result<(), String> {
+        super::obelisk_install::install(&self.home, progress, stop).map_err(|e| format!("{e:#}"))
     }
 
     fn open_engine(&self) -> Result<(), String> {
@@ -423,6 +434,9 @@ pub(super) struct Runtime {
     /// Where to go once the game the person starts by hand (a Mac) is up, since when it waits, and the account it was
     /// asked for (it goes to that account only).
     pending: Option<(Place, Instant, Option<String>)>,
+    /// On a Mac: Play was asked for while VRChat was not in Obelisk yet (its install, or Obelisk's own, was started
+    /// from here); it is played once it is there, within [`PLAY_WHEN_READY_FOR`].
+    play_when_ready: Option<Instant>,
     /// Starts under way, by profile (Home's Play and profile choice, Go there, the VRChat bridge): each claims its
     /// profile from before the start until a VRChat on it is seen, or [`PROFILE_HELD`] passed (REQUEST15 fix B4).
     starting: Vec<Claim>,
@@ -502,6 +516,7 @@ impl Default for Runtime {
             game_checked: None,
             machine: real_machine(),
             pending: None,
+            play_when_ready: None,
             starting: Vec::new(),
             claims_made: 0,
             mine_next: None,
@@ -846,10 +861,23 @@ impl Controller {
         if matches!(game, Game::Running(_)) {
             self.launcher_go_pending();
         }
+        // VRChat is in Obelisk now, and Play was asked for before it was: played at once (Obelisk comes to the front).
+        let waited = match game {
+            Game::NoEngine | Game::NotInstalled => None,
+            _ => self.launcher.lock().unwrap().play_when_ready.take(),
+        };
+        if game == Game::NotRunning && machine.by_hand() && waited.is_some_and(|since| since.elapsed() < PLAY_WHEN_READY_FOR) {
+            self.launcher_action(Action::Play { mode: LaunchMode::Desktop, destination: None });
+        }
         // Published only when something changed (this runs every few seconds).
         self.update_if(|s| {
             let unresolved = runs.iter().filter(|r| r.2.is_none()).count() as u32;
-            let changed = s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles || s.launcher.unresolved != unresolved;
+            // The wait for VRChat to be in Obelisk ends with it there (or with Obelisk gone again).
+            let waiting_over = s.launcher.engine_setup == Some(EngineSetup::WaitingForGame) && game != Game::NotInstalled;
+            if waiting_over {
+                s.launcher.engine_setup = None;
+            }
+            let changed = waiting_over || s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles || s.launcher.unresolved != unresolved;
             s.launcher.unresolved = unresolved;
             if s.launcher.profiles != profiles {
                 s.launcher.profiles = profiles;
@@ -1283,8 +1311,13 @@ impl Controller {
             }
             Action::OpenEngine => {
                 let machine = self.launcher.lock().unwrap().machine.clone();
+                // Opened to download VRChat in it: the game is played once it is there.
+                if machine.by_hand() && !machine.engine_missing() && !machine.installed() {
+                    self.launcher.lock().unwrap().play_when_ready = Some(Instant::now());
+                }
                 machine.open_engine().err().map(Notice::Error)
             }
+            Action::InstallEngine => self.launcher_install_engine(),
             Action::CloseProfile => {
                 self.update(|s| s.launcher.profile = None);
                 None
@@ -1699,6 +1732,43 @@ impl Controller {
                 s.launcher.invites.sort_by_key(|i| std::cmp::Reverse(i.received_at));
             });
         }
+    }
+
+    /// A Mac without Obelisk: it is downloaded, checked, installed and opened, each step shown on Home; Play follows by
+    /// itself once the person has signed in to Steam there and VRChat is downloaded. One at a time.
+    fn launcher_install_engine(self: &Shared) -> Option<Notice> {
+        let machine = self.launcher.lock().unwrap().machine.clone();
+        if !machine.by_hand() {
+            return None;
+        }
+        if machine.engine_missing() {
+            let first = self.update_if(|s| {
+                let busy = matches!(s.launcher.engine_setup, Some(EngineSetup::Downloading { .. } | EngineSetup::Installing));
+                if !busy {
+                    s.launcher.engine_setup = Some(EngineSetup::Downloading { percent: 0 });
+                }
+                !busy
+            });
+            if !first {
+                return None;
+            }
+            let step = |step: EngineSetup| {
+                self.update_if(|s| {
+                    let changed = s.launcher.engine_setup.as_ref() != Some(&step);
+                    s.launcher.engine_setup = Some(step);
+                    changed
+                });
+            };
+            if let Err(words) = machine.install_engine(&step, &self.quitting) {
+                self.update(|s| s.launcher.engine_setup = Some(EngineSetup::Failed(words.clone())));
+                return Some(Notice::Error(tr!("Obelisk could not be installed: {reason}", reason = words)));
+            }
+        }
+        self.launcher.lock().unwrap().play_when_ready = Some(Instant::now());
+        self.update(|s| s.launcher.engine_setup = Some(EngineSetup::WaitingForGame));
+        let opened = machine.open_engine().err().map(Notice::Error);
+        self.launcher_game(machine.as_ref());
+        opened
     }
 
     /// A Mac: Obelisk is opened for the person to press Play in; the destination waits for the game.

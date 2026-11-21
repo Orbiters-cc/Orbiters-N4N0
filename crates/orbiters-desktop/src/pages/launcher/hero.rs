@@ -5,7 +5,7 @@
 use super::states::{self, PlayState};
 use super::{access_name, cover_uv, region_tag, Cx, State};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, Sense, Ui};
-use orbiters_core::launcher::{Action, GameProfile, Invite, InviteKind, LaunchMode};
+use orbiters_core::launcher::{Action, EngineSetup, GameProfile, Invite, InviteKind, LaunchMode};
 use orbiters_core::vrchat_launch::VR_HERE;
 use orbiters_i18n::tr;
 use orbiters_ui::anim::{self, Spring};
@@ -78,20 +78,30 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             widgets::text(p, pos2(rect.left() + 42.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 14.0).weight(weight::MEDIUM));
         }
         (_, missing) if !VR_HERE => {
-            // A Mac: what is missing, and the button that goes and gets it (Obelisk's site, or Obelisk itself).
-            let (line, label) = match missing {
-                PlayState::NoEngine => (tr("VRChat runs on a Mac with Obelisk, free: turn Beta versions on in it."), tr("Get Obelisk")),
-                _ => (tr("Download VRChat in Obelisk (Beta versions on in its settings), then come back."), tr("Open Obelisk")),
+            // A Mac: what is missing, and the button that gets it (Obelisk installed from here, or opened).
+            let setup = state.data.engine_setup.clone();
+            let (line, label, action): (String, Option<&str>, Action) = match (missing, setup) {
+                (_, Some(EngineSetup::Downloading { percent })) => (tr!("Downloading Obelisk, which runs VRChat on a Mac: {percent} %", percent = percent), None, Action::InstallEngine),
+                (_, Some(EngineSetup::Installing)) => (tr("Checking Obelisk and putting it in Applications…").into(), None, Action::InstallEngine),
+                (PlayState::NoEngine, _) => (tr("VRChat runs on a Mac through Obelisk, a free app.").into(), Some(tr("Install Obelisk & play VRChat")), Action::InstallEngine),
+                (_, Some(EngineSetup::WaitingForGame)) => (tr("Sign in to Steam in Obelisk and download VRChat. Play follows.").into(), Some(tr("Open Obelisk")), Action::OpenEngine),
+                _ => (tr("Download VRChat in Obelisk (Beta versions on in its settings), then come back.").into(), Some(tr("Open Obelisk")), Action::OpenEngine),
             };
-            let button = widgets::Button::new(label).variant(widgets::Variant::Secondary).id_salt("launcher-engine");
-            let bw = button.desired_width(ui);
+            let primary = action == Action::InstallEngine;
+            let button = label.map(|label| widgets::Button::new(label).variant(if primary { widgets::Variant::Primary } else { widgets::Variant::Secondary }).id_salt("launcher-engine"));
+            let bw = button.as_ref().map_or(0.0, |b| b.desired_width(ui));
             let at = Rect::from_min_size(pos2(rect.right() - 12.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
             let p = ui.painter().clone();
             widgets::frame(&p, rect, 16.0, theme::surface_soft());
-            widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, theme::WARN);
+            match button {
+                Some(_) => widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, theme::WARN),
+                None => {
+                    orbiters_ui::feedback::spinner(&p, pos2(rect.left() + 26.0, rect.center().y), 8.0, 2.0, theme::ACCENT);
+                }
+            }
             widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), at.left() - rect.left() - 58.0);
-            if button.show_at(ui, at).clicked() {
-                state.act(cx, anim::time(ui.ctx()), Action::OpenEngine);
+            if button.is_some_and(|b| b.show_at(ui, at).clicked()) {
+                state.act(cx, anim::time(ui.ctx()), action);
             }
         }
         (_, _) => {

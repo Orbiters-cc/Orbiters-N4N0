@@ -14,6 +14,52 @@ pub const BUNDLE_ID: &str = "com.zagrios.obelisk";
 /// Where a person gets it.
 pub const SITE: &str = "https://getobelisk.app";
 
+/// Obelisk's latest release, as GitHub tells it (no account, nothing of the person in the request).
+pub const LATEST: &str = "https://api.github.com/repos/Zagrios/Obelisk/releases/latest";
+/// Where a release's files are, and nowhere else is one taken from.
+const DOWNLOADS: &str = "https://github.com/Zagrios/Obelisk/releases/download/";
+/// The largest disk image taken (0.6.4's is 26 MB).
+const LARGEST: u64 = 512 << 20;
+/// What `codesign --verify -R` holds a downloaded Obelisk to: Obelisk's own identifier, signed with the Developer ID of
+/// its maker's team (Mathieu GRIES-PEROZ, FGW3Z8B82D, read from its 0.6.4). Another program under its name, or Obelisk
+/// signed by anyone else, is not installed.
+pub const REQUIREMENT: &str = r#"anchor apple generic and identifier "com.zagrios.obelisk" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "FGW3Z8B82D""#; // i18n: not shown (a code requirement, in codesign's language)
+/// Obelisk's own setting "Beta versions" (Settings > Updates), in its preferences (`defaults`, domain [`BUNDLE_ID`]):
+/// VRChat's support is in the beta versions of its engine as of November 2026.
+pub const BETA_SETTING: &str = "obelisk.updates.betaReleases";
+
+/// The disk image of a release, to download.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Download {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+    /// The address of the file that says its SHA-256, published beside it.
+    pub checksum_url: String,
+}
+
+/// The Apple silicon disk image that GitHub's answer for a release names, with its checksum file. An answer without
+/// both, or naming files anywhere but Obelisk's releases, gives none.
+pub fn latest_download(release: &str) -> Option<Download> {
+    let release: serde_json::Value = serde_json::from_str(release).ok()?;
+    let assets: Vec<(&str, &str, u64)> = release
+        .get("assets")?
+        .as_array()?
+        .iter()
+        .filter_map(|a| Some((a.get("name")?.as_str()?, a.get("browser_download_url")?.as_str()?, a.get("size")?.as_u64()?)))
+        .filter(|(name, url, _)| url.starts_with(DOWNLOADS) && url.ends_with(&format!("/{name}")) && !name.contains(['/', '\\']))
+        .collect();
+    let (name, url, size) = *assets.iter().find(|(name, _, size)| name.starts_with("Obelisk-") && name.ends_with("-arm64.dmg") && (1..=LARGEST).contains(size))?;
+    let (_, checksum_url, _) = *assets.iter().find(|(other, _, _)| *other == format!("{name}.sha256"))?;
+    Some(Download { name: name.into(), url: url.into(), size, checksum_url: checksum_url.into() })
+}
+
+/// The SHA-256 a checksum file says (`<64 hex digits>  <file name>`), in lower case.
+pub fn checksum(text: &str) -> Option<String> {
+    let first = text.split_whitespace().next()?;
+    (first.len() == 64 && first.bytes().all(|b| b.is_ascii_hexdigit())).then(|| first.to_ascii_lowercase())
+}
+
 /// The home of the person at this Mac.
 pub fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_default()
@@ -112,6 +158,30 @@ mod tests {
         assert!(is_receipt_file("steam-installations-76561198000000000.json"));
         assert!(!is_receipt_file("steam-installations-76561198000000000.incomplete.json"), "a download that did not finish is no installation");
         assert!(!is_receipt_file("epic-installations-1.json"));
+    }
+
+    #[test]
+    fn a_release_names_the_disk_image_to_download() {
+        let release = r#"{"tag_name": "v0.6.4", "assets": [
+            {"name": "appcast.xml", "size": 7861, "browser_download_url": "https://github.com/Zagrios/Obelisk/releases/download/v0.6.4/appcast.xml"},
+            {"name": "Obelisk-0.6.4-arm64.dmg", "size": 26422576, "browser_download_url": "https://github.com/Zagrios/Obelisk/releases/download/v0.6.4/Obelisk-0.6.4-arm64.dmg"},
+            {"name": "Obelisk-0.6.4-arm64.dmg.sha256", "size": 90, "browser_download_url": "https://github.com/Zagrios/Obelisk/releases/download/v0.6.4/Obelisk-0.6.4-arm64.dmg.sha256"}
+        ]}"#;
+        let download = latest_download(release).unwrap();
+        assert_eq!(download.name, "Obelisk-0.6.4-arm64.dmg");
+        assert_eq!(download.size, 26422576);
+        assert!(download.checksum_url.ends_with("/Obelisk-0.6.4-arm64.dmg.sha256"));
+        assert_eq!(latest_download("not json"), None);
+        assert_eq!(latest_download(&release.replace("-arm64.dmg.sha256", "-arm64.dmg.md5")), None, "no checksum, no download");
+        assert_eq!(latest_download(&release.replace("https://github.com/Zagrios/Obelisk/", "https://example.com/Zagrios/Obelisk/")), None, "only from Obelisk's releases");
+        assert_eq!(latest_download(&release.replace("26422576", "99999999999")), None, "not a disk image of that size");
+        assert_eq!(latest_download(&release.replace("arm64", "x86_64")), None, "Apple silicon only");
+
+        let sum = "1684f0cdea69a38770e70a934f75054454d9bd16f79571e0074292e11dec330c";
+        assert_eq!(checksum(&format!("{sum}  Obelisk-0.6.4-arm64.dmg\n")).as_deref(), Some(sum));
+        assert_eq!(checksum(&sum.to_uppercase()).as_deref(), Some(sum));
+        assert_eq!(checksum("<html>Not Found</html>"), None);
+        assert_eq!(checksum(""), None);
     }
 
     #[test]

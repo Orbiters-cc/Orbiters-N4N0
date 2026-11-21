@@ -494,6 +494,11 @@ struct PretendMac {
     running: Mutex<Vec<(u32, bool)>>,
     obelisk: bool,
     vrchat: bool,
+    /// What `install_engine` and the person in Obelisk change: Obelisk here, then VRChat in it.
+    got_obelisk: std::sync::atomic::AtomicBool,
+    got_vrchat: std::sync::atomic::AtomicBool,
+    cannot_install: bool,
+    installs: Mutex<u32>,
     opened: Mutex<u32>,
     cannot_open: bool,
 }
@@ -502,13 +507,23 @@ impl Machine for PretendMac {
         self.running.lock().unwrap().clone()
     }
     fn installed(&self) -> bool {
-        self.obelisk && self.vrchat
+        !self.engine_missing() && (self.vrchat || self.got_vrchat.load(Ordering::Relaxed))
     }
     fn engine_missing(&self) -> bool {
-        !self.obelisk
+        !self.obelisk && !self.got_obelisk.load(Ordering::Relaxed)
     }
     fn by_hand(&self) -> bool {
         true
+    }
+    fn install_engine(&self, progress: &dyn Fn(EngineSetup), _stop: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+        *self.installs.lock().unwrap() += 1;
+        progress(EngineSetup::Downloading { percent: 50 });
+        if self.cannot_install {
+            return Err("no network".into());
+        }
+        progress(EngineSetup::Installing);
+        self.got_obelisk.store(true, Ordering::Relaxed);
+        Ok(())
     }
     fn start(&self, args: &[String]) -> Result<(), String> {
         assert!(args.is_empty(), "nothing can be given to a game the person starts in Obelisk");
@@ -1507,4 +1522,73 @@ fn a_newly_starting_unknown_vrchat_is_not_passed_because_an_older_one_never_spok
     // The same three, pressed again: starts.
     assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Sent { .. })));
     assert_eq!(machine.beside.lock().unwrap().len(), 1);
+}
+
+/// The press of "Install Obelisk & play VRChat" to the game: Obelisk is installed and opened, the person signs in and
+/// downloads VRChat there, and Play follows by itself (Obelisk opened again for its Play).
+#[test]
+fn install_obelisk_and_play_goes_on_to_the_game_by_itself() {
+    let machine = Arc::new(PretendMac::default());
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::NoEngine);
+    assert_eq!(c.launcher_do(Action::InstallEngine), None);
+    assert_eq!(*machine.installs.lock().unwrap(), 1);
+    assert_eq!(*machine.opened.lock().unwrap(), 1, "Obelisk is opened once installed, for the Steam sign-in");
+    assert_eq!(c.view().launcher.game, Game::NotInstalled);
+    assert_eq!(c.view().launcher.engine_setup, Some(EngineSetup::WaitingForGame));
+    c.launcher_game(machine.as_ref());
+    assert_eq!(*machine.opened.lock().unwrap(), 1, "nothing more while VRChat downloads");
+
+    machine.got_vrchat.store(true, Ordering::Relaxed);
+    c.launcher_game(machine.as_ref());
+    let until = Instant::now() + Duration::from_secs(5);
+    while c.view().launcher.game != Game::Starting(LaunchMode::Desktop) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(c.view().launcher.game, Game::Starting(LaunchMode::Desktop), "played without another press");
+    assert_eq!(*machine.opened.lock().unwrap(), 2, "Obelisk comes to the front for its Play");
+    assert_eq!(c.view().launcher.engine_setup, None);
+    c.launcher_game(machine.as_ref());
+    assert_eq!(*machine.opened.lock().unwrap(), 2, "once");
+}
+
+#[test]
+fn an_install_that_fails_says_why_and_can_be_tried_again() {
+    let machine = Arc::new(PretendMac { cannot_install: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert!(matches!(c.launcher_do(Action::InstallEngine), Some(Notice::Error(_))));
+    assert_eq!(c.view().launcher.engine_setup, Some(EngineSetup::Failed("no network".into())));
+    assert_eq!(*machine.opened.lock().unwrap(), 0, "nothing to open");
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::NoEngine, "the button is there again");
+    assert!(matches!(c.launcher_do(Action::InstallEngine), Some(Notice::Error(_))));
+    assert_eq!(*machine.installs.lock().unwrap(), 2);
+    // While one is under way, a second press starts no second download.
+    c.update(|s| s.launcher.engine_setup = Some(EngineSetup::Downloading { percent: 10 }));
+    assert_eq!(c.launcher_do(Action::InstallEngine), None);
+    assert_eq!(*machine.installs.lock().unwrap(), 2);
+}
+
+#[test]
+fn obelisk_opened_to_download_vrchat_plays_once_it_is_there_and_not_an_hour_later() {
+    let machine = Arc::new(PretendMac { obelisk: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.launcher_do(Action::OpenEngine), None);
+    assert!(c.launcher.lock().unwrap().play_when_ready.is_some());
+    // The download took more than an hour: the person presses Play when they are back.
+    c.launcher.lock().unwrap().play_when_ready = Instant::now().checked_sub(PLAY_WHEN_READY_FOR + Duration::from_secs(1));
+    machine.got_vrchat.store(true, Ordering::Relaxed);
+    c.launcher_game(machine.as_ref());
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(c.view().launcher.game, Game::NotRunning);
+    assert_eq!(*machine.opened.lock().unwrap(), 1, "Obelisk is not brought to the front long after");
+    assert!(c.launcher.lock().unwrap().play_when_ready.is_none());
+    // On a PC the button does not exist, and its action does nothing.
+    let pc = Controller::new(Settings::default());
+    pc.launcher_machine(Arc::new(Pretend::default()));
+    assert_eq!(pc.launcher_do(Action::InstallEngine), None);
+    assert_eq!(pc.view().launcher.engine_setup, None);
 }

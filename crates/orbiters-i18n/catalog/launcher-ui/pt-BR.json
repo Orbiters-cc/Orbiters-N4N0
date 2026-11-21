@@ -81,11 +81,14 @@
   "vrchat status\u0004Offline": "Offline",
   "request invite, short\u0004Request": "Pedir",
   "Request an invite from {name}": "Pedir um convite a {name}",
-  "VRChat runs on a Mac with Obelisk, free: turn Beta versions on in it.": "O VRChat roda no Mac com o Obelisk, grátis: ative nele as versões beta.",
-  "Get Obelisk": "Obter o Obelisk",
   "Download VRChat in Obelisk (Beta versions on in its settings), then come back.": "Baixe o VRChat no Obelisk (versões beta ativadas nos ajustes dele) e depois volte.",
   "Open Obelisk": "Abrir o Obelisk",
   "On this Mac, through Obelisk": "Neste Mac, pelo Obelisk",
   "Obelisk is open": "O Obelisk está aberto",
-  "Press Play on VRChat there": "Clique em Jogar no VRChat lá"
+  "Press Play on VRChat there": "Clique em Jogar no VRChat lá",
+  "Downloading Obelisk, which runs VRChat on a Mac: {percent} %": "Baixando o Obelisk, que roda o VRChat no Mac: {percent} %",
+  "Checking Obelisk and putting it in Applications…": "Verificando o Obelisk e colocando em Aplicativos…",
+  "VRChat runs on a Mac through Obelisk, a free app.": "O VRChat roda no Mac pelo Obelisk, um app gratuito.",
+  "Install Obelisk & play VRChat": "Instalar o Obelisk e jogar VRChat",
+  "Sign in to Steam in Obelisk and download VRChat. Play follows.": "Entre no Steam pelo Obelisk e baixe o VRChat. O jogo vem em seguida."
 }

@@ -123,7 +123,7 @@ pub fn is_vrchat_process(command: &[String], install: Option<&Path>) -> bool {
 pub fn session_game(record: &str) -> Option<u32> {
     let record: serde_json::Value = serde_json::from_str(record).ok()?;
     let app = record.get("store")?.get("app_id")?.as_u64()?;
-    if app.to_string() != crate::vrchat_launch::STEAM_APP || record.get("phase").and_then(serde_json::Value::as_str) == Some("Finished") {
+    if app.to_string() != crate::vrchat_launch::STEAM_APP || record.get("phase").and_then(serde_json::Value::as_str) == Some("Finished") { // i18n: not shown (a value in Obelisk's file)
         return None;
     }
     record.get("game")?.get("pid")?.as_u64().and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 1)

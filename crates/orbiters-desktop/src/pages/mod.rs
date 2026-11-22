@@ -30,6 +30,8 @@ mod gallery_select;
 pub mod sharing;
 pub mod requests;
 pub mod settings;
+mod settings_n4n0;
+pub mod settings_registry;
 pub mod splat_export;
 pub mod splat_worker;
 pub mod splats;
@@ -97,6 +99,20 @@ pub enum Go {
     VrchatAccount,
     /// Settings, where the Explorer points are with the Orbiters account (Home's points, REQUEST19 1).
     ExplorerPoints,
+    /// Settings on a setting (its registry id, `n4n0.calls`) or a sub-tab (`n4n0`): shown, brought into view, lit.
+    Settings(&'static str),
+}
+
+impl Go {
+    /// The setting (or sub-tab) of Settings it opens, for those that open Settings.
+    pub fn setting(self) -> Option<&'static str> {
+        match self {
+            Go::VrchatAccount => Some("account.vrchat"),
+            Go::ExplorerPoints => Some("account.explorer-points"),
+            Go::Settings(target) => Some(target),
+            Go::FreeSpace | Go::Projects => None,
+        }
+    }
 }
 
 impl Cx<'_> {

@@ -5,12 +5,15 @@ use super::{section, Cx};
 use crate::bridge::clients::{Change, Client, ClientStatus, Old, Registration};
 use crate::bridge::person::{Paused, HOTKEY};
 use crate::bridge::Command;
-use egui::{vec2, Sense, Ui};
+use egui::{pos2, vec2, Sense, Ui};
 use orbiters_core::settings::ExperimentalSettings;
 use orbiters_i18n::{mark, tr};
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Variant};
+
+/// How many of the bridge's last actions show.
+const BRIDGE_LINES: usize = 12;
 
 /// What VRChat's Terms say of this, plainly, right where it is turned on. Their Effective Date was October 23, 2026.
 const TERMS: &str = mark("VRChat's Terms of Service forbid using the platform with \"automated means\" not provided by VRChat, or \"in a manner inconsistent with individual human usage\" (section 13.2). This bridge is that. VRChat can suspend or terminate your account for it. Nothing here hides it from VRChat.");
@@ -209,27 +212,28 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         ui.add_space(12.0);
         widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 7.0), egui::Align2::LEFT_CENTER, &Txt::new(tr("Recent actions"), 13.5).weight(weight::MEDIUM));
         ui.add_space(24.0);
-        let height = 170.0;
+        // The last actions, newest at the bottom, in the page's own scroll (never a scroll area inside it).
+        let mut galleys = Vec::new();
+        if status.log.is_empty() {
+            galleys.push((ui.painter().layout_job(Txt::new(tr("Nothing yet."), 11.5).mono().color(theme::FG_3).line_height(17.0).job(width - 24.0)), theme::FG_3));
+        }
+        for line in status.log.iter().skip(status.log.len().saturating_sub(BRIDGE_LINES)) {
+            let color = if line.ok { theme::FG_2 } else { theme::WARN };
+            // Today's actions: the time says enough.
+            let when = super::local_time_unix(line.at);
+            let time = when.rsplit(", ").next().unwrap_or(&when);
+            let text = format!("{time}  {}", line.text);
+            galleys.push((ui.painter().layout_job(Txt::new(text, 11.5).mono().color(color).line_height(17.0).job(width - 24.0)), color));
+        }
+        let height = galleys.iter().map(|(g, _)| g.size().y).sum::<f32>() + 24.0;
         let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
         ui.painter().rect_filled(rect, theme::radius(12.0), theme::INK_900);
-        let mut inside = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(12.0)).id_salt("bridge-log"));
-        egui::ScrollArea::vertical().id_salt("bridge-log-scroll").stick_to_bottom(true).auto_shrink([false, false]).show(&mut inside, |ui| {
-            if status.log.is_empty() {
-                let g = ui.painter().layout_job(Txt::new(tr("Nothing yet."), 11.5).mono().color(theme::FG_3).line_height(17.0).job(width - 24.0));
-                let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
-                ui.painter().galley(r.min, g, theme::FG_3);
-            }
-            for line in &status.log {
-                let color = if line.ok { theme::FG_2 } else { theme::WARN };
-                // Today's actions: the time says enough.
-                let when = super::local_time_unix(line.at);
-                let time = when.rsplit(", ").next().unwrap_or(&when);
-                let text = format!("{time}  {}", line.text);
-                let g = ui.painter().layout_job(Txt::new(text, 11.5).mono().color(color).line_height(17.0).job(width - 24.0));
-                let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
-                ui.painter().galley(r.min, g, color);
-            }
-        });
+        let mut y = rect.top() + 12.0;
+        for (g, color) in galleys {
+            let h = g.size().y;
+            ui.painter().galley(pos2(rect.left() + 12.0, y), g, color);
+            y += h;
+        }
         ui.add_space(14.0);
     });
     changed

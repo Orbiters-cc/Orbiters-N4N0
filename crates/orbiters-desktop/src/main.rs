@@ -60,6 +60,8 @@ mod worlds;
 mod window;
 mod words;
 mod worker;
+#[cfg(all(test, windows))]
+mod test_crash;
 
 /// A development build reads switches from `<its name>.env` beside it, `ORBITERS_…=value` a line: the VR sandbox's
 /// shared session starts every agent's program with the session controller's own environment, so a test build cannot

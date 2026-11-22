@@ -404,6 +404,9 @@ pub enum Action {
     Play { mode: LaunchMode, destination: Option<Place> },
     /// Start a VRChat on this profile, beside any running on others; never a second one on the same profile.
     PlayOn { mode: LaunchMode, profile: u32 },
+    /// [`Action::PlayOn`] right into `destination` (Home's Where, REQUEST20 2): the instance's link goes to VRChat as it
+    /// starts on `profile`. Never sent to a VRChat already running on that profile.
+    PlayAt { mode: LaunchMode, profile: u32, destination: Place },
     /// Change the account's own profile (status, its text, bio, picture, banner) at VRChat.
     EditProfile(ProfileEdit),
     /// Read the account's own icons or gallery pictures, to choose among.
@@ -412,6 +415,9 @@ pub enum Action {
     ReadMine,
     /// Accept an invite and play it in that mode (or send the running game there).
     AcceptInvite { invite: String, mode: LaunchMode },
+    /// [`Action::AcceptInvite`] starting VRChat on `profile` (Home's Where, REQUEST20 2): the same one accept per invite,
+    /// the same card going and coming back, the same hide at VRChat once there.
+    AcceptInviteOn { invite: String, mode: LaunchMode, profile: u32 },
     /// Hide an invite / request / boop here (and mark it seen at VRChat when signed in).
     Dismiss { id: String },
     RequestInvite { to: String },

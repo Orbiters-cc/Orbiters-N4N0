@@ -1,0 +1,2 @@
+# The VRChat session kept through Orbiters environment and account changes (REQUEST20, stream vrchat-session). Its texts
+# are in files other areas cover: controller/vrchat_login.rs, controller/launcher.rs, pages/settings.rs.

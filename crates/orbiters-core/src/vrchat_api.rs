@@ -25,7 +25,9 @@ const ENTROPY: &[u8] = b"Orbiters.N4N0 VRChat session";
 /// The deadline is checked even while the controller is waiting for a network response.
 pub struct Gate {
     revoked: AtomicBool,
-    expires: Instant,
+    /// The deadline, in nanoseconds after `base`: Orbiters saying yes again pushes it on ([`Gate::extend`]).
+    base: Instant,
+    expires: AtomicU64,
     operations: AtomicU64,
 }
 impl Default for Gate {
@@ -35,10 +37,17 @@ impl Default for Gate {
 }
 impl Gate {
     pub fn for_duration(lifetime: Duration) -> Self {
-        Self { revoked: AtomicBool::new(false), expires: Instant::now() + lifetime, operations: AtomicU64::new(0) }
+        let gate = Self { revoked: AtomicBool::new(false), base: Instant::now(), expires: AtomicU64::new(0), operations: AtomicU64::new(0) };
+        gate.extend(lifetime);
+        gate
     }
     pub fn allowed(&self) -> bool {
-        !self.revoked.load(Ordering::Acquire) && Instant::now() < self.expires
+        !self.revoked.load(Ordering::Acquire) && (self.base.elapsed().as_nanos() as u64) < self.expires.load(Ordering::Acquire)
+    }
+    /// Good for at least `lifetime` from now (never shorter than it was). A revoked gate stays revoked.
+    pub fn extend(&self, lifetime: Duration) {
+        let until = (self.base.elapsed() + lifetime).as_nanos().min(u64::MAX as u128) as u64;
+        self.expires.fetch_max(until, Ordering::AcqRel);
     }
     /// Cancel queued personal work without disabling the separate logout transport.
     pub fn cancel_operations(&self) {
@@ -625,6 +634,45 @@ fn retry_after(value: Option<&str>) -> Duration {
 
 /// The saved session's file at most (two cookies, sealed): a larger one is damaged, and is not read whole.
 const SESSION_MAX: usize = 64 * 1024;
+/// The saved session, in the local data folder: one for this Windows account, whatever the Orbiters environment or
+/// account (the VRChat account is the same). Sealed with DPAPI for the current Windows user.
+pub const SESSION_FILE: &str = "vrchat-session.bin";
+/// The last good copy beside it, sealed the same way: read when the session file is damaged.
+pub const SESSION_BACKUP: &str = "vrchat-session.bin.prev";
+
+/// [`SESSION_BACKUP`] beside the session file `path` (its name and `.prev`).
+fn backup_of(path: &std::path::Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".prev");
+    PathBuf::from(name)
+}
+
+/// Sealed bytes as cookies: `None` when they are not this Windows user's session (damaged, another user's, empty).
+fn unseal(bytes: &[u8]) -> Option<Cookies> {
+    if bytes.is_empty() || bytes.len() > SESSION_MAX {
+        return None;
+    }
+    let plain = crate::dpapi::crypt(bytes, ENTROPY, false).ok()?;
+    let cookies: Cookies = serde_json::from_slice(&plain).ok()?;
+    (!cookies.auth.is_empty()).then_some(cookies)
+}
+
+/// Removes what a write killed half-way left beside the session (`<file>.<pid>-<n>.tmp`), once a minute old: sealed
+/// cookies are not left lying about.
+fn remove_stale_writes(path: &std::path::Path) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let Some(file) = file.to_str() else { continue };
+        let Some(rest) = file.strip_prefix(name).and_then(|r| r.strip_prefix('.')) else { continue };
+        let ours = rest.strip_suffix(".tmp").is_some_and(|r| r.split_once('-').is_some_and(|(a, b)| a.bytes().all(|c| c.is_ascii_digit()) && b.bytes().all(|c| c.is_ascii_digit())));
+        let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d > Duration::from_secs(60));
+        if ours && old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
 
 /// Up to `max + 1` bytes of the file at `path`: more than `max` says it is larger, without reading all of it.
 fn read_at_most(path: &std::path::Path, max: usize) -> std::io::Result<Vec<u8>> {
@@ -656,6 +704,13 @@ pub struct Client {
     /// Pages of world lists (searches, popular, favorites) by their path: what they found and whether more follow.
     world_lists: HashMap<String, (Instant, Vec<crate::maps::FoundWorld>, bool)>,
     store: Option<PathBuf>,
+    /// The account whose session VRChat ended (a 401 confirmed by a second look, or its cookie deleted): kept for "Sign
+    /// in again" instead of looking like a computer that never signed in. A new sign-in clears it.
+    ended: Option<User>,
+    /// How long to wait before the one look that confirms a 401 (VRChat answers a single one now and then).
+    recheck_delay: Duration,
+    /// Asking again after a 401 that the look said was not the session's end: a second one is not looked into again.
+    retrying: bool,
 }
 impl Client {
     pub fn new(allowed: Arc<Gate>) -> Self {
@@ -687,7 +742,10 @@ impl Client {
             instances: HashMap::new(),
             world_lists: HashMap::new(),
             // `%LOCALAPPDATA%/Orbiters` as before, or the given folders' (a harness, a test: never the person's session).
-            store: Some(crate::paths::local_data_root().join("vrchat-session.bin")),
+            store: Some(crate::paths::local_data_root().join(SESSION_FILE)),
+            ended: None,
+            recheck_delay: Duration::from_secs(2),
+            retrying: false,
         }
     }
     pub fn operation(&self, deadline: Instant) -> Operation { self.allowed.operation(deadline) }
@@ -720,22 +778,36 @@ impl Client {
         }
     }
     /// Called only after the feature check. A disabled feature never reads or decrypts this file.
+    /// A damaged session file falls back to the last good copy beside it (and is mended from it). No file at all is
+    /// "signed out" (an explicit sign-out removes both), never the copy alone.
     pub fn restore(&mut self) -> Result<bool> {
         self.permitted()?;
-        let path = self.store.as_ref().ok_or(Error::Storage)?;
-        let bytes = match read_at_most(path, SESSION_MAX) {
-            Ok(b) => b,
+        let path = self.store.clone().ok_or(Error::Storage)?;
+        let bytes = match read_at_most(&path, SESSION_MAX) {
+            Ok(b) => Some(b),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(_) => return Err(Error::Storage),
+            Err(_) => None,
         };
-        if bytes.len() > SESSION_MAX {
-            return Err(Error::Storage);
-        }
-        let plain = crate::dpapi::crypt(&bytes, ENTROPY, false).map_err(|_| Error::Storage)?;
+        remove_stale_writes(&path);
+        let main = bytes.as_deref().and_then(unseal);
+        let cookies = match main {
+            Some(c) => c,
+            None => {
+                let backup = read_at_most(&backup_of(&path), SESSION_MAX).ok().as_deref().and_then(unseal);
+                let Some(c) = backup else { return Err(Error::Storage) };
+                // Mended from the copy, best effort: the session works from memory either way.
+                if let Ok(sealed) = std::fs::read(backup_of(&path)) {
+                    let _ = crate::write_atomic_private(&path, &sealed);
+                }
+                c
+            }
+        };
         self.permitted()?;
-        self.cookies = serde_json::from_slice(&plain).map_err(|_| Error::Storage)?;
-        Ok(!self.cookies.auth.is_empty())
+        self.cookies = cookies;
+        Ok(true)
     }
+    /// Atomic (a temporary file renamed over it), then the same into the last good copy: a write killed at any point
+    /// leaves at least one whole, readable session.
     fn save(&self) -> Result<()> {
         self.permitted()?;
         // Unit tests have no store and never touch the person's session.
@@ -743,9 +815,13 @@ impl Client {
         let plain = serde_json::to_vec(&self.cookies).map_err(|_| Error::Storage)?;
         let sealed = crate::dpapi::crypt(&plain, ENTROPY, true).map_err(|_| Error::Storage)?;
         std::fs::create_dir_all(path.parent().ok_or(Error::Storage)?).map_err(|_| Error::Storage)?;
-        crate::write_atomic_private(path, &sealed).map_err(|_| Error::Storage)
+        crate::write_atomic_private(path, &sealed).map_err(|_| Error::Storage)?;
+        // The copy is a spare: failing to write it does not fail the sign-in.
+        let _ = crate::write_atomic_private(&backup_of(path), &sealed);
+        Ok(())
     }
-    fn forget(&mut self) -> Result<()> {
+    /// Lets go of the session in memory only (its file stays for a later restore).
+    fn clear(&mut self) {
         self.cookies = Cookies::default();
         self.user = None;
         self.pending_methods.clear();
@@ -755,14 +831,103 @@ impl Client {
         self.friends = None;
         self.instances.clear();
         self.world_lists.clear();
+    }
+    /// VRChat ended the session: it is let go of in memory, its account kept for "Sign in again". The file is not removed
+    /// (only the person's own sign-out does that): if VRChat was wrong, a restart or "Try again" brings it back.
+    fn end(&mut self) {
+        if let Some(user) = self.user.take() {
+            self.ended = Some(user);
+        }
+        self.clear();
+    }
+    /// The person's sign-out: memory, the session file and its copy.
+    fn forget(&mut self) -> Result<()> {
+        self.clear();
+        self.ended = None;
         if let Some(path) = &self.store {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return Err(Error::Storage),
+            // The session file first: once it is gone the person is signed out even if the copy stays a moment.
+            for file in [path.clone(), backup_of(path)] {
+                match std::fs::remove_file(&file) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(Error::Storage),
+                }
             }
         }
         Ok(())
+    }
+    /// The client of a new grant (another Orbiters identity or environment, or Orbiters' yes asked again) with this one's
+    /// session: cookies, who is signed in, what was read with it, its transport and saved file. This one keeps nothing
+    /// and stays on its own, revoked gate: requests queued on it are refused. Nothing is read again or asked of VRChat.
+    pub fn hand_over(&mut self, gate: Arc<Gate>) -> Client {
+        Client {
+            transport: self.transport.clone(),
+            cookies: std::mem::take(&mut self.cookies),
+            allowed: gate,
+            operation: None,
+            #[cfg(test)]
+            pacing_pause: None,
+            limiter: self.limiter.clone(),
+            user: self.user.take(),
+            pending_methods: std::mem::take(&mut self.pending_methods),
+            challenge_verified: std::mem::take(&mut self.challenge_verified),
+            avatars: std::mem::take(&mut self.avatars),
+            worlds: std::mem::take(&mut self.worlds),
+            friends: self.friends.take(),
+            instances: std::mem::take(&mut self.instances),
+            world_lists: std::mem::take(&mut self.world_lists),
+            store: self.store.clone(),
+            ended: self.ended.take(),
+            recheck_delay: self.recheck_delay,
+            retrying: false,
+        }
+    }
+    /// Who is signed in, while the grant allows it.
+    pub fn signed_in_user(&self) -> Option<User> {
+        self.signed_in().then(|| self.user.clone()).flatten()
+    }
+    /// Whether a session (or a sign-in under way) is held in memory, whatever the grant says.
+    pub fn holds_session(&self) -> bool {
+        !self.cookies.auth.is_empty()
+    }
+    /// Whether a saved session is on this computer (the file is only looked for, not read).
+    pub fn session_saved(&self) -> bool {
+        self.store.as_ref().is_some_and(|p| p.is_file())
+    }
+    /// The account whose session VRChat ended, until a new sign-in.
+    pub fn ended_user(&self) -> Option<&User> {
+        self.ended.as_ref()
+    }
+    /// One look at who is signed in, after a 401: `Ok(true)` the session is alive, `Ok(false)` VRChat ended it, an error
+    /// when VRChat could not say (no network, 429, 5xx): the session is kept then.
+    fn session_alive(&mut self) -> Result<bool> {
+        if !self.recheck_delay.is_zero() {
+            std::thread::sleep(self.recheck_delay);
+        }
+        self.pace("auth")?;
+        let cookie = self.cookies.header();
+        self.permitted()?;
+        let r = self.transport.send(Request { method: "GET", url: format!("{BASE}/auth/user"), cookie, basic: None, body: None, upload: None })?;
+        if r.status == 429 {
+            return Err(self.back_off(&r));
+        }
+        self.permitted()?;
+        let before = self.cookies.auth.clone();
+        self.cookies.absorb(&r.cookies);
+        if !before.is_empty() && self.cookies.auth.is_empty() {
+            return Ok(false);
+        }
+        match r.status {
+            200..=299 => match parse_login(&r.body) {
+                Ok(Login::SignedIn(_)) => Ok(true),
+                // Asking for a code again: the session as it was is over.
+                Ok(Login::TwoFactor(_)) => Ok(false),
+                Err(e) => Err(e),
+            },
+            401 => Ok(false),
+            500..=599 => Err(Error::Unavailable),
+            status => Err(Error::Refused(status, error_message(&r.body))),
+        }
     }
     fn pace(&self, family: &'static str) -> Result<()> {
         loop {
@@ -810,6 +975,9 @@ impl Client {
     ) -> Result<Response> {
         self.pace(family)?;
         let verifying = family == "auth" && url.contains("/twofactorauth/") && url.ends_with("/verify");
+        // A request of a signed-in session (not a password, not a code under way): a 401 to it is looked into once.
+        let of_session = basic.is_none() && self.pending_methods.is_empty() && !self.cookies.auth.is_empty();
+        let again = (method == "GET").then(|| (url.clone(), body.clone()));
         let session_host = url.starts_with("https://api.vrchat.cloud/") || url.starts_with("https://files.vrchat.cloud/");
         let cookie = if session_host { self.cookies.header() } else { String::new() };
         self.permitted()?;
@@ -824,7 +992,8 @@ impl Client {
             self.cookies.absorb(&response.cookies);
         }
         if !before.auth.is_empty() && self.cookies.auth.is_empty() {
-            self.forget()?;
+            // VRChat deleted the cookie: that session is over.
+            self.end();
             return Err(Error::Unauthorized);
         }
         if accept.contains(&response.status) {
@@ -833,8 +1002,28 @@ impl Client {
         match response.status {
             400 if verifying => Err(Error::WrongCode),
             401 if !session_host => Err(Error::NotFound),
+            // Already looked into: the session is alive, this one request was refused.
+            401 if self.retrying => Err(Error::Refused(401, error_message(&response.body))),
+            401 if of_session => match self.session_alive() {
+                // Alive: a read is asked once more, anything else said to be refused (nothing was done).
+                Ok(true) => match again {
+                    Some((url, body)) => {
+                        self.retrying = true;
+                        let r = self.request_accepting(family, method, url, None, body, accept);
+                        self.retrying = false;
+                        r
+                    }
+                    None => Err(Error::Refused(401, error_message(&response.body))),
+                },
+                Ok(false) => {
+                    self.end();
+                    Err(Error::Unauthorized)
+                }
+                // VRChat could not say (no network, 429, 5xx, signed out of Orbiters meanwhile): the session stays.
+                Err(e) => Err(e),
+            },
             401 => {
-                self.forget()?;
+                self.end();
                 Err(Error::Unauthorized)
             }
             404 | 403 => Err(Error::NotFound),
@@ -869,6 +1058,7 @@ impl Client {
             Login::SignedIn(user) => {
                 self.save()?;
                 self.user = Some(user.clone());
+                self.ended = None;
                 self.pending_methods.clear();
                 self.challenge_verified = false;
             }
@@ -886,9 +1076,11 @@ impl Client {
         }
         Ok(login)
     }
+    /// The session file is replaced only once the new sign-in is complete: a wrong password or an abandoned code leaves
+    /// the saved one as it was.
     pub fn sign_in(&mut self, username: &str, password: &str) -> Result<Login> {
         self.permitted()?;
-        self.forget()?;
+        self.clear();
         let response = self.request("auth", "GET", format!("{BASE}/auth/user"), Some(basic_header(username, password)), None)?;
         self.accept_login(&response.body)
     }
@@ -917,7 +1109,8 @@ impl Client {
     }
     pub fn cancel_login(&mut self) -> Result<()> {
         self.permitted()?;
-        self.forget()
+        self.clear();
+        Ok(())
     }
     /// Retry a saved or partly completed session without sending a password or repeating verification.
     pub fn resume(&mut self) -> Result<Option<Login>> {
@@ -1683,12 +1876,14 @@ pub(crate) mod tests {
         c.transport = Arc::new(Mock { answers: Mutex::new(answers.into()), seen: seen.clone() });
         c.limiter = Default::default();
         c.store = None;
+        c.recheck_delay = Duration::ZERO;
         c.user = Some(User { id: "usr_test".into(), display_name: "Tester".into(), ..Default::default() });
         c.cookies.auth = "mock-session".into();
         (c, seen)
     }
+    /// A session VRChat ended: its 401, and the same to the look that confirms it.
     pub(crate) fn expired_session() -> Client {
-        mock(vec![response(401, "", &[])]).0
+        mock(vec![response(401, "", &[]), response(401, "", &[])]).0
     }
     fn chooser_instance(id: &str, access: &str) -> serde_json::Value {
         serde_json::json!({"worldId":"wrld_test", "instanceId":id, "accessType":access, "region":"eu", "n_users":3,
@@ -1718,7 +1913,7 @@ pub(crate) mod tests {
         let (mut c, _) = mock(vec![json(serde_json::json!({"instances":[]}))]);
         assert!(c.world_instances("wrld_test").unwrap().items.is_empty());
         for status in [401,500,429] {
-            let (mut c, _) = mock(vec![response(status,"",&[])]);
+            let (mut c, _) = mock(vec![response(status,"",&[]),response(status,"",&[])]);
             let error = c.world_instances("wrld_test").unwrap_err();
             assert!(match status {401=>error==Error::Unauthorized,500=>error==Error::Unavailable,_=>matches!(error,Error::RateLimited(_))});
         }
@@ -2055,7 +2250,7 @@ pub(crate) mod tests {
     }
     #[test]
     fn expired_session_and_rate_limit_are_actionable() {
-        let (mut c, _) = mock(vec![response(401, "", &[])]);
+        let (mut c, _) = mock(vec![response(401, "", &[]), response(401, "", &[])]);
         assert_eq!(c.current_user(), Err(Error::Unauthorized));
         let mut r = response(429, "", &[]);
         r.retry_after = Some("20".into());
@@ -2254,9 +2449,205 @@ pub(crate) mod tests {
         restored.resume().unwrap();
         assert_eq!(seen.lock().unwrap()[0].cookie, "auth=rotated");
         assert!(seen.lock().unwrap()[0].basic.is_none());
+        assert!(backup_of(&path).exists(), "the last good copy beside it");
         assert_eq!(c.sign_out(), Err(Error::Unavailable));
-        assert!(!path.exists());
+        assert!(!path.exists() && !backup_of(&path).exists(), "the person's sign-out removes the session and its copy");
         assert!(!c.signed_in() && c.cookies.header().is_empty());
+    }
+    fn signed_in_body() -> &'static str {
+        r#"{"id":"usr_test","displayName":"Tester"}"# // i18n: not shown (inside a test the scan cannot skip)
+    }
+    fn unpaced(answers: Vec<Response>) -> (Client, Arc<Mutex<Vec<Request>>>) {
+        let (c, seen) = mock(answers);
+        c.limiter.lock().unwrap().unpaced = true;
+        (c, seen)
+    }
+    fn session_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("orbiters-r20-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+    /// r20: VRChat answering one 401 does not end the session: one look at who is signed in, then the read is asked again.
+    #[test]
+    fn a_single_401_is_looked_into_and_the_read_asked_again() {
+        let (mut c, seen) = unpaced(vec![response(401, "", &[]), response(200, signed_in_body(), &[]), json(serde_json::json!({"id":"avtr_a","name":"A"}))]);
+        assert_eq!(c.avatar("avtr_a").unwrap().name, "A");
+        assert!(c.signed_in() && c.holds_session() && c.ended_user().is_none());
+        let urls: Vec<String> = seen.lock().unwrap().iter().map(|r| r.url.clone()).collect();
+        assert_eq!(urls.len(), 3);
+        assert!(urls[1].ends_with("/auth/user") && urls[2].ends_with("/avatars/avtr_a"));
+        assert!(seen.lock().unwrap().iter().all(|r| r.method != "PUT"), "no logout");
+        // Alive, but this request refused twice: said refused, still signed in, not looked into twice.
+        let (mut c, seen) = unpaced(vec![response(401, "", &[]), response(200, signed_in_body(), &[]), response(401, "", &[])]);
+        assert_eq!(c.avatar("avtr_b"), Err(Error::Refused(401, String::new())));
+        assert!(c.signed_in());
+        assert_eq!(seen.lock().unwrap().len(), 3);
+    }
+    /// r20: a session VRChat really ended (401 to the look too) is let go of, keeps its account's name, and its file stays.
+    #[cfg(windows)]
+    #[test]
+    fn a_confirmed_401_ends_the_session_but_keeps_the_name_and_the_file() {
+        let dir = session_dir("revoked");
+        let path = dir.join(SESSION_FILE);
+        let (mut c, seen) = unpaced(vec![response(401, "", &[]), response(401, "", &[])]);
+        c.store = Some(path.clone());
+        c.save().unwrap();
+        assert_eq!(c.friends(), Err(Error::Unauthorized));
+        assert!(!c.signed_in() && !c.holds_session());
+        assert_eq!(c.ended_user().map(|u| u.display_name.as_str()), Some("Tester"));
+        assert!(path.is_file(), "only the person's sign-out removes the file");
+        assert!(seen.lock().unwrap().iter().all(|r| !r.url.ends_with("/logout")), "VRChat's logout is never called for them");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// r20: when the look itself gets a 429, a 5xx or a password-less refusal of another kind, the session stays.
+    #[test]
+    fn rate_limits_and_outages_never_sign_out() {
+        for look in [response(429, "", &[]), response(503, "", &[]), response(502, "", &[])] {
+            let status = look.status;
+            let (mut c, _) = unpaced(vec![response(401, "", &[]), look]);
+            let e = c.friends().unwrap_err();
+            assert!(matches!(e, Error::RateLimited(_) | Error::Unavailable), "{status}: {e:?}");
+            assert!(c.signed_in() && c.holds_session(), "{status}: kept");
+        }
+        // A 429 or 5xx straight away is not a sign-out either.
+        for first in [response(429, "", &[]), response(500, "", &[])] {
+            let (mut c, _) = unpaced(vec![first]);
+            assert!(c.friends().is_err());
+            assert!(c.signed_in());
+        }
+    }
+    /// r20: a social send refused with 401 while the session is alive is not sent again (VRChat did nothing).
+    #[test]
+    fn a_send_refused_with_401_is_not_repeated() {
+        let (mut c, seen) = unpaced(vec![response(401, "", &[]), response(200, signed_in_body(), &[])]);
+        assert_eq!(c.invite_self("wrld_a", "1"), Err(Error::Refused(401, String::new())));
+        assert_eq!(seen.lock().unwrap().iter().filter(|r| r.method == "POST").count(), 1);
+        assert!(c.signed_in());
+    }
+    /// r20: a damaged session file is read from the last good copy, and mended from it.
+    #[cfg(windows)]
+    #[test]
+    fn a_damaged_session_file_falls_back_to_the_last_good_copy() {
+        let dir = session_dir("damaged");
+        let path = dir.join(SESSION_FILE);
+        let (mut c, _) = mock(vec![]);
+        c.store = Some(path.clone());
+        c.cookies.auth = "r20-good-cookie".into();
+        c.save().unwrap();
+        for damage in [b"half a fil".to_vec(), Vec::new(), vec![0u8; 3 * SESSION_MAX]] {
+            std::fs::write(&path, &damage).unwrap();
+            let (mut fresh, _) = mock(vec![]);
+            fresh.cookies = Cookies::default();
+            fresh.store = Some(path.clone());
+            assert_eq!(fresh.restore(), Ok(true), "{} bytes", damage.len());
+            assert_eq!(fresh.cookies.auth, "r20-good-cookie");
+            assert_eq!(unseal(&std::fs::read(&path).unwrap()).unwrap().auth, "r20-good-cookie", "mended");
+        }
+        // Both damaged: not a session, an error that offers "Try again"; no file at all: signed out.
+        std::fs::write(&path, b"x").unwrap();
+        std::fs::write(backup_of(&path), b"y").unwrap();
+        let (mut fresh, _) = mock(vec![]);
+        fresh.store = Some(path.clone());
+        assert_eq!(fresh.restore(), Err(Error::Storage));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(fresh.restore(), Ok(false), "the copy alone is never a session: a sign-out removes the file first");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// r20: a write killed half-way (its temporary file left, the rename never done) loses nothing: the session file is
+    /// whole, and the leftover is removed once old.
+    #[cfg(windows)]
+    #[test]
+    fn an_interrupted_write_leaves_the_session_whole() {
+        let dir = session_dir("crash");
+        let path = dir.join(SESSION_FILE);
+        let (mut c, _) = mock(vec![]);
+        c.store = Some(path.clone());
+        c.cookies.auth = "r20-before".into();
+        c.save().unwrap();
+        // The next write died after its temporary file, before the rename.
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".4242-7.tmp");
+        let tmp = PathBuf::from(tmp);
+        std::fs::write(&tmp, b"half").unwrap();
+        std::fs::File::options().write(true).open(&tmp).unwrap().set_modified(std::time::SystemTime::now() - Duration::from_secs(600)).unwrap();
+        // And one that died between the session file and its copy: the copy is the earlier session, both readable.
+        c.cookies.auth = "r20-after".into();
+        let sealed = crate::dpapi::crypt(&serde_json::to_vec(&c.cookies).unwrap(), ENTROPY, true).unwrap();
+        crate::write_atomic_private(&path, &sealed).unwrap();
+        let (mut fresh, _) = mock(vec![]);
+        fresh.store = Some(path.clone());
+        assert_eq!(fresh.restore(), Ok(true));
+        assert_eq!(fresh.cookies.auth, "r20-after");
+        assert_eq!(unseal(&std::fs::read(backup_of(&path)).unwrap()).unwrap().auth, "r20-before");
+        assert!(!tmp.exists(), "a stale half-write is removed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// r20: two processes (here threads) saving at once never leave a mixed or half file.
+    #[cfg(windows)]
+    #[test]
+    fn two_writers_at_once_leave_a_readable_session() {
+        let dir = session_dir("writers");
+        let path = dir.join(SESSION_FILE);
+        let handles: Vec<_> = (0..2)
+            .map(|n| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let (mut c, _) = mock(vec![]);
+                    c.store = Some(path);
+                    for i in 0..15 {
+                        c.cookies.auth = format!("r20-writer-{n}-{i}");
+                        c.save().unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        for file in [path.clone(), backup_of(&path)] {
+            assert!(unseal(&std::fs::read(&file).unwrap()).unwrap().auth.starts_with("r20-writer-"));
+        }
+        let leftovers = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(leftovers, 2, "the session and its copy, no temporary files");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// r20: starting a sign-in or abandoning its code leaves the saved session as it was; only the person's sign-out removes it.
+    #[cfg(windows)]
+    #[test]
+    fn only_signing_out_removes_the_saved_session() {
+        let dir = session_dir("cancel");
+        let path = dir.join(SESSION_FILE);
+        let (mut c, seen) = mock(vec![response(200, r#"{"requiresTwoFactorAuth":["totp"]}"#, &["auth=half"])]);
+        c.store = Some(path.clone());
+        c.save().unwrap();
+        assert!(matches!(c.sign_in("someone", "wrong"), Ok(Login::TwoFactor(_))));
+        c.cancel_login().unwrap();
+        assert!(path.is_file() && backup_of(&path).is_file());
+        assert_eq!(seen.lock().unwrap().len(), 1, "no logout");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// r20: a new grant (another Orbiters identity or environment) goes on with the session in memory: nothing read again,
+    /// nothing asked of VRChat, and the earlier grant's client keeps nothing.
+    #[test]
+    fn a_new_grant_carries_the_session_without_asking_vrchat() {
+        let (mut old, seen) = mock(vec![]);
+        old.allowed.revoke();
+        let new = old.hand_over(Arc::new(Gate::for_duration(Duration::from_secs(60))));
+        assert!(new.signed_in() && new.holds_session() && new.signed_in_user_id() == Some("usr_test"));
+        assert!(!old.holds_session() && old.user.is_none() && !old.signed_in());
+        assert!(seen.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn a_gate_is_extended_but_never_revived() {
+        let gate = Gate::for_duration(Duration::ZERO);
+        assert!(!gate.allowed());
+        gate.extend(Duration::from_secs(60));
+        assert!(gate.allowed());
+        gate.extend(Duration::from_secs(1));
+        assert!(gate.allowed(), "never shortened");
+        gate.revoke();
+        gate.extend(Duration::from_secs(60));
+        assert!(!gate.allowed());
     }
     #[cfg(windows)]
     #[test]
@@ -2483,6 +2874,16 @@ pub(crate) mod tests {
     }
 }
 
+/// A client for another crate's tests: no saved session file, and any HTTP request panics.
+#[cfg(feature = "test-support")]
+pub fn offline_client(gate: Arc<Gate>) -> Client {
+    let (c, _) = test_client(gate, vec![]);
+    let mut c = c;
+    c.cookies = Cookies::default();
+    c.user = None;
+    c
+}
+
 /// In-memory HTTP seam for cross-crate regression tests. No cookies or session files leave this fake.
 #[cfg(feature = "test-support")]
 pub fn test_client(gate: Arc<Gate>, replies: Vec<(u16, serde_json::Value)>) -> (Client, Arc<Mutex<Vec<(String, String)>>>) {
@@ -2497,6 +2898,7 @@ pub fn test_client(gate: Arc<Gate>, replies: Vec<(u16, serde_json::Value)>) -> (
     let calls = Arc::new(Mutex::new(vec![]));
     let mut c = Client::new(gate);
     c.store = None;
+    c.recheck_delay = Duration::ZERO;
     c.limiter = Arc::new(Mutex::new(Limiter { unpaced: true, ..Default::default() }));
     c.cookies.auth = "fake".into();
     c.user = Some(User { id: "usr_test".into(), ..Default::default() });

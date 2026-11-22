@@ -1003,7 +1003,9 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
     use crate::controller::vrchat_login::{Command, Recovery};
     use orbiters_core::vrchat_api::{Secret, TwoFactor};
     let status = &cx.snap.vrchat_login;
-    if !status.allowed || !matches!(cx.snap.account.state, AccountState::SignedIn { .. }) {
+    // Orbiters being checked or out of reach keeps the card (r20): the VRChat session waits, it is not signed out.
+    let orbiters = matches!(cx.snap.account.state, AccountState::SignedIn { .. } | AccountState::Checking { .. } | AccountState::Offline { .. });
+    if !(status.allowed || status.waiting) || !orbiters {
         *state = VrchatForm::default();
         return;
     }
@@ -1017,6 +1019,8 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
     let busy = status.busy || state.pending;
     let subtitle = if let Some(user) = &status.user {
         tr!("Signed in as {username}", username = user.display_name)
+    } else if let (true, Some(user)) = (status.waiting, &status.known) {
+        tr!("{username}, waiting for Orbiters", username = user.display_name)
     } else if !status.methods.is_empty() {
         tr("Two-factor authentication: one more step").into()
     } else {
@@ -1025,7 +1029,11 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
     let mut command = None;
     section(ui, cx, 10, icons::VIRTUAL_REALITY, tr("VRChat account"), Some(&subtitle), |ui| {
         ui.add_space(6.0);
-        if let Some(user) = &status.user {
+        if status.waiting {
+            state.picture = None;
+            ui.add_space(6.0);
+            super::sharing::working(ui, tr("Kept on this computer. It comes back by itself once Orbiters answers."));
+        } else if let Some(user) = &status.user {
             if let Some(picture) = &status.picture {
                 if state.picture.as_ref().is_none_or(|(id, revision, _)| id != &user.id || *revision != status.revision) {
                     let image = egui::ColorImage::from_rgba_unmultiplied([picture.width as usize, picture.height as usize], &picture.rgba);

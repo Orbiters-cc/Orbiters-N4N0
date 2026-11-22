@@ -122,7 +122,8 @@ mod tests {
         let (a, _) = asked(vec![(200, instance()), (429, serde_json::json!({}))], &location());
         assert!(failed(&a, "rate limiting"), "{a:?}");
         // The session expired: sign in again, with the way there.
-        let (a, _) = asked(vec![(401, serde_json::json!({}))], &location());
+        // (r20: a 401 is looked into once, who is signed in, before the session counts as ended.)
+        let (a, _) = asked(vec![(401, serde_json::json!({})), (401, serde_json::json!({}))], &location());
         assert!(matches!(&a, InviteAnswer::NeedsVrchat { message } if message.contains("expired")), "{a:?}");
     }
 

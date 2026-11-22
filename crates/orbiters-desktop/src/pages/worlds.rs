@@ -901,7 +901,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                         r.translate(vec2(0.0, dy)),
                         icons::CUBE,
                         tr("No session recorded here yet"),
-                        tr("Record this world from the Capture page with the capture kit's depth frames on, then come back to share it in 3D."),
+                        tr("Record this world from the capture bar of Photos & captures with the capture kit's depth frames on, then come back to share it in 3D."),
                     );
                 }
                 for s in &world.sessions {

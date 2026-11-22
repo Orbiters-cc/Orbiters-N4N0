@@ -300,7 +300,7 @@ impl Page {
             Page::Worlds => tr("Worlds in 3D"),
             Page::Instances => tr("Previous instances"),
             Page::Youtube => "YouTube",
-            Page::VideoHistory => tr("History"),
+            Page::VideoHistory => tr("Video history"),
             Page::Ask => tr("Ask N4N0"),
             Page::MenuSettings => tr("Settings"),
             Page::Tracking => tr("Smooth tracking"),
@@ -321,7 +321,7 @@ impl Page {
             Page::AppCaptures => tr("Photos & captures"),
             Page::AppWorlds => tr("Worlds"),
             Page::AppEvents => tr("Events"),
-            Page::AppVideos => tr("Videos"),
+            Page::AppVideos => tr("Video history"),
             Page::AppSettings => tr("Settings"),
         }
     }

@@ -19,6 +19,8 @@ fn older(name: &str) -> Option<&'static str> {
         "settings-start" => "app.start-windows",
         "settings-watch" => "vr.watch",
         "settings-vr-audio" => "vr.audio-output",
+        // REQUEST21: the smoothing's Reset, the values moved off the measured ones (photos_capture.rs makes the scene).
+        "settings-smoothing-reset" => "vr.smoothing-reset",
         "network-settings" => "vrchat.network",
         "vrchat-bridge" => "vrchat.bridge",
         n if n.starts_with("vrchat-login") || n.starts_with("launcher-") => "account.vrchat",

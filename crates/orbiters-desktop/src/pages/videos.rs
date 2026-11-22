@@ -534,7 +534,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     {
         let mut tu = ui.new_child(UiBuilder::new().max_rect(head_r).id_salt("videos-title"));
         tu.multiply_opacity(head_a);
-        super::heading(&tu, head_r, "VRChat", tr("Videos"), Some(&sub));
+        super::heading(&tu, head_r, "VRChat", tr("Video history"), Some(&sub));
     }
     let mut su = ui.new_child(UiBuilder::new().max_rect(search_r).id_salt("videos-search"));
     widgets::search_field(&mut su, "videos-search", &mut state.query, tr("Search videos"), 224.0);

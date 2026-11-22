@@ -173,6 +173,14 @@ impl State {
     }
 
     /// Opens the storage popover, on its confirmation when `confirming` (screenshots).
+    /// Back to the gallery: Capture files, a capture's detail, the storage popover and the 3D viewer are left.
+    pub fn to_gallery(&mut self) {
+        self.manage = false;
+        self.detail = None;
+        self.storage = None;
+        self.viewer = None;
+    }
+
     pub fn open_storage(&mut self, confirming: bool) {
         self.serial += 1;
         self.storage = Some(if confirming { Popover::confirming(self.serial) } else { Popover::new(self.serial) });
@@ -265,13 +273,22 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
+/// Photos & captures: its gallery, the capture element at its top (REQUEST21 5: the Capture tab's content, `capture`,
+/// with the capture kit's avatar picker of Unity projects, `projects`); or its capture files.
+pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::capture::State, projects: &mut super::projects::State) {
     if state.sessions.is_none() && !state.list.running() {
         state.read_list_for(ui.ctx(), (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit));
     }
     state.take_list(cx.snap.cleanup.as_ref(), anim::time(ui.ctx()));
     if !state.manage && state.detail.is_none() && state.storage.is_none() && state.viewer.is_none() {
-        state.manage = super::gallery::show(ui, cx, &mut state.gallery);
+        state.manage = super::gallery::show(ui, cx, &mut state.gallery, capture, projects);
+        // A capture that is not among the gallery's cards (still being read): its detail, in Capture files.
+        if let Some(dir) = state.gallery.take_review() {
+            let ctx = ui.ctx().clone();
+            let middle = ui.max_rect().center();
+            state.open_session(&ctx, dir, Rect::from_center_size(middle, vec2(300.0, 200.0)));
+        }
+        super::projects::modals(ui, cx, projects);
         return;
     }
     show_library(ui, cx, state);
@@ -865,7 +882,7 @@ fn empty_state(ui: &mut Ui, cx: &Cx, searching: bool, height: f32) {
     let (title, text) = if searching {
         (tr("No session matches"), tr("Try another world name."))
     } else {
-        (tr("No sessions yet"), tr("Record in VRChat from the Capture page, or import a raw capture from Mixer's simulator."))
+        (tr("No sessions yet"), tr("Record in VRChat from the capture bar of Photos & captures, or import a raw capture from Mixer's simulator."))
     };
     widgets::text(&p, rect.center() + vec2(0.0, 18.0), Align2::CENTER_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({

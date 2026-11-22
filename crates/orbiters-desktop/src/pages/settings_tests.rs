@@ -377,3 +377,36 @@ fn settings_speak_the_language() {
         });
     }
 }
+
+/// REQUEST21 (Enzo: "a reset button for the smoothing values to put them back to the default ones that have been measured
+/// to be matching vrchat the most"): Reset under the two sliders writes both back to the measured values (the defaults),
+/// as the sliders write them, says so briefly, and is greyed once both are there.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn reset_puts_the_menus_smoothing_back_to_the_values_measured_with_vrchat() {
+    use orbiters_core::settings::OrbitSettings;
+    orbiters_ui::widgets::watch_controls();
+    let mut h = Harness::new();
+    h.snap.settings.orbit.vr_smoothing_quick_menu_ms = 60.0;
+    h.snap.settings.orbit.vr_smoothing_wheel_ms = 5.0;
+    // Brought into view as the search would (it is under the card's other rows).
+    h.open("vr.smoothing-reset");
+    h.row("Reset the smoothing");
+    let (r, on) = orbiters_ui::widgets::control(&h.ctx, "Reset").expect("Reset is drawn");
+    assert!(on, "off the measured values: it takes a press");
+    h.press(r.center());
+    h.settle();
+    let (quick, wheel) = OrbitSettings::measured_smoothing();
+    let patch = h.patches().last().cloned().expect("a change written");
+    assert_eq!(patch["orbit"]["vr_smoothing_quick_menu_ms"].as_f64(), Some(quick as f64), "{patch}");
+    assert_eq!(patch["orbit"]["vr_smoothing_wheel_ms"].as_f64(), Some(wheel as f64), "{patch}");
+    let (patched, left_out) = (*h.snap.settings).clone().patched(&patch);
+    assert!(left_out.is_empty() && patched.orbit.smoothing_as_measured(), "{left_out:?}");
+    // The service writes it: at the measured values, Reset is greyed.
+    h.snap.settings.orbit.vr_smoothing_quick_menu_ms = quick;
+    h.snap.settings.orbit.vr_smoothing_wheel_ms = wheel;
+    h.settle();
+    let (_, on) = orbiters_ui::widgets::control(&h.ctx, "Reset").expect("Reset is drawn");
+    assert!(!on, "both at the measured values: nothing to reset");
+}
+

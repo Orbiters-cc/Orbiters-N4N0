@@ -76,7 +76,7 @@ pub(super) fn stage(ctx: &egui::Context, gallery: &mut crate::pages::gallery::St
 const SHOT: &str = "VRChat_2026-10-28_21-12-04.318_1920x1080";
 
 /// The made-up pictures: several shapes, and the multi-layer one with its three layers (written when missing).
-fn entries(dir: &Path) -> Vec<Entry> {
+pub(super) fn entries(dir: &Path) -> Vec<Entry> {
     let _ = std::fs::create_dir_all(dir);
     let shapes: [(u32, u32); 7] = [(960, 540), (540, 960), (720, 720), (800, 600), (1050, 450), (900, 600), (600, 900)];
     let mut out = Vec::new();

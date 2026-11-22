@@ -35,5 +35,6 @@
   "VRChat did not say": "VRChatから返答がありません",
   "New instance of this world": "このワールドの新しいインスタンス",
   "Choose": "選ぶ",
-  "Previous instance · {when}": "過去のインスタンス · {when}"
+  "Previous instance · {when}": "過去のインスタンス · {when}",
+  "In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording.": "VRでは、録画中にカメラの軌跡とカバーした範囲がコントローラーの上に浮かびます。「写真とキャプチャ」のキャプチャのオプションと同じ表示です。SteamVRが表示するのはヘッドセット内だけで、VRChatのカメラや録画には映りません。"
 }

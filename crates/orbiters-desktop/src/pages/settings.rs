@@ -1055,7 +1055,7 @@ fn headset_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> boo
         widgets::field(
             ui,
             tr("Coverage while recording"),
-            Some(tr("In VR, the camera path and what it has covered float above a controller while you record, as on the Capture page. SteamVR shows it in your headset only: never in VRChat's camera or the recording.")),
+            Some(tr("In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording.")),
             300.0,
             |ui| {
                 apply |= widgets::segmented(ui, "coverage-overlay", &mut draft.coverage_overlay, &hands, true);

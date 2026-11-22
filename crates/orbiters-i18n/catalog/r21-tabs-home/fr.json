@@ -35,5 +35,6 @@
   "VRChat did not say": "VRChat n’a pas répondu",
   "New instance of this world": "Nouvelle instance de ce monde",
   "Choose": "Choisir",
-  "Previous instance · {when}": "Instance précédente · {when}"
+  "Previous instance · {when}": "Instance précédente · {when}",
+  "In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording.": "En VR, le trajet de la caméra et ce qu’elle a couvert flottent au-dessus d’une manette pendant l’enregistrement, comme dans les options de capture de Photos et captures. SteamVR ne l’affiche que dans ton casque : jamais dans la caméra de VRChat ni dans l’enregistrement."
 }

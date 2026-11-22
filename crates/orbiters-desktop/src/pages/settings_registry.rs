@@ -277,7 +277,7 @@ pub static ENTRIES: &[Entry] = &[
     e("vr.watch", Vr, CARD_HEADSET, mark("Orbiters watch"), mark("The N4N0 mark on a wrist in VR, shown as you turn the wrist to look at it. Point at it with the other hand and pull the trigger once: N4N0's menu opens before you (or on your avatar's N4N0 screen), used with your controllers' lasers while VRChat keeps them; pull again to close it. Grip it to move it. The Orbiters panel floats beside you from the SteamVR tab's Float button."), mark("wrist watch hand left right"))
         .rows(&[mark("Orbiters watch"), mark("Watch on")])
         .gate(Gate::VrchatHere),
-    e("vr.coverage", Vr, CARD_HEADSET, mark("Coverage while recording"), mark("In VR, the camera path and what it has covered float above a controller while you record, as on the Capture page. SteamVR shows it in your headset only: never in VRChat's camera or the recording."), mark("path coverage controller")).gate(Gate::VrchatHere),
+    e("vr.coverage", Vr, CARD_HEADSET, mark("Coverage while recording"), mark("In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording."), mark("path coverage controller")).gate(Gate::VrchatHere),
     e("vr.walk", Vr, CARD_HEADSET, mark("Walk boost"), mark("In VR, your walking stick carries you further, so you walk faster in VRChat. Also in the SteamVR tab and N4N0's menu."), mark("fast walk speed strength locomotion OVR Advanced Settings driver"))
         .rows(&[mark("Walk boost"), mark("Strength"), mark("Through SteamVR's driver"), mark("Fast walk's lesser mode")])
         .gate(Gate::VrchatHere),

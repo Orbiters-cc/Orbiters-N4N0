@@ -85,3 +85,5 @@ crates/orbiters-desktop/src/controller/launcher_tests.rs
 crates/orbiters-core/src/launcher_live.rs
 # The shared 3D view's protocol (its words are the contract's, never shown).
 crates/orbiters-core/src/shared_view.rs
+# VRChat groups' service tests (made-up groups and replies).
+crates/orbiters-desktop/src/controller/groups_tests.rs

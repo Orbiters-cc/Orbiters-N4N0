@@ -713,3 +713,48 @@ pub mod stage {
         state.flow = Some(Flow::Confirming { prepared, serial: state.serial, origin });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M9: an answer asked under an earlier generation (another account, a page closed) is dropped, never shown.
+    #[test]
+    fn obsolete_answers_are_dropped() {
+        let mut jobs = Jobs::default();
+        jobs.running.push(Kind::Discover);
+        let old = jobs.generation;
+        jobs.reset();
+        jobs.tx.send(Answer { generation: old, kind: Kind::Discover, reply: Reply::Discovered(vec![GroupCard::default()]), image: None, source: None }).unwrap();
+        assert!(jobs.take().is_empty(), "a reply to the old account is not taken");
+        jobs.tx.send(Answer { generation: jobs.generation, kind: Kind::Discover, reply: Reply::Discovered(vec![]), image: None, source: None }).unwrap();
+        assert_eq!(jobs.take().len(), 1);
+    }
+
+    /// M10: what a done write says names nobody and no group, role or post.
+    #[test]
+    fn toasts_carry_no_names() {
+        use crate::controller::groups::Done;
+        let role = orbiters_core::groups::Role { name: "Secret Role Name".into(), ..Default::default() };
+        let post = orbiters_core::groups::Post { title: "Secret Post Title".into(), ..Default::default() };
+        for done in [Done::Role(role.clone()), Done::Roles(vec![role]), Done::Post(post), Done::MemberRoles { user: "usr_x".into(), role_ids: vec![] }] {
+            let text = done_text(&done);
+            assert!(!text.contains("Secret") && !text.contains("usr_"), "{text}");
+        }
+        for f in [Failure::Api(GroupFailure::Forbidden), Failure::Changed, Failure::Withheld(Why::RoleAtOrAbove)] {
+            assert!(!failure_text(f).is_empty());
+        }
+    }
+
+    /// Pictures are kept in memory, a bounded number: the oldest go first (M10).
+    #[test]
+    fn pictures_are_bounded() {
+        let ctx = egui::Context::default();
+        let mut p = Pictures::default();
+        for i in 0..PICTURES_MAX + 5 {
+            p.stage(&ctx, &format!("https://api.vrchat.cloud/api/1/file/file_{i}/1/file"), egui::ColorImage::new([1, 1], vec![Color32::WHITE]));
+        }
+        assert_eq!(p.map.len(), PICTURES_MAX);
+        assert!(!p.map.contains_key("https://api.vrchat.cloud/api/1/file/file_0/1/file"));
+    }
+}

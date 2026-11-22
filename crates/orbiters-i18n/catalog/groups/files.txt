@@ -1,0 +1,8 @@
+# VRChat groups (REQUEST22 1, stream r22/groups, 2026-11-22): Home's Groups section, a group's page, the banner studio.
+crates/orbiters-desktop/src/pages/groups/mod.rs
+crates/orbiters-desktop/src/pages/groups/page.rs
+crates/orbiters-desktop/src/pages/groups/studio.rs
+crates/orbiters-desktop/src/pages/groups/art.rs
+crates/orbiters-desktop/src/controller/groups.rs
+crates/orbiters-core/src/groups.rs
+crates/orbiters-core/src/vrchat_api/groups.rs

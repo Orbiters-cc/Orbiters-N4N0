@@ -724,6 +724,16 @@ impl Controller {
     }
 
     fn push_notice(&self, notice: Notice) {
+        // Kept for Settings, Log: a toast is gone in seconds.
+        if let (Notice::Toast { kind, message }, false) = (&notice, cfg!(test)) {
+            let kind = match kind {
+                NoticeKind::Info => "info",
+                NoticeKind::Success => "success",
+                NoticeKind::Warning => "warning",
+                NoticeKind::Error => "error",
+            };
+            orbiters_core::notice_log::append(&orbiters_core::paths::logs_dir(), kind, message, time::OffsetDateTime::now_utc().unix_timestamp());
+        }
         // The tray takes no notice: one that only it got waits for the next window.
         if !self.broadcast(|| ToClient::Notice { notice: notice.clone() }) {
             let mut pending = self.notices.lock().unwrap();

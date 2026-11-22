@@ -21,6 +21,7 @@ pub mod launcher_local;
 #[cfg(test)]
 mod launcher_live;
 pub mod maps;
+pub mod notice_log;
 pub mod obelisk;
 pub mod osc;
 pub mod picture_sources;

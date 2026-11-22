@@ -1584,7 +1584,8 @@ fn play_on_a_mac_starts_vrchat_itself_straight_into_the_destination() {
     let starts = machine.starts.lock().unwrap().clone();
     assert_eq!(starts.len(), 1);
     assert!(!starts[0].iter().any(|a| a == "--no-vr"), "a Mac has no SteamVR to keep out of: {:?}", starts[0]);
-    assert_eq!(starts[0].len(), 1, "the PC's performance options are not a Mac's: {:?}", starts[0]);
+    assert!(!starts[0].iter().any(|a| a.starts_with("--")), "the PC's performance options are not a Mac's: {:?}", starts[0]);
+    assert!(starts[0].windows(2).any(|w| w == ["-screen-fullscreen", "1"]), "the whole screen, not a small window: {:?}", starts[0]);
     assert!(starts[0].last().is_some_and(|a| a.starts_with("vrchat://launch") && a.contains(W)), "straight into the instance: {:?}", starts[0]);
     assert!(c.launcher.lock().unwrap().pending.is_none(), "no invite to oneself is needed");
     assert_eq!(*machine.opened.lock().unwrap(), 0);

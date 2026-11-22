@@ -283,8 +283,8 @@ pub const CARD: Vec2 = vec2(420.0, 136.0);
 /// Its words, in English (the catalog area `windowrest` has them in every language).
 const TITLE: &str = mark("Orbiters - N4N0 will minimize to save memory");
 const KEEP: &str = mark("Keep open");
-const SETTING: &str = mark("Close the minimized window while playing");
-const SETTING_HINT: &str = mark("After 15 minutes minimized while VRChat runs, Orbiters - N4N0 asks for 8 seconds, then closes its window to the tray to give its memory back. Open it again from the tray: it comes back on its page.");
+pub(crate) const SETTING: &str = mark("Close the minimized window while playing");
+pub(crate) const SETTING_HINT: &str = mark("After 15 minutes minimized while VRChat runs, Orbiters - N4N0 asks for 8 seconds, then closes its window to the tray to give its memory back. Open it again from the tray: it comes back on its page.");
 
 fn title() -> &'static str {
     tr(TITLE)

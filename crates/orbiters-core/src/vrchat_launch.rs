@@ -189,6 +189,22 @@ pub fn arguments(mode: LaunchMode, settings: &LaunchSettings, destination: Optio
     out
 }
 
+/// A start on a VRChat profile (Home's Play with its profile choice, REQUEST15 7a) and, with Home's Where (REQUEST20 2),
+/// into a destination: the mode and the options as [`arguments`], then `window` (what a Desktop start adds, see
+/// [`desktop_window`]), then `--profile=N` ([`profile_arg`]), and the destination's link last, as [`arguments`] puts it.
+/// A destination that is not of VRChat's own grammar ([`is_destination`]) adds nothing.
+pub fn arguments_on(mode: LaunchMode, settings: &LaunchSettings, window: Vec<String>, profile: u32, destination: Option<(&str, &str)>) -> Vec<String> {
+    let mut out = arguments(mode, settings, None);
+    out.extend(window);
+    out.extend(profile_arg(profile));
+    if let Some((world, instance)) = destination {
+        if is_destination(world, instance) {
+            out.push(link(world, instance));
+        }
+    }
+    out
+}
+
 /// The highest profile number Home offers (VRChat takes any; a person keeps a few accounts).
 pub const PROFILE_MAX: u32 = 15;
 
@@ -312,6 +328,33 @@ mod tests {
         let group = "12345~group(grp_00000000-0000-4000-8000-000000000001)~groupAccessType(plus)~canRequestInvite~region(use)~nonce(ab12)";
         assert_eq!(arguments(LaunchMode::Vr, &LaunchSettings { performance: false, ..Default::default() }, Some((w, group))).len(), 1);
         assert_eq!(arguments(LaunchMode::Vr, &LaunchSettings { performance: false, ..Default::default() }, Some(("wrld_bad", "1"))), Vec::<String>::new());
+    }
+
+    /// REQUEST20 2: Home's Where starts the chosen profile right in the chosen instance, the link last after the profile.
+    #[test]
+    fn a_start_on_a_profile_puts_the_window_then_the_profile_then_the_link() {
+        let w = "wrld_00000000-0000-4000-8000-0000000000aa";
+        let off = LaunchSettings { performance: false, ..Default::default() };
+        let window = vec!["-screen-width".to_string(), "1280".into(), "-screen-height".into(), "720".into(), "-screen-fullscreen".into(), "0".into()];
+        let friends_plus = "48213~hidden(usr_00000000-0000-4000-8000-000000000001)~region(eu)~nonce(0a1b2c3d-0000-4000-8000-000000000000)";
+        let args = arguments_on(LaunchMode::Desktop, &off, window.clone(), 2, Some((w, friends_plus)));
+        let mut expected = vec!["--no-vr".to_string()];
+        expected.extend(window.clone());
+        expected.push("--profile=2".into());
+        expected.push(format!("vrchat://launch?ref=orbiters.cc&id={w}:{friends_plus}"));
+        assert_eq!(args, expected);
+        // Profile 0 says no profile; no destination: what Play on a profile always did.
+        assert_eq!(arguments_on(LaunchMode::Vr, &off, Vec::new(), 0, Some((w, "12345~region(us)"))), [format!("vrchat://launch?ref=orbiters.cc&id={w}:12345~region(us)")]);
+        assert_eq!(arguments_on(LaunchMode::Desktop, &off, Vec::new(), 3, None), ["--no-vr", "--profile=3"]);
+        // Still only VRChat's own instance ids: anything else adds nothing at all.
+        for bad in ["1 --profile=0", "1\"&x", "", "1~region(eu)&id=wrld_x"] {
+            assert_eq!(arguments_on(LaunchMode::Desktop, &off, Vec::new(), 1, Some((w, bad))), ["--no-vr", "--profile=1"], "{bad}");
+        }
+        assert_eq!(arguments_on(LaunchMode::Desktop, &off, Vec::new(), 1, Some(("wrld_bad", "1"))), ["--no-vr", "--profile=1"]);
+        // With the performance options, they come before the window, as Play's always did.
+        let on = arguments_on(LaunchMode::Vr, &LaunchSettings::default(), Vec::new(), 1, Some((w, "7~region(jp)")));
+        assert_eq!(on.first().map(String::as_str), Some("--process-priority=1"));
+        assert_eq!(&on[on.len() - 2..], ["--profile=1".to_string(), format!("vrchat://launch?ref=orbiters.cc&id={w}:7~region(jp)")]);
     }
 
     #[test]

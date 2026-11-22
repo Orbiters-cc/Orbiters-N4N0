@@ -1,0 +1,3 @@
+# REQUEST20 2 (stream r20-where, 2026-11-22): Where, above Home's Play buttons: the places VRChat starts into
+# (pages/launcher/destinations.rs). Kept here so that areas translated side by side never edit the same file.
+crates/orbiters-desktop/src/pages/launcher/destinations.rs

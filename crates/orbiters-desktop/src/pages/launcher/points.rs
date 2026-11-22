@@ -23,7 +23,7 @@ pub const HOW_EARNED: &str = mark("Earned by sharing the first public 3D picture
 /// The chip's height and its insets.
 const H: f32 = 34.0;
 const PAD: f32 = 12.0;
-const ICON: f32 = 15.0;
+const ICON: f32 = 17.0;
 
 /// What the chip shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -99,7 +99,8 @@ pub fn draw(ui: &mut Ui, at: egui::Pos2, room: f32, chip: &Chip) -> bool {
     let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SNAPPY);
     let p = ui.painter().clone();
     p.rect_filled(rect, theme::radius(H / 2.0), theme::black(0.5 + 0.2 * hover));
-    widgets::icon(&p, pos2(rect.left() + PAD + ICON / 2.0, rect.top() + 15.0), icons::COMPASS, ICON, theme::ACCENT);
+    // In the middle of the chip's height: beside the text and its line together, not the text alone.
+    widgets::icon(&p, pos2(rect.left() + PAD + ICON / 2.0, rect.center().y), icons::COMPASS, ICON, theme::ACCENT);
     let mut x = rect.left() + lead;
     let y = rect.top() + 15.0;
     let end = rect.right() - PAD;

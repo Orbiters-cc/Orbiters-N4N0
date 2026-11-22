@@ -233,6 +233,9 @@ pub enum Action {
     SeeInApp,
     /// No capture kit on this avatar: the Orbiters window, on Projects, where My Avatar adds it.
     AddKit,
+    /// Previous instances, an invite only the person's own VRChat account can send: the Orbiters window, at Settings,
+    /// VRChat account, to connect it (REQUEST20 4).
+    ConnectVrchat,
     /// Moves in what plays: where is the pointer's.
     Timeline,
     /// A tile of the gallery: a capture shows in 3D, a picture large.
@@ -709,6 +712,8 @@ pub struct Facts {
     pub view_showing: bool,
     /// Which instance was last asked for and how that is going, on the button pressed. Which result's link was just copied.
     pub invite_chip: Option<(String, InviteChip)>,
+    /// Only the person's own VRChat account can send the last Invite me (REQUEST20 4): Connect VRChat shows.
+    pub invite_vrchat: bool,
     pub video_copied: Option<usize>,
     /// YouTube's results, and what was searched.
     pub videos: Vec<VideoTile>,
@@ -1046,6 +1051,8 @@ pub enum Look {
     Web,
     /// No capture kit: one line saying where to add it, and a button there.
     AddKit,
+    /// Previous instances' head: Connect VRChat, when only the person's own account can invite them.
+    ConnectVrchat,
     /// Over one place's captures: their name, how many, and the way back to every picture.
     SetHead,
     /// What plays: the ring's cell or the wing's foot.
@@ -1691,6 +1698,9 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
         Sheet::Instances => {
             let (x0, y0, height, gap) = (24.0, VISIT_TOP, VISIT_HEIGHT, VISIT_GAP);
             let mut out = vec![Item { action: Action::Idle, rect: r(0.0, 0.0, 1024.0, VISIT_HEAD), look: Look::VisitHead }];
+            if facts.invite_vrchat {
+                out.push(Item { action: Action::ConnectVrchat, rect: CONNECT_VRCHAT, look: Look::ConnectVrchat });
+            }
             for (i, visit) in facts.worlds_visited.iter().enumerate() {
                 let y = y0 + i as f32 * (height + gap) - facts.gallery_scroll;
                 // Only what shows is laid on the page.
@@ -2038,6 +2048,8 @@ fn talk_line_height(text: &str) -> f32 {
 /// The Instances sheet's rows.
 /// What stays over the rows as they scroll: one line on what they offer, and over their columns what those are.
 const VISIT_HEAD: f32 = 40.0;
+/// Connect VRChat at the end of Previous instances' head.
+const CONNECT_VRCHAT: Rect = Rect { min: Pos2 { x: 1024.0 - 24.0 - 236.0, y: 2.0 }, max: Pos2 { x: 1024.0 - 24.0, y: 38.0 } };
 const VISIT_TOP: f32 = 44.0;
 const VISIT_HEIGHT: f32 = 90.0;
 const VISIT_GAP: f32 = 8.0;
@@ -2580,6 +2592,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
             tr("Needs the capture kit: add it in Orbiters, My Avatar.").into(),
         ),
         Action::AddKit => (tr("My Avatar").into(), tr("Opens Orbiters where My Avatar adds the capture kit to this avatar.").into()),
+        Action::ConnectVrchat => (tr("Connect VRChat").into(), tr("Opens Orbiters on the computer at Settings, VRChat account: your invites then come from your own account.").into()),
         Action::Picture(_) if facts.picture_wait.is_some() => (if facts.digits && facts.sheet.is_none() { tr("Press 6 to call it off") } else { tr("Press to call it off") }.into(), tr("Or open VRChat's camera: it then starts by itself.").into()),
         Action::Picture(mode) => {
             if let Some(s) = facts.countdown {
@@ -2595,7 +2608,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Invite(group, visit) => {
             let place = facts.worlds_visited.get(group);
             let when = place.and_then(|v| if visit == 0 { None } else { v.earlier.get(visit - 1).map(|e| e.1.clone()) });
-            (tr("Invite me").into(), when.map_or_else(|| tr("Orbiters invites you to the instance you were last in here.").to_string(), |w| tr!("To the instance you were in {when}.", when = w)))
+            (tr("Invite me").into(), when.map_or_else(|| tr("An invite to the instance you were last in here.").to_string(), |w| tr!("To the instance you were in {when}.", when = w)))
         }
         Action::WorldInfo(group) => (
             facts.worlds_visited.get(group).map_or_else(|| tr("A world").to_string(), |v| v.name.clone()),
@@ -3698,6 +3711,16 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let kind = facts.recent.first().map_or(RecentKind::Capture, |r| r.kind);
             p.text(pos2(rect.left() + 48.0 + wide, rect.center().y), Align2::LEFT_CENTER, how_many(kind, count), small, look::MUTED);
         }
+        Look::ConnectVrchat => {
+            let fill = if pressed { theme::mix(look::accent(), Color32::BLACK, 0.25) } else if hovered { theme::mix(look::accent(), Color32::WHITE, 0.15) } else { look::accent() };
+            p.rect_filled(rect, look::radius(rect.height() / 2.0), fill);
+            let font = look::font(17.0, weight::BOLD);
+            let words = fit(p, tr("Connect VRChat"), &font, rect.width() - 56.0);
+            let wide = p.layout_no_wrap(words.clone(), font.clone(), look::on_accent()).size().x;
+            let left = rect.center().x - (wide + 28.0) / 2.0;
+            widgets::icon(p, pos2(left + 10.0, rect.center().y), icons::SIGN_IN, 19.0, look::on_accent());
+            p.text(pos2(left + 28.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::on_accent());
+        }
         Look::AddKit => {
             // A quiet line at the end of what the row does, a link at its end: nothing on it shouts, the pictures under it lead.
             if hovered || pressed {
@@ -4247,7 +4270,10 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         }
         Look::VisitHead => {
             // What the rows offer, as large as what is in them; what each column is, on each row over it (round 10's judges found these small and loose).
-            p.text(pos2(26.0, 20.0), Align2::LEFT_CENTER, tr("A world: its page. Invite me: your last visit, or an earlier time."), look::font(19.0, weight::SEMIBOLD), look::LABEL);
+            // Up to Connect VRChat when it shows (REQUEST20 4); how the last invite went is in the sheet's head.
+            let room = if facts.invite_vrchat { CONNECT_VRCHAT.left() - 16.0 - 26.0 } else { 1024.0 - 52.0 };
+            let font = look::font(19.0, weight::SEMIBOLD);
+            p.text(pos2(26.0, 20.0), Align2::LEFT_CENTER, fit(p, tr("A world: its page. Invite me: your last visit, or an earlier time."), &font, room), font, look::LABEL);
 
         }
         Look::HereNow => {

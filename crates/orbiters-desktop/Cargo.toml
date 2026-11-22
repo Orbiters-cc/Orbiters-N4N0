@@ -10,6 +10,8 @@ name = "orbiters-desktop"
 path = "src/main.rs"
 
 [dependencies]
+# Draws the Steam sign-in's QR code on a Mac (Home), and the codes the scanner's tests read.
+qrcode = { version = "0.14", default-features = false }
 orbiters-version = { workspace = true }
 orbiters-i18n = { workspace = true }
 orbiters-projects = { workspace = true }
@@ -68,8 +70,6 @@ objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
 [dev-dependencies]
 orbiters-core = { workspace = true, features = ["test-support"] }
 dirs = { workspace = true }
-# Draws the QR codes the scanner's tests read.
-qrcode = { version = "0.14", default-features = false }
 # Reads back the SPZ files Export writes (version 3: one gzip stream).
 flate2 = { workspace = true }
 

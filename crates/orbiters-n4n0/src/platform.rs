@@ -119,6 +119,12 @@ pub trait Host: Send + Sync + 'static {
     fn notify(&self, kind: NoticeKind, message: String);
     /// The Orbiters account the assistant asks with and link cards are dropped with: its API and credential.
     fn account(&self) -> Option<(Api, String)>;
+    /// Previous instances' Invite me with the person's own VRChat account, when one is connected in the app (REQUEST20
+    /// 4): VRChat's invite to oneself to `location` (`wrld_…:<instance>`), and how it went. `None`: no VRChat account
+    /// is connected here, and nothing was sent (Orbiters' own account is asked instead). Called on a thread of its own.
+    fn invite_self(&self, _location: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
+        None
+    }
     /// Runs `action` after what OSC messages asked for before it, off the OSC receiving thread ([`Actions`]). False when
     /// it was dropped (too many wait already).
     fn queue(&self, action: Box<dyn FnOnce() + Send>) -> bool;

@@ -949,6 +949,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 vr::event::TRACKED_DEVICE_ACTIVATED | vr::event::TRACKED_DEVICE_DEACTIVATED | vr::event::TRACKED_DEVICE_ROLE_CHANGED => {
                     poses.forget(&e);
                     devices.changed();
+                    t.walk.devices_changed();
                     if let Some(orbit)=t.orbit.as_mut() { orbit.invalidate_camera_tracking(); }
                 }
                 vr::event::PROPERTY_CHANGED => poses.forget(&e),

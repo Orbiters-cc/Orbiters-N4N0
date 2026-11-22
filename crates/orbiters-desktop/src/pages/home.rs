@@ -92,6 +92,8 @@ enum Act {
     Smoothing(usize, u16),
     /// Back to Home itself.
     Home,
+    /// Settings, VRChat account (Previous instances' Connect VRChat, REQUEST20 4).
+    VrchatAccount,
 }
 
 #[derive(Default)]
@@ -268,7 +270,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Page::Home | Page::Card | Page::More | Page::Feedback | Page::FeedbackLabels | Page::Comments | Page::Mirror => {
                     home(ui, cx, menu, &idle, copied_id, network, launcher, &mut acts)
                 }
-                Page::Instances | Page::AddFriend => instances(ui, cx, menu, &mut acts),
+                Page::Instances | Page::AddFriend => instances(ui, cx, menu, snap.vrchat_login.user.is_some(), &mut acts),
                 Page::Search | Page::Results => youtube(ui, cx, menu, &picture, focus, copied_id, &mut acts),
                 Page::Call => call(ui, cx, menu, &mut acts),
                 Page::Photo => photo(ui, cx, menu, take_blocked, &mut acts),
@@ -342,6 +344,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             Act::Suggestion(text) => host.menu.suggestion = text,
             Act::Smoothing(kind, ms) => effects.extend(host.menu.set_smoothing_ms(kind, ms)),
             Act::Home => effects.extend(go_home(host)),
+            Act::VrchatAccount => cx.go = Some(super::Go::VrchatAccount),
         }
     }
     // It stays open here (nothing closes it): a close goes back to Home. A dropped card is on the avatar's screen: the
@@ -397,6 +400,8 @@ fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>,
 
     // Play in VR, Play in Desktop (always, with the VRChat profile they start on), an invite received with both in it;
     // then the account's own profile, changed where it shows (REQUEST15 7).
+    // Where VRChat starts into (REQUEST20 2), above the Play buttons it goes with.
+    super::launcher::destinations::row(ui, cx, launcher, 1);
     super::launcher::hero(ui, cx, launcher, 1);
     super::launcher::mine_card(ui, cx, launcher, 3);
 
@@ -1516,11 +1521,21 @@ fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     m.finish(ui);
 }
 
-/// Previous instances: Orbiters' VRChat account invites the player back to one (Invite me), once it is their friend (Add
-/// Orbiters as a friend, with its name and page, shows above the list when Orbiters asked for it).
-fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
+/// Previous instances: Invite me sends the player an invite back to one, from their own VRChat account when it is
+/// connected here (`own_vrchat`, REQUEST20 4), else from Orbiters' VRChat account once it is their friend (Add Orbiters as
+/// a friend, with its name and page, shows above the list when Orbiters asked for it). When only their own account can
+/// do it, Connect VRChat shows above the list, with why.
+fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, own_vrchat: bool, acts: &mut Vec<Act>) {
     top(ui, cx, tr("Previous instances"), &layout::text(menu, Content::InstancesTitle), acts);
     let mut index = 1;
+    if let Some(why) = menu.invite_vrchat.as_deref().filter(|_| !menu.invite_waiting) {
+        section_up_to(ui, cx, f32::INFINITY, index, icons::SIGN_IN, tr("Invite me needs your VRChat account"), Some(why), |ui| {
+            if Button::new(tr("Connect VRChat")).icon(icons::SIGN_IN).variant(Variant::Primary).show(ui).clicked() {
+                acts.push(Act::VrchatAccount);
+            }
+        });
+        index += 1;
+    }
     if let Some(account) = &menu.invite_account {
         let why = tr("VRChat lets Orbiters invite only its friends: in VRChat, Social, search the name, Add friend; then Try again");
         section_up_to(ui, cx, f32::INFINITY, index, icons::USER, tr("Add Orbiters as a friend"), Some(why), |ui| {
@@ -1547,7 +1562,11 @@ fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         let text = if menu.instances_ready { tr("Worlds you join in VRChat show here, newest first.") } else { tr("Reading VRChat's logs…") };
         return note_card(ui, cx, index, icons::GLOBE, tr("No instance yet"), text);
     }
-    let sub = tr("Orbiters' VRChat account invites you back: open the invite in VRChat");
+    let sub = if own_vrchat {
+        tr("Your VRChat account invites you back: look at your VRChat notifications")
+    } else {
+        tr("Orbiters' VRChat account invites you back: open the invite in VRChat")
+    };
     // As wide as the page: the instances go side by side on wide ones.
     section_up_to(ui, cx, f32::INFINITY, index, icons::GLOBE, tr("Instances you were in"), Some(sub), |ui| {
         ui.add_space(4.0);
@@ -1624,14 +1643,43 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
-    /// What Home asked of the app: settings changes and N4N0 commands.
+    /// What Home asked of the app: settings changes and N4N0 commands; the launcher's actions and what it asked of
+    /// VRChat (REQUEST20 2: a new instance is made, as VRChat would answer, nothing reaches it).
     #[derive(Default)]
     struct Recorder {
         patches: Mutex<Vec<serde_json::Value>>,
         n4n0: Mutex<Vec<N4n0Command>>,
+        launcher: Mutex<Vec<orbiters_core::launcher::Action>>,
+        asked: Mutex<Vec<String>>,
     }
 
+    /// The instance VRChat makes in these tests.
+    const MADE: &str = "48213~hidden(usr_00000000-0000-4000-8000-000000000000)~region(us)~nonce(0a1b2c3d-0000-4000-8000-000000000000)";
+
     impl Backend for Recorder {
+        fn launcher(&self, action: orbiters_core::launcher::Action) -> bool {
+            self.launcher.lock().unwrap().push(action);
+            true
+        }
+        fn vrchat_data(&self, _scope: crate::controller::vrchat_data::Scope, request: crate::controller::vrchat_data::Request) -> crate::controller::vrchat_data::Result {
+            use crate::controller::vrchat_data::{Request, Response};
+            self.asked.lock().unwrap().push(format!("{request:?}"));
+            match request {
+                Request::CreateInstance { world, access, region } => Ok(Response::CreatedInstance(orbiters_core::vrchat_api::WorldInstance {
+                    world,
+                    id: MADE.into(),
+                    access: if access == orbiters_core::vrchat_api::CreateAccess::FriendsPlus { orbiters_core::vrchat_api::InstanceAccess::FriendsPlus } else { orbiters_core::vrchat_api::InstanceAccess::Unknown },
+                    region: format!("{region:?}").to_lowercase(),
+                    occupants: 0,
+                    capacity: None,
+                    friends: None,
+                    full: false,
+                    closed: false,
+                    can_join: true,
+                })),
+                _ => Err("not in tests".into()),
+            }
+        }
         fn n4n0(&self, command: N4n0Command) {
             self.n4n0.lock().unwrap().push(command);
         }
@@ -1815,6 +1863,92 @@ mod tests {
         h.state.launcher_mut().set_data(std::sync::Arc::new(data));
         h.settle();
         assert!(h.state.launcher_mut().shown());
+    }
+
+    /// REQUEST20 2: Where above Play. Nothing chosen, Play does what it always did; a card chosen (nothing sent by the
+    /// choice), Play goes there: an invite accepted on the profile chosen, a new Friends+ instance made by VRChat first
+    /// and gone to, a public one named here without a VRChat sign-in. A chosen card that goes hands the choice back to
+    /// Home and says so; with VRChat running on the profile chosen, Where stands aside.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn where_chooses_the_place_play_starts_vrchat_in() {
+        use crate::pages::launcher::destinations::{Frequent, HistoryView};
+        use orbiters_core::launcher::{Action, Game, GameProfile, InviteKind, LaunchMode, Source};
+        orbiters_ui::widgets::watch_controls();
+        let mut h = Harness::new();
+        let data = orbiters_core::launcher::sample();
+        let Source::SignedIn { user_id: me, .. } = data.source.clone() else { panic!("the sample is signed in") };
+        let invite = data.invites.iter().find(|i| i.kind == InviteKind::Invite).cloned().unwrap();
+        let invite_world = invite.place.as_ref().unwrap().world_name.clone();
+        let world = "wrld_00000000-0000-4000-8000-000000000301";
+        let history = HistoryView { frequent: vec![Frequent { world_id: world.into(), name: "Lantern Garden".into(), visits: 5, score: 3.0, last: 0, picture: None }], last: None };
+        let stage = |h: &mut Harness, data: &orbiters_core::launcher::LauncherState, signed_in: bool| {
+            let l = h.state.launcher_mut();
+            l.set_data(Arc::new(data.clone()));
+            l.stand_in(1_795_000_000, "");
+            l.places.stand_in(Some(history.clone()), Vec::new(), None, signed_in);
+        };
+        stage(&mut h, &data, true);
+        h.settle();
+        let click = |h: &mut Harness, label: &str| {
+            let (r, on) = orbiters_ui::widgets::control(&h.ctx, label).unwrap_or_else(|| panic!("{label} is drawn"));
+            assert!(on, "{label} takes a press");
+            h.press(r.center());
+            h.release(r.center());
+            h.frame(Vec::new());
+        };
+        let sent = |h: &Harness| h.recorder.launcher.lock().unwrap().clone();
+        let mine = |action: Action| Action::As { account: me.clone(), action: Box::new(action) };
+        // Nothing chosen: Play is VRChat's own start, on the profile under the buttons.
+        click(&mut h, "Play in VR");
+        assert_eq!(sent(&h), [mine(Action::PlayOn { mode: LaunchMode::Vr, profile: 0 })]);
+        // The invite chosen: nothing goes until Play, then the invite is accepted into its own instance.
+        click(&mut h, &invite_world);
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(format!("invite:{}", invite.id).as_str()));
+        assert_eq!(sent(&h).len(), 1, "a choice sends nothing");
+        click(&mut h, "Play in Desktop");
+        assert_eq!(sent(&h).last(), Some(&mine(Action::AcceptInviteOn { invite: invite.id.clone(), mode: LaunchMode::Desktop, profile: 0 })));
+        // A place visited often: VRChat makes a new Friends+ instance (in VRChat's default region, none played yet),
+        // then VRChat starts right in it.
+        click(&mut h, "Lantern Garden");
+        assert!(h.recorder.asked.lock().unwrap().is_empty(), "a choice asks nothing of VRChat");
+        click(&mut h, "Play in VR");
+        for _ in 0..400 {
+            if sent(&h).len() == 3 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            h.frame(Vec::new());
+        }
+        assert_eq!(h.recorder.asked.lock().unwrap().as_slice(), [format!("CreateInstance {{ world: {world:?}, access: FriendsPlus, region: Us }}")]);
+        let Some(Action::As { account, action }) = sent(&h).last().cloned() else { panic!("bound to the account") };
+        assert_eq!(account, me);
+        let Action::PlayAt { mode: LaunchMode::Vr, profile: 0, destination } = *action else { panic!("{action:?}") };
+        assert_eq!((destination.world_id.as_str(), destination.instance_id.as_str()), (world, MADE));
+        // The chosen invite goes (put away, accepted elsewhere): the choice is Home again, and the page says so.
+        click(&mut h, &invite_world);
+        let mut gone = data.clone();
+        gone.invites.retain(|i| i.id != invite.id);
+        h.state.launcher_mut().set_data(Arc::new(gone));
+        h.frame(Vec::new());
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), None);
+        assert!(h.state.launcher_mut().places.notice().is_some_and(|n| n.contains(&invite_world)), "{:?}", h.state.launcher_mut().places.notice());
+        // No VRChat sign-in: a new instance is a public one named here; nothing is asked of VRChat.
+        stage(&mut h, &data, false);
+        h.settle();
+        click(&mut h, "Lantern Garden");
+        click(&mut h, "Play in Desktop");
+        let Some(Action::As { action, .. }) = sent(&h).last().cloned() else { panic!() };
+        let Action::PlayAt { destination, .. } = *action else { panic!("{action:?}") };
+        assert!(crate::controller::vrchat_data::public_instance(&destination.instance_id), "{}", destination.instance_id);
+        assert_eq!(h.recorder.asked.lock().unwrap().len(), 1, "VRChat was asked nothing more");
+        // VRChat runs on the profile chosen: Where stands aside (the Play part says it runs).
+        let mut running = data.clone();
+        running.game = Game::Running(LaunchMode::Vr);
+        running.profiles = vec![GameProfile { profile: 0, account: Some("Sample Me".into()), running: Some(LaunchMode::Vr), starting: None, assistant: false }];
+        stage(&mut h, &running, true);
+        h.settle();
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Lantern Garden").is_none());
     }
 
     #[test]

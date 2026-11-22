@@ -246,8 +246,9 @@ pub fn favourites(list: &Value) -> BTreeMap<String, Vec<String>> {
 }
 
 /// Rebuilds [`LauncherState::groups`] from the friends: the favourite groups (kept in their order, with their names),
-/// then in game, website, offline. Each section's members by name; offline by last seen, newest first. In a favourite
-/// group, those in game come first, then those on the website, then the others (by name each).
+/// then in game, website, offline. Sorted as VRCNext sorts its friends list (REQUEST20 3): in the game and on the
+/// website by status (join me, active, ask me, busy), then by name; offline by name. In a favourite group, those in
+/// game come first, then those on the website, then the others (by status and name each).
 pub fn regroup(state: &mut LauncherState, favourite_groups: &[(String, String)]) {
     let mut by_name: Vec<&Friend> = state.friends.iter().collect();
     by_name.sort_by_key(|f| f.name.to_lowercase());
@@ -259,23 +260,35 @@ pub fn regroup(state: &mut LauncherState, favourite_groups: &[(String, String)])
             kind: GroupKind::Favourite,
             members: {
                 let mut members: Vec<&&Friend> = by_name.iter().filter(|f| f.favourite_groups.contains(id)).collect();
-                members.sort_by_key(|f| match f.presence {
+                members.sort_by_key(|f| (match f.presence {
                     Presence::InGame => 0,
                     Presence::Website => 1,
                     Presence::Offline => 2,
-                });
+                }, status_rank(f.status)));
                 members.into_iter().map(|f| f.id.clone()).collect()
             },
         })
         .collect();
     for (id, kind, presence) in [("in-game", GroupKind::InGame, Presence::InGame), ("website", GroupKind::Website, Presence::Website), ("offline", GroupKind::Offline, Presence::Offline)] {
         let mut members: Vec<&Friend> = by_name.iter().copied().filter(|f| f.presence == presence).collect();
-        if presence == Presence::Offline {
-            members.sort_by_key(|f| std::cmp::Reverse(f.last_seen));
+        // Stable: by name within a status.
+        if presence != Presence::Offline {
+            members.sort_by_key(|f| status_rank(f.status));
         }
         groups.push(FriendGroup { id: id.into(), name: String::new(), kind, members: members.into_iter().map(|f| f.id.clone()).collect() });
     }
     state.groups = groups;
+}
+
+/// VRCNext's order of the statuses in its friends list: join me, active, ask me, busy, then the rest.
+fn status_rank(status: Status) -> u8 {
+    match status {
+        Status::JoinMe => 0,
+        Status::Active => 1,
+        Status::AskMe => 2,
+        Status::Busy => 3,
+        Status::Offline => 4,
+    }
 }
 
 /// An invite or an invite request from a (v1) `Notification`.

@@ -441,6 +441,10 @@ pub enum WhyPlaySpace {
     Setting,
     /// The driver did not move every device here.
     Refused,
+    /// Some devices that move with the person come from another tracking system than the headset's (Vive trackers with a
+    /// Quest, aligned by Space Calibrator): a calibration add-on moves those devices' poses after the driver's walk, turned by
+    /// its calibration, so the play space is moved instead, which SteamVR applies to every device after every driver.
+    OtherTrackingSystem,
 }
 
 impl WalkPath {
@@ -452,6 +456,7 @@ impl WalkPath {
             WalkPath::PlaySpace(WhyPlaySpace::NotRunning | WhyPlaySpace::OldDriver) => Some(mark("Restart SteamVR once for the better Fast walk.")),
             WalkPath::PlaySpace(WhyPlaySpace::SafeMode | WhyPlaySpace::TurnedOff) => Some(mark("Turn orbiters_smooth on in SteamVR for the better Fast walk.")),
             WalkPath::PlaySpace(WhyPlaySpace::Refused) => Some(mark("The driver could not carry your devices here.")),
+            WalkPath::PlaySpace(WhyPlaySpace::OtherTrackingSystem) => Some(mark("Fast walk moves the play space to keep your trackers aligned.")),
         }
     }
 
@@ -472,6 +477,9 @@ impl WalkPath {
             WalkPath::PlaySpace(WhyPlaySpace::Refused) => {
                 Some(mark("The driver could not carry all your devices, so Fast walk moves the play space. OVR Advanced Settings' drag and turn put you back. See walk-boost.log."))
             }
+            WalkPath::PlaySpace(WhyPlaySpace::OtherTrackingSystem) => Some(mark(
+                "Your trackers use another tracking system than your headset (aligned by Space Calibrator, for instance), so Fast walk moves the play space: that keeps every tracker on your body. OVR Advanced Settings' drag and turn put you back.",
+            )),
         }
     }
 }
@@ -1082,7 +1090,7 @@ mod tests {
     #[test]
     fn the_lesser_way_says_what_would_change_it() {
         use WhyPlaySpace::*;
-        for why in [NotRunning, OldDriver, SafeMode, TurnedOff, Refused] {
+        for why in [NotRunning, OldDriver, SafeMode, TurnedOff, Refused, OtherTrackingSystem] {
             assert!(WalkPath::PlaySpace(why).lesser_words().is_some() && WalkPath::PlaySpace(why).lesser_short().is_some(), "{why:?}");
         }
         for path in [WalkPath::Driver, WalkPath::PlaySpace(Setting)] {

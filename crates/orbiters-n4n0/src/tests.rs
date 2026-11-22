@@ -80,6 +80,10 @@ pub(crate) struct TestHost {
     pub(crate) app_facts: Mutex<Option<orbiters_n4n0_core::intents::Facts>>,
     pub(crate) app_intents: Mutex<Vec<orbiters_n4n0_core::intents::Intent>>,
     pub(crate) app_answers: Mutex<HashMap<&'static str, Value>>,
+    /// The person's own VRChat account in the stand-in app: what its invite to oneself answers (`None`: none connected),
+    /// and the locations it was asked for.
+    vrchat_invite: Mutex<Option<orbiters_n4n0_core::menu::InviteAnswer>>,
+    invited_self: Mutex<Vec<String>>,
     /// N4N0's files, gone with the test.
     _dir: TempDir,
 }
@@ -220,6 +224,12 @@ impl Host for TestHost {
 
     fn account(&self) -> Option<(Api, String)> {
         self.server.lock().unwrap().clone().map(|(base, token)| (Api::at(&base), token))
+    }
+
+    fn invite_self(&self, location: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
+        let answer = self.vrchat_invite.lock().unwrap().clone()?;
+        self.invited_self.lock().unwrap().push(location.to_string());
+        Some(answer)
     }
 
     fn queue(&self, action: Box<dyn FnOnce() + Send>) -> bool {
@@ -3678,3 +3688,68 @@ fn the_assistant_turned_off_in_settings_stops_an_answer_too() {
 /// The assistant's intents in the runtime (REQUEST20 6): their own file, as test data.
 #[path = "tests_assistant.rs"]
 mod assistant;
+/// A stand-in Orbiters for Invite me: answers every request with `status` and `body`, and counts them.
+fn orbiters_invites(status: u16, body: &'static str) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let asked = Arc::new(AtomicUsize::new(0));
+    let count = asked.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0usize;
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap_or(0);
+                }
+                line.clear();
+            }
+            let mut sent = vec![0u8; length];
+            let _ = reader.read_exact(&mut sent);
+            count.fetch_add(1, Ordering::SeqCst);
+            let mut stream = stream;
+            let _ = write!(stream, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()); // i18n: not shown
+        }
+    });
+    (base, asked)
+}
+
+/// REQUEST20 4: Invite me goes from the person's own VRChat account when the app has one connected (Orbiters is not
+/// asked); without one, Orbiters' account is asked, its befriend answer kept, and what it could not do says to connect
+/// a VRChat account.
+#[test]
+fn invite_me_takes_the_connected_vrchat_account_else_orbiters_and_then_says_to_connect_one() {
+    use orbiters_n4n0_core::menu::InviteAnswer;
+    let location = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd:48213~region(eu)";
+    // Connected: its answer, whatever it is; Orbiters never asked.
+    let (base, asked) = orbiters_invites(201, r#"{"sent":true}"#);
+    for answer in [InviteAnswer::Sent, InviteAnswer::Failed { message: "This instance is full".into() }, InviteAnswer::NeedsVrchat { message: "expired".into() }] {
+        let host = TestHost::default();
+        *host.server.lock().unwrap() = Some((base.clone(), "orbit-test".into()));
+        *host.vrchat_invite.lock().unwrap() = Some(answer.clone());
+        assert_eq!(crate::screen::invite_route(&host, location), answer);
+        assert_eq!(*host.invited_self.lock().unwrap(), [location]);
+    }
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "Orbiters' account is not asked when the person's own is connected");
+    // Not connected: Orbiters' account, as before.
+    let host = TestHost::default();
+    *host.server.lock().unwrap() = Some((base.clone(), "orbit-test".into()));
+    assert_eq!(crate::screen::invite_route(&host, location), InviteAnswer::Sent);
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    let (befriend, _) = orbiters_invites(409, r#"{"code":"not_friends","message":"Add it first.","account":{"name":"Orbiters","link":"https://vrchat.com/home/user/usr_1"}}"#);
+    *host.server.lock().unwrap() = Some((befriend, "orbit-test".into()));
+    assert!(matches!(crate::screen::invite_route(&host, location), InviteAnswer::NeedsFriend { .. }), "adding Orbiters as a friend can work: offered");
+    // What Orbiters' account could not do: connect your own.
+    let (refused, _) = orbiters_invites(409, r#"{"code":"refused","message":"VRChat refused this invite. The instance may have closed."}"#);
+    *host.server.lock().unwrap() = Some((refused, "orbit-test".into()));
+    let InviteAnswer::NeedsVrchat { message } = crate::screen::invite_route(&host, location) else { panic!("connect VRChat") };
+    assert!(message.contains("VRChat refused this invite") && message.contains("Connect your VRChat account"), "{message}");
+    *host.server.lock().unwrap() = None;
+    assert!(matches!(crate::screen::invite_route(&host, location), InviteAnswer::NeedsVrchat { message } if message.contains("Sign in to Orbiters")));
+    assert!(host.invited_self.lock().unwrap().is_empty());
+}

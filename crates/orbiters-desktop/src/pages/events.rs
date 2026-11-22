@@ -857,7 +857,7 @@ impl Window {
                 Outcome::Checked(a) => a,
                 Outcome::N4n0(InviteAnswer::Sent) => Ask::Invited,
                 Outcome::N4n0(InviteAnswer::NeedsFriend { account, .. }) => Ask::Befriend { name: account.name, link: account.link },
-                Outcome::N4n0(InviteAnswer::Failed { message }) => Ask::Error(message),
+                Outcome::N4n0(InviteAnswer::Failed { message } | InviteAnswer::NeedsVrchat { message }) => Ask::Error(message),
             };
             self.asks.insert(step, ask);
         }

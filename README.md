@@ -1,193 +1,408 @@
 # Orbiters - N4N0
 
-The companion app of **N4N0** for VRChat, and of its menu: fast walk, YouTube, calls, 3D pictures, music, the light and
-your avatar's saved states, side by side as equals on the window's Home, in the SteamVR overlay and on N4N0's screen on
-your avatar. It also
-captures VRChat worlds while you play and brings them into Unity with [Mixer](https://github.com/Orbiters-cc/Mixer).
+Orbiters - N4N0 is a free desktop companion for [VRChat](https://hello.vrchat.com/) by the Orbiters project
+([orbiters.cc](https://orbiters.cc)). It starts VRChat for you and shows your friends, puts a set of tools beside
+VRChat's own menus (on the desktop and in a SteamVR headset), runs **N4N0**, a small companion that floats on your
+avatar and answers when you talk to it, takes **3D pictures** of worlds with VRChat's camera, and keeps your
+pictures, visited worlds, videos and Unity avatar projects in one place. It works next to the game, through the
+interfaces VRChat and SteamVR offer to other programs: it does not modify, inject into or read the memory of VRChat.
 
-N4N0's capture kit on your avatar draws a small *capture strip* into VRChat's Stream camera: the exact camera pose,
-projection and frame flags, bit-coded in grey blocks, plus *depth frames* that carry exact depth from the game. The app
-drives it over OSC (contracts `Docs/rig-frames.md`, N4N0's capture kit); N4N0 › Record in the Action Menu starts and
-stops a recording too.
-Orbiters - N4N0 receives the Stream camera over Spout, decodes every frame, keeps lossless keyframes, poses and
-depth, and writes a session bundle that the reconstruction (next milestone) turns into Gaussian splats and meshes.
-It never asks for your VRChat login: it only reads VRChat's local log, OSC and Spout.
+![Orbiters - N4N0's Home: Play in VR and Play in Desktop, the profile card, N4N0's features and the friends list](docs/readme/home-launcher.webp)
 
-Orbiters - N4N0 also runs **N4N0**, the companion that floats on your avatar (the N4N0 prop from My Avatar's gallery):
-it answers on a text panel everyone around you can read, puts your hoodie on when you ask, keeps your GoGoLoco pose
-when you change avatar, holds parameters that worlds reset, shows an AFK message while you are away, saves the videos
-a world plays and takes pictures. Its assistant runs on Orbiters (`/n4n0/workspace` on the website, free quota or your own key);
-the window's N4N0 page turns it off for a tool without AI. You talk to it by holding Talk in its menu, touching it, the
-Talk button in the window or the SteamVR tab, or by starting a sentence with "Nano" (N4N0 said aloud); speech is transcribed on this
-computer and only the sentences meant for N4N0 go to the assistant.
+<sub>Every picture in this README is rendered by the app's own screenshot harness with made-up people, worlds and accounts.</sub>
 
-Calling N4N0 also opens **N4N0's menu**: the SteamVR binding "Open N4N0's menu" (two quick taps on the left thumbrest or
-trackpad, or a double press of X on controllers with neither, unless you change it in SteamVR's controller settings), the
-watch on a wrist, the wake word on its own, or a hand on N4N0. It has fast walk (walk
-boost on or off), YouTube (a keyboard with YouTube's suggestions as you type, five results a page with their thumbnail,
-channel and duration, and "Copy link" to paste in a world's video player; a sentence you say on the search page is what
-it searches), calls, a 3D picture with a timer, the music that plays, N4N0's light and the avatar's states. A copied link
-can be dropped in the world as a card on N4N0's screen (Drop): for 15 seconds whoever grabs it copies the link, through
-Orbiters for everyone else (contracts `Docs/n4n0.md`, Link card). The window's Home is the same
-menu, with the keyboard for searching. It opens in the SteamVR overlay in front of you, and SteamVR's laser
-works on it; when your N4N0 has the projected screen ("Replace Orbiters overlay" on N4N0's card in My Avatar), it
-opens on that screen in VRChat instead, where you touch it with your index finger and people around see it too
-(contracts `Docs/n4n0.md`, Menu and Screen). YouTube is read without an account or a key, as YouTube's own website does.
+## Contents
 
-A **3D picture** (1, 4 or 8 s) flies VRChat's camera around you while it records, then reconstructs the place. N4N0's
-camera rig follows the camera and about every other frame shows six more views at once (left, front, right, back, up,
-down; contracts `Docs/rig-frames.md`): the same flight gives the reconstruction several times the angles. Those views
-have no depth of their own, and the rig renders the world six more times a frame, for the length of the picture only.
-While you **record**, the rig follows VRChat's camera too and turns on for 0.3 s every few metres the camera goes (at
-most every 4 s; Settings, "Six more views while recording"), so the reconstruction also sees what you forgot to film,
-and N4N0's capture kit draws wherever the camera goes. In VR, what the recording has covered so far (the Capture page's
-camera path) floats above a controller while you record (Settings, "Coverage while recording"); in desktop mode it
-shows in a corner of the screen. Neither is ever in the recording: SteamVR draws overlays into the headset only, and
-the frames are VRChat's camera's own picture, shared over Spout before anything is drawn over it.
-With **camera dolly streams** on (Settings, experimental, VRC+), a 3D picture flies four cameras with VRChat's camera
-dolly in its multi-stream mode: yours, and one left, one right and one above it (1.2 m off), all looking where yours
-does; the dolly gives each extra camera a Spout sender of its own (`VRCSender2` to `VRCSender4`), which recordings then
-read beside `VRCSender1`. Their frames that carry your capture kit's strip join the session as views of their own. In
-VRChat, set Camera › Dolly › Streaming to Multi once (an import does not carry it).
+- [Download and install](#download-and-install)
+- [What it does](#what-it-does)
+  - [Start VRChat and see your friends](#start-vrchat-and-see-your-friends)
+  - [N4N0, the companion on your avatar](#n4n0-the-companion-on-your-avatar)
+  - [Orbiters beside VRChat's menus](#orbiters-beside-vrchats-menus)
+  - [VRChat's camera: 3D pictures, recordings and QR codes](#vrchats-camera-3d-pictures-recordings-and-qr-codes)
+  - [3D captures, the 3D view and sharing](#3d-captures-the-3d-view-and-sharing)
+  - [Photos, visited worlds and videos](#photos-visited-worlds-and-videos)
+  - [YouTube and music](#youtube-and-music)
+  - [Events](#events)
+  - [Unity projects](#unity-projects)
+  - [In VR: fast walk, tracking, frame rate, translation](#in-vr-fast-walk-tracking-frame-rate-translation)
+  - [Languages and updates](#languages-and-updates)
+  - [Coming soon and experimental](#coming-soon-and-experimental)
+  - [On a Mac](#on-a-mac)
+- [How it works with VRChat, and what it does not do](#how-it-works-with-vrchat-and-what-it-does-not-do)
+- [Privacy and network use](#privacy-and-network-use)
+- [Building from source](#building-from-source)
+- [Project layout](#project-layout)
+- [Releases and signing](#releases-and-signing)
+- [Code signing policy](#code-signing-policy)
+- [Contributing and security](#contributing-and-security)
+- [Licence](#licence)
+- [Credits](#credits)
 
-In VR it also offers **walk boost**: while you push the stick you walk with, your play space moves along with you, so
-you cover more ground in VRChat. The chaperone stays on your room's walls, and the play space goes back when you
-change world or recenter. Its strength is a slider in the SteamVR tab, in Settings, and in N4N0's Walk boost radial on your avatar.
-**States** keep how an avatar is: every parameter OSC can set (GoGoLoco's pose and the avatar's size only when the state
-says so, N4N0's own never), saved under a name from Home's States page or N4N0's menu, and put back over OSC in one
-press. One state per avatar can be its default, put back after each world join and each switch to that avatar. They
-live in `avatar-states.json` beside the settings (contracts `Docs/n4n0.md`, Saved states).
+## Download and install
 
-And, when you turn it on in Settings, it shares **your frame rate per world** with Orbiters: a summary a minute with
-the world, your avatar, how many people were there and the names of their avatars (never who they are), plus your
-graphics card, processor and headset (contracts `Docs/world-performance.md`). The Map explorer shows which worlds run
-well.
+Download `OrbitersSetup-<version>.exe` from the
+[latest release](https://github.com/Orbiters-cc/Orbiters-N4N0/releases/latest) and run it. It installs for your
+Windows user only, in `%LOCALAPPDATA%\Programs\Orbiters - N4N0`, without administrator rights, and adds the app to
+Windows' installed apps, so it can be removed from Settings › Apps like any other program. The setup offers a desktop
+shortcut, starting with Windows (in the tray) and starting with SteamVR; all three can be changed later in the app's
+Settings.
 
-## On a Mac
+The setup is not code-signed yet, so Windows SmartScreen warns about it ("Windows protected your PC": More info, then
+Run anyway). See [Releases and signing](#releases-and-signing) for how releases are checked today.
 
-Orbiters - N4N0 runs on Macs with Apple silicon, with the same window. VRChat has no Mac version, so what needs it on the
-same computer has nothing to read there (Spout, SteamVR, VRChat's log: recording, 3D pictures, the QR code scanner, fast
-walk, tracking, the SteamVR overlay, world view). Everything else works: Unity projects, Photos & captures and their
-reconstruction, the 3D view and the editors, Visited worlds and Events through your account, calls, N4N0 and its menu, and
-OSC with a **VRChat on another device of the network**.
-
-What you make is in `~/Orbiters` (not Documents, which iCloud may sync). That VRChat is found by itself: a Quest, a Pico or an Android phone on the same Wi-Fi, with OSC on in VRChat's Action Menu
-(Options › OSC › Enabled), shows up in Home and Settings within seconds, and the only one found is connected at once
-(several: you choose; some routers keep devices from finding each other: type its address). A PC needs one launch option,
-which the same card writes out for you to copy: `--osc=9000:<this Mac's address>:9001`.
-
-## Layout
-
-| Path | What it is |
+| | |
 |---|---|
-| `crates/orbiters-desktop` | The desktop app: a small tray service (controller, capture worker, VRChat watchers, OSC; no GPU) and, while it is open, the window in its own process (`--window`, egui on wgpu) talking to it over a loopback link |
-| `crates/orbiters-ui` | Interface toolkit shared by the window and the coming VR overlay: theme, fonts, springs, the glow background shader, widgets, record button, trail map, toasts, offscreen renderer |
-| `crates/orbiters-capture` | Capture worker process (`orbiters-capture`): frame sources, strip and depth decoding, session bundles |
-| `crates/orbiters-reconstruct` | Reconstruction worker process (`orbiters-reconstruct`): trains Gaussian splats from a session's keyframes, poses and depth on the GPU (WGSL kernels on wgpu, checked against an f64 reference) |
-| `crates/orbiters-sound` | Interface sounds computed at start-up (a port of React Bits' Sound Lab renderer, see its NOTICE.md), the default-output player and the settings' mic monitor |
-| `crates/orbiters-n4n0-core` | N4N0, the companion on the avatar (contracts `Docs/n4n0.md`): its text panel's sender, avatar controls found by label, the tools and client of its assistant, the wake word, saved videos |
-| `crates/orbiters-n4n0` | N4N0's runtime, shared with the Android app: the panel, faces and helpers, the assistant's turns, N4N0's menu on the avatar's screen and the menu host the interfaces run, saved states, link cards, its ears, the music watcher; what each platform does its own way behind small traits (the app, OSC, clipboard, browser, sounds, language, ears, mouse, music, files) |
-| `crates/orbiters-voice` | N4N0's ears, a worker process (`orbiters-voice`): the microphone while N4N0 listens, Silero VAD and NVIDIA Parakeet through sherpa-onnx, on the CPU; it also installs the speech models |
-| `crates/orbiters-call` | N4N0's calls, a worker process (`orbiters-call`): WebRTC voice (webrtc-rs, Opus) between two Orbiters - N4N0 apps, through Cloudflare Realtime TURN when needed (contracts `Docs/n4n0-calls.md`) |
-| `crates/orbiters-audio` | Microphones and a process's sound through WASAPI (microphones through Core Audio on a Mac), for the capture worker and the voice worker |
-| `crates/orbiters-core` | Shared logic: settings, session bundles, keyframes, VRChat log, OSC/OSCQuery (this computer's VRChat, or a Quest's over the Wi-Fi), worker protocols; TLS, folders and the account's store per platform |
-| `crates/orbiters-projects` | Unity discovery, shared VCC/ALCOM project storage and VPM packages, avatar inventory and Toolkit setup requests ([Unity projects](docs/unity-projects.md)) |
-| `crates/orbiters-spout` | Spout2 receiver and test sender (Direct3D 11), protocol-compatible with the Spout2 SDK |
-| `crates/orbiters-setup` | The setup (`OrbitersSetup-<version>.exe`): installs the app for the person in `%LOCALAPPDATA%\Programs` (no administrator rights), updates it and uninstalls it, in the app's look |
-| `crates/orbiters-update` | Releases: the signed release file apps read, the setup's payload, the install record, downloading an update |
-| `xtask/` | Release tooling, `cargo xtask keygen / bump / dist / publish / release` (see [Releasing](docs/releasing.md)) |
-| `contracts/` | Submodule [OrbitersContracts](https://github.com/Orbiters-cc/OrbitersContracts): formats shared with Mixer |
+| System | Windows 10 or 11, 64-bit. Recording VRChat's sound on its own (process loopback) needs Windows 11. |
+| VRChat | The Steam version, on the same computer, for everything that reads the game (camera, log, overlays). |
+| SteamVR | Optional. Needed for the headset features: the overlay in VR, fast walk, tracking smoothing, live translation. |
+| Accounts | None required. An Orbiters account adds sharing, events, N4N0's assistant and explorer points. |
+| Disk | About 30 MB installed. Speech models (about 490 MB) and translation models are downloaded only if you turn those features on. |
+| macOS | Apple silicon, development pre-releases only so far: see [On a Mac](#on-a-mac). |
 
-## Building
+Stable releases are marked *Latest* on the releases page; versions named `-dev.N` are development pre-releases.
 
-Requirements: Rust (stable, MSVC toolchain on Windows). No web runtime: the interface is drawn natively.
+## What it does
+
+The window has nine pages: **Home**, **N4N0**, **Capture**, **Unity projects**, **Photos & captures**,
+**Visited worlds**, **Events**, **Videos** and **Settings**. Most of what follows is also reachable inside VRChat,
+from the tiles beside its menus or from N4N0's menu.
+
+### Start VRChat and see your friends
+
+Home has **Play in VR** and **Play in Desktop**. Both start VRChat through Steam, as you would, with the launch options
+you chose in Settings, and with the VRChat profile you pick (`--profile`) when you use several. Under them is your
+profile card (picture, status, bio, banner) and the Explorer points you earned with public 3D pictures.
+
+The friends list in the right column shows who is in game, on the website or offline, grouped as VRChat's favourite
+groups, with a search across friends, worlds and notes. Received boops and invite requests come first. A friend's
+profile opens in a card with where they are, Join, Request invite and Boop.
+
+![A friend's profile card over Home: where they are, Join, Request invite, Boop](docs/readme/friend-profile.webp)
+
+Where the list comes from: without a VRChat sign-in, it reads what [VRCX](https://github.com/vrcx-team/VRCX) or
+VRCNext already keep on this computer (read only, nothing is written to their folders). Signing in to VRChat inside
+the app is optional and is opened by Orbiters account by account; when it is used, requests go straight to VRChat with
+your own session (see [Privacy](#privacy-and-network-use)).
+
+### N4N0, the companion on your avatar
+
+N4N0 is a prop you add to your avatar (Unity projects › **Add N4N0**, or Orbiters' My Avatar tool). In VRChat it floats
+by you with a text panel everyone around can read. You talk to it by holding Talk, by touching it, or by starting a
+sentence with "Nano"; speech is transcribed **on this computer**, and only the sentences meant for N4N0 go to its
+assistant, which runs on Orbiters (a free daily quota). It can put your hoodie on, keep your GoGoLoco pose when you
+change avatar, hold parameters that worlds reset, show an AFK message, save the videos a world plays and take
+pictures. The N4N0 page can turn the assistant off for a tool without AI.
+
+![The N4N0 page: a conversation with N4N0 and what everyone sees on its panel](docs/readme/n4n0-assistant.webp)
+
+**N4N0's menu** is the same set of features as Home's cards: fast walk, YouTube, a 3D picture with a timer, the music
+that plays, N4N0's light, saved avatar states (every parameter OSC can set, saved under a name and put back in one
+press), tracking, previous instances, the QR code scanner and suggestions to the team. In VR it opens from a SteamVR
+binding (two quick taps on the left thumbrest or trackpad by default), from a watch on your wrist, or from the wake
+word; it opens in front of you as a SteamVR overlay, or on N4N0's own screen in the world when your N4N0 has one.
+
+![Home's feature cards, the same as N4N0's menu in VR](docs/readme/home-features.webp)
+
+### Orbiters beside VRChat's menus
+
+When VRChat's Quick Menu opens, a column of Orbiters tiles docks beside it: Worlds in 3D, YouTube, Instances,
+Pictures, Ask N4N0, All tools and what is playing on the computer. A second ring of cells surrounds the Action Menu's
+wheel. They appear when VRChat's menu opens and go when it closes. In desktop mode they are borderless windows over
+VRChat's; in VR they are SteamVR overlays riding the hand that opened the menu, pointed at with the other hand's laser.
+
+![The tiles beside the Quick Menu in desktop mode, drawn over a stand-in of VRChat's menu](docs/readme/overlay-desktop.webp)
+
+<sub>Desktop form, over a grey stand-in of VRChat's Quick Menu (the harness does not draw VRChat's own menu).</sub>
+
+![The headset layout of the same tiles, drawn flat](docs/readme/overlay-headset-layout.webp)
+
+<sub>Headset layout, drawn flat over the same stand-in. In the headset the tiles hang beside the menu on your hand.</sub>
+
+### VRChat's camera: 3D pictures, recordings and QR codes
+
+When VRChat's camera is open, tiles beside it offer **3D of people**, **3D of world** (1, 4 or 8 seconds),
+**Record** and **QR code**. A 3D picture flies the camera around you while it records; the app then reconstructs the
+place on your graphics card. Pointing the camera at a QR code opens its page in a panel next to the camera (an
+off-screen browser view), or in your browser if you ask; styled codes (inverted, coloured, with a logo) are read too.
+
+![The tiles beside VRChat's camera in desktop mode](docs/readme/camera-desktop.webp)
+
+<sub>Desktop mode, painted over a real frame of the game from the repository's test pictures.</sub>
+
+![The same tiles beside VRChat's camera in a headset](docs/readme/camera-headset.webp)
+
+<sub>In a headset: a picture of one eye taken in VRChat, with the tiles where the app's tracker places them.</sub>
+
+3D pictures and recordings need N4N0's **capture kit** on your avatar (added from Unity projects, like N4N0): it draws
+a small strip into the camera's picture that carries the camera's exact position and depth. The app reads the camera's
+picture over Spout (VRChat's Spout Stream option) and never needs your VRChat login for it.
+
+### 3D captures, the 3D view and sharing
+
+Each recording or 3D picture becomes a capture in Photos & captures. The app trains it into Gaussian splats on your
+GPU (`orbiters-reconstruct`), shows it in a 3D view you can orbit, save a view of, edit and select splats in, and
+exports it as SPZ or GLB for other tools ([docs/splat-exports.md](docs/splat-exports.md)). Captures can be sent to
+Unity through [Mixer](https://github.com/Orbiters-cc/Mixer).
+
+Sharing is your choice, per capture: keep it on this computer, share it with chosen people, or make it public on
+Orbiters. Public 3D pictures appear in **Worlds in 3D**, where anyone using the app can search VRChat's worlds, see
+which have captures, stand inside one in VR, like, label and comment on worlds. When you arrive in a world that has no
+public 3D picture yet, N4N0 says so once (Settings can turn this off), and the first public pictures of a world earn
+Explorer points.
+
+<sub>No picture of the 3D view here: it needs a real reconstructed capture, and the README uses made-up data only.</sub>
+
+### Photos, visited worlds and videos
+
+- **Photos & captures**: your VRChat pictures and captures, grouped by world and instance, with pictures shared with
+  you and your communities' galleries. A photo editor works on copies (crop, light, colour, curves, blur, text,
+  layers of VRChat's multi-layer pictures); the original is never written ([docs/photo-editor.md](docs/photo-editor.md)).
+- **Visited worlds**: every world you visited, read from VRChat's own log files and kept after VRChat deletes them,
+  with the pictures you took and the sessions you recorded there. **Previous instances** lets you go back.
+- **Videos**: every video the worlds' players played, from the same logs, by day, with its link to copy for another
+  world's player and lists of bookmarks of your own.
+
+### YouTube and music
+
+YouTube search with suggestions as you type, five results a page and **Copy link** to paste in a world's video player;
+in VR, a copied link can be dropped in the world as a card others can grab. It reads YouTube the way its website does,
+with no account and no key. What plays on the computer (Spotify, a browser, any app that reports to Windows' media
+controls) shows with play, pause and next.
+
+![The YouTube page with suggestions as you type](docs/readme/youtube.webp)
+
+### Events
+
+The Events page lists the events published on Orbiters, soonest first, with the ones happening now on top. An event
+opens with its programme step by step, its worlds, its pictures and **Invite me**.
+
+![The Events page with an event happening now](docs/readme/events.webp)
+
+### Unity projects
+
+A manager for VRChat Unity projects that works with the same project list as the VRChat Creator Companion and ALCOM,
+without either running: find and add projects, create one from a template, duplicate one with its exact package
+versions, open it in Unity, manage VPM packages and repositories, see each project's avatars and disk use, and add
+N4N0 or the capture kit to an avatar ([docs/unity-projects.md](docs/unity-projects.md)).
+
+![Unity projects: your projects, a project's avatars, Add N4N0](docs/readme/unity-projects.webp)
+
+### In VR: fast walk, tracking, frame rate, translation
+
+| Feature | What it does |
+|---|---|
+| Fast walk | While you walk with the stick, your tracked devices are carried along, so you cover more ground. Strength is a slider. |
+| Tracking smoothing | Eases the poses of the headset, controllers and trackers, each with its own strength. |
+| FPS booster | One slider, Off · Background · Picture · Avatars. It keeps a change only if measured frames rise, and puts everything back ([docs/fps-booster.md](docs/fps-booster.md)). |
+| Live translation | Off by default. Reads the text you see in the headset and lays its translation over it in the room ([docs/translate.md](docs/translate.md)). |
+| Sound devices | Switches Windows' default output and input to the headset's while SteamVR runs, and back after. |
+| Floating panel and watch | The SteamVR dashboard tab can float beside you while VRChat keeps the controllers; a watch on your wrist opens N4N0's menu. |
+
+Fast walk and tracking smoothing go through the app's SteamVR driver; see
+[How it works](#how-it-works-with-vrchat-and-what-it-does-not-do).
+
+### Languages and updates
+
+The whole app is in English, French, Spanish, Brazilian Portuguese and Japanese, the languages of the Orbiters
+website. It follows this computer's language, or the one saved on your Orbiters account.
+
+![Settings in French](docs/readme/settings-french.webp)
+
+Installed apps look for a new version 45 seconds after they start and every 4 hours, download it in the background,
+check it against the signed release, and offer **Restart to update**; a running recording, reconstruction or upload is
+never cut by it. Settings › About has **Look now**.
+
+### Coming soon and experimental
+
+- **Calls** between two Orbiters - N4N0 apps appear in the menus but say *Coming soon*: they are not open to accounts yet.
+- **VRChat bridge** (experimental, off by default): an [MCP](https://modelcontextprotocol.io/) service that lets an AI
+  agent run VRChat in desktop mode in private instances to take 3D pictures. Only the project owner's account can turn
+  it on today (the server decides); for everyone else Settings shows nothing and nothing listens. Its rules, and how
+  it stands against VRChat's Terms of Service, are in [docs/vrchat-bridge.md](docs/vrchat-bridge.md).
+
+### On a Mac
+
+There are development builds for Macs with Apple silicon (a `.dmg` on some `-dev` pre-releases). VRChat has no Mac
+version, so what reads VRChat on the same computer has nothing to read there (the camera over Spout, 3D pictures and
+recordings, the log, SteamVR features). The rest works: Unity projects, Photos & captures and their reconstruction, the
+3D view and editors, Events, N4N0 and its menu, and OSC with VRChat on another device of the network (a Quest, a Pico,
+a phone or a PC on the same Wi-Fi). Play can also start VRChat on the Mac through `obelisk-cli`, a separate GPL-3.0
+program from the [Orbiters-cc/Obelisk](https://github.com/Orbiters-cc/Obelisk) fork, downloaded from that fork's
+releases; none of its code is in N4N0.
+
+## How it works with VRChat, and what it does not do
+
+Orbiters - N4N0 talks to VRChat only through what VRChat and SteamVR offer to other programs, plus ordinary Windows
+interfaces. Each line below is what the code does; the comments of each module say the same.
+
+| Interface | Used for |
+|---|---|
+| [OSC and OSCQuery](https://docs.vrchat.com/docs/osc-overview) | Avatar parameters (N4N0, saved states, the capture kit), opening the camera in Stream mode while recording. |
+| VRChat's log files (`output_log_*.txt`) | Read only: the current world and instance, who joined, the avatar worn, the videos played. |
+| Spout (VRChat's Spout Stream camera option) | The camera's picture for recordings, 3D pictures and the QR code scanner. |
+| Steam | Play starts VRChat with `steam -applaunch 438100` and documented launch options, so Easy Anti-Cheat starts as usual. |
+| SteamVR (OpenVR) | Overlays for the tiles and panels, controller actions, the compositor's eye picture (camera tiles, translation), the `supersampleScale` setting (FPS booster). |
+| The app's SteamVR driver | `driver_orbiters_smooth.dll`, registered with SteamVR at first start and loaded by SteamVR into its own server. It eases device poses for tracking smoothing and adds fast walk's movement. It does nothing until one of those is on. It touches SteamVR's pose pipeline, not VRChat. |
+| Windows Graphics Capture | In desktop mode only, small parts of VRChat's window, while a key was just pressed or a menu shows, to know where VRChat's menus and camera are. |
+| A low-level mouse hook | In desktop mode only, while Left Alt is held with VRChat's wheel open, so the mouse can point at the ring of tiles. |
+| VRChat's web API | Only if you sign in to VRChat in the app (opened per account), with your own session: friends, profiles, invites, boops, instances. |
+
+What it does **not** do:
+
+- No injection into VRChat, no reading or writing of its memory, no handle opened on its process, nothing done to or
+  around Easy Anti-Cheat, no files of VRChat's modified.
+- The FPS booster never changes VRChat's priority or settings: it changes other programs' priority (Windows'
+  efficiency mode) and SteamVR's own setting, records every change before making it, and puts it back, even after a
+  crash. VRChat's own graphics settings are listed for you to change in VRChat yourself.
+- It does not ask for your VRChat password to work. The optional VRChat sign-in sends it only to VRChat.
+
+## Privacy and network use
+
+What stays on this computer: your recordings and their reconstruction, the VRChat log reading, speech recognition
+(NVIDIA Parakeet through sherpa-onnx, on the processor), the friends data read from VRCX or VRCNext, your pictures
+unless you share them, and your Unity projects.
+
+What leaves it, and to whom:
+
+| Destination | What is sent | When |
+|---|---|---|
+| Orbiters (`orbiters.cc`) | Sign-in (a browser pairing; nothing is typed in the app), the update feed and setups | When signed in; update checks always |
+| Orbiters | Captures and pictures you share, world likes, labels and comments, explorer points, events and galleries | When you use those features |
+| Orbiters | The sentences meant for N4N0 (typed, or transcribed here) and its answers | When the assistant is on and you talk to N4N0 |
+| Orbiters | **Beta usage statistics**: which pages and buttons are used and in what order, the app's and the computer's processor, graphics and memory use, VRChat's frame rate in VR, hardware models. Never what you type or say, pictures, links, worlds or people. Linked to your Orbiters account when signed in. | **On by default** during the beta; a notice in the window says so; turning it off in Settings deletes what was waiting |
+| Orbiters | Your frame rate per world, with the world, your avatar, the number of people and their avatars' names (never who they are) | Off by default; Settings turns it on |
+| Orbiters | The ids of avatars in your Unity projects, for their thumbnails | When you are not signed in to VRChat |
+| VRChat's picture servers | Ordinary downloads of public pictures (worlds, avatars, profiles), without any cookie | When a page shows them |
+| VRChat (`api.vrchat.cloud`, `files.vrchat.cloud`, `assets.vrchat.com`) | Requests with your own VRChat session | Only if you signed in to VRChat in the app |
+| YouTube (`youtube.com`, `suggestqueries.google.com`, `i.ytimg.com`) | Your searches; titles and thumbnails of videos in your history | When you search or open Videos |
+| GitHub releases (k2-fsa), Hugging Face | Model downloads (speech, text reading, translation) | Only when you install those models |
+| A translation service you choose | The text to translate: an AI server on this computer, one on your network, or Orbiters | Only with live translation on |
+| VPM package repositories | Package listings and downloads | On the Unity projects page |
+| The page a QR code points to | An ordinary web request, in a private off-screen view | When you open a scanned code |
+
+Where credentials are kept: the Orbiters sign-in is shared with the Orbiters Unity tools in Unity's preferences folder,
+protected with Windows' DPAPI for your Windows user. The optional VRChat session keeps only VRChat's `auth` and
+`twoFactorAuth` cookies, DPAPI-protected, in `%LOCALAPPDATA%\Orbiters\vrchat-session.bin`; passwords and codes are
+never stored ([docs/vrchat-sign-in.md](docs/vrchat-sign-in.md)). The uninstaller can remove settings, caches and models
+too; your recordings are never removed by it.
+
+## Building from source
+
+Requirements:
+
+- Rust stable with the MSVC toolchain on Windows (Xcode's command line tools on a Mac).
+- CMake 3.x on the `PATH` (the calls worker compiles the Opus codec).
+- Access to the `contracts` submodule, [Orbiters-cc/OrbitersContracts](https://github.com/Orbiters-cc/OrbitersContracts),
+  the formats shared with Mixer. **It is a private repository today: without access the workspace does not build.**
 
 ```sh
+git clone https://github.com/Orbiters-cc/Orbiters-N4N0.git
+cd Orbiters-N4N0
 git submodule update --init
 cargo build --release -p orbiters-desktop -p orbiters-capture -p orbiters-reconstruct -p orbiters-voice -p orbiters-call
 target/release/orbiters-desktop
 ```
 
-On a Mac: Xcode's command line tools and CMake (`brew install cmake`); the same `cargo build` command makes the programs,
-and `cargo xtask dist` the application and its disk image ([Releasing](docs/releasing.md)).
+The app looks for its workers (`orbiters-capture`, `orbiters-reconstruct`, `orbiters-voice`, `orbiters-call`) next
+to its own executable. Building `orbiters-voice` downloads sherpa-onnx's prebuilt libraries (about 8 MB, from
+k2-fsa's GitHub releases) and places them next to it. `orbiters-desktop --hidden` starts in the tray, `--quit` stops it.
 
-Building `orbiters-voice` downloads sherpa-onnx's prebuilt shared libraries (about 8 MB, from k2-fsa's GitHub
-releases) and places `sherpa-onnx-c-api.dll` and `onnxruntime.dll` next to it; ship them with it. The speech models
-(about 490 MB) are not part of the app: the N4N0 page installs them into `%LOCALAPPDATA%/Orbiters/Models` when the
-person asks. `orbiters-voice transcribe <file.wav>` checks them on 16 kHz recordings.
-
-Building `orbiters-call` compiles the Opus codec from source and needs CMake on the PATH (3.x; the portable zip from
-Kitware's releases is enough).
-
-Ship `THIRD_PARTY_NOTICES.md` and `THIRD_PARTY_LICENSES.md` with the programs. After a dependency change, regenerate
-the licenses with `python scripts/third_party_licenses.py`.
-
-The app looks for `orbiters-capture`, `orbiters-reconstruct`, `orbiters-voice` and `orbiters-call` next to its own
-executable. What stays running is small: in the tray the
-service and the worker use about 25 MB together and no GPU. The window is a separate process that exists only
-while it is open (about 120 MB, mostly the GPU driver); it repaints only while something moves, and looping
-animations run only while it is focused. It draws on the graphics card (Settings, Interface, Window graphics, can
-move it to the processor's integrated GPU), its 3D view's splats on the integrated GPU while VRChat runs (3D view on
-the integrated GPU), and while it is behind VRChat it draws the service's news at most five times a second ([what that saves VRChat](docs/igpu-experiment.md)). `orbiters-desktop --hidden` starts in
-the tray, `--quit` stops it.
-
-`orbiters-desktop --gpu-bench <scenario> [--gpu integrated|graphics-card]` opens the window over a stand-in controller
-and drives it, for measuring what it costs each GPU with the tools in `scripts/gpu-lab` (see
-[docs/igpu-experiment.md](docs/igpu-experiment.md)).
-
-To review the interface without a window, render it offscreen in its main states (capture idle and recording,
-consent notice, toasts, sessions, session detail, settings, splash):
-
-```sh
-target/release/orbiters-desktop --screenshot <out folder> [--sessions <sessions folder>] [--raw <raw captures folder>] [--scale 1.5] [--only sessions]
-```
-
-`--only e2e` instead records a real test pattern through the capture worker, driven by synthetic clicks (Test
-pattern, then the record button), and writes the session into the sessions folder. `--only e2e-reconstruct` opens
-the newest session and presses Reconstruct (the real worker replaces its `reconstruction/` folder). `--only splats-3d`
-opens the newest session's 3D view (the splats drawn by the reconstruction's own rasteriser on the window's GPU),
-then orbits it.
-
-## Releasing
-
-Bump the version, commit, push, then `cargo xtask release`: it builds and signs the programs on this computer, packs
-them into the setup, publishes it on orbiters.cc and tags the commit. Installed apps find the new version within
-hours, download it in the background and install it on their next restart. Everything about it, first-time set-up
-included, is in [docs/releasing.md](docs/releasing.md).
-
-## Command-line tools
-
-```sh
-cargo run -p orbiters-capture -- list-sources
-cargo run -p orbiters-capture -- send-test --name "Orbiters Test Pattern"           # a Spout sender with valid strips
-cargo run -p orbiters-capture -- record --source "spout:Orbiters Test Pattern" --seconds 10
-cargo run -p orbiters-capture -- record --source "raw:<raw capture folder>"          # replay a Mixer simulator capture
-cargo run -p orbiters-capture -- send-test --name Dolly2 --stream 1                  # another camera's view of the same frames
-cargo run -p orbiters-capture -- record --source spout:Dolly1 --extra Dolly2,Dolly3   # several senders as one session
-cargo run -p orbiters-capture -- verify "<raw capture folder>"                        # compare with its ground truth
-cargo run --release -p orbiters-reconstruct -- "<session folder>" [--iterations N] [--budget N] [--width N]
-cargo run -p orbiters-desktop -- --n4n0-menu <folder>    # N4N0's screen pages and layout table (for Toolkit), sample pages
-cargo run -p orbiters-desktop -- --n4n0-menu <folder> --theme <theme.json> --strings <strings.json>   # in a theme and language
-cargo run -p orbiters-desktop -- --n4n0-menu-strings <file.json>    # the menu's English texts by key, with each key's max
-```
-
-`--n4n0-menu` writes `N4N0 screen pages.png` and `N4N0 screen layout.png`, which Orbiters Toolkit carries as
-its screen pages and layout (`.png.bytes` in its `Editor/VRChat` folder): run it and copy them over whenever the
-menu's layout or look changes, so the avatar's screen matches the overlay. With `--theme` it writes only that theme's
-pages (as `N4N0 screen pages.png`), the layout and `N4N0 screen colors.json`; `--strings` draws the pages' texts in
-another language. The base themes and translations are `crates/orbiters-n4n0-core/menu-themes/` and
-`crates/orbiters-n4n0-core/menu-strings/` (contracts `Docs/n4n0.md`, Menu themes and translations); write `en.json` again with
-`--n4n0-menu-strings` when a text or a place changes (a test says so).
-
-## Tests
+Tests and lints:
 
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 
-## License
+Tests never touch the person's own folders, the registry, VRChat or the network: they run on temporary folders and
+recorded replies. The interface can be reviewed without a window: `orbiters-desktop --screenshot <out folder>
+[--only <scenario>] [--language <tag>]` renders pages offscreen with made-up data (this README's pictures were made
+so). After a dependency change, regenerate the licence file with `python scripts/third_party_licenses.py`.
 
-Free to use, proprietary source: see [LICENSE.md](LICENSE.md), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
-Copyright (c) 2026 Enzo DUTRA / blackorbit.
+More: [docs/releasing.md](docs/releasing.md) (releases), [docs/vr-sandbox.md](docs/vr-sandbox.md) (the SteamVR test
+sandbox), and the other notes in [docs/](docs/).
+
+## Project layout
+
+| Path | What it is |
+|---|---|
+| `crates/orbiters-desktop` | The app: the tray service (VRChat watchers, OSC, workers), the window, the SteamVR and desktop overlays |
+| `crates/orbiters-ui` | The interface toolkit: theme, fonts, widgets, animations, offscreen and CPU painters |
+| `crates/orbiters-core` | Shared logic: settings, VRChat log, OSC/OSCQuery, the Orbiters and VRChat API clients, credential storage |
+| `crates/orbiters-i18n` | Every text of the app in its five languages |
+| `crates/orbiters-capture` | Capture worker: Spout frames, the capture kit's strip and depth, session bundles |
+| `crates/orbiters-reconstruct` | Reconstruction worker: Gaussian splats trained on the GPU (WGSL on wgpu) |
+| `crates/orbiters-n4n0`, `orbiters-n4n0-core`, `orbiters-n4n0-mobile` | N4N0: its runtime, menu, assistant client, saved states; the phone core |
+| `crates/orbiters-voice` | Speech worker: voice detection and transcription on the CPU (sherpa-onnx) |
+| `crates/orbiters-call` | Calls worker (WebRTC, Opus); calls are not open yet |
+| `crates/orbiters-audio`, `orbiters-sound` | Microphones and process audio (WASAPI); the interface's sounds |
+| `crates/orbiters-openvr` | A minimal SteamVR client: poses, overlays, input, mirror textures |
+| `crates/orbiters-smooth`, `orbiters-smooth-driver` | Tracking smoothing and fast walk: the shared control block and the SteamVR driver |
+| `crates/orbiters-booster` | The FPS booster's logic and its undo journal |
+| `crates/orbiters-qr`, `orbiters-translate`, `orbiters-web` | QR reading, live translation (OCR and placement), private off-screen web pages |
+| `crates/orbiters-projects` | Unity projects, VPM packages, templates, avatar setup |
+| `crates/orbiters-spout` | Spout2 receiver and test sender (Direct3D 11) |
+| `crates/orbiters-setup`, `orbiters-update`, `orbiters-version` | The setup and uninstaller, signed releases and updates, the version |
+| `xtask/` | Release tooling: `cargo xtask keygen / bump / dist / publish / release / github` |
+| `contracts/` | Submodule: formats shared with Mixer (private, see [Building](#building-from-source)) |
+
+## Releases and signing
+
+Releases are built on the maintainer's computer with `cargo xtask release`, not on a hosted CI. Each version is tagged
+`desktop-v<version>` and published on the [releases page](https://github.com/Orbiters-cc/Orbiters-N4N0/releases) with
+its setup, and on orbiters.cc for installed apps ([docs/releasing.md](docs/releasing.md)).
+
+How a release is checked today:
+
+- **Updates are signed.** Each release is described by a file signed with the project's Ed25519 release key; the
+  public half (`crates/orbiters-update/update-key.pub`) is built into every app. An installed app checks that
+  signature, then the setup's size and SHA-256, before installing anything. The server holds no key, so a compromised
+  server cannot make an app install anything.
+- **The setup checks itself.** It holds a compressed payload whose index lists each file's size and SHA-256, unpacks
+  and checks it before moving files into place, and puts the old files back if a move fails.
+- **The setup and programs are not Authenticode-signed yet.** GitHub shows each asset's SHA-256 digest on the release
+  page; a downloaded setup can be compared with `Get-FileHash OrbitersSetup-<version>.exe`.
+
+## Code signing policy
+
+Windows code signing (Authenticode) of the programs and the setup is not in place yet; when it is, this section will
+name the service and certificate used. Until then, only the update signature above applies.
+
+| Role | Who |
+|---|---|
+| Committers and reviewers | [Members of the Orbiters-cc organisation](https://github.com/orgs/Orbiters-cc/people) |
+| Approvers (who decide that a release is published and signed) | [Owners of the Orbiters-cc organisation](https://github.com/orgs/Orbiters-cc/people?query=role%3Aowner) |
+
+The project has one maintainer today, who holds all three roles. Contributions from anyone else are reviewed by the
+maintainer before they are merged.
+
+Privacy: what the program sends over the network, and to whom, is in [Privacy and network use](#privacy-and-network-use).
+
+## Contributing and security
+
+Issues and pull requests are welcome on [GitHub](https://github.com/Orbiters-cc/Orbiters-N4N0/issues). Note the
+licence below: contributions are accepted, but the code may not be reused or redistributed without permission.
+
+Please report security problems privately rather than in a public issue, through the maintainer's GitHub profile or
+[orbiters.cc](https://orbiters.cc), and give enough to reproduce them.
+
+## Licence
+
+Orbiters - N4N0 is **free to use with readable source, but not open source**: it is under the proprietary
+[Orbiters Desktop Licence](LICENSE.md). You may download and use unmodified copies from the official channels, read
+the source, and make tools that talk to it with attribution; copying, modifying or redistributing it needs written
+permission. Copyright (c) 2026 Enzo DUTRA / blackorbit.
+
+Third-party components keep their own licences: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the full
+texts in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md), both shipped with the app. Recording what VRChat shows
+comes with responsibilities toward world creators and other players, which the licence states.
+
+## Credits
+
+Built on [egui](https://github.com/emilk/egui) and [wgpu](https://github.com/gfx-rs/wgpu),
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) with Silero VAD and NVIDIA Parakeet,
+[ONNX Runtime](https://onnxruntime.ai/), PaddleOCR's models, [webrtc-rs](https://github.com/webrtc-rs/webrtc),
+[vrc-get](https://github.com/vrc-get/vrc-get) (ALCOM's VPM resolver), the
+[Spout2](https://github.com/leadedge/Spout2) protocol and [Phosphor Icons](https://phosphoricons.com/), among the
+components listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). VRChat is a trademark of VRChat Inc.; this
+project is not affiliated with or endorsed by VRChat Inc. or Valve.

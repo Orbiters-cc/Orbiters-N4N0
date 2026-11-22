@@ -839,6 +839,32 @@ impl Client {
         CStr::from_bytes_until_nul(&buf).ok().map(|s| s.to_string_lossy().into_owned())
     }
 
+    /// The names of the drivers SteamVR has (`IVRDriverManager_001`: `GetDriverCount` 0, `GetDriverName` 1, layout from
+    /// Valve's public `openvr_capi.h`), each with whether it is enabled. Only read: a diagnostic of which add-ons share
+    /// SteamVR's poses (a tracking-space calibrator, for one). Empty when SteamVR does not give the interface.
+    pub fn driver_names(&self) -> Vec<(String, bool)> {
+        let Ok(table) = self.interface("IVRDriverManager_001") else { return Vec::new() };
+        type Count = unsafe extern "system" fn() -> u32;
+        type Name = unsafe extern "system" fn(u32, *mut c_char, u32) -> u32;
+        type Enabled = unsafe extern "system" fn(u32) -> bool;
+        // SAFETY: entry 0 is GetDriverCount.
+        let count = unsafe { entry::<Count>(table, 0)() }.min(256);
+        let mut out = Vec::new();
+        for driver in 0..count {
+            let mut buf = [0u8; 256];
+            // SAFETY: entry 1 is GetDriverName; the buffer's size is what is passed.
+            let n = unsafe { entry::<Name>(table, 1)(driver, buf.as_mut_ptr().cast(), buf.len() as u32) };
+            if n == 0 || n as usize > buf.len() {
+                continue;
+            }
+            let Ok(name) = CStr::from_bytes_until_nul(&buf) else { continue };
+            // SAFETY: entry 3 is IsEnabled.
+            let enabled = unsafe { entry::<Enabled>(table, 3)(driver) };
+            out.push((name.to_string_lossy().into_owned(), enabled));
+        }
+        out
+    }
+
     /// Next event for this application, if any.
     pub fn poll_event(&self) -> Option<Event> {
         type F = unsafe extern "system" fn(*mut Event, u32) -> bool;

@@ -7,6 +7,7 @@
 //! are textures handed in by URL ([`State::provide_picture`]); the page lists the ones it would draw
 //! ([`State::wanted_pictures`]).
 
+pub mod destinations;
 mod hero;
 pub mod list;
 pub mod mine;
@@ -128,6 +129,8 @@ pub struct State {
     /// The data and session the whole list's pictures were last handed to the background for, and what was handed.
     warmed_for: Option<(Arc<LauncherState>, crate::controller::vrchat_data::Scope)>,
     warmed: u64,
+    /// Where VRChat starts into, above the Play buttons (REQUEST20 2).
+    pub places: destinations::Places,
 }
 
 impl Default for State {
@@ -164,6 +167,7 @@ impl Default for State {
             owners_for: None,
             warmed_for: None,
             warmed: 0,
+            places: destinations::Places::default(),
         }
     }
 }
@@ -320,6 +324,12 @@ impl State {
 
     pub fn stand_in_dismiss(&mut self, id: &str) {
         self.dismissed.insert(id.to_string());
+    }
+
+    /// Pictures of the page: these sections folded (never saved).
+    pub fn stand_in_folded(&mut self, sections: &[&str]) {
+        self.folded = sections.iter().map(|s| s.to_string()).collect();
+        self.folds += 1;
     }
 
     /// Pictures of the page: the VRChat profile chosen for the next Play.
@@ -499,7 +509,16 @@ fn folded_file() -> Option<std::path::PathBuf> {
 }
 
 fn load_folded() -> HashSet<String> {
-    folded_file().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    folded_from(folded_file().and_then(|f| std::fs::read(f).ok()))
+}
+
+/// The sections folded, from what was saved: never saved, Offline starts folded as VRCNext's does (REQUEST20 3), so the
+/// list opens on who is there; once the person folded or opened anything, what they chose.
+fn folded_from(saved: Option<Vec<u8>>) -> HashSet<String> {
+    match saved {
+        Some(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        None => [list::OFFLINE.to_string()].into(),
+    }
 }
 
 fn save_folded(folded: &HashSet<String>) {
@@ -662,9 +681,10 @@ pub(super) fn backdrop(p: &egui::Painter, rect: Rect, radius: f32, state: &mut S
     }
 }
 
-/// A press that needs nothing of the account's list: Play with no destination, Play on a profile, a Mac's Obelisk.
+/// A press that needs nothing of the account's list: Play with no destination, Play on a profile, a Mac's Obelisk, and
+/// Where's places of this computer's own history (a list's invite or room is never one: [`destinations::Suggestion::local`]).
 fn local_play(action: &Action) -> bool {
-    matches!(action, Action::Play { destination: None, .. } | Action::PlayOn { .. } | Action::OpenEngine)
+    matches!(action, Action::Play { destination: None, .. } | Action::PlayOn { .. } | Action::PlayAt { .. } | Action::OpenEngine | Action::InstallEngine)
 }
 
 /// The column (or the rail) beside Home's content, at `rect`.
@@ -871,6 +891,13 @@ mod tests {
         // Unwired (pictures of the page, tests) or a local copy: never stale.
         state.login = None;
         assert!(!state.stale());
+    }
+
+    #[test]
+    fn offline_starts_folded_and_then_what_the_person_chose_is_kept() {
+        assert_eq!(folded_from(None), [list::OFFLINE.to_string()].into());
+        assert!(folded_from(Some(b"[]".to_vec())).is_empty(), "opened once: stays open");
+        assert_eq!(folded_from(Some(br#"["group_0","website"]"#.to_vec())), ["group_0".to_string(), "website".to_string()].into());
     }
 
     #[test]

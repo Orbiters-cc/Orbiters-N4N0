@@ -7,7 +7,7 @@
 //!    may only need the system's or what ships beside it.
 //! 3. It is signed from the inside out with the best identity this computer has: Developer ID, else Apple Development,
 //!    else ad hoc. Developer ID also goes to Apple's notary when a profile for it is set up (`macos_notary_profile`).
-//! 4. It is zipped and put on a disk image with a link to Applications.
+//! 4. It is zipped and put on a disk image with a link to Applications, in a window with the app's look (tools/dmg).
 //! 5. The release file names the zip and is signed with the release key, when this computer has it.
 
 use crate::{output, run, Config};
@@ -23,6 +23,9 @@ const PROGRAMS: [&str; 5] = ["orbiters-desktop", "orbiters-capture", "orbiters-r
 const LIBRARIES: [&str; 2] = ["libsherpa-onnx-c-api.dylib", "libonnxruntime.dylib"];
 const FACE_MODEL: &str = "crates/orbiters-reconstruct/assets/faces-v1-int8.onnx";
 const ICON: &str = "crates/orbiters-desktop/assets/AppIcon.icns";
+/// The disk image's volume before the application is in it: the link to Applications, the window's picture and Finder's
+/// layout of it (tools/dmg makes it; tools/dmg/README.md).
+const IMAGE_TEMPLATE: &str = "crates/orbiters-desktop/assets/dmg/template.dmg";
 const DOCUMENTS: [&str; 3] = ["LICENSE.md", "THIRD_PARTY_LICENSES.md", "THIRD_PARTY_NOTICES.md"];
 /// The oldest macOS the app runs on. Rust's target asks for 11; Metal 3 features and the C libraries built here for this.
 const MINIMUM_MACOS: &str = "13.0";
@@ -364,16 +367,27 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     println!("\n== Archive and disk image");
     zip(&archive)?;
     let image = dist.join(mac_disk_image_name(&version));
-    let staging = dist.join("image");
-    std::fs::create_dir_all(&staging)?;
-    run(Command::new("ditto").arg(&app).arg(staging.join(MAC_APP)))?;
-    #[cfg(unix)]
-    std::os::unix::fs::symlink("/Applications", staging.join("Applications"))?;
-    run(Command::new("hdiutil")
-        .args(["create", "-quiet", "-volname", "Orbiters - N4N0", "-fs", "HFS+", "-format", "UDZO", "-ov", "-srcfolder"])
-        .arg(&staging)
-        .arg(&image))?;
-    std::fs::remove_dir_all(&staging)?;
+    // The image is the template's volume, made large enough, with the application put in: Finder finds the window's
+    // picture through a bookmark that names that very volume, so a new volume with the same files would show none.
+    let (work, mount) = (dist.join("image.dmg"), dist.join("image"));
+    run(Command::new("hdiutil").args(["convert", "-quiet"]).arg(crate::root().join(IMAGE_TEMPLATE)).args(["-format", "UDRW", "-ov", "-o"]).arg(&work))?;
+    run(Command::new("hdiutil").args(["resize", "-quiet", "-size", &format!("{}m", image_megabytes(folder_bytes(&app)?))]).arg(&work))?;
+    std::fs::create_dir_all(&mount)?;
+    run(Command::new("hdiutil").args(["attach", "-quiet", "-nobrowse", "-noautoopen", "-mountpoint"]).arg(&mount).arg(&work))?;
+    let filled = run(Command::new("ditto").arg(&app).arg(mount.join(MAC_APP))).and_then(|()| {
+        anyhow::ensure!(mount.join(".DS_Store").is_file() && mount.join(".background").is_dir() && mount.join("Applications").is_symlink(), "{IMAGE_TEMPLATE} lacks its layout, its picture or its link to Applications");
+        // What macOS leaves on a volume it mounted for writing.
+        for leftover in [".fseventsd", ".Trashes"] {
+            let _ = std::fs::remove_dir_all(mount.join(leftover));
+        }
+        Ok(())
+    });
+    let detached = run(Command::new("hdiutil").args(["detach", "-quiet"]).arg(&mount)).or_else(|_| run(Command::new("hdiutil").args(["detach", "-quiet", "-force"]).arg(&mount)));
+    filled?;
+    detached?;
+    run(Command::new("hdiutil").args(["convert", "-quiet"]).arg(&work).args(["-format", "UDZO", "-imagekey", "zlib-level=9", "-ov", "-o"]).arg(&image))?;
+    std::fs::remove_file(&work)?;
+    let _ = std::fs::remove_dir(&mount);
     // The image's own signature only matters to the notary: the application inside carries its signature, and each signing
     // is one more question from the keychain.
     if let (Identity::DeveloperId(_), Some(profile)) = (&identity, &config.macos_notary_profile) {
@@ -419,6 +433,23 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     Ok(dist)
 }
 
+/// The bytes of every file under `folder`.
+fn folder_bytes(folder: &Path) -> anyhow::Result<u64> {
+    let mut bytes = 0;
+    for entry in std::fs::read_dir(folder)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        bytes += if kind.is_dir() { folder_bytes(&entry.path())? } else { entry.metadata()?.len() };
+    }
+    Ok(bytes)
+}
+
+/// How large the image's volume is made for an application of `bytes`: with room for the file system's own tables
+/// (the compressed image does not carry the empty part).
+fn image_megabytes(bytes: u64) -> u64 {
+    (bytes >> 20) + (bytes >> 23) + 48
+}
+
 fn sign_image(identity: &Identity, image: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(run_within(Command::new("codesign").args(["--force", "--sign", identity.name()]).arg(image), SIGNING_LIMIT)?, "{} was not signed", image.display());
     Ok(())
@@ -460,6 +491,13 @@ mod tests {
         let started = Instant::now();
         assert!(!run_within(Command::new("/bin/sleep").arg("30"), Duration::from_millis(300)).unwrap(), "one that does not end in time counts as not done");
         assert!(started.elapsed() < Duration::from_secs(5), "and is ended, not waited for");
+    }
+
+    #[test]
+    fn the_image_has_room_for_the_application() {
+        assert_eq!(image_megabytes(0), 48);
+        assert_eq!(image_megabytes(144 << 20), 144 + 18 + 48);
+        assert!(crate::root().join(IMAGE_TEMPLATE).is_file(), "the template the disk image is made from is committed");
     }
 
     #[test]

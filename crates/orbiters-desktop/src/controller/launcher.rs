@@ -12,7 +12,7 @@
 //!   for another program to press its Play. N4N0 opens Obelisk and says to press Play there; it sees the game once
 //!   it runs, and a destination is an invite to oneself (kept until the game is up when it was not).
 use super::{Controller, Shared};
-use orbiters_core::launcher::{Action, Game, Invite, LaunchMode, LauncherState, Notice, Place, Possible, Profile, SentKind, Source, Whereabouts};
+use orbiters_core::launcher::{Action, EngineSetup, Game, Invite, LaunchMode, LauncherState, Notice, Place, Possible, Profile, SentKind, Source, Whereabouts};
 use orbiters_core::launcher_feed::{self, Cooldowns, Decorations};
 use orbiters_core::vrchat_api::{Client, Error};
 use orbiters_core::vrchat_launch::{desktop_window, SavedWindow};
@@ -59,6 +59,8 @@ const RESYNC_AFTER: Duration = Duration::from_secs(5 * 60);
 /// card comes back (and VRChat still has the invite).
 const ARRIVE_WITHIN: Duration = Duration::from_secs(10 * 60);
 const PENDING_FOR: Duration = Duration::from_secs(10 * 60);
+/// How long a Play asked for before VRChat was in Obelisk waits for it (its sign-in to Steam, then gigabytes to download).
+const PLAY_WHEN_READY_FOR: Duration = Duration::from_secs(60 * 60);
 
 /// The game on this computer, real or a test's.
 pub trait Machine: Send + Sync {
@@ -93,6 +95,24 @@ pub trait Machine: Send + Sync {
     /// Opens what runs VRChat here, or where it is got (`Action::OpenEngine`).
     fn open_engine(&self) -> Result<(), String> {
         Ok(())
+    }
+    /// Whether a by-hand machine starts the game itself after all (a Mac, through the engine without a window): `start`
+    /// then takes the arguments, a destination goes with them, and nothing is opened for the person to press Play in.
+    fn direct(&self) -> bool {
+        false
+    }
+    /// A start is still under way (the engine or an update of the game may download before the game shows).
+    fn starting(&self) -> bool {
+        false
+    }
+    /// Why the last start failed after `start` returned, told once.
+    fn start_failure(&self) -> Option<String> {
+        None
+    }
+    /// Sets up what runs VRChat here (`Action::InstallEngine`), the game included; `progress` hears each step and
+    /// `stop` ends it early.
+    fn install_engine(&self, _progress: &dyn Fn(EngineSetup), _stop: &AtomicBool) -> Result<(), String> {
+        Err(tr("VRChat could not be started: nothing to install on this computer.").into())
     }
 }
 
@@ -144,65 +164,82 @@ impl RealMachine {
     }
 }
 
-/// VRChat on this Mac, through Obelisk.
+/// VRChat on this Mac: started by N4N0 itself, through Obelisk's engine without its window (`obelisk_cli`).
 pub struct MacMachine {
-    pub home: std::path::PathBuf,
+    /// Where N4N0 keeps the program it downloaded.
+    tools: std::path::PathBuf,
+    /// The program's library: VRChat, the engine, the records of what runs.
+    library: std::path::PathBuf,
+    play: Arc<super::obelisk_cli::Play>,
+    /// Steam refused the saved sign-in at the last start: the set-up is offered again until it ran.
+    signed_out: AtomicBool,
 }
 
 impl MacMachine {
-    fn app(&self) -> Option<std::path::PathBuf> {
-        orbiters_core::obelisk::app_places(&self.home).into_iter().find(|p| p.is_dir())
+    pub fn new(home: &std::path::Path) -> Self {
+        MacMachine {
+            tools: orbiters_core::obelisk::tools(&orbiters_core::paths::config_dir()),
+            library: orbiters_core::obelisk::library(home),
+            play: Arc::default(),
+            signed_out: AtomicBool::new(false),
+        }
     }
 }
 
 impl Machine for MacMachine {
     fn running(&self) -> Vec<(u32, bool)> {
-        let install = orbiters_core::obelisk::vrchat_install(&orbiters_core::obelisk::library(&self.home));
+        // What the engine's own records name, while that process lives; else what this N4N0's start said.
+        let recorded = orbiters_core::obelisk::session_games(&self.library);
         let mut system = sysinfo::System::new();
-        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::OnlyIfNotSet));
-        let mut found: Vec<u32> = system
-            .processes()
-            .values()
-            .filter(|p| {
-                let command: Vec<String> = p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect();
-                orbiters_core::obelisk::is_vrchat_process(&command, install.as_deref())
-            })
-            .map(|p| p.pid().as_u32())
-            .collect();
+        let pids: Vec<sysinfo::Pid> = recorded.iter().map(|pid| sysinfo::Pid::from_u32(*pid)).collect();
+        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&pids), true, sysinfo::ProcessRefreshKind::nothing());
+        let mut found: Vec<u32> = recorded.into_iter().filter(|pid| system.process(sysinfo::Pid::from_u32(*pid)).is_some()).collect();
+        if found.is_empty() {
+            found.extend(self.play.running().map(|pid| pid.unwrap_or(0)));
+        }
         found.sort_unstable();
+        found.dedup();
         // No headset on a Mac: the desktop game, always.
         found.into_iter().map(|pid| (pid, true)).collect()
     }
 
     fn installed(&self) -> bool {
-        orbiters_core::obelisk::engine(&self.home) == orbiters_core::obelisk::Engine::Ready
+        !self.signed_out.load(Ordering::Relaxed) && orbiters_core::obelisk::engine(&self.tools, &self.library) == orbiters_core::obelisk::Engine::Ready
     }
 
     fn engine_missing(&self) -> bool {
-        orbiters_core::obelisk::engine(&self.home) == orbiters_core::obelisk::Engine::Missing
+        orbiters_core::obelisk::engine(&self.tools, &self.library) == orbiters_core::obelisk::Engine::Missing
     }
 
     fn by_hand(&self) -> bool {
         true
     }
 
-    fn start(&self, _args: &[String]) -> Result<(), String> {
-        self.open_engine()
+    fn direct(&self) -> bool {
+        true
     }
 
-    fn open_engine(&self) -> Result<(), String> {
-        let mut open = std::process::Command::new("/usr/bin/open");
-        match self.app() {
-            Some(app) => open.arg(app),
-            // Not in Applications (or not at all): macOS finds it by its identifier, else its site.
-            None if orbiters_core::obelisk::library(&self.home).is_dir() => open.args(["-b", orbiters_core::obelisk::BUNDLE_ID]),
-            None => open.arg(orbiters_core::obelisk::SITE),
-        };
-        match open.status() {
-            Ok(status) if status.success() => Ok(()),
-            Ok(_) => Err(tr("Obelisk could not be opened.").into()),
-            Err(e) => Err(e.to_string()),
+    fn start(&self, args: &[String]) -> Result<(), String> {
+        let program = orbiters_core::obelisk::program(&self.tools).ok_or_else(|| tr("VRChat is not set up on this Mac yet.").to_string())?;
+        self.play.start(&program, args)
+    }
+
+    fn starting(&self) -> bool {
+        self.play.starting()
+    }
+
+    fn start_failure(&self) -> Option<String> {
+        let failure = self.play.failure()?;
+        if matches!(failure.code.as_str(), "not_signed_in" | "sign_in_expired" | "not_installed") {
+            self.signed_out.store(true, Ordering::Relaxed);
         }
+        Some(failure.words)
+    }
+
+    fn install_engine(&self, progress: &dyn Fn(EngineSetup), stop: &AtomicBool) -> Result<(), String> {
+        super::obelisk_cli::set_up(&self.tools, progress, stop).map_err(|failure| failure.words)?;
+        self.signed_out.store(false, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -295,7 +332,7 @@ pub fn game_profiles(
 /// This computer's.
 fn real_machine() -> Arc<dyn Machine> {
     if cfg!(target_os = "macos") {
-        Arc::new(MacMachine { home: orbiters_core::obelisk::home() })
+        Arc::new(MacMachine::new(&orbiters_core::obelisk::home()))
     } else {
         Arc::new(RealMachine::default())
     }
@@ -423,6 +460,9 @@ pub(super) struct Runtime {
     /// Where to go once the game the person starts by hand (a Mac) is up, since when it waits, and the account it was
     /// asked for (it goes to that account only).
     pending: Option<(Place, Instant, Option<String>)>,
+    /// On a Mac: Play was asked for while VRChat was not in Obelisk yet (its install, or Obelisk's own, was started
+    /// from here); it is played once it is there, within [`PLAY_WHEN_READY_FOR`].
+    play_when_ready: Option<Instant>,
     /// Starts under way, by profile (Home's Play and profile choice, Go there, the VRChat bridge): each claims its
     /// profile from before the start until a VRChat on it is seen, or [`PROFILE_HELD`] passed (REQUEST15 fix B4).
     starting: Vec<Claim>,
@@ -502,6 +542,7 @@ impl Default for Runtime {
             game_checked: None,
             machine: real_machine(),
             pending: None,
+            play_when_ready: None,
             starting: Vec::new(),
             claims_made: 0,
             mine_next: None,
@@ -832,12 +873,27 @@ impl Controller {
         }
         let profiles = if here && !machine.by_hand() { game_profiles(&self.view().settings.launch.profiles, &runs, &view.vrchat.runs, &claims) } else { Vec::new() };
         let running: Vec<(u32, bool)> = runs.iter().map(|r| (r.0, r.1)).collect();
+        // A start that failed after it was asked for (the game's own start, far from the press): said, and over.
+        let failed = machine.start_failure();
+        if let Some(words) = &failed {
+            *self.launcher_started.lock().unwrap() = None;
+            self.launcher.lock().unwrap().pending = None;
+            let notice = Notice::Error(tr!("VRChat could not be started: {reason}", reason = words));
+            self.launcher_notice(notice.clone());
+            let ctl = self.clone();
+            let _ = std::thread::Builder::new().name("launcher-start-failed".into()).spawn(move || {
+                std::thread::sleep(NOTICE_FOR);
+                ctl.launcher_notice_over(&notice);
+            });
+        }
         let game = match running.first() {
             Some((_, desktop)) => Game::Running(if *desktop { LaunchMode::Desktop } else { LaunchMode::Vr }),
             None if !here => Game::NotRunning,
             None => match view.launcher.game {
+                // Still starting for as long as the machine says so (the engine may download first).
+                Game::Starting(mode) if failed.is_none() && machine.starting() => Game::Starting(mode),
                 // A start just asked for is "starting" until VRChat shows up (or a minute passes).
-                Game::Starting(mode) if self.launcher_started_recently() => Game::Starting(mode),
+                Game::Starting(mode) if failed.is_none() && self.launcher_started_recently() => Game::Starting(mode),
                 _ if machine.engine_missing() => Game::NoEngine,
                 _ if !machine.installed() => Game::NotInstalled,
                 _ => Game::NotRunning,
@@ -846,10 +902,23 @@ impl Controller {
         if matches!(game, Game::Running(_)) {
             self.launcher_go_pending();
         }
+        // VRChat is in Obelisk now, and Play was asked for before it was: played at once (Obelisk comes to the front).
+        let waited = match game {
+            Game::NoEngine | Game::NotInstalled => None,
+            _ => self.launcher.lock().unwrap().play_when_ready.take(),
+        };
+        if game == Game::NotRunning && machine.by_hand() && waited.is_some_and(|since| since.elapsed() < PLAY_WHEN_READY_FOR) {
+            self.launcher_action(Action::Play { mode: LaunchMode::Desktop, destination: None });
+        }
         // Published only when something changed (this runs every few seconds).
         self.update_if(|s| {
             let unresolved = runs.iter().filter(|r| r.2.is_none()).count() as u32;
-            let changed = s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles || s.launcher.unresolved != unresolved;
+            // A set-up that ended (VRChat is there to play) is no longer on show.
+            let waiting_over = matches!(s.launcher.engine_setup, Some(EngineSetup::Checking | EngineSetup::Game { .. })) && !matches!(game, Game::NotInstalled | Game::NoEngine);
+            if waiting_over {
+                s.launcher.engine_setup = None;
+            }
+            let changed = waiting_over || s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles || s.launcher.unresolved != unresolved;
             s.launcher.unresolved = unresolved;
             if s.launcher.profiles != profiles {
                 s.launcher.profiles = profiles;
@@ -1223,7 +1292,9 @@ impl Controller {
         let account = account.as_deref();
         match action {
             Action::Play { mode, destination } => Some(self.launcher_play(mode, destination, account)),
-            Action::PlayOn { mode, profile } => Some(self.launcher_play_on(mode, profile)),
+            Action::PlayOn { mode, profile } => Some(self.launcher_play_on(mode, profile, None, account)),
+            // Home's Where (REQUEST20 2): the chosen profile, right into the chosen instance.
+            Action::PlayAt { mode, profile, destination } => Some(self.launcher_play_on(mode, profile, Some(destination), account)),
             // The account's own profile: REQUEST15 7b.
             Action::EditProfile(edit) => self.launcher_edit_mine(edit, account),
             Action::ListPictures(kind) => {
@@ -1236,40 +1307,8 @@ impl Controller {
                 }
                 None
             }
-            Action::AcceptInvite { invite, mode } => {
-                // An invite is the account's whose list showed it: never accepted for another, nor with no sign-in.
-                let owner = match (self.launcher_sender(account), account) {
-                    (Ok(_), Some(owner)) => owner.to_string(),
-                    (sender, _) => return Some(notice_or_changed(sender.err())),
-                };
-                let found = self.view().launcher.invites.iter().find(|i| i.id == invite).cloned();
-                let Some(found) = found.filter(|i| i.place.is_some()) else { return Some(Notice::Error(tr("This invite is no longer here.").into())) };
-                // One accept per invite: reserved before anything starts (two presses, two threads).
-                {
-                    let from = match &self.view().launcher.me {
-                        Some(me) => match &me.whereabouts {
-                            Whereabouts::World(p) => Some((p.world_id.clone(), p.instance_id.clone())),
-                            _ => None,
-                        },
-                        None => None,
-                    };
-                    let mut rt = self.launcher.lock().unwrap();
-                    if rt.accepted.iter().any(|a| a.invite.id == invite) {
-                        return Some(Notice::Error(tr("This invite is no longer here.").into()));
-                    }
-                    rt.accepted.push(Accepted { invite: found.clone(), at: Instant::now(), owner: owner.clone(), from, hide_failures: 0, hide_again: None, moved: false });
-                }
-                let notice = self.launcher_play(mode, found.place.clone(), Some(&owner));
-                if matches!(notice, Notice::Error(_)) {
-                    // Not on the way: the reservation goes, the card stays.
-                    self.launcher.lock().unwrap().accepted.retain(|a| a.invite.id != invite);
-                } else {
-                    // The card goes here at once; VRChat hides the invite only once the account got there (a start that
-                    // fails, or lands at home, leaves it in VRChat and brings the card back).
-                    self.update(|s| s.launcher.invites.retain(|i| i.id != invite));
-                }
-                Some(notice)
-            }
+            Action::AcceptInvite { invite, mode } => Some(self.launcher_accept(&invite, mode, None, account)),
+            Action::AcceptInviteOn { invite, mode, profile } => Some(self.launcher_accept(&invite, mode, Some(profile), account)),
             Action::Dismiss { id } => {
                 self.launcher_dismiss(&id, account);
                 None
@@ -1283,8 +1322,13 @@ impl Controller {
             }
             Action::OpenEngine => {
                 let machine = self.launcher.lock().unwrap().machine.clone();
+                // Opened to download VRChat in it: the game is played once it is there.
+                if machine.by_hand() && !machine.engine_missing() && !machine.installed() {
+                    self.launcher.lock().unwrap().play_when_ready = Some(Instant::now());
+                }
                 machine.open_engine().err().map(Notice::Error)
             }
+            Action::InstallEngine => self.launcher_install_engine(),
             Action::CloseProfile => {
                 self.update(|s| s.launcher.profile = None);
                 None
@@ -1296,6 +1340,47 @@ impl Controller {
                 None
             }
         }
+    }
+
+    /// Accepts the invite `invite` of the list of `account` and plays it in `mode`: through [`Self::launcher_play`], or on
+    /// `profile` when Home's Where chose one (REQUEST20 2). One accept per invite, reserved before anything starts; the
+    /// card goes at once and VRChat hides the invite once the account got there ([`Self::launcher_settle_accepted`]).
+    fn launcher_accept(self: &Shared, invite: &str, mode: LaunchMode, profile: Option<u32>, account: Option<&str>) -> Notice {
+        // An invite is the account's whose list showed it: never accepted for another, nor with no sign-in.
+        let owner = match (self.launcher_sender(account), account) {
+            (Ok(_), Some(owner)) => owner.to_string(),
+            (sender, _) => return notice_or_changed(sender.err()),
+        };
+        let found = self.view().launcher.invites.iter().find(|i| i.id == invite).cloned();
+        let Some(found) = found.filter(|i| i.place.is_some()) else { return Notice::Error(tr("This invite is no longer here.").into()) };
+        // One accept per invite: reserved before anything starts (two presses, two threads).
+        {
+            let from = match &self.view().launcher.me {
+                Some(me) => match &me.whereabouts {
+                    Whereabouts::World(p) => Some((p.world_id.clone(), p.instance_id.clone())),
+                    _ => None,
+                },
+                None => None,
+            };
+            let mut rt = self.launcher.lock().unwrap();
+            if rt.accepted.iter().any(|a| a.invite.id == invite) {
+                return Notice::Error(tr("This invite is no longer here.").into());
+            }
+            rt.accepted.push(Accepted { invite: found.clone(), at: Instant::now(), owner: owner.clone(), from, hide_failures: 0, hide_again: None, moved: false });
+        }
+        let notice = match profile {
+            None => self.launcher_play(mode, found.place.clone(), Some(&owner)),
+            Some(profile) => self.launcher_play_on(mode, profile, found.place.clone(), Some(&owner)),
+        };
+        if matches!(notice, Notice::Error(_)) {
+            // Not on the way: the reservation goes, the card stays.
+            self.launcher.lock().unwrap().accepted.retain(|a| a.invite.id != invite);
+        } else {
+            // The card goes here at once; VRChat hides the invite only once the account got there (a start that
+            // fails, or lands at home, leaves it in VRChat and brings the card back).
+            self.update(|s| s.launcher.invites.retain(|i| i.id != invite));
+        }
+        notice
     }
 
     fn launcher_play(self: &Shared, mode: LaunchMode, destination: Option<Place>, account: Option<&str>) -> Notice {
@@ -1509,17 +1594,29 @@ impl Controller {
 
     /// Home's Play with a profile chosen (REQUEST15 7a): a VRChat on `profile`, beside the ones running on other profiles
     /// (VRChat's own launcher with `--profile`), never a second one on the same profile. Through Steam when none runs.
-    fn launcher_play_on(self: &Shared, mode: LaunchMode, profile: u32) -> Notice {
+    /// With Home's Where (REQUEST20 2), right into `destination`: its link goes last ([`vrchat_launch::arguments_on`]);
+    /// one from the list of `account` (an invite, a friend's room) goes only while that account is signed in and on show.
+    ///
+    /// [`vrchat_launch::arguments_on`]: orbiters_core::vrchat_launch::arguments_on
+    fn launcher_play_on(self: &Shared, mode: LaunchMode, profile: u32, destination: Option<Place>, account: Option<&str>) -> Notice {
         if !self.view().launcher.possible.play {
             return Notice::Error(tr("VRChat runs on another device: Play works on the computer that runs it.").into());
         }
         if profile > orbiters_core::vrchat_launch::PROFILE_MAX {
             return Notice::Error(tr("VRChat does not know this profile.").into());
         }
+        // Only VRChat's own grammar goes on, as Play's (a destination comes from the network or over IPC).
+        if destination.as_ref().is_some_and(|p| !orbiters_core::vrchat_launch::is_destination(&p.world_id, &p.instance_id)) {
+            return Notice::Error(tr("VRChat does not know this world.").into());
+        }
+        let scoped = destination.is_some() && account.is_some();
+        if scoped && self.launcher_sender(account).is_err() {
+            return changed_account();
+        }
         let machine = self.launcher.lock().unwrap().machine.clone();
         if machine.by_hand() {
             // A Mac: Obelisk runs one VRChat, on its own profile.
-            return if profile == 0 { self.launcher_play(mode, None, None) } else { Notice::Error(tr("On a Mac, VRChat runs one profile, through Obelisk.").into()) };
+            return if profile == 0 { self.launcher_play(mode, destination, account) } else { Notice::Error(tr("On a Mac, VRChat runs one profile, through Obelisk.").into()) };
         }
         // The same start lock as Play: from the look at the running VRChats to the start, two presses start one.
         let mut started = self.launcher_started.lock().unwrap();
@@ -1565,18 +1662,23 @@ impl Controller {
             return Notice::Error(tr("VRChat was not found on this computer. Install it from Steam, or start it once.").into());
         }
         let settings = view.settings.launch.clone();
-        let mut args = orbiters_core::vrchat_launch::arguments(mode, &settings, None);
         // VRChat's saved window is one for all its profiles: the same care as Play's.
         let saved = machine.saved_window();
         let mut keep_window = None;
-        match mode {
-            LaunchMode::Desktop => args.extend(desktop_window(saved, settings.desktop_window)),
-            LaunchMode::Vr if runs.is_empty() && settings.performance && settings.small_window_in_vr => {
-                keep_window = saved.filter(SavedWindow::normal).filter(|w| settings.desktop_window != Some(*w))
+        let window = match mode {
+            LaunchMode::Desktop => desktop_window(saved, settings.desktop_window),
+            LaunchMode::Vr => {
+                if runs.is_empty() && settings.performance && settings.small_window_in_vr {
+                    keep_window = saved.filter(SavedWindow::normal).filter(|w| settings.desktop_window != Some(*w));
+                }
+                Vec::new()
             }
-            LaunchMode::Vr => {}
+        };
+        let args = orbiters_core::vrchat_launch::arguments_on(mode, &settings, window, profile, destination.as_ref().map(|p| (p.world_id.as_str(), p.instance_id.as_str())));
+        // Checked again right before the hand-off: the account may have changed while VRChat's runs were looked at.
+        if scoped && self.launcher_sender(account).is_err() {
+            return changed_account();
         }
-        args.extend(orbiters_core::vrchat_launch::profile_arg(profile));
         // The claim is made before the start and while the start lock is held: a second press, Go there or the bridge
         // sees it from the moment this one decided (REQUEST15 fix B4).
         let claim = match self.launcher_claim(profile, mode) {
@@ -1611,7 +1713,7 @@ impl Controller {
                         }
                     });
                 }
-                Notice::Sent { to: String::new(), action: SentKind::Launch }
+                Notice::Sent { to: destination.map(|p| p.world_id).unwrap_or_default(), action: SentKind::Launch }
             }
             Err(words) => Notice::Error(tr!("VRChat could not be started: {reason}", reason = words)),
         }
@@ -1701,9 +1803,55 @@ impl Controller {
         }
     }
 
+    /// A Mac where VRChat is not set up: what runs it is downloaded and checked, the person signs in to Steam, VRChat
+    /// downloads, each step shown on Home; then it is played, without another press. One at a time.
+    fn launcher_install_engine(self: &Shared) -> Option<Notice> {
+        let machine = self.launcher.lock().unwrap().machine.clone();
+        if !machine.by_hand() {
+            return None;
+        }
+        if !machine.installed() {
+            let first = self.update_if(|s| {
+                let busy = !matches!(s.launcher.engine_setup, None | Some(EngineSetup::Failed(_)));
+                if !busy {
+                    s.launcher.engine_setup = Some(EngineSetup::Downloading { percent: 0 });
+                }
+                !busy
+            });
+            if !first {
+                return None;
+            }
+            let step = |step: EngineSetup| {
+                self.update_if(|s| {
+                    let changed = s.launcher.engine_setup.as_ref() != Some(&step);
+                    s.launcher.engine_setup = Some(step);
+                    changed
+                });
+            };
+            if let Err(words) = machine.install_engine(&step, &self.quitting) {
+                self.update(|s| s.launcher.engine_setup = Some(EngineSetup::Failed(words.clone())));
+                return Some(Notice::Error(tr!("VRChat could not be set up: {reason}", reason = words)));
+            }
+        }
+        self.launcher.lock().unwrap().play_when_ready = Some(Instant::now());
+        self.update(|s| s.launcher.engine_setup = None);
+        let opened = if machine.direct() { None } else { machine.open_engine().err().map(Notice::Error) };
+        self.launcher_game(machine.as_ref());
+        opened
+    }
+
     /// A Mac: Obelisk is opened for the person to press Play in; the destination waits for the game.
     /// `started` is the start's lock, held by [`Self::launcher_play`].
     fn launcher_play_by_hand(self: &Shared, machine: &dyn Machine, destination: Option<Place>, account: Option<&str>, started: &mut Option<Instant>) -> Notice {
+        let direct = machine.direct();
+        if direct && !machine.installed() {
+            // Not set up yet: the set-up starts (or goes on), the game follows it, and the destination waits for it.
+            if let Some(p) = destination.clone() {
+                self.launcher.lock().unwrap().pending = Some((p, Instant::now(), account.map(str::to_owned)));
+            }
+            self.launcher_action(Action::InstallEngine);
+            return Notice::Sent { to: destination.map(|p| p.world_id).unwrap_or_default(), action: SentKind::Launch };
+        }
         if machine.engine_missing() {
             let _ = machine.open_engine();
             return Notice::Error(tr("VRChat runs on a Mac through Obelisk, a free app. Get it, turn on Beta versions in its settings, then download VRChat in it.").into());
@@ -1712,20 +1860,28 @@ impl Controller {
             let _ = machine.open_engine();
             return Notice::Error(tr("Download VRChat in Obelisk (with Beta versions on in its settings), then come back.").into());
         }
-        // A second Play while the person is still to press Play in Obelisk opens nothing again, and keeps the
-        // destination the first asked for (a plain Play asks for none); a new destination replaces it.
-        let again = started.is_some_and(|t| t.elapsed() < MAC_STARTING_FOR);
+        // A second Play while the first start is under way starts nothing again, and keeps the destination the first
+        // asked for (a plain Play asks for none); a new destination replaces it.
+        let again = started.is_some_and(|t| t.elapsed() < MAC_STARTING_FOR) || machine.starting();
         if again {
             if let Some(p) = destination.clone() {
                 self.launcher.lock().unwrap().pending = Some((p, Instant::now(), account.map(str::to_owned)));
             }
             return Notice::Sent { to: destination.map(|p| p.world_id).unwrap_or_default(), action: SentKind::Launch };
         }
-        match machine.start(&[]) {
+        // Started by N4N0 itself, straight into the destination, as on a PC.
+        let args = if direct {
+            let settings = self.view().settings.launch.clone();
+            orbiters_core::obelisk::game_arguments(orbiters_core::vrchat_launch::arguments(LaunchMode::Desktop, &settings, destination.as_ref().map(|p| (p.world_id.as_str(), p.instance_id.as_str()))))
+        } else {
+            Vec::new()
+        };
+        match machine.start(&args) {
             Ok(()) => {
                 // Bound to the account it was asked on.
                 *started = Some(Instant::now());
-                self.launcher.lock().unwrap().pending = destination.clone().map(|p| (p, Instant::now(), account.map(str::to_owned)));
+                // A game the person starts by hand takes its destination as an invite once it is up.
+                self.launcher.lock().unwrap().pending = destination.clone().filter(|_| !direct).map(|p| (p, Instant::now(), account.map(str::to_owned)));
                 self.update(|s| s.launcher.game = Game::Starting(LaunchMode::Desktop));
                 Notice::Sent { to: destination.map(|p| p.world_id).unwrap_or_default(), action: SentKind::Launch }
             }

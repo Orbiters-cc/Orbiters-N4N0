@@ -276,6 +276,22 @@ pub enum Game {
     NoEngine,
 }
 
+/// Setting VRChat up on a Mac ([`crate::obelisk`]), from the press of "Install & play VRChat" to the game.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum EngineSetup {
+    /// What runs VRChat on a Mac is coming, this much of it.
+    Downloading { percent: u8 },
+    /// It is checked (whose signature it carries) and put in place.
+    Installing,
+    /// The person signs in to Steam: this address, shown as a QR code, is read with the Steam app on their phone.
+    SignIn { qr_url: String },
+    /// Steam is asked what to download, or the files there are read.
+    Checking,
+    /// The engine downloads (`game` false) or VRChat does (`game` true), this much when it is known.
+    Game { game: bool, percent: Option<u8> },
+    Failed(String),
+}
+
 /// One of VRChat's local profiles (`--profile=N`, REQUEST15 7a): each keeps its own signed-in account, so several
 /// VRChats run side by side only on different profiles.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -404,6 +420,9 @@ pub enum Action {
     Play { mode: LaunchMode, destination: Option<Place> },
     /// Start a VRChat on this profile, beside any running on others; never a second one on the same profile.
     PlayOn { mode: LaunchMode, profile: u32 },
+    /// [`Action::PlayOn`] right into `destination` (Home's Where, REQUEST20 2): the instance's link goes to VRChat as it
+    /// starts on `profile`. Never sent to a VRChat already running on that profile.
+    PlayAt { mode: LaunchMode, profile: u32, destination: Place },
     /// Change the account's own profile (status, its text, bio, picture, banner) at VRChat.
     EditProfile(ProfileEdit),
     /// Read the account's own icons or gallery pictures, to choose among.
@@ -412,13 +431,18 @@ pub enum Action {
     ReadMine,
     /// Accept an invite and play it in that mode (or send the running game there).
     AcceptInvite { invite: String, mode: LaunchMode },
+    /// [`Action::AcceptInvite`] starting VRChat on `profile` (Home's Where, REQUEST20 2): the same one accept per invite,
+    /// the same card going and coming back, the same hide at VRChat once there.
+    AcceptInviteOn { invite: String, mode: LaunchMode, profile: u32 },
     /// Hide an invite / request / boop here (and mark it seen at VRChat when signed in).
     Dismiss { id: String },
     RequestInvite { to: String },
     /// Boop; `emoji` from [`LauncherState::boop_emojis`], `None` for a plain boop.
     Boop { to: String, emoji: Option<String> },
-    /// On a Mac: open what runs VRChat there (Obelisk), or where it is got when it is not installed.
+    /// On a Mac where the game is started by hand in another app: open that app.
     OpenEngine,
+    /// On a Mac where VRChat is not set up: get what runs it, sign in to Steam, download VRChat, then play.
+    InstallEngine,
     /// Open the profile modal; the details arrive in [`LauncherState::profile`].
     OpenProfile { id: String },
     CloseProfile,
@@ -476,6 +500,9 @@ pub struct LauncherState {
     /// The signed-in account's own profile, for Home's card (`None` until read, and with no sign-in).
     #[serde(default)]
     pub mine: Option<MyProfile>,
+    /// On a Mac: how getting Obelisk goes, from the press of its button until VRChat is in it.
+    #[serde(default)]
+    pub engine_setup: Option<EngineSetup>,
 }
 
 impl LauncherState {
@@ -610,6 +637,7 @@ pub fn sample() -> LauncherState {
             GameProfile { profile: 0, account: Some("Sample Me".into()), ..GameProfile::default() },
             GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },
         ],
+        engine_setup: None,
         mine: Some(MyProfile {
             loaded: true,
             bio: "Made-up account for drawing the page.

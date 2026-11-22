@@ -746,7 +746,19 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
             picture: None,
         })
         .collect();
-    qm_scene("orbit-sheet-instances", out, hd, &Facts { desktop: false, worlds_visited: visits, sheet: Some(Sheet::Instances), sheet_title: "Instances".into(), ..idle.clone() }, None, Some(Sheet::Instances))?;
+    let instances = Facts { desktop: false, worlds_visited: visits, sheet: Some(Sheet::Instances), sheet_title: "Instances".into(), ..idle.clone() };
+    qm_scene("orbit-sheet-instances", out, hd, &instances, None, Some(Sheet::Instances))?;
+    // REQUEST20 4: Invite me answered, in the page's head and on the button pressed: sent from the person's own VRChat
+    // account; refused (the instance full); only the person's own account can (Connect VRChat), its session expired.
+    let pressed = |chip| Some(("wrld_2:1~region(eu)".to_string(), chip));
+    let sent = Facts { invite_chip: pressed(panels::InviteChip::Sent), invite_said: Some(orbiters_i18n::tr("Invite sent: look at your VRChat notifications").into()), ..instances.clone() };
+    qm_scene("orbit-invite-sent", out, hd, &sent, None, Some(Sheet::Instances))?;
+    let full = orbiters_i18n::tr!("Not invited: {error}", error = orbiters_i18n::tr("This instance is full right now: try later or pick another."));
+    qm_scene("orbit-invite-full", out, hd, &Facts { invite_chip: pressed(panels::InviteChip::Failed), invite_said: Some(full), ..instances.clone() }, None, Some(Sheet::Instances))?;
+    let connect = orbiters_i18n::tr!("Connect your VRChat account here and the invite comes from it. Orbiters' account could not invite you: {reason}", reason = "VRChat refused this invite. The instance may have closed.");
+    qm_scene("orbit-invite-connect", out, hd, &Facts { invite_chip: pressed(panels::InviteChip::Failed), invite_said: Some(connect), invite_vrchat: true, ..instances.clone() }, None, Some(Sheet::Instances))?;
+    let expired = orbiters_core::vrchat_api::Error::Unauthorized.to_string();
+    qm_scene("orbit-invite-expired", out, hd, &Facts { invite_chip: pressed(panels::InviteChip::Failed), invite_said: Some(expired), invite_vrchat: true, ..instances.clone() }, None, Some(Sheet::Instances))?;
     let mics = vec![
         panels::MicTile { id: "a".into(), name: "Quest Pro microphone".into(), level: 0.72, can_hear: true, default: true },
         panels::MicTile { id: "b".into(), name: "Headset (Virtual Desktop Audio)".into(), level: 0.08, can_hear: true, default: false },

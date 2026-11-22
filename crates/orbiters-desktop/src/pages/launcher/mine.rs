@@ -4,6 +4,7 @@
 //! card says Saving, Saved or why not, and VRChat's limits (lengths, VRC+, its pace) before they are hit.
 
 use super::{cover_uv, status_color, status_name, Cx, State};
+use crate::controller::vrchat_login::Presence;
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Key, Order, Rect, Sense, Ui, UiBuilder};
 use orbiters_core::launcher::{Action, BannerChoice, MyProfile, OwnPicture, PictureKind, ProfileEdit, ProfilePart, Saving, Source, Status, BIO_MAX, SETTABLE_STATUSES, STATUS_TEXT_MAX};
 use orbiters_i18n::tr;
@@ -84,6 +85,8 @@ pub struct Mine {
     saved_seen: Option<(u64, f64)>,
     /// The Explorer points' chip was pressed: to Settings after this frame.
     go_points: bool,
+    /// The connecting account's picture (r21), by what it was made from.
+    face: Option<(String, egui::TextureHandle)>,
 }
 
 impl Mine {
@@ -192,8 +195,14 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     settle(state, anim::time(ui.ctx()));
     let h = height(ui, state, ui.available_width());
     let mut go = false;
+    // r21: a saved session being restored (or signed in, its profile not read yet) is not "signed out".
+    let vrchat = cx.snap.vrchat_login.presence();
+    let shown = cx.snap.vrchat_login.shown_user().map(|u| u.display_name.clone()).filter(|n| !n.trim().is_empty());
+    let face = face(ui, state, &cx.snap.vrchat_login);
     super::super::block(ui, cx, index, h, |ui, rect| {
-        if signed_in(state).is_none() {
+        if signed_in(state).is_none() && vrchat != Presence::SignedOut {
+            connecting(ui, rect, shown.as_deref(), face.as_ref(), vrchat == Presence::SignedIn);
+        } else if signed_in(state).is_none() {
             go = sign_in(ui, rect);
         } else {
             draw(ui, cx, state, rect);
@@ -287,6 +296,41 @@ fn sign_in(ui: &mut Ui, rect: Rect) -> bool {
     widgets::text_truncated(&p, pos2(x, rect.center().y - 11.0), Align2::LEFT_CENTER, &Txt::new(tr("Your VRChat profile"), 15.0).weight(weight::SEMIBOLD), room);
     widgets::text_truncated(&p, pos2(x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(tr("Sign in to change your status, bio, picture and banner from here."), 12.5).color(theme::FG_3), room);
     b.show_at(ui, Rect::from_min_size(pos2(rect.right() - PAD - bw, rect.center().y - 16.0), vec2(bw, 32.0))).clicked()
+}
+
+/// The account's picture the sign-in has (its last known one while connecting), made once per picture.
+fn face(ui: &Ui, state: &mut State, login: &crate::controller::vrchat_login::Status) -> Option<egui::TextureHandle> {
+    let (user, picture) = (login.shown_user()?, login.picture.as_ref()?);
+    let key = format!("{}:{}x{}:{}", user.id, picture.width, picture.height, picture.rgba.iter().take(64).map(|b| *b as u32).sum::<u32>());
+    if state.mine.face.as_ref().is_none_or(|(k, _)| *k != key) {
+        let image = egui::ColorImage::from_rgba_unmultiplied([picture.width as usize, picture.height as usize], &picture.rgba);
+        state.mine.face = Some((key, ui.ctx().load_texture("vrchat-connecting-face", image, egui::TextureOptions::LINEAR)));
+    }
+    state.mine.face.as_ref().map(|(_, t)| t.clone())
+}
+
+/// The card while the saved VRChat session is restored (r21): the account's last known name and picture and a quiet
+/// spinner, never a sign-in. `signed_in`: VRChat said yes, the profile itself is on its way.
+fn connecting(ui: &mut Ui, rect: Rect, name: Option<&str>, face: Option<&egui::TextureHandle>, signed_in: bool) {
+    let p = ui.painter().clone();
+    widgets::frame(&p, rect, theme::CARD_RADIUS, theme::surface());
+    paint::stroke_squircle(&p, rect, theme::squircle(theme::CARD_RADIUS), theme::hairline());
+    let c = pos2(rect.left() + PAD + 24.0, rect.center().y);
+    match (face, name) {
+        (None, None) => {
+            p.circle_filled(c, 24.0, theme::control());
+            widgets::icon(&p, c, icons::USER_CIRCLE, 24.0, theme::FG_3);
+        }
+        _ => widgets::avatar(&p, Rect::from_center_size(c, vec2(48.0, 48.0)), face, name.unwrap_or_default()),
+    }
+    let x = c.x + 40.0;
+    let room = rect.right() - PAD - 40.0 - x;
+    let title = name.map_or_else(|| tr("Your VRChat profile").to_string(), str::to_string);
+    widgets::text_truncated(&p, pos2(x, rect.center().y - 11.0), Align2::LEFT_CENTER, &Txt::new(&title, 15.0).weight(weight::SEMIBOLD), room);
+    let line = if signed_in { tr("Reading your VRChat profile…") } else { tr("Connecting to VRChat…") };
+    widgets::text_truncated(&p, pos2(x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::FG_3), room);
+    orbiters_ui::feedback::spinner(&p, pos2(rect.right() - PAD - 12.0, rect.center().y), 8.0, 2.0, theme::FG_3);
+    orbiters_ui::anim::request_frame(ui.ctx());
 }
 
 /// What a part shows while its change is on the way: the change, at once.

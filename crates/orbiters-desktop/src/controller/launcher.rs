@@ -762,11 +762,16 @@ impl Controller {
 
     pub(super) fn start_launcher(self: &Shared) {
         let weak = Arc::downgrade(self);
-        let _ = std::thread::Builder::new().name("launcher".into()).spawn(move || loop {
-            let Some(ctl) = weak.upgrade() else { break };
-            ctl.launcher_tick();
-            drop(ctl);
-            std::thread::sleep(Duration::from_secs(2));
+        // A VRChat account just signed in rings it: its list is read at once, not at the next look (r21).
+        let bell = self.vrchat_login.lock().unwrap().signed_bell.clone();
+        let _ = std::thread::Builder::new().name("launcher".into()).spawn(move || {
+            let mut seen = bell.rung();
+            loop {
+                let Some(ctl) = weak.upgrade() else { break };
+                ctl.launcher_tick();
+                drop(ctl);
+                seen = bell.wait(seen, Duration::from_secs(2));
+            }
         });
     }
 

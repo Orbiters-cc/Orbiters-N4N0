@@ -1,0 +1,2 @@
+# A saved VRChat session restored at launch shows as connecting, never as signed out (REQUEST21, stream vrchat-start). Its
+# texts are in files other areas cover: pages/launcher/{mine,row,destinations,modal}.rs, pages/settings.rs, overlay/worlds/panel.rs.

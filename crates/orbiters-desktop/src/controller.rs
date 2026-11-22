@@ -798,7 +798,7 @@ impl Controller {
         let previous = self.view();
         let s = {
             let mut s = self.snapshot.lock().unwrap();
-            vrchat_login::follow_orbiters(&mut s, &mut self.vrchat_login.lock().unwrap());
+            vrchat_login::follow_orbiters_and_record(&mut s, &mut self.vrchat_login.lock().unwrap());
             s.settle(&previous);
             s.clone()
         };

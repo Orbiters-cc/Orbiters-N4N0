@@ -104,6 +104,12 @@ fn open_with_browser(url: &str) -> anyhow::Result<()> {
 impl Controller {
     /// Reads the account now, then follows it (and a sign-in in progress) on a thread of its own.
     pub(super) fn start_account(self: &Shared) {
+        // What the saved account is shows before any window asks (r21): "checking", never "not signed in" while nothing
+        // was read yet. Its file only; Orbiters is asked on the thread.
+        let server = Server::current();
+        if let Ok(saved) = account::read_saved(server) {
+            self.account_at_launch(server, saved.map(|a| a.username));
+        }
         let ctl = self.clone();
         let _ = std::thread::Builder::new().name("account".into()).spawn(move || loop {
             ctl.account_tick();
@@ -125,6 +131,21 @@ impl Controller {
         if changed || offline_due || refused_due {
             self.read_account(server, modified, !changed && refused_due);
         }
+    }
+
+    /// The account as its file says at launch (`Some(username)`: one is saved), while it is still `Unknown`.
+    pub(super) fn account_at_launch(&self, server: Server, saved: Option<Option<String>>) {
+        self.update_if(|s| {
+            if s.account.state != AccountState::Unknown {
+                return false;
+            }
+            s.account.development = server == Server::Development;
+            s.account.state = match saved {
+                Some(username) => AccountState::Checking { username },
+                None => AccountState::SignedOut,
+            };
+            true
+        });
     }
 
     /// Reads the saved account for `server` and asks Orbiters whether it still works. `again_refused`: asking again

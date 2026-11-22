@@ -88,7 +88,7 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut V
                 }
             },
         );
-        apply |= choices(ui, &mut draft.output, &state.outputs);
+        apply |= choices(ui, "vr-audio-output", &mut draft.output, &state.outputs);
         if let Some(e) = &state.test_error {
             caption(ui, &tr!("The test did not play: {error}", error = e), theme::DANGER);
         }
@@ -98,7 +98,7 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut V
             mark("The microphone that becomes every app's default when SteamVR starts."),
         );
         widgets::field(ui, tr("Input in VR"), Some(input), 0.0, |_| {});
-        apply |= choices(ui, &mut draft.input, &state.inputs);
+        apply |= choices(ui, "vr-audio-input", &mut draft.input, &state.inputs);
         if let Some(input) = &draft.input {
             ui.add_space(4.0);
             mic_test(ui, &mut state.mic, &present(input, &state.inputs));
@@ -128,22 +128,22 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut V
 }
 
 /// "Don't change" and each device, the chosen one shown even when it is not there now.
-fn choices(ui: &mut Ui, choice: &mut Option<AudioEndpoint>, devices: &[AudioEndpoint]) -> bool {
+fn choices(ui: &mut Ui, key: &str, choice: &mut Option<AudioEndpoint>, devices: &[AudioEndpoint]) -> bool {
     let mut changed = false;
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        if source_chip(ui, tr("Don't change"), choice.is_none()).clicked() && choice.is_some() {
+        if source_chip(ui, key, tr("Don't change"), choice.is_none()).clicked() && choice.is_some() {
             *choice = None;
             changed = true;
         }
         let found = choice.as_ref().and_then(|c| crate::controller::vr_audio::resolve(c, devices)).map(|e| e.id.clone());
         if let Some(c) = choice.as_ref().filter(|_| found.is_none()) {
-            source_chip(ui, &tr!("{name} (not connected)", name = c.name), true);
+            source_chip(ui, key, &tr!("{name} (not connected)", name = c.name), true);
         }
         for d in devices {
             let active = found.as_deref() == Some(d.id.as_str());
-            if source_chip(ui, &d.name, active).clicked() && choice.as_ref() != Some(d) {
+            if source_chip(ui, key, &d.name, active).clicked() && choice.as_ref() != Some(d) {
                 *choice = Some(d.clone());
                 changed = true;
             }

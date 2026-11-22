@@ -128,6 +128,7 @@ pub fn dropdown(
     selected: Option<usize>,
     enabled: bool,
 ) -> Option<usize> {
+    widgets::mark_control(&widgets::salt_key(&id_salt), "dropdown", rect);
     let id = ui.scope_id().with(("dropdown", id_salt));
     let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
     note_control(ui.ctx(), value, rect, enabled);

@@ -80,10 +80,23 @@ pub struct State {
     /// How many of the notices the log shows.
     log_shown: usize,
     /// Tests: the rows drawn last frame (their card's English title, their label, where), and the cards.
+    /// The arrows moved the lit result this frame: it is brought into view.
+    keyed: bool,
+    /// How many of the worker log's last lines show (older ones a press of Show more away).
+    worker_shown: usize,
     #[cfg(test)]
     pub(super) seen: Vec<(&'static str, String, Rect)>,
     #[cfg(test)]
     pub(super) seen_cards: Vec<(&'static str, Rect)>,
+    /// Tests: the controls drawn last frame (their card's English title, their key, where).
+    #[cfg(test)]
+    pub(super) seen_controls: Vec<(&'static str, String, Rect)>,
+    /// Tests: each row drawn last frame: its label, the room it gave its control, the width left to its text.
+    #[cfg(test)]
+    pub(super) seen_fields: Vec<(String, Rect, f32)>,
+    /// Tests: where each result was drawn last frame.
+    #[cfg(test)]
+    pub(super) result_rects: Vec<Rect>,
 }
 
 /// A setting being brought into view: when it was lit, and the frames it was waited for.
@@ -266,6 +279,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             if up {
                 state.active = (state.active + shown - 1) % shown;
             }
+            state.keyed |= down || up;
         }
     }
     let focus_search = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K));
@@ -343,8 +357,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         state.choose_group(group, now);
     }
     if let Some(entry) = chosen {
+        // Hidden until another setting allows it: that setting is the one shown and lit.
+        let target = target_of(entry, cx.snap);
         state.choose_group(entry.group, now);
-        state.jump = Some(Jump { id: entry.id, lit: None, waited: 0, quiet: false });
+        state.jump = Some(Jump { id: target.id, lit: None, waited: 0, quiet: false });
         state.found = Some(entry.id);
     } else if cleared {
         state.query.clear();
@@ -498,18 +514,28 @@ fn results(ui: &mut Ui, cx: &Cx, state: &mut State, found: &[Found], words: &[St
     let title = tr_n("{count} matching setting", "{count} matching settings", found.len() as u64);
     let keys = tr("↑ ↓ to move, Enter to open, Esc to clear");
     let shown = found.len().min(state.limit);
+    // The pointer picks the lit result only as it moves: one left over a row never takes it back from the arrows.
+    let moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+    #[cfg(test)]
+    state.result_rects.clear();
     section(ui, cx, 0, icons::MAGNIFYING_GLASS, &title, Some(keys), |ui| {
         ui.add_space(6.0);
         for (i, f) in found.iter().take(shown).enumerate() {
-            if let Some(picked) = result_row(ui, f, words, i == state.active) {
-                if picked.hovered {
-                    state.active = i;
-                }
-                if picked.pressed {
-                    *chosen = Some(f.entry);
-                }
+            let needs = hidden_by(f.entry, cx.snap);
+            let picked = result_row(ui, f, words, i == state.active, needs);
+            #[cfg(test)]
+            state.result_rects.push(picked.rect);
+            if i == state.active && state.keyed {
+                ui.scroll_to_rect(picked.rect, None);
+            }
+            if picked.hovered && moved {
+                state.active = i;
+            }
+            if picked.pressed {
+                *chosen = Some(f.entry);
             }
         }
+        state.keyed = false;
         if found.len() > shown {
             ui.add_space(8.0);
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
@@ -525,12 +551,31 @@ fn results(ui: &mut Ui, cx: &Cx, state: &mut State, found: &[Found], words: &[St
 const NO_RESULTS: &str = mark("Try another word, or the name of a feature: microphone, VR, language, update.");
 
 struct RowPick {
+    rect: Rect,
     hovered: bool,
     pressed: bool,
 }
 
-/// One result; whether it is hovered or pressed.
-fn result_row(ui: &mut Ui, f: &Found, words: &[String], active: bool) -> Option<RowPick> {
+/// What hides `entry` here, when it is hidden: the setting it needs, unmet.
+fn hidden_by(entry: &Entry, snap: &Snapshot) -> Option<registry::Needs> {
+    entry.needs.filter(|n| !(n.met)(snap))
+}
+
+/// The setting a result or a link brings into view: itself, or, while it is hidden, the setting that shows it (followed
+/// up the chain).
+pub(super) fn target_of(entry: &'static Entry, snap: &Snapshot) -> &'static Entry {
+    let mut at = entry;
+    for _ in 0..4 {
+        match hidden_by(at, snap).and_then(|n| registry::entry(n.parent)) {
+            Some(parent) => at = parent,
+            None => break,
+        }
+    }
+    at
+}
+
+/// One result; where it is, whether it is hovered or pressed. A setting hidden until another allows it says so.
+fn result_row(ui: &mut Ui, f: &Found, words: &[String], active: bool, needs: Option<registry::Needs>) -> RowPick {
     let e = f.entry;
     let width = ui.available_width();
     let text_w = width - 28.0 - 32.0;
@@ -541,10 +586,18 @@ fn result_row(ui: &mut Ui, f: &Found, words: &[String], active: bool) -> Option<
     let about = (!e.about.is_empty()).then(|| ui.painter().layout_job(marked(tr(e.about), words, Txt::new("", 12.0).color(theme::FG_3).line_height(17.0), text_w, 2)));
     let related = (f.by_keyword && !e.keywords.is_empty())
         .then(|| ui.painter().layout_job(marked(&tr!("Related: {words}", words = tr(e.keywords)), words, Txt::new("", 11.5).color(theme::FG_4), text_w, 1)));
-    let h = 12.0 + crumb.size().y + 3.0 + title.size().y + about.as_ref().map_or(0.0, |g| 3.0 + g.size().y) + related.as_ref().map_or(0.0, |g| 3.0 + g.size().y) + 12.0;
+    let hidden = needs.map(|n| ui.painter().layout_job(Txt::new(format!("↳ {}", tr(n.when)), 11.5).color(theme::WARN).job(text_w)));
+    let h = 12.0
+        + crumb.size().y
+        + 3.0
+        + title.size().y
+        + about.as_ref().map_or(0.0, |g| 3.0 + g.size().y)
+        + related.as_ref().map_or(0.0, |g| 3.0 + g.size().y)
+        + hidden.as_ref().map_or(0.0, |g| 4.0 + g.size().y)
+        + 12.0;
     let (r, resp) = ui.allocate_exact_size(vec2(width, h), Sense::click());
     if !ui.is_rect_visible(r) {
-        return None;
+        return RowPick { rect: r, hovered: false, pressed: false };
     }
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     let lit = anim::toggle(ui.ctx(), resp.id.with("lit"), active, Spring::SNAPPY);
@@ -567,10 +620,16 @@ fn result_row(ui: &mut Ui, f: &Found, words: &[String], active: bool) -> Option<
         y += gh;
     }
     if let Some(g) = related {
-        p.galley(pos2(x, y + 3.0), g, theme::FG_4);
+        y += 3.0;
+        let gh = g.size().y;
+        p.galley(pos2(x, y), g, theme::FG_4);
+        y += gh;
+    }
+    if let Some(g) = hidden {
+        p.galley(pos2(x, y + 4.0), g, theme::WARN);
     }
     widgets::icon(p, pos2(r.right() - 22.0, r.center().y), icons::ARROW_RIGHT, 14.0, theme::mix(theme::FG_4, theme::ACCENT, lit));
-    Some(RowPick { hovered: resp.hovered(), pressed: widgets::pressed(&resp) })
+    RowPick { rect: r, hovered: resp.hovered(), pressed: widgets::pressed(&resp) }
 }
 
 /// `text` laid out in `look`'s font and colour, the words of the search on a tint of the accent.
@@ -605,36 +664,51 @@ fn group_page(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, draf
         widgets::text(p, pos2(r.left() + 2.0, r.top() + 13.0), Align2::LEFT_CENTER, &Txt::new(group.title(), 20.0).weight(weight::SEMIBOLD).tracking(-0.01));
         widgets::text_truncated(p, pos2(r.left() + 2.0, r.top() + 38.0), Align2::LEFT_CENTER, &Txt::new(group.about(), 12.5).color(theme::FG_3), r.width() - 4.0);
     });
+    // A link to a setting hidden until another allows it lands on that one.
+    if let Some(jump) = state.jump.as_mut().filter(|j| j.lit.is_none()) {
+        if let Some(entry) = registry::entry(jump.id) {
+            jump.id = target_of(entry, cx.snap).id;
+        }
+    }
     if let Some(entry) = state.found.and_then(registry::entry).filter(|e| e.group == group) {
-        if found_banner(ui, entry) {
+        let when = hidden_by(entry, cx.snap).map(|n| tr(n.when));
+        if found_banner(ui, entry, when) {
             state.found = None;
         }
     }
-    let (cards, rows) = widgets::record_fields(|| group_cards(ui, cx, state, base, draft, asked));
+    let ((cards, rows), controls) = widgets::record_controls(|| widgets::record_fields(|| group_cards(ui, cx, state, base, draft, asked)));
+    let card_of = |at: egui::Pos2| cards.iter().find(|(_, c)| c.contains(at)).map_or("", |(n, _)| *n);
     #[cfg(test)]
     {
-        state.seen = rows.iter().map(|r| (cards.iter().find(|(_, c)| c.contains(r.rect.center())).map_or("", |(n, _)| *n), r.label.clone(), r.rect)).collect();
+        state.seen = rows.iter().map(|r| (card_of(r.rect.center()), r.label.clone(), r.rect)).collect();
         state.seen_cards = cards.clone();
+        state.seen_fields = rows.iter().map(|r| (r.label.clone(), r.control, r.text_width)).collect();
+        state.seen_controls = controls.iter().filter(|c| c.rect.is_positive()).map(|c| (card_of(c.rect.center()), c.key.clone(), c.rect)).collect();
     }
-    light(ui, state, &cards, &rows, now);
+    let _ = &card_of;
+    light(ui, state, &cards, &rows, &controls, now);
 }
 
 /// Above a sub-tab, the setting the search opened in it: where it is, and a cross. True when it is dismissed.
-fn found_banner(ui: &mut Ui, entry: &Entry) -> bool {
+fn found_banner(ui: &mut Ui, entry: &Entry, when: Option<&str>) -> bool {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().min(orbiters_ui::layout::SECTION_ALONE_MAX), 44.0), Sense::hover());
     let p = ui.painter();
     p.rect_filled(r, theme::radius(14.0), theme::alpha(theme::ACCENT, 0.08));
     widgets::icon(p, pos2(r.left() + 20.0, r.center().y), icons::MAGNIFYING_GLASS, 14.0, theme::ACCENT);
     let place = if entry.card == entry.title { entry.group.title().to_string() } else { format!("{} › {}", entry.group.title(), entry.shown_card()) };
     let t = widgets::text_truncated(p, pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(format!("{place} › "), 12.5).color(theme::FG_3), r.width() * 0.5);
-    widgets::text_truncated(p, pos2(t.right(), r.center().y), Align2::LEFT_CENTER, &Txt::new(entry.shown(entry.title), 12.5).weight(weight::SEMIBOLD), r.right() - t.right() - 52.0);
+    let n = widgets::text_truncated(p, pos2(t.right(), r.center().y), Align2::LEFT_CENTER, &Txt::new(entry.shown(entry.title), 12.5).weight(weight::SEMIBOLD), r.right() - t.right() - 52.0);
+    // Hidden until another setting allows it: what it needs, beside it (that setting is the one lit).
+    if let Some(when) = when {
+        widgets::text_truncated(p, pos2(n.right() + 10.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(when, 12.0).color(theme::WARN), (r.right() - n.right() - 62.0).max(0.0));
+    }
     let x = Rect::from_center_size(pos2(r.right() - 22.0, r.center().y), vec2(28.0, 28.0));
     widgets::IconButton::new(icons::X, tr("Dismiss")).size(28.0, 13.0).id_salt("settings-found-dismiss").show_at(ui, x).clicked()
 }
 
 /// Brings the setting a link asked for into view, the frame its card is drawn, and lights it for a moment: its row on a
 /// soft tint of the accent behind its text, or a whole card ringed.
-fn light(ui: &mut Ui, state: &mut State, cards: &[(&'static str, Rect)], rows: &[widgets::FieldRow], now: f64) {
+fn light(ui: &mut Ui, state: &mut State, cards: &[(&'static str, Rect)], rows: &[widgets::FieldRow], controls: &[widgets::ControlMark], now: f64) {
     let Some(jump) = state.jump.as_mut() else { return };
     let Some(entry) = registry::entry(jump.id).filter(|e| e.group == state.group) else {
         state.jump = None;
@@ -642,7 +716,11 @@ fn light(ui: &mut Ui, state: &mut State, cards: &[(&'static str, Rect)], rows: &
     };
     let card = cards.iter().find(|(c, r)| *c == entry.card && r.height() > 1.0).map(|(_, r)| *r);
     let row = card.filter(|_| !entry.whole).and_then(|c| rows.iter().find(|r| c.contains(r.rect.center()) && entry.has_row(&r.label)));
-    let Some(target) = row.map(|r| r.rect).or(card) else {
+    // A setting that is a control of its own (a slider, chips): the controls of it drawn in its card, together.
+    let control = card.filter(|_| row.is_none() && !entry.whole).and_then(|c| {
+        controls.iter().filter(|m| m.rect.is_positive() && c.contains(m.rect.center()) && entry.controls.contains(&m.key.as_str())).map(|m| m.rect).reduce(|a, b| a.union(b))
+    });
+    let Some(target) = row.map(|r| r.rect).or(control).or(card) else {
         // Not drawn (yet): a card can come a frame late; after half a second the sub-tab alone is shown.
         jump.waited += 1;
         if jump.waited > 30 {
@@ -666,6 +744,11 @@ fn light(ui: &mut Ui, state: &mut State, cards: &[(&'static str, Rect)], rows: &
             let (painter, slot) = &row.behind;
             painter.set(*slot, egui::Shape::rect_filled(r, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.14 * k)));
             ui.painter().rect_stroke(r, theme::radius(12.0), egui::Stroke::new(1.0, theme::alpha(theme::ACCENT, 0.45 * k)), egui::StrokeKind::Inside);
+        }
+        None if control.is_some() => {
+            let r = target.expand(6.0);
+            ui.painter().rect_filled(r, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.10 * k));
+            ui.painter().rect_stroke(r, theme::radius(12.0), egui::Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.6 * k)), egui::StrokeKind::Outside);
         }
         None => {
             for (grow, a) in [(2.0, 0.8), (6.0, 0.18), (10.0, 0.07)] {
@@ -845,7 +928,7 @@ fn capture_card(ui: &mut Ui, cx: &Cx, index: usize, base: &Settings, draft: &mut
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                     for s in &snap.sources {
-                        if source_chip(ui, &format!("{} · {}×{}", s.name, s.width, s.height), draft.spout_sender == s.name).clicked() {
+                        if source_chip(ui, "spout-source", &format!("{} · {}×{}", s.name, s.width, s.height), draft.spout_sender == s.name).clicked() {
                             draft.spout_sender = s.name.clone();
                             texts.forget("spout-sender");
                             apply = true;
@@ -986,12 +1069,12 @@ fn performance_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings, mi
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                if source_chip(ui, default_mic(), draft.performance.mic_device.is_empty()).clicked() {
+                if source_chip(ui, "perf-mic", default_mic(), draft.performance.mic_device.is_empty()).clicked() {
                     draft.performance.mic_device.clear();
                     apply = true;
                 }
                 for m in &snap.mics {
-                    if source_chip(ui, &m.name, draft.performance.mic_device == m.id).clicked() {
+                    if source_chip(ui, "perf-mic", &m.name, draft.performance.mic_device == m.id).clicked() {
                         draft.performance.mic_device = m.id.clone();
                         apply = true;
                     }
@@ -1301,10 +1384,20 @@ fn about_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings, state: &
             apply |= widgets::toggle(ui, "development", &mut draft.development);
         });
         if state.log_open {
-            // The worker's last lines, as many as fit: the page is the one place that scrolls.
+            // The worker's last lines; older ones a press of Show more away, in the page's one scroll.
             let lines = cx.ctl.worker_log().unwrap_or_default();
+            state.worker_shown = state.worker_shown.max(WORKER_LINES);
+            if lines.len() > state.worker_shown {
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+                let mut bu = ui.new_child(UiBuilder::new().max_rect(r).layout(Layout::left_to_right(egui::Align::Center)));
+                let more = tr!("Show more ({count} more)", count = lines.len() - state.worker_shown);
+                if Button::new(&more).variant(Variant::Ghost).size(Size::Sm).id_salt("worker-log-more").show(&mut bu).clicked() {
+                    state.worker_shown += 100;
+                }
+                ui.add_space(6.0);
+            }
             let k = anim::spring_from(ui.ctx(), Id::unique("worker-log-open"), [0.0], [1.0], Spring::SOFT)[0].clamp(0.0, 1.0);
-            let text = if lines.is_empty() { tr("No output yet.").to_string() } else { lines[lines.len().saturating_sub(WORKER_LINES)..].join("\n") };
+            let text = if lines.is_empty() { tr("No output yet.").to_string() } else { lines[lines.len().saturating_sub(state.worker_shown)..].join("\n") };
             let w = ui.available_width();
             let g = ui.painter().layout_job(Txt::new(text, 11.0).mono().color(theme::FG_2).line_height(17.0).job(w - 24.0));
             let (r, _) = ui.allocate_exact_size(vec2(w, (g.size().y + 24.0) * k), Sense::hover());
@@ -1317,7 +1410,7 @@ fn about_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings, state: &
     apply
 }
 
-/// The worker log's last lines shown under About.
+/// The worker log's last lines shown at first under About.
 const WORKER_LINES: usize = 40;
 
 /// Updates of an installed app: where they stand, and the button that moves them on (controller/update.rs).
@@ -1836,10 +1929,13 @@ pub(crate) fn default_mic() -> &'static str {
     tr(crate::words::DEFAULT_MIC)
 }
 
-pub(super) fn source_chip(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
+/// A chip to choose a source (a Spout sender, a microphone, a sound device); `key` names the choice it makes, for the
+/// registry of Settings ([`widgets::mark_control`]).
+pub(super) fn source_chip(ui: &mut Ui, key: &str, label: &str, active: bool) -> egui::Response {
     let t = Txt::new(label, 12.0).color(if active { theme::FG } else { theme::FG_2 });
     let s = widgets::text_size(ui, &t);
     let (r, resp) = ui.allocate_exact_size(vec2(s.x + 24.0, 30.0), Sense::click());
+    widgets::mark_control(key, "chip", r);
     let hover = anim::toggle(ui.ctx(), resp.id.with("hover"), resp.hovered(), Spring::SNAPPY);
     let press = anim::toggle(ui.ctx(), resp.id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let rr = Rect::from_center_size(r.center(), r.size() * (1.0 - 0.05 * press));

@@ -325,12 +325,12 @@ pub fn ears_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings, mic: 
         widgets::field(ui, tr("Microphone"), Some(tr("The one N4N0 listens to.")), 0.0, |_| {});
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-            if source_chip(ui, super::settings::default_mic(), draft.n4n0.mic_device.is_empty()).clicked() {
+            if source_chip(ui, "n4n0-mic", super::settings::default_mic(), draft.n4n0.mic_device.is_empty()).clicked() {
                 draft.n4n0.mic_device.clear();
                 apply = true;
             }
             for m in &snap.mics {
-                if source_chip(ui, &m.name, draft.n4n0.mic_device == m.id).clicked() {
+                if source_chip(ui, "n4n0-mic", &m.name, draft.n4n0.mic_device == m.id).clicked() {
                     draft.n4n0.mic_device = m.id.clone();
                     apply = true;
                 }

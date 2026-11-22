@@ -20,6 +20,51 @@ thread_local! {
     static FIELD: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
     /// The rows [`field`] drew while [`record_fields`] runs.
     static ROWS: std::cell::RefCell<Option<Vec<FieldRow>>> = const { std::cell::RefCell::new(None) };
+    /// The controls drawn while [`record_controls`] runs.
+    static CONTROLS: std::cell::RefCell<Option<Vec<ControlMark>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A control drawn while [`record_controls`] ran: what names it (its id salt, or a button's English label), what kind of
+/// control it is, and where. Settings claims each one for a setting of its registry, or names it an action or a status.
+#[derive(Clone, Debug)]
+pub struct ControlMark {
+    pub key: String,
+    pub kind: &'static str,
+    pub rect: Rect,
+}
+
+/// Runs `f`, and gives back every control drawn in it: toggles, sliders, segments, text fields, buttons, icon buttons,
+/// step sliders, dropdowns, and what a page marks itself ([`mark_control`]).
+pub fn record_controls<R>(f: impl FnOnce() -> R) -> (R, Vec<ControlMark>) {
+    let was = CONTROLS.with(|c| c.replace(Some(Vec::new())));
+    let out = f();
+    let marks = CONTROLS.with(|c| c.replace(was)).unwrap_or_default();
+    (out, marks)
+}
+
+/// Notes a control drawn at `rect` under `key`, while [`record_controls`] runs (a page's own control: a chip, a tile).
+pub fn mark_control(key: &str, kind: &'static str, rect: Rect) {
+    CONTROLS.with(|c| {
+        if let Some(marks) = c.borrow_mut().as_mut() {
+            marks.push(ControlMark { key: key.to_owned(), kind, rect });
+        }
+    });
+}
+
+/// Gives the control marked last its rect (marked before its salt was used up).
+fn set_last_mark(rect: Rect) {
+    CONTROLS.with(|c| {
+        if let Some(last) = c.borrow_mut().as_mut().and_then(|m| m.last_mut()) {
+            if last.rect == Rect::NOTHING {
+                last.rect = rect;
+            }
+        }
+    });
+}
+
+/// An id salt as a control's key: a text salt without its quotes.
+pub fn salt_key(salt: &impl std::fmt::Debug) -> String {
+    format!("{salt:?}").trim_matches('"').to_owned()
 }
 
 /// A settings row [`field`] drew while [`record_fields`] ran: its label as shown, where it is, and a shape slot under its
@@ -28,6 +73,9 @@ thread_local! {
 pub struct FieldRow {
     pub label: String,
     pub rect: Rect,
+    /// The room the row gave its control, on its right, and the width left to its label and description.
+    pub control: Rect,
+    pub text_width: f32,
     pub behind: (Painter, egui::layers::ShapeIdx),
 }
 
@@ -341,6 +389,7 @@ impl<'a> Button<'a> {
         let w = self.desired_width(ui);
         let (rect, resp) = ui.allocate_exact_size(vec2(w, h), if self.enabled { Sense::click() } else { Sense::hover() });
         note_control(ui.ctx(), self.label, rect, self.enabled);
+        mark_control(orbiters_i18n::english_of(self.label), "button", rect);
         if resp.clicked() {
             note_press(self.label);
         }
@@ -364,6 +413,7 @@ impl<'a> Button<'a> {
             pressed(&resp);
         }
         note_control(ui.ctx(), self.label, rect, self.enabled);
+        mark_control(orbiters_i18n::english_of(self.label), "button", rect);
         if resp.clicked() {
             note_press(self.label);
         }
@@ -476,6 +526,7 @@ impl<'a> IconButton<'a> {
     pub fn show(self, ui: &mut Ui) -> Response {
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(self.size), Sense::click());
         note_control(ui.ctx(), self.label, rect, true);
+        mark_control(orbiters_i18n::english_of(self.label), "icon button", rect);
         if resp.clicked() {
             note_press(self.label);
         }
@@ -490,6 +541,7 @@ impl<'a> IconButton<'a> {
         let resp = ui.interact(rect, ui.scope_id().with("icon-button").with_salt(key), Sense::click());
         pressed(&resp);
         note_control(ui.ctx(), self.label, rect, true);
+        mark_control(orbiters_i18n::english_of(self.label), "icon button", rect);
         if resp.clicked() {
             note_press(self.label);
         }
@@ -588,12 +640,14 @@ fn fit_segments(mut widths: Vec<f32>, pad_x: f32, avail: f32) -> Vec<f32> {
 /// Segmented control whose highlight slides between options with a bouncy spring. Returns true when the value
 /// changed (on press). Never wider than the room it is given ([`fit_segments`]).
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut T, options: &[SegOption<'_, T>], small: bool) -> bool {
+    let key = salt_key(&id_salt);
     let id = ui.scope_id().with(id_salt);
     let (item_h, size) = if small { (28.0, 12.0) } else { (32.0, 13.0) };
     let badge_txt = |b: &str| Txt::new(b.to_uppercase(), 9.5).weight(weight::SEMIBOLD).tracking(0.04).color(theme::FG_2);
     let widths = fit_segments(segment_widths(ui, options, small), if small { 12.0 } else { 14.0 }, ui.available_width());
     let track_w = widths.iter().sum::<f32>() + 8.0;
     let (track, _) = ui.allocate_exact_size(vec2(track_w, item_h + 8.0), Sense::hover());
+    mark_control(&key, "segments", track);
     let painter = ui.painter();
     painter.rect_filled(track, theme::radius(track.height() * 0.5), theme::surface_soft());
 
@@ -693,8 +747,10 @@ mod segmented_tests {
 
 /// Switch: the knob springs across, the track turns Orbiters green. Acts on press.
 pub fn toggle(ui: &mut Ui, id_salt: impl egui::AsIdSalt, on: &mut bool) -> bool {
+    mark_control(&salt_key(&id_salt), "toggle", Rect::NOTHING);
     let id = ui.scope_id().with(id_salt);
     let (rect, _) = ui.allocate_exact_size(vec2(48.0, 28.0), Sense::hover());
+    set_last_mark(rect);
     let resp = ui.interact(rect, id, Sense::click());
     let mut changed = false;
     if pressed(&resp) {
@@ -726,9 +782,11 @@ pub fn slider(
     step: f32,
     format: impl Fn(f32) -> String,
 ) -> bool {
+    mark_control(&salt_key(&id_salt), "slider", Rect::NOTHING);
     let id = ui.scope_id().with(id_salt);
     let (min, max) = (*range.start(), *range.end());
     let (rect, _) = ui.allocate_exact_size(vec2(192.0 + 12.0 + 80.0, 28.0), Sense::hover());
+    set_last_mark(rect);
     let track_rect = Rect::from_min_size(rect.min, vec2(192.0, 28.0));
     let resp = ui.interact(track_rect, id, Sense::click_and_drag());
     if resp.drag_stopped() || (resp.clicked() && !resp.dragged()) {
@@ -771,8 +829,10 @@ pub fn slider(
 
 /// Single-line text field: dark well, hairline, indigo focus ring.
 pub fn text_field(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut String, hint: &str, width: f32, mono: bool) -> Response {
+    let key = salt_key(&id_salt);
     let id = ui.scope_id().with(id_salt);
     let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
+    mark_control(&key, "text field", rect);
     field_frame(ui, rect, id, value, hint, Well { mono, leading: None, radius: 12.0, clear: false })
 }
 
@@ -786,8 +846,10 @@ pub fn search_field(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut Strin
 /// A [`search_field`] with an × at its end while something is typed: it empties the field (a change, like typing) and
 /// leaves the focus there to type the next thing.
 pub fn search_field_clearable(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut String, hint: &str, width: f32) -> Response {
+    let key = salt_key(&id_salt);
     let id = ui.scope_id().with(id_salt);
     let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
+    mark_control(&key, "search field", rect);
     field_frame(ui, rect, id, value, hint, Well { mono: false, leading: Some(icons::MAGNIFYING_GLASS), radius: 20.0, clear: true })
 }
 
@@ -1002,7 +1064,8 @@ pub fn field(ui: &mut Ui, label: &str, description: Option<&str>, control_width:
     ROWS.with(|r| {
         if let Some(rows) = r.borrow_mut().as_mut() {
             let slot = ui.painter().add(egui::Shape::Noop);
-            rows.push(FieldRow { label: label.to_owned(), rect, behind: (ui.painter().clone(), slot) });
+            let control = Rect::from_min_max(pos2(rect.right() - control_width, rect.top()), rect.max);
+            rows.push(FieldRow { label: label.to_owned(), rect, control, text_width: width - control_width - 24.0, behind: (ui.painter().clone(), slot) });
         }
     });
     let p = ui.painter();

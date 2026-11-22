@@ -159,8 +159,8 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
         });
     }
     // REQUEST20 2: Where, above Home's Play buttons (made-up places only). Run with --width 1040 --height 700 and
-    // --width 900 too, and --language fr / ja.
-    for name in WHERE {
+    // --width 900 too, and --language fr / ja. REQUEST21 6 and 7: All tools, Where's previous instances.
+    for name in WHERE.into_iter().chain(PREVIOUS) {
         scenarios.push(Scenario {
             name,
             page: Page::Home,
@@ -215,6 +215,72 @@ pub(super) const WHERE: [&str; 15] = [
     "launcher-where-other-profile",
     "launcher-small-where",
 ];
+
+/// REQUEST21 6 and 7: Home's All tools; Where's Previous instances, its sheet over Home (forty made-up instances), searched,
+/// empty, a row being asked about, one VRChat said is closed (New instance of this world offered, its kind), one
+/// chosen (the sheet put away: Where's selected card), a closed one taken as a new instance, and signed out of VRChat.
+pub(super) const PREVIOUS: [&str; 10] = [
+    "launcher-all-tools",
+    "launcher-where-previous",
+    "launcher-where-previous-search",
+    "launcher-where-previous-empty",
+    "launcher-where-previous-asking",
+    "launcher-where-previous-closed",
+    "launcher-where-previous-kind-list",
+    "launcher-where-previous-selected",
+    "launcher-where-previous-new",
+    "launcher-where-previous-signed-out",
+];
+
+/// Made-up instances of the history, newest first: world names of the sample, every kind, several regions.
+fn previous_rows() -> Vec<crate::pages::launcher::previous::Visit> {
+    const NAMES: [&str; 20] = [
+        "Lantern Garden", "Midnight Rooftop", "Movie Night Hall", "Pixel Arcade", "Boat Valley", "Cloud Library", "Neon Alley", "Sunset Pier", "Quiet Forest Camp",
+        "Starlight Observatory", "Retro Diner", "Crystal Caves", "Harbor Market", "Snowy Cabin", "Lofi Study Room", "Garden Teahouse", "Rainy Station", "Sky Island",
+        "Moonlit Shrine", "Paper Lantern Street",
+    ]; // i18n: not shown (made-up world names of the pictures)
+    let kinds = ["~hidden(usr_00000000-0000-4000-8000-000000000004)", "~friends(usr_00000000-0000-4000-8000-000000000005)", "", "~private(usr_00000000-0000-4000-8000-0000000000ff)~canRequestInvite", "~group(grp_00000000-0000-4000-8000-000000000001)~groupAccessType(public)"];
+    let regions = ["eu", "us", "jp", "use"];
+    (0..40u64)
+        .map(|n| crate::pages::launcher::previous::Visit {
+            world_id: format!("wrld_00000000-0000-4000-8000-{:012}", 400 + n % 20),
+            instance: format!("{}{}~region({})", 10_000 + n * 37, kinds[n as usize % kinds.len()], regions[n as usize % regions.len()]),
+            name: NAMES[n as usize % NAMES.len()].into(),
+            at: NOW as u64 - 1_800 - n * 5 * 3_600,
+        })
+        .collect()
+}
+
+/// Where's previous instances for a scenario (nothing read, nothing asked of VRChat).
+fn stage_previous(ctx: &egui::Context, state: &mut crate::pages::launcher::State, name: &str) {
+    use crate::pages::launcher::previous::Check;
+    let rows = previous_rows();
+    let previous = &mut state.places.previous;
+    match name {
+        "launcher-where-previous-search" => previous.stand_in(rows.clone(), "Garden"),
+        "launcher-where-previous-empty" => previous.stand_in(Vec::new(), ""),
+        _ => previous.stand_in(rows.clone(), ""),
+    }
+    match name {
+        "launcher-where-previous-asking" => previous.stand_in_pick(rows[1].clone(), Check::Asking, false),
+        "launcher-where-previous-closed" | "launcher-where-previous-kind-list" => previous.stand_in_pick(rows[0].clone(), Check::Closed, false),
+        "launcher-where-previous-selected" => {
+            previous.stand_in_pick(rows[1].clone(), Check::Open, false);
+            previous.stand_in_close();
+            state.places.stand_in_choose(&rows[1].key(), &rows[1].name, true);
+        }
+        "launcher-where-previous-new" => {
+            previous.stand_in_pick(rows[0].clone(), Check::Closed, true);
+            state.places.stand_in_choose(&rows[0].key(), &rows[0].name, false);
+        }
+        "launcher-where-previous-signed-out" => {
+            previous.stand_in_pick(rows[2].clone(), Check::NotAsked, true);
+            state.places.stand_in_choose(&rows[2].key(), &rows[2].name, false);
+        }
+        _ => {}
+    }
+    let _ = ctx;
+}
 
 /// Where's made-up places for a scenario, handed to the page (nothing is read).
 fn stage_where(ctx: &egui::Context, state: &mut crate::pages::launcher::State, name: &str, t: f64) {
@@ -397,11 +463,11 @@ fn data(name: &str) -> LauncherState {
     let mut s = sample();
     more_people(&mut s);
     // REQUEST20 2: the invite's world is the sketch's "Chill House"; signed out of VRChat, Play alone and no list's places.
-    if WHERE.contains(&name) {
+    if WHERE.contains(&name) || PREVIOUS.contains(&name) {
         if let Some(place) = s.invites.iter_mut().find(|i| i.kind == InviteKind::Invite).and_then(|i| i.place.as_mut()) {
             place.world_name = "Chill House".into();
         }
-        if name == "launcher-where-signed-out" {
+        if name == "launcher-where-signed-out" || name == "launcher-where-previous-signed-out" {
             s.source = Source::Nothing;
             s.possible = Possible { play: true, ..Default::default() };
             s.invites.clear();
@@ -661,6 +727,9 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
     if !name.starts_with("launcher-") {
         return;
     }
+    if name == "launcher-all-tools" && f == 0 {
+        app.home_mut().open_all_tools();
+    }
     let state = app.home_mut().launcher_mut();
     if name == "launcher-pictures-cached" && f > 0 {
         pictures_on_screen(state, f);
@@ -698,8 +767,11 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
             _ => {}
         }
         // Where (REQUEST20 2) reads nothing in pictures: its own places, or none.
-        if WHERE.contains(&name) {
+        if WHERE.contains(&name) || PREVIOUS.contains(&name) {
             stage_where(ctx, state, name, t);
+            if name.starts_with("launcher-where-previous") {
+                stage_previous(ctx, state, name);
+            }
         } else {
             state.places.stand_in(Some(Default::default()), Vec::new(), None, true);
         }
@@ -736,6 +808,10 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
         "launcher-mine-status" if f == 30 => state.mine.stand_in_status_list(ctx),
         "launcher-mine-icons" if f == 30 => state.mine.stand_in_picker(false, false, Rect::NOTHING, t),
         "launcher-where-kind-list" if f == 30 => state.places.stand_in_kind_list(ctx, &format!("often:wrld_00000000-0000-4000-8000-{:012}", 301)),
+        "launcher-where-previous-kind-list" if f == 40 => {
+            let first = &previous_rows()[0];
+            orbiters_ui::popup::open(ctx, egui::Id::unique(("where-previous-kind", first.location())).with("list"));
+        }
         // A notice is said for ten seconds: said again near the end so it shows.
         "launcher-where-expired" if f + 5 == frames => {
             let line = orbiters_i18n::tr!("{name} is no longer available: Play starts VRChat at home.", name = "Chill House");

@@ -691,7 +691,7 @@ mod tests {
     /// or draws in memory), with why. A thread added later and not classified fails this test.
     #[test]
     fn every_thread_the_window_starts_is_counted_or_classified() {
-        const IDLE: [(&str, &str); 13] = [
+        const IDLE: [(&str, &str); 15] = [
             ("pages/editor/preview.rs", "draws the editor's previews in memory"),
             ("pages/gallery_select.rs", "fetches pictures to hand out by a drag (a cache)"),
             ("pages/projects/builds.rs", "builds project previews (a cache)"),
@@ -705,6 +705,8 @@ mod tests {
             ("worlds.rs:pictures-", "decodes pictures (a cache)"),
             ("media.rs", "asks the music players what plays"),
             ("pages/launcher/destinations.rs:where-{name}", "reads Where's places (the history, events, an instance open) into memory"),
+            ("pages/launcher/previous.rs:where-previous-open", "asks whether a previous instance is still open, into memory"),
+            ("pages/launcher/previous.rs:where-previous-history", "reads the previous instances (this computer's history) into memory"),
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = vec![root.join("app.rs"), root.join("window.rs"), root.join("views.rs"), root.join("worlds.rs"), root.join("media.rs"), root.join("window_rest.rs"), root.join("drag_out.rs")];

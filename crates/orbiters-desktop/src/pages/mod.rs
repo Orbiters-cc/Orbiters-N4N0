@@ -58,7 +58,6 @@ use std::sync::mpsc;
 pub enum Page {
     /// N4N0's menu: what the app does, side by side.
     Home,
-    Capture,
     Projects,
     N4n0,
     Sessions,
@@ -93,7 +92,7 @@ pub struct Cx<'a> {
 pub enum Go {
     /// Sessions, its storage popover open.
     FreeSpace,
-    /// Unity projects (Capture's avatar picker, when it has no avatar to offer).
+    /// Unity projects (the capture element's avatar picker, when it has no avatar to offer).
     Projects,
     /// Settings, where the VRChat account is signed in (the launcher's "Sign in to VRChat").
     VrchatAccount,

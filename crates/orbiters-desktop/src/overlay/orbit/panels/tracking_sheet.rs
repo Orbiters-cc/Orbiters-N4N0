@@ -101,7 +101,20 @@ pub(super) fn tracking_items(facts: &Facts) -> Vec<Item> {
             out.push(Item { action: Action::Set(Pick::SmoothingBar(which)), rect: r(X, row(i + 1) + 4.0, 1000.0 - X, 58.0), look: Look::SmoothingBar(which) });
         }
     }
+    // The tiles' two back to the values measured to match VRChat, while either is elsewhere (REQUEST21).
+    if !reset_done(facts) {
+        out.push(Item { action: Action::Set(Pick::SmoothingReset), rect: RESET, look: Look::Choice { icon: icons::ARROW_COUNTER_CLOCKWISE, label: tr("Reset"), on: false } });
+    }
     out
+}
+
+/// Under the sliders, at the left: the tiles' smoothing back to the measured values.
+const RESET: Rect = Rect { min: Pos2 { x: 26.0, y: 484.0 }, max: Pos2 { x: 236.0, y: 536.0 } };
+
+/// Whether the tiles' two smoothings are the measured ones, as shown now (a slider held counts as it is shown).
+fn reset_done(facts: &Facts) -> bool {
+    let (quick, wheel) = orbiters_core::settings::OrbitSettings::measured_smoothing();
+    Smoothed::QuickMenu.value(facts) == quick.round() as u16 && Smoothed::Wheel.value(facts) == wheel.round() as u16
 }
 
 /// The rows' names, and what the driver does now.
@@ -124,9 +137,11 @@ pub(super) fn draw_tracking(p: &Painter, facts: &Facts) {
         }
     }
     let note = facts.tracking.as_ref().map_or(facts.tracking_note.as_str(), |t| t.2.as_str());
+    // Right of Reset while it shows.
+    let left = if reset_done(facts) { 26.0 } else { RESET.right() + 18.0 };
     if !note.is_empty() {
         let font = look::font(16.0, weight::MEDIUM);
-        p.text(pos2(26.0, row(ROWS.len() + 1) + 12.0), Align2::LEFT_CENTER, fit(p, tr(note), &font, 1000.0 - 26.0), font, look::MUTED);
+        p.text(pos2(left, row(ROWS.len() + 1) + 12.0), Align2::LEFT_CENTER, fit(p, tr(note), &font, 1000.0 - left), font, look::MUTED);
     }
 }
 
@@ -154,6 +169,7 @@ pub(super) fn tracking_caption(action: Action) -> Option<(String, String)> {
         Pick::Smoothing(true) => (tr("Smooth tracking on"), tr("SteamVR's devices are eased as these sliders say.")),
         Pick::Smoothing(false) => (tr("Smooth tracking off"), tr("SteamVR tracks every device as it is.")),
         Pick::SmoothingBar(which) => (which.name(), tr("Press on the bar, or drag along it: a device in steady motion trails by this time.")),
+        Pick::SmoothingReset => (tr("Reset the smoothing"), tr("Puts both smoothings back to the values measured to match VRChat")),
         _ => return None,
     };
     Some((a.to_string(), b.to_string()))
@@ -190,6 +206,36 @@ mod tests {
         let (patched, left_out) = settings.patched(&Smoothed::Device(1).patch(33, Some(settings.tracking.ms)).unwrap());
         assert!(left_out.is_empty(), "{left_out:?}");
         assert_eq!((patched.tracking.enabled, patched.tracking.ms[1]), (true, 33));
+    }
+
+    /// REQUEST21: Reset shows while either tile smoothing is off the values measured to match VRChat (the defaults: one
+    /// source), under the sliders, and writes both back as the sliders write them.
+    #[test]
+    fn reset_shows_off_the_measured_values_and_puts_both_back() {
+        use orbiters_core::settings::{OrbitSettings, Settings};
+        let resets = |f: &Facts| tracking_items(f).iter().filter(|i| i.action == Action::Set(Pick::SmoothingReset)).count();
+        assert_eq!(resets(&Facts::default()), 0, "at the measured values: no Reset");
+        let mut moved = Facts::default();
+        moved.orbit.vr_smoothing_wheel_ms = 64.0;
+        assert_eq!(resets(&moved), 1);
+        let held = Facts { smoothing_held: Some((Smoothed::QuickMenu, 50)), ..Facts::default() };
+        assert_eq!(resets(&held), 1, "a slider held off it");
+        let items = tracking_items(&Facts { tracking: Some((true, [0, 78, 42], String::new())), ..moved.clone() });
+        let reset = items.iter().find(|i| i.action == Action::Set(Pick::SmoothingReset)).unwrap();
+        assert!(items.iter().filter(|i| i.action != reset.action).all(|i| !i.rect.intersects(reset.rect)), "under the sliders, on nothing");
+        assert!(reset.rect.bottom() <= 576.0);
+        // The settings it writes: the sliders' two fields, at the measured values.
+        let mut settings = Settings::default();
+        settings.orbit.vr_smoothing_quick_menu_ms = 90.0;
+        settings.orbit.vr_smoothing_wheel_ms = 3.0;
+        let (patched, left_out) = settings.patched(&OrbitSettings::smoothing_reset_patch());
+        assert!(left_out.is_empty(), "{left_out:?}");
+        let (quick, wheel) = OrbitSettings::measured_smoothing();
+        assert_eq!((patched.orbit.vr_smoothing_quick_menu_ms, patched.orbit.vr_smoothing_wheel_ms), (quick, wheel));
+        assert_eq!((quick, wheel), (OrbitSettings::default().vr_smoothing_quick_menu_ms, OrbitSettings::default().vr_smoothing_wheel_ms));
+        assert!(patched.orbit.smoothing_as_measured() && !settings.orbit.smoothing_as_measured());
+        let sliders = settings.patched(&Smoothed::QuickMenu.patch(quick as u16, None).unwrap()).0.patched(&Smoothed::Wheel.patch(wheel as u16, None).unwrap()).0;
+        assert_eq!(sliders.orbit, patched.orbit, "the same fields the sliders write, the same values");
     }
 
     #[test]

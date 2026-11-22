@@ -1724,6 +1724,12 @@ pub fn behaviour_shots(out: &Path) -> anyhow::Result<()> {
         facts.smoothing_held = held;
         qm_scene(&format!("tracking-{name}"), out, vec2(1920.0, 1080.0), &facts, None, Some(Sheet::Tracking))?;
     }
+    // REQUEST21: the tiles' smoothing moved off the measured values, Reset under the sliders; and at them, no Reset.
+    let mut moved = base.clone();
+    moved.orbit.vr_smoothing_quick_menu_ms = 62.0;
+    moved.orbit.vr_smoothing_wheel_ms = 8.0;
+    qm_scene("tracking-smoothing-reset", out, vec2(1920.0, 1080.0), &moved, None, Some(Sheet::Tracking))?;
+    qm_scene("tracking-smoothing-measured", out, vec2(1920.0, 1080.0), &base, None, Some(Sheet::Tracking))?;
     Ok(())
 }
 
@@ -2132,7 +2138,7 @@ pub(super) fn r19_history_shots(out: &Path) -> anyhow::Result<()> {
         r19_scene(&format!("r19-youtube-results-{form}"), out, hd, &results, None, false)?;
         r19_scene(&format!("r19-youtube-results-history-pointed-{form}"), out, hd, &results, Some(Action::VideoHistory), false)?;
         // History: many, the second's link just copied; scrolled far down; at its end.
-        let page = Facts { sheet: Some(Sheet::VideoHistory), sheet_title: "History".into(), history: history(0.0, Some(1)), ..base.clone() };
+        let page = Facts { sheet: Some(Sheet::VideoHistory), sheet_title: "Video history".into(), history: history(0.0, Some(1)), ..base.clone() };
         r19_scene(&format!("r19-history-{form}"), out, hd, &page, None, false)?;
         let scroll = 41.0 * 128.0;
         r19_scene(&format!("r19-history-scrolled-{form}"), out, hd, &Facts { gallery_scroll: scroll, history: history(scroll, None), ..page.clone() }, None, false)?;

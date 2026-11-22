@@ -35,7 +35,7 @@ const RUNNING_MAX: usize = 3;
 const GROUPS_MAX: usize = 100;
 const HYDRATE_MAX: usize = 12;
 /// A picture of the page at most (memory only).
-const PICTURE_MAX: usize = 4 * 1024 * 1024;
+const PICTURE_MAX: usize = 12 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Request {
@@ -78,19 +78,6 @@ pub enum Write {
 }
 
 impl Write {
-    pub fn group(&self) -> Option<&str> {
-        match self {
-            Write::MemberRole { group, .. }
-            | Write::CreateRole { group, .. }
-            | Write::EditRole { group, .. }
-            | Write::DeleteRole { group, .. }
-            | Write::CreatePost { group, .. }
-            | Write::EditPost { group, .. }
-            | Write::DeletePost { group, .. }
-            | Write::ApplyArt { group, .. } => Some(group),
-            Write::Upload { .. } => None,
-        }
-    }
     /// What one write at a time is counted on, and what an unknown outcome holds.
     fn target(&self) -> String {
         match self {

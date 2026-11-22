@@ -11,6 +11,7 @@ pub mod editor;
 pub mod events;
 pub mod experimental;
 pub mod form;
+pub mod groups;
 pub mod header;
 pub mod home;
 pub mod language_card;

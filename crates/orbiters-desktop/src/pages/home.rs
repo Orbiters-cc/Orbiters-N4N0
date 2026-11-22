@@ -121,6 +121,8 @@ pub struct State {
     music: super::Watch<bool, Music>,
     /// The VRChat launcher on Home itself: the friends list, Play, invites, profiles (REQUEST10).
     launcher: super::launcher::State,
+    /// The groups the account runs, at Home's bottom, and a group's page in Home's place (REQUEST22).
+    groups: super::groups::State,
 }
 
 impl State {
@@ -137,6 +139,7 @@ impl State {
 
     /// Back to Home itself (the sidebar's Home pressed on a feature's page).
     pub fn back_home(&mut self) {
+        self.groups.close();
         if let Some(host) = self.host.as_mut() {
             self.pending.extend(go_home(host));
         }
@@ -160,6 +163,11 @@ impl State {
     /// The launcher on Home (the controller hands it what it knows; the screenshot review stages it).
     pub fn launcher_mut(&mut self) -> &mut super::launcher::State {
         &mut self.launcher
+    }
+
+    /// The Groups section and a group's page (the screenshot review stages them).
+    pub fn groups_mut(&mut self) -> &mut super::groups::State {
+        &mut self.groups
     }
 
     /// The States page (the screenshot review opens an avatar's states).
@@ -189,9 +197,13 @@ fn go_home(host: &mut MenuHost) -> Vec<Effect> {
 }
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
+    // A group's page (or the banner studio) takes Home's place (REQUEST22).
+    if state.groups.page_open() {
+        return super::groups::show_page(ui, cx, &mut state.groups);
+    }
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
-    let State { host, shown, since, opened, focus, copied, states, pending, network, music: music_watch, launcher } = state;
+    let State { host, shown, since, opened, focus, copied, states, pending, network, music: music_watch, launcher, groups } = state;
     launcher.wire(&ctx, cx);
     let host = host.get_or_insert_with(|| {
         // What it fetches (YouTube's answers, thumbnails) asks for a frame when it arrives.
@@ -268,7 +280,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 // World feedback is given from the world's window (Visited worlds) and the menus, not from this Home; the
                 // screen mirror shows only on the avatar's screen.
                 Page::Home | Page::Card | Page::More | Page::Feedback | Page::FeedbackLabels | Page::Comments | Page::Mirror => {
-                    home(ui, cx, menu, &idle, copied_id, network, launcher, &mut acts)
+                    home(ui, cx, menu, &idle, copied_id, network, launcher, &mut acts);
+                    super::groups::home_section(ui, cx, groups);
                 }
                 Page::Instances | Page::AddFriend => instances(ui, cx, menu, snap.vrchat_login.user.is_some(), &mut acts),
                 Page::Search | Page::Results => youtube(ui, cx, menu, &picture, focus, copied_id, &mut acts),

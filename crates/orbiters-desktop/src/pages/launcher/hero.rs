@@ -40,8 +40,9 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     if VR_HERE {
         return hero_profiles(ui, cx, state, index);
     }
-    let play = states::play(&state.data);
-    let invite = invite(state);
+    let play = making(state, states::play(&state.data));
+    // While Where shows above, an invite is one of its places: its card here is for a VRChat already running (Join).
+    let invite = invite(state).filter(|_| !state.places.showing);
     // A Mac being set up, at the Steam sign-in: the QR code to read with the phone.
     let sign_in = match (&state.data.engine_setup, play) {
         (Some(EngineSetup::SignIn { qr_url }), PlayState::NotInstalled | PlayState::NoEngine) if !VR_HERE => Some(qr_url.clone()),
@@ -62,7 +63,7 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             if !VR_HERE {
                 // A Mac: one button, the desktop game.
                 if play_button(ui, rect, LaunchMode::Desktop, play, true, None) {
-                    state.act(cx, anim::time(ui.ctx()), Action::Play { mode: LaunchMode::Desktop, destination: None });
+                    super::destinations::play(state, cx, anim::time(ui.ctx()), LaunchMode::Desktop, None);
                 }
                 return;
             }
@@ -71,10 +72,10 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             let vr = Rect::from_min_size(rect.min, vec2(w, rect.height()));
             let desk = Rect::from_min_size(pos2(vr.right() + gap, rect.top()), vec2(w, rect.height()));
             if play_button(ui, vr, LaunchMode::Vr, play, true, None) {
-                state.act(cx, anim::time(ui.ctx()), Action::Play { mode: LaunchMode::Vr, destination: None });
+                super::destinations::play(state, cx, anim::time(ui.ctx()), LaunchMode::Vr, None);
             }
             if play_button(ui, desk, LaunchMode::Desktop, play, true, None) {
-                state.act(cx, anim::time(ui.ctx()), Action::Play { mode: LaunchMode::Desktop, destination: None });
+                super::destinations::play(state, cx, anim::time(ui.ctx()), LaunchMode::Desktop, None);
             }
         }
         (_, PlayState::Running(mode)) => {
@@ -126,6 +127,14 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     });
 }
 
+/// The Play buttons while Where has VRChat make a new instance for the press: the mode pressed turns, as a start does.
+fn making(state: &State, play: PlayState) -> PlayState {
+    match (play, state.places.making()) {
+        (PlayState::Ready, Some(mode)) => PlayState::Starting(mode),
+        (play, _) => play,
+    }
+}
+
 /// A profile's chip: its number and the account last seen on it, how it runs now.
 fn chip_label(p: &GameProfile) -> String {
     match &p.account {
@@ -159,8 +168,8 @@ fn chip_hint(p: &GameProfile) -> String {
 fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     let offered = states::profiles(&state.data, state.added_profile);
     let next = states::next_profile(&offered, state.chosen_profile);
-    let play = states::play_on(&state.data, &offered, next);
-    let invite = invite(state);
+    let play = making(state, states::play_on(&state.data, &offered, next));
+    let invite = invite(state).filter(|_| !state.places.showing);
     match play {
         PlayState::Unavailable => return,
         PlayState::NotInstalled | PlayState::NoEngine => {
@@ -208,7 +217,8 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             if play_button(ui, r, mode, play, true, whose.as_deref()) {
                 // The choice stays on the profile just started, so the buttons say it starts, then runs.
                 state.chosen_profile = Some(next);
-                state.act(cx, clock, Action::PlayOn { mode, profile: next });
+                // Into the place chosen above (Where), or VRChat's own start.
+                super::destinations::play(state, cx, clock, mode, Some(next));
             }
         }
         // The profile choice.

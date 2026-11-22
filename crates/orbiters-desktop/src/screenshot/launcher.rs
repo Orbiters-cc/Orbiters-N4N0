@@ -158,6 +158,24 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
             library: None,
         });
     }
+    // REQUEST20 2: Where, above Home's Play buttons (made-up places only). Run with --width 1040 --height 700 and
+    // --width 900 too, and --language fr / ja.
+    for name in WHERE {
+        scenarios.push(Scenario {
+            name,
+            page: Page::Home,
+            snapshot: base.clone(),
+            frames: 100,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        });
+    }
     for name in NAMES {
         scenarios.push(Scenario {
             name,
@@ -173,6 +191,98 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
             home: None,
             library: None,
         });
+    }
+}
+
+/// REQUEST20 2's pictures: Where with an invite, an event, the last instance and the places visited most
+/// ("launcher-where"; its second page; a card chosen; a new instance's kind changed and its list open; one being
+/// made), only places visited, nothing visited yet, the history still read, signed out of VRChat, no pictures
+/// (offline), a chosen card gone, an event waiting for its invite, and a profile of another account chosen.
+pub(super) const WHERE: [&str; 15] = [
+    "launcher-where",
+    "launcher-where-page-2",
+    "launcher-where-selected",
+    "launcher-where-kind",
+    "launcher-where-kind-list",
+    "launcher-where-making",
+    "launcher-where-frequent",
+    "launcher-where-nothing",
+    "launcher-where-loading",
+    "launcher-where-signed-out",
+    "launcher-where-offline",
+    "launcher-where-expired",
+    "launcher-where-waiting",
+    "launcher-where-other-profile",
+    "launcher-small-where",
+];
+
+/// Where's made-up places for a scenario, handed to the page (nothing is read).
+fn stage_where(ctx: &egui::Context, state: &mut crate::pages::launcher::State, name: &str, t: f64) {
+    use crate::pages::launcher::destinations::{EventSoon, Frequent, HistoryView, LastVisit};
+    use orbiters_core::vrchat_api::CreateAccess;
+    let offline = name == "launcher-where-offline";
+    if !offline {
+        for n in 0..8 {
+            let url = format!("sample://world/{n}");
+            let texture = ctx.load_texture(url.clone(), picture(&url), TextureOptions::LINEAR);
+            state.provide_picture(&url, texture);
+        }
+    }
+    let world = |n: u32| format!("wrld_00000000-0000-4000-8000-{:012}", 300 + n);
+    let pic = |n: u32| (!offline).then(|| format!("sample://world/{n}"));
+    let day = 86_400u64;
+    let now = NOW as u64;
+    let often = |n: u32, name: &str, visits: u32, score: f64, p: u32| Frequent { world_id: world(n), name: name.into(), visits, score, last: now - day, picture: pic(p) };
+    let history = HistoryView {
+        frequent: vec![often(1, "Lantern Garden", 14, 9.1, 4), often(2, "Midnight Rooftop", 9, 6.2, 1), often(3, "Movie Night Hall", 6, 3.4, 5), often(4, "Pixel Arcade", 4, 2.0, 0)],
+        last: Some(LastVisit {
+            world_id: world(5),
+            instance: "48213~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)~nonce(0a1b2c3d-0000-4000-8000-000000000000)".into(),
+            name: "Boat Valley".into(),
+            at: now - 3 * 3600,
+            picture: pic(3),
+        }),
+    };
+    let event = |location: bool| EventSoon {
+        id: "00000000-0000-4000-8000-0000000000e1".into(),
+        title: "Sample Build Night".into(),
+        starts_at: NOW + 12 * 60,
+        ends_at: Some(NOW + 2 * 3600),
+        world_id: Some(world(7)),
+        picture: pic(7),
+        location: location.then(|| format!("{}:31337~group(grp_00000000-0000-4000-8000-000000000001)~groupAccessType(public)~region(eu)", world(7))),
+    };
+    match name {
+        "launcher-where-frequent" => state.places.stand_in(Some(history), Vec::new(), Some(false), true),
+        "launcher-where-nothing" => state.places.stand_in(Some(HistoryView::default()), Vec::new(), None, true),
+        "launcher-where-loading" => state.places.stand_in(None, Vec::new(), None, true),
+        "launcher-where-signed-out" => state.places.stand_in(Some(history), Vec::new(), None, false),
+        "launcher-where-waiting" => {
+            state.places.stand_in(Some(history), vec![event(false)], Some(true), true);
+            state.places.stand_in_choose("event:00000000-0000-4000-8000-0000000000e1", "Sample Build Night", false);
+        }
+        _ => state.places.stand_in(Some(history), vec![event(true)], Some(true), true),
+    }
+    match name {
+        "launcher-where-page-2" => state.places.stand_in_page(1),
+        "launcher-where-selected" | "launcher-small-where" => state.places.stand_in_choose("invite:not_00000000-0000-4000-8000-000000000001", "Chill House", true),
+        "launcher-where-kind" | "launcher-where-kind-list" | "launcher-where-making" => {
+            let key = format!("often:{}", world(1));
+            state.places.stand_in_choose(&key, "Lantern Garden", false);
+            if name == "launcher-where-kind" {
+                state.places.stand_in_kind(&world(1), CreateAccess::Friends);
+            }
+            if name == "launcher-where-making" {
+                state.places.stand_in_making(LaunchMode::Vr);
+            }
+            // Its card is on the second page of three at the usual width.
+            state.places.stand_in_page(1);
+        }
+        "launcher-where-expired" => {
+            let line = orbiters_i18n::tr!("{name} is no longer available: Play starts VRChat at home.", name = "Chill House");
+            state.places.stand_in_notice(&line, t);
+        }
+        _ => {}
     }
 }
 
@@ -286,6 +396,18 @@ fn more_people(state: &mut LauncherState) {
 fn data(name: &str) -> LauncherState {
     let mut s = sample();
     more_people(&mut s);
+    // REQUEST20 2: the invite's world is the sketch's "Chill House"; signed out of VRChat, Play alone and no list's places.
+    if WHERE.contains(&name) {
+        if let Some(place) = s.invites.iter_mut().find(|i| i.kind == InviteKind::Invite).and_then(|i| i.place.as_mut()) {
+            place.world_name = "Chill House".into();
+        }
+        if name == "launcher-where-signed-out" {
+            s.source = Source::Nothing;
+            s.possible = Possible { play: true, ..Default::default() };
+            s.invites.clear();
+            s.boops.clear();
+        }
+    }
     if let Some(n) = name.strip_prefix("launcher-boops-").and_then(|n| n.split('-').next()).and_then(|n| n.parse::<usize>().ok()) {
         // Made-up people of the list, newest first, a few minutes apart.
         s.boops = (0..n)
@@ -330,7 +452,7 @@ fn data(name: &str) -> LauncherState {
             s.game = Game::Running(LaunchMode::Vr);
             s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None)];
         }
-        "launcher-profiles" | "launcher-small-profiles" => {
+        "launcher-profiles" | "launcher-small-profiles" | "launcher-where-other-profile" => {
             s.game = Game::Running(LaunchMode::Vr);
             s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None), profile(1, "Sample Alt", None, None), profile(2, "Sample Builder", None, None)];
         }
@@ -575,7 +697,14 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
             "launcher-sections-scrolled" => state.stand_in_folded(&["in-game"]),
             _ => {}
         }
-        if name != "launcher-invite" {
+        // Where (REQUEST20 2) reads nothing in pictures: its own places, or none.
+        if WHERE.contains(&name) {
+            stage_where(ctx, state, name, t);
+        } else {
+            state.places.stand_in(Some(Default::default()), Vec::new(), None, true);
+        }
+        let keep_invite = name == "launcher-invite" || (WHERE.contains(&name) && !matches!(name, "launcher-where-frequent" | "launcher-where-nothing" | "launcher-where-signed-out" | "launcher-where-expired"));
+        if !keep_invite {
             for id in invites {
                 state.stand_in_dismiss(&id);
             }
@@ -606,6 +735,12 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
         "launcher-mine-gallery" if f == 30 => state.mine.stand_in_picker(true, true, Rect::NOTHING, t),
         "launcher-mine-status" if f == 30 => state.mine.stand_in_status_list(ctx),
         "launcher-mine-icons" if f == 30 => state.mine.stand_in_picker(false, false, Rect::NOTHING, t),
+        "launcher-where-kind-list" if f == 30 => state.places.stand_in_kind_list(ctx, &format!("often:wrld_00000000-0000-4000-8000-{:012}", 301)),
+        // A notice is said for ten seconds: said again near the end so it shows.
+        "launcher-where-expired" if f + 5 == frames => {
+            let line = orbiters_i18n::tr!("{name} is no longer available: Play starts VRChat at home.", name = "Chill House");
+            state.places.stand_in_notice(&line, t);
+        }
         _ => {}
     }
 }

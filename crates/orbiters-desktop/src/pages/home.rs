@@ -60,10 +60,19 @@ fn menu_text(text: Text) -> &'static str {
     Strings::builtin(orbiters_i18n::language()).get(text)
 }
 
-/// The window's features: every Home tile, then previous instances and the QR code scanner (More's, on the avatar's
-/// screen).
+/// The window's features, as All tools shows them: every tile of the avatar's Home, then previous instances and the QR
+/// code scanner (More's, on the avatar's screen).
 fn features() -> impl Iterator<Item = (Target, Icon, Text, Tint)> {
     HOME_TILES.into_iter().chain(MORE_CARDS_QR.into_iter().filter(|t| matches!(t.0, Target::Instances | Target::Qr))).filter(|t| available(t.0))
+}
+
+/// The features Home itself shows (REQUEST21 6: "remove all the tiles except: Call, Suggest, Tracking"), in the owner's
+/// order. The others are one press away, under All tools, and each also where it belongs: fast walk in Settings'
+/// Performance, the 3D picture in Photos & captures' capture bar, previous instances in Where.
+const HOME_ONLY: [Target; 3] = [Target::Call, Target::Suggest, Target::Tracking];
+
+fn home_tiles() -> impl Iterator<Item = (Target, Icon, Text, Tint)> {
+    HOME_ONLY.into_iter().filter_map(|target| features().find(|t| t.0 == target))
 }
 
 /// Whether a feature can work here. Where VRChat does not run on this computer, these need it on the same computer:
@@ -94,6 +103,8 @@ enum Act {
     Home,
     /// Settings, VRChat account (Previous instances' Connect VRChat, REQUEST20 4).
     VrchatAccount,
+    /// All tools opened, or closed back to Home (REQUEST21 6).
+    Tools(bool),
 }
 
 #[derive(Default)]
@@ -113,6 +124,9 @@ pub struct State {
     states: super::states::StatesPage,
     /// VRChat on the network, shown here until one is connected.
     network: super::network::State,
+    /// All tools shows (every feature of N4N0's menu) instead of Home's three (REQUEST21 6); a feature opened from it
+    /// comes back to it.
+    all_tools: bool,
     /// What going back to Home asked of the menu's host from outside a frame (the sidebar's Home: the QR code scanner
     /// stops), done at the next one.
     pending: Vec<Effect>,
@@ -135,11 +149,17 @@ impl State {
         self.launcher.holds() || self.shown() == Some(Page::Music)
     }
 
-    /// Back to Home itself (the sidebar's Home pressed on a feature's page).
+    /// Back to Home itself (the sidebar's Home pressed on a feature's page, or on All tools).
     pub fn back_home(&mut self) {
+        self.all_tools = false;
         if let Some(host) = self.host.as_mut() {
             self.pending.extend(go_home(host));
         }
+    }
+
+    /// All tools shows, every feature of N4N0's menu (screenshots, tests).
+    pub fn open_all_tools(&mut self) {
+        self.all_tools = true;
     }
 
     /// The window leaves Home for another page (the sidebar): the QR code scanner its page holds stops, the friends its
@@ -191,7 +211,7 @@ fn go_home(host: &mut MenuHost) -> Vec<Effect> {
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
-    let State { host, shown, since, opened, focus, copied, states, pending, network, music: music_watch, launcher } = state;
+    let State { host, shown, since, opened, focus, copied, states, pending, network, all_tools, music: music_watch, launcher } = state;
     launcher.wire(&ctx, cx);
     let host = host.get_or_insert_with(|| {
         // What it fetches (YouTube's answers, thumbnails) asks for a frame when it arrives.
@@ -216,10 +236,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let mut effects = host.poll();
     effects.append(pending);
 
-    // A page opened enters as a page of its own: its blocks count from then.
+    // A page opened enters as a page of its own: its blocks count from then (All tools too).
     let page = shown_page(host.menu.page);
     let now = anim::time(&ctx);
-    if *shown != Some(page) {
+    let tools_shown = page == Page::Home && *all_tools;
+    if *shown != Some(page) || ctx.data(|d| d.get_temp::<bool>(Id::unique("home-all-tools-was"))) != Some(tools_shown) {
+        ctx.data_mut(|d| d.insert_temp(Id::unique("home-all-tools-was"), tools_shown));
         *shown = Some(page);
         *since = now;
         *opened += 1;
@@ -268,7 +290,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 // World feedback is given from the world's window (Visited worlds) and the menus, not from this Home; the
                 // screen mirror shows only on the avatar's screen.
                 Page::Home | Page::Card | Page::More | Page::Feedback | Page::FeedbackLabels | Page::Comments | Page::Mirror => {
-                    home(ui, cx, menu, &idle, copied_id, network, launcher, &mut acts)
+                    if *all_tools {
+                        tools(ui, cx, menu, copied_id, &mut acts)
+                    } else {
+                        home(ui, cx, menu, &idle, copied_id, network, launcher, &mut acts)
+                    }
                 }
                 Page::Instances | Page::AddFriend => instances(ui, cx, menu, snap.vrchat_login.user.is_some(), &mut acts),
                 Page::Search | Page::Results => youtube(ui, cx, menu, &picture, focus, copied_id, &mut acts),
@@ -292,10 +318,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             }
         });
     });
-    // Escape goes back to Home, unless the page took it for itself (a rename it cancels): asked after the page.
+    // Escape goes back to Home (to All tools from a feature opened there), unless the page took it for itself (a
+    // rename it cancels): asked after the page.
     if page != Page::Home && ui.input(|i| i.key_pressed(Key::Escape)) {
         acts.insert(0, Act::Home);
+    } else if page == Page::Home && *all_tools && !launcher.holds() && ui.input(|i| i.key_pressed(Key::Escape)) {
+        acts.insert(0, Act::Tools(false));
     }
+    // A feature's page says where its way back goes.
+    ctx.data_mut(|d| d.insert_temp(Id::unique("home-back-to-tools"), *all_tools));
     // Down to where the content starts (its top margin).
     super::under_top(ui, cx, "home", from, ui.max_rect().top() + cx.top + 8.0);
     if let (Some(column), Some(side)) = (right_margin, side) {
@@ -344,6 +375,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             Act::Suggestion(text) => host.menu.suggestion = text,
             Act::Smoothing(kind, ms) => effects.extend(host.menu.set_smoothing_ms(kind, ms)),
             Act::Home => effects.extend(go_home(host)),
+            Act::Tools(open) => *all_tools = open,
             Act::VrchatAccount => cx.go = Some(super::Go::VrchatAccount),
         }
     }
@@ -411,25 +443,33 @@ fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>,
     }
 
     let w = ui.available_width();
-    // With the launcher beside them (Play, the account's profile, friends), the features take a compact grid: they
-    // matter more in game and in the overlay than in this window (REQUEST15 7c). Alone on Home, their cards.
+    // With the launcher beside them (Play, the account's profile, friends), the features take a compact row: they
+    // matter more in game and in the overlay than in this window (REQUEST15 7c). Alone on Home, their cards. Home keeps
+    // three of them (REQUEST21 6), side by side, and All tools, at the caption's end, has every one.
     let compact = launcher.shown();
-    if compact {
+    {
         let p = ui.painter().clone();
-        let (cap, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
+        let (cap, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
         widgets::text(&p, pos2(cap.left() + 2.0, cap.center().y), Align2::LEFT_CENTER, &Txt::caps(tr("N4N0's features")));
-        ui.add_space(-8.0);
+        let more = Button::new(tr("All tools")).icon(icons::SQUARES_FOUR).variant(Variant::Ghost).size(Size::Sm).id_salt("home-all-tools").hint(tr("Every tool of N4N0's menu: fast walk, YouTube, the 3D picture, music, the light, saved states, previous instances, the QR code scanner"));
+        let mw = more.desired_width(ui);
+        if more.show_at(ui, Rect::from_min_size(pos2(cap.right() - mw, cap.top() - 1.0), vec2(mw, 32.0))).clicked() {
+            acts.push(Act::Tools(true));
+        }
+        ui.add_space(-10.0);
     }
-    let (cols, gap) = if compact { (compact_columns(w), COMPACT_GAP) } else { (home_columns(w), GAP) };
+    let gap = if compact { COMPACT_GAP } else { GAP };
+    let tiles: Vec<_> = home_tiles().collect();
+    let count = tiles.len();
+    // One row of them, as wide as the page; under each other where three would not keep their names.
+    let narrow_min = if compact { COMPACT_MIN } else { TILE_MIN - 30.0 };
+    let cols = if (w - gap * (count as f32 - 1.0)) / count as f32 >= narrow_min { count } else { 1 };
     let card_w = (w - gap * (cols - 1) as f32) / cols as f32;
-    let card_h = if compact { COMPACT_H } else { tile_height(card_w) };
-    // The features, then what N4N0 says in the rest of the last row (one place at least): the grid stays whole.
-    let count = features().count();
-    let cells = count + 1;
-    let rows = cells.div_ceil(cols);
+    let card_h = if compact { COMPACT_H } else { tile_height(card_w.min(TILE_MAX)) };
+    let rows = count.div_ceil(cols);
     let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + gap) - gap), Sense::hover());
     let cell = |i: usize| area.min + vec2((i % cols) as f32 * (card_w + gap), (i / cols) as f32 * (card_h + gap));
-    for (i, tile) in features().enumerate() {
+    for (i, tile) in tiles.into_iter().enumerate() {
         let rect = Rect::from_min_size(cell(i), vec2(card_w, card_h));
         if compact {
             feature_compact(ui, cx, i, tile, rect, menu, copied, acts);
@@ -437,9 +477,52 @@ fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>,
             feature(ui, cx, i, tile, rect, menu, copied, acts);
         }
     }
+    // What N4N0 says, under them, the row's whole width.
+    let said_h = if compact { COMPACT_H } else { CARD_H - 24.0 };
+    let (at, _) = ui.allocate_exact_size(vec2(w, said_h), Sense::hover());
+    said(ui, cx, 1 + count, at, menu);
+}
+
+/// All tools (REQUEST21 6): every feature of N4N0's menu as Home had them, the window's whole grid of cards, with what
+/// N4N0 says in the rest of the last row. Back (or Escape) goes to Home.
+fn tools(ui: &mut Ui, cx: &mut Cx, menu: &Menu, copied: Option<&str>, acts: &mut Vec<Act>) {
+    // Home's own heading, its caption the way back (the grid stays where Home's was).
+    block(ui, cx, 0, 72.0, |ui, rect| {
+        let id = Id::unique("all-tools-back");
+        let caption = Txt::caps(tr("Home"));
+        let size = widgets::text_size(ui, &caption);
+        let link = Rect::from_min_size(pos2(rect.left() - 6.0, rect.top() - 4.0), vec2(size.x + 34.0, 22.0));
+        let resp = ui.interact(link, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Back to Home"));
+        widgets::note_control(ui.ctx(), tr("Back to Home"), link, true);
+        let hover = anim::toggle(ui.ctx(), id.with("hover"), resp.hovered(), Spring::SNAPPY);
+        let p = ui.painter();
+        p.rect_filled(link, theme::radius(11.0), theme::white(0.06 * hover));
+        let ink = theme::mix(theme::FG_3, theme::FG, hover);
+        widgets::icon(p, pos2(link.left() + 14.0, link.center().y), icons::ARROW_LEFT, 12.0, ink);
+        widgets::text(p, pos2(link.left() + 26.0, rect.top() + 7.0), Align2::LEFT_CENTER, &caption.color(ink));
+        widgets::text(p, pos2(rect.left(), rect.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(tr("All tools"), 30.0).weight(weight::SEMIBOLD).tracking(-0.015));
+        let sub = Txt::new(tr("Every tool of N4N0's menu, as on your avatar's screen and in VR"), 13.0).color(theme::FG_3);
+        widgets::text_truncated(p, pos2(rect.left(), rect.top() + 62.0), Align2::LEFT_CENTER, &sub, rect.width() * 0.8);
+        if widgets::activated(&resp) {
+            acts.push(Act::Tools(false));
+        }
+    });
+    let w = ui.available_width();
+    let cols = home_columns(w);
+    let card_w = (w - GAP * (cols - 1) as f32) / cols as f32;
+    let card_h = tile_height(card_w);
+    // The features, then what N4N0 says in the rest of the last row (one place at least): the grid stays whole.
+    let count = features().count();
+    let cells = count + 1;
+    let rows = cells.div_ceil(cols);
+    let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + GAP) - GAP), Sense::hover());
+    let cell = |i: usize| area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (card_h + GAP));
+    for (i, tile) in features().enumerate() {
+        feature(ui, cx, i, tile, Rect::from_min_size(cell(i), vec2(card_w, card_h)), menu, copied, acts);
+    }
     let span = cols - count % cols;
     let at = cell(count);
-    said(ui, cx, 1 + count, Rect::from_min_size(at, vec2(span as f32 * (card_w + gap) - gap, card_h)), menu);
+    said(ui, cx, 1 + count, Rect::from_min_size(at, vec2(span as f32 * (card_w + GAP) - GAP, card_h)), menu);
 }
 
 /// Home's compact features: their height, the room between them, the narrowest before a row takes one fewer.
@@ -447,10 +530,6 @@ const COMPACT_H: f32 = 60.0;
 const COMPACT_GAP: f32 = 10.0;
 const COMPACT_MIN: f32 = 172.0;
 
-/// The compact grid's columns at `width`: as many as fit, two to six.
-fn compact_columns(width: f32) -> usize {
-    (((width + COMPACT_GAP) / (COMPACT_MIN + COMPACT_GAP)).floor() as usize).clamp(2, 6)
-}
 
 /// The narrowest a Home tile gets before the row takes one fewer, the widest before it takes one more past six, and
 /// the most tiles on a row (two rows of six hold every feature and what N4N0 says).
@@ -503,6 +582,7 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Tint), rec
     // "Coming soon" (Call without N4N0 calls) stays greyed but takes a click, which says why.
     let enabled = state.pointable();
     let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
+    widgets::note_control(&ctx, title, rect, enabled);
     if enabled && widgets::pressed(&resp) {
         acts.push(Act::Press(target));
     }
@@ -603,6 +683,7 @@ fn feature_compact(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Ti
     // "Coming soon" (Call without N4N0 calls) stays greyed but takes a click, which says why.
     let enabled = state.pointable();
     let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
+    widgets::note_control(&ctx, title, rect, enabled);
     if enabled && widgets::pressed(&resp) {
         acts.push(Act::Press(target));
     }
@@ -754,10 +835,11 @@ fn n4n0_face(p: &Painter, center: Pos2, radius: f32) {
     }
 }
 
-/// The top of a feature's page: back to Home, over its heading.
+/// The top of a feature's page: back to Home (or to All tools, when it was opened there), over its heading.
 fn top(ui: &mut Ui, cx: &Cx, title: &str, sub: &str, acts: &mut Vec<Act>) {
+    let to_tools = ui.ctx().data(|d| d.get_temp::<bool>(Id::unique("home-back-to-tools"))).unwrap_or(false);
     block(ui, cx, 0, 116.0, |ui, rect| {
-        let back = Button::new(tr("Home")).icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm);
+        let back = Button::new(if to_tools { tr("All tools") } else { tr("Home") }).icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm);
         let w = back.desired_width(ui);
         if back.show_at(ui, Rect::from_min_size(rect.min, vec2(w, 32.0))).clicked() {
             acts.push(Act::Home);
@@ -1730,8 +1812,9 @@ mod tests {
         fn quit(&self) {}
     }
 
-    /// Home in a 1048 × 780 page, frame by frame: its cards are four to a row, 233 wide from x 32, 128 high from y 140
-    /// (16 apart): fast walk, YouTube, Call, 3D picture, then music, light, States and what N4N0 says.
+    /// Home in a 1048 × 780 page, frame by frame. On All tools (`State::open_all_tools`) its cards are four to a row,
+    /// 233 wide from x 32, 128 high from y 140 (16 apart), as Home's were: fast walk, YouTube, Call, 3D picture, then
+    /// music, light, States, Tracking, then suggest, previous instances, the QR code scanner and what N4N0 says.
     struct Harness {
         ctx: egui::Context,
         recorder: Arc<Recorder>,
@@ -1805,7 +1888,8 @@ mod tests {
         Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
     }
 
-    /// The middle of a feature's card on the default window: four to a row, wherever the features this computer has put it.
+    /// The middle of a feature's card on All tools at the default window: four to a row, wherever the features this
+    /// computer has put it.
     fn card_of(target: Target) -> Pos2 {
         let at = features().position(|t| t.0 == target).expect("a feature here");
         pos2(147.0 + 250.0 * (at % 4) as f32, 204.0 + 144.0 * (at / 4) as f32)
@@ -1818,6 +1902,9 @@ mod tests {
     fn home_at_rest_asks_for_no_frame() {
         let mut h = Harness::new();
         assert_eq!(crate::pages::rest::frames_a_minute(0.0, |t| h.frame_at(t, Vec::new())), 0, "Home, untouched");
+        h.state.open_all_tools();
+        let from = h.time;
+        assert_eq!(crate::pages::rest::frames_a_minute(from, |t| h.frame_at(t, Vec::new())), 0, "All tools, untouched");
         // YouTube's page, nothing typed: at most its field's caret blinking (it drew 600 frames a minute).
         let youtube = card_of(Target::YouTube);
         h.press(youtube);
@@ -1844,25 +1931,56 @@ mod tests {
         assert!(music_shown(&playing(10), false) != music_shown(&louder, false));
     }
 
-    /// REQUEST15 7c: beside the launcher the features take half the room or less, and every one stays.
+    /// REQUEST21 6: Home keeps Call, Suggest and Tracking, side by side in one row (compact beside the launcher, cards
+    /// alone); every other feature is under All tools, one press
+    /// away, and still opens its page there; All tools' Home (or Escape) goes back.
+    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn beside_the_launcher_the_features_take_a_compact_grid() {
-        // The default window's page beside the friends column (1048 - 16 - 314 - 52), and the narrowest page.
-        for w in [666.0f32, 560.0] {
-            let count = features().count() + 1;
-            let big_cols = home_columns(w);
-            let big = count.div_ceil(big_cols) as f32 * (tile_height((w - GAP * (big_cols - 1) as f32) / big_cols as f32) + GAP);
-            let cols = compact_columns(w);
-            let small = count.div_ceil(cols) as f32 * (COMPACT_H + COMPACT_GAP);
-            assert!(small * 2.0 <= big + 1.0, "{w}: {small} against {big}");
-            assert!((w - COMPACT_GAP * (cols - 1) as f32) / cols as f32 >= COMPACT_MIN, "{w}: names stay readable");
+    fn home_keeps_call_suggest_and_tracking_and_all_tools_has_the_rest() {
+        widgets::watch_controls();
+        let names = |targets: &[Target]| -> Vec<&'static str> { targets.iter().map(|t| features().find(|f| f.0 == *t).map(|f| menu_text(f.2)).expect("a feature")).collect() };
+        let kept = names(&[Target::Call, Target::Suggest, Target::Tracking]);
+        let moved = names(&[Target::FastWalk, Target::YouTube, Target::Photo, Target::Music, Target::Light, Target::States, Target::Instances, Target::Qr]);
+        assert_eq!(home_tiles().map(|t| t.0).collect::<Vec<_>>(), HOME_ONLY, "the three, in the owner's order");
+        assert_eq!(features().count(), 11, "All tools keeps every one");
+        for launcher in [false, true] {
+            let mut h = Harness::new();
+            if launcher {
+                let mut data = orbiters_core::launcher::LauncherState::default();
+                data.possible.play = true;
+                h.state.launcher_mut().set_data(Arc::new(data));
+            }
+            h.settle();
+            assert_eq!(h.state.launcher_mut().shown(), launcher);
+            let rects: Vec<Rect> = kept.iter().map(|n| widgets::control(&h.ctx, n).unwrap_or_else(|| panic!("{n} on Home")).0).collect();
+            // One row, the page's width shared.
+            assert!(rects.iter().all(|r| (r.top() - rects[0].top()).abs() < 0.5 && (r.width() - rects[0].width()).abs() < 0.5), "{rects:?}");
+            assert!(rects[0].left() < rects[1].left() && rects[1].left() < rects[2].left());
+            for n in &moved {
+                assert!(widgets::control(&h.ctx, n).is_none(), "{n} is not on Home (launcher {launcher})");
+            }
+            // All tools: every feature, and each opens its page as Home's did.
+            let (all, on) = widgets::control(&h.ctx, "All tools").expect("All tools on Home");
+            assert!(on);
+            h.press(all.center());
+            h.release(all.center());
+            h.settle();
+            for n in kept.iter().chain(&moved) {
+                assert!(widgets::control(&h.ctx, n).is_some(), "{n} under All tools");
+            }
+            let (youtube, _) = widgets::control(&h.ctx, moved[1]).expect("YouTube");
+            h.press(youtube.center());
+            h.release(youtube.center());
+            assert_eq!(h.page(), Page::Search);
+            h.frame(vec![key(Key::Escape)]);
+            h.settle();
+            assert_eq!(h.page(), Page::Home);
+            assert!(widgets::control(&h.ctx, moved[0]).is_some(), "back on All tools, where it was opened");
+            h.frame(vec![key(Key::Escape)]);
+            h.settle();
+            assert!(widgets::control(&h.ctx, moved[0]).is_none(), "Escape on All tools: Home");
+            assert!(widgets::control(&h.ctx, kept[1]).is_some());
         }
-        let mut h = Harness::new();
-        let mut data = orbiters_core::launcher::LauncherState::default();
-        data.possible.play = true;
-        h.state.launcher_mut().set_data(std::sync::Arc::new(data));
-        h.settle();
-        assert!(h.state.launcher_mut().shown());
     }
 
     /// REQUEST20 2: Where above Play. Nothing chosen, Play does what it always did; a card chosen (nothing sent by the
@@ -1961,6 +2079,7 @@ mod tests {
     #[test]
     fn a_card_opens_its_page_on_the_press_and_home_comes_back() {
         let mut h = Harness::new();
+        h.state.open_all_tools();
         h.settle();
         // YouTube's card: its page on the press, and the search field takes the keys.
         let youtube = card_of(Target::YouTube);
@@ -1991,6 +2110,7 @@ mod tests {
     #[test]
     fn the_qr_code_scanner_scans_while_its_page_shows() {
         let mut h = Harness::new();
+        h.state.open_all_tools();
         h.settle();
         // The third row: suggest, previous instances, the QR code scanner, then what N4N0 says.
         let qr = pos2(640.0, 490.0);
@@ -2031,6 +2151,7 @@ mod tests {
     #[test]
     fn a_switch_acts_alone_and_shows_its_change_at_once() {
         let mut h = Harness::new();
+        h.state.open_all_tools();
         h.settle();
         // Fast walk's switch: one change, saved as the setting; the card under it does nothing more.
         let walk = pos2(217.0, 180.0);
@@ -2061,6 +2182,7 @@ mod tests {
         widgets::watch_controls();
         for avatar_goes in [false, true] {
             let mut h = Harness::new();
+            h.state.open_all_tools();
             let states = vec![StateView { id: "s1".into(), name: "Hoodie on".into(), ..Default::default() }];
             let party = StateView { id: "s9".into(), name: "Party".into(), ..Default::default() };
             h.snap.n4n0.states = StatesView {
@@ -2114,6 +2236,7 @@ mod tests {
         use crate::state::{AvatarView, StateView, StatesView};
         widgets::watch_controls();
         let mut h = Harness::new();
+        h.state.open_all_tools();
         let states =
             vec![StateView { id: "s1".into(), name: "Hoodie on".into(), parameters: 10, pose_parameters: 2, eye_height: Some(1.6), ..Default::default() }];
         let party = StateView { id: "s9".into(), name: "Party".into(), ..Default::default() };

@@ -1,0 +1,4 @@
+{
+  "Fast walk moves the play space to keep your trackers aligned.": "トラッカーのずれを防ぐため、早歩きはプレイスペースを動かします。",
+  "Your trackers use another tracking system than your headset (aligned by Space Calibrator, for instance), so Fast walk moves the play space: that keeps every tracker on your body. OVR Advanced Settings' drag and turn put you back.": "トラッカーがヘッドセットとは別のトラッキングシステムを使っているため（Space Calibratorなどで合わせている場合）、早歩きはプレイスペースを動かします。こうするとすべてのトラッカーが体に付いたままになります。OVR Advanced Settingsのドラッグや回転で元の位置に戻ります。"
+}

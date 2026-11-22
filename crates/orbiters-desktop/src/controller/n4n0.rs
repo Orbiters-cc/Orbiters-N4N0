@@ -94,6 +94,11 @@ impl Host for Link {
         self.with(|c| c.account_api()).flatten()
     }
 
+    /// With the VRChat account connected in Settings, when there is one (REQUEST20 4).
+    fn invite_self(&self, location: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
+        self.with(|c| c.previous_instance_invite(location)).flatten()
+    }
+
     /// On the OSC action thread, in order with the record toggle.
     fn queue(&self, action: Box<dyn FnOnce() + Send>) -> bool {
         self.with(|c| c.osc_action(move |_| action())).unwrap_or(false)

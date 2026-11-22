@@ -1153,12 +1153,14 @@ fn hero(
         _ => None,
     };
     let buttons_w = 2.0 * 168.0 + 8.0;
-    widgets::text_truncated(
+    // Copy name right after the name (REQUEST20 1): its room comes off the name's.
+    let copy_room = 32.0 + 8.0 + 72.0;
+    let name_at = widgets::text_truncated(
         &cp,
         pos2(rect.left() + 28.0, rect.bottom() - 58.0 + dy),
         Align2::LEFT_CENTER,
         &Txt::new(&world.name, 30.0).weight(weight::SEMIBOLD).tracking(-0.015),
-        rect.width() - 56.0 - buttons_w,
+        rect.width() - 56.0 - buttons_w - copy_room,
     );
     let mut sub = Vec::new();
     if let Some(a) = listed.and_then(|p| p.world.author_name.clone()) {
@@ -1186,6 +1188,7 @@ fn hero(
 
     let mut hu = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("hero-actions"));
     hu.multiply_opacity(content);
+    copy_name(&mut hu, &world.id, &world.name, pos2(name_at.right() + 8.0, name_at.center().y));
     let y = rect.bottom() - 24.0 - 40.0 + dy;
     let map_r = Rect::from_min_size(pos2(rect.right() - 24.0 - 168.0, y), vec2(168.0, 40.0));
     let vrc_r = Rect::from_min_size(pos2(map_r.left() - 8.0 - 168.0, y), vec2(168.0, 40.0));
@@ -1200,6 +1203,33 @@ fn hero(
     if map.show_at(&mut hu, map_r).clicked() {
         let r = controller::open_url(&world_page_url(server(cx), &world.id));
         cx.run(&ctx, r);
+    }
+}
+
+/// How long Copy name says Copied.
+const COPIED_FOR: f64 = 1.6;
+
+/// Copy name beside a world's name (REQUEST20 1), its left edge at `at`'s x, centred on its y: the name, exactly, to the
+/// clipboard; Copied beside it for a moment.
+pub(crate) fn copy_name(ui: &mut Ui, id: &str, name: &str, at: egui::Pos2) {
+    if name.trim().is_empty() {
+        return;
+    }
+    let ctx = ui.ctx().clone();
+    let key = Id::unique(("world-name-copied", id));
+    let now = ctx.input(|i| i.time);
+    let copied = ctx.data(|d| d.get_temp::<f64>(key)).is_some_and(|at| now - at < COPIED_FOR);
+    let rect = Rect::from_min_size(pos2(at.x, at.y - 16.0), vec2(32.0, 32.0));
+    let (glyph, label) = if copied { (icons::CHECK, mark("Copied")) } else { (icons::COPY, mark("Copy the world's name")) };
+    let b = IconButton::new(glyph, label).size(32.0, 15.0).backdrop(theme::alpha(theme::INK_950, 0.35)).id_salt(("world-copy-name", id));
+    if widgets::activated(&b.show_at(ui, rect)) {
+        ctx.copy_text(name.to_string());
+        ctx.data_mut(|d| d.insert_temp(key, now));
+    }
+    if copied {
+        let t = Txt::new(tr("Copied"), 13.0).weight(weight::SEMIBOLD).color(theme::ACCENT);
+        widgets::text(ui.painter(), pos2(rect.right() + 8.0, rect.center().y), Align2::LEFT_CENTER, &t);
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
 }
 

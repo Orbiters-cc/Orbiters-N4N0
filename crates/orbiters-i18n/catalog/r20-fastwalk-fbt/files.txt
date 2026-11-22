@@ -1,0 +1,3 @@
+# REQUEST20 (stream r20-fastwalk-fbt, 2026-11-22): Fast walk with trackers of another tracking system (Space Calibrator):
+# the walk path's two new texts, in crates/orbiters-desktop/src/state.rs (covered by the controller area). Kept here so that
+# areas translated side by side never edit the same file.

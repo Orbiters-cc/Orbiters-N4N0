@@ -216,3 +216,36 @@ fn a_place_with_anything_outside_vrchats_id_grammar_is_no_place() {
         assert_eq!(whereabouts(&format!("{W}:{bad}")), Whereabouts::Unknown);
     }
 }
+
+/// REQUEST20 3: the sections sorted as VRCNext sorts its friends list: in the game and on the website by status (join me,
+/// active, ask me, busy), then by name; offline by name (not by last seen).
+#[test]
+fn sections_are_sorted_by_status_then_name_and_offline_by_name() {
+    let person = |n: u32, name: &str, presence, status, seen| Friend {
+        id: format!("usr_00000000-0000-4000-8000-{n:012}"),
+        name: name.into(),
+        presence,
+        status,
+        last_seen: Some(seen),
+        ..Friend::default()
+    };
+    let mut state = LauncherState::default();
+    state.friends = vec![
+        person(1, "zed", Presence::InGame, Status::JoinMe, 0),
+        person(2, "Amy", Presence::InGame, Status::Busy, 0),
+        person(3, "bob", Presence::InGame, Status::Active, 0),
+        person(4, "Abe", Presence::InGame, Status::Active, 0),
+        person(5, "web b", Presence::Website, Status::AskMe, 0),
+        person(6, "web a", Presence::Website, Status::Active, 0),
+        person(7, "Old", Presence::Offline, Status::Offline, 100),
+        person(8, "new", Presence::Offline, Status::Offline, 900),
+        person(9, "Mid", Presence::Offline, Status::Offline, 500),
+    ];
+    regroup(&mut state, &[]);
+    let names = |id: &str| -> Vec<String> {
+        state.groups.iter().find(|g| g.id == id).unwrap().members.iter().map(|m| state.friend(m).unwrap().name.clone()).collect()
+    };
+    assert_eq!(names("in-game"), ["zed", "Abe", "bob", "Amy"]);
+    assert_eq!(names("website"), ["web a", "web b"]);
+    assert_eq!(names("offline"), ["Mid", "new", "Old"]);
+}

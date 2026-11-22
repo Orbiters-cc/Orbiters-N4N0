@@ -1851,6 +1851,26 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
+            name: "settings-walk-trackers",
+            page: Page::Settings,
+            snapshot: {
+                let mut s = idle.clone();
+                s.settings.walk_boost.enabled = true;
+                s.steamvr.walk_path = Some(crate::state::WalkPath::PlaySpace(crate::state::WhyPlaySpace::OtherTrackingSystem));
+                s.settings.world_performance = true;
+                s
+            },
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 5600.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
             name: "settings-scrolled",
             page: Page::Settings,
             snapshot: idle.clone(),
@@ -2489,6 +2509,28 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     vrchat_bridge::append(&mut scenarios);
     launcher::append(&mut scenarios);
     launcher_real::append(&mut scenarios);
+    // REQUEST20 4: Previous instances' Invite me answered: sent from the person's own VRChat account, the instance closed,
+    // full, VRChat's pace, its session expired (Connect VRChat), and Orbiters' account unable without one (Connect VRChat).
+    for name in INVITE_SHOTS {
+        let mut snapshot = scenarios.iter().find(|s| s.name == "home-instances").map(|s| s.snapshot.clone()).expect("home-instances");
+        if name != "home-invite-orbiters" {
+            snapshot.vrchat_login.user = Some(orbiters_core::vrchat_api::User { id: "usr_00000000-0000-4000-8000-000000000000".into(), display_name: "Sample Me".into(), ..Default::default() });
+        }
+        scenarios.push(Scenario {
+            name,
+            page: Page::Home,
+            snapshot,
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Instances, samples: true }),
+            library: None,
+        });
+    }
     // Last: they read a picture folder on another drive, and what comes after them can wait on a slow or failing one.
     gallery_folders::append(&mut scenarios);
 
@@ -2772,6 +2814,10 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         if let (Some(shot), 2) = (sc.home, f) {
             if let Some(host) = app.home_mut().menu_host() {
                 stage_home(host, shot);
+                if let Some(answer) = invite_answer(sc.name) {
+                    let _ = host.press(orbiters_n4n0_core::menu::Target::InviteMe(0));
+                    host.menu.invite_answered(answer);
+                }
                 // VRChat's camera was closed when the picture was asked for.
                 if sc.name == "home-photo-camera" {
                     host.menu.notice = Some(orbiters_n4n0::platform::CAMERA_CLOSED.into());
@@ -2936,6 +2982,26 @@ fn stage_videos(ctx: &egui::Context, app: &mut App, name: &str) {
 /// Home with one of its features' pages open: YouTube with the overlay's sample suggestions or results (their
 /// thumbnails too, nothing fetched) or as it opens; calls, the music and the light as the snapshot and the stand-in
 /// music say.
+/// REQUEST20 4's pictures of Invite me's answers (made-up instances, nothing sent).
+const INVITE_SHOTS: [&str; 6] = ["home-invite-sent", "home-invite-closed", "home-invite-full", "home-invite-rate", "home-invite-expired", "home-invite-orbiters"];
+
+/// The answer each of [`INVITE_SHOTS`] shows, in the words the app gives it.
+fn invite_answer(name: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
+    use orbiters_n4n0_core::menu::InviteAnswer;
+    let failed = |m: &'static str| InviteAnswer::Failed { message: orbiters_i18n::tr(m).into() };
+    Some(match name {
+        "home-invite-sent" => InviteAnswer::Sent,
+        "home-invite-closed" => failed("This instance has closed: VRChat cannot invite you there."),
+        "home-invite-full" => failed("This instance is full right now: try later or pick another."),
+        "home-invite-rate" => InviteAnswer::Failed { message: orbiters_core::vrchat_api::Error::RateLimited(std::time::Duration::from_secs(30)).to_string() },
+        "home-invite-expired" => InviteAnswer::NeedsVrchat { message: orbiters_core::vrchat_api::Error::Unauthorized.to_string() },
+        "home-invite-orbiters" => InviteAnswer::NeedsVrchat {
+            message: orbiters_i18n::tr!("Connect your VRChat account here and the invite comes from it. Orbiters' account could not invite you: {reason}", reason = "VRChat refused this invite. The instance may have closed."),
+        },
+        _ => return None,
+    })
+}
+
 fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }: HomeShot) {
     use crate::overlay::menu_pages::{sample_rgba, sample_suggestions, sample_videos};
     use orbiters_n4n0_core::menu::{Effect, Target};

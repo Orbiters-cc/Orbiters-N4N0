@@ -1,11 +1,11 @@
 //! The column's parts: the account's head, the line about the sign-in, what was received, the list's rows (only those
 //! in view), and the rail of pictures a narrow window has instead.
 
-use super::list::{self, Row};
+use super::list::{self, Row, Section};
 use super::states::{self, Reach};
 use super::{column_fill, person_picture, rank_color, status_name, where_line, Cx, State};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui, UiBuilder};
-use orbiters_core::launcher::{Action, Friend, GroupKind, InviteKind, Presence, Whereabouts};
+use orbiters_core::launcher::{Action, Friend, InviteKind, Presence, Whereabouts};
 use orbiters_i18n::{tr, tr_ctx};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
@@ -318,7 +318,7 @@ pub(super) fn list(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, cloc
         for (i, row) in shown {
             let r = Rect::from_min_size(origin + vec2(0.0, state.tops[i]), vec2(width, row.height()));
             match row {
-                Row::Header { group, kind, name, count, online, folded } => header(ui, state, r, &group, kind, &name, count, online, folded),
+                Row::Header { group, section, name, count, folded } => header(ui, state, r, &group, section, &name, count, folded),
                 Row::Person { group, friend } => person(ui, cx, state, r, &group, friend, clock),
                 Row::GotHead { count, boops } => got_head(ui, r, count, boops),
                 // As wide as a person's card, the gap under it.
@@ -350,10 +350,12 @@ fn empty(ui: &mut Ui, state: &State, rect: Rect) {
     widgets::text_truncated(p, pos2(c.x, c.y + 28.0), Align2::CENTER_CENTER, &Txt::new(line, 12.5).color(theme::FG_3), rect.width() - 32.0);
 }
 
-/// A section's header: its name and count; a press folds or opens it (remembered).
-#[allow(clippy::too_many_arguments)]
-fn header(ui: &mut Ui, state: &mut State, rect: Rect, group: &str, kind: GroupKind, name: &str, count: usize, online: usize, folded: bool) {
+/// A section's header: what it is (the mark the counts line gives it), its name and count; a press folds or opens it
+/// (remembered). A favourite group's, inside the favourites, sits indented with its own name.
+fn header(ui: &mut Ui, state: &mut State, rect: Rect, group: &str, section: Section, name: &str, count: usize, folded: bool) {
     let id = Id::unique(("launcher-header", group));
+    let nested = section.nested();
+    let rect = if nested { Rect::from_min_max(pos2(rect.left() + 14.0, rect.top()), rect.max) } else { rect };
     let resp = ui.interact(rect.shrink2(vec2(4.0, 2.0)), id, Sense::click());
     let hover = anim::toggle(ui.ctx(), id.with("hover"), resp.hovered(), Spring::SNAPPY);
     let open = anim::toggle(ui.ctx(), id.with("open"), !folded, Spring::SNAPPY);
@@ -362,23 +364,34 @@ fn header(ui: &mut Ui, state: &mut State, rect: Rect, group: &str, kind: GroupKi
         p.rect_filled(rect.shrink2(vec2(4.0, 3.0)), theme::radius(10.0), theme::white(0.035 * hover));
     }
     let y = rect.center().y + 2.0;
-    let mut x = rect.left() + 12.0;
-    let title = match kind {
-        GroupKind::Favourite => {
-            widgets::icon_fill(p, pos2(x + 5.0, y), icons::STAR, 11.0, theme::WARN);
-            x += 16.0;
-            Txt::new(if name.is_empty() { tr("Favourites") } else { name }, 12.5).weight(weight::SEMIBOLD).color(theme::FG)
+    let x = rect.left() + 12.0;
+    // The same marks as the counts line over the list: filled in the game, a ring on the website.
+    let mark = pos2(x + 5.0, y);
+    match section {
+        Section::Favourites | Section::FavouriteGroup | Section::OtherFavourites => {
+            widgets::icon_fill(p, mark, icons::STAR, if nested { 10.0 } else { 11.0 }, theme::alpha(theme::WARN, if nested { 0.75 } else { 1.0 }))
         }
-        GroupKind::InGame => Txt::caps(tr_ctx("friends section", "In game")).color(theme::FG_2),
-        GroupKind::Website => Txt::caps(tr_ctx("friends section", "On the website")).color(theme::FG_2),
-        GroupKind::Offline => Txt::caps(tr_ctx("friends section", "Offline")).color(theme::FG_2),
-    };
-    let t = widgets::text_truncated(p, pos2(x, y), Align2::LEFT_CENTER, &title, rect.width() - 110.0);
-    widgets::text(p, pos2(t.right() + 7.0, y), Align2::LEFT_CENTER, &Txt::new(count.to_string(), 11.5).weight(weight::MEDIUM).color(theme::FG_4));
-    if kind == GroupKind::Favourite && count > 0 && states::live(&state.data) == states::Live::SignedIn {
-        let on = orbiters_i18n::tr!("{n} online", n = online);
-        widgets::text(p, pos2(rect.right() - 36.0, y), Align2::RIGHT_CENTER, &Txt::new(on, 11.0).color(if online > 0 { theme::alpha(theme::ACCENT, 0.85) } else { theme::FG_4 }));
+        Section::InGame => {
+            p.circle_filled(mark, 4.0, theme::ACCENT);
+        }
+        Section::Website => {
+            p.circle_stroke(mark, 3.3, egui::Stroke::new(1.6, theme::ACCENT));
+        }
+        Section::Offline => {
+            p.circle_filled(mark, 4.0, theme::FG_4);
+        }
     }
+    let x = x + 16.0;
+    let title = match section {
+        Section::Favourites => Txt::caps(tr_ctx("friends section", "Favourites")).color(theme::FG_2),
+        Section::FavouriteGroup => Txt::new(name, 12.5).weight(weight::SEMIBOLD).color(theme::FG),
+        Section::OtherFavourites => Txt::new(tr_ctx("favourite group", "Other"), 12.5).weight(weight::SEMIBOLD).color(theme::FG),
+        Section::InGame => Txt::caps(tr_ctx("friends section", "In game")).color(theme::FG_2),
+        Section::Website => Txt::caps(tr_ctx("friends section", "On the website")).color(theme::FG_2),
+        Section::Offline => Txt::caps(tr_ctx("friends section", "Offline")).color(theme::FG_2),
+    };
+    let t = widgets::text_truncated(p, pos2(x, y), Align2::LEFT_CENTER, &title, rect.width() - 90.0);
+    widgets::text(p, pos2(t.right() + 7.0, y), Align2::LEFT_CENTER, &Txt::new(count.to_string(), 11.5).weight(weight::MEDIUM).color(theme::FG_4));
     // The caret turns as the section folds.
     let c = pos2(rect.right() - 20.0, y);
     let glyph = if open > 0.5 { icons::CARET_DOWN } else { icons::CARET_RIGHT };
@@ -682,6 +695,13 @@ mod tests {
         data.boops = (0..30)
             .map(|i| Boop { id: format!("not_boop_{i:02}"), from_id: format!("usr_sample_boop_{i:02}"), from_name: from.name.clone(), from_icon: String::new(), emoji: None, received_at: 1_000 - i as i64 })
             .collect();
+        // More people in the game, so that the friends under the boops fill more than the view (Offline starts folded).
+        for n in 0..12 {
+            let mut f = from.clone();
+            f.id = format!("usr_sample_more_{n:02}");
+            data.groups.iter_mut().find(|g| g.id == list::IN_GAME).unwrap().members.push(f.id.clone());
+            data.friends.push(f);
+        }
         let mut state = State { data: Arc::new(data), ..Default::default() };
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);

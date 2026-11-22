@@ -829,6 +829,10 @@ impl eframe::App for App {
         if let Some(page) = self.ctl.take_show_page() {
             if page == "projects" {
                 self.set_page(Page::Projects, anim::time(ctx));
+            } else if page == "vrchat-account" {
+                // Previous instances' Connect VRChat in the menus around VRChat (REQUEST20 4): where Home's Sign in to VRChat leads.
+                self.set_page(Page::Settings, anim::time(ctx));
+                bring_to_front(ctx);
             } else if let Some(dir) = page.strip_prefix("share-to:") {
                 // "Share to …" beside VRChat's camera on the desktop: this window's own share dialog, on its friends.
                 let server = if self.ctl.view().settings.development { orbiters_core::account::Server::Development } else { orbiters_core::account::Server::Production };

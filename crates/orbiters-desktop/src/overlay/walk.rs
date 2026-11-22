@@ -40,7 +40,20 @@
 //! as it is then. The person is put back once, by that application, and never thrown; nothing here can keep the distance
 //! walked through such a show, as the other application writes a whole play space that lacks it.
 //!
-//! `walk-boost.log` in the logs folder says when a walk starts and stops and why, and what another application did.
+//! **More than one tracking system** (Enzo's Quest Pro over Virtual Desktop with Vive trackers on base stations, aligned by
+//! OpenVR Space Calibrator): the walk goes through the play space, never the driver. Space Calibrator's driver hooks the same
+//! pose function as ours, but inside the function (MinHook) where ours patches its table entry, so ours always runs first: it
+//! then turns and moves the world-from-driver transform of every device of its target tracking system (`R·t + T`), the
+//! walk we had just added to it included. The trackers were carried by `R·d` while the headset went `d`: off by `2·sin(θ/2)`
+//! of every metre walked, θ being the calibration's turn (walk-boost.log, 2026-11-22 03:46: devices 1, 4 and 8, his three
+//! lighthouse trackers, 0.41 m off after 3.02 m, θ ≈ 8°, under the check's 1 m; 32 m walked then put them ~4 m from him).
+//! SteamVR applies the play space (the standing universe's zero pose) to every device's final raw pose, after every driver,
+//! so a walk through it carries every device by the same `d` whatever the calibration, and Space Calibrator, which calibrates
+//! in the raw space, never sees it. Which devices a calibrator may move is told by SteamVR's `Prop_TrackingSystemName_String`,
+//! the very property Space Calibrator chooses them by ([`TrackingSystems`]).
+//!
+//! `walk-boost.log` in the logs folder says when a walk starts and stops and why, and what another application did, and which
+//! tracking systems the devices come from.
 
 use super::actions::Walk;
 use orbiters_core::settings::{Follow, Hand, WalkBoostSettings};
@@ -99,6 +112,83 @@ const PROOF_METRES: f32 = 3.0;
 const PROOF_MISS_METRES: f32 = 1.0;
 /// Readings further apart than this start over: the person may have moved about too much for them to tell anything.
 const PROOF_WITHIN: Duration = Duration::from_secs(20);
+/// Which tracking system each device comes from is read again this often (and at once when a device comes or goes).
+const SYSTEMS_EVERY: Duration = Duration::from_secs(2);
+
+/// Which tracking system each device that moves with the person comes from (SteamVR's `Prop_TrackingSystemName_String`), and
+/// whether a calibration add-on is loaded. A device of another system than the headset's is one a tracking-space calibrator
+/// (Space Calibrator chooses its devices by this very name) moves after every hook of ours: the walk must not go through the
+/// driver then. Base stations and other devices fixed in the room do not count; nor does a device whose system SteamVR does
+/// not name (Space Calibrator leaves those alone too).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrackingSystems {
+    /// The headset's tracking system, when SteamVR names it.
+    pub head: Option<String>,
+    /// Each device that moves with the person, and its system.
+    pub devices: Vec<(u32, String)>,
+    /// The drivers SteamVR has whose name says they calibrate tracking spaces (`01spacecalibrator`), enabled or not; `None`
+    /// when SteamVR did not say.
+    pub calibrators: Option<Vec<(String, bool)>>,
+}
+
+impl TrackingSystems {
+    /// From each device's index, class and tracking system name, and the drivers SteamVR has.
+    pub fn of(devices: impl IntoIterator<Item = (u32, vr::DeviceClass, Option<String>)>, drivers: Option<Vec<(String, bool)>>) -> Self {
+        let mut out = TrackingSystems { calibrators: drivers.map(|d| d.into_iter().filter(|(name, _)| is_calibrator(name)).collect()), ..Default::default() };
+        for (index, class, system) in devices {
+            let moves = matches!(class, vr::DeviceClass::Hmd | vr::DeviceClass::Controller | vr::DeviceClass::GenericTracker);
+            let Some(system) = system.filter(|s| moves && !s.is_empty()) else { continue };
+            if class == vr::DeviceClass::Hmd && out.head.is_none() {
+                out.head = Some(system.clone());
+            }
+            out.devices.push((index, system));
+        }
+        out
+    }
+
+    /// The devices of another tracking system than the headset's (without a named headset: of any but the first system seen).
+    pub fn others(&self) -> Vec<u32> {
+        let Some(first) = self.head.as_ref().or_else(|| self.devices.first().map(|(_, s)| s)) else { return Vec::new() };
+        self.devices.iter().filter(|(_, s)| s != first).map(|(i, _)| *i).collect()
+    }
+
+    /// More than one tracking system carries the person: the walk goes through the play space.
+    pub fn mixed(&self) -> bool {
+        !self.others().is_empty()
+    }
+
+    /// The system of device `index`, when known.
+    fn of_device(&self, index: u32) -> Option<&str> {
+        self.devices.iter().find(|(i, _)| *i == index).map(|(_, s)| s.as_str())
+    }
+
+    /// One line for the walk's log: how many devices each system has, which are not the headset's, the calibrator.
+    fn line(&self) -> String {
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+        for (_, system) in &self.devices {
+            match counts.iter_mut().find(|(s, _)| *s == system) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((system, 1)),
+            }
+        }
+        let systems = counts.iter().map(|(s, n)| format!("{s} {n}")).collect::<Vec<_>>().join(", ");
+        let head = self.head.as_deref().unwrap_or("not named"); // i18n: not shown (the walk's log)
+        let others = self.others();
+        let calibrators = match &self.calibrators {
+            None => "drivers not listed".to_string(), // i18n: not shown (the walk's log)
+            Some(c) if c.is_empty() => "no calibration driver".to_string(), // i18n: not shown (the walk's log)
+            Some(c) => c.iter().map(|(name, on)| format!("calibration driver {name} {}", if *on { "enabled" } else { "disabled" })).collect::<Vec<_>>().join(", "), // i18n: not shown (the walk's log)
+        };
+        let universes = if others.is_empty() { 1 } else { counts.len() };
+        format!("tracking systems: {systems} (the headset's: {head}); {universes} universe(s); devices of another system: {others:?}; {calibrators}") // i18n: not shown (the walk's log)
+    }
+}
+
+/// A driver whose name says it aligns tracking spaces: Space Calibrator's (`01spacecalibrator`) and its forks.
+fn is_calibrator(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("calibrat") || name.contains("spacecal")
+}
 
 /// Whether two matrices place a universe at the same spot, the same way round.
 fn same_place(a: &Matrix34, b: &Matrix34) -> bool {
@@ -608,6 +698,10 @@ pub struct WalkBoost {
     /// How the walk goes now, and what was last said of it.
     path: WalkPath,
     path_said: Option<WalkPath>,
+    /// Which tracking systems the devices come from, when last read, and what of it was last said.
+    systems: Option<TrackingSystems>,
+    systems_read: Option<Instant>,
+    systems_said: Option<TrackingSystems>,
 }
 
 impl WalkBoost {
@@ -642,7 +736,26 @@ impl WalkBoost {
             proven: false,
             path: WalkPath::PlaySpace(WhyPlaySpace::NotRunning),
             path_said: None,
+            systems: None,
+            systems_read: None,
+            systems_said: None,
         }
+    }
+
+    /// Which tracking systems the devices come from now: more than one, and the walk goes through the play space from the
+    /// next step. Said in the log when it changed (the calibrator's state is said with it, never alone).
+    pub fn set_tracking_systems(&mut self, systems: TrackingSystems) {
+        let said = self.systems_said.as_ref().is_some_and(|s| s.devices == systems.devices && s.head == systems.head);
+        if !said {
+            self.log.say(systems.line());
+            self.systems_said = Some(systems.clone());
+        }
+        self.systems = Some(systems);
+    }
+
+    /// A device came, went or changed role: which tracking systems carry the person is read again on the next frame.
+    pub fn devices_changed(&mut self) {
+        self.systems_read = None;
     }
 
     /// The way through SteamVR's driver.
@@ -660,11 +773,17 @@ impl WalkBoost {
 
     /// How the walk goes now.
     fn choose_path(&mut self, settings: &WalkBoostSettings) -> WalkPath {
-        let wanted = settings.enabled && settings.through_driver && !self.refused;
+        let mixed = self.systems.as_ref().is_some_and(TrackingSystems::mixed);
+        let wanted = settings.enabled && settings.through_driver && !self.refused && !mixed;
         let Some(driver) = self.driver.as_mut() else { return WalkPath::PlaySpace(WhyPlaySpace::NotRunning) };
         driver.want(wanted);
         if !settings.through_driver {
             return WalkPath::PlaySpace(WhyPlaySpace::Setting);
+        }
+        // Another tracking system's devices are moved after the driver's walk by whatever aligns them: only the play space
+        // carries them with the headset.
+        if mixed {
+            return WalkPath::PlaySpace(WhyPlaySpace::OtherTrackingSystem);
         }
         if self.refused {
             return WalkPath::PlaySpace(WhyPlaySpace::Refused);
@@ -682,7 +801,8 @@ impl WalkBoost {
     fn end_through(&mut self, why: &str) {
         if let Some(through) = self.through.take() {
             let walked = length(&through.offset);
-            self.log.say(format!("through the driver: back by {walked:.2} m: {why}")); // i18n: not shown (the walk's log)
+            let o = through.offset;
+            self.log.say(format!("through the driver: back by {walked:.2} m: {why}; offset [{:.3}, {:.3}, {:.3}] taken back, the driver adds nothing now", o[0], o[1], o[2])); // i18n: not shown (the walk's log)
             if let Some(driver) = self.driver.as_mut() {
                 driver.send(&WalkNow::default());
             }
@@ -780,6 +900,16 @@ impl WalkBoost {
 
     /// One frame: reads the stick and carries the person further.
     pub fn update(&mut self, steamvr: &vr::Client, m: &Moment) {
+        let now = Instant::now();
+        if self.systems_read.is_none_or(|t| now.saturating_duration_since(t) >= SYSTEMS_EVERY) {
+            self.systems_read = Some(now);
+            let devices = (0..MAX_DEVICES as u32)
+                .filter(|&i| steamvr.is_connected(i))
+                .map(|i| (i, steamvr.device_class(i), steamvr.string_property(i, vr::prop::TRACKING_SYSTEM_NAME)));
+            let drivers = steamvr.driver_names();
+            let drivers = (!drivers.is_empty()).then_some(drivers);
+            self.set_tracking_systems(TrackingSystems::of(devices.collect::<Vec<_>>(), drivers));
+        }
         let Ok(mut setup) = steamvr.chaperone_setup() else { return };
         let actions = self.actions;
         // The overlay loop read every action set this frame (actions::Actions::update).
@@ -991,7 +1121,8 @@ impl WalkBoost {
             let Some((_, now_at)) = devices.iter().find(|(d, _)| d == device) else { continue };
             let went = [0, 1, 2].map(|i| now_at[i] - then[i]);
             let missed = length(&[went[0] - expected[0], went[1] - expected[1], went[2] - expected[2]]);
-            lines.push(format!("device {device} {:.2} m, missed by {missed:.2}", length(&went))); // i18n: not shown (the walk's log)
+            let system = self.systems.as_ref().and_then(|s| s.of_device(*device)).map(|s| format!(" ({s})")).unwrap_or_default();
+            lines.push(format!("device {device}{system} {:.2} m, missed by {missed:.2}", length(&went))); // i18n: not shown (the walk's log)
             behind |= missed > PROOF_MISS_METRES;
         }
         if lines.is_empty() {
@@ -1061,7 +1192,8 @@ impl WalkBoost {
     fn say_put_back(&mut self, why: &str) {
         if let Some(carried) = &self.carried {
             let walked = length(&carried.offset);
-            self.log.say(format!("back where the carry began, {walked:.2} m ago: {why}")); // i18n: not shown (the walk's log)
+            let o = carried.offset;
+            self.log.say(format!("back where the carry began, {walked:.2} m ago: {why}; play space offset [{:.3}, {:.3}, {:.3}] taken back, never saved", o[0], o[1], o[2])); // i18n: not shown (the walk's log)
         }
     }
 
@@ -2485,5 +2617,274 @@ mod tests {
         }
         assert!((dragged[2] - last[2] - speed * 1.11).abs() < 0.1, "on at its speed: from {dragged:?} to {last:?}");
         assert_eq!((rig.room.shows, rig.room.reverts, rig.room.hides), (0, 0, 0), "the boost never touched the play space");
+    }
+
+
+    // ---- Two tracking universes (Enzo, 2026-11-22: a Quest Pro over Virtual Desktop, Vive trackers on base stations,
+    // aligned by OpenVR Space Calibrator 1.3) ----
+
+    /// A rotation about +Y by `degrees`, then a move by `t`.
+    fn placed(degrees: f32, t: [f32; 3]) -> Matrix34 {
+        let mut m = yaw(degrees);
+        for (row, v) in m.m.iter_mut().zip(t) {
+            row[3] = v;
+        }
+        m
+    }
+
+    /// `m` applied to the point `p`.
+    fn applied(m: &Matrix34, p: [f32; 3]) -> [f32; 3] {
+        let r = turned(m, p);
+        [r[0] + m.m[0][3], r[1] + m.m[1][3], r[2] + m.m[2][3]]
+    }
+
+    /// Two tracking systems as SteamVR meets them with Space Calibrator 1.3 in vrserver: the headset and its controllers in
+    /// the headset's raw space ("oculus"), three trackers in the base stations' ("lighthouse"). Each pose goes through our
+    /// hook first (the walk added to its world-from-driver translation), then through Space Calibrator's, which for the
+    /// trackers turns and moves that transform by its calibration: `R·(t + walk) + T`
+    /// (`ServerTrackedDeviceProvider::HandleDevicePoseUpdated`, v1.3). Then SteamVR applies the play space that shows.
+    struct TwoSystems {
+        room: Room,
+        fake: Fake,
+        /// Space Calibrator's calibration: the lighthouse raw space into the headset's.
+        calibration: Matrix34,
+        /// Each device where it really is, in its own system's raw space, the person standing still.
+        oculus: Vec<(u32, [f32; 3])>,
+        lighthouse: Vec<(u32, [f32; 3])>,
+    }
+
+    impl TwoSystems {
+        fn new(standing: Matrix34, calibration: Matrix34, fake: &Fake) -> Self {
+            let head = [0.2, 1.7, -0.3];
+            let oculus = vec![(0, head), (2, [head[0] - 0.3, 1.2, head[2] - 0.2]), (3, [head[0] + 0.3, 1.2, head[2] - 0.2])];
+            // Hips and feet, under the head in the headset's raw space: in the base stations' raw space, where calibration's
+            // inverse puts them.
+            let back = inverse(&calibration);
+            let lighthouse = [(1, [0.0, -0.75, 0.05]), (4, [-0.15, -1.6, 0.0]), (8, [0.15, -1.6, 0.0])]
+                .into_iter()
+                .map(|(i, d)| (i, applied(&back, [head[0] + d[0], head[1] + d[1], head[2] + d[2]])))
+                .collect();
+            Self { room: Room::new(standing), fake: fake.clone(), calibration, oculus, lighthouse }
+        }
+
+        /// What SteamVR says each device is, and its tracking system; a base station too.
+        fn systems(&self) -> TrackingSystems {
+            let mut devices = vec![(0, vr::DeviceClass::Hmd, Some("oculus".to_string()))];
+            devices.extend([2, 3].map(|i| (i, vr::DeviceClass::Controller, Some("oculus".to_string()))));
+            devices.extend([1, 4, 8].map(|i| (i, vr::DeviceClass::GenericTracker, Some("lighthouse".to_string()))));
+            devices.push((7, vr::DeviceClass::TrackingReference, Some("lighthouse".to_string())));
+            TrackingSystems::of(devices, Some(vec![("lighthouse".into(), true), ("01spacecalibrator".into(), true), ("oculus".into(), true)]))
+        }
+
+        /// Device `i` in SteamVR's raw space, after both hooks.
+        fn raw(&self, i: u32) -> [f32; 3] {
+            let o = self.fake.at(Duration::ZERO).offset;
+            let walked = |p: [f32; 3]| [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
+            if let Some((_, p)) = self.oculus.iter().find(|(d, _)| *d == i) {
+                return walked(*p);
+            }
+            let (_, p) = self.lighthouse.iter().find(|(d, _)| *d == i).expect("a device of the rig");
+            applied(&self.calibration, walked(*p))
+        }
+
+        /// Device `i` in the standing universe that shows: what VRChat reads.
+        fn standing(&self, i: u32) -> [f32; 3] {
+            let u = self.room.live().standing;
+            let raw = self.raw(i);
+            turned_back(&u, [raw[0] - u.m[0][3], raw[1] - u.m[1][3], raw[2] - u.m[2][3]])
+        }
+
+        /// From the headset to each tracker, in the standing universe: the body as VRChat's full-body IK sees it.
+        fn body(&self) -> Vec<[f32; 3]> {
+            let head = self.standing(0);
+            self.lighthouse.iter().map(|(i, _)| minus(self.standing(*i), head)).collect()
+        }
+
+        fn head_frame(&self, degrees: f32) -> Matrix34 {
+            compose(&inverse(&self.room.live().standing), &yaw(degrees))
+        }
+    }
+
+    impl PlaySpace for TwoSystems {
+        fn revert(&mut self) {
+            self.room.revert();
+        }
+        fn read(&mut self) -> Option<Setup> {
+            self.room.read()
+        }
+        fn write(&mut self, setup: &Setup) {
+            self.room.write(setup);
+        }
+        fn show(&mut self) {
+            self.room.show();
+        }
+        fn hide(&mut self) {
+            self.room.hide();
+        }
+        fn live_standing(&mut self) -> Option<Matrix34> {
+            Some(self.room.live().standing)
+        }
+        fn devices(&mut self) -> Vec<(u32, [f32; 3])> {
+            let mut all: Vec<u32> = self.oculus.iter().chain(&self.lighthouse).map(|(i, _)| *i).collect();
+            all.sort();
+            all.into_iter().map(|i| (i, self.standing(i))).collect()
+        }
+    }
+
+    /// Walks the rig for `seconds` at 72 Hz along a winding path (the head turning, the stick pushed this way and that), from
+    /// `t0` + `from`; returns the time reached.
+    fn wind(walk: &mut WalkBoost, rig: &mut TwoSystems, s: &WalkBoostSettings, t0: Instant, from: Duration, seconds: f32) -> Duration {
+        let m = moment(s, Some("wrld_1"));
+        let frames = (seconds * 72.0) as u32;
+        let mut at = from;
+        for f in 0..frames {
+            at = from + Duration::from_secs_f64(f as f64 / 72.0);
+            let turn = 50.0 * (f as f32 / 90.0).sin();
+            let stick = [0.4 * (f as f32 / 37.0).cos(), 0.9];
+            let head = rig.head_frame(turn);
+            walk.step(rig, &m, || Some(stick), || Some(head), t0 + at);
+        }
+        at
+    }
+
+    fn calibration() -> Matrix34 {
+        // θ ≈ 8°, as walk-boost.log's 0.41 m off after 3.02 m says (2·sin(θ/2)·3.02 = 0.42), and a move of the base stations'
+        // origin.
+        placed(7.8, [1.4, 0.15, -2.2])
+    }
+
+    /// What Enzo saw, shown first: through the driver, with Space Calibrator after our hook, the trackers are carried along a
+    /// turned path, and the check of the first metres lets an 8° turn through (it allows the 1 m a hand reaches).
+    #[test]
+    fn through_the_driver_a_calibrated_tracker_goes_its_own_way() {
+        let fake = Fake::new();
+        let (s, mut walk) = (settings(), through_driver(&fake));
+        let mut rig = TwoSystems::new(Matrix34::IDENTITY, calibration(), &fake);
+        let body = rig.body();
+        wind(&mut walk, &mut rig, &s, Instant::now(), Duration::ZERO, 5.0);
+        assert_eq!(walk.path, WalkPath::Driver, "nothing told the walk about the second tracking system");
+        assert!(walk.proven, "the check passed, as in his log: {:?}", walk.log.said);
+        let walked = length(&fake.at(Duration::ZERO).offset);
+        let worst = rig.body().iter().zip(&body).map(|(now, then)| length(&minus(*now, *then))).fold(0.0, f32::max);
+        let expected = 2.0 * (7.8f32.to_radians() / 2.0).sin() * walked;
+        assert!(walked > 10.0 && (worst - expected).abs() < 0.01, "walked {walked} m: the trackers {worst} m off the headset, {expected} expected");
+    }
+
+    /// The fix: SteamVR naming another tracking system for some devices than the headset's, the walk moves the play space,
+    /// never the driver, and every tracker stays where it was on the body, whatever path was walked, in any play space.
+    #[test]
+    fn with_two_tracking_systems_every_device_moves_together() {
+        for standing in [Matrix34::IDENTITY, placed(-35.0, [0.8, 0.0, 1.9])] {
+            let fake = Fake::new();
+            let (s, mut walk) = (settings(), through_driver(&fake));
+            let mut rig = TwoSystems::new(standing, calibration(), &fake);
+            walk.set_tracking_systems(rig.systems());
+            let (body, head) = (rig.body(), rig.standing(0));
+            let start = rig.room.saved.clone();
+            let t0 = Instant::now();
+            let at = wind(&mut walk, &mut rig, &s, t0, Duration::ZERO, 6.0);
+            assert_eq!(walk.path, WalkPath::PlaySpace(WhyPlaySpace::OtherTrackingSystem));
+            assert!(!fake.0.lock().unwrap().wanted && fake.0.lock().unwrap().writes == 0, "the driver is never asked nor written");
+            let went = length(&minus(rig.standing(0), head));
+            assert!(went > 10.0, "walked {went} m");
+            for (now, then) in rig.body().iter().zip(&body) {
+                assert!(length(&minus(*now, *then)) < 1e-3, "a tracker moved on the body by {:?} after {went} m", minus(*now, *then));
+            }
+            // The walk ends (another world): the play space back as it was, its saved setup never touched.
+            walk.step(&mut rig, &moment(&s, Some("wrld_2")), || None, || None, t0 + at + Duration::from_millis(14));
+            assert!(rig.room.preview.is_none() && rig.room.saved == start && rig.room.live().close_to(&start));
+            assert!(length(&minus(rig.standing(0), head)) < 1e-3);
+            assert!(walk.log.said.iter().any(|l| l.contains("tracking systems: oculus 3, lighthouse 3") && l.contains("[1, 4, 8]") && l.contains("01spacecalibrator enabled")), "{:?}", walk.log.said);
+            assert!(walk.log.said.iter().any(|l| l.contains("taken back, never saved")), "{:?}", walk.log.said);
+        }
+    }
+
+    /// A tracker of another system turned on in the middle of a walk through the driver: the driver's offset is taken back at
+    /// once (nothing is left added to any pose) and the walk goes on through the play space, the body whole again.
+    #[test]
+    fn a_second_tracking_system_appearing_mid_walk_takes_the_driver_s_offset_back() {
+        let fake = Fake::new();
+        let (s, mut walk) = (settings(), through_driver(&fake));
+        let mut rig = TwoSystems::new(Matrix34::IDENTITY, calibration(), &fake);
+        let body = rig.body();
+        let t0 = Instant::now();
+        let at = wind(&mut walk, &mut rig, &s, t0, Duration::ZERO, 2.0);
+        assert!(walk.path == WalkPath::Driver && length(&fake.at(Duration::ZERO).offset) > 3.0);
+        walk.set_tracking_systems(rig.systems());
+        wind(&mut walk, &mut rig, &s, t0, at + Duration::from_millis(14), 3.0);
+        assert_eq!(walk.path, WalkPath::PlaySpace(WhyPlaySpace::OtherTrackingSystem));
+        assert!(fake.at(Duration::ZERO).is_zero() && fake.at(Duration::from_secs(1)).is_zero(), "the driver adds nothing any more");
+        for (now, then) in rig.body().iter().zip(&body) {
+            assert!(length(&minus(*now, *then)) < 1e-3, "{now:?} {then:?}");
+        }
+        assert!(walk.log.said.iter().any(|l| l.contains("taken back, the driver adds nothing now")), "{:?}", walk.log.said);
+    }
+
+    /// The overlay dying in the middle of a walk (killed, crashed) leaves nothing: nothing of the walk is ever saved (the play
+    /// space is only previewed, and SteamVR drops a preview with its process; the driver adds nothing once its writer is gone,
+    /// `ffi_walk.rs`), so the next start finds SteamVR's setup as it was before the walk and walks from there.
+    #[test]
+    fn a_crash_in_the_middle_leaves_both_universes_as_they_were() {
+        for semantics in EVERY_SEMANTICS {
+            let fake = Fake::new();
+            let s = settings();
+            let mut rig = TwoSystems::new(placed(20.0, [0.3, 0.0, -0.4]), calibration(), &fake);
+            rig.room.semantics = semantics;
+            let start = rig.room.saved.clone();
+            let (body, head) = (rig.body(), rig.standing(0));
+            {
+                let mut walk = through_driver(&fake);
+                walk.set_tracking_systems(rig.systems());
+                wind(&mut walk, &mut rig, &s, Instant::now(), Duration::ZERO, 2.0);
+                assert!(rig.room.preview.is_some() && length(&minus(rig.standing(0), head)) > 3.0);
+                // Killed here: no reset, no put back.
+                std::mem::forget(walk);
+            }
+            // SteamVR drops the dead process's preview.
+            rig.room.preview = None;
+            assert_eq!(rig.room.saved, start, "{semantics:?}: the saved setup was never written");
+            assert!(length(&minus(rig.standing(0), head)) < 1e-4 && fake.at(Duration::ZERO).is_zero());
+            for (now, then) in rig.body().iter().zip(&body) {
+                assert!(length(&minus(*now, *then)) < 1e-4);
+            }
+            // The next start walks from there, and puts it back there.
+            let mut walk = through_driver(&fake);
+            walk.set_tracking_systems(rig.systems());
+            let t0 = Instant::now();
+            let at = wind(&mut walk, &mut rig, &s, t0, Duration::ZERO, 1.0);
+            walk.step(&mut rig, &moment(&s, Some("wrld_2")), || None, || None, t0 + at + Duration::from_millis(14));
+            assert!(rig.room.preview.is_none() && rig.room.saved == start, "{semantics:?}");
+        }
+    }
+
+    /// Which devices count: those that move with the person and that SteamVR names a system for; base stations not.
+    #[test]
+    fn tracking_systems_are_told_by_the_devices_that_carry_the_person() {
+        let fake = Fake::new();
+        let rig = TwoSystems::new(Matrix34::IDENTITY, calibration(), &fake);
+        let mixed = rig.systems();
+        assert!(mixed.mixed() && mixed.others() == vec![1, 4, 8]);
+        assert_eq!(mixed.calibrators, Some(vec![("01spacecalibrator".to_string(), true)]));
+        // All lighthouse (an Index with Vive trackers): one system, base stations of course the same, the driver may carry.
+        let one = TrackingSystems::of(
+            [(0, vr::DeviceClass::Hmd, "lighthouse"), (1, vr::DeviceClass::Controller, "lighthouse"), (5, vr::DeviceClass::GenericTracker, "lighthouse"), (7, vr::DeviceClass::TrackingReference, "lighthouse")]
+                .map(|(i, c, s)| (i, c, Some(s.to_string()))),
+            None,
+        );
+        assert!(!one.mixed() && one.devices.len() == 3);
+        // A base station of another system (lighthouse stations with a Quest and no trackers) moves nothing: one system.
+        let stations = TrackingSystems::of([(0, vr::DeviceClass::Hmd, Some("oculus".into())), (7, vr::DeviceClass::TrackingReference, Some("lighthouse".into()))], None);
+        assert!(!stations.mixed());
+        // A device SteamVR names no system for is not one a calibrator chooses.
+        let unnamed = TrackingSystems::of([(0, vr::DeviceClass::Hmd, Some("oculus".into())), (4, vr::DeviceClass::GenericTracker, None)], None);
+        assert!(!unnamed.mixed());
+        // The same systems said once, however often read.
+        let mut walk = boost();
+        for _ in 0..5 {
+            walk.set_tracking_systems(rig.systems());
+        }
+        assert_eq!(walk.log.said.iter().filter(|l| l.starts_with("tracking systems:")).count(), 1);
+        walk.set_tracking_systems(one);
+        assert_eq!(walk.log.said.iter().filter(|l| l.starts_with("tracking systems:")).count(), 2);
     }
 }

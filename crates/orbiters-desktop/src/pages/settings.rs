@@ -243,7 +243,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let side_w = (longest + 42.0 + 14.0 + 36.0).clamp(SIDE_MIN, SIDE_MAX);
     let side = head.width() - side_w - SIDE_GAP >= CONTENT_MIN;
     let tabs_r = Rect::from_min_size(pos2(head.left(), head.bottom() + 14.0), vec2(head.width(), 40.0));
-    let content_top = if side { head.bottom() + 20.0 } else { tabs_r.bottom() + 18.0 };
+    // Under a row of tabs, room enough for what scrolls up under them to be fully blurred by the time it reaches them.
+    let content_top = if side { head.bottom() + 20.0 } else { tabs_r.bottom() + 36.0 };
     let content_left = if side { head.left() + side_w + SIDE_GAP } else { head.left() };
     let search_w = (head.width() * 0.48).clamp(220.0, 400.0);
     let search_r = Rect::from_min_size(pos2(head.right() - search_w, head.bottom() - 40.0), vec2(search_w, 40.0));

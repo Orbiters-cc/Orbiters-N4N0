@@ -163,9 +163,11 @@ struct Asked {
     quit: bool,
 }
 
-/// Where the sub-tabs are a side list: below this, a row of tabs over the content.
-const SIDE_LIST_FROM: f32 = 760.0;
-const SIDE_W: f32 = 204.0;
+/// The sub-tabs are a side list while the cards keep this much beside it: below, a row of tabs over the content.
+const CONTENT_MIN: f32 = 600.0;
+/// The side list is as wide as its longest name needs (each language its own), within these.
+const SIDE_MIN: f32 = 196.0;
+const SIDE_MAX: f32 = 272.0;
 const SIDE_GAP: f32 = 28.0;
 const SIDE_ITEM: f32 = 40.0;
 /// How many results show before "Show more results" (the website's twelve).
@@ -236,10 +238,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
     let page = ui.max_rect();
     let head = Rect::from_min_size(pos2(page.left() + super::PAD_X, page.top() + cx.top + 8.0), vec2(page.width() - super::PAD_X * 2.0, 72.0));
-    let side = head.width() >= SIDE_LIST_FROM;
+    // Room for the longest name, its icon and a count of results.
+    let longest = groups.iter().map(|g| widgets::text_size(ui, &Txt::new(g.title(), 13.5).weight(weight::MEDIUM)).x).fold(0.0, f32::max);
+    let side_w = (longest + 42.0 + 14.0 + 36.0).clamp(SIDE_MIN, SIDE_MAX);
+    let side = head.width() - side_w - SIDE_GAP >= CONTENT_MIN;
     let tabs_r = Rect::from_min_size(pos2(head.left(), head.bottom() + 14.0), vec2(head.width(), 40.0));
     let content_top = if side { head.bottom() + 20.0 } else { tabs_r.bottom() + 18.0 };
-    let content_left = if side { head.left() + SIDE_W + SIDE_GAP } else { head.left() };
+    let content_left = if side { head.left() + side_w + SIDE_GAP } else { head.left() };
     let search_w = (head.width() * 0.48).clamp(220.0, 400.0);
     let search_r = Rect::from_min_size(pos2(head.right() - search_w, head.bottom() - 40.0), vec2(search_w, 40.0));
 
@@ -328,7 +333,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     let counts: Vec<usize> = groups.iter().map(|g| if searching { found.iter().filter(|f| f.entry.group == *g).count() } else { 0 }).collect();
     let picked = if side {
-        let r = Rect::from_min_size(pos2(head.left(), content_top), vec2(SIDE_W, page.bottom() - content_top));
+        let r = Rect::from_min_size(pos2(head.left(), content_top), vec2(side_w, page.bottom() - content_top));
         side_list(ui, r, &groups, state.group, searching, &counts)
     } else {
         tab_row(ui, tabs_r, &groups, state.group, searching, &counts)
@@ -395,7 +400,8 @@ fn side_list(ui: &mut Ui, rect: Rect, groups: &[Group], shown: Group, searching:
             picked = Some(*group);
         }
         let on = *group == shown && !searching;
-        let target = if on { egui::Color32::WHITE } else if resp.hovered() { theme::FG_2 } else { theme::FG_3 };
+        let none = searching && counts.get(i).copied().unwrap_or(0) == 0;
+        let target = if on { egui::Color32::WHITE } else if resp.hovered() { theme::FG_2 } else if none { theme::FG_4 } else { theme::FG_3 };
         let fg = anim::color(&ctx, id.with(("fg", i)), target, Spring::SNAPPY);
         let icon_c = anim::color(&ctx, id.with(("ic", i)), if on { theme::ACCENT } else { target }, Spring::SNAPPY);
         let p = ui.painter();
@@ -406,11 +412,12 @@ fn side_list(ui: &mut Ui, rect: Rect, groups: &[Group], shown: Group, searching:
         }
         let count = counts.get(i).copied().unwrap_or(0);
         let mut room = r.width() - 46.0 - 12.0;
-        if searching {
-            let t = Txt::new(count.to_string(), 11.0).color(if count > 0 { theme::FG_2 } else { theme::FG_4 });
+        // While searching: how many results each has, where it has any.
+        if searching && count > 0 {
+            let t = Txt::new(count.to_string(), 11.0).color(theme::FG_2);
             let s = widgets::text_size(ui, &t);
             let badge = Rect::from_min_size(pos2(r.right() - 10.0 - s.x - 14.0, r.center().y - 10.0), vec2(s.x + 14.0, 20.0));
-            ui.painter().rect_filled(badge, theme::radius(10.0), if count > 0 { theme::alpha(theme::ACCENT, 0.16) } else { theme::white(0.04) });
+            ui.painter().rect_filled(badge, theme::radius(10.0), theme::alpha(theme::ACCENT, 0.16));
             widgets::text(ui.painter(), badge.center(), Align2::CENTER_CENTER, &t);
             room -= badge.width() + 8.0;
         }

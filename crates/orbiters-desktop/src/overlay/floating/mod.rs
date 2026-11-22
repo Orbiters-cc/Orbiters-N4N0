@@ -300,7 +300,7 @@ impl Floating {
         let band = band.or(notice.as_ref().map(|n| BandOffer::Notice(n.id).id()));
         // The band at the size of what it shows: the world notice is taller; every other face is "Talk with N4N0?"'s size.
         if let (Some(p), Some(n)) = (self.prompt.as_mut(), notice.as_ref()) {
-            p.fit(cx.overlay, prompt::Face::World { earns_one: n.earns == Some(1.0) });
+            p.fit(cx.overlay, prompt::Face::World { earns_one: n.earns == Some(1.0), on: None });
         } else if let Some(p) = self.prompt.as_mut().filter(|_| band.is_some()) {
             p.fit(cx.overlay, prompt::Face::Talk);
         }
@@ -457,13 +457,13 @@ impl Floating {
                 }
             }
         }
-        // "Take a 3D picture": the picture waits for VRChat's camera. Unlike the two above it acts when let go on the band,
-        // and a band gone or changed under the held trigger does nothing (verify-vr: presses on release).
+        // "Take a 3D picture" (the picture waits for VRChat's camera), or its cross. Unlike the two above it acts when let go
+        // on the band, and a band gone or changed under the held trigger does nothing (verify-vr: presses on release).
         let held = cx.actions.triggers().iter().any(|t| *t);
         let shown = notice.as_ref().map(|n| n.id);
         if let Some(id) = notice_release(&mut self.notice_down, shown, outcome.prompt_press, held, outcome.prompt_hover, cx.input_read) {
             clicked = true;
-            cx.backend.explorer(crate::controller::explorer::Command::NoticeTake { id });
+            cx.backend.explorer(notice_command(id, outcome.prompt_at));
             if let Some(p) = self.prompt.as_mut() {
                 p.pressed(cx.overlay, BandOffer::Notice(id).id());
             }
@@ -527,7 +527,10 @@ impl Floating {
         } else if let (Some(p), Some(o)) = (self.prompt.as_mut(), rest) {
             p.paint(cx.overlay, cx.presenter, prompt::Face::KeepOpen { seconds: o.seconds(now_ms) }, outcome.prompt_hover, o.left(now_ms));
         } else if let (Some(p), Some(n)) = (self.prompt.as_mut(), notice.as_ref()) {
-            p.paint(cx.overlay, cx.presenter, prompt::Face::World { earns_one: n.earns == Some(1.0) }, outcome.prompt_hover, n.left(crate::controller::explorer::now_ms()));
+            // No line of time on it: its picture changes only with the laser; it fades out at SteamVR's alpha.
+            let on = outcome.prompt_at.and_then(crate::world_notice::part_at_uv);
+            p.paint(cx.overlay, cx.presenter, prompt::Face::World { earns_one: n.earns == Some(1.0), on }, outcome.prompt_hover, 0.0);
+            p.fade(cx.overlay, crate::world_notice::opacity(n, crate::controller::explorer::now_ms()));
         }
         turn.clicked = clicked;
         turn
@@ -593,6 +596,16 @@ pub fn notice_release(down: &mut Option<u64>, shown: Option<u64>, pulled: bool, 
     }
     let id = down.take()?;
     on.then_some(id)
+}
+
+/// What a let-go on the world notice (`id`) asks, by where the laser was on it (`at`, from its top left): its cross closes
+/// it (that world is not told again), anywhere else takes a 3D picture (Request20).
+fn notice_command(id: u64, at: Option<[f32; 2]>) -> crate::controller::explorer::Command {
+    use crate::controller::explorer::Command;
+    match at.and_then(crate::world_notice::part_at_uv) {
+        Some(crate::world_notice::Part::Close) => Command::NoticeDismiss { id },
+        _ => Command::NoticeTake { id },
+    }
 }
 
 /// Which of the floating pieces show a picture of their current layout ([`crate::overlay::presented::Presented::current`]).
@@ -723,6 +736,17 @@ mod tests {
         assert_eq!(notice_release(&mut down, Some(4), false, false, true, true), None, "and came back: nothing");
         notice_release(&mut down, Some(4), true, true, true, true);
         assert_eq!(notice_release(&mut down, Some(5), false, false, true, true), None, "another notice");
+    }
+
+    /// Request20: let go on the notice's cross, it closes; anywhere else on it, it takes a 3D picture.
+    #[test]
+    fn the_notice_s_cross_closes_it_and_the_rest_takes_a_picture() {
+        use crate::controller::explorer::Command;
+        assert_eq!(notice_command(3, Some([0.97, 0.5])), Command::NoticeDismiss { id: 3 });
+        assert_eq!(notice_command(3, Some([0.86, 0.05])), Command::NoticeDismiss { id: 3 }, "the cross's part is the card's whole height");
+        assert_eq!(notice_command(3, Some([0.4, 0.7])), Command::NoticeTake { id: 3 });
+        assert_eq!(notice_command(3, Some([0.05, 0.1])), Command::NoticeTake { id: 3 });
+        assert_eq!(notice_command(3, None), Command::NoticeTake { id: 3 }, "on it with no place (its edge): the card's own action");
     }
 
     /// Night3, SWEEP-7 and -8: what the band says of the window's offer follows what it shows, both ways, every time:

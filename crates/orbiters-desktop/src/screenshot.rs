@@ -52,6 +52,7 @@ mod launcher_real;
 mod vr_audio;
 mod vrchat_bridge;
 mod worlds_overlay;
+mod quiet_prompt;
 
 /// What the interface shows of a VRChat on the network, as a Mac sees it.
 fn network_snapshot(base: &crate::state::Snapshot, link: crate::state::LanLink) -> crate::state::Snapshot {
@@ -273,6 +274,10 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("r18-share") {
         return orbit::r18_share_shots(&out);
+    }
+    // Request20: the world notice made discreet, before and after.
+    if only.as_deref() == Some("quiet-prompt") {
+        return quiet_prompt::shots(&out);
     }
     if only.as_deref() == Some("explorer") {
         return orbit::explorer_shots(&out);

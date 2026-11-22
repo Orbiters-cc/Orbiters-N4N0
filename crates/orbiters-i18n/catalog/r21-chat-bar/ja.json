@@ -1,0 +1,23 @@
+{
+  "Talk to N4N0 ({shortcut})": "N4N0と話す（{shortcut}）",
+  "Sign in to talk to N4N0": "ログインしてN4N0と話す",
+  "N4N0's assistant is off": "N4N0のアシスタントはオフです",
+  "N4N0 answered": "N4N0が返信しました",
+  "Continue with N4N0": "N4N0との会話を続ける",
+  "Ask N4N0 anything…": "N4N0に何でも聞いてください…",
+  "Offline: N4N0 does the short commands it knows": "オフライン：N4N0は知っている短いコマンドだけ実行します",
+  "Close (Esc)": "閉じる（Esc）",
+  "Back to the conversation": "会話に戻る",
+  "N4N0 answers with Orbiters' assistant: sign in with your Orbiters account, in your browser.": "N4N0はOrbitersのアシスタントで返答します。ブラウザでOrbitersアカウントにログインしてください。",
+  "Turn N4N0 on to talk to it here.": "ここでN4N0と話すには、N4N0をオンにしてください。",
+  "Turn on N4N0": "N4N0をオンにする",
+  "Turn it on to talk to N4N0 here. Without it, N4N0 stays a tool without AI.": "ここでN4N0と話すにはオンにしてください。オフのままだと、N4N0はAIなしのツールです。",
+  "Turn on the assistant": "アシスタントをオンにする",
+  "N4N0 is thinking…": "N4N0が考えています…",
+  "Nothing yet: what N4N0 does for you is listed here.": "まだ何もありません。N4N0があなたのためにしたことがここに表示されます。",
+  "Install N4N0's ears to talk instead of typing.": "入力する代わりに話すには、N4N0の耳をインストールしてください。",
+  "Send (Enter)": "送信（Enter）",
+  "N4N0 is answering…": "N4N0が返答しています…",
+  "Enter to send · Shift+Enter for a new line": "Enterで送信 · Shift+Enterで改行",
+  "Pick a feature, or talk to N4N0 at the top of the window": "機能を選ぶか、ウィンドウ上部でN4N0と話しましょう"
+}

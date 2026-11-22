@@ -119,7 +119,7 @@ pub fn under(ui: &Ui, id: Id, textures: &Textures, from: ShapeIdx, band: Rect, l
 
 /// Whether the font atlas is being replaced this frame (it grew, or egui cleared it once full): the renderer's copy
 /// is then not the one this frame's text was laid out in.
-fn atlas_changing(ctx: &egui::Context, textures: &Textures) -> bool {
+pub(crate) fn atlas_changing(ctx: &egui::Context, textures: &Textures) -> bool {
     #[derive(Clone, Copy)]
     struct Seen {
         pass: u64,
@@ -143,7 +143,7 @@ fn atlas_changing(ctx: &egui::Context, textures: &Textures) -> bool {
 /// What a band shows, summed up (a fast multiplicative hash of the copies' meshes and the band's size and look):
 /// the same as last frame, last frame's blur is painted again.
 #[derive(Default)]
-struct Fingerprint(u64);
+pub(crate) struct Fingerprint(u64);
 
 impl Fingerprint {
     fn add(&mut self, word: u64) {
@@ -274,7 +274,7 @@ struct Uniforms {
 }
 
 /// What the offscreen passes draw into: egui-wgpu's own texture format, in which its colours are gamma encoded.
-const OFFSCREEN: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+pub(crate) const OFFSCREEN: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Blur levels, each twice the one before; a row blends the two around the blur it wants.
 const LEVELS: usize = 4;
@@ -488,7 +488,7 @@ impl Band {
 }
 
 /// The sampler egui-wgpu makes for these options.
-fn sampler(o: TextureOptions) -> wgpu::SamplerDescriptor<'static> {
+pub(crate) fn sampler(o: TextureOptions) -> wgpu::SamplerDescriptor<'static> {
     let filter = |f| match f {
         TextureFilter::Nearest => wgpu::FilterMode::Nearest,
         TextureFilter::Linear => wgpu::FilterMode::Linear,

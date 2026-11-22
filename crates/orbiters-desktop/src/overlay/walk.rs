@@ -172,12 +172,12 @@ impl TrackingSystems {
             }
         }
         let systems = counts.iter().map(|(s, n)| format!("{s} {n}")).collect::<Vec<_>>().join(", ");
-        let head = self.head.as_deref().unwrap_or("not named");
+        let head = self.head.as_deref().unwrap_or("not named"); // i18n: not shown (the walk's log)
         let others = self.others();
         let calibrators = match &self.calibrators {
-            None => "drivers not listed".to_string(),
-            Some(c) if c.is_empty() => "no calibration driver".to_string(),
-            Some(c) => c.iter().map(|(name, on)| format!("calibration driver {name} {}", if *on { "enabled" } else { "disabled" })).collect::<Vec<_>>().join(", "),
+            None => "drivers not listed".to_string(), // i18n: not shown (the walk's log)
+            Some(c) if c.is_empty() => "no calibration driver".to_string(), // i18n: not shown (the walk's log)
+            Some(c) => c.iter().map(|(name, on)| format!("calibration driver {name} {}", if *on { "enabled" } else { "disabled" })).collect::<Vec<_>>().join(", "), // i18n: not shown (the walk's log)
         };
         let universes = if others.is_empty() { 1 } else { counts.len() };
         format!("tracking systems: {systems} (the headset's: {head}); {universes} universe(s); devices of another system: {others:?}; {calibrators}") // i18n: not shown (the walk's log)

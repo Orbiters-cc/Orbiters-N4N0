@@ -54,5 +54,6 @@
   "No version of what runs VRChat on a Mac was found on GitHub.": "Aucune version de ce qui fait tourner VRChat sur Mac n’a été trouvée sur GitHub.",
   "The download does not say its checksum.": "Le téléchargement n’indique pas sa somme de contrôle.",
   "The download could not be unpacked.": "Le téléchargement n’a pas pu être décompressé.",
-  "The download is not signed by Orbiters: nothing was installed.": "Le téléchargement n’est pas signé par Orbiters : rien n’a été installé."
+  "The download is not signed by Orbiters: nothing was installed.": "Le téléchargement n’est pas signé par Orbiters : rien n’a été installé.",
+  "VRChat closed shortly after it started. If it crashed, press Play again.": "VRChat s’est fermé peu après son démarrage. S’il a planté, appuie de nouveau sur Jouer."
 }

@@ -371,9 +371,11 @@ fn open_here(cx: &Cx) -> Open {
     let status = &cx.snap.vrchat_login;
     let orbiters = matches!(cx.snap.account.state, AccountState::SignedIn { .. } | AccountState::Checking { .. } | AccountState::Offline { .. });
     let adapter = cx.gpu.map(|g| &g.adapter).filter(|a| a.choice);
+    // As `vrchat_account` decides to draw its card (a saved session being restored shows too).
+    let connecting = status.presence() == crate::controller::vrchat_login::Presence::Connecting && status.methods.is_empty();
     Open {
         bridge: cx.snap.bridge.allowed,
-        vrchat_login: (status.allowed || status.waiting) && orbiters,
+        vrchat_login: (status.allowed || status.waiting || connecting) && orbiters,
         gpu_choice: adapter.is_some(),
         gpu_split: adapter.is_some_and(|a| !a.integrated),
     }
@@ -764,8 +766,9 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
                     false
                 });
             }
-            // Only for an account the server says has it: nobody else sees a trace of it.
-            if snap.bridge.allowed && vrchat_here {
+            // Only for an account the server says has it: nobody else sees a trace of it. On a Mac too, where VRChat runs
+            // under Obelisk's engine: what it can do there is its capabilities' to say (bridge/caps.rs).
+            if snap.bridge.allowed {
                 apply |= place(&mut m, c, 4, mark("Experimental"), |ui| super::experimental::show(ui, cx, 4, &mut state.experimental, &mut draft.experimental));
             }
             // What VRChat on this very computer gives (Spout, its log, SteamVR) has no settings where it cannot run.
@@ -1635,7 +1638,9 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
     let status = &cx.snap.vrchat_login;
     // Orbiters being checked or out of reach keeps the card (r20): the VRChat session waits, it is not signed out.
     let orbiters = matches!(cx.snap.account.state, AccountState::SignedIn { .. } | AccountState::Checking { .. } | AccountState::Offline { .. });
-    if !(status.allowed || status.waiting) || !orbiters {
+    // r21: a saved session being restored shows too, connecting, never as a sign-in form.
+    let connecting = status.presence() == crate::controller::vrchat_login::Presence::Connecting && status.methods.is_empty();
+    if !(status.allowed || status.waiting || connecting) || !orbiters {
         *state = VrchatForm::default();
         return;
     }
@@ -1651,6 +1656,8 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
         tr!("Signed in as {username}", username = user.display_name)
     } else if let (true, Some(user)) = (status.waiting, &status.known) {
         tr!("{username}, waiting for Orbiters", username = user.display_name)
+    } else if let (true, Some(user)) = (connecting, &status.known) {
+        tr!("{username}, connecting…", username = user.display_name)
     } else if !status.methods.is_empty() {
         tr("Two-factor authentication: one more step").into()
     } else {
@@ -1663,6 +1670,10 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
             state.picture = None;
             ui.add_space(6.0);
             super::sharing::working(ui, tr("Kept on this computer. It comes back by itself once Orbiters answers."));
+        } else if connecting {
+            state.picture = None;
+            ui.add_space(6.0);
+            super::sharing::working(ui, tr("Connecting to VRChat…"));
         } else if let Some(user) = &status.user {
             if let Some(picture) = &status.picture {
                 if state.picture.as_ref().is_none_or(|(id, revision, _)| id != &user.id || *revision != status.revision) {
@@ -1766,7 +1777,7 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
                 }
             });
         }
-        if busy {
+        if busy && !connecting {
             ui.add_space(12.0);
             super::sharing::working(ui, tr("Waiting for VRChat…"));
         }

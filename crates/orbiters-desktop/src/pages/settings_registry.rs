@@ -105,7 +105,7 @@ pub enum Gate {
     /// VRChat is on the network (a Mac).
     NotVrchatHere,
     Windows,
-    /// The VRChat bridge, for an account the server offers it to.
+    /// The VRChat bridge, for an account the server offers it to (on a Mac too).
     Bridge,
     /// A VRChat account can be connected (the server allows it).
     VrchatLogin,
@@ -131,7 +131,7 @@ impl Open {
             Gate::VrchatHere => orbiters_core::osc::VRCHAT_RUNS_HERE,
             Gate::NotVrchatHere => !orbiters_core::osc::VRCHAT_RUNS_HERE,
             Gate::Windows => cfg!(windows),
-            Gate::Bridge => self.bridge && orbiters_core::osc::VRCHAT_RUNS_HERE,
+            Gate::Bridge => self.bridge,
             Gate::VrchatLogin => self.vrchat_login,
             Gate::GpuChoice => self.gpu_choice,
             Gate::GpuSplit => self.gpu_split,
@@ -316,7 +316,7 @@ pub static ENTRIES: &[Entry] = &[
     e("vrchat.tiny-window", Vrchat, mark("Play VRChat"), mark("Tiny desktop window in VR"), mark("A 100 × 100 window on the monitor while you play in VR, so it costs almost nothing. Turn it off to show or record the game on the monitor. Desktop mode keeps its window."), mark("window monitor desktop small")).gate(Gate::VrchatHere).sometimes(),
     e("vrchat.perf-report", Vrchat, mark("Performance report"), mark("Performance report"), mark("If VRChat or your computer lags with N4N0, this puts together what N4N0 measured over the last hour with your computer's specifications and the settings that matter. You see it before anything is sent, and it is kept on this computer."), mark("lag slow report diagnostics")).gate(Gate::VrchatHere).whole(),
     e("vrchat.bridge", Vrchat, mark("Experimental"), mark("VRChat bridge"), mark("Lets an agent such as Claude Code start VRChat in desktop mode, go from private instance to private instance, look around and take 3D pictures, through a service on this computer only. Your own keyboard or mouse pauses it."), mark("agent MCP automation bridge"))
-        .rows(&[mark("VRChat bridge"), mark("It stays closed"), mark("Address"), mark("Token"), mark("Taking over")])
+        .rows(&[mark("VRChat bridge"), mark("Screen recording"), mark("It stays closed"), mark("Address"), mark("Token"), mark("Taking over")])
         .gate(Gate::Bridge),
     e("vrchat.network", Vrchat, mark("VRChat on your network"), mark("VRChat on your network"), mark("When it is not found by itself (some routers keep devices from finding each other)."), mark("network LAN address headset phone PC"))
         .rows(&[mark("Allow the local network"), mark("Address you typed"), mark("VRChat on a headset or a phone"), mark("VRChat on another PC"), mark("Enter its address")])

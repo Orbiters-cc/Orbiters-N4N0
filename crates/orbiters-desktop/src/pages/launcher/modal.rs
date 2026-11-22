@@ -338,6 +338,12 @@ fn boop_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Frien
     let booped = state.booped.get(&friend.id).cloned();
     let reach = states::boop(&state.data, friend, booped.as_ref().map(|b| b.0), clock, now);
     let p = ui.painter().clone();
+    if reach == Reach::SignIn && cx.snap.vrchat_login.presence() != crate::controller::vrchat_login::Presence::SignedOut {
+        // r21: the saved session is being restored: no sign-in offered meanwhile.
+        widgets::icon(&p, pos2(r.left() + 10.0, r.center().y), icons::HOURGLASS_MEDIUM, 15.0, theme::FG_3);
+        widgets::text_truncated(&p, pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Connecting to VRChat…"), 13.0).color(theme::FG_2), r.width() - 30.0);
+        return;
+    }
     if reach == Reach::SignIn {
         widgets::icon(&p, pos2(r.left() + 10.0, r.center().y), icons::INFO, 15.0, theme::BLUE);
         let t = tr("Sign in to VRChat to boop and ask for invites.");

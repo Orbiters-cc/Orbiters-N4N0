@@ -61,6 +61,10 @@ pub struct Behaviour {
     pub focus_works: bool,
     /// The profile has no account signed in: the game waits at its sign-in page.
     pub needs_sign_in: bool,
+    /// The game's graphics go (a Mac's engine): it runs on without a picture.
+    pub renderer_lost: bool,
+    /// The start ends before the game is up, saying this (a Mac's crashed start).
+    pub start_fails: Option<String>,
     /// The app is lent to a side session's picture (the main session's game).
     pub lent_away: bool,
     /// The account the game itself signed in with (a side session's profile), as its log says.
@@ -95,6 +99,8 @@ impl Default for Behaviour {
             reconstruct_fails: None,
             focus_works: false,
             needs_sign_in: false,
+            renderer_lost: false,
+            start_fails: None,
             lent_away: false,
             account: None,
             link_opens_page: true,
@@ -510,6 +516,8 @@ impl Game for LabGame {
             steamvr: false,
             session_account: state.behaviour.account.clone().filter(|_| running),
             needs_sign_in: running && state.behaviour.needs_sign_in,
+            renderer_lost: running && state.behaviour.renderer_lost,
+            start_failed: state.behaviour.start_fails.clone().filter(|_| !running && !state.launches.is_empty()),
         }
     }
 
@@ -543,7 +551,7 @@ impl Game for LabGame {
             return Err(Failure::new("start_failed", "VRChat did not start: the lab says no.", "Ask the person to look at the computer.")); // i18n: not shown (an AI client reads it in the tool's answer; the lab is a fake VRChat for tests)
         }
         state.launches.push(plan.clone());
-        if state.behaviour.launch_hangs {
+        if state.behaviour.launch_hangs || state.behaviour.start_fails.is_some() {
             return Ok(());
         }
         if let Some(after) = state.behaviour.comes_up_after {
@@ -609,8 +617,18 @@ impl Game for LabGame {
         if state.foreign || state.beside == Some(pid) {
             return None;
         }
-        drop(state);
-        super::win::window_of(pid, Some(&self.title))
+        #[cfg(windows)]
+        {
+            drop(state);
+            super::win::window_of(pid, Some(&self.title))
+        }
+        // Elsewhere (a Mac) the stand-in window: no window of the system at all, so nothing of the person's desktop.
+        #[cfg(not(windows))]
+        {
+            let window = state.window.as_ref().filter(|w| !w.closed.load(Ordering::Relaxed) && state.pid == Some(pid))?;
+            let (width, height) = *window.size.lock().unwrap();
+            Some(GameWindow { handle: 1, width, height })
+        }
     }
 
     fn is_foreground(&self, window: &GameWindow) -> bool {
@@ -639,7 +657,12 @@ impl Game for LabGame {
             return Err(Failure::new("close_failed", "Windows did not take the close request.", "This is the lab.")); // i18n: not shown
         }
         if !ignored {
+            #[cfg(windows)]
             super::win::close_window(window.handle)?;
+            #[cfg(not(windows))]
+            if let Some(w) = self.state.lock().unwrap().window.as_ref().filter(|_| window.handle == 1) {
+                w.closed.store(true, Ordering::Relaxed);
+            }
         }
         // Counted once asked for and taken.
         self.state.lock().unwrap().closes += 1;
@@ -647,6 +670,21 @@ impl Game for LabGame {
     }
 
     fn capture(&self, window: &GameWindow, max_width: u32) -> Result<Shot, Failure> {
+        #[cfg(not(windows))]
+        {
+            // The stand-in's picture: a grey frame of the window's size with a lighter band (not black: a world is up).
+            let _ = &self.capture_in_child;
+            let (width, height) = (window.width.max(1), window.height.max(1));
+            let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+            for y in 0..height {
+                let v = if y > height / 3 && y < height / 2 { 180 } else { 60 };
+                for _ in 0..width {
+                    pixels.extend_from_slice(&[v, v, v, 255]);
+                }
+            }
+            super::capture::encode(&super::capture::Bgra { width, height, pixels }, max_width).map_err(|e| Failure::new("screenshot_failed", e, "This is the lab.")) // i18n: not shown
+        }
+        #[cfg(windows)]
         match &self.capture_in_child {
             Some(exe) => super::capture::shot_in_child(exe, window.handle, max_width),
             None => super::capture::shot(window.handle, max_width).map_err(|e| Failure::new("screenshot_failed", e, "This is the lab.")), // i18n: not shown
@@ -794,11 +832,18 @@ impl Game for LabGame {
 /// person at this computer does not see or lose anything to it.
 pub struct LabWindow {
     pub closed: Arc<AtomicBool>,
+    /// The stand-in's content size where there is no real window (a Mac).
+    #[cfg(not(windows))]
+    pub size: Arc<Mutex<(u32, u32)>>,
 }
 
 impl Default for LabWindow {
     fn default() -> Self {
-        Self { closed: Arc::new(AtomicBool::new(true)) }
+        Self {
+            closed: Arc::new(AtomicBool::new(true)),
+            #[cfg(not(windows))]
+            size: Arc::new(Mutex::new((1280, 720))),
+        }
     }
 }
 
@@ -829,9 +874,11 @@ impl LabWindow {
     #[cfg(not(windows))]
     fn show_menu(_window: &GameWindow, _open: bool) {}
 
+    /// Elsewhere than Windows a stand-in with no system window behind it: found, captured and closed through the lab's own
+    /// calls, so that the bridge's flows run on a Mac too.
     #[cfg(not(windows))]
     pub fn open(_title: &str) -> Option<Self> {
-        None
+        Some(Self { closed: Arc::new(AtomicBool::new(false)), size: Arc::new(Mutex::new((1280, 720))) })
     }
 
     #[cfg(windows)]

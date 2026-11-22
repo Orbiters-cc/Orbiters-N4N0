@@ -197,11 +197,31 @@ fn stage(stage: super::shares::Stage) -> PublishSeen {
 
 /// The drive a path is on (`C:`), or the path itself where there are no drive letters.
 fn drive(path: &Path) -> String {
+    #[cfg(unix)]
+    if let Some(volume) = volume_of(path) {
+        return volume.to_string_lossy().into_owned();
+    }
     let text = path.to_string_lossy();
     match text.get(..2) {
         Some(d) if d.ends_with(':') => d.to_ascii_uppercase(),
         _ => text.into_owned(),
     }
+}
+
+/// The mount point of the volume `path` is on (its nearest existing folder's, walking up while the device stays the same):
+/// two folders of one disk are one disk, as `C:` is on Windows.
+#[cfg(unix)]
+pub(crate) fn volume_of(path: &Path) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let mut at = path.ancestors().find(|p| p.exists())?.canonicalize().ok()?;
+    let device = std::fs::metadata(&at).ok()?.dev();
+    while let Some(parent) = at.parent() {
+        if std::fs::metadata(parent).ok()?.dev() != device {
+            break;
+        }
+        at = parent.to_path_buf();
+    }
+    Some(at)
 }
 
 impl crate::bridge::game::Publish for RealPublish {

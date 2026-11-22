@@ -9,6 +9,16 @@
   from the fork github.com/Orbiters-cc/Obelisk (branch `cli`, GPL-3.0, its `docs/CLI.md` is the contract), a separate
   program N4N0 downloads from that fork's releases and runs (`orbiters_core::obelisk`, `controller/obelisk_cli.rs`).
   Nothing of N4N0 goes into the fork, and none of the fork's code into N4N0.
+- **The VRChat bridge on a Mac observes and travels only** (`docs/vrchat-bridge.md`, "On a Mac"). What a computer's bridge can
+  do is `bridge/caps.rs`, never `cfg` in shared logic: Windows has every capability (keep it so: its tools, guide and tests are
+  unchanged), and a Mac's tool list, guide, prompt and Settings come from its set. A tool it lacks is refused there before any side
+  effect. The Mac's game is `controller/bridge_mac.rs`: only its own launch (launch id, Game session UUID, launcher birth, the log
+  whose `Arg:` lines name its link) is ever read, looked at or closed; Home's VRChat is the person's. It starts through the start
+  Home's Play shares (`obelisk_cli::Play`: one at a time, none within 80 s of an early end, by the engine's records), closes with
+  `steam quit --session` and never `--force`. VRChat under the engine often loses its graphics seconds after arriving
+  (`renderer_lost`, `start_crashed`: the engine's, not the bridge's). Screenshots need macOS's Screen Recording for the tray service,
+  which only the person can allow. A real game on this Mac: at most a few starts, never one within 80 s of an early quit, close it
+  when done (`obelisk-cli steam quit 438100 --wait 60`), and know each start signs the owner's Steam in here and out on his PC.
 
 - **Every version bump gets a GitHub release.** `cargo xtask bump <version>`, commit and push, then
   `cargo xtask release` (with `--unsigned` until Azure Artifact Signing is set up; see `docs/releasing.md`). It tags

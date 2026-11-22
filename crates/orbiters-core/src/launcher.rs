@@ -276,15 +276,19 @@ pub enum Game {
     NoEngine,
 }
 
-/// Getting what runs VRChat on a Mac (Obelisk), from the press of "Install Obelisk & play VRChat".
+/// Setting VRChat up on a Mac ([`crate::obelisk`]), from the press of "Install & play VRChat" to the game.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EngineSetup {
-    /// Its disk image is coming, this much of it.
+    /// What runs VRChat on a Mac is coming, this much of it.
     Downloading { percent: u8 },
-    /// Checked (Obelisk's own signature, Apple's notary) and being put in Applications.
+    /// It is checked (whose signature it carries) and put in place.
     Installing,
-    /// Installed and open: the person signs in to Steam there and downloads VRChat; Play follows by itself.
-    WaitingForGame,
+    /// The person signs in to Steam: this address, shown as a QR code, is read with the Steam app on their phone.
+    SignIn { qr_url: String },
+    /// Steam is asked what to download, or the files there are read.
+    Checking,
+    /// The engine downloads (`game` false) or VRChat does (`game` true), this much when it is known.
+    Game { game: bool, percent: Option<u8> },
     Failed(String),
 }
 
@@ -429,9 +433,9 @@ pub enum Action {
     RequestInvite { to: String },
     /// Boop; `emoji` from [`LauncherState::boop_emojis`], `None` for a plain boop.
     Boop { to: String, emoji: Option<String> },
-    /// On a Mac: open what runs VRChat there (Obelisk), or where it is got when it is not installed.
+    /// On a Mac where the game is started by hand in another app: open that app.
     OpenEngine,
-    /// On a Mac without Obelisk: download it, check it, install it, open it, and play once VRChat is in it.
+    /// On a Mac where VRChat is not set up: get what runs it, sign in to Steam, download VRChat, then play.
     InstallEngine,
     /// Open the profile modal; the details arrive in [`LauncherState::profile`].
     OpenProfile { id: String },

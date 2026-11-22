@@ -221,10 +221,11 @@ How it is one verified game (`controller/bridge_mac.rs`):
   place with it, and a screenshot is refused until the game is back in its private instance): VRChat's own folder in the engine's Wine prefix (`…/cc.orbiters.obelisk-cli/Prefixes/steam-438100-windows-linux/prefix/drive_c/users/crossover/AppData/LocalLow/VRChat/VRChat`,
   `obelisk::vrchat_log_dir`), the one file of this start, followed by its own `LogWatcher`. The app's other VRChat features on a
   Mac still follow the VRChat on the network: they are not changed by this.
-- **Arrival needs the game to draw** (renderer evidence), not only the log's join: its window on screen **and the frames it has
-  shown growing**, from its own Game session's record (`shown`, obelisk-cli 0.1.5: counted from the game's own log every 2 s). A
-  count that stops growing for 8 s while the screen is unlocked is a frozen picture: `get_state`'s `vrchat.renderer_lost` true and
-  `screenshot` answers `renderer_lost`; a count that lost its continuity proves nothing either way (not arrived). The engine's log of
+- **Arrival needs the game to draw** (renderer evidence), not only the log's join: its window on screen **and its frames growing**:
+  the frames shown, from its own Game session's record (`shown`, obelisk-cli 0.1.5: counted from the game's own log every 2 s), or
+  the presents its window server logs (`neptune unixlib wsi (wsd): <n> presents`, about every 3 s). A covered window or a locked
+  screen shows nothing while the game still presents (measured 23:54: presents on, shown events stuck), so only both stalled for
+  15 s is a frozen game: `get_state`'s `vrchat.renderer_lost` true and `screenshot` answers `renderer_lost`. The engine's log of
   this start (`~/Library/Logs/Obelisk/Steam/wine-438100.log`, a new file at each start) is held open once found and read whole, in
   order: its graphics server dropping the game (`VTEST_CLIENT_ERROR_CONTEXT_LOST`) says the same. Before arrival either ends the
   start with `start_crashed`, as does a start the program says ended early (also after its launcher was seen).

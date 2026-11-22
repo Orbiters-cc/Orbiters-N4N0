@@ -304,6 +304,8 @@ pub struct ListStatus {
     pub source: Option<FoundBy>,
     /// Signed in to VRChat in the app (its own session answers; Favorites and Active need it).
     pub vrchat: bool,
+    /// Its saved session is being restored (r21): not signed out yet.
+    pub connecting: bool,
     /// A search of every world applies (two characters typed and the typing paused).
     pub searching: bool,
 }
@@ -2347,6 +2349,8 @@ impl Panel {
         let searching = self.searching(d);
         let (icon, title, line) = if let Some((title, line)) = self.failure(d) {
             (icons::WARNING, title, line)
+        } else if !searching && self.section.needs_vrchat() && !d.status.list.vrchat && d.status.list.connecting {
+            (icons::HOURGLASS_MEDIUM, tr("Connecting to VRChat…"), tr("Your VRChat session is being restored."))
         } else if !searching && self.section.needs_vrchat() && !d.status.list.vrchat {
             (icons::SIGN_IN, tr("Sign in to VRChat to see these"), tr("On the computer: Orbiters - N4N0, Settings, VRChat account"))
         } else if self.loading(d) {

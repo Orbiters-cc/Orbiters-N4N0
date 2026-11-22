@@ -33,6 +33,36 @@ pub struct Status {
     /// says so and the card offers to sign in again).
     #[serde(default)]
     pub known: Option<User>,
+    /// A session saved on this computer is being restored and nothing has said yet whether it works: Orbiters' account and
+    /// its grant not answered, the file being read, VRChat not answered (r21). `known` is its last account when kept.
+    #[serde(default)]
+    pub restoring: bool,
+}
+
+/// What every view shows of the VRChat sign-in (r21): only `SignedOut` offers "Sign in to VRChat".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence {
+    /// Nobody signed in for certain: no saved session, signed out, VRChat ended it, or not for this Orbiters account.
+    SignedOut,
+    /// A saved session is being restored or waits for Orbiters: quiet, with its last known account; no sign-in offered.
+    Connecting,
+    SignedIn,
+}
+
+impl Status {
+    pub fn presence(&self) -> Presence {
+        if self.user.is_some() {
+            Presence::SignedIn
+        } else if self.restoring || self.waiting {
+            Presence::Connecting
+        } else {
+            Presence::SignedOut
+        }
+    }
+    /// The account to show: the one signed in, or the one being connected (its last known name and picture).
+    pub fn shown_user(&self) -> Option<&User> {
+        self.user.as_ref().or(self.known.as_ref().filter(|_| self.presence() == Presence::Connecting))
+    }
 }
 /// A picture replaced on VRChat (`Controller::vrchat_picture`): its step while it runs, then its outcome.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -143,6 +173,36 @@ pub(super) struct Runtime {
     /// The saved session could not be read back because VRChat or the network could not answer (at start, after
     /// sleep): read again from then on, by itself (r20: only "Retry" did).
     restore_again: Option<Instant>,
+    /// The saved session is being read back and checked with VRChat now (r21).
+    restoring_now: bool,
+    /// Rung when the Orbiters account changes: the next look comes at once, not after its half second (r21).
+    pub(super) bell: Arc<Bell>,
+    /// Rung when a VRChat account becomes signed in: the launcher reads its list at once, not at its next look.
+    pub(super) signed_bell: Arc<Bell>,
+    /// The Orbiters account's state and environment the last publish saw, to ring `bell` when it changes.
+    seen_account: Option<(std::mem::Discriminant<AccountState>, bool)>,
+}
+
+/// A wake-up for a thread that looks every so often: it looks at once when rung.
+#[derive(Default)]
+pub struct Bell {
+    rung: Mutex<u64>,
+    cond: std::sync::Condvar,
+}
+impl Bell {
+    pub fn ring(&self) {
+        *self.rung.lock().unwrap() += 1;
+        self.cond.notify_all();
+    }
+    /// Waits until rung after `seen` (what the last wait returned) or for `at_most`; returns how often it was rung.
+    pub fn wait(&self, seen: u64, at_most: Duration) -> u64 {
+        let rung = self.rung.lock().unwrap();
+        let (rung, _) = self.cond.wait_timeout_while(rung, at_most, |r| *r == seen).unwrap();
+        *rung
+    }
+    pub fn rung(&self) -> u64 {
+        *self.rung.lock().unwrap()
+    }
 }
 /// Asks the Orbiters server at an API address whether the credential's member may use VRChat sign-in.
 type Asker = Arc<dyn Fn(&Api, &str) -> anyhow::Result<bool> + Send + Sync>;
@@ -158,7 +218,7 @@ impl Default for Runtime {
         let ask: Asker = Arc::new(|_: &Api, _: &str| Err(anyhow::anyhow!("tests never reach Orbiters")));
         #[cfg(not(test))]
         let ask: Asker = Arc::new(|api: &Api, token: &str| api.vrchat_login_feature(token));
-        Self { client: Arc::new(Mutex::new(client)), gate, identity: None, grants: HashMap::new(), generation: 0, busy: false, restored: false, saved: None, ask, restore_again: None }
+        Self { client: Arc::new(Mutex::new(client)), gate, identity: None, grants: HashMap::new(), generation: 0, busy: false, restored: false, saved: None, ask, restore_again: None, restoring_now: false, bell: Arc::default(), signed_bell: Arc::default(), seen_account: None }
     }
 }
 impl Runtime {
@@ -220,12 +280,36 @@ impl Controller {
         self.vrchat_identity().is_some_and(|(api, token)| api.url("") == identity.0 && token == identity.1)
     }
     pub(super) fn start_vrchat_login(self: &Shared) {
+        self.vrchat_at_launch(read_account_cache());
         let weak = Arc::downgrade(self);
-        let _ = std::thread::Builder::new().name("vrchat-feature".into()).spawn(move || loop {
-            let Some(ctl) = weak.upgrade() else { break };
-            ctl.vrchat_feature_tick();
-            drop(ctl);
-            std::thread::sleep(Duration::from_millis(500));
+        let bell = self.vrchat_login.lock().unwrap().bell.clone();
+        let _ = std::thread::Builder::new().name("vrchat-feature".into()).spawn(move || {
+            let mut seen = bell.rung();
+            loop {
+                let Some(ctl) = weak.upgrade() else { break };
+                ctl.vrchat_feature_tick();
+                drop(ctl);
+                // Half a second, or at once when the Orbiters account changes (r21: the first look after launch waited).
+                seen = bell.wait(seen, Duration::from_millis(500));
+            }
+        });
+    }
+    /// Before the first look and before any window asks (r21): a session saved here is "connecting", with the last
+    /// account's name and picture kept on this computer, never "signed out" while nothing has been asked yet.
+    pub(super) fn vrchat_at_launch(&self, cached: Option<(User, Option<Picture>)>) {
+        let saved = self.vrchat_login.lock().unwrap().saved();
+        if !saved {
+            return;
+        }
+        self.update(|s| {
+            let st = &mut s.vrchat_login;
+            if st.user.is_none() {
+                st.restoring = true;
+                if let Some((user, picture)) = cached {
+                    st.known = Some(user);
+                    st.picture = picture;
+                }
+            }
         });
     }
     /// One look: follows the Orbiters identity, asks Orbiters when due, hands the session to each new grant, reads the
@@ -295,19 +379,27 @@ impl Controller {
                 return None;
             }
             rt.busy = true;
+            rt.restoring_now = true;
             rt.generation += 1;
             Some((rt.client.clone(), rt.generation))
         });
         if let (Some((client, generation)), Some(id)) = (restore, identity.as_ref()) {
-            self.update(|s| s.vrchat_login.busy = true);
-            let (result, portrait) = {
+            self.update(|s| {
+                s.vrchat_login.busy = true;
+                s.vrchat_login.restoring = true;
+            });
+            let result = {
                 let mut c = client.lock().unwrap();
                 let mut result = c.resume();
-                let portrait = if let Ok(Some(Login::SignedIn(u))) = &result { c.image(u.picture()).ok().and_then(picture) } else { None };
                 if matches!(result, Ok(Some(Login::SignedIn(_)))) && !c.signed_in() {
                     result = Err(Error::Unauthorized);
                 }
-                (result, portrait)
+                result
+            };
+            // Its picture comes after: "signed in" shows as soon as VRChat said who it is (r21).
+            let signed_in = match &result {
+                Ok(Some(Login::SignedIn(u))) => Some(u.clone()),
+                _ => None,
             };
             {
                 let mut rt = self.vrchat_login.lock().unwrap();
@@ -327,8 +419,22 @@ impl Controller {
                     }
                     _ => {}
                 }
+                rt.restoring_now = false;
             }
-            self.finish_vrchat(generation, id, result, portrait);
+            self.finish_vrchat(generation, id, result, None);
+            if let Some(user) = signed_in {
+                self.vrchat_login.lock().unwrap().signed_bell.ring();
+                let portrait = if user.picture().is_empty() { None } else { client.lock().unwrap().image(user.picture()).ok().and_then(picture) };
+                let shown = self.update_if(|s| {
+                    let st = &mut s.vrchat_login;
+                    let same = st.user.as_ref().is_some_and(|u| u.id == user.id);
+                    if same && portrait.is_some() {
+                        st.picture = portrait.clone();
+                    }
+                    same && portrait.is_some()
+                });
+                write_account_cache(&user, if shown { portrait.as_ref() } else { None });
+            }
         }
         self.settle_vrchat_status(matches!(orbiters, Orbiters::Gone));
     }
@@ -344,14 +450,17 @@ impl Controller {
     /// What the session is, said in the status: usable, waiting for Orbiters, ended by VRChat, or not for this account.
     /// Never touches what a command under way will say.
     fn settle_vrchat_status(&self, orbiters_gone: bool) {
-        let (granted, waiting, busy, client) = {
+        let (granted, waiting, busy, pending, client, signed_bell) = {
             let mut rt = self.vrchat_login.lock().unwrap();
             let granted = rt.identity.clone().is_some_and(|id| rt.allowed_for(&id));
             let refused = rt.identity.as_ref().and_then(|id| rt.grants.get(id)).is_some_and(|g| g.refused());
             // A client busy with a request holds a session (a sign-in, a read).
             let held = rt.client.try_lock().map(|c| c.holds_session()).unwrap_or(true);
-            let waiting = !granted && !orbiters_gone && !refused && (held || rt.saved());
-            (granted, waiting, rt.busy, rt.client.clone())
+            let saved = held || rt.saved();
+            let waiting = !granted && !orbiters_gone && !refused && saved;
+            // The saved session is still to be read, is being read, or got no answer yet (r21).
+            let pending = saved && (!rt.restored || rt.restoring_now || rt.restore_again.is_some());
+            (granted, waiting, rt.busy, pending, rt.client.clone(), rt.signed_bell.clone())
         };
         let Ok(c) = client.try_lock() else { return };
         let user = c.signed_in_user();
@@ -363,14 +472,19 @@ impl Controller {
             if granted {
                 st.allowed = true;
                 st.waiting = false;
+                st.restoring = st.user.is_none() && st.methods.is_empty() && (pending || (busy && st.restoring));
                 // The runtime says whether a command or the restore is under way; one that was dropped (the grant changed
                 // under it) leaves nothing busy.
                 if !busy {
                     st.busy = false;
                     match user {
                         Some(u) => {
+                            if st.user.is_none() {
+                                signed_bell.ring();
+                            }
                             st.user = Some(u);
                             st.known = None;
+                            st.restoring = false;
                         }
                         None => {
                             if st.user.take().is_some() {
@@ -380,7 +494,7 @@ impl Controller {
                             }
                             if ended.is_some() {
                                 st.known = ended;
-                            } else if st.methods.is_empty() {
+                            } else if st.methods.is_empty() && !st.restoring {
                                 st.known = st.known.take().filter(|_| st.error.is_some());
                             }
                         }
@@ -388,7 +502,7 @@ impl Controller {
                 }
             } else if waiting {
                 let known = st.user.take().or(st.known.take()).or(user).or(ended);
-                *st = Status { revision: st.revision, waiting: true, known, picture: st.picture.take(), upload: st.upload.take(), ..Status::default() };
+                *st = Status { revision: st.revision, waiting: true, restoring: true, known, picture: st.picture.take(), upload: st.upload.take(), ..Status::default() };
             } else {
                 let known = st.user.take().or(st.known.take());
                 *st = Status { revision: st.revision, known, upload: st.upload.take(), ..Status::default() };
@@ -455,8 +569,11 @@ impl Controller {
                 let mut rt = ctl.vrchat_login.lock().unwrap();
                 if signing_out && result.is_ok() {
                     rt.saved = Some(false);
-                } else if matches!(result, Ok(Some(Login::SignedIn(_)))) {
+                    remove_account_cache();
+                } else if let Ok(Some(Login::SignedIn(u))) = &result {
                     rt.saved = Some(true);
+                    rt.signed_bell.ring();
+                    write_account_cache(u, picture.as_ref());
                 }
             }
             let recovery = match &result {
@@ -507,12 +624,14 @@ impl Controller {
             status.recovery = recovery;
             status.revision = status.revision.wrapping_add(1);
             if clear_session {
+                status.restoring = false;
                 status.known = status.user.take().or(status.known.take());
                 status.picture = None;
                 status.methods.clear();
             }
             match result {
                 Ok(Some(Login::SignedIn(u))) => {
+                    status.restoring = false;
                     status.user = Some(u);
                     status.known = None;
                     status.methods.clear();
@@ -526,6 +645,7 @@ impl Controller {
                     status.error = None;
                 }
                 Ok(None) => {
+                    status.restoring = false;
                     status.user = None;
                     status.known = None;
                     status.picture = None;
@@ -562,6 +682,12 @@ impl Controller {
 /// grant too, but the session shows as kept and waiting, not signed out (r20). The session itself is never dropped
 /// here: it stays in memory and on disk for the next grant.
 pub(super) fn follow_orbiters(s: &mut crate::state::Snapshot, rt: &mut Runtime) {
+    // The Orbiters account changed (read, checked, signed in or out, the environment): VRChat's next look comes at once.
+    let seen = (std::mem::discriminant(&s.account.state), s.account.development);
+    if rt.seen_account != Some(seen) {
+        rt.seen_account = Some(seen);
+        rt.bell.ring();
+    }
     let switching = s.account.development != (Server::current() == Server::Development) || s.account.state == AccountState::Unknown;
     let gone = matches!(s.account.state, AccountState::SignedOut | AccountState::Expired { .. });
     if !switching && !gone {
@@ -578,7 +704,46 @@ pub(super) fn follow_orbiters(s: &mut crate::state::Snapshot, rt: &mut Runtime) 
         }
     } else if st.allowed || st.user.is_some() {
         let known = st.user.take().or(st.known.take());
-        *st = Status { revision: st.revision, waiting: true, known, picture: st.picture.take(), upload: st.upload.take(), ..Status::default() };
+        *st = Status { revision: st.revision, waiting: true, restoring: true, known, picture: st.picture.take(), upload: st.upload.take(), ..Status::default() };
+    }
+}
+
+/// The last VRChat account signed in here, its name and picture (r21): shown while its saved session is restored at the
+/// next launch. In the cache folder (removed with the app's data); never cookies; removed when the person signs out.
+/// Tests keep none.
+fn account_cache_path() -> Option<std::path::PathBuf> {
+    (!cfg!(test)).then(|| orbiters_core::paths::cache_dir().join("vrchat-account.json"))
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedAccount {
+    id: String,
+    name: String,
+    #[serde(default)]
+    picture: Option<Picture>,
+}
+
+fn read_account_cache() -> Option<(User, Option<Picture>)> {
+    let text = std::fs::read_to_string(account_cache_path()?).ok()?;
+    let cached: CachedAccount = serde_json::from_str(&text).ok()?;
+    let user: User = serde_json::from_value(serde_json::json!({"id": cached.id, "displayName": cached.name})).ok()?;
+    Some((user, cached.picture))
+}
+
+fn write_account_cache(user: &User, picture: Option<&Picture>) {
+    let Some(path) = account_cache_path() else { return };
+    // A picture fetched before stays when this time none came.
+    let picture = picture.cloned().or_else(|| read_account_cache().filter(|(u, _)| u.id == user.id).and_then(|(_, p)| p));
+    let cached = CachedAccount { id: user.id.clone(), name: user.display_name.clone(), picture };
+    if let (Some(dir), Ok(text)) = (path.parent(), serde_json::to_vec(&cached)) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = orbiters_core::write_atomic(&path, &text);
+    }
+}
+
+fn remove_account_cache() {
+    if let Some(path) = account_cache_path() {
+        let _ = std::fs::remove_file(path);
     }
 }
 

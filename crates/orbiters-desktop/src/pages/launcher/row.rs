@@ -62,6 +62,23 @@ pub(super) fn me(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer
 /// What needs the VRChat sign-in, said once at the head of the list, with the way to sign in. Returns where the next
 /// part starts.
 pub(super) fn sign_in_note(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: Rect, y: f32) -> f32 {
+    // r21: a saved session being restored, or signed in with its list on the way: said quietly, no sign-in offered.
+    let vrchat = cx.snap.vrchat_login.presence();
+    if vrchat != crate::controller::vrchat_login::Presence::SignedOut && states::live(&state.data) != states::Live::SignedIn {
+        let name = cx.snap.vrchat_login.shown_user().map(|u| u.display_name.clone()).filter(|n| !n.trim().is_empty());
+        let text = match (vrchat, name) {
+            (crate::controller::vrchat_login::Presence::SignedIn, _) => tr("Reading your friends from VRChat…").to_string(),
+            (_, Some(name)) => orbiters_i18n::tr!("Connecting to VRChat as {name}…", name = name),
+            (_, None) => tr("Connecting to VRChat…").to_string(),
+        };
+        let row = Rect::from_min_size(pos2(inner.left() + 2.0, y), vec2(inner.width() - 4.0, 36.0));
+        let p = ui.painter().clone();
+        widgets::frame(&p, row, 12.0, theme::white(0.04));
+        orbiters_ui::feedback::spinner(&p, pos2(row.left() + 18.0, row.center().y), 6.0, 2.0, theme::FG_3);
+        widgets::text_truncated(&p, pos2(row.left() + 34.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(&text, 12.5).color(theme::FG_2), row.width() - 44.0);
+        anim::request_frame(ui.ctx());
+        return y + row.height() + 10.0;
+    }
     let text = match (states::live(&state.data), &state.data.source) {
         (states::Live::SignedIn, _) => return y,
         (states::Live::Copy, orbiters_core::launcher::Source::Database { app, read_at }) => {

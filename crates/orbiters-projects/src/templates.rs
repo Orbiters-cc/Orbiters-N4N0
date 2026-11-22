@@ -288,7 +288,7 @@ fn stopped(destination: &Path, made: Made) -> anyhow::Error {
 
 /// [`copy_keeping`], running `made` once its folder exists (a test stops the copy, or swaps the folder, there).
 /// `project`: the project rules of what is left out (a package's folder is copied whole but for Git's and Node's).
-fn copy_keeping_then(
+pub(crate) fn copy_keeping_then(
     source: &Path,
     destination: &Path,
     keep: Keep,
@@ -540,7 +540,7 @@ pub fn duplication_bytes(source: &Path, keep: Keep) -> anyhow::Result<u64> {
 }
 
 /// Materialize external UPM folder dependencies so a moved duplicate does not depend on its source location.
-fn copy_local_packages(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
+pub(crate) fn copy_local_packages(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
     let path = destination.join("Packages/manifest.json");
     if !path.is_file() { return Ok(()); }
     let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
@@ -603,7 +603,7 @@ pub fn packages_only_in_library(project: &Path) -> Vec<String> {
 }
 
 /// Check every locked dependency, including transitive dependencies, against the copied package metadata.
-fn installed_dependencies_complete(project: &Path) -> anyhow::Result<bool> {
+pub(crate) fn installed_dependencies_complete(project: &Path) -> anyhow::Result<bool> {
     let path = project.join("Packages/vpm-manifest.json");
     if !path.exists() { return Ok(true); }
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;

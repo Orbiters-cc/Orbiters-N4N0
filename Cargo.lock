@@ -4385,6 +4385,7 @@ name = "orbiters-projects"
 version = "0.3.8"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "dirs 6.0.0",
  "futures",
  "image",
@@ -4398,9 +4399,11 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "orbiters-core",
  "orbiters-i18n",
+ "orbiters-update",
  "plist",
  "reqwest",
  "resvg",
+ "ring",
  "serde",
  "serde_json",
  "sysinfo",

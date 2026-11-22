@@ -558,7 +558,15 @@ fn walk(
 }
 
 pub fn find_editor(version: &str) -> Option<PathBuf> {
-    find_editor_in(version, crate::hub_data_dir().as_deref(), &default_editor_folders(), &crate::vcc_dir())
+    crate::unity6::editors::find(version).usable().map(|c| c.program.clone())
+}
+
+/// Every program this computer's Unity Hub, VCC and ALCOM files name for `version`, in the order they are tried, each
+/// with where it was named. Hints only ([`crate::unity6::editors`] asks each program what it is), and absolute paths
+/// only: an empty or relative setting names nothing (an empty `secondaryInstallPath.json` must not become a path in
+/// the current folder).
+pub fn editor_hints(version: &str) -> Vec<(PathBuf, crate::unity6::editors::Hint)> {
+    hints_in(version, crate::hub_data_dir().as_deref(), &default_editor_folders(), &crate::vcc_dir())
 }
 
 /// The folders under which Unity Hub puts editors by itself.
@@ -594,29 +602,41 @@ fn editor_program(path: PathBuf) -> PathBuf {
     }
 }
 
-/// [`find_editor`] with its places given.
+/// [`find_editor`] with its places given (tests: the app goes through [`crate::unity6::editors::find`]).
+#[cfg(test)]
 fn find_editor_in(version: &str, hub: Option<&Path>, folders: &[PathBuf], vcc: &Path) -> Option<PathBuf> {
+    use crate::unity6::editors::{find_with, probe, Hint};
     // Search only the requested version: opening another editor could upgrade a project.
-    let mut candidates = vec![];
+    if let Some(c) = find_with(version, hints_in(version, hub, folders, vcc), &probe).usable() {
+        return Some(c.program.clone());
+    }
+    let more = database_editors_in(version, vcc).into_iter().map(|p| (p, Hint::VccDatabase)).collect();
+    find_with(version, more, &probe).usable().map(|c| c.program.clone())
+}
+
+/// [`editor_hints`] with its places given.
+fn hints_in(version: &str, hub: Option<&Path>, folders: &[PathBuf], vcc: &Path) -> Vec<(PathBuf, crate::unity6::editors::Hint)> {
+    use crate::unity6::editors::Hint;
+    let mut candidates: Vec<(PathBuf, Hint)> = vec![];
     // Unity Hub names the folder after the version alone, with the architecture too when two are installed side by side
     // (`-arm64`, `-x86_64`). Unity for Apple silicon first: the other one runs under Rosetta, if at all.
     let suffixes: &[&str] = if cfg!(target_os = "macos") { &["-arm64", "", "-x86_64"] } else { &[""] };
     for folder in folders {
-        candidates.extend(suffixes.iter().map(|s| editor_in_folder(&folder.join(format!("{version}{s}")))));
+        candidates.extend(suffixes.iter().map(|s| (editor_in_folder(&folder.join(format!("{version}{s}"))), Hint::HubFolder)));
     }
     if let Some(hub) = hub {
         if let Ok(s) = std::fs::read_to_string(hub.join("editors-v2.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-                editor_entries(&v, version, &mut candidates);
+                let mut listed = vec![];
+                editor_entries(&v, version, &mut listed);
+                candidates.extend(listed.into_iter().map(|p| (p, Hint::HubList)));
             }
         }
         if let Ok(s) = std::fs::read_to_string(hub.join("secondaryInstallPath.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-                for value in [v.as_str(), v["secondaryInstallPath"].as_str()] {
-                    if let Some(p) = value {
-                        for suffix in suffixes {
-                            candidates.push(editor_in_folder(&PathBuf::from(p).join(format!("{version}{suffix}"))));
-                        }
+                for p in [v.as_str(), v["secondaryInstallPath"].as_str()].into_iter().flatten().map(str::trim).filter(|p| !p.is_empty()) {
+                    for suffix in suffixes {
+                        candidates.push((editor_in_folder(&PathBuf::from(p).join(format!("{version}{suffix}"))), Hint::HubSecondary));
                     }
                 }
             }
@@ -625,40 +645,50 @@ fn find_editor_in(version: &str, hub: Option<&Path>, folders: &[PathBuf], vcc: &
         #[cfg(target_os = "macos")]
         for file in [hub.join("settings.json"), PathBuf::from("/Library/Application Support/Unity/config/services-config.json")] {
             let settings: serde_json::Value = std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-            if let Some(p) = settings["machineWideSecondaryInstallLocation"].as_str().filter(|p| !p.is_empty()) {
-                candidates.extend(suffixes.iter().map(|s| editor_in_folder(&PathBuf::from(p).join(format!("{version}{s}")))));
+            if let Some(p) = settings["machineWideSecondaryInstallLocation"].as_str().filter(|p| !p.trim().is_empty()) {
+                candidates.extend(suffixes.iter().map(|s| (editor_in_folder(&PathBuf::from(p).join(format!("{version}{s}"))), Hint::HubSecondary)));
             }
         }
     }
     if let Ok(s) = std::fs::read_to_string(vcc.join("settings.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-            if let Some(p) = v["preferredUnityEditors"][version].as_str() {
-                candidates.push(if cfg!(target_os = "macos") { editor_program(PathBuf::from(p)) } else { PathBuf::from(p) });
+            if let Some(p) = v["preferredUnityEditors"][version].as_str().filter(|p| !p.trim().is_empty()) {
+                candidates.push((if cfg!(target_os = "macos") { editor_program(PathBuf::from(p)) } else { PathBuf::from(p) }, Hint::VccSettings));
             }
         }
     }
-    if let Some(p) = candidates.iter().find(|p| p.is_file()) {
-        return Some(p.clone());
-    }
-    // Editors VCC or ALCOM found or were given (outside Unity Hub's lists).
+    candidates.retain(|(p, _)| p.is_absolute());
+    candidates
+}
+
+/// Editors of `version` VCC or ALCOM found or were given (outside Unity Hub's lists), from their database.
+pub fn database_editors(version: &str) -> Vec<PathBuf> {
+    database_editors_in(version, &crate::vcc_dir())
+}
+
+fn database_editors_in(version: &str, vcc: &Path) -> Vec<PathBuf> {
     // VCC's database can be held by VCC itself: a wait there must not hold up Open in Unity, whose answer is then "not
     // installed" as for any version not in the lists above.
     let version = version.to_string();
     let vcc = vcc.to_path_buf();
     crate::within(std::time::Duration::from_secs(5), move || {
-        crate::runtime().ok()?.block_on(async {
-            let io = vrc_get_vpm::io::DefaultEnvironmentIo::new(vcc.into());
-            let db = vrc_get_vpm::environment::VccDatabaseConnection::connect(&io).await.ok()?;
-            let wanted = vrc_get_vpm::version::UnityVersion::parse(&version)?;
-            db.get_unity_installations()
-                .iter()
-                .filter(|u| u.version() == Some(wanted))
-                .filter_map(|u| u.path().map(PathBuf::from))
-                .map(|p| if cfg!(target_os = "macos") { editor_program(p) } else { p })
-                .find(|p| p.is_file())
+        crate::runtime().ok().map(|rt| {
+            rt.block_on(async {
+                let io = vrc_get_vpm::io::DefaultEnvironmentIo::new(vcc.into());
+                let Ok(db) = vrc_get_vpm::environment::VccDatabaseConnection::connect(&io).await else { return vec![] };
+                let Some(wanted) = vrc_get_vpm::version::UnityVersion::parse(&version) else { return vec![] };
+                db.get_unity_installations()
+                    .iter()
+                    .filter(|u| u.version() == Some(wanted))
+                    .filter_map(|u| u.path().map(PathBuf::from))
+                    .map(|p| if cfg!(target_os = "macos") { editor_program(p) } else { p })
+                    .filter(|p| p.is_absolute())
+                    .collect()
+            })
         })
     })
     .flatten()
+    .unwrap_or_default()
 }
 fn editor_entries(v: &serde_json::Value, version: &str, out: &mut Vec<PathBuf>) {
     match v {
@@ -964,5 +994,40 @@ mod retained_lists {
         std::fs::write(&world, scene("VRCWorld again", WORLD)).unwrap();
         read_again(&mut scan);
         assert_eq!(shown(&scan), (vec![OTHER_AVATAR.to_string()], vec![WORLD.to_string()]));
+    }
+}
+
+#[cfg(test)]
+mod editor_hint_tests {
+    use super::*;
+
+    /// M8: Unity Hub's files are hints. An empty or relative install folder names no program (it would be a path in the
+    /// current folder), and a program found where a hint says is used only for its own version.
+    #[test]
+    fn empty_and_relative_hints_name_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let vcc = temp.path().join("vcc");
+        std::fs::create_dir_all(&hub).unwrap();
+        std::fs::create_dir_all(&vcc).unwrap();
+        // What this PC's Hub had: an empty secondary path, no editors-v2.json.
+        std::fs::write(hub.join("secondaryInstallPath.json"), "\"\"").unwrap();
+        std::fs::write(vcc.join("settings.json"), serde_json::json!({ "preferredUnityEditors": { "6000.0.67f1": "", "2022.3.22f1": "Editors/Unity.exe" } }).to_string()).unwrap();
+        for version in ["6000.0.67f1", "2022.3.22f1"] {
+            let hints = hints_in(version, Some(&hub), &[], &vcc);
+            assert!(hints.iter().all(|(p, _)| p.is_absolute()), "{hints:?}");
+            assert!(hints.is_empty(), "{hints:?}");
+        }
+        assert_eq!(find_editor_in("6000.0.67f1", Some(&hub), &[], &vcc), None);
+        // A real folder named in it: its version's program, from that folder.
+        let editors = temp.path().join("Editors");
+        let program = editor_in_folder(&editors.join("6000.0.67f1"));
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(&program, "stand-in").unwrap();
+        std::fs::write(hub.join("secondaryInstallPath.json"), serde_json::json!(editors).to_string()).unwrap();
+        let hints = hints_in("6000.0.67f1", Some(&hub), &[], &vcc);
+        assert_eq!(hints, vec![(program.clone(), crate::unity6::editors::Hint::HubSecondary)]);
+        assert_eq!(find_editor_in("6000.0.67f1", Some(&hub), &[], &vcc), Some(program), "found, its version unread: usable, not verified");
+        assert_eq!(find_editor_in("2022.3.22f1", Some(&hub), &[], &vcc), None, "only the version asked for");
     }
 }

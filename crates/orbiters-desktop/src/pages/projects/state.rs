@@ -34,6 +34,8 @@ pub(super) enum Modal {
     Duplicate(PathBuf),
     /// A package change that conflicted, and the plan solving it.
     Conflict,
+    /// Try on Unity 6, for the project in this folder.
+    Unity6(PathBuf),
 }
 /// The Duplicate dialog's choices: the copy's name and where it goes, Library taken along, and what was found of that
 /// place (on a worker, when they change).
@@ -310,6 +312,8 @@ pub struct State {
     pub(super) scroll_fix: Option<f32>,
     /// Whether a scan ran last frame (its final sort is followed too).
     pub(super) was_scanning: bool,
+    /// VRChat's move to Unity 6: standings, trials, editors, the Try on Unity 6 sheet (`unity6`).
+    pub(super) u6: super::unity6::U6,
 }
 impl Default for State {
     fn default() -> Self {
@@ -452,6 +456,7 @@ impl Default for State {
             scroll_anchor: None,
             scroll_fix: None,
             was_scanning: false,
+            u6: Default::default(),
         }
     }
 }
@@ -460,6 +465,9 @@ impl Drop for State {
         self.cancel.store(true, Ordering::Relaxed);
         self.copy_cancel.store(true, Ordering::Relaxed);
         self.size_cancel.store(true, Ordering::Relaxed);
+        if let Some(run) = &self.u6.run {
+            run.cancel.store(true, Ordering::Relaxed);
+        }
     }
 }
 /// Mixer's package, from the Orbiters repository.
@@ -687,6 +695,7 @@ impl State {
             self.refresh(ctx, false);
         }
         self.poll_thumbs(ctx);
+        self.poll_unity6(ctx, cx);
         let environment = crate::controller::vrchat_data::Scope::of(cx.snap);
         // Another account or VRChat session: every picture is asked for again, the ones shown staying until their
         // replacements arrive (a sign-in must not blank the page's covers first).

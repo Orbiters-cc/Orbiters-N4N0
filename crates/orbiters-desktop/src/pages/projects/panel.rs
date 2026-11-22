@@ -97,6 +97,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
             let top = ui.cursor().top();
             hero(ui, cx, state, &project, !split.docked);
             super::storage_card::card(ui, state, &project);
+            super::unity6_card::card(ui, cx, state, &project);
             if state.modal.is_none() {
                 super::ui::errors(ui, state, "panel");
             }

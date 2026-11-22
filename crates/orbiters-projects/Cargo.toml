@@ -13,6 +13,10 @@ dirs.workspace = true
 uuid.workspace = true
 time.workspace = true
 orbiters-core.workspace = true
+# The release key a served Unity 6 release list is checked against (unity6::matrix), and its Ed25519 check.
+orbiters-update = { workspace = true, features = ["signing"] }
+ring = "0.17"
+base64 = "0.22"
 vrc-get-vpm = { version = "=0.0.17", features = ["experimental-project-management", "experimental-unity-management"] }
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "time", "io-util"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }

@@ -20,6 +20,7 @@ pub mod size;
 pub mod storage;
 pub mod suggestions;
 pub mod templates;
+pub mod unity6;
 pub mod updates;
 pub mod vpm;
 mod vpm_http;
@@ -318,13 +319,12 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
         "{}",
         tr!("Something else holds {name}'s lock (its Temp/UnityLockfile): Unity still quitting, or Orbiters repairing its storage. Try again in a moment.", name = project.name)
     );
-    anyhow::ensure!(
-        !project.unity.is_empty(),
-        "{}",
-        tr!("{name} does not say which Unity version it uses (ProjectSettings/ProjectVersion.txt).", name = project.name)
-    );
-    let editor = discovery::find_editor(&project.unity)
-        .ok_or_else(|| anyhow::anyhow!("{}", tr!("Unity {version} is not installed. Open Unity Hub to install this version.", version = project.unity)))?;
+    // Read again now, not as the scan saw it: Creator Companion or another tool may have changed it since (M6).
+    let unity = unity6::standing::EditorStamp::read(&project.path).text;
+    anyhow::ensure!(!unity.is_empty(), "{}", tr!("{name} does not say which Unity version it uses (ProjectSettings/ProjectVersion.txt).", name = project.name));
+    // Only that exact editor: another one would upgrade or downgrade the project (a Unity 6 project never goes to 2022).
+    let editor = choose_editor(&unity, unity6::editors::find(&unity))?;
+    let project = &discovery::Project { unity, ..project.clone() };
     // Only ever instant. A problem with it must not stop Unity opening: the panel's warning says what to do about the disk.
     let moved = storage::preflight(&project.path).unwrap_or_else(|e| {
         eprintln!("the storage check of {} did not finish: {e:#}", project.path.display());
@@ -340,6 +340,21 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
     let started = start_on_mac(&editor, &project.path, START_WATCH, &project.unity);
     started?;
     Ok(Opened { already_open: false, moved })
+}
+
+/// The program Open uses for a project on `unity`: exactly that version (or, said nothing of itself, found where a hint
+/// said); never another one, which is named instead.
+fn choose_editor(unity: &str, found: unity6::editors::Found) -> anyhow::Result<PathBuf> {
+    match found {
+        unity6::editors::Found::Exact(c) | unity6::editors::Found::Unverified(c) => Ok(c.program),
+        unity6::editors::Found::Missing { wrong } => match wrong.first() {
+            Some(other) => anyhow::bail!(
+                "{}",
+                tr!("Unity {version} is not installed: {path} is another version. Open Unity Hub to install {version}.", version = unity, path = other.program.display())
+            ),
+            None => anyhow::bail!("{}", tr!("Unity {version} is not installed. Open Unity Hub to install this version.", version = unity)),
+        },
+    }
 }
 
 /// The editor being started, so that each way it can fail is told as one whole sentence (a sentence cut in pieces cannot be translated).
@@ -382,14 +397,20 @@ impl Starting<'_> {
 /// [`FIRST_SIGHT`] was gone before it could be looked at.
 #[cfg(target_os = "macos")]
 fn start_on_mac(editor: &Path, project: &Path, watch: std::time::Duration, unity: &str) -> anyhow::Result<()> {
+    start_on_mac_with(editor, project, watch, unity, &[])
+}
+
+/// [`start_on_mac`] with more arguments for the editor after the project's (a trial's `-logFile`).
+#[cfg(target_os = "macos")]
+fn start_on_mac_with(editor: &Path, project: &Path, watch: std::time::Duration, unity: &str, extra: &[&std::ffi::OsStr]) -> anyhow::Result<()> {
     use std::process::Stdio;
     let who = Starting { unity, editor };
     let Some(app) = mac::enclosing_app(editor) else {
         let mut command = hidden_command(editor);
-        command.arg("-projectPath").arg(project).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        command.arg("-projectPath").arg(project).args(extra).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         return start_watched(command, watch, who);
     };
-    let answer = mac::start_app(&app).arg("--args").arg("-projectPath").arg(project).output().map_err(|e| who.not_started(e))?;
+    let answer = mac::start_app(&app).arg("--args").arg("-projectPath").arg(project).args(extra).output().map_err(|e| who.not_started(e))?;
     if !answer.status.success() {
         return Err(who.not_started(String::from_utf8_lossy(&answer.stderr).trim()));
     }
@@ -411,18 +432,39 @@ fn start_on_mac(editor: &Path, project: &Path, watch: std::time::Duration, unity
 #[cfg(target_os = "macos")]
 const FIRST_SIGHT: std::time::Duration = std::time::Duration::from_secs(6);
 
+/// Starts `editor` (Unity `unity`) on `project` with a log of its own (`-logFile log`, a Unity 6 trial's attempt), watched
+/// as Open in Unity is: an error when it cannot start or quits at once. The process id, when the system gives it.
+pub fn start_logged(editor: &Path, project: &Path, log: &Path, unity: &str) -> anyhow::Result<Option<u32>> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut command = hidden_command(editor);
+        command.arg("-projectPath").arg(project).arg("-logFile").arg(log);
+        start_watched_id(command, START_WATCH, Starting { unity, editor })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        start_on_mac_with(editor, project, START_WATCH, unity, &[std::ffi::OsStr::new("-logFile"), log.as_os_str()]).map(|()| None)
+    }
+}
+
 /// Starts `command` and watches it for `watch`: a program that could not start, or that quit at once with a failure, is an
 /// error rather than a success said too soon. One still running, or ended well (it handed over to another process), is
 /// started.
-fn start_watched(mut command: std::process::Command, watch: std::time::Duration, who: Starting) -> anyhow::Result<()> {
+fn start_watched(command: std::process::Command, watch: std::time::Duration, who: Starting) -> anyhow::Result<()> {
+    start_watched_id(command, watch, who).map(|_| ())
+}
+
+/// [`start_watched`], with the process id.
+fn start_watched_id(mut command: std::process::Command, watch: std::time::Duration, who: Starting) -> anyhow::Result<Option<u32>> {
     let mut child = command.spawn().map_err(|e| who.not_started(e))?;
+    let pid = Some(child.id());
     let start = std::time::Instant::now();
     while start.elapsed() < watch {
         if let Some(status) = child.try_wait().map_err(|e| who.not_watched(e))? {
             if !status.success() {
                 return Err(who.quit(Some(status)));
             }
-            return Ok(());
+            return Ok(pid);
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -431,7 +473,7 @@ fn start_watched(mut command: std::process::Command, watch: std::time::Duration,
     std::thread::spawn(move || {
         let _ = child.wait();
     });
-    Ok(())
+    Ok(pid)
 }
 
 pub fn open_hub() -> anyhow::Result<()> {
@@ -604,6 +646,29 @@ mod open_tests {
         assert_eq!(within(Duration::from_millis(50), || std::thread::sleep(Duration::from_secs(5))), None);
         assert!(start.elapsed() < Duration::from_secs(2));
         assert_eq!(within(Duration::from_secs(5), || 7), Some(7));
+    }
+
+    /// M6/M8: Open goes by the version the project's file says at the click, and never uses another editor.
+    #[test]
+    fn open_refuses_another_editor_and_reads_the_version_at_the_click() {
+        use unity6::editors::{Candidate, Check, Found, Hint};
+        let candidate = |program: &str, check: Check| Candidate { program: PathBuf::from(program), hint: Hint::HubFolder, check, identity: None, modules: Default::default() };
+        let wrong = candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Wrong("it is Unity 2022.3.22f1, not 6000.0.67f1".into()));
+        let error = format!("{:#}", choose_editor("6000.0.67f1", Found::Missing { wrong: vec![wrong] }).unwrap_err());
+        assert!(error.contains("another version") && error.contains("6000.0.67f1"), "{error}");
+        assert!(format!("{:#}", choose_editor("6000.0.67f1", Found::Missing { wrong: vec![] }).unwrap_err()).contains("not installed"));
+        let exact = candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Verified);
+        assert_eq!(choose_editor("6000.0.67f1", Found::Exact(exact)).unwrap(), PathBuf::from("C:/Hub/6000.0.67f1/Editor/Unity.exe"));
+        // The scan saw 2022; Creator Companion changed the file since: the file is what counts, and a file naming no
+        // version stops Open before any editor is looked for.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("ProjectSettings")).unwrap();
+        std::fs::write(temp.path().join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 6000.0.67f1\n").unwrap();
+        assert_eq!(unity6::standing::EditorStamp::read(temp.path()).text, "6000.0.67f1");
+        std::fs::write(temp.path().join("ProjectSettings/ProjectVersion.txt"), "nothing\n").unwrap();
+        let project = discovery::Project { name: "Changed".into(), path: temp.path().to_path_buf(), unity: "2022.3.22f1".into(), ..Default::default() };
+        let error = format!("{:#}", open_now(&project).unwrap_err());
+        assert!(error.contains("does not say which Unity version"), "{error}");
     }
 
     #[test]

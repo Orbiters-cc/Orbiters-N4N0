@@ -290,6 +290,8 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     } else {
         grid(ui, cx, state, &registered);
     }
+    // Unity 6 trials not (yet) projects: being made, stopped, or not where they were (AGENTS.md: a retained copy is visible).
+    super::unity6_card::job_rows(ui, state);
     if !proposals.is_empty() {
         ui.add_space(32.0);
         section_title(ui, tr("Found on this computer"), Some(proposals_n), Some(tr("Add one to manage its avatars and packages here, in VCC and in ALCOM.")));
@@ -395,6 +397,10 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
         );
     } else if hidden {
         badge(&pt, ui, pos2(cover.right() - 12.0, cover.top() + 12.0), Some(icons::EYE_SLASH), tr("Hidden"), theme::black(0.6), theme::FG_2, true);
+    } else if state.u6.trial_at(&p.path).is_some() {
+        badge(&pt, ui, pos2(cover.right() - 12.0, cover.top() + 12.0), Some(icons::COPY), tr("Unity 6 trial"), theme::black(0.6), theme::ACCENT, true);
+    } else if !state.u6.trials_of(&p.path).is_empty() {
+        badge(&pt, ui, pos2(cover.right() - 12.0, cover.top() + 12.0), Some(icons::COPY), tr("Has a Unity 6 trial"), theme::black(0.6), theme::FG_2, true);
     }
     let x = r.left() + 16.0;
     widgets::text_truncated(&pt, pos2(x, cover.bottom() + 22.0), Align2::LEFT_CENTER, &Txt::new(&p.name, 15.0).weight(weight::SEMIBOLD), r.width() - 32.0);
@@ -408,7 +414,7 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
     let mut px = x;
     let py = cover.bottom() + 70.0;
     let pills = [
-        (Some(icons::CUBE), p.unity.clone()),
+        (Some(icons::CUBE), state.u6.standing(&p.path).and_then(super::unity6_card::pill).unwrap_or_else(|| p.unity.clone())),
         if p.avatars.is_empty() {
             (Some(icons::GLOBE), if p.kind == orbiters_projects::discovery::Kind::Worlds { tr("World").into() } else { tr("No avatar yet").into() })
         } else {

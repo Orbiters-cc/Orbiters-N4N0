@@ -19,7 +19,7 @@ use super::tools::{paused_failure, Answer};
 use super::Call;
 use orbiters_core::account::Server;
 use orbiters_projects::discovery::{self, Kind, Project, Scan};
-use orbiters_projects::{blender, coherent, editor, git, hidden, missing, network, size, storage, templates, updates, vpm};
+use orbiters_projects::{blender, coherent, editor, git, hidden, missing, network, size, storage, templates, unity6, updates, vpm};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -221,6 +221,7 @@ pub const GUIDE: &str = "# Unity projects\n\n\
 These tools do what Orbiters - N4N0's Unity projects tab does, in the same shared VCC environment as Creator Companion and ALCOM, so what you change shows there and in the tab.\n\n\
 - `unity_list_projects` lists the projects found on this computer (`listed` ones are in VCC's list, the others were found on a disk). `refresh: true` looks again in a job.\n\
 - `unity_get_project` with a project's `path`: its installed packages, updates (and those held back, with why), Update all's plan, Unity's editor, its disk, Git, Blender files, previews and worlds.\n\
+- Unity 6: each project's `unity_line` says where it stands from its own files (`on_2022`, `on_unity6`, `editor_and_sdk_differ`, `sdk_missing`, ...), its SDK, whether that is a beta, and the Unity 6 trials Orbiters recorded of it (`trials`) or as it (`trial_of`). These are facts to read: no tool migrates a project, opens Unity 6 or uploads. A trial keeps its original's content IDs (`upload_warning`): once uploaded from Unity 6, that content can no longer be uploaded from 2022, so say so before suggesting an upload. The person starts a trial in the tab (Try on Unity 6), and Creator Companion migrates it.\n\
 - Packages: `unity_find_packages` for what the repositories offer; `unity_change_packages` to install (a version or the newest), remove, update one, update all, or restore what is missing. A change that conflicts comes back with the plan that makes it coherent: show it to the person if it removes anything, then `apply_plan`. A change that fails because no repository lists a package: `unity_missing_packages` looks for the repositories that have it and adds them.\n\
 - `unity_repositories` lists, adds (by URL), removes, turns on and off, and downloads again the VPM repositories; `suggest` searches Orbiters' catalog of known ones.\n\
 - `unity_editor` opens a project in Unity, brings it forward, asks it to Save & Exit, or (with `confirm`) kills it.\n\
@@ -379,6 +380,52 @@ impl Editors {
     }
 }
 
+/// The Unity 6 transition's read-only facts of the project at `path` (REQUEST22): its standing from its own files, and
+/// the trials Orbiters recorded of it or as it. No tool migrates, opens Unity 6 or uploads.
+fn unity_line_json(path: &Path, matrix: &unity6::matrix::Matrix, trials: &[(unity6::trial::Job, unity6::trial::Status)]) -> Value {
+    use unity6::standing::{Content, State};
+    let s = unity6::standing::read(path, matrix);
+    let state = match s.state {
+        State::NotVrchat => "not_vrchat",
+        State::LegacySdk => "legacy_sdk_in_assets",
+        State::EditorUnknown => "editor_unknown",
+        State::SdkMissing => "sdk_missing",
+        State::SdkIncomplete => "sdk_incomplete",
+        State::On2022 => "on_2022",
+        State::OnUnity6 => "on_unity6",
+        State::Disagree => "editor_and_sdk_differ",
+        State::OtherLine => "other_line",
+        State::LineUnknown => "line_unknown",
+    };
+    let key = discovery::key(path);
+    let as_trial = trials.iter().find(|(j, s)| !matches!(s, unity6::trial::Status::Replaced) && (discovery::key(&j.unity6().path) == key || discovery::key(&j.trial.path) == key));
+    let of_it: Vec<Value> = trials
+        .iter()
+        .filter(|(j, _)| discovery::key(&j.source.path) == key)
+        .map(|(j, st)| json!({ "trial": j.unity6().path, "status": format!("{st:?}"), "made": j.created }))
+        .collect();
+    let mut out = json!({
+        "state": state,
+        "editor": s.editor.text,
+        "editor_revision": s.editor.revision,
+        "sdk_installed": s.sdk.installed,
+        "sdk_locked": s.sdk.locked,
+        "sdk_requested": s.sdk.requested,
+        "sdk_needs_line": s.sdk.needs,
+        "sdk_missing": s.sdk.missing,
+        "sdk_not_at_locked_version": s.sdk.mismatched,
+        "beta": s.beta,
+        "content": s.sdk.content.map(|c| match c { Content::Avatars => "avatars", Content::Worlds => "worlds", Content::Base => "base" }),
+        "history": if as_trial.is_some() { "a Unity 6 trial Orbiters recorded" } else { "not recorded by Orbiters" },
+        "trial_of": as_trial.map(|(j, st)| json!({ "original": j.source.path, "status": format!("{st:?}"), "made": j.created })),
+        "trials": of_it,
+    });
+    if as_trial.is_some() {
+        out["upload_warning"] = json!("This trial keeps its original's avatar and world IDs: once one is uploaded from Unity 6, VRChat no longer lets it be uploaded from Unity 2022. Test with Build & Test, or give the trial a test ID of its own first.");
+    }
+    out
+}
+
 fn project_json(project: &Project, hidden: &std::collections::BTreeSet<String>, editors: &Editors) -> Value {
     let size = size::lookup(&project.path).size;
     let things = |list: &[orbiters_projects::avatars::Avatar]| -> Vec<Value> {
@@ -398,6 +445,17 @@ fn project_json(project: &Project, hidden: &std::collections::BTreeSet<String>, 
         "unity_editor": editors.json(&project.path),
         "size": size.map(|s| json!({ "total": s.total, "library": s.library, "files": s.files })),
     })
+}
+
+/// The release list kept in app data and the trials recorded there (read only, no network).
+fn unity6_facts() -> (unity6::matrix::Matrix, Vec<(unity6::trial::Job, unity6::trial::Status)>) {
+    let dir = orbiters_projects::data_dir();
+    let matrix = unity6::matrix::load(&dir, unity6::key().as_ref());
+    let trials = unity6::trial::jobs(&dir).into_iter().map(|j| {
+        let s = unity6::trial::status(&j, false, &matrix);
+        (j, s)
+    }).collect();
+    (matrix, trials)
 }
 
 fn version_is_prerelease(version: &str) -> bool {
@@ -683,12 +741,19 @@ impl Projects {
         let include_hidden = args["include_hidden"].as_bool().unwrap_or(false);
         let query = text(args, "query").map(str::to_lowercase);
         let editors = Editors::look();
+        let (matrix, trials) = unity6_facts();
         let projects: Vec<Value> = scan
             .projects
             .iter()
             .filter(|p| include_hidden || !hidden::contains(&hidden, &p.path))
             .filter(|p| query.as_ref().is_none_or(|q| orbiters_core::search::Query::new(q).matches(&p.name) || p.path.to_string_lossy().to_lowercase().contains(q)))
-            .map(|p| project_json(p, &hidden, &editors))
+            .map(|p| {
+                let mut v = project_json(p, &hidden, &editors);
+                if !p.missing {
+                    v["unity_line"] = unity_line_json(&p.path, &matrix, &trials);
+                }
+                v
+            })
             .collect();
         let scanning = self.jobs.lock().unwrap().list.iter().any(|j| j.lane == Lane::Scan && !j.done());
         Ok(json!({
@@ -707,6 +772,13 @@ impl Projects {
         let hidden = hidden::load();
         let editors = Editors::look();
         let mut out = project_json(&project, &hidden, &editors);
+        if !project.missing {
+            let (matrix, trials) = unity6_facts();
+            out["unity_line"] = unity_line_json(&project.path, &matrix, &trials);
+            if let Some(t) = matrix.unity6_target() {
+                out["unity6_target"] = json!({ "sdk": t.sdk, "unity": t.unity, "changeset": t.changeset, "channel": "beta", "hub_link": t.hub_link(), "guide": "https://vrc-beta-docs.netlify.app/sdk/upgrade/unity-6000/" });
+            }
+        }
         if project.missing {
             out["next"] = json!("Its folder is missing: connect its disk, or remove it from the list with unity_manage_project.");
             return Ok(out);
@@ -1902,5 +1974,59 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orbiters-bridge-projects-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+}
+
+#[cfg(test)]
+mod unity6_tests {
+    use super::*;
+    use unity6::trial::{Job, Phase, Place, Status, Target};
+
+    fn project(at: &Path, editor: &str, sdk: &str, line: &str) {
+        std::fs::create_dir_all(at.join("ProjectSettings")).unwrap();
+        std::fs::create_dir_all(at.join("Packages/com.vrchat.base")).unwrap();
+        std::fs::create_dir_all(at.join("Packages/com.vrchat.avatars")).unwrap();
+        std::fs::write(at.join("ProjectSettings/ProjectVersion.txt"), format!("m_EditorVersion: {editor}\n")).unwrap();
+        let lock = json!({ "dependencies": { "com.vrchat.avatars": { "version": sdk } }, "locked": { "com.vrchat.base": { "version": sdk }, "com.vrchat.avatars": { "version": sdk } } });
+        std::fs::write(at.join("Packages/vpm-manifest.json"), lock.to_string()).unwrap();
+        for name in ["com.vrchat.base", "com.vrchat.avatars"] {
+            std::fs::write(at.join("Packages").join(name).join("package.json"), json!({ "name": name, "version": sdk, "unity": line }).to_string()).unwrap();
+        }
+    }
+
+    /// M14: the bridge reads the same standing as the tab, and the trials' record; it changes nothing.
+    #[test]
+    fn a_projects_unity_line_comes_from_its_files_and_the_trials_record() {
+        let temp = std::env::temp_dir().join(format!("orbiters-bridge-unity6-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let original = temp.join("Avatar");
+        let trial = temp.join("Avatar (Unity 6)");
+        project(&original, "2022.3.22f1", "3.10.6", "2022.3");
+        project(&trial, "6000.0.67f1", "3.11.0-beta.1", "6000.0");
+        let m = unity6::matrix::Matrix::built_in();
+        let v = unity_line_json(&original, &m, &[]);
+        assert_eq!((v["state"].as_str(), v["sdk_installed"].as_str(), v["beta"].as_bool(), v["content"].as_str()), (Some("on_2022"), Some("3.10.6"), Some(false), Some("avatars")));
+        assert_eq!(v["history"], "not recorded by Orbiters");
+        assert!(v["upload_warning"].is_null() && v["trial_of"].is_null());
+        let job = Job {
+            id: "t1".into(),
+            created: 1_763_800_000,
+            source: Place { path: original.clone(), id: None, name: "Avatar".into() },
+            trial: Place { path: trial.clone(), id: None, name: "Avatar (Unity 6)".into() },
+            phase: Phase::Prepared,
+            target: Target { sdk: "3.11.0-beta.1".into(), unity: "6000.0.67f1".into(), changeset: "78a1c2bbeb6a".into() },
+            error: None,
+            attempts: vec![],
+            migrated: None,
+        };
+        let trials = vec![(job, Status::OnUnity6)];
+        let v = unity_line_json(&original, &m, &trials);
+        assert_eq!(v["trials"].as_array().unwrap().len(), 1);
+        let v = unity_line_json(&trial, &m, &trials);
+        assert_eq!((v["state"].as_str(), v["beta"].as_bool()), (Some("on_unity6"), Some(true)));
+        assert_eq!(v["trial_of"]["original"], json!(original));
+        assert!(v["upload_warning"].as_str().unwrap().contains("Unity 2022"));
+        assert!(GUIDE.contains("unity_line") && GUIDE.contains("no tool migrates"));
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

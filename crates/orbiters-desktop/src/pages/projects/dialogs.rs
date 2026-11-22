@@ -60,6 +60,10 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let (t, s) = super::conflict::head(state);
             (glyph::PACKAGE, t, s, 620.0)
         }
+        Modal::Unity6(path) => {
+            let (t, s) = super::unity6_sheet::head(state, path);
+            (icons::CUBE, t, s, 600.0)
+        }
     };
     let step = match &modal {
         Modal::Repos => 0,
@@ -69,6 +73,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         Modal::Setup => 4,
         Modal::Duplicate(_) => 5,
         Modal::Conflict => 6,
+        Modal::Unity6(_) => 7 + state.u6.sheet.step as usize,
     };
     let creating = matches!(modal, Modal::New | Modal::Duplicate(_)) && state.running() || (modal == Modal::Conflict && state.conflict.as_ref().is_some_and(|c| c.solving.running()));
     let resp = Dialog::new(id, state.modal_origin, &title)
@@ -87,6 +92,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Modal::Setup => setup_steps(ui, state),
                 Modal::Duplicate(path) => super::duplicate::body(ui, state, path),
                 Modal::Conflict => super::conflict::body(ui, state),
+                Modal::Unity6(path) => super::unity6_sheet::body(ui, cx, state, path),
             }),
             Part::Footer => match &modal {
                 Modal::Repos => {}
@@ -96,6 +102,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Modal::Setup => setup_footer(ui, cx, state),
                 Modal::Duplicate(path) => super::duplicate::footer(ui, state, path),
                 Modal::Conflict => super::conflict::footer(ui, state),
+                Modal::Unity6(path) => super::unity6_sheet::footer(ui, cx, state, path),
             },
         });
     if resp.closed {

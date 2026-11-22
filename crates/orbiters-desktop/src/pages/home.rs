@@ -1527,7 +1527,7 @@ fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, own_vrchat: bool, acts: &mut Vec
     top(ui, cx, tr("Previous instances"), &layout::text(menu, Content::InstancesTitle), acts);
     let mut index = 1;
     if let Some(why) = menu.invite_vrchat.as_deref().filter(|_| !menu.invite_waiting) {
-        section_up_to(ui, cx, f32::INFINITY, index, icons::SIGN_IN, tr("Connect your VRChat account"), Some(why), |ui| {
+        section_up_to(ui, cx, f32::INFINITY, index, icons::SIGN_IN, tr("Invite me needs your VRChat account"), Some(why), |ui| {
             if Button::new(tr("Connect VRChat")).icon(icons::SIGN_IN).variant(Variant::Primary).show(ui).clicked() {
                 acts.push(Act::VrchatAccount);
             }

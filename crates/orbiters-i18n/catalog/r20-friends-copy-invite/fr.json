@@ -3,7 +3,6 @@
   "favourite group\u0004Other": "Autres",
   "Copy the world's name": "Copier le nom du monde",
   "Invite sent: look at your VRChat notifications": "Invitation envoyée : regarde tes notifications VRChat",
-  "Orbiters' account could not invite you ({reason}). Connect your VRChat account in Orbiters - N4N0: the invite then comes from it.": "Le compte d’Orbiters n’a pas pu t’inviter ({reason}). Connecte ton compte VRChat dans Orbiters - N4N0 : l’invitation viendra alors de lui.",
   "Only an instance of your Previous instances can be invited to from here.": "D’ici, on ne peut être invité que dans une de tes instances précédentes.",
   "This instance has closed: VRChat can no longer invite you to it.": "Cette instance est fermée : VRChat ne peut plus t’y inviter.",
   "This instance is full right now. Try again later, or pick another one.": "Cette instance est pleine pour le moment. Réessaie plus tard ou choisis-en une autre.",
@@ -12,6 +11,7 @@
   "Connect VRChat": "Connecter VRChat",
   "Opens Orbiters on the computer at Settings, VRChat account: your invites then come from your own account.": "Ouvre Orbiters sur l’ordinateur dans Paramètres, Compte VRChat : tes invitations viendront alors de ton propre compte.",
   "An invite to the instance you were last in here.": "Une invitation dans l’instance où tu étais la dernière fois ici.",
-  "Connect your VRChat account": "Connecte ton compte VRChat",
-  "Your VRChat account invites you back: look at your VRChat notifications": "Ton compte VRChat t’y invite à nouveau : regarde tes notifications VRChat"
+  "Your VRChat account invites you back: look at your VRChat notifications": "Ton compte VRChat t’y invite à nouveau : regarde tes notifications VRChat",
+  "Connect your VRChat account here and the invite comes from it. Orbiters' account could not invite you: {reason}": "Connecte ton compte VRChat ici et l’invitation viendra de lui. Le compte d’Orbiters n’a pas pu t’inviter : {reason}",
+  "Invite me needs your VRChat account": "L’invitation demande ton compte VRChat"
 }

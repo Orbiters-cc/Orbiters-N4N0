@@ -3133,7 +3133,7 @@ pub(crate) fn invite_route(host: &dyn crate::Host, location: &str) -> orbiters_n
     };
     match answer {
         InviteAnswer::Failed { message } => InviteAnswer::NeedsVrchat {
-            message: tr!("Orbiters' account could not invite you ({reason}). Connect your VRChat account in Orbiters - N4N0: the invite then comes from it.", reason = message.trim_end_matches('.')),
+            message: tr!("Connect your VRChat account here and the invite comes from it. Orbiters' account could not invite you: {reason}", reason = message),
         },
         other => other,
     }

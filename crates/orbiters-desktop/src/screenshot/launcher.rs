@@ -552,10 +552,10 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
         }
         let invites: Vec<String> = data.invites.iter().filter(|i| i.kind == InviteKind::Invite).map(|i| i.id.clone()).collect();
         state.set_data(std::sync::Arc::new(data));
-        state.stand_in(NOW, if name == "launcher-sections-search" { "lo" } else { "" });
+        state.stand_in(NOW, if name == "launcher-sections-search" { "moth" } else { "" });
         match name {
             "launcher-sections-folded" => state.stand_in_folded(&["group_1", "in-game", "offline"]),
-            // Offline folded as it starts.
+            // In game folded, Offline opened (it starts folded): the website's and the offline ones, by name.
             "launcher-sections-scrolled" => state.stand_in_folded(&["in-game"]),
             _ => {}
         }

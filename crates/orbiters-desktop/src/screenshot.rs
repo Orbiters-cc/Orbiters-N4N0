@@ -2976,7 +2976,7 @@ fn invite_answer(name: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
         "home-invite-rate" => InviteAnswer::Failed { message: orbiters_core::vrchat_api::Error::RateLimited(std::time::Duration::from_secs(30)).to_string() },
         "home-invite-expired" => InviteAnswer::NeedsVrchat { message: orbiters_core::vrchat_api::Error::Unauthorized.to_string() },
         "home-invite-orbiters" => InviteAnswer::NeedsVrchat {
-            message: orbiters_i18n::tr!("Orbiters' account could not invite you ({reason}). Connect your VRChat account in Orbiters - N4N0: the invite then comes from it.", reason = "VRChat refused this invite. The instance may have closed"),
+            message: orbiters_i18n::tr!("Connect your VRChat account here and the invite comes from it. Orbiters' account could not invite you: {reason}", reason = "VRChat refused this invite. The instance may have closed."),
         },
         _ => return None,
     })

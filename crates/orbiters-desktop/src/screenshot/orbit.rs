@@ -2132,7 +2132,7 @@ pub(super) fn r19_history_shots(out: &Path) -> anyhow::Result<()> {
         r19_scene(&format!("r19-youtube-results-{form}"), out, hd, &results, None, false)?;
         r19_scene(&format!("r19-youtube-results-history-pointed-{form}"), out, hd, &results, Some(Action::VideoHistory), false)?;
         // History: many, the second's link just copied; scrolled far down; at its end.
-        let page = Facts { sheet: Some(Sheet::VideoHistory), sheet_title: "History".into(), history: history(0.0, Some(1)), ..base.clone() };
+        let page = Facts { sheet: Some(Sheet::VideoHistory), sheet_title: "Video history".into(), history: history(0.0, Some(1)), ..base.clone() };
         r19_scene(&format!("r19-history-{form}"), out, hd, &page, None, false)?;
         let scroll = 41.0 * 128.0;
         r19_scene(&format!("r19-history-scrolled-{form}"), out, hd, &Facts { gallery_scroll: scroll, history: history(scroll, None), ..page.clone() }, None, false)?;

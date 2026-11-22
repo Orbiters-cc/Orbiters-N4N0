@@ -34,7 +34,7 @@ pub const ON_MENU: usize = usize::MAX;
 const LOOK_EVERY: Duration = Duration::from_secs(5);
 
 /// The page's words.
-pub const TITLE: &str = mark("History");
+pub const TITLE: &str = mark("Video history");
 pub const OPEN_WHY: &str = mark("Every video the worlds' players played, to copy or drop again.");
 pub const EMPTY_WHY: &str = mark("Videos the worlds' video players play in VRChat show up here, ready to copy or drop in a world again.");
 

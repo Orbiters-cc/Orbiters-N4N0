@@ -3,7 +3,7 @@
 //! motion … into a chat layout so the discussion can continue").
 //!
 //! A bar in the middle of the title strip ([`layout`]) takes what is typed to N4N0, on every page. Typing in it (or
-//! returning to a conversation, or Ctrl+K / ⌘K with one under way) grows that same shape, in one spring ([`morph`]),
+//! returning to a conversation, or Ctrl+J / ⌘J with one under way) grows that same shape, in one spring ([`morph`]),
 //! into the chat: anchored where the bar is, centred, over the page, which blurs and darkens behind it as it grows
 //! ([`orbiters_ui::backdrop`]), more next to the chat than far from it. The text field rides from the bar down to the
 //! chat's composer as it grows. Esc, a press beside the chat or its close button shrink it back into the bar the same
@@ -30,8 +30,9 @@ use orbiters_i18n::tr;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{anim, icons, widgets};
 
-/// Ctrl+K (⌘K on a Mac): to the bar from anywhere in the window. Nothing else of the window uses it.
-pub const SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::K);
+/// Ctrl+J (⌘J on a Mac): to the bar from anywhere in the window. Nothing else of the window uses it (Ctrl+K is the
+/// Settings page's search, REQUEST21 2).
+pub const SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::J);
 
 /// The text field's id: one field, in the bar or in the chat's composer.
 pub fn field_id() -> Id {
@@ -517,9 +518,9 @@ fn paint_surface(ui: &Ui, rect: Rect, radius: f32, k: f32, focused: bool, hovere
 /// The shortcut as the keyboard shows it.
 pub fn shortcut_text() -> &'static str {
     if cfg!(target_os = "macos") {
-        "⌘K"
+        "⌘J"
     } else {
-        "Ctrl K"
+        "Ctrl J"
     }
 }
 

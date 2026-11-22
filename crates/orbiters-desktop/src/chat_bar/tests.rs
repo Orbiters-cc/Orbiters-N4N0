@@ -404,9 +404,9 @@ impl Window {
 fn the_shortcut_takes_the_keyboard_to_the_bar_and_typing_grows_the_chat() {
     let mut w = Window::new(ready(), 1280.0);
     assert!(!w.focused() && !w.chat().shows());
-    w.key(Key::K, Modifiers::COMMAND);
+    w.key(Key::J, Modifiers::COMMAND);
     w.frame(Vec::new());
-    assert!(w.focused(), "Ctrl+K: the bar has the keyboard");
+    assert!(w.focused(), "Ctrl+J: the bar has the keyboard");
     assert!(!w.chat().is_open(), "nothing typed, no conversation: still the bar");
     w.type_text("hello");
     assert_eq!(w.chat().draft(), "hello");
@@ -419,9 +419,22 @@ fn the_shortcut_takes_the_keyboard_to_the_bar_and_typing_grows_the_chat() {
 }
 
 #[test]
+fn ctrl_k_stays_the_settings_search_s_and_ctrl_j_is_the_chat_s_on_every_page() {
+    let mut w = Window::new(ready(), 1280.0);
+    w.app.set_page(Page::Settings, w.time);
+    w.settle();
+    w.key(Key::K, Modifiers::COMMAND);
+    w.frame(Vec::new());
+    assert!(!w.focused() && !w.chat().shows(), "Ctrl+K on Settings is its search's");
+    w.key(Key::J, Modifiers::COMMAND);
+    w.frame(Vec::new());
+    assert!(w.focused(), "Ctrl+J: the bar, on Settings too");
+}
+
+#[test]
 fn shift_enter_starts_a_line_and_a_composing_input_method_keeps_its_enter() {
     let mut w = Window::new(ready(), 1280.0);
-    w.key(Key::K, Modifiers::COMMAND);
+    w.key(Key::J, Modifiers::COMMAND);
     w.type_text("first");
     w.key(Key::Enter, Modifiers::SHIFT);
     w.type_text("second");
@@ -439,7 +452,7 @@ fn shift_enter_starts_a_line_and_a_composing_input_method_keeps_its_enter() {
 #[test]
 fn esc_and_a_press_beside_the_chat_shrink_it_back_and_keep_what_was_typed() {
     let mut w = Window::new(ready(), 1280.0);
-    w.key(Key::K, Modifiers::COMMAND);
+    w.key(Key::J, Modifiers::COMMAND);
     w.type_text("half a thought");
     for _ in 0..4 {
         w.frame(Vec::new());
@@ -465,7 +478,7 @@ fn esc_and_a_press_beside_the_chat_shrink_it_back_and_keep_what_was_typed() {
 #[test]
 fn the_page_gets_no_keys_presses_or_wheel_while_the_chat_has_them() {
     let mut w = Window::new(ready(), 1280.0);
-    w.key(Key::K, Modifiers::COMMAND);
+    w.key(Key::J, Modifiers::COMMAND);
     w.type_text("x");
     w.settle();
     let panel = layout::panel(Rect::from_min_size(Pos2::ZERO, w.size));
@@ -515,15 +528,15 @@ fn a_conversation_under_way_opens_from_the_bar_and_stays_across_pages() {
     w.app.set_page(Page::Home, w.time);
     w.settle();
     assert_eq!(w.chat().draft(), "thanks");
-    w.key(Key::K, Modifiers::COMMAND);
+    w.key(Key::J, Modifiers::COMMAND);
     w.settle();
-    assert!(w.chat().is_open(), "Ctrl+K with a conversation: the chat itself");
+    assert!(w.chat().is_open(), "Ctrl+J with a conversation: the chat itself");
 }
 
 #[test]
 fn a_streamed_answer_flows_in_and_the_window_rests_after() {
     let mut w = Window::new(ready(), 1280.0);
-    w.key(Key::K, Modifiers::COMMAND);
+    w.key(Key::J, Modifiers::COMMAND);
     w.type_text("tell me");
     w.key(Key::Enter, Modifiers::NONE);
     w.backend.set(|s| {
@@ -560,7 +573,7 @@ fn a_question_is_answered_with_its_buttons() {
     snap.n4n0.lines = vec![line(N4n0Who::You, "Boop Sam", 1), line(N4n0Who::Note, question, 2)].into();
     snap.n4n0.confirmations = vec![N4n0Confirmation { id: "7".into(), title: String::new(), summary: question.into(), approve_url: format!("{}7", orbiters_n4n0::status::LOCAL_APPROVAL) }];
     let mut w = Window::new(snap, 1280.0);
-    w.key(Key::K, Modifiers::COMMAND);
+    w.key(Key::J, Modifiers::COMMAND);
     w.settle();
     let (yes, on) = orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("Yes, do it")).expect("Yes is drawn");
     assert!(on);
@@ -588,7 +601,7 @@ fn signed_out_and_assistant_off_say_so_and_lead_to_the_fix() {
     let mut off = ready();
     off.settings.n4n0.assistant = false;
     let mut w = Window::new(off, 1280.0);
-    w.key(Key::K, Modifiers::COMMAND);
+    w.key(Key::J, Modifiers::COMMAND);
     w.settle();
     let (on, _) = orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("Turn on the assistant")).expect("Turn on is offered");
     w.press(on.center());

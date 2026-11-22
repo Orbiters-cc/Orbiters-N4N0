@@ -83,9 +83,9 @@ impl<'a> Shot<'a> {
         Ok(image)
     }
 
-    /// The bar takes the keyboard (Ctrl+K) and `text` is typed into it.
+    /// The bar takes the keyboard (Ctrl+J) and `text` is typed into it.
     fn type_in(&mut self, text: &str) -> anyhow::Result<()> {
-        self.frame(vec![key(Key::K, Modifiers::COMMAND)], false)?;
+        self.frame(vec![key(Key::J, Modifiers::COMMAND)], false)?;
         self.frame(Vec::new(), false)?;
         self.frame(vec![Event::Text(text.into())], false)?;
         Ok(())
@@ -181,7 +181,7 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
         // Focused, then a conversation to go back to (an answer came while it was closed).
         let mut s = Shot::new(gpu, base.clone(), Page::Home, wide, scale);
         s.wait(1.2)?;
-        s.frame(vec![key(Key::K, Modifiers::COMMAND)], false)?;
+        s.frame(vec![key(Key::J, Modifiers::COMMAND)], false)?;
         s.wait(0.3)?;
         s.shoot(out, "bar-focused")?;
         let mut talked = base.clone();
@@ -202,7 +202,7 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
         conversation(&mut talked);
         let mut s = Shot::new(gpu, talked, Page::Home, wide, scale);
         s.wait(1.6)?;
-        s.frame(vec![key(Key::K, Modifiers::COMMAND)], false)?;
+        s.frame(vec![key(Key::J, Modifiers::COMMAND)], false)?;
         s.frame(Vec::new(), false)?;
         let mut frames = Vec::new();
         frames.push(s.shoot(out, "morph-open-00")?);
@@ -221,7 +221,7 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
         sheet(&frames, &out.join("morph-close-strip.png"))?;
         // Reversed half-way: typed, then Esc after 5 frames.
         s.wait(0.5)?;
-        s.frame(vec![key(Key::K, Modifiers::COMMAND)], false)?;
+        s.frame(vec![key(Key::J, Modifiers::COMMAND)], false)?;
         s.frame(vec![Event::Text("!".into())], false)?;
         let mut frames = Vec::new();
         for f in 0..16 {
@@ -238,7 +238,7 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
     let open = |gpu: &mut Offscreen, snap: Snapshot, name: &str, wait: f64, staged: &dyn Fn(&mut Shot<'_>)| -> anyhow::Result<()> {
         let mut s = Shot::new(gpu, snap, Page::Home, wide, scale);
         s.wait(1.2)?;
-        s.frame(vec![key(Key::K, Modifiers::COMMAND)], false)?;
+        s.frame(vec![key(Key::J, Modifiers::COMMAND)], false)?;
         staged(&mut s);
         s.wait(wait)?;
         s.shoot(out, &format!("{name}{tag}"))?;
@@ -340,9 +340,9 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
         let mut morph = Vec::new();
         let mut open_rest = Vec::new();
         for _ in 0..5 {
-            // Ctrl+K with a conversation under way: the chat grows at once.
+            // Ctrl+J with a conversation under way: the chat grows at once.
             for f in 0..24 {
-                morph.push(s.timed(if f == 0 { vec![key(Key::K, Modifiers::COMMAND)] } else { Vec::new() })?);
+                morph.push(s.timed(if f == 0 { vec![key(Key::J, Modifiers::COMMAND)] } else { Vec::new() })?);
             }
             for _ in 0..10 {
                 open_rest.push(s.timed(Vec::new())?);

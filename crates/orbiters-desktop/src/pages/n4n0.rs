@@ -9,7 +9,6 @@ use crate::ipc::N4n0Command;
 use crate::state::{CallLink, CallPhase, CallView, N4n0Face, N4n0Status};
 use egui::{pos2, vec2, Align2, Layout, Rect, Sense, Ui, UiBuilder};
 use orbiters_i18n::{mark, tr, tr_ctx, tr_latin, tr_n};
-use orbiters_ui::anim;
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Variant};

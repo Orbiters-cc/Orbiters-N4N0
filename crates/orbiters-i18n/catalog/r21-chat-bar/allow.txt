@@ -1,2 +1,2 @@
-Ctrl K
-⌘K
+Ctrl J
+⌘J

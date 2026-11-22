@@ -55,7 +55,7 @@ whether it gets an answer within a minute; without one, nobody being at the scre
 wait (unless `macos_identity` names an identity: then it stops with an error). `cargo xtask dist` and `cargo xtask github`
 again later replace the release's files with properly signed ones.
 
-Notarizing waits 15 minutes for Apple's answer on the application, then on the image. Without one in time (a new
+Notarizing waits 3 minutes for Apple's answer on the application, then on the image. Without one in time (a new
 account's first submissions can stay "In Progress" for hours), the release goes on unstapled and the image is left with
 the notary: macOS asks Apple for the ticket when the image is opened, so the same file opens normally once Apple has
 passed it (`xcrun notarytool history --keychain-profile <profile>`).

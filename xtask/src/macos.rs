@@ -461,7 +461,7 @@ fn image_megabytes(bytes: u64) -> u64 {
 }
 
 /// How long Apple's notary gets to answer for one file before the release goes on without its ticket.
-const NOTARY_WAIT: &str = "15m";
+const NOTARY_WAIT: &str = "3m";
 
 /// Sends `file` to Apple's notary and waits for its answer: whether it was accepted in time.
 fn notarized(profile: &str, file: &Path) -> bool {

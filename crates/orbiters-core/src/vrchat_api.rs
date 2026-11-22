@@ -2410,7 +2410,9 @@ pub(crate) mod tests {
             response(200, r#"{"id":"wrld_a:1","instanceId":"1","n_users":3}"#, &[]),
             response(200, r#"{"id":"wrld_a:2","active":true,"closedAt":"2026-10-30T10:00:00.000Z"}"#, &[]),
             response(200, r#"{"id":"wrld_a:3","hardClose":true}"#, &[]),
-            response(400, r#"{"error":{"message":"\"malformed url\"","status_code":400,"waf_code":26497}}"#, &[]),
+            // Built, not a raw string: the i18n scan read the escaped quotes of a raw string as escapes, and lost its place for
+            // the rest of the file.
+            response(400, &serde_json::json!({"error":{"message":"\"malformed url\"","status_code":400,"waf_code":26497}}).to_string(), &[]),
             response(200, "<html>", &[]),
             response(302, "", &[]),
         ]);

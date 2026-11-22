@@ -212,7 +212,7 @@ How it is one verified game (`controller/bridge_mac.rs`):
   `obelisk::vrchat_log_dir`), the one file of this start, followed by its own `LogWatcher`. The app's other VRChat features on a
   Mac still follow the VRChat on the network: they are not changed by this.
 - **Arrival needs the game's window on screen** (renderer evidence), not only the log's join. The engine's log
-  (`~/Library/Logs/Obelisk/Steam/wine-438100.log`) is read from the launch on: its graphics server dropping the game
+  (`~/Library/Logs/Obelisk/Steam/wine-438100.log`, a new file at each start: told apart by its inode) is read from the launch on: its graphics server dropping the game
   (`VTEST_CLIENT_ERROR_CONTEXT_LOST`) makes `get_state`'s `vrchat.renderer_lost` true and `screenshot` answer `renderer_lost`;
   before arrival it ends the start with `start_crashed`, as does a start the program says ended early.
 - **Window:** the engine's window server (`wsd`, the launcher's own child) owns the game's window; the largest shown one is the game's
@@ -223,7 +223,9 @@ How it is one verified game (`controller/bridge_mac.rs`):
   window even when covered, never the desktop). macOS asks **Screen Recording** of the process that captures, the tray service of
   Orbiters - N4N0: without it `screenshot` answers `screen_recording_not_allowed`, and Settings' bridge section shows **Allow screen
   recording**, which asks macOS from that process and opens System Settings, Privacy & Security, Screen Recording, where the person
-  switches Orbiters - N4N0 on and reopens it.
+  switches Orbiters - N4N0 on and reopens it. While the Mac's screen is locked macOS shows no frame of the game (the window counts
+  as covered: 0 shown events, measured 22:00), so `screenshot` answers `screen_locked` with `retry_after_s`, and `get_state`'s
+  `this_computer` says `screen_recording_allowed` and `screen_locked`.
 - **Close** is the game's own Quit through the engine, for that Game session only (`obelisk-cli steam quit 438100 --session <uuid>`,
   0.1.3; with an older program the running session is checked to be the bridge's first). Never forced: a game that does not go is
   `close_timeout`, and the person decides.
@@ -246,6 +248,18 @@ built as VRChat's client builds one), with `-screen-fullscreen 0 -screen-width 1
 | 20:44:50 | Up, in the exact instance (`Joining …~nonce(742cce87…)`), local player 53 s after the start (20:45:43). **Graphics lost at 20:45:49**: `neptune: ring fatal error`, `virgl_render_server … destroying Neptune context`, `VTEST_CLIENT_ERROR_CONTEXT_LOST`; the game ran on without a frame (527 frames in all). Graceful `steam quit --wait 60`: gone in 6 s. |
 | 20:48:10 | **Hung 11 s in** (last frame and last log line at 20:48:32, every process at 0 % CPU, 96 frames). `steam quit --wait 60` was not taken in 60 s (`still_running`); ended with `--force` by the experimenter (not by the bridge, which never forces). |
 | 20:52:35 | Up, local player at 20:53:28. **Graphics lost at 20:53:33**, 5 s after arrival. Graceful quit in 6 s. |
+| 22:00:43 | Started while the Mac's screen was locked (by the previous run's agent, into `wrld_4cf554b4…`): 1,489 frames presented and **0 shown** (`neptune unixlib wsi (wsd): … 0 shown events`: macOS treats the window of a locked screen as covered), then `VTEST_CLIENT_ERROR_CONTEXT_LOST`. Record `7e65e1ed`: `Finished`, 92 s, 0 frames. Hence `screenshot`'s `screen_locked` and `get_state`'s `this_computer.screen_locked`. |
+| 22:16:19 | Screen unlocked, obelisk-cli 0.1.3, home world, `--osc=9010:127.0.0.1:9011`. Window shown, frames shown (874 by arrival), local player at 22:17:12, a picture of the world at 22:17:15. **Graphics lost at 22:17:16**: `virgl_render_server: npt: resource_update: byte_size 70744960 exceeds cap 67108864`, `ring_submit_cmd: dispatch failed`, then `neptune: ring fatal error` and `VTEST_CLIENT_ERROR_CONTEXT_LOST`. 1,134 frames, 170 s. `steam quit --session <uuid> --wait 60`: `exited` 6 s later, `ended_by_request` true. |
+| 22:19:45 | Same, to act during the loading screen. **Graphics lost at 22:20:36** with exactly the same line (`byte_size 70744960 exceeds cap 67108864`), 5 s after the local avatar began loading (`Starting download of Avatar @ 64 MB`, 22:20:31). 1,074 frames, 323 s; graceful quit by session in 7 s. |
+
+**Why the graphics go (2026-11-22 22:17 and 22:20, the same bytes both times):** one texture or buffer upload of 70,744,960 bytes
+is refused by the render server's D3D path, whose cap is 64 MiB (`resource_update: byte_size %u exceeds cap %u` in Voile's
+`linux/graphics/lib/libvirglrenderer.1.dylib`); the guest's command ring then fails for good. Both times it came seconds after the
+local avatar (64 MB bundle, the owner's current one) loaded, in the same world, so which asset it is (avatar or world) is not yet
+told apart. It is deterministic, so it is fixable in the engine: raise that cap in the render server's `resource_update` (it is not
+in our forks voile-lkd or voile-wine: it is Voile's virglrenderer build, MIT, and would need a fork of its own delivered beside the
+engine patch), or have the guest side (`npt_dispatch_resource_update` in Voile's `d3d11.dll`) split an update larger than the cap
+into several by subresource or by rows. Either is engine work, out of the bridge's scope.
 
 The engine's graphics drop is the engine's (out of this work's scope); it is what `renderer_lost` and `start_crashed` report.
 
@@ -260,9 +274,12 @@ and `… of type OSC on 9010`. Every socket is the Mac's own (the engine's `lkd`
   advertised. To make it work: the port must be read another way (VRChat's log line names it, and so does `lsof` of the session's
   processes), or the engine forwards the game's mDNS to `mDNSResponder` (`DNSServiceRegister` in `lkd`'s network layer for the
   multicast group 224.0.0.251:5353 the game joins).
-- *Host to game, UDP:* the socket is bound on the host (`UDP *:9010`), but whether VRChat acts on what reaches it was not measured: in
-  the one start with OSC on and a picture, the graphics had gone 5 s after arrival, before `/input/LookRight` was sent, so no picture
-  could show it. Next: send `/input/LookRight 1` while frames are shown and compare two screenshots.
+- *Host to game, UDP:* **works** (22:18, start of 22:16:19). One datagram `/avatar/parameters/EyeBig ,T` to `127.0.0.1:9010` changed
+  the avatar's parameter, read back through OSCQuery (`/avatar/parameters/EyeBig` `VALUE` `[False]`, then `[True]` 0.6 s after,
+  `[False]` again after `,F`). The game's logic runs on after its graphics go, so this holds then too. Not shown in a picture: the
+  graphics had gone 1 s before `/input/LookRight` was sent (the two pictures around it differ by 0.85/255 on average, 0 % of
+  pixels: a frozen frame). The socket is shared by two of the engine's processes (`fexdarwin`, both `UDP *:9010`).
+- *Game to host* again in that start: 5,039 datagrams from 44 addresses in its first minute.
 
 **(b) Windowed arguments.** VRChat's log listed all ten arguments in order (`Launching with args: 10`: the exe, Steam's `--no-vr`, then
 ours). The engine made a window of `1280x720 px` (`wsd: client …: window 1 1280x720 px style 0xf`), which macOS lists as 640 x 392
@@ -273,14 +290,18 @@ is a 400 x 225 point window, and four 1470 x 33 windows stay off screen.
 **(c) Hover and click.** `wsdctl <socket> hover 320 180` and `tap 53` (Escape) were taken by the window server
 (`wsd: debug input kind 5 a 320 b 180 -> window 1: view 640x360 pt, frame shown 0x0 px, pointer scale 2.0000 x 2.0000`, so its
 coordinates are content **points**, scaled by 2 to the game's pixels), without the window having the focus. Whether VRChat acted on
-them is not known: both times the graphics had gone first (`frame shown 0x0`), and the click on a menu control was therefore not
-tried. The resize part was not reached. What Phase 2 needs from the engine either way: `wsdctl`'s `click X Y` and `hover` exist, but
+them is **not known**: in every start the graphics had gone first (`frame shown 0x0`; 22:17:19 and :20 again, 3 s after the drop),
+and VRChat logs nothing for a key or a click. The click on a menu control and the resize were therefore **not done**: they need
+frames for some seconds after a `tap 53` (Escape opens the menu), that is, the graphics fix above, or the loading screen before
+the avatar loads (tried at 22:19: the experiment's own script took the 400 x 225 splash for the game's window and missed it). What Phase 2 needs from the engine either way: `wsdctl`'s `click X Y` and `hover` exist, but
 not button down and up, right or middle buttons, signed relative motion, or an answer saying the event reached a shown frame; those
 belong in `wsd`'s control socket (Orbiters-cc/voile-lkd, branch `orbiters`), shipped through the CLI's engine patch.
 
-**(d) Stream camera decode.** Not tried: it needs the camera opened through the menu (clicks, (c)) and frames shown for several
-seconds, and no start kept its graphics that long. Even with frames, the window shows the desktop view with the camera's small
-viewfinder, not the camera's render target, so the strip's pixels would be scaled and lost: an export of the stream camera's render
+**(d) Stream camera decode.** **Not done**: it needs the camera opened through the menu (clicks, (c)) and frames shown for several
+seconds, and no start kept its graphics that long (every start lost them within 6 s of the avatar loading). Not measured either (an assumption of the first write-up): whether the
+window then shows only the desktop view with the camera's small viewfinder. VRChat's camera has a Stream mode meant to show the
+camera's view in the desktop window; if it does under the engine, at the window's 1280 x 720, the strip could be read from a lossless
+window capture (`screencapture -l` gives PNG) and that is what to try first once frames last. Otherwise the strip's pixels would be scaled and lost: an export of the stream camera's render
 target from the engine (DXMT's present of that texture) is what Phase 3 would need.
 
 ## The protocol

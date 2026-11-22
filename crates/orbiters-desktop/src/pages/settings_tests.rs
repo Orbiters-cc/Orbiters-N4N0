@@ -389,7 +389,8 @@ fn reset_puts_the_menus_smoothing_back_to_the_values_measured_with_vrchat() {
     let mut h = Harness::new();
     h.snap.settings.orbit.vr_smoothing_quick_menu_ms = 60.0;
     h.snap.settings.orbit.vr_smoothing_wheel_ms = 5.0;
-    h.open("vr");
+    // Brought into view as the search would (it is under the card's other rows).
+    h.open("vr.smoothing-reset");
     h.row("Reset the smoothing");
     let (r, on) = orbiters_ui::widgets::control(&h.ctx, "Reset").expect("Reset is drawn");
     assert!(on, "off the measured values: it takes a press");

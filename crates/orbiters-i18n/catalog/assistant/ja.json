@@ -92,5 +92,18 @@
   "Page offered": "ページを案内",
   "N4N0 can't do this by voice: {what}. N4N0 will open {page} instead.": "N4N0は音声ではこれをできません：{what}。代わりに{page}を開きます。",
   "N4N0 will do this if you say yes: {what}.": "「はい」と言えばN4N0がこれをします：{what}。",
-  "N4N0 can't do that now": "N4N0は今それをできません"
+  "N4N0 can't do that now": "N4N0は今それをできません",
+  "Too many actions in a short time: wait a moment.": "短時間に操作が多すぎます。少し待ってください。",
+  "N4N0: {what}": "N4N0：{what}",
+  "N4N0 shares the 3D capture you just took, as you said.": "言われたとおり、N4N0が今撮った3Dキャプチャーを共有します。",
+  "I can't do that now.": "今はそれができません。",
+  "Turn off {control}": "{control}をオフ",
+  "Set {control} to {value}": "{control}を{value}に",
+  "Turn on {control}": "{control}をオン",
+  "Let go of {control}": "{control}の固定を解除",
+  "Keep {control} as set": "{control}をこのまま固定",
+  "Picture with VRChat's camera": "VRChatのカメラで写真",
+  "Save the world's video": "ワールドの動画を保存",
+  "Copy to the clipboard": "クリップボードにコピー",
+  "N4N0's light on": "N4N0のライトをオン"
 }

@@ -32,6 +32,7 @@ use orbiters_n4n0_core::controls::{Controls, Setting};
 use orbiters_n4n0_core::menu::Pages;
 use orbiters_n4n0_core::policy::{self, TurnPolicy, Verdict};
 use orbiters_n4n0_core::text::{latin, Message, TextSender};
+use orbiters_n4n0_core::intents::{self, Gate, Intent, Outcome, Via};
 use orbiters_n4n0_core::tools::{self, Action, Mood};
 use orbiters_n4n0_core::videos::{self, SavedVideo, Videos};
 use rosc::OscType;
@@ -197,6 +198,9 @@ struct TurnTools {
     waiting: Vec<Pending>,
     /// What ran (for a note when the turn fails afterwards).
     done: Vec<String>,
+    /// A result of this turn carried text other people wrote: nothing more changes in it without the owner's yes
+    /// (`intents::gate`).
+    tainted: bool,
 }
 
 #[derive(Default)]
@@ -257,7 +261,7 @@ pub(crate) struct N4n0Runtime {
     /// What Orbiters - N4N0 tells the assistant at its next turn (the owner's yes, a turn that failed after its
     /// tools ran).
     pub(crate) notes: Vec<String>,
-    quota: Option<Quota>,
+    pub(crate) quota: Option<Quota>,
     videos: Videos,
     /// The saved videos could not be read at start-up: saving would replace them, so nothing is saved until they can.
     videos_unreadable: Option<String>,
@@ -341,6 +345,8 @@ pub(crate) struct N4n0Runtime {
     pub(crate) input: crate::input::InputRuntime,
     /// The screen mirror's camera (mirror.rs).
     pub(crate) mirror: crate::mirror::MirrorRuntime,
+    /// The assistant's intents: their log, undo, lists and limits (assistant.rs).
+    pub(crate) assistant: crate::assistant::AssistantRuntime,
 }
 
 impl N4n0Runtime {
@@ -644,6 +650,7 @@ impl N4n0Runtime {
             input_params: crate::input::InputRuntime::used(&self.params) as u8,
             // As the overlay's menu sees it: there, the camera's picture never shows.
             mirror: self.mirror.view(Instant::now(), crate::mirror::reach(false, &self.params)),
+            assistant: self.assistant.view.clone(),
         }
     }
 
@@ -2056,7 +2063,12 @@ impl N4n0 {
     /// The owner's sentence after N4N0 asked to do something (`true`: it was the answer): a yes does it, a no drops it.
     /// Anything else is a new request: what waited is dropped (the assistant hears so) and the sentence goes its way.
     fn answer(self: &Shared, text: &str) -> bool {
-        let reply = policy::reply(text);
+        self.answer_with(policy::reply(text))
+    }
+
+    /// The owner's answer to what N4N0 asked to do: yes (`Some(true)`), no, or something else (`None`), said or pressed
+    /// (the Ask page's Yes and No). `true`: it was an answer.
+    pub(crate) fn answer_with(self: &Shared, reply: Option<bool>) -> bool {
         let pending = {
             let mut rt = self.n4n0.lock().unwrap();
             if rt.pending.is_empty() {
@@ -2069,6 +2081,11 @@ impl N4n0 {
         match reply {
             Some(true) => self.confirmed(pending),
             Some(false) | None => {
+                for p in &pending {
+                    if let Action::App(intent) = &p.action {
+                        self.intent_log(intent, Outcome::Declined, None, Via::Model);
+                    }
+                }
                 let what: Vec<String> = pending.into_iter().map(|p| p.what).collect();
                 let mut rt = self.n4n0.lock().unwrap();
                 rt.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
@@ -2121,6 +2138,9 @@ impl N4n0 {
             Command::Talk { down } => self.talk(down, Source::Window),
             Command::AskPage { open } => self.ask_page(open),
             Command::AskRetry => self.ask_retry(),
+            Command::AskAnswer { yes } => {
+                self.answer_with(Some(yes));
+            }
             Command::Assistant { on } => self.assistant_switch(on),
             Command::AskTalk { down } => self.ask_talk(down),
             Command::WakeOffer { accept, id } => self.wake_offer_answer(accept, id),
@@ -2325,6 +2345,11 @@ impl N4n0 {
         }
         if !self.with_settings(|s| s.n4n0.enabled && s.n4n0.assistant) {
             self.add_line(N4n0Who::Note, tr("N4N0's assistant is off: turn it on in Orbiters - N4N0 › N4N0."));
+            return;
+        }
+        // The common short commands, from the person's own sentence alone: at once, with no network (REQUEST20 6).
+        if let Some(actions) = intents::quick::understand(&text) {
+            self.quick(&text, actions);
             return;
         }
         let Some((api, token)) = self.host.account() else {
@@ -2598,6 +2623,9 @@ impl N4n0 {
             Ok(action) => action,
             Err(e) => return result(&e, true),
         };
+        if let Action::App(intent) = action {
+            return self.run_intent(call, intent, turn);
+        }
         // Raw writes are for avatars without a menu (the tool is offered only there), before any question is asked.
         if matches!(action, Action::SetParameter { .. }) && self.n4n0.lock().unwrap().manifest {
             return result("This avatar has menu labels: use set_avatar_control.", true); // i18n: not shown
@@ -2616,8 +2644,71 @@ impl N4n0 {
             }
             Verdict::Run => {
                 let (what, changes) = (policy::what(&action, control.as_ref()), policy::changes(&action));
+                let says = action_says(&action);
                 match self.action(action, Some(&bound)) {
                     Ok(content) => {
+                        if changes {
+                            turn.done.push(what);
+                            if !says.is_empty() {
+                                self.log_line(&call.name, says, intents::Risk::Act, Outcome::Done, None, Via::Model);
+                            }
+                        }
+                        result(&content.to_string(), false)
+                    }
+                    Err(e) => {
+                        if !says.is_empty() {
+                            self.log_line(&call.name, says, intents::Risk::Act, Outcome::Failed, Some(e.chars().take(120).collect()), Via::Model);
+                        }
+                        result(&e, true)
+                    }
+                }
+            }
+        }
+    }
+
+    /// A call of one of the app's intents: through its gate (what it needs, its risk class, whether the turn read other
+    /// people's text), then counted, run or asked about, and logged.
+    fn run_intent(self: &Shared, call: &ToolCall, intent: Intent, turn: &mut TurnTools) -> ToolResult {
+        let result = |content: &str, is_error: bool| ToolResult {
+            id: call.id.clone(),
+            content: assistant::utf16_prefix(content, assistant::RESULT_UNITS).to_string(),
+            is_error,
+        };
+        let facts = self.assistant_facts();
+        let gate = intents::gate(&intent, &facts, turn.tainted);
+        let action = Action::App(intent.clone());
+        if let (Gate::Run | Gate::Confirm | Gate::Offer(_), Verdict::Refuse { why }) = (&gate, turn.policy.review(&action, None)) {
+            self.intent_log(&intent, Outcome::Refused, None, Via::Model);
+            return result(&why, true);
+        }
+        match gate {
+            Gate::Refuse(why) => {
+                let person = facts.lacks(&intent).map(|n| n.says().to_string());
+                self.intent_log(&intent, Outcome::Refused, person, Via::Model);
+                let content = json!({ "not_done": why, "note": "Say in a few words why it cannot be done now, and offer what can be done instead." }); // i18n: not shown
+                result(&content.to_string(), true)
+            }
+            Gate::Confirm | Gate::Offer(_) => {
+                let offered = matches!(gate, Gate::Offer(_));
+                let what = intent.what();
+                self.intent_log(&intent, if offered { Outcome::Offered } else { Outcome::Asked }, None, Via::Model);
+                let epoch = self.n4n0.lock().unwrap().avatar_epoch;
+                turn.waiting.push(Pending { action, what: what.clone(), bound: Bound { epoch, path: None }, control: None });
+                let note = if offered {
+                    "Not done by voice, never: Orbiters - N4N0 offers the owner its page instead and opens it only if they say yes. Say so in a few words, without asking again." // i18n: not shown
+                } else {
+                    "Orbiters - N4N0 asked the owner, and does it only if they say yes: say so in a few words, without asking again." // i18n: not shown
+                };
+                result(&json!({ "waiting_for_owner": true, "asked": what, "note": note }).to_string(), false)
+            }
+            Gate::Run => {
+                let reads = intent.spec().reads_others;
+                let (what, changes) = (intent.what(), intent.spec().changes);
+                match self.intent_run(intent, Via::Model) {
+                    Ok(content) => {
+                        if reads {
+                            turn.tainted = true;
+                        }
                         if changes {
                             turn.done.push(what);
                         }
@@ -2627,6 +2718,11 @@ impl N4n0 {
                 }
             }
         }
+    }
+
+    /// Does an action of the older tools for the assistant's offline path and undo, as a tool call would.
+    pub(crate) fn run_action_for_assistant(self: &Shared, action: Action) -> Result<Value, String> {
+        self.action(action, None)
     }
 
     /// The control an action names, as the policy looks at it (its path, its nsfw tag), when the avatar has it; and what
@@ -2832,6 +2928,7 @@ impl N4n0 {
                 self.add_line(N4n0Who::Note, if light.on { tr!("N4N0's light: {color}", color = orbiters_n4n0_core::menu::layout::light_color(light.color)) } else { tr("N4N0's light: off").to_string() });
                 Ok(json!({ "on": light.on, "color": name.to_lowercase(), "brightness": light.level }))
             }
+            Action::App(intent) => self.intent_run(intent, Via::Model),
             Action::Mood { mood } => {
                 self.n4n0.lock().unwrap().mood = Some(match mood {
                     Mood::Neutral => N4n0Face::Talking,
@@ -2948,6 +3045,30 @@ pub(crate) fn thumbnail_bytes(tree: Option<i32>, manifest: Option<&AvatarManifes
 }
 
 /// What a music command did, as the conversation's note says it (a whole line each: languages order the words differently).
+/// What an action does, in the person's language, for the action log (empty: a question, never logged).
+pub(crate) fn action_says(action: &Action) -> String {
+    let q = |t: &str| context::quoted(t, NAME_CHARS);
+    match action {
+        Action::SetControl { control, on: Some(false), value: None } => tr!("Turn off {control}", control = q(control)),
+        Action::SetControl { control, value: Some(v), .. } => tr!("Set {control} to {value}", control = q(control), value = format!("{v:.2}")),
+        Action::SetControl { control, .. } => tr!("Turn on {control}", control = q(control)),
+        Action::SetParameter { name, value } => tr!("Set {control} to {value}", control = q(name), value = format!("{value:.2}")),
+        Action::Hold { control, release: true, .. } => tr!("Let go of {control}", control = q(control)),
+        Action::Hold { control, .. } => tr!("Keep {control} as set", control = q(control)),
+        Action::TakePhoto { .. } => tr("Picture with VRChat's camera").into(),
+        Action::SaveVideo => tr("Save the world's video").into(),
+        Action::CopyToClipboard { .. } => tr("Copy to the clipboard").into(),
+        Action::SetAfkMessage { .. } => tr("AFK message").into(),
+        Action::Media { command: Some(c), .. } => media_line(*c),
+        Action::Media { volume_change: Some(v), .. } if *v > 0 => tr("Louder").into(),
+        Action::Media { volume_change: Some(_), .. } => tr("Quieter").into(),
+        Action::Light { on: Some(false), .. } => tr("N4N0's light: off").into(),
+        Action::Light { .. } => tr("N4N0's light on").into(),
+        Action::App(intent) => intent.says(),
+        Action::Media { .. } | Action::Mood { .. } | Action::FindControls { .. } | Action::ListSavedVideos => String::new(),
+    }
+}
+
 fn media_line(command: orbiters_n4n0_core::menu::MediaCommand) -> String {
     use orbiters_n4n0_core::menu::MediaCommand;
     match command {

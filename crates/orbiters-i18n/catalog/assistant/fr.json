@@ -92,5 +92,18 @@
   "Page offered": "Page proposée",
   "N4N0 can't do this by voice: {what}. N4N0 will open {page} instead.": "N4N0 ne peut pas faire ça à la voix : {what}. N4N0 ouvrira {page} à la place.",
   "N4N0 will do this if you say yes: {what}.": "N4N0 fera ceci si tu dis oui : {what}.",
-  "N4N0 can't do that now": "N4N0 ne peut pas faire ça maintenant"
+  "N4N0 can't do that now": "N4N0 ne peut pas faire ça maintenant",
+  "Too many actions in a short time: wait a moment.": "Trop d'actions en peu de temps : attends un instant.",
+  "N4N0: {what}": "N4N0 : {what}",
+  "N4N0 shares the 3D capture you just took, as you said.": "N4N0 partage la capture 3D que tu viens de prendre, comme tu l'as dit.",
+  "I can't do that now.": "Je ne peux pas faire ça maintenant.",
+  "Turn off {control}": "Désactiver {control}",
+  "Set {control} to {value}": "Mettre {control} à {value}",
+  "Turn on {control}": "Activer {control}",
+  "Let go of {control}": "Relâcher {control}",
+  "Keep {control} as set": "Garder {control} tel quel",
+  "Picture with VRChat's camera": "Photo avec la caméra de VRChat",
+  "Save the world's video": "Enregistrer la vidéo du monde",
+  "Copy to the clipboard": "Copier dans le presse-papiers",
+  "N4N0's light on": "Lumière de N4N0 allumée"
 }

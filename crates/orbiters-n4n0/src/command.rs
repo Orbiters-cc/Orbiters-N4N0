@@ -39,6 +39,10 @@ pub enum Command {
     Assistant { on: bool },
     /// Explicit retry after a microphone/worker failure; rechecks every preflight requirement.
     AskRetry,
+    /// The Ask page's Yes or No to what N4N0 asked to do (the same as saying it).
+    AskAnswer {
+        yes: bool,
+    },
     /// A question typed in the window or the overlay.
     Ask {
         text: String,

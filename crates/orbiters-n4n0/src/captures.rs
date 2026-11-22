@@ -22,6 +22,8 @@ impl crate::N4n0 {
             effects
         };
         self.screen_effects(effects);
+        // A share the assistant was asked for "the next one" goes once it is ready.
+        self.share_next_check();
         self.publish();
     }
 

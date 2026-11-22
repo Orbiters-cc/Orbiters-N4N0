@@ -42,6 +42,8 @@ crates/orbiters-booster
 crates/orbiters-version
 
 crates/orbiters-desktop/src/harness.rs
+# The test binary's own crash report.
+crates/orbiters-desktop/src/test_crash.rs
 crates/orbiters-desktop/src/overlay/orbit/paint_bench.rs
 
 # CPU paint worker: thread names and developer assertions only.

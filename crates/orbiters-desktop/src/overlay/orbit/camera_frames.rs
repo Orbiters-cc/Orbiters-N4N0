@@ -572,6 +572,8 @@ mod imp {
 
     impl Frames {
         pub fn open() -> Result<Self, String> {
+            // This thread joins no apartment: its capture lives in the process's MTA, held for as long as the process.
+            crate::hold_the_mta();
             let text = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
             // SAFETY: a plain query by name.
             let window = unsafe { FindWindowW(w!("UnityWndClass"), w!("VRChat")) }.map_err(|e| text("no VRChat window", e))?; // i18n: not shown (only printed to the log, with `camera panel:`)

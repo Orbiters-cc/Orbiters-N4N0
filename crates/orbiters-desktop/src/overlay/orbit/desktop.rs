@@ -781,6 +781,8 @@ pub(super) struct Gpu {
 
 impl Gpu {
     pub(super) fn new() -> Result<Self, String> {
+        // Its captures' objects stay valid whichever threads join and leave the apartment meanwhile.
+        crate::hold_the_mta();
         let text = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
         let (mut device, mut context): (Option<ID3D11Device>, Option<ID3D11DeviceContext>) = (None, None);
         // SAFETY: the outputs are valid.
@@ -3052,6 +3054,62 @@ mod tests {
         looker.ask(None);
         eprintln!("asking for looks: slowest {:.3} ms", slowest.as_secs_f64() * 1000.0); // i18n: not shown (a test's measurement)
         assert!(slowest < Duration::from_millis(5), "{slowest:?}");
+    }
+
+    /// r20/test-crash, 2026-11-22: the desktop tests died twice of an access violation. Windows Graphics Capture's objects live in the process's
+    /// multithreaded apartment (MTA). A thread that does not join it itself ([`super::super::desk_translate::frame_of`]'s, the translation's
+    /// reading thread) has one only while another thread is in it; when the last thread that joined it ends (the looks thread joins it with
+    /// `RoInitialize` and never leaves), COM tears the apartment down under objects still in use. Made in a child process, so a fault fails this
+    /// test instead of ending the run: a thread joins the MTA and ends while this one holds a frame pool, then the pool is closed and another made.
+    #[test]
+    fn capture_objects_outlive_the_last_thread_that_joined_the_mta() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "overlay::orbit::desktop::tests::the_mta_left_under_a_frame_pool", "--test-threads=1", "--nocapture"])
+            .env("ORBITERS_TEST_MTA_CHILD", "1")
+            .output()
+            .unwrap();
+        let text = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "the child ended with {:?}:\n{text}", output.status.code().map(|c| format!("{:#x}", c as u32)));
+        assert!(text.contains("no Direct3D device here") || text.contains("a frame pool made after the MTA's last member left"), "{text}");
+        assert!(!text.contains("[test-crash]"), "{text}");
+    }
+
+    #[test]
+    #[ignore = "run in a child process by capture_objects_outlive_the_last_thread_that_joined_the_mta"]
+    fn the_mta_left_under_a_frame_pool() {
+        if std::env::var_os("ORBITERS_TEST_MTA_CHILD").is_none() {
+            return;
+        }
+        let (joined_tx, joined) = std::sync::mpsc::channel();
+        let (leave_tx, leave) = std::sync::mpsc::channel::<()>();
+        let member = std::thread::spawn(move || {
+            // SAFETY: joins the MTA as the looks thread does, and ends without leaving it, as that thread does.
+            unsafe {
+                let _ = RoInitialize(RO_INIT_MULTITHREADED);
+            }
+            joined_tx.send(()).unwrap();
+            let _ = leave.recv();
+        });
+        joined.recv().unwrap();
+        // This thread never joins an apartment: as frame_of's.
+        let Ok(gpu) = Gpu::new() else {
+            println!("no Direct3D device here");
+            return;
+        };
+        let size = windows::Graphics::SizeInt32 { Width: 8, Height: 8 };
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&gpu.winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size).expect("a frame pool");
+        let mark = crate::test_crash::dlls_noted_count();
+        leave_tx.send(()).unwrap();
+        member.join().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let unloaded = crate::test_crash::dlls_unloaded_since(mark);
+        println!("DLLs unloaded since the MTA's last member left: {unloaded:?}");
+        assert!(!unloaded.iter().any(|d| d.eq_ignore_ascii_case("GraphicsCapture.dll")), "the capture's code went under its objects: {unloaded:?}");
+        let again = Direct3D11CaptureFramePool::CreateFreeThreaded(&gpu.winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size).expect("another frame pool");
+        let _ = pool.Close();
+        let _ = again.Close();
+        drop(gpu);
+        println!("a frame pool made after the MTA's last member left, and both closed");
     }
 
     #[test]

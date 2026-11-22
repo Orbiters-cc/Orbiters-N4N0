@@ -1090,7 +1090,8 @@ impl Bridge {
             "session": self.session_json(s, &seen),
             "bridge": {
                 "paused": paused,
-                "hotkey": HOTKEY,
+                // A Mac has no hotkey (caps.rs): Settings' Pause and Stop.
+                "hotkey": self.capabilities().hotkey.then_some(HOTKEY),
                 "last_event": event,
                 "sessions": self.sessions().len(),
                 // A VRChat of a start that could never be proven the bridge's: maybe the bridge's own, still running.

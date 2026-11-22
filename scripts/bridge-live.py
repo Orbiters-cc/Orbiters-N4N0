@@ -16,7 +16,6 @@ tool, outcome) to a file.
 
 import base64
 import ctypes
-import ctypes.wintypes as wintypes
 import json
 import os
 import sys
@@ -27,8 +26,11 @@ import urllib.request
 ENTROPY = b"Orbiters.N4N0 VRChat bridge"
 
 
-class Blob(ctypes.Structure):
-    _fields_ = [("size", wintypes.DWORD), ("data", ctypes.POINTER(ctypes.c_char))]
+if sys.platform == "win32":
+    import ctypes.wintypes as wintypes
+
+    class Blob(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("data", ctypes.POINTER(ctypes.c_char))]
 
 
 def blob(data):
@@ -36,7 +38,13 @@ def blob(data):
 
 
 def keys():
-    """The port and token from the file the app seals them in (bridge/keeper.rs, Keys)."""
+    """The port and token from the file the app seals them in (bridge/keeper.rs, Keys). On a Mac the file is this user's
+    only and not sealed (orbiters_core::seal_for_user)."""
+    if sys.platform == "darwin":
+        path = os.path.expanduser("~/Library/Application Support/orbiters-desktop/vrchat-bridge.dat")
+        with open(path, "rb") as file:
+            plain = json.loads(file.read())
+        return plain["port"], plain["token"]
     path = os.path.expandvars(r"%APPDATA%\Orbiters\Desktop\vrchat-bridge.dat")
     with open(path, "rb") as file:
         sealed = blob(file.read())

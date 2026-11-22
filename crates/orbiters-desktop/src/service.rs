@@ -138,6 +138,31 @@ impl Service {
         self.links.lock().unwrap().iter().filter(|l| l.role == role).count()
     }
 
+    /// The window to the front on `page` (started when it is closed): the overlay's Open in app, the assistant's pages.
+    pub fn show_page(&self, page: String) {
+        let linked = self.links.lock().unwrap().iter().find(|l| l.role == Role::Window).map(|l| (l.pid, l.mailbox.clone()));
+        match linked {
+            Some((pid, mailbox)) => {
+                allow_foreground(pid);
+                mailbox.post(ToClient::ShowPage { page });
+            }
+            None => {
+                *self.page_for_window.lock().unwrap() = Some(page);
+                self.show_window(false);
+            }
+        }
+    }
+
+    /// N4N0's assistant opens the window's pages by [`Service::show_page`] (controller/assistant.rs).
+    pub(crate) fn lend_pages(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        crate::controller::assistant::set_page_opener(Box::new(move |page| {
+            if let Some(svc) = weak.upgrade() {
+                svc.show_page(page);
+            }
+        }));
+    }
+
     /// Brings the window to the front, starting a window process when there is none.
     pub fn show_window(&self, splash: bool) {
         if self.quitting.load(Ordering::Relaxed) {
@@ -502,19 +527,7 @@ impl Service {
             }
             // Only the window picks picture files; the upload runs on a thread of its own.
             ToService::ShowWindow => self.show_window(false),
-            ToService::ShowPage { page } => {
-                let linked = self.links.lock().unwrap().iter().find(|l| l.role == Role::Window).map(|l| (l.pid, l.mailbox.clone()));
-                match linked {
-                    Some((pid, mailbox)) => {
-                        allow_foreground(pid);
-                        mailbox.post(ToClient::ShowPage { page });
-                    }
-                    None => {
-                        *self.page_for_window.lock().unwrap() = Some(page);
-                        self.show_window(false);
-                    }
-                }
-            }
+            ToService::ShowPage { page } => self.show_page(page),
             ToService::Orbit { status } => self.ctl.set_orbit_status(status),
             ToService::TranslateStatus { status } => self.ctl.set_translate_status(status),
             ToService::Translate { id, batch } => {
@@ -1046,6 +1059,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
             svc.restart_into(setup, dir);
         }
     }));
+    service.lend_pages();
 
     service.usage.open(crate::usage::spool::folder());
     crate::usage::spool::set_current(service.usage.clone());

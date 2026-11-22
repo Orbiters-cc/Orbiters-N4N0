@@ -35,6 +35,10 @@ pub struct Prompt {
     drawn_with: Option<u64>,
     /// What SteamVR confirmed of the offer placed: the only ground on which it says it shows it.
     evidence: Evidence,
+    /// Where the face it shows goes before the eyes ([`Face::spot`]).
+    spot: (f32, f32, f32),
+    /// Its alpha as SteamVR has it (the world notice fades in and out at it, with no new picture).
+    alpha: f32,
 }
 
 /// What SteamVR confirmed of the band for the offer placed (night4, verify2 SWEEP-7): put where it goes, made visible,
@@ -58,9 +62,9 @@ impl Evidence {
 pub enum Face {
     Talk,
     KeepOpen { seconds: u64 },
-    /// "No 3D picture of this world yet" with "Take a 3D picture" (`crate::world_notice`, REQUEST13); whether it says the
-    /// point a picture there earns.
-    World { earns_one: bool },
+    /// "No 3D picture of this world yet" with "Take a 3D picture" and its cross (`crate::world_notice`, REQUEST13, made
+    /// discreet by Request20); whether it says the point a picture there earns, the part a laser is on.
+    World { earns_one: bool, on: Option<crate::world_notice::Part> },
 }
 
 impl Face {
@@ -71,6 +75,18 @@ impl Face {
             _ => (VR_PX, VR_WIDTH_M),
         }
     }
+
+    /// Where it goes before the eyes when it comes: how far ahead, how far under their line, how far right of where the
+    /// head faces, in metres. The world notice low and to the right, out of the way (Request20); the rest straight ahead.
+    pub fn spot(self) -> (f32, f32, f32) {
+        match self {
+            Face::World { .. } => {
+                let s = crate::world_notice::VR_SPOT;
+                (s.distance, s.below, s.right)
+            }
+            _ => (DISTANCE_M, BELOW_M, 0.0),
+        }
+    }
 }
 
 impl Prompt {
@@ -79,12 +95,16 @@ impl Prompt {
         let _ = overlay.set_width_in_meters(handle, VR_WIDTH_M);
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, SORT_ORDER);
-        Ok(Self { handle, canvas: Canvas::new(VR_PX[0], VR_PX[1]), presented: Default::default(), px: VR_PX, width_m: VR_WIDTH_M, placed: None, pressed: None, visible: false, drawn: None, drawn_with: None, evidence: Evidence::default() })
+        Ok(Self { handle, canvas: Canvas::new(VR_PX[0], VR_PX[1]), presented: Default::default(), px: VR_PX, width_m: VR_WIDTH_M, placed: None, pressed: None, visible: false, drawn: None, drawn_with: None, evidence: Evidence::default(), spot: Face::Talk.spot(), alpha: 1.0 })
     }
 
     /// At the size `face` takes (before [`Prompt::place`]): another size is a new picture, placed again.
     pub fn fit(&mut self, overlay: &vr::Overlay, face: Face) {
         let (px, width_m) = face.size();
+        if face.spot() != self.spot {
+            self.spot = face.spot();
+            self.placed = None;
+        }
         if px != self.px || width_m != self.width_m {
             self.canvas = Canvas::new(px[0], px[1]);
             self.px = px;
@@ -117,8 +137,12 @@ impl Prompt {
             return None;
         };
         if self.placed.is_none_or(|(placed, _)| placed != id) {
-            // A new offer: where the eyes look now (a word heard again moves it there again).
-            let at = space::before_eyes(head?, DISTANCE_M, BELOW_M);
+            // A new offer: where the eyes look now (a word heard again moves it there again), whole at once.
+            let (distance, below, right) = self.spot;
+            let at = space::before_eyes_aside(head?, distance, below, right);
+            if self.alpha != 1.0 && overlay.set_alpha(self.handle, 1.0).is_ok() {
+                self.alpha = 1.0;
+            }
             self.evidence = Evidence { placed: overlay.set_transform_absolute(self.handle, &at).is_ok(), ..Evidence::default() };
             self.placed = Some((id, at));
             self.drawn = None;
@@ -130,7 +154,9 @@ impl Prompt {
         }
         let (_, at) = self.placed?;
         if !self.visible {
-            let _ = overlay.set_alpha(self.handle, 1.0);
+            if overlay.set_alpha(self.handle, 1.0).is_ok() {
+                self.alpha = 1.0;
+            }
             // Refused: not visible, tried again next turn.
             self.visible = overlay.show(self.handle).is_ok();
             self.evidence.shown = self.visible;
@@ -146,6 +172,15 @@ impl Prompt {
     /// The band's picture that shows is of what it offers now (it may be pointed at and pressed).
     pub fn current(&self) -> bool {
         self.presented.current()
+    }
+
+    /// How much of it shows (the world notice's fade, [`crate::world_notice::opacity`]): SteamVR's alpha, said only when it
+    /// changed by a step that shows (no new picture for it).
+    pub fn fade(&mut self, overlay: &vr::Overlay, alpha: f32) {
+        let alpha = (alpha.clamp(0.0, 1.0) * 64.0).round() / 64.0;
+        if self.visible && alpha != self.alpha && overlay.set_alpha(self.handle, alpha).is_ok() {
+            self.alpha = alpha;
+        }
     }
 
     /// Pressed: it goes now.
@@ -169,7 +204,7 @@ impl Prompt {
             self.canvas.paint(0.0, |p| match face {
                 Face::Talk => paint_vr(p, hover, left),
                 Face::KeepOpen { seconds } => crate::window_rest::paint_band(p, hover, left, seconds),
-                Face::World { earns_one } => crate::world_notice::paint_vr(p, earns_one, hover, left),
+                Face::World { earns_one, on } => crate::world_notice::paint_vr(p, earns_one, on),
             });
         }
         let px = self.px;
@@ -236,6 +271,38 @@ mod tests {
         assert!(!Evidence::default().confirms(), "a new offer: nothing confirmed yet");
     }
 
+    /// A head at `at` facing `yaw` degrees from -Z (level).
+    fn head(yaw: f32, at: space::V3) -> Matrix34 {
+        let (s, c) = yaw.to_radians().sin_cos();
+        space::from_axes([c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c], at)
+    }
+
+    /// Request20: the world notice comes low and to the right of where the head faces, whatever way it faces: about 17°
+    /// right and 19° down, its far corner well inside a headset's view (under 30° both ways), facing the eyes; every other
+    /// face still comes straight ahead.
+    #[test]
+    fn the_world_notice_comes_low_and_right_of_the_gaze() {
+        let face = Face::World { earns_one: false, on: None };
+        let (distance, below, right) = face.spot();
+        let (px, width) = face.size();
+        let height = width * px[1] as f32 / px[0] as f32;
+        for (yaw, at) in [(0.0, [0.0, 1.6, 0.0]), (40.0, [1.0, 1.2, -2.0]), (135.0, [-0.5, 1.7, 0.4]), (-90.0, [0.0, 0.9, 0.0])] {
+            let h = head(yaw, at);
+            let placed = space::before_eyes_aside(&h, distance, below, right);
+            let d = space::sub(space::position(&placed), space::position(&h));
+            let (x, y, ahead) = (space::dot(d, space::axis(&h, 0)), space::dot(d, space::axis(&h, 1)), -space::dot(d, space::axis(&h, 2)));
+            assert!((ahead - distance).abs() < 1e-4 && (x - right).abs() < 1e-4 && (y + below).abs() < 1e-4, "yaw {yaw}: {x} {y} {ahead}");
+            let (across, down) = ((x / ahead).atan().to_degrees(), (-y / ahead).atan().to_degrees());
+            assert!((12.0..=24.0).contains(&across) && (12.0..=24.0).contains(&down), "yaw {yaw}: {across}° right, {down}° down");
+            let (far_x, far_y) = (((x + width / 2.0) / ahead).atan().to_degrees(), ((-y + height / 2.0) / ahead).atan().to_degrees());
+            assert!(far_x < 30.0 && far_y < 30.0, "yaw {yaw}: its far corner at {far_x}°, {far_y}°");
+            let to_eyes = space::unit(space::scale(d, -1.0)).unwrap();
+            assert!(space::dot(space::axis(&placed, 2), to_eyes) > 0.99, "yaw {yaw}: it faces the eyes");
+        }
+        assert_eq!(Face::Talk.spot(), (DISTANCE_M, BELOW_M, 0.0), "the other faces: straight ahead, as before");
+        assert_eq!(Face::KeepOpen { seconds: 3 }.spot(), (DISTANCE_M, BELOW_M, 0.0));
+    }
+
     #[test]
     fn its_face_paints_in_every_language() {
         let mut canvas = Canvas::new(VR_PX[0], VR_PX[1]);
@@ -250,11 +317,11 @@ mod tests {
                 }
             });
             assert!(canvas.pixels().iter().any(|&b| b != 0), "{language:?}: something was painted");
-            let (px, _) = Face::World { earns_one: true }.size();
+            let (px, _) = Face::World { earns_one: true, on: None }.size();
             let mut world = Canvas::new(px[0], px[1]);
             orbiters_i18n::in_language(language, || {
                 for _ in 0..2 {
-                    world.paint(0.0, |p| crate::world_notice::paint_vr(p, true, true, 0.5));
+                    world.paint(0.0, |p| crate::world_notice::paint_vr(p, true, Some(crate::world_notice::Part::Close)));
                 }
             });
             assert!(world.pixels().iter().any(|&b| b != 0), "{language:?}: the world notice was painted");

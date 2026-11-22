@@ -52,6 +52,7 @@ mod launcher_real;
 mod vr_audio;
 mod vrchat_bridge;
 mod worlds_overlay;
+mod quiet_prompt;
 
 /// What the interface shows of a VRChat on the network, as a Mac sees it.
 fn network_snapshot(base: &crate::state::Snapshot, link: crate::state::LanLink) -> crate::state::Snapshot {
@@ -258,6 +259,10 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("orbit") {
         return orbit::shots(&out);
     }
+    // Ask N4N0's page with the assistant's actions (REQUEST20 6): made-up sentences, names and actions.
+    if only.as_deref() == Some("orbit-r20-ask") {
+        return orbit::r20_ask_shots(&out);
+    }
     // The FPS booster's sheet alone (REQUEST15 4).
     if only.as_deref() == Some("orbit-booster") {
         return orbit::booster_shots(&out);
@@ -273,6 +278,10 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("r18-share") {
         return orbit::r18_share_shots(&out);
+    }
+    // Request20: the world notice made discreet, before and after.
+    if only.as_deref() == Some("quiet-prompt") {
+        return quiet_prompt::shots(&out);
     }
     if only.as_deref() == Some("explorer") {
         return orbit::explorer_shots(&out);

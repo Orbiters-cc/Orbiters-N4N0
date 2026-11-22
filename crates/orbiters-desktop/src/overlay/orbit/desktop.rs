@@ -103,6 +103,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut meter = crate::perf::TurnMeter::new("orbit-desktop", Instant::now());
     // Translation on the desktop (REQUEST15 item 2): its reading thread while it is on, and its translations over VRChat's window.
     let mut translations = super::desk_translate::Host::default();
+    // "No 3D picture of this world yet" in the bottom right corner (Request20).
+    let mut notice = super::desk_notice::Card::default();
     loop {
         let turn = Instant::now();
         let dt = turn.duration_since(last_turn).as_secs_f32();
@@ -118,6 +120,13 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let corner_clicks: Vec<bool> = MOUSE.with(|m| {
             let mut m = m.borrow_mut();
             let (mine, rest): (Vec<_>, Vec<_>) = m.drain(..).partition(|(_, h)| corner.owns(HWND(*h as *mut _)));
+            *m = rest;
+            mine.into_iter().map(|(down, _)| down).collect()
+        });
+        // The world notice's, apart too.
+        let notice_clicks: Vec<bool> = MOUSE.with(|m| {
+            let mut m = m.borrow_mut();
+            let (mine, rest): (Vec<_>, Vec<_>) = m.drain(..).partition(|(_, h)| notice.owns(*h));
             *m = rest;
             mine.into_iter().map(|(down, _)| down).collect()
         });
@@ -147,11 +156,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             // Laid again, in order, when the layer changes or another window came between VRChat's and ours.
             let layer = (!keyboard).then_some(game);
             let changed = stack::set(layer);
-            if changed || layer.is_some_and(|g| !stack::holds(g, &shown_windows(&windows, &pointer, &corner, &pill, &translations))) {
+            if changed || layer.is_some_and(|g| !stack::holds(g, &shown_windows(&windows, &pointer, &corner, &pill, &translations, &notice))) {
                 // The translations lowest: they lie on VRChat's text, under anything of ours.
                 translations.raise();
                 windows.raise_all();
                 pill.raise();
+                notice.raise();
                 pointer.raise();
                 corner.raise();
             }
@@ -161,6 +171,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         translations.update(&snap, &backend, shown_on.map(|w| super::desk_translate::OnScreen { window: w, origin: client_origin(w), client: client_size(w), pid: snap.vrchat.pid.unwrap_or(0) }), covered);
         let Some(window) = shown_on else {
             corner.show(false, pos2(0.0, 0.0), vec2(0.0, 0.0), turn);
+            notice.hide();
             // The parts of menus that closed are kept for a while; with the game behind another window nothing else comes by to let them go.
             panels.let_go(turn);
             pill.show(None, pos2(0.0, 0.0), vec2(0.0, 0.0));
@@ -278,7 +289,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             // VRChat's own frame with ours laid over it: never the screen, which may hold another program's window or a notification by then
             // (verify2-r15 blocker 2). No frame within half a second: no picture.
             let picture = if crate::mismatch::switches(&snap.settings).picture {
-                let ours: Vec<&PanelWindow> = windows.list.values().chain(corner.window.as_ref()).chain(pill.window.as_ref()).chain(pointer.window()).chain(translations.windows()).collect();
+                let ours: Vec<&PanelWindow> = windows.list.values().chain(corner.window.as_ref()).chain(pill.window.as_ref()).chain(notice.window.as_ref()).chain(pointer.window()).chain(translations.windows()).collect();
                 report_picture(window, origin, size, &ours)
             } else {
                 None
@@ -296,7 +307,21 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         panels.set_open(open, places, &snap);
         // The service's request for N4N0's menu, on the desktop with no avatar screen for it: All tools on the sheet (REQUEST15 item 3 fix B1).
         panels.serve_menu(&snap);
+        panels.serve_assistant(&snap);
         panels.follow_note(&snap);
+        // "No 3D picture of this world yet" (Request20): in the bottom right corner while nothing is in its way. One of our
+        // pages, VRChat's wheel (it holds the pointer) or its camera panel puts it away; VRChat's Quick Menu or a part of
+        // ours only where they lie on its place.
+        {
+            let mut parts: Vec<egui::Rect> = panels.all().filter(|p| p.shown).map(|p| p.placed.rect).collect();
+            if seen == Seen::Open(Around::QuickMenu) {
+                parts.push(super::desk_notice::quick_menu_rect(size));
+            }
+            let in_the_way = panels.sheet_open() || matches!(seen, Seen::Open(Around::Wheel | Around::Camera)) || panel.is_some();
+            if notice.update(&backend, snap.explorer.notice.as_ref(), in_the_way, &parts, origin, size, &notice_clicks, cursor_at(), turn) {
+                clicks.play();
+            }
+        }
         if panels.is_empty() {
             pointer.stop();
             windows.hide_all();
@@ -537,9 +562,9 @@ fn front_is(game: HWND) -> bool {
 }
 
 /// Every window of ours that shows: what must lie right above VRChat's while another program has the keyboard.
-fn shown_windows(windows: &Windows, pointer: &pointer::Pointer, corner: &Corner, pill: &Pill, translations: &super::desk_translate::Host) -> Vec<HWND> {
+fn shown_windows(windows: &Windows, pointer: &pointer::Pointer, corner: &Corner, pill: &Pill, translations: &super::desk_translate::Host, notice: &super::desk_notice::Card) -> Vec<HWND> {
     let mut all: Vec<HWND> = windows.list.values().filter(|w| w.shown).map(|w| w.hwnd).chain(translations.windows().map(|w| w.hwnd)).collect();
-    all.extend([pointer.window(), corner.window.as_ref(), pill.window.as_ref()].into_iter().flatten().filter(|w| w.shown).map(|w| w.hwnd));
+    all.extend([pointer.window(), corner.window.as_ref(), pill.window.as_ref(), notice.window.as_ref()].into_iter().flatten().filter(|w| w.shown).map(|w| w.hwnd));
     all
 }
 

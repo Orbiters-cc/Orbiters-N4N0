@@ -9,6 +9,7 @@
 //! where N4N0 keeps its files ([`Files`]). The desktop implements them with Windows' own; TLS, the folders and the
 //! account's credential are `orbiters_core`'s, per platform.
 
+mod assistant;
 mod captures;
 mod command;
 mod feedback;
@@ -28,6 +29,7 @@ mod voice;
 #[cfg(test)]
 mod tests;
 
+pub use assistant::{AssistantView, OpenAsk};
 pub use command::{Command, MenuHolder};
 pub use platform::{
     language_of, Actions, Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Mouse, MouseState, NoMouse, Osc, Platform, QrEvents, QrGlimpse, QrScan, QrSeen, QrSide,

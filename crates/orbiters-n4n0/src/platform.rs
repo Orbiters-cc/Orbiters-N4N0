@@ -198,6 +198,22 @@ pub trait Host: Send + Sync + 'static {
     /// VRChat's `InStation`, `Seated` or `VelocityMagnitude` (on the OSC receiving thread); `None`: a new avatar, which
     /// has not said how it moves yet.
     fn motion(&self, _said: Option<(&str, &OscValue)>) {}
+    /// What the app can do now, for the assistant's intents (`orbiters_n4n0_core::intents`, REQUEST20 6). N4N0 adds what it
+    /// knows itself (the prop, link cards). A phone's app has no `computer` features.
+    fn assistant_facts(&self) -> orbiters_n4n0_core::intents::Facts {
+        orbiters_n4n0_core::intents::Facts { vrchat: self.scene().vrchat, signed_in: self.account().is_some(), ..Default::default() }
+    }
+    /// The app's own state for the assistant's questions (explorer points, friends online, recording, …), as a JSON
+    /// object keyed by `intents::About` keys. Text other people wrote in it is cut short as data ([`orbiters_n4n0_core::context::data`]).
+    fn assistant_state(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+    /// Runs one of the app's own intents by the path its pages use (on the assistant's thread: it may wait for a
+    /// moment). `item`: the list item an index named, as this app answered it (its `ref`). The result is for the model;
+    /// a query's list goes in `items`.
+    fn assistant_intent(&self, _intent: &orbiters_n4n0_core::intents::Intent, _item: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+        Err(orbiters_n4n0_core::intents::Need::Computer.missing().into())
+    }
 }
 
 /// OSC with VRChat as the app runs it (`orbiters_core::osc::OscService`: on this computer's loopback for the desktop,

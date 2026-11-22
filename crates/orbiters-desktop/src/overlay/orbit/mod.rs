@@ -21,6 +21,8 @@ pub mod desktop;
 #[cfg(windows)]
 pub mod desk_translate;
 #[cfg(windows)]
+pub mod desk_notice;
+#[cfg(windows)]
 pub mod paint_bench;
 pub mod panels;
 pub mod qm_buttons;
@@ -1060,6 +1062,10 @@ pub struct Panels {
     /// on the sheet) shows because of one: on the desktop it is N4N0's menu when the avatar's screen does not take it ([`Panels::serve_menu`]).
     request_seen: Option<u32>,
     serving: bool,
+    /// The assistant's last page request opened here (`N4n0Status::assistant`'s `open`), and one waiting for these
+    /// panels to be up, since when (REQUEST20 6).
+    assistant_seen: Option<u32>,
+    assistant_wait: Option<(u32, Instant)>,
     /// What plays's picture as last made, by its name: panels make their own textures of it.
     art: Option<(String, ColorImage)>,
     /// The camera's tiles lie on its right ([`super::vr`]): what they say lines up on that side.
@@ -1192,6 +1198,8 @@ impl Panels {
             show_keys: false,
             reported: None,
             request_seen: None,
+            assistant_seen: None,
+            assistant_wait: None,
             serving: false,
             art: None,
             camera_right: false,
@@ -2636,6 +2644,11 @@ impl Panels {
             } else {
                 Vec::new()
             },
+            // What N4N0 asks, does and did (REQUEST20 6), on its page.
+            talk_question: snap.n4n0.confirmations.iter().rev().find(|c| c.is_local()).map(|c| c.summary.trim_end_matches(orbiters_i18n::tr("(or say yes or no)")).trim().to_string()).filter(|_| self.facts.sheet == Some(Sheet::Talk)),
+            talk_doing: snap.n4n0.assistant.doing.clone().filter(|_| self.facts.sheet == Some(Sheet::Talk)),
+            talk_log: if self.facts.sheet == Some(Sheet::Talk) { talk_log_rows(&snap.n4n0.assistant.log, orbiters_n4n0::unix_ms()) } else { Vec::new() },
+            talk_actions: self.facts.talk_actions,
             // On its own page it is all there already.
             n4n0_says: snap.n4n0.panel.clone().filter(|_| self.facts.sheet != Some(Sheet::Talk)),
             wake_word: snap.settings.n4n0.wake_words.first().filter(|_| snap.settings.n4n0.wake_word).cloned(),
@@ -3426,6 +3439,17 @@ impl Panels {
                 }
             },
             Action::NewConversation => self.backend.n4n0(N4n0Command::NewConversation),
+            // The question's Yes or No, as saying it (REQUEST20 6).
+            Action::AskAnswer(yes) => self.backend.n4n0(N4n0Command::AskAnswer { yes }),
+            Action::TalkActions => {
+                self.facts.talk_actions = !self.facts.talk_actions;
+                self.facts.gallery_scroll = 0.0;
+                self.gallery_to = 0.0;
+                self.throw = 0.0;
+                if let Some(panel) = self.takeover.as_mut() {
+                    panel.dirty = true;
+                }
+            }
             Action::Peek => {
                 self.peek = !self.peek;
                 let peek = self.peek;
@@ -4395,6 +4419,62 @@ impl Panels {
         self.report_menu();
     }
 
+    /// The assistant asked for a page (REQUEST20 6): it opens here as its own press opens it ([`Panels::act`]), once. While
+    /// these panels are not up (VRChat's menu closed) it waits for them a little; the window's pages are the window's.
+    pub fn serve_assistant(&mut self, snap: &Snapshot) {
+        /// How long an asked page waits for the panels to come up.
+        const WAITS: std::time::Duration = std::time::Duration::from_secs(45);
+        use orbiters_n4n0_core::intents::Page as P;
+        // The request standing when these panels started is an old one.
+        let Some(seen) = self.assistant_seen else {
+            self.assistant_seen = Some(snap.n4n0.assistant.open.as_ref().map_or(0, |o| o.id));
+            return;
+        };
+        let Some(ask) = snap.n4n0.assistant.open.clone() else { return };
+        if seen == ask.id || ask.page.on_window() {
+            self.assistant_seen = Some(ask.id);
+            return;
+        }
+        if self.open.is_none() || self.takeover_place.is_none() {
+            match self.assistant_wait {
+                Some((id, since)) if id == ask.id && since.elapsed() > WAITS => self.assistant_seen = Some(ask.id),
+                Some((id, _)) if id == ask.id => {}
+                _ => self.assistant_wait = Some((ask.id, Instant::now())),
+            }
+            return;
+        }
+        self.assistant_seen = Some(ask.id);
+        self.assistant_wait = None;
+        let action = match ask.page {
+            P::AllTools => Action::All,
+            P::Pictures => Action::Pictures,
+            P::Worlds => Action::Worlds,
+            P::Instances => Action::Page(Target::Instances),
+            P::Youtube => Action::Page(Target::YouTube),
+            P::VideoHistory => Action::VideoHistory,
+            P::Ask => Action::Talk,
+            P::MenuSettings => Action::Settings,
+            P::Tracking => Action::Page(Target::Tracking),
+            P::Microphones => Action::Page(Target::Microphones),
+            P::FpsBooster => Action::Booster,
+            P::Translation => Action::Translate,
+            P::Music => Action::Page(Target::Music),
+            P::Light => Action::Page(Target::Light),
+            P::States => Action::Page(Target::States),
+            P::Picture3d => Action::Page(Target::Photo),
+            P::Calls => Action::Page(Target::Call),
+            P::QrScanner => Action::Page(Target::Qr),
+            P::Suggest => Action::Page(Target::Suggest),
+            _ => return,
+        };
+        let mut out = Pressed::default();
+        self.act(action, snap, &mut out);
+        // A world's page: as a previous instance's row opens it (F10).
+        if let (P::Worlds, Some((id, name)), Some(worlds)) = (ask.page, ask.world.as_ref(), self.stage.worlds.as_mut()) {
+            worlds.open_world(id, name);
+        }
+    }
+
     /// Tells the service what N4N0's menu here is now (open, its keyboard), when that changed: open while it serves the service's request
     /// ([`Panels::serve_menu`]) or its keyboard shows (keys then go to it).
     fn report_menu(&mut self) {
@@ -4582,6 +4662,41 @@ impl Panels {
 const ASSISTANT_HELD_FOR: Duration = Duration::from_secs(3);
 
 /// Where talking with N4N0 stands, and why it cannot when it cannot.
+
+/// [`talk_log_rows`], for the screenshot harness's made-up logs.
+pub fn talk_log_rows_for_shots(log: &[orbiters_n4n0_core::intents::LogEntry], now_ms: u64) -> Vec<panels::TalkLogRow> {
+    talk_log_rows(log, now_ms)
+}
+
+/// The action log as Ask N4N0's page lists it (REQUEST20 6): the newest first, each line's words ready.
+fn talk_log_rows(log: &[orbiters_n4n0_core::intents::LogEntry], now_ms: u64) -> Vec<panels::TalkLogRow> {
+    use orbiters_n4n0_core::intents::{outcome_says, Outcome, Risk, Via};
+    log.iter()
+        .rev()
+        .map(|e| {
+            let minutes = now_ms.saturating_sub(e.at_ms) / 60_000;
+            let when = if minutes == 0 { tr("just now").to_string() } else { orbiters_i18n::tr!("{minutes} min ago", minutes = minutes) };
+            let mut detail = vec![when];
+            if e.via == Via::Quick {
+                detail.push(tr("understood offline").to_string());
+            }
+            if e.risk == Risk::Confirm {
+                detail.push(tr("needs your yes each time").to_string());
+            }
+            if let Some(why) = &e.why {
+                detail.push(why.clone());
+            }
+            let tone = match e.outcome {
+                Outcome::Done => panels::TalkTone::Done,
+                Outcome::Asked | Outcome::Offered => panels::TalkTone::Waiting,
+                Outcome::Refused | Outcome::Failed => panels::TalkTone::Wrong,
+                Outcome::Declined => panels::TalkTone::Declined,
+            };
+            panels::TalkLogRow { said: e.said.clone(), outcome: outcome_says(e.outcome).to_string(), detail: detail.join(" · "), tone }
+        })
+        .collect()
+}
+
 fn talk_now(snap: &Snapshot) -> panels::TalkNow {
     use orbiters_n4n0::status::VoiceReadiness;
     let voice = &snap.n4n0.voice;

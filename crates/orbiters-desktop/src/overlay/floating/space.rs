@@ -198,10 +198,17 @@ impl Quad {
 /// Upright before the eyes of `head`: `distance` ahead of them along where they look (level), `below` lower, facing
 /// them, upright as the play space is (N4N0's screen's home, its aim at the eyes with the scene's up).
 pub fn before_eyes(head: &Matrix34, distance: f32, below: f32) -> Matrix34 {
+    before_eyes_aside(head, distance, below, 0.0)
+}
+
+/// [`before_eyes`], and `right` metres to the right of where the head faces (its heading only: a tilted head does not
+/// move it up or down), still facing the eyes.
+pub fn before_eyes_aside(head: &Matrix34, distance: f32, below: f32, right: f32) -> Matrix34 {
     let back = axis(head, 2);
     let ahead = unit([-back[0], 0.0, -back[2]]).unwrap_or([0.0, 0.0, -1.0]);
+    let side = [-ahead[2], 0.0, ahead[0]];
     let eyes = position(head);
-    let at = [eyes[0] + ahead[0] * distance, eyes[1] - below, eyes[2] + ahead[2] * distance];
+    let at = [eyes[0] + ahead[0] * distance + side[0] * right, eyes[1] - below, eyes[2] + ahead[2] * distance + side[2] * right];
     facing(at, eyes, [0.0, 1.0, 0.0]).unwrap_or_else(|| from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], at))
 }
 

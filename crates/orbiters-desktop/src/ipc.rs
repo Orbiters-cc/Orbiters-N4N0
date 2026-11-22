@@ -1288,6 +1288,12 @@ pub(crate) mod tests {
         o.qr.note = "Turn the stream camera on".into();
         o.mirror.zoom = 3;
         o.calls.picked = 2;
+        o.assistant = orbiters_n4n0::AssistantView {
+            doing: Some("Fast walk on".into()),
+            open: Some(orbiters_n4n0::OpenAsk { id: 2, page: orbiters_n4n0_core::intents::Page::Worlds, world: None }),
+            ..Default::default()
+        }
+        .into();
         // The window's offer to close to the tray (window_rest), what the VR band said of it.
         s.window_rest = crate::state::WindowRest { offer: Some(crate::state::RestOffer { id: 3, until_ms: 1_762_800_008_000, for_ms: 8_000, left_ms: 8_000 }), shown: Some(3), kept: None };
         // The shared 3D view: a friend here, an offer waiting, a friend's view followed.

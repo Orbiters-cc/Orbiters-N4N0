@@ -36,6 +36,8 @@ enum Kind {
     Mood,
     Media,
     Light,
+    /// The app's features (`crate::intents`): their risk class gates each, this counts them.
+    App,
 }
 
 fn kind(action: &Action) -> Kind {
@@ -51,6 +53,7 @@ fn kind(action: &Action) -> Kind {
         Action::Mood { .. } => Kind::Mood,
         Action::Media { .. } => Kind::Media,
         Action::Light { .. } => Kind::Light,
+        Action::App(_) => Kind::App,
     }
 }
 
@@ -68,6 +71,7 @@ fn limit(kind: Kind) -> (usize, &'static str) {
         Kind::Mood => (3, "moods"),
         Kind::Media => (6, "music controls"), // i18n: not shown
         Kind::Light => (4, "light changes"), // i18n: not shown
+        Kind::App => (12, "Orbiters - N4N0 actions"), // i18n: not shown
     }
 }
 
@@ -182,12 +186,16 @@ pub fn what(action: &Action, control: Option<&Control>) -> String {
         Action::Mood { .. } => "change N4N0's look".into(), // i18n: not shown
         Action::Media { .. } => "control the music".into(), // i18n: not shown
         Action::Light { .. } => "change N4N0's light".into(), // i18n: not shown
+        Action::App(intent) => intent.what(),
     }
 }
 
 /// Whether `action` changes something (the avatar, the settings, the clipboard, a picture taken), which the assistant
 /// must hear of even when its turn fails afterwards.
 pub fn changes(action: &Action) -> bool {
+    if let Action::App(intent) = action {
+        return intent.spec().changes;
+    }
     !matches!(action, Action::FindControls { .. } | Action::ListSavedVideos | Action::Mood { .. } | Action::Media { command: None, volume_change: None })
 }
 
@@ -224,6 +232,8 @@ pub fn ask(action: &Action, control: Option<&Control>) -> String {
                 None => tr!("N4N0 asks to show {text} to people while you are away.", text = text),
             }
         }
+        // The app's intents ask in their own words.
+        Action::App(intent) => crate::intents::ask(intent),
         // Nothing else waits for a yes ([`TurnPolicy::review`]).
         other => what(other, control), // i18n: not shown
     };

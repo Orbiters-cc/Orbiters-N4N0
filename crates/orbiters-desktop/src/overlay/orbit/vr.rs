@@ -2059,6 +2059,7 @@ impl OrbitVr {
             return Turn::default();
         }
         self.panels.follow(cx.snap, cx.backend.library_version());
+        self.panels.serve_assistant(cx.snap);
         self.panels.menu_turn(cx.snap);
         self.panels.step_springs(dt);
 

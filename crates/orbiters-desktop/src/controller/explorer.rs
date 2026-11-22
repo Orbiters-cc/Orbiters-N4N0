@@ -149,10 +149,6 @@ pub struct WorldNotice {
 }
 
 impl WorldNotice {
-    /// What is left of its time, 1 to 0.
-    pub fn left(&self, now_ms: u64) -> f32 {
-        (self.until_ms.saturating_sub(now_ms) as f32 / self.for_ms.max(1) as f32).clamp(0.0, 1.0)
-    }
     pub fn up(&self, now_ms: u64) -> bool {
         now_ms < self.until_ms
     }
@@ -300,6 +296,35 @@ pub fn decide(on: bool, told: bool, since: Duration, last: Option<Duration>, way
         return Decision::Wait;
     }
     Decision::Show
+}
+
+/// What a press on the notice did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pressed {
+    /// For no notice up now (another one, or it went): nothing.
+    Nothing,
+    /// "Take a 3D picture" (the card): one is taken.
+    Take,
+    /// Its cross: it goes, and that world is not told again.
+    Closed,
+}
+
+/// The press `command` on the notice `up` (Request20, tested alone): the card takes a 3D picture; the cross closes it,
+/// and its world is put with this account's worlds told (it was when the notice came: again here, so that a write that
+/// failed then cannot bring it back on the next visit), never another world. A press for a notice no longer up does
+/// nothing.
+fn notice_pressed(command: &Command, up: Option<&WorldNotice>, told: &mut Told, account: &str) -> Pressed {
+    let (id, take) = match *command {
+        Command::NoticeTake { id } => (id, true),
+        Command::NoticeDismiss { id } => (id, false),
+        _ => return Pressed::Nothing,
+    };
+    let Some(notice) = up.filter(|n| n.id == id) else { return Pressed::Nothing };
+    if take {
+        return Pressed::Take;
+    }
+    told.add(account, &notice.world_id);
+    Pressed::Closed
 }
 
 /// Worlds told about, per account, on disk.
@@ -576,16 +601,23 @@ impl super::Controller {
     pub fn explorer_command(self: &Shared, command: Command) {
         let status = self.explorer_status();
         match command {
-            Command::NoticeTake { id } => {
-                if status.notice.as_ref().is_some_and(|n| n.id == id) {
+            Command::NoticeTake { .. } | Command::NoticeDismiss { .. } => {
+                let account = account_key(&self.view());
+                let pressed = {
+                    let mut s = self.explorer.lock().unwrap();
+                    let told = s.told.get_or_insert_with(|| Told::read(&told_path()));
+                    let pressed = notice_pressed(&command, status.notice.as_ref(), told, &account);
+                    if pressed == Pressed::Closed {
+                        told.write(&told_path());
+                    }
+                    pressed
+                };
+                if pressed != Pressed::Nothing {
                     self.update(|st| st.explorer.notice = None);
+                }
+                if pressed == Pressed::Take {
                     // The existing flow: a 3D picture once VRChat's camera is open (it waits for it, and says so).
                     self.n4n0_command(crate::ipc::N4n0Command::Photo3DWhenCamera { seconds: 3 });
-                }
-            }
-            Command::NoticeDismiss { id } => {
-                if status.notice.as_ref().is_some_and(|n| n.id == id) {
-                    self.update(|st| st.explorer.notice = None);
                 }
             }
             Command::NoticeHeld { id } => {
@@ -1025,6 +1057,40 @@ mod tests {
         }
         assert!(!many.has("ada", "wrld_0") && many.has("ada", &format!("wrld_{}", REMEMBERED + 2)), "the oldest go first");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Request20: the cross closes the notice for that world for good (kept on disk with the worlds told, per account):
+    /// on the next visit there it does not come; another world's still does. A press for another notice does nothing.
+    #[test]
+    fn closing_the_notice_keeps_that_world_quiet_and_only_that_world() {
+        let dir = std::env::temp_dir().join(format!("orbiters-explorer-{}", uuid::Uuid::new_v4().simple()));
+        let path = dir.join("explorer-worlds.json");
+        let notice = WorldNotice { id: 4, world_id: "wrld_a".into(), world_name: "A".into(), earns: None, until_ms: u64::MAX, for_ms: NOTICE_MS };
+        let mut told = Told::read(&path);
+        assert_eq!(notice_pressed(&Command::NoticeDismiss { id: 3 }, Some(&notice), &mut told, "ada"), Pressed::Nothing, "another notice's cross");
+        assert_eq!(notice_pressed(&Command::NoticeDismiss { id: 4 }, None, &mut told, "ada"), Pressed::Nothing, "it went already");
+        assert!(!told.has("ada", "wrld_a"));
+        assert_eq!(notice_pressed(&Command::NoticeDismiss { id: 4 }, Some(&notice), &mut told, "ada"), Pressed::Closed);
+        told.write(&path);
+        let again = Told::read(&path);
+        assert!(again.has("ada", "wrld_a"), "remembered on disk");
+        assert!(!again.has("ada", "wrld_b") && !again.has("bram", "wrld_a"), "that world, that account only");
+        let settled = SETTLE + S;
+        assert_eq!(decide(true, again.has("ada", "wrld_a"), settled, None, NOTHING, Duration::ZERO), Decision::Drop, "the next visit there: nothing");
+        assert_eq!(decide(true, again.has("ada", "wrld_b"), settled, None, NOTHING, Duration::ZERO), Decision::Show, "another world: it comes");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Request20: a press on the card itself still takes a 3D picture (the controller then asks N4N0's flow for one, which
+    /// waits for VRChat's camera); a press for a notice no longer up does not.
+    #[test]
+    fn the_press_on_the_notice_takes_a_3d_picture() {
+        let notice = WorldNotice { id: 9, world_id: "wrld_a".into(), world_name: "A".into(), earns: Some(1.0), until_ms: u64::MAX, for_ms: NOTICE_MS };
+        let mut told = Told::default();
+        assert_eq!(notice_pressed(&Command::NoticeTake { id: 9 }, Some(&notice), &mut told, "ada"), Pressed::Take);
+        assert_eq!(notice_pressed(&Command::NoticeTake { id: 8 }, Some(&notice), &mut told, "ada"), Pressed::Nothing);
+        assert_eq!(notice_pressed(&Command::NoticeTake { id: 9 }, None, &mut told, "ada"), Pressed::Nothing);
+        assert_eq!(notice_pressed(&Command::NoticeHeld { id: 9 }, Some(&notice), &mut told, "ada"), Pressed::Nothing);
     }
 
     fn item(id: u64, public: bool, grants: &[&str]) -> Item {

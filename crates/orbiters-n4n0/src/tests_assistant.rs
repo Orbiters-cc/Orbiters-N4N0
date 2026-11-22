@@ -315,3 +315,55 @@ fn the_next_capture_is_shared_once_it_is_ready() {
     assert_eq!(shares.len(), 1);
     assert_eq!((shares[0].key.as_str(), shares[0].recipients[0].id.as_str()), ("new", "usr_b"));
 }
+
+/// The question number a surface shows (`N4n0Confirmation::approve_url`'s local number).
+fn shown_question(t: &TestHost) -> u64 {
+    let c = t.view().confirmations.iter().find(|c| c.is_local()).cloned().expect("a question waits");
+    c.approve_url.strip_prefix(LOCAL_APPROVAL).and_then(|n| n.parse().ok()).expect("a local question's number")
+}
+
+/// One turn in which the model asks to boop `friend` (a harmless stand-in action that waits for a yes).
+fn ask_to_boop(t: &TestHost, n: &Shared, friend: &str) {
+    let calls = json!([call("b1", "orbiters_friends", json!({ "intent": "boop", "friend": friend }))]);
+    let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }]), calls), done(json!([]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask(format!("boop {friend}"), "typed");
+    turn_ended(n, &bodies, 2);
+}
+
+/// The answer a surface sends for the question it showed.
+fn answer_shown(n: &Shared, yes: bool, question: u64) {
+    let _ = question; // BEFORE-RUN: the current API carries no question
+    n.command(Command::AskAnswer { yes });
+}
+
+/// Verify-r21 blocker 1: question A is answered on one surface, question B arrives, then another surface's late answer
+/// to A (still on screen there) comes in: it answers nothing. B neither runs (a stale Yes) nor goes (a stale No), and
+/// B's own answer still works. The same for a typed yes sent while A was the question shown.
+#[test]
+fn a_late_answer_to_an_older_question_never_resolves_the_next_one() {
+    for late_yes in [true, false] {
+        let (t, n) = ready();
+        let sam = Intent::Boop { friend: Some("Sam".into()) };
+        let mira = Intent::Boop { friend: Some("Mira".into()) };
+        ask_to_boop(&t, &n, "Sam");
+        let a = shown_question(&t);
+        // The overlay's Yes to A.
+        answer_shown(&n, true, a);
+        assert_eq!(*t.app_intents.lock().unwrap(), vec![sam.clone()]);
+        ask_to_boop(&t, &n, "Mira");
+        let b = shown_question(&t);
+        assert_ne!(a, b);
+        // The window's late answer to A, still on its screen.
+        answer_shown(&n, late_yes, a);
+        assert_eq!(*t.app_intents.lock().unwrap(), vec![sam.clone()], "a late answer to A ran B ({late_yes})");
+        assert_eq!(shown_question(&t), b, "B still waits ({late_yes})");
+        // A typed yes sent while A was the question on screen: nothing either.
+        n.command(Command::Ask { text: "yes".into() }); // BEFORE-RUN
+        assert_eq!(*t.app_intents.lock().unwrap(), vec![sam.clone()], "a typed yes for A ran B");
+        assert_eq!(shown_question(&t), b, "B still waits after a typed yes for A");
+        // B's own answer.
+        answer_shown(&n, true, b);
+        assert_eq!(*t.app_intents.lock().unwrap(), vec![sam.clone(), mira.clone()]);
+    }
+}

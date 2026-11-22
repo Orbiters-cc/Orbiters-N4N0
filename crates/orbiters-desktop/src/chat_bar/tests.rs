@@ -431,6 +431,25 @@ fn ctrl_k_stays_the_settings_search_s_and_ctrl_j_is_the_chat_s_on_every_page() {
     assert!(w.focused(), "Ctrl+J: the bar, on Settings too");
 }
 
+/// Verify-r21 blocker 2: what sends is a fresh press of Enter, never a held Enter's repeats, nor the Enter that comes in
+/// the same moment as a paste; the text then needs its own fresh Enter.
+#[test]
+fn a_held_enter_or_a_paste_never_sends() {
+    let mut w = Window::new(ready(), 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.type_text("yes");
+    let repeat = Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: true, modifiers: Modifiers::NONE };
+    w.frame(vec![repeat.clone()]);
+    w.frame(vec![repeat]);
+    assert!(w.backend.sent().is_empty(), "a held Enter's repeats sent {:?}", w.backend.sent());
+    let fresh = Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+    w.frame(vec![Event::Paste(" please".into()), fresh]);
+    assert!(w.backend.sent().is_empty(), "a paste with an Enter in the same moment sent {:?}", w.backend.sent());
+    assert_eq!(w.chat().draft(), "yes please");
+    w.key(Key::Enter, Modifiers::NONE);
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::Ask { text, .. }) if text == "yes please"), "{:?}", w.backend.sent());
+}
+
 #[test]
 fn shift_enter_starts_a_line_and_a_composing_input_method_keeps_its_enter() {
     let mut w = Window::new(ready(), 1280.0);

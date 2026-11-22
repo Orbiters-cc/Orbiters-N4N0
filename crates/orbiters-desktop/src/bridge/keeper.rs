@@ -304,6 +304,8 @@ impl Keeper {
             }
             Command::Client { client, change } => self.change_client(client, change),
             Command::CheckClients => self.clients(|clients, wanted| clients.check(wanted)),
+            // Asked by this process, the one whose screenshots need it (macOS judges the process that captures).
+            Command::AllowScreenRecording => super::mac::ask_screen_recording(),
         }
         self.tick();
     }
@@ -338,6 +340,7 @@ impl Keeper {
         }
         if status.allowed {
             self.bridge.status_into(&mut status);
+            status.screen_recording = super::mac::screen_recording();
             if let Some(registrations) = self.registrations.get() {
                 status.clients = registrations.statuses();
             }

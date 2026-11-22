@@ -496,6 +496,8 @@ mod around;
 mod booster;
 pub(crate) use booster::{dev_build as booster_dev_build, restore_at_sign_in as booster_restore_at_sign_in, store as booster_store};
 mod bridge_game;
+#[cfg(target_os = "macos")]
+mod bridge_mac;
 mod bridge_publish;
 mod bridge_side;
 mod burst;

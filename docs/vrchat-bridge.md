@@ -179,6 +179,110 @@ deletes a project's files: the tab has no such action, and neither do the tools.
 (drawn on the window's GPU; the tools list the previews), and "Change the picture on VRChat" of a row's menu (a write to
 the VRChat account, which the bridge does not make).
 
+## On a Mac (2026-11-22)
+
+VRChat runs on an Apple-silicon Mac under Obelisk's engine (`obelisk-cli`, `orbiters_core::obelisk`), and the bridge there
+**observes and travels**: `go_to_world` starts VRChat in a new private instance of the account's own, `screenshot` looks at its
+window, `wait_for`, `get_state`, `find_worlds`, the label, picture and Unity tools work as on Windows, and `close_vrchat` asks the
+game to quit. What a computer can do is one set of capabilities (`bridge/caps.rs`): Windows has every one, so nothing changed there;
+on a Mac the tool list (`tools/list`), the guide (`bridge://guide`, `tools::GUIDE_MAC`), the prompt and the server's instructions
+leave out what cannot work, and a call to it anyway answers `not_on_this_computer` before anything is done (no instance made, no
+game started or closed). Settings shows the bridge's section on a Mac too, with its own sentence and a **Screen recording** row.
+
+| Not on a Mac yet | Why | What it would take |
+| --- | --- | --- |
+| `walk`, `turn`, `press`, `mouse`, `focus_game`, `wear_avatar`, `aim_camera` | Person first: no synthetic input until a guard can release it after a crash and the engine has an input interface with targets, units and releases. OSC reaches the game (Phase 0 below), but nothing proves a datagram to port 9000 is this session's game rather than a headset's on the network. | Phase 2: OSC bound to the verified session's own `--osc` ports; clicks and keys through `wsd` (below). |
+| `take_3d_picture`, `open_camera` | No Spout under the engine: the capture kit's strip lives in the stream camera's render target, and the window shows a scaled viewfinder. | Phase 3: an engine-side export of the stream camera's render target. |
+| `open_session`, `close_session`, profiles, VR sessions, travel by link | One Steam game per engine library; no SteamVR; no link pipe into a running game. | Out of scope. |
+
+How it is one verified game (`controller/bridge_mac.rs`):
+
+- **Start.** Through the very start Home's Play uses (`obelisk_cli::Play` in `MacMachine`): one start at a time, and **none within
+  80 s of a start that ended early** (`start_wait` with `retry_after_s`; Home says the same). That wait comes from the engine's own
+  session records (`SteamSessions/<id>.v2.json`: ended under 150 s or with 0 frames shown), so it holds across a restart of N4N0.
+  Each start has a launch id; its outcome (its Game session, the engine's launcher process, how it ended) is kept by that id for
+  whoever made it, and Home's toast is told once as before.
+- **Arguments:** `--no-vr -screen-fullscreen 0 -screen-width 1280 -screen-height 720 vrchat://launch?ref=orbiters.cc&id=<world>:<instance>`,
+  after Steam's own `--no-vr`, exactly as given (measured).
+- **Ownership.** A game is the bridge's only when it is its own launch's: the launcher's process with its birth time, the Game
+  session the program names (obelisk-cli 0.1.3 says it in `running`; before, the engine's record of that launcher), and the VRChat
+  log made after the launch whose own `Arg:` lines hold the instance's launch link. A VRChat started from Home, or found after a
+  restart of the service, is the person's: `get_state` says it runs, and nothing of it is read, looked at or closed.
+- **Its log:** VRChat's own folder in the engine's Wine prefix (`…/cc.orbiters.obelisk-cli/Prefixes/steam-438100-windows-linux/prefix/drive_c/users/crossover/AppData/LocalLow/VRChat/VRChat`,
+  `obelisk::vrchat_log_dir`), the one file of this start, followed by its own `LogWatcher`. The app's other VRChat features on a
+  Mac still follow the VRChat on the network: they are not changed by this.
+- **Arrival needs the game's window on screen** (renderer evidence), not only the log's join. The engine's log
+  (`~/Library/Logs/Obelisk/Steam/wine-438100.log`) is read from the launch on: its graphics server dropping the game
+  (`VTEST_CLIENT_ERROR_CONTEXT_LOST`) makes `get_state`'s `vrchat.renderer_lost` true and `screenshot` answer `renderer_lost`;
+  before arrival it ends the start with `start_crashed`, as does a start the program says ended early.
+- **Window:** the engine's window server (`wsd`, the launcher's own child) owns the game's window; the largest shown one is the game's
+  (never its 400 x 225 splash or the crash box). Coordinates: the game renders 1280 x 720 backing pixels, 640 x 360 points at scale 2,
+  under a 32-point title bar; `window_width`/`window_height` are the content's pixels, the screenshot is that content alone (title
+  bar cut), and `scale` maps the JPEG to it. The bridge never resizes the window or brings it forward on a Mac (no input needs it).
+- **Screenshots** are the window alone through macOS's `screencapture -l <window id>` (ScreenCaptureKit's single-window capture: the
+  window even when covered, never the desktop). macOS asks **Screen Recording** of the process that captures, the tray service of
+  Orbiters - N4N0: without it `screenshot` answers `screen_recording_not_allowed`, and Settings' bridge section shows **Allow screen
+  recording**, which asks macOS from that process and opens System Settings, Privacy & Security, Screen Recording, where the person
+  switches Orbiters - N4N0 on and reopens it.
+- **Close** is the game's own Quit through the engine, for that Game session only (`obelisk-cli steam quit 438100 --session <uuid>`,
+  0.1.3; with an older program the running session is checked to be the bridge's first). Never forced: a game that does not go is
+  `close_timeout`, and the person decides.
+- **The person:** any keyboard, mouse or trackpad event (the HID system's idle time, `CGEventSourceSecondsSinceLastEventType`, no
+  permission needed; the bridge sends no input on a Mac, so all of it is theirs) pauses the agent for 30 s. No hotkey on a Mac:
+  Settings' Pause and Stop.
+- **Agents:** Claude Code and Codex are found on the person's own search path (asked once of their login shell, then the usual
+  places of Homebrew, npm and the installers), and run with it (their scripts need `node`). Codex's settings file is written readable
+  by this user only from its first byte.
+- **Disks** in `get_state` are grouped by real volume (a mount point), and the Unity tools take only folders on volumes macOS calls
+  local (`statfs`'s `MNT_LOCAL`), never a network share.
+
+### Phase 0 on this Mac (2026-11-22: VRChat under Voile `v26.3.0-27.beta1`, obelisk-cli 0.1.1, Apple M3, macOS 27)
+
+Three starts, each into a new private instance of the owner's own home world (`wrld_7281543e…:<n>~private(usr_1339e525…)~region(eu)~nonce(<uuid>)`,
+built as VRChat's client builds one), with `-screen-fullscreen 0 -screen-width 1280 -screen-height 720 --osc=9010:127.0.0.1:9011` and the link.
+
+| Start | What happened |
+| --- | --- |
+| 20:44:50 | Up, in the exact instance (`Joining …~nonce(742cce87…)`), local player 53 s after the start (20:45:43). **Graphics lost at 20:45:49**: `neptune: ring fatal error`, `virgl_render_server … destroying Neptune context`, `VTEST_CLIENT_ERROR_CONTEXT_LOST`; the game ran on without a frame (527 frames in all). Graceful `steam quit --wait 60`: gone in 6 s. |
+| 20:48:10 | **Hung 11 s in** (last frame and last log line at 20:48:32, every process at 0 % CPU, 96 frames). `steam quit --wait 60` was not taken in 60 s (`still_running`); ended with `--force` by the experimenter (not by the bridge, which never forces). |
+| 20:52:35 | Up, local player at 20:53:28. **Graphics lost at 20:53:33**, 5 s after arrival. Graceful quit in 6 s. |
+
+The engine's graphics drop is the engine's (out of this work's scope); it is what `renderer_lost` and `start_crashed` report.
+
+**(a) OSC transports.** VRChat's OSC setting was off (`UI.Settings.Osc` 0 in the prefix's `user.reg`; `VRC_INPUT_OSC` is another
+key): set to 1 before the second start, after which VRChat logged `Advertising Service VRChat-Client-… of type OSCQuery on <port>`
+and `… of type OSC on 9010`. Every socket is the Mac's own (the engine's `lkd` maps them onto host sockets): `lsof` showed
+`UDP *:9010` for the game's input, `UDP 127.0.0.1:<n>->127.0.0.1:9011` for its output, `TCP 127.0.0.1:<port> (LISTEN)` for OSCQuery.
+- *Game to host, UDP:* **works.** 16,523 datagrams to 127.0.0.1:9011 in 300 s from 43 addresses (`/avatar/parameters/…`), also after
+  the graphics went.
+- *OSCQuery `HOST_INFO`:* **works** from the host: `{"NAME":"VRChat-Client-7A8B59",…,"OSC_IP":"127.0.0.1","OSC_PORT":9010,"OSC_TRANSPORT":"UDP"}`.
+- *mDNS advertisement:* **does not reach the Mac**: `dns-sd -B _oscjson._tcp` and `_osc._udp` listed no `VRChat-Client` while it
+  advertised. To make it work: the port must be read another way (VRChat's log line names it, and so does `lsof` of the session's
+  processes), or the engine forwards the game's mDNS to `mDNSResponder` (`DNSServiceRegister` in `lkd`'s network layer for the
+  multicast group 224.0.0.251:5353 the game joins).
+- *Host to game, UDP:* the socket is bound on the host (`UDP *:9010`), but whether VRChat acts on what reaches it was not measured: in
+  the one start with OSC on and a picture, the graphics had gone 5 s after arrival, before `/input/LookRight` was sent, so no picture
+  could show it. Next: send `/input/LookRight 1` while frames are shown and compare two screenshots.
+
+**(b) Windowed arguments.** VRChat's log listed all ten arguments in order (`Launching with args: 10`: the exe, Steam's `--no-vr`, then
+ours). The engine made a window of `1280x720 px` (`wsd: client …: window 1 1280x720 px style 0xf`), which macOS lists as 640 x 392
+points (content 640 x 360 at scale 2 under a 32-point title bar). `screencapture -l` gave 1280 x 784 pixels: 64 rows of title bar,
+then 1280 x 720 of the game (a picture of the world while frames came; identical frames after the graphics went). The splash before it
+is a 400 x 225 point window, and four 1470 x 33 windows stay off screen.
+
+**(c) Hover and click.** `wsdctl <socket> hover 320 180` and `tap 53` (Escape) were taken by the window server
+(`wsd: debug input kind 5 a 320 b 180 -> window 1: view 640x360 pt, frame shown 0x0 px, pointer scale 2.0000 x 2.0000`, so its
+coordinates are content **points**, scaled by 2 to the game's pixels), without the window having the focus. Whether VRChat acted on
+them is not known: both times the graphics had gone first (`frame shown 0x0`), and the click on a menu control was therefore not
+tried. The resize part was not reached. What Phase 2 needs from the engine either way: `wsdctl`'s `click X Y` and `hover` exist, but
+not button down and up, right or middle buttons, signed relative motion, or an answer saying the event reached a shown frame; those
+belong in `wsd`'s control socket (Orbiters-cc/voile-lkd, branch `orbiters`), shipped through the CLI's engine patch.
+
+**(d) Stream camera decode.** Not tried: it needs the camera opened through the menu (clicks, (c)) and frames shown for several
+seconds, and no start kept its graphics that long. Even with frames, the window shows the desktop view with the camera's small
+viewfinder, not the camera's render target, so the strip's pixels would be scaled and lost: an export of the stream camera's render
+target from the engine (DXMT's present of that texture) is what Phase 3 would need.
+
 ## The protocol
 
 Streamable HTTP on `127.0.0.1`, one POST endpoint answering JSON, revision `2026-07-28` (stateless, `server/discover`, the `Mcp-Method` and `Mcp-Name`

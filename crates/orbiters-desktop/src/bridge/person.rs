@@ -97,6 +97,9 @@ pub enum Heard {
 pub struct Listener {
     #[cfg(windows)]
     thread: u32,
+    /// Set when it is dropped: the Mac's listening thread ends.
+    #[cfg(target_os = "macos")]
+    stop: Arc<std::sync::atomic::AtomicBool>,
     /// The hotkey was taken by another program.
     pub hotkey_taken: bool,
 }
@@ -107,6 +110,8 @@ impl Listener {
         Self {
             #[cfg(windows)]
             thread: 0,
+            #[cfg(target_os = "macos")]
+            stop: Arc::default(),
             hotkey_taken: false,
         }
     }
@@ -137,7 +142,43 @@ pub fn listen(own: Arc<OwnInput>, heard: impl Fn(Heard) + Send + 'static) -> Opt
     ready_rx.recv_timeout(Duration::from_secs(5)).ok().flatten().map(|(thread, hotkey_taken)| Listener { thread, hotkey_taken })
 }
 
-#[cfg(not(windows))]
+/// A Mac: the HID system's time since its last keyboard, mouse or trackpad event, looked at ten times a second
+/// (`CGEventSourceSecondsSinceLastEventType`, which needs no permission and sees every app's input). The bridge sends no
+/// input on a Mac (caps.rs), so every event is the person's. No hotkey: Settings' Pause and Stop hold it.
+#[cfg(target_os = "macos")]
+pub fn listen(_own: Arc<OwnInput>, heard: impl Fn(Heard) + Send + 'static) -> Option<Listener> {
+    let stop: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    let ending = stop.clone();
+    std::thread::Builder::new()
+        .name("bridge-person".into())
+        .spawn(move || {
+            let mut last = super::mac::idle_seconds();
+            while !ending.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+                let idle = super::mac::idle_seconds();
+                if is_new_input(last, idle) {
+                    heard(Heard::PersonInput);
+                }
+                last = idle;
+            }
+        })
+        .ok()?;
+    Some(Listener { stop, hotkey_taken: false })
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Listener {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Whether the idle time read now after `before` says an input came between: it went back rather than on.
+pub fn is_new_input(before: f64, now: f64) -> bool {
+    now + 0.05 < before
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn listen(_own: Arc<OwnInput>, _heard: impl Fn(Heard) + Send + 'static) -> Option<Listener> {
     None
 }
@@ -293,6 +334,21 @@ mod tests {
         own.sent(u32::MAX - 50);
         assert!(!own.someone_else(u32::MAX.wrapping_add(20), u32::MAX - 60));
         assert!(own.someone_else(200, u32::MAX - 60));
+    }
+
+    #[test]
+    fn an_idle_time_that_goes_back_is_new_input() {
+        assert!(is_new_input(3.0, 0.1), "someone touched the trackpad");
+        assert!(!is_new_input(3.0, 3.1), "nobody: the idle time goes on");
+        assert!(!is_new_input(3.0, 2.98), "a reading's jitter is not input");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_mac_listener_starts_and_stops() {
+        let listener = listen(Arc::new(OwnInput::default()), |_| {}).expect("it always starts on a Mac");
+        assert!(!listener.hotkey_taken);
+        drop(listener);
     }
 
     #[cfg(windows)]

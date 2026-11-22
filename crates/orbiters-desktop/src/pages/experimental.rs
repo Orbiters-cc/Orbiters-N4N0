@@ -112,6 +112,7 @@ fn status_line(cx: &Cx) -> (String, egui::Color32) {
     let status = &cx.snap.bridge;
     match (&status.paused, &status.client) {
         (Some(Paused::Person { .. }), _) => (tr("Paused: you are using the computer. The agent goes on 30 seconds after you stop.").into(), theme::WARN),
+        (Some(Paused::Held), _) if !status.capabilities.hotkey => (tr("Paused until you resume here.").into(), theme::WARN),
         (Some(Paused::Held), _) => (tr!("Paused until you resume (here, or {hotkey}).", hotkey = HOTKEY), theme::WARN),
         (None, Some(client)) if status.acting => (tr!("{name} is acting now.", name = client.name), theme::OK),
         (None, Some(client)) if client.connected => (tr!("{name} is connected.", name = client.name), theme::OK),
@@ -125,7 +126,11 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
     let mut changed = false;
     let status = &cx.snap.bridge;
     section(ui, cx, index, icons::FLASK, tr("Experimental"), Some(tr("Offered to this account by Orbiters, and not finished")), |ui| {
-        let note = tr("Lets an agent such as Claude Code start VRChat in desktop mode, go from private instance to private instance, look around and take 3D pictures, through a service on this computer only. Your own keyboard or mouse pauses it.");
+        let note = if status.capabilities.all() {
+            tr("Lets an agent such as Claude Code start VRChat in desktop mode, go from private instance to private instance, look around and take 3D pictures, through a service on this computer only. Your own keyboard or mouse pauses it.")
+        } else {
+            tr("Lets an agent such as Claude Code start VRChat on this Mac, go from private instance to private instance and look at its window, through a service on this computer only. On a Mac it cannot walk, click or take 3D pictures yet. Your own keyboard or mouse pauses it.")
+        };
         widgets::field(ui, tr("VRChat bridge"), Some(note), 48.0, |ui| {
             changed |= widgets::toggle(ui, "vrchat-bridge", &mut draft.vrchat_bridge);
         });
@@ -181,6 +186,22 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         ui.add_space(8.0);
         widgets::separator(ui);
 
+        // A Mac's screenshots need macOS's Screen Recording for the service, which only the person can give.
+        if status.screen_recording == Some(false) {
+            widgets::field(
+                ui,
+                tr("Screen recording"),
+                Some(tr("macOS does not let Orbiters - N4N0 see VRChat's window yet, so the agent cannot look at it. Allow it, switch Orbiters - N4N0 on in System Settings if macOS opens it, then quit and reopen Orbiters - N4N0.")),
+                200.0,
+                |ui| {
+                    if Button::new(tr("Allow screen recording")).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
+                        cx.ctl.bridge_command(Command::AllowScreenRecording);
+                    }
+                },
+            );
+            widgets::separator(ui);
+        }
+
         // One click, per agent.
         for client in clients(status) {
             client_row(ui, cx, client, true);
@@ -199,7 +220,9 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
             }
         });
         widgets::separator(ui);
-        let hotkey = if status.hotkey_taken {
+        let hotkey = if !status.capabilities.hotkey {
+            tr("Pause above holds it until you resume.").to_string()
+        } else if status.hotkey_taken {
             tr!("{hotkey} is taken by another program: your own input and Stop still work.", hotkey = HOTKEY)
         } else {
             tr!("{hotkey} pauses it until pressed again.", hotkey = HOTKEY)

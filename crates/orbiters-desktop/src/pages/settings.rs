@@ -146,8 +146,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             if orbiters_core::osc::VRCHAT_RUNS_HERE {
                 m.add(18, |ui| apply |= super::launch_card::card(ui, cx, 18, &mut draft));
             }
-            // Only for an account the server says has it: nobody else sees a trace of it.
-            if snap.bridge.allowed && orbiters_core::osc::VRCHAT_RUNS_HERE {
+            // Only for an account the server says has it: nobody else sees a trace of it. On a Mac too, where VRChat runs
+            // under Obelisk's engine: what it can do there is its capabilities' to say (bridge/caps.rs).
+            if snap.bridge.allowed {
                 m.add(11, |ui| apply |= super::experimental::show(ui, cx, 11, &mut state.experimental, &mut draft.experimental));
             }
             // What VRChat on this very computer gives (Spout, its log, SteamVR) has no settings where it cannot run.

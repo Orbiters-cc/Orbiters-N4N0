@@ -16,6 +16,8 @@ crates/orbiters-n4n0-core/src/intents/quick.rs
 crates/orbiters-n4n0-core/src/intents/tests.rs
 crates/orbiters-n4n0/src/tests_assistant.rs
 crates/orbiters-desktop/src/bridge/tools.rs
+crates/orbiters-desktop/src/bridge/caps.rs
+crates/orbiters-desktop/src/bridge/flow_tests.rs
 crates/orbiters-desktop/src/bridge/projects.rs
 crates/orbiters-desktop/src/bridge/sandbox.rs
 crates/orbiters-desktop/src/bridge/vr.rs

@@ -14,10 +14,13 @@
 //!   projects and copies, the Library move, Orbiters' packages and world uploads, behind the same gate, address and token.
 
 pub mod capture;
+pub mod caps;
 pub mod clients;
 // It drives a real game window through Windows; the bridge does nothing where VRChat does not run.
 #[cfg(all(test, windows))]
 mod e2e;
+#[cfg(test)]
+mod flow_tests;
 pub mod game;
 pub mod guard;
 pub mod input;
@@ -25,6 +28,7 @@ pub mod journal;
 pub mod vr;
 pub mod keeper;
 pub mod lab;
+pub mod mac;
 pub mod map;
 pub mod map_tool;
 pub mod mcp;
@@ -113,6 +117,12 @@ pub struct Status {
     /// camera column, `overlay::orbit::desktop`).
     #[serde(default)]
     pub driven: Vec<u32>,
+    /// What this computer's VRChat can be made to do (caps.rs): Settings says only what is true here.
+    #[serde(default)]
+    pub capabilities: caps::Capabilities,
+    /// Whether macOS lets the capturing process record the screen (`None`: not asked, or not a Mac).
+    #[serde(default)]
+    pub screen_recording: Option<bool>,
 }
 
 /// What Settings asks of the service.
@@ -130,6 +140,8 @@ pub enum Command {
     Resume,
     /// A new token: clients have to be given it again.
     NewToken,
+    /// macOS: asks for the Screen Recording permission the screenshots need, for the process that captures (the service).
+    AllowScreenRecording,
 }
 
 /// A 3D picture the agent took in this run.
@@ -197,6 +209,8 @@ pub(crate) struct Run {
     pub leaving: bool,
     /// The last event is such a leaving (`landed_elsewhere`).
     pub left: bool,
+    /// The last event is a start that crashed before it arrived (`start_crashed`: a Mac's engine).
+    pub crashed: bool,
     /// The window's client size when its VRChat arrived (what `-screen-width` and `-screen-height` asked): the size clicks'
     /// coordinates are for, put back when someone changed it.
     pub size: Option<(u32, u32)>,
@@ -402,6 +416,8 @@ pub struct Bridge {
     pub projects: projects::Projects,
     /// The worlds' maps from their 3D pictures, and the avatars' moves (map_tool.rs).
     pub(crate) maps: map_tool::Maps,
+    /// What this computer's VRChat can be made to do (caps.rs): everything on Windows.
+    caps: Mutex<caps::Capabilities>,
 }
 
 impl Bridge {
@@ -435,6 +451,7 @@ impl Bridge {
             last_close: Mutex::new(None),
             projects: projects::Projects::default(),
             maps: map_tool::Maps::default(),
+            caps: Mutex::new(caps::Capabilities::here()),
         });
         // The Unity tools look at the person again at the moment they act (verify-n4n0 6).
         let weak = Arc::downgrade(&bridge);
@@ -442,8 +459,19 @@ impl Bridge {
         bridge
     }
 
+    /// What this computer's VRChat can be made to do.
+    pub fn capabilities(&self) -> caps::Capabilities {
+        *self.caps.lock().unwrap()
+    }
+
+    /// Another computer's capabilities, for the tests that play a Mac's or a PC's bridge on any computer.
+    pub fn set_capabilities(&self, caps: caps::Capabilities) {
+        *self.caps.lock().unwrap() = caps;
+    }
+
     /// Fills in what the bridge itself knows.
     pub fn status_into(&self, status: &mut Status) {
+        status.capabilities = self.capabilities();
         status.paused = self.paused_for_status();
         status.client = self.client_seen();
         status.acting = self.in_flight.load(Ordering::Relaxed) > 0;

@@ -723,7 +723,8 @@ mod tests {
             let mut toasts = orbiters_ui::toast::Toasts::default();
             let column = Rect::from_min_size(pos2(0.0, 0.0), vec2(380.0, 780.0));
             let mut out = Vec::new();
-            for _ in 0..3 {
+            // Two seconds of frames: the column fades in, and nothing is painted while it is transparent.
+            for _ in 0..120 {
                 let input = egui::RawInput { screen_rect: Some(column), time: Some(ctx.input(|x| x.time) + 1.0 / 60.0), ..Default::default() };
                 let mut output = ctx.run_ui(input, |ui| {
                     let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
@@ -739,6 +740,7 @@ mod tests {
         let tester = || serde_json::from_value::<orbiters_core::vrchat_api::User>(serde_json::json!({"id": "usr_test", "displayName": "Tester"})).unwrap();
         let connecting = crate::controller::vrchat_login::Status { restoring: true, known: Some(tester()), ..Default::default() };
         let drawn = painted(connecting);
+        assert!(drawn.contains("Search friends"), "the column is painted: {drawn}");
         assert!(!drawn.contains("Sign in to VRChat"), "{drawn}");
         assert!(drawn.contains("Connecting to VRChat as Tester"), "{drawn}");
         let waiting = crate::controller::vrchat_login::Status { waiting: true, restoring: true, known: Some(tester()), ..Default::default() };

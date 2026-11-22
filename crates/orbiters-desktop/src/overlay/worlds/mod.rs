@@ -816,6 +816,14 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                         self.go_there(world, target);
                     }
                 }
+                // The computer's clipboard, the same in a headset (REQUEST20 1: to paste the name elsewhere). Copied shows on
+                // the button; only a failure is said.
+                Action::CopyName(name) => {
+                    use orbiters_n4n0::Clipboard as _;
+                    if let Err(e) = crate::device::WindowsClipboard.copy(&name) {
+                        let _ = self.said.0.send(e);
+                    }
+                }
                 Action::OpenWeb(world) => {
                     let Some(link) = finder::web_link(&world) else { continue };
                     let tx = self.said.0.clone();
@@ -2408,6 +2416,14 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                         self.go_there(world, target);
                     }
                 }
+                // The computer's clipboard, the same in a headset (REQUEST20 1: to paste the name elsewhere). Copied shows on
+                // the button; only a failure is said.
+                Action::CopyName(name) => {
+                    use orbiters_n4n0::Clipboard as _;
+                    if let Err(e) = crate::device::WindowsClipboard.copy(&name) {
+                        let _ = self.said.0.send(e);
+                    }
+                }
                 Action::OpenWeb(world) => {
                     let Some(link) = finder::web_link(&world) else { continue };
                     let tx = self.said.0.clone();
@@ -3024,6 +3040,24 @@ mod go_tests {
         worlds.vrchat = false;
         let status = worlds.status();
         assert!(status.go.list.is_none() && status.go.went.is_none() && status.go.error.is_some());
+    }
+}
+
+#[cfg(test)]
+mod copy_name_tests {
+    use super::*;
+
+    /// REQUEST20 1: Copy name puts the name, exactly, on the computer's clipboard (the tests' stand-in for it), and says
+    /// nothing more than its button's Copied.
+    #[test]
+    fn copy_name_puts_the_exact_name_on_the_clipboard() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let mut worlds = Worlds::alone(ctx);
+        let name = "Midnight Rooftop ✦ copy-test 7f3a".to_string();
+        worlds.act_alone(vec![panel::Action::CopyName(name.clone())], &[]);
+        assert!(crate::device::COPIED.lock().unwrap().contains(&name));
+        assert!(worlds.said.1.try_recv().is_err(), "nothing said");
     }
 }
 

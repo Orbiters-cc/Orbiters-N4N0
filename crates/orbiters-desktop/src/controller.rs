@@ -514,6 +514,7 @@ mod maps;
 pub(crate) mod menu_shares;
 mod n4n0;
 mod perf;
+mod previous_invite;
 mod performance;
 pub mod publish_cost;
 pub mod picture_repair;

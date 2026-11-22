@@ -1,0 +1,4 @@
+# REQUEST20 (stream r20-friends-copy-invite, 2026-11-22): the friends list in VRCNext's sections (pages/launcher),
+# Copy name beside a world's name (overlay/worlds/panel.rs, pages/worlds.rs), Previous instances' Invite me with the
+# person's own VRChat account (controller/previous_invite.rs; the menus' answers in overlay/orbit/panels.rs, pages/home.rs).
+crates/orbiters-desktop/src/controller/previous_invite.rs

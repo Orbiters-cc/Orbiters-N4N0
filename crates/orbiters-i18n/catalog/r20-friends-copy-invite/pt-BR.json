@@ -1,0 +1,17 @@
+{
+  "friends section\u0004Favourites": "Favoritos",
+  "favourite group\u0004Other": "Outros",
+  "Copy the world's name": "Copiar o nome do mundo",
+  "Invite sent: look at your VRChat notifications": "Convite enviado: veja suas notificações do VRChat",
+  "Only an instance of your Previous instances can be invited to from here.": "Daqui, só dá para receber convite para uma das suas instâncias anteriores.",
+  "This instance has closed, or VRChat does not show it to your account.": "Esta instância foi fechada, ou o VRChat não a mostra para sua conta.",
+  "VRChat does not let your account into this instance (invite only, or for its owner's friends).": "O VRChat não deixa sua conta entrar nesta instância (só por convite, ou para os amigos do dono).",
+  "Connect VRChat": "Conectar VRChat",
+  "Opens Orbiters on the computer at Settings, VRChat account: your invites then come from your own account.": "Abre o Orbiters no computador em Configurações, Conta do VRChat: seus convites passam a vir da sua própria conta.",
+  "An invite to the instance you were last in here.": "Um convite para a instância em que você esteve por último aqui.",
+  "Your VRChat account invites you back: look at your VRChat notifications": "Sua conta do VRChat te convida de volta: veja suas notificações do VRChat",
+  "Connect your VRChat account here and the invite comes from it. Orbiters' account could not invite you: {reason}": "Conecte aqui sua conta do VRChat e o convite virá dela. A conta do Orbiters não conseguiu te convidar: {reason}",
+  "Invite me needs your VRChat account": "O convite precisa da sua conta do VRChat",
+  "This instance has closed: VRChat cannot invite you there.": "Esta instância foi fechada: o VRChat não pode te convidar.",
+  "This instance is full right now: try later or pick another.": "Esta instância está cheia: tente mais tarde ou escolha outra."
+}

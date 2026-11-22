@@ -417,7 +417,7 @@ pub struct InviteAccount {
     pub link: String,
 }
 
-/// How an Invite me went (Orbiters' answer).
+/// How an Invite me went: VRChat's answer to the person's own VRChat account (connected in the app), else Orbiters'.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum InviteAnswer {
@@ -427,6 +427,9 @@ pub enum InviteAnswer {
     NeedsFriend { account: InviteAccount, message: String },
     /// Why it was not sent.
     Failed { message: String },
+    /// Not sent, and the way that works is the person's own VRChat account in the app (REQUEST20 4): none is connected
+    /// (Orbiters' account could not invite them), or its session expired. `message` says why; the menus offer to connect.
+    NeedsVrchat { message: String },
 }
 
 /// A saved state of the avatar worn, as the menu lists it (Orbiters - N4N0 keeps them: contracts `Docs/n4n0.md`, States).
@@ -1189,6 +1192,9 @@ pub struct Menu {
     pub invite_waiting: bool,
     /// Orbiters' VRChat account to befriend first, once an invite said so.
     pub invite_account: Option<InviteAccount>,
+    /// The last Invite me could not be sent without the person's own VRChat account in the app, and why: the menus
+    /// offer to connect it (REQUEST20 4).
+    pub invite_vrchat: Option<String>,
     /// The QR code scanner, as the host runs it.
     pub qr: crate::qr::QrView,
     /// The 3D captures as the host lists them (the last one made, History's), and the page of History shown (from 0).
@@ -2985,13 +2991,18 @@ impl Menu {
     pub fn invite_answered(&mut self, answer: InviteAnswer) {
         self.invite_went = Some(matches!(answer, InviteAnswer::Sent));
         self.invite_waiting = false;
+        self.invite_vrchat = None;
         match answer {
             InviteAnswer::Sent => {
                 if self.page == Page::AddFriend {
                     self.go_unasked(Page::Instances);
                 }
                 self.invite_account = None;
-                self.notice = Some(mark("Invite sent: open it in VRChat's notifications").into());
+                self.notice = Some(mark("Invite sent: look at your VRChat notifications").into());
+            }
+            InviteAnswer::NeedsVrchat { message } => {
+                self.notice = Some(cut(&message, 80));
+                self.invite_vrchat = Some(message);
             }
             InviteAnswer::NeedsFriend { account, message } => {
                 self.invite_account = Some(account);
@@ -4096,11 +4107,19 @@ mod tests {
         assert_eq!(menu.page, Page::Instances);
         menu.unasked_at = None;
         assert!(!menu.invite_waiting);
-        assert_eq!(layout::text(&menu, layout::Content::InstancesTitle), "Invite sent: open it in VRChat's notifications");
+        assert_eq!(layout::text(&menu, layout::Content::InstancesTitle), "Invite sent: look at your VRChat notifications");
         let _ = menu.press(Target::InviteMe(0));
         menu.invite_answered(InviteAnswer::Failed { message: "Link your VRChat account on Orbiters first.".into() });
         assert_eq!(menu.page, Page::Instances);
         assert!(menu.notice.as_deref().is_some_and(|n| n.starts_with("Not invited: Link your VRChat account")));
+        // REQUEST20 4: only the person's own VRChat account can do it: said, and kept for the menus' Connect VRChat,
+        // until the next answer.
+        let _ = menu.press(Target::InviteMe(0));
+        menu.invite_answered(InviteAnswer::NeedsVrchat { message: "Connect your VRChat account".into() });
+        assert_eq!((menu.invite_vrchat.as_deref(), menu.notice.as_deref(), menu.invite_went), (Some("Connect your VRChat account"), Some("Connect your VRChat account"), Some(false)));
+        let _ = menu.press(Target::InviteMe(0));
+        menu.invite_answered(InviteAnswer::Sent);
+        assert_eq!(menu.invite_vrchat, None);
         let _ = menu.press(Target::Back);
         assert_eq!(menu.page, Page::More);
     }

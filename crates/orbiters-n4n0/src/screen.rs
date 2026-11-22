@@ -1594,16 +1594,15 @@ impl N4n0 {
         });
     }
 
-    /// Orbiters' VRChat account invites the player to `location` (Previous instances' Invite me), from the screen's menu
-    /// (`screen`) or another's (the answer then goes in the status' `invite`); a toast says how it went.
+    /// Previous instances' Invite me to `location`, from the screen's menu (`screen`) or another's (the answer then goes
+    /// in the status' `invite`); a toast says how it went. The person's own VRChat account sends it when one is
+    /// connected in the app (REQUEST20 4: Orbiters' account "always fails"); else Orbiters' VRChat account is asked,
+    /// and what it could not do says to connect one ([`invite_route`]).
     pub(crate) fn invite_send(self: &Shared, location: String, screen: bool) {
         use orbiters_n4n0_core::menu::InviteAnswer;
         let n = self.clone();
         let _ = std::thread::Builder::new().name("n4n0-invite".into()).spawn(move || {
-            let answer = match n.host.account() {
-                Some((api, token)) => orbiters_n4n0_core::invites::send(&api, &token, &location),
-                None => InviteAnswer::Failed { message: signed_out_message() },
-            };
+            let answer = invite_route(n.host.as_ref(), &location);
             {
                 let mut rt = n.n4n0.lock().unwrap();
                 if screen {
@@ -1615,11 +1614,12 @@ impl N4n0 {
                 }
             }
             match &answer {
-                InviteAnswer::Sent => n.notify(NoticeKind::Success, tr("Orbiters invited you: open the invite in VRChat's notifications.")),
+                InviteAnswer::Sent => n.notify(NoticeKind::Success, tr("Invite sent: look at your VRChat notifications")),
                 InviteAnswer::NeedsFriend { account, .. } => {
                     n.notify(NoticeKind::Info, tr!("Add {name} as a friend on VRChat, then try again.", name = account.name))
                 }
                 InviteAnswer::Failed { message } => n.notify(NoticeKind::Warning, tr!("No invite: {message}", message = message)),
+                InviteAnswer::NeedsVrchat { message } => n.notify(NoticeKind::Warning, tr!("No invite: {message}", message = message)),
             }
             n.publish();
         });
@@ -3115,5 +3115,26 @@ mod tests {
         assert_eq!(keyboard(Setting::Qwerty, &French), KeyboardLayout::Qwerty);
         assert_eq!(French.language(), "fr");
         assert_eq!(photo_setting(photo_length(orbiters_core::settings::Photo3dLength::Full)), orbiters_core::settings::Photo3dLength::Full);
+    }
+}
+
+/// Which account sends Previous instances' Invite me to `location` and how it went (REQUEST20 4): the person's own VRChat
+/// account when the app has one connected ([`Host::invite_self`]); else Orbiters' VRChat account, through Orbiters. That
+/// one can invite only an account that befriended it, to an instance it may invite to: what it could not do becomes the
+/// way that works, connecting the person's own VRChat account (Add Orbiters as a friend stays, it can work).
+pub(crate) fn invite_route(host: &dyn crate::Host, location: &str) -> orbiters_n4n0_core::menu::InviteAnswer {
+    use orbiters_n4n0_core::menu::InviteAnswer;
+    if let Some(answer) = host.invite_self(location) {
+        return answer;
+    }
+    let answer = match host.account() {
+        Some((api, token)) => orbiters_n4n0_core::invites::send(&api, &token, location),
+        None => InviteAnswer::Failed { message: signed_out_message() },
+    };
+    match answer {
+        InviteAnswer::Failed { message } => InviteAnswer::NeedsVrchat {
+            message: tr!("Connect your VRChat account here and the invite comes from it. Orbiters' account could not invite you: {reason}", reason = message),
+        },
+        other => other,
     }
 }

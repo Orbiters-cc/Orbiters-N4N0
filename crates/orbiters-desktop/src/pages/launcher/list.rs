@@ -1,11 +1,16 @@
-//! The friends list as rows, without drawing: the sections in the contract's order (the account's favourite groups,
-//! then in game, on the website, offline), each one a header and its people unless folded; a search keeps the people
-//! it finds in every section they are in, opens the folded ones and drops the sections left empty. Only the rows in
-//! view are drawn ([`visible`]); a refresh keeps the first row in view where it was ([`anchored`]). The boops and invite
-//! requests received come first, rows of the same list ([`with_received`]): one list, one scroll (REQUEST18 1).
+//! The friends list as rows, without drawing, in VRCNext's sections (REQUEST20 3, Enzo: "the online friends (actively in
+//! the game), the web active friends and the offline friends to be separated, in the same exact way it is in VRCNext"):
+//! first the favourites who are in the game (one section, split by favourite group when two or more groups have someone
+//! in it), then the others in the game, those active on the website (or the companion app) but not in the game, and the
+//! offline ones. A favourite who is not in the game is in their presence section only, and nobody shows twice. Each
+//! section is a header with its count and its people unless folded (remembered; Offline starts folded, as VRCNext's
+//! does); a section with nobody says nothing. A search keeps the people it finds in the sections they are in, opens the
+//! folded ones and drops the sections left empty. Only the rows in view are drawn ([`visible`]); a refresh keeps the
+//! first row in view where it was ([`anchored`]). The boops and invite requests received come first, rows of the same
+//! list ([`with_received`]): one list, one scroll (REQUEST18 1).
 
-use orbiters_core::launcher::{Friend, FriendGroup, GroupKind, InviteKind, LauncherState, Whereabouts};
-use std::collections::HashSet;
+use orbiters_core::launcher::{Friend, FriendGroup, GroupKind, InviteKind, LauncherState, Presence, Whereabouts};
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 /// A section's header and a person's row.
@@ -16,21 +21,48 @@ pub const PERSON_H: f32 = 58.0;
 pub const GOT_HEAD_H: f32 = 28.0;
 pub const GOT_H: f32 = 54.0;
 
+/// The sections' keys (what a fold remembers): a favourite group's own is its id (`group_0`…).
+pub const FAVOURITES: &str = "favourites";
+pub const OTHER_FAVOURITES: &str = "favourites-other";
+pub const IN_GAME: &str = "in-game";
+pub const WEBSITE: &str = "website";
+pub const OFFLINE: &str = "offline";
+
+/// What a section is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Section {
+    /// The favourites in the game, all their groups together.
+    Favourites,
+    /// One favourite group's people in the game, under [`Section::Favourites`] when two or more groups have someone.
+    FavouriteGroup,
+    /// Favourites in the game whose group the account no longer lists (VRCNext's "Other").
+    OtherFavourites,
+    InGame,
+    Website,
+    Offline,
+}
+
+impl Section {
+    /// Drawn indented, inside the favourites.
+    pub fn nested(self) -> bool {
+        matches!(self, Section::FavouriteGroup | Section::OtherFavourites)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Row {
     Header {
-        /// [`FriendGroup::id`].
+        /// The section's key ([`FAVOURITES`], a favourite group's id, [`IN_GAME`]…): what folds it.
         group: String,
-        kind: GroupKind,
-        /// The favourite group's own name (empty for the presence sections).
+        section: Section,
+        /// The favourite group's own name (empty for the others).
         name: String,
         /// People in it (found by the search, while one is typed).
         count: usize,
-        /// Of them, in the game or on the website (a favourite group says it).
-        online: usize,
         folded: bool,
     },
     Person {
+        /// The key of the section the row is in.
         group: String,
         /// Index in [`LauncherState::friends`].
         friend: usize,
@@ -51,8 +83,7 @@ impl Row {
         }
     }
 
-    /// What tells a row from the others across refreshes: a person is in a favourite group and in their presence
-    /// section, two rows.
+    /// What tells a row from the others across refreshes.
     pub fn key(&self, state: &LauncherState) -> String {
         match self {
             Row::Header { group, .. } => format!("h:{group}"),
@@ -76,24 +107,90 @@ pub fn matches(friend: &Friend, query: &str) -> bool {
         || matches!(&friend.whereabouts, Whereabouts::World(place) if has(&place.world_name))
 }
 
+/// Whether the list knows who is in the game: a copy without presence (VRCX's database) does not, and then the
+/// favourites hold every favourite (else they would all be "offline" and the favourites empty).
+fn knows_presence(state: &LauncherState) -> bool {
+    !state.friends.iter().all(|f| f.whereabouts == Whereabouts::Unknown)
+}
+
 /// The rows of the list for `query` with the sections in `folded` closed.
 pub fn rows(state: &LauncherState, query: &str, folded: &HashSet<String>) -> Vec<Row> {
     let query = query.trim().to_lowercase();
     let searching = !query.is_empty();
-    let index: std::collections::HashMap<&str, usize> = state.friends.iter().enumerate().map(|(i, f)| (f.id.as_str(), i)).collect();
+    let is_folded = |key: &str| !searching && folded.contains(key);
+    let index: HashMap<&str, usize> = state.friends.iter().enumerate().map(|(i, f)| (f.id.as_str(), i)).collect();
+    let presence_known = knows_presence(state);
+    let favourite_groups: Vec<&FriendGroup> = state.groups.iter().filter(|g| g.kind == GroupKind::Favourite).collect();
+    // A favourite shows among the favourites while in the game (VRCNext), under the first of their groups the account lists.
+    let in_favourites = |f: &Friend| !f.favourite_groups.is_empty() && (f.presence == Presence::InGame || !presence_known);
+    let home = |f: &Friend| f.favourite_groups.iter().find(|g| favourite_groups.iter().any(|fg| fg.id == **g)).cloned();
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut subs: Vec<(&FriendGroup, Vec<usize>)> = Vec::new();
+    for group in &favourite_groups {
+        let people: Vec<usize> = group
+            .members
+            .iter()
+            .filter_map(|id| index.get(id.as_str()).copied())
+            .filter(|&i| {
+                let f = &state.friends[i];
+                in_favourites(f) && home(f).as_deref() == Some(group.id.as_str()) && matches(f, &query)
+            })
+            .filter(|&i| seen.insert(i))
+            .collect();
+        if !people.is_empty() {
+            subs.push((group, people));
+        }
+    }
+    // Favourites of a group the account does not list (any more), in the presence sections' order.
+    let other: Vec<usize> = state
+        .groups
+        .iter()
+        .filter(|g| g.kind != GroupKind::Favourite)
+        .flat_map(|g| g.members.iter())
+        .filter_map(|id| index.get(id.as_str()).copied())
+        .filter(|&i| in_favourites(&state.friends[i]) && home(&state.friends[i]).is_none() && matches(&state.friends[i], &query))
+        .filter(|&i| seen.insert(i))
+        .collect();
     let mut out = Vec::new();
-    for group in &state.groups {
-        let found: Vec<usize> =
-            group.members.iter().filter_map(|id| index.get(id.as_str()).copied()).filter(|&i| matches(&state.friends[i], &query)).collect();
-        // A presence section with nobody, and any section the search left empty, says nothing.
-        if found.is_empty() && (searching || group.kind != GroupKind::Favourite) {
+    let header = |group: &str, section, name: &str, count| Row::Header { group: group.into(), section, name: name.into(), count, folded: is_folded(group) };
+    let total = subs.iter().map(|s| s.1.len()).sum::<usize>() + other.len();
+    if total > 0 {
+        out.push(header(FAVOURITES, Section::Favourites, "", total));
+        if !is_folded(FAVOURITES) {
+            let person = |group: &str, friend| Row::Person { group: group.into(), friend };
+            if subs.len() > 1 {
+                for (group, people) in &subs {
+                    out.push(header(&group.id, Section::FavouriteGroup, &group.name, people.len()));
+                    if !is_folded(&group.id) {
+                        out.extend(people.iter().map(|&i| person(&group.id, i)));
+                    }
+                }
+                if !other.is_empty() {
+                    out.push(header(OTHER_FAVOURITES, Section::OtherFavourites, "", other.len()));
+                    if !is_folded(OTHER_FAVOURITES) {
+                        out.extend(other.iter().map(|&i| person(OTHER_FAVOURITES, i)));
+                    }
+                }
+            } else {
+                out.extend(subs.iter().flat_map(|s| s.1.iter()).chain(&other).map(|&i| person(FAVOURITES, i)));
+            }
+        }
+    }
+    for (key, kind, section) in [(IN_GAME, GroupKind::InGame, Section::InGame), (WEBSITE, GroupKind::Website, Section::Website), (OFFLINE, GroupKind::Offline, Section::Offline)] {
+        let found: Vec<usize> = state
+            .groups
+            .iter()
+            .filter(|g| g.kind == kind)
+            .flat_map(|g| g.members.iter())
+            .filter_map(|id| index.get(id.as_str()).copied())
+            .filter(|&i| !seen.contains(&i) && matches(&state.friends[i], &query))
+            .collect();
+        if found.is_empty() {
             continue;
         }
-        let online = found.iter().filter(|&&i| state.friends[i].presence != orbiters_core::launcher::Presence::Offline).count();
-        let is_folded = !searching && folded.contains(&group.id);
-        out.push(Row::Header { group: group.id.clone(), kind: group.kind, name: group.name.clone(), count: found.len(), online, folded: is_folded });
-        if !is_folded {
-            out.extend(found.into_iter().map(|friend| Row::Person { group: group.id.clone(), friend }));
+        out.push(header(key, section, "", found.len()));
+        if !is_folded(key) {
+            out.extend(found.into_iter().map(|friend| Row::Person { group: key.into(), friend }));
         }
     }
     out
@@ -196,55 +293,182 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn favourites_come_first_then_in_game_website_offline() {
-        let state = sample();
-        let rows = rows(&state, "", &HashSet::new());
-        let headers: Vec<_> = rows.iter().filter_map(|r| if let Row::Header { group, .. } = r { Some(group.as_str()) } else { None }).collect();
-        assert_eq!(headers, ["group_0", "group_1", "in-game", "website", "offline"]);
-        // A favourite is in their group and in their presence section.
-        let nova = people(&rows, &state).iter().filter(|n| *n == "Nova Sample").count();
-        assert_eq!(nova, 2);
-        let Row::Header { online, count, .. } = &rows[0] else { panic!() };
-        assert_eq!((*count, *online), (2, 2));
+    fn headers(rows: &[Row]) -> Vec<(String, Section, usize)> {
+        rows.iter().filter_map(|r| if let Row::Header { group, section, count, .. } = r { Some((group.clone(), *section, *count)) } else { None }).collect()
     }
 
-    #[test]
-    fn a_folded_section_keeps_its_header_and_hides_its_people() {
-        let state = sample();
-        let folded: HashSet<String> = ["in-game".to_string()].into();
-        let rows = rows(&state, "", &folded);
-        let at = rows.iter().position(|r| matches!(r, Row::Header { group, .. } if group == "in-game")).unwrap();
-        assert!(matches!(&rows[at], Row::Header { folded: true, count: 4, .. }));
-        assert!(matches!(&rows[at + 1], Row::Header { group, .. } if group == "website"));
-    }
-
-    #[test]
-    fn empty_presence_sections_are_left_out_but_favourite_groups_stay() {
-        let mut state = sample();
-        for f in &mut state.friends {
-            if f.presence == Presence::Website {
-                f.presence = Presence::Offline;
+    /// A friend of the sample, changed.
+    fn one(state: &mut LauncherState, n: usize, presence: Presence, whereabouts: Whereabouts, groups: &[&str]) {
+        let f = &mut state.friends[n];
+        f.presence = presence;
+        f.whereabouts = whereabouts;
+        f.favourite_groups = groups.iter().map(|g| g.to_string()).collect();
+        let id = f.id.clone();
+        for g in &mut state.groups {
+            g.members.retain(|m| *m != id);
+            let here = match g.kind {
+                GroupKind::Favourite => groups.contains(&g.id.as_str()),
+                GroupKind::InGame => presence == Presence::InGame,
+                GroupKind::Website => presence == Presence::Website,
+                GroupKind::Offline => presence == Presence::Offline,
+            };
+            if here {
+                g.members.push(id.clone());
             }
         }
-        state.groups.iter_mut().find(|g| g.id == "website").unwrap().members.clear();
-        state.groups.iter_mut().find(|g| g.id == "group_1").unwrap().members.clear();
+    }
+
+    /// REQUEST20 3, as VRCNext's friends list: the favourites in the game (by group when two or more groups have someone),
+    /// then the others in the game, on the website, offline; a favourite not in the game only in their presence section.
+    #[test]
+    fn sections_are_vrcnext_s_favourites_in_game_then_in_game_website_offline() {
+        let state = sample();
         let rows = rows(&state, "", &HashSet::new());
-        assert!(!rows.iter().any(|r| matches!(r, Row::Header { group, .. } if group == "website")));
-        assert!(rows.iter().any(|r| matches!(r, Row::Header { group, count: 0, .. } if group == "group_1")));
+        assert_eq!(
+            people(&rows, &state),
+            [
+                "[favourites 3]", "[group_0 2]", "Nova Sample", "Pixel Fox", "[group_1 1]", "Mochi Byte",
+                "[in-game 1]", "Orbit Tester", "[website 1]", "Lumen", "[offline 2]", "Quiet Kite", "Sample Seven"
+            ]
+        );
+        let sections: Vec<Section> = headers(&rows).into_iter().map(|h| h.1).collect();
+        assert_eq!(sections, [Section::Favourites, Section::FavouriteGroup, Section::FavouriteGroup, Section::InGame, Section::Website, Section::Offline]);
+        // Pixel Fox is in both groups: under the first the account lists, once. Quiet Kite (a favourite, offline) is in Offline only.
+        let shown: Vec<usize> = rows.iter().filter_map(|r| if let Row::Person { friend, .. } = r { Some(*friend) } else { None }).collect();
+        assert_eq!(shown.len(), state.friends.len(), "everyone once");
+        assert_eq!(shown.iter().collect::<HashSet<_>>().len(), state.friends.len(), "nobody twice");
+        // The names a favourite group header shows.
+        assert!(matches!(&rows[1], Row::Header { name, .. } if name == "best people"));
+    }
+
+    /// One favourite group with someone in the game: one Favourites section, its people right under it (VRCNext).
+    #[test]
+    fn one_group_in_the_game_is_one_favourites_section() {
+        let mut state = sample();
+        let there = state.friends[2].whereabouts.clone();
+        one(&mut state, 2, Presence::InGame, there, &["group_0"]);
+        let shown = rows(&state, "", &HashSet::new());
+        assert_eq!(people(&shown, &state)[..4], ["[favourites 3]", "Nova Sample", "Pixel Fox", "Mochi Byte"]);
+        assert!(!shown.iter().any(|r| matches!(r, Row::Header { section: Section::FavouriteGroup, .. })));
+        // Nobody of them in the game: no Favourites at all, they are in their sections.
+        let mut state = sample();
+        for n in [0, 1, 2] {
+            one(&mut state, n, Presence::Website, Whereabouts::Website, &["group_0"]);
+        }
+        let shown = rows(&state, "", &HashSet::new());
+        assert_eq!(headers(&shown).iter().map(|h| h.0.as_str()).collect::<Vec<_>>(), ["in-game", "website", "offline"]);
+        assert_eq!(headers(&shown)[1].2, 4);
+    }
+
+    /// Every presence a friend can have puts them in one section, by these rules.
+    #[test]
+    fn every_friend_state_has_its_section() {
+        let place = match &sample().friends[0].whereabouts {
+            Whereabouts::World(p) => p.clone(),
+            _ => unreachable!(),
+        };
+        let cases: [(Presence, Whereabouts, &[&str], &str); 9] = [
+            (Presence::InGame, Whereabouts::World(place.clone()), &[], IN_GAME),
+            (Presence::InGame, Whereabouts::Private, &[], IN_GAME),
+            (Presence::InGame, Whereabouts::Traveling, &[], IN_GAME),
+            (Presence::Website, Whereabouts::Website, &[], WEBSITE),
+            (Presence::Offline, Whereabouts::Offline, &[], OFFLINE),
+            (Presence::InGame, Whereabouts::Private, &["group_0"], FAVOURITES),
+            (Presence::Website, Whereabouts::Website, &["group_0"], WEBSITE),
+            (Presence::Offline, Whereabouts::Offline, &["group_0"], OFFLINE),
+            // A favourite group the account no longer lists.
+            (Presence::InGame, Whereabouts::World(place), &["group_9"], FAVOURITES),
+        ];
+        for (presence, whereabouts, groups, expected) in cases {
+            let mut state = sample();
+            one(&mut state, 6, presence, whereabouts.clone(), groups);
+            let rows = rows(&state, "", &HashSet::new());
+            let at: Vec<&str> = rows.iter().filter_map(|r| match r {
+                Row::Person { group, friend: 6 } => Some(group.as_str()),
+                _ => None,
+            }).collect();
+            // Under the favourites, split by group here (two groups have someone): its group's key, or the others'.
+            let expected = match (expected, groups.first()) {
+                (FAVOURITES, Some(&"group_9")) => OTHER_FAVOURITES,
+                (FAVOURITES, Some(g)) => *g,
+                (e, _) => e,
+            };
+            assert_eq!(at, [expected], "{presence:?} {whereabouts:?} {groups:?}");
+        }
+        // A copy that knows nobody's presence (VRCX's database): the favourites hold every favourite.
+        let mut state = sample();
+        for n in 0..state.friends.len() {
+            let groups: Vec<String> = state.friends[n].favourite_groups.clone();
+            let groups: Vec<&str> = groups.iter().map(String::as_str).collect();
+            one(&mut state, n, Presence::Offline, Whereabouts::Unknown, &groups);
+        }
+        let rows = rows(&state, "", &HashSet::new());
+        assert_eq!(headers(&rows).iter().map(|h| (h.0.as_str(), h.2)).collect::<Vec<_>>(), [("favourites", 4), ("group_0", 2), ("group_1", 2), ("offline", 3)]);
+    }
+
+    /// The header's line ("9 in game · 24 on the website · 224 friends") says what the sections hold.
+    #[test]
+    fn the_counts_line_agrees_with_the_sections() {
+        let mut state = sample();
+        one(&mut state, 5, Presence::InGame, Whereabouts::Private, &["group_1"]);
+        let rows = rows(&state, "", &HashSet::new());
+        let count = |s: Section| headers(&rows).iter().filter(|h| h.1 == s).map(|h| h.2).sum::<usize>();
+        let (in_game, web, all) = counts(&state);
+        assert_eq!(count(Section::Favourites) + count(Section::InGame), in_game);
+        assert_eq!(count(Section::Website), web);
+        assert_eq!(count(Section::Favourites) + count(Section::InGame) + count(Section::Website) + count(Section::Offline), all);
+        // The groups inside the favourites add up to it.
+        assert_eq!(count(Section::FavouriteGroup) + count(Section::OtherFavourites), count(Section::Favourites));
     }
 
     #[test]
-    fn search_finds_names_status_worlds_and_notes_and_opens_folded_sections() {
+    fn a_folded_section_keeps_its_header_and_count_and_hides_its_people() {
         let state = sample();
-        let folded: HashSet<String> = state.groups.iter().map(|g| g.id.clone()).collect();
-        assert_eq!(people(&rows(&state, "  MOCHI ", &folded), &state), ["[group_1 1]", "Mochi Byte", "[in-game 1]", "Mochi Byte"]);
+        let folded: HashSet<String> = [OFFLINE.to_string(), "group_0".to_string()].into();
+        assert_eq!(
+            people(&rows(&state, "", &folded), &state),
+            ["[favourites 3]", "[group_0 2]", "[group_1 1]", "Mochi Byte", "[in-game 1]", "Orbit Tester", "[website 1]", "Lumen", "[offline 2]"]
+        );
+        let all = rows(&state, "", &folded);
+        assert!(matches!(all.last(), Some(Row::Header { folded: true, count: 2, section: Section::Offline, .. })));
+        // The favourites folded: their groups go with them.
+        let folded: HashSet<String> = [FAVOURITES.to_string()].into();
+        assert_eq!(people(&rows(&state, "", &folded), &state)[..3], ["[favourites 3]", "[in-game 1]", "Orbit Tester"]);
+    }
+
+    #[test]
+    fn empty_sections_say_nothing() {
+        let mut state = sample();
+        one(&mut state, 4, Presence::Offline, Whereabouts::Offline, &[]);
+        let rows = rows(&state, "", &HashSet::new());
+        assert!(!rows.iter().any(|r| matches!(r, Row::Header { section: Section::Website, .. })));
+        assert!(!rows.iter().any(|r| matches!(r, Row::Header { count: 0, .. })));
+    }
+
+    #[test]
+    fn search_finds_names_status_worlds_and_notes_across_sections_and_opens_folded_ones() {
+        let state = sample();
+        let mut folded: HashSet<String> = state.groups.iter().map(|g| g.id.clone()).collect();
+        folded.insert(FAVOURITES.into());
+        assert_eq!(people(&rows(&state, "  MOCHI ", &folded), &state), ["[favourites 1]", "Mochi Byte"]);
         // The world someone is in.
-        assert_eq!(people(&rows(&state, "café", &folded), &state), ["[group_1 1]", "Mochi Byte", "[in-game 1]", "Mochi Byte"]);
-        // Their status line, the account's note.
+        assert_eq!(people(&rows(&state, "café", &folded), &state), ["[favourites 1]", "Mochi Byte"]);
+        // Their status line, the account's note; one in every section.
         assert!(people(&rows(&state, "unity", &folded), &state).contains(&"Orbit Tester".to_string()));
         assert!(people(&rows(&state, "meetup", &folded), &state).contains(&"Pixel Fox".to_string()));
+        assert_eq!(people(&rows(&state, "e", &folded), &state).iter().filter(|r| r.starts_with('[')).count(), 6, "{:?}", people(&rows(&state, "e", &folded), &state));
         assert!(rows(&state, "nobody by this name", &folded).is_empty());
+    }
+
+    /// Exactly one scrolling region in the panel (Enzo 2026-11-20, never a scroll area inside another): the list's own,
+    /// whose rows are the received ones, the section headers and the people.
+    #[test]
+    fn the_friends_panel_has_one_scroll_region() {
+        let scrolls = |source: &str| source.matches("ScrollArea::").count();
+        assert_eq!(scrolls(include_str!("row.rs")), 1, "the list");
+        assert_eq!(scrolls(include_str!("list.rs")), 1, "rows only (the one here is this test's own)");
+        // The column draws the head, then that list: mod.rs has none (the profile window and the account's own are over the page).
+        assert_eq!(scrolls(include_str!("mod.rs")), 0);
     }
 
     /// REQUEST18 1: every boop and invite request received is a row of the one list, newest first, before the sections;
@@ -288,7 +512,7 @@ mod tests {
             let mut f = template.clone();
             f.id = format!("usr_many_{i}");
             f.name = format!("Many {i}");
-            state.groups.iter_mut().find(|g| g.id == "offline").unwrap().members.push(f.id.clone());
+            state.groups.iter_mut().find(|g| g.id == OFFLINE).unwrap().members.push(f.id.clone());
             state.friends.push(f);
         }
         let rows = rows(&state, "", &HashSet::new());
@@ -310,15 +534,18 @@ mod tests {
         let before = rows(&state, "", &HashSet::new());
         let keys: Vec<String> = before.iter().map(|r| r.key(&state)).collect();
         let tops_before = tops(&before);
+        // Orbit Tester, in the game.
         let offset = tops_before[7] + 10.0;
         let anchor = anchor_at(&keys, &tops_before, offset).unwrap();
-        // Two more people in the first favourite group (above the view).
+        // Two more favourites come into the game in the first group (above the view).
         let mut after_state = state.clone();
-        let extra: Vec<String> = after_state.friends[3..5].iter().map(|f| f.id.clone()).collect();
-        after_state.groups[0].members.extend(extra);
+        for n in [4, 6] {
+            one(&mut after_state, n, Presence::InGame, Whereabouts::Private, &["group_0"]);
+        }
         let after = rows(&after_state, "", &HashSet::new());
         let after_keys: Vec<String> = after.iter().map(|r| r.key(&after_state)).collect();
         let new_offset = anchored(&after_keys, &tops(&after), &anchor).unwrap();
+        // Two more rows above it, and the Website section (Lumen, its only one) gone below it.
         assert_eq!(new_offset, offset + 2.0 * PERSON_H);
     }
 }

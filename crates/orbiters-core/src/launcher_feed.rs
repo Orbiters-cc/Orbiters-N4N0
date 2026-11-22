@@ -145,13 +145,23 @@ pub fn decorations(v: &Value) -> Decorations {
     Decorations { icon_frame: id("iconFrame"), nameplate: id("nameplateEffect") }
 }
 
-/// The small picture: the chosen icon, else the profile picture override, else the avatar's.
+/// Where a person's small picture is read, first found first, as VRChat's client and VRCX (`userImage`) take it
+/// (REQUEST20 "profile pictures are not loading"). `iconUrl` is the picture VRChat itself chose for the person (their
+/// VRC+ icon, else their profile picture, else their avatar's thumbnail): since 2025 it is the ONLY picture a `User`
+/// (every `friend-online` / `friend-location` / `friend-update` message, `GET /users/{id}`) carries, and the one
+/// `LimitedUserFriend` carries beside `currentAvatarImageUrl`. The others are older answers' fields (still in
+/// `LimitedUserInstance`, `CurrentUser`, other apps' copies), in VRChat's own order.
+pub const ICON_FIELDS: [&str; 7] =
+    ["iconUrl", "userIcon", "profilePicOverrideThumbnail", "profilePicOverride", "currentAvatarThumbnailImageUrl", "currentAvatarImageUrl", "imageUrl"];
+
+/// The field a person's small picture is taken from ([`ICON_FIELDS`]), None when the answer names none.
+pub fn icon_field(v: &Value) -> Option<&'static str> {
+    ICON_FIELDS.into_iter().find(|k| !picture(v, k).is_empty())
+}
+
+/// The small picture ([`ICON_FIELDS`]).
 fn icon(v: &Value) -> String {
-    ["userIcon", "profilePicOverrideThumbnail", "profilePicOverride", "currentAvatarThumbnailImageUrl", "currentAvatarImageUrl"]
-        .into_iter()
-        .map(|k| picture(v, k))
-        .find(|u| !u.is_empty())
-        .unwrap_or_default()
+    icon_field(v).map(|k| picture(v, k)).unwrap_or_default()
 }
 
 /// The look of a user answer; decorations come empty (see [`Decorations`]).
@@ -401,7 +411,8 @@ pub fn profile(base: Friend, profile: &Value, user: &Value, mutuals: Option<(u32
     }
     let seen = [seconds(&text(user, "last_activity")), seconds(&text(user, "last_login"))].into_iter().flatten().max();
     friend.last_seen = friend.last_seen.max(seen);
-    let large = ["profilePicOverride", "currentAvatarImageUrl"].into_iter().map(|k| Some(picture(profile, k)).filter(|u| !u.is_empty()).unwrap_or_else(|| picture(user, k))).find(|u| !u.is_empty()).unwrap_or_default();
+    // VRCX's `userImageFull`: VRChat's own choice first, then the full pictures of older answers.
+    let large = ["iconUrl", "profilePicOverride", "currentAvatarImageUrl"].into_iter().map(|k| Some(picture(profile, k)).filter(|u| !u.is_empty()).unwrap_or_else(|| picture(user, k))).find(|u| !u.is_empty()).unwrap_or_default();
     Profile {
         pronouns: both("pronouns"),
         bio: both("bio"),
@@ -450,6 +461,11 @@ pub fn apply(state: &mut LauncherState, favourite_groups: &[(String, String)], m
             }
             new.look.nameplate = old.look.nameplate.clone();
             new.look.icon_frame = old.look.icon_frame.clone();
+            // A message whose user names no picture says nothing about it (a person always has one): the picture known
+            // stays, as VRCX merges a message into the person it keeps. Replacing it with nothing showed the letter.
+            if new.look.icon.is_empty() {
+                new.look.icon = old.look.icon.clone();
+            }
             new.last_seen = new.last_seen.max(old.last_seen);
         }
         new

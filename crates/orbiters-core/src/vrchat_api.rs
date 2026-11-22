@@ -202,8 +202,10 @@ pub struct User {
     pub current_avatar_image_url: String,
 }
 impl User {
+    /// The person's picture as VRChat's client shows it: `iconUrl` (VRChat's own choice) first, as
+    /// [`crate::launcher_feed::ICON_FIELDS`].
     pub fn picture(&self) -> &str {
-        [&self.user_icon, &self.icon_url, &self.current_avatar_thumbnail_image_url, &self.current_avatar_image_url]
+        [&self.icon_url, &self.user_icon, &self.current_avatar_thumbnail_image_url, &self.current_avatar_image_url]
             .into_iter()
             .find(|url| !url.is_empty())
             .map_or("", String::as_str)

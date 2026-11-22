@@ -92,6 +92,8 @@ enum Act {
     Smoothing(usize, u16),
     /// Back to Home itself.
     Home,
+    /// Settings, VRChat account (Previous instances' Connect VRChat, REQUEST20 4).
+    VrchatAccount,
 }
 
 #[derive(Default)]
@@ -268,7 +270,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Page::Home | Page::Card | Page::More | Page::Feedback | Page::FeedbackLabels | Page::Comments | Page::Mirror => {
                     home(ui, cx, menu, &idle, copied_id, network, launcher, &mut acts)
                 }
-                Page::Instances | Page::AddFriend => instances(ui, cx, menu, &mut acts),
+                Page::Instances | Page::AddFriend => instances(ui, cx, menu, snap.vrchat_login.user.is_some(), &mut acts),
                 Page::Search | Page::Results => youtube(ui, cx, menu, &picture, focus, copied_id, &mut acts),
                 Page::Call => call(ui, cx, menu, &mut acts),
                 Page::Photo => photo(ui, cx, menu, take_blocked, &mut acts),
@@ -342,6 +344,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             Act::Suggestion(text) => host.menu.suggestion = text,
             Act::Smoothing(kind, ms) => effects.extend(host.menu.set_smoothing_ms(kind, ms)),
             Act::Home => effects.extend(go_home(host)),
+            Act::VrchatAccount => cx.go = Some(super::Go::VrchatAccount),
         }
     }
     // It stays open here (nothing closes it): a close goes back to Home. A dropped card is on the avatar's screen: the
@@ -1516,11 +1519,21 @@ fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     m.finish(ui);
 }
 
-/// Previous instances: Orbiters' VRChat account invites the player back to one (Invite me), once it is their friend (Add
-/// Orbiters as a friend, with its name and page, shows above the list when Orbiters asked for it).
-fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
+/// Previous instances: Invite me sends the player an invite back to one, from their own VRChat account when it is
+/// connected here (`own_vrchat`, REQUEST20 4), else from Orbiters' VRChat account once it is their friend (Add Orbiters as
+/// a friend, with its name and page, shows above the list when Orbiters asked for it). When only their own account can
+/// do it, Connect VRChat shows above the list, with why.
+fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, own_vrchat: bool, acts: &mut Vec<Act>) {
     top(ui, cx, tr("Previous instances"), &layout::text(menu, Content::InstancesTitle), acts);
     let mut index = 1;
+    if let Some(why) = menu.invite_vrchat.as_deref().filter(|_| !menu.invite_waiting) {
+        section_up_to(ui, cx, f32::INFINITY, index, icons::SIGN_IN, tr("Connect your VRChat account"), Some(why), |ui| {
+            if Button::new(tr("Connect VRChat")).icon(icons::SIGN_IN).variant(Variant::Primary).show(ui).clicked() {
+                acts.push(Act::VrchatAccount);
+            }
+        });
+        index += 1;
+    }
     if let Some(account) = &menu.invite_account {
         let why = tr("VRChat lets Orbiters invite only its friends: in VRChat, Social, search the name, Add friend; then Try again");
         section_up_to(ui, cx, f32::INFINITY, index, icons::USER, tr("Add Orbiters as a friend"), Some(why), |ui| {
@@ -1547,7 +1560,11 @@ fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         let text = if menu.instances_ready { tr("Worlds you join in VRChat show here, newest first.") } else { tr("Reading VRChat's logs…") };
         return note_card(ui, cx, index, icons::GLOBE, tr("No instance yet"), text);
     }
-    let sub = tr("Orbiters' VRChat account invites you back: open the invite in VRChat");
+    let sub = if own_vrchat {
+        tr("Your VRChat account invites you back: look at your VRChat notifications")
+    } else {
+        tr("Orbiters' VRChat account invites you back: open the invite in VRChat")
+    };
     // As wide as the page: the instances go side by side on wide ones.
     section_up_to(ui, cx, f32::INFINITY, index, icons::GLOBE, tr("Instances you were in"), Some(sub), |ui| {
         ui.add_space(4.0);

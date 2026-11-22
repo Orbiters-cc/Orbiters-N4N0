@@ -1,0 +1,17 @@
+{
+  "friends section\u0004Favourites": "Favoritos",
+  "favourite group\u0004Other": "Otros",
+  "Copy the world's name": "Copiar el nombre del mundo",
+  "Invite sent: look at your VRChat notifications": "Invitación enviada: mira tus notificaciones de VRChat",
+  "Orbiters' account could not invite you ({reason}). Connect your VRChat account in Orbiters - N4N0: the invite then comes from it.": "La cuenta de Orbiters no pudo invitarte ({reason}). Conecta tu cuenta de VRChat en Orbiters - N4N0: la invitación vendrá entonces de ella.",
+  "Only an instance of your Previous instances can be invited to from here.": "Desde aquí solo puedes recibir invitaciones a una de tus instancias anteriores.",
+  "This instance has closed: VRChat can no longer invite you to it.": "Esta instancia se cerró: VRChat ya no puede invitarte a ella.",
+  "This instance is full right now. Try again later, or pick another one.": "Esta instancia está llena ahora mismo. Vuelve a intentarlo más tarde o elige otra.",
+  "This instance has closed, or VRChat does not show it to your account.": "Esta instancia se cerró, o VRChat no se la muestra a tu cuenta.",
+  "VRChat does not let your account into this instance (invite only, or for its owner's friends).": "VRChat no deja entrar a tu cuenta en esta instancia (solo por invitación, o para los amigos de su dueño).",
+  "Connect VRChat": "Conectar VRChat",
+  "Opens Orbiters on the computer at Settings, VRChat account: your invites then come from your own account.": "Abre Orbiters en el ordenador en Ajustes, Cuenta de VRChat: tus invitaciones vendrán entonces de tu propia cuenta.",
+  "An invite to the instance you were last in here.": "Una invitación a la instancia en la que estuviste por última vez aquí.",
+  "Connect your VRChat account": "Conecta tu cuenta de VRChat",
+  "Your VRChat account invites you back: look at your VRChat notifications": "Tu cuenta de VRChat te invita de nuevo: mira tus notificaciones de VRChat"
+}

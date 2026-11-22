@@ -2594,6 +2594,13 @@ impl Panels {
                 };
                 (place.clone(), state)
             }),
+            // How the last Invite me went, said in the page's head for a while once answered (REQUEST20 4).
+            invite_said: self.invited.as_ref().filter(|(_, at)| at.elapsed() < Duration::from_secs(12) && !menu.invite_waiting).and_then(|_| {
+                let sent = menu.invite_went?;
+                let said = if sent { tr("Invite sent: look at your VRChat notifications").to_string() } else { menu.invite_vrchat.clone().or_else(|| menu.notice.clone())? };
+                Some((said, sent))
+            }),
+            invite_vrchat: menu.invite_vrchat.is_some() && !menu.invite_waiting,
             video_copied: self.copied.filter(|(_, at)| at.elapsed() < Duration::from_secs(2)).map(|(i, _)| i),
             videos: if self.facts.sheet == Some(Sheet::Results) {
                 menu.results
@@ -3497,6 +3504,8 @@ impl Panels {
             }
             Action::OpenApp => self.backend.show_window(),
             Action::AddKit => self.backend.show_page("projects"),
+            // The window, at Settings, VRChat account (REQUEST20 4).
+            Action::ConnectVrchat => self.backend.show_page("vrchat-account"),
             Action::SeeInApp => {
                 if let Some(loaded) = self.facts.opened.and_then(|n| self.recents.tile(n)) {
                     self.backend.show_page(&format!("session:{}", loaded.key.display())); // i18n: not shown (a page's name for the app)

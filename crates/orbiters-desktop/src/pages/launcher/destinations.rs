@@ -461,6 +461,8 @@ type Shared<T> = Arc<Mutex<Read<T>>>;
 /// Starts `work` on a thread when `every` passed since the last read (and none is under way); its value lands in
 /// `slot`, and the page is drawn again.
 fn refresh<T: Send + 'static>(slot: &Shared<T>, every: Duration, ctx: &egui::Context, name: &str, work: impl FnOnce() -> Option<T> + Send + 'static) {
+    // Reads only, into memory (a file of this computer, Orbiters' events, whether VRChat says an instance is open):
+    // nothing of the window's work to finish before it may rest (window_rest's classified threads).
     {
         let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
         if s.busy || s.at.is_some_and(|at| at.elapsed() < every) {
@@ -469,7 +471,7 @@ fn refresh<T: Send + 'static>(slot: &Shared<T>, every: Duration, ctx: &egui::Con
         s.busy = true;
     }
     let (shared, ctx) = (slot.clone(), ctx.clone());
-    let started = std::thread::Builder::new().name(name.into()).spawn(move || {
+    let started = std::thread::Builder::new().name(format!("where-{name}")).spawn(move || {
         let value = work();
         let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
         if value.is_some() {
@@ -649,12 +651,12 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>) -> (Vec<Suggesti
     // Tests read nothing of this computer's or the network's (pictures of the page hand everything in).
     let reads = state.places.staged.is_none() && !cfg!(test);
     if reads {
-        refresh(&state.places.history, HISTORY_EVERY, &ctx, "where-history", || {
+        refresh(&state.places.history, HISTORY_EVERY, &ctx, "history", || {
             let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
             Some(HistoryView::of(&history, orbiters_core::visited::now()))
         });
         let server = orbiters_core::account::Server::current();
-        refresh(&state.places.events, EVENTS_EVERY, &ctx, "where-events", move || Some(read_events(server, events_now())));
+        refresh(&state.places.events, EVENTS_EVERY, &ctx, "events", move || Some(read_events(server, events_now())));
     }
     let history = state.places.history.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
     let loading = match &state.places.staged {
@@ -678,7 +680,7 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>) -> (Vec<Suggesti
                 }
                 if let Some(scope) = state.scope.clone() {
                     let (ctl, world, instance, key) = (cx.ctl.clone(), last.world_id.clone(), last.instance.clone(), location.clone());
-                    refresh(&state.places.open, OPEN_EVERY, &ctx, "where-open", move || match ctl.vrchat_data(scope, Request::Instance { world, instance }) {
+                    refresh(&state.places.open, OPEN_EVERY, &ctx, "open", move || match ctl.vrchat_data(scope, Request::Instance { world, instance }) {
                         Ok(Response::Instance(open)) => Some((key, open)),
                         _ => Some((key, None)),
                     });
@@ -1113,7 +1115,10 @@ pub fn play(state: &mut State, cx: &Cx, clock: f64, mode: LaunchMode, profile: O
     let (Launch::Create { world, name, access, region }, Some(scope), Some(me)) = (plan, state.scope.clone(), me) else { return };
     state.places.making = Some(mode);
     let (ctl, made, ctx) = (cx.ctl.clone(), state.places.made.clone(), state.ctx.clone());
+    // Work of the window until VRChat was asked to start: it does not rest to the tray in the middle of it.
+    let working = super::super::Working::begin();
     let started = std::thread::Builder::new().name("where-new-instance".into()).spawn(move || {
+        let _working = working;
         let result = make_and_go(ctl.as_ref(), scope, &me, &world, &name, access, region, mode, profile);
         *made.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
         if let Some(ctx) = ctx {

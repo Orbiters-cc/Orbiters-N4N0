@@ -375,6 +375,17 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     let mut signed_out_review = docked.clone(); signed_out_review.list.vrchat = false;
     paint("review-signed-out", &entries, &detail, &signed_out_review, &feedback, 5.0)?;
     paint("side-headset", &entries, &detail, &Status { headset: true, ..Default::default() }, &feedback, 5.0)?;
+    // REQUEST20 1: Copy name right after a world's name, on a screen and in a headset (on a sheet, the carousel's form):
+    // at rest, pointed at, just pressed (Copied), and after a long name that takes two lines on a screen.
+    for (form, panel, headset) in [("screen", &detail, false), ("headset", &vr_detail, true)] {
+        let at = Status { headset, ..shown.clone() };
+        let id = panel.selected.unwrap_or(10);
+        paint(&format!("copy-name-{form}"), &entries, panel, &at, &feedback, 5.0)?;
+        paint(&format!("copy-name-{form}-hover"), &entries, &Panel { hover: Some(Target::CopyName), ..panel.clone() }, &at, &feedback, 5.0)?;
+        paint(&format!("copy-name-{form}-copied"), &entries, &Panel { copied: Some((id, 4.6)), ..panel.clone() }, &at, &feedback, 5.0)?;
+        let long = Panel { selected: Some(11), copied: Some((11, 4.6)), ..panel.clone() };
+        paint(&format!("copy-name-{form}-long"), &entries, &long, &Status { current: Some(11), ..at.clone() }, &feedback, 5.0)?;
+    }
     // A headset's list with no side panel, on a sheet: endless, with no arrows and no Back of its own; and part way through the side panel coming out.
     let sheet = Panel { on_sheet: true, ..base.clone() };
     paint("browse-headset", &entries, &sheet, &Status { headset: true, ..Default::default() }, &feedback, 5.0)?;

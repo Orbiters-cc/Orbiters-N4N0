@@ -190,6 +190,8 @@ pub enum Target {
     Join,
     /// The world's page on vrchat.com.
     OpenWeb,
+    /// The world's name to the computer's clipboard (REQUEST20 1), beside the name on its side panel.
+    CopyName,
     /// Reads the world's feedback again, after Orbiters did not answer.
     RetryFeedback,
     /// An instance of the Go there list (its place in the list): there, directly.
@@ -231,6 +233,8 @@ pub enum Action {
     Join(String),
     /// A world's page on vrchat.com (its id), in the computer's browser.
     OpenWeb(String),
+    /// This text (a world's name, exactly as shown) to the computer's clipboard: in a headset too, to paste it there.
+    CopyName(String),
     /// Signing in to Orbiters, in the computer's browser: the way out of "sign in to write a comment" (F6).
     SignIn,
     /// The world's feedback asked for again (Orbiters did not answer).
@@ -563,7 +567,14 @@ pub struct Panel {
     pub pointer: Option<Pos2>,
     /// Something changed: paint again.
     pub dirty: bool,
+    /// Copy name's place, just after the name as the last paint laid it out, for that capture (its id) in a headset or not.
+    copy_at: std::cell::Cell<Option<(u64, bool, Rect)>>,
+    /// The capture whose name was last copied, and when: its button says Copied for a moment.
+    copied: Option<(u64, f64)>,
 }
+
+/// How long Copy name says Copied.
+const COPIED_FOR: f64 = 1.6;
 
 fn ease_out(t: f64) -> f32 {
     let t = t.clamp(0.0, 1.0) as f32;
@@ -1273,6 +1284,7 @@ impl Panel {
             || matches!(self.page, Page::Typing | Page::Compose(_))
             || self.confirm.is_some_and(|(_, at)| time - at < CONFIRM_FOR + 0.1)
             || self.note.as_ref().is_some_and(|(_, at)| time - at < NOTE_FOR + 0.1)
+            || self.copied.is_some_and(|(_, at)| time - at < COPIED_FOR + 0.1)
     }
 
     /// How many captures lead the list when worlds without one follow them for lack of them.
@@ -1483,6 +1495,10 @@ impl Panel {
                     out.push((Target::CloseSide, SIDE_CLOSE));
                 }
                 let Some(e) = self.entry(d) else { return out };
+                // Just after its name, where the last paint put it.
+                if let Some((_, _, rect)) = self.copy_at.get().filter(|(id, headset, _)| *id == e.id && *headset == vr) {
+                    out.push((Target::CopyName, rect));
+                }
                 let status = d.status;
                 let current = status.current == Some(e.id) && (status.shown || status.stage.is_some());
                 // Going there needs the member's own VRChat session in Orbiters (Enzo, F5): without it there is no list to choose from, and no button.
@@ -1764,6 +1780,14 @@ impl Panel {
                 Vec::new()
             }
             Target::OpenWeb => self.entry(d).map(|e| Action::OpenWeb(e.world_id.clone())).into_iter().collect(),
+            Target::CopyName => match self.entry(d).filter(|e| !e.name.trim().is_empty()) {
+                Some(e) => {
+                    self.copied = Some((e.id, time));
+                    self.dirty = true;
+                    vec![Action::CopyName(e.name.clone())]
+                }
+                None => Vec::new(),
+            },
             Target::Has3d => {
                 self.has_3d = !self.has_3d;
                 self.to_the_top();
@@ -2486,14 +2510,33 @@ impl Panel {
         }
         // Its name, as long as it is; who made it.
         let (x, width) = if vr { (VR_LEFT, SIDE_RIGHT - VR_LEFT) } else { (SIDE_LEFT, SIDE_RIGHT - SIDE_LEFT) };
-        if vr {
-            text_cut(p, pos2(x, VR_NAME), width, orbit_look::txt(entry.name.clone(), 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)));
+        // Copy name right after it (REQUEST20 1): its room comes off the name's.
+        let (copy_w, copy_h) = if vr { (44.0, 38.0) } else { (34.0, 30.0) };
+        let name_room = width - copy_w - 8.0;
+        let copy_rect = if vr {
+            let galley = p.layout_job(orbit_look::txt(entry.name.clone(), 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)).job_truncated(name_room));
+            let middle = VR_NAME + galley.size().y / 2.0;
+            let end = x + galley.size().x;
+            p.galley(pos2(x, VR_NAME), galley, theme::FG);
+            Rect::from_min_size(pos2(end + 6.0, middle - copy_h / 2.0), vec2(copy_w, copy_h))
         } else {
-            let mut title = orbit_look::txt(entry.name.clone(), 21.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)).job(width);
+            let mut title = orbit_look::txt(entry.name.clone(), 21.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)).job(name_room);
             title.wrap.max_rows = 2;
             let galley = p.layout_job(title);
             // Its last line just over who made it, however many it has.
-            p.galley(pos2(x, SIDE_NAME_FOOT - galley.size().y), galley, theme::FG);
+            let top = SIDE_NAME_FOOT - galley.size().y;
+            let last = galley.rows.last().map(|r| r.rect()).unwrap_or(Rect::NOTHING);
+            let (end, middle) = if last.is_positive() { (x + last.right(), top + last.center().y) } else { (x, SIDE_NAME_FOOT - 14.0) };
+            p.galley(pos2(x, top), galley, theme::FG);
+            Rect::from_min_size(pos2(end + 4.0, middle - copy_h / 2.0), vec2(copy_w, copy_h))
+        };
+        if !entry.name.trim().is_empty() {
+            self.copy_at.set(Some((entry.id, vr, copy_rect)));
+            let (h, pr) = state(Target::CopyName);
+            let copied = self.copied.is_some_and(|(id, at)| id == entry.id && time - at < COPIED_FOR);
+            copy_button(p, copy_rect, copied, vr, h, pr, rest);
+        } else {
+            self.copy_at.set(None);
         }
         let facts = d.facts_of(entry);
         let mut under = Vec::new();
@@ -2807,6 +2850,27 @@ fn text(p: &Painter, at: Pos2, align: Align2, txt: Txt) {
 fn text_cut(p: &Painter, at: Pos2, width: f32, txt: Txt) {
     let galley = p.layout_job(txt.job_truncated(width));
     p.galley(at, galley, txt.color);
+}
+
+/// Copy name beside a world's name: an icon on the panel's raised tone; pointed at, it says what it does; pressed, Copied
+/// with a check for a moment, in the accent. What it says grows to its right, or to its left where the panel ends first.
+#[allow(clippy::too_many_arguments)]
+fn copy_button(p: &Painter, rect: Rect, copied: bool, vr: bool, hover: bool, pressed: bool, alpha: f32) {
+    let rect = if pressed { rect.shrink(1.5) } else { rect };
+    let (bg, fg) = if copied { (orbit_look::accent(), orbit_look::on_accent()) } else if hover { (RAISED2, theme::FG) } else { (RAISED, theme::FG_2) };
+    let words = if copied { Some(tr("Copied")) } else if hover { Some(tr_ctx("world name", "Copy name")) } else { None };
+    let galley = words.map(|w| p.layout_job(orbit_look::txt(w, if vr { 18.0 } else { 15.5 }).weight(weight::SEMIBOLD).color(fade(fg, alpha)).job(f32::INFINITY)));
+    let wide = galley.as_ref().map_or(0.0, |g| g.size().x + 12.0);
+    let mut face = Rect::from_min_size(rect.min, vec2(rect.width() + wide, rect.height()));
+    if face.right() > SIDE_RIGHT {
+        face = face.translate(vec2(SIDE_RIGHT - face.right(), 0.0));
+    }
+    p.rect_filled(face, CornerRadius::same((face.height() / 2.0) as u8), fade(bg, alpha));
+    let glyph_at = pos2(face.left() + rect.width() / 2.0, face.center().y);
+    widgets::icon(p, glyph_at, if copied { icons::CHECK } else { icons::COPY }, if vr { 22.0 } else { 18.0 }, fade(fg, alpha));
+    if let Some(g) = galley {
+        p.galley(pos2(face.left() + rect.width() - 4.0, face.center().y - g.size().y / 2.0), g, fade(fg, alpha));
+    }
 }
 
 fn round_button(p: &Painter, center: Pos2, glyph: &str, hover: bool, pressed: bool, alpha: f32) {
@@ -3714,6 +3778,39 @@ mod tests {
         assert_eq!(panel.page, Page::Detail);
     }
 
+    /// REQUEST20 1: Copy name right after a world's name on its side panel, in a headset and on a screen, once painted;
+    /// pressed, the name exactly as shown, and Copied for a moment.
+    #[test]
+    fn copy_name_sits_after_the_name_and_copies_it_exactly() {
+        let mut entries = super::super::catalog::parse(LISTING).unwrap();
+        entries[1].name = "Dawn ☆ Café [JP] ".into();
+        let (facts, feedback) = (HashMap::new(), FeedbackView::default());
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        for headset in [false, true] {
+            let status = Status { headset, ..Default::default() };
+            let d = data(&entries, &status, &feedback, &facts);
+            let mut panel = Panel { page: Page::Detail, selected: Some(2), ..Default::default() };
+            let copy = |panel: &Panel| panel.targets(&d).into_iter().find(|(t, _)| *t == Target::CopyName).map(|(_, r)| r);
+            assert!(copy(&panel).is_none(), "placed by a paint");
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| panel.draw(ui.painter(), &d, 1.0));
+            let rect = copy(&panel).expect("beside the name");
+            let (side, left) = if headset { (VR_SIDE, VR_LEFT) } else { (SIDE, SIDE_LEFT) };
+            assert!(side.contains_rect(rect), "{rect:?}");
+            assert!(rect.left() > left + 60.0 && rect.left() < left + 300.0, "just after a short name: {rect:?}");
+            assert!(rect.height() >= 30.0 && rect.width() >= 34.0, "big enough to press: {rect:?}");
+            let others: Vec<Rect> = panel.targets(&d).into_iter().filter(|(t, _)| *t != Target::CopyName && *t != Target::Back).map(|(_, r)| r).collect();
+            assert!(others.iter().all(|r| !r.intersects(rect)), "on nothing else: {rect:?} {others:?}");
+            assert_eq!(panel.hit(&d, rect.center().x, rect.center().y), Some(Target::CopyName));
+            assert_eq!(panel.press(Target::CopyName, &d, 2.0), [Action::CopyName("Dawn ☆ Café [JP] ".into())], "exactly as shown");
+            assert!(panel.copied.is_some_and(|(id, _)| id == 2) && panel.animating(&status, 2.5));
+            assert!(!panel.animating(&status, 2.0 + COPIED_FOR + 0.5) || panel.page_at > 0.0);
+            // Another world chosen: its own name, never the one before's.
+            panel.selected = Some(3);
+            assert!(copy(&panel).is_none(), "placed again for it");
+        }
+    }
+
     #[test]
     fn a_world_without_a_capture_opens_its_page_to_join_it() {
         let captures = super::super::catalog::parse(LISTING).unwrap();
@@ -3800,6 +3897,7 @@ impl Panel {
     }
     pub(crate) fn adopt_metrics(&self, from: &Self) {
         self.list_step.set(from.list_step.get()); self.list_headset.set(from.list_headset.get()); self.vr_most.set(from.vr_most.get());
+        self.copy_at.set(from.copy_at.get());
     }
     pub(crate) fn same_input(&self, b: &Self, target: Target) -> bool {
         if self.page != b.page || self.selected != b.selected || self.layout != b.layout { return false; }

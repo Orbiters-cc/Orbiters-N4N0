@@ -345,18 +345,19 @@ mod tests {
     #[test]
     fn one_group_in_the_game_is_one_favourites_section() {
         let mut state = sample();
-        one(&mut state, 2, Presence::InGame, state.friends[2].whereabouts.clone(), &["group_0"]);
-        let rows = rows(&state, "", &HashSet::new());
-        assert_eq!(people(&rows, &state)[..4], ["[favourites 3]", "Nova Sample", "Pixel Fox", "Mochi Byte"]);
-        assert!(!rows.iter().any(|r| matches!(r, Row::Header { section: Section::FavouriteGroup, .. })));
+        let there = state.friends[2].whereabouts.clone();
+        one(&mut state, 2, Presence::InGame, there, &["group_0"]);
+        let shown = rows(&state, "", &HashSet::new());
+        assert_eq!(people(&shown, &state)[..4], ["[favourites 3]", "Nova Sample", "Pixel Fox", "Mochi Byte"]);
+        assert!(!shown.iter().any(|r| matches!(r, Row::Header { section: Section::FavouriteGroup, .. })));
         // Nobody of them in the game: no Favourites at all, they are in their sections.
         let mut state = sample();
         for n in [0, 1, 2] {
             one(&mut state, n, Presence::Website, Whereabouts::Website, &["group_0"]);
         }
-        let rows = rows(&state, "", &HashSet::new());
-        assert_eq!(headers(&rows).iter().map(|h| h.0.as_str()).collect::<Vec<_>>(), ["in-game", "website", "offline"]);
-        assert_eq!(headers(&rows)[1].2, 4);
+        let shown = rows(&state, "", &HashSet::new());
+        assert_eq!(headers(&shown).iter().map(|h| h.0.as_str()).collect::<Vec<_>>(), ["in-game", "website", "offline"]);
+        assert_eq!(headers(&shown)[1].2, 4);
     }
 
     /// Every presence a friend can have puts them in one section, by these rules.

@@ -691,7 +691,7 @@ mod tests {
     /// or draws in memory), with why. A thread added later and not classified fails this test.
     #[test]
     fn every_thread_the_window_starts_is_counted_or_classified() {
-        const IDLE: [(&str, &str); 13] = [
+        const IDLE: [(&str, &str); 15] = [
             ("pages/editor/preview.rs", "draws the editor's previews in memory"),
             ("pages/gallery_select.rs", "fetches pictures to hand out by a drag (a cache)"),
             ("pages/projects/builds.rs", "builds project previews (a cache)"),

@@ -626,5 +626,8 @@
   "{count} report sent. Thank you!": "{count} 件のレポートを送信しました。ありがとうございます！",
   "{count} reports sent. Thank you!": "{count} 件のレポートを送信しました。ありがとうございます！",
   "{count} report deleted.": "{count} 件のレポートを削除しました。",
-  "{count} reports deleted.": "{count} 件のレポートを削除しました。"
+  "{count} reports deleted.": "{count} 件のレポートを削除しました。",
+  "Log": "ログ",
+  "Every notice, warning and error N4N0 showed, kept here": "N4N0 が表示した通知・警告・エラーをすべてここに保存します",
+  "Copy all": "すべてコピー"
 }

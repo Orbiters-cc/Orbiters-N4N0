@@ -626,5 +626,8 @@
   "{count} report sent. Thank you!": "{count} relatório enviado. Obrigado!",
   "{count} reports sent. Thank you!": "{count} relatórios enviados. Obrigado!",
   "{count} report deleted.": "{count} relatório excluído.",
-  "{count} reports deleted.": "{count} relatórios excluídos."
+  "{count} reports deleted.": "{count} relatórios excluídos.",
+  "Log": "Registro",
+  "Every notice, warning and error N4N0 showed, kept here": "Todos os avisos, alertas e erros que o N4N0 mostrou, guardados aqui",
+  "Copy all": "Copiar tudo"
 }

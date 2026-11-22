@@ -58,6 +58,7 @@ pub fn run(program: &Path, args: &[&str], stop: &AtomicBool, mut each: impl FnMu
         }
         let Some(event) = obelisk::event(&line) else { continue };
         if let Event::Error { code, message } = &event {
+            note(args, code, message);
             failed = Some(Failure::new(code, words(code, message)));
         }
         each(&event);
@@ -69,6 +70,16 @@ pub fn run(program: &Path, args: &[&str], stop: &AtomicBool, mut each: impl FnMu
         None if status.success() => Ok(()),
         None => Err(Failure::new("internal", tr("What runs VRChat on this Mac stopped without saying why."))),
     }
+}
+
+/// What the program itself said of a failure (its code and its own sentence), into Settings, Log: the person reads
+/// N4N0's words in the toast, and whoever looks into it reads these.
+fn note(args: &[&str], code: &str, message: &str) {
+    if cfg!(test) {
+        return;
+    }
+    let text = format!("obelisk-cli {}: {code}: {message}", args.iter().take(2).copied().collect::<Vec<_>>().join(" ")); // i18n: not shown (a program's own words, for the log)
+    orbiters_core::notice_log::append(&orbiters_core::paths::logs_dir(), "detail", &text, time::OffsetDateTime::now_utc().unix_timestamp());
 }
 
 fn spawn(program: &Path, args: &[&str]) -> std::io::Result<Child> {
@@ -179,7 +190,12 @@ impl Play {
                     Some(Event::Running { pid }) => play.now.lock().unwrap().running = Some(pid),
                     Some(Event::Exited { .. }) => play.now.lock().unwrap().running = None,
                     // A failure after the game ran (its session, its Cloud saves) is not a start that failed.
-                    Some(Event::Error { code, message }) if play.now.lock().unwrap().running.is_none() => failure = Some(Failure::new(&code, words(&code, &message))),
+                    Some(Event::Error { code, message }) => {
+                        note(&["steam", "play"], &code, &message);
+                        if play.now.lock().unwrap().running.is_none() {
+                            failure = Some(Failure::new(&code, words(&code, &message)));
+                        }
+                    }
                     _ => {}
                 }
             }

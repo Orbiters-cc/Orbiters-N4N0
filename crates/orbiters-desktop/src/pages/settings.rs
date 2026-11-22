@@ -662,6 +662,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     ui.add_space(12.0);
                 }
             }));
+            m.add(19, |ui| section(ui, cx, 19, icons::SCROLL, tr("Log"), Some(tr("Every notice, warning and error N4N0 showed, kept here")), notice_log));
             m.finish(ui);
             if want_log {
                 state.log_open = !state.log_open;
@@ -1279,4 +1280,65 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
         widgets::field(ui, tr("Right now"), Some(&now), 48.0, |_| {});
     }
     apply
+}
+
+/// How many notices Settings shows (the file keeps more).
+const LOG_SHOWN: usize = 400;
+
+/// Every notice the app showed (`orbiters_core::notice_log`), newest first: a toast is gone in seconds, and an error
+/// nobody had the time to read is still here.
+fn notice_log(ui: &mut Ui) {
+    let logs = orbiters_core::paths::logs_dir();
+    let file = orbiters_core::notice_log::file(&logs);
+    // Read again only when the file changed (looked at once a second).
+    let id = Id::unique("settings-notice-log");
+    let changed = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+    let kept: Option<(Option<std::time::SystemTime>, std::sync::Arc<Vec<orbiters_core::notice_log::Entry>>)> = ui.ctx().data(|d| d.get_temp(id));
+    let entries = match kept {
+        Some((at, entries)) if at == changed => entries,
+        _ => {
+            let entries = std::sync::Arc::new(orbiters_core::notice_log::newest(&logs, LOG_SHOWN));
+            ui.ctx().data_mut(|d| d.insert_temp(id, (changed, entries.clone())));
+            entries
+        }
+    };
+    ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+    ui.add_space(8.0);
+    if entries.is_empty() {
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+        widgets::text(ui.painter(), pos2(row.left(), row.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Nothing yet."), 13.0).color(theme::FG_3));
+        return;
+    }
+    let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+    let mut bu = ui.new_child(UiBuilder::new().max_rect(bar).layout(Layout::right_to_left(egui::Align::Center)));
+    bu.spacing_mut().item_spacing = vec2(8.0, 0.0);
+    if Button::new(tr("Show the file")).icon(icons::FOLDER_OPEN).variant(Variant::Ghost).size(Size::Sm).id_salt("notice-log-file").show(&mut bu).clicked() {
+        let _ = super::editor::files::reveal(&file);
+    }
+    if Button::new(tr("Copy all")).icon(icons::COPY).variant(Variant::Ghost).size(Size::Sm).id_salt("notice-log-copy").show(&mut bu).clicked() {
+        let text: Vec<String> = entries.iter().map(|e| format!("{}  {}  {}", super::local_time_unix(e.at.max(0) as u64), e.kind, e.text)).collect();
+        ui.ctx().copy_text(text.join("\n"));
+    }
+    egui::ScrollArea::vertical().id_salt("notice-log").max_height(320.0).auto_shrink([false, true]).show(ui, |ui| {
+        for entry in entries.iter() {
+            let colour = match entry.kind.as_str() {
+                "error" => theme::DANGER,
+                "warning" => theme::WARN,
+                "success" => theme::OK,
+                "detail" => theme::FG_4,
+                _ => theme::FG_3,
+            };
+            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+            if !ui.is_rect_visible(row) {
+                continue;
+            }
+            let p = ui.painter();
+            p.circle_filled(pos2(row.left() + 5.0, row.center().y), 3.5, colour);
+            let time = widgets::text(p, pos2(row.left() + 18.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(super::local_time_unix(entry.at.max(0) as u64), 12.0).color(theme::FG_3).mono());
+            let one_line = entry.text.replace('\n', " ");
+            let text_colour = if entry.kind == "detail" { theme::FG_3 } else { theme::FG_2 };
+            widgets::text_truncated(p, pos2(time.right() + 12.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(&one_line, 12.5).color(text_colour), row.right() - time.right() - 20.0);
+            ui.interact(row, id.with(("row", entry.at, one_line.len())), Sense::hover()).on_hover_text(&entry.text);
+        }
+    });
 }

@@ -241,12 +241,14 @@ pub fn event(line: &str) -> Option<Event> {
     })
 }
 
-/// VRChat's arguments for a start on a Mac, from those of a desktop start on a PC: the destination's link alone.
-/// `--no-vr` is left out (a Mac has no SteamVR to keep out of, and people who run VRChat this way report starts that
-/// hang with it), and so are the PC's performance options (process priorities, video decoding by the graphics card:
-/// tuned for Windows, never tried under the engine, and not offered in a Mac's settings).
+/// VRChat's arguments for a start on a Mac, from those of a desktop start on a PC: the whole screen (Unity's own
+/// options: without them the game opens in a small window, as it does at its first start anywhere), then the
+/// destination's link. `--no-vr` is left out (a Mac has no SteamVR to keep out of, and people who run VRChat this way
+/// report starts that hang with it), and so are the PC's performance options (process priorities, video decoding by
+/// the graphics card: tuned for Windows, never tried under the engine, and not offered in a Mac's settings).
 pub fn game_arguments(desktop: Vec<String>) -> Vec<String> {
-    desktop.into_iter().filter(|a| a.starts_with("vrchat://")).collect()
+    let whole_screen = ["-screen-fullscreen", "1", "-window-mode", "borderless"].map(String::from);
+    whole_screen.into_iter().chain(desktop.into_iter().filter(|a| a.starts_with("vrchat://"))).collect()
 }
 
 #[cfg(test)]
@@ -386,9 +388,10 @@ mod tests {
     }
 
     #[test]
-    fn a_mac_s_start_is_given_the_destination_alone() {
+    fn a_mac_s_start_is_given_the_whole_screen_and_the_destination() {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(game_arguments(args(&["--no-vr", "--process-priority=1", "--fps=90", "vrchat://launch?ref=vrchat.com&id=wrld_1:2"])), args(&["vrchat://launch?ref=vrchat.com&id=wrld_1:2"]));
-        assert!(game_arguments(args(&["--no-vr"])).is_empty());
+        let whole = ["-screen-fullscreen", "1", "-window-mode", "borderless"];
+        assert_eq!(game_arguments(args(&["--no-vr", "--process-priority=1", "--fps=90", "vrchat://launch?ref=vrchat.com&id=wrld_1:2"])), args(&[whole.as_slice(), &["vrchat://launch?ref=vrchat.com&id=wrld_1:2"]].concat()));
+        assert_eq!(game_arguments(args(&["--no-vr"])), args(&whole));
     }
 }

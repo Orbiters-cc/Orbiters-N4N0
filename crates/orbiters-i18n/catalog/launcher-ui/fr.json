@@ -90,5 +90,18 @@
   "Checking Obelisk and putting it in Applications…": "Vérification d’Obelisk et installation dans Applications…",
   "VRChat runs on a Mac through Obelisk, a free app.": "VRChat tourne sur Mac grâce à Obelisk, une app gratuite.",
   "Install Obelisk & play VRChat": "Installer Obelisk et jouer à VRChat",
-  "Sign in to Steam in Obelisk and download VRChat. Play follows.": "Connecte-toi à Steam dans Obelisk et télécharge VRChat. Le jeu suit."
+  "Sign in to Steam in Obelisk and download VRChat. Play follows.": "Connecte-toi à Steam dans Obelisk et télécharge VRChat. Le jeu suit.",
+  "Getting what runs VRChat on a Mac: {percent} %": "Récupération de ce qui fait tourner VRChat sur Mac : {percent} %",
+  "Setting VRChat up on this Mac…": "Installation de VRChat sur ce Mac…",
+  "Downloading the engine that runs VRChat on a Mac: {progress}": "Téléchargement du moteur qui fait tourner VRChat sur Mac : {progress}",
+  "Downloading VRChat: {progress}": "Téléchargement de VRChat : {progress}",
+  "VRChat can run on this Mac with your Steam account (about 2 GB).": "VRChat peut tourner sur ce Mac avec ton compte Steam (environ 2 Go).",
+  "Install & play VRChat": "Installer et jouer à VRChat",
+  "On this Mac, with Obelisk's engine": "Sur ce Mac, avec le moteur d’Obelisk",
+  "Sign in to Steam": "Connecte-toi à Steam",
+  "VRChat is downloaded with your Steam account.": "VRChat est téléchargé avec ton compte Steam.",
+  "1. Open the Steam app on your phone.": "1. Ouvre l’app Steam sur ton téléphone.",
+  "2. Scan this code with it and approve the sign-in.": "2. Scanne ce code avec et approuve la connexion.",
+  "The download starts by itself after that.": "Le téléchargement démarre tout seul ensuite.",
+  "Waiting for your phone…": "En attente de ton téléphone…"
 }

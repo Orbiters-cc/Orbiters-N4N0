@@ -5,6 +5,10 @@
   there; one that goes over OSC talks with the VRChat on the network (`orbiters_core::lan`). Native code goes behind
   `cfg(target_os = "macos")` beside the `cfg(windows)` path. `cargo xtask` on a Mac makes the Mac's release:
   `target/dist/<version>/Orbiters-N4N0-<version>-macos-arm64.dmg` is the build to give (see `docs/releasing.md`).
+  VRChat itself does run on a Mac, started by N4N0 through Obelisk's engine without its window: `obelisk-cli`, built
+  from the fork github.com/Orbiters-cc/Obelisk (branch `cli`, GPL-3.0, its `docs/CLI.md` is the contract), a separate
+  program N4N0 downloads from that fork's releases and runs (`orbiters_core::obelisk`, `controller/obelisk_cli.rs`).
+  Nothing of N4N0 goes into the fork, and none of the fork's code into N4N0.
 
 - **Every version bump gets a GitHub release.** `cargo xtask bump <version>`, commit and push, then
   `cargo xtask release` (with `--unsigned` until Azure Artifact Signing is set up; see `docs/releasing.md`). It tags

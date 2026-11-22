@@ -14,6 +14,8 @@ use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{paint, widgets};
 
 const PLAY_H: f32 = 84.0;
+/// The Steam sign-in's card on a Mac: its QR code and what to do with it.
+const SIGN_IN_H: f32 = 196.0;
 /// The profile choice under the Play buttons: its chips' height, the room above it.
 const CHIP_H: f32 = 32.0;
 const CHIP_GAP: f32 = 8.0;
@@ -40,6 +42,14 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     }
     let play = states::play(&state.data);
     let invite = invite(state);
+    // A Mac being set up, at the Steam sign-in: the QR code to read with the phone.
+    let sign_in = match (&state.data.engine_setup, play) {
+        (Some(EngineSetup::SignIn { qr_url }), PlayState::NotInstalled | PlayState::NoEngine) if !VR_HERE => Some(qr_url.clone()),
+        _ => None,
+    };
+    if let Some(qr_url) = sign_in {
+        return super::super::block(ui, cx, index, SIGN_IN_H, |ui, rect| steam_sign_in(ui, rect, &qr_url));
+    }
     let height = match (&invite, play) {
         (Some(_), PlayState::Ready | PlayState::Starting(_) | PlayState::Running(_)) => INVITE_H,
         (_, PlayState::Ready | PlayState::Starting(_)) => PLAY_H,
@@ -78,15 +88,17 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             widgets::text(p, pos2(rect.left() + 42.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 14.0).weight(weight::MEDIUM));
         }
         (_, missing) if !VR_HERE => {
-            // A Mac: what is missing, and the button that gets it (Obelisk installed from here, or opened).
+            // A Mac: VRChat is not set up yet. One button does it all; while it runs, what it is at.
             let setup = state.data.engine_setup.clone();
-            let (line, label, action): (String, Option<&str>, Action) = match (missing, setup) {
-                (_, Some(EngineSetup::Downloading { percent })) => (tr!("Downloading Obelisk, which runs VRChat on a Mac: {percent} %", percent = percent), None, Action::InstallEngine),
-                (_, Some(EngineSetup::Installing)) => (tr("Checking Obelisk and putting it in Applications…").into(), None, Action::InstallEngine),
-                (PlayState::NoEngine, _) => (tr("VRChat runs on a Mac through Obelisk, a free app.").into(), Some(tr("Install Obelisk & play VRChat")), Action::InstallEngine),
-                (_, Some(EngineSetup::WaitingForGame)) => (tr("Sign in to Steam in Obelisk and download VRChat. Play follows.").into(), Some(tr("Open Obelisk")), Action::OpenEngine),
-                _ => (tr("Download VRChat in Obelisk (Beta versions on in its settings), then come back.").into(), Some(tr("Open Obelisk")), Action::OpenEngine),
+            let percent_of = |p: Option<u8>| p.map(|p| format!("{p} %")).unwrap_or_else(|| "…".into());
+            let (line, label, action): (String, Option<&str>, Action) = match setup {
+                Some(EngineSetup::Downloading { percent }) => (tr!("Getting what runs VRChat on a Mac: {percent} %", percent = percent), None, Action::InstallEngine),
+                Some(EngineSetup::Installing | EngineSetup::Checking | EngineSetup::SignIn { .. }) => (tr("Setting VRChat up on this Mac…").into(), None, Action::InstallEngine),
+                Some(EngineSetup::Game { game: false, percent }) => (tr!("Downloading the engine that runs VRChat on a Mac: {progress}", progress = percent_of(percent)), None, Action::InstallEngine),
+                Some(EngineSetup::Game { game: true, percent }) => (tr!("Downloading VRChat: {progress}", progress = percent_of(percent)), None, Action::InstallEngine),
+                Some(EngineSetup::Failed(_)) | None => (tr("VRChat can run on this Mac with your Steam account (about 2 GB).").into(), Some(tr("Install & play VRChat")), Action::InstallEngine),
             };
+            let _ = missing;
             let primary = action == Action::InstallEngine;
             let button = label.map(|label| widgets::Button::new(label).variant(if primary { widgets::Variant::Primary } else { widgets::Variant::Secondary }).id_salt("launcher-engine"));
             let bw = button.as_ref().map_or(0.0, |b| b.desired_width(ui));
@@ -253,7 +265,7 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
     let ctx = ui.ctx().clone();
     let (label, sub, glyph) = match mode {
         LaunchMode::Vr => (tr("Play in VR"), tr("With your headset, through SteamVR"), icons::VIRTUAL_REALITY),
-        LaunchMode::Desktop if !VR_HERE => (tr("Play VRChat"), tr("On this Mac, through Obelisk"), icons::DESKTOP),
+        LaunchMode::Desktop if !VR_HERE => (tr("Play VRChat"), tr("On this Mac, with Obelisk's engine"), icons::DESKTOP),
         LaunchMode::Desktop => (tr("Play in Desktop"), tr("Keyboard and mouse, no headset"), icons::DESKTOP),
     };
     let starting = play == PlayState::Starting(mode);
@@ -300,9 +312,7 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
             widgets::icon(&p, c, glyph, 24.0, fg);
         }
         x += chip + 14.0;
-        // A Mac: Obelisk is open and the person presses Play there.
         let (title, sub) = match starting {
-            true if !VR_HERE => (tr("Obelisk is open"), tr("Press Play on VRChat there")),
             true => (tr("Starting VRChat…"), sub),
             false if running => (
                 match mode {
@@ -447,4 +457,51 @@ fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Inv
         let t = orbiters_i18n::tr!("{n} more invites", n = more);
         widgets::text(&p, pos2(right, by + bh * 0.5), Align2::RIGHT_CENTER, &Txt::new(t, 12.0).color(theme::FG_4));
     }
+}
+
+/// The Steam sign-in of a Mac's set-up: the address Steam gave as a QR code, and what to do with it.
+fn steam_sign_in(ui: &mut Ui, rect: Rect, qr_url: &str) {
+    let p = ui.painter().clone();
+    widgets::frame(&p, rect, 16.0, theme::surface_soft());
+    let side = rect.height() - 32.0;
+    let card = Rect::from_min_size(pos2(rect.left() + 16.0, rect.top() + 16.0), vec2(side, side));
+    p.rect_filled(card, theme::radius(12.0), egui::Color32::WHITE);
+    // The code's modules, kept from one frame to the next for the same address.
+    let id = Id::unique("launcher-steam-qr");
+    let kept: Option<(String, usize, std::sync::Arc<Vec<bool>>)> = ui.ctx().data(|d| d.get_temp(id));
+    let (n, dark) = match kept {
+        Some((url, n, dark)) if url == qr_url => (n, dark),
+        _ => {
+            let (n, dark) = match qrcode::QrCode::new(qr_url.as_bytes()) {
+                Ok(code) => (code.width(), code.to_colors().into_iter().map(|c| c == qrcode::Color::Dark).collect()),
+                Err(_) => (0, Vec::new()),
+            };
+            let dark = std::sync::Arc::new(dark);
+            ui.ctx().data_mut(|d| d.insert_temp(id, (qr_url.to_string(), n, dark.clone())));
+            (n, dark)
+        }
+    };
+    if n > 0 {
+        let inner = card.shrink(10.0);
+        let module = inner.width() / n as f32;
+        for (i, _) in dark.iter().enumerate().filter(|(_, dark)| **dark) {
+            let (x, y) = ((i % n) as f32, (i / n) as f32);
+            // A hair wider than a module, so that no light line shows between two dark ones.
+            p.rect_filled(Rect::from_min_size(pos2(inner.left() + x * module, inner.top() + y * module), vec2(module + 0.35, module + 0.35)), 0.0, egui::Color32::BLACK);
+        }
+    }
+    let x = card.right() + 20.0;
+    let room = rect.right() - 16.0 - x;
+    widgets::text_truncated(&p, pos2(x, rect.top() + 40.0), Align2::LEFT_CENTER, &Txt::new(tr("Sign in to Steam"), 18.0).weight(weight::SEMIBOLD), room);
+    let lines = [
+        tr("VRChat is downloaded with your Steam account."),
+        tr("1. Open the Steam app on your phone."),
+        tr("2. Scan this code with it and approve the sign-in."),
+        tr("The download starts by itself after that."),
+    ];
+    for (i, line) in lines.into_iter().enumerate() {
+        widgets::text_truncated(&p, pos2(x, rect.top() + 72.0 + 24.0 * i as f32), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(if i == 0 || i == 3 { theme::FG_3 } else { theme::FG_2 }), room);
+    }
+    orbiters_ui::feedback::spinner(&p, pos2(x + 8.0, rect.bottom() - 26.0), 7.0, 2.0, theme::ACCENT);
+    widgets::text_truncated(&p, pos2(x + 24.0, rect.bottom() - 26.0), Align2::LEFT_CENTER, &Txt::new(tr("Waiting for your phone…"), 12.5).color(theme::FG_3), room - 24.0);
 }

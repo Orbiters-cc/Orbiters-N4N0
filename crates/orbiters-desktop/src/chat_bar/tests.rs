@@ -345,15 +345,21 @@ impl Window {
     }
 
     fn frame(&mut self, events: Vec<Event>) {
-        self.time += 1.0 / 60.0;
+        self.frame_after(1.0 / 60.0, events);
+    }
+
+    fn frame_after(&mut self, seconds: f64, events: Vec<Event>) {
+        self.time += seconds;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)), time: Some(self.time), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(true), ..Default::default() });
         input.events = events;
         let app = &mut self.app;
-        let out = self.ctx.run_ui(input, |ui| {
+        let mut out = self.ctx.run_ui(input, |ui| {
             app.logic_offline(ui.ctx());
             app.draw(ui);
         });
+        // Nothing paints these frames.
+        out.textures_delta.clear();
         self.repaint = out.viewport_output.get(&ViewportId::ROOT).is_some_and(|v| v.repaint_delay < std::time::Duration::from_secs(1));
     }
 
@@ -538,9 +544,12 @@ fn a_streamed_answer_flows_in_and_the_window_rests_after() {
     w.settle();
     // Rest: the chat open, nothing moving, the field without the keyboard (a blinking caret asks for frames).
     w.ctx.memory_mut(|m| m.surrender_focus(field_id()));
+    // The window's own decorations (the glow's drift) rest half a minute after the last input: past that, only what
+    // moves asks for frames.
     for _ in 0..40 {
-        w.frame(Vec::new());
+        w.frame_after(1.0, Vec::new());
     }
+    assert!(w.chat().is_open(), "still open");
     assert!(!w.repaint, "an open chat at rest asks for no frames");
 }
 

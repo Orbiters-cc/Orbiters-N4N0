@@ -223,22 +223,30 @@ fn conversation(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, thre
     bar.count = all.len();
     let column_w = (thread.width() - 56.0).min(COLUMN);
     let now = anim::time(ui.ctx());
-    let mut area = egui::ScrollArea::vertical().id_salt("chat-thread").auto_shrink([false, false]).stick_to_bottom(true);
-    if grew && bar.follow {
-        area = area.vertical_scroll_offset(f32::MAX);
-    }
+    let area = egui::ScrollArea::vertical().id_salt("chat-thread").auto_shrink([false, false]).stick_to_bottom(true);
     let out = area.show(ui, |ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         ui.add_space(8.0);
         let last = all.len() - 1;
         for (i, item) in all.iter().enumerate() {
-            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 0.0), Sense::hover());
-            let left = row.center().x - column_w / 2.0;
-            let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(left, row.top()), vec2(column_w, f32::INFINITY))));
-            item_ui(bar, &mut cu, ctl, item, i == last, now);
+            let top = ui.cursor().top();
+            let left = ui.max_rect().center().x - column_w / 2.0;
+            let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(left, top), vec2(column_w, 4000.0))));
+            cu.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            item_ui(bar, &mut cu, ctl, item, i, i == last, now);
             let used = cu.min_rect().height();
-            ui.allocate_exact_size(vec2(ui.available_width(), used + 14.0), Sense::hover());
+            // Steps of one turn sit closer than turns.
+            let gap = match (item, all.get(i + 1)) {
+                (Item::You(_), _) | (_, Some(Item::You(_))) => 18.0,
+                _ => 10.0,
+            };
+            ui.allocate_exact_size(vec2(ui.available_width(), used + gap), Sense::hover());
         }
         ui.add_space(6.0);
+        // Something new (a message sent, an answer begun): its end in view, unless the person scrolled up to read.
+        if grew && bar.follow {
+            ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+        }
     });
     // Scrolled up by hand: the end is no longer followed until it is back in view.
     let at_end = out.state.clamped_offset().y + out.inner_rect.height() >= out.content_size.y - 4.0;
@@ -270,18 +278,21 @@ fn empty(ui: &mut Ui, thread: Rect) {
 
 /// One step of the thread in the column `ui`.
 #[allow(clippy::too_many_arguments)]
-fn item_ui(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, item: &Item<'_>, last: bool, now: f64) {
+fn item_ui(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, item: &Item<'_>, index: usize, last: bool, now: f64) {
     let width = ui.available_width();
     match item {
         Item::You(line) => {
             let max = (width * 0.85).min(520.0);
             let g = ui.painter().layout_job(Txt::new(&line.text, 14.0).color(theme::FG).line_height(20.0).job(max - 28.0));
             let size = g.size() + vec2(28.0, 20.0);
-            let (row, resp) = ui.allocate_exact_size(vec2(width, size.y), Sense::hover());
+            let (row, _) = ui.allocate_exact_size(vec2(width, size.y), Sense::hover());
             let bubble = Rect::from_min_size(pos2(row.right() - size.x, row.top()), size);
             ui.painter().rect_filled(bubble, CornerRadius { nw: 18, ne: 18, sw: 18, se: 6 }, theme::white(0.075));
             ui.painter().galley(bubble.min + vec2(14.0, 10.0), g, theme::FG);
-            copy_row(bar, ui, &line.text, line.at_ms, true, last || resp.hovered(), now);
+            // Its copy button beside it, while it is pointed at: nothing moves when it shows.
+            let at = Rect::from_center_size(pos2(bubble.left() - 18.0, bubble.bottom() - 15.0), vec2(26.0, 26.0));
+            let near = ui.rect_contains_pointer(row);
+            copy_button(bar, ui, &line.text, (index, line.at_ms), at, near, now);
         }
         Item::N4n0 { line, first } => {
             if *first {
@@ -300,7 +311,10 @@ fn item_ui(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, item: &Item<'_>, last: boo
                 ui.painter().circle_filled(end + vec2(8.0, 0.0), 3.0 + 0.8 * k, theme::alpha(theme::ACCENT, 0.55 + 0.45 * k));
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
             } else {
-                copy_row(bar, ui, &line.text, line.at_ms, false, last || resp.hovered(), now);
+                let (row, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
+                let at = Rect::from_center_size(pos2(row.left() + 13.0, row.center().y + 2.0), vec2(26.0, 26.0));
+                let near = last || resp.hovered() || ui.rect_contains_pointer(row);
+                copy_button(bar, ui, &line.text, (index, line.at_ms), at, near, now);
             }
         }
         Item::Note(text) => {
@@ -387,22 +401,22 @@ fn confirm(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, c: &N4n0Confirmation, widt
     }
 }
 
-/// The row under a message: its copy button (shown on the last message and the one pointed at).
-fn copy_row(bar: &mut ChatBar, ui: &mut Ui, text: &str, at_ms: u64, mine: bool, shown: bool, now: f64) {
-    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
-    let r = Rect::from_center_size(pos2(if mine { row.right() - 13.0 } else { row.left() + 13.0 }, row.center().y + 2.0), vec2(26.0, 26.0));
-    let hovered = ui.rect_contains_pointer(row) || ui.rect_contains_pointer(r);
-    let k = anim::toggle(ui.ctx(), Id::unique(("chat-copy-shown", at_ms, mine)), shown || hovered, anim::Spring::SNAPPY);
+/// A message's copy button at `at` (shown on the last answer and the message pointed at); a check for a moment once
+/// copied, as the website's.
+fn copy_button(bar: &mut ChatBar, ui: &mut Ui, text: &str, key: (usize, u64), at: Rect, shown: bool, now: f64) {
+    let id = Id::unique(("chat-copy", key));
+    let k = anim::toggle(ui.ctx(), id.with("shown"), shown || ui.rect_contains_pointer(at), anim::Spring::SNAPPY);
     if k < 0.01 {
         return;
     }
-    let done = bar.copied.is_some_and(|(at, when)| at == at_ms && now - when < 1.6);
-    let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(r));
+    let mark_key = key.1 ^ ((key.0 as u64) << 48);
+    let done = bar.copied.is_some_and(|(k, when)| k == mark_key && now - when < 1.6);
+    let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(at));
     cu.multiply_opacity(k);
     let glyph = if done { icons::CHECK } else { icons::COPY };
-    if IconButton::new(glyph, mark("Copy")).size(26.0, 13.0).id_salt(("chat-copy", at_ms, mine)).show_at(&mut cu, r).clicked() {
+    if IconButton::new(glyph, mark("Copy")).size(26.0, 13.0).id_salt(id).show_at(&mut cu, at).clicked() {
         ui.ctx().copy_text(text.to_string());
-        bar.copied = Some((at_ms, now));
+        bar.copied = Some((mark_key, now));
         bar.focus = true;
     }
     if done {

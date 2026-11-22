@@ -43,16 +43,17 @@ fn backdrop_layer() -> LayerId {
     LayerId::new(Order::Middle, Id::unique("orbiters-chat-backdrop"))
 }
 
-/// The page behind the open chat: blurred (gaussian sigma, points) next to the chat, half of that far from it, and
+/// The page behind the open chat: blurred (gaussian sigma, points) next to the chat, 40 % of that far from it, and
 /// darker.
 const BEHIND: orbiters_ui::backdrop::Look = orbiters_ui::backdrop::Look {
     strength: 0.0,
-    blur: 22.0,
-    dim: 0.42,
+    blur: 16.0,
+    dim: 0.30,
     focus: Rect::NOTHING,
     radius: layout::PANEL_RADIUS,
     reach: 420.0,
-    far: 0.55,
+    far: 0.4,
+    base: theme::INK_950,
 };
 
 /// Whether N4N0 can answer here, and if not, why (what the bar and the chat say, quietly, and where they lead).
@@ -135,6 +136,11 @@ impl ChatBar {
         &self.draft
     }
 
+    /// Shows what N4N0 did instead of the conversation (the chat's head does it; screenshots too).
+    pub fn show_log(&mut self, on: bool) {
+        self.log = on;
+    }
+
     /// Where the title strip put the bar in the last frame.
     pub fn strip(&self) -> Option<Strip> {
         self.strip
@@ -214,6 +220,7 @@ impl ChatBar {
         if self.morph.reduced() {
             // No morph: the bar stays, the chat fades in over it.
             self.draw(&ctx, ctl, snap, strip, 0.0, 1.0, !self.morph.is_open(), Id::unique("orbiters-chat-bar"));
+            // Over the bar (only the chat is raised: egui raises what asks in no set order).
             if self.morph.alpha() > 0.0 {
                 self.draw(&ctx, ctl, snap, strip, 1.0, self.morph.alpha(), self.morph.is_open(), Id::unique("orbiters-chat"));
             }
@@ -234,19 +241,19 @@ impl ChatBar {
         Area::new(backdrop_layer().id).order(Order::Middle).fixed_pos(body.min).interactable(true).constrain(false).show(ctx, |ui| {
             let resp = ui.allocate_rect(body, Sense::click());
             let look = orbiters_ui::backdrop::Look { strength, focus, radius, ..BEHIND };
-            match gpu {
-                Some(gpu) => orbiters_ui::backdrop::behind(ui.painter(), Id::unique("orbiters-chat-behind"), &gpu.textures, LayerId::background(), egui::layers::ShapeIdx(0), body, look),
-                // Without the window's GPU (a test) there is nothing to blur with: only the darkening.
-                None => {
-                    ui.painter().rect_filled(body, 0.0, theme::black(BEHIND.dim * strength));
-                }
+            let blurred = gpu.is_some_and(|gpu| {
+                orbiters_ui::backdrop::behind(ui.painter(), Id::unique("orbiters-chat-behind"), &gpu.textures, LayerId::background(), egui::layers::ShapeIdx(0), body, look)
+            });
+            // Without the window's GPU (a test), or for the one frame a new backdrop meets a changing font atlas, there
+            // is nothing to blur with: the page only darkens.
+            if !blurred {
+                ui.painter().rect_filled(body, 0.0, theme::black(BEHIND.dim * strength));
             }
             close = resp.clicked() && self.morph.is_open();
         });
         if close {
             self.close(ctx);
         }
-        ctx.move_to_top(backdrop_layer());
     }
 
     /// The bar and the chat as one shape at `t` (0 the bar, 1 the chat), seen at `alpha`; the text field in it when
@@ -291,7 +298,11 @@ impl ChatBar {
                 }
             }
         });
-        ctx.move_to_top(LayerId::new(Order::Middle, id));
+        // The chat over its backdrop (shown after it, the backdrop would be on top) and over the page's windows. Only
+        // this one area asks: egui raises what asks in no set order.
+        if id == Id::unique("orbiters-chat") {
+            ctx.move_to_top(LayerId::new(Order::Middle, id));
+        }
     }
 
     /// What the bar shows at rest: N4N0's face, what to do (or why not), the shortcut and the microphone.
@@ -389,11 +400,7 @@ impl ChatBar {
         let focused = ui.memory(|m| m.has_focus(field_id()));
         // Enter sends (Shift+Enter is a new line); never while an input method composes, nor the Enter that commits it.
         let committed = ui.input(|i| i.events.iter().any(|e| matches!(e, Event::Ime(egui::ImeEvent::Commit(_)))));
-        let enter = focused
-            && ready
-            && !self.composing
-            && !committed
-            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+        let enter = focused && ready && !self.composing && !committed && take_plain_enter(ui);
         let font = theme::font(egui::lerp(13.0..=14.0, t), weight::REGULAR);
         let rows = if t < 0.5 { 1 } else { panel::draft_rows(ui, &self.draft, at.width()) };
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(at));
@@ -415,8 +422,13 @@ impl ChatBar {
         } else {
             child.add(edit)
         };
-        if t > 0.5 && self.draft.is_empty() && ready {
-            let hint = Txt::new(tr("Ask N4N0 anything…"), 14.0).color(theme::FG_4);
+        if t > 0.5 && self.draft.is_empty() {
+            let hint = match gate(snap) {
+                Gate::Ready => tr("Ask N4N0 anything…"),
+                Gate::SignedOut => tr("Sign in to talk to N4N0"),
+                Gate::Off => tr("N4N0's assistant is off"),
+            };
+            let hint = Txt::new(hint, 14.0).color(theme::FG_4);
             let mut p = ui.painter().clone();
             p.multiply_opacity(chat_alpha);
             widgets::text_truncated(&p, pos2(at.left(), at.top() + 9.5), Align2::LEFT_CENTER, &hint, at.width());
@@ -448,6 +460,14 @@ impl ChatBar {
     }
 }
 
+/// Takes a plain Enter out of this frame's events (egui's `consume_key` would take Shift+Enter for it too).
+fn take_plain_enter(ui: &Ui) -> bool {
+    ui.input_mut(|i| {
+        let at = i.events.iter().position(|e| matches!(e, Event::Key { key: Key::Enter, pressed: true, modifiers, .. } if !modifiers.shift && !modifiers.ctrl && !modifiers.alt && !modifiers.command));
+        at.map(|at| i.events.remove(at)).is_some()
+    })
+}
+
 /// Where the text is in the bar: after N4N0's face, before the shortcut and the microphone.
 fn bar_field(bar: Bar, snap: &Snapshot) -> Rect {
     let rect = bar.rect();
@@ -470,7 +490,7 @@ fn paint_surface(ui: &Ui, rect: Rect, radius: f32, k: f32, focused: bool, hovere
     let ctx = ui.ctx();
     let p = ui.painter();
     let hover = anim::toggle(ctx, Id::unique("orbiters-chat-hover"), hovered, anim::Spring::SNAPPY);
-    let ring = anim::toggle(ctx, Id::unique("orbiters-chat-ring"), focused && k < 0.5, anim::Spring::SNAPPY);
+    let ring = anim::toggle(ctx, Id::unique("orbiters-chat-ring"), focused && k < 0.12, anim::Spring::SNAPPY);
     if k > 0.0 {
         let shadow = egui::epaint::Shadow { offset: [0, (22.0 * k) as i8], blur: (60.0 * k) as u8, spread: 0, color: theme::black(0.55 * k) };
         p.add(shadow.as_shape(rect, theme::radius(radius)));

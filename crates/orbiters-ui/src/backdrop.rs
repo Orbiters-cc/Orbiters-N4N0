@@ -39,6 +39,9 @@ pub struct Look {
     pub reach: f32,
     /// The share of the strength kept far from the panel (0 to 1).
     pub far: f32,
+    /// What lies under the page (the window's own background): the copy is drawn over it, so that what the copy cannot
+    /// draw again (the glow, GPU content) does not leave the sharp page showing through the blur.
+    pub base: egui::Color32,
 }
 
 /// The copy is drawn at this fraction of the window's density: it is about to be blurred.
@@ -55,26 +58,32 @@ const RAMP: f32 = 1.2;
 
 /// Paints, under what `painter` paints next, a blurred and dimmed copy of the shapes `from..` of the layer `source`
 /// that reach into `area`. `id` names the GPU objects of this backdrop: keep it stable. Nothing is drawn while the
-/// strength is about nothing.
+/// strength is about nothing. False when nothing could be painted (the first frame of a backdrop that falls when the
+/// font atlas is being replaced): the caller darkens the page instead, for that frame.
 #[allow(clippy::too_many_arguments)]
-pub fn behind(painter: &Painter, id: Id, textures: &Textures, source: LayerId, from: ShapeIdx, area: Rect, look: Look) {
+pub fn behind(painter: &Painter, id: Id, textures: &Textures, source: LayerId, from: ShapeIdx, area: Rect, look: Look) -> bool {
     let ctx = painter.ctx();
     let ppp = ctx.pixels_per_point();
     let snap = |p: egui::Pos2| pos2((p.x * ppp).round() / ppp, (p.y * ppp).round() / ppp);
     let area = Rect::from_min_max(snap(area.min), snap(area.max));
     if area.width() < 1.0 || area.height() < 1.0 || look.strength <= 0.002 {
-        return;
+        return true;
     }
     let low = ppp * DENSITY;
     let size = [((area.width() * low).ceil() as u32).max(1), ((area.height() * low).ceil() as u32).max(1)];
     let full = [(area.width() * ppp).round(), (area.height() * ppp).round()];
     let composite = Composite::of(&look, area, ppp, full);
     let pass = ctx.cumulative_pass_nr();
+    let made = id.with("backdrop-made");
     // Text laid out this frame points into a font atlas the renderer gets only after it: last frame's copy is painted.
     if atlas_changing(ctx, textures) {
-        painter.add(egui_wgpu::Callback::new_paint_callback(area, BackdropCallback { id, content: None, size, composite, pass }));
-        return;
+        let recent = ctx.data(|d| d.get_temp::<u64>(made)).is_some_and(|at| at + FORGET_AFTER / 2 >= pass);
+        if recent {
+            painter.add(egui_wgpu::Callback::new_paint_callback(area, BackdropCallback { id, content: None, size, composite, pass }));
+        }
+        return recent;
     }
+    ctx.data_mut(|d| d.insert_temp(made, pass));
     let to_area = TSTransform::from_translation(-area.min.to_vec2());
     let mut copies = Vec::new();
     ctx.graphics(|g| {
@@ -109,7 +118,7 @@ pub fn behind(painter: &Painter, id: Id, textures: &Textures, source: LayerId, f
     }
     let fingerprint = {
         let mut h = Fingerprint::default();
-        (size, low.to_bits()).hash(&mut h);
+        (size, low.to_bits(), look.base.to_array()).hash(&mut h);
         for p in &primitives {
             let r = p.clip_rect;
             [r.min.x, r.min.y, r.max.x, r.max.y].map(f32::to_bits).hash(&mut h);
@@ -121,8 +130,9 @@ pub fn behind(painter: &Painter, id: Id, textures: &Textures, source: LayerId, f
         }
         h.finish()
     };
-    let content = Some(Content { primitives, textures: used, ppp: low, fingerprint });
+    let content = Some(Content { primitives, textures: used, ppp: low, fingerprint, base: look.base });
     painter.add(egui_wgpu::Callback::new_paint_callback(area, BackdropCallback { id, content, size, composite, pass }));
+    true
 }
 
 /// The composite's uniforms (see the shader's `C`).
@@ -158,6 +168,7 @@ struct Content {
     textures: Vec<(TextureId, wgpu::Texture, TextureOptions)>,
     ppp: f32,
     fingerprint: u64,
+    base: egui::Color32,
 }
 
 struct BackdropCallback {
@@ -277,11 +288,15 @@ fn fs_composite(in: V) -> @location(0) vec4<f32> {
         col = mix(level(lo, in.uv), level(lo + 1, in.uv), k - f32(lo));
     }
     let a = clamp(sigma / c.extra.z, 0.0, 1.0);
-    col = vec4<f32>(col.rgb * (1.0 - c.shape.w * s), col.a);
+    // What the copy lacks (the window's glow and other GPU content of its own) stays the page's, darkened all the same:
+    // over the page, the blurred copy at `a`, then everything darker by `dim`.
+    let dim = c.shape.w * s;
+    var rgb = col.rgb;
     if (c.extra.x > 0.5 && col.a > 0.0) {
-        col = vec4<f32>(srgb_to_linear(col.rgb / col.a) * col.a, col.a);
+        rgb = srgb_to_linear(col.rgb / col.a) * col.a;
     }
-    return col * a;
+    let keep = (1.0 - a * col.a) * (1.0 - dim);
+    return vec4<f32>(rgb * a * (1.0 - dim), 1.0 - keep);
 }
 "#;
 
@@ -537,13 +552,17 @@ fn forget_old(res: &mut BackdropResources, pass: u64) {
 }
 
 fn begin(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) -> wgpu::RenderPass<'static> {
+    begin_on(encoder, view, wgpu::Color::TRANSPARENT)
+}
+
+fn begin_on(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, clear: wgpu::Color) -> wgpu::RenderPass<'static> {
     encoder
         .begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("orbiters backdrop"), // i18n: not shown (names a graphics debugger shows)
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
@@ -598,7 +617,9 @@ impl egui_wgpu::CallbackTrait for BackdropCallback {
         let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: size, pixels_per_point: content.ppp * k };
         let commands = backdrop.renderer.update_buffers(device, queue, encoder, &primitives, &screen);
         if let Some(t) = &backdrop.targets {
-            backdrop.renderer.render(&mut begin(encoder, &t.content), &primitives, &screen);
+            // The offscreen texture holds gamma-encoded colours, as egui's own do.
+            let [r, g, b, a] = content.base.to_normalized_gamma_f32().map(f64::from);
+            backdrop.renderer.render(&mut begin_on(encoder, &t.content, wgpu::Color { r, g, b, a }), &primitives, &screen);
             for (target, bind, down) in &t.passes {
                 let mut pass = begin(encoder, target);
                 pass.set_pipeline(if *down { &res.down } else { &res.up });
@@ -642,7 +663,7 @@ mod tests {
 
     #[test]
     fn the_composite_is_told_the_panel_in_pixels_of_the_area() {
-        let look = Look { strength: 2.0, blur: 24.0, dim: 0.4, focus: Rect::from_min_size(pos2(300.0, 40.0), egui::vec2(600.0, 500.0)), radius: 20.0, reach: 300.0, far: 0.5 };
+        let look = Look { strength: 2.0, blur: 24.0, dim: 0.4, focus: Rect::from_min_size(pos2(300.0, 40.0), egui::vec2(600.0, 500.0)), radius: 20.0, reach: 300.0, far: 0.5, base: egui::Color32::BLACK };
         let area = Rect::from_min_size(pos2(0.0, 40.0), egui::vec2(1280.0, 780.0));
         let c = Composite::of(&look, area, 2.0, [2560.0, 1560.0]);
         assert_eq!(c.size, [2560.0, 1560.0, 24.0, 1.0], "strength clamped, blur in pixels of the half-density copy");

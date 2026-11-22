@@ -349,7 +349,7 @@ impl App {
         let stop_at = Rect::from_min_size(pos2(rect.right() - if cfg!(target_os = "macos") { 12.0 } else { 4.0 + 44.0 * 3.0 + 12.0 } - stop_w, rect.top() + 6.0), vec2(stop_w, 28.0));
         // N4N0's bar takes the middle of what is left between the name and the buttons.
         let buttons_start = if cfg!(target_os = "macos") { rect.right() - 12.0 } else { rect.right() - 4.0 - 44.0 * 3.0 };
-        let strip = crate::chat_bar::layout::Strip::new(rect, TITLE_H, r.right(), if live { stop_at.left() } else { buttons_start });
+        let strip = crate::chat_bar::layout::Strip::new(Rect::from_min_max(rect.min, pos2(rect.right(), ui.max_rect().bottom())), TITLE_H, r.right(), if live { stop_at.left() } else { buttons_start });
         let subtitle = match snap.capture.state {
             CaptureState::Recording => Some(tr("Recording").to_string()),
             CaptureState::Importing => Some(tr("Importing").to_string()),

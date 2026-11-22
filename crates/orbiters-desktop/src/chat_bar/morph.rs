@@ -10,8 +10,8 @@ pub const FADE: f32 = 0.12;
 
 /// The spring: about a quarter of a second to open, a couple of percent of overshoot (the website's `settleSpring`
 /// feel), critically enough damped that a reversal never wobbles.
-const STIFFNESS: f32 = 380.0;
-const DAMPING: f32 = 30.0;
+const STIFFNESS: f32 = 260.0;
+const DAMPING: f32 = 26.0;
 
 /// Close enough to the target (and slow enough) to stop.
 const EPS: f32 = 0.001;

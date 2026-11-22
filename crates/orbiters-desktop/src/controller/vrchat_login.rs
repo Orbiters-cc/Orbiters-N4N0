@@ -181,6 +181,9 @@ pub(super) struct Runtime {
     pub(super) signed_bell: Arc<Bell>,
     /// The Orbiters account's state and environment the last publish saw, to ring `bell` when it changes.
     seen_account: Option<(std::mem::Discriminant<AccountState>, bool)>,
+    /// What every publish said of the sign-in (tests: no state any window could see is missed).
+    #[cfg(test)]
+    pub(super) presences: Vec<Presence>,
 }
 
 /// A wake-up for a thread that looks every so often: it looks at once when rung.
@@ -218,7 +221,7 @@ impl Default for Runtime {
         let ask: Asker = Arc::new(|_: &Api, _: &str| Err(anyhow::anyhow!("tests never reach Orbiters")));
         #[cfg(not(test))]
         let ask: Asker = Arc::new(|api: &Api, token: &str| api.vrchat_login_feature(token));
-        Self { client: Arc::new(Mutex::new(client)), gate, identity: None, grants: HashMap::new(), generation: 0, busy: false, restored: false, saved: None, ask, restore_again: None, restoring_now: false, bell: Arc::default(), signed_bell: Arc::default(), seen_account: None }
+        Self { client: Arc::new(Mutex::new(client)), gate, identity: None, grants: HashMap::new(), generation: 0, busy: false, restored: false, saved: None, ask, restore_again: None, restoring_now: false, bell: Arc::default(), signed_bell: Arc::default(), seen_account: None, #[cfg(test)] presences: Vec::new() }
     }
 }
 impl Runtime {
@@ -373,20 +376,22 @@ impl Controller {
                 return None;
             }
             // A session handed over signed in needs nothing; cookies without an account yet are asked who they are.
-            let signed_in = rt.client.try_lock().ok().map(|c| c.signed_in_user().is_some())?;
+            let (signed_in, held) = rt.client.try_lock().ok().map(|c| (c.signed_in_user().is_some(), c.holds_session()))?;
             rt.restored = true;
             if signed_in {
                 return None;
             }
+            // Only a session there is shows as connecting (r21): none saved is "signed out" at once, without a spinner.
+            let saved = held || rt.saved();
             rt.busy = true;
-            rt.restoring_now = true;
+            rt.restoring_now = saved;
             rt.generation += 1;
-            Some((rt.client.clone(), rt.generation))
+            Some((rt.client.clone(), rt.generation, saved))
         });
-        if let (Some((client, generation)), Some(id)) = (restore, identity.as_ref()) {
+        if let (Some((client, generation, saved)), Some(id)) = (restore, identity.as_ref()) {
             self.update(|s| {
                 s.vrchat_login.busy = true;
-                s.vrchat_login.restoring = true;
+                s.vrchat_login.restoring = saved;
             });
             let result = {
                 let mut c = client.lock().unwrap();
@@ -706,6 +711,13 @@ pub(super) fn follow_orbiters(s: &mut crate::state::Snapshot, rt: &mut Runtime) 
         let known = st.user.take().or(st.known.take());
         *st = Status { revision: st.revision, waiting: true, restoring: true, known, picture: st.picture.take(), upload: st.upload.take(), ..Status::default() };
     }
+}
+
+/// [`follow_orbiters`] and, in tests, what the publish says of the sign-in.
+pub(super) fn follow_orbiters_and_record(s: &mut crate::state::Snapshot, rt: &mut Runtime) {
+    follow_orbiters(s, rt);
+    #[cfg(test)]
+    rt.presences.push(s.vrchat_login.presence());
 }
 
 /// The last VRChat account signed in here, its name and picture (r21): shown while its saved session is restored at the
@@ -1056,6 +1068,134 @@ mod tests {
         assert!(seen.iter().all(|text| !text.contains(COOKIE)), "the cookie leaked");
         assert!(seen.len() > 8);
     }
+
+    /// r21: a launch with a session saved here, as the service's `start()` makes it: the account file read (Checking),
+    /// the sign-in's first state, then the looks. `vrchat` answers VRChat's requests; Orbiters says `orbiters`.
+    fn launch(vrchat: impl Fn(&str, &str) -> (u16, serde_json::Value) + Send + Sync + 'static, orbiters: Option<bool>, saved: bool) -> Shared {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let gate = Arc::new(Gate::default());
+        let (client, _) = orbiters_core::vrchat_api::test_server(gate.clone(), Duration::ZERO, vrchat);
+        let client = if saved { client } else { orbiters_core::vrchat_api::offline_client(gate) };
+        c.test_saved_vrchat(client, move |_: &Api, _: &str| orbiters.ok_or_else(|| anyhow::anyhow!("connection refused")));
+        c.vrchat_login.lock().unwrap().saved = Some(saved);
+        c.account_at_launch(Server::current(), Some(Some("tester".into())));
+        let cached = serde_json::from_value(serde_json::json!({"id": "usr_test", "displayName": "Tester"})).unwrap();
+        c.vrchat_at_launch(Some((cached, None)));
+        // From here a window can be connected (the service listens once `start()` returned).
+        c.vrchat_login.lock().unwrap().presences.clear();
+        c.update(|_| {});
+        c
+    }
+    /// The account file's credential installed (the account thread's read), still being checked by Orbiters.
+    fn account_read(c: &Controller) {
+        {
+            let mut rt = c.account_runtime.lock().unwrap();
+            rt.read = Some((Server::current(), None));
+            rt.account = Some(orbiters_core::account::Account { token: "fake".into(), user: None, username: Some("tester".into()), avatar_url: None, features: None });
+        }
+        c.update(|s| s.account.state = AccountState::Checking { username: Some("tester".into()) });
+    }
+    fn presences(c: &Controller) -> Vec<Presence> {
+        c.vrchat_login.lock().unwrap().presences.clone()
+    }
+    fn me(_: &str, url: &str) -> (u16, serde_json::Value) {
+        if url.ends_with("/auth/user") { (200, serde_json::json!({"id": "usr_test", "displayName": "Tester"})) } else { (404, serde_json::json!({})) }
+    }
+
+    /// r21, the owner's report: with a session saved here, no state any window could see offers "Sign in to VRChat"
+    /// before the outcome is known: it is "connecting" with the last account's name from the first state on, then
+    /// signed in, without waiting for anything else (the friends list).
+    #[test]
+    fn a_saved_session_is_connecting_from_launch_until_signed_in() {
+        let c = launch(me, Some(true), true);
+        let status = c.view().vrchat_login.clone();
+        assert_eq!(status.presence(), Presence::Connecting, "{status:?}");
+        assert_eq!(status.shown_user().map(|u| u.display_name.as_str()), Some("Tester"), "its last known name at once");
+        c.vrchat_feature_tick();
+        account_read(&c);
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester(), "{:?}", c.view().vrchat_login);
+        let seen = presences(&c);
+        let first_signed_in = seen.iter().position(|p| *p == Presence::SignedIn).expect("signed in");
+        assert!(seen[..first_signed_in].iter().all(|p| *p == Presence::Connecting), "{seen:?}");
+        assert!(!seen.contains(&Presence::SignedOut), "{seen:?}");
+    }
+
+    /// r21: VRChat saying the saved session is over is the one way to "signed out" from connecting, at its answer only.
+    #[test]
+    fn a_dead_saved_session_turns_to_sign_in_again_only_at_vrchats_answer() {
+        let c = launch(|_, _| (401, serde_json::json!({})), Some(true), true);
+        c.vrchat_feature_tick();
+        account_read(&c);
+        c.vrchat_feature_tick();
+        let status = c.view().vrchat_login.clone();
+        assert_eq!(status.presence(), Presence::SignedOut, "{status:?}");
+        assert!(status.error.is_some() && !status.restoring);
+        let seen = presences(&c);
+        let first_out = seen.iter().position(|p| *p == Presence::SignedOut).unwrap();
+        assert!(seen[..first_out].iter().all(|p| *p == Presence::Connecting), "{seen:?}");
+        assert!(seen[first_out..].iter().all(|p| *p == Presence::SignedOut), "{seen:?}");
+    }
+
+    /// r21: nothing saved here: "signed out" at once and throughout, never a spinner.
+    #[test]
+    fn without_a_saved_session_it_is_signed_out_at_once_without_a_spinner() {
+        let c = launch(me, Some(true), false);
+        assert_eq!(c.view().vrchat_login.presence(), Presence::SignedOut);
+        c.vrchat_feature_tick();
+        account_read(&c);
+        for _ in 0..3 {
+            c.vrchat_feature_tick();
+        }
+        let seen = presences(&c);
+        assert!(!seen.is_empty() && seen.iter().all(|p| *p == Presence::SignedOut), "{seen:?}");
+        assert!(!c.view().vrchat_login.restoring);
+    }
+
+    /// r21 with r20's rule: Orbiters out of reach (or slow) keeps a saved session "connecting", never "signed out", for
+    /// as long as it does not answer; eligibility is still never decided from what is on disk.
+    #[test]
+    fn orbiters_out_of_reach_keeps_a_saved_session_connecting() {
+        let c = launch(me, None, true);
+        c.vrchat_feature_tick();
+        account_read(&c);
+        c.update(|s| s.account.state = AccountState::Offline { username: Some("tester".into()) });
+        for _ in 0..5 {
+            c.vrchat_feature_tick();
+        }
+        let status = c.view().vrchat_login.clone();
+        assert!(status.presence() == Presence::Connecting && status.user.is_none() && !status.allowed, "{status:?}");
+        assert!(presences(&c).iter().all(|p| *p == Presence::Connecting), "{:?}", presences(&c));
+        assert!(c.vrchat_signed_client().is_none(), "nothing usable without Orbiters' yes");
+    }
+
+    /// r21: VRChat not answering the saved session (no network) keeps it connecting, read again by itself.
+    #[test]
+    fn vrchat_not_answering_keeps_a_saved_session_connecting() {
+        let c = launch(|_, _| (503, serde_json::json!({})), Some(true), true);
+        c.vrchat_feature_tick();
+        account_read(&c);
+        c.vrchat_feature_tick();
+        assert_eq!(c.view().vrchat_login.presence(), Presence::Connecting, "{:?}", c.view().vrchat_login);
+        assert!(!presences(&c).contains(&Presence::SignedOut));
+    }
+
+    #[test]
+    fn presence_says_what_every_view_shows() {
+        let mut s = Status::default();
+        assert_eq!(s.presence(), Presence::SignedOut);
+        s.known = Some(User { id: "usr_test".into(), ..Default::default() });
+        assert_eq!(s.presence(), Presence::SignedOut, "an ended session's name alone is not connecting");
+        assert!(s.shown_user().is_none());
+        s.restoring = true;
+        assert_eq!(s.presence(), Presence::Connecting);
+        assert_eq!(s.shown_user().map(|u| u.id.as_str()), Some("usr_test"));
+        s.restoring = false;
+        s.waiting = true;
+        assert_eq!(s.presence(), Presence::Connecting);
+        s.user = Some(User { id: "usr_test".into(), ..Default::default() });
+        assert_eq!(s.presence(), Presence::SignedIn);
+    }
 }
 
 #[cfg(test)]
@@ -1066,6 +1206,7 @@ impl Controller {
         let mut rt = self.vrchat_login.lock().unwrap();
         rt.client = Arc::new(Mutex::new(client));
         rt.restored = false;
+        rt.saved = Some(true);
         rt.ask = Arc::new(ask);
     }
     pub(super) fn test_vrchat(&self, replies: Vec<(u16, serde_json::Value)>) -> (Arc<Mutex<Client>>, Arc<Mutex<Vec<(String, String)>>>) {

@@ -700,6 +700,56 @@ mod tests {
         fn quit(&self) {}
     }
 
+    /// r21: the friends column drawn from a launch with a session saved here: while it is connecting (and once signed
+    /// in, its list not read yet) no "Sign in to VRChat" is painted, the account's name is; signed out for certain, it is.
+    #[test]
+    fn the_friends_column_offers_the_sign_in_only_when_signed_out_for_certain() {
+        fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| texts(s, out)),
+                _ => {}
+            }
+        }
+        let painted = |login: crate::controller::vrchat_login::Status| {
+            let mut data = orbiters_core::launcher::sample();
+            data.source = orbiters_core::launcher::Source::Database { app: orbiters_core::launcher::DatabaseApp::VrcNext, read_at: 0 };
+            let mut state = State { data: Arc::new(data), ..Default::default() };
+            let ctx = egui::Context::default();
+            orbiters_ui::install(&ctx);
+            let ctl: Ctl = Arc::new(Still);
+            let mut snap = Snapshot::new(Settings::default());
+            snap.vrchat_login = login;
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let column = Rect::from_min_size(pos2(0.0, 0.0), vec2(380.0, 780.0));
+            let mut out = Vec::new();
+            for _ in 0..3 {
+                let input = egui::RawInput { screen_rect: Some(column), time: Some(ctx.input(|x| x.time) + 1.0 / 60.0), ..Default::default() };
+                let mut output = ctx.run_ui(input, |ui| {
+                    let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                    super::super::side_panel(ui, &mut cx, &mut state, column, super::super::Side::Column(column.width()));
+                });
+                // Nothing paints these frames.
+                output.textures_delta.clear();
+                out.clear();
+                output.shapes.iter().for_each(|c| texts(&c.shape, &mut out));
+            }
+            out.join(" | ")
+        };
+        let tester = || serde_json::from_value::<orbiters_core::vrchat_api::User>(serde_json::json!({"id": "usr_test", "displayName": "Tester"})).unwrap();
+        let connecting = crate::controller::vrchat_login::Status { restoring: true, known: Some(tester()), ..Default::default() };
+        let drawn = painted(connecting);
+        assert!(!drawn.contains("Sign in to VRChat"), "{drawn}");
+        assert!(drawn.contains("Connecting to VRChat as Tester"), "{drawn}");
+        let waiting = crate::controller::vrchat_login::Status { waiting: true, restoring: true, known: Some(tester()), ..Default::default() };
+        assert!(!painted(waiting).contains("Sign in to VRChat"));
+        let signed_in = crate::controller::vrchat_login::Status { allowed: true, user: Some(tester()), ..Default::default() };
+        let drawn = painted(signed_in);
+        assert!(!drawn.contains("Sign in to VRChat") && drawn.contains("Reading your friends from VRChat"), "{drawn}");
+        let drawn = painted(crate::controller::vrchat_login::Status::default());
+        assert!(drawn.contains("Sign in to VRChat"), "signed out for certain: {drawn}");
+    }
+
     /// REQUEST18 1, Enzo: "the whole thing is scrollable … intricated scrollable frames are terrible experience". Thirty
     /// boops (made up, from the sample's made-up people) in the friends column of a 780 high window: the column has one
     /// scroll area, its list; the newest boops' rows are its first rows, and one turn of the wheel over the list takes them

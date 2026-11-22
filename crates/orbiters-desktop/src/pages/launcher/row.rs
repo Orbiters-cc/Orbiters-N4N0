@@ -695,6 +695,13 @@ mod tests {
         data.boops = (0..30)
             .map(|i| Boop { id: format!("not_boop_{i:02}"), from_id: format!("usr_sample_boop_{i:02}"), from_name: from.name.clone(), from_icon: String::new(), emoji: None, received_at: 1_000 - i as i64 })
             .collect();
+        // More people in the game, so that the friends under the boops fill more than the view (Offline starts folded).
+        for n in 0..12 {
+            let mut f = from.clone();
+            f.id = format!("usr_sample_more_{n:02}");
+            data.groups.iter_mut().find(|g| g.id == list::IN_GAME).unwrap().members.push(f.id.clone());
+            data.friends.push(f);
+        }
         let mut state = State { data: Arc::new(data), ..Default::default() };
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);

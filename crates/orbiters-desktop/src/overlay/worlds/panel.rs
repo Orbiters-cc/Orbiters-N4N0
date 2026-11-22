@@ -3793,7 +3793,8 @@ mod tests {
             let mut panel = Panel { page: Page::Detail, selected: Some(2), ..Default::default() };
             let copy = |panel: &Panel| panel.targets(&d).into_iter().find(|(t, _)| *t == Target::CopyName).map(|(_, r)| r);
             assert!(copy(&panel).is_none(), "placed by a paint");
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| panel.draw(ui.painter(), &d, 1.0));
+            let mut painted = ctx.run_ui(egui::RawInput::default(), |ui| panel.draw(ui.painter(), &d, 1.0));
+            painted.textures_delta.clear();
             let rect = copy(&panel).expect("beside the name");
             let (side, left) = if headset { (VR_SIDE, VR_LEFT) } else { (SIDE, SIDE_LEFT) };
             assert!(side.contains_rect(rect), "{rect:?}");

@@ -9,7 +9,7 @@ use orbiters_core::launcher::*;
 
 const NOW: i64 = 1_795_000_000;
 
-pub(super) const NAMES: [&str; 28] = [
+pub(super) const NAMES: [&str; 32] = [
     "launcher-list",
     "launcher-invite",
     "launcher-hover",
@@ -43,6 +43,13 @@ pub(super) const NAMES: [&str; 28] = [
     // request), at the list's top ("launcher-boops-30-scrolled": the same list scrolled past them).
     "launcher-boops-6",
     "launcher-boops-30",
+    // REQUEST20 3: the friends in VRCNext's sections (favourites in the game by group, in game, on the website, offline):
+    // some folded; one favourite group in the game (one Favourites section); a search across the sections; the same list
+    // scrolled down to the website and offline ones ("launcher-sections-scrolled" below). "launcher-list" is all open.
+    "launcher-sections-folded",
+    "launcher-sections-one-group",
+    "launcher-sections-search",
+    "launcher-sections-copy",
 ];
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
@@ -84,7 +91,12 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
     // Request16 3: scrollbars show only while scrolling. Home and the friends list half a second after a turn of the wheel over each (their bars up); run with
     // `--extend 90 --sequence 90` to see them fade once the wheel stops. "launcher-list" is the same page at rest, no bar.
     // REQUEST18 1: the friends' list with thirty boops at its top, scrolled past them by one turn of the wheel over it.
-    for (name, pointer, scroll) in [("launcher-scrolled", pos2(560.0, 520.0), 400.0), ("launcher-friends-scrolled", pos2(1100.0, 560.0), 400.0), ("launcher-boops-30-scrolled", pos2(1100.0, 560.0), 1720.0)] {
+    for (name, pointer, scroll) in [
+        ("launcher-scrolled", pos2(560.0, 520.0), 400.0),
+        ("launcher-friends-scrolled", pos2(1100.0, 560.0), 400.0),
+        ("launcher-boops-30-scrolled", pos2(1100.0, 560.0), 1720.0),
+        ("launcher-sections-scrolled", pos2(1100.0, 560.0), 1300.0),
+    ] {
         scenarios.push(Scenario {
             name,
             page: Page::Home,
@@ -255,6 +267,9 @@ fn more_people(state: &mut LauncherState) {
     for boop in &mut state.boops {
         boop.from_icon = state.friends.iter().find(|f| f.id == boop.from_id).map(|f| f.look.icon.clone()).unwrap_or_default();
     }
+    // Sorted as the app sorts a list it read (VRCNext's order).
+    let groups: Vec<(String, String)> = state.groups.iter().filter(|g| g.kind == GroupKind::Favourite).map(|g| (g.id.clone(), g.name.clone())).collect();
+    orbiters_core::launcher_feed::regroup(state, &groups);
     if let Some(profile) = state.profile.as_mut() {
         profile.friend = state.friends[0].clone();
         profile.bio = "Made-up person for drawing the page. Likes quiet worlds, rooftop sunsets and long talks about shaders.\nAlways up for a boop.".into();
@@ -329,7 +344,16 @@ fn data(name: &str) -> LauncherState {
     if name.starts_with("launcher-mine") || name == "launcher-small-mine" {
         s.invites.clear();
     }
-    if name == "launcher-database" {
+    if name == "launcher-sections-one-group" {
+        // Nobody of the second group in the game now.
+        for f in s.friends.iter_mut().filter(|f| f.favourite_groups.first().is_some_and(|g| g == "group_1") && !f.favourite_groups.contains(&"group_0".to_string())) {
+            f.presence = Presence::Website;
+            f.whereabouts = Whereabouts::Website;
+        }
+        let groups: Vec<(String, String)> = s.groups.iter().filter(|g| g.kind == GroupKind::Favourite).map(|g| (g.id.clone(), g.name.clone())).collect();
+        orbiters_core::launcher_feed::regroup(&mut s, &groups);
+    }
+    if name == "launcher-database" || name == "launcher-sections-copy" {
         // A VRCX copy: who and what was last known, nothing live.
         s.source = Source::Database { app: DatabaseApp::Vrcx, read_at: NOW - 420 };
         s.possible = Possible { play: true, ..Default::default() };
@@ -528,7 +552,13 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
         }
         let invites: Vec<String> = data.invites.iter().filter(|i| i.kind == InviteKind::Invite).map(|i| i.id.clone()).collect();
         state.set_data(std::sync::Arc::new(data));
-        state.stand_in(NOW, "");
+        state.stand_in(NOW, if name == "launcher-sections-search" { "lo" } else { "" });
+        match name {
+            "launcher-sections-folded" => state.stand_in_folded(&["group_1", "in-game", "offline"]),
+            // Offline folded as it starts.
+            "launcher-sections-scrolled" => state.stand_in_folded(&["in-game"]),
+            _ => {}
+        }
         if name != "launcher-invite" {
             for id in invites {
                 state.stand_in_dismiss(&id);

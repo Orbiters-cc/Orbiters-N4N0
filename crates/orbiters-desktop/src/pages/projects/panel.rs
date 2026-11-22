@@ -318,7 +318,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
         let b = Button::new(if moving {
             tr("Moving its Library…")
         } else if waiting {
-            tr("Waiting for Creator Companion")
+            tr("Waiting for migration")
         } else {
             tr("Open in Unity")
         })

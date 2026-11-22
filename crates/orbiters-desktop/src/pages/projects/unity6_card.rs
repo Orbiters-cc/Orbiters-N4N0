@@ -422,6 +422,36 @@ fn project_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, 
         );
     }
     release_list(ui, &m);
+    // Its trials.
+    let pairs: Vec<(PathBuf, String)> = state.u6.trials_of(&project.path).into_iter().map(|p| (p.trial.clone(), p.job.clone())).collect();
+    for (trial, _) in &pairs {
+        let name = trial.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        item(ui, icons::COPY, theme::ACCENT, &tr!("Unity 6 trial: {name}", name = name), Some(&trial.display().to_string()));
+        if buttons(ui, &[(tr("Show the trial"), icons::ARROW_RIGHT, true, "show-trial")], false).is_some() {
+            state.open(&ctx, trial.clone());
+        }
+    }
+    if state.u6.mac() {
+        para(
+            ui,
+            tr("On a Mac, Creator Companion's migration is not available: its window is for Windows. Orbiters shows where the project stands and what the guide's changes involve; the migration itself is done on Windows."),
+            12.0,
+            theme::FG_3,
+        );
+    } else if s.state == standing::State::On2022 && target.as_ref().is_some_and(|t| m.actionable(t)) && project.registered && !project.missing {
+        let anchor = ui.cursor().min;
+        if buttons(ui, &[(tr("Try on Unity 6…"), icons::COPY, state.u6.run.is_none() && !state.running(), "try")], true).is_some() {
+            super::unity6_sheet::open(&ctx, state, project, Rect::from_min_size(anchor, vec2(160.0, 32.0)));
+        }
+        state.anchors.insert("u6-try".into(), Rect::from_min_size(anchor, vec2(160.0, 32.0)));
+    } else {
+        let why = match s.state {
+            standing::State::OnUnity6 => tr("This project is on Unity 6 already."),
+            _ if !project.registered => tr("Add the project to your list first."),
+            _ => tr("A trial starts from a VRChat project on Unity 2022 with its SDK installed."),
+        };
+        para(ui, why, 12.0, theme::FG_3);
+    }
     // The editors: its own, and Unity 6's for a project on 2022.
     let mut versions = vec![s.editor.text.clone()];
     if let Some(t) = target.as_ref().filter(|_| matches!(s.state, standing::State::On2022 | standing::State::Disagree)) {
@@ -450,39 +480,6 @@ fn project_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, 
             checklist(ui, list);
         }
     }
-    // Its trials.
-    let pairs: Vec<(PathBuf, String)> = state.u6.trials_of(&project.path).into_iter().map(|p| (p.trial.clone(), p.job.clone())).collect();
-    for (trial, _) in &pairs {
-        let name = trial.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        item(ui, icons::COPY, theme::ACCENT, &tr!("Unity 6 trial: {name}", name = name), Some(&trial.display().to_string()));
-        if buttons(ui, &[(tr("Show the trial"), icons::ARROW_RIGHT, true, "show-trial")], false).is_some() {
-            state.open(&ctx, trial.clone());
-        }
-    }
-    if state.u6.mac() {
-        para(
-            ui,
-            tr("On a Mac, Creator Companion's migration is not available: its window is for Windows. Orbiters shows where the project stands and what the guide's changes involve; the migration itself is done on Windows."),
-            12.0,
-            theme::FG_3,
-        );
-        return;
-    }
-    let ready = s.state == standing::State::On2022 && target.as_ref().is_some_and(|t| m.actionable(t)) && project.registered && !project.missing;
-    if !ready {
-        let why = match s.state {
-            standing::State::OnUnity6 => tr("This project is on Unity 6 already."),
-            _ if !project.registered => tr("Add the project to your list first."),
-            _ => tr("A trial starts from a VRChat project on Unity 2022 with its SDK installed."),
-        };
-        para(ui, why, 12.0, theme::FG_3);
-        return;
-    }
-    let anchor = ui.cursor().min;
-    if buttons(ui, &[(tr("Try on Unity 6…"), icons::COPY, state.u6.run.is_none() && !state.running(), "try")], true).is_some() {
-        super::unity6_sheet::open(&ctx, state, project, Rect::from_min_size(anchor, vec2(160.0, 32.0)));
-    }
-    state.anchors.insert("u6-try".into(), Rect::from_min_size(anchor, vec2(160.0, 32.0)));
 }
 
 /// What to do in Creator Companion while a trial waits for it.

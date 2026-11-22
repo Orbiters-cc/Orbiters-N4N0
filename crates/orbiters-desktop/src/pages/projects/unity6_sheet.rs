@@ -43,7 +43,7 @@ fn disk(path: &Path) -> String {
     } else {
         let text = path.to_string_lossy();
         let text = text.strip_prefix(r"\\?\").unwrap_or(&text).to_string();
-        Path::new(&text).components().next().map_or(text.clone(), |c| c.as_os_str().to_string_lossy().into_owned())
+        Path::new(&text).components().next().map_or(text.clone(), |c| c.as_os_str().to_string_lossy().trim_end_matches(':').to_string())
     }
 }
 

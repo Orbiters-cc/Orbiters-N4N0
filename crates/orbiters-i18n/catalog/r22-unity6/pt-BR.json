@@ -198,7 +198,7 @@
   "VRChat's guide asks to check the project in Unity 2022 first: open it, look at Unity's Console and at the VRChat SDK's Builder for errors. A trial of a project that does not build in 2022 says little about Unity 6.": "O guia do VRChat pede para verificar o projeto no Unity 2022 primeiro: abra-o e procure erros na Console do Unity e no Builder do SDK do VRChat. Um teste de um projeto que não compila no 2022 diz pouco sobre o Unity 6.",
   "VRChat's release list in Orbiters: built into this version, checked {day}.": "Lista de versões do VRChat no Orbiters: embutida nesta versão, verificada em {day}.",
   "VRChat's release list in Orbiters: from orbiters.cc, verified {when}.": "Lista de versões do VRChat no Orbiters: do orbiters.cc, verificada {when}.",
-  "Waiting for Creator Companion": "Aguardando o Creator Companion",
+  "Waiting for migration": "Aguardando a migração",
   "What was made is listed in the gallery under Unity 6 trials, with its folder and what can be done.": "O que foi feito aparece na galeria em Testes do Unity 6, com a pasta e o que dá para fazer.",
   "Where the trial goes": "Onde fica o teste",
   "Works differently in Unity 6: the Upgrade Wizard and the SDK Builder offer to remove the obstacle.": "Funciona de outro jeito no Unity 6: o Upgrade Wizard e o Builder do SDK oferecem remover o obstáculo.",

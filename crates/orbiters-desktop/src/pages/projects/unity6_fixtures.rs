@@ -168,7 +168,7 @@ impl State {
                 outcome::Outcome::Undetermined(outcome::Unknown::EndedEarly),
                 outcome::Outcome::CompilerErrors {
                     errors: vec![
-                        diag("Packages/com.vrlabs.av3manager/Editor/Manager.cs", 212, "CS0618", "'Rigidbody.velocity' is obsolete"), // i18n: not shown (sample data of the screenshot scenes)
+                        diag("Packages/com.vrlabs.av3manager/Editor/Manager.cs", 212, "CS0246", "The type or namespace name 'AnimatorControllerLayer' could not be found"), // i18n: not shown (sample data of the screenshot scenes)
                         diag("Assets/Scripts/Spin.cs", 8, "CS1061", "'Rigidbody' does not contain a definition for 'angularDrag'"), // i18n: not shown (sample data of the screenshot scenes)
                     ],
                     running: false,

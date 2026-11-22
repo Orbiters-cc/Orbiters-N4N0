@@ -62,7 +62,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         }
         Modal::Unity6(path) => {
             let (t, s) = super::unity6_sheet::head(state, path);
-            (icons::CUBE, t, s, 680.0)
+            (icons::CUBE, t, s, 720.0)
         }
     };
     let step = match &modal {

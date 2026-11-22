@@ -198,7 +198,7 @@
   "VRChat's guide asks to check the project in Unity 2022 first: open it, look at Unity's Console and at the VRChat SDK's Builder for errors. A trial of a project that does not build in 2022 says little about Unity 6.": "VRChat のガイドでは、まず Unity 2022 でプロジェクトを確認するよう求めています。開いて、Unity の Console と VRChat SDK の Builder にエラーがないか見てください。2022 でビルドできないプロジェクトのお試しでは、Unity 6 についてほとんど分かりません。",
   "VRChat's release list in Orbiters: built into this version, checked {day}.": "Orbiters 内の VRChat のリリース一覧: このバージョンに組み込み、{day} に確認。",
   "VRChat's release list in Orbiters: from orbiters.cc, verified {when}.": "Orbiters 内の VRChat のリリース一覧: orbiters.cc から、{when}に検証済み。",
-  "Waiting for Creator Companion": "Creator Companion を待っています",
+  "Waiting for migration": "移行待ち",
   "What was made is listed in the gallery under Unity 6 trials, with its folder and what can be done.": "作られたものは、ギャラリーの「Unity 6 のお試し」にフォルダーとできることと一緒に表示されます。",
   "Where the trial goes": "お試しの保存先",
   "Works differently in Unity 6: the Upgrade Wizard and the SDK Builder offer to remove the obstacle.": "Unity 6 では動きが変わります。Upgrade Wizard と SDK の Builder が Obstacle の削除を提案します。",

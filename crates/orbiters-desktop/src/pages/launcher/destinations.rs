@@ -92,6 +92,8 @@ pub enum Reason {
     Recent { rejoin: bool },
     /// Visited this many times in the last [`FREQUENT_DAYS`] days.
     Frequent { visits: u32 },
+    /// Chosen among the previous instances (REQUEST21 7), joined last at `at` (Unix seconds).
+    Previous { at: u64 },
 }
 
 /// Where Play goes with a card.
@@ -129,7 +131,7 @@ impl Suggestion {
     /// Whether its place comes from this computer alone (Home, the history), not from an account's list: such a card is
     /// started whatever account is on show.
     pub fn local(&self) -> bool {
-        matches!(self.reason, Reason::Home | Reason::Frequent { .. } | Reason::Recent { rejoin: false })
+        matches!(self.reason, Reason::Home | Reason::Frequent { .. } | Reason::Recent { rejoin: false }) || matches!(self.reason, Reason::Previous { .. }) && self.go == Go::New
     }
 
     /// Whether Play makes a new instance for it.
@@ -257,6 +259,8 @@ pub struct Inputs<'a> {
     /// The VRChat account signed in and on show, whose places these are for (its user id); `None`: none, or the profile
     /// chosen is another account's.
     pub me: Option<&'a str>,
+    /// An instance chosen among the previous ones (REQUEST21 7), right after Home when it is Where's choice.
+    pub picked: Option<&'a super::previous::Picked>,
 }
 
 /// The cards, in the order shown: Home, then the invites, the events, the last instance and the places visited most,
@@ -265,6 +269,21 @@ pub fn suggestions(i: &Inputs) -> Vec<Suggestion> {
     let mut out = vec![Suggestion { key: "home".into(), world_id: String::new(), name: tr("Home world").into(), picture: None, reason: Reason::Home, go: Go::Home, region: String::new() }];
     let region = i.history.map_or("us", HistoryView::region).to_string();
     let taken = |out: &[Suggestion], world: &str| !world.is_empty() && out.iter().any(|s| s.world_id == world && matches!(s.go, Go::Instance(_) | Go::Invite { .. } | Go::New));
+    // The instance the person chose among the previous ones: rejoined only while VRChat says it is open and its kind
+    // lets the account in, else a new instance of its world.
+    if let Some(p) = i.picked.filter(|p| p.chosen()) {
+        let v = &p.visit;
+        let place = orbiters_core::launcher_feed::place(&v.location(), &v.name).filter(|_| p.rejoins(i.me));
+        let own = v.region();
+        let (go, region) = match place {
+            Some(pl) => {
+                let r = pl.region.clone();
+                (Go::Instance(pl), r)
+            }
+            None => (Go::New, if own.is_empty() { region.clone() } else { own }),
+        };
+        out.push(Suggestion { key: v.key(), world_id: v.world_id.clone(), name: world_name(&v.name), picture: None, reason: Reason::Previous { at: v.at }, go, region });
+    }
     if i.me.is_some() {
         let fresh = i.invites.iter().filter(|v| v.kind == InviteKind::Invite && !(i.dismissed)(&v.id) && (v.received_at <= 0 || i.now - v.received_at <= INVITE_FOR));
         for v in fresh {
@@ -426,7 +445,7 @@ pub fn action(launch: &Launch, mode: LaunchMode, profile: Option<u32>) -> Option
 }
 
 /// The kinds a new instance can be of (the overlay's Go there's), each as VRChat names it, and who may join.
-fn kinds() -> [(CreateAccess, InstanceAccess, &'static str); 5] {
+pub(super) fn kinds() -> [(CreateAccess, InstanceAccess, &'static str); 5] {
     [
         (CreateAccess::Public, InstanceAccess::Public, tr("anyone")),
         (CreateAccess::FriendsPlus, InstanceAccess::FriendsPlus, tr("your friends and theirs")),
@@ -436,7 +455,7 @@ fn kinds() -> [(CreateAccess, InstanceAccess, &'static str); 5] {
     ]
 }
 
-fn kind_access(access: CreateAccess) -> InstanceAccess {
+pub(super) fn kind_access(access: CreateAccess) -> InstanceAccess {
     kinds().into_iter().find(|k| k.0 == access).map_or(InstanceAccess::Public, |k| k.1)
 }
 
@@ -541,13 +560,13 @@ pub struct Places {
     events: Shared<Vec<EventSoon>>,
     /// Whether the last instance is open, for its location.
     open: Shared<(String, Option<bool>)>,
-    chosen: Option<Chosen>,
+    pub(super) chosen: Option<Chosen>,
     /// The kind of a new instance chosen on a card, by world (Friends+ otherwise).
-    kinds: HashMap<String, CreateAccess>,
+    pub(super) kinds: HashMap<String, CreateAccess>,
     /// The page of cards shown when they do not all fit.
-    page: usize,
+    pub(super) page: usize,
     /// A quiet line and when it was said (egui's clock).
-    notice: Option<(String, f64)>,
+    pub(super) notice: Option<(String, f64)>,
     /// A new instance being made for Play, the mode pressed (its button turns), and its answer.
     making: Option<LaunchMode>,
     made: Arc<Mutex<Option<Result<(), String>>>>,
@@ -559,6 +578,8 @@ pub struct Places {
     infos: Option<crate::worlds::Infos>,
     /// Pictures of the page: what is handed in instead of being read.
     staged: Option<Staged>,
+    /// Every previous instance, in a sheet over Home (REQUEST21 7), and the one chosen there.
+    pub previous: super::previous::Previous,
 }
 
 struct Staged {
@@ -623,6 +644,10 @@ impl Places {
     /// A new instance is being made for Play: the Play button of `mode` turns.
     pub fn making(&self) -> Option<LaunchMode> {
         self.making
+    }
+
+    fn previous_staged(&self) -> bool {
+        self.previous.is_staged()
     }
 }
 
@@ -690,7 +715,7 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>) -> (Vec<Suggesti
         }
     }
     let dismissed = |id: &str| state.dismissed.contains(id);
-    let inputs = Inputs { now, invites: &state.data.invites, dismissed: &dismissed, events: &events, history: history.as_ref(), last_open, me };
+    let inputs = Inputs { now, invites: &state.data.invites, dismissed: &dismissed, events: &events, history: history.as_ref(), last_open, me, picked: state.places.previous.picked.as_ref() };
     (suggestions(&inputs), loading)
 }
 
@@ -712,6 +737,7 @@ fn showing(play: PlayState) -> bool {
 pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     state.places.showing = false;
     if !state.shown() {
+        state.places.previous.stand_in_close();
         return;
     }
     let (play, profile_account) = if orbiters_core::vrchat_launch::VR_HERE {
@@ -723,12 +749,19 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         (super::states::play(&state.data), None)
     };
     if !showing(play) {
+        // VRChat runs on the profile chosen: the previous instances' sheet goes with Where.
+        state.places.previous.stand_in_close();
         return;
     }
     state.places.showing = true;
     let ctx = ui.ctx().clone();
     let clock = anim::time(&ctx);
     let (me, can_create) = account(state, cx, profile_account.as_deref());
+    // What the previous instances' sheet allows (it is drawn over the page, after this).
+    state.places.previous.me = me.clone();
+    state.places.previous.can_create = can_create;
+    state.places.previous.signed_in_elsewhere = me.is_none() && matches!(state.data.source, Source::SignedIn { .. }) && profile_account.is_some();
+    super::previous::follow(state);
     let (cards, loading) = cards(ui, cx, state, me.as_deref());
     if let Some(name) = settle(&mut state.places.chosen, &cards) {
         state.places.notice = Some((orbiters_i18n::tr!("{name} is no longer available: Play starts VRChat at home.", name = name), clock));
@@ -772,8 +805,10 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             None => tr("Home world").to_string(),
         };
         let arrows_w = if pages > 1 { 2.0 * 30.0 + 52.0 } else { 0.0 };
+        // Every instance he was in, to start VRChat in one of them (REQUEST21 7).
+        let previous_w = super::previous::button(ui, state, pos2(head.right() - arrows_w - if pages > 1 { 10.0 } else { 0.0 }, head.center().y));
         let selected = orbiters_i18n::tr!("Selected: {name}", name = chosen_name);
-        widgets::text_truncated(&p, pos2(title.right() + 14.0, head.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(selected, 13.5).weight(weight::MEDIUM).color(theme::ACCENT), head.right() - title.right() - 26.0 - arrows_w);
+        widgets::text_truncated(&p, pos2(title.right() + 14.0, head.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(selected, 13.5).weight(weight::MEDIUM).color(theme::ACCENT), head.right() - title.right() - 38.0 - arrows_w - previous_w);
         if pages > 1 {
             let next = Rect::from_center_size(pos2(head.right() - 15.0, head.center().y), vec2(30.0, 30.0));
             let prev = next.translate(vec2(-34.0, 0.0));
@@ -879,10 +914,15 @@ fn hint(state: &mut State, cards: &[Suggestion], signed_in: bool, can_create: bo
 
 /// The kind of a new instance for `card`: the one chosen on it, else Friends+; public only where VRChat cannot make one.
 fn kind_of(state: &State, card: &Suggestion, can_create: bool) -> CreateAccess {
+    kind_for(state, &card.world_id, can_create)
+}
+
+/// [`kind_of`] for a world (the previous instances' rows choose it too, for the same card).
+pub(super) fn kind_for(state: &State, world: &str, can_create: bool) -> CreateAccess {
     if !can_create {
         return CreateAccess::Public;
     }
-    state.places.kinds.get(&card.world_id).copied().unwrap_or(CreateAccess::FriendsPlus)
+    state.places.kinds.get(world).copied().unwrap_or(CreateAccess::FriendsPlus)
 }
 
 /// A card's line under its name (why it is offered), and the colour of its mark. What it goes to is on its picture: a
@@ -898,6 +938,11 @@ fn reason_line(card: &Suggestion, now: i64) -> (String, &'static str, Color32) {
         }
         Reason::Recent { .. } => (tr("Last visited").into(), icons::CLOCK_COUNTER_CLOCKWISE, theme::FG_3),
         Reason::Frequent { .. } => (tr("Often visited").into(), icons::STAR, theme::FG_3),
+        Reason::Previous { at } => (
+            orbiters_i18n::tr!("Previous instance · {when}", when = orbiters_ui::format::relative_time(*at, now.max(0) as u64)),
+            icons::CLOCK_COUNTER_CLOCKWISE,
+            theme::FG_3,
+        ),
     }
 }
 
@@ -1047,21 +1092,33 @@ fn picture(state: &mut State, card: &Suggestion) -> Option<egui::TextureHandle> 
             return state.picture(url);
         }
     }
-    if state.places.staged.is_some() || card.world_id.is_empty() || cfg!(test) {
+    match &card.picture {
+        Some(url) if url.starts_with("https://") => remote_picture(state, &card.world_id, url.clone()),
+        _ => world_picture(state, &card.world_id),
+    }
+}
+
+/// A world's own picture on the Map explorer (Orbiters' public pages, kept on this computer): Where's cards' and the
+/// previous instances' rows'. None in pictures of the page and tests (nothing read).
+pub(super) fn world_picture(state: &mut State, world_id: &str) -> Option<egui::TextureHandle> {
+    if state.places.staged.is_some() || state.places.previous_staged() || world_id.is_empty() || cfg!(test) {
         return None;
     }
     let ctx = state.ctx.clone()?;
-    let url = match &card.picture {
-        Some(url) if url.starts_with("https://") => url.clone(),
-        _ => {
-            let infos = state.places.infos.get_or_insert_with(|| crate::worlds::Infos::new(&ctx));
-            match infos.get(&card.world_id)? {
-                crate::worlds::Info::Listed(page) => page.world.thumbnail_url.clone().or(page.world.image_url.clone()).filter(|u| u.starts_with("https://"))?,
-                _ => return None,
-            }
-        }
+    let infos = state.places.infos.get_or_insert_with(|| crate::worlds::Infos::new(&ctx));
+    let url = match infos.get(world_id)? {
+        crate::worlds::Info::Listed(page) => page.world.thumbnail_url.clone().or(page.world.image_url.clone()).filter(|u| u.starts_with("https://"))?,
+        _ => return None,
     };
-    let picture = crate::worlds::Picture::Remote { world_id: card.world_id.clone(), url, large: false };
+    remote_picture(state, world_id, url)
+}
+
+fn remote_picture(state: &mut State, world_id: &str, url: String) -> Option<egui::TextureHandle> {
+    if state.places.staged.is_some() || world_id.is_empty() || cfg!(test) {
+        return None;
+    }
+    let ctx = state.ctx.clone()?;
+    let picture = crate::worlds::Picture::Remote { world_id: world_id.to_string(), url, large: false };
     state.loader.as_mut()?.get(&ctx, &picture)
 }
 
@@ -1196,7 +1253,7 @@ mod tests {
     }
 
     fn inputs<'a>(invites: &'a [Invite], events: &'a [EventSoon], history: Option<&'a HistoryView>, last_open: Option<bool>, me: Option<&'a str>) -> Inputs<'a> {
-        Inputs { now: NOW, invites, dismissed: &|_| false, events, history, last_open, me }
+        Inputs { now: NOW, invites, dismissed: &|_| false, events, history, last_open, me, picked: None }
     }
 
     #[test]

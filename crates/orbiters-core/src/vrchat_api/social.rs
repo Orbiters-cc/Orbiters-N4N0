@@ -135,12 +135,13 @@ impl Client {
         self.request("invites", "POST", format!("{BASE}/users/{}/boop", encode(user)), None, Some(body)).map(drop)
     }
 
-    /// An inventory template's picture (`getInventoryTemplate`): what an `iconFrame` / `nameplateEffect` id shows.
+    /// An inventory template's picture (`getInventoryTemplate`): what an `iconFrame` / `nameplateEffect` id is drawn
+    /// with ([`decoration_picture`]); `NotFound` when it names none.
     pub fn inventory_template_picture(&mut self, id: &str) -> Result<String> {
         self.authenticated()?;
         let r = self.get("inventory", &format!("/inventory/template/{}", encode(id)))?;
         let v = json(&r.body)?;
-        v.get("imageUrl").and_then(Value::as_str).filter(|u| u.starts_with("https://")).map(str::to_string).ok_or(Error::InvalidResponse)
+        decoration_picture(&v).ok_or(Error::NotFound)
     }
 
     /// The account's own profile as it sees it (`getPublicProfile` with `asSelf=true`): bio, icon, banner type, colour
@@ -195,6 +196,22 @@ impl Client {
         let token = v.get("token").and_then(Value::as_str).filter(|t| !t.is_empty() && v.get("ok").and_then(Value::as_bool) != Some(false));
         token.map(|t| Secret(t.to_string())).ok_or(Error::Unauthorized)
     }
+}
+
+/// The picture a decoration (an icon frame, a nameplate) is drawn with, from its template: the `base` asset of its
+/// `metadata.assets` (the still picture), else its `mainAnimation` (its first frame is drawn), as VRCX's `IconFrame` and
+/// nameplate draw it. Never the template's `imageUrl`: that is the shop's preview, the decoration around a grey stand-in
+/// person on a dark disc (a nameplate with grey stand-in lines), and drawn around a friend's picture it covered it with
+/// that silhouette (REQUEST20).
+pub fn decoration_picture(template: &Value) -> Option<String> {
+    let assets = template.get("metadata")?.get("assets")?.as_array()?;
+    ["base", "mainAnimation"].into_iter().find_map(|kind| {
+        assets
+            .iter()
+            .filter(|a| a.get("type").and_then(Value::as_str) == Some(kind))
+            .find_map(|a| a.get("url").and_then(Value::as_str).filter(|u| u.starts_with("https://")))
+            .map(str::to_string)
+    })
 }
 
 /// The body of a status change: only VRChat's own statuses a person picks, and a text of at most
@@ -283,7 +300,7 @@ mod tests {
             (200, r#"{"friends":3,"groups":1}"#),
             (200, r#"[]"#),
             (200, r#"[]"#),
-            (200, r#"{"id":"invt_1","imageUrl":"https://api.vrchat.cloud/plate"}"#),
+            (200, r#"{"id":"invt_1","imageUrl":"https://api.vrchat.cloud/preview","metadata":{"assets":[{"type":"mainAnimation","url":"https://api.vrchat.cloud/moving"},{"type":"base","url":"https://api.vrchat.cloud/plate"}]}}"#),
             (200, r#"{"ok":true,"token":"authcookie_x"}"#),
         ]);
         assert_eq!(c.friends_page(false, 0).unwrap().len(), 1);
@@ -314,6 +331,20 @@ mod tests {
                 "GET /auth",
             ]
         );
+    }
+
+    #[test]
+    fn a_decoration_is_drawn_with_its_asset_never_with_the_shops_preview() {
+        use serde_json::json;
+        let asset = |kind: &str, url: &str| json!({"type": kind, "url": url, "fileId": "file_x"});
+        let template = |assets: Value| json!({"id": "invt_1", "itemType": "iconFrame", "imageUrl": "https://api.vrchat.cloud/api/1/file/file_preview/1/file", "metadata": {"assets": assets}});
+        let base = "https://api.vrchat.cloud/api/1/file/file_base/1/file";
+        let moving = "https://api.vrchat.cloud/api/1/file/file_moving/1/file";
+        assert_eq!(decoration_picture(&template(json!([asset("introAnimation", "https://x/intro"), asset("mainAnimation", moving), asset("base", base)]))).as_deref(), Some(base));
+        assert_eq!(decoration_picture(&template(json!([asset("mainAnimation", moving)]))).as_deref(), Some(moving), "a moving one only: its first frame");
+        assert_eq!(decoration_picture(&template(json!([asset("base", "http://insecure/base")]))), None);
+        assert_eq!(decoration_picture(&template(json!([]))), None, "no asset: nothing drawn, not the preview");
+        assert_eq!(decoration_picture(&json!({"imageUrl": "https://api.vrchat.cloud/api/1/file/file_preview/1/file"})), None);
     }
 
     #[test]

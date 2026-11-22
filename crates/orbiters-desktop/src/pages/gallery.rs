@@ -162,6 +162,12 @@ pub struct State {
     export: Option<super::splat_export::Export>,
     /// Reconstruct again's question from a card's menu, over the page ([`super::reconstruct_again`]).
     again: Option<again::Ask>,
+    /// The capture element's height at the last frame (REQUEST21 5).
+    capture_h: f32,
+    /// A capture the capture element asked to open: its card's window at the next frame, or, not among the cards, its
+    /// detail in Capture files (for the page around: [`State::take_review`]).
+    review: Option<String>,
+    review_elsewhere: Option<std::path::PathBuf>,
 }
 /// Screenshots: the world tour's captures of 2026-11-15 as Orbiters lists them once their folders here were deleted
 /// (L-no-thumbnails): two worlds, private uploads and one public per world, each with its picture on Orbiters.
@@ -437,6 +443,11 @@ impl State {
         }
     }
 
+    /// A capture the capture element asked to open that is not among the cards: the page around opens its detail.
+    pub fn take_review(&mut self) -> Option<std::path::PathBuf> {
+        self.review_elsewhere.take()
+    }
+
     /// Opens `entry`'s window on its friends to choose ("Share to …" beside VRChat's camera, REQUEST13).
     pub fn open_share_to(&mut self, ctx: &egui::Context, entry: Entry) {
         self.dialog = Some(Dialog::new(ctx, entry, true));
@@ -681,7 +692,9 @@ fn requests_button() -> Button<'static> {
 }
 
 /// `true` opens the existing capture-management surface (reconstruction, storage, import).
-pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
+/// The gallery, the capture element at the top of its list (`capture`, `projects`: REQUEST21 5). Whether Manage captures
+/// was pressed.
+pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::capture::State, projects: &mut super::projects::State) -> bool {
     let ctx = ui.ctx().clone();
     state.requests.poll(&ctx, cx);
     let page = ui.max_rect();
@@ -855,6 +868,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let selecting = state.select.any();
     // Preserve the visible picture when progressive batches insert or reshape content above it.
     // Use the same layout calculation as rendering; compensate only for layout changes, leaving wheel input intact.
+    // The capture element at the list's top (REQUEST21 5): as it grows or shrinks out of view (scrolled past), what is
+    // in view stays where it is; in view, it pushes the gallery down as it opens. Its height is known before it is drawn.
+    let capture_h = capture.height(now);
+    let capture_moved = if state.scroll_offset > 1.0 && state.scroll_offset >= state.capture_h { capture_h - state.capture_h } else { 0.0 };
+    state.capture_h = capture_h;
     let mut positions = HashMap::new();
     if state.layout_width > 0.0 {
         let mut y = top - page.top();
@@ -872,8 +890,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     if super::new_search(&mut state.searched, &q) {
         scroll = scroll.vertical_scroll_offset(0.0);
     } else if let Some(offset) = anchored_scroll_offset(state.scroll_offset, state.scroll_anchor.as_ref().map(|(key, _)| key.as_str()), &state.layout_positions, &positions) {
-        scroll = scroll.vertical_scroll_offset(offset);
+        scroll = scroll.vertical_scroll_offset(offset + capture_moved);
+    } else if capture_moved.abs() > 0.1 {
+        scroll = scroll.vertical_scroll_offset(state.scroll_offset + capture_moved);
     }
+    let mut capture_out = None;
     let output = scroll
         .auto_shrink([false, false])
         .scroll_bar_rect(Rect::from_min_max(pos2(page.left(), top), page.max))
@@ -882,6 +903,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             background = Some(ui.interact(ui.clip_rect(), Id::unique("photos-captures-band"), Sense::drag()));
             egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 40 }).show(ui, |ui| {
                 ui.add_space(top - page.top());
+                // The capture element: the Capture tab's content, a bar until it is needed (REQUEST21 5).
+                {
+                    let name_of = |dir: &std::path::Path| {
+                        let key = dir.to_string_lossy();
+                        entries.iter().find(|e| e.key == key).map(|e| e.world_name.clone()).filter(|n| !n.is_empty())
+                    };
+                    capture_out = super::capture::element(ui, cx, capture, projects, &name_of, top - page.top());
+                }
                 let width = ui.available_width();
                 state.layout_width = width;
                 if entries.is_empty() {
@@ -1094,7 +1123,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             });
         });
     state.scroll_offset = output.state.clamped_offset().y;
-    let visible_top = state.scroll_offset + top - page.top();
+    // (The groups' places are counted from under the capture element.)
+    let visible_top = state.scroll_offset + top - page.top() - capture_h;
+    if let Some(super::capture::Out::Review(dir)) = capture_out {
+        let key = dir.to_string_lossy().to_string();
+        match entries.iter().position(|e| e.key == key) {
+            Some(_) => state.review = Some(key),
+            None => state.review_elsewhere = Some(dir),
+        }
+    }
     // The topmost item in view; of a row's items, all at the same height, always the same one (by its key): the map
     // gives them in an order of its own at each frame, and the anchor went from one to another without a scroll.
     state.scroll_anchor = positions.iter().filter(|(_, y)| **y >= visible_top)
@@ -1364,6 +1401,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let modal = state.dialog.is_some() || state.instance.is_some() || state.community.is_open() || state.export.is_some() || state.again.is_some();
     state.select.bar(ui, page, &entries, &mut state.pictures, modal);
     state.shown = entries;
+    if let Some(key) = state.review.take() {
+        state.open_key(&ctx, &key);
+    }
     manage
 }
 

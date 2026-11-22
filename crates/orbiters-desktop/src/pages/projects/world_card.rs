@@ -282,7 +282,7 @@ fn add(ui: &mut Ui, cx: &mut Cx, state: &mut State, w: &Avatar, name: &str, here
         state.anchors.insert(format!("world-capture-{i}"), r);
         let replaces = mine.is_some_and(|m| m.preview.is_some());
         let hint = if !recorded {
-            tr("Record this world from the Capture page, then reconstruct it in Photos & captures")
+            tr("Record this world from the capture bar of Photos & captures, then reconstruct it there")
         } else if captures.is_empty() {
             tr("Reconstruct a capture of this world in Photos & captures first")
         } else if replaces {

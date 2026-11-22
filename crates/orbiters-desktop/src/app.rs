@@ -79,8 +79,8 @@ impl App {
         app.gpu = cc.wgpu_render_state.as_ref().map(crate::gpu::Handles::of_window);
         app.show_splash = splash;
         // Closed to the tray to save memory: back on the page it was on.
-        if let Some(page) = crate::window_rest::resume::take().and_then(|name| page_named(&name)) {
-            app.set_page(page, 0.0);
+        if let Some(name) = crate::window_rest::resume::take() {
+            app.go_named(&name, 0.0);
         }
         app
     }
@@ -146,6 +146,35 @@ impl App {
     /// The GPU of an offscreen renderer (screenshots).
     pub fn set_gpu(&mut self, gpu: crate::gpu::Handles) {
         self.gpu = Some(gpu);
+    }
+
+    /// Photos & captures with its capture element open on `part`: where every link of the Capture tab leads now
+    /// (REQUEST21 5). Back on its gallery first (a capture's files, an open detail or viewer are left).
+    pub fn open_capture(&mut self, part: pages::capture::Part, now: f64) {
+        self.set_page(Page::Sessions, now);
+        self.sessions.to_gallery();
+        self.capture.reveal(part);
+    }
+
+    /// The page a name says (a window closed to the tray on it, N4N0's assistant): the Capture tab's old name opens
+    /// Photos & captures on its capture element. Whether the name was one.
+    fn go_named(&mut self, name: &str, now: f64) -> bool {
+        if name == CAPTURE_PAGE {
+            self.open_capture(pages::capture::Part::Actions, now);
+            return true;
+        }
+        match page_named(name) {
+            Some(page) => {
+                self.set_page(page, now);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The capture element of Photos & captures (screenshots stage it).
+    pub fn capture_mut(&mut self) -> &mut pages::capture::State {
+        &mut self.capture
     }
 
     pub fn home_mut(&mut self) -> &mut pages::home::State {
@@ -449,12 +478,11 @@ impl App {
         let items = [
             (Page::Home, tr("Home"), icons::HOUSE),
             (Page::N4n0, "N4N0", icons::N4N0),
-            (Page::Capture, tr("Capture"), icons::APERTURE),
             (Page::Projects, tr("Unity projects"), icons::CUBE),
             (Page::Sessions, tr("Photos & captures"), icons::IMAGES),
             (Page::Worlds, tr("Visited worlds"), icons::GLOBE),
             (Page::Events, tr("Events"), icons::CALENDAR_DOTS),
-            (Page::Videos, tr("Videos"), icons::FILM_STRIP),
+            (Page::Videos, tr("Video history"), icons::FILM_STRIP),
             (Page::Settings, tr("Settings"), icons::SLIDERS_HORIZONTAL),
         ];
         let item_rect = |i: usize| Rect::from_min_size(pos2(inner.left(), nav_top + i as f32 * 48.0), vec2(inner.width(), 44.0));
@@ -494,14 +522,17 @@ impl App {
                 widgets::icon(&p, pos2(x + 9.0, r.center().y), glyph, 18.0, icon_c);
             }
             widgets::text(&p, pos2(x + 30.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(label, 14.0).weight(weight::MEDIUM).color(fg));
-            if page == Page::Capture && capturing {
+            // Photos & captures: how many captures it holds, and the dot of one under way (the Capture tab's, which it took in).
+            let mut badge_right = r.right() - 12.0;
+            if page == Page::Sessions && capturing {
                 let tone = if snap.capture.state == CaptureState::Importing { widgets::Tone::Info } else { widgets::Tone::Rec };
                 widgets::status_dot(&p, pos2(r.right() - 16.0, r.center().y), tone, true);
+                badge_right = r.right() - 30.0;
             }
             if page == Page::Sessions && snap.storage.sessions > 0 {
                 let t = Txt::new(snap.storage.sessions.to_string(), 11.0).color(theme::FG_3);
                 let s = widgets::text_size(ui, &t);
-                let badge = Rect::from_min_size(pos2(r.right() - 12.0 - s.x - 16.0, r.center().y - 10.0), vec2(s.x + 16.0, 20.0));
+                let badge = Rect::from_min_size(pos2(badge_right - s.x - 16.0, r.center().y - 10.0), vec2(s.x + 16.0, 20.0));
                 p.rect_filled(badge, theme::radius(10.0), theme::white(0.07));
                 widgets::text(&p, badge.center(), Align2::CENTER_CENTER, &t);
             }
@@ -540,7 +571,7 @@ impl App {
         };
         side_status(ui, pos2(inner.left(), bottom - 34.0 - 44.0), tr("Action Menu"), &osc_text, osc_tone, inner.width());
         // Several VRChats on this computer: how many, and the one pictures are taken in (its account, its world); a press
-        // opens the Capture page, where another is chosen.
+        // opens Photos & captures' capture element on them, where another is chosen.
         let several = snap.vrchat.several_target().filter(|_| orbiters_core::osc::VRCHAT_RUNS_HERE);
         let (vrchat_label, vrchat_text) = match several {
             Some(target) => {
@@ -560,7 +591,7 @@ impl App {
                 ui.painter().rect_filled(vrchat_row.shrink2(vec2(4.0, 0.0)), theme::radius(10.0), theme::white(0.04));
             }
             if widgets::pressed(&resp) {
-                self.set_page(Page::Capture, now);
+                self.open_capture(pages::capture::Part::Vrchats, now);
             }
         }
         side_status(ui, vrchat_row.min, &vrchat_label, &vrchat_text, vrchat_tone, inner.width());
@@ -670,10 +701,9 @@ impl App {
         };
         match self.page {
             Page::Home => pages::home::show(&mut child, &mut cx, &mut self.home),
-            Page::Capture => pages::capture::show(&mut child, &mut cx, &mut self.capture, &mut self.projects),
             Page::Projects => pages::projects::show(&mut child, &mut cx, &mut self.projects),
             Page::N4n0 => pages::n4n0::show(&mut child, &mut cx, &mut self.n4n0),
-            Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),
+            Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions, &mut self.capture, &mut self.projects),
             Page::Worlds => pages::worlds::show(&mut child, &mut cx, &mut self.worlds),
             Page::Events => pages::events::show(&mut child, &mut cx, &mut self.events),
             Page::Videos => pages::videos::show(&mut child, &mut cx, &mut self.videos),
@@ -852,8 +882,7 @@ impl eframe::App for App {
                 }
             } else if let Some(name) = crate::controller::assistant::window_page(&page) {
                 // N4N0's assistant opened one of the window's pages (REQUEST20 6).
-                if let Some(to) = page_named(name) {
-                    self.set_page(to, anim::time(ctx));
+                if self.go_named(name, anim::time(ctx)) {
                     bring_to_front(ctx);
                 }
             } else if let Some(dir) = page.strip_prefix("session:") {
@@ -987,12 +1016,17 @@ impl App {
     }
 }
 
+/// The Capture tab's name, as a window closed to the tray on it saved it and N4N0's assistant names it: it took its
+/// place in Photos & captures (REQUEST21 5).
+const CAPTURE_PAGE: &str = "Capture";
+
 /// The page of a name [`App::follow_rest`] saved (its `Debug` name).
 fn page_named(name: &str) -> Option<Page> {
-    [Page::Home, Page::Capture, Page::Projects, Page::N4n0, Page::Sessions, Page::Worlds, Page::Events, Page::Videos, Page::Settings]
-        .into_iter()
-        .find(|p| format!("{p:?}") == name)
+    PAGES.into_iter().find(|p| format!("{p:?}") == name)
 }
+
+/// The window's pages, in the sidebar's order.
+const PAGES: [Page; 8] = [Page::Home, Page::N4n0, Page::Projects, Page::Sessions, Page::Worlds, Page::Events, Page::Videos, Page::Settings];
 
 /// Shows the window and gives it focus (a second launch or the tray asked for it).
 fn bring_to_front(ctx: &egui::Context) {

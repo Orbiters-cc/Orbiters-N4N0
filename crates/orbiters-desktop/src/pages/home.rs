@@ -234,9 +234,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     cx.entered = entered.max(*since);
 
     let mut acts = Vec::new();
-    // The 3D picture as the Capture page allows it.
+    // The 3D picture as Photos & captures' capture element allows it.
     let take_blocked = if !snap.settings.consent_acknowledged {
-        Some(tr("Accept the capture notice on the Capture page first"))
+        Some(tr("Accept the capture notice in Photos & captures first"))
     } else if !snap.vrchat.running {
         Some(tr("Start VRChat first: its camera takes the picture"))
     } else {

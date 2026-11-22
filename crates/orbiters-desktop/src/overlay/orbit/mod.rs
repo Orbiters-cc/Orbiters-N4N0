@@ -3149,6 +3149,7 @@ impl Panels {
                 return;
             }
             panels::Pick::Smoothing(on) => serde_json::json!({ "tracking": { "enabled": on } }),
+            panels::Pick::SmoothingReset => orbiters_core::settings::OrbitSettings::smoothing_reset_patch(),
             panels::Pick::Translate(pick) => {
                 use panels::TranslatePick;
                 match pick {

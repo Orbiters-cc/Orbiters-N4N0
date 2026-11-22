@@ -32,6 +32,24 @@ fn fixture() -> std::path::PathBuf {
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {
     let idle = snapshot_of(scenarios, "capture-idle");
+    // REQUEST21: Settings › VR with the menus' smoothing moved off the values measured with VRChat: Reset under them.
+    let mut moved = idle.clone();
+    moved.settings.orbit.vr_smoothing_quick_menu_ms = 62.0;
+    moved.settings.orbit.vr_smoothing_wheel_ms = 8.0;
+    scenarios.push(Scenario {
+        name: "settings-smoothing-reset",
+        page: Page::Settings,
+        snapshot: moved,
+        frames: 120,
+        splash: false,
+        open_detail: false,
+        toasts: vec![],
+        pointer: None,
+        scroll: 0.0,
+        world: None,
+        home: None,
+        library: None,
+    });
     for name in NAMES {
         let mut snapshot = match name {
             "photos-capture-recording" | "photos-capture-recording-hidden" => snapshot_of(scenarios, "capture-recording"),

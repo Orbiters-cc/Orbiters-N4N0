@@ -36,5 +36,11 @@
   "New instance of this world": "Nova instância deste mundo",
   "Choose": "Escolher",
   "Previous instance · {when}": "Instância anterior · {when}",
-  "In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording.": "Em VR, o trajeto da câmera e o que ela já cobriu flutuam sobre um controle enquanto você grava, como nas opções de captura de Fotos e capturas. O SteamVR mostra isso só no seu headset: nunca na câmera do VRChat nem na gravação."
+  "In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording.": "Em VR, o trajeto da câmera e o que ela já cobriu flutuam sobre um controle enquanto você grava, como nas opções de captura de Fotos e capturas. O SteamVR mostra isso só no seu headset: nunca na câmera do VRChat nem na gravação.",
+  "Reset the smoothing": "Redefinir a suavização",
+  "Back to {quick} on the Quick Menu and {wheel} on the wheel: the values measured to match VRChat's own menus.": "Volta para {quick} no Quick Menu e {wheel} na roda: os valores medidos para acompanhar os menus do VRChat.",
+  "Both are already the values measured to match VRChat": "Os dois já estão nos valores medidos para acompanhar o VRChat",
+  "Puts both smoothings back to the values measured to match VRChat": "Volta as duas suavizações aos valores medidos para acompanhar o VRChat",
+  "Smoothing back to the values measured to match VRChat": "Suavização de volta aos valores medidos para acompanhar o VRChat",
+  "default measured smoothing back": "padrão medido suavização voltar"
 }

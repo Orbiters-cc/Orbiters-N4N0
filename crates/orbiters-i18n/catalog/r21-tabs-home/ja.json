@@ -36,5 +36,11 @@
   "New instance of this world": "このワールドの新しいインスタンス",
   "Choose": "選ぶ",
   "Previous instance · {when}": "過去のインスタンス · {when}",
-  "In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording.": "VRでは、録画中にカメラの軌跡とカバーした範囲がコントローラーの上に浮かびます。「写真とキャプチャ」のキャプチャのオプションと同じ表示です。SteamVRが表示するのはヘッドセット内だけで、VRChatのカメラや録画には映りません。"
+  "In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording.": "VRでは、録画中にカメラの軌跡とカバーした範囲がコントローラーの上に浮かびます。「写真とキャプチャ」のキャプチャのオプションと同じ表示です。SteamVRが表示するのはヘッドセット内だけで、VRChatのカメラや録画には映りません。",
+  "Reset the smoothing": "スムージングをリセット",
+  "Back to {quick} on the Quick Menu and {wheel} on the wheel: the values measured to match VRChat's own menus.": "クイックメニューは{quick}、ホイールは{wheel}に戻します。VRChat自身のメニューに合うよう測定した値です。",
+  "Both are already the values measured to match VRChat": "どちらもすでにVRChatに合うよう測定した値です",
+  "Puts both smoothings back to the values measured to match VRChat": "両方のスムージングを、VRChatに合うよう測定した値に戻します",
+  "Smoothing back to the values measured to match VRChat": "スムージングをVRChatに合うよう測定した値に戻しました",
+  "default measured smoothing back": "初期値 測定 スムージング 戻す"
 }

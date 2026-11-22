@@ -1724,6 +1724,12 @@ pub fn behaviour_shots(out: &Path) -> anyhow::Result<()> {
         facts.smoothing_held = held;
         qm_scene(&format!("tracking-{name}"), out, vec2(1920.0, 1080.0), &facts, None, Some(Sheet::Tracking))?;
     }
+    // REQUEST21: the tiles' smoothing moved off the measured values, Reset under the sliders; and at them, no Reset.
+    let mut moved = base.clone();
+    moved.orbit.vr_smoothing_quick_menu_ms = 62.0;
+    moved.orbit.vr_smoothing_wheel_ms = 8.0;
+    qm_scene("tracking-smoothing-reset", out, vec2(1920.0, 1080.0), &moved, None, Some(Sheet::Tracking))?;
+    qm_scene("tracking-smoothing-measured", out, vec2(1920.0, 1080.0), &base, None, Some(Sheet::Tracking))?;
     Ok(())
 }
 

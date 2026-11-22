@@ -367,6 +367,8 @@ pub enum Pick {
     Smoothing(bool),
     /// Along a smoothing slider.
     SmoothingBar(Smoothed),
+    /// The tiles' two smoothings back to the values measured to match VRChat (REQUEST21).
+    SmoothingReset,
     /// Something on the FPS booster's sheet.
     Booster(BoosterPick),
     /// Something on Translation's sheet.

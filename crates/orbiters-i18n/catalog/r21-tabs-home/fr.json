@@ -36,5 +36,11 @@
   "New instance of this world": "Nouvelle instance de ce monde",
   "Choose": "Choisir",
   "Previous instance · {when}": "Instance précédente · {when}",
-  "In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording.": "En VR, le trajet de la caméra et ce qu’elle a couvert flottent au-dessus d’une manette pendant l’enregistrement, comme dans les options de capture de Photos et captures. SteamVR ne l’affiche que dans ton casque : jamais dans la caméra de VRChat ni dans l’enregistrement."
+  "In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording.": "En VR, le trajet de la caméra et ce qu’elle a couvert flottent au-dessus d’une manette pendant l’enregistrement, comme dans les options de capture de Photos et captures. SteamVR ne l’affiche que dans ton casque : jamais dans la caméra de VRChat ni dans l’enregistrement.",
+  "Reset the smoothing": "Réinitialiser le lissage",
+  "Back to {quick} on the Quick Menu and {wheel} on the wheel: the values measured to match VRChat's own menus.": "Revient à {quick} sur le Quick Menu et {wheel} sur la roue : les valeurs mesurées pour suivre les menus de VRChat.",
+  "Both are already the values measured to match VRChat": "Les deux sont déjà les valeurs mesurées pour suivre VRChat",
+  "Puts both smoothings back to the values measured to match VRChat": "Remet les deux lissages aux valeurs mesurées pour suivre VRChat",
+  "Smoothing back to the values measured to match VRChat": "Lissage revenu aux valeurs mesurées pour suivre VRChat",
+  "default measured smoothing back": "défaut mesuré lissage revenir"
 }

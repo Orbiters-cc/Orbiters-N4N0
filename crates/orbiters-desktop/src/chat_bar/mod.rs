@@ -277,7 +277,14 @@ impl ChatBar {
             if bar_alpha > 0.0 {
                 self.bar_contents(&mut inner, ctl, snap, strip.bar, bar_alpha, &shape);
             }
-            let composer = panel::composer_rect(&inner, rect, &self.draft, snap);
+            // The composer is the bar's well travelling down to the chat's foot (the text in it all the way).
+            let composer_end = panel::composer_rect(&inner, rect, &self.draft, snap);
+            let k = smoothstep(0.0, 1.0, open_k);
+            let composer = Rect::from_min_max(bar.min + (composer_end.min - bar.min) * k, bar.max + (composer_end.max - bar.max) * k);
+            if open_k > 0.0 && !matches!(strip.bar, Bar::Icon(_)) || open_k > 0.3 {
+                let well = theme::alpha(theme::INK_750, smoothstep(0.0, 0.25, open_k));
+                inner.painter().rect_filled(composer, theme::radius(egui::lerp(layout::BAR_RADIUS..=20.0, k)), well);
+            }
             if chat_alpha > 0.0 {
                 let mut chat = inner.new_child(egui::UiBuilder::new().max_rect(panel));
                 chat.set_clip_rect(rect);
@@ -286,7 +293,7 @@ impl ChatBar {
             }
             if field && !(matches!(strip.bar, Bar::Icon(_)) && open_k < 0.05) {
                 let in_bar = bar_field(strip.bar, snap);
-                let at = layout::field(in_bar, panel::field_rect(composer), open_k);
+                let at = layout::field(in_bar, panel::field_rect(composer_end), open_k);
                 self.field(&mut inner, ctl, snap, at, open_k, chat_alpha);
             }
             let pressed = widgets::pressed(&shape);

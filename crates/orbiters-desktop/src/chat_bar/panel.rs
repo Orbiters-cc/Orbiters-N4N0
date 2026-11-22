@@ -461,11 +461,11 @@ fn log(ui: &mut Ui, snap: &Snapshot, now_ms: u64) {
     });
 }
 
-/// The composer's surface, its microphone and send button, and how to send; the field itself is the bar's
+/// The composer's microphone and send button, and how to send; the field itself is the bar's
 /// ([`super::ChatBar::field`]), brought down here.
 fn dock(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, composer: Rect) {
+    // (Its surface is painted with the shape, travelling from the bar: `ChatBar::draw`.)
     let p = ui.painter().clone();
-    p.rect_filled(composer, theme::radius(20.0), theme::INK_750);
     let ready = gate(snap) == Gate::Ready;
     let y = composer.bottom() - 24.0;
     let mic = Rect::from_center_size(pos2(composer.left() + 26.0, y), vec2(32.0, 32.0));

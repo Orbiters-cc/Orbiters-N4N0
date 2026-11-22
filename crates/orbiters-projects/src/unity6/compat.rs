@@ -236,7 +236,7 @@ pub fn checklist(project: &Path, content: Content, cancel: &AtomicBool) -> Check
             break;
         }
         if !e.file_type().is_file() {
-            if e.file_type().is_dir() && e.file_name() == "TextMesh Pro" {
+            if e.file_type().is_dir() && e.file_name() == "TextMesh Pro" { // i18n: not shown (a folder name Unity makes)
                 tmp_in_assets = true;
             }
             continue;
@@ -290,7 +290,7 @@ pub fn checklist(project: &Path, content: Content, cancel: &AtomicBool) -> Check
                 if body.contains("__get_velocity") || body.contains("__set_velocity") {
                     note(Item::CustomUasm, &rel);
                 }
-                if body.lines().any(|l| l.trim() == "ringBufferMode: 2") {
+                if body.lines().any(|l| l.trim() == "ringBufferMode: 2") { // i18n: not shown (a line of a scene file)
                     note(Item::RingBuffer, &rel);
                 }
                 // NavMeshAgent is class 195, NavMeshObstacle 208.

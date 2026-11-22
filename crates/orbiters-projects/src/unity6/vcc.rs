@@ -30,7 +30,7 @@ pub fn read(path: &Path) -> Option<Vcc> {
     let folder = if path.is_file() { path.parent()?.to_path_buf() } else { path.to_path_buf() };
     let info: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("WebApp/Dist/buildInfo.json")).ok()?).ok()?;
     let v = &info["version"];
-    let version = match (v["Major"].as_u64(), v["Minor"].as_u64(), v["Patch"].as_u64()) {
+    let version = match (v["Major"].as_u64(), v["Minor"].as_u64(), v["Patch"].as_u64()) { // i18n: not shown (field names of VCC's build file)
         (Some(a), Some(b), Some(c)) => Some(match v["PreRelease"].as_str().filter(|p| !p.is_empty()) {
             Some(pre) => format!("{a}.{b}.{c}-{pre}"),
             None => format!("{a}.{b}.{c}"),

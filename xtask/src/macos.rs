@@ -356,11 +356,15 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     let archive = dist.join(mac_archive_name(&version));
     let zip = |to: &Path| run(Command::new("ditto").args(["-c", "-k", "--keepParent", "--sequesterRsrc"]).arg(&app).arg(to));
 
+    // Whether Apple's notary answered for the application in time: its ticket is then stapled to it and to the image.
+    let mut stapled = false;
     if let (Identity::DeveloperId(_), Some(profile)) = (&identity, &config.macos_notary_profile) {
         println!("\n== Notarizing");
         zip(&archive)?;
-        run(Command::new("xcrun").args(["notarytool", "submit", "--wait", "--keychain-profile", profile]).arg(&archive))?;
-        run(Command::new("xcrun").args(["stapler", "staple"]).arg(&app))?;
+        stapled = notarized(profile, &archive);
+        if stapled {
+            run(Command::new("xcrun").args(["stapler", "staple"]).arg(&app))?;
+        }
         std::fs::remove_file(&archive)?;
     }
 
@@ -392,8 +396,14 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     // is one more question from the keychain.
     if let (Identity::DeveloperId(_), Some(profile)) = (&identity, &config.macos_notary_profile) {
         sign_image(&identity, &image)?;
-        run(Command::new("xcrun").args(["notarytool", "submit", "--wait", "--keychain-profile", profile]).arg(&image))?;
-        run(Command::new("xcrun").args(["stapler", "staple"]).arg(&image))?;
+        if stapled && notarized(profile, &image) {
+            run(Command::new("xcrun").args(["stapler", "staple"]).arg(&image))?;
+        } else {
+            // Left with Apple, which answers when it will (a new account's first submissions can take hours): macOS asks
+            // Apple for the ticket when the image is opened, so the same file opens normally once Apple has passed it.
+            let _ = run(Command::new("xcrun").args(["notarytool", "submit", "--keychain-profile", profile]).arg(&image));
+            println!("\nNOT STAPLED: Apple's notary has not answered yet. `xcrun notarytool history --keychain-profile {profile}` says when it has.\n");
+        }
     }
 
     let installer = Artifact {
@@ -448,6 +458,21 @@ fn folder_bytes(folder: &Path) -> anyhow::Result<u64> {
 /// (the compressed image does not carry the empty part).
 fn image_megabytes(bytes: u64) -> u64 {
     (bytes >> 20) + (bytes >> 23) + 48
+}
+
+/// How long Apple's notary gets to answer for one file before the release goes on without its ticket.
+const NOTARY_WAIT: &str = "15m";
+
+/// Sends `file` to Apple's notary and waits for its answer: whether it was accepted in time.
+fn notarized(profile: &str, file: &Path) -> bool {
+    println!("> notarytool submit {}", file.display());
+    let answered = Command::new("xcrun").args(["notarytool", "submit", "--wait", "--timeout", NOTARY_WAIT, "--keychain-profile", profile]).arg(file).output();
+    let text = answered.map(|o| String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr)).unwrap_or_default();
+    let accepted = text.lines().any(|l| l.trim() == "status: Accepted");
+    if !accepted {
+        println!("Apple's notary did not accept {} within {NOTARY_WAIT}:\n{}", file.display(), text.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
+    }
+    accepted
 }
 
 fn sign_image(identity: &Identity, image: &Path) -> anyhow::Result<()> {

@@ -55,6 +55,11 @@ whether it gets an answer within a minute; without one, nobody being at the scre
 wait (unless `macos_identity` names an identity: then it stops with an error). `cargo xtask dist` and `cargo xtask github`
 again later replace the release's files with properly signed ones.
 
+Notarizing waits 15 minutes for Apple's answer on the application, then on the image. Without one in time (a new
+account's first submissions can stay "In Progress" for hours), the release goes on unstapled and the image is left with
+the notary: macOS asks Apple for the ticket when the image is opened, so the same file opens normally once Apple has
+passed it (`xcrun notarytool history --keychain-profile <profile>`).
+
 **The release key** is the same as Windows' (installed apps trust `update-key.pub`), so a Mac makes a signed release only
 once it holds a copy (`~/.orbiters-release/update-signing-key`). Without it, `dist` says so and makes no release file:
 `release --dev` then puts the files on GitHub only, and installed Macs do not hear of it.

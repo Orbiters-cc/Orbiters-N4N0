@@ -105,5 +105,16 @@
   "Picture with VRChat's camera": "VRChatのカメラで写真",
   "Save the world's video": "ワールドの動画を保存",
   "Copy to the clipboard": "クリップボードにコピー",
-  "N4N0's light on": "N4N0のライトをオン"
+  "N4N0's light on": "N4N0のライトをオン",
+  "N4N0 does what it asked, this once.": "N4N0が頼んだことを今回だけ実行します。",
+  "No, leave it": "いいえ、やめる",
+  "Nothing is done.": "何もしません。",
+  "Back to what was said.": "会話に戻ります。",
+  "What N4N0 did": "N4N0がしたこと",
+  "Every action N4N0 took or asked about, and how it went.": "N4N0が実行した、または確認した操作とその結果。",
+  "Or say yes or no": "「はい」か「いいえ」と言っても答えられます",
+  "Doing: {what}": "実行中：{what}",
+  "Actions ({count})": "操作（{count}）",
+  "understood offline": "オフラインで理解",
+  "needs your yes each time": "毎回あなたの「はい」が必要"
 }

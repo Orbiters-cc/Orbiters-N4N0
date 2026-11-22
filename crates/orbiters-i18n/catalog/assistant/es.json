@@ -105,5 +105,16 @@
   "Picture with VRChat's camera": "Foto con la cámara de VRChat",
   "Save the world's video": "Guardar el vídeo del mundo",
   "Copy to the clipboard": "Copiar al portapapeles",
-  "N4N0's light on": "Luz de N4N0 encendida"
+  "N4N0's light on": "Luz de N4N0 encendida",
+  "N4N0 does what it asked, this once.": "N4N0 hace lo que pidió, esta vez.",
+  "No, leave it": "No, déjalo",
+  "Nothing is done.": "No se hace nada.",
+  "Back to what was said.": "Volver a lo que se dijo.",
+  "What N4N0 did": "Lo que hizo N4N0",
+  "Every action N4N0 took or asked about, and how it went.": "Cada acción que N4N0 hizo o pidió, y cómo fue.",
+  "Or say yes or no": "O di sí o no",
+  "Doing: {what}": "Haciendo: {what}",
+  "Actions ({count})": "Acciones ({count})",
+  "understood offline": "entendido sin conexión",
+  "needs your yes each time": "necesita tu sí cada vez"
 }

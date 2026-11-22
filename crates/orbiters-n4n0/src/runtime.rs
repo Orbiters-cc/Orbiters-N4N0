@@ -164,7 +164,32 @@ impl Bound {
 /// The question the owner reads for what waits for their yes, in their language (TXT-22), and the same for the avatar's
 /// panel, which has Latin letters only.
 fn questions(pending: &[Pending]) -> (String, String) {
-    let ask = || policy::asking(&pending.iter().map(|p| policy::ask(&p.action, p.control.as_ref())).collect::<Vec<_>>());
+    let ask = || {
+        // The app's intents that wait for a yes, in one sentence of what will be done (REQUEST20 6); the rest as before.
+        let intents: Vec<String> = pending
+            .iter()
+            .filter_map(|p| match &p.action {
+                Action::App(i) if !matches!(i, Intent::Restricted { .. }) => Some(i.says()),
+                _ => None,
+            })
+            .collect();
+        let mut asks: Vec<String> = Vec::new();
+        if !intents.is_empty() {
+            asks.push(tr!("N4N0 will do this if you say yes: {what}.", what = intents.join("; ")));
+        }
+        asks.extend(
+            pending
+                .iter()
+                .filter(|p| !matches!(&p.action, Action::App(i) if !matches!(i, Intent::Restricted { .. })))
+                .map(|p| policy::ask(&p.action, p.control.as_ref())),
+        );
+        // One sentence for the intents, however many: "do it" or "do them" as there are actions.
+        let mut out = policy::asking(&asks);
+        if asks.len() == 1 && pending.len() > 1 {
+            out = format!("{} {}", asks[0], tr("Say yes to do them."));
+        }
+        out
+    };
     (ask(), latin(ask))
 }
 

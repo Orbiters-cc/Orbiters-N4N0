@@ -50,7 +50,7 @@ fn the_offline_path_works_signed_out_and_without_a_network() {
     assert!(t.settings().walk_boost.enabled, "through the menus' own Fast walk");
     let status = t.view();
     let lines: Vec<(N4n0Who, String)> = status.lines.iter().map(|l| (l.who, l.text.clone())).collect();
-    assert_eq!(lines, vec![(N4n0Who::You, "Turn on fast walk".to_string()), (N4n0Who::N4n0, "Fast walk on.".to_string())]);
+    assert_eq!(lines, vec![(N4n0Who::You, "Turn on fast walk".to_string()), (N4n0Who::N4n0, "Fast walk on".to_string())]);
     let entry = status.assistant.log.last().unwrap();
     assert_eq!((entry.intent.as_str(), entry.outcome, entry.via), ("fast_walk", Outcome::Done, Via::Quick));
     assert!(t.notices().iter().any(|(k, m)| *k == NoticeKind::Success && m.contains("Fast walk on")), "a toast says it: {:?}", t.notices());
@@ -110,6 +110,7 @@ fn outward_actions_wait_for_a_yes_and_page_only_ones_never_run() {
     let status = t.view();
     let question = status.confirmations.iter().find(|c| c.is_local()).expect("a question").summary.clone();
     assert!(question.contains("\"Sam\"") && question.contains("by voice"), "{question}");
+    assert_eq!(question.matches("if you say yes").count(), 1, "one sentence for what waits: {question}");
     assert_eq!(log(&t), vec![("fast_walk".into(), Outcome::Done), ("boop".into(), Outcome::Asked), ("restricted".into(), Outcome::Offered)]);
     // No (the Ask page's button): nothing goes.
     n.command(Command::AskAnswer { yes: false });

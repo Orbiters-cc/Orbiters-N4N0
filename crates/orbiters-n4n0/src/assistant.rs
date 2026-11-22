@@ -719,7 +719,7 @@ impl crate::N4n0 {
         }
         let mut rt = self.n4n0.lock().unwrap();
         if !said.is_empty() {
-            rt.line(N4n0Who::N4n0, format!("{}.", said.join(" · ")));
+            rt.line(N4n0Who::N4n0, said.join(" · "));
         }
         panel.extend(said.iter().cloned());
         if !panel.is_empty() {

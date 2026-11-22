@@ -84,6 +84,16 @@ fn the_tools_fit_what_the_server_takes() {
         }
     }
     assert_eq!(names.iter().collect::<std::collections::HashSet<_>>().len(), names.len(), "unique names");
+    // What the Orbiters server takes of a client tool (backend services/n4n0/assistant/conversation.js, LIMITS): a name of
+    // letters, digits, _ and -, a description of 2000 characters at most, a schema of 16000.
+    for tool in &all {
+        let name = tool["name"].as_str().unwrap();
+        assert!(name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'), "{name}");
+        let description = tool["description"].as_str().unwrap().chars().count();
+        assert!(description <= 2000, "{name}: a description of {description} characters");
+        let schema = tool["input_schema"].to_string().len();
+        assert!(schema <= 16000, "{name}: a schema of {schema} characters");
+    }
     assert!(!names.contains(&"open_orbiters_tools"), "the server's own name");
     // Every catalogue tool name reads back as its own.
     assert!(matches!(tools::parse("orbiters_walk", &json!({ "intent": "fast_walk", "on": false })), Ok(Action::App(Intent::FastWalk { on: false }))));

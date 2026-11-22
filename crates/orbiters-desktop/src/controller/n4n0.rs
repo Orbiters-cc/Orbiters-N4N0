@@ -183,6 +183,19 @@ impl Host for Link {
         super::menu_shares::capture_picture(key)
     }
 
+    /// N4N0's assistant's intents for the app's own features (controller/assistant.rs, REQUEST20 6).
+    fn assistant_facts(&self) -> orbiters_n4n0_core::intents::Facts {
+        self.with(|c| c.assistant_facts()).unwrap_or_default()
+    }
+
+    fn assistant_state(&self) -> serde_json::Value {
+        self.with(|c| c.assistant_state()).unwrap_or_default()
+    }
+
+    fn assistant_intent(&self, intent: &orbiters_n4n0_core::intents::Intent, item: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+        self.with(|c| c.assistant_intent(intent, item)).unwrap_or_else(|| Err("Orbiters - N4N0 is closing.".into())) // i18n: not shown
+    }
+
     /// The avatar's Walk boost radial: kept, and not sent back to the radial.
     fn walk_boost(&self, strength: f32) {
         self.with(|c| c.set_walk_boost(strength, true));

@@ -255,6 +255,10 @@ pub enum Action {
     AssistantSwitch,
     /// N4N0 forgets this conversation.
     NewConversation,
+    /// The answer to what N4N0 asked to do (REQUEST20 6): yes, or no; the same as saying it.
+    AskAnswer(bool),
+    /// Ask N4N0's page shows what N4N0 did (its action log), or the conversation again.
+    TalkActions,
     /// A YouTube result, the `n`-th: its link, for the world's player.
     Video(usize),
     /// A YouTube result as a card dropped in the world.
@@ -587,6 +591,30 @@ impl Recent {
     }
 }
 
+/// How a line of N4N0's action log went, as its mark shows it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TalkTone {
+    #[default]
+    Done,
+    /// Waits for the person's yes, or a page was offered.
+    Waiting,
+    /// Not done: refused, failed.
+    Wrong,
+    /// The person said no.
+    Declined,
+}
+
+/// A line of N4N0's action log (REQUEST20 6), its words ready in the person's language.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TalkLogRow {
+    pub said: String,
+    /// How it went, in a word or two.
+    pub outcome: String,
+    /// When, and how ("offline", "needs your yes").
+    pub detail: String,
+    pub tone: TalkTone,
+}
+
 /// What the panels show of Orbiters' state.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Facts {
@@ -696,6 +724,13 @@ pub struct Facts {
     /// The browser was opened to sign in, from this page.
     pub talk_signing_in: bool,
     pub talk_lines: Vec<(bool, String)>,
+    /// What N4N0 asks to do and waits for the person's yes for, in their language (REQUEST20 6).
+    pub talk_question: Option<String>,
+    /// What N4N0 is doing now.
+    pub talk_doing: Option<String>,
+    /// What N4N0 did, newest first, and whether the page shows it rather than the conversation.
+    pub talk_log: Vec<TalkLogRow>,
+    pub talk_actions: bool,
     /// Tracking smoothing: on or off and each kind's milliseconds, and what the driver does now (`None`: not here).
     pub tracking: Option<(bool, [u16; 3], String)>,
     /// Why not, when it is not here.
@@ -935,6 +970,10 @@ pub enum Look {
     TalkButton,
     /// Starting the conversation over.
     NewTalk,
+    /// Yes, or No, to what N4N0 asks (REQUEST20 6).
+    AskAnswer(bool),
+    /// Actions, or Conversation: what Ask N4N0's page shows.
+    TalkActions,
     /// A world the person was in: its picture, name and last time.
     Visit(usize),
     /// Takes everything away for a moment, or brings it back.
@@ -1636,6 +1675,17 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             if !facts.talk_lines.is_empty() {
                 out.push(Item { action: Action::NewConversation, rect: r(1024.0 - 24.0 - 170.0, 10.0, 170.0, 40.0), look: Look::NewTalk });
             }
+            // What N4N0 did, a press away from the conversation (REQUEST20 6).
+            if !facts.talk_log.is_empty() {
+                let right = if facts.talk_lines.is_empty() { 1024.0 - 24.0 } else { 1024.0 - 24.0 - 170.0 - 10.0 };
+                out.push(Item { action: Action::TalkActions, rect: r(right - 160.0, 10.0, 160.0, 40.0), look: Look::TalkActions });
+            }
+            // Its question, answered with a press as well as by voice.
+            if facts.talk_question.is_some() {
+                let card = talk_question_card(facts);
+                out.push(Item { action: Action::AskAnswer(true), rect: r(card.right() - 16.0 - 150.0, card.bottom() - 16.0 - 44.0, 150.0, 44.0), look: Look::AskAnswer(true) });
+                out.push(Item { action: Action::AskAnswer(false), rect: r(card.right() - 16.0 - 150.0 - 12.0 - 130.0, card.bottom() - 16.0 - 44.0, 130.0, 44.0), look: Look::AskAnswer(false) });
+            }
             out
         }
         Sheet::Instances => {
@@ -1950,6 +2000,31 @@ pub fn videos_shown(scroll: f32) -> std::ops::Range<usize> {
 const TALK_LEFT: f32 = 368.0;
 const TALK_TOP: f32 = 60.0;
 const TALK_WIDTH: f32 = 1024.0 - TALK_LEFT - 24.0;
+/// The "doing" line above where Ask N4N0's page ends (REQUEST20 6).
+const TALK_DOING_HEIGHT: f32 = 40.0;
+/// A row of the action log.
+const TALK_LOG_ROW: f32 = 64.0;
+
+/// The question card at the foot of Ask N4N0's page: as tall as its question needs, up to five lines (it says what will be
+/// done, never more than that).
+fn talk_question_card(facts: &Facts) -> Rect {
+    let chars = facts.talk_question.as_deref().map_or(0, |q| q.chars().count()) as f32;
+    let per_line = ((TALK_WIDTH - 36.0) / 8.6).max(20.0);
+    let lines = (chars / per_line).ceil().clamp(1.0, 5.0);
+    let height = 104.0 + lines * 23.0;
+    Rect::from_min_size(pos2(TALK_LEFT, 576.0 - 12.0 - height), vec2(TALK_WIDTH, height))
+}
+
+/// Where the conversation (or the log) ends: above the question, or the line of what is being done.
+fn talk_bottom(facts: &Facts) -> f32 {
+    if facts.talk_question.is_some() {
+        talk_question_card(facts).top() - 8.0
+    } else if facts.talk_doing.is_some() {
+        576.0 - 8.0 - TALK_DOING_HEIGHT
+    } else {
+        576.0
+    }
+}
 
 /// A line's height: as good as can be told with no painter to measure it with, and a little over.
 fn talk_line_height(text: &str) -> f32 {
@@ -2002,7 +2077,8 @@ pub fn max_scroll(sheet: Sheet, facts: &Facts) -> f32 {
             (top + facts.videos.len().div_ceil(columns) as f32 * (height + 12.0) + 8.0 - 576.0).max(0.0)
         }
         Sheet::VideoHistory => history_sheet::max_scroll(facts),
-        Sheet::Talk => (TALK_TOP + facts.talk_lines.iter().map(|(_, t)| talk_line_height(t)).sum::<f32>() + facts.talk_heard.as_deref().map_or(0.0, talk_line_height) + 8.0 - 576.0).max(0.0),
+        Sheet::Talk if facts.talk_actions => (TALK_TOP + facts.talk_log.len() as f32 * (TALK_LOG_ROW + 8.0) + 8.0 - talk_bottom(facts)).max(0.0),
+        Sheet::Talk => (TALK_TOP + facts.talk_lines.iter().map(|(_, t)| talk_line_height(t)).sum::<f32>() + facts.talk_heard.as_deref().map_or(0.0, talk_line_height) + 8.0 - talk_bottom(facts)).max(0.0),
         _ => 0.0,
     }
 }
@@ -2580,6 +2656,10 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
             _ => (tr("Talk to N4N0").into(), tr("Press, speak, and press again.").into()),
         },
         Action::NewConversation => (tr("New conversation").into(), tr("N4N0 starts over.").into()),
+        Action::AskAnswer(true) => (tr("Yes, do it").into(), tr("N4N0 does what it asked, this once.").into()),
+        Action::AskAnswer(false) => (tr("No, leave it").into(), tr("Nothing is done.").into()),
+        Action::TalkActions if facts.talk_actions => (tr("Conversation").into(), tr("Back to what was said.").into()),
+        Action::TalkActions => (tr("What N4N0 did").into(), tr("Every action N4N0 took or asked about, and how it went.").into()),
         Action::HideView => (tr("Hide 3D").into(), tr("The capture around you goes.").into()),
         Action::SmallView(true) => (tr_ctx("view", "Small").into(), tr("Before you: grip it to take it, its hand's stick zooms.").into()),
         Action::SmallView(false) => (tr("Around you").into(), tr("Stand in it again.").into()),
@@ -3006,11 +3086,71 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     }
 }
 
+/// The foot of Ask N4N0's page (REQUEST20 6): what N4N0 asks to do, with Yes and No (the items), or what it is doing now.
+fn draw_talk_foot(p: &Painter, facts: &Facts) {
+    if let Some(question) = &facts.talk_question {
+        let card = talk_question_card(facts);
+        p.rect_filled(card, look::radius(look::TILE_RADIUS + 4.0), theme::mix(look::TILE, look::accent(), 0.10));
+        p.rect_stroke(card, look::radius(look::TILE_RADIUS + 4.0), Stroke::new(1.5, theme::alpha(look::accent(), 0.55)), egui::StrokeKind::Inside);
+        widgets::icon(p, pos2(card.left() + 28.0, card.top() + 28.0), icons::CHAT_TEARDROP_TEXT, 24.0, look::accent());
+        text(p, pos2(card.left() + 50.0, card.top() + 28.0), Align2::LEFT_CENTER, tr("N4N0 asks"), 18.0, weight::BOLD, look::LABEL);
+        let font = look::font(17.0, weight::MEDIUM);
+        let galley = p.layout(question.clone(), font, look::LABEL, card.width() - 36.0);
+        let shown = p.with_clip_rect(Rect::from_min_max(card.min + vec2(18.0, 46.0), pos2(card.right() - 18.0, card.bottom() - 70.0)));
+        shown.galley(card.min + vec2(18.0, 48.0), galley, look::LABEL);
+        let hint = look::font(15.0, weight::MEDIUM);
+        p.text(pos2(card.left() + 18.0, card.bottom() - 38.0), Align2::LEFT_CENTER, fit(p, tr("Or say yes or no"), &hint, card.width() - 340.0), hint, look::MUTED);
+    } else if let Some(doing) = &facts.talk_doing {
+        let strip = Rect::from_min_size(pos2(TALK_LEFT, 576.0 - 8.0 - TALK_DOING_HEIGHT), vec2(TALK_WIDTH, TALK_DOING_HEIGHT));
+        p.rect_filled(strip, look::radius(strip.height() / 2.0), look::TILE);
+        p.circle_filled(pos2(strip.left() + 22.0, strip.center().y), 6.0, look::accent());
+        let font = look::font(16.5, weight::SEMIBOLD);
+        let words = tr!("Doing: {what}", what = doing);
+        p.text(pos2(strip.left() + 38.0, strip.center().y), Align2::LEFT_CENTER, fit(p, &words, &font, strip.width() - 52.0), font, look::LABEL);
+    }
+}
+
+/// What N4N0 did (REQUEST20 6): a row a line of the log, newest first, each with how it went.
+fn draw_talk_log(p: &Painter, facts: &Facts) {
+    let area = Rect::from_min_max(pos2(TALK_LEFT, TALK_TOP), pos2(1024.0 - 20.0, talk_bottom(facts)));
+    let clip = p.with_clip_rect(area);
+    let mut y = TALK_TOP - facts.gallery_scroll;
+    for row in &facts.talk_log {
+        if y + TALK_LOG_ROW >= TALK_TOP && y <= area.bottom() {
+            let rect = Rect::from_min_size(pos2(TALK_LEFT, y), vec2(TALK_WIDTH, TALK_LOG_ROW));
+            clip.rect_filled(rect, look::radius(look::TILE_RADIUS), look::TILE);
+            let (glyph, ink) = match row.tone {
+                TalkTone::Done => (icons::CHECK, look::accent()),
+                TalkTone::Waiting => (icons::CLOCK, theme::mix(look::LABEL, look::accent(), 0.35)),
+                TalkTone::Wrong => (icons::WARNING_CIRCLE, theme::WARN),
+                TalkTone::Declined => (icons::X, look::MUTED),
+            };
+            widgets::icon(&clip, pos2(rect.left() + 28.0, rect.center().y), glyph, 24.0, ink);
+            let chip_font = look::font(14.5, weight::SEMIBOLD);
+            let chip_w = clip.layout_no_wrap(row.outcome.clone(), chip_font.clone(), ink).size().x.min(170.0) + 24.0;
+            let chip = Rect::from_min_size(pos2(rect.right() - 14.0 - chip_w, rect.center().y - 15.0), vec2(chip_w, 30.0));
+            clip.rect_filled(chip, look::radius(15.0), theme::alpha(ink, 0.16));
+            clip.text(chip.center(), Align2::CENTER_CENTER, fit(&clip, &row.outcome, &chip_font, chip_w - 16.0), chip_font, ink);
+            let room = chip.left() - rect.left() - 70.0;
+            let font = look::font(17.0, weight::SEMIBOLD);
+            clip.text(pos2(rect.left() + 54.0, rect.top() + 22.0), Align2::LEFT_CENTER, fit(&clip, &row.said, &font, room), font, look::LABEL);
+            let small = look::font(14.0, weight::MEDIUM);
+            clip.text(pos2(rect.left() + 54.0, rect.top() + 45.0), Align2::LEFT_CENTER, fit(&clip, &row.detail, &small, room), small, look::MUTED);
+        }
+        y += TALK_LOG_ROW + 8.0;
+    }
+}
+
 /// The conversation with N4N0, newest at the foot, the person's lines to the right.
 fn draw_conversation(p: &Painter, facts: &Facts) {
-    text(p, pos2(TALK_LEFT + 2.0, 30.0), Align2::LEFT_CENTER, tr("Conversation"), 20.0, weight::BOLD, look::LABEL);
-    let area = Rect::from_min_max(pos2(TALK_LEFT, TALK_TOP), pos2(1024.0 - 20.0, 576.0));
-    if facts.talk_lines.is_empty() && facts.talk_heard.is_none() {
+    text(p, pos2(TALK_LEFT + 2.0, 30.0), Align2::LEFT_CENTER, if facts.talk_actions { tr("What N4N0 did") } else { tr("Conversation") }, 20.0, weight::BOLD, look::LABEL);
+    draw_talk_foot(p, facts);
+    if facts.talk_actions {
+        draw_talk_log(p, facts);
+        return;
+    }
+    let area = Rect::from_min_max(pos2(TALK_LEFT, TALK_TOP), pos2(1024.0 - 20.0, talk_bottom(facts)));
+    if facts.talk_lines.is_empty() && facts.talk_heard.is_none() && facts.talk_question.is_none() {
         let (first, second) = match facts.talk {
             TalkNow::SignIn => (tr("Sign in first"), tr("N4N0 answers as your Orbiters account: sign in, then talk.")),
             TalkNow::Waiting | TalkNow::Listening(_) if facts.talk_auto => (tr("Go ahead"), tr("N4N0 hears when you start talking, and when you stop.")),
@@ -3950,6 +4090,27 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.rect_filled(rect, look::radius(rect.height() / 2.0), if hovered { look::TILE_HOVER } else { look::TILE });
             let (words, font) = fitted(p, tr("New conversation"), 15.0, weight::SEMIBOLD, rect.width() - 24.0, 13.0);
             p.text(rect.center(), Align2::CENTER_CENTER, words, font, look::LABEL);
+        }
+        Look::TalkActions => {
+            let on = facts.talk_actions;
+            p.rect_filled(rect, look::radius(rect.height() / 2.0), if on { theme::alpha(look::accent(), 0.2) } else if hovered { look::TILE_HOVER } else { look::TILE });
+            let words = if on { tr("Conversation").to_string() } else { tr!("Actions ({count})", count = facts.talk_log.len()) };
+            widgets::icon(p, pos2(rect.left() + 22.0, rect.center().y), if on { icons::CHAT_TEARDROP_TEXT } else { icons::LIST }, 18.0, if on { look::accent() } else { look::MUTED });
+            let (words, font) = fitted(p, &words, 15.0, weight::SEMIBOLD, rect.width() - 50.0, 13.0);
+            p.text(pos2(rect.left() + 38.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
+        }
+        Look::AskAnswer(yes) => {
+            let fill = if yes { if pressed { theme::mix(look::accent(), Color32::BLACK, 0.2) } else { look::accent() } } else if hovered { look::TILE_HOVER } else { look::TILE };
+            p.rect_filled(rect, look::radius(rect.height() / 2.0), fill);
+            if yes && hovered && !pressed {
+                p.rect_stroke(rect, look::radius(rect.height() / 2.0), Stroke::new(2.0, Color32::from_white_alpha(120)), egui::StrokeKind::Inside);
+            }
+            let (glyph, words, ink) = if yes { (icons::CHECK, tr("Yes, do it"), look::on_accent()) } else { (icons::X, tr("No, leave it"), look::LABEL) };
+            let (words, font) = fitted(p, words, 16.0, weight::SEMIBOLD, rect.width() - 52.0, 13.0);
+            let wide = p.layout_no_wrap(words.clone(), font.clone(), ink).size().x;
+            let left = rect.center().x - (wide + 26.0) / 2.0;
+            widgets::icon(p, pos2(left + 9.0, rect.center().y), glyph, 18.0, ink);
+            p.text(pos2(left + 26.0, rect.center().y), Align2::LEFT_CENTER, words, font, ink);
         }
         Look::TalkButton => {
             // Clear as day: the one thing on this page that changes with whether N4N0 hears you.
@@ -5999,6 +6160,39 @@ mod tests {
         assert!(sheet_items(Sheet::Talk, &talked).iter().any(|i| i.action == Action::NewConversation));
         assert!(max_scroll(Sheet::Talk, &talked) > 1000.0);
         assert_eq!(max_scroll(Sheet::Talk, &Facts { talk_lines: vec![(true, "Hello".into())], ..facts() }), 0.0);
+    }
+
+    /// REQUEST20 6: what N4N0 asks is answered with a press as well as by voice, and what it did is a press away.
+    #[test]
+    fn the_ask_page_answers_and_lists_what_n4n0_did() {
+        let asked = Facts { talk_question: Some("N4N0 will do this if you say yes: Boop \"Sam\". Say yes to do it.".into()), ..facts() };
+        let items = sheet_items(Sheet::Talk, &asked);
+        let rect = |a: Action| items.iter().find(|i| i.action == a).map(|i| i.rect).unwrap_or_else(|| panic!("{a:?}"));
+        let (yes, no) = (rect(Action::AskAnswer(true)), rect(Action::AskAnswer(false)));
+        assert!(!yes.intersects(no) && no.right() < yes.left(), "No, then Yes, apart");
+        let talk = rect(Action::TalkToggle);
+        assert!(!yes.intersects(talk) && !no.intersects(talk) && yes.bottom() <= 576.0, "on the conversation's side, on the page");
+        assert!(talk_question_card(&asked).contains_rect(yes) && talk_question_card(&asked).contains_rect(no));
+        // A long question has room: its card grows, its buttons stay on the page.
+        let long = Facts { talk_question: Some("N4N0 will do this if you say yes: Boop \"Sam\"; Set your VRChat status to Busy; Set your VRChat status text to \"brb, food\". Say yes to do them.".into()), ..facts() };
+        assert!(talk_question_card(&long).height() > talk_question_card(&asked).height());
+        assert!(sheet_items(Sheet::Talk, &long).iter().all(|i| i.rect.top() >= 0.0 && i.rect.bottom() <= 576.0));
+        assert!(caption(Action::AskAnswer(true), &asked).is_some() && caption(Action::AskAnswer(false), &asked).is_some());
+        // Nothing asked: no buttons; nothing done: no Actions.
+        assert!(!sheet_items(Sheet::Talk, &facts()).iter().any(|i| matches!(i.action, Action::AskAnswer(_) | Action::TalkActions)));
+        let logged = Facts { talk_log: (0..20).map(|i| TalkLogRow { said: format!("Action {i}"), ..Default::default() }).collect(), ..facts() };
+        let chip = sheet_items(Sheet::Talk, &logged).into_iter().find(|i| i.action == Action::TalkActions).expect("Actions").rect;
+        assert!(chip.top() >= 0.0 && chip.right() <= 1024.0);
+        // With a conversation too, Actions sits beside New conversation, never over it.
+        let both = Facts { talk_lines: vec![(true, "Hi".into())], ..logged.clone() };
+        let items = sheet_items(Sheet::Talk, &both);
+        let new = items.iter().find(|i| i.action == Action::NewConversation).unwrap().rect;
+        let actions = items.iter().find(|i| i.action == Action::TalkActions).unwrap().rect;
+        assert!(!new.intersects(actions));
+        assert!(max_scroll(Sheet::Talk, &Facts { talk_actions: true, ..logged.clone() }) > 500.0, "the log scrolls");
+        // The question leaves the conversation less room, never under it.
+        let long = Facts { talk_lines: (0..40).map(|i| (i % 2 == 0, "A sentence of a fair length said here. ".repeat(3))).collect(), ..facts() };
+        assert!(max_scroll(Sheet::Talk, &Facts { talk_question: asked.talk_question.clone(), ..long.clone() }) > max_scroll(Sheet::Talk, &long));
     }
 
     /// When N4N0 speaks it shows, wherever the person is in these menus.

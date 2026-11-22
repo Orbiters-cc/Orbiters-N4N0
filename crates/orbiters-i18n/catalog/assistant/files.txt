@@ -1,3 +1,4 @@
 # The assistant's catalogue of intents (REQUEST20 6): what the person reads of each action, its log and its questions.
 crates/orbiters-n4n0-core/src/intents/mod.rs
 crates/orbiters-n4n0/src/assistant.rs
+crates/orbiters-desktop/src/controller/assistant.rs

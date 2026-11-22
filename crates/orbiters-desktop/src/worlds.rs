@@ -796,7 +796,16 @@ impl Pictures {
     /// The pictures of VRChat people a page will show (the whole friends list, in its order: `(address, usr_ id)`), read
     /// with the session of `scope`: those not kept on this computer are completed from VRCX's and VRCNext's copies, and
     /// the rest asked of VRChat in the background, slowly ([`profile_pictures::Profiles::warm`]).
-    pub fn warm_profiles(&self, scope: &crate::controller::vrchat_data::Scope, items: Vec<(String, Option<String>)>) {
+    /// A person's picture that could not be had is asked again at its next look, not after its wait (up to five minutes):
+    /// a new list, or the session back after waiting, is when it can be had.
+    pub fn warm_profiles(&mut self, scope: &crate::controller::vrchat_data::Scope, items: Vec<(String, Option<String>)>) {
+        for (picture, kept) in &mut self.slots {
+            if let (Picture::Profile { .. }, Slot::Missing { since, tries }) = (picture, &mut kept.slot) {
+                if *tries != NEVER {
+                    (*since, *tries) = (f64::NEG_INFINITY, 0);
+                }
+            }
+        }
         if let Some(backend) = &self.backend {
             profile_pictures::Profiles::shared().warm(items, profile_fetch(backend, scope));
         }

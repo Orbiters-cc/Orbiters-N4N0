@@ -16,6 +16,8 @@ use std::time::Duration;
 
 /// How many times in a row a QR code nobody read is replaced by a new sign-in before the set-up gives up.
 const SIGN_INS: u32 = 8;
+/// A game that ends this soon after it started did not start for the person (the engine, or VRChat in it, crashed).
+const TOO_SHORT: u64 = obelisk::EARLY_END.as_secs();
 
 /// A command of the program that failed: its code (`docs/CLI.md` of the fork), and a sentence for the person.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +82,35 @@ fn note(args: &[&str], code: &str, message: &str) {
     }
     let text = format!("obelisk-cli {}: {code}: {message}", args.iter().take(2).copied().collect::<Vec<_>>().join(" ")); // i18n: not shown (a program's own words, for the log)
     orbiters_core::notice_log::append(&orbiters_core::paths::logs_dir(), "detail", &text, time::OffsetDateTime::now_utc().unix_timestamp());
+}
+
+/// Runs the program with `args` for at most `limit`, each line of what it says to `each`: for short commands whose events
+/// the caller reads itself (the bridge's quit). Killed past its time.
+pub fn run_for(program: &Path, args: &[&str], limit: Duration, mut each: impl FnMut(&str)) -> Result<(), String> {
+    let mut child = spawn(program, args).map_err(|e| e.to_string())?;
+    let out = child.stdout.take().expect("piped");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let until = std::time::Instant::now() + limit;
+    loop {
+        match receiver.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+            Ok(line) => each(&line),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(tr!("It did not answer within {seconds} s.", seconds = limit.as_secs()));
+            }
+        }
+    }
+    let _ = child.wait();
+    Ok(())
 }
 
 fn spawn(program: &Path, args: &[&str]) -> std::io::Result<Child> {
@@ -149,7 +180,9 @@ fn sign_in(program: &Path, progress: &dyn Fn(EngineSetup), stop: &AtomicBool) ->
     Err(last)
 }
 
-/// A VRChat being started, or running, by this N4N0: the program stays attached until the game ends.
+/// A VRChat being started, or running, by this N4N0: the program stays attached until the game ends. Home's Play and the
+/// VRChat bridge start through the same one (`MacMachine::play`): one start at a time, none for [`obelisk::AFTER_EARLY_END`]
+/// after a start that ended early, and each start's outcome kept by its launch id for whoever made it.
 #[derive(Default)]
 pub struct Play {
     now: Mutex<Now>,
@@ -161,15 +194,57 @@ struct Now {
     attached: bool,
     /// The game was seen running by the program, under this process when it said which.
     running: Option<Option<u32>>,
-    /// Why the last start failed, until it is told.
+    /// Why the last start failed, until Home told it (Home's toast: once).
     failure: Option<Failure>,
     /// The program's own process: once it is gone the game is neither starting nor running by its word, whoever
     /// still holds its output open (the game's supervisor inherits it).
     program: Option<u32>,
+    /// The launches made, newest last (a few kept): what each came to, read by its launch id without being used up.
+    launches: Vec<Launch>,
+    made: u64,
 }
 
-/// A game that ends this soon after it started did not start for the person (the engine, or VRChat in it, crashed).
-const TOO_SHORT: u64 = 150;
+/// What became of one start, as the program said it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Launch {
+    pub id: u64,
+    /// The engine's launcher of the game, and its Game session (from 0.1.3 the program says it; before, the engine's
+    /// records are read for it).
+    pub launcher: Option<u32>,
+    pub session: Option<String>,
+    pub running: bool,
+    /// The game ended: after how many seconds, with how many frames shown.
+    pub ended: Option<(Option<u64>, Option<u64>)>,
+    /// Why it did not start (or ended at once).
+    pub failure: Option<Failure>,
+    /// The program is no longer attached to it.
+    pub over: bool,
+}
+
+/// Why a start was not made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// A start is under way already, or the game runs.
+    Busy,
+    /// A start ended early this long ago: Easy Anti-Cheat fails a start this soon after one.
+    Wait(Duration),
+    /// The program could not be run.
+    Failed(String),
+}
+
+impl Refused {
+    /// In the person's words.
+    pub fn words(&self) -> String {
+        match self {
+            Refused::Busy => tr("VRChat is already starting.").into(),
+            Refused::Wait(wait) => tr!("VRChat ended early a moment ago: it can be started again in {seconds} s.", seconds = wait.as_secs().max(1)),
+            Refused::Failed(why) => why.clone(),
+        }
+    }
+}
+
+/// How many launches' outcomes are kept.
+const LAUNCHES_KEPT: usize = 8;
 
 /// Whether the process `pid` still runs (one that ended and was not yet waited for does not).
 fn alive(pid: u32) -> bool {
@@ -179,55 +254,123 @@ fn alive(pid: u32) -> bool {
     system.process(pid).is_some_and(|p| !matches!(p.status(), sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead))
 }
 
+impl Now {
+    fn launch(&mut self, id: u64) -> Option<&mut Launch> {
+        self.launches.iter_mut().find(|l| l.id == id)
+    }
+}
+
 impl Play {
-    /// Starts VRChat with `args`; the events are followed on a thread of their own. An error when the program cannot
-    /// be run at all, or a start is already under way.
-    pub fn start(self: &Arc<Self>, program: &Path, args: &[String]) -> Result<(), String> {
+    /// Starts VRChat with `args` from the library `library` (whose records say when a start last ended early); the events
+    /// are followed on a thread of their own. The launch's id, or why it was not made.
+    pub fn start(self: &Arc<Self>, program: &Path, library: &Path, args: &[String]) -> Result<u64, Refused> {
+        self.start_at(program, library, args, std::time::SystemTime::now())
+    }
+
+    pub(crate) fn start_at(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime) -> Result<u64, Refused> {
         let mut now = self.now.lock().unwrap();
         if now.attached {
-            return Err(tr("VRChat is already starting.").into());
+            return Err(Refused::Busy);
+        }
+        if let Some(wait) = obelisk::start_wait(obelisk::last_early_end(library), now_is) {
+            return Err(Refused::Wait(wait));
         }
         let mut command: Vec<&str> = vec!["steam", "play", obelisk::STEAM_APP];
         if !args.is_empty() {
             command.push("--");
             command.extend(args.iter().map(String::as_str));
         }
-        let mut child = spawn(program, &command).map_err(|e| e.to_string())?;
-        *now = Now { attached: true, running: None, failure: None, program: Some(child.id()) };
+        let mut child = spawn(program, &command).map_err(|e| Refused::Failed(e.to_string()))?;
+        now.made += 1;
+        let id = now.made;
+        now.attached = true;
+        now.running = None;
+        now.failure = None;
+        now.program = Some(child.id());
+        now.launches.push(Launch { id, ..Default::default() });
+        let drop_old = now.launches.len().saturating_sub(LAUNCHES_KEPT);
+        now.launches.drain(..drop_old);
         drop(now);
         let play = self.clone();
+        let library = library.to_path_buf();
         let followed = std::thread::Builder::new().name("obelisk-play".into()).spawn(move || {
             let out = child.stdout.take().expect("piped");
-            let mut failure = None;
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                match obelisk::event(&line) {
-                    Some(Event::Running { pid }) => play.now.lock().unwrap().running = Some(pid),
-                    Some(Event::Exited { code, seconds }) => {
-                        play.now.lock().unwrap().running = None;
-                        note(&["steam", "play"], "exited", &format!("exit code {code:?} after {seconds:?} s")); // i18n: not shown (for the log)
-                        if seconds.is_some_and(|s| s < TOO_SHORT) {
-                            failure = Some(Failure::new("ended_at_once", tr("VRChat closed shortly after it started. If it crashed, press Play again.")));
-                        }
-                    }
-                    // A failure after the game ran (its session, its Cloud saves) is not a start that failed.
-                    Some(Event::Error { code, message }) => {
-                        note(&["steam", "play"], &code, &message);
-                        if play.now.lock().unwrap().running.is_none() {
-                            failure = Some(Failure::new(&code, words(&code, &message)));
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            play.follow(id, &library, BufReader::new(out).lines().map_while(Result::ok));
             let _ = child.wait();
-            let mut now = play.now.lock().unwrap();
-            *now = Now { attached: false, running: None, failure, program: None };
+            play.finish(id);
         });
         if followed.is_err() {
-            self.now.lock().unwrap().attached = false;
-            return Err(tr("VRChat could not be followed.").into());
+            let mut now = self.now.lock().unwrap();
+            now.attached = false;
+            return Err(Refused::Failed(tr("VRChat could not be followed.").into()));
         }
-        Ok(())
+        Ok(id)
+    }
+
+    /// What the program says of launch `id`, line by line.
+    fn follow(&self, id: u64, library: &Path, lines: impl Iterator<Item = String>) {
+        for line in lines {
+            let Some(event) = obelisk::event(&line) else { continue };
+            let mut now = self.now.lock().unwrap();
+            match event {
+                Event::Running { pid, session } => {
+                    now.running = Some(pid);
+                    // Before 0.1.3 the program does not name the session: the engine's record of the game does.
+                    let session = session.or_else(|| {
+                        pid.and_then(|pid| obelisk::session_records(library).into_iter().find(|(r, _)| r.game == Some(pid) && !r.over()).map(|(r, _)| r.id))
+                    });
+                    if let Some(launch) = now.launch(id) {
+                        launch.launcher = pid;
+                        launch.session = session;
+                        launch.running = true;
+                    }
+                }
+                Event::Exited { code, seconds, frames } => {
+                    now.running = None;
+                    if !cfg!(test) {
+                        note(&["steam", "play"], "exited", &format!("exit code {code:?} after {seconds:?} s, {frames:?} frames shown")); // i18n: not shown (for the log)
+                    }
+                    let early = seconds.is_some_and(|s| s < TOO_SHORT) || frames == Some(0);
+                    let failure = early.then(|| Failure::new("ended_at_once", tr("VRChat closed shortly after it started. If it crashed, press Play again.")));
+                    if let Some(failure) = &failure {
+                        now.failure = Some(failure.clone());
+                    }
+                    if let Some(launch) = now.launch(id) {
+                        launch.running = false;
+                        launch.ended = Some((seconds, frames));
+                        if launch.failure.is_none() {
+                            launch.failure = failure;
+                        }
+                    }
+                }
+                // A failure after the game ran (its session, its Cloud saves) is not a start that failed.
+                Event::Error { code, message } => {
+                    if !cfg!(test) {
+                        note(&["steam", "play"], &code, &message);
+                    }
+                    let ran = now.launch(id).is_some_and(|l| l.running || l.ended.is_some());
+                    if !ran {
+                        let failure = Failure::new(&code, words(&code, &message));
+                        now.failure = Some(failure.clone());
+                        if let Some(launch) = now.launch(id) {
+                            launch.failure = Some(failure);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn finish(&self, id: u64) {
+        let mut now = self.now.lock().unwrap();
+        now.attached = false;
+        now.running = None;
+        now.program = None;
+        if let Some(launch) = now.launch(id) {
+            launch.over = true;
+            launch.running = false;
+        }
     }
 
     /// A start is under way and the game is not up yet (the engine or an update of VRChat may download first).
@@ -242,9 +385,21 @@ impl Play {
         now.running.filter(|_| now.program.is_some_and(alive))
     }
 
-    /// Why the last start failed: told once.
+    /// The program's own process while it is attached to a game: a real process that lives exactly as long as the game is
+    /// this N4N0's to follow (what `MacMachine` names the game by when the program did not say the game's process).
+    pub fn program(&self) -> Option<u32> {
+        let now = self.now.lock().unwrap();
+        now.program.filter(|p| alive(*p))
+    }
+
+    /// Why the last start failed: told once, to Home (the bridge reads its own launch's by [`Play::launch`]).
     pub fn failure(&self) -> Option<Failure> {
         self.now.lock().unwrap().failure.take()
+    }
+
+    /// What became of launch `id`, as often as asked.
+    pub fn launch(&self, id: u64) -> Option<Launch> {
+        self.now.lock().unwrap().launches.iter().find(|l| l.id == id).cloned()
     }
 }
 
@@ -353,6 +508,72 @@ mod tests {
         std::fs::copy("/bin/ls", program.parent().unwrap().join("obelisk-cli")).unwrap();
         assert!(!genuine(program.parent().unwrap()));
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// A program that says what obelisk-cli said on 2026-11-22 (recorded), then holds on as long as `hold` seconds.
+    fn fake_program(dir: &Path, lines: &[&str], hold: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let script = dir.join("obelisk-cli");
+        let body: String = lines.iter().map(|l| format!("printf '%s\\n' '{l}'\n")).collect();
+        std::fs::write(&script, format!("#!/bin/sh\n{body}sleep {hold}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    fn wait_for(play: &Play, id: u64, done: impl Fn(&Launch) -> bool) -> Launch {
+        let begin = std::time::Instant::now();
+        loop {
+            let launch = play.launch(id).expect("kept");
+            if done(&launch) || begin.elapsed() > Duration::from_secs(20) {
+                return launch;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn each_start_s_outcome_is_kept_by_its_id_for_home_and_the_bridge_alike() {
+        let dir = std::env::temp_dir().join(format!("orbiters-play-trace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let library = dir.join("library");
+        // The start of 19:54: running under its launcher, then out after 100 s with no frame shown.
+        let program = fake_program(
+            &dir,
+            &[
+                r#"{"event":"preparing","app_id":438100}"#,
+                r#"{"event":"starting","app_id":438100}"#,
+                r#"{"event":"running","app_id":438100,"pid":83030,"session_id":"6da7c40d-9fd2-4f3b-8770-aadffa2d0088"}"#,
+                r#"{"event":"exited","app_id":438100,"session_id":"6da7c40d-9fd2-4f3b-8770-aadffa2d0088","frames":0,"exit_code":0,"exit_signal":null,"seconds":100,"ended_by_request":false}"#,
+            ],
+            0,
+        );
+        let play = Arc::new(Play::default());
+        let id = play.start(&program, &library, &[]).expect("starts");
+        let launch = wait_for(&play, id, |l| l.over);
+        assert_eq!((launch.launcher, launch.session.as_deref()), (Some(83030), Some("6da7c40d-9fd2-4f3b-8770-aadffa2d0088")));
+        assert_eq!(launch.ended, Some((Some(100), Some(0))));
+        assert_eq!(launch.failure.as_ref().map(|f| f.code.as_str()), Some("ended_at_once"), "no frame shown: a start that did not work");
+        // Home's toast takes it once; the bridge still reads its own launch's.
+        assert!(play.failure().is_some());
+        assert!(play.failure().is_none(), "told once");
+        assert!(play.launch(id).unwrap().failure.is_some(), "the launch's own outcome is not used up");
+
+        // One start at a time, for whoever asks.
+        let slow = fake_program(&dir.join("slow"), &[r#"{"event":"starting","app_id":438100}"#], 3);
+        let first = play.start(&slow, &library, &[]).expect("starts");
+        assert_eq!(play.start(&slow, &library, &[]), Err(Refused::Busy));
+        wait_for(&play, first, |l| l.over);
+
+        // An early end in the engine's records holds every start for 80 s, from the records (a restart of N4N0 keeps it).
+        std::fs::create_dir_all(library.join("SteamSessions")).unwrap();
+        std::fs::write(library.join("SteamSessions").join("a.v2.json"), r#"{"id":"a","store":{"app_id":438100},"phase":"Finished","played":{"seconds":100,"frames":{"count":0}}}"#).unwrap();
+        let refused = play.start(&program, &library, &[]).unwrap_err();
+        assert!(matches!(refused, Refused::Wait(wait) if wait > Duration::from_secs(70)), "{refused:?}");
+        assert!(refused.words().contains("s."));
+        let later = std::time::SystemTime::now() + Duration::from_secs(81);
+        assert!(play.start_at(&program, &library, &[], later).is_ok(), "80 s on, it starts");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -55,5 +55,6 @@
   "The download does not say its checksum.": "ダウンロードにチェックサムがありません。",
   "The download could not be unpacked.": "ダウンロードを展開できませんでした。",
   "The download is not signed by Orbiters: nothing was installed.": "ダウンロードに Orbiters の署名がありません。何もインストールしていません。",
-  "VRChat closed shortly after it started. If it crashed, press Play again.": "VRChat が起動直後に終了しました。クラッシュした場合は、もう一度プレイを押してください。"
+  "VRChat closed shortly after it started. If it crashed, press Play again.": "VRChat が起動直後に終了しました。クラッシュした場合は、もう一度プレイを押してください。",
+  "VRChat ended early a moment ago: it can be started again in {seconds} s.": "VRChat は少し前に早く終了しました。{seconds} 秒後にもう一度起動できます。"
 }

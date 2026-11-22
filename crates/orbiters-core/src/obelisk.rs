@@ -160,10 +160,111 @@ pub fn session_game(record: &str) -> Option<u32> {
     record.get("game")?.get("pid")?.as_u64().and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 1)
 }
 
-/// The processes the session records in `library` name as a running VRChat.
-pub fn session_games(library: &Path) -> Vec<u32> {
+/// The processes the session records in `library` name as a running VRChat. `None` when the records could not be read
+/// at all: that is not "none runs" (a folder that does not exist yet is: no game was ever started there).
+pub fn session_games(library: &Path) -> Option<Vec<u32>> {
+    let files = match std::fs::read_dir(library.join("SteamSessions")) {
+        Ok(files) => files,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    Some(files.flatten().filter(|f| f.file_name().to_string_lossy().ends_with(".v2.json")).filter_map(|f| std::fs::read_to_string(f.path()).ok()).filter_map(|text| session_game(&text)).collect())
+}
+
+/// One of the engine's Game session records (`SteamSessions/<id>.v2.json`) as far as N4N0 reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionRecord {
+    /// The Game session's UUID (the record's name).
+    pub id: String,
+    /// `Preparing`, `Running`, `Finalizing`, `Finished`, `Failed`.
+    pub phase: String,
+    /// The engine's launcher of the game while it runs (the `running` event's pid).
+    pub game: Option<u32>,
+    /// How long the game ran, and how many frames it presented, once it ended.
+    pub seconds: Option<u64>,
+    pub frames: Option<u64>,
+}
+
+impl SessionRecord {
+    pub fn over(&self) -> bool {
+        matches!(self.phase.as_str(), "Finished" | "Failed") // i18n: not shown (values in the engine's file)
+    }
+
+    /// The game ended before it was played: within [`EARLY_END`] of its start, or without a frame shown (a start whose
+    /// graphics never came up runs on 100 s and more, measured 2026-11-22 19:54).
+    pub fn ended_early(&self) -> bool {
+        self.over() && (self.seconds.is_some_and(|s| s < EARLY_END.as_secs()) || self.frames == Some(0))
+    }
+}
+
+/// A game that ends this soon after it started did not start for the person (the engine, or VRChat in it, crashed).
+pub const EARLY_END: std::time::Duration = std::time::Duration::from_secs(150);
+/// How long VRChat is not started again after a start that ended early: one within about 80 s of an early end is what makes
+/// Easy Anti-Cheat fail (AGENTS.md, the VR sandbox's rules), whoever starts it (Home's Play or the bridge).
+pub const AFTER_EARLY_END: std::time::Duration = std::time::Duration::from_secs(80);
+
+/// Reads a session record; anything else gives none.
+pub fn session_record(text: &str) -> Option<SessionRecord> {
+    let record: serde_json::Value = serde_json::from_str(text).ok()?;
+    let app = record.get("store")?.get("app_id")?.as_u64()?;
+    if app.to_string() != crate::vrchat_launch::STEAM_APP {
+        return None;
+    }
+    let played = record.get("played").filter(|p| p.is_object());
+    Some(SessionRecord {
+        id: record.get("id")?.as_str()?.to_string(),
+        phase: record.get("phase")?.as_str()?.to_string(),
+        game: record.get("game").and_then(|g| g.get("pid")).and_then(serde_json::Value::as_u64).and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 1),
+        seconds: played.and_then(|p| p.get("seconds")).and_then(serde_json::Value::as_u64),
+        frames: played.and_then(|p| p.get("frames")).and_then(|f| f.get("count")).and_then(serde_json::Value::as_u64),
+    })
+}
+
+/// Every VRChat session record in `library`, with when it was last written.
+pub fn session_records(library: &Path) -> Vec<(SessionRecord, std::time::SystemTime)> {
     let Ok(files) = std::fs::read_dir(library.join("SteamSessions")) else { return Vec::new() };
-    files.flatten().filter(|f| f.file_name().to_string_lossy().ends_with(".v2.json")).filter_map(|f| std::fs::read_to_string(f.path()).ok()).filter_map(|text| session_game(&text)).collect()
+    files
+        .flatten()
+        .filter(|f| f.file_name().to_string_lossy().ends_with(".v2.json"))
+        .filter_map(|f| {
+            let written = f.metadata().and_then(|m| m.modified()).ok()?;
+            Some((session_record(&std::fs::read_to_string(f.path()).ok()?)?, written))
+        })
+        .collect()
+}
+
+/// How long a start must still wait at `now`, after the last start that ended early at `ended` ([`AFTER_EARLY_END`]):
+/// from the engine's own records, so that it holds across a restart of N4N0.
+pub fn start_wait(ended: Option<std::time::SystemTime>, now: std::time::SystemTime) -> Option<std::time::Duration> {
+    let since = now.duration_since(ended?).unwrap_or_default();
+    AFTER_EARLY_END.checked_sub(since).filter(|wait| !wait.is_zero())
+}
+
+/// When the last start that ended early ended, from the records in `library`.
+pub fn last_early_end(library: &Path) -> Option<std::time::SystemTime> {
+    session_records(library).into_iter().filter(|(r, _)| r.ended_early()).map(|(_, at)| at).max()
+}
+
+/// VRChat's own log folder in the engine's Wine prefix (its `crossover` user; the earlier lookup for Proton's `steamuser`
+/// never finds it).
+pub fn vrchat_log_dir(library: &Path) -> PathBuf {
+    library.join("Prefixes/steam-438100-windows-linux/prefix/drive_c/users/crossover/AppData/LocalLow/VRChat/VRChat")
+}
+
+/// The engine's log of VRChat's runs (Wine, the window server, the graphics server), in the home `home`.
+pub fn engine_log(home: &Path) -> PathBuf {
+    home.join("Library/Logs/Obelisk/Steam").join(format!("wine-{}.log", crate::vrchat_launch::STEAM_APP))
+}
+
+/// Whether a stretch of the engine's log says the game's graphics went: its graphics server dropped the game's context
+/// (measured 2026-11-22, three starts: 5 to 46 s after the world loaded, the game ran on without a frame).
+pub fn renderer_lost(engine_log: &str) -> bool {
+    engine_log.contains("VTEST_CLIENT_ERROR_CONTEXT_LOST") || engine_log.contains("npt: destroying Neptune context") // i18n: not shown (the engine's log lines)
+}
+
+/// The engine's socket of the window server of the game whose launcher is `launcher`, under the temporary folder `tmp`.
+pub fn window_server_socket(tmp: &Path, launcher: u32) -> PathBuf {
+    tmp.join(format!("obelisk-engine-{launcher}")).join("wsd.sock")
 }
 
 /// What a Mac has of what VRChat needs.
@@ -208,9 +309,10 @@ pub enum Event {
     Installed,
     /// The game's supervisor holds it.
     Starting,
-    Running { pid: Option<u32> },
-    /// The game ended, after this many seconds when the program knows.
-    Exited { code: Option<i64>, seconds: Option<u64> },
+    /// The game runs: the engine's launcher of it, and its Game session (0.1.3 and later say it).
+    Running { pid: Option<u32>, session: Option<String> },
+    /// The game ended, after this many seconds and with this many frames shown, when the program knows.
+    Exited { code: Option<i64>, seconds: Option<u64>, frames: Option<u64> },
     /// The command failed: its stable code, and a sentence in English for a log.
     Error { code: String, message: String },
     /// Anything else the program tells.
@@ -235,8 +337,15 @@ pub fn event(line: &str) -> Option<Event> {
         },
         "installed" => Event::Installed,
         "starting" => Event::Starting,
-        "running" => Event::Running { pid: value.get("pid").and_then(serde_json::Value::as_u64).and_then(|pid| u32::try_from(pid).ok()) },
-        "exited" => Event::Exited { code: value.get("exit_code").and_then(serde_json::Value::as_i64), seconds: value.get("seconds").and_then(serde_json::Value::as_u64) },
+        "running" => Event::Running {
+            pid: value.get("pid").and_then(serde_json::Value::as_u64).and_then(|pid| u32::try_from(pid).ok()),
+            session: value.get("session_id").and_then(serde_json::Value::as_str).map(str::to_owned),
+        },
+        "exited" => Event::Exited {
+            code: value.get("exit_code").and_then(serde_json::Value::as_i64),
+            seconds: value.get("seconds").and_then(serde_json::Value::as_u64),
+            frames: value.get("frames").and_then(serde_json::Value::as_u64),
+        },
         "error" => Event::Error { code: text("code"), message: text("message") },
         _ => Event::Other,
     })
@@ -368,6 +477,55 @@ mod tests {
     }
 
     #[test]
+    fn a_record_says_its_session_and_whether_it_ended_early() {
+        // As the engine wrote them on 2026-11-22: a start whose graphics never came up (100 s, 0 frames), one played, one running.
+        let crashed = r#"{"version":2,"id":"6da7c40d-9fd2-4f3b-8770-aadffa2d0088","store":{"app_id":438100,"host":"stopped"},"phase":"Finished","played":{"seconds":100,"frames":{"count":0}},"game":null}"#;
+        let played = r#"{"version":2,"id":"f790b579","store":{"app_id":438100},"phase":"Finished","played":{"seconds":511,"frames":{"count":11500}},"game":null}"#;
+        let running = r#"{"version":2,"id":"f2931045","store":{"app_id":438100},"phase":"Running","played":null,"game":{"pid":12777}}"#;
+        let crashed = session_record(crashed).unwrap();
+        assert_eq!((crashed.id.as_str(), crashed.frames, crashed.seconds), ("6da7c40d-9fd2-4f3b-8770-aadffa2d0088", Some(0), Some(100)));
+        assert!(crashed.ended_early());
+        assert!(!session_record(played).unwrap().ended_early());
+        let running = session_record(running).unwrap();
+        assert_eq!(running.game, Some(12777));
+        assert!(!running.over() && !running.ended_early());
+        assert_eq!(session_record(r#"{"version":2,"id":"x"}"#), None, "the pointer to the last session");
+        assert_eq!(session_record(&running_other_app()), None);
+    }
+
+    fn running_other_app() -> String {
+        r#"{"version":2,"id":"y","store":{"app_id":252950},"phase":"Running","game":{"pid":5}}"#.into()
+    }
+
+    #[test]
+    fn a_start_waits_80_s_after_an_early_end_whoever_starts_it() {
+        use std::time::{Duration, SystemTime};
+        let ended = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        assert_eq!(start_wait(None, ended), None, "nothing ended early");
+        assert_eq!(start_wait(Some(ended), ended + Duration::from_secs(10)), Some(Duration::from_secs(70)));
+        assert_eq!(start_wait(Some(ended), ended + Duration::from_secs(80)), None);
+        assert_eq!(start_wait(Some(ended), ended - Duration::from_secs(5)), Some(Duration::from_secs(80)), "a clock set back waits the whole time");
+        // From the records themselves: it holds across a restart of N4N0.
+        let temp = Temp::new("gate");
+        let sessions = temp.0.join("SteamSessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        assert_eq!(session_games(&temp.0), Some(Vec::new()));
+        std::fs::write(sessions.join("a.v2.json"), r#"{"id":"a","store":{"app_id":438100},"phase":"Finished","played":{"seconds":40,"frames":{"count":96}}}"#).unwrap();
+        let wait = start_wait(last_early_end(&temp.0), SystemTime::now()).expect("an early end just now");
+        assert!(wait > Duration::from_secs(70));
+        assert_eq!(session_games(&temp.0.join("nothing-here")), Some(Vec::new()), "no folder: no game ever ran");
+    }
+
+    #[test]
+    fn the_engine_s_log_says_when_the_graphics_went() {
+        assert!(renderer_lost("neptune: ring fatal error\nclient: VTEST_CLIENT_ERROR_CONTEXT_LOST\n"));
+        assert!(renderer_lost("Nov 22 20:53:33  virgl_render_server[19563] <Debug>: npt: destroying Neptune context 1"));
+        assert!(!renderer_lost("wsd: window 1 overlay: frame held 100.0 ms"));
+        assert_eq!(window_server_socket(Path::new("/var/folders/x/T"), 12777), PathBuf::from("/var/folders/x/T/obelisk-engine-12777/wsd.sock"));
+        assert!(vrchat_log_dir(Path::new("/L")).ends_with("users/crossover/AppData/LocalLow/VRChat/VRChat"));
+    }
+
+    #[test]
     fn the_program_s_lines_are_read_as_what_n4n0_acts_on() {
         assert_eq!(event(r#"{"event":"status","version":"0.1.0","account":null,"keychain":"ok"}"#), Some(Event::Status { account: None }));
         assert_eq!(event(r#"{"event":"status","account":{"steam_id":"7656","account_name":"someone"}}"#), Some(Event::Status { account: Some("someone".into()) }));
@@ -379,9 +537,11 @@ mod tests {
         assert_eq!(event(r#"{"event":"progress","app_id":438100,"phase":"verifying","fraction":7.0}"#), Some(Event::Progress { phase: Phase::Checking, fraction: Some(1.0) }));
         assert_eq!(event(r#"{"event":"installed","app_id":438100}"#), Some(Event::Installed));
         assert_eq!(event(r#"{"event":"starting","app_id":438100}"#), Some(Event::Starting));
-        assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":4242}"#), Some(Event::Running { pid: Some(4242) }));
-        assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":null}"#), Some(Event::Running { pid: None }));
-        assert_eq!(event(r#"{"event":"exited","app_id":438100,"exit_code":0,"exit_signal":null,"seconds":100}"#), Some(Event::Exited { code: Some(0), seconds: Some(100) }));
+        assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":4242}"#), Some(Event::Running { pid: Some(4242), session: None }));
+        assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":12777,"session_id":"f2931045-90d3-4302-a8a9-94021747c54f"}"#), Some(Event::Running { pid: Some(12777), session: Some("f2931045-90d3-4302-a8a9-94021747c54f".into()) }));
+        assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":null}"#), Some(Event::Running { pid: None, session: None }));
+        assert_eq!(event(r#"{"event":"exited","app_id":438100,"exit_code":0,"exit_signal":null,"seconds":100}"#), Some(Event::Exited { code: Some(0), seconds: Some(100), frames: None }));
+        assert_eq!(event(r#"{"event":"exited","app_id":438100,"session_id":"x","frames":0,"exit_code":0,"seconds":100}"#), Some(Event::Exited { code: Some(0), seconds: Some(100), frames: Some(0) }));
         assert_eq!(event(r#"{"event":"error","code":"not_signed_in","message":"No Steam account is signed in.","key":null}"#), Some(Event::Error { code: "not_signed_in".into(), message: "No Steam account is signed in.".into() }));
         assert_eq!(event(r#"{"event":"voile_update","version":"v1"}"#), Some(Event::Other));
         assert_eq!(event("warning: something on the wrong stream"), None);

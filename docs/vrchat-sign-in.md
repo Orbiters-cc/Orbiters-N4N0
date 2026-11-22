@@ -13,21 +13,39 @@ or when leaving Settings. Errors stay in the card, with retry/removal actions wh
 ## Privacy and lifecycle
 
 - `Api::vrchat_login_feature(token)` calls `GET /features/mine?names=n4n0-vrchat-login` with only the
-  Orbiters bearer credential. A grant is cached in memory for three hours. Failures deny access and
-  retry after a minute; a missing, malformed or false flag never enables VRChat sign-in.
+  Orbiters bearer credential. Each answer is kept in memory per Orbiters identity (its server's address and
+  credential) as an `orbiters_core::features::Grant`: asked again every 30 minutes; a no (or a refused
+  credential) ends it at once; a server out of reach ends it only once the last yes is 12 hours old. A missing,
+  malformed or false flag never enables VRChat sign-in, and an identity never answered for has no grant.
 - `orbiters_core::vrchat_api::Client` owns a separate HTTP agent and private cookie state. It does not
   use the Orbiters `Api`. Its User-Agent is `Orbiters-N4N0/<version> blackorbit.eclaire@gmail.com`.
 - Only `auth` and `twoFactorAuth` cookies are persisted, encrypted by current-user Windows DPAPI in
-  `%LOCALAPPDATA%\Orbiters\vrchat-session.bin`. Passwords, codes and user profile data are not stored there.
+  `%LOCALAPPDATA%\Orbiters\vrchat-session.bin` (and its last good copy `vrchat-session.bin.prev`). Passwords,
+  codes and user profile data are not stored there.
   Non-Windows builds refuse persistent VRChat session storage. The existing Orbiters account store
   shares only the DPAPI utility, with a different entropy value and its own file.
-- Signed-out Orbiters accounts, environment/account changes and expired feature grants revoke direct
-  access. An old grant is never re-enabled. A stored VRChat session stays on disk but is not decrypted
-  or used until a fresh feature check allows it. Responses from revoked requests are discarded.
-- VRChat sign-out clears the local session and deletes its file before attempting `PUT /logout`.
-  A network failure cannot retain the local file. A deletion failure is shown with a removal retry.
-- HTTP 401 clears the session; rejected codes remain retryable. A completed verification followed by
-  a failed user lookup resumes with cookies instead of consuming a recovery code again.
+- The VRChat session belongs to the Windows user, not to an Orbiters environment or account (r20, after an
+  environment switch with the development server down signed VRChat out). Signing out of Orbiters (or Orbiters
+  refusing its credential) revokes direct access at once. An Orbiters account being checked or out of reach keeps
+  its identity. An environment or account change revokes the old grant; the new identity's own grant (an earlier
+  yes still valid, or Orbiters' answer) then gets a **new** gate and client that take the session over in memory
+  (`Client::hand_over`): no file read, no VRChat request. Meanwhile `Status::waiting` shows the session as kept and
+  waiting for Orbiters (Settings: "{name}, waiting for Orbiters"; Home keeps the friends list on show). An old grant
+  is never re-enabled and its client keeps nothing; responses from revoked requests are discarded. The saved file is
+  decrypted once per process, after the first grant; a restore that got no answer is tried again a minute later.
+- VRChat sign-out clears the local session and deletes its file and its copy before attempting `PUT /logout`.
+  A network failure cannot retain the local file. A deletion failure is shown with a removal retry. `PUT /logout`
+  is never sent for anything else. Starting a sign-in or cancelling a code leaves the saved session as it was.
+- A 401 to a signed-in session is looked into once (`GET /auth/user` two seconds later): alive, a read is asked once
+  more and anything else is reported refused (never sent again); a second 401 (or the auth cookie deleted by VRChat)
+  ends the session in memory and keeps the account (`Status::known`, "VRChat ended the session of {name}. Sign in
+  again…"). The file is kept, so a restart or "Retry the saved session" recovers if VRChat was wrong. A 429, 5xx or
+  network error never signs out. Rejected codes remain retryable. A completed verification followed by a failed user
+  lookup resumes with cookies instead of consuming a recovery code again.
+- The file is written atomically (temporary file + rename), then copied the same way to `vrchat-session.bin.prev`
+  (same DPAPI sealing). A damaged file is read from the copy and mended; no file at all is "signed out" (the copy alone
+  never is a session). Leftover `vrchat-session.bin.<pid>-<n>.tmp` older than a minute are removed. The removal with
+  data (setup) takes both files.
 - The client sends at most one request per second in each endpoint family. The process-wide limiter
   survives account changes and honors both seconds and HTTP-date `Retry-After` values. HTTP 429 returns
   a retry error without automatic retries. Avatars are cached for 24 hours; friends for five minutes.

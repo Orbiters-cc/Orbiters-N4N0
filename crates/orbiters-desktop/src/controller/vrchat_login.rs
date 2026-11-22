@@ -108,6 +108,9 @@ const ASK_EVERY: Duration = Duration::from_secs(30 * 60);
 /// no ends it at once, and nothing survives the process.
 const PROOF_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
 
+/// How long after a restore that got no answer it is tried again.
+const RESTORE_AGAIN: Duration = Duration::from_secs(60);
+
 fn new_grant() -> Grant {
     Grant::new(ASK_EVERY, PROOF_LIFETIME)
 }
@@ -137,6 +140,9 @@ pub(super) struct Runtime {
     saved: Option<bool>,
     /// How Orbiters is asked (tests: a stand-in for each server, never the network).
     ask: Asker,
+    /// The saved session could not be read back because VRChat or the network could not answer (at start, after
+    /// sleep): read again from then on, by itself (r20: only "Retry" did).
+    restore_again: Option<Instant>,
 }
 /// Asks the Orbiters server at an API address whether the credential's member may use VRChat sign-in.
 type Asker = Arc<dyn Fn(&Api, &str) -> anyhow::Result<bool> + Send + Sync>;
@@ -152,7 +158,7 @@ impl Default for Runtime {
         let ask: Asker = Arc::new(|_: &Api, _: &str| Err(anyhow::anyhow!("tests never reach Orbiters")));
         #[cfg(not(test))]
         let ask: Asker = Arc::new(|api: &Api, token: &str| api.vrchat_login_feature(token));
-        Self { client: Arc::new(Mutex::new(client)), gate, identity: None, grants: HashMap::new(), generation: 0, busy: false, restored: false, saved: None, ask }
+        Self { client: Arc::new(Mutex::new(client)), gate, identity: None, grants: HashMap::new(), generation: 0, busy: false, restored: false, saved: None, ask, restore_again: None }
     }
 }
 impl Runtime {
@@ -278,12 +284,14 @@ impl Controller {
         // The saved session, read once per process: from then on it is handed from grant to grant.
         let restore = identity.as_ref().and_then(|id| {
             let mut rt = self.vrchat_login.lock().unwrap();
-            if rt.restored || rt.busy || !rt.allowed_for(id) {
+            let later = rt.restore_again.is_some_and(|t| Instant::now() < t);
+            if rt.restored || rt.busy || later || !rt.allowed_for(id) {
                 return None;
             }
-            let held = rt.client.try_lock().ok().map(|c| c.holds_session())?;
+            // A session handed over signed in needs nothing; cookies without an account yet are asked who they are.
+            let signed_in = rt.client.try_lock().ok().map(|c| c.signed_in_user().is_some())?;
             rt.restored = true;
-            if held {
+            if signed_in {
                 return None;
             }
             rt.busy = true;
@@ -301,8 +309,24 @@ impl Controller {
                 }
                 (result, portrait)
             };
-            if matches!(result, Ok(Some(_))) {
-                self.vrchat_login.lock().unwrap().saved = Some(true);
+            {
+                let mut rt = self.vrchat_login.lock().unwrap();
+                match &result {
+                    Ok(Some(_)) => {
+                        rt.saved = Some(true);
+                        rt.restore_again = None;
+                    }
+                    // No answer is not an answer: the saved session is read again later (VRChat's own wait first).
+                    Err(Error::Unavailable | Error::InvalidResponse) => {
+                        rt.restored = false;
+                        rt.restore_again = Some(Instant::now() + RESTORE_AGAIN);
+                    }
+                    Err(Error::RateLimited(wait)) => {
+                        rt.restored = false;
+                        rt.restore_again = Some(Instant::now() + RESTORE_AGAIN.max(*wait));
+                    }
+                    _ => {}
+                }
             }
             self.finish_vrchat(generation, id, result, portrait);
         }
@@ -815,6 +839,27 @@ mod tests {
         assert!(status.allowed && status.user.is_none() && status.error.is_some(), "{status:?}");
         assert_eq!(status.known.map(|u| u.id), tester(), "the account whose session ended");
         assert!(!calls.lock().unwrap().iter().any(|(_, url)| url.ends_with("/logout")));
+    }
+
+    /// r20: a saved session that could not be read back because VRChat did not answer (no network at start) is read
+    /// again by itself, not only from "Retry"; one VRChat refused is not asked again and again.
+    #[test]
+    fn a_restore_without_an_answer_is_tried_again_by_itself() {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let me = serde_json::json!({"id": "usr_test", "displayName": "Tester"});
+        let (client, calls) = c.test_vrchat(vec![(503, serde_json::json!({})), (200, me)]);
+        client.lock().unwrap().cancel_login().unwrap();
+        orbiters_core::vrchat_api::set_test_cookie(&mut client.lock().unwrap(), "saved");
+        c.vrchat_login.lock().unwrap().restored = false;
+        c.vrchat_feature_tick();
+        assert!(c.view().vrchat_login.user.is_none() && c.view().vrchat_login.recovery == Recovery::Resume);
+        assert!(!c.vrchat_login.lock().unwrap().restored);
+        c.vrchat_feature_tick();
+        assert_eq!(calls.lock().unwrap().len(), 1, "not before its time");
+        c.vrchat_login.lock().unwrap().restore_again = Some(Instant::now());
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester(), "{:?}", c.view().vrchat_login);
+        assert_eq!(calls.lock().unwrap().len(), 2);
     }
 
     /// r20: the session's cookie never leaves the service: not in any state handed to the windows and overlays, not in a

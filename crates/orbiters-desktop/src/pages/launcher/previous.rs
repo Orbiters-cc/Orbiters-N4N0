@@ -316,6 +316,8 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     panel.multiply_opacity(t.clamp(0.0, 1.0));
     panel.set_clip_rect(rect.intersect(ui.clip_rect()));
     paint::shadow(panel.painter(), rect, 22.0, vec2(0.0, 18.0), 44.0, -6.0, theme::black(0.55));
+    // Opaque under its surface: nothing of Home shows through the list.
+    widgets::frame(panel.painter(), rect, 22.0, theme::INK_900);
     widgets::frame(panel.painter(), rect, 22.0, theme::surface());
     paint::stroke_squircle(panel.painter(), rect, theme::squircle(22.0), theme::hairline());
     let inner = rect.shrink2(vec2(22.0, 20.0));

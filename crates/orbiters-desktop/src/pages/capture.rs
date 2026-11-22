@@ -258,6 +258,8 @@ pub fn element(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super
     let level = level(state.open, state.closed_for, reason);
     let mut out = None;
     let mut toggle = false;
+    // A link to the three big actions shows the element from its bar down (they are right under it).
+    let bar_top = ui.cursor().top();
     bar(ui, cx, state, level, reason, name_of, &mut toggle);
     if toggle {
         if level > Level::Bar {
@@ -308,6 +310,8 @@ pub fn element(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super
         });
     }
     if !tops.is_empty() {
+        tops.retain(|(p, _)| *p != Part::Actions);
+        tops.push((Part::Actions, bar_top));
         state.tops = tops;
     }
     // A part asked for, once it stands still: put under what stays over the list.
@@ -428,7 +432,7 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
     let x = tile.right() + 14.0;
     let consent = snap.settings.consent_acknowledged;
     let here = orbiters_core::osc::VRCHAT_RUNS_HERE;
-    if capturing {
+    if capturing && !open {
         let stop = match c.state {
             CaptureState::Stopping => tr("Saving…"),
             CaptureState::Importing => tr("Importing…"),
@@ -444,8 +448,9 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
             cx.ctl.stop_capture();
         }
         right = r.left() - 8.0;
-    } else if here && !open {
-        // A 3D picture of people, of the world: in words where they fit, else their icons.
+    } else if here && !capturing && level < Level::Full {
+        // A 3D picture of people, of the world: in words where they fit, else their icons (every option shows them
+        // large).
         let vrchat = snap.vrchat.running;
         let why_not = if !vrchat { tr("Start VRChat first: its camera takes the picture") } else { "" };
         let people = tr("3D picture of people");
@@ -502,7 +507,11 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
         },
         _ => tr("Capture").into(),
     };
-    let line: (String, egui::Color32) = match reason {
+    // Collapsed, the bar sums up why it would open; open, the card under it says that, and the bar what capturing
+    // stands at.
+    let summary = if open && reason != Some(Why::Capturing) { None } else { reason };
+    let line: (String, egui::Color32) = match summary {
+        Some(Why::Capturing) if open => (world.world_name.clone().filter(|_| world.in_world).unwrap_or_else(|| tr("VRChat world").into()), theme::FG_2),
         Some(Why::Capturing) => {
             let elapsed = format::duration(c.stats.as_ref().map(|s| s.elapsed_s).unwrap_or(0.0));
             let kept = c.stats.as_ref().map_or(0, |s| s.keyframes);
@@ -1828,7 +1837,8 @@ pub(crate) mod tests {
         h.snap.capture.session_dir = Some(PathBuf::from("Lantern Garden 2026-11-22 21-00"));
         h.settle();
         assert_eq!(h.state.level(&h.snap), Level::Full, "a recording: every option");
-        assert!(h.drawn("Pause") && h.drawn("Stop recording"));
+        assert!(h.drawn("Pause"));
+        assert!(!h.drawn("Stop recording"), "open, the card's own Stop: not a second one on the bar");
         assert_eq!(h.scroll_areas(), 1);
         h.press("Pause");
         assert_eq!(h.said(), ["pause true"]);

@@ -666,6 +666,8 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Tint), rec
                 acts.push(Act::Press(switch));
             }
         }
+        // ("Coming soon" stands there instead: the way in would show under it.)
+        None if state.soon => {}
         None => widgets::icon(&p, pos2(r.right() - INSET - 8.0, chip.center().y), icons::CARET_RIGHT, 16.0, theme::mix(theme::FG_4, theme::FG_2, hover)),
     }
 }

@@ -522,17 +522,18 @@ impl App {
                 widgets::icon(&p, pos2(x + 9.0, r.center().y), glyph, 18.0, icon_c);
             }
             widgets::text(&p, pos2(x + 30.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(label, 14.0).weight(weight::MEDIUM).color(fg));
-            // Photos & captures: how many captures it holds, and the dot of one under way (the Capture tab's, which it took in).
-            let mut badge_right = r.right() - 12.0;
+            // Photos & captures: how many captures it holds, and on its icon the dot of one under way (the Capture tab's,
+            // which it took in).
             if page == Page::Sessions && capturing {
                 let tone = if snap.capture.state == CaptureState::Importing { widgets::Tone::Info } else { widgets::Tone::Rec };
-                widgets::status_dot(&p, pos2(r.right() - 16.0, r.center().y), tone, true);
-                badge_right = r.right() - 30.0;
+                let at = pos2(x + 18.0, r.center().y - 8.0);
+                p.circle_filled(at, 5.5, theme::INK_950);
+                widgets::status_dot(&p, at, tone, true);
             }
             if page == Page::Sessions && snap.storage.sessions > 0 {
                 let t = Txt::new(snap.storage.sessions.to_string(), 11.0).color(theme::FG_3);
                 let s = widgets::text_size(ui, &t);
-                let badge = Rect::from_min_size(pos2(badge_right - s.x - 16.0, r.center().y - 10.0), vec2(s.x + 16.0, 20.0));
+                let badge = Rect::from_min_size(pos2(r.right() - 12.0 - s.x - 16.0, r.center().y - 10.0), vec2(s.x + 16.0, 20.0));
                 p.rect_filled(badge, theme::radius(10.0), theme::white(0.07));
                 widgets::text(&p, badge.center(), Align2::CENTER_CENTER, &t);
             }

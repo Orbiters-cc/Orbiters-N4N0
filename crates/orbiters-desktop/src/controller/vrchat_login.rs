@@ -631,6 +631,221 @@ mod tests {
         assert!(!gate.allowed());
         assert!(!c.view().vrchat_login.allowed);
     }
+
+    /// A stand-in for each Orbiters server (r20): what it answers about VRChat sign-in, or nothing (down), and who was asked.
+    #[derive(Default)]
+    struct Servers {
+        answers: Mutex<HashMap<String, bool>>,
+        asked: Mutex<Vec<String>>,
+    }
+    fn servers(c: &Controller) -> Arc<Servers> {
+        let servers = Arc::new(Servers::default());
+        let seen = servers.clone();
+        c.vrchat_login.lock().unwrap().ask = Arc::new(move |api: &Api, _: &str| {
+            let url = api.url("");
+            seen.asked.lock().unwrap().push(url.clone());
+            match seen.answers.lock().unwrap().get(&url) {
+                Some(yes) => Ok(*yes),
+                None => Err(anyhow::anyhow!("connection refused")),
+            }
+        });
+        servers
+    }
+    /// The Orbiters account `token` of `server`, as the account thread installs it, shown as `state`.
+    fn orbiters_account(c: &Controller, server: Server, token: &str, state: AccountState) {
+        {
+            let mut rt = c.account_runtime.lock().unwrap();
+            rt.read = Some((server, None));
+            rt.account = Some(orbiters_core::account::Account { token: token.into(), user: None, username: Some("tester".into()), avatar_url: None, features: None });
+        }
+        c.update(|s| {
+            s.account.state = state;
+            s.account.development = Server::current() == Server::Development;
+        });
+    }
+    /// The environment switch itself: for a moment the account on show is the other environment's.
+    fn switching(c: &Controller) {
+        c.update(|s| s.account.development = Server::current() != Server::Development);
+    }
+    fn other_server() -> Server {
+        if Server::current() == Server::Development { Server::Production } else { Server::Development }
+    }
+    fn signed_in_as(c: &Controller) -> Option<String> {
+        c.view().vrchat_login.user.as_ref().map(|u| u.id.clone())
+    }
+    fn tester() -> Option<String> {
+        Some("usr_test".into())
+    }
+
+    /// r20, the owner's report: switching the environment dev -> prod -> dev, with the development server down on the
+    /// way back, keeps the VRChat session: nothing signs out, nothing is read again, VRChat is not asked anything (its
+    /// logout least of all), and in between it shows as waiting, never as a computer that never signed in.
+    #[test]
+    fn switching_environment_there_and_back_keeps_the_vrchat_session() {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let (_, calls) = c.test_vrchat(vec![]);
+        let orbiters = servers(&c);
+        let (here, there) = (Server::current(), other_server());
+        let (here_url, there_url) = (Api::new(here).url(""), Api::new(there).url(""));
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester());
+        // The switch: the other environment's account is not read yet.
+        switching(&c);
+        let status = c.view().vrchat_login.clone();
+        assert!(status.waiting && status.user.is_none() && status.known.as_ref().map(|u| u.id.as_str()) == Some("usr_test"), "{status:?}");
+        c.vrchat_feature_tick();
+        assert!(c.view().vrchat_login.waiting);
+        // Its account read and being checked; its server says yes: the same session goes on.
+        orbiters.answers.lock().unwrap().insert(there_url.clone(), true);
+        orbiters_account(&c, there, "there-token", AccountState::Checking { username: Some("tester".into()) });
+        c.vrchat_feature_tick();
+        let status = c.view().vrchat_login.clone();
+        assert_eq!(signed_in_as(&c), tester(), "{status:?}");
+        assert!(status.allowed && !status.waiting && status.error.is_none());
+        // Back, with the first environment's server down (Docker off): its account is offline, its earlier yes holds.
+        switching(&c);
+        c.vrchat_feature_tick();
+        orbiters_account(&c, here, "fake", AccountState::Offline { username: Some("tester".into()) });
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester(), "{:?}", c.view().vrchat_login);
+        assert!(c.vrchat_signed_client().is_some_and(|client| client.lock().unwrap().signed_in()));
+        // Nothing went to VRChat; only the server not asked before was asked.
+        assert!(calls.lock().unwrap().is_empty(), "{:?}", calls.lock().unwrap());
+        assert_eq!(*orbiters.asked.lock().unwrap(), vec![there_url]);
+        assert!(!orbiters.asked.lock().unwrap().contains(&here_url));
+    }
+
+    /// r20: an Orbiters server that cannot be reached never signs VRChat out nor drops its session: an account it never
+    /// answered for waits (kept, shown as waiting), and goes on as soon as the server answers.
+    #[test]
+    fn an_orbiters_server_out_of_reach_never_signs_vrchat_out() {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let (_, calls) = c.test_vrchat(vec![]);
+        let orbiters = servers(&c);
+        let there = other_server();
+        c.vrchat_feature_tick();
+        // The same account, Orbiters now out of reach and the yes due again: it stands.
+        {
+            let mut rt = c.vrchat_login.lock().unwrap();
+            let id = rt.identity.clone().unwrap();
+            rt.grants.get_mut(&id).unwrap().answered(&Err(anyhow::anyhow!("connection refused")), Instant::now());
+        }
+        orbiters_account(&c, Server::current(), "fake", AccountState::Offline { username: Some("tester".into()) });
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester());
+        // Another environment whose server is down and never answered: waiting, the session kept.
+        orbiters_account(&c, there, "there-token", AccountState::Offline { username: Some("tester".into()) });
+        for _ in 0..3 {
+            c.vrchat_feature_tick();
+        }
+        let status = c.view().vrchat_login.clone();
+        assert!(status.waiting && !status.allowed && status.user.is_none() && status.error.is_none(), "{status:?}");
+        assert_eq!(status.known.map(|u| u.id), tester());
+        assert!(c.vrchat_login.lock().unwrap().client.lock().unwrap().holds_session(), "kept in memory");
+        // It answers: back, without signing in again.
+        orbiters.answers.lock().unwrap().insert(Api::new(there).url(""), true);
+        c.vrchat_login.lock().unwrap().grants.values_mut().for_each(|g| g.forget());
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester(), "{:?}", c.view().vrchat_login);
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    /// r20: Orbiters saying no (this account may not use VRChat sign-in) ends it at once, but nothing is signed out at
+    /// VRChat and the session stays for an account that may.
+    #[test]
+    fn orbiters_saying_no_stops_the_use_but_keeps_the_session() {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let (_, calls) = c.test_vrchat(vec![]);
+        let orbiters = servers(&c);
+        let there = other_server();
+        c.vrchat_feature_tick();
+        orbiters.answers.lock().unwrap().insert(Api::new(there).url(""), false);
+        orbiters_account(&c, there, "someone-else", AccountState::SignedIn { username: "someone".into() });
+        c.vrchat_feature_tick();
+        let status = c.view().vrchat_login.clone();
+        assert!(!status.allowed && !status.waiting && status.user.is_none(), "{status:?}");
+        assert!(c.vrchat_signed_client().is_none());
+        // The first account again: its yes stands, the same session goes on.
+        orbiters_account(&c, Server::current(), "fake", AccountState::SignedIn { username: "tester".into() });
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester());
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    /// r20: signing out of Orbiters stops VRChat at once (above); signing in again finds the same session, unasked.
+    #[test]
+    fn signing_out_of_orbiters_and_in_again_finds_the_same_session() {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let (_, calls) = c.test_vrchat(vec![]);
+        servers(&c);
+        c.vrchat_feature_tick();
+        c.update(|s| s.account.state = AccountState::SignedOut);
+        assert!(!c.view().vrchat_login.allowed && c.view().vrchat_login.user.is_none());
+        c.vrchat_feature_tick();
+        orbiters_account(&c, Server::current(), "fake", AccountState::SignedIn { username: "tester".into() });
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester());
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    /// r20: one 401 from VRChat is looked into and changes nothing; a 401 confirmed shows the account's session ended
+    /// with "Sign in again", never like a computer that never signed in; a 429 is not a sign-out.
+    #[test]
+    fn a_401_is_looked_into_and_a_429_is_not_a_sign_out() {
+        let me = serde_json::json!({"id": "usr_test", "displayName": "Tester"});
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let (client, _) = c.test_vrchat(vec![(401, serde_json::json!({})), (200, me.clone()), (200, serde_json::json!({"id": "avtr_a", "name": "A"}))]);
+        c.vrchat_feature_tick();
+        assert!(client.lock().unwrap().avatar("avtr_a").is_ok());
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester());
+        assert!(c.view().vrchat_login.error.is_none());
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let (client, _) = c.test_vrchat(vec![(429, serde_json::json!({}))]);
+        c.vrchat_feature_tick();
+        assert!(matches!(client.lock().unwrap().avatar("avtr_a"), Err(Error::RateLimited(_))));
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester());
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let (client, calls) = c.test_vrchat(vec![(401, serde_json::json!({})), (401, serde_json::json!({}))]);
+        c.vrchat_feature_tick();
+        assert_eq!(client.lock().unwrap().avatar("avtr_a"), Err(Error::Unauthorized));
+        c.vrchat_feature_tick();
+        let status = c.view().vrchat_login.clone();
+        assert!(status.allowed && status.user.is_none() && status.error.is_some(), "{status:?}");
+        assert_eq!(status.known.map(|u| u.id), tester(), "the account whose session ended");
+        assert!(!calls.lock().unwrap().iter().any(|(_, url)| url.ends_with("/logout")));
+    }
+
+    /// r20: the session's cookie never leaves the service: not in any state handed to the windows and overlays, not in a
+    /// notice, not in an error, whatever happened to the session (switches, waiting, ended).
+    #[test]
+    fn the_session_cookie_is_in_no_published_state_or_notice() {
+        const COOKIE: &str = "r20-cookie-7f3a9c";
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let (client, _) = c.test_vrchat(vec![(401, serde_json::json!({})), (401, serde_json::json!({}))]);
+        orbiters_core::vrchat_api::set_test_cookie(&mut client.lock().unwrap(), COOKIE);
+        let orbiters = servers(&c);
+        fn look(c: &Controller) -> Vec<String> {
+            vec![serde_json::to_string(&*c.view()).unwrap(), format!("{:?}", c.view().vrchat_login), format!("{:?}", c.take_notices())]
+        }
+        let mut seen = Vec::new();
+        c.vrchat_feature_tick();
+        seen.extend(look(&c));
+        switching(&c);
+        seen.extend(look(&c));
+        orbiters.answers.lock().unwrap().insert(Api::new(other_server()).url(""), true);
+        orbiters_account(&c, other_server(), "there-token", AccountState::SignedIn { username: "tester".into() });
+        c.vrchat_feature_tick();
+        seen.extend(look(&c));
+        let client = c.vrchat_signed_client().unwrap();
+        let error = client.lock().unwrap().avatar("avtr_a").unwrap_err();
+        seen.push(format!("{error} {error:?}"));
+        c.vrchat_feature_tick();
+        seen.extend(look(&c));
+        assert!(seen.iter().all(|text| !text.contains(COOKIE)), "the cookie leaked");
+        assert!(seen.len() > 8);
+    }
 }
 
 #[cfg(test)]

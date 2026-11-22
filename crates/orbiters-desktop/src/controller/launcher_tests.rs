@@ -1638,3 +1638,25 @@ fn play_before_the_set_up_on_a_mac_sets_up_first_and_an_install_that_fails_can_b
     assert_eq!(pc.launcher_do(Action::InstallEngine), None);
     assert_eq!(pc.view().launcher.engine_setup, None);
 }
+
+/// r20: while the VRChat session waits for Orbiters (the environment just switched, Orbiters out of reach), the list on
+/// show stays: not cleared, not replaced by VRCX's or VRCNext's copy, nothing read again; the same account goes on after.
+#[test]
+fn a_session_waiting_for_orbiters_keeps_the_list_on_show() {
+    let c = controller(Arc::new(Pretend::default()));
+    let (_client, calls) = c.test_vrchat(vec![]);
+    signed_in_list(&c);
+    {
+        let mut rt = c.launcher.lock().unwrap();
+        rt.loaded_for = Some(Some("usr_test".into()));
+        rt.loaded_at = Some(Instant::now());
+    }
+    c.vrchat_login.lock().unwrap().suspend();
+    c.update(|s| s.vrchat_login.waiting = true);
+    for _ in 0..3 {
+        c.launcher_tick();
+    }
+    assert!(matches!(&c.view().launcher.source, Source::SignedIn { user_id, .. } if user_id == "usr_test"), "{:?}", c.view().launcher.source);
+    assert_eq!(c.launcher.lock().unwrap().loaded_for, Some(Some("usr_test".into())));
+    assert!(calls.lock().unwrap().is_empty());
+}

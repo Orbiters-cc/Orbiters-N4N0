@@ -2457,11 +2457,6 @@ pub(crate) mod tests {
     fn signed_in_body() -> &'static str {
         r#"{"id":"usr_test","displayName":"Tester"}"# // i18n: not shown (inside a test the scan cannot skip)
     }
-    fn unpaced(answers: Vec<Response>) -> (Client, Arc<Mutex<Vec<Request>>>) {
-        let (c, seen) = mock(answers);
-        c.limiter.lock().unwrap().unpaced = true;
-        (c, seen)
-    }
     fn session_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("orbiters-r20-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2872,6 +2867,12 @@ pub(crate) mod tests {
             assert_eq!((s.len(), md5_base64(&s).as_str()), (len, md5), "{n} bytes");
         }
     }
+}
+
+/// Another crate's test gives the fake session a cookie it can look for afterwards (that it never leaves the service).
+#[cfg(feature = "test-support")]
+pub fn set_test_cookie(client: &mut Client, auth: &str) {
+    client.cookies.auth = auth.into();
 }
 
 /// A client for another crate's tests: no saved session file, and any HTTP request panics.

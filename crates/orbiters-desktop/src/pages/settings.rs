@@ -79,6 +79,11 @@ pub struct State {
     found: Option<&'static str>,
     /// How many of the notices the log shows.
     log_shown: usize,
+    /// Tests: the rows drawn last frame (their card's English title, their label, where), and the cards.
+    #[cfg(test)]
+    pub(super) seen: Vec<(&'static str, String, Rect)>,
+    #[cfg(test)]
+    pub(super) seen_cards: Vec<(&'static str, Rect)>,
 }
 
 /// A setting being brought into view: when it was lit, and the frames it was waited for.
@@ -87,6 +92,8 @@ struct Jump {
     id: &'static str,
     lit: Option<f64>,
     waited: u32,
+    /// Brought into view without being lit (screenshots of older scenes).
+    quiet: bool,
 }
 
 impl State {
@@ -109,7 +116,7 @@ impl State {
             (None, None) => return false,
         };
         self.choose_group(group, now);
-        self.jump = jump.map(|id| Jump { id, lit: None, waited: 0 });
+        self.jump = jump.map(|id| Jump { id, lit: None, waited: 0, quiet: false });
         true
     }
 
@@ -132,6 +139,18 @@ impl State {
     /// Screenshots: something typed in the search.
     pub(crate) fn stage_search(&mut self, query: &str) {
         self.query = query.to_owned();
+    }
+
+    /// Screenshots: the setting `id` as the search opened it (said above its sub-tab).
+    pub(crate) fn stage_found(&mut self, id: &str) {
+        self.found = registry::entry(id).map(|e| e.id);
+    }
+
+    /// Screenshots of the scenes made before the sub-tabs: the setting they show comes into view, unlit.
+    pub(crate) fn quietly(&mut self) {
+        if let Some(jump) = self.jump.as_mut() {
+            jump.quiet = true;
+        }
     }
 }
 
@@ -180,7 +199,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     // Starting with Windows: read on each visit; a write that failed shows what is.
     if state.windows_read != cx.visit {
         state.windows_read = cx.visit;
-        state.windows_start = Some(crate::startup::starts_with_windows());
+        // Tests never read this computer's registry.
+        state.windows_start = Some(!cfg!(test) && crate::startup::starts_with_windows());
     }
     if let Some(result) = state.windows_job.as_mut().and_then(Job::take) {
         state.windows_job = None;
@@ -290,7 +310,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         resp.request_focus();
     }
     if state.query.is_empty() && !resp.has_focus() {
-        let keys = if cfg!(target_os = "macos") { "⌘ K" } else { "Ctrl K" };
+        let keys = if cfg!(target_os = "macos") { "⌘ K" } else { "Ctrl K" }; // i18n: not shown (key names, as on the keyboard)
         let t = Txt::new(keys, 11.0).color(theme::FG_4);
         let s = widgets::text_size(ui, &t);
         let chip = Rect::from_min_size(pos2(search_r.right() - 14.0 - s.x - 12.0, search_r.center().y - 10.0), vec2(s.x + 12.0, 20.0));
@@ -318,7 +338,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     if let Some(entry) = chosen {
         state.choose_group(entry.group, now);
-        state.jump = Some(Jump { id: entry.id, lit: None, waited: 0 });
+        state.jump = Some(Jump { id: entry.id, lit: None, waited: 0, quiet: false });
         state.found = Some(entry.id);
     } else if cleared {
         state.query.clear();
@@ -581,6 +601,11 @@ fn group_page(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, draf
         }
     }
     let (cards, rows) = widgets::record_fields(|| group_cards(ui, cx, state, base, draft, asked));
+    #[cfg(test)]
+    {
+        state.seen = rows.iter().map(|r| (cards.iter().find(|(_, c)| c.contains(r.rect.center())).map_or("", |(n, _)| *n), r.label.clone(), r.rect)).collect();
+        state.seen_cards = cards.clone();
+    }
     light(ui, state, &cards, &rows, now);
 }
 
@@ -620,7 +645,7 @@ fn light(ui: &mut Ui, state: &mut State, cards: &[(&'static str, Rect)], rows: &
         now
     });
     let k = glow(now - lit);
-    if k <= 0.0 {
+    if k <= 0.0 || jump.quiet {
         state.jump = None;
         return;
     }
@@ -1941,3 +1966,7 @@ fn notice_log(ui: &mut Ui, shown: &mut usize) {
         ui.add_space(8.0);
     }
 }
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod tests;

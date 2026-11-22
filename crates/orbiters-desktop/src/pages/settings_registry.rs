@@ -249,7 +249,7 @@ pub static ENTRIES: &[Entry] = &[
     e("n4n0.menu-touch", N4n0, mark("N4N0's menu"), mark("Touch N4N0"), mark("A hand on N4N0 opens the menu; touching it again closes it."), mark("hand touch open")),
     e("n4n0.menu-try", N4n0, mark("N4N0's menu"), mark("Try it"), mark("Opens the menu (or closes it) as the button and N4N0 do."), mark("open test")),
     e("n4n0.keyboard", N4n0, mark("N4N0's menu"), mark("Keyboard"), mark("The letters of the search keyboard. Automatic follows this computer's keyboard."), mark("QWERTY AZERTY layout letters")),
-    e("n4n0.look", N4n0, mark("N4N0's menu"), "Look", mark("Retro: a green phosphor terminal, as on an old computer. N4N0's screen has its own Look, in My Avatar."), mark("retro modern theme style appearance")).context("appearance"),
+    e("n4n0.look", N4n0, mark("N4N0's menu"), "Look", mark("Retro: a green phosphor terminal, as on an old computer. N4N0's screen has its own Look, in My Avatar."), mark("retro modern theme style appearance")).context("appearance"), // i18n: not shown ("Look" is translated in its context, tr_ctx("appearance", "Look"))
     e("n4n0.screen-size", N4n0, mark("N4N0's menu"), mark("Screen size"), mark("How large N4N0's projected screen is, for you and everyone around."), mark("small large bigger size")),
     e("n4n0.calls", N4n0, mark("Calls"), mark("Calls"), mark("Your presence and your VRChat friends (as hashes, from VRCX and VRCNext) go to Orbiters, to find friends you can call. Calls go through Orbiters' relay: a friend never sees this computer's address."), mark("call voice friends relay phone")).rows(&[mark("Calls"), CALLS_SOON]),
     e("n4n0.direct-calls", N4n0, mark("Calls"), mark("Direct calls"), mark("Connect straight to the friend when your networks allow it: a little faster, but each of you sees the other's IP address."), mark("IP address peer direct faster")).sometimes(),
@@ -314,7 +314,7 @@ pub static ENTRIES: &[Entry] = &[
     e("vrchat.frame-cap", Vrchat, mark("Play VRChat"), mark("Frame cap"), mark("Frames per second on the desktop. In VR, the headset sets the pace."), mark("FPS limit cap")).gate(Gate::VrchatHere).sometimes(),
     e("vrchat.video-decoding", Vrchat, mark("Play VRChat"), mark("Video decoding on the graphics card"), mark("Videos in worlds cost the processor less."), mark("video GPU decoding hardware")).gate(Gate::VrchatHere).sometimes(),
     e("vrchat.tiny-window", Vrchat, mark("Play VRChat"), mark("Tiny desktop window in VR"), mark("A 100 × 100 window on the monitor while you play in VR, so it costs almost nothing. Turn it off to show or record the game on the monitor. Desktop mode keeps its window."), mark("window monitor desktop small")).gate(Gate::VrchatHere).sometimes(),
-    e("vrchat.perf-report", Vrchat, mark("Performance report"), mark("Performance report"), mark("If VRChat or your computer lags with N4N0, this puts together what N4N0 measured over the last hour with your computer's specifications and the settings that matter. You see it before anything is sent, and it is kept on this computer."), mark("lag slow report diagnostics")).gate(Gate::VrchatHere),
+    e("vrchat.perf-report", Vrchat, mark("Performance report"), mark("Performance report"), mark("If VRChat or your computer lags with N4N0, this puts together what N4N0 measured over the last hour with your computer's specifications and the settings that matter. You see it before anything is sent, and it is kept on this computer."), mark("lag slow report diagnostics")).gate(Gate::VrchatHere).whole(),
     e("vrchat.bridge", Vrchat, mark("Experimental"), mark("VRChat bridge"), mark("Lets an agent such as Claude Code start VRChat in desktop mode, go from private instance to private instance, look around and take 3D pictures, through a service on this computer only. Your own keyboard or mouse pauses it."), mark("agent MCP automation bridge"))
         .rows(&[mark("VRChat bridge"), mark("It stays closed"), mark("Address"), mark("Token"), mark("Taking over")])
         .gate(Gate::Bridge),
@@ -566,17 +566,14 @@ mod tests {
         assert!(marks("abc", &words("zz")).is_empty());
     }
 
+    /// Titles, rows and descriptions are held to orbiters-i18n's coverage test (some stay as they are in a language,
+    /// as product names do); the words added for the search are each language's own.
     #[test]
     fn every_entry_is_translated() {
         for language in Language::TRANSLATED {
             in_language(language, || {
-                for e in ENTRIES {
-                    for text in [e.card, e.about, e.keywords].into_iter().chain(e.row_keys().iter().copied()) {
-                        if text.is_empty() || text == "N4N0" {
-                            continue;
-                        }
-                        assert_ne!(e.shown(text), text, "{language:?}: {} has no translation of {text:?}", e.id);
-                    }
+                for e in ENTRIES.iter().filter(|e| !e.keywords.is_empty()) {
+                    assert_ne!(tr(e.keywords), e.keywords, "{language:?}: {} has no keywords of its own", e.id);
                 }
                 for g in Group::ALL {
                     assert_ne!(g.title(), g.english(), "{language:?}: {g:?}");

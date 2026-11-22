@@ -195,7 +195,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     (tr(CALLS_OFF), true)
                 };
                 widgets::field(ui, tr("Calls"), Some(why), 150.0, |ui| {
-                    if settings && Button::new(tr("Open Settings")).icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
+                    if settings && Button::new(tr("Settings")).icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
                         to_settings = Some("n4n0.calls");
                     }
                 });

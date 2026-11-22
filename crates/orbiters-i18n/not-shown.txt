@@ -80,6 +80,7 @@ crates/orbiters-core/src/pipeline.rs
 crates/orbiters-core/src/vrchat_launch.rs
 crates/orbiters-core/src/vrchat_api/social.rs
 crates/orbiters-desktop/src/controller/launcher_tests.rs
+crates/orbiters-desktop/src/pages/settings_tests.rs
 crates/orbiters-core/src/launcher_live.rs
 # The shared 3D view's protocol (its words are the contract's, never shown).
 crates/orbiters-core/src/shared_view.rs

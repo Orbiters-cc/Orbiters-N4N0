@@ -525,6 +525,21 @@ impl Service {
                     });
                 }
             }
+            // VRChat groups: the window's alone (M10), answered to its link alone (M9).
+            ToService::Groups { id, scope, request } => {
+                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
+                if let Some(mailbox) = mailbox {
+                    if !crate::controller::groups::allowed_from(role) {
+                        mailbox.post(ToClient::Groups { id, reply: crate::controller::groups::Reply::Failed(crate::controller::groups::Failure::NotHere) });
+                    } else {
+                        let ctl = ctl.clone();
+                        std::thread::spawn(move || {
+                            let reply = ctl.groups(link, scope, request);
+                            mailbox.post(ToClient::Groups { id, reply });
+                        });
+                    }
+                }
+            }
             // Only the window picks picture files; the upload runs on a thread of its own.
             ToService::ShowWindow => self.show_window(false),
             ToService::ShowPage { page } => self.show_page(page),

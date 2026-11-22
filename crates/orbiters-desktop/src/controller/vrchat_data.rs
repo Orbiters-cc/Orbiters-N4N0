@@ -29,6 +29,10 @@ impl Scope {
             revision: s.vrchat_login.revision,
         }
     }
+    /// The signed-in VRChat account this scope was taken under.
+    pub fn vrchat_user(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {

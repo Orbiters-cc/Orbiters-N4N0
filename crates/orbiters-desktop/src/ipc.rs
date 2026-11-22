@@ -57,6 +57,11 @@ pub enum ToClient {
         id: String,
         result: crate::controller::vrchat_data::Result,
     },
+    /// The answer to this window's [`ToService::Groups`]: to it alone, never broadcast (REQUEST22, M9).
+    Groups {
+        id: String,
+        reply: crate::controller::groups::Reply,
+    },
     /// Come to the front.
     Show,
     /// Come to the front on this page of the app's (`"projects"`, where My Avatar is), as the menus around VRChat ask.
@@ -207,6 +212,12 @@ pub enum ToService {
         id: String,
         scope: crate::controller::vrchat_data::Scope,
         request: crate::controller::vrchat_data::Request,
+    },
+    /// A VRChat groups request of the window's (`controller::groups`): only a window's link is answered.
+    Groups {
+        id: String,
+        scope: crate::controller::vrchat_data::Scope,
+        request: crate::controller::groups::Request,
     },
     /// A new picture on VRChat for an avatar or world of the signed-in VRChat account, from a picture file
     /// (`Controller::vrchat_picture`; its progress in the snapshot).
@@ -642,6 +653,7 @@ pub struct Client {
     worker_log: Mutex<Option<Vec<String>>>,
     maps: Mutex<Option<MapsMine>>,
     vrchat_data: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::vrchat_data::Result>>>,
+    groups: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::groups::Reply>>>,
     translated: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::translate::Answer>>>,
     /// [`ToClient::Locomotion`]'s values, with when they came, until the overlay takes them.
     locomotion: Mutex<Vec<(Instant, String, f32)>>,
@@ -696,6 +708,7 @@ impl Client {
             worker_log: Mutex::new(None),
             maps: Mutex::new(None),
             vrchat_data: Mutex::default(),
+            groups: Mutex::default(),
             translated: Mutex::default(),
             locomotion: Mutex::default(),
             show: AtomicBool::new(false),
@@ -749,6 +762,11 @@ impl Client {
                     ToClient::VrchatData { id, result } => {
                         if let Some(tx) = c.vrchat_data.lock().unwrap().remove(&id) {
                             let _ = tx.send(result);
+                        }
+                    }
+                    ToClient::Groups { id, reply } => {
+                        if let Some(tx) = c.groups.lock().unwrap().remove(&id) {
+                            let _ = tx.send(reply);
                         }
                     }
                     ToClient::Translated { id, result } => {
@@ -909,6 +927,7 @@ impl Client {
         // Cancels waiting receivers, not work the service has already accepted. Nothing is replayed. A translation
         // waiting for its answer returns at once too, not after its 30 s (CTL-11 f).
         self.vrchat_data.lock().unwrap().clear();
+        self.groups.lock().unwrap().clear();
         self.translated.lock().unwrap().clear();
         if SAY_STATE.load(Ordering::Relaxed) { println!("link ended"); }
         self.repaint(false);
@@ -929,6 +948,22 @@ impl Client {
 
     pub fn maps(&self) -> Option<MapsMine> {
         self.maps.lock().unwrap().clone()
+    }
+
+    /// A groups request, answered to this link alone; the service's own limits bound how long it takes.
+    pub fn groups(&self, scope: crate::controller::vrchat_data::Scope, request: crate::controller::groups::Request) -> crate::controller::groups::Reply {
+        use crate::controller::groups::{Failure, Reply};
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.groups.lock().unwrap().insert(id.clone(), tx);
+        if self.state.lock().unwrap().closed {
+            self.groups.lock().unwrap().remove(&id);
+            return Reply::Failed(Failure::Api(orbiters_core::vrchat_api::GroupFailure::Unavailable));
+        }
+        self.send(&ToService::Groups { id: id.clone(), scope, request });
+        let reply = rx.recv_timeout(Duration::from_secs(150)).unwrap_or(Reply::Failed(Failure::Api(orbiters_core::vrchat_api::GroupFailure::Unavailable)));
+        self.groups.lock().unwrap().remove(&id);
+        reply
     }
 
     pub fn vrchat_data(

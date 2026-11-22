@@ -11,7 +11,9 @@ use std::sync::{
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
+mod groups;
 mod social;
+pub use groups::{art_body, post_create_body, post_edit_body, role_create_body, role_update_body, Failure as GroupFailure, Members, Posts, UPLOAD_MAX as GROUP_UPLOAD_MAX};
 pub use social::{boop_body, own_profile_body, own_status_body};
 
 const BASE: &str = "https://api.vrchat.cloud/api/1";
@@ -545,6 +547,42 @@ struct Request {
     body: Option<String>,
     /// Bytes for a storage address VRChat handed out: sent alone, with their type and MD5 and no cookie.
     upload: Option<Upload>,
+    /// A `multipart/form-data` body (`/file/image`), sent with the session's cookie.
+    form: Option<Form>,
+}
+/// A form of text fields and one file, as `POST /file/image` takes it.
+struct Form {
+    fields: Vec<(&'static str, String)>,
+    file_name: &'static str,
+    mime: &'static str,
+    bytes: Vec<u8>,
+}
+impl Form {
+    /// The body and its boundary (one that the file's bytes do not hold).
+    fn encode(&self) -> (String, Vec<u8>) {
+        let mut n = 0u32;
+        let boundary = loop {
+            let b = format!("----OrbitersN4N0Form{:08x}{n}", md5(&self.bytes)[..4].iter().fold(0u32, |a, x| a << 8 | *x as u32));
+            if !self.bytes.windows(b.len()).any(|w| w == b.as_bytes()) {
+                break b;
+            }
+            n += 1;
+        };
+        let mut body = Vec::with_capacity(self.bytes.len() + 512);
+        for (name, value) in &self.fields {
+            body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").as_bytes());
+        }
+        body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n", self.file_name, self.mime).as_bytes());
+        body.extend_from_slice(&self.bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        (boundary, body)
+    }
+}
+/// Sends whose effect VRChat may have made before its answer was lost (a dropped connection, a timeout, a 5xx, a body
+/// that could not be read, the grant ending meanwhile): their outcome is unknown, never "not sent" (B2). Every group
+/// write is one, beside instance creation and invites.
+fn ambiguous(method: &str, family: &str) -> bool {
+    (method == "POST" && matches!(family, "instances" | "invites")) || (method != "GET" && family == groups::WRITES)
 }
 struct Upload {
     mime: &'static str,
@@ -566,6 +604,17 @@ struct Http(ureq::Agent);
 impl Transport for Http {
     fn send(&self, r: Request) -> Result<Response> {
         // Redirects are handled explicitly below; neither Basic auth nor cookies follow an untrusted redirect.
+        if let Some(form) = r.form {
+            let (boundary, body) = form.encode();
+            let response = self
+                .0
+                .post(&r.url)
+                .header("Cookie", &r.cookie)
+                .header("Content-Type", format!("multipart/form-data; boundary={boundary}"))
+                .send(&body[..])
+                .map_err(|_| Error::Unavailable)?;
+            return Self::answer(response);
+        }
         let response = match (r.method, r.upload) {
             ("GET", _) => {
                 let mut q = self.0.get(&r.url);
@@ -592,9 +641,15 @@ impl Transport for Http {
                 Some(body) => self.0.put(&r.url).header("Cookie", &r.cookie).header("Content-Type", "application/json").send(body),
                 None => self.0.put(&r.url).header("Cookie", &r.cookie).send_empty(),
             },
+            ("DELETE", _) => self.0.delete(&r.url).header("Cookie", &r.cookie).call(),
             _ => return Err(Error::InvalidResponse),
         }
         .map_err(|_| Error::Unavailable)?;
+        Self::answer(response)
+    }
+}
+impl Http {
+    fn answer(response: ureq::http::Response<ureq::Body>) -> Result<Response> {
         let status = response.status().as_u16();
         let cookies = response.headers().get_all("set-cookie").iter().filter_map(|h| h.to_str().ok().map(str::to_owned)).collect();
         let retry_after = response.headers().get("retry-after").and_then(|h| h.to_str().ok()).map(str::to_owned);
@@ -909,7 +964,7 @@ impl Client {
         self.pace("auth")?;
         let cookie = self.cookies.header();
         self.permitted()?;
-        let r = self.transport.send(Request { method: "GET", url: format!("{BASE}/auth/user"), cookie, basic: None, body: None, upload: None })?;
+        let r = self.transport.send(Request { method: "GET", url: format!("{BASE}/auth/user"), cookie, basic: None, body: None, upload: None, form: None })?;
         if r.status == 429 {
             return Err(self.back_off(&r));
         }
@@ -965,7 +1020,6 @@ impl Client {
     fn request(&mut self, family: &'static str, method: &'static str, url: String, basic: Option<String>, body: Option<String>) -> Result<Response> {
         self.request_accepting(family, method, url, basic, body, &[])
     }
-    /// [`Self::request`], an answer with a status of `accept` returned as it is (a request that tells those apart).
     fn request_accepting(
         &mut self,
         family: &'static str,
@@ -973,6 +1027,21 @@ impl Client {
         url: String,
         basic: Option<String>,
         body: Option<String>,
+        accept: &[u16],
+    ) -> Result<Response> {
+        self.request_with(family, method, url, basic, body, None, accept)
+    }
+    /// [`Self::request`], an answer with a status of `accept` returned as it is (a request that tells those apart), and
+    /// a form instead of a JSON body when one is given.
+    #[allow(clippy::too_many_arguments)]
+    fn request_with(
+        &mut self,
+        family: &'static str,
+        method: &'static str,
+        url: String,
+        basic: Option<String>,
+        body: Option<String>,
+        form: Option<Form>,
         accept: &[u16],
     ) -> Result<Response> {
         self.pace(family)?;
@@ -983,12 +1052,13 @@ impl Client {
         let session_host = url.starts_with("https://api.vrchat.cloud/") || url.starts_with("https://files.vrchat.cloud/");
         let cookie = if session_host { self.cookies.header() } else { String::new() };
         self.permitted()?;
-        let response = self.transport.send(Request { method, url, cookie, basic, body, upload: None }).map_err(|e| if method == "POST" && matches!(family, "instances" | "invites") { Error::OutcomeUnknown } else { e })?;
+        let unknown = ambiguous(method, family);
+        let response = self.transport.send(Request { method, url, cookie, basic, body, upload: None, form }).map_err(|e| if unknown { Error::OutcomeUnknown } else { e })?;
         // Backoff survives a revoked grant. No response data or cookies do.
         if response.status == 429 {
             return Err(self.back_off(&response));
         }
-        self.permitted().map_err(|e| if method == "POST" && matches!(family, "instances" | "invites") { Error::OutcomeUnknown } else { e })?;
+        self.permitted().map_err(|e| if unknown { Error::OutcomeUnknown } else { e })?;
         let before = self.cookies.clone();
         if session_host {
             self.cookies.absorb(&response.cookies);
@@ -1011,7 +1081,7 @@ impl Client {
                 Ok(true) => match again {
                     Some((url, body)) => {
                         self.retrying = true;
-                        let r = self.request_accepting(family, method, url, None, body, accept);
+                        let r = self.request_with(family, method, url, None, body, None, accept);
                         self.retrying = false;
                         r
                     }
@@ -1029,16 +1099,16 @@ impl Client {
                 Err(Error::Unauthorized)
             }
             404 | 403 => Err(Error::NotFound),
-            500..=599 if method == "POST" && matches!(family, "instances" | "invites") => Err(Error::OutcomeUnknown),
+            500..=599 if unknown => Err(Error::OutcomeUnknown),
             500..=599 => Err(Error::Unavailable),
             // Redirects are not followed: for a social send it is no proof that VRChat did it.
-            300..=399 if method == "POST" && matches!(family, "instances" | "invites") => Err(Error::OutcomeUnknown),
+            300..=399 if unknown => Err(Error::OutcomeUnknown),
             200..=399 => {
                 if self.cookies != before && self.user.is_some() {
                     // A social send that VRChat took stays sent even when the session could not be saved here: an
                     // error now would let the person send it again.
                     if let Err(e) = self.save() {
-                        if !(method == "POST" && matches!(family, "instances" | "invites")) {
+                        if !unknown {
                             return Err(e);
                         }
                     }
@@ -1137,7 +1207,7 @@ impl Client {
             return Ok(());
         }
         self.pace("auth")?;
-        let r = self.transport.send(Request { method: "PUT", url: format!("{BASE}/logout"), cookie, basic: None, body: None, upload: None })?;
+        let r = self.transport.send(Request { method: "PUT", url: format!("{BASE}/logout"), cookie, basic: None, body: None, upload: None, form: None })?;
         if r.status == 429 {
             return Err(self.back_off(&r));
         }
@@ -1671,7 +1741,7 @@ fn put_part(client: &Mutex<Client>, url: &str, part: &Part) -> Result<()> {
         (c.transport.clone(), c.allowed.clone())
     };
     let upload = Upload { mime: part.mime, md5: part.md5.clone(), bytes: part.bytes.to_vec() };
-    let r = transport.send(Request { method: "PUT", url: url.into(), cookie: String::new(), basic: None, body: None, upload: Some(upload) })?;
+    let r = transport.send(Request { method: "PUT", url: url.into(), cookie: String::new(), basic: None, body: None, upload: Some(upload), form: None })?;
     if !gate.allowed() {
         return Err(Error::Disabled);
     }
@@ -1882,6 +1952,15 @@ pub(crate) mod tests {
         c.user = Some(User { id: "usr_test".into(), display_name: "Tester".into(), ..Default::default() });
         c.cookies.auth = "mock-session".into();
         (c, seen)
+    }
+    /// A signed-in client over `answers`, unpaced, recording each request (the groups module's tests).
+    pub(super) fn mock_signed_in(answers: Vec<Response>) -> (Client, Arc<Mutex<Vec<Request>>>) {
+        let (c, seen) = mock(answers);
+        c.limiter.lock().unwrap().unpaced = true;
+        (c, seen)
+    }
+    pub(super) fn raw_response(status: u16, body: &str) -> Response {
+        response(status, body, &[])
     }
     /// A session VRChat ended: its 401, and the same to the look that confirms it.
     pub(crate) fn expired_session() -> Client {
@@ -2942,4 +3021,53 @@ pub fn test_client(gate: Arc<Gate>, replies: Vec<(u16, serde_json::Value)>) -> (
     c.user = Some(User { id: "usr_test".into(), ..Default::default() });
     c.transport = Arc::new(Fake { replies: Mutex::new(replies.into()), calls: calls.clone() });
     (c, calls)
+}
+
+/// What a [`scripted_client`] answers to the next request.
+#[cfg(feature = "test-support")]
+pub enum Scripted {
+    Answer(u16, serde_json::Value),
+    /// The request was taken and the connection died before the answer (commit-then-drop).
+    Drop,
+    /// Runs `then` (the account switching, say) while the request is in flight, then answers.
+    During(Box<dyn FnOnce() + Send>, u16, serde_json::Value),
+}
+/// A request a [`scripted_client`] saw: what was sent, its JSON body, whether it was a form.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug)]
+pub struct Sent {
+    pub method: String,
+    pub url: String,
+    pub body: Option<String>,
+    pub form: bool,
+}
+/// [`test_client`] that records bodies and can drop a connection after a request. A request past the script is
+/// recorded and fails as unreachable (never a panic on a service thread).
+#[cfg(feature = "test-support")]
+pub fn scripted_client(gate: Arc<Gate>, replies: Vec<Scripted>) -> (Client, Arc<Mutex<Vec<Sent>>>) {
+    struct Fake { replies: Mutex<std::collections::VecDeque<Scripted>>, sent: Arc<Mutex<Vec<Sent>>> }
+    impl Transport for Fake {
+        fn send(&self, r: Request) -> Result<Response> {
+            self.sent.lock().unwrap().push(Sent { method: r.method.into(), url: r.url.clone(), body: r.body.clone(), form: r.form.is_some() });
+            let next = self.replies.lock().unwrap().pop_front();
+            let (status, body) = match next {
+                None | Some(Scripted::Drop) => return Err(Error::Unavailable),
+                Some(Scripted::Answer(s, b)) => (s, b),
+                Some(Scripted::During(then, s, b)) => {
+                    then();
+                    (s, b)
+                }
+            };
+            Ok(Response { status, body: body.to_string().into_bytes(), cookies: vec![], retry_after: None, location: None })
+        }
+    }
+    let sent = Arc::new(Mutex::new(vec![]));
+    let mut c = Client::new(gate);
+    c.store = None;
+    c.recheck_delay = Duration::ZERO;
+    c.limiter = Arc::new(Mutex::new(Limiter { unpaced: true, ..Default::default() }));
+    c.cookies.auth = "fake".into();
+    c.user = Some(User { id: "usr_test".into(), ..Default::default() });
+    c.transport = Arc::new(Fake { replies: Mutex::new(replies.into()), sent: sent.clone() });
+    (c, sent)
 }

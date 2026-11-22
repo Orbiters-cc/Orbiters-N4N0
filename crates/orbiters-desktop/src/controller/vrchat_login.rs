@@ -1209,6 +1209,22 @@ impl Controller {
         rt.saved = Some(true);
         rt.ask = Arc::new(ask);
     }
+    /// [`Self::test_vrchat`] over a [`orbiters_core::vrchat_api::scripted_client`]: bodies recorded, drops possible.
+    pub(super) fn test_vrchat_scripted(&self, replies: Vec<orbiters_core::vrchat_api::Scripted>) -> Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>> {
+        self.test_account();
+        let identity = self.vrchat_identity().unwrap();
+        let mut rt = self.vrchat_login.lock().unwrap();
+        assert!(rt.grant(Duration::from_secs(3600)));
+        let id = (identity.0.url(""), identity.1);
+        rt.identity = Some(id.clone());
+        rt.grants.entry(id).or_insert_with(new_grant).answered(&Ok(true), Instant::now());
+        rt.restored = true;
+        let (client, sent) = orbiters_core::vrchat_api::scripted_client(rt.gate.clone(), replies);
+        rt.client = Arc::new(Mutex::new(client));
+        drop(rt);
+        self.update(|s| { s.vrchat_login.allowed = true; s.vrchat_login.user = Some(User { id: "usr_test".into(), ..Default::default() }); });
+        sent
+    }
     pub(super) fn test_vrchat(&self, replies: Vec<(u16, serde_json::Value)>) -> (Arc<Mutex<Client>>, Arc<Mutex<Vec<(String, String)>>>) {
         self.test_account();
         let identity = self.vrchat_identity().unwrap();

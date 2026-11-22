@@ -39,8 +39,11 @@ struct Mine {
     launch: Option<u64>,
     at: Option<SystemTime>,
     link: Option<String>,
-    /// The engine's log from where it was at the launch: only what came after is this start's.
+    /// The engine's log from where it was at the launch: only what came after is this start's. The engine begins a new
+    /// log file at each start (measured 2026-11-22), so the file it was (`engine_file`) is kept too: another file is read
+    /// from its beginning.
     engine_from: u64,
+    engine_file: Option<u64>,
     renderer_lost: bool,
     /// The launcher and its birth, once the program said it.
     launcher: Option<(u32, u64)>,
@@ -169,7 +172,10 @@ impl MacGame {
         if !mine.renderer_lost {
             let file = obelisk::engine_log(&obelisk::home());
             if let Ok(mut f) = std::fs::File::open(&file) {
-                let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                let meta = f.metadata().ok();
+                let len = meta.as_ref().map_or(0, |m| m.len());
+                let id = meta.as_ref().and_then(file_id);
+                (mine.engine_from, mine.engine_file) = engine_log_from(mine.engine_from, mine.engine_file, len, id);
                 let from = mine.engine_from.max(len.saturating_sub(ENGINE_LOG_LOOK));
                 if len > from && f.seek(SeekFrom::Start(from)).is_ok() {
                     let mut bytes = Vec::new();
@@ -225,6 +231,30 @@ impl MacGame {
             (Err(e), None) => Err(Failure::new("close_failed", format!("The engine could not be asked to quit VRChat: {e}"), "Call get_state; if VRChat still runs, tell the person.")), // i18n: not shown
             (Ok(()), None) => Ok(()),
         }
+    }
+}
+
+/// Where this start's part of the engine's log begins, given where it began at the launch (`from` in file `file`) and the
+/// log now (`len` bytes, file `id`): a new file, or one cut shorter, is all this start's.
+fn engine_log_from(from: u64, file: Option<u64>, len: u64, id: Option<u64>) -> (u64, Option<u64>) {
+    if len < from || id != file {
+        (0, id)
+    } else {
+        (from, file)
+    }
+}
+
+/// Which file this is (its inode), to tell the engine's new log from the one before it.
+fn file_id(meta: &std::fs::Metadata) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
     }
 }
 
@@ -311,11 +341,12 @@ impl Game for MacGame {
         // The same lock Home's Play starts under.
         let _started = ctl.launcher_started_lock();
         let link = crate::bridge::game::launch_link(&plan.world_id, &plan.instance);
-        let engine_from = std::fs::metadata(obelisk::engine_log(&obelisk::home())).map(|m| m.len()).unwrap_or(0);
+        let engine = std::fs::metadata(obelisk::engine_log(&obelisk::home())).ok();
+        let (engine_from, engine_file) = (engine.as_ref().map_or(0, |m| m.len()), engine.as_ref().and_then(file_id));
         let at = SystemTime::now();
         match mac.start_launch(&plan.args()) {
             Ok(id) => {
-                *self.mine.lock().unwrap() = Mine { launch: Some(id), at: Some(at), link: Some(link), engine_from, ..Default::default() };
+                *self.mine.lock().unwrap() = Mine { launch: Some(id), at: Some(at), link: Some(link), engine_from, engine_file, ..Default::default() };
                 Ok(())
             }
             Err(super::obelisk_cli::Refused::Wait(wait)) => Err(Failure::new(
@@ -368,6 +399,14 @@ impl Game for MacGame {
                 "macOS does not let Orbiters - N4N0 record the screen, so VRChat's window cannot be looked at.", // i18n: not shown (an AI client reads it)
                 "Tell the person: in Orbiters - N4N0's Settings, Experimental, VRChat bridge, press Allow screen recording (or allow Orbiters - N4N0 in System Settings, Privacy & Security, Screen Recording), then quit and reopen Orbiters - N4N0.", // i18n: not shown
             ));
+        }
+        if native::screen_locked() {
+            return Err(Failure::new(
+                "screen_locked",
+                "The Mac's screen is locked: macOS does not let VRChat's window be drawn meanwhile, so its picture would be black.", // i18n: not shown (an AI client reads it)
+                "Try again in a minute (the person has to unlock the Mac first), or tell them.", // i18n: not shown
+            )
+            .retry_after(60));
         }
         let frame = self.mine.lock().unwrap().window;
         let png = native::capture_png(window.handle as u32).map_err(|e| Failure::new("screenshot_failed", format!("macOS did not give the window's picture: {e}"), "Call get_state; try again in a moment."))?; // i18n: not shown
@@ -454,6 +493,10 @@ mod tests {
         assert_eq!(log_of_launch(&dir, since, "vrchat://launch?ref=orbiters.cc&id=wrld_1:3"), None, "a log naming another instance is not this start's");
         assert_eq!(log_of_launch(&dir, SystemTime::now() + Duration::from_secs(60), link), None, "a log from before the start is not this start's");
         let _ = std::fs::remove_dir_all(&dir);
+        // The engine's log of the launch before (48 MB), then the new start's own file: read from its beginning.
+        assert_eq!(engine_log_from(48 << 20, Some(7), 60 << 20, Some(7)), (48 << 20, Some(7)), "the same file grown: what came after the launch");
+        assert_eq!(engine_log_from(48 << 20, Some(7), 50 << 20, Some(9)), (0, Some(9)), "a new file, even past the old length, is all this start's");
+        assert_eq!(engine_log_from(48 << 20, Some(7), 4096, Some(7)), (0, Some(7)), "cut shorter in place");
         assert!(version_has_session("0.1.3") && version_has_session("0.2.0") && !version_has_session("0.1.1") && !version_has_session("x"));
     }
 }

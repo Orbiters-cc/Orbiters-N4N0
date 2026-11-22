@@ -391,7 +391,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 fn idle_line(settings: &Settings) -> String {
     // Enzo: saying its name should not be the first thing offered: "almost nobody will want to do that".
     let _ = settings;
-    tr("Pick a feature, or hold Talk on N4N0's page to talk to it").into()
+    // Talking to N4N0 is the bar at the top of the window, on every page (REQUEST21 3).
+    tr("Pick a feature, or talk to N4N0 at the top of the window").into()
 }
 
 #[allow(clippy::too_many_arguments)]

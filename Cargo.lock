@@ -4542,6 +4542,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "memmap2",
+ "naga",
  "orbiters-i18n",
  "png",
  "pollster 1.0.1",

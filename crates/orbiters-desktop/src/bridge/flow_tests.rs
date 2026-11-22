@@ -200,7 +200,11 @@ fn the_person_s_vrchat_on_a_mac_is_never_touched() {
     flow.game.set_foreign_game(Some("1~private(usr_someone)~region(eu)"));
     flow.fails("go_to_world", json!({ "world_id": LAB_WORLD_A }), "not_started_by_bridge");
     flow.fails("close_vrchat", json!({}), "not_started_by_bridge");
-    flow.fails("screenshot", json!({}), "not_started_by_bridge");
+    let refused = flow.fails("screenshot", json!({}), "not_started_by_bridge");
+    // Measured live 2026-11-22: a Mac's answer sent the agent to open_session, which a Mac does not have.
+    assert!(!refused["next"].as_str().unwrap().contains("open_session"), "{refused}");
+    let state = flow.tool("get_state", json!({})).unwrap();
+    assert!(!state["next"].as_str().unwrap().contains("open_session"), "{}", state["next"]);
     assert_eq!((flow.game.closes(), flow.game.launches().len()), (0, 0));
     assert!(flow.game.instances().is_empty(), "no instance is made for a start that cannot happen");
     drop(flow.bridge);

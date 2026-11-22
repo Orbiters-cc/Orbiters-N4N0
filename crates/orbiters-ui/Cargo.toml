@@ -20,3 +20,7 @@ skrifa = "0.44"
 # The photo editor (photo): its pixels worked on every core, its edits saved as JSON.
 rayon = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+# The backdrop blur's shader is parsed and validated in its tests (the version wgpu itself uses).
+naga = { version = "30", features = ["wgsl-in"] }

@@ -41,6 +41,8 @@ pub struct App {
     videos: pages::videos::State,
     settings: pages::settings::State,
     n4n0: pages::n4n0::State,
+    /// N4N0's bar in the title strip and the chat it grows into (REQUEST21 3).
+    chat: crate::chat_bar::ChatBar,
     logo_glitch: Option<(f64, f32)>,
     logo_hovered: bool,
     /// The page (and Home's feature) last told to the usage statistics.
@@ -107,6 +109,7 @@ impl App {
             videos: Default::default(),
             settings: Default::default(),
             n4n0: Default::default(),
+            chat: Default::default(),
             logo_glitch: None,
             logo_hovered: false,
             usage_here: None,
@@ -146,6 +149,31 @@ impl App {
     /// The GPU of an offscreen renderer (screenshots).
     pub fn set_gpu(&mut self, gpu: crate::gpu::Handles) {
         self.gpu = Some(gpu);
+    }
+
+    /// The page shown.
+    pub fn shown_page(&self) -> Page {
+        self.page
+    }
+
+    /// N4N0's bar and chat (REQUEST21 3).
+    pub fn chat(&self) -> &crate::chat_bar::ChatBar {
+        &self.chat
+    }
+
+    pub fn chat_mut(&mut self) -> &mut crate::chat_bar::ChatBar {
+        &mut self.chat
+    }
+
+    /// Settings, on a setting (its registry id, `account.vrchat`) or a sub-tab (`vr`): the sub-tab shows, the setting comes
+    /// into view and is lit (`pages::settings::State::open`). An unknown name opens Settings as it was.
+    pub fn open_settings(&mut self, target: &str, now: f64) {
+        self.set_page(Page::Settings, now);
+        self.settings.open(target, now);
+    }
+
+    pub fn settings_mut(&mut self) -> &mut pages::settings::State {
+        &mut self.settings
     }
 
     pub fn home_mut(&mut self) -> &mut pages::home::State {
@@ -260,6 +288,10 @@ impl App {
 
         let title = Rect::from_min_size(full.min, vec2(full.width(), TITLE_H));
         let body = Rect::from_min_max(pos2(full.left(), full.top() + TITLE_H), full.max);
+        // The shortcut to N4N0's bar, Esc, and the keys of the page while the bar or the chat has the keyboard.
+        if content_ready {
+            self.chat.before_page(&ctx, &snap);
+        }
         if content_ready {
             let since = *self.sidebar_since.get_or_insert(now);
             self.sidebar(ui, &snap, Rect::from_min_size(body.min, vec2(SIDEBAR_W, body.height())), since);
@@ -271,11 +303,15 @@ impl App {
                 self.usage_told = true;
                 self.ctl.patch_settings(serde_json::json!({ "usage": { "told": true, "told_perf": true, "told_account": true } }));
                 if answer == pages::usage_notice::Answer::Settings {
-                    self.set_page(Page::Settings, now);
+                    self.open_settings("privacy.usage", now);
                 }
             }
         }
-        self.title_bar(ui, &snap, title);
+        let strip = self.title_bar(ui, &snap, title);
+        // N4N0's bar in the strip, on every page, and the chat it grows into over the page (REQUEST21 3).
+        if content_ready {
+            self.chat.show(ui, &self.ctl, &snap, strip, self.gpu.as_ref());
+        }
         self.toasts.show(&ctx);
         // "Talk with N4N0?": the wake word heard during a call.
         crate::wake_offer::window(&ctx, &self.ctl, snap.n4n0.voice.wake_offer);
@@ -295,7 +331,8 @@ impl App {
         }
     }
 
-    fn title_bar(&mut self, ui: &mut Ui, snap: &Snapshot, rect: Rect) {
+    /// The title strip; says where it put N4N0's bar (drawn after it, with the chat).
+    fn title_bar(&mut self, ui: &mut Ui, snap: &Snapshot, rect: Rect) -> crate::chat_bar::layout::Strip {
         let ctx = ui.ctx().clone();
         let id = Id::unique("orbiters-title-bar");
         let bar = ui.interact(rect, id, Sense::click_and_drag());
@@ -315,6 +352,15 @@ impl App {
         let r = widgets::text(p, pos2(rect.left() + lead, rect.center().y), Align2::LEFT_CENTER, &name);
         // The beta's chip after the app's name, over every page (Enzo, 2026-11-15).
         let r = r.union(beta_chip(ui, pos2(r.right() + 8.0, rect.center().y)));
+        // While a recording runs, its Stop from every page (Enzo, F13): never a start.
+        let live = !snap.capture.photo_3d && matches!(snap.capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused | CaptureState::Stopping);
+        let stopping = snap.capture.state == CaptureState::Stopping;
+        let stop = widgets::Button::new(if stopping { tr("Stopping…") } else { tr("Stop recording") }).icon(icons::RECORD).variant(widgets::Variant::Stop).size(widgets::Size::Sm).enabled(!stopping);
+        let stop_w = stop.desired_width(ui);
+        let stop_at = Rect::from_min_size(pos2(rect.right() - if cfg!(target_os = "macos") { 12.0 } else { 4.0 + 44.0 * 3.0 + 12.0 } - stop_w, rect.top() + 6.0), vec2(stop_w, 28.0));
+        // N4N0's bar takes the middle of what is left between the name and the buttons.
+        let buttons_start = if cfg!(target_os = "macos") { rect.right() - 12.0 } else { rect.right() - 4.0 - 44.0 * 3.0 };
+        let strip = crate::chat_bar::layout::Strip::new(Rect::from_min_max(rect.min, pos2(rect.right(), ui.max_rect().bottom())), TITLE_H, r.right(), if live { stop_at.left() } else { buttons_start });
         let subtitle = match snap.capture.state {
             CaptureState::Recording => Some(tr("Recording").to_string()),
             CaptureState::Importing => Some(tr("Importing").to_string()),
@@ -328,19 +374,12 @@ impl App {
             Align2::LEFT_CENTER,
             &sub,
             &Txt::new("", 12.0).color(theme::FG_3),
-            420.0,
+            // The world's name stops before N4N0's bar.
+            (strip.free_until() - r.right() - 8.0).clamp(0.0, 420.0),
         );
 
-        // While a recording runs, its Stop from every page (Enzo, F13): never a start.
-        let live = !snap.capture.photo_3d && matches!(snap.capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused | CaptureState::Stopping);
-        if live {
-            let stopping = snap.capture.state == CaptureState::Stopping;
-            let b = widgets::Button::new(if stopping { tr("Stopping…") } else { tr("Stop recording") }).icon(icons::RECORD).variant(widgets::Variant::Stop).size(widgets::Size::Sm).enabled(!stopping);
-            let w = b.desired_width(ui);
-            let at = Rect::from_min_size(pos2(rect.right() - if cfg!(target_os = "macos") { 12.0 } else { 4.0 + 44.0 * 3.0 + 12.0 } - w, rect.top() + 6.0), vec2(w, 28.0));
-            if widgets::activated(&b.show_at(ui, at)) {
-                self.ctl.stop_capture();
-            }
+        if live && widgets::activated(&stop.show_at(ui, stop_at)) {
+            self.ctl.stop_capture();
         }
         // Window buttons, platform order.
         let close = if cfg!(windows) {
@@ -351,7 +390,8 @@ impl App {
             tr("Quit")
         };
         if cfg!(target_os = "macos") {
-            return self.mac_window_buttons(ui, rect, id, close);
+            self.mac_window_buttons(ui, rect, id, close);
+            return strip;
         }
         let buttons = [(icons::MINUS, tr("Minimize"), 15.0, false), (icons::SQUARE, tr("Maximize"), 12.0, false), (icons::X, close, 16.0, true)];
         for (i, (glyph, label, size, danger)) in buttons.into_iter().enumerate() {
@@ -380,6 +420,7 @@ impl App {
                 }
             }
         }
+        strip
     }
 
     /// A Mac's window buttons, where and as every Mac window has them: close, minimize and full screen as red, yellow
@@ -686,7 +727,11 @@ impl App {
                     self.sessions.open_storage(false);
                 }
                 pages::Go::Projects => self.set_page(Page::Projects, anim::time(&ctx)),
-                pages::Go::VrchatAccount | pages::Go::ExplorerPoints => self.set_page(Page::Settings, anim::time(&ctx)),
+                go => {
+                    if let Some(target) = go.setting() {
+                        self.open_settings(target, anim::time(&ctx));
+                    }
+                }
             }
         }
     }
@@ -840,7 +885,11 @@ impl eframe::App for App {
                 self.set_page(Page::Projects, anim::time(ctx));
             } else if page == "vrchat-account" {
                 // Previous instances' Connect VRChat in the menus around VRChat (REQUEST20 4): where Home's Sign in to VRChat leads.
-                self.set_page(Page::Settings, anim::time(ctx));
+                self.open_settings("account.vrchat", anim::time(ctx));
+                bring_to_front(ctx);
+            } else if let Some(target) = page.strip_prefix("settings:") {
+                // A setting of the window's Settings, by its registry id or its sub-tab's (REQUEST21 2).
+                self.open_settings(target, anim::time(ctx));
                 bring_to_front(ctx);
             } else if let Some(dir) = page.strip_prefix("share-to:") {
                 // "Share to …" beside VRChat's camera on the desktop: this window's own share dialog, on its friends.
@@ -891,6 +940,7 @@ impl eframe::App for App {
     /// The window closes with Talk held: let go of it, or VRChat would stay muted and N4N0 go on listening.
     fn on_exit(&mut self) {
         self.n4n0.leave(&self.ctl);
+        self.chat.leave(&self.ctl);
         crate::usage::flush(&self.ctl);
     }
 

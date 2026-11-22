@@ -65,6 +65,9 @@ mod portable {
     pub fn screen_recording() -> Option<bool> {
         None
     }
+    pub fn screen_locked() -> bool {
+        false
+    }
     pub fn ask_screen_recording() {}
 }
 #[cfg(not(target_os = "macos"))]
@@ -94,6 +97,7 @@ mod imp {
         fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> CFTypeRef;
         fn CGRectMakeWithDictionaryRepresentation(dict: CFTypeRef, rect: *mut CGRect) -> bool;
         fn CGEventSourceSecondsSinceLastEventType(state: i32, kind: u32) -> f64;
+        fn CGSessionCopyCurrentDictionary() -> CFTypeRef;
         fn CGMainDisplayID() -> u32;
         fn CGDisplayPixelsWide(display: u32) -> usize;
         fn CGDisplayBounds(display: u32) -> CGRect;
@@ -113,6 +117,7 @@ mod imp {
         fn CFNumberGetValue(number: CFTypeRef, kind: CFIndex, out: *mut c_void) -> bool;
         fn CFBooleanGetValue(boolean: CFTypeRef) -> bool;
         fn CFRelease(object: CFTypeRef);
+        fn CFStringCreateWithCString(allocator: CFTypeRef, text: *const std::ffi::c_char, encoding: u32) -> CFTypeRef;
     }
 
     /// `kCGWindowListOptionAll`, `kCGWindowListOptionOnScreenOnly`, `kCGWindowListExcludeDesktopElements`.
@@ -179,6 +184,24 @@ mod imp {
             CFRelease(array);
         }
         out
+    }
+
+    /// Whether the Mac's screen is locked now. Measured 2026-11-22: while it is, the engine's window server shows no frame of
+    /// the game (`0 shown events`: macOS calls the window covered), so a capture is black whatever the game draws.
+    pub fn screen_locked() -> bool {
+        // SAFETY: the dictionary and the key are ours and released once; the value is read while the dictionary lives.
+        unsafe {
+            let session = CGSessionCopyCurrentDictionary();
+            if session.is_null() {
+                return false;
+            }
+            let key = CFStringCreateWithCString(std::ptr::null(), c"CGSSessionScreenIsLocked".as_ptr(), 0x0800_0100);
+            let value = CFDictionaryGetValue(session, key);
+            let locked = !value.is_null() && CFBooleanGetValue(value);
+            CFRelease(key);
+            CFRelease(session);
+            locked
+        }
     }
 
     /// Every window, on screen or not, of every process.

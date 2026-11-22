@@ -822,6 +822,15 @@ pub fn window_icon() -> egui::IconData {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // A Mac's window that macOS called covered is not drawn (eframe skips it), and macOS does not always say when
+        // it shows again: after a full-screen game over it closed or crashed, the window stayed a still picture that
+        // took no press (a Mac's VRChat, 2026-11-22). What this hook sees of the window is as old as its last drawn
+        // frame, so "covered" cannot be asked here: a window that is not minimized is drawn at least twice a second,
+        // covered or not. Next to nothing behind a game, and it comes back by itself.
+        if cfg!(target_os = "macos") && self.windowed && ctx.input(|i| i.viewport().minimized != Some(true)) {
+            ctx.send_viewport_cmd(ViewportCommand::RequestPaintWhileHidden);
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
         if self.ctl.take_show() {
             bring_to_front(ctx);
         }

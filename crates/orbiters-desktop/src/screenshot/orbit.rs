@@ -1820,7 +1820,7 @@ pub(super) fn explorer_shots(out: &Path) -> anyhow::Result<()> {
     for (state, hover) in [("rest", false), ("laser", true)] {
         let mut canvas = Canvas::new(bw, bh);
         for _ in 0..2 {
-            canvas.paint(0.0, |p| crate::world_notice::paint_vr(p, notice.earns == Some(1.0), hover, 0.6));
+            canvas.paint(0.0, |p| crate::world_notice::paint_vr(p, notice.earns == Some(1.0), hover.then_some(crate::world_notice::Part::Take)));
         }
         let path = out.join(format!("explorer-band-{lang}-{state}.png"));
         save_png(&path, &over_ground(canvas.pixels(), bw, bh))?;

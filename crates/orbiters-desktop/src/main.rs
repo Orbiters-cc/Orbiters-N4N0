@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod chat_bar;
 mod audio_devices;
 mod backend;
 mod booster;

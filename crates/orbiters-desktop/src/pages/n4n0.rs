@@ -1,4 +1,4 @@
-//! N4N0 page: talking to N4N0 (typed, or held to speak), what N4N0 knows of the avatar (the N4N0 prop and its panel),
+//! N4N0 page (talking to N4N0 is the bar at the top of the window, `crate::chat_bar`, on every page): what N4N0 knows of the avatar (the N4N0 prop and its panel),
 //! calls, saved videos, what Orbiters costs this computer, and testing what everyone sees of N4N0 (its states, sample
 //! texts, away, hidden, touched). N4N0's settings (the bot, the AFK message, carried and held parameters, its menu, calls
 //! on or off, its ears and its assistant) are in Settings › N4N0 companion and Voice & assistant (REQUEST21 2): the
@@ -6,52 +6,22 @@
 
 use super::{section, Cx};
 use crate::ipc::N4n0Command;
-use crate::state::{AccountState, CallLink, CallPhase, CallView, N4n0Face, N4n0Line, N4n0Status, N4n0Who};
+use crate::state::{CallLink, CallPhase, CallView, N4n0Face, N4n0Status};
 use egui::{pos2, vec2, Align2, Layout, Rect, Sense, Ui, UiBuilder};
-use orbiters_core::settings::Settings;
 use orbiters_i18n::{mark, tr, tr_ctx, tr_latin, tr_n};
-use orbiters_ui::anim;
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Variant};
 
 #[derive(Default)]
-pub struct State {
-    /// The question being typed.
-    ask: String,
-    /// The Talk button is held.
-    talking: bool,
-}
+pub struct State {}
 
 impl State {
-    /// Ends a held Talk (leaving the page).
-    pub fn leave(&mut self, cx: &crate::backend::Ctl) {
-        if self.talking {
-            self.talking = false;
-            cx.n4n0(N4n0Command::Talk { down: false });
-        }
-    }
+    /// Leaving the page (talking to N4N0, and a held Talk, are the chat bar's: `crate::chat_bar`).
+    pub fn leave(&mut self, _cx: &crate::backend::Ctl) {}
 }
 
-/// How the assistant stands, for the conversation's subtitle.
-fn assistant_line(n4n0: &N4n0Status, settings: &Settings, account: &AccountState) -> String {
-    if !settings.n4n0.enabled {
-        return tr("N4N0 is off").into();
-    }
-    if !settings.n4n0.assistant {
-        return tr("Assistant off: N4N0 is a tool without AI").into();
-    }
-    if !matches!(account, AccountState::SignedIn { .. } | AccountState::Offline { .. } | AccountState::Checking { .. }) {
-        return tr("Sign in to Orbiters (Settings) to talk to N4N0").into();
-    }
-    match &n4n0.quota {
-        Some(q) if q.own_key => tr("Answers on your own key").into(),
-        Some(q) if q.limit > 0 => tr!("{left} of {limit} free answers left today", left = q.limit.saturating_sub(q.used), limit = q.limit),
-        _ => tr("Ask anything, or hold Talk and speak").into(),
-    }
-}
-
-pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
+pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
     let snap = cx.snap;
     // A setting of N4N0's asked for (the heading's Settings, the Calls card's): Settings opens on it.
     let mut to_settings: Option<&'static str> = None;
@@ -71,70 +41,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
             });
 
-            let talk_sub = assistant_line(n4n0, &snap.settings, &snap.account.state);
+            // Talking to N4N0 is the bar at the top of the window, on every page (REQUEST21 3).
             let mut m = super::Masonry::new(ui, "n4n0");
-            m.add(1, |ui| section(ui, cx, 1, icons::N4N0, tr("Talk to N4N0"), Some(&talk_sub), |ui| {
-                conversation(ui, n4n0);
-                ui.add_space(12.0);
-                let signed_in = matches!(snap.account.state, AccountState::SignedIn { .. } | AccountState::Offline { .. } | AccountState::Checking { .. });
-                let can_ask = snap.settings.n4n0.enabled && snap.settings.n4n0.assistant && signed_in;
-                let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
-                // A longer word in another language widens its button, and the field gives the room.
-                let talk_label = if state.talking { tr("Listening…") } else { tr("Hold to talk") };
-                let talk_w = Button::new(talk_label).icon(icons::MICROPHONE).desired_width(ui).max(132.0);
-                let ask_w = Button::new(tr("Ask")).icon(icons::SPARKLE).desired_width(ui).max(92.0);
-                let field = Rect::from_min_max(row.min, pos2(row.right() - talk_w - ask_w - 16.0, row.max.y));
-                let mut fu = ui.new_child(UiBuilder::new().max_rect(field).layout(Layout::left_to_right(egui::Align::Center)));
-                let resp = widgets::text_field(&mut fu, "n4n0-ask", &mut state.ask, tr("Ask N4N0 something…"), field.width(), false);
-                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let ask_rect = Rect::from_min_size(pos2(field.right() + 8.0, row.top()), vec2(ask_w, 40.0));
-                let ask = Button::new(tr("Ask")).icon(icons::SPARKLE).variant(Variant::Primary).enabled(can_ask && !n4n0.thinking && !state.ask.trim().is_empty()).width(ask_w).show_at(ui, ask_rect);
-                if (ask.clicked() || enter) && can_ask && !state.ask.trim().is_empty() && !n4n0.thinking {
-                    cx.ctl.n4n0(N4n0Command::Ask { text: std::mem::take(&mut state.ask) });
-                }
-                // Talk: held to speak, like the menu's button. One widget whatever its label says: the press that
-                // changes the label keeps holding it.
-                let talk_rect = Rect::from_min_size(pos2(ask_rect.right() + 8.0, row.top()), vec2(talk_w, 40.0));
-                let talk = Button::new(talk_label)
-                    .icon(icons::MICROPHONE)
-                    .enabled(can_ask && n4n0.voice.installed)
-                    .width(talk_w)
-                    .id_salt("n4n0-talk")
-                    .show_at(ui, talk_rect);
-                let held = talk.is_pointer_button_down_on();
-                if held != state.talking && (can_ask && n4n0.voice.installed || state.talking) {
-                    state.talking = held;
-                    cx.ctl.n4n0(N4n0Command::Talk { down: held });
-                }
-                if !n4n0.voice.installed && can_ask {
-                    ui.add_space(6.0);
-                    note(ui, tr("Install N4N0's ears below to talk instead of typing."), theme::FG_3);
-                }
-                for c in &n4n0.confirmations {
-                    ui.add_space(12.0);
-                    // What N4N0 asks before it does it is answered here (or by saying yes); the rest on Orbiters.
-                    let (fallback, label, icon) = if c.is_local() {
-                        (tr("N4N0 asks before it does this. Say or type no to leave it."), tr("Yes, do it"), icons::CHECK)
-                    } else {
-                        (tr("Waiting for your approval on Orbiters."), tr("Approve on Orbiters"), icons::ARROW_SQUARE_OUT)
-                    };
-                    let desc = if c.summary.is_empty() { fallback } else { c.summary.as_str() };
-                    widgets::field(ui, if c.title.is_empty() { tr("Needs your approval") } else { &c.title }, Some(desc), 190.0, |ui| {
-                        if Button::new(label).icon(icon).variant(Variant::Primary).size(Size::Sm).show(ui).clicked() {
-                            cx.ctl.n4n0(N4n0Command::OpenLink { url: c.approve_url.clone() });
-                        }
-                    });
-                }
-                if !n4n0.lines.is_empty() {
-                    ui.add_space(8.0);
-                    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
-                    let mut bu = ui.new_child(UiBuilder::new().max_rect(r).layout(Layout::right_to_left(egui::Align::Center)));
-                    if Button::new(tr("New conversation")).icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Ghost).size(Size::Sm).show(&mut bu).clicked() {
-                        cx.ctl.n4n0(N4n0Command::NewConversation);
-                    }
-                }
-            }));
-
             let avatar_sub = avatar_line(snap);
             m.add(2, |ui| section(ui, cx, 2, icons::PERSON, tr("On your avatar"), Some(&avatar_sub), |ui| {
                 panel_preview(ui, n4n0);
@@ -494,85 +402,6 @@ fn note(ui: &mut Ui, text: &str, color: egui::Color32) {
     let g = ui.painter().layout_job(Txt::new(text, 12.0).color(color).job(ui.available_width()));
     let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
     ui.painter().galley(r.min, g, color);
-}
-
-/// The last lines of the conversation: the person's to the right, N4N0's in green to the left, what N4N0 did in small.
-fn conversation(ui: &mut Ui, n4n0: &N4n0Status) {
-    let width = ui.available_width();
-    let lines: Vec<&N4n0Line> = n4n0.lines.iter().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
-    if lines.is_empty() && !n4n0.thinking && !n4n0.listening {
-        let (r, _) = ui.allocate_exact_size(vec2(width, 64.0), Sense::hover());
-        ui.painter().rect_filled(r, theme::radius(14.0), theme::white(0.03));
-        widgets::text(
-            ui.painter(),
-            r.center(),
-            Align2::CENTER_CENTER,
-            &Txt::new(tr("“Nano, put my hoodie on.” “Nano, plan a movie night Saturday.” “Nano, save this video.”"), 12.5).color(theme::FG_3),
-        );
-        return;
-    }
-    for line in lines {
-        let max = (width * 0.72).min(560.0);
-        match line.who {
-            N4n0Who::You | N4n0Who::N4n0 => {
-                let mine = line.who == N4n0Who::You;
-                let t = Txt::new(&line.text, 13.5).color(theme::FG).line_height(19.0);
-                let g = ui.painter().layout_job(t.job(max - 28.0));
-                let size = g.size() + vec2(28.0, 18.0);
-                let (row, _) = ui.allocate_exact_size(vec2(width, size.y + 8.0), Sense::hover());
-                let bubble = if mine {
-                    Rect::from_min_size(pos2(row.right() - size.x, row.top()), size)
-                } else {
-                    Rect::from_min_size(pos2(row.left() + 34.0, row.top()), size)
-                };
-                let fill = if mine { theme::INK_700 } else { theme::alpha(theme::ACCENT, 0.13) };
-                ui.painter().rect_filled(bubble, theme::radius(14.0), fill);
-                ui.painter().galley(bubble.min + vec2(14.0, 9.0), g, theme::FG);
-                if !mine {
-                    n4n0_dot(ui, pos2(row.left() + 13.0, bubble.top() + 15.0), 11.0);
-                }
-            }
-            N4n0Who::Note | N4n0Who::Error => {
-                let color = if line.who == N4n0Who::Error { theme::DANGER } else { theme::FG_3 };
-                let g = ui.painter().layout_job(Txt::new(&line.text, 11.5).color(color).job(width - 34.0));
-                let (row, _) = ui.allocate_exact_size(vec2(width, g.size().y + 8.0), Sense::hover());
-                ui.painter().galley(pos2(row.left() + 34.0, row.top() + 2.0), g, color);
-            }
-        }
-    }
-    // The answer arriving says it all by itself: the dots are for before its first words.
-    let arriving = n4n0.lines.last().is_some_and(|l| l.streaming);
-    if (n4n0.thinking && !arriving) || n4n0.listening {
-        let (row, _) = ui.allocate_exact_size(vec2(width, 38.0), Sense::hover());
-        let bubble = Rect::from_min_size(pos2(row.left() + 34.0, row.top()), vec2(if n4n0.listening { 150.0 } else { 64.0 }, 30.0));
-        ui.painter().rect_filled(bubble, theme::radius(14.0), theme::alpha(theme::ACCENT, 0.13));
-        n4n0_dot(ui, pos2(row.left() + 13.0, bubble.center().y), 11.0);
-        let t = anim::time(ui.ctx());
-        if n4n0.listening {
-            // The microphone's level, as N4N0 hears it.
-            let level = n4n0.voice.level.clamp(0.0, 1.0);
-            let bar = Rect::from_min_size(pos2(bubble.left() + 14.0, bubble.center().y - 3.0), vec2(bubble.width() - 28.0, 6.0));
-            ui.painter().rect_filled(bar, theme::radius(3.0), theme::white(0.08));
-            ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * level).max(6.0), bar.height())), theme::radius(3.0), theme::ACCENT);
-        } else {
-            for i in 0..3 {
-                let phase = ((t * 2.2 - i as f64 * 0.22).sin() * 0.5 + 0.5) as f32;
-                let c = pos2(bubble.left() + 20.0 + i as f32 * 12.0, bubble.center().y - 2.0 * phase);
-                ui.painter().circle_filled(c, 3.2, theme::alpha(theme::ACCENT, 0.45 + 0.55 * phase));
-            }
-        }
-        // Dots and a level meter: 30 frames a second, not the monitor's rate.
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
-    }
-}
-
-/// N4N0's little face: a green disc with two eyes.
-fn n4n0_dot(ui: &Ui, center: egui::Pos2, radius: f32) {
-    let p = ui.painter();
-    p.circle_filled(center, radius, theme::ACCENT);
-    for dx in [-3.6f32, 3.6] {
-        p.rect_filled(Rect::from_center_size(center + vec2(dx, -0.5), vec2(2.4, 5.0)), theme::radius(1.2), theme::ON_ACCENT);
-    }
 }
 
 /// The panel as people see it: four rows of 32 characters, white on a dark glass, empty when N4N0 is quiet.

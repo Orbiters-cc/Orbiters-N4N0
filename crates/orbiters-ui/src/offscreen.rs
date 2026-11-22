@@ -80,7 +80,33 @@ impl Offscreen {
         image.transpose()
     }
 
+    /// Runs one frame of `ui` and paints it without reading it back, waiting for the GPU to finish: how long the
+    /// interface took to lay out (egui's pass) and to tessellate, upload and draw (until the GPU is done).
+    pub fn frame_timed(&mut self, ctx: &egui::Context, input: RawInput, ui: impl FnMut(&mut egui::Ui)) -> anyhow::Result<(std::time::Duration, std::time::Duration)> {
+        let screen = input.screen_rect.unwrap_or(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
+        let start = std::time::Instant::now();
+        let mut full = ctx.run_ui(input, ui);
+        let laid_out = start.elapsed();
+        let start = std::time::Instant::now();
+        for (id, deltas) in full.textures_delta.set.drain() {
+            for delta in deltas {
+                self.renderer.write().update_texture(&self.device, &self.queue, id, &delta);
+            }
+        }
+        self.render(ctx, &full, screen, false)?;
+        let drawn = start.elapsed();
+        for id in full.textures_delta.free.drain() {
+            self.renderer.write().free_texture(&id);
+        }
+        Ok((laid_out, drawn))
+    }
+
     fn paint(&mut self, ctx: &egui::Context, full: &egui::FullOutput, screen: egui::Rect) -> anyhow::Result<ColorImage> {
+        self.render(ctx, full, screen, true).map(|image| image.unwrap_or_else(|| ColorImage::filled([1, 1], egui::Color32::BLACK)))
+    }
+
+    /// Draws a frame; reads it back when `readback`, else only waits for the GPU to finish it.
+    fn render(&mut self, ctx: &egui::Context, full: &egui::FullOutput, screen: egui::Rect, readback: bool) -> anyhow::Result<Option<ColorImage>> {
         let ppp = full.pixels_per_point;
         crate::text_audit::record(&full.shapes);
         let jobs = ctx.tessellate(full.shapes.clone(), ppp);
@@ -117,6 +143,12 @@ impl Offscreen {
             renderer.render(&mut pass.forget_lifetime(), &jobs, &desc);
         }
         drop(renderer);
+        if !readback {
+            commands.push(encoder.finish());
+            self.queue.submit(commands);
+            self.device.poll(wgpu::PollType::wait_indefinitely()).context("GPU frame")?; // i18n: not shown (only the screenshot tools, run by developers, draw off screen; their failure goes to a console)
+            return Ok(None);
+        }
         let row = (w * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("orbiters offscreen readback"), // i18n: not shown (names a graphics debugger shows)
@@ -142,7 +174,7 @@ impl Offscreen {
         }
         drop(mapped);
         buffer.unmap();
-        Ok(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
+        Ok(Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba)))
     }
 }
 

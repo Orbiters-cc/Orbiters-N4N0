@@ -53,6 +53,7 @@ mod vr_audio;
 mod vrchat_bridge;
 mod worlds_overlay;
 mod quiet_prompt;
+mod chat_bar;
 mod settings_r21;
 
 /// What the interface shows of a VRChat on the network, as a Mac sees it.
@@ -220,6 +221,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("capture-wearer") {
         return capture_actions::wearer(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("chat-bar") {
+        return chat_bar::shots(&mut Offscreen::new()?, &out, &settings, scale);
     }
     if only.as_deref() == Some("language-live") {
         return language_live::walk(&mut Offscreen::new()?, &out, &settings, scale);

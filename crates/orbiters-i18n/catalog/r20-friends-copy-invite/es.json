@@ -4,8 +4,6 @@
   "Copy the world's name": "Copiar el nombre del mundo",
   "Invite sent: look at your VRChat notifications": "Invitación enviada: mira tus notificaciones de VRChat",
   "Only an instance of your Previous instances can be invited to from here.": "Desde aquí solo puedes recibir invitaciones a una de tus instancias anteriores.",
-  "This instance has closed: VRChat can no longer invite you to it.": "Esta instancia se cerró: VRChat ya no puede invitarte a ella.",
-  "This instance is full right now. Try again later, or pick another one.": "Esta instancia está llena ahora mismo. Vuelve a intentarlo más tarde o elige otra.",
   "This instance has closed, or VRChat does not show it to your account.": "Esta instancia se cerró, o VRChat no se la muestra a tu cuenta.",
   "VRChat does not let your account into this instance (invite only, or for its owner's friends).": "VRChat no deja entrar a tu cuenta en esta instancia (solo por invitación, o para los amigos de su dueño).",
   "Connect VRChat": "Conectar VRChat",
@@ -13,5 +11,7 @@
   "An invite to the instance you were last in here.": "Una invitación a la instancia en la que estuviste por última vez aquí.",
   "Your VRChat account invites you back: look at your VRChat notifications": "Tu cuenta de VRChat te invita de nuevo: mira tus notificaciones de VRChat",
   "Connect your VRChat account here and the invite comes from it. Orbiters' account could not invite you: {reason}": "Conecta aquí tu cuenta de VRChat y la invitación vendrá de ella. La cuenta de Orbiters no pudo invitarte: {reason}",
-  "Invite me needs your VRChat account": "La invitación necesita tu cuenta de VRChat"
+  "Invite me needs your VRChat account": "La invitación necesita tu cuenta de VRChat",
+  "This instance has closed: VRChat cannot invite you there.": "Esta instancia se cerró: VRChat no puede invitarte allí.",
+  "This instance is full right now: try later or pick another.": "Esta instancia está llena: inténtalo más tarde o elige otra."
 }

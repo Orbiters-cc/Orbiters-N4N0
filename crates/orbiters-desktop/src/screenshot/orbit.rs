@@ -753,7 +753,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     let pressed = |chip| Some(("wrld_2:1~region(eu)".to_string(), chip));
     let sent = Facts { invite_chip: pressed(panels::InviteChip::Sent), invite_said: Some(orbiters_i18n::tr("Invite sent: look at your VRChat notifications").into()), ..instances.clone() };
     qm_scene("orbit-invite-sent", out, hd, &sent, None, Some(Sheet::Instances))?;
-    let full = orbiters_i18n::tr!("Not invited: {error}", error = orbiters_i18n::tr("This instance is full right now. Try again later, or pick another one."));
+    let full = orbiters_i18n::tr!("Not invited: {error}", error = orbiters_i18n::tr("This instance is full right now: try later or pick another."));
     qm_scene("orbit-invite-full", out, hd, &Facts { invite_chip: pressed(panels::InviteChip::Failed), invite_said: Some(full), ..instances.clone() }, None, Some(Sheet::Instances))?;
     let connect = orbiters_i18n::tr!("Connect your VRChat account here and the invite comes from it. Orbiters' account could not invite you: {reason}", reason = "VRChat refused this invite. The instance may have closed.");
     qm_scene("orbit-invite-connect", out, hd, &Facts { invite_chip: pressed(panels::InviteChip::Failed), invite_said: Some(connect), invite_vrchat: true, ..instances.clone() }, None, Some(Sheet::Instances))?;

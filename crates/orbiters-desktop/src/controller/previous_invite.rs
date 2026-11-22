@@ -42,8 +42,8 @@ pub fn invite_self(client: &Mutex<Client>, known: &[InstanceRow], location: &str
     // Each request on its own hold of the session: a sign-out meanwhile stops the next.
     let looked = client.lock().unwrap().world_instance(world, instance);
     match looked {
-        Ok(Some(i)) if i.closed => return failed(tr("This instance has closed: VRChat can no longer invite you to it.").into()),
-        Ok(Some(i)) if i.full => return failed(tr("This instance is full right now. Try again later, or pick another one.").into()),
+        Ok(Some(i)) if i.closed => return failed(tr("This instance has closed: VRChat cannot invite you there.").into()),
+        Ok(Some(i)) if i.full => return failed(tr("This instance is full right now: try later or pick another.").into()),
         Ok(Some(_)) => {}
         Ok(None) | Err(Error::NotFound) => return failed(tr("This instance has closed, or VRChat does not show it to your account.").into()),
         Err(e) => return refusal(e),

@@ -4,8 +4,6 @@
   "Copy the world's name": "ワールド名をコピー",
   "Invite sent: look at your VRChat notifications": "招待を送りました：VRChatの通知を確認してください",
   "Only an instance of your Previous instances can be invited to from here.": "ここから招待できるのは、以前のインスタンスのいずれかだけです。",
-  "This instance has closed: VRChat can no longer invite you to it.": "このインスタンスは閉じられました。VRChatはもう招待できません。",
-  "This instance is full right now. Try again later, or pick another one.": "このインスタンスは現在満員です。あとでもう一度試すか、別のインスタンスを選んでください。",
   "This instance has closed, or VRChat does not show it to your account.": "このインスタンスは閉じられたか、VRChatがあなたのアカウントに表示していません。",
   "VRChat does not let your account into this instance (invite only, or for its owner's friends).": "VRChatはあなたのアカウントをこのインスタンスに入れません（招待制、またはオーナーのフレンド限定）。",
   "Connect VRChat": "VRChatを接続",
@@ -13,5 +11,7 @@
   "An invite to the instance you were last in here.": "ここで最後にいたインスタンスへの招待です。",
   "Your VRChat account invites you back: look at your VRChat notifications": "あなたのVRChatアカウントから再び招待します。VRChatの通知を確認してください",
   "Connect your VRChat account here and the invite comes from it. Orbiters' account could not invite you: {reason}": "ここでVRChatアカウントを接続すると、そのアカウントから招待が届きます。Orbitersのアカウントでは招待できませんでした：{reason}",
-  "Invite me needs your VRChat account": "招待にはあなたのVRChatアカウントが必要です"
+  "Invite me needs your VRChat account": "招待にはあなたのVRChatアカウントが必要です",
+  "This instance has closed: VRChat cannot invite you there.": "このインスタンスは閉じられました。VRChatは招待できません。",
+  "This instance is full right now: try later or pick another.": "このインスタンスは満員です。あとで試すか別のものを選んでください。"
 }

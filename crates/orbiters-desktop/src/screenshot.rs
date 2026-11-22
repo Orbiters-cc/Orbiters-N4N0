@@ -2971,8 +2971,8 @@ fn invite_answer(name: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
     let failed = |m: &'static str| InviteAnswer::Failed { message: orbiters_i18n::tr(m).into() };
     Some(match name {
         "home-invite-sent" => InviteAnswer::Sent,
-        "home-invite-closed" => failed("This instance has closed: VRChat can no longer invite you to it."),
-        "home-invite-full" => failed("This instance is full right now. Try again later, or pick another one."),
+        "home-invite-closed" => failed("This instance has closed: VRChat cannot invite you there."),
+        "home-invite-full" => failed("This instance is full right now: try later or pick another."),
         "home-invite-rate" => InviteAnswer::Failed { message: orbiters_core::vrchat_api::Error::RateLimited(std::time::Duration::from_secs(30)).to_string() },
         "home-invite-expired" => InviteAnswer::NeedsVrchat { message: orbiters_core::vrchat_api::Error::Unauthorized.to_string() },
         "home-invite-orbiters" => InviteAnswer::NeedsVrchat {

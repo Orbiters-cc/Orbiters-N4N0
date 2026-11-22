@@ -325,13 +325,14 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
         _ if state.data.mine.is_none() => me.look.banner.clone(),
         _ => String::new(),
     };
-    let radii = [theme::CARD_RADIUS, theme::CARD_RADIUS, 0.0, 0.0];
+    // The card's own corners at the top, square where the banner meets the rest of the card.
+    let radii = [theme::squircle(theme::CARD_RADIUS), theme::squircle(theme::CARD_RADIUS), 0.0, 0.0];
     match (choice == BannerChoice::Colour).then_some(()).map_or_else(|| state.picture(&banner_url), |_| None) {
         Some(t) => paint::squircle_texture(&p, banner, radii, t.id(), cover_uv(t.size_vec2(), banner.size()), Color32::WHITE),
         None => {
             let [r, g, b] = colour.unwrap_or([60, 70, 110]);
             let c = Color32::from_rgb(r, g, b);
-            paint::fill_convex(&p, &paint::squircle_points(banner, theme::squircle(theme::CARD_RADIUS)), |at| {
+            paint::fill_convex(&p, &paint::squircle_points_corners(banner, radii), |at| {
                 let t = ((at.x - banner.left()) / banner.width() * 0.7 + (at.y - banner.top()) / banner.height() * 0.3).clamp(0.0, 1.0);
                 theme::mix(c, theme::mix(c, theme::INK_900, 0.55), t)
             });

@@ -664,7 +664,7 @@ pub(super) fn backdrop(p: &egui::Painter, rect: Rect, radius: f32, state: &mut S
 
 /// A press that needs nothing of the account's list: Play with no destination, Play on a profile, a Mac's Obelisk.
 fn local_play(action: &Action) -> bool {
-    matches!(action, Action::Play { destination: None, .. } | Action::PlayOn { .. } | Action::OpenEngine)
+    matches!(action, Action::Play { destination: None, .. } | Action::PlayOn { .. } | Action::OpenEngine | Action::InstallEngine)
 }
 
 /// The column (or the rail) beside Home's content, at `rect`.

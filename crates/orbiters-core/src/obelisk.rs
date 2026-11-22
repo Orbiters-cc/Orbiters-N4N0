@@ -14,6 +14,52 @@ pub const BUNDLE_ID: &str = "com.zagrios.obelisk";
 /// Where a person gets it.
 pub const SITE: &str = "https://getobelisk.app";
 
+/// Obelisk's latest release, as GitHub tells it (no account, nothing of the person in the request).
+pub const LATEST: &str = "https://api.github.com/repos/Zagrios/Obelisk/releases/latest";
+/// Where a release's files are, and nowhere else is one taken from.
+const DOWNLOADS: &str = "https://github.com/Zagrios/Obelisk/releases/download/";
+/// The largest disk image taken (0.6.4's is 26 MB).
+const LARGEST: u64 = 512 << 20;
+/// What `codesign --verify -R` holds a downloaded Obelisk to: Obelisk's own identifier, signed with the Developer ID of
+/// its maker's team (Mathieu GRIES-PEROZ, FGW3Z8B82D, read from its 0.6.4). Another program under its name, or Obelisk
+/// signed by anyone else, is not installed.
+pub const REQUIREMENT: &str = r#"anchor apple generic and identifier "com.zagrios.obelisk" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "FGW3Z8B82D""#; // i18n: not shown (a code requirement, in codesign's language)
+/// Obelisk's own setting "Beta versions" (Settings > Updates), in its preferences (`defaults`, domain [`BUNDLE_ID`]):
+/// VRChat's support is in the beta versions of its engine as of November 2026.
+pub const BETA_SETTING: &str = "obelisk.updates.betaReleases";
+
+/// The disk image of a release, to download.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Download {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+    /// The address of the file that says its SHA-256, published beside it.
+    pub checksum_url: String,
+}
+
+/// The Apple silicon disk image that GitHub's answer for a release names, with its checksum file. An answer without
+/// both, or naming files anywhere but Obelisk's releases, gives none.
+pub fn latest_download(release: &str) -> Option<Download> {
+    let release: serde_json::Value = serde_json::from_str(release).ok()?;
+    let assets: Vec<(&str, &str, u64)> = release
+        .get("assets")?
+        .as_array()?
+        .iter()
+        .filter_map(|a| Some((a.get("name")?.as_str()?, a.get("browser_download_url")?.as_str()?, a.get("size")?.as_u64()?)))
+        .filter(|(name, url, _)| url.starts_with(DOWNLOADS) && url.ends_with(&format!("/{name}")) && !name.contains(['/', '\\']))
+        .collect();
+    let (name, url, size) = *assets.iter().find(|(name, _, size)| name.starts_with("Obelisk-") && name.ends_with("-arm64.dmg") && (1..=LARGEST).contains(size))?;
+    let (_, checksum_url, _) = *assets.iter().find(|(other, _, _)| *other == format!("{name}.sha256"))?;
+    Some(Download { name: name.into(), url: url.into(), size, checksum_url: checksum_url.into() })
+}
+
+/// The SHA-256 a checksum file says (`<64 hex digits>  <file name>`), in lower case.
+pub fn checksum(text: &str) -> Option<String> {
+    let first = text.split_whitespace().next()?;
+    (first.len() == 64 && first.bytes().all(|b| b.is_ascii_hexdigit())).then(|| first.to_ascii_lowercase())
+}
+
 /// The home of the person at this Mac.
 pub fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_default()
@@ -71,6 +117,24 @@ pub fn is_vrchat_process(command: &[String], install: Option<&Path>) -> bool {
     })
 }
 
+/// The process of the VRChat that one of Obelisk's session records (`SteamSessions/<id>.v2.json`, which its supervisor
+/// keeps while a Steam game runs: read from Obelisk 0.6.4's) says is running: Steam's VRChat, not finished, with the
+/// game's process named. The caller checks that the process still lives (a record outlives a crash).
+pub fn session_game(record: &str) -> Option<u32> {
+    let record: serde_json::Value = serde_json::from_str(record).ok()?;
+    let app = record.get("store")?.get("app_id")?.as_u64()?;
+    if app.to_string() != crate::vrchat_launch::STEAM_APP || record.get("phase").and_then(serde_json::Value::as_str) == Some("Finished") { // i18n: not shown (a value in Obelisk's file)
+        return None;
+    }
+    record.get("game")?.get("pid")?.as_u64().and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 1)
+}
+
+/// The processes Obelisk's session records in `library` name as a running VRChat.
+pub fn session_games(library: &Path) -> Vec<u32> {
+    let Ok(files) = std::fs::read_dir(library.join("SteamSessions")) else { return Vec::new() };
+    files.flatten().filter(|f| f.file_name().to_string_lossy().ends_with(".v2.json")).filter_map(|f| std::fs::read_to_string(f.path()).ok()).filter_map(|text| session_game(&text)).collect()
+}
+
 /// What a Mac has of what VRChat needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
@@ -115,6 +179,30 @@ mod tests {
     }
 
     #[test]
+    fn a_release_names_the_disk_image_to_download() {
+        let release = r#"{"tag_name": "v0.6.4", "assets": [
+            {"name": "appcast.xml", "size": 7861, "browser_download_url": "https://github.com/Zagrios/Obelisk/releases/download/v0.6.4/appcast.xml"},
+            {"name": "Obelisk-0.6.4-arm64.dmg", "size": 26422576, "browser_download_url": "https://github.com/Zagrios/Obelisk/releases/download/v0.6.4/Obelisk-0.6.4-arm64.dmg"},
+            {"name": "Obelisk-0.6.4-arm64.dmg.sha256", "size": 90, "browser_download_url": "https://github.com/Zagrios/Obelisk/releases/download/v0.6.4/Obelisk-0.6.4-arm64.dmg.sha256"}
+        ]}"#;
+        let download = latest_download(release).unwrap();
+        assert_eq!(download.name, "Obelisk-0.6.4-arm64.dmg");
+        assert_eq!(download.size, 26422576);
+        assert!(download.checksum_url.ends_with("/Obelisk-0.6.4-arm64.dmg.sha256"));
+        assert_eq!(latest_download("not json"), None);
+        assert_eq!(latest_download(&release.replace("-arm64.dmg.sha256", "-arm64.dmg.md5")), None, "no checksum, no download");
+        assert_eq!(latest_download(&release.replace("https://github.com/Zagrios/Obelisk/", "https://example.com/Zagrios/Obelisk/")), None, "only from Obelisk's releases");
+        assert_eq!(latest_download(&release.replace("26422576", "99999999999")), None, "not a disk image of that size");
+        assert_eq!(latest_download(&release.replace("arm64", "x86_64")), None, "Apple silicon only");
+
+        let sum = "1684f0cdea69a38770e70a934f75054454d9bd16f79571e0074292e11dec330c";
+        assert_eq!(checksum(&format!("{sum}  Obelisk-0.6.4-arm64.dmg\n")).as_deref(), Some(sum));
+        assert_eq!(checksum(&sum.to_uppercase()).as_deref(), Some(sum));
+        assert_eq!(checksum("<html>Not Found</html>"), None);
+        assert_eq!(checksum(""), None);
+    }
+
+    #[test]
     fn the_mac_has_obelisk_and_vrchat_or_says_which_is_missing() {
         struct Home(PathBuf);
         impl Home {
@@ -147,6 +235,17 @@ mod tests {
         std::fs::remove_file(library.join("steam-installations-42.json")).unwrap();
         std::fs::write(library.join("steam-installations-42.incomplete.json"), &receipt).unwrap();
         assert_eq!(engine(home.path()), Engine::NoVrchat, "still downloading");
+    }
+
+    #[test]
+    fn a_session_record_names_the_running_vrchat() {
+        let record = |app: u32, phase: &str, game: &str| format!(r#"{{"version":2,"id":"f2766c7f","account_id":"1","store":{{"app_id":{app},"host":"running"}},"phase":"{phase}","supervisor":{{"pid":48097,"uid":501}},"game":{game},"starting":null,"socket":"/tmp/x/control"}}"#);
+        assert_eq!(session_game(&record(438100, "Running", r#"{"pid":48200,"uid":501,"executable":"/x/wine"}"#)), Some(48200));
+        assert_eq!(session_game(&record(438100, "Finished", r#"{"pid":48200,"uid":501}"#)), None, "as Obelisk leaves it once the game closed");
+        assert_eq!(session_game(&record(438100, "Running", "null")), None, "not started yet");
+        assert_eq!(session_game(&record(252950, "Running", r#"{"pid":48200,"uid":501}"#)), None, "another game");
+        assert_eq!(session_game(r#"{"version":2,"id":"f2766c7f"}"#), None, "the pointer to the last session");
+        assert_eq!(session_game("not json"), None);
     }
 
     #[test]

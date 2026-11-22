@@ -28,5 +28,12 @@
   "Obelisk could not be opened.": "Não foi possível abrir o Obelisk.",
   "Sign in to VRChat in Settings so an invite to this instance can be sent to you.": "Entre no VRChat nas Configurações para que um convite para esta instância seja enviado a você.",
   "VRChat runs on a Mac through Obelisk, a free app. Get it, turn on Beta versions in its settings, then download VRChat in it.": "O VRChat roda no Mac pelo Obelisk, um app gratuito. Baixe-o, ative as versões beta nos ajustes dele e depois baixe o VRChat nele.",
-  "Download VRChat in Obelisk (with Beta versions on in its settings), then come back.": "Baixe o VRChat no Obelisk (com as versões beta ativadas nos ajustes dele) e depois volte."
+  "Download VRChat in Obelisk (with Beta versions on in its settings), then come back.": "Baixe o VRChat no Obelisk (com as versões beta ativadas nos ajustes dele) e depois volte.",
+  "VRChat could not be started: nothing to install on this computer.": "Não foi possível iniciar o VRChat: não há nada para instalar neste computador.",
+  "Obelisk could not be installed: {reason}": "Não foi possível instalar o Obelisk: {reason}",
+  "Obelisk's latest version was not found on GitHub.": "A versão mais recente do Obelisk não foi encontrada no GitHub.",
+  "Obelisk's release does not say its checksum.": "A versão do Obelisk não informa a soma de verificação.",
+  "Obelisk's disk image could not be opened.": "Não foi possível abrir a imagem de disco do Obelisk.",
+  "The download is not Obelisk as its maker signed it: nothing was installed.": "O download não é o Obelisk como o autor o assinou: nada foi instalado.",
+  "Obelisk could not be put in Applications.": "Não foi possível colocar o Obelisk em Aplicativos."
 }

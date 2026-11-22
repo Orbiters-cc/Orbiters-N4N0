@@ -28,5 +28,12 @@
   "Obelisk could not be opened.": "Obelisk を開けませんでした。",
   "Sign in to VRChat in Settings so an invite to this instance can be sent to you.": "このインスタンスへの招待を自分に送るには、設定で VRChat にサインインしてください。",
   "VRChat runs on a Mac through Obelisk, a free app. Get it, turn on Beta versions in its settings, then download VRChat in it.": "Mac では、無料アプリ Obelisk で VRChat が動きます。入手して、その設定でベータ版をオンにし、そこで VRChat をダウンロードしてください。",
-  "Download VRChat in Obelisk (with Beta versions on in its settings), then come back.": "Obelisk で VRChat をダウンロードして（設定でベータ版をオンに）、戻ってきてください。"
+  "Download VRChat in Obelisk (with Beta versions on in its settings), then come back.": "Obelisk で VRChat をダウンロードして（設定でベータ版をオンに）、戻ってきてください。",
+  "VRChat could not be started: nothing to install on this computer.": "VRChat を起動できませんでした。このコンピューターにインストールするものがありません。",
+  "Obelisk could not be installed: {reason}": "Obelisk をインストールできませんでした: {reason}",
+  "Obelisk's latest version was not found on GitHub.": "GitHub に Obelisk の最新版が見つかりませんでした。",
+  "Obelisk's release does not say its checksum.": "Obelisk のリリースにチェックサムがありません。",
+  "Obelisk's disk image could not be opened.": "Obelisk のディスクイメージを開けませんでした。",
+  "The download is not Obelisk as its maker signed it: nothing was installed.": "ダウンロードしたものは作者が署名した Obelisk ではありません。何もインストールしていません。",
+  "Obelisk could not be put in Applications.": "Obelisk を「アプリケーション」に入れられませんでした。"
 }

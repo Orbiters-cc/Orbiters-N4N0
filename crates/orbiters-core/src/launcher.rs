@@ -276,6 +276,18 @@ pub enum Game {
     NoEngine,
 }
 
+/// Getting what runs VRChat on a Mac (Obelisk), from the press of "Install Obelisk & play VRChat".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum EngineSetup {
+    /// Its disk image is coming, this much of it.
+    Downloading { percent: u8 },
+    /// Checked (Obelisk's own signature, Apple's notary) and being put in Applications.
+    Installing,
+    /// Installed and open: the person signs in to Steam there and downloads VRChat; Play follows by itself.
+    WaitingForGame,
+    Failed(String),
+}
+
 /// One of VRChat's local profiles (`--profile=N`, REQUEST15 7a): each keeps its own signed-in account, so several
 /// VRChats run side by side only on different profiles.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -419,6 +431,8 @@ pub enum Action {
     Boop { to: String, emoji: Option<String> },
     /// On a Mac: open what runs VRChat there (Obelisk), or where it is got when it is not installed.
     OpenEngine,
+    /// On a Mac without Obelisk: download it, check it, install it, open it, and play once VRChat is in it.
+    InstallEngine,
     /// Open the profile modal; the details arrive in [`LauncherState::profile`].
     OpenProfile { id: String },
     CloseProfile,
@@ -476,6 +490,9 @@ pub struct LauncherState {
     /// The signed-in account's own profile, for Home's card (`None` until read, and with no sign-in).
     #[serde(default)]
     pub mine: Option<MyProfile>,
+    /// On a Mac: how getting Obelisk goes, from the press of its button until VRChat is in it.
+    #[serde(default)]
+    pub engine_setup: Option<EngineSetup>,
 }
 
 impl LauncherState {
@@ -610,6 +627,7 @@ pub fn sample() -> LauncherState {
             GameProfile { profile: 0, account: Some("Sample Me".into()), ..GameProfile::default() },
             GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },
         ],
+        engine_setup: None,
         mine: Some(MyProfile {
             loaded: true,
             bio: "Made-up account for drawing the page.

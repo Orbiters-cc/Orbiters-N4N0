@@ -13,6 +13,9 @@
 //!   stack for addresses inside loaded modules, written to stderr and to a file: `ORBITERS_TEST_CRASH_LOG` when set,
 //!   else `orbiters-desktop-test-crash-<pid>.log` in the temp folder.
 //!
+//! - a fault in a DLL that was unloaded since (its code gone, so "no module") is named from a record of every DLL loaded
+//!   and unloaded since the start (the loader's notifications), which the whole story also lists.
+//!
 //! It is installed before `main` by the C runtime's initialiser table, so it covers every test without each one asking.
 //! Nothing here is in the program people run.
 
@@ -70,12 +73,128 @@ static FIRST_CHANCE_LINES: AtomicUsize = AtomicUsize::new(0);
 static FATAL: AtomicUsize = AtomicUsize::new(0);
 
 extern "C" fn install() {
-    // SAFETY: both take a function that lives as long as the process; the previous filter is kept to be called after ours.
+    // SAFETY: each takes a function that lives as long as the process; the previous filter is kept to be called after ours.
     unsafe {
+        let mut cookie = std::ptr::null_mut();
+        LdrRegisterDllNotification(0, dll_noted, std::ptr::null_mut(), &mut cookie);
         AddVectoredExceptionHandler(1, first_chance);
         let previous = SetUnhandledExceptionFilter(Some(unhandled));
         PREVIOUS.store(previous.map_or(0, |f| f as usize), Ordering::SeqCst);
     }
+}
+
+// ---------------------------------------------------------------------------------------- the DLLs loaded and let go
+
+/// A fault in a DLL that was let go has no module any more: what lay at its address is known only from this record of
+/// every DLL loaded and unloaded since the start, kept in a ring without allocating (the loader calls in under its lock).
+#[repr(C)]
+struct UnicodeString {
+    length: u16,
+    maximum: u16,
+    buffer: *const u16,
+}
+
+#[repr(C)]
+struct DllNotification {
+    flags: u32,
+    full_name: *const UnicodeString,
+    base_name: *const UnicodeString,
+    base: *mut c_void,
+    size: u32,
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+extern "system" {
+    fn LdrRegisterDllNotification(
+        flags: u32,
+        callback: unsafe extern "system" fn(u32, *const DllNotification, *mut c_void),
+        context: *mut c_void,
+        cookie: *mut *mut c_void,
+    ) -> i32;
+}
+
+const LOADED: u32 = 1;
+const UNLOADED: u32 = 2;
+const RING: usize = 512;
+const NAME: usize = 48;
+
+#[derive(Clone, Copy)]
+struct Dll {
+    reason: u32,
+    base: usize,
+    size: usize,
+    name: [u16; NAME],
+    len: usize,
+}
+
+impl Dll {
+    const NONE: Dll = Dll { reason: 0, base: 0, size: 0, name: [0; NAME], len: 0 };
+
+    fn holds(&self, address: usize) -> bool {
+        self.reason != 0 && address >= self.base && address < self.base + self.size
+    }
+
+    fn name_into(&self, out: &mut Line) {
+        for c in char::decode_utf16(self.name[..self.len].iter().copied()) {
+            let _ = out.write_char(c.unwrap_or('?'));
+        }
+    }
+}
+
+struct Ring(std::cell::UnsafeCell<[Dll; RING]>);
+// SAFETY: written only by the loader's notifications, which come one at a time under its lock; read when the process dies.
+unsafe impl Sync for Ring {}
+
+static DLLS: Ring = Ring(std::cell::UnsafeCell::new([Dll::NONE; RING]));
+static DLLS_NOTED: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "system" fn dll_noted(reason: u32, data: *const DllNotification, _: *mut c_void) {
+    if data.is_null() || (reason != LOADED && reason != UNLOADED) {
+        return;
+    }
+    // SAFETY: the loader hands valid data for the call; the ring's slot is written by this callback alone (see `Ring`).
+    unsafe {
+        let data = &*data;
+        let mut entry = Dll { reason, base: data.base as usize, size: data.size as usize, ..Dll::NONE };
+        if let Some(name) = data.base_name.as_ref().filter(|n| !n.buffer.is_null()) {
+            let n = (name.length as usize / 2).min(NAME);
+            entry.name[..n].copy_from_slice(std::slice::from_raw_parts(name.buffer, n));
+            entry.len = n;
+        }
+        let at = DLLS_NOTED.load(Ordering::Acquire);
+        (*DLLS.0.get())[at % RING] = entry;
+        DLLS_NOTED.store(at + 1, Ordering::Release);
+    }
+}
+
+/// The DLLs noted, oldest first (the last `RING` of them), one entry copied at a time (a fault's stack may be short).
+fn dlls_noted() -> impl Iterator<Item = Dll> {
+    let noted = DLLS_NOTED.load(Ordering::Acquire);
+    // SAFETY: plain copies of the ring's entries (see `Ring`).
+    (noted.saturating_sub(RING)..noted).map(|i| unsafe { std::ptr::read_volatile(DLLS.0.get().cast::<Dll>().add(i % RING)) })
+}
+
+/// How many DLL loads and unloads were noted so far: a mark for [`dlls_unloaded_since`].
+pub(crate) fn dlls_noted_count() -> usize {
+    DLLS_NOTED.load(Ordering::Acquire)
+}
+
+/// The names of the DLLs unloaded since `mark` ([`dlls_noted_count`]).
+pub(crate) fn dlls_unloaded_since(mark: usize) -> Vec<String> {
+    let noted = dlls_noted_count();
+    dlls_noted()
+        .skip(RING.min(noted).saturating_sub(noted.saturating_sub(mark)))
+        .filter(|d| d.reason == UNLOADED)
+        .map(|d| String::from_utf16_lossy(&d.name[..d.len]))
+        .collect()
+}
+
+/// `name.dll+0x1234 (unloaded)` for an address inside a DLL that was let go since, without allocating.
+fn unloaded_module_of(address: usize, out: &mut Line) -> bool {
+    let Some(dll) = dlls_noted().filter(|d| d.reason == UNLOADED && d.holds(address)).last() else { return false };
+    dll.name_into(out);
+    let _ = write!(out, "+{:#x} (a DLL unloaded since)", address - dll.base);
+    true
 }
 
 /// A fixed buffer to format into without allocating.
@@ -137,7 +256,7 @@ fn module_of(address: usize, out: &mut Line) -> bool {
 
 fn describe(record: &ExceptionRecord, out: &mut Line) {
     let _ = write!(out, "code {:#010x} at {:p} (", record.code, record.address);
-    if !module_of(record.address as usize, out) {
+    if !module_of(record.address as usize, out) && !unloaded_module_of(record.address as usize, out) {
         let _ = out.write_str("no module");
     }
     let _ = out.write_str(")");
@@ -149,6 +268,11 @@ fn describe(record: &ExceptionRecord, out: &mut Line) {
             _ => "touching",
         };
         let _ = write!(out, " {what} {:#x}", record.information[1]);
+        // What lay there: a fault reading a freed DLL's tables (an object whose code was unloaded) says so.
+        let mut there = Line::new();
+        if module_of(record.information[1], &mut there) || unloaded_module_of(record.information[1], &mut there) {
+            let _ = write!(out, " ({})", there.as_str());
+        }
     }
     // SAFETY: always callable.
     let _ = write!(out, " on thread {}", unsafe { GetCurrentThreadId() });
@@ -211,7 +335,7 @@ unsafe fn stack_pointer(_: *mut c_void) -> usize {
 fn whole_story(summary: &str, rsp: usize) -> String {
     let mut out = String::new();
     let thread = std::thread::current();
-    let _ = writeln!(out, "[test-crash] {}", summary.trim());
+    let _ = writeln!(out, "{}", summary.trim());
     let _ = writeln!(out, "[test-crash] thread name: {:?} (libtest names a test's thread after the test)", thread.name());
     let _ = writeln!(out, "[test-crash] backtrace:\n{}", std::backtrace::Backtrace::force_capture());
     let (mut low, mut high) = (0usize, 0usize);
@@ -225,12 +349,19 @@ fn whole_story(summary: &str, rsp: usize) -> String {
             // SAFETY: inside this thread's committed stack, above its pointer at the fault.
             let value = unsafe { std::ptr::read_volatile(at as *const usize) };
             let mut place = Line::new();
-            if value > 0x10000 && module_of(value, &mut place) {
+            if value > 0x10000 && (module_of(value, &mut place) || unloaded_module_of(value, &mut place)) {
                 let _ = writeln!(out, "  [rsp+{:#06x}] {value:#x} {}", at - rsp, place.as_str());
                 shown += 1;
             }
             at += 8;
         }
+    }
+    let _ = writeln!(out, "[test-crash] DLLs loaded and unloaded since the start, oldest first:");
+    for dll in dlls_noted() {
+        let mut name = Line::new();
+        dll.name_into(&mut name);
+        let what = if dll.reason == LOADED { "loaded  " } else { "UNLOADED" };
+        let _ = writeln!(out, "  {what} {:#x}..{:#x} {}", dll.base, dll.base + dll.size, name.as_str());
     }
     out
 }
@@ -248,6 +379,34 @@ mod tests {
         }
         // SAFETY: none: this reads address 8 to make the access violation this module is to report.
         let _ = unsafe { std::ptr::read_volatile(std::hint::black_box(8usize) as *const u8) };
+    }
+
+    /// An address in a DLL that was loaded and let go is named after that DLL.
+    #[test]
+    fn an_address_in_an_unloaded_dll_is_named_after_it() {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn LoadLibraryW(name: *const u16) -> *mut std::ffi::c_void;
+            fn FreeLibrary(module: *mut std::ffi::c_void) -> i32;
+            fn GetModuleHandleW(name: *const u16) -> *mut std::ffi::c_void;
+        }
+        let name: Vec<u16> = "msimg32.dll\0".encode_utf16().collect();
+        // SAFETY: a system DLL of no use here, loaded and let go; nothing of it is called.
+        let base = unsafe {
+            if !GetModuleHandleW(name.as_ptr()).is_null() {
+                return; // Already in the process for something else: it would not be unloaded.
+            }
+            let module = LoadLibraryW(name.as_ptr());
+            assert!(!module.is_null());
+            FreeLibrary(module);
+            if !GetModuleHandleW(name.as_ptr()).is_null() {
+                return;
+            }
+            module as usize
+        };
+        let mut line = super::Line::new();
+        assert!(super::unloaded_module_of(base + 0x10, &mut line));
+        assert_eq!(line.as_str().to_ascii_lowercase(), "msimg32.dll+0x10 (a dll unloaded since)");
     }
 
     /// A child test that reads address 8 dies with 0xc0000005, and what it leaves names the test, the reading and the function.

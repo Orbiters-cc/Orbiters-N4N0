@@ -54,5 +54,6 @@
   "No version of what runs VRChat on a Mac was found on GitHub.": "Mac で VRChat を動かすプログラムのバージョンが GitHub に見つかりませんでした。",
   "The download does not say its checksum.": "ダウンロードにチェックサムがありません。",
   "The download could not be unpacked.": "ダウンロードを展開できませんでした。",
-  "The download is not signed by Orbiters: nothing was installed.": "ダウンロードに Orbiters の署名がありません。何もインストールしていません。"
+  "The download is not signed by Orbiters: nothing was installed.": "ダウンロードに Orbiters の署名がありません。何もインストールしていません。",
+  "VRChat closed shortly after it started. If it crashed, press Play again.": "VRChat が起動直後に終了しました。クラッシュした場合は、もう一度プレイを押してください。"
 }

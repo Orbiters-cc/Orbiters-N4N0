@@ -177,6 +177,15 @@ pub struct MacMachine {
 
 impl MacMachine {
     pub fn new(home: &std::path::Path) -> Self {
+        // A newer release of the program (the engine's fixes come with it) is got once per run, a little after the start.
+        let tools = orbiters_core::obelisk::tools(&orbiters_core::paths::config_dir());
+        let _ = std::thread::Builder::new().name("obelisk-update".into()).spawn(move || {
+            if cfg!(test) {
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(15));
+            super::obelisk_cli::update(&tools, &AtomicBool::new(false));
+        });
         MacMachine {
             tools: orbiters_core::obelisk::tools(&orbiters_core::paths::config_dir()),
             library: orbiters_core::obelisk::library(home),
@@ -190,11 +199,13 @@ impl Machine for MacMachine {
     fn running(&self) -> Vec<(u32, bool)> {
         // What the engine's own records name, while that process lives; else what this N4N0's start said.
         let recorded = orbiters_core::obelisk::session_games(&self.library);
+        let recorded_none = recorded.is_empty();
         let mut system = sysinfo::System::new();
         let pids: Vec<sysinfo::Pid> = recorded.iter().map(|pid| sysinfo::Pid::from_u32(*pid)).collect();
         system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&pids), true, sysinfo::ProcessRefreshKind::nothing());
         let mut found: Vec<u32> = recorded.into_iter().filter(|pid| system.process(sysinfo::Pid::from_u32(*pid)).is_some()).collect();
-        if found.is_empty() {
+        // Before the record names the game's process, the program's word that it runs (under its own process id here).
+        if found.is_empty() && recorded_none {
             found.extend(self.play.running().map(|pid| pid.unwrap_or(0)));
         }
         found.sort_unstable();

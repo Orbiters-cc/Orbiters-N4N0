@@ -209,7 +209,8 @@ pub enum Event {
     /// The game's supervisor holds it.
     Starting,
     Running { pid: Option<u32> },
-    Exited { code: Option<i64> },
+    /// The game ended, after this many seconds when the program knows.
+    Exited { code: Option<i64>, seconds: Option<u64> },
     /// The command failed: its stable code, and a sentence in English for a log.
     Error { code: String, message: String },
     /// Anything else the program tells.
@@ -235,7 +236,7 @@ pub fn event(line: &str) -> Option<Event> {
         "installed" => Event::Installed,
         "starting" => Event::Starting,
         "running" => Event::Running { pid: value.get("pid").and_then(serde_json::Value::as_u64).and_then(|pid| u32::try_from(pid).ok()) },
-        "exited" => Event::Exited { code: value.get("exit_code").and_then(serde_json::Value::as_i64) },
+        "exited" => Event::Exited { code: value.get("exit_code").and_then(serde_json::Value::as_i64), seconds: value.get("seconds").and_then(serde_json::Value::as_u64) },
         "error" => Event::Error { code: text("code"), message: text("message") },
         _ => Event::Other,
     })
@@ -380,7 +381,7 @@ mod tests {
         assert_eq!(event(r#"{"event":"starting","app_id":438100}"#), Some(Event::Starting));
         assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":4242}"#), Some(Event::Running { pid: Some(4242) }));
         assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":null}"#), Some(Event::Running { pid: None }));
-        assert_eq!(event(r#"{"event":"exited","app_id":438100,"exit_code":0,"exit_signal":null}"#), Some(Event::Exited { code: Some(0) }));
+        assert_eq!(event(r#"{"event":"exited","app_id":438100,"exit_code":0,"exit_signal":null,"seconds":100}"#), Some(Event::Exited { code: Some(0), seconds: Some(100) }));
         assert_eq!(event(r#"{"event":"error","code":"not_signed_in","message":"No Steam account is signed in.","key":null}"#), Some(Event::Error { code: "not_signed_in".into(), message: "No Steam account is signed in.".into() }));
         assert_eq!(event(r#"{"event":"voile_update","version":"v1"}"#), Some(Event::Other));
         assert_eq!(event("warning: something on the wrong stream"), None);

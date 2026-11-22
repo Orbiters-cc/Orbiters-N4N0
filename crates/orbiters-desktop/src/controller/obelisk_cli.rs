@@ -163,6 +163,20 @@ struct Now {
     running: Option<Option<u32>>,
     /// Why the last start failed, until it is told.
     failure: Option<Failure>,
+    /// The program's own process: once it is gone the game is neither starting nor running by its word, whoever
+    /// still holds its output open (the game's supervisor inherits it).
+    program: Option<u32>,
+}
+
+/// A game that ends this soon after it started did not start for the person (the engine, or VRChat in it, crashed).
+const TOO_SHORT: u64 = 150;
+
+/// Whether the process `pid` still runs (one that ended and was not yet waited for does not).
+fn alive(pid: u32) -> bool {
+    let mut system = sysinfo::System::new();
+    let pid = sysinfo::Pid::from_u32(pid);
+    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, sysinfo::ProcessRefreshKind::nothing());
+    system.process(pid).is_some_and(|p| !matches!(p.status(), sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead))
 }
 
 impl Play {
@@ -179,7 +193,7 @@ impl Play {
             command.extend(args.iter().map(String::as_str));
         }
         let mut child = spawn(program, &command).map_err(|e| e.to_string())?;
-        *now = Now { attached: true, running: None, failure: None };
+        *now = Now { attached: true, running: None, failure: None, program: Some(child.id()) };
         drop(now);
         let play = self.clone();
         let followed = std::thread::Builder::new().name("obelisk-play".into()).spawn(move || {
@@ -188,7 +202,13 @@ impl Play {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 match obelisk::event(&line) {
                     Some(Event::Running { pid }) => play.now.lock().unwrap().running = Some(pid),
-                    Some(Event::Exited { .. }) => play.now.lock().unwrap().running = None,
+                    Some(Event::Exited { code, seconds }) => {
+                        play.now.lock().unwrap().running = None;
+                        note(&["steam", "play"], "exited", &format!("exit code {code:?} after {seconds:?} s")); // i18n: not shown (for the log)
+                        if seconds.is_some_and(|s| s < TOO_SHORT) {
+                            failure = Some(Failure::new("ended_at_once", tr("VRChat closed shortly after it started. If it crashed, press Play again.")));
+                        }
+                    }
                     // A failure after the game ran (its session, its Cloud saves) is not a start that failed.
                     Some(Event::Error { code, message }) => {
                         note(&["steam", "play"], &code, &message);
@@ -201,7 +221,7 @@ impl Play {
             }
             let _ = child.wait();
             let mut now = play.now.lock().unwrap();
-            *now = Now { attached: false, running: None, failure };
+            *now = Now { attached: false, running: None, failure, program: None };
         });
         if followed.is_err() {
             self.now.lock().unwrap().attached = false;
@@ -213,17 +233,32 @@ impl Play {
     /// A start is under way and the game is not up yet (the engine or an update of VRChat may download first).
     pub fn starting(&self) -> bool {
         let now = self.now.lock().unwrap();
-        now.attached && now.running.is_none()
+        now.attached && now.running.is_none() && now.program.is_some_and(alive)
     }
 
-    /// The process the program said the game runs under, while it does.
+    /// The process the program said the game runs under, while it does and the program is there to say so.
     pub fn running(&self) -> Option<Option<u32>> {
-        self.now.lock().unwrap().running
+        let now = self.now.lock().unwrap();
+        now.running.filter(|_| now.program.is_some_and(alive))
     }
 
     /// Why the last start failed: told once.
     pub fn failure(&self) -> Option<Failure> {
         self.now.lock().unwrap().failure.take()
+    }
+}
+
+/// Gets the newest release when `tools` holds an older one (a fix of the engine comes this way): quietly, and a
+/// failure changes nothing. The next start runs the newest release there is.
+pub fn update(tools: &Path, stop: &AtomicBool) {
+    let Some(have) = obelisk::program(tools) else { return };
+    let agent = orbiters_core::http_agent(Some(Duration::from_secs(20)), Some(Duration::from_secs(60)));
+    let Some(latest) = text(&agent, obelisk::RELEASES, 4 << 20).ok().and_then(|list| obelisk::latest_download(&list)) else { return };
+    if have.parent().and_then(|f| f.file_name()).is_some_and(|folder| folder == latest.folder()) || tools.join(latest.folder()).exists() {
+        return;
+    }
+    if let Err(e) = install(tools, &|_| {}, stop) {
+        note(&["update"], "download", &format!("{e:#}"));
     }
 }
 

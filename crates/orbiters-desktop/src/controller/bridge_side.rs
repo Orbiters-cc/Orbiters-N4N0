@@ -919,7 +919,7 @@ impl Game for SideGame {
         if self.sides.chosen() == Some(pid) {
             return Err(Failure::new(
                 "app_in_use",
-                "The person chose this session's VRChat for their own 3D pictures in Orbiters - N4N0 (its Capture page): the capture is theirs here until they choose another.", // i18n: not shown
+                "The person chose this session's VRChat for their own 3D pictures in Orbiters - N4N0 (the capture element of its Photos & captures): the capture is theirs here until they choose another.", // i18n: not shown
                 "Walk, look and screenshot meanwhile (your input waits while they record), and try again later; tell the person if you need pictures now.", // i18n: not shown
             )
             .retry_after(120));

@@ -733,14 +733,18 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
             }
         }
         Group::Vr => {
+            let mut smoothing_reset = false;
             if vrchat_here {
                 apply |= place(&mut m, c, 1, registry::CARD_AROUND, |ui| {
                     let mut apply = false;
                     section(ui, cx, 1, icons::STACK, tr(registry::CARD_AROUND), Some(tr("Orbiters beside VRChat's Quick Menu, its wheel and its camera")), |ui| {
-                        apply = orbit_settings(ui, snap, &mut draft.orbit);
+                        apply = orbit_settings(ui, snap, &mut draft.orbit, &mut smoothing_reset);
                     });
                     apply
                 });
+                if smoothing_reset {
+                    cx.toasts.push(&ctx, toast::Kind::Info, tr("Smoothing back to the values measured to match VRChat"));
+                }
                 apply |= place(&mut m, c, 2, registry::CARD_HEADSET, |ui| headset_card(ui, cx, 2, draft));
                 apply |= place(&mut m, c, 3, mark("When SteamVR starts"), |ui| super::vr_audio::show(ui, cx, 3, &mut state.vr_audio, &mut draft.vr_audio));
             }
@@ -1055,7 +1059,7 @@ fn headset_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> boo
         widgets::field(
             ui,
             tr("Coverage while recording"),
-            Some(tr("In VR, the camera path and what it has covered float above a controller while you record, as on the Capture page. SteamVR shows it in your headset only: never in VRChat's camera or the recording.")),
+            Some(tr("In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording.")),
             300.0,
             |ui| {
                 apply |= widgets::segmented(ui, "coverage-overlay", &mut draft.coverage_overlay, &hands, true);
@@ -1847,7 +1851,7 @@ pub(super) fn source_chip(ui: &mut Ui, label: &str, active: bool) -> egui::Respo
 
 /// How Orbiters appears around VRChat's menus: a switch for each of them, how the tiles follow the hand, and what stands
 /// in the way now. (Where N4N0's own menu shows is with N4N0's menu, in [`super::settings_n4n0::menu_card`].)
-fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core::settings::OrbitSettings) -> bool {
+fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core::settings::OrbitSettings, reset: &mut bool) -> bool {
     let mut apply = false;
     widgets::field(ui, tr("Around the Action Menu's wheel"), Some(tr("Orbiters around VRChat's own wheel, with it, whatever N4N0's menu does: opened with R in desktop mode, or by holding the menu button in VR.")), 48.0, |ui| {
         apply |= widgets::toggle(ui, "orbit-wheel", &mut orbit.wheel);
@@ -1896,6 +1900,25 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
     });
     widgets::field(ui, tr("Smoothing on the wheel"), Some(tr("The same around VRChat's Action Menu. About 20 ms lines up with VRChat.")), 300.0, |ui| {
         apply |= widgets::slider(ui, "orbit-vr-smoothing-wheel", &mut orbit.vr_smoothing_wheel_ms, 0.0..=150.0, 1.0, smoothing);
+    });
+    // Both back to what was measured to match VRChat's own menus (the defaults), at once, as the sliders write them.
+    let (quick, wheel) = orbiters_core::settings::OrbitSettings::measured_smoothing();
+    let back = tr!("Back to {quick} on the Quick Menu and {wheel} on the wheel: the values measured to match VRChat's own menus.", quick = smoothing(quick), wheel = smoothing(wheel));
+    widgets::field(ui, tr("Reset the smoothing"), Some(&back), 300.0, |ui| {
+        let done = orbit.smoothing_as_measured();
+        let b = Button::new(tr("Reset"))
+            .icon(icons::ARROW_COUNTER_CLOCKWISE)
+            .variant(Variant::Secondary)
+            .size(Size::Sm)
+            .enabled(!done)
+            .id_salt("orbit-vr-smoothing-reset")
+            .hint(if done { tr("Both are already the values measured to match VRChat") } else { tr("Puts both smoothings back to the values measured to match VRChat") });
+        if b.show(ui).clicked() {
+            orbit.vr_smoothing_quick_menu_ms = quick;
+            orbit.vr_smoothing_wheel_ms = wheel;
+            apply = true;
+            *reset = true;
+        }
     });
     let now = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
         Some(tr("VRChat runs on another computer here, so nothing can appear around its menus.").to_string())

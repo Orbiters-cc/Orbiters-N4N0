@@ -346,6 +346,25 @@ impl OrbitSettings {
     pub fn any(&self) -> bool {
         self.around_wheel() || self.around_quick_menu()
     }
+
+    /// The smoothings measured in the headset to match VRChat's own menus (Quick Menu, wheel, in milliseconds): the
+    /// defaults, which Reset puts back (REQUEST21). One source: [`OrbitSettings::default`].
+    pub fn measured_smoothing() -> (f32, f32) {
+        let d = Self::default();
+        (d.vr_smoothing_quick_menu_ms, d.vr_smoothing_wheel_ms)
+    }
+
+    /// Whether both smoothings are the measured ones (to the millisecond the sliders set).
+    pub fn smoothing_as_measured(&self) -> bool {
+        let (quick, wheel) = Self::measured_smoothing();
+        (self.vr_smoothing_quick_menu_ms - quick).abs() < 0.5 && (self.vr_smoothing_wheel_ms - wheel).abs() < 0.5
+    }
+
+    /// The settings' patch that puts both smoothings back to the measured ones (what the sliders write, both at once).
+    pub fn smoothing_reset_patch() -> serde_json::Value {
+        let (quick, wheel) = Self::measured_smoothing();
+        serde_json::json!({ "orbit": { "vr_smoothing_quick_menu_ms": quick, "vr_smoothing_wheel_ms": wheel } })
+    }
 }
 
 impl Default for OrbitSettings {

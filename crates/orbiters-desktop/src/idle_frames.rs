@@ -30,11 +30,10 @@ use std::collections::HashMap;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-const PAGES: [(&str, Page); 10] = [
+const PAGES: [(&str, Page); 9] = [
     ("home", Page::Home),
     (STATES, Page::Home),
     ("n4n0", Page::N4n0),
-    ("capture", Page::Capture),
     ("projects", Page::Projects),
     ("sessions", Page::Sessions),
     ("worlds", Page::Worlds),

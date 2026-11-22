@@ -3149,6 +3149,7 @@ impl Panels {
                 return;
             }
             panels::Pick::Smoothing(on) => serde_json::json!({ "tracking": { "enabled": on } }),
+            panels::Pick::SmoothingReset => orbiters_core::settings::OrbitSettings::smoothing_reset_patch(),
             panels::Pick::Translate(pick) => {
                 use panels::TranslatePick;
                 match pick {
@@ -3493,7 +3494,7 @@ impl Panels {
             // YouTube's History (REQUEST19 2): its page from YouTube's; pressed there again, back to YouTube.
             Action::VideoHistory if self.facts.sheet == Some(Sheet::VideoHistory) => self.go_back(snap, out),
             Action::VideoHistory => {
-                self.open_sheet(Sheet::VideoHistory, mark("History"), snap);
+                self.open_sheet(Sheet::VideoHistory, panels::history_sheet::TITLE, snap);
                 self.history.look_now();
                 self.history_asked = None;
             }

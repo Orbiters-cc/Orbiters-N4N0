@@ -288,5 +288,6 @@
   "no copy of it could be kept beside it": "横にコピーを残せませんでした",
   "not a PNG": "PNG ではありません",
   "a damaged PNG chunk": "破損した PNG チャンク",
-  "a PNG chunk this copy cannot keep": "このコピーに残せない PNG チャンク"
+  "a PNG chunk this copy cannot keep": "このコピーに残せない PNG チャンク",
+  "the key file is being written: try again": "鍵のファイルを書き込み中です。もう一度お試しください"
 }

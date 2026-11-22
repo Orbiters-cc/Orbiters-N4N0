@@ -350,5 +350,6 @@
   "Open the camera in {who}'s VRChat first": "Abre primero la cámara en el VRChat de {who}",
   "profile {number}": "perfil {number}",
   "{count} VRChat": "{count} VRChat",
-  "{count} VRChats": "{count} VRChats"
+  "{count} VRChats": "{count} VRChats",
+  "The bridge's keys could not be read ({error}), so it stays closed until they can be.": "No se pudieron leer las claves del puente ({error}), así que sigue cerrado hasta que se puedan leer."
 }

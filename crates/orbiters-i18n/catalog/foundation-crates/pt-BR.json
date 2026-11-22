@@ -288,5 +288,6 @@
   "no copy of it could be kept beside it": "não foi possível guardar uma cópia ao lado dele",
   "not a PNG": "não é um PNG",
   "a damaged PNG chunk": "um bloco PNG danificado",
-  "a PNG chunk this copy cannot keep": "um bloco PNG que esta cópia não pode manter"
+  "a PNG chunk this copy cannot keep": "um bloco PNG que esta cópia não pode manter",
+  "the key file is being written: try again": "o arquivo da chave está sendo gravado: tente de novo"
 }

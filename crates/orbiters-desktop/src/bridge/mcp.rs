@@ -449,7 +449,7 @@ fn rpc(shared: &Shared, request: &Request, message: &Value, stream: &TcpStream) 
         "tools/list" => Ok(with_cache(json!({ "tools": tools::list_for(&shared.bridge.capabilities()) }), modern.is_some())),
         "resources/list" => Ok(with_cache(
             json!({ "resources": [
-                { "uri": "bridge://guide", "name": "guide", "title": "How to take 3D pictures from world to world", "description": "The loop, when to give up on a world, and what not to do. Read it first.", "mimeType": "text/markdown" },
+                guide_resource(&shared.bridge.capabilities()),
                 super::projects::resource(),
             ] }),
             modern.is_some(),
@@ -466,14 +466,14 @@ fn rpc(shared: &Shared, request: &Request, message: &Value, stream: &TcpStream) 
             _ => Err((-32602, super::projects::NO_SUCH_RESOURCE.to_string())),
         },
         "prompts/list" => Ok(with_cache(
-            json!({ "prompts": [{ "name": "world_tour", "title": "A tour of worlds", "description": "Go from world to world and take 3D pictures, in private instances, unattended.", "arguments": [{ "name": "worlds", "description": "World ids to visit, or what kind of worlds to look for.", "required": false }] }] }),
+            json!({ "prompts": [tour_prompt(&shared.bridge.capabilities())] }),
             modern.is_some(),
         )),
         "prompts/get" => match message["params"]["name"].as_str() {
             Some("world_tour") => {
                 let worlds = message["params"]["arguments"]["worlds"].as_str().unwrap_or("worlds of your choice, from find_worlds"); // i18n: not shown
                 Ok(json!({
-                    "description": "Go from world to world and take 3D pictures.",
+                    "description": tour_prompt(&shared.bridge.capabilities())["description"].clone(), // i18n: not shown
                     "messages": [{ "role": "user", "content": { "type": "text", "text": format!("{}\n\nDo this now, for: {worlds}.", tools::guide_for(&shared.bridge.capabilities())) } }],
                 }))
             }
@@ -492,6 +492,25 @@ fn rpc(shared: &Shared, request: &Request, message: &Value, stream: &TcpStream) 
             Reply::json(200, "OK", &body)
         }
     }
+}
+
+/// The guide as `resources/list` names it: what it promises is what this computer's bridge can do.
+fn guide_resource(caps: &super::caps::Capabilities) -> Value {
+    if caps.capture_3d {
+        json!({ "uri": "bridge://guide", "name": "guide", "title": "How to take 3D pictures from world to world", "description": "The loop, when to give up on a world, and what not to do. Read it first.", "mimeType": "text/markdown" })
+    } else {
+        json!({ "uri": "bridge://guide", "name": "guide", "title": "How to go from world to world and look", "description": "The loop on this computer (private instances, screenshots), what it cannot do, and what not to do. Read it first.", "mimeType": "text/markdown" })
+    }
+}
+
+/// The world tour prompt as `prompts/list` names it, by the same capabilities.
+fn tour_prompt(caps: &super::caps::Capabilities) -> Value {
+    let description = if caps.capture_3d {
+        "Go from world to world and take 3D pictures, in private instances, unattended." // i18n: not shown (an MCP client reads it)
+    } else {
+        "Go from world to world in private instances and look at each with a screenshot, unattended." // i18n: not shown (an MCP client reads it)
+    };
+    json!({ "name": "world_tour", "title": "A tour of worlds", "description": description, "arguments": [{ "name": "worlds", "description": "World ids to visit, or what kind of worlds to look for.", "required": false }] })
 }
 
 /// What the current revision wants on what may be cached.

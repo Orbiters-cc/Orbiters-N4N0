@@ -57,6 +57,12 @@ fn rpc(port: u16, method: &str, params: Value) -> Value {
     serde_json::from_slice(&reply[end + 4..]).unwrap_or(Value::Null)
 }
 
+/// A successful JSON-RPC answer: its `result` an object, no `error`. A protocol failure never passes as an answer.
+fn ok(answer: Value) -> Value {
+    assert!(answer.get("error").is_none() && answer["result"].is_object(), "not a successful answer: {answer}");
+    answer
+}
+
 struct Flow {
     game: Arc<LabGame>,
     bridge: Arc<Bridge>,
@@ -74,8 +80,9 @@ impl Flow {
     }
 
     fn tool(&self, name: &str, arguments: Value) -> Result<Value, Value> {
-        let answer = rpc(self.server.port(), "tools/call", json!({ "name": name, "arguments": arguments }));
+        let answer = ok(rpc(self.server.port(), "tools/call", json!({ "name": name, "arguments": arguments })));
         let result = &answer["result"];
+        assert!(result["structuredContent"].is_object(), "{name}: no structured content in {answer}");
         if result["isError"] == true {
             Err(result["structuredContent"].clone())
         } else {
@@ -91,7 +98,7 @@ impl Flow {
     }
 
     fn names(&self) -> Vec<String> {
-        rpc(self.server.port(), "tools/list", json!({}))["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+        ok(rpc(self.server.port(), "tools/list", json!({})))["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
     }
 }
 
@@ -111,8 +118,8 @@ fn a_mac_offers_observe_and_travel_and_refuses_the_rest_before_anything_happens(
     let guide = rpc(flow.server.port(), "resources/read", json!({ "uri": "bridge://guide" }));
     let text = guide["result"]["contents"][0]["text"].as_str().unwrap_or_default();
     assert!(text.contains("on a Mac") && !text.contains("take_3d_picture` with"), "the Mac's guide");
-    let init = rpc(flow.server.port(), "server/discover", json!({}));
-    assert!(init.to_string().contains("on this Mac") || init["result"].is_null(), "{init}");
+    let init = ok(rpc(flow.server.port(), "server/discover", json!({})));
+    assert!(init["result"]["instructions"].as_str().is_some_and(|i| i.contains("on this Mac")), "{init}");
 
     // Called anyway: refused by name, and nothing done (no instance made, no start, no close).
     for (name, args) in [
@@ -127,6 +134,7 @@ fn a_mac_offers_observe_and_travel_and_refuses_the_rest_before_anything_happens(
     }
     assert!(flow.game.instances().is_empty() && flow.game.launches().is_empty() && flow.game.closes() == 0);
     let state = flow.tool("get_state", json!({})).unwrap();
+    assert!(state["vrchat"].is_object(), "{state}");
     assert_eq!(state["this_computer"]["platform"], "macos");
     assert_eq!(state["this_computer"]["not_available"].as_array().map(Vec::len), Some(5));
 }
@@ -138,7 +146,9 @@ fn a_pc_offers_every_tool_as_before() {
     assert_eq!(flow.names(), all);
     assert_eq!(super::tools::list_for(&Capabilities::WINDOWS), super::tools::list());
     assert_eq!(super::tools::guide_for(&Capabilities::WINDOWS), super::tools::GUIDE);
-    assert!(flow.tool("get_state", json!({})).unwrap().get("this_computer").is_none(), "a PC's state is as it was");
+    let state = flow.tool("get_state", json!({})).unwrap();
+    assert!(state["vrchat"].is_object() && state["place"].is_object(), "a whole state: {state}");
+    assert!(state.get("this_computer").is_none(), "a PC's state is as it was");
 }
 
 #[test]
@@ -148,8 +158,15 @@ fn a_mac_goes_from_world_to_world_looks_and_closes() {
     let arrived = if arrived["arrived"] == true { arrived } else { flow.tool("wait_for", json!({ "until": "in_world" })).expect("arrives") };
     assert_eq!(arrived["arrived"], true, "{arrived}");
     assert!(arrived["next"].as_str().unwrap().contains("screenshot"), "{arrived}");
-    let answer = rpc(flow.server.port(), "tools/call", json!({ "name": "screenshot", "arguments": {} }));
+    let answer = ok(rpc(flow.server.port(), "tools/call", json!({ "name": "screenshot", "arguments": {} })));
     let info = &answer["result"]["structuredContent"];
+    // The picture is of the window the bridge says it looks at, on every computer.
+    let window = &flow.tool("get_state", json!({})).unwrap()["vrchat"]["window"];
+    assert_eq!((info["window_width"].as_u64(), info["window_height"].as_u64()), (window["width"].as_u64(), window["height"].as_u64()), "{answer} {window}");
+    assert!(info["window_width"].as_u64().is_some_and(|w| w > 0), "{answer}");
+    // A Mac's game is the size its launch asked for (VRChat honours -screen-width and -screen-height under the engine);
+    // Windows' fake window keeps the 640 x 360 its own end-to-end tests are written for.
+    #[cfg(not(windows))]
     assert_eq!((info["window_width"].as_u64(), info["window_height"].as_u64()), (Some(1280), Some(720)), "{answer}");
     assert_eq!(info["window_restored"], false, "a Mac never resizes the window");
     assert_eq!(flow.game.resizes(), 0);
@@ -208,4 +225,70 @@ fn the_person_s_vrchat_on_a_mac_is_never_touched() {
     assert_eq!((flow.game.closes(), flow.game.launches().len()), (0, 0));
     assert!(flow.game.instances().is_empty(), "no instance is made for a start that cannot happen");
     drop(flow.bridge);
+}
+
+/// The verifier's case: a start the shared gate refuses (the person's start under way, the 80 s after an early end) makes
+/// no instance at VRChat's API; and the next world after the bridge's own game closed waits for the gate in the same call,
+/// instead of failing with an instance made and the first game gone.
+#[test]
+fn a_start_the_gate_refuses_makes_nothing_and_the_next_world_waits_for_it() {
+    let flow = Flow::new("mac-gate", Capabilities::MAC);
+    flow.game.set_behaviour(|b| b.admit_refused = Some("vrchat_starting".into()));
+    flow.fails("go_to_world", json!({ "world_id": LAB_WORLD_A }), "vrchat_starting");
+    assert!(flow.game.instances().is_empty(), "no instance for a start that cannot happen");
+    assert!(flow.game.launches().is_empty());
+
+    flow.game.set_behaviour(|b| {
+        b.admit_refused = None;
+        b.gate_after_close = Duration::from_millis(1500);
+    });
+    let first = flow.tool("go_to_world", json!({ "world_id": LAB_WORLD_A })).expect("the first world");
+    if first["arrived"] != true {
+        flow.tool("wait_for", json!({ "until": "in_world" })).expect("arrives");
+    }
+    std::thread::sleep(Duration::from_millis(60));
+    let second = flow.tool("go_to_world", json!({ "world_id": LAB_WORLD_B })).expect("waits for the gate, then starts");
+    let second = if second["arrived"] == true { second } else { flow.tool("wait_for", json!({ "until": "in_world" })).unwrap() };
+    assert_eq!(second["world_id"], LAB_WORLD_B);
+    assert_eq!((flow.game.instances().len(), flow.game.launches().len()), (2, 2), "one instance per world, none lost");
+    flow.tool("close_vrchat", json!({})).expect("closes");
+}
+
+/// The verifier's cases: arguments a Mac's tool list does not have, or of another type, are refused before anything is
+/// done (a numeric session read as the main one, a text profile passed over); a Unity tool keeps its own `session`; the
+/// waits and the metadata promise only what this computer can do.
+#[test]
+fn a_mac_holds_arguments_to_its_own_tool_list_and_promises_only_what_it_can() {
+    let flow = Flow::new("mac-arguments", Capabilities::MAC);
+    flow.fails("go_to_world", json!({ "world_id": LAB_WORLD_A, "profile": "2" }), "not_on_this_computer");
+    flow.fails("go_to_world", json!({ "world_id": 5 }), "bad_arguments");
+    flow.fails("go_to_world", json!({ "world_id": LAB_WORLD_A, "region": "mars" }), "bad_arguments");
+    flow.fails("go_to_world", json!({ "world_id": LAB_WORLD_A, "nonsense": true }), "bad_arguments");
+    assert!(flow.game.instances().is_empty() && flow.game.launches().is_empty(), "nothing made for any of them");
+    let arrived = flow.tool("go_to_world", json!({ "world_id": LAB_WORLD_A })).expect("go_to_world");
+    if arrived["arrived"] != true {
+        flow.tool("wait_for", json!({ "until": "in_world" })).expect("arrives");
+    }
+    flow.fails("close_vrchat", json!({ "session": 3 }), "bad_arguments");
+    assert_eq!(flow.game.closes(), 0, "the main game was not closed for a malformed call");
+    let sessions = flow.tool("list_sessions", json!({})).expect("list_sessions");
+    assert!(!sessions["next"].as_str().unwrap().contains("open_session"), "{sessions}");
+    flow.fails("wait_for", json!({ "until": "signed_in" }), "not_on_this_computer");
+    flow.fails("wait_for", json!({ "until": "picture_saved" }), "not_on_this_computer");
+
+    let list = rpc(flow.server.port(), "tools/list", json!({}));
+    let tool = |name: &str| list["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).cloned().unwrap_or(Value::Null);
+    let waits = tool("wait_for")["inputSchema"]["properties"]["until"]["enum"].clone();
+    assert!(!waits.as_array().unwrap().iter().any(|u| u == "signed_in" || u == "picture_saved"), "{waits}");
+    let unity = list["result"]["tools"].as_array().unwrap().iter().find(|t| t["inputSchema"]["properties"].get("session").is_some() && t["name"].as_str().unwrap().starts_with("unity_"));
+    assert!(unity.is_some(), "a Unity tool keeps its capture's session argument");
+    let resources = rpc(flow.server.port(), "resources/list", json!({}));
+    let prompts = rpc(flow.server.port(), "prompts/list", json!({}));
+    assert!(!resources.to_string().contains("3D pictures") && !prompts.to_string().contains("3D pictures"), "{resources} {prompts}");
+    flow.tool("close_vrchat", json!({})).expect("closes");
+
+    // A PC keeps its metadata, its waits and its tolerance as before.
+    let pc = Flow::new("pc-arguments", Capabilities::WINDOWS);
+    let resources = rpc(pc.server.port(), "resources/list", json!({}));
+    assert!(resources.to_string().contains("3D pictures"));
 }

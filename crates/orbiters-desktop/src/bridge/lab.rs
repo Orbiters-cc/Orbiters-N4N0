@@ -79,6 +79,12 @@ pub struct Behaviour {
     /// VRChat comes up this long after `launch` (Easy Anti-Cheat loading first: 2026-11-15 12:25, its "301" line came before
     /// VRChat.exe).
     pub comes_up_after: Option<Duration>,
+    /// A start shared with the person's (a Mac's gate) refuses to admit one, with this code (`vrchat_starting`,
+    /// `start_wait`), before anything is made for it.
+    pub admit_refused: Option<&'static str>,
+    /// After a close, no start for this long (a Mac: the end being finalized, the wait after an early end): `launch`
+    /// refuses meanwhile, and `start_ready` says how long is left.
+    pub gate_after_close: Duration,
 }
 
 impl Default for Behaviour {
@@ -107,6 +113,8 @@ impl Default for Behaviour {
             link_refused: false,
             launch_hangs: false,
             comes_up_after: None,
+            admit_refused: None,
+            gate_after_close: Duration::ZERO,
         }
     }
 }
@@ -153,6 +161,7 @@ struct State {
     launches: Vec<LaunchPlan>,
     log_serial: u32,
     closes: u32,
+    closed_at: Option<Instant>,
     resizes: u32,
     /// The window's real client size at each click (from Windows, not from what the bridge passed).
     clicked_at_size: Vec<(u32, u32)>,
@@ -394,6 +403,12 @@ impl LabGame {
     /// The VRChat of a launch comes up: its window, its process, its new log.
     fn come_up(&self, plan: &LaunchPlan) -> Result<(), Failure> {
         let window = LabWindow::open(&self.title).ok_or_else(|| Failure::new("start_failed", "The fake window did not open.", "This is the lab."))?; // i18n: not shown
+        // The stand-in comes up at the size the launch asked for, as VRChat does with -screen-width and -screen-height. (On
+        // Windows the real fake window keeps its own 640 x 360, which the end-to-end tests are written for.)
+        #[cfg(not(windows))]
+        {
+            *window.size.lock().unwrap() = (plan.width, plan.height);
+        }
         let mut state = self.state.lock().unwrap();
         state.window = Some(window);
         state.pid = Some(std::process::id());
@@ -550,6 +565,9 @@ impl Game for LabGame {
         if state.behaviour.launch_fails {
             return Err(Failure::new("start_failed", "VRChat did not start: the lab says no.", "Ask the person to look at the computer.")); // i18n: not shown (an AI client reads it in the tool's answer; the lab is a fake VRChat for tests)
         }
+        if let Some(left) = state.closed_at.and_then(|at| (at + state.behaviour.gate_after_close).checked_duration_since(Instant::now())) {
+            return Err(Failure::new("start_wait", format!("The lab's gate holds starts for {} ms more.", left.as_millis()), "Wait.").retry_after(1)); // i18n: not shown (the lab is a fake VRChat for tests)
+        }
         state.launches.push(plan.clone());
         if state.behaviour.launch_hangs || state.behaviour.start_fails.is_some() {
             return Ok(());
@@ -647,7 +665,20 @@ impl Game for LabGame {
         super::win::resize_client(window.handle, width, height);
     }
 
+    fn admit_start(&self, _own_running: bool) -> Result<(), Failure> {
+        match self.state.lock().unwrap().behaviour.admit_refused {
+            Some(code) => Err(Failure::new(code, "The lab's shared start says no.", "Wait.").retry_after(1)), // i18n: not shown (the lab is a fake VRChat for tests)
+            None => Ok(()),
+        }
+    }
+
+    fn start_ready(&self) -> Option<Duration> {
+        let state = self.state.lock().unwrap();
+        state.closed_at.and_then(|at| (at + state.behaviour.gate_after_close).checked_duration_since(Instant::now()))
+    }
+
     fn close(&self, window: &GameWindow) -> Result<(), Failure> {
+        self.state.lock().unwrap().closed_at = Some(Instant::now());
         let (takes, refused, ignored) = {
             let b = &self.state.lock().unwrap().behaviour;
             (b.close_takes, b.close_refused, b.close_ignored)
@@ -1112,7 +1143,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     while keeper.port().is_none() && begin.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(20));
     }
-    let keys = super::keeper::Keys::load_or_create(&dir.join("keys.dat"));
+    let keys = super::keeper::Keys::load_or_create(&dir.join("keys.dat")).expect("the lab's keys");
     println!(
         "{}",
         serde_json::json!({ "address": format!("http://127.0.0.1:{}/mcp", keeper.port().unwrap_or(0)), "token": keys.token, "dir": dir, "world_a": LAB_WORLD_A, "world_b": LAB_WORLD_B, "camera_icon": CAMERA_ICON, "pid": std::process::id() })

@@ -37,6 +37,8 @@ windows = { workspace = true, features = ["Win32_Security_Cryptography"] }
 # The session store's key in the login keychain, and its AES-GCM (`dpapi`; ring is already built for the releases' signatures).
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+# CFData for an add-only keychain item (`dpapi`), the version security-framework 3 uses.
+core-foundation = "0.10"
 ring = "0.17"
 
 # TLS (`http_tls`): Windows' own through native TLS on the desktop; rustls with ring on Android, where native TLS would

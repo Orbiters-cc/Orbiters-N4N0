@@ -350,5 +350,6 @@
   "Open the camera in {who}'s VRChat first": "先に{who}のVRChatでカメラを開いてください",
   "profile {number}": "プロファイル{number}",
   "{count} VRChat": "VRChat {count}個",
-  "{count} VRChats": "VRChat {count}個"
+  "{count} VRChats": "VRChat {count}個",
+  "The bridge's keys could not be read ({error}), so it stays closed until they can be.": "ブリッジの鍵を読み込めませんでした（{error}）。読み込めるようになるまで閉じたままです。"
 }

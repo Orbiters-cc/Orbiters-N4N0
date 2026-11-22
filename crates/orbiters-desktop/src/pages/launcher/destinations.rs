@@ -73,6 +73,9 @@ const CARD_MAX_W: f32 = 236.0;
 const CARD_GAP: f32 = 12.0;
 const BODY_H: f32 = 58.0;
 const HINT_H: f32 = 26.0;
+/// The Play heading under the row (over the Play buttons), and the room above it.
+const PLAY_HEAD_H: f32 = 26.0;
+const PLAY_HEAD_GAP: f32 = 22.0;
 const RADIUS: f32 = 16.0;
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -589,9 +592,30 @@ impl Places {
         self.notice = Some((text.into(), clock));
     }
 
+    /// Pictures of the page: the list of kinds open on the card `key`.
+    pub fn stand_in_kind_list(&mut self, ctx: &egui::Context, key: &str) {
+        popup::open(ctx, Id::unique(("where-kind", key)).with("list"));
+    }
+
+    /// Pictures of the page: a new instance being made for Play in `mode`.
+    pub fn stand_in_making(&mut self, mode: LaunchMode) {
+        self.making = Some(mode);
+    }
+
     /// Pictures of the page: the page of cards shown.
     pub fn stand_in_page(&mut self, page: usize) {
         self.page = page;
+    }
+
+    /// The chosen card's key, and the quiet line under the cards (tests).
+    #[cfg(test)]
+    pub fn chosen_key(&self) -> Option<&str> {
+        self.chosen.as_ref().map(|c| c.key.as_str())
+    }
+
+    #[cfg(test)]
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_ref().map(|n| n.0.as_str())
     }
 
     /// A new instance is being made for Play: the Play button of `mode` turns.
@@ -622,7 +646,9 @@ fn account(state: &State, cx: &Cx, profile_account: Option<&str>) -> (Option<Str
 fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>) -> (Vec<Suggestion>, bool) {
     let ctx = ui.ctx().clone();
     let now = state.now();
-    if state.places.staged.is_none() {
+    // Tests read nothing of this computer's or the network's (pictures of the page hand everything in).
+    let reads = state.places.staged.is_none() && !cfg!(test);
+    if reads {
         refresh(&state.places.history, HISTORY_EVERY, &ctx, "where-history", || {
             let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
             Some(HistoryView::of(&history, orbiters_core::visited::now()))
@@ -643,7 +669,7 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>) -> (Vec<Suggesti
     if let (Some(last), Some(me)) = (&last, me) {
         if rejoinable(&last.instance, me) {
             let known = state.places.open.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
-            if state.places.staged.is_none() {
+            if reads {
                 if known.as_ref().is_some_and(|k| k.0 != location) {
                     // Another instance since: asked about now.
                     let mut s = state.places.open.lock().unwrap_or_else(|e| e.into_inner());
@@ -730,13 +756,19 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     // Signed out of VRChat: the way to sign in, at the line's end.
     let offer_sign_in = !matches!(state.data.source, Source::SignedIn { .. }) && state.places.notice.is_none() && state.places.making.is_none();
     let mut sign_in = false;
-    let height = HEAD_H + HEAD_GAP + card_h + if hint.is_some() { HINT_H + 4.0 } else { 0.0 } + 18.0;
+    let height = HEAD_H + HEAD_GAP + card_h + if hint.is_some() { HINT_H + 4.0 } else { 0.0 } + PLAY_HEAD_GAP + PLAY_HEAD_H;
     super::super::block(ui, cx, index, height, |ui, rect| {
         // The heading: Where, and what is chosen.
         let p = ui.painter().clone();
         let head = Rect::from_min_size(rect.min, vec2(rect.width(), HEAD_H));
         let title = widgets::text(&p, pos2(head.left(), head.center().y), Align2::LEFT_CENTER, &Txt::new(tr_ctx("launch", "Where"), 19.0).weight(weight::SEMIBOLD).tracking(-0.01));
-        let chosen_name = state.places.chosen.as_ref().map_or_else(|| tr("Home world").to_string(), |c| c.name.clone());
+        // A new instance says its kind with the name (the card's line no longer has room for it).
+        let chosen_card = state.places.chosen.as_ref().and_then(|c| shown_cards.iter().find(|s| s.key == c.key));
+        let chosen_name = match chosen_card {
+            Some(card) if card.new_instance() => orbiters_i18n::tr!("{name} · new {kind} instance", name = card.name, kind = access_name(kind_access(kind_of(state, card, can_create)))),
+            Some(card) => card.name.clone(),
+            None => tr("Home world").to_string(),
+        };
         let arrows_w = if pages > 1 { 2.0 * 30.0 + 52.0 } else { 0.0 };
         let selected = orbiters_i18n::tr!("Selected: {name}", name = chosen_name);
         widgets::text_truncated(&p, pos2(title.right() + 14.0, head.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(selected, 13.5).weight(weight::MEDIUM).color(theme::ACCENT), head.right() - title.right() - 26.0 - arrows_w);
@@ -745,11 +777,16 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             let prev = next.translate(vec2(-34.0, 0.0));
             let at = state.places.page;
             widgets::text(&p, pos2(prev.left() - 8.0, head.center().y), Align2::RIGHT_CENTER, &Txt::new(format!("{} / {pages}", at + 1), 12.5).color(theme::FG_3));
-            if at > 0 && widgets::activated(&widgets::IconButton::new(icons::CARET_LEFT, orbiters_i18n::mark("Previous places")).size(30.0, 14.0).id_salt("where-prev").show_at(ui, prev)) {
-                state.places.page -= 1;
-            }
-            if at + 1 < pages && widgets::activated(&widgets::IconButton::new(icons::CARET_RIGHT, orbiters_i18n::mark("More places")).size(30.0, 14.0).id_salt("where-next").show_at(ui, next)) {
-                state.places.page += 1;
+            // Both arrows always, the one that leads nowhere faded and inert (the row does not shift between pages).
+            for (r, glyph, label, back) in [(prev, icons::CARET_LEFT, orbiters_i18n::mark("Previous places"), true), (next, icons::CARET_RIGHT, orbiters_i18n::mark("More places"), false)] {
+                let can = if back { at > 0 } else { at + 1 < pages };
+                if can {
+                    if widgets::activated(&widgets::IconButton::new(glyph, label).size(30.0, 14.0).id_salt(("where-page", back)).show_at(ui, r)) {
+                        state.places.page = if back { at - 1 } else { at + 1 };
+                    }
+                } else {
+                    widgets::icon(&p, r.center(), glyph, 14.0, theme::FG_4);
+                }
             }
         }
         // The cards of this page.
@@ -791,8 +828,8 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             widgets::text_truncated(&p, pos2(rect.left() + 22.0, y), Align2::LEFT_CENTER, &Txt::new(text.as_str(), 12.5).color(theme::FG_2), room);
         }
         // The Play heading, under the row, over the buttons.
-        let py = rect.bottom() - 4.0;
-        widgets::text(&p, pos2(rect.left(), py), Align2::LEFT_BOTTOM, &Txt::new(tr_ctx("launch", "Play"), 19.0).weight(weight::SEMIBOLD).tracking(-0.01));
+        let py = rect.bottom() - PLAY_HEAD_H * 0.5 - 2.0;
+        widgets::text(&p, pos2(rect.left(), py), Align2::LEFT_CENTER, &Txt::new(tr_ctx("launch", "Play"), 19.0).weight(weight::SEMIBOLD).tracking(-0.01));
     });
     if sign_in {
         cx.go = Some(super::super::Go::VrchatAccount);
@@ -846,9 +883,9 @@ fn kind_of(state: &State, card: &Suggestion, can_create: bool) -> CreateAccess {
     state.places.kinds.get(&card.world_id).copied().unwrap_or(CreateAccess::FriendsPlus)
 }
 
-/// A card's line under its name, and the colour of its mark.
-fn reason_line(card: &Suggestion, kind: CreateAccess, now: i64) -> (String, &'static str, Color32) {
-    let new_kind = || access_name(kind_access(kind));
+/// A card's line under its name (why it is offered), and the colour of its mark. What it goes to is on its picture: a
+/// new instance's kind ("New · Friends+", to change), or the kind and region of the one that is there.
+fn reason_line(card: &Suggestion, now: i64) -> (String, &'static str, Color32) {
     match &card.reason {
         Reason::Home => (tr("VRChat's usual start").into(), icons::HOUSE, theme::FG_3),
         Reason::Invite { from, .. } => (orbiters_i18n::tr!("Invite from {name}", name = from), icons::ENVELOPE_SIMPLE, theme::ACCENT),
@@ -857,9 +894,8 @@ fn reason_line(card: &Suggestion, kind: CreateAccess, now: i64) -> (String, &'st
             let minutes = ((starts_at - now + 59) / 60).max(1);
             (orbiters_i18n::tr!("Event · starts in {minutes} min", minutes = minutes), icons::CALENDAR_DOTS, theme::WARN)
         }
-        Reason::Recent { rejoin: true } => (tr("Last visited · rejoin its instance").into(), icons::CLOCK_COUNTER_CLOCKWISE, theme::FG_3),
-        Reason::Recent { rejoin: false } => (orbiters_i18n::tr!("Last visited · new {kind} instance", kind = new_kind()), icons::CLOCK_COUNTER_CLOCKWISE, theme::FG_3),
-        Reason::Frequent { .. } => (orbiters_i18n::tr!("Often visited · new {kind} instance", kind = new_kind()), icons::STAR, theme::FG_3),
+        Reason::Recent { .. } => (tr("Last visited").into(), icons::CLOCK_COUNTER_CLOCKWISE, theme::FG_3),
+        Reason::Frequent { .. } => (tr("Often visited").into(), icons::STAR, theme::FG_3),
     }
 }
 
@@ -935,7 +971,7 @@ fn card_ui(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, pic_h: f32, card
     let x = rect.left() + 14.0;
     let room = rect.width() - 28.0;
     widgets::text_truncated(&p, pos2(x, pic.bottom() + 19.0), Align2::LEFT_CENTER, &Txt::new(card.name.as_str(), 14.5).weight(weight::SEMIBOLD).tracking(-0.01), room);
-    let (line, glyph, tone) = reason_line(card, kind, now);
+    let (line, glyph, tone) = reason_line(card, now);
     let y = pic.bottom() + 41.0;
     if matches!(card.reason, Reason::Invite { .. }) {
         p.circle_filled(pos2(x + 4.0, y), 4.0, theme::ACCENT);
@@ -969,7 +1005,7 @@ fn kind_pill(ui: &mut Ui, state: &mut State, pic: Rect, card: &Suggestion, kind:
     let ctx = ui.ctx().clone();
     let access = kind_access(kind);
     let label = access_name(access);
-    let txt = Txt::new(label, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+    let txt = Txt::new(orbiters_i18n::tr!("New · {kind}", kind = label), 11.5).weight(weight::SEMIBOLD).color(theme::FG);
     let w = widgets::text_size(ui, &txt).x + if can_create { 44.0 } else { 30.0 };
     let r = Rect::from_min_size(pic.left_bottom() + vec2(8.0, -30.0), vec2(w.min(pic.width() - 16.0), 22.0));
     let id = Id::unique(("where-kind", &card.key));
@@ -1009,7 +1045,7 @@ fn picture(state: &mut State, card: &Suggestion) -> Option<egui::TextureHandle> 
             return state.picture(url);
         }
     }
-    if state.places.staged.is_some() || card.world_id.is_empty() {
+    if state.places.staged.is_some() || card.world_id.is_empty() || cfg!(test) {
         return None;
     }
     let ctx = state.ctx.clone()?;

@@ -105,6 +105,10 @@ impl State {
 
     /// Open in Unity, from wherever it is offered. `quiet`: no word when it worked (the setup dialog goes on by itself).
     pub(super) fn open_unity(&mut self, ctx: &egui::Context, project: &Project, quiet: bool) {
+        if self.u6.waiting(&project.path) {
+            self.error = Some(tr("This trial waits for Creator Companion's migration: Orbiters does not open it or change its packages before.").into());
+            return;
+        }
         if self.repairing(&project.path) {
             self.error = Some(tr!("Orbiters is moving the Library of {name}. Unity can open it once that ends, or after Cancel.", name = project.name));
             return;

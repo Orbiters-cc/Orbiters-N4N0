@@ -20,6 +20,7 @@ mod toolkit_update;
 mod ui;
 mod unity6;
 mod unity6_card;
+mod unity6_fixtures;
 mod unity6_sheet;
 mod unity_session;
 mod vrchat_picture;

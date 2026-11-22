@@ -41,7 +41,7 @@ pub(super) fn project_items(state: &State, project: &Project, opening: bool) -> 
                 acts.push((Item::new(tr("Save & Exit Unity")).icon(icons::FLOPPY_DISK), ProjectAct::SaveExit));
                 acts.push((Item::new(tr("Kill Unity…")).icon(icons::X_CIRCLE).danger(), ProjectAct::Kill));
             }
-        } else if project.registered && !project.missing && !busy {
+        } else if project.registered && !project.missing && !busy && !state.u6.waiting(&project.path) {
             acts.push((Item::new(tr("Open in Unity")).icon(icons::PLAY), ProjectAct::Open));
         } else if !project.registered && !busy {
             acts.push((Item::new(tr("Add to my projects")).icon(icons::PLUS), ProjectAct::Add));

@@ -2,6 +2,7 @@
 # Scenes and sample data for renders.
 crates/orbiters-desktop/src/screenshot
 crates/orbiters-desktop/src/screenshot.rs
+crates/orbiters-desktop/src/pages/projects/unity6_fixtures.rs
 crates/orbiters-desktop/src/bench.rs
 crates/orbiters-desktop/src/idle_frames.rs
 crates/orbiters-desktop/src/controller/publish_cost.rs

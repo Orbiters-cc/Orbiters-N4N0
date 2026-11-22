@@ -20,7 +20,6 @@ const OUTCOME_EVERY: Duration = Duration::from_secs(3);
 
 /// A trial being made by this window.
 pub(crate) struct Run {
-    pub source: PathBuf,
     pub recorded: Arc<Mutex<Option<String>>>,
     pub job: Job<Result<trial::Job, String>>,
     pub cancel: Arc<AtomicBool>,
@@ -49,7 +48,6 @@ pub(crate) type Checked = Result<(unity6::budget::Budget, Vec<trial::Blocker>), 
 #[derive(Default)]
 pub(crate) struct Sheet {
     pub step: Step,
-    pub project: Option<PathBuf>,
     pub name: String,
     pub location: String,
     /// The (location, name) checked, and what was found.
@@ -63,7 +61,6 @@ pub(crate) struct Sheet {
 #[derive(Clone, Default)]
 pub(crate) struct Fixture {
     pub mac: bool,
-    pub running_trial: bool,
 }
 
 #[derive(Default)]
@@ -97,6 +94,8 @@ pub(crate) struct U6 {
     pub error: Option<String>,
     /// The compatibility view's packages shown.
     pub show_packages: bool,
+    /// Screenshots: the panel scrolls to the Unity 6 card on its next frame.
+    pub scroll_to: bool,
     pub fixture: Option<Fixture>,
 }
 
@@ -116,6 +115,12 @@ impl U6 {
         self.look.as_ref()?.trials.iter().find(|(j, s)| {
             !matches!(s, trial::Status::Replaced) && (orbiters_projects::discovery::key(&j.unity6().path) == key || orbiters_projects::discovery::key(&j.trial.path) == key)
         })
+    }
+
+    /// Whether the project at `path` is a trial still waiting for Creator Companion's migration: nothing opens it or
+    /// changes its packages from here then (the revision of DESIGN22, 4e).
+    pub fn waiting(&self, path: &Path) -> bool {
+        self.trial_at(path).is_some_and(|(_, s)| matches!(s, trial::Status::Waiting { .. }))
     }
 
     /// The trials of the original at `path` (both folders still the ones recorded).
@@ -362,7 +367,7 @@ impl State {
             trial::prepare(trial::Prepare { dir: &dir, vcc: &vcc, source: &from, parent: &parent, name: &name, target: t, open: &open, budget: &budget, recorded: &recorded }, &stop, &prog)
                 .map_err(|e| format!("{e:#}"))
         });
-        self.u6.run = Some(Run { source, recorded, job, cancel, progress });
+        self.u6.run = Some(Run { recorded, job, cancel, progress });
         self.u6.sheet.step = Step::Copying;
     }
 }
@@ -400,5 +405,33 @@ mod tests {
         assert!(state.u6.apply(3, look(&[("h:\\unity projects\\a", standing::State::On2022)])));
         assert_eq!(state.u6.standing(Path::new("H:/Unity projects/A")).map(|s| s.state), Some(standing::State::On2022), "by project, whatever the path's spelling");
         assert_eq!(state.selected.as_deref(), Some(Path::new("H:/Unity projects/A")));
+    }
+
+    /// The revision's 4e: a trial waiting for Creator Companion is neither opened nor offered Open from here.
+    #[test]
+    fn a_trial_waiting_for_creator_companion_is_not_opened() {
+        let mut state = State::default();
+        let path = PathBuf::from("H:/Unity projects/My avatars (Unity 6)");
+        let job = trial::Job {
+            id: "t".into(),
+            created: 0,
+            source: trial::Place { path: PathBuf::from("H:/Unity projects/My avatars"), id: None, name: "My avatars".into() },
+            trial: trial::Place { path: path.clone(), id: None, name: "My avatars (Unity 6)".into() },
+            phase: trial::Phase::Prepared,
+            target: trial::Target { sdk: "3.11.0-beta.1".into(), unity: "6000.0.67f1".into(), changeset: "78a1c2bbeb6a".into() },
+            error: None,
+            attempts: vec![],
+            migrated: None,
+        };
+        let mut l = look(&[]);
+        l.trials = vec![(job, trial::Status::Waiting { vcc_copy: None })];
+        state.u6.apply(1, l);
+        assert!(state.u6.waiting(&path));
+        let project = orbiters_projects::discovery::Project { path: path.clone(), name: "My avatars (Unity 6)".into(), registered: true, ..Default::default() };
+        let acts = super::super::menus::project_items(&state, &project, true);
+        assert!(!acts.iter().any(|(_, a)| *a == super::super::menus::ProjectAct::Open), "no Open in its menu");
+        let ctx = egui::Context::default();
+        state.open_unity(&ctx, &project, false);
+        assert!(!state.action.running() && state.error.as_deref().is_some_and(|e| e.contains("Creator Companion")));
     }
 }

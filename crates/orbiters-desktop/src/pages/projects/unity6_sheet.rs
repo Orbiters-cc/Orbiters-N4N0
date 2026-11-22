@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 
 pub(super) fn open(ctx: &egui::Context, state: &mut State, project: &Project, origin: Rect) {
     state.u6.sheet = Sheet {
-        project: Some(project.path.clone()),
         name: trial::trial_name(&project.name),
         location: project.path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
         ..Default::default()

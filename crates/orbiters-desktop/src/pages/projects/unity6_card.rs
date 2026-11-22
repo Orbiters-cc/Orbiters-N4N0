@@ -42,6 +42,18 @@ pub(super) fn item(ui: &mut Ui, glyph: &str, tint: Color32, title: &str, detail:
     }
 }
 
+/// A step of a list: its number in a disc, its text wrapped beside it.
+fn numbered(ui: &mut Ui, n: usize, text: &str) {
+    let w = ui.available_width();
+    let g = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::FG_2).line_height(19.0).job(w - 30.0));
+    let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y.max(20.0)), Sense::hover());
+    let p = ui.painter();
+    let c = pos2(r.left() + 10.0, r.top() + 10.0);
+    p.circle_filled(c, 10.0, theme::white(0.07));
+    widgets::text(p, c, Align2::CENTER_CENTER, &Txt::new(n.to_string(), 11.0).weight(weight::SEMIBOLD).color(theme::FG_2));
+    p.galley(pos2(r.left() + 30.0, r.top()), g, theme::FG_2);
+}
+
 /// A tinted box holding a heading and a paragraph (what cannot be undone).
 pub(super) fn notice(ui: &mut Ui, tone: Tone, title: &str, text: &str) {
     let w = ui.available_width();
@@ -392,8 +404,8 @@ fn project_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, 
     let ctx = ui.ctx().clone();
     let m = state.u6.matrix();
     let target = m.unity6_target().cloned();
-    let title = match pill(s) {
-        Some(head) => tr!("Unity {editor} · {state}", editor = s.editor.text, state = head),
+    let title = match s.sdk.version() {
+        Some(sdk) => tr!("Unity {editor} · SDK {sdk}", editor = s.editor.text, sdk = sdk),
         None => tr!("Unity {version}", version = s.editor.text),
     };
     item(ui, icons::CUBE, theme::FG_3, &title, Some(&sentence(s, &m)));
@@ -503,7 +515,7 @@ pub(super) fn vcc_steps(ui: &mut Ui, state: &mut State, trial: &Path, target: &t
         tr!("Let it finish: it opens the project in Unity {unity}, where VRChat's Upgrade Wizard asks you about the changes.", unity = target.unity),
     ];
     for (i, step) in steps.iter().enumerate() {
-        item(ui, icons::CIRCLE, theme::FG_4, &format!("{}.", i + 1), Some(step));
+        numbered(ui, i + 1, step);
     }
     let list = [
         (tr("Copy the trial's path"), icons::COPY, true, "copy-path"),

@@ -1772,6 +1772,7 @@ impl State {
         }
         self.stage_panel(name);
         super::vrchat_picture::stage(self, name);
+        self.stage_unity6(name);
         if self.modal.is_some() {
             self.modal_serial = 1;
             self.modal_origin = Rect::from_center_size(ctx.content_rect().center() + egui::vec2(0.0, 120.0), egui::vec2(180.0, 44.0));

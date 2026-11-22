@@ -15,7 +15,8 @@
 //!   call), at most [`FETCHERS`] at a time, what is on screen first, the rest of the list in the background one every
 //!   [`BACKGROUND_EVERY`], waiting longer after each failure ([`backoff`]), and never what is kept and unchanged.
 //!
-//! Picture addresses are never written to a log.
+//! Picture addresses are never written to a log. What happened to each person's picture is ([`note`]): a short digest
+//! of their id, the kind of address and the outcome, so the next session's log says why a missing picture is missing.
 
 use egui::ColorImage;
 use image::RgbaImage;
@@ -44,6 +45,43 @@ const BACKGROUND_TRIES: u8 = 3;
 /// The folder is measured at most this often.
 const EVICT_EVERY: Duration = Duration::from_secs(20);
 const MAGIC: &[u8; 8] = b"ORBPIC1\n";
+/// The mark a folder gets once the decoration previews it kept before REQUEST20 were swept ([`Store::sweep_previews`]).
+const SWEPT: &str = ".previews-swept-1";
+
+/// A line in `logs/profile-pictures.log` (kept under 1 MB, the one before renamed `.old`): what happened to a person's
+/// picture. Only [`who`], the kind of address ([`kind`]), the outcome and VRChat's answer: never an address (VRChat's
+/// carry signatures), a name or a picture. In tests, the test build's own folder ([`orbiters_core::paths::logs_dir`]).
+pub fn note(line: &str) {
+    use std::io::Write;
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _one = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = orbiters_core::paths::logs_dir();
+    let path = dir.join("profile-pictures.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::rename(&path, dir.join("profile-pictures.old.log"));
+    }
+    if let Ok(mut f) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&path)) {
+        let _ = writeln!(f, "{} {line}", orbiters_core::now_utc_iso());
+    }
+}
+
+/// Whose picture, for [`note`]: `u:` and 8 characters of a digest of the person's id (`k` for a picture that is nobody's).
+pub fn who(user: Option<&str>) -> String {
+    user.map_or_else(|| "k".to_string(), |u| format!("u:{}", &digest(u)[..8]))
+}
+
+/// The kind of an address, for [`note`]: `file` (a VRChat file and version) or `other`.
+pub fn kind(url: &str) -> &'static str {
+    if orbiters_core::picture_sources::vrchat_file(url).is_some() { "file" } else { "other" }
+}
+
+/// Why a picture could not be had, for [`note`]: the answer's first line without any address, short.
+fn reason(error: &str) -> String {
+    let line = error.lines().next().unwrap_or_default();
+    let cut = line.find("http").map_or(line, |i| &line[..i]);
+    let short: String = cut.chars().take(120).collect();
+    if short.trim().is_empty() { "no reason given".into() } else { short.trim().to_string() } // i18n: not shown (a log line)
+}
 
 /// What names a picture: its VRChat file and version (the same picture at any size), or a digest of another address.
 pub fn picture_key(url: &str) -> String {
@@ -185,6 +223,38 @@ impl Store {
             }
         }
         written
+    }
+
+    /// Once per folder (it is marked after): the pictures kept for nobody (`k-` files, never a person's `u-` file) with
+    /// see-through pixels go. Before REQUEST20 the friends list drew VRChat's shop PREVIEW of each icon frame and nameplate
+    /// (the decoration around a grey stand-in person on a dark disc, or with grey stand-in lines) and kept it here as a
+    /// picture of nobody; a decoration is drawn with its own asset since, so those files would only wait for the cap. A
+    /// see-through picture of nobody is that shape (a photo is opaque); one that was something else is asked again when
+    /// shown. Our folder only: VRCX's and VRCNext's are never written. Returns how many went.
+    pub fn sweep_previews(&self) -> usize {
+        let mark = self.dir.join(SWEPT);
+        if mark.exists() {
+            return 0;
+        }
+        let Ok(entries) = std::fs::read_dir(&self.dir) else { return 0 };
+        let mut gone = 0;
+        for e in entries.flatten() {
+            let path = e.path();
+            let nobodys = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("k-") && n.ends_with(".pic"));
+            if !nobodys {
+                continue;
+            }
+            let see_through = Self::read(&path, true)
+                .and_then(|(_, png)| image::load_from_memory_with_format(&png, image::ImageFormat::Png).ok())
+                .is_some_and(|i| i.to_rgba8().pixels().any(|p| p.0[3] < 255));
+            if see_through && std::fs::remove_file(&path).is_ok() {
+                gone += 1;
+            }
+        }
+        if std::fs::create_dir_all(&self.dir).is_ok() {
+            let _ = std::fs::write(&mark, b"");
+        }
+        gone
     }
 
     /// A kept picture shown now is used: it goes last when the folder is too large.
@@ -387,6 +457,16 @@ impl Fetcher {
         self.line.1.notify_all();
     }
 
+    /// VRChat may be asked again now (a new list or a session back after waiting): the wait after failures ends and the
+    /// failures in a row are forgotten. Without it a picture asked after the session came back waited out a back-off of
+    /// up to five minutes that the session's absence had built up.
+    pub fn resume(&self) {
+        let mut line = self.lock();
+        line.blocked_until = None;
+        line.failures = 0;
+        self.line.1.notify_all();
+    }
+
     /// The background's pictures (not asked by a page) leave: another list replaces them.
     pub fn clear_background(&self) {
         self.lock().jobs.retain(|j| j.asked.is_some() || !j.replies.is_empty());
@@ -427,17 +507,29 @@ fn work(line: &(Mutex<Line>, Condvar), store: &Store) {
             }
         };
         // Kept meanwhile (another page, VRCX's copy): no network.
+        let (whose, what) = (who(job.user.as_deref()), kind(&job.url));
         let outcome = match store.get(job.user.as_deref(), &job.url) {
             Kept::Exact(image) => Outcome::Got(image),
             _ => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (job.via)(&job.url))) {
                 Ok(Ok(bytes)) => match small(&bytes) {
                     Some(image) => {
                         store.put(job.user.as_deref(), &job.url, &image);
+                        note(&format!("fetched {whose} {what}")); // i18n: not shown (a log line)
                         Outcome::Got(image)
                     }
-                    None => Outcome::Unreadable,
+                    None => {
+                        note(&format!("not a picture {whose} {what}: {} bytes, not asked again in this run", bytes.len())); // i18n: not shown (a log line)
+                        Outcome::Unreadable
+                    }
                 },
-                Ok(Err(_)) | Err(_) => Outcome::Failed,
+                Ok(Err(e)) => {
+                    note(&format!("failed {whose} {what}: {}", reason(&e))); // i18n: not shown (a log line)
+                    Outcome::Failed
+                }
+                Err(_) => {
+                    note(&format!("failed {whose} {what}: the picture's decoder stopped")); // i18n: not shown (a log line)
+                    Outcome::Failed
+                }
             },
         };
         let Job { id, url, user, via, replies, tries, .. } = job;
@@ -494,6 +586,10 @@ impl Profiles {
         static SHARED: OnceLock<Arc<Profiles>> = OnceLock::new();
         SHARED.get_or_init(|| {
             let store = Store::at(orbiters_core::paths::cache_dir().join("profile-pictures"), CAP_BYTES);
+            let swept = store.sweep_previews();
+            if swept > 0 {
+                note(&format!("swept {swept} decoration previews kept before (once)")); // i18n: not shown (a log line)
+            }
             Self::new(Arc::new(store), OtherCaches::on_this_computer())
         })
     }
@@ -541,17 +637,28 @@ impl Profiles {
         use std::sync::atomic::Ordering;
         let generation = self.warming.fetch_add(1, Ordering::AcqRel) + 1;
         let me = self.clone();
+        // A new list, or the session back: asked again at once.
+        self.fetcher.resume();
         let _ = std::thread::Builder::new().name("profile-pictures-warm".into()).spawn(move || {
             me.fetcher.clear_background();
+            let (mut kept, mut elsewhere, mut queued) = (0, 0, 0);
+            let total = items.len();
             for (url, user) in items {
                 if me.warming.load(Ordering::Acquire) != generation {
                     return;
                 }
-                if me.store.has(user.as_deref(), &url) || me.from_elsewhere(&url, user.as_deref()).is_some() {
+                if me.store.has(user.as_deref(), &url) {
+                    kept += 1;
                     continue;
                 }
+                if me.from_elsewhere(&url, user.as_deref()).is_some() {
+                    elsewhere += 1;
+                    continue;
+                }
+                queued += 1;
                 me.fetcher.queue(&url, user.as_deref(), via.clone());
             }
+            note(&format!("list of {total} pictures: {kept} kept, {elsewhere} from VRCX or VRCNext, {queued} to ask of VRChat")); // i18n: not shown (a log line)
         });
     }
 }
@@ -857,5 +964,87 @@ mod tests {
         assert!(p.store.has(Some(A), &url(40, 1)), "from VRCX");
         assert!(p.store.has(None, &url(42, 1)), "asked in the background");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "only the one nobody kept");
+    }
+
+    /// A made-up see-through picture: a ring of colour around a clear middle and clear corners (a decoration's shape).
+    fn see_through(rgb: [u8; 3]) -> image::RgbaImage {
+        image::RgbaImage::from_fn(32, 32, |x, y| {
+            let d = ((x as f32 - 15.5).powi(2) + (y as f32 - 15.5).powi(2)).sqrt();
+            if (11.0..15.0).contains(&d) { image::Rgba([rgb[0], rgb[1], rgb[2], 255]) } else { image::Rgba([0, 0, 0, 0]) }
+        })
+    }
+
+    #[test]
+    fn decoration_previews_kept_before_are_swept_once_and_peoples_pictures_stay() {
+        let temp = Temp::new();
+        let store = Store::at(temp.0.join("profile-pictures"), CAP_BYTES);
+        let opaque = image::RgbaImage::from_pixel(8, 8, image::Rgba([40, 90, 160, 255]));
+        // Before REQUEST20: a frame's shop preview and a nameplate's, kept for nobody; a person's see-through VRC+ icon;
+        // a person's photo kept for nobody (Sharing's chips, a boop's other picture).
+        assert!(store.put(None, &url(50, 1), &see_through([0, 220, 120])));
+        assert!(store.put(None, &url(51, 1), &see_through([200, 40, 200])));
+        assert!(store.put(Some(A), &url(52, 1), &see_through([250, 250, 250])));
+        assert!(store.put(None, &url(53, 1), &opaque));
+        assert_eq!(store.sweep_previews(), 2);
+        assert!(!store.has(None, &url(50, 1)) && !store.has(None, &url(51, 1)), "the previews went");
+        assert!(store.has(Some(A), &url(52, 1)), "a person's picture is never swept, see-through or not");
+        assert!(store.has(None, &url(53, 1)), "a photo of nobody stays");
+        // Once: a decoration kept from now on (its own asset, see-through) stays.
+        assert!(store.put(None, &url(54, 1), &see_through([0, 0, 255])));
+        assert_eq!(store.sweep_previews(), 0);
+        assert!(store.has(None, &url(54, 1)));
+        // An empty or missing folder: nothing to do, and no error.
+        assert_eq!(Store::at(temp.0.join("never-made"), CAP_BYTES).sweep_previews(), 0);
+    }
+
+    #[test]
+    fn after_the_session_waited_pictures_are_asked_again_at_once() {
+        let temp = Temp::new();
+        let p = profiles(&temp.0, none());
+        // The session is waiting for Orbiters: every ask fails, the wait grows (5 s, then 10 s...).
+        let waiting = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (w, calls) = (waiting.clone(), Arc::new(AtomicUsize::new(0)));
+        let c = calls.clone();
+        let bytes = picture(16, 16, [30, 160, 90], image::ImageFormat::Png);
+        let via: Fetch = Arc::new(move |_: &str| {
+            c.fetch_add(1, Ordering::SeqCst);
+            if w.load(Ordering::SeqCst) { Err("Your VRChat session expired. Sign in again.".into()) } else { Ok(bytes.clone()) }
+        });
+        let (reply, got) = reply_channel();
+        assert!(p.load(&url(60, 1), Some(A), Some(via.clone()), |_| {}, reply).is_none());
+        assert!(got.recv_timeout(Duration::from_secs(10)).unwrap().is_none(), "failed while waiting");
+        // The session is back: the page's next look still waits out the back-off...
+        waiting.store(false, Ordering::SeqCst);
+        let (reply, got) = reply_channel();
+        assert!(p.load(&url(60, 1), Some(A), Some(via.clone()), |_| {}, reply).is_none());
+        assert!(got.recv_timeout(Duration::from_millis(1500)).is_err(), "still in the back-off");
+        // ...until the list of the session back is handed in: asked at once, and kept.
+        p.warm(vec![(url(61, 1), Some(B.to_string()))], via.clone());
+        let image = got.recv_timeout(Duration::from_secs(3)).expect("asked again at once").expect("the picture");
+        assert!(near(colour_of(&image), [30, 160, 90]));
+        assert!(p.store.has(Some(A), &url(60, 1)));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !p.store.has(Some(B), &url(61, 1)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(p.store.has(Some(B), &url(61, 1)), "the background goes on too");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn the_log_says_why_without_an_address_or_an_id() {
+        let temp = Temp::new();
+        let p = profiles(&temp.0, none());
+        // A person of this test only (their digest is looked for in the test build's log).
+        let person = format!("usr_00000000-0000-4000-8000-{:012}", std::process::id() as u64 * 1000 + 7);
+        let refused: Fetch = Arc::new(|_: &str| Err("VRChat refused the request (HTTP 403: see https://files.vrchat.cloud/x?Signature=abc).".into()));
+        let (reply, got) = reply_channel();
+        p.load(&url(70, 1), Some(&person), Some(refused), |_| {}, reply);
+        assert!(got.recv_timeout(Duration::from_secs(10)).unwrap().is_none());
+        let log = std::fs::read_to_string(orbiters_core::paths::logs_dir().join("profile-pictures.log")).unwrap_or_default();
+        let line = log.lines().find(|l| l.contains(&who(Some(&person)))).expect("a line about that person");
+        assert!(line.contains("failed") && line.contains("HTTP 403") && line.contains(" file"), "{line}");
+        assert!(!line.contains("http") && !line.contains("Signature") && !line.contains(&person) && !line.contains("file_"), "{line}");
+        assert!(orbiters_core::paths::logs_dir().starts_with(std::env::temp_dir()), "the test build's own folder");
     }
 }

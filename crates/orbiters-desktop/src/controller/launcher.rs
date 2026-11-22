@@ -602,12 +602,16 @@ fn now() -> i64 {
 pub fn read_signed_in(client: &Mutex<Client>) -> Result<(LauncherState, Vec<(String, String)>, BTreeMap<String, Decorations>), Error> {
     let mut friends = BTreeMap::new();
     let mut worn = BTreeMap::new();
+    let mut fields = PictureFields::default();
     for offline in [false, true] {
         for page in 0..50 {
             let items = client.lock().unwrap().friends_page(offline, page * 100)?;
             let n = items.len();
             for v in &items {
                 if let Some(f) = launcher_feed::friend(v, !offline) {
+                    if !friends.contains_key(&f.id) {
+                        fields.count(&f.id, v);
+                    }
                     worn.insert(f.id.clone(), launcher_feed::decorations(v));
                     friends.entry(f.id.clone()).or_insert(f);
                 }
@@ -617,6 +621,7 @@ pub fn read_signed_in(client: &Mutex<Client>) -> Result<(LauncherState, Vec<(Str
             }
         }
     }
+    crate::worlds::profile_pictures::note(&fields.line());
     let me_value = client.lock().unwrap().current_user_value()?;
     let mut me_value = me_value;
     me_value["state"] = serde_json::Value::String("online".into());
@@ -652,6 +657,29 @@ pub fn read_signed_in(client: &Mutex<Client>) -> Result<(LauncherState, Vec<(Str
     state.boops.sort_by_key(|b| std::cmp::Reverse(b.received_at));
     launcher_feed::regroup(&mut state, &groups);
     Ok((state, groups, worn))
+}
+
+/// Which field each person's picture came from in VRChat's friends list ([`launcher_feed::ICON_FIELDS`]), for the
+/// pictures' log: counts, and digests of the ids of those with none (never a name or an address).
+#[derive(Default)]
+struct PictureFields {
+    from: BTreeMap<&'static str, usize>,
+    none: Vec<String>,
+}
+
+impl PictureFields {
+    fn count(&mut self, id: &str, v: &serde_json::Value) {
+        match launcher_feed::icon_field(v) {
+            Some(field) => *self.from.entry(field).or_default() += 1,
+            None => self.none.push(crate::worlds::profile_pictures::who(Some(id))),
+        }
+    }
+
+    fn line(&self) -> String {
+        let from: Vec<String> = self.from.iter().map(|(field, n)| format!("{field} {n}")).collect();
+        let none: Vec<&str> = self.none.iter().take(40).map(String::as_str).collect();
+        format!("friends list pictures from: {}; none {} {}", from.join(", "), self.none.len(), none.join(" ")) // i18n: not shown (a log line)
+    }
 }
 
 /// How long after the `failures`-th failed read in a row the next one is: 30 s doubling to 10 minutes, spread by

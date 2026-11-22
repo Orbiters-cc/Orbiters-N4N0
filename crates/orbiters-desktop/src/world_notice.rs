@@ -4,8 +4,9 @@
 //!
 //! Request20 (Enzo, 2026-11-22: "a bit more discrete, like on the bottom right side with a more transparent background
 //! and a close button"): one small card, the same face everywhere ([`paint_card`]): its words on one line, the action
-//! as a small pill under them, a cross at its right end. Its ground is see-through (a third of what is behind shows) and
-//! it has no frame, as nothing floating has one. A press on the card is "Take a 3D picture"; a press on the cross closes
+//! as a small pill under them, a cross at its right end. Over the game its ground is see-through (a third of what is
+//! behind shows; on N4N0's own window, over the page's words, nearly whole) and it has no frame, as nothing floating has
+//! one. A press on the card is "Take a 3D picture"; a press on the cross closes
 //! it, and that world is never told again for this account (the controller keeps it with the worlds told). It fades in,
 //! stays [`crate::controller::explorer::NOTICE_MS`], and fades out by itself; frames are asked for only while it fades.
 //! - On N4N0's window: in its bottom right corner, over "Talk with N4N0?" when both are up ([`window`]).
@@ -39,13 +40,15 @@ fn why_of(earns_one: bool) -> &'static str {
 pub const CARD: Vec2 = vec2(288.0, 66.0);
 const RADIUS: f32 = 16.0;
 const PAD: f32 = 14.0;
-/// The cross's part: the card's right end, its whole height (in a headset 3.7 x 4.6 cm, a laser's easy target).
+/// The cross's part: the card's right end, its whole height (in a headset 4 x 5 cm, a laser's easy target).
 pub const CLOSE_W: f32 = 52.0;
 /// How much of its ground is dark: a third of what is behind shows through (it was 94 % to 96 %). White words on it keep
 /// more than 5:1 over a white world (the ground then reads as a mid grey) and far more over a dark one.
 pub const GROUND: f32 = 0.66;
+/// On N4N0's own window it lies over the page's own words: there its ground is nearly whole, so they do not show through.
+pub const WINDOW_GROUND: f32 = 0.92;
 /// Under a laser or the pointer, a little darker.
-const GROUND_HOVER: f32 = 0.8;
+const DARKER: f32 = 0.14;
 /// How long it takes to come and to go.
 pub const FADE_IN_MS: u64 = 300;
 pub const FADE_OUT_MS: u64 = 900;
@@ -92,11 +95,13 @@ pub fn still_for_ms(notice: &WorldNotice, now_ms: u64) -> u64 {
 
 /// The card's face at `at` (its top left), `s` pixels a unit: its words on one line, "Take a 3D picture" as a pill under
 /// them (and "+1 Explorer point" beside it when a picture here earns one, or "+1" where that does not fit), the cross at
-/// its right end. `hover`: the part under a laser or the pointer.
-pub fn paint_card(p: &Painter, at: Pos2, s: f32, earns_one: bool, hover: Option<Part>) {
+/// its right end. `ground`: how dark its ground is ([`GROUND`] over a game, [`WINDOW_GROUND`] on N4N0's window); `hover`:
+/// the part under a laser or the pointer.
+pub fn paint_card(p: &Painter, at: Pos2, s: f32, ground: f32, earns_one: bool, hover: Option<Part>) {
     let u = |x: f32, y: f32| at + vec2(x, y) * s;
     let card = Rect::from_min_size(at, CARD * s);
-    p.rect_filled(card, RADIUS * s, theme::alpha(theme::INK_950, if hover.is_some() { GROUND_HOVER } else { GROUND }));
+    let ground = if hover.is_some() { (ground + DARKER).min(0.96) } else { ground };
+    p.rect_filled(card, RADIUS * s, theme::alpha(theme::INK_950, ground));
     let close_left = CARD.x - CLOSE_W;
     let room = (close_left - 6.0 - PAD) * s;
     let title = tr(NOTICE_TITLE);
@@ -115,7 +120,7 @@ pub fn paint_card(p: &Painter, at: Pos2, s: f32, earns_one: bool, hover: Option<
     widgets::text_truncated(p, pos2(pill.left() + lead, pill.center().y), Align2::LEFT_CENTER, &Txt::new(take, tsize).weight(weight::SEMIBOLD).color(theme::INK_950), words_room + 2.0 * s);
     if earns_one {
         let from = pill.right() + 8.0 * s;
-        let left = u(close_left - 6.0, 0.0).x - from;
+        let left = u(close_left - 12.0, 0.0).x - from;
         let whole = tr(EARNED_ONE);
         let fits = |t: &str, size: f32| p.layout_no_wrap(t.to_string(), egui::FontId::proportional(size), theme::FG).size().x <= left;
         let said = [11.5 * s, 11.0 * s, 10.5 * s].into_iter().find(|&z| fits(whole, z)).map(|z| (whole, z)).or_else(|| fits("+1", 12.0 * s).then_some(("+1", 12.0 * s)));
@@ -158,7 +163,7 @@ pub fn window(ctx: &Context, ctl: &Ctl, notice: Option<&WorldNotice>, lift: f32)
             Some(Part::Close) => card.on_hover_text(tr(NOT_NOW)),
             _ => card.on_hover_text(why(notice)),
         };
-        paint_card(&p, rect.min, WINDOW_S, notice.earns == Some(1.0), hover);
+        paint_card(&p, rect.min, WINDOW_S, WINDOW_GROUND, notice.earns == Some(1.0), hover);
         if card.clicked() {
             match part(card.interact_pointer_pos()) {
                 Some(Part::Close) => ctl.explorer(Command::NoticeDismiss { id: notice.id }),
@@ -175,20 +180,21 @@ pub fn window(ctx: &Context, ctl: &Ctl, notice: Option<&WorldNotice>, lift: f32)
 
 /// In a headset: pixels a unit of its picture, the picture's size (the card alone, so a laser's place on it is a place on
 /// the card), its width in the play space, and where it is put: `distance` ahead of the eyes, `below` their line and
-/// `right` of it, in metres (about 17° right and 19° down: in view, out of the way of what is looked at).
+/// `right` of it, in metres (about 17° right and 19° down: in view, out of the way of what is looked at). Its words are
+/// about 1° high there, as VRChat's own small labels.
 pub const VR_S: f32 = 2.2;
 pub const VR_PX: [u32; 2] = [634, 146];
-pub const VR_WIDTH_M: f32 = 0.2;
+pub const VR_WIDTH_M: f32 = 0.22;
 pub struct Spot {
     pub distance: f32,
     pub below: f32,
     pub right: f32,
 }
-pub const VR_SPOT: Spot = Spot { distance: 0.7, below: 0.24, right: 0.22 };
+pub const VR_SPOT: Spot = Spot { distance: 0.62, below: 0.21, right: 0.19 };
 
 /// The headset's picture: the card at [`VR_S`]. `hover`: the part a laser is on.
 pub fn paint_vr(p: &Painter, earns_one: bool, hover: Option<Part>) {
-    paint_card(p, Pos2::ZERO, VR_S, earns_one, hover);
+    paint_card(p, Pos2::ZERO, VR_S, GROUND, earns_one, hover);
 }
 
 #[cfg(test)]
@@ -236,7 +242,11 @@ mod tests {
         // In a headset its picture is the card alone, and the cross is a laser's size there.
         assert!((VR_PX[0] as f32 - CARD.x * VR_S).abs() < 1.0 && (VR_PX[1] as f32 - CARD.y * VR_S).abs() < 1.0);
         let metres = VR_WIDTH_M / CARD.x;
-        assert!(CLOSE_W * metres >= 0.035 && CARD.y * metres >= 0.04, "{} x {} m", CLOSE_W * metres, CARD.y * metres);
+        assert!(CLOSE_W * metres >= 0.039 && CARD.y * metres >= 0.05, "{} x {} m", CLOSE_W * metres, CARD.y * metres);
+        // Its title about a degree high where it is put.
+        let title_m = 13.5 * metres;
+        let degrees = (title_m / VR_SPOT.distance).atan().to_degrees();
+        assert!((0.85..1.3).contains(&degrees), "{degrees}°");
     }
 
     /// Request20: it fades in, stays, fades out over the end of its time and is gone after it; frames are needed only while

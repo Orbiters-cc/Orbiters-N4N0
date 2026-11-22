@@ -149,10 +149,6 @@ pub struct WorldNotice {
 }
 
 impl WorldNotice {
-    /// What is left of its time, 1 to 0.
-    pub fn left(&self, now_ms: u64) -> f32 {
-        (self.until_ms.saturating_sub(now_ms) as f32 / self.for_ms.max(1) as f32).clamp(0.0, 1.0)
-    }
     pub fn up(&self, now_ms: u64) -> bool {
         now_ms < self.until_ms
     }

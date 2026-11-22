@@ -217,7 +217,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
             let px = [rect.width().ceil() as u32, rect.height().ceil() as u32];
             let mut canvas = Canvas::new(px[0], px[1]);
             for _ in 0..2 {
-                canvas.paint(0.0, |p| crate::world_notice::paint_card(p, egui::Pos2::ZERO, zoom, true, hover));
+                canvas.paint(0.0, |p| crate::world_notice::paint_card(p, egui::Pos2::ZERO, zoom, crate::world_notice::GROUND, true, hover));
             }
             let mut desk = ground(kind, DESK[0], DESK[1]);
             lay(&mut desk, DESK[0], canvas.pixels(), px, [rect.min.x.round() as i32, rect.min.y.round() as i32], alpha);

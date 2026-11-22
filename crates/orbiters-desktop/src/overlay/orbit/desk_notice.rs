@@ -129,7 +129,7 @@ impl Card {
         if self.drawn != Some(look) {
             // The first paint loads the fonts.
             for _ in 0..if self.drawn.is_none() { 2 } else { 1 } {
-                canvas.paint(0.0, |p| world_notice::paint_card(p, Pos2::ZERO, zoom, earns_one, over));
+                canvas.paint(0.0, |p| world_notice::paint_card(p, Pos2::ZERO, zoom, world_notice::GROUND, earns_one, over));
             }
             window.picture(canvas.pixels(), [0, 0, px[0], px[1]]);
             self.drawn = Some(look);
@@ -149,7 +149,8 @@ mod tests {
 
     /// Request20: in every shape of VRChat's window the card lies whole inside it, in its bottom right corner, clear of
     /// the menu mismatch corner (bottom left) and of VRChat's hints (its top corners), and with VRChat's Quick Menu open
-    /// it lies clear of the menu and of our wing (it may stay up then, where the pointer is free to press it).
+    /// it lies clear of the menu, and in a 16:9 or wider window of our wing too (it may stay up then, where the pointer
+    /// is free to press it).
     #[test]
     fn the_card_lies_in_the_bottom_right_corner_of_every_window() {
         for (w, h) in SIZES {
@@ -169,7 +170,13 @@ mod tests {
                 .map(|p| p.rect)
                 .collect();
             assert!(clear(card, &[qm]), "{w}x{h}: the Quick Menu {qm:?} {card:?}");
-            assert!(clear(card, &wing), "{w}x{h}: our wing");
+            if w / h >= 16.0 / 9.0 - 0.01 {
+                assert!(clear(card, &wing), "{w}x{h}: our wing");
+            } else {
+                // In a squarish window our parts go under the menu in a strip that reaches the corner: there the card is
+                // held back while the Quick Menu is open, never laid over them.
+                assert!(!clear(card, &wing), "{w}x{h}: the strip under the menu");
+            }
         }
     }
 

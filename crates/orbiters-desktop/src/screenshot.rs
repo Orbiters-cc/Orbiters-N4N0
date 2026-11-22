@@ -53,6 +53,7 @@ mod vr_audio;
 mod vrchat_bridge;
 mod worlds_overlay;
 mod quiet_prompt;
+mod settings_r21;
 
 /// What the interface shows of a VRChat on the network, as a Mac sees it.
 fn network_snapshot(base: &crate::state::Snapshot, link: crate::state::LanLink) -> crate::state::Snapshot {
@@ -2518,6 +2519,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     vrchat_bridge::append(&mut scenarios);
     launcher::append(&mut scenarios);
     launcher_real::append(&mut scenarios);
+    // REQUEST21 2: Settings in sub-tabs, with its search.
+    settings_r21::append(&mut scenarios);
     // REQUEST20 4: Previous instances' Invite me answered: sent from the person's own VRChat account, the instance closed,
     // full, VRChat's pace, its session expired (Connect VRChat), and Orbiters' account unable without one (Connect VRChat).
     for name in INVITE_SHOTS {
@@ -2560,6 +2563,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         if only.as_deref().is_some_and(|list| list.split(',').all(|o| {
             o != sc.name
                 && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
+                && !(o == "r21" && sc.name.starts_with("r21-"))
                 && !(o == "editor" && sc.name.starts_with("editor-"))
                 && !(o == "launcher" && sc.name.starts_with("launcher-") && !sc.name.starts_with("launcher-small"))
                 && !(o == "sharing" && (sc.name.starts_with("gallery-") || sc.name.starts_with("world-share")))
@@ -2671,6 +2675,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         app.skip_splash();
     }
     let total = sc.frames + run.extend;
+    // A Settings scene that shows its own setting (its sub-tab, scrolled to it) needs no wheel to get there.
+    let mut staged = false;
     for f in 0..total {
         let t = f as f64 / 60.0;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(t), ..Default::default() };
@@ -2684,7 +2690,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             input.events.push(Event::PointerMoved(pos2(760.0, 500.0)));
             input.events.push(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -scroll), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE, source: egui::MouseWheelSource::Wheel });
         }
-        if sc.scroll != 0.0 && f + 30 == sc.frames {
+        if sc.scroll != 0.0 && f + 30 == sc.frames && !staged {
             input.events.push(Event::PointerMoved(sc.pointer.unwrap_or(pos2(760.0, 500.0))));
             input.events.push(Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
@@ -2696,6 +2702,9 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         if f == 0 {
             app.set_page(sc.page, t);
+            if sc.page == Page::Settings {
+                staged = settings_r21::stage(&mut app, sc.name, t);
+            }
             if sc.name.starts_with("projects-") || sc.name.starts_with("capture-toolkit") {
                 app.projects_mut().stage(&ctx, sc.name);
             }

@@ -1,0 +1,3 @@
+# REQUEST21 2: Settings' sub-tabs, its search and the registry of every setting, and N4N0's settings moved there.
+crates/orbiters-desktop/src/pages/settings_registry.rs
+crates/orbiters-desktop/src/pages/settings_n4n0.rs

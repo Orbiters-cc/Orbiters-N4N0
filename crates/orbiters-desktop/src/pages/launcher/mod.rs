@@ -201,7 +201,9 @@ impl State {
     }
 
     /// The people's pictures of the data, each address with whose it is: the account's own, invites and boops, then
-    /// the friends in the list's order (its sections, then anyone in none), each once. A person's picture is the one
+    /// the friends in the order the sectioned list shows them (favourites in the game by their groups, in the game, on
+    /// the website, offline: every section open), then anyone in none, each once. The background asks them in this order,
+    /// so what the list shows first comes first (the rows on screen are asked before all of them). A person's picture is the one
     /// their row shows; an invite's or a boop's other picture of someone on the list is nobody's (kept by its address:
     /// one picture a person, two would replace each other at every look).
     fn people_pictures(data: &LauncherState) -> Vec<(String, Option<String>)> {
@@ -223,10 +225,11 @@ impl State {
         for b in &data.boops {
             add(&b.from_icon, &b.from_id);
         }
-        let by_id: HashMap<&str, &Friend> = data.friends.iter().map(|f| (f.id.as_str(), f)).collect();
-        for id in data.groups.iter().flat_map(|g| &g.members) {
-            if let Some(f) = by_id.get(id.as_str()) {
-                add(&f.look.icon, &f.id);
+        for row in list::rows(data, "", &HashSet::new()) {
+            if let Row::Person { friend, .. } = row {
+                if let Some(f) = data.friends.get(friend) {
+                    add(&f.look.icon, &f.id);
+                }
             }
         }
         for f in &data.friends {
@@ -238,8 +241,8 @@ impl State {
     /// The whole list's pictures to the background (REQUEST17), when the list or the session changed: kept ones are
     /// shown at once from then on, missing ones come from VRCX's or VRCNext's copies or, slowly, from VRChat.
     fn warm_pictures(&mut self) {
-        let (Some(loader), Some(scope)) = (self.loader.as_ref(), self.scope.as_ref()) else { return };
-        if self.stale() || self.warmed_for.as_ref().is_some_and(|(d, s)| Arc::ptr_eq(d, &self.data) && s == scope) {
+        let (Some(_), Some(scope)) = (self.loader.as_ref(), self.scope.clone()) else { return };
+        if self.stale() || self.warmed_for.as_ref().is_some_and(|(d, s)| Arc::ptr_eq(d, &self.data) && *s == scope) {
             return;
         }
         self.warmed_for = Some((self.data.clone(), scope.clone()));
@@ -247,12 +250,20 @@ impl State {
         let hash = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            (scope, &items).hash(&mut h);
+            (&scope, &items).hash(&mut h);
             h.finish()
         };
         if hash != self.warmed && !items.is_empty() {
             self.warmed = hash;
-            loader.warm_profiles(scope, items);
+            if let Some(loader) = self.loader.as_mut() {
+                loader.warm_profiles(&scope, items);
+            }
+            // Who has no picture address at all (their row shows the letter whatever the cache does), for the log.
+            let without: Vec<String> = self.data.friends.iter().filter(|f| f.look.icon.is_empty()).map(|f| crate::worlds::profile_pictures::who(Some(&f.id))).collect();
+            if !without.is_empty() {
+                let shown: Vec<&str> = without.iter().take(40).map(String::as_str).collect();
+                crate::worlds::profile_pictures::note(&format!("{} of {} friends have no picture address: {}", without.len(), self.data.friends.len(), shown.join(" "))); // i18n: not shown (a log line)
+            }
         }
     }
 

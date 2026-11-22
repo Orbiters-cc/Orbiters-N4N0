@@ -249,3 +249,74 @@ fn sections_are_sorted_by_status_then_name_and_offline_by_name() {
     assert_eq!(names("website"), ["web a", "web b"]);
     assert_eq!(names("offline"), ["Mid", "new", "Old"]);
 }
+
+/// Made-up VRChat picture addresses (REQUEST20): a file and version.
+fn pic(file: u32, version: u32) -> String {
+    format!("https://api.vrchat.cloud/api/1/file/file_00000000-0000-4000-8000-{file:012}/{version}/file")
+}
+
+#[test]
+fn a_persons_picture_is_the_one_vrchat_shows() {
+    let with = |fields: &[(&str, String)]| {
+        let mut v = json!({"id": A, "displayName": "Pic Sample", "location": "private", "state": "online"});
+        for (k, url) in fields {
+            v[*k] = Value::String(url.clone());
+        }
+        (icon_field(&v), friend(&v, true).unwrap().look.icon)
+    };
+    // A `User` of a pipeline message today: only VRChat's own choice.
+    assert_eq!(with(&[("iconUrl", pic(1, 1))]), (Some("iconUrl"), pic(1, 1)));
+    // A `LimitedUserFriend`: VRChat's choice (their icon, say), not their avatar's full picture beside it.
+    assert_eq!(with(&[("iconUrl", pic(1, 2)), ("currentAvatarImageUrl", pic(2, 1))]), (Some("iconUrl"), pic(1, 2)));
+    // Older answers: VRC+ icon, then the profile picture (small first), then the avatar's thumbnail, then its picture.
+    let all = [
+        ("userIcon", pic(3, 1)),
+        ("profilePicOverrideThumbnail", pic(4, 1)),
+        ("profilePicOverride", pic(4, 1)),
+        ("currentAvatarThumbnailImageUrl", pic(5, 1)),
+        ("currentAvatarImageUrl", pic(5, 1)),
+        ("imageUrl", pic(6, 1)),
+    ];
+    for skip in 0..all.len() {
+        assert_eq!(with(&all[skip..]), (Some(all[skip].0), all[skip].1.clone()), "without the {skip} first");
+    }
+    // Empty or not VRChat's https (VRCNext's own `http://localhost` copies) does not count: the next one does.
+    assert_eq!(with(&[("iconUrl", String::new()), ("userIcon", "http://localhost:1234/x.png".into()), ("currentAvatarThumbnailImageUrl", pic(7, 1))]), (Some("currentAvatarThumbnailImageUrl"), pic(7, 1)));
+    // Nothing named: no picture (the row shows the letter), and nothing made up.
+    assert_eq!(with(&[]), (None, String::new()));
+}
+
+#[test]
+fn a_message_without_a_picture_keeps_the_known_one_and_a_new_picture_replaces_it() {
+    let mut state = LauncherState::default();
+    let first = json!({"id": A, "displayName": "Nova Sample", "location": "private", "state": "online", "iconUrl": pic(10, 1), "currentAvatarImageUrl": pic(11, 1)});
+    state.friends = vec![friend(&first, true).unwrap()];
+    let message = |kind: &str, content: Value| json!({"type": kind, "content": content.to_string()}).to_string();
+    let icon = |state: &LauncherState| state.friend(A).unwrap().look.icon.clone();
+    assert_eq!(icon(&state), pic(10, 1));
+
+    // Moved: a `User` with no picture field at all (a partial one) says nothing about the picture.
+    let moved = apply(&mut state, &[], &message("friend-location", json!({"userId": A, "location": format!("{W}:9~region(us)"), "worldId": W, "travelingToLocation": "", "canRequestInvite": true, "user": {"id": A, "displayName": "Nova Sample", "status": "busy", "tags": []}})), 100);
+    assert!(moved.changed);
+    assert_eq!(icon(&state), pic(10, 1), "the picture known stays (it was the letter)");
+    // Updates, online again: VRChat's `iconUrl` of today is read, a new version or file replaces the picture.
+    apply(&mut state, &[], &message("friend-update", json!({"userId": A, "user": {"id": A, "displayName": "Nova Sample", "status": "busy", "iconUrl": pic(10, 2)}})), 110);
+    assert_eq!(icon(&state), pic(10, 2), "a new version of their icon");
+    apply(&mut state, &[], &message("friend-offline", json!({"userId": A})), 120);
+    apply(&mut state, &[], &message("friend-online", json!({"userId": A, "location": "private", "platform": "standalonewindows", "canRequestInvite": false, "user": {"id": A, "displayName": "Nova Sample", "status": "active", "iconUrl": pic(12, 1)}})), 130);
+    assert_eq!(icon(&state), pic(12, 1), "another picture altogether (another avatar's thumbnail)");
+    // The account's own card reads the same field.
+    state.me = friend(&json!({"id": B, "displayName": "Me", "state": "online", "iconUrl": pic(13, 1)}), false);
+    apply(&mut state, &[], &message("user-update", json!({"userId": B, "user": {"id": B, "displayName": "Me", "status": "active", "iconUrl": pic(13, 2)}})), 140);
+    assert_eq!(state.me.as_ref().unwrap().look.icon, pic(13, 2));
+}
+
+#[test]
+fn the_profiles_large_picture_is_vrchats_choice_too() {
+    let base = friend(&json!({"id": A, "displayName": "Nova", "state": "online", "location": "private", "iconUrl": pic(20, 1)}), true).unwrap();
+    let user = json!({"id": A, "iconUrl": pic(20, 1), "currentAvatarImageUrl": pic(21, 1)});
+    assert_eq!(profile(base.clone(), &Value::Null, &user, None).picture, pic(20, 1));
+    let older = json!({"id": A, "profilePicOverride": pic(22, 1), "currentAvatarImageUrl": pic(21, 1)});
+    assert_eq!(profile(base.clone(), &Value::Null, &older, None).picture, pic(22, 1));
+    assert_eq!(profile(base, &Value::Null, &json!({"id": A}), None).picture, pic(20, 1), "else the small one");
+}

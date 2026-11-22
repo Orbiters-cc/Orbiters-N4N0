@@ -737,4 +737,62 @@ mod tests {
         assert!((0..30).all(|i| !drawn(&state, i)), "scrolled past the boops: none left in view");
         assert_eq!(ctx.data(|d| d.count::<egui::scroll_area::State>()), 1, "still one scroll area");
     }
+
+    /// REQUEST20: the pictures of the rows on screen are the ones asked (then asked first by the fetcher, which serves what
+    /// a page asked in the last two seconds before the background), top row first, in the sectioned list's order; none of a
+    /// folded section or of the rows below the view. The background then walks the people in that same order.
+    #[test]
+    fn the_rows_on_screen_ask_for_their_pictures_in_the_sectioned_lists_order() {
+        let mut data = orbiters_core::launcher::sample();
+        data.boops.clear();
+        data.invites.clear();
+        let in_game = data.friends.iter().find(|f| f.presence == Presence::InGame && f.favourite_groups.is_empty()).unwrap().clone();
+        for n in 0..30 {
+            let mut f = in_game.clone();
+            f.id = format!("usr_sample_more_{n:02}");
+            data.groups.iter_mut().find(|g| g.id == list::IN_GAME).unwrap().members.push(f.id.clone());
+            data.friends.push(f);
+        }
+        for (i, f) in data.friends.iter_mut().enumerate() {
+            f.look.icon = format!("https://api.vrchat.cloud/api/1/file/file_00000000-0000-4000-8000-{i:012}/1/file");
+        }
+        let folded: std::collections::HashSet<String> = [list::OFFLINE.to_string()].into();
+        let order: Vec<String> = list::rows(&data, "", &folded)
+            .into_iter()
+            .filter_map(|r| match r {
+                Row::Person { friend, .. } => Some(data.friends[friend].look.icon.clone()),
+                _ => None,
+            })
+            .collect();
+        let icons: Vec<String> = data.friends.iter().map(|f| f.look.icon.clone()).collect();
+        let offline: Vec<String> = data.friends.iter().filter(|f| f.presence == Presence::Offline).map(|f| f.look.icon.clone()).collect();
+        assert!(!offline.is_empty());
+        let mut state = State { data: Arc::new(data), ..Default::default() };
+        (state.folded, state.folded_read) = (folded, true);
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: Ctl = Arc::new(Still);
+        let snap = Snapshot::new(Settings::default());
+        let mut toasts = orbiters_ui::toast::Toasts::default();
+        let column = Rect::from_min_size(pos2(0.0, 0.0), vec2(380.0, 780.0));
+        for _ in 0..30 {
+            let input = egui::RawInput { screen_rect: Some(column), time: Some(ctx.input(|x| x.time) + 1.0 / 60.0), ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| {
+                let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                super::super::side_panel(ui, &mut cx, &mut state, column, super::super::Side::Column(column.width()));
+            });
+            output.textures_delta.clear();
+        }
+        // The people's pictures asked (the list also asks its decorations; none here).
+        let asked: Vec<String> = state.wanted.iter().filter(|w| icons.contains(w)).cloned().collect();
+        assert!(asked.len() >= 4, "the rows on screen asked for theirs: {}", asked.len());
+        assert_eq!(asked, order[..asked.len()], "top row first, in the list's order (favourites in the game, then in the game)");
+        assert!(asked.len() < order.len(), "the rows below the view are not asked yet");
+        assert!(asked.iter().all(|a| !offline.contains(a)), "nothing of the folded Offline section");
+        // The background walks everyone in the order the list shows them (every section open), after the rows on screen.
+        let background: Vec<String> = State::people_pictures(&state.data).into_iter().map(|(url, _)| url).collect();
+        assert_eq!(background[..order.len()], order[..], "the open sections first, in their order");
+        assert!(offline.iter().all(|o| background.contains(o)), "then Offline's (folded is not forgotten)");
+        assert_eq!(background.len(), icons.len(), "each person once");
+    }
 }

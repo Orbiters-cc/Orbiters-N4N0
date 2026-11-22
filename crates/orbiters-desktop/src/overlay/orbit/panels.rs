@@ -684,9 +684,7 @@ pub struct Facts {
     pub view_showing: bool,
     /// Which instance was last asked for and how that is going, on the button pressed. Which result's link was just copied.
     pub invite_chip: Option<(String, InviteChip)>,
-    /// How the last Invite me went, in words, for a while after the answer (sent: `true`), and whether only the person's
-    /// own VRChat account can send it (Connect VRChat shows).
-    pub invite_said: Option<(String, bool)>,
+    /// Only the person's own VRChat account can send the last Invite me (REQUEST20 4): Connect VRChat shows.
     pub invite_vrchat: bool,
     pub video_copied: Option<usize>,
     /// YouTube's results, and what was searched.
@@ -4109,19 +4107,10 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         }
         Look::VisitHead => {
             // What the rows offer, as large as what is in them; what each column is, on each row over it (round 10's judges found these small and loose).
-            // Just after an Invite me, how it went instead (REQUEST20 4): sent, or why not, up to Connect VRChat when it shows.
+            // Up to Connect VRChat when it shows (REQUEST20 4); how the last invite went is in the sheet's head.
             let room = if facts.invite_vrchat { CONNECT_VRCHAT.left() - 16.0 - 26.0 } else { 1024.0 - 52.0 };
             let font = look::font(19.0, weight::SEMIBOLD);
-            match &facts.invite_said {
-                Some((said, sent)) => {
-                    let (glyph, ink) = if *sent { (icons::CHECK_CIRCLE, look::accent()) } else { (icons::WARNING, theme::WARN) };
-                    widgets::icon(p, pos2(38.0, 20.0), glyph, 22.0, ink);
-                    p.text(pos2(56.0, 20.0), Align2::LEFT_CENTER, fit(p, said, &font, room - 30.0), font, look::LABEL);
-                }
-                None => {
-                    p.text(pos2(26.0, 20.0), Align2::LEFT_CENTER, fit(p, tr("A world: its page. Invite me: your last visit, or an earlier time."), &font, room), font, look::LABEL);
-                }
-            }
+            p.text(pos2(26.0, 20.0), Align2::LEFT_CENTER, fit(p, tr("A world: its page. Invite me: your last visit, or an earlier time."), &font, room), font, look::LABEL);
 
         }
         Look::HereNow => {

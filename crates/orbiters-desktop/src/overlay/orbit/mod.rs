@@ -2594,12 +2594,6 @@ impl Panels {
                 };
                 (place.clone(), state)
             }),
-            // How the last Invite me went, said in the page's head for a while once answered (REQUEST20 4).
-            invite_said: self.invited.as_ref().filter(|(_, at)| at.elapsed() < Duration::from_secs(12) && !menu.invite_waiting).and_then(|_| {
-                let sent = menu.invite_went?;
-                let said = if sent { tr("Invite sent: look at your VRChat notifications").to_string() } else { menu.invite_vrchat.clone().or_else(|| menu.notice.clone())? };
-                Some((said, sent))
-            }),
             invite_vrchat: menu.invite_vrchat.is_some() && !menu.invite_waiting,
             video_copied: self.copied.filter(|(_, at)| at.elapsed() < Duration::from_secs(2)).map(|(i, _)| i),
             videos: if self.facts.sheet == Some(Sheet::Results) {

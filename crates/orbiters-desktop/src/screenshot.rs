@@ -53,6 +53,7 @@ mod vr_audio;
 mod vrchat_bridge;
 mod worlds_overlay;
 mod quiet_prompt;
+mod photos_capture;
 
 /// The part of Photos & captures' capture element a scene of the old Capture tab opens it on (REQUEST21 5).
 fn capture_part(name: &str) -> Option<crate::pages::capture::Part> {
@@ -2525,6 +2526,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     editor::append(&mut scenarios);
     projects_panel::append(&mut scenarios);
     gallery_layouts::append(&mut scenarios);
+    photos_capture::append(&mut scenarios);
     gallery_assets::append(&mut scenarios);
     gallery_talk::append(&mut scenarios);
     floating::append(&mut scenarios);
@@ -2797,6 +2799,9 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             }
             // The layouts and a multi-layer picture, on made-up pictures.
             gallery_layouts::stage(&ctx, gallery, sc.name, f);
+            // REQUEST21 5: the capture element over made-up pictures.
+            photos_capture::stage(&ctx, &mut app, sc.name, f, t);
+            let gallery = app.sessions_mut().gallery_mut();
             if let Some(p) = gallery_folders::stage(gallery, sc.name, f, total) {
                 input.events.push(Event::PointerMoved(p));
                 input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });

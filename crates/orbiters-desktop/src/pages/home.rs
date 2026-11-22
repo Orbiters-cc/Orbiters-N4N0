@@ -1733,6 +1733,8 @@ mod tests {
         n4n0: Mutex<Vec<N4n0Command>>,
         launcher: Mutex<Vec<orbiters_core::launcher::Action>>,
         asked: Mutex<Vec<String>>,
+        /// What VRChat says of an instance asked about (REQUEST21 7: whether it is still open).
+        alive: Mutex<Option<bool>>,
     }
 
     /// The instance VRChat makes in these tests.
@@ -1759,6 +1761,7 @@ mod tests {
                     closed: false,
                     can_join: true,
                 })),
+                Request::Instance { .. } => Ok(Response::Instance(*self.alive.lock().unwrap())),
                 _ => Err("not in tests".into()),
             }
         }
@@ -1957,7 +1960,10 @@ mod tests {
             assert!(rects.iter().all(|r| (r.top() - rects[0].top()).abs() < 0.5 && (r.width() - rects[0].width()).abs() < 0.5), "{rects:?}");
             assert!(rects[0].left() < rects[1].left() && rects[1].left() < rects[2].left());
             for n in &moved {
-                assert!(widgets::control(&h.ctx, n).is_none(), "{n} is not on Home (launcher {launcher})");
+                // (Previous instances is also Where's button, over Play: not a tile of the row.)
+                if let Some((r, _)) = widgets::control(&h.ctx, n) {
+                    assert!(*n == names(&[Target::Instances])[0] && launcher && r.height() <= 32.5 && r.bottom() < rects[0].top(), "{n} is not on Home (launcher {launcher}): {r:?}");
+                }
             }
             // All tools: every feature, and each opens its page as Home's did.
             let (all, on) = widgets::control(&h.ctx, "All tools").expect("All tools on Home");
@@ -2300,5 +2306,116 @@ mod tests {
             h.recorder.n4n0.lock().unwrap().last(),
             Some(N4n0Command::States { action: StateAction::Save { name: Some(name), .. }, avatar: None }) if name == "State 2"
         ));
+    }
+
+    /// REQUEST21 7: Where's Previous instances. Opening the list sends nothing; a row chosen is asked of VRChat (whether
+    /// it is still open), and only an open one becomes Where's choice, Play then starting VRChat in that very instance;
+    /// one VRChat says is closed offers a new instance of its world, which Play makes first and starts in; Escape puts the
+    /// list away with the choice kept. Signed out of VRChat, the list still shows and a row is a new public instance.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_previous_instance_chosen_in_where_is_where_play_starts_vrchat() {
+        use crate::pages::launcher::destinations::HistoryView;
+        use crate::pages::launcher::previous::Visit;
+        use orbiters_core::launcher::{Action, LaunchMode, Source};
+        orbiters_ui::widgets::watch_controls();
+        let mut h = Harness::new();
+        let data = orbiters_core::launcher::sample();
+        let Source::SignedIn { user_id: me, .. } = data.source.clone() else { panic!("the sample is signed in") };
+        let world = |n: u32| format!("wrld_00000000-0000-4000-8000-{:012}", 500 + n);
+        let rows = vec![
+            Visit { world_id: world(1), instance: "31337~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), name: "Harbor Market".into(), at: 1_794_990_000 },
+            Visit { world_id: world(2), instance: "4242~friends(usr_00000000-0000-4000-8000-000000000005)~region(jp)".into(), name: "Snowy Cabin".into(), at: 1_794_900_000 },
+        ];
+        let stage = |h: &mut Harness, data: &orbiters_core::launcher::LauncherState| {
+            let l = h.state.launcher_mut();
+            l.set_data(Arc::new(data.clone()));
+            l.stand_in(1_795_000_000, "");
+            l.places.stand_in(Some(HistoryView::default()), Vec::new(), None, true);
+            l.places.previous.stand_in_rows(rows.clone());
+        };
+        stage(&mut h, &data);
+        h.settle();
+        let click = |h: &mut Harness, label: &str| {
+            let (r, on) = orbiters_ui::widgets::control(&h.ctx, label).unwrap_or_else(|| panic!("{label} is drawn"));
+            assert!(on, "{label} takes a press");
+            h.press(r.center());
+            h.release(r.center());
+            for _ in 0..30 {
+                h.frame(Vec::new());
+            }
+        };
+        let until = |h: &mut Harness, what: &str, done: &dyn Fn(&mut Harness) -> bool| {
+            for _ in 0..400 {
+                if done(h) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+                h.frame(Vec::new());
+            }
+            panic!("{what}");
+        };
+        let sent = |h: &Harness| h.recorder.launcher.lock().unwrap().clone();
+        let mine = |action: Action| Action::As { account: me.clone(), action: Box::new(action) };
+        // The list: nothing is sent or asked by opening it.
+        click(&mut h, "Previous instances");
+        assert!(h.state.launcher_mut().places.previous.is_up());
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Harbor Market").is_some() && orbiters_ui::widgets::control(&h.ctx, "Snowy Cabin").is_some());
+        assert!(h.recorder.asked.lock().unwrap().is_empty() && sent(&h).is_empty(), "opening the list sends nothing");
+        // Open: chosen once VRChat said so; Escape keeps the choice; Play starts VRChat in that instance.
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        click(&mut h, "Harbor Market");
+        until(&mut h, "VRChat's answer", &|h| h.state.launcher_mut().places.chosen_key().is_some());
+        assert_eq!(h.recorder.asked.lock().unwrap().as_slice(), [format!("Instance {{ world: {:?}, instance: {:?} }}", world(1), rows[0].instance)]);
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(rows[0].key().as_str()));
+        assert!(sent(&h).is_empty(), "a choice starts nothing");
+        h.frame(vec![key(Key::Escape)]);
+        h.settle();
+        assert!(!h.state.launcher_mut().places.previous.is_up(), "Escape puts the list away");
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(rows[0].key().as_str()), "with the choice kept");
+        click(&mut h, "Play in VR");
+        let Some(Action::As { account, action }) = sent(&h).last().cloned() else { panic!("bound to the account: {:?}", sent(&h)) };
+        assert_eq!(account, me);
+        let Action::PlayAt { mode: LaunchMode::Vr, profile: 0, destination } = *action else { panic!("{action:?}") };
+        assert_eq!((destination.world_id.as_str(), destination.instance_id.as_str()), (world(1).as_str(), rows[0].instance.as_str()));
+        // Closed: not chosen by itself; a new instance of its world, made by VRChat at Play, then started in.
+        *h.recorder.alive.lock().unwrap() = Some(false);
+        click(&mut h, "Previous instances");
+        click(&mut h, "Snowy Cabin");
+        until(&mut h, "VRChat's answer", &|h| orbiters_ui::widgets::control(&h.ctx, "New instance of this world").is_some());
+        assert_ne!(h.state.launcher_mut().places.chosen_key(), Some(rows[1].key().as_str()), "a closed instance is not taken silently");
+        click(&mut h, "New instance of this world");
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(rows[1].key().as_str()));
+        h.frame(vec![key(Key::Escape)]);
+        h.settle();
+        click(&mut h, "Play in Desktop");
+        until(&mut h, "the new instance and the start", &|h| sent(&h).len() == 2);
+        assert!(h.recorder.asked.lock().unwrap().iter().any(|a| a == &format!("CreateInstance {{ world: {:?}, access: FriendsPlus, region: Jp }}", world(2))), "{:?}", h.recorder.asked.lock().unwrap());
+        let Some(Action::As { action, .. }) = sent(&h).last().cloned() else { panic!() };
+        let Action::PlayAt { mode: LaunchMode::Desktop, destination, .. } = *action else { panic!("{action:?}") };
+        assert_eq!((destination.world_id.as_str(), destination.instance_id.as_str()), (world(2).as_str(), MADE));
+        // Signed out of VRChat: the list shows, a row is a new public instance at once, nothing asked of VRChat.
+        let mut out = data.clone();
+        out.source = Source::Nothing;
+        out.possible = orbiters_core::launcher::Possible { play: true, ..Default::default() };
+        out.invites.clear();
+        let mut h = Harness::new();
+        stage(&mut h, &out);
+        h.settle();
+        click(&mut h, "Previous instances");
+        click(&mut h, "Harbor Market");
+        assert!(h.recorder.asked.lock().unwrap().is_empty(), "nothing asked of VRChat signed out");
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(rows[0].key().as_str()));
+        h.frame(vec![key(Key::Escape)]);
+        h.settle();
+        click(&mut h, "Play in VR");
+        let last = match sent(&h).last().cloned() {
+            Some(Action::As { action, .. }) => *action,
+            Some(other) => other,
+            None => panic!("Play sent nothing"),
+        };
+        let Action::PlayAt { destination, .. } = last else { panic!("{last:?}") };
+        assert_eq!(destination.world_id, world(1));
+        assert!(crate::controller::vrchat_data::public_instance(&destination.instance_id) && destination.instance_id.ends_with("~region(eu)"), "{}", destination.instance_id);
     }
 }

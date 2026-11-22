@@ -159,6 +159,12 @@ impl State {
         level(self.open, self.closed_for, why(snap, self.finished.is_some(), kit_missing(snap)))
     }
 
+    /// Screenshots: the person's Hide pressed for what shows now (a recording under way: the bar alone).
+    pub fn stage_hidden(&mut self) {
+        self.open = false;
+        self.closed_for = Some(Why::Capturing);
+    }
+
     /// Screenshots: a capture that just ended, in `dir`.
     pub fn stage_finished(&mut self, dir: PathBuf, picture: Option<PictureMode>) {
         self.finished = Some(Finished { dir, picture });
@@ -1589,4 +1595,306 @@ fn camera_path(ui: &mut Ui, cx: &mut Cx) {
             }
         }
     });
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::backend::{Backend, Ctl};
+    use crate::state::Snapshot;
+    use egui::{Event, Modifiers, PointerButton, Pos2, RawInput};
+    use std::sync::{Arc, Mutex};
+
+    /// What the capture element asked of the service, as words (nothing reaches one).
+    #[derive(Default)]
+    pub(crate) struct Recorder {
+        pub said: Mutex<Vec<String>>,
+    }
+
+    impl Recorder {
+        fn push(&self, what: impl Into<String>) {
+            self.said.lock().unwrap().push(what.into());
+        }
+    }
+
+    impl Backend for Recorder {
+        fn n4n0(&self, command: crate::ipc::N4n0Command) {
+            self.push(format!("{command:?}"));
+        }
+        fn view(&self) -> Arc<Snapshot> {
+            Arc::new(Snapshot::new(Settings::default()))
+        }
+        fn take_notices(&self) -> Vec<crate::controller::Notice> {
+            Vec::new()
+        }
+        fn library_version(&self) -> u64 {
+            0
+        }
+        fn attach(&self, _ctx: &egui::Context) {}
+        fn start_capture(&self) {}
+        fn stop_capture(&self) {
+            self.push("stop");
+        }
+        fn pause_capture(&self, paused: bool) {
+            self.push(format!("pause {paused}"));
+        }
+        fn start_test_capture(&self) {
+            self.push("test pattern");
+        }
+        fn scan(&self) {
+            self.push("scan");
+        }
+        fn choose_vrchat(&self, pid: Option<u32>) {
+            self.push(format!("choose {pid:?}"));
+        }
+        fn import_raw_capture(&self, _dir: PathBuf) {}
+        fn patch_settings(&self, patch: serde_json::Value) {
+            self.push(format!("settings {patch}"));
+        }
+        fn trash_session(&self, _dir: PathBuf) {}
+        fn clean_up(&self, _trim: Vec<PathBuf>, _delete: Vec<PathBuf>) {}
+        fn reconstruct(&self, _dir: PathBuf) {}
+        fn stop_reconstruction(&self) {
+            self.push("stop reconstruction");
+        }
+        fn unqueue_reconstruction(&self, _dir: PathBuf) {}
+        fn send_to_mixer(&self, _dir: PathBuf, _title: String) {}
+        fn sign_in(&self) {}
+        fn reopen_sign_in(&self) {}
+        fn cancel_sign_in(&self) {}
+        fn sign_out(&self) {}
+        fn request_worker_log(&self) {}
+        fn worker_log(&self) -> Option<Vec<String>> {
+            None
+        }
+        fn upload_pictures(&self, _world_id: String, _world_name: String, _paths: Vec<PathBuf>) {}
+        fn upload_preview(&self, _world_id: String, _world_name: String, _session: PathBuf) {}
+        fn request_maps(&self) {}
+        fn maps(&self) -> Option<crate::state::MapsMine> {
+            None
+        }
+        fn calibrated(&self, _calibration: orbiters_contracts::performance::calibration::Calibration) {}
+        fn frames(&self, _chunk: crate::state::FrameChunk) {}
+        fn headset(&self, _in_use: bool) {}
+        fn walk_boost(&self, _strength: f32) {}
+        fn osc_reconnect(&self) {}
+        fn updates(&self, _action: crate::ipc::UpdateAction) {}
+        fn quit(&self) {}
+    }
+
+    /// The element at the top of a list that scrolls, as Photos & captures draws it (one scroll area: the list's), in a
+    /// 1000 × 800 page, frame by frame.
+    struct Harness {
+        ctx: egui::Context,
+        recorder: Arc<Recorder>,
+        ctl: Ctl,
+        snap: Snapshot,
+        state: State,
+        projects: crate::pages::projects::State,
+        toasts: orbiters_ui::toast::Toasts,
+        time: f64,
+        out: Option<Out>,
+    }
+
+    impl Harness {
+        /// VRChat running here in a world, the capture notice accepted.
+        fn new() -> Self {
+            let ctx = egui::Context::default();
+            orbiters_ui::install(&ctx);
+            let recorder = Arc::new(Recorder::default());
+            let ctl: Ctl = recorder.clone();
+            let mut snap = Snapshot::new(Settings { consent_acknowledged: true, ..Settings::default() });
+            snap.vrchat.running = true;
+            snap.vrchat.world.in_world = true;
+            snap.vrchat.world.world_name = Some("Lantern Garden".into());
+            Self { ctx, recorder, ctl, snap, state: State::default(), projects: Default::default(), toasts: Default::default(), time: 0.0, out: None }
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 1.0 / 60.0;
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))), time: Some(self.time), events, ..Default::default() };
+            let (ctl, snap, toasts, state, projects) = (&self.ctl, &self.snap, &mut self.toasts, &mut self.state, &mut self.projects);
+            let mut out = None;
+            let mut output = self.ctx.run_ui(input, |ui| {
+                egui::ScrollArea::vertical().id_salt("photos-captures").auto_shrink([false, false]).show(ui, |ui| {
+                    let mut cx = Cx { ctl, snap, toasts: &mut *toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                    out = element(ui, &mut cx, state, projects, &|_| Some("Lantern Garden".to_string()), 0.0);
+                    // The gallery under it.
+                    ui.allocate_exact_size(vec2(ui.available_width(), 2000.0), Sense::hover());
+                });
+            });
+            output.textures_delta.clear();
+            if out.is_some() {
+                self.out = out;
+            }
+        }
+
+        fn settle(&mut self) {
+            for _ in 0..60 {
+                self.frame(Vec::new());
+            }
+        }
+
+        fn drawn(&self, label: &str) -> bool {
+            widgets::control(&self.ctx, label).is_some()
+        }
+
+        /// Presses the control labelled `label` where it was drawn (it must take presses), and lets it settle.
+        fn press(&mut self, label: &str) {
+            let (r, on) = widgets::control(&self.ctx, label).unwrap_or_else(|| panic!("{label} is drawn"));
+            assert!(on, "{label} takes a press");
+            let at = r.center();
+            self.frame(vec![Event::PointerMoved(at), Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
+            self.frame(vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]);
+            self.settle();
+        }
+
+        fn said(&self) -> Vec<String> {
+            self.recorder.said.lock().unwrap().clone()
+        }
+
+        fn scroll_areas(&self) -> usize {
+            self.ctx.data(|d| d.count::<egui::scroll_area::State>())
+        }
+    }
+
+    /// REQUEST21 5: by default a bar over the gallery (its two pictures on it, nothing more); Options opens every option
+    /// the Capture tab had, in the list's own flow (no scroll area of its own); Hide closes them again.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn every_function_of_the_capture_tab_is_in_photos_and_captures() {
+        widgets::watch_controls();
+        let mut h = Harness::new();
+        h.settle();
+        assert_eq!(h.state.level(&h.snap), Level::Bar, "a gallery first");
+        assert!(h.drawn("3D picture of people") && h.drawn("3D picture of the world"), "the primary actions on the bar");
+        for hidden in ["capture-people", "Test pattern", "Scan", "Lossless"] {
+            assert!(!h.drawn(hidden), "{hidden}: only once opened");
+        }
+        let bar_only = h.state.height(h.time);
+        assert!((bar_only - BAR_H - AFTER).abs() < 1.0, "the bar alone: {bar_only}");
+        // The bar's own: a 3D picture of people, of the world, straight away.
+        h.press("3D picture of people");
+        h.press("3D picture of the world");
+        assert_eq!(h.said(), ["Photo3DOf { mode: People }", "Photo3DOf { mode: World }"]);
+
+        // Every option, in the page's flow.
+        h.press("Options");
+        assert_eq!(h.state.level(&h.snap), Level::Full);
+        let open = h.state.height(h.time);
+        assert!(open > bar_only + 600.0, "it grew in place: {open}");
+        for label in [
+            "capture-people",
+            "capture-world",
+            orbiters_ui::record::LABEL,
+            "Test pattern",
+            "Scan",
+            // The picture's length, a recording's mode and how much of it stays.
+            flight_labels()[0],
+            flight_labels()[2],
+            "Record",
+            "Lossless",
+            "Compact",
+            "Hide",
+        ] {
+            assert!(h.drawn(label), "{label} is in the open element");
+        }
+        assert_eq!(h.scroll_areas(), 1, "one scroll area: the page's list");
+        h.recorder.said.lock().unwrap().clear();
+        h.press("capture-people");
+        h.press("capture-world");
+        h.press("Test pattern");
+        h.press("Scan");
+        h.press("Compact");
+        let said = h.said();
+        assert_eq!(said[..4], ["Photo3DOf { mode: People }", "Photo3DOf { mode: World }", "test pattern", "scan"], "{said:?}");
+        assert!(said[4].starts_with("settings") && said[4].contains("compact"), "{said:?}");
+        // Hide: the gallery again.
+        h.press("Hide");
+        assert_eq!(h.state.level(&h.snap), Level::Bar);
+        assert!(!h.drawn("capture-people"));
+        assert!((h.state.height(h.time) - bar_only).abs() < 1.0);
+    }
+
+    /// A recording opens every option by itself (its numbers, its path), with its Pause and Stop; hidden by the person,
+    /// the bar keeps its Stop, and the next capture opens it again. A capture notice not accepted: the bar's pictures
+    /// open the element on it instead of taking one.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn what_runs_opens_it_by_itself_and_the_person_closes_it() {
+        widgets::watch_controls();
+        let mut h = Harness::new();
+        h.snap.capture.state = CaptureState::Recording;
+        h.snap.capture.session_dir = Some(PathBuf::from("Lantern Garden 2026-11-22 21-00"));
+        h.settle();
+        assert_eq!(h.state.level(&h.snap), Level::Full, "a recording: every option");
+        assert!(h.drawn("Pause") && h.drawn("Stop recording"));
+        assert_eq!(h.scroll_areas(), 1);
+        h.press("Pause");
+        assert_eq!(h.said(), ["pause true"]);
+        h.press("Hide");
+        assert_eq!(h.state.level(&h.snap), Level::Bar, "the person's Hide holds while it records");
+        assert!(h.drawn("Stop recording"), "its Stop stays on the bar");
+        h.press("Stop recording");
+        assert_eq!(h.said().last().map(String::as_str), Some("stop"));
+        // Ended: the capture is there to open and share; Open asks the page to open its window.
+        h.snap.capture.state = CaptureState::Idle;
+        h.settle();
+        assert_eq!(h.state.level(&h.snap), Level::Status, "a finished capture wants a look");
+        h.press("Open and share");
+        assert_eq!(h.out, Some(Out::Review(PathBuf::from("Lantern Garden 2026-11-22 21-00"))));
+        assert_eq!(h.state.level(&h.snap), Level::Bar);
+        // A reconstruction: its card, its Stop.
+        h.snap.reconstruction = Some(crate::state::ReconstructionJob::new(PathBuf::from("Lantern Garden 2026-11-22 21-00"), false));
+        h.settle();
+        assert_eq!(h.state.level(&h.snap), Level::Status);
+        h.press("Stop reconstruction");
+        assert_eq!(h.said().last().map(String::as_str), Some("stop reconstruction"));
+        h.snap.reconstruction = None;
+        // The last capture's error, until the next one.
+        h.snap.capture.error = Some("made up".into());
+        h.settle();
+        assert_eq!(h.state.level(&h.snap), Level::Status);
+        h.snap.capture.error = None;
+        // The notice first: the bar's picture opens the element on it.
+        h.snap.settings.consent_acknowledged = false;
+        h.settle();
+        h.recorder.said.lock().unwrap().clear();
+        h.press("3D picture of people");
+        assert!(h.said().is_empty(), "no picture before the notice is accepted");
+        assert_eq!(h.state.level(&h.snap), Level::Full);
+        assert!(h.drawn("I understand"));
+    }
+
+    #[test]
+    fn it_opens_by_itself_for_the_strongest_reason_and_a_hide_holds_for_that_one() {
+        assert_eq!(level(false, None, None), Level::Bar);
+        assert_eq!(level(true, None, None), Level::Full);
+        assert_eq!(level(false, None, Some(Why::Capturing)), Level::Full);
+        for why in [Why::Reconstructing, Why::Error, Why::LeftOut, Why::Kit, Why::Finished] {
+            assert_eq!(level(false, None, Some(why)), Level::Status, "{why:?}");
+            assert_eq!(level(false, Some(why), Some(why)), Level::Bar, "{why:?} hidden");
+            assert_eq!(level(false, Some(Why::Capturing), Some(why)), Level::Status, "a hide of another reason");
+        }
+        let mut snap = Snapshot::new(Settings::default());
+        assert_eq!(why(&snap, false, false), None);
+        assert_eq!(why(&snap, true, false), Some(Why::Finished));
+        assert_eq!(why(&snap, true, true), Some(Why::Kit));
+        snap.capture.left_out.why = Some("x".into());
+        assert_eq!(why(&snap, true, true), Some(Why::LeftOut));
+        snap.capture.error = Some("x".into());
+        assert_eq!(why(&snap, true, true), Some(Why::Error));
+        snap.reconstruction = Some(crate::state::ReconstructionJob::new(PathBuf::from("s"), false));
+        assert_eq!(why(&snap, true, true), Some(Why::Reconstructing));
+        snap.capture.state = CaptureState::Recording;
+        assert_eq!(why(&snap, true, true), Some(Why::Capturing));
+    }
+
+    /// The owner's rule (never a scroll area inside another): the element draws none of its own.
+    #[test]
+    fn the_element_has_no_scroll_area_of_its_own() {
+        let source = include_str!("capture.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(!code.contains(concat!("Scroll", "Area")), "the capture element scrolls with the page's list");
+    }
 }

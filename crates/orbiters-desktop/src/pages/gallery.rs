@@ -156,6 +156,8 @@ pub struct State {
     layout_positions: HashMap<String, f32>,
     /// Screenshots: made-up local pictures added to this computer's (several shapes, a multi-layer picture).
     fixture_extra: Vec<Entry>,
+    /// Screenshots: the made-up pictures alone, none of this computer's.
+    fixture_only_extra: bool,
     /// The photo editor on a picture from Orbiters (Edit in a card's menu), over the page while it is open.
     editor: Option<super::editor::Editor>,
     /// Export… of a 3D capture of this computer (its card's menu), over the page ([`super::splat_export`]).
@@ -301,7 +303,7 @@ impl State {
         if self.feed.items.is_empty() {
             return;
         }
-        self.locals.truncate(2);
+        self.locals.truncate(if self.fixture_only_extra { 0 } else { 2 });
         for (n, e) in self.locals.iter_mut().enumerate() {
             e.world_id = self.feed.items[0].world.id.clone();
             e.world_name = self.feed.items[0].world.name.clone();
@@ -324,6 +326,12 @@ impl State {
         }
         self.fixture_extra = entries;
         self.fixture_locals = true;
+        self.stage_locals();
+    }
+
+    /// Screenshots: the made-up pictures alone (none of this computer's beside them).
+    pub fn stage_made_up_only(&mut self) {
+        self.fixture_only_extra = true;
         self.stage_locals();
     }
 

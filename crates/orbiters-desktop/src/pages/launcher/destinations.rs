@@ -1460,6 +1460,52 @@ mod tests {
         assert_eq!(args, ["--no-vr".to_string(), "--profile=3".into(), format!("vrchat://launch?ref=orbiters.cc&id={}:{}", place.world_id, place.instance_id)]);
     }
 
+    /// REQUEST21 7: a previous instance chosen is Where's card right after Home ("Previous instance · …"): open (VRChat
+    /// said so) and joinable, Play starts VRChat in that very instance; closed and taken as a new one, VRChat makes a new
+    /// instance of its world (the kind chosen), or without a VRChat sign-in a public one is named here; asked about and
+    /// not yet answered, or closed and not taken, it is no card at all. It is the strongest: its world shows once.
+    #[test]
+    fn a_previous_instance_chosen_starts_vrchat_in_it_while_open_else_in_a_new_one() {
+        use super::super::previous::{Check, Picked, Visit};
+        let instance = "48213~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)~nonce(0a1b2c3d-0000-4000-8000-000000000000)";
+        let v = Visit { world_id: world(3), instance: instance.into(), name: "World 3".into(), at: NOW as u64 - 86_400 };
+        let history = view(Some((3, "9~region(use)")), &[3, 4]);
+        let mode = LaunchMode::Vr;
+        let cards_for = |p: &Picked, me: Option<&'static str>| suggestions(&Inputs { picked: Some(p), ..inputs(&[], &[], Some(&history), Some(true), me) });
+        // Open: rejoined, in that instance, on the profile chosen.
+        let open = Picked { visit: v.clone(), check: Check::Open, new: false };
+        let cards = cards_for(&open, Some(ME));
+        assert_eq!(keys(&cards)[..2], ["home".to_string(), v.key()]);
+        assert!(!cards.iter().any(|c| c.key.starts_with("recent:") || c.key == format!("often:{}", world(3))), "its world once: {:?}", keys(&cards));
+        assert_eq!(cards[1].reason, Reason::Previous { at: v.at });
+        assert!(reason_line(&cards[1], NOW).0.contains("1 d ago"), "{}", reason_line(&cards[1], NOW).0);
+        let Some(Action::PlayAt { destination, profile: 2, mode: m }) = action(&launch(&cards[1], CreateAccess::FriendsPlus, true, 0), mode, Some(2)) else { panic!() };
+        assert_eq!((m, destination.world_id.as_str(), destination.instance_id.as_str()), (mode, world(3).as_str(), instance));
+        let args = orbiters_core::vrchat_launch::arguments_on(mode, &orbiters_core::vrchat_launch::LaunchSettings { performance: false, ..Default::default() }, Vec::new(), 2, Some((&destination.world_id, &destination.instance_id)));
+        assert_eq!(args.last(), Some(&format!("vrchat://launch?ref=orbiters.cc&id={}:{instance}", world(3))), "the link last: {args:?}");
+        assert!(args.contains(&"--profile=2".to_string()));
+        // Someone else's invite instance, even open: not by its link (a new instance of its world).
+        let theirs = Picked { visit: Visit { instance: "77~private(usr_00000000-0000-4000-8000-000000000009)~region(eu)".into(), ..v.clone() }, check: Check::Open, new: false };
+        assert_eq!(cards_for(&theirs, Some(ME))[1].go, Go::New);
+        // Asked and not answered yet, or closed and not taken: no card (Play does what it did).
+        for check in [Check::Asking, Check::Closed, Check::Unknown] {
+            let p = Picked { visit: v.clone(), check, new: false };
+            assert!(!cards_for(&p, Some(ME)).iter().any(|c| c.key == v.key()), "{check:?}");
+        }
+        // Closed, a new instance of its world taken: VRChat makes it (the kind chosen), in the instance's own region.
+        let new = Picked { visit: v.clone(), check: Check::Closed, new: true };
+        let cards = cards_for(&new, Some(ME));
+        assert_eq!(cards[1].go, Go::New);
+        assert!(cards[1].local(), "a new instance of a world of this computer's history");
+        assert_eq!(launch(&cards[1], CreateAccess::Friends, true, 0), Launch::Create { world: world(3), name: "World 3".into(), access: CreateAccess::Friends, region: InstanceRegion::Eu });
+        // Signed out of VRChat: a public one named here, VRChat's own grammar.
+        let out = Picked { visit: v.clone(), check: Check::NotAsked, new: true };
+        let cards = cards_for(&out, None);
+        let Launch::At(place) = launch(&cards[1], CreateAccess::FriendsPlus, false, 42) else { panic!() };
+        assert!(crate::controller::vrchat_data::public_instance(&place.instance_id) && place.instance_id.ends_with("~region(eu)"), "{}", place.instance_id);
+        assert_eq!(action(&Launch::At(place.clone()), mode, Some(0)), Some(Action::PlayAt { mode, profile: 0, destination: place }));
+    }
+
     #[test]
     fn nothing_visited_leaves_home_alone() {
         let empty = HistoryView::default();

@@ -1018,7 +1018,7 @@ impl App {
 
 /// The Capture tab's name, as a window closed to the tray on it saved it and N4N0's assistant names it: it took its
 /// place in Photos & captures (REQUEST21 5).
-const CAPTURE_PAGE: &str = "Capture";
+const CAPTURE_PAGE: &str = "Capture"; // i18n: not shown (the window's own page names)
 
 /// The page of a name [`App::follow_rest`] saved (its `Debug` name).
 fn page_named(name: &str) -> Option<Page> {
@@ -1043,3 +1043,41 @@ impl App {
         self.drain_notices(ctx);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pages::capture::Part;
+
+    /// REQUEST21 5: the Capture tab left the sidebar; every way that opened it opens Photos & captures with its capture
+    /// element open on the part it showed: a window closed to the tray on it, N4N0's assistant opening "the capture
+    /// page", the sidebar's VRChats. Every other page's name still finds its page.
+    #[test]
+    fn every_link_of_the_capture_tab_opens_photos_and_captures_on_its_part() {
+        let ctl: Ctl = Arc::new(pages::capture::tests::Recorder::default());
+        assert!(page_named(CAPTURE_PAGE).is_none(), "no Capture page any more");
+        assert!(!PAGES.iter().any(|p| format!("{p:?}") == CAPTURE_PAGE));
+        for p in PAGES {
+            assert_eq!(page_named(&format!("{p:?}")), Some(p));
+        }
+        // Closed to the tray on Capture, or the assistant's "open the capture page" (its window name is the tab's).
+        assert_eq!(crate::controller::assistant::window_page("page:Capture"), Some(CAPTURE_PAGE));
+        let mut app = App::offline(ctl.clone());
+        assert!(app.go_named(CAPTURE_PAGE, 1.0));
+        assert_eq!(app.page, Page::Sessions);
+        assert!(app.capture.is_open());
+        assert_eq!(app.capture.revealing(), Some(Part::Actions));
+        // The sidebar's VRChats: on the one pictures are taken in.
+        let mut app = App::offline(ctl.clone());
+        app.open_capture(Part::Vrchats, 1.0);
+        assert_eq!(app.page, Page::Sessions);
+        assert_eq!(app.capture.revealing(), Some(Part::Vrchats));
+        // Another page's name: that page, the element left as it was.
+        let mut app = App::offline(ctl);
+        assert!(app.go_named("Videos", 1.0));
+        assert_eq!(app.page, Page::Videos);
+        assert!(!app.capture.is_open());
+        assert!(!app.go_named("Nowhere", 1.0));
+    }
+}
+

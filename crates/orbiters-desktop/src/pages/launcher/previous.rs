@@ -123,7 +123,9 @@ pub struct Previous {
     /// The history's instances, read when the sheet opens (pictures of the page hand them in).
     rows: Arc<Mutex<Option<Vec<Visit>>>>,
     reading: bool,
+    /// The rows were handed in (nothing is read), and nothing is asked of VRChat or loaded either (pictures of the page).
     staged: bool,
+    quiet: bool,
     pub picked: Option<Picked>,
     /// VRChat's answer for a location asked about.
     answer: Arc<Mutex<Option<(String, Option<bool>)>>>,
@@ -134,9 +136,9 @@ pub struct Previous {
 }
 
 impl Previous {
-    /// Whether its rows were handed in (pictures of the page, tests: nothing is read).
+    /// Whether nothing is asked or loaded (pictures of the page).
     pub fn is_staged(&self) -> bool {
-        self.staged
+        self.quiet
     }
 
     /// Whether the sheet is up.
@@ -148,8 +150,16 @@ impl Previous {
     pub fn stand_in(&mut self, rows: Vec<Visit>, query: &str) {
         *self.rows.lock().unwrap_or_else(|e| e.into_inner()) = Some(rows);
         self.staged = true;
+        self.quiet = true;
         self.query = query.into();
         self.up = Some((0.0, None));
+    }
+
+    /// Tests: the history's instances handed in (nothing read); a row picked is asked of the backend as on the app.
+    #[cfg(test)]
+    pub fn stand_in_rows(&mut self, rows: Vec<Visit>) {
+        *self.rows.lock().unwrap_or_else(|e| e.into_inner()) = Some(rows);
+        self.staged = true;
     }
 
     /// Pictures of the page: `visit` picked, VRChat having said `check`.
@@ -223,7 +233,7 @@ fn pick(state: &mut State, cx: &Cx, visit: &Visit) {
         if state.places.chosen.as_ref().is_some_and(|c| c.key.starts_with("previous:")) {
             state.places.chosen = None;
         }
-        if state.places.previous.staged {
+        if state.places.previous.quiet {
             return;
         }
         let Some(scope) = state.scope.clone() else {
@@ -382,7 +392,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                     let v = &shown[i];
                     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
                     let r = r.shrink2(vec2(8.0, 0.0));
-                    if let Some(p) = row(ui, cx, state, r, v, now) {
+                    if let Some(p) = row(ui, state, r, v, now) {
                         pressed = Some((v.clone(), p));
                     }
                 }
@@ -409,7 +419,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
 /// One instance: its world's picture, name, kind, region and when; what VRChat said of it once picked, and the way to a
 /// new instance of its world where it cannot be rejoined. `Some(false)` pressed to pick it, `Some(true)` its new
 /// instance taken.
-fn row(ui: &mut Ui, cx: &Cx, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<bool> {
+fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<bool> {
     let ctx = ui.ctx().clone();
     let id = Id::unique(("where-previous-row", v.location()));
     let resp = ui.interact(r, id, Sense::click());

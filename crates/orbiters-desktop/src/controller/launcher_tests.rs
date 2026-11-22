@@ -494,6 +494,17 @@ struct PretendMac {
     running: Mutex<Vec<(u32, bool)>>,
     obelisk: bool,
     vrchat: bool,
+    /// What `install_engine` and the person in Obelisk change: Obelisk here, then VRChat in it.
+    got_obelisk: std::sync::atomic::AtomicBool,
+    got_vrchat: std::sync::atomic::AtomicBool,
+    cannot_install: bool,
+    installs: Mutex<u32>,
+    /// A Mac that starts the game itself (the engine without a window): what each start was given, whether one is
+    /// still under way, why the last one failed.
+    direct: bool,
+    starts: Mutex<Vec<Vec<String>>>,
+    still_starting: std::sync::atomic::AtomicBool,
+    failure: Mutex<Option<String>>,
     opened: Mutex<u32>,
     cannot_open: bool,
 }
@@ -502,15 +513,44 @@ impl Machine for PretendMac {
         self.running.lock().unwrap().clone()
     }
     fn installed(&self) -> bool {
-        self.obelisk && self.vrchat
+        !self.engine_missing() && (self.vrchat || self.got_vrchat.load(Ordering::Relaxed))
     }
     fn engine_missing(&self) -> bool {
-        !self.obelisk
+        !self.obelisk && !self.got_obelisk.load(Ordering::Relaxed)
     }
     fn by_hand(&self) -> bool {
         true
     }
+    fn install_engine(&self, progress: &dyn Fn(EngineSetup), _stop: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+        *self.installs.lock().unwrap() += 1;
+        progress(EngineSetup::Downloading { percent: 50 });
+        if self.cannot_install {
+            return Err("no network".into());
+        }
+        progress(EngineSetup::Installing);
+        self.got_obelisk.store(true, Ordering::Relaxed);
+        if self.direct {
+            // The whole set-up: the sign-in, then the game.
+            progress(EngineSetup::SignIn { qr_url: "https://s.team/q/1/2".into() });
+            progress(EngineSetup::Game { game: true, percent: Some(50) });
+            self.got_vrchat.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+    fn direct(&self) -> bool {
+        self.direct
+    }
+    fn starting(&self) -> bool {
+        self.still_starting.load(Ordering::Relaxed)
+    }
+    fn start_failure(&self) -> Option<String> {
+        self.failure.lock().unwrap().take()
+    }
     fn start(&self, args: &[String]) -> Result<(), String> {
+        if self.direct {
+            self.starts.lock().unwrap().push(args.to_vec());
+            return if self.cannot_open { Err("no".into()) } else { Ok(()) };
+        }
         assert!(args.is_empty(), "nothing can be given to a game the person starts in Obelisk");
         self.open_engine()
     }
@@ -1594,4 +1634,94 @@ fn where_accepts_an_invite_on_the_chosen_profile() {
     let other = Action::As { account: "usr_other".into(), action: Box::new(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Vr, profile: 1 }) };
     assert!(matches!(c.launcher_do(other), Some(Notice::Error(_))));
     assert!(machine.started.lock().unwrap().is_empty());
+}
+
+/// A Mac that starts the game itself: the press of "Install & play VRChat" sets everything up, then plays, with no
+/// other press and nothing opened.
+#[test]
+fn install_and_play_on_a_mac_sets_up_then_starts_the_game_itself() {
+    let machine = Arc::new(PretendMac { direct: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::NoEngine);
+    assert_eq!(c.launcher_do(Action::InstallEngine), None);
+    assert_eq!(*machine.installs.lock().unwrap(), 1);
+    assert_eq!(*machine.opened.lock().unwrap(), 0, "no other app is ever opened");
+    let until = Instant::now() + Duration::from_secs(5);
+    while c.view().launcher.game != Game::Starting(LaunchMode::Desktop) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(c.view().launcher.game, Game::Starting(LaunchMode::Desktop), "played without another press");
+    assert_eq!(c.view().launcher.engine_setup, None);
+    assert_eq!(machine.starts.lock().unwrap().len(), 1);
+    machine.running.lock().unwrap().push((42, true));
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::Running(LaunchMode::Desktop));
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None }), Some(Notice::Error(_))));
+    assert_eq!(machine.starts.lock().unwrap().len(), 1, "never a second VRChat");
+}
+
+#[test]
+fn play_on_a_mac_starts_vrchat_itself_straight_into_the_destination() {
+    let machine = Arc::new(PretendMac { direct: true, obelisk: true, vrchat: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::NotRunning);
+    assert_eq!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) }), Some(Notice::Sent { to: W.into(), action: SentKind::Launch }));
+    let starts = machine.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 1);
+    assert!(!starts[0].iter().any(|a| a == "--no-vr"), "a Mac has no SteamVR to keep out of: {:?}", starts[0]);
+    assert_eq!(starts[0].len(), 1, "the PC's performance options are not a Mac's: {:?}", starts[0]);
+    assert!(starts[0].last().is_some_and(|a| a.starts_with("vrchat://launch") && a.contains(W)), "straight into the instance: {:?}", starts[0]);
+    assert!(c.launcher.lock().unwrap().pending.is_none(), "no invite to oneself is needed");
+    assert_eq!(*machine.opened.lock().unwrap(), 0);
+    // A second press while it starts starts nothing more, however long the engine takes to download first.
+    *c.launcher_started.lock().unwrap() = Instant::now().checked_sub(MAC_STARTING_FOR + Duration::from_secs(1));
+    machine.still_starting.store(true, Ordering::Relaxed);
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::Starting(LaunchMode::Desktop), "still starting while the machine says so");
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None }), Some(Notice::Sent { .. })));
+    assert_eq!(machine.starts.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_start_that_fails_on_a_mac_is_said_and_play_is_offered_again() {
+    let machine = Arc::new(PretendMac { direct: true, obelisk: true, vrchat: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None }), Some(Notice::Sent { .. })));
+    machine.still_starting.store(true, Ordering::Relaxed);
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::Starting(LaunchMode::Desktop));
+    // The engine gave up (Steam refused, Easy Anti-Cheat did not start…).
+    machine.still_starting.store(false, Ordering::Relaxed);
+    *machine.failure.lock().unwrap() = Some("Steam could not be reached.".into());
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::NotRunning, "Play again, not three minutes of Starting");
+    assert!(matches!(c.view().launcher.notice, Some(Notice::Error(ref words)) if words.contains("Steam could not be reached.")));
+    assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None }), Some(Notice::Sent { .. })));
+    assert_eq!(machine.starts.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn play_before_the_set_up_on_a_mac_sets_up_first_and_an_install_that_fails_can_be_tried_again() {
+    let machine = Arc::new(PretendMac { direct: true, cannot_install: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert!(matches!(c.launcher_do(Action::InstallEngine), Some(Notice::Error(_))));
+    assert_eq!(c.view().launcher.engine_setup, Some(EngineSetup::Failed("no network".into())));
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::NoEngine, "the button is there again");
+    assert!(matches!(c.launcher_do(Action::InstallEngine), Some(Notice::Error(_))));
+    assert_eq!(*machine.installs.lock().unwrap(), 2);
+    // While one is under way, a second press starts no second set-up.
+    c.update(|s| s.launcher.engine_setup = Some(EngineSetup::SignIn { qr_url: "https://s.team/q/1/2".into() }));
+    assert_eq!(c.launcher_do(Action::InstallEngine), None);
+    assert_eq!(*machine.installs.lock().unwrap(), 2);
+    assert!(machine.starts.lock().unwrap().is_empty());
+    // On a PC the button does not exist, and its action does nothing.
+    let pc = Controller::new(Settings::default());
+    pc.launcher_machine(Arc::new(Pretend::default()));
+    assert_eq!(pc.launcher_do(Action::InstallEngine), None);
+    assert_eq!(pc.view().launcher.engine_setup, None);
 }

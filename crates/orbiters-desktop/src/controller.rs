@@ -508,6 +508,7 @@ pub(crate) mod hide_self;
 pub use hide_self::{upload_can_hide, uploaded_avatar_name};
 mod lan;
 pub mod launcher;
+mod obelisk_cli;
 mod language;
 mod maps;
 pub(crate) mod menu_shares;

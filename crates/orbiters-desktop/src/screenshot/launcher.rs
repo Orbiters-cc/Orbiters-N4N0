@@ -9,7 +9,7 @@ use orbiters_core::launcher::*;
 
 const NOW: i64 = 1_795_000_000;
 
-pub(super) const NAMES: [&str; 28] = [
+pub(super) const NAMES: [&str; 31] = [
     "launcher-list",
     "launcher-invite",
     "launcher-hover",
@@ -18,6 +18,9 @@ pub(super) const NAMES: [&str; 28] = [
     "launcher-starting",
     "launcher-no-engine",
     "launcher-not-installed",
+    "launcher-engine-downloading",
+    "launcher-engine-sign-in",
+    "launcher-engine-game",
     "launcher-small",
     "launcher-small-drawer",
     "launcher-small-modal",
@@ -413,6 +416,19 @@ fn data(name: &str) -> LauncherState {
     }
     if name == "launcher-not-installed" {
         s.game = Game::NotInstalled;
+    }
+    // A Mac's set-up under way: the download, the Steam sign-in, VRChat's own download.
+    if name == "launcher-engine-downloading" {
+        s.game = Game::NoEngine;
+        s.engine_setup = Some(orbiters_core::launcher::EngineSetup::Downloading { percent: 43 });
+    }
+    if name == "launcher-engine-sign-in" {
+        s.game = Game::NotInstalled;
+        s.engine_setup = Some(orbiters_core::launcher::EngineSetup::SignIn { qr_url: "https://s.team/q/1/1234567890123456789".into() });
+    }
+    if name == "launcher-engine-game" {
+        s.game = Game::NotInstalled;
+        s.engine_setup = Some(orbiters_core::launcher::EngineSetup::Game { game: true, percent: Some(62) });
     }
     // VRChat's profiles (REQUEST15 7a): one running, or a second account beside it.
     let profile = |profile: u32, account: &str, running: Option<LaunchMode>, starting: Option<LaunchMode>| GameProfile { profile, account: Some(account.into()), running, starting, assistant: false };

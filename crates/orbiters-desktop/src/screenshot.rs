@@ -1851,6 +1851,26 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
+            name: "settings-walk-trackers",
+            page: Page::Settings,
+            snapshot: {
+                let mut s = idle.clone();
+                s.settings.walk_boost.enabled = true;
+                s.steamvr.walk_path = Some(crate::state::WalkPath::PlaySpace(crate::state::WhyPlaySpace::OtherTrackingSystem));
+                s.settings.world_performance = true;
+                s
+            },
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 5600.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
             name: "settings-scrolled",
             page: Page::Settings,
             snapshot: idle.clone(),

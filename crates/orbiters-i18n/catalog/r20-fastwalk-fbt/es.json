@@ -1,0 +1,4 @@
+{
+  "Fast walk moves the play space to keep your trackers aligned.": "El Paso rápido mueve el espacio de juego para mantener alineados tus trackers.",
+  "Your trackers use another tracking system than your headset (aligned by Space Calibrator, for instance), so Fast walk moves the play space: that keeps every tracker on your body. OVR Advanced Settings' drag and turn put you back.": "Tus trackers usan otro sistema de seguimiento que tu visor (alineados con Space Calibrator, por ejemplo), así que el Paso rápido mueve el espacio de juego: así cada tracker se queda en tu cuerpo. El arrastre y el giro de OVR Advanced Settings te devuelven atrás."
+}

@@ -54,6 +54,12 @@ pub struct App {
     rest_card: crate::window_rest::card::Card,
 }
 
+/// A Mac window's three buttons, in macOS's own colours, and the room they take at the title bar's left.
+const MAC_CLOSE: egui::Color32 = egui::Color32::from_rgb(0xff, 0x5f, 0x57);
+const MAC_MINIMIZE: egui::Color32 = egui::Color32::from_rgb(0xfe, 0xbc, 0x2e);
+const MAC_FULL_SCREEN: egui::Color32 = egui::Color32::from_rgb(0x28, 0xc8, 0x40);
+const MAC_BUTTONS_W: f32 = 82.0;
+
 impl App {
     /// The window of the window process; `splash` plays the opening (first window since the app started).
     pub fn new(cc: &eframe::CreationContext<'_>, ctl: Ctl, splash: bool) -> Self {
@@ -304,7 +310,9 @@ impl App {
         }
         let p = ui.painter();
         let name = Txt::new("Orbiters - N4N0", 12.0).weight(weight::SEMIBOLD).tracking(0.025).color(theme::FG_2);
-        let r = widgets::text(p, pos2(rect.left() + 16.0, rect.center().y), Align2::LEFT_CENTER, &name);
+        // On a Mac the window's three buttons come first, where every Mac window has them.
+        let lead = if cfg!(target_os = "macos") { MAC_BUTTONS_W } else { 16.0 };
+        let r = widgets::text(p, pos2(rect.left() + lead, rect.center().y), Align2::LEFT_CENTER, &name);
         // The beta's chip after the app's name, over every page (Enzo, 2026-11-15).
         let r = r.union(beta_chip(ui, pos2(r.right() + 8.0, rect.center().y)));
         let subtitle = match snap.capture.state {
@@ -329,7 +337,7 @@ impl App {
             let stopping = snap.capture.state == CaptureState::Stopping;
             let b = widgets::Button::new(if stopping { tr("Stopping…") } else { tr("Stop recording") }).icon(icons::RECORD).variant(widgets::Variant::Stop).size(widgets::Size::Sm).enabled(!stopping);
             let w = b.desired_width(ui);
-            let at = Rect::from_min_size(pos2(rect.right() - 4.0 - 44.0 * 3.0 - 12.0 - w, rect.top() + 6.0), vec2(w, 28.0));
+            let at = Rect::from_min_size(pos2(rect.right() - if cfg!(target_os = "macos") { 12.0 } else { 4.0 + 44.0 * 3.0 + 12.0 } - w, rect.top() + 6.0), vec2(w, 28.0));
             if widgets::activated(&b.show_at(ui, at)) {
                 self.ctl.stop_capture();
             }
@@ -342,6 +350,9 @@ impl App {
         } else {
             tr("Quit")
         };
+        if cfg!(target_os = "macos") {
+            return self.mac_window_buttons(ui, rect, id, close);
+        }
         let buttons = [(icons::MINUS, tr("Minimize"), 15.0, false), (icons::SQUARE, tr("Maximize"), 12.0, false), (icons::X, close, 16.0, true)];
         for (i, (glyph, label, size, danger)) in buttons.into_iter().enumerate() {
             let b = Rect::from_min_size(pos2(rect.right() - 4.0 - 44.0 * (3 - i) as f32, rect.top() + 4.0), vec2(44.0, 32.0));
@@ -366,6 +377,41 @@ impl App {
                     }
                     // The window process ends; the tray service keeps running (and frees the window's memory).
                     _ => ctx.send_viewport_cmd(ViewportCommand::Close),
+                }
+            }
+        }
+    }
+
+    /// A Mac's window buttons, where and as every Mac window has them: close, minimize and full screen as red, yellow
+    /// and green dots at the bar's left, their signs shown while the pointer is over the three, grey while the window is
+    /// not the front one.
+    fn mac_window_buttons(&mut self, ui: &mut Ui, rect: Rect, id: Id, close: &str) {
+        let ctx = ui.ctx().clone();
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let centre = |i: usize| pos2(rect.left() + 20.0 + 20.0 * i as f32, rect.center().y);
+        let group = Rect::from_min_max(centre(0) - vec2(10.0, 10.0), centre(2) + vec2(10.0, 10.0));
+        let over = ui.rect_contains_pointer(group);
+        let buttons = [(MAC_CLOSE, icons::X, close), (MAC_MINIMIZE, icons::MINUS, tr("Minimize")), (MAC_FULL_SCREEN, icons::ARROWS_OUT, tr("Full screen"))];
+        for (i, (colour, glyph, label)) in buttons.into_iter().enumerate() {
+            let c = centre(i);
+            let resp = ui.interact(Rect::from_center_size(c, vec2(18.0, 18.0)), id.with(("mac", i)), Sense::click()).on_hover_text(label);
+            let down = resp.is_pointer_button_down_on();
+            let p = ui.painter();
+            let fill = if focused || over { colour } else { theme::INK_600 };
+            p.circle_filled(c, 6.0, if down { theme::mix(fill, egui::Color32::BLACK, 0.25) } else { fill });
+            p.circle_stroke(c, 6.0, egui::Stroke::new(0.5, theme::black(0.2)));
+            if over {
+                widgets::icon(p, c, glyph, 8.5, theme::black(0.6));
+            }
+            if resp.clicked() && self.windowed {
+                match i {
+                    // The window process ends; the menu bar's service keeps running (and frees the window's memory).
+                    0 => ctx.send_viewport_cmd(ViewportCommand::Close),
+                    1 => ctx.send_viewport_cmd(ViewportCommand::Minimized(true)),
+                    _ => {
+                        let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                        ctx.send_viewport_cmd(ViewportCommand::Fullscreen(!full));
+                    }
                 }
             }
         }

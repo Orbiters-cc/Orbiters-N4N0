@@ -33,7 +33,7 @@ cargo xtask release --dev
 ```
 
 `dist` writes in `target/dist/<version>/`: `Orbiters - N4N0.app`, `Orbiters-N4N0-<version>-macos-arm64.dmg` (the
-application and a link to Applications, what people download), `Orbiters-N4N0-<version>-macos-arm64.zip` (what installed
+application and a link to Applications in a window with the app's look, made from the template of `tools/dmg`; what people download), `Orbiters-N4N0-<version>-macos-arm64.zip` (what installed
 apps update with) and, when this computer has the release key, the signed `<channel>.json` that names the zip. `github`
 attaches the disk image and the zip to the version's release, beside Windows' setup if it is already there (it does not
 replace it), and Windows' `github` does the same the other way around.
@@ -48,7 +48,7 @@ serves `docker-data/downloads` as files. `xtask publish` uploads them with SSH a
 |---|---|
 | Developer ID Application, notarized (`macos_notary_profile`, from `xcrun notarytool store-credentials`) | The app opens normally, anywhere. **Needs Apple's Developer Program; the only one to give the public.** |
 | Apple Development | Gatekeeper blocks it where it was downloaded by hand, until allowed in System Settings › Privacy & Security › Open Anyway. Permissions and the keychain survive updates, since the signature's identity stays. |
-| Ad hoc | The same, and macOS asks for the microphone, the local network and the keychain again after each update. |
+| Ad hoc | The same, and macOS asks for the microphone and the local network again after each update. The key of the saved sign-ins is then a file beside the settings, not a keychain item (`orbiters_core::dpapi`): the keychain would ask for the login password at every update. |
 
 The keychain asks for the signing key at each file unless told **Always Allow** once. `dist` first signs a small file to see
 whether it gets an answer within a minute; without one, nobody being at the screen, it signs ad hoc and says so, rather than

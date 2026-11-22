@@ -116,6 +116,30 @@ impl Controller {
         }
     }
 
+    /// A new Friends+ instance of `world` made for the signed-in VRChat account, then VRChat started (or sent) into it:
+    /// Home's Where's `make_and_go` (REQUEST20 2), the region the person played in last.
+    fn new_instance_and_play(self: &Shared, world: &str, name: &str, vr: bool) -> Result<Value, String> {
+        use super::vrchat_data::{Request, Response, Scope};
+        use orbiters_core::vrchat_api::{CreateAccess, InstanceRegion};
+        let s = self.view();
+        let Source::SignedIn { user_id: me, .. } = &s.launcher.source else {
+            return Err("A new Friends+ instance is made for the owner's VRChat account: none is connected (Settings).".into()); // i18n: not shown
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
+        let region = crate::overlay::worlds::panel::go::region_of(crate::pages::launcher::destinations::HistoryView::of(&history, now).region()).unwrap_or(InstanceRegion::Us);
+        let made = match self.vrchat_data(Scope::of(&s), Request::CreateInstance { world: world.into(), access: CreateAccess::FriendsPlus, region }) {
+            Ok(Response::CreatedInstance(made)) => made,
+            Ok(Response::WorldError(e)) => return Err(format!("VRChat did not make the instance: {e:?}")), // i18n: not shown
+            Ok(_) => return Err("VRChat answered something unexpected.".into()), // i18n: not shown
+            Err(e) => return Err(format!("VRChat did not make the instance: {e}")), // i18n: not shown
+        };
+        let place = Place { world_id: made.world.clone(), world_name: name.into(), world_picture: String::new(), instance_id: made.id.clone(), access: made.access, region: made.region.clone() };
+        let mode = if vr { LaunchMode::Vr } else { LaunchMode::Desktop };
+        self.launcher_action(Home::As { account: me.clone(), action: Box::new(Home::Play { mode, destination: Some(place) }) });
+        Ok(json!({ "done": true, "instance": "new Friends+" }))
+    }
+
     /// The friend the owner named, among the VRChat account's friends.
     fn friend_id(&self, said: &str) -> Result<String, String> {
         let s = self.view();
@@ -190,7 +214,52 @@ impl Controller {
                 self.launcher_action(Home::Play { mode: self.launch_mode(), destination: Some(place) });
                 done()
             }
-            // Home's friends list.
+            // Home's Where: the places VRChat can start at, as its cards offer them (REQUEST20 2).
+            Intent::Places => {
+                let s = self.view();
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                let mut items = vec![json!({ "ref": "home", "go": "home", "name": "VRChat's home world" })]; // i18n: not shown
+                for i in s.launcher.invites.iter().filter(|i| i.kind == orbiters_core::launcher::InviteKind::Invite && i.place.is_some()).take(3) {
+                    items.push(json!({ "ref": i.id, "go": "invite", "name": i.place.as_ref().map(|p| data(&p.world_name, NAME_CHARS)), "from": data(&i.from_name, NAME_CHARS) }));
+                }
+                for r in orbiters_n4n0_core::invites::read_rows().iter().take(3) {
+                    items.push(json!({ "ref": r.location, "go": "instance", "name": data(&r.world, NAME_CHARS), "type": r.kind() }));
+                }
+                let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
+                for f in crate::pages::launcher::destinations::frequent(&history, now).iter().take(3) {
+                    items.push(json!({ "ref": f.world_id, "go": "new", "name": data(&f.name, NAME_CHARS), "visits_lately": f.visits, "instance": "a new Friends+ one" })); // i18n: not shown
+                }
+                Ok(json!({ "items": items }))
+            }
+            // Home's Play, with or without a place of Where.
+            Intent::Play { vr, index } => {
+                let mode = if *vr { LaunchMode::Vr } else { LaunchMode::Desktop };
+                let go = item.and_then(|i| i.get("go")).and_then(Value::as_str).unwrap_or("home");
+                match (index, go) {
+                    (None, _) | (Some(_), "home") => self.launcher_action(Home::Play { mode, destination: None }),
+                    (Some(_), "invite") => self.launcher_action(self.as_shown(Home::AcceptInvite { invite: reference()?, mode })),
+                    (Some(_), "instance") => {
+                        let location = reference()?;
+                        let (world_id, instance_id) = location.split_once(':').ok_or("Not a VRChat location.")?; // i18n: not shown
+                        let (access, region) = orbiters_core::launcher_feed::access(instance_id);
+                        let place = Place { world_id: world_id.into(), world_name: String::new(), world_picture: String::new(), instance_id: instance_id.into(), access, region };
+                        self.launcher_action(Home::Play { mode, destination: Some(place) });
+                    }
+                    (Some(_), "new") => {
+                        let name = item.and_then(|i| i.get("name")).and_then(Value::as_str).unwrap_or_default().to_string();
+                        return self.new_instance_and_play(&reference()?, &name, *vr);
+                    }
+                    _ => return Err("Not a place of the last places list.".into()), // i18n: not shown
+                }
+                done()
+            }
+            // A searched world, as Where's new instance (REQUEST20 2).
+            Intent::GoToWorld { .. } => {
+                let name = item.and_then(|i| i.get("name")).and_then(Value::as_str).unwrap_or_default().to_string();
+                let vr = self.launch_mode() == LaunchMode::Vr;
+                self.new_instance_and_play(&reference()?, &name, vr)
+            }
+            // Home's friends list, by its sections (REQUEST20 3).
             Intent::FriendsOnline => {
                 let s = self.view();
                 let items: Vec<Value> = s
@@ -207,13 +276,14 @@ impl Controller {
                             Whereabouts::Website => "on the website".into(), // i18n: not shown
                             _ => String::new(),
                         };
-                        json!({ "name": data(&f.name, NAME_CHARS), "status": format!("{:?}", f.status), "status_text": data(&f.status_text, NAME_CHARS), "in_game": f.presence == Presence::InGame, "where": place })
+                        json!({ "name": data(&f.name, NAME_CHARS), "section": if f.presence == Presence::InGame { "in the game" } else { "on the website" }, "status": format!("{:?}", f.status), "status_text": data(&f.status_text, NAME_CHARS), "where": place }) // i18n: not shown
                     })
                     .collect();
                 if items.is_empty() && !matches!(s.launcher.source, Source::SignedIn { .. } | Source::Database { .. }) {
                     return Err("No friends list here: the owner connects a VRChat account in Settings.".into()); // i18n: not shown
                 }
-                Ok(json!({ "friends": items }))
+                let offline = s.launcher.friends.iter().filter(|f| f.presence == Presence::Offline).count();
+                Ok(json!({ "friends": items, "offline_count": offline }))
             }
             // Home's Boop (back), Request invite, profile.
             Intent::Boop { friend } => {

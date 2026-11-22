@@ -19,6 +19,7 @@ fn sample(name: &str) -> Value {
             "on" | "open" | "public" => json!(true),
             "strength" => json!(0.5),
             "step" => json!("up"),
+            "mode" => json!("vr"),
             "of" => json!("world"),
             "in_seconds" => json!(5),
             "length" => json!("full"),

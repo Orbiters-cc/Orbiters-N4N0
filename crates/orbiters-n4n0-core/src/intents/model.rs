@@ -34,9 +34,13 @@ fn about(name: &str) -> &'static str {
         "world_label" => "world_label(label, on): labels the world the owner is in (a label of world_feedback). Waits for the owner's yes.", // i18n: not shown
         "world_feedback" => "world_feedback: the likes, labels and comments of the world the owner is in.", // i18n: not shown
         "instances" => "instances: the instances the owner was in, newest first (numbered).", // i18n: not shown
-        "invite_me" => "invite_me(index): sends the owner an invite to a previous instance. Waits for the owner's yes.", // i18n: not shown
+        "places" => "places: where VRChat can start, as Home's Where offers it: VRChat's home, invites received, the last instances, the worlds visited most (numbered).", // i18n: not shown
+        "play" => "play(mode vr|desktop, index?): starts VRChat (or sends it, running) at its home, or at a place of the last places list (a world visited most gets a new Friends+ instance). Waits for the owner's yes.", // i18n: not shown
+        "go_to_world" => "go_to_world(index): takes the owner to a world of the last world search, in a new Friends+ instance made for their VRChat account. Waits for the owner's yes.", // i18n: not shown
+        "copy_world_name" => "copy_world_name(index?): a world's name to the clipboard: of the last world search, or of the world the owner is in.", // i18n: not shown
+        "invite_me" => "invite_me(index): sends the owner an invite to a previous instance, from their own VRChat account when it is connected (else Orbiters' account). Waits for the owner's yes.", // i18n: not shown
         "go_to_instance" => "go_to_instance(index): takes the owner's VRChat to a previous instance. Waits for the owner's yes.", // i18n: not shown
-        "friends_online" => "friends_online: the owner's VRChat friends in the game and on the website, with where they are.", // i18n: not shown
+        "friends_online" => "friends_online: the owner's VRChat friends by section as Home lists them (in the game, on the website), with where they are, and how many are offline.", // i18n: not shown
         "boop" => "boop(friend?): boops a friend by name; no friend: boops back whoever booped last. Waits for the owner's yes.", // i18n: not shown
         "request_invite" => "request_invite(friend): asks a friend for an invite. Waits for the owner's yes.", // i18n: not shown
         "friend_profile" => "friend_profile(friend): opens a friend's profile on Home.", // i18n: not shown
@@ -76,7 +80,7 @@ fn summary(group: Group) -> &'static str {
         Group::Pictures => "3D pictures, recordings, the camera's QR code scanner and sharing 3D captures.", // i18n: not shown
         Group::Videos => "YouTube for the worlds' video players: search, open, copy a link, drop a link card; the videos played lately.", // i18n: not shown
         Group::Worlds => "VRChat worlds: where the owner is, searching worlds, a world's page, likes, labels and comments.", // i18n: not shown
-        Group::Instances => "The instances the owner was in: invites to them, going back.", // i18n: not shown
+        Group::Instances => "Where to go: the instances the owner was in (invites to them, going back), and Home's Where: the places VRChat can start at, and Play.", // i18n: not shown
         Group::Friends => "The owner's VRChat friends: who is online, boops, invite requests, profiles, invites received.", // i18n: not shown
         Group::Profile => "The owner's VRChat status, status line and bio.", // i18n: not shown
         Group::Calls => "Orbiters' voice calls with VRChat friends.", // i18n: not shown
@@ -96,6 +100,7 @@ fn parameter(name: &str) -> Value {
         "step" => json!({ "enum": ["up", "down"] }),
         "of" => json!({ "enum": ["people", "world"] }),
         "in_seconds" => json!({ "type": "integer", "minimum": 0, "maximum": 30 }),
+        "mode" => json!({ "enum": ["vr", "desktop"] }),
         "length" => json!({ "enum": ["quick", "standard", "full"] }),
         "which" => json!({ "type": "string", "description": "latest, next, or the capture's number in the last list" }), // i18n: not shown
         "public" => json!({ "type": "boolean" }),
@@ -126,7 +131,8 @@ pub fn parameters(name: &str) -> &'static [&'static str] {
         "picture_length" => &["length"],
         "share_capture" => &["which", "public", "friends"],
         "youtube_search" | "world_search" => &["query"],
-        "youtube_watch" | "youtube_copy" | "youtube_drop" | "history_copy" | "history_drop" | "world_page" | "invite_me" | "go_to_instance" | "accept_invite" => &["index"],
+        "youtube_watch" | "youtube_copy" | "youtube_drop" | "history_copy" | "history_drop" | "world_page" | "invite_me" | "go_to_instance" | "accept_invite" | "go_to_world" | "copy_world_name" => &["index"],
+        "play" => &["mode", "index"],
         "world_comment" | "set_status_text" | "set_bio" | "suggest" => &["text"],
         "world_label" => &["label", "on"],
         "boop" | "request_invite" | "friend_profile" | "call" => &["friend"],

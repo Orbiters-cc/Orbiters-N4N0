@@ -116,5 +116,13 @@
   "Doing: {what}": "En cours : {what}",
   "Actions ({count})": "Actions ({count})",
   "understood offline": "compris hors ligne",
-  "needs your yes each time": "demande ton oui à chaque fois"
+  "needs your yes each time": "demande ton oui à chaque fois",
+  "Go to world {n} in a new Friends+ instance": "Aller au monde {n} dans une nouvelle instance Friends+",
+  "Copy this world's name": "Copier le nom de ce monde",
+  "Copy the name of world {n}": "Copier le nom du monde {n}",
+  "Read where VRChat can start": "Lire où VRChat peut démarrer",
+  "Start VRChat in VR": "Lancer VRChat en VR",
+  "Start VRChat in desktop mode": "Lancer VRChat en mode bureau",
+  "Start VRChat in VR at place {n}": "Lancer VRChat en VR au lieu {n}",
+  "Start VRChat in desktop mode at place {n}": "Lancer VRChat en mode bureau au lieu {n}"
 }

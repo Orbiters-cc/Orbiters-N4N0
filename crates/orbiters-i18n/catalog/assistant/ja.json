@@ -116,5 +116,13 @@
   "Doing: {what}": "実行中：{what}",
   "Actions ({count})": "操作（{count}）",
   "understood offline": "オフラインで理解",
-  "needs your yes each time": "毎回あなたの「はい」が必要"
+  "needs your yes each time": "毎回あなたの「はい」が必要",
+  "Go to world {n} in a new Friends+ instance": "新しいFriends+インスタンスでワールド{n}へ行く",
+  "Copy this world's name": "このワールドの名前をコピー",
+  "Copy the name of world {n}": "ワールド{n}の名前をコピー",
+  "Read where VRChat can start": "VRChatの開始場所を読む",
+  "Start VRChat in VR": "VRChatをVRで起動",
+  "Start VRChat in desktop mode": "VRChatをデスクトップモードで起動",
+  "Start VRChat in VR at place {n}": "場所{n}でVRChatをVRで起動",
+  "Start VRChat in desktop mode at place {n}": "場所{n}でVRChatをデスクトップモードで起動"
 }

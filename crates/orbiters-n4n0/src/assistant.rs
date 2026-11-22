@@ -80,7 +80,8 @@ fn list_of(intent: &Intent) -> Option<&'static str> {
     Some(match intent {
         Intent::YoutubeSearch { .. } | Intent::YoutubeWatch { .. } | Intent::YoutubeCopy { .. } | Intent::YoutubeDrop { .. } => "youtube",
         Intent::VideoHistory | Intent::HistoryCopy { .. } | Intent::HistoryDrop { .. } => "video_history",
-        Intent::WorldSearch { .. } | Intent::WorldPage { index: Some(_) } => "worlds",
+        Intent::WorldSearch { .. } | Intent::WorldPage { index: Some(_) } | Intent::GoToWorld { .. } | Intent::CopyWorldName { index: Some(_) } => "worlds",
+        Intent::Places | Intent::Play { index: Some(_), .. } => "places",
         Intent::Instances | Intent::InviteMe { .. } | Intent::GoToInstance { .. } => "instances",
         Intent::Invites | Intent::AcceptInvite { .. } => "invites",
         Intent::Captures | Intent::ShareCapture { which: Which::Index(_), .. } => "captures",
@@ -99,6 +100,9 @@ fn index_of(intent: &Intent) -> Option<usize> {
         | Intent::GoToInstance { index }
         | Intent::AcceptInvite { index }
         | Intent::WorldPage { index: Some(index) }
+        | Intent::GoToWorld { index }
+        | Intent::CopyWorldName { index: Some(index) }
+        | Intent::Play { index: Some(index), .. }
         | Intent::ShareCapture { which: Which::Index(index), .. } => Some(*index),
         _ => None,
     }
@@ -362,6 +366,16 @@ impl crate::N4n0 {
                     }
                 };
                 self.open_page(Page::Worlds, Some(world));
+                (done(), None)
+            }
+            // The worlds sheet's Copy name: the same clipboard as the menus' copies.
+            Intent::CopyWorldName { index } => {
+                let name = match index {
+                    Some(_) => item.as_ref().and_then(|i| field(i, "name")).map(str::to_string),
+                    None => self.host.world().world_name,
+                };
+                let name = name.filter(|n| !n.trim().is_empty()).ok_or("No world name to copy.")?; // i18n: not shown
+                self.screen_effects(vec![Effect::CopyText { text: name }]);
                 (done(), None)
             }
             Intent::WorldLike { on } => {

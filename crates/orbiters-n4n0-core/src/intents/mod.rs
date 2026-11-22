@@ -576,10 +576,21 @@ pub enum Intent {
     WorldComment { text: String },
     WorldLabel { label: String, on: bool },
     WorldFeedback,
-    // Instances.
+    /// A searched world (the `index`-th of the last search), in a new Friends+ instance made for the signed-in VRChat
+    /// account, as Home's Where makes one (REQUEST20 2).
+    GoToWorld { index: usize },
+    /// A world's name to the clipboard (the worlds sheet's Copy name, REQUEST20 1): of the last search's `index`-th, or
+    /// (`None`) of the world the person is in.
+    CopyWorldName { index: Option<usize> },
+    // Instances, and where VRChat starts (Home's Where).
     Instances,
     InviteMe { index: usize },
     GoToInstance { index: usize },
+    /// The places Home's Where offers (VRChat's home, invites, the last instances, the worlds visited most).
+    Places,
+    /// Home's Play: VRChat started (or, running, sent) in VR or desktop mode, at its home or at the `index`-th place of
+    /// the last list of places.
+    Play { vr: bool, index: Option<usize> },
     // Friends.
     FriendsOnline,
     /// `None`: whoever booped last.
@@ -667,9 +678,13 @@ pub const CATALOGUE: &[Spec] = &[
     spec("world_comment", G::Worlds, R::Confirm, &[N::Computer, N::SignedIn, N::Vrchat], false, true),
     spec("world_label", G::Worlds, R::Confirm, &[N::Computer, N::SignedIn, N::Vrchat], false, true),
     spec("world_feedback", G::Worlds, R::Act, &[N::Computer, N::Vrchat], true, false),
+    spec("go_to_world", G::Worlds, R::Confirm, &[N::Computer, N::VrchatAccount], false, true),
+    spec("copy_world_name", G::Worlds, R::Act, &[], false, true),
     spec("instances", G::Instances, R::Act, &[N::Computer], true, false),
     spec("invite_me", G::Instances, R::Confirm, &[N::Computer], false, true),
     spec("go_to_instance", G::Instances, R::Confirm, &[N::Computer], false, true),
+    spec("places", G::Instances, R::Act, &[N::Computer], true, false),
+    spec("play", G::Instances, R::Confirm, &[N::Computer], false, true),
     spec("friends_online", G::Friends, R::Act, &[N::Computer], true, false),
     spec("boop", G::Friends, R::Confirm, &[N::Computer, N::VrchatAccount], false, true),
     spec("request_invite", G::Friends, R::Confirm, &[N::Computer, N::VrchatAccount], false, true),
@@ -727,6 +742,10 @@ impl Intent {
             Intent::WorldComment { .. } => "world_comment",
             Intent::WorldLabel { .. } => "world_label",
             Intent::WorldFeedback => "world_feedback",
+            Intent::GoToWorld { .. } => "go_to_world",
+            Intent::CopyWorldName { .. } => "copy_world_name",
+            Intent::Places => "places",
+            Intent::Play { .. } => "play",
             Intent::Instances => "instances",
             Intent::InviteMe { .. } => "invite_me",
             Intent::GoToInstance { .. } => "go_to_instance",
@@ -820,6 +839,14 @@ impl Intent {
             Intent::WorldLabel { label, on: true } => tr!("Label this world {label}", label = q(label)),
             Intent::WorldLabel { label, on: false } => tr!("Take back the label {label}", label = q(label)),
             Intent::WorldFeedback => tr("Read this world's feedback").into(),
+            Intent::GoToWorld { index } => tr!("Go to world {n} in a new Friends+ instance", n = n(index)),
+            Intent::CopyWorldName { index: None } => tr("Copy this world's name").into(),
+            Intent::CopyWorldName { index: Some(i) } => tr!("Copy the name of world {n}", n = n(i)),
+            Intent::Places => tr("Read where VRChat can start").into(),
+            Intent::Play { vr: true, index: None } => tr("Start VRChat in VR").into(),
+            Intent::Play { vr: false, index: None } => tr("Start VRChat in desktop mode").into(),
+            Intent::Play { vr: true, index: Some(i) } => tr!("Start VRChat in VR at place {n}", n = n(i)),
+            Intent::Play { vr: false, index: Some(i) } => tr!("Start VRChat in desktop mode at place {n}", n = n(i)),
             Intent::Instances => tr("Read your previous instances").into(),
             Intent::InviteMe { index } => tr!("Invite you to previous instance {n}", n = n(index)),
             Intent::GoToInstance { index } => tr!("Go to previous instance {n}", n = n(index)),
@@ -1031,6 +1058,17 @@ fn parse_in(group: Group, input: &Value) -> Result<Intent, String> {
         "world_comment" => Intent::WorldComment { text: said(input, "text", 500)? },
         "world_label" => Intent::WorldLabel { label: said(input, "label", 40)?, on: on(Some(true))? },
         "world_feedback" => Intent::WorldFeedback,
+        "go_to_world" => Intent::GoToWorld { index: index(input, "index")? },
+        "copy_world_name" => Intent::CopyWorldName { index: if input.get("index").is_some() { Some(index(input, "index")?) } else { None } },
+        "places" => Intent::Places,
+        "play" => Intent::Play {
+            vr: match text(input, "mode").map(|m| m.to_ascii_lowercase()).as_deref() {
+                Some("vr") => true,
+                Some("desktop") => false,
+                _ => return Err("play needs \"mode\": vr or desktop. Ask the owner which if they did not say.".into()), // i18n: not shown
+            },
+            index: if input.get("index").is_some() { Some(index(input, "index")?) } else { None },
+        },
         "instances" => Intent::Instances,
         "invite_me" => Intent::InviteMe { index: index(input, "index")? },
         "go_to_instance" => Intent::GoToInstance { index: index(input, "index")? },

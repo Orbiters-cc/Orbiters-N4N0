@@ -188,6 +188,7 @@ fn sample(name: &str) -> Value {
             "public" => json!(true),
             "strength" => json!(0.5),
             "step" => json!("up"),
+            "mode" => json!("desktop"),
             "of" => json!("world"),
             "in_seconds" => json!(0),
             "length" => json!("full"),
@@ -224,14 +225,15 @@ fn every_intent_runs_by_its_own_path() {
     let three = |kind: &str| json!({ "items": [{ "ref": format!("{kind}1") }, { "ref": format!("{kind}2") }, { "ref": format!("{kind}3") }] });
     t.app_answers.lock().unwrap().insert("instances", three("wrld_a:"));
     t.app_answers.lock().unwrap().insert("invites", three("inv_"));
-    t.app_answers.lock().unwrap().insert("world_search", three("wrld_s"));
+    t.app_answers.lock().unwrap().insert("world_search", json!({ "items": [{ "ref": "wrld_s1", "name": "One" }, { "ref": "wrld_s2", "name": "Second world" }, { "ref": "wrld_s3", "name": "Three" }] }));
+    t.app_answers.lock().unwrap().insert("places", json!({ "items": [{ "ref": "home", "go": "home" }, { "ref": "wrld_p:1", "go": "instance" }] }));
     t.app_answers.lock().unwrap().insert("video_history", json!({ "items": [{ "ref": "https://youtu.be/aaaaaaaaaaa", "title": "One" }, { "ref": "https://youtu.be/bbbbbbbbbbb", "title": "Two" }] }));
     // Every intent once, far more than a minute allows (its limit has a test of its own).
     let run = |intent: Intent| {
         n.n4n0.lock().unwrap().assistant.limiter = Default::default();
         n.intent_run(intent, Via::Model)
     };
-    for query in ["instances", "invites", "world_search", "video_history"] {
+    for query in ["instances", "invites", "world_search", "video_history", "places"] {
         let spec = intents::spec_of(query).unwrap();
         let intent = intents::parse(spec.group.tool(), &sample(query)).unwrap().unwrap();
         let answer = run(intent).unwrap();
@@ -256,7 +258,7 @@ fn every_intent_runs_by_its_own_path() {
     }
     let names: Vec<&str> = local.iter().map(|(n, _)| *n).collect();
     // Those N4N0 does itself, by its menus' own effects and commands (the rest went to the app, checked above).
-    for name in ["fast_walk", "picture_length", "picture_3d", "smoothing", "open_page", "restricted", "state", "undo", "end_call", "mute_call", "answer_call", "invite_me", "history_copy", "world_like", "world_page"] {
+    for name in ["fast_walk", "picture_length", "picture_3d", "smoothing", "open_page", "restricted", "state", "undo", "end_call", "mute_call", "answer_call", "invite_me", "history_copy", "world_like", "world_page", "copy_world_name"] {
         assert!(names.contains(&name), "{name} is N4N0's own: {names:?}");
     }
     let got = |name: &str| local.iter().find(|(n, _)| *n == name).map(|(_, r)| r.clone()).unwrap();
@@ -270,6 +272,7 @@ fn every_intent_runs_by_its_own_path() {
     assert!(got("call").unwrap_err().contains("Nobody called"), "a friend not among the contacts is asked about");
     assert!(got("state").unwrap()["untrusted_text_from_others"]["explorer_points"]["points"] == 42, "the app's own state answers too");
     assert!(CLIPBOARD.lock().unwrap().contains(&"https://youtu.be/bbbbbbbbbbb".to_string()), "history_copy: the second played video's link");
+    assert!(CLIPBOARD.lock().unwrap().contains(&"Second world".to_string()), "copy_world_name: the second searched world's name");
     assert_eq!(t.view().assistant.open.as_ref().map(|o| o.page), Some(Page::AppSettings), "restricted opened Settings, last");
     // Undo undid the last undoable step: the menus' look as it was, through the app again.
     assert!(got("undo").is_ok());

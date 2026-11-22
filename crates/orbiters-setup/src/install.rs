@@ -701,6 +701,8 @@ fn finish_booster(progress: &Progress, silent: bool) {
 /// the booster's journal (`finish_booster` decides on it) are not on it.
 const OWN_DATA: &[(&str, Kind)] = &[
     ("vrchat-session.bin", Kind::File),
+    // Its last good copy (r20), sealed the same way: a removal with data leaves no VRChat cookie behind.
+    ("vrchat-session.bin.prev", Kind::File),
     ("usage", Kind::Folder),
     ("menu-reports", Kind::Folder),
     ("SteamVR", Kind::Folder),
@@ -1101,6 +1103,7 @@ mod tests {
         };
         for own in [
             "vrchat-session.bin",
+            "vrchat-session.bin.prev",
             "usage/install-id",
             "usage/waiting.jsonl",
             "menu-reports/2026-11-19-a/report.json",
@@ -1130,7 +1133,7 @@ mod tests {
         let failed = remove_own_data(&root, &["orbiters-desktop".into()]);
         assert_eq!(failed.len(), 1, "{failed:?}");
         assert!(failed[0].contains("hidden-projects.json") && root.join("hidden-projects.json/inside").is_dir());
-        for gone in ["vrchat-session.bin", "usage", "menu-reports", "orbit-vr-tune.json", "unity-projects.json", "project-pictures", "avatar-thumbnails", "world-thumbnails", "package-icons", "logs/perf.jsonl", "logs/shares.log", "logs/perf-report-20261119.json", "logs/orbiters-desktop.log", "logs/orbiters-desktop.old.log", "logs/vr-test-frames"] {
+        for gone in ["vrchat-session.bin", "vrchat-session.bin.prev", "usage", "menu-reports", "orbit-vr-tune.json", "unity-projects.json", "project-pictures", "avatar-thumbnails", "world-thumbnails", "package-icons", "logs/perf.jsonl", "logs/shares.log", "logs/perf-report-20261119.json", "logs/orbiters-desktop.log", "logs/orbiters-desktop.old.log", "logs/vr-test-frames"] {
             assert!(std::fs::symlink_metadata(root.join(gone)).is_err(), "{gone} left");
         }
         for kept in ["account.json", "Avatars/avtr_a.json", "Mixer/inbox.json", "booster/journal.json", "logs/toolkit.log", "VCC/settings.json"] {

@@ -48,6 +48,12 @@ impl FeatureCache {
         self.allowed && !self.due()
     }
 }
+/// Whether an answer about a feature is "no answer" (the server out of reach, down, timing out): not a yes, and not a no
+/// either. A credential the server refuses (401, 403, 404, 425) is a no.
+pub fn out_of_reach(answer: &anyhow::Result<bool>) -> bool {
+    answer.as_ref().err().is_some_and(|e| !e.downcast_ref::<crate::account::ApiError>().is_some_and(|a| matches!(a.status, 401 | 403 | 404 | 425)))
+}
+
 /// A feature that keeps being asked for, for something that acts while it is granted: unlike [`FeatureCache`], asked again
 /// every `refresh` and good for `lifetime` from the last answer that said yes, so a refusal ends it at the next look, a
 /// server out of reach only once the proof is too old, and nothing here survives the process.
@@ -59,6 +65,8 @@ pub struct Grant {
     proof: Option<Instant>,
     /// When it was last asked, whatever came of it.
     asked: Option<Instant>,
+    /// The last answer was a no (not "no answer").
+    refused: bool,
 }
 
 impl Grant {
@@ -66,22 +74,25 @@ impl Grant {
     const RETRY: Duration = Duration::from_secs(30);
 
     pub fn new(refresh: Duration, lifetime: Duration) -> Self {
-        Self { refresh, lifetime, proof: None, asked: None }
+        Self { refresh, lifetime, proof: None, asked: None, refused: false }
     }
 
     /// What the server answered, now: yes, no, or (an error) no answer.
     pub fn answered(&mut self, answer: &anyhow::Result<bool>, now: Instant) {
         self.asked = Some(now);
+        self.refused = matches!(answer, Ok(false)) || (answer.is_err() && !out_of_reach(answer));
         match answer {
             Ok(true) => self.proof = Some(now),
             Ok(false) => self.proof = None,
-            Err(e) => {
-                // A credential the server refuses (signed out everywhere, expired) is a no, not "out of reach".
-                if e.downcast_ref::<crate::account::ApiError>().is_some_and(|a| matches!(a.status, 401 | 403 | 404 | 425)) {
-                    self.proof = None;
-                }
-            }
+            Err(_) if out_of_reach(answer) => {}
+            // A credential the server refuses (signed out everywhere, expired) is a no, not "out of reach".
+            Err(_) => self.proof = None,
         }
+    }
+
+    /// How long the last yes still holds (nothing without one).
+    pub fn remaining(&self, now: Instant) -> Duration {
+        self.proof.map_or(Duration::ZERO, |t| self.lifetime.saturating_sub(now.duration_since(t)))
     }
 
     /// Whether to ask the server now.
@@ -95,10 +106,16 @@ impl Grant {
         self.proof.is_some_and(|t| now.duration_since(t) < self.lifetime)
     }
 
+    /// Whether the server's last answer was a no (a refused credential included), not "out of reach".
+    pub fn refused(&self) -> bool {
+        self.refused
+    }
+
     /// Back to knowing nothing (another account, another server).
     pub fn forget(&mut self) {
         self.proof = None;
         self.asked = None;
+        self.refused = false;
     }
 }
 

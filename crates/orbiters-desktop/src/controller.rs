@@ -786,14 +786,7 @@ impl Controller {
         let previous = self.view();
         let s = {
             let mut s = self.snapshot.lock().unwrap();
-            if !matches!(s.account.state, crate::state::AccountState::SignedIn { .. })
-                || s.account.development != (orbiters_core::account::Server::current() == orbiters_core::account::Server::Development)
-            {
-                self.vrchat_login.lock().unwrap().suspend();
-                if s.vrchat_login != vrchat_login::Status::default() {
-                    s.vrchat_login = vrchat_login::Status::default();
-                }
-            }
+            vrchat_login::follow_orbiters(&mut s, &mut self.vrchat_login.lock().unwrap());
             s.settle(&previous);
             s.clone()
         };

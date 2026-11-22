@@ -875,7 +875,10 @@ mod tests {
             if mode=="closed" { fresh["hardClose"]=true.into(); }
             if mode=="null" { fresh=serde_json::Value::Null; }
             let status = mode.parse().unwrap_or(200);
-            let (_, calls) = ctl.test_vrchat(vec![(200,review_instance()),(status,fresh)]);
+            let mut replies = vec![(200,review_instance()),(status,fresh)];
+            // r20: a 401 is looked into once (who is signed in) before the session counts as ended.
+            if status == 401 { replies.push((401,serde_json::json!({}))); }
+            let (_, calls) = ctl.test_vrchat(replies);
             let scope=Scope::of(&ctl.view());
             ctl.vrchat_data(scope.clone(),Request::CreateInstance {world:REVIEW_WORLD.into(),access:orbiters_core::vrchat_api::CreateAccess::Invite,region:orbiters_core::vrchat_api::InstanceRegion::Eu}).unwrap();
             let result=ctl.vrchat_data(scope,Request::InviteSelf {world:REVIEW_WORLD.into(),instance:REVIEW_ID.into()}).unwrap();
@@ -884,7 +887,7 @@ mod tests {
         }
         for status in [401,429] {
             let ctl=Controller::new(orbiters_core::settings::Settings::default());
-            ctl.test_vrchat(vec![(status,serde_json::json!({}))]);
+            ctl.test_vrchat(if status == 401 { vec![(401,serde_json::json!({})),(401,serde_json::json!({}))] } else { vec![(status,serde_json::json!({}))] });
             assert!(matches!(ctl.vrchat_data(Scope::of(&ctl.view()),Request::CreateInstance {world:REVIEW_WORLD.into(),access:orbiters_core::vrchat_api::CreateAccess::Invite,region:orbiters_core::vrchat_api::InstanceRegion::Eu}).unwrap(),Response::WorldError(WorldError::Api(_))));
         }
     }
@@ -919,7 +922,9 @@ mod tests {
     fn review_invite_post_errors_are_not_success_and_scope_changes_do_no_http() {
         for status in [401,429,500] {
             let ctl=Controller::new(orbiters_core::settings::Settings::default());
-            let (_,calls)=ctl.test_vrchat(vec![(200,review_instance()),(200,review_instance()),(status,serde_json::json!({}))]);
+            let mut replies=vec![(200,review_instance()),(200,review_instance()),(status,serde_json::json!({}))];
+            if status==401 { replies.push((401,serde_json::json!({}))); }
+            let (_,calls)=ctl.test_vrchat(replies);
             let scope=Scope::of(&ctl.view());
             ctl.vrchat_data(scope.clone(),Request::CreateInstance {world:REVIEW_WORLD.into(),access:orbiters_core::vrchat_api::CreateAccess::Invite,region:orbiters_core::vrchat_api::InstanceRegion::Eu}).unwrap();
             let reply=ctl.vrchat_data(scope.clone(),Request::InviteSelf {world:REVIEW_WORLD.into(),instance:REVIEW_ID.into()}).unwrap();

@@ -1,0 +1,6 @@
+{
+  "VRChat ended the session of {name}. Sign in again to use it here.": "VRChatが{name}のセッションを終了しました。ここで使うにはもう一度サインインしてください。",
+  "{username}, waiting for Orbiters": "{username}、Orbitersの応答待ち",
+  "Kept on this computer. It comes back by itself once Orbiters answers.": "このコンピューターに保存されています。Orbitersが応答すれば自動で戻ります。",
+  "Your VRChat session waits for Orbiters to answer. Try again in a moment.": "VRChatのセッションはOrbitersの応答を待っています。少ししてからもう一度お試しください。"
+}

@@ -679,6 +679,9 @@ impl Controller {
     /// `expected` is the account the press was made on ([`Action::As`]); a press that names none sends nothing.
     fn launcher_sender(&self, expected: Option<&str>) -> Result<Arc<Mutex<Client>>, Notice> {
         let Some(client) = self.launcher_client() else {
+            if self.view().vrchat_login.waiting {
+                return Err(Notice::Error(tr("Your VRChat session waits for Orbiters to answer. Try again in a moment.").into()));
+            }
             return Err(Notice::Error(tr("Sign in to VRChat in Settings to boop and ask for invites.").into()));
         };
         let account = client.lock().unwrap().signed_in_user_id().map(str::to_owned);
@@ -700,6 +703,22 @@ impl Controller {
 
     /// One look: is the source still the one read, is a read due, is the game running.
     fn launcher_tick(self: &Shared) {
+        // The VRChat session waits for Orbiters (the environment or account just changed, Orbiters out of reach): the list
+        // on show stays as it is, neither cleared nor replaced by the local copy, and nothing is read until it is back (r20).
+        if self.view().vrchat_login.waiting {
+            let (machine, check_game) = {
+                let mut rt = self.launcher.lock().unwrap();
+                let check_game = rt.game_checked.is_none_or(|t| t.elapsed() > GAME_EVERY);
+                if check_game {
+                    rt.game_checked = Some(Instant::now());
+                }
+                (rt.machine.clone(), check_game)
+            };
+            if check_game {
+                self.launcher_game(machine.as_ref());
+            }
+            return;
+        }
         let client = self.launcher_client();
         let account = client.as_ref().and_then(|c| c.lock().unwrap().signed_in_user_id().map(str::to_owned));
         let reopen;
@@ -715,7 +734,9 @@ impl Controller {
                 }
                 rt.pipeline_client = None;
             }
-            reopen = regranted && client.is_some();
+            // Its live updates come back with a new grant, also once they stopped on the old one's revocation (r20).
+            let stopped = !changed && rt.pipeline.is_none() && rt.loaded_at.is_some() && account.is_some();
+            reopen = (regranted || stopped) && client.is_some();
             if changed {
                 rt.pictures.clear();
                 rt.worn.clear();

@@ -215,6 +215,7 @@ pub(crate) mod imp {
         }
         // SAFETY: WinRT in this thread's apartment; it stays for the process, which ends after this picture.
         let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
+        crate::hold_the_mta();
         let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|e| text("capture item", e))?; // i18n: not shown
         // SAFETY: a window handle; asking for one that is gone only fails.
         let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window) }.map_err(|e| text("capture item", e))?; // i18n: not shown

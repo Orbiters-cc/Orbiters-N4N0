@@ -81,7 +81,30 @@ fn sandbox_switches() {
     }
 }
 
+/// Windows: the process's multithreaded COM apartment (MTA), held from the first call until the process ends.
+///
+/// A thread that uses COM or WinRT objects without joining an apartment itself (Windows Graphics Capture in
+/// `desk_translate::frame_of`, the translation's reading thread, the VR camera panel's frames) has the MTA only while
+/// another thread is in it. When the last thread that joined it ends (the desktop's looks thread joins it with
+/// `RoInitialize` and ends with its capture), COM tears the apartment down and unloads the DLLs it loaded
+/// (`GraphicsCapture.dll`, `dcomp.dll`, `CoreMessaging.dll`) under the objects still in use, and windows-rs's cached
+/// activation factories with them: the next call reads freed memory (the desktop tests' access violations of
+/// 2026-11-22, r20/test-crash). Holding the MTA keeps every such object's code loaded. windows-rs does the same by
+/// itself only when no apartment exists at its first activation.
+#[cfg(windows)]
+pub(crate) fn hold_the_mta() {
+    static HELD: std::sync::Once = std::sync::Once::new();
+    HELD.call_once(|| {
+        // SAFETY: a plain call; its cookie is never handed back, so the apartment lasts as long as the process.
+        if let Err(e) = unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() } {
+            eprintln!("COM: the multithreaded apartment could not be held ({e})"); // i18n: not shown (a log's line)
+        }
+    });
+}
+
 fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    hold_the_mta();
     // The release's version, for the libraries too (orbiters-version says why it is given here).
     orbiters_version::set(env!("ORBITERS_VERSION"));
     sandbox_switches();

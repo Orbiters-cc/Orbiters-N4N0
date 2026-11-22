@@ -487,6 +487,7 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 }
 
 /// What a press asks, done after drawing.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Act {
     Back,
     Tab(Tab),

@@ -37,6 +37,7 @@ const HYDRATE_MAX: usize = 12;
 /// A picture of the page at most (memory only).
 const PICTURE_MAX: usize = 12 * 1024 * 1024;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Request {
     /// Home's Groups section: the groups this account owns or helps run.
@@ -113,6 +114,7 @@ pub enum Done {
     Group(Box<Group>),
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Outcome {
     Done(Done),
@@ -336,12 +338,7 @@ impl Controller {
             }
         }
         // Memberships the account's list does not show (hidden ones): read one by one, a few at most.
-        let mut read = 0;
-        for card in cards.iter_mut().filter(|c| c.name.is_empty()) {
-            if read == HYDRATE_MAX {
-                break;
-            }
-            read += 1;
+        for card in cards.iter_mut().filter(|c| c.name.is_empty()).take(HYDRATE_MAX) {
             if let Ok(group) = self.groups_read(scope, |c| c.group(&card.id)) {
                 card.name = group.name;
                 card.short_code = group.short_code;

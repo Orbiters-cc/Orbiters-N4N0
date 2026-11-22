@@ -49,6 +49,9 @@ enum Loading {
     Photos(mpsc::Receiver<Vec<(PathBuf, Option<egui::ColorImage>)>>),
 }
 
+/// What an export gives: each target's file and its size, or why it failed.
+type Exported = Result<Vec<(Target, PathBuf, u64)>, String>;
+
 pub(crate) struct Studio {
     pub card: GroupCard,
     account: String,
@@ -61,7 +64,7 @@ pub(crate) struct Studio {
     error: Option<String>,
     /// Exports of this visit: target, file, size in bytes.
     pub exported: Vec<(Target, PathBuf, u64)>,
-    exporting: Option<mpsc::Receiver<Result<Vec<(Target, PathBuf, u64)>, String>>>,
+    exporting: Option<mpsc::Receiver<Exported>>,
     /// The upload's PNG being made, then on its way (prepare → confirm → commit).
     making_upload: Option<mpsc::Receiver<Result<Vec<u8>, String>>>,
     /// Uploaded to the gallery, the group not changed yet (M6).
@@ -193,7 +196,10 @@ impl Studio {
 fn load_file(ctx: &egui::Context, path: PathBuf) -> Loading {
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
+    // Work of the window while it runs: it does not rest to the tray in the middle of it.
+    let working = crate::pages::Working::begin();
     std::thread::spawn(move || {
+        let _working = working;
         let r = art::load_source(&path).map(|img| (img, Source::File(path))).map_err(|_| tr("That picture could not be read.").to_string());
         let _ = tx.send(r);
         ctx.request_repaint();
@@ -205,7 +211,10 @@ fn load_file(ctx: &egui::Context, path: PathBuf) -> Loading {
 fn recent_photos(ctx: &egui::Context, folders: Vec<PathBuf>) -> Loading {
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
+    // Work of the window while it runs: it does not rest to the tray in the middle of it.
+    let working = crate::pages::Working::begin();
     std::thread::spawn(move || {
+        let _working = working;
         let mut found: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
         let mut seen = 0usize;
         let mut stack: Vec<(PathBuf, u8)> = folders.into_iter().map(|f| (f, 0)).collect();
@@ -227,7 +236,7 @@ fn recent_photos(ctx: &egui::Context, folders: Vec<PathBuf>) -> Loading {
                 }
             }
         }
-        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.sort_by_key(|f| std::cmp::Reverse(f.0));
         let out = found
             .into_iter()
             .take(PHOTOS_MAX)
@@ -851,7 +860,10 @@ fn act_on(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act) {
             let name = studio.card.name.clone();
             let (tx, rx) = mpsc::channel();
             let ctx2 = ctx.clone();
+            // Work of the window while it runs: it does not rest to the tray in the middle of it.
+            let working = crate::pages::Working::begin();
             std::thread::spawn(move || {
+                let _working = working;
                 let dir = art::export_dir();
                 let r = targets
                     .into_iter()

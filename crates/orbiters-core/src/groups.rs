@@ -521,7 +521,7 @@ pub fn can(action: Action, actor: &Actor, catalogue: &Catalogue) -> Verdict {
             }
             if role.is_owner_role() {
                 // Only its holder edits its words; its rights and flags are fixed.
-                if !actor.role_ids.iter().any(|r| *r == role.id) {
+                if !actor.role_ids.contains(&role.id) {
                     return Withheld(Why::RoleAtOrAbove);
                 }
                 if change.permissions.is_some() || change.touches_flags() {

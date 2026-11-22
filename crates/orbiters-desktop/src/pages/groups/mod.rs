@@ -93,7 +93,10 @@ impl Jobs {
         }
         self.running.push(kind.clone());
         let (tx, ctl, ctx, scope, generation) = (self.tx.clone(), ctl.clone(), ctx.clone(), scope.clone(), self.generation);
+        // Work of the window while it runs: it does not rest to the tray in the middle of it.
+        let working = crate::pages::Working::begin();
         std::thread::spawn(move || {
+            let _working = working;
             let reply = ctl.groups(scope, request);
             let image = match (&kind, &reply) {
                 (Kind::Picture(_), Reply::Picture(bytes)) => decode_picture(bytes),

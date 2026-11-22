@@ -1748,3 +1748,76 @@ fn a_session_waiting_for_orbiters_keeps_the_list_on_show() {
     assert_eq!(c.launcher.lock().unwrap().loaded_for, Some(Some("usr_test".into())));
     assert!(calls.lock().unwrap().is_empty());
 }
+
+/// r21: a launch with a saved VRChat session, Orbiters answering after `orbiters` and VRChat after `vrchat` (at VRChat's
+/// own pace): how long until the window can say "signed in to VRChat" (the sign-in's status), and until the friends
+/// list read with the session is on show. `None`: not within 20 s.
+fn launch_times(orbiters: Duration, vrchat: Duration) -> (Option<Duration>, Option<Duration>) {
+    let c = controller(Arc::new(Pretend::default()));
+    let me = json!({"id": "usr_test", "displayName": "Tester", "currentAvatarThumbnailImageUrl": "https://api.vrchat.cloud/api/1/file/file_me/1/file"});
+    let friend = |i: usize, online: bool| json!({"id": format!("usr_00000000-0000-4000-8000-{i:012}"), "displayName": format!("Friend {i}"), "status": if online { "active" } else { "offline" }, "location": if online { "private" } else { "offline" }, "tags": []});
+    let (client, _) = orbiters_core::vrchat_api::test_server(Arc::new(orbiters_core::vrchat_api::Gate::default()), vrchat, move |_, url| {
+        if url.contains("/auth/user/friends") {
+            let page: Vec<_> = match (url.contains("offline=true"), url.contains("offset=0")) {
+                (false, true) => (0..30).map(|i| friend(i, true)).collect(),
+                (true, true) => (30..130).map(|i| friend(i, false)).collect(),
+                (true, false) if url.contains("offset=100") => (130..224).map(|i| friend(i, false)).collect(),
+                _ => Vec::new(),
+            };
+            (200, json!(page))
+        } else if url.ends_with("/auth/user") {
+            (200, me.clone())
+        } else if url.contains("/favorite") || url.contains("/notifications") {
+            (200, json!([]))
+        } else {
+            (404, json!({}))
+        }
+    });
+    c.test_saved_vrchat(client, move |_, _| {
+        std::thread::sleep(orbiters);
+        Ok(true)
+    });
+    // The account file is read at once (Checking); Orbiters answers its check after `orbiters`.
+    {
+        let mut rt = c.account_runtime.lock().unwrap();
+        rt.read = Some((orbiters_core::account::Server::current(), None));
+        rt.account = Some(orbiters_core::account::Account { token: "fake".into(), user: None, username: Some("tester".into()), avatar_url: None, features: None });
+    }
+    let development = orbiters_core::account::Server::current() == orbiters_core::account::Server::Development;
+    c.update(|s| {
+        s.account.state = crate::state::AccountState::Checking { username: Some("tester".into()) };
+        s.account.development = development;
+    });
+    let start = Instant::now();
+    {
+        let c = c.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(orbiters);
+            c.update(|s| s.account.state = crate::state::AccountState::SignedIn { username: "tester".into() });
+        });
+    }
+    c.start_vrchat_login();
+    c.start_launcher();
+    let (mut status, mut list) = (None, None);
+    while start.elapsed() < Duration::from_secs(20) && (status.is_none() || list.is_none()) {
+        let snap = c.view();
+        if status.is_none() && snap.vrchat_login.user.is_some() {
+            status = Some(start.elapsed());
+        }
+        if list.is_none() && matches!(snap.launcher.source, Source::SignedIn { .. }) {
+            list = Some(start.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    (status, list)
+}
+
+/// r21 measurement, by hand (`--ignored --nocapture`): Orbiters at 150 ms an answer, VRChat at 250 ms.
+#[test]
+#[ignore]
+fn launch_with_a_saved_session_times() {
+    for _ in 0..3 {
+        let (status, list) = launch_times(Duration::from_millis(150), Duration::from_millis(250));
+        println!("r21 launch: sign-in status says signed in after {status:?}; the friends list read with it after {list:?}");
+    }
+}

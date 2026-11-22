@@ -895,6 +895,14 @@ mod tests {
 
 #[cfg(test)]
 impl Controller {
+    /// A saved session at launch (r21 timing tests): `client` holds its cookie and nobody is signed in yet; Orbiters is
+    /// asked through `ask`.
+    pub(super) fn test_saved_vrchat(&self, client: Client, ask: impl Fn(&Api, &str) -> anyhow::Result<bool> + Send + Sync + 'static) {
+        let mut rt = self.vrchat_login.lock().unwrap();
+        rt.client = Arc::new(Mutex::new(client));
+        rt.restored = false;
+        rt.ask = Arc::new(ask);
+    }
     pub(super) fn test_vrchat(&self, replies: Vec<(u16, serde_json::Value)>) -> (Arc<Mutex<Client>>, Arc<Mutex<Vec<(String, String)>>>) {
         self.test_account();
         let identity = self.vrchat_identity().unwrap();

@@ -696,6 +696,8 @@ impl Game for SideGame {
             steamvr: snap.steamvr.running,
             session_account: st.account.clone(),
             needs_sign_in: st.needs_sign_in,
+            renderer_lost: false,
+            start_failed: None,
         }
     }
 

@@ -165,6 +165,17 @@ impl App {
         &mut self.chat
     }
 
+    /// Settings, on a setting (its registry id, `account.vrchat`) or a sub-tab (`vr`): the sub-tab shows, the setting comes
+    /// into view and is lit (`pages::settings::State::open`). An unknown name opens Settings as it was.
+    pub fn open_settings(&mut self, target: &str, now: f64) {
+        self.set_page(Page::Settings, now);
+        self.settings.open(target, now);
+    }
+
+    pub fn settings_mut(&mut self) -> &mut pages::settings::State {
+        &mut self.settings
+    }
+
     pub fn home_mut(&mut self) -> &mut pages::home::State {
         &mut self.home
     }
@@ -292,7 +303,7 @@ impl App {
                 self.usage_told = true;
                 self.ctl.patch_settings(serde_json::json!({ "usage": { "told": true, "told_perf": true, "told_account": true } }));
                 if answer == pages::usage_notice::Answer::Settings {
-                    self.set_page(Page::Settings, now);
+                    self.open_settings("privacy.usage", now);
                 }
             }
         }
@@ -716,7 +727,11 @@ impl App {
                     self.sessions.open_storage(false);
                 }
                 pages::Go::Projects => self.set_page(Page::Projects, anim::time(&ctx)),
-                pages::Go::VrchatAccount | pages::Go::ExplorerPoints => self.set_page(Page::Settings, anim::time(&ctx)),
+                go => {
+                    if let Some(target) = go.setting() {
+                        self.open_settings(target, anim::time(&ctx));
+                    }
+                }
             }
         }
     }
@@ -870,7 +885,11 @@ impl eframe::App for App {
                 self.set_page(Page::Projects, anim::time(ctx));
             } else if page == "vrchat-account" {
                 // Previous instances' Connect VRChat in the menus around VRChat (REQUEST20 4): where Home's Sign in to VRChat leads.
-                self.set_page(Page::Settings, anim::time(ctx));
+                self.open_settings("account.vrchat", anim::time(ctx));
+                bring_to_front(ctx);
+            } else if let Some(target) = page.strip_prefix("settings:") {
+                // A setting of the window's Settings, by its registry id or its sub-tab's (REQUEST21 2).
+                self.open_settings(target, anim::time(ctx));
                 bring_to_front(ctx);
             } else if let Some(dir) = page.strip_prefix("share-to:") {
                 // "Share to …" beside VRChat's camera on the desktop: this window's own share dialog, on its friends.

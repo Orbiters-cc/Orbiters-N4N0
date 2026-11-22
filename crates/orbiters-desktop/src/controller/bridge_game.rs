@@ -173,6 +173,8 @@ impl Game for RealGame {
             steamvr: snap.steamvr.running,
             session_account: None,
             needs_sign_in: false,
+            renderer_lost: false,
+            start_failed: None,
         }
     }
 
@@ -458,6 +460,10 @@ impl Controller {
                 return;
             }
         };
+        // A Mac's VRChat runs under Obelisk's engine: its own game (bridge_mac.rs), everything else the same.
+        #[cfg(target_os = "macos")]
+        let game: Arc<dyn crate::bridge::game::Game> = Arc::new(super::bridge_mac::MacGame::new(Arc::downgrade(self), exe.clone()));
+        #[cfg(not(target_os = "macos"))]
         let game = Arc::new(RealGame::new(Arc::downgrade(self), exe.clone()));
         let bridge = Bridge::new(game, Some(exe.clone()));
         bridge.set_opener(Arc::new(super::bridge_side::RealOpener::new(Arc::downgrade(self), exe)));

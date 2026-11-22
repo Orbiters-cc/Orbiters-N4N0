@@ -38,10 +38,13 @@ pub(crate) fn crypt(_: &[u8], _: &[u8], _: bool) -> anyhow::Result<Vec<u8>> {
 pub(crate) fn crypt(data: &[u8], entropy: &[u8], encrypt: bool) -> anyhow::Result<Vec<u8>> {
     let key = mac::key()?;
     if encrypt {
-        mac::seal(&key, data, entropy)
-    } else {
-        mac::open(&key, data, entropy)
+        return mac::seal(&key, data, entropy);
     }
+    // What an unsigned build of this computer sealed with its key file opens too (`mac::older_key`).
+    mac::open(&key, data, entropy).or_else(|e| match mac::older_key().filter(|older| *older != key) {
+        Some(older) => mac::open(&older, data, entropy).map_err(|_| e),
+        None => Err(e),
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -63,16 +66,54 @@ mod mac {
     /// The key file of builds the keychain cannot know again, in the settings' folder.
     const KEY_FILE: &str = "session-key";
 
-    /// The key of this run: found once, and a refusal is kept as well (the keychain is not asked again and again).
+    /// The keychain's "interaction not allowed": it is locked (the Mac's screen locked, or before the person's login),
+    /// and no question could be asked. Not a refusal: asked again at the next need.
+    const LOCKED: i32 = -25308;
+
+    /// Why there is no key: `again` when asking once more later may give it (a locked keychain).
+    #[derive(Debug)]
+    pub(super) struct NoKey {
+        pub message: String,
+        pub again: bool,
+    }
+
+    /// The key of this run: found once, and a refusal is kept as well (the keychain is not asked again and again),
+    /// except a locked keychain's, which is not one.
     pub(super) fn key() -> anyhow::Result<[u8; KEY_LEN]> {
-        static KEY: std::sync::OnceLock<Result<[u8; KEY_LEN], String>> = std::sync::OnceLock::new();
-        KEY.get_or_init(|| {
-            let file = crate::paths::config_dir().join(KEY_FILE);
-            let found = if signed_by_a_team() { keychain_key_after(&file) } else { file_key(&file) };
-            found.map_err(|e| format!("{e:#}"))
-        })
-        .clone()
-        .map_err(|e| anyhow::anyhow!(e))
+        static KEY: std::sync::Mutex<Option<Result<[u8; KEY_LEN], String>>> = std::sync::Mutex::new(None);
+        let mut kept = KEY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(found) = kept.as_ref() {
+            return found.clone().map_err(|e| anyhow::anyhow!(e));
+        }
+        let file = crate::paths::config_dir().join(KEY_FILE);
+        let found = if signed() { keychain_key_after(&file) } else { file_key(&file).map_err(|e| NoKey { message: format!("{e:#}"), again: false }) };
+        match found {
+            Ok(key) => {
+                *kept = Some(Ok(key));
+                Ok(key)
+            }
+            Err(NoKey { message, again }) => {
+                if !again {
+                    *kept = Some(Err(message.clone()));
+                }
+                Err(anyhow::anyhow!(message))
+            }
+        }
+    }
+
+    /// For a signed build, the key file an unsigned build of this computer made (a developer's run from `target`): what it
+    /// sealed opens with it. Never the signed build's own key, which is the keychain's.
+    pub(super) fn older_key() -> Option<[u8; KEY_LEN]> {
+        if !signed() {
+            return None;
+        }
+        std::fs::read(crate::paths::config_dir().join(KEY_FILE)).ok().and_then(|bytes| <[u8; KEY_LEN]>::try_from(bytes.as_slice()).ok())
+    }
+
+    /// [`signed_by_a_team`], asked once per run.
+    fn signed() -> bool {
+        static SIGNED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SIGNED.get_or_init(signed_by_a_team)
     }
 
     /// Whether this program's signature names a team (`codesign -dv` on itself): one the keychain knows again after an
@@ -107,18 +148,52 @@ mod mac {
         Ok(key)
     }
 
-    /// A signed build's key: the keychain's. A key file left by an ad hoc build before it goes into the keychain first
-    /// (in place of an item that build may have left, which would ask), so what was sealed with it still opens.
-    fn keychain_key_after(file: &std::path::Path) -> anyhow::Result<[u8; KEY_LEN]> {
-        if let Some(key) = std::fs::read(file).ok().and_then(|bytes| <[u8; KEY_LEN]>::try_from(bytes.as_slice()).ok()) {
-            let _ = delete_generic_password(SERVICE, ACCOUNT);
-            let _ = delete_generic_password(SERVICE, FIRST_ACCOUNT);
-            if set_generic_password(SERVICE, ACCOUNT, &key).is_ok() {
-                let _ = std::fs::remove_file(file);
-            }
-            return Ok(key);
+    /// What a signed build does with the keychain's answer and a key file an unsigned build may have left.
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) enum Plan {
+        /// The keychain's key: it is this app's, whatever file lies beside the settings (2026-11-22 21:59: a developer's
+        /// unsigned run had made a file key, and the signed app put it in the keychain in place of its own key, which
+        /// opened the saved VRChat session; that session could never be opened again).
+        Keychain,
+        /// No key in the keychain yet, and the key file of the unsigned build that came before: it goes in, so that what it
+        /// sealed still opens.
+        FileIntoKeychain,
+        /// None anywhere: a new one, in the keychain.
+        New,
+    }
+
+    /// `item` is the keychain's answer (`Ok(true)` it has the key, `Ok(false)` it has none, `Err` it would not say).
+    pub(super) fn plan(item: Result<bool, i32>, file: bool) -> Result<Plan, i32> {
+        match item {
+            Ok(true) => Ok(Plan::Keychain),
+            Ok(false) if file => Ok(Plan::FileIntoKeychain),
+            Ok(false) => Ok(Plan::New),
+            Err(code) => Err(code),
         }
-        keychain_key()
+    }
+
+    /// A signed build's key: the keychain's ([`plan`]).
+    fn keychain_key_after(file: &std::path::Path) -> Result<[u8; KEY_LEN], NoKey> {
+        let refused = |e: security_framework::base::Error| NoKey { again: e.code() == LOCKED, message: tr!("the keychain did not give the key: {error}", error = e) };
+        let item = match get_generic_password(SERVICE, ACCOUNT) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.code() == NOT_FOUND => None,
+            Err(e) => return Err(refused(e)),
+        };
+        let file_key = std::fs::read(file).ok().and_then(|bytes| <[u8; KEY_LEN]>::try_from(bytes.as_slice()).ok());
+        match plan(Ok(item.is_some()), file_key.is_some()) {
+            Ok(Plan::Keychain) => <[u8; KEY_LEN]>::try_from(item.unwrap_or_default().as_slice())
+                .map_err(|_| NoKey { message: tr("the keychain holds a key of another length").to_string(), again: false }),
+            Ok(Plan::FileIntoKeychain) => {
+                let key = file_key.unwrap_or_default();
+                let _ = delete_generic_password(SERVICE, FIRST_ACCOUNT);
+                if set_generic_password(SERVICE, ACCOUNT, &key).is_ok() {
+                    let _ = std::fs::remove_file(file);
+                }
+                Ok(key)
+            }
+            Ok(Plan::New) | Err(_) => keychain_key().map_err(|e| NoKey { message: format!("{e:#}"), again: false }),
+        }
     }
 
     /// The key from the login keychain, made and kept there when there is none yet.
@@ -199,6 +274,15 @@ mod mac {
             assert_ne!(file_key(&file).unwrap(), first, "a damaged file is replaced, not an error for ever");
             assert_eq!(std::fs::read(&file).unwrap().len(), KEY_LEN);
             let _ = std::fs::remove_dir_all(&folder);
+        }
+
+        #[test]
+        fn the_keychain_s_key_is_never_replaced_by_an_unsigned_build_s_file() {
+            assert_eq!(plan(Ok(true), true), Ok(Plan::Keychain), "the keychain's key stays the app's, a file beside it or not");
+            assert_eq!(plan(Ok(true), false), Ok(Plan::Keychain));
+            assert_eq!(plan(Ok(false), true), Ok(Plan::FileIntoKeychain), "an unsigned build's key moves in only where there is none");
+            assert_eq!(plan(Ok(false), false), Ok(Plan::New));
+            assert_eq!(plan(Err(LOCKED), true), Err(LOCKED), "a locked keychain changes nothing");
         }
 
         /// The real login keychain (`cargo test -p orbiters-core keychain -- --ignored`): macOS may ask the first time.

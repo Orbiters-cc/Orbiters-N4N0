@@ -97,6 +97,10 @@ pub struct Seen {
     pub session_account: Option<(String, String)>,
     /// This VRChat waits at its sign-in page: only the person can sign in, on its window.
     pub needs_sign_in: bool,
+    /// The game runs, but its graphics went: nothing new will show (VRChat under Obelisk's engine on a Mac).
+    pub renderer_lost: bool,
+    /// The bridge's start ended before the game was up, and why (a Mac's shared start says it at once).
+    pub start_failed: Option<String>,
 }
 
 /// A place to find worlds from.

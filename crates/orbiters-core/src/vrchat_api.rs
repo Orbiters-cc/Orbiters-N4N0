@@ -2873,6 +2873,39 @@ pub(crate) mod tests {
     }
 }
 
+/// A pretend VRChat for another crate's timing tests: each request answered by `answer(method, url)` after `latency`,
+/// paced as the real client paces (one request a second per kind), with a saved session's cookie and nobody signed in
+/// yet (what a restore starts from). No file, no network.
+#[cfg(feature = "test-support")]
+pub fn test_server(
+    gate: Arc<Gate>,
+    latency: Duration,
+    answer: impl Fn(&str, &str) -> (u16, serde_json::Value) + Send + Sync + 'static,
+) -> (Client, Arc<Mutex<Vec<(String, String)>>>) {
+    struct Slow<F> {
+        answer: F,
+        latency: Duration,
+        calls: Arc<Mutex<Vec<(String, String)>>>,
+    }
+    impl<F: Fn(&str, &str) -> (u16, serde_json::Value) + Send + Sync> Transport for Slow<F> {
+        fn send(&self, r: Request) -> Result<Response> {
+            std::thread::sleep(self.latency);
+            self.calls.lock().unwrap().push((r.method.into(), r.url.clone()));
+            let (status, body) = (self.answer)(r.method, &r.url);
+            Ok(Response { status, body: body.to_string().into_bytes(), cookies: vec![], retry_after: None, location: None })
+        }
+    }
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mut c = Client::new(gate);
+    c.store = None;
+    c.recheck_delay = Duration::ZERO;
+    c.limiter = Arc::new(Mutex::new(Limiter::default()));
+    c.cookies.auth = "saved".into();
+    c.user = None;
+    c.transport = Arc::new(Slow { answer, latency, calls: calls.clone() });
+    (c, calls)
+}
+
 /// Another crate's test gives the fake session a cookie it can look for afterwards (that it never leaves the service).
 #[cfg(feature = "test-support")]
 pub fn set_test_cookie(client: &mut Client, auth: &str) {

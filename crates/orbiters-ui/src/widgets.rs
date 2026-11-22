@@ -18,6 +18,35 @@ static PRESS_HOOK: std::sync::OnceLock<fn(&'static str)> = std::sync::OnceLock::
 thread_local! {
     /// The label of the settings row ([`field`]) whose control is being drawn: what a toggle or slider there is named by.
     static FIELD: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    /// The rows [`field`] drew while [`record_fields`] runs.
+    static ROWS: std::cell::RefCell<Option<Vec<FieldRow>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A settings row [`field`] drew while [`record_fields`] ran: its label as shown, where it is, and a shape slot under its
+/// text, to paint something behind the row (a search result's highlight) once the page knows which row it wants.
+#[derive(Clone)]
+pub struct FieldRow {
+    pub label: String,
+    pub rect: Rect,
+    pub behind: (Painter, egui::layers::ShapeIdx),
+}
+
+/// Runs `f`, and gives back every row [`field`] drew in it (Settings' search finds and lights its rows by them; its test
+/// sees that none is drawn without a registry entry). A nested call keeps its own rows.
+pub fn record_fields<R>(f: impl FnOnce() -> R) -> (R, Vec<FieldRow>) {
+    let was = ROWS.with(|r| r.replace(Some(Vec::new())));
+    let out = f();
+    let rows = ROWS.with(|r| r.replace(was)).unwrap_or_default();
+    (out, rows)
+}
+
+/// Runs `f` without its rows being recorded ([`record_fields`]): rows named by what they show (a parameter, a device found),
+/// not settings of their own.
+pub fn unrecorded<R>(f: impl FnOnce() -> R) -> R {
+    let was = ROWS.with(|r| r.take());
+    let out = f();
+    ROWS.with(|r| *r.borrow_mut() = was);
+    out
 }
 
 /// From now on, `hook` hears the English name of every control pressed: buttons, icon buttons, segments, the switches and sliders of a settings
@@ -970,6 +999,12 @@ pub fn field(ui: &mut Ui, label: &str, description: Option<&str>, control_width:
     let text_h = label_g.size().y + desc_g.as_ref().map(|g| g.size().y + 2.0).unwrap_or(0.0);
     let h = text_h.max(36.0) + 28.0;
     let (rect, _) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
+    ROWS.with(|r| {
+        if let Some(rows) = r.borrow_mut().as_mut() {
+            let slot = ui.painter().add(egui::Shape::Noop);
+            rows.push(FieldRow { label: label.to_owned(), rect, behind: (ui.painter().clone(), slot) });
+        }
+    });
     let p = ui.painter();
     let mut y = rect.center().y - text_h * 0.5;
     p.galley(pos2(rect.left(), y), label_g.clone(), theme::FG);

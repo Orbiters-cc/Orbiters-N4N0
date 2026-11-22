@@ -1,0 +1,8 @@
+{
+  "Connecting to VRChat…": "VRChatに接続中…",
+  "Connecting to VRChat as {name}…": "{name}としてVRChatに接続中…",
+  "Reading your friends from VRChat…": "VRChatからフレンドを読み込み中…",
+  "Reading your VRChat profile…": "VRChatのプロフィールを読み込み中…",
+  "{username}, connecting…": "{username}、接続中…",
+  "Your VRChat session is being restored.": "VRChatのセッションを復元しています。"
+}

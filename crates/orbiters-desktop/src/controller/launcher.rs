@@ -114,6 +114,10 @@ pub trait Machine: Send + Sync {
     fn install_engine(&self, _progress: &dyn Fn(EngineSetup), _stop: &AtomicBool) -> Result<(), String> {
         Err(tr("VRChat could not be started: nothing to install on this computer.").into())
     }
+    /// A Mac's machine, whose start the VRChat bridge shares (`None` elsewhere, and for a test's).
+    fn as_mac(&self) -> Option<&MacMachine> {
+        None
+    }
 }
 
 /// How VRChat is started on this computer: through Steam only when Steam's library really holds it; else through the
@@ -195,18 +199,41 @@ impl MacMachine {
     }
 }
 
+impl MacMachine {
+    /// The start shared by Home's Play and the VRChat bridge (the bridge's `controller/bridge_mac.rs`).
+    pub fn play(&self) -> &Arc<super::obelisk_cli::Play> {
+        &self.play
+    }
+
+    /// The program to start the game with, when it is there.
+    pub fn program(&self) -> Option<std::path::PathBuf> {
+        orbiters_core::obelisk::program(&self.tools)
+    }
+
+    /// Starts VRChat with `args` through the shared start: its launch id, or why not.
+    pub fn start_launch(&self, args: &[String]) -> Result<u64, super::obelisk_cli::Refused> {
+        let program = self.program().ok_or_else(|| super::obelisk_cli::Refused::Failed(tr("VRChat is not set up on this Mac yet.").to_string()))?;
+        self.play.start(&program, &self.library, args)
+    }
+}
+
 impl Machine for MacMachine {
     fn running(&self) -> Vec<(u32, bool)> {
-        // What the engine's own records name, while that process lives; else what this N4N0's start said.
+        // What the engine's own records name, while that process lives; else what this N4N0's start said. Records that
+        // could not be read are no proof that nothing runs: then the program's word, as before a record exists.
         let recorded = orbiters_core::obelisk::session_games(&self.library);
-        let recorded_none = recorded.is_empty();
+        let recorded_none = recorded.as_ref().is_none_or(Vec::is_empty);
+        let recorded = recorded.unwrap_or_default();
         let mut system = sysinfo::System::new();
         let pids: Vec<sysinfo::Pid> = recorded.iter().map(|pid| sysinfo::Pid::from_u32(*pid)).collect();
         system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&pids), true, sysinfo::ProcessRefreshKind::nothing());
         let mut found: Vec<u32> = recorded.into_iter().filter(|pid| system.process(sysinfo::Pid::from_u32(*pid)).is_some()).collect();
-        // Before the record names the game's process, the program's word that it runs (under its own process id here).
+        // Before the record names the game's process, the program's word that it runs: under the process it said, else
+        // under the program's own (alive for exactly as long as it follows the game), never a made-up 0.
         if found.is_empty() && recorded_none {
-            found.extend(self.play.running().map(|pid| pid.unwrap_or(0)));
+            if let Some(said) = self.play.running() {
+                found.extend(said.or_else(|| self.play.program()));
+            }
         }
         found.sort_unstable();
         found.dedup();
@@ -231,8 +258,7 @@ impl Machine for MacMachine {
     }
 
     fn start(&self, args: &[String]) -> Result<(), String> {
-        let program = orbiters_core::obelisk::program(&self.tools).ok_or_else(|| tr("VRChat is not set up on this Mac yet.").to_string())?;
-        self.play.start(&program, args)
+        self.start_launch(args).map(drop).map_err(|refused| refused.words())
     }
 
     fn starting(&self) -> bool {
@@ -251,6 +277,10 @@ impl Machine for MacMachine {
         super::obelisk_cli::set_up(&self.tools, progress, stop).map_err(|failure| failure.words)?;
         self.signed_out.store(false, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn as_mac(&self) -> Option<&MacMachine> {
+        Some(self)
     }
 }
 
@@ -732,11 +762,16 @@ impl Controller {
 
     pub(super) fn start_launcher(self: &Shared) {
         let weak = Arc::downgrade(self);
-        let _ = std::thread::Builder::new().name("launcher".into()).spawn(move || loop {
-            let Some(ctl) = weak.upgrade() else { break };
-            ctl.launcher_tick();
-            drop(ctl);
-            std::thread::sleep(Duration::from_secs(2));
+        // A VRChat account just signed in rings it: its list is read at once, not at the next look (r21).
+        let bell = self.vrchat_login.lock().unwrap().signed_bell.clone();
+        let _ = std::thread::Builder::new().name("launcher".into()).spawn(move || {
+            let mut seen = bell.rung();
+            loop {
+                let Some(ctl) = weak.upgrade() else { break };
+                ctl.launcher_tick();
+                drop(ctl);
+                seen = bell.wait(seen, Duration::from_secs(2));
+            }
         });
     }
 
@@ -1569,6 +1604,16 @@ impl Controller {
     /// Claims `profile` for a start that is about to be made, called under the start lock (`launcher_started`): refused
     /// while another start holds any profile (one start at a time) or a VRChat bridge session holds this one. The claim
     /// keeps every other start of Orbiters off that profile until a VRChat on it is seen (REQUEST15 fix B4).
+    /// This computer's machine now (a Mac's shares its start with the VRChat bridge: `bridge_mac.rs`).
+    pub(super) fn launcher_machine_now(&self) -> Arc<dyn Machine> {
+        self.launcher.lock().unwrap().machine.clone()
+    }
+
+    /// The lock Home's starts are made under, for the bridge's start on a Mac.
+    pub(super) fn launcher_started_lock(&self) -> std::sync::MutexGuard<'_, Option<Instant>> {
+        self.launcher_started.lock().unwrap()
+    }
+
     pub(super) fn launcher_claim(&self, profile: u32, mode: LaunchMode) -> Result<u64, Notice> {
         self.launcher_claim_as(profile, mode, true)
     }

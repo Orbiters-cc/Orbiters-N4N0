@@ -1292,7 +1292,9 @@ impl Controller {
         let account = account.as_deref();
         match action {
             Action::Play { mode, destination } => Some(self.launcher_play(mode, destination, account)),
-            Action::PlayOn { mode, profile } => Some(self.launcher_play_on(mode, profile)),
+            Action::PlayOn { mode, profile } => Some(self.launcher_play_on(mode, profile, None, account)),
+            // Home's Where (REQUEST20 2): the chosen profile, right into the chosen instance.
+            Action::PlayAt { mode, profile, destination } => Some(self.launcher_play_on(mode, profile, Some(destination), account)),
             // The account's own profile: REQUEST15 7b.
             Action::EditProfile(edit) => self.launcher_edit_mine(edit, account),
             Action::ListPictures(kind) => {
@@ -1305,40 +1307,8 @@ impl Controller {
                 }
                 None
             }
-            Action::AcceptInvite { invite, mode } => {
-                // An invite is the account's whose list showed it: never accepted for another, nor with no sign-in.
-                let owner = match (self.launcher_sender(account), account) {
-                    (Ok(_), Some(owner)) => owner.to_string(),
-                    (sender, _) => return Some(notice_or_changed(sender.err())),
-                };
-                let found = self.view().launcher.invites.iter().find(|i| i.id == invite).cloned();
-                let Some(found) = found.filter(|i| i.place.is_some()) else { return Some(Notice::Error(tr("This invite is no longer here.").into())) };
-                // One accept per invite: reserved before anything starts (two presses, two threads).
-                {
-                    let from = match &self.view().launcher.me {
-                        Some(me) => match &me.whereabouts {
-                            Whereabouts::World(p) => Some((p.world_id.clone(), p.instance_id.clone())),
-                            _ => None,
-                        },
-                        None => None,
-                    };
-                    let mut rt = self.launcher.lock().unwrap();
-                    if rt.accepted.iter().any(|a| a.invite.id == invite) {
-                        return Some(Notice::Error(tr("This invite is no longer here.").into()));
-                    }
-                    rt.accepted.push(Accepted { invite: found.clone(), at: Instant::now(), owner: owner.clone(), from, hide_failures: 0, hide_again: None, moved: false });
-                }
-                let notice = self.launcher_play(mode, found.place.clone(), Some(&owner));
-                if matches!(notice, Notice::Error(_)) {
-                    // Not on the way: the reservation goes, the card stays.
-                    self.launcher.lock().unwrap().accepted.retain(|a| a.invite.id != invite);
-                } else {
-                    // The card goes here at once; VRChat hides the invite only once the account got there (a start that
-                    // fails, or lands at home, leaves it in VRChat and brings the card back).
-                    self.update(|s| s.launcher.invites.retain(|i| i.id != invite));
-                }
-                Some(notice)
-            }
+            Action::AcceptInvite { invite, mode } => Some(self.launcher_accept(&invite, mode, None, account)),
+            Action::AcceptInviteOn { invite, mode, profile } => Some(self.launcher_accept(&invite, mode, Some(profile), account)),
             Action::Dismiss { id } => {
                 self.launcher_dismiss(&id, account);
                 None
@@ -1370,6 +1340,47 @@ impl Controller {
                 None
             }
         }
+    }
+
+    /// Accepts the invite `invite` of the list of `account` and plays it in `mode`: through [`Self::launcher_play`], or on
+    /// `profile` when Home's Where chose one (REQUEST20 2). One accept per invite, reserved before anything starts; the
+    /// card goes at once and VRChat hides the invite once the account got there ([`Self::launcher_settle_accepted`]).
+    fn launcher_accept(self: &Shared, invite: &str, mode: LaunchMode, profile: Option<u32>, account: Option<&str>) -> Notice {
+        // An invite is the account's whose list showed it: never accepted for another, nor with no sign-in.
+        let owner = match (self.launcher_sender(account), account) {
+            (Ok(_), Some(owner)) => owner.to_string(),
+            (sender, _) => return notice_or_changed(sender.err()),
+        };
+        let found = self.view().launcher.invites.iter().find(|i| i.id == invite).cloned();
+        let Some(found) = found.filter(|i| i.place.is_some()) else { return Notice::Error(tr("This invite is no longer here.").into()) };
+        // One accept per invite: reserved before anything starts (two presses, two threads).
+        {
+            let from = match &self.view().launcher.me {
+                Some(me) => match &me.whereabouts {
+                    Whereabouts::World(p) => Some((p.world_id.clone(), p.instance_id.clone())),
+                    _ => None,
+                },
+                None => None,
+            };
+            let mut rt = self.launcher.lock().unwrap();
+            if rt.accepted.iter().any(|a| a.invite.id == invite) {
+                return Notice::Error(tr("This invite is no longer here.").into());
+            }
+            rt.accepted.push(Accepted { invite: found.clone(), at: Instant::now(), owner: owner.clone(), from, hide_failures: 0, hide_again: None, moved: false });
+        }
+        let notice = match profile {
+            None => self.launcher_play(mode, found.place.clone(), Some(&owner)),
+            Some(profile) => self.launcher_play_on(mode, profile, found.place.clone(), Some(&owner)),
+        };
+        if matches!(notice, Notice::Error(_)) {
+            // Not on the way: the reservation goes, the card stays.
+            self.launcher.lock().unwrap().accepted.retain(|a| a.invite.id != invite);
+        } else {
+            // The card goes here at once; VRChat hides the invite only once the account got there (a start that
+            // fails, or lands at home, leaves it in VRChat and brings the card back).
+            self.update(|s| s.launcher.invites.retain(|i| i.id != invite));
+        }
+        notice
     }
 
     fn launcher_play(self: &Shared, mode: LaunchMode, destination: Option<Place>, account: Option<&str>) -> Notice {
@@ -1583,17 +1594,29 @@ impl Controller {
 
     /// Home's Play with a profile chosen (REQUEST15 7a): a VRChat on `profile`, beside the ones running on other profiles
     /// (VRChat's own launcher with `--profile`), never a second one on the same profile. Through Steam when none runs.
-    fn launcher_play_on(self: &Shared, mode: LaunchMode, profile: u32) -> Notice {
+    /// With Home's Where (REQUEST20 2), right into `destination`: its link goes last ([`vrchat_launch::arguments_on`]);
+    /// one from the list of `account` (an invite, a friend's room) goes only while that account is signed in and on show.
+    ///
+    /// [`vrchat_launch::arguments_on`]: orbiters_core::vrchat_launch::arguments_on
+    fn launcher_play_on(self: &Shared, mode: LaunchMode, profile: u32, destination: Option<Place>, account: Option<&str>) -> Notice {
         if !self.view().launcher.possible.play {
             return Notice::Error(tr("VRChat runs on another device: Play works on the computer that runs it.").into());
         }
         if profile > orbiters_core::vrchat_launch::PROFILE_MAX {
             return Notice::Error(tr("VRChat does not know this profile.").into());
         }
+        // Only VRChat's own grammar goes on, as Play's (a destination comes from the network or over IPC).
+        if destination.as_ref().is_some_and(|p| !orbiters_core::vrchat_launch::is_destination(&p.world_id, &p.instance_id)) {
+            return Notice::Error(tr("VRChat does not know this world.").into());
+        }
+        let scoped = destination.is_some() && account.is_some();
+        if scoped && self.launcher_sender(account).is_err() {
+            return changed_account();
+        }
         let machine = self.launcher.lock().unwrap().machine.clone();
         if machine.by_hand() {
             // A Mac: Obelisk runs one VRChat, on its own profile.
-            return if profile == 0 { self.launcher_play(mode, None, None) } else { Notice::Error(tr("On a Mac, VRChat runs one profile, through Obelisk.").into()) };
+            return if profile == 0 { self.launcher_play(mode, destination, account) } else { Notice::Error(tr("On a Mac, VRChat runs one profile, through Obelisk.").into()) };
         }
         // The same start lock as Play: from the look at the running VRChats to the start, two presses start one.
         let mut started = self.launcher_started.lock().unwrap();
@@ -1639,18 +1662,23 @@ impl Controller {
             return Notice::Error(tr("VRChat was not found on this computer. Install it from Steam, or start it once.").into());
         }
         let settings = view.settings.launch.clone();
-        let mut args = orbiters_core::vrchat_launch::arguments(mode, &settings, None);
         // VRChat's saved window is one for all its profiles: the same care as Play's.
         let saved = machine.saved_window();
         let mut keep_window = None;
-        match mode {
-            LaunchMode::Desktop => args.extend(desktop_window(saved, settings.desktop_window)),
-            LaunchMode::Vr if runs.is_empty() && settings.performance && settings.small_window_in_vr => {
-                keep_window = saved.filter(SavedWindow::normal).filter(|w| settings.desktop_window != Some(*w))
+        let window = match mode {
+            LaunchMode::Desktop => desktop_window(saved, settings.desktop_window),
+            LaunchMode::Vr => {
+                if runs.is_empty() && settings.performance && settings.small_window_in_vr {
+                    keep_window = saved.filter(SavedWindow::normal).filter(|w| settings.desktop_window != Some(*w));
+                }
+                Vec::new()
             }
-            LaunchMode::Vr => {}
+        };
+        let args = orbiters_core::vrchat_launch::arguments_on(mode, &settings, window, profile, destination.as_ref().map(|p| (p.world_id.as_str(), p.instance_id.as_str())));
+        // Checked again right before the hand-off: the account may have changed while VRChat's runs were looked at.
+        if scoped && self.launcher_sender(account).is_err() {
+            return changed_account();
         }
-        args.extend(orbiters_core::vrchat_launch::profile_arg(profile));
         // The claim is made before the start and while the start lock is held: a second press, Go there or the bridge
         // sees it from the moment this one decided (REQUEST15 fix B4).
         let claim = match self.launcher_claim(profile, mode) {
@@ -1685,7 +1713,7 @@ impl Controller {
                         }
                     });
                 }
-                Notice::Sent { to: String::new(), action: SentKind::Launch }
+                Notice::Sent { to: destination.map(|p| p.world_id).unwrap_or_default(), action: SentKind::Launch }
             }
             Err(words) => Notice::Error(tr!("VRChat could not be started: {reason}", reason = words)),
         }

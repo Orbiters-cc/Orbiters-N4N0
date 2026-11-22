@@ -1549,6 +1549,93 @@ fn a_newly_starting_unknown_vrchat_is_not_passed_because_an_older_one_never_spok
     assert_eq!(machine.beside.lock().unwrap().len(), 1);
 }
 
+/// REQUEST20 2: Home's Where starts the chosen profile right in the chosen instance (the link last), refuses what is not
+/// VRChat's own instance id, a profile that already runs, and a destination of an account no longer on show.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn where_starts_the_chosen_profile_in_the_chosen_instance() {
+    let fresh = "48213~hidden(usr_test)~region(eu)~nonce(0a1b2c3d-0000-4000-8000-000000000000)";
+    let place = launcher_feed::place(&format!("{W}:{fresh}"), "Sample Lounge").unwrap();
+    // None runs: through Steam, the profile then the link.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    assert_eq!(
+        c.launcher_do(Action::PlayAt { mode: LaunchMode::Desktop, profile: 2, destination: place.clone() }),
+        Some(Notice::Sent { to: W.into(), action: SentKind::Launch })
+    );
+    let started = machine.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    let n = started[0].len();
+    assert_eq!(&started[0][n - 2..], ["--profile=2".to_string(), format!("vrchat://launch?ref=orbiters.cc&id={W}:{fresh}")]);
+    assert_eq!(started[0][0], "--no-vr");
+    // Profile 0 is VRChat's own start: the link alone after the options.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    c.launcher_do(Action::PlayAt { mode: LaunchMode::Vr, profile: 0, destination: place.clone() });
+    let started = machine.started.lock().unwrap().clone();
+    assert!(!started[0].iter().any(|a| a.starts_with("--profile")));
+    assert_eq!(started[0].last().unwrap(), &format!("vrchat://launch?ref=orbiters.cc&id={W}:{fresh}"));
+    // Beside a VRChat on profile 0: VRChat's own launcher, into the instance; never on the running profile.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    machine.running.lock().unwrap().push((10, false));
+    let c = controller(machine.clone());
+    assert!(matches!(c.launcher_do(Action::PlayAt { mode: LaunchMode::Desktop, profile: 0, destination: place.clone() }), Some(Notice::Error(_))));
+    assert!(machine.started.lock().unwrap().is_empty() && machine.beside.lock().unwrap().is_empty(), "nothing went to the running one");
+    assert!(matches!(c.launcher_do(Action::PlayAt { mode: LaunchMode::Desktop, profile: 1, destination: place.clone() }), Some(Notice::Sent { .. })));
+    let beside = machine.beside.lock().unwrap().clone();
+    assert_eq!(beside[0].last().unwrap(), &format!("vrchat://launch?ref=orbiters.cc&id={W}:{fresh}"));
+    assert!(beside[0].contains(&"--profile=1".to_string()));
+    // Only VRChat's own instance ids: nothing starts at all for another (not even a start at home).
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    for bad in ["1 --profile=0", "1\"&evil", "", "1~region(eu)&id=wrld_x"] {
+        let mut odd = place.clone();
+        odd.instance_id = bad.into();
+        assert!(matches!(c.launcher_do(Action::PlayAt { mode: LaunchMode::Vr, profile: 1, destination: odd }), Some(Notice::Error(_))), "{bad:?}");
+    }
+    let mut odd = place.clone();
+    odd.world_id = "wrld_../x".into();
+    assert!(matches!(c.launcher_do(Action::PlayAt { mode: LaunchMode::Vr, profile: 1, destination: odd }), Some(Notice::Error(_))));
+    assert!(machine.started.lock().unwrap().is_empty() && machine.beside.lock().unwrap().is_empty());
+    // A destination pressed on another account's list: nothing starts.
+    let (_, _) = c.test_vrchat(vec![]);
+    signed_in_list(&c);
+    let other = Action::As { account: "usr_other".into(), action: Box::new(Action::PlayAt { mode: LaunchMode::Vr, profile: 1, destination: place.clone() }) };
+    assert!(matches!(c.launcher_do(other), Some(Notice::Error(_))));
+    assert!(machine.started.lock().unwrap().is_empty());
+    assert!(matches!(c.launcher_do(mine(Action::PlayAt { mode: LaunchMode::Vr, profile: 1, destination: place })), Some(Notice::Sent { .. })), "its own account's: it goes");
+}
+
+/// REQUEST20 2: an invite chosen in Home's Where starts the chosen profile in the invite's own instance, with the accept's
+/// usual care (one accept, the card goes); nothing is sent to VRChat for it at the press.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn where_accepts_an_invite_on_the_chosen_profile() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    let (_, calls) = c.test_vrchat(vec![]);
+    signed_in_list(&c);
+    let place = launcher_feed::place(&format!("{W}:777~friends({A})~region(jp)"), "Café").unwrap();
+    c.update(|s| {
+        s.launcher.invites = vec![Invite { id: "not_1".into(), kind: InviteKind::Invite, from_id: A.into(), from_name: "Nova".into(), from_icon: String::new(), place: Some(place), message: String::new(), received_at: 0 }];
+    });
+    assert!(matches!(c.launcher_do(mine(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Desktop, profile: 3 })), Some(Notice::Sent { .. })));
+    let args = machine.started.lock().unwrap()[0].clone();
+    let n = args.len();
+    assert_eq!(&args[n - 2..], ["--profile=3".to_string(), format!("vrchat://launch?ref=orbiters.cc&id={W}:777~friends({A})~region(jp)")]);
+    assert!(c.view().launcher.invites.is_empty(), "the card goes");
+    assert!(matches!(c.launcher_do(mine(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Vr, profile: 3 })), Some(Notice::Error(_))), "one accept per invite");
+    assert!(calls.lock().unwrap().is_empty(), "nothing asked of VRChat at the press: {:?}", calls.lock().unwrap());
+    // Another account's invite: refused, nothing starts.
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    let (_, _) = c.test_vrchat(vec![]);
+    signed_in_list(&c);
+    let other = Action::As { account: "usr_other".into(), action: Box::new(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Vr, profile: 1 }) };
+    assert!(matches!(c.launcher_do(other), Some(Notice::Error(_))));
+    assert!(machine.started.lock().unwrap().is_empty());
+}
+
 /// A Mac that starts the game itself: the press of "Install & play VRChat" sets everything up, then plays, with no
 /// other press and nothing opened.
 #[test]

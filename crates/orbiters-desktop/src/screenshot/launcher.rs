@@ -9,7 +9,7 @@ use orbiters_core::launcher::*;
 
 const NOW: i64 = 1_795_000_000;
 
-pub(super) const NAMES: [&str; 33] = [
+pub(super) const NAMES: [&str; 35] = [
     "launcher-list",
     "launcher-invite",
     "launcher-hover",

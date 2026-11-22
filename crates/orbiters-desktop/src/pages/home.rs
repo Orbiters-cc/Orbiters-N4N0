@@ -397,6 +397,8 @@ fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>,
 
     // Play in VR, Play in Desktop (always, with the VRChat profile they start on), an invite received with both in it;
     // then the account's own profile, changed where it shows (REQUEST15 7).
+    // Where VRChat starts into (REQUEST20 2), above the Play buttons it goes with.
+    super::launcher::destinations::row(ui, cx, launcher, 1);
     super::launcher::hero(ui, cx, launcher, 1);
     super::launcher::mine_card(ui, cx, launcher, 3);
 

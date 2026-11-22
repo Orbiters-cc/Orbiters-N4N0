@@ -7,6 +7,7 @@
 //! are textures handed in by URL ([`State::provide_picture`]); the page lists the ones it would draw
 //! ([`State::wanted_pictures`]).
 
+pub mod destinations;
 mod hero;
 pub mod list;
 pub mod mine;
@@ -128,6 +129,8 @@ pub struct State {
     /// The data and session the whole list's pictures were last handed to the background for, and what was handed.
     warmed_for: Option<(Arc<LauncherState>, crate::controller::vrchat_data::Scope)>,
     warmed: u64,
+    /// Where VRChat starts into, above the Play buttons (REQUEST20 2).
+    pub places: destinations::Places,
 }
 
 impl Default for State {
@@ -164,6 +167,7 @@ impl Default for State {
             owners_for: None,
             warmed_for: None,
             warmed: 0,
+            places: destinations::Places::default(),
         }
     }
 }
@@ -663,7 +667,7 @@ pub(super) fn backdrop(p: &egui::Painter, rect: Rect, radius: f32, state: &mut S
 }
 
 /// A press that needs nothing of the account's list: Play with no destination, Play on a profile, a Mac's Obelisk, and
-/// Where's places of this computer's own history (a list's invite or room is never one: [`where_::Suggestion::local`]).
+/// Where's places of this computer's own history (a list's invite or room is never one: [`destinations::Suggestion::local`]).
 fn local_play(action: &Action) -> bool {
     matches!(action, Action::Play { destination: None, .. } | Action::PlayOn { .. } | Action::PlayAt { .. } | Action::OpenEngine)
 }

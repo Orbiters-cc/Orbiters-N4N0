@@ -9,6 +9,11 @@ crates/orbiters-desktop/src/controller/picture_repair.rs
 crates/orbiters-desktop/src/link_smoke.rs
 crates/orbiters-desktop/src/link_between.rs
 # What AI clients read, not people.
+crates/orbiters-n4n0-core/src/intents/model.rs
+# What the assistant's offline path hears (phrases matched, never shown), and its tests.
+crates/orbiters-n4n0-core/src/intents/phrases.rs
+crates/orbiters-n4n0-core/src/intents/quick.rs
+crates/orbiters-n4n0-core/src/intents/tests.rs
 crates/orbiters-desktop/src/bridge/tools.rs
 crates/orbiters-desktop/src/bridge/projects.rs
 crates/orbiters-desktop/src/bridge/sandbox.rs

@@ -841,6 +841,12 @@ impl eframe::App for App {
                     self.sessions.gallery_mut().open_share_to(ctx, entry);
                     bring_to_front(ctx);
                 }
+            } else if let Some(name) = crate::controller::assistant::window_page(&page) {
+                // N4N0's assistant opened one of the window's pages (REQUEST20 6).
+                if let Some(to) = page_named(name) {
+                    self.set_page(to, anim::time(ctx));
+                    bring_to_front(ctx);
+                }
             } else if let Some(dir) = page.strip_prefix("session:") {
                 // Asked from a capture turning on a sheet: it opens here, in the app's own 3D viewer.
                 self.set_page(Page::Sessions, anim::time(ctx));

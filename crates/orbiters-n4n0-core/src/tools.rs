@@ -60,6 +60,8 @@ pub enum Action {
         color: Option<u8>,
         level: Option<f32>,
     },
+    /// One of the app's own features, from the catalogue of intents ([`crate::intents`]): its gate is its risk class.
+    App(crate::intents::Intent),
 }
 
 /// The client tools, for `tools` of a turn. `bare_parameters`: the avatar has no manifest, so its parameters are
@@ -141,6 +143,8 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
             "input_schema": { "type": "object", "properties": { "mood": { "enum": ["neutral", "happy", "annoyed", "surprised", "sleepy"] } }, "required": ["mood"] }
         }),
     ];
+    // The app's own features, a tool per domain (REQUEST20 6).
+    tools.extend(crate::intents::specs());
     if bare_parameters {
         tools.push(json!({
             "name": "set_avatar_parameter",
@@ -165,6 +169,9 @@ fn flag(input: &Value, key: &str) -> Option<bool> {
 
 /// The action a tool call asks for, or why it cannot be done.
 pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
+    if let Some(intent) = crate::intents::parse(name, input) {
+        return intent.map(Action::App);
+    }
     let need = |key: &str| text(input, key).ok_or_else(|| format!("{name} needs \"{key}\".")); // i18n: not shown
     Ok(match name {
         "set_avatar_control" => Action::SetControl { control: need("control")?, on: flag(input, "on"), value: number(input, "value") },
@@ -229,7 +236,8 @@ mod tests {
     fn every_spec_parses_back() {
         for bare in [false, true] {
             let specs = specs(bare);
-            for spec in &specs {
+            // The catalogue's tools have tests of their own (`intents::tests`).
+            for spec in specs.iter().filter(|s| crate::intents::Group::of_tool(s["name"].as_str().unwrap()).is_none()) {
                 let name = spec["name"].as_str().unwrap();
                 assert!(spec["description"].as_str().unwrap().len() > 20);
                 assert_eq!(spec["input_schema"]["type"], "object", "{name}");

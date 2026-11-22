@@ -491,6 +491,7 @@ fn publish_log(line: &str) {
 }
 
 mod account;
+pub mod assistant;
 mod around;
 mod booster;
 pub(crate) use booster::{dev_build as booster_dev_build, restore_at_sign_in as booster_restore_at_sign_in, store as booster_store};

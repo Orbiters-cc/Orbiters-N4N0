@@ -296,6 +296,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         panels.set_open(open, places, &snap);
         // The service's request for N4N0's menu, on the desktop with no avatar screen for it: All tools on the sheet (REQUEST15 item 3 fix B1).
         panels.serve_menu(&snap);
+        panels.serve_assistant(&snap);
         panels.follow_note(&snap);
         if panels.is_empty() {
             pointer.stop();

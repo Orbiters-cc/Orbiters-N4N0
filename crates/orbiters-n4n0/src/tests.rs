@@ -75,6 +75,11 @@ pub(crate) struct TestHost {
     shares: Mutex<Vec<orbiters_n4n0_core::captures::ShareAsk>>,
     friends: Mutex<Option<Result<Vec<orbiters_n4n0_core::captures::Friend>, String>>>,
     capture_pictures: Mutex<Vec<String>>,
+    /// The assistant's app intents (REQUEST20 6): what the stand-in app can do, the intents it was asked to run, and
+    /// its answers by intent.
+    pub(crate) app_facts: Mutex<Option<orbiters_n4n0_core::intents::Facts>>,
+    pub(crate) app_intents: Mutex<Vec<orbiters_n4n0_core::intents::Intent>>,
+    pub(crate) app_answers: Mutex<HashMap<&'static str, Value>>,
     /// The person's own VRChat account in the stand-in app: what its invite to oneself answers (`None`: none connected),
     /// and the locations it was asked for.
     vrchat_invite: Mutex<Option<orbiters_n4n0_core::menu::InviteAnswer>>,
@@ -304,6 +309,19 @@ impl Host for TestHost {
 
     fn motion(&self, said: Option<(&str, &OscValue)>) {
         self.motion.lock().unwrap().push(said.map(|(n, v)| (n.to_string(), v.clone())));
+    }
+
+    fn assistant_facts(&self) -> orbiters_n4n0_core::intents::Facts {
+        self.app_facts.lock().unwrap().unwrap_or(orbiters_n4n0_core::intents::Facts { vrchat: self.scene.lock().unwrap().vrchat, signed_in: self.server.lock().unwrap().is_some(), ..Default::default() })
+    }
+
+    fn assistant_state(&self) -> Value {
+        json!({ "explorer_points": { "points": 42, "title": "Wanderer" } })
+    }
+
+    fn assistant_intent(&self, intent: &orbiters_n4n0_core::intents::Intent, _item: Option<&Value>) -> Result<Value, String> {
+        self.app_intents.lock().unwrap().push(intent.clone());
+        Ok(self.app_answers.lock().unwrap().get(intent.name()).cloned().unwrap_or_else(|| json!({ "done": true })))
     }
 }
 
@@ -3667,6 +3685,9 @@ fn the_assistant_turned_off_in_settings_stops_an_answer_too() {
     assert!(*worker.dropped.lock().unwrap());
 }
 
+/// The assistant's intents in the runtime (REQUEST20 6): their own file, as test data.
+#[path = "tests_assistant.rs"]
+mod assistant;
 /// A stand-in Orbiters for Invite me: answers every request with `status` and `body`, and counts them.
 fn orbiters_invites(status: u16, body: &'static str) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

@@ -477,6 +477,7 @@ fn turn_of(panels: &mut Panels, snap: &Snapshot, around: Option<Around>, library
     panels.set_open(around, places, snap);
     panels.serve_menu(snap);
     panels.follow(snap, library);
+    panels.serve_assistant(snap);
     panels.menu_turn(snap);
     panels.step_springs(0.011);
     let mut handed = Vec::new();
@@ -1703,6 +1704,52 @@ fn drop_link_without_the_avatar_s_card_says_why_and_does_nothing() {
         assert_eq!(person.panels.stage.host.menu.copied, None, "{says}: nothing marked copied");
         assert!(person.find(Action::PlayingLink(Target::CopyPlaying)).is_some(), "Copy link stays");
     }
+}
+
+/// REQUEST20 6: the assistant asked for a page: it opens here once, as its own press opens it; one the panels were not up for
+/// waits for them; a page of the window is the window's; the request standing when the panels started is an old one.
+#[test]
+fn the_assistant_opens_the_page_it_asked_for_once() {
+    use orbiters_n4n0::{AssistantView, OpenAsk};
+    use orbiters_n4n0_core::intents::Page;
+    let ask = |person: &mut Person, id: u32, page: Page| {
+        let snap = Arc::make_mut(&mut person.snap);
+        snap.n4n0.assistant = AssistantView { open: Some(OpenAsk { id, page, world: None }), ..Default::default() }.into();
+    };
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    ask(&mut person, 1, Page::Translation);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Translate), "by Translation's own press");
+    // Once: closed by the person, it stays closed.
+    person.panels.close_sheet();
+    person.turns(3);
+    assert_eq!(person.panels.facts.sheet, None);
+    ask(&mut person, 2, Page::MenuSettings);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Settings));
+    // The window's page: not these panels'.
+    ask(&mut person, 3, Page::AppSettings);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Settings));
+    // Asked while VRChat's menu is closed: it opens when the menu comes.
+    person.panels.close_sheet();
+    person.around = None;
+    person.turns(2);
+    ask(&mut person, 4, Page::Instances);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, None);
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Instances));
+    drop(person);
+    // Panels started with a request already standing: it was for whoever was there then.
+    let mut late = Person::new();
+    ask(&mut late, 9, Page::Translation);
+    late.around = Some(Around::QuickMenu);
+    late.turns(3);
+    assert_eq!(late.panels.facts.sheet, None);
 }
 
 #[test]

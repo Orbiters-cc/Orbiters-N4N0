@@ -291,6 +291,9 @@ pub struct N4n0Status {
     /// The screen mirror as the overlay's menu shows it (from screen version 14: its card says why it is not there).
     #[serde(default)]
     pub mirror: orbiters_n4n0_core::mirror::MirrorView,
+    /// The assistant's actions (REQUEST20 6): its log, what it does now, the page it asked to open.
+    #[serde(default)]
+    pub assistant: Slice<crate::assistant::AssistantView>,
 }
 
 // The avatar's states and the world feedback stay plain values for now (copied with the state, compared by value):
@@ -301,7 +304,7 @@ orbiters_core::parts!(N4n0Status {
         bot, bot_keeps_menu, test_pictures, screen, screen_open, desktop_mode, menu_request, menu_toggle, dictation, photo_countdown, photo_wait, light, states,
         can_drop, card, tracking, tracking_note, suggestion, versions, keys, world_video, photo_note, invite, qr, feedback, input_params, mirror,
     ],
-    slices: [lines, videos, resources, calls, captures, friends],
+    slices: [lines, videos, resources, calls, captures, friends, assistant],
     identity: [],
     nested: [],
 });

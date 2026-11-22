@@ -1683,8 +1683,8 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             // Its question, answered with a press as well as by voice.
             if facts.talk_question.is_some() {
                 let card = talk_question_card(facts);
-                out.push(Item { action: Action::AskAnswer(true), rect: r(card.right() - 16.0 - 150.0, card.bottom() - 16.0 - 44.0, 150.0, 44.0), look: Look::AskAnswer(true) });
-                out.push(Item { action: Action::AskAnswer(false), rect: r(card.right() - 16.0 - 150.0 - 12.0 - 130.0, card.bottom() - 16.0 - 44.0, 130.0, 44.0), look: Look::AskAnswer(false) });
+                out.push(Item { action: Action::AskAnswer(true), rect: r(card.right() - 16.0 - 170.0, card.bottom() - 14.0 - 44.0, 170.0, 44.0), look: Look::AskAnswer(true) });
+                out.push(Item { action: Action::AskAnswer(false), rect: r(card.right() - 16.0 - 170.0 - 12.0 - 170.0, card.bottom() - 14.0 - 44.0, 170.0, 44.0), look: Look::AskAnswer(false) });
             }
             out
         }
@@ -2008,10 +2008,12 @@ const TALK_LOG_ROW: f32 = 64.0;
 /// The question card at the foot of Ask N4N0's page: as tall as its question needs, up to five lines (it says what will be
 /// done, never more than that).
 fn talk_question_card(facts: &Facts) -> Rect {
-    let chars = facts.talk_question.as_deref().map_or(0, |q| q.chars().count()) as f32;
-    let per_line = ((TALK_WIDTH - 36.0) / 8.6).max(20.0);
-    let lines = (chars / per_line).ceil().clamp(1.0, 5.0);
-    let height = 104.0 + lines * 23.0;
+    // Its text's width in half-glyphs (a CJK glyph is two), against a line's at the card's 17 px font; a little over.
+    let units: f32 = facts.talk_question.as_deref().map_or(0.0, |q| q.chars().map(|c| if (c as u32) >= 0x2E80 { 2.0 } else { 1.0 }).sum());
+    let per_line = ((TALK_WIDTH - 36.0) / 8.8).max(20.0);
+    let lines = (units / per_line + 0.15).ceil().clamp(1.0, 5.0);
+    // Its head (48), the lines, the foot with Yes and No (72).
+    let height = 48.0 + lines * 23.0 + 72.0;
     Rect::from_min_size(pos2(TALK_LEFT, 576.0 - 12.0 - height), vec2(TALK_WIDTH, height))
 }
 
@@ -3096,10 +3098,10 @@ fn draw_talk_foot(p: &Painter, facts: &Facts) {
         text(p, pos2(card.left() + 50.0, card.top() + 28.0), Align2::LEFT_CENTER, tr("N4N0 asks"), 18.0, weight::BOLD, look::LABEL);
         let font = look::font(17.0, weight::MEDIUM);
         let galley = p.layout(question.clone(), font, look::LABEL, card.width() - 36.0);
-        let shown = p.with_clip_rect(Rect::from_min_max(card.min + vec2(18.0, 46.0), pos2(card.right() - 18.0, card.bottom() - 70.0)));
-        shown.galley(card.min + vec2(18.0, 48.0), galley, look::LABEL);
+        let shown = p.with_clip_rect(Rect::from_min_max(card.min + vec2(18.0, 44.0), pos2(card.right() - 18.0, card.bottom() - 66.0)));
+        shown.galley(card.min + vec2(18.0, 46.0), galley, look::LABEL);
         let hint = look::font(15.0, weight::MEDIUM);
-        p.text(pos2(card.left() + 18.0, card.bottom() - 38.0), Align2::LEFT_CENTER, fit(p, tr("Or say yes or no"), &hint, card.width() - 340.0), hint, look::MUTED);
+        p.text(pos2(card.left() + 18.0, card.bottom() - 36.0), Align2::LEFT_CENTER, fit(p, tr("Or say yes or no"), &hint, card.width() - 36.0 - 2.0 * 170.0 - 12.0 - 12.0), hint, look::MUTED);
     } else if let Some(doing) = &facts.talk_doing {
         let strip = Rect::from_min_size(pos2(TALK_LEFT, 576.0 - 8.0 - TALK_DOING_HEIGHT), vec2(TALK_WIDTH, TALK_DOING_HEIGHT));
         p.rect_filled(strip, look::radius(strip.height() / 2.0), look::TILE);

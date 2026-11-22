@@ -243,11 +243,51 @@ fn text<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 /// Whether `path` is a plain path on a drive of this computer (`C:\…`): never a network share (`\\host\share`, whose
 /// first look opens a connection to a host the text chose) nor a device path (`\\?\`, `\\.\`) (BRIDGE-7).
 pub(crate) fn on_a_local_drive(path: &Path) -> bool {
-    use std::path::{Component, Prefix};
-    let lexical = path.is_absolute() && matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_)));
-    if cfg!(not(windows)) {
-        return path.is_absolute();
+    #[cfg(unix)]
+    {
+        lexical_or_absolute_local(path)
     }
+    #[cfg(not(unix))]
+    {
+        use std::path::{Component, Prefix};
+        let lexical = path.is_absolute() && matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_)));
+        on_a_windows_disk(path, lexical)
+    }
+}
+
+/// A Mac or Linux: an absolute path whose nearest existing folder is on a volume the system calls local (`statfs`'s
+/// `MNT_LOCAL` on a Mac): never a network share (SMB, AFP, NFS) or a folder linked to one.
+#[cfg(unix)]
+fn lexical_or_absolute_local(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    let Some(existing) = path.ancestors().find(|p| p.exists()) else { return true };
+    local_volume(existing).unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn local_volume(path: &Path) -> Option<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    /// `MNT_LOCAL` of `<sys/mount.h>`.
+    const MNT_LOCAL: u32 = 0x0000_1000;
+    let real = std::fs::canonicalize(path).ok()?;
+    let name = std::ffi::CString::new(real.as_os_str().as_bytes()).ok()?;
+    let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid C string and a zeroed structure of the call's own type, written by the call.
+    let ok = unsafe { libc::statfs(name.as_ptr(), &mut stats) } == 0;
+    ok.then_some(stats.f_flags & MNT_LOCAL != 0)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn local_volume(path: &Path) -> Option<bool> {
+    // Linux: what /proc/mounts says of the filesystem's type would be needed; absolute is what was checked before.
+    Some(path.is_absolute())
+}
+
+#[cfg(not(unix))]
+fn on_a_windows_disk(path: &Path, lexical: bool) -> bool {
+    use std::path::{Component, Prefix};
     // A drive letter can be a mapped network share, and a folder a link to one (verify-n4n0 6): what the nearest existing
     // folder resolves to must be a disk of this computer.
     lexical && {

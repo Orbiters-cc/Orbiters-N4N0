@@ -267,6 +267,9 @@ fn run(exe: &Path, args: &[&str], home: Option<&Path>, environment: &[(&str, &st
     use std::io::Read;
     use std::process::{Command, Stdio};
     let mut command = Command::new(exe);
+    // A Mac's app gets launchd's bare PATH: the clients' own scripts (`#!/usr/bin/env node`) need the person's.
+    #[cfg(unix)]
+    command.env("PATH", search_path());
     command.args(args).envs(environment.iter().copied()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(home) = home {
         command.current_dir(home);
@@ -310,9 +313,44 @@ fn run(exe: &Path, args: &[&str], home: Option<&Path>, environment: &[(&str, &st
 
 /// A program's place: on `PATH`, else where its installer puts it (a tray service started at sign-in may have an older `PATH`
 /// than a terminal opened now).
+#[cfg(windows)]
 fn find_program(name: &str, known: &[PathBuf]) -> Option<PathBuf> {
     let on_path = std::env::var_os("PATH").into_iter().flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>());
     on_path.flat_map(|dir| [dir.join(format!("{name}.exe")), dir.join(format!("{name}.cmd"))]).chain(known.iter().cloned()).find(|p| p.is_file())
+}
+
+/// A Mac (or Linux): on the person's own search path ([`search_path`]), else where its installers put it.
+#[cfg(unix)]
+fn find_program(name: &str, known: &[PathBuf]) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |p: &PathBuf| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+    std::env::split_paths(&search_path()).map(|dir| dir.join(name)).chain(known.iter().cloned()).find(executable)
+}
+
+/// The search path the person's own terminal has: an app started from the Dock or at sign-in gets launchd's
+/// `/usr/bin:/bin:/usr/sbin:/sbin` only, where neither `claude` nor `node` is. Their login shell is asked once (it reads
+/// their profile, as a new terminal does), and the usual places of Homebrew, npm and the clients' installers are added.
+#[cfg(unix)]
+fn search_path() -> std::ffi::OsString {
+    static PATH: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let shell = std::env::var_os("SHELL").filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+        if !cfg!(test) {
+            if let Ok(out) = std::process::Command::new(&shell).args(["-l", "-c", "printf %s \"$PATH\""]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output() {
+                dirs.extend(std::env::split_paths(&std::ffi::OsString::from(String::from_utf8_lossy(&out.stdout).trim().to_string())));
+            }
+        }
+        dirs.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
+        if let Some(home) = home() {
+            dirs.extend([home.join(".local/bin"), home.join(".claude/local"), home.join(".npm-global/bin"), home.join(".volta/bin"), home.join(".bun/bin")]);
+        }
+        dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from));
+        let mut seen = std::collections::HashSet::new();
+        dirs.retain(|d| !d.as_os_str().is_empty() && seen.insert(d.clone()));
+        std::env::join_paths(dirs).unwrap_or_default()
+    })
+    .clone()
 }
 
 /// A folder of this user's that Windows names in the environment.
@@ -321,7 +359,11 @@ fn named_folder(variable: &str) -> Option<PathBuf> {
 }
 
 fn home() -> Option<PathBuf> {
-    named_folder("USERPROFILE")
+    if cfg!(windows) {
+        named_folder("USERPROFILE")
+    } else {
+        named_folder("HOME").or_else(|| Some(orbiters_core::obelisk::home()).filter(|h| !h.as_os_str().is_empty()))
+    }
 }
 
 /// Claude Code's `claude mcp`.
@@ -471,12 +513,27 @@ impl CodexCli {
             return Ok(());
         }
         let temporary = file.with_extension("toml.orbiters-tmp");
-        std::fs::write(&temporary, changed).map_err(|e| tr!("Codex's settings could not be written: {error}", error = e))?;
+        write_private(&temporary, &changed).map_err(|e| tr!("Codex's settings could not be written: {error}", error = e))?;
         std::fs::rename(&temporary, &file).map_err(|e| {
             let _ = std::fs::remove_file(&temporary);
             tr!("Codex's settings could not be written: {error}", error = e)
         })
     }
+}
+
+/// Writes a file that holds a token: on a Mac readable by this user only from its first byte (a file made by plain
+/// `write` would be readable by everyone until changed); on Windows as before, with its folder's permissions.
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::remove_file(path);
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+        file.write_all(text.as_bytes())
+    }
+    #[cfg(not(unix))]
+    std::fs::write(path, text)
 }
 
 struct Slot {

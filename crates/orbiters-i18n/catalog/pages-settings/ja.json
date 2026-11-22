@@ -629,5 +629,11 @@
   "{count} reports deleted.": "{count} 件のレポートを削除しました。",
   "Log": "ログ",
   "Every notice, warning and error N4N0 showed, kept here": "N4N0 が表示した通知・警告・エラーをすべてここに保存します",
-  "Copy all": "すべてコピー"
+  "Copy all": "すべてコピー",
+  "Allow screen recording": "画面収録を許可",
+  "Lets an agent such as Claude Code start VRChat on this Mac, go from private instance to private instance and look at its window, through a service on this computer only. On a Mac it cannot walk, click or take 3D pictures yet. Your own keyboard or mouse pauses it.": "Claude Code などのエージェントが、このコンピューターだけのサービスを通じて、この Mac で VRChat を起動し、プライベートインスタンスからプライベートインスタンスへ移動し、そのウィンドウを見られるようにします。Mac ではまだ歩く、クリックする、3D 写真を撮ることはできません。あなた自身のキーボードやマウスの操作で一時停止します。",
+  "Pause above holds it until you resume.": "上の一時停止で、再開するまで止めておけます。",
+  "Paused until you resume here.": "ここで再開するまで一時停止中です。",
+  "Screen recording": "画面収録",
+  "macOS does not let Orbiters - N4N0 see VRChat's window yet, so the agent cannot look at it. Allow it, switch Orbiters - N4N0 on in System Settings if macOS opens it, then quit and reopen Orbiters - N4N0.": "macOS はまだ Orbiters - N4N0 に VRChat のウィンドウを見ることを許可していないため、エージェントはそれを見られません。許可し、macOS がシステム設定を開いたら Orbiters - N4N0 をオンにしてから、Orbiters - N4N0 を終了して開き直してください。"
 }

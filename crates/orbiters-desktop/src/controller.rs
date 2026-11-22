@@ -496,6 +496,8 @@ mod around;
 mod booster;
 pub(crate) use booster::{dev_build as booster_dev_build, restore_at_sign_in as booster_restore_at_sign_in, store as booster_store};
 mod bridge_game;
+#[cfg(target_os = "macos")]
+mod bridge_mac;
 mod bridge_publish;
 mod bridge_side;
 mod burst;
@@ -796,7 +798,7 @@ impl Controller {
         let previous = self.view();
         let s = {
             let mut s = self.snapshot.lock().unwrap();
-            vrchat_login::follow_orbiters(&mut s, &mut self.vrchat_login.lock().unwrap());
+            vrchat_login::follow_orbiters_and_record(&mut s, &mut self.vrchat_login.lock().unwrap());
             s.settle(&previous);
             s.clone()
         };

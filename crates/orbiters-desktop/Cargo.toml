@@ -57,6 +57,8 @@ tray-icon = "0.26"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon = "0.26"
+# statfs's MNT_LOCAL: whether a folder is on a disk of this Mac (bridge/projects.rs).
+libc = "0.2"
 # eframe's: the window process's activation policy (window.rs).
 winit = { version = "0.30", default-features = false }
 objc2 = "0.6"

@@ -787,9 +787,11 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     let total = shown_cards.len() + extra;
     let pages = total.div_ceil(fit).max(1);
     state.places.page = state.places.page.min(pages - 1);
-    let hint = hint(state, &cards, me.is_some(), can_create, clock, profile_account.as_deref());
+    // r21: a saved session being restored says so; only a certain "signed out" offers the sign-in.
+    let signed_out = cx.snap.vrchat_login.presence() == crate::controller::vrchat_login::Presence::SignedOut;
+    let hint = hint(state, &cards, me.is_some(), can_create, clock, profile_account.as_deref(), !signed_out);
     // Signed out of VRChat: the way to sign in, at the line's end.
-    let offer_sign_in = !matches!(state.data.source, Source::SignedIn { .. }) && state.places.notice.is_none() && state.places.making.is_none();
+    let offer_sign_in = signed_out && !matches!(state.data.source, Source::SignedIn { .. }) && state.places.notice.is_none() && state.places.making.is_none();
     let mut sign_in = false;
     let height = HEAD_H + HEAD_GAP + card_h + if hint.is_some() { HINT_H + 4.0 } else { 0.0 } + PLAY_HEAD_GAP + PLAY_HEAD_H;
     super::super::block(ui, cx, index, height, |ui, rect| {
@@ -884,7 +886,7 @@ enum Tone {
 
 /// The line under the cards, when there is something to say: an instance being made, a card that went or an instance
 /// that could not be made (for a while), an event that waits for its invite, why invites and Friends+ are missing.
-fn hint(state: &mut State, cards: &[Suggestion], signed_in: bool, can_create: bool, clock: f64, profile_account: Option<&str>) -> Option<(String, Tone)> {
+fn hint(state: &mut State, cards: &[Suggestion], signed_in: bool, can_create: bool, clock: f64, profile_account: Option<&str>, connecting: bool) -> Option<(String, Tone)> {
     if let Some(mode) = state.places.making {
         let _ = mode;
         let kind = state.places.chosen.as_ref().and_then(|c| cards.iter().find(|s| s.key == c.key)).map(|s| kind_of(state, s, can_create)).unwrap_or(CreateAccess::FriendsPlus);
@@ -907,6 +909,8 @@ fn hint(state: &mut State, cards: &[Suggestion], signed_in: bool, can_create: bo
         (Source::SignedIn { name, .. }, false) if profile_account.is_some() => {
             Some((orbiters_i18n::tr!("Invites and Friends+ instances are for {name}: choose their profile to use them.", name = name), Tone::Quiet))
         }
+        // r21: a saved session being restored (or its list on the way) is not "signed out".
+        (_, false) if connecting => Some((tr("Connecting to VRChat…").into(), Tone::Busy)),
         (_, false) => Some((tr("Sign in to VRChat to see invites here and open Friends+ instances.").into(), Tone::Quiet)),
         _ => None,
     }

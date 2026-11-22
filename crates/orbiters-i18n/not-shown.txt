@@ -16,6 +16,8 @@ crates/orbiters-n4n0-core/src/intents/phrases.rs
 crates/orbiters-n4n0-core/src/intents/quick.rs
 crates/orbiters-n4n0-core/src/intents/tests.rs
 crates/orbiters-n4n0/src/tests_assistant.rs
+# The tests of N4N0's bar and chat (REQUEST21 3).
+crates/orbiters-desktop/src/chat_bar/tests.rs
 crates/orbiters-desktop/src/bridge/tools.rs
 crates/orbiters-desktop/src/bridge/caps.rs
 crates/orbiters-desktop/src/bridge/flow_tests.rs
@@ -83,6 +85,7 @@ crates/orbiters-core/src/pipeline.rs
 crates/orbiters-core/src/vrchat_launch.rs
 crates/orbiters-core/src/vrchat_api/social.rs
 crates/orbiters-desktop/src/controller/launcher_tests.rs
+crates/orbiters-desktop/src/pages/settings_tests.rs
 crates/orbiters-core/src/launcher_live.rs
 # The shared 3D view's protocol (its words are the contract's, never shown).
 crates/orbiters-core/src/shared_view.rs

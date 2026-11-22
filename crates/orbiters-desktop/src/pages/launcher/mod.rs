@@ -13,6 +13,7 @@ pub mod list;
 pub mod mine;
 mod modal;
 pub mod points;
+pub mod previous;
 mod row;
 pub mod states;
 
@@ -375,7 +376,7 @@ impl State {
     /// A friend's profile (or another of its windows) is open, or the account's own is being changed
     /// (`crate::window_rest`).
     pub fn holds(&self) -> bool {
-        self.modal.is_some() || self.mine.editing.is_some()
+        self.modal.is_some() || self.mine.editing.is_some() || self.places.previous.is_up()
     }
 
     /// A boop or request the service could not send: its "Sent" (shown at the press) is taken back; the toast says why.
@@ -735,6 +736,8 @@ pub fn over_page(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         }
     }
     modal::show(ui, cx, state, page, clock);
+    // Where's previous instances (REQUEST21 7).
+    previous::sheet(ui, cx, state, page);
 }
 
 /// The friends list: the account, search, counts, what needs the sign-in, received boops and requests, then the

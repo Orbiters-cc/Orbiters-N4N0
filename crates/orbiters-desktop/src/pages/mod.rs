@@ -30,6 +30,8 @@ mod gallery_select;
 pub mod sharing;
 pub mod requests;
 pub mod settings;
+mod settings_n4n0;
+pub mod settings_registry;
 pub mod splat_export;
 pub mod splat_worker;
 pub mod splats;
@@ -56,7 +58,6 @@ use std::sync::mpsc;
 pub enum Page {
     /// N4N0's menu: what the app does, side by side.
     Home,
-    Capture,
     Projects,
     N4n0,
     Sessions,
@@ -91,12 +92,26 @@ pub struct Cx<'a> {
 pub enum Go {
     /// Sessions, its storage popover open.
     FreeSpace,
-    /// Unity projects (Capture's avatar picker, when it has no avatar to offer).
+    /// Unity projects (the capture element's avatar picker, when it has no avatar to offer).
     Projects,
     /// Settings, where the VRChat account is signed in (the launcher's "Sign in to VRChat").
     VrchatAccount,
     /// Settings, where the Explorer points are with the Orbiters account (Home's points, REQUEST19 1).
     ExplorerPoints,
+    /// Settings on a setting (its registry id, `n4n0.calls`) or a sub-tab (`n4n0`): shown, brought into view, lit.
+    Settings(&'static str),
+}
+
+impl Go {
+    /// The setting (or sub-tab) of Settings it opens, for those that open Settings.
+    pub fn setting(self) -> Option<&'static str> {
+        match self {
+            Go::VrchatAccount => Some("account.vrchat"),
+            Go::ExplorerPoints => Some("account.explorer-points"),
+            Go::Settings(target) => Some(target),
+            Go::FreeSpace | Go::Projects => None,
+        }
+    }
 }
 
 impl Cx<'_> {

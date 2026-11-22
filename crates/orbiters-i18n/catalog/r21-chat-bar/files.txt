@@ -1,0 +1,6 @@
+# REQUEST21 3 (stream r21-chat-bar, 2026-11-22): N4N0's bar in the window's title strip and the chat it grows into.
+# Home's heading now points there (pages/home.rs is another area's: its one new text is translated here).
+crates/orbiters-desktop/src/chat_bar/mod.rs
+crates/orbiters-desktop/src/chat_bar/panel.rs
+crates/orbiters-desktop/src/chat_bar/layout.rs
+crates/orbiters-desktop/src/chat_bar/morph.rs

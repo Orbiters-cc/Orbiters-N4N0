@@ -650,7 +650,12 @@ impl Bridge {
             (_, Some(_)) => Err(Failure::new(
                 "not_started_by_bridge",
                 "This VRChat was not started by this bridge: it is the person's, so it is left alone.",
-                "Leave it alone. open_session with a profile of your own (1, 2…) starts a VRChat of yours beside it; or the person closes theirs.",
+                if self.capabilities().side_sessions {
+                    "Leave it alone. open_session with a profile of your own (1, 2…) starts a VRChat of yours beside it; or the person closes theirs."
+                } else {
+                    // One VRChat at a time on this computer (a Mac): no session beside the person's.
+                    "Leave it alone and tell the person: only one VRChat runs on this computer, so they close theirs before go_to_world can start one."
+                },
             )),
             (_, None) => Err(Failure::new("vrchat_not_running", "VRChat is not running in this session.", "Call go_to_world.")),
         }
@@ -1136,7 +1141,16 @@ impl Bridge {
         // A computer that cannot do everything (a Mac) says what it cannot, and what its game's graphics are doing.
         let caps = self.capabilities();
         if !caps.all() {
-            state["this_computer"] = json!({ "platform": caps.platform, "not_available": caps.missing() });
+            state["this_computer"] = json!({
+                "platform": caps.platform,
+                "not_available": caps.missing(),
+                // A Mac's screenshots need Screen Recording for Orbiters - N4N0, and an unlocked screen.
+                "screen_recording_allowed": super::mac::screen_recording(),
+                "screen_locked": super::mac::screen_locked(),
+            });
+            if s.is_main() && seen.running && !started_by_bridge {
+                state["next"] = json!("This VRChat is the person's (started from Orbiters - N4N0's Home, or before the bridge's last restart): leave it alone and tell them. Only one VRChat runs on this Mac: they close theirs before go_to_world can start one.");
+            }
             state["vrchat"]["renderer_lost"] = json!(seen.renderer_lost);
             if seen.renderer_lost {
                 state["next"] = json!("VRChat's graphics stopped on this computer: call close_vrchat, then go on with the next world.");

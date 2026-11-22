@@ -53,6 +53,23 @@ mod vr_audio;
 mod vrchat_bridge;
 mod worlds_overlay;
 mod quiet_prompt;
+mod chat_bar;
+mod settings_r21;
+mod photos_capture;
+
+/// The part of Photos & captures' capture element a scene of the old Capture tab opens it on (REQUEST21 5).
+fn capture_part(name: &str) -> Option<crate::pages::capture::Part> {
+    use crate::pages::capture::Part;
+    if name.starts_with("capture-vrchats") {
+        Some(Part::Vrchats)
+    } else if name.starts_with("capture-") {
+        Some(Part::Actions)
+    } else if name.starts_with("projects-avatars") || matches!(name, "projects-choice" | "projects-ready" | "projects-capture") {
+        Some(Part::Needs)
+    } else {
+        None
+    }
+}
 
 /// What the interface shows of a VRChat on the network, as a Mac sees it.
 fn network_snapshot(base: &crate::state::Snapshot, link: crate::state::LanLink) -> crate::state::Snapshot {
@@ -219,6 +236,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("capture-wearer") {
         return capture_actions::wearer(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("chat-bar") {
+        return chat_bar::shots(&mut Offscreen::new()?, &out, &settings, scale);
     }
     if only.as_deref() == Some("language-live") {
         return language_live::walk(&mut Offscreen::new()?, &out, &settings, scale);
@@ -1274,7 +1294,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "splash",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: idle.clone(),
             frames: 66,
             splash: true,
@@ -1288,7 +1308,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-idle",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: idle.clone(),
             frames: 90,
             splash: false,
@@ -1302,7 +1322,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-recording",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: recording,
             frames: 120,
             splash: false,
@@ -1316,7 +1336,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-picture-people",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: picture_people,
             frames: 120,
             splash: false,
@@ -1330,7 +1350,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-picture-world",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: picture_world,
             frames: 120,
             splash: false,
@@ -1344,7 +1364,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-picture-world-shows",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: picture_world_shows,
             frames: 120,
             splash: false,
@@ -1358,7 +1378,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-toolkit-project",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: toolkit_project,
             frames: 120,
             splash: false,
@@ -1372,7 +1392,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-toolkit-elsewhere",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: toolkit_elsewhere,
             frames: 120,
             splash: false,
@@ -1386,7 +1406,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-idle-after",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: idle_after,
             frames: 120,
             splash: false,
@@ -1400,7 +1420,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-no-strip",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: no_strip,
             frames: 120,
             splash: false,
@@ -1414,7 +1434,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-consent",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: consent,
             frames: 90,
             splash: false,
@@ -1428,7 +1448,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-vrchats-one",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: vrchats_one,
             frames: 90,
             splash: false,
@@ -1442,7 +1462,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-vrchats-own",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: vrchats_own,
             frames: 90,
             splash: false,
@@ -1456,7 +1476,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-vrchats-agent",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: vrchats_agent,
             frames: 90,
             splash: false,
@@ -1470,7 +1490,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "capture-vrchats-closed",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: vrchats_closed,
             frames: 90,
             splash: false,
@@ -1484,7 +1504,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         },
         Scenario {
             name: "toasts",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: idle.clone(),
             frames: 60,
             splash: false,
@@ -1827,7 +1847,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         // Content under the title bar (and the sessions under their heading): blurred, not cut.
         Scenario {
             name: "capture-scrolled",
-            page: Page::Capture,
+            page: Page::Sessions,
             snapshot: idle.clone(),
             frames: 120,
             splash: false,
@@ -2306,7 +2326,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         snapshot.account.development = true;
         scenarios.push(Scenario {
             name,
-            page: if capture { Page::Capture } else { Page::Projects },
+            page: if capture { Page::Sessions } else { Page::Projects },
             snapshot,
             frames: if matches!(name, "projects-icons-live" | "projects-repos-live") {
                 // Real lookups: time for them to land.
@@ -2511,6 +2531,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     editor::append(&mut scenarios);
     projects_panel::append(&mut scenarios);
     gallery_layouts::append(&mut scenarios);
+    photos_capture::append(&mut scenarios);
     gallery_assets::append(&mut scenarios);
     gallery_talk::append(&mut scenarios);
     floating::append(&mut scenarios);
@@ -2518,6 +2539,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     vrchat_bridge::append(&mut scenarios);
     launcher::append(&mut scenarios);
     launcher_real::append(&mut scenarios);
+    // REQUEST21 2: Settings in sub-tabs, with its search.
+    settings_r21::append(&mut scenarios);
     // REQUEST20 4: Previous instances' Invite me answered: sent from the person's own VRChat account, the instance closed,
     // full, VRChat's pace, its session expired (Connect VRChat), and Orbiters' account unable without one (Connect VRChat).
     for name in INVITE_SHOTS {
@@ -2560,6 +2583,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         if only.as_deref().is_some_and(|list| list.split(',').all(|o| {
             o != sc.name
                 && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
+                && !(o == "r21" && sc.name.starts_with("r21-"))
                 && !(o == "editor" && sc.name.starts_with("editor-"))
                 && !(o == "launcher" && sc.name.starts_with("launcher-") && !sc.name.starts_with("launcher-small"))
                 && !(o == "sharing" && (sc.name.starts_with("gallery-") || sc.name.starts_with("world-share")))
@@ -2671,6 +2695,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         app.skip_splash();
     }
     let total = sc.frames + run.extend;
+    // A Settings scene that shows its own setting (its sub-tab, scrolled to it) needs no wheel to get there.
+    let mut staged = false;
     for f in 0..total {
         let t = f as f64 / 60.0;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(t), ..Default::default() };
@@ -2684,7 +2710,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             input.events.push(Event::PointerMoved(pos2(760.0, 500.0)));
             input.events.push(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -scroll), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE, source: egui::MouseWheelSource::Wheel });
         }
-        if sc.scroll != 0.0 && f + 30 == sc.frames {
+        if sc.scroll != 0.0 && f + 30 == sc.frames && !staged {
             input.events.push(Event::PointerMoved(sc.pointer.unwrap_or(pos2(760.0, 500.0))));
             input.events.push(Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
@@ -2696,6 +2722,13 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         if f == 0 {
             app.set_page(sc.page, t);
+            // The Capture tab's scenes: Photos & captures, its capture element open where the tab showed it (REQUEST21 5).
+            if let Some(part) = capture_part(sc.name) {
+                app.open_capture(part, t);
+            }
+            if sc.page == Page::Settings {
+                staged = settings_r21::stage(&mut app, sc.name, t);
+            }
             if sc.name.starts_with("projects-") || sc.name.starts_with("capture-toolkit") {
                 app.projects_mut().stage(&ctx, sc.name);
             }
@@ -2779,6 +2812,9 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             }
             // The layouts and a multi-layer picture, on made-up pictures.
             gallery_layouts::stage(&ctx, gallery, sc.name, f);
+            // REQUEST21 5: the capture element over made-up pictures.
+            photos_capture::stage(&ctx, &mut app, sc.name, f, t);
+            let gallery = app.sessions_mut().gallery_mut();
             if let Some(p) = gallery_folders::stage(gallery, sc.name, f, total) {
                 input.events.push(Event::PointerMoved(p));
                 input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
@@ -3237,9 +3273,9 @@ fn e2e(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, scale: f
     let vrchat = StandInVrchat::start(&ctl)?;
     let before = controller::list_sessions(&settings.sessions_dir).len();
     let mut run = Run::new(gpu, backend, scale);
-    // The window opens on Home: recording is on Capture.
+    // The window opens on Home: recording is in Photos & captures, its capture element open (REQUEST21 5).
     let t = run.time();
-    run.app.set_page(Page::Capture, t);
+    run.app.open_capture(crate::pages::capture::Part::Actions, t);
     run.click("Test pattern", 20.0)?;
     run.until("the test pattern to record", 30.0, |_| {
         let v = ctl.view();

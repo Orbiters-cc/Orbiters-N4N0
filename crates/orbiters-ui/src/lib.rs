@@ -7,6 +7,7 @@
 pub mod anim;
 pub mod autoscroll;
 pub mod blender_logo;
+pub mod backdrop;
 pub mod blur;
 pub mod dialog;
 pub mod feedback;
@@ -56,4 +57,5 @@ pub fn install_wgpu(device: &egui_wgpu::wgpu::Device, format: egui_wgpu::wgpu::T
     resources.insert(RenderTarget { format, msaa_samples });
     glow::install(device, format, msaa_samples, resources);
     blur::install(device, format, msaa_samples, resources);
+    backdrop::install(device, format, msaa_samples, resources);
 }

@@ -367,6 +367,8 @@ pub enum Pick {
     Smoothing(bool),
     /// Along a smoothing slider.
     SmoothingBar(Smoothed),
+    /// The tiles' two smoothings back to the values measured to match VRChat (REQUEST21).
+    SmoothingReset,
     /// Something on the FPS booster's sheet.
     Booster(BoosterPick),
     /// Something on Translation's sheet.
@@ -5853,7 +5855,7 @@ mod tests {
         let pages: Vec<(Sheet, &str)> = vec![
             (Sheet::Worlds, "Worlds"), (Sheet::Results, "YouTube"), (Sheet::Menu, "YouTube"), (Sheet::Instances, "Instances"), (Sheet::Pictures, "Pictures"),
             (Sheet::Talk, "Ask N4N0"), (Sheet::Settings, "Settings"), (Sheet::Tracking, "Smooth tracking"), (Sheet::Mics, "Microphones"), (Sheet::Booster, "Boost FPS"),
-            (Sheet::Menu, "Saved looks"), (Sheet::Menu, "QR code"), (Sheet::VideoHistory, "History"),
+            (Sheet::Menu, "Saved looks"), (Sheet::Menu, "QR code"), (Sheet::VideoHistory, "Video history"),
         ];
         let size = Zone::SheetBack.units().size();
         for language in Language::ALL {

@@ -1266,7 +1266,7 @@ impl Controller {
         }
         anyhow::ensure!(self.stop_generation.load(Ordering::Acquire) == stop_generation, "{}", tr("Finish the current capture first."));
         if !importing && !settings.consent_acknowledged {
-            anyhow::bail!("{}", tr("Please read and accept the capture notice first (Capture page)."));
+            anyhow::bail!("{}", tr("Please read and accept the capture notice first (Photos & captures)."));
         }
         if self.snapshot.lock().unwrap().capture.state == CaptureState::Stopping {
             anyhow::ensure!(!rollover, "{}", tr("Finish the current capture first."));

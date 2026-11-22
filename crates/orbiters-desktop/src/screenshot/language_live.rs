@@ -42,7 +42,6 @@ pub(super) fn walk(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale: 
         for (page, name) in [
             (Page::Home, "home"),
             (Page::N4n0, "n4n0"),
-            (Page::Capture, "capture"),
             (Page::Projects, "projects"),
             (Page::Sessions, "gallery"),
             (Page::Worlds, "worlds"),

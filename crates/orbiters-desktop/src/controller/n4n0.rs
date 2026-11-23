@@ -350,7 +350,8 @@ impl Controller {
             let mut before: Option<(Instant, Vec<crate::perf::Raw>)> = None;
             let mut beat = 0u64;
             while !ctl.n4n0.stopped() {
-                if beat.is_multiple_of(3) {
+                // (elsewhere than on Windows every process is asked: less often beside a game)
+                if beat.is_multiple_of(if ctl.game_on_this_mac() { 15 } else { 3 }) {
                     if cfg!(windows) {
                         ctl.n4n0_resources_scanned(&mut before);
                     } else {

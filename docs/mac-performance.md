@@ -188,6 +188,26 @@ window open). Every row above and every earlier VRChat row is at whatever clock 
 settings has to be interleaved and at one thermal state, and the bench should record `NSProcessInfo.thermalState` and the
 CPU of everything else beside each window (it records neither yet).
 
+### What N4N0's own window cost (2026-11-23, fixed)
+
+The 22 to 28 % of a core was the window drawing at the display's rate for as long as it was open: on a Mac it asked, in every
+pass, for a paint of the hidden window, and egui answers anything asked of a window with a frame. Covered, where no display
+holds the rate back, it was far worse. It now draws only when something asks and it can be seen (`mac_cover.rs`: while
+eframe holds it hidden it looks at the windows macOS lists, every second, every three beside a game). Measured with a release
+build over made-up state in a temporary folder (`orbiters-desktop --link-smoke --no-panels --hold 48`, CPU time of the
+window's process over 10 s, nobody touching it, the Mac busy with builds):
+
+| Window | before | after |
+|---|---|---|
+| shown, behind another app, nothing changing | 22 % of a core | 4.8 % |
+| the same, the service saying something new five times a second | 23 % | 6.9 % |
+| covered, nothing changing | 137 % | 0.0 % |
+| covered, five times a second | 137 % | 1.3 % |
+
+The service's own looks (3 to 5 % of a core with nothing open, seen by thread on the running app, not measured again) are fewer:
+the engine's session records once a second instead of ten times, every process on the Mac every 30 s instead of 3, and beside
+a game the network every 2 s instead of twice a second and the processes' CPU every 15 s instead of 3.
+
 ### Next (not done)
 
 1. One VRChat start per condition (58, 100, 45) with the timeline and the encoder times: the split of the fence wait, the GPU's

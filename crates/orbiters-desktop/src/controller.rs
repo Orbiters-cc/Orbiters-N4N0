@@ -2575,6 +2575,12 @@ impl Controller {
         self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.runs_here() && !self.headset_on_break()
     }
 
+    /// Whether VRChat runs on this very Mac, through the engine: what looks at the Mac now and then does so less often beside it
+    /// (its CPU, its GPU and N4N0 share one budget of power and heat, docs/mac-performance.md).
+    pub(crate) fn game_on_this_mac(&self) -> bool {
+        !orbiters_core::osc::VRCHAT_RUNS_HERE && matches!(self.snapshot.lock().unwrap().launcher.game, orbiters_core::launcher::Game::Running(_))
+    }
+
     /// VRChat started or closed. A run goes where the setting has it beside VRChat (pausing, and going on there) and those
     /// held for VRChat start once it closes.
     pub(crate) fn vrchat_changed(self: &Shared, running: bool) {
@@ -3343,8 +3349,12 @@ fn spawn_watchers(ctl: Shared) {
             loop {
                 // VRChat process, every 3 s (first, so the world below knows whether VRChat runs).
                 if tick.is_multiple_of(3) {
-                    // Names only: the default refresh also reads every process's command line and environment.
-                    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
+                    // Names only: the default refresh also reads every process's command line and environment. On a Mac
+                    // nothing of VRChat or SteamVR runs under those names (its VRChat is the engine's, known by its
+                    // records): a look now and then.
+                    if orbiters_core::osc::VRCHAT_RUNS_HERE || tick.is_multiple_of(30) {
+                        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
+                    }
                     let named = |names: &[&str]| {
                         system
                             .processes()

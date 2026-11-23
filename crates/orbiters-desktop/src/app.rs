@@ -50,6 +50,8 @@ pub struct App {
     /// The usage statistics' notice was closed here (the service's settings say so a moment later).
     usage_told: bool,
     /// Minimised for long while VRChat runs: the countdown to closing to the tray (`crate::window_rest`), on its clock.
+    #[cfg(target_os = "macos")]
+    cover: crate::mac_cover::Cover,
     rest: crate::window_rest::Rest,
     rest_clock: std::time::Instant,
     #[cfg(windows)]
@@ -114,6 +116,8 @@ impl App {
             logo_hovered: false,
             usage_here: None,
             usage_told: false,
+            #[cfg(target_os = "macos")]
+            cover: Default::default(),
             rest: Default::default(),
             rest_clock: std::time::Instant::now(),
             #[cfg(windows)]
@@ -899,15 +903,13 @@ pub fn window_icon() -> egui::IconData {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         // A Mac's window that macOS called covered is not drawn (eframe skips it), and macOS does not always say when
-        // it shows again: after a full-screen game over it closed or crashed, the window stayed a still picture that
-        // took no press (a Mac's VRChat, 2026-11-22). What this hook sees of the window is as old as its last drawn
-        // frame, so "covered" cannot be asked here: a window that is not minimized is drawn at least twice a second,
-        // covered or not. Next to nothing behind a game, and it comes back by itself.
-        if cfg!(target_os = "macos") && self.windowed && ctx.input(|i| i.viewport().minimized != Some(true)) {
-            ctx.send_viewport_cmd(ViewportCommand::RequestPaintWhileHidden);
-            ctx.request_repaint_after(std::time::Duration::from_millis(500));
-        }
+        // it shows again (mac_cover.rs).
+        #[cfg(target_os = "macos")]
+        let game_in_front = self.windowed && self.follow_cover(ctx, focused);
+        #[cfg(not(target_os = "macos"))]
+        let game_in_front = false;
         if self.ctl.take_show() {
             bring_to_front(ctx);
         }
@@ -943,8 +945,7 @@ impl eframe::App for App {
                 self.sessions.open_session(ctx, std::path::PathBuf::from(dir), Rect::from_center_size(middle, vec2(300.0, 200.0)));
             }
         }
-        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        self.ctl.set_background(!focused && self.ctl.view().vrchat.runs_here());
+        self.ctl.set_background(!focused && (game_in_front || self.ctl.view().vrchat.runs_here()));
         // Minimized, no frame is drawn and only this runs: what the pages watch on their threads stops until the window
         // shows again (the microphones Settings listens to, Unity's editors, the folders).
         pages::watch::follow_window(ctx);
@@ -1025,6 +1026,26 @@ impl App {
             _ => false,
         };
         page || orbiters_ui::front::held(ctx)
+    }
+
+    /// A Mac's window held hidden: drawn only when it shows after all. Whether a game of the engine is in front.
+    #[cfg(target_os = "macos")]
+    fn follow_cover(&mut self, ctx: &egui::Context, focused: bool) -> bool {
+        use crate::mac_cover::Step;
+        let (minimized, hidden) = ctx.input(|i| (i.viewport().minimized == Some(true), i.viewport().occluded == Some(true)));
+        if minimized {
+            return false;
+        }
+        match self.cover.step(self.rest_clock.elapsed().as_secs_f64(), hidden, focused, crate::mac_cover::look) {
+            Step::AsAsked => {}
+            Step::Draw(again) => {
+                // (asking for it asks for a frame now: only ever when this one is to be drawn)
+                ctx.send_viewport_cmd(ViewportCommand::RequestPaintWhileHidden);
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(again));
+            }
+            Step::Wait(again) => ctx.request_repaint_after(std::time::Duration::from_secs_f64(again)),
+        }
+        self.cover.game()
     }
 
     /// One look at the countdown to closing to the tray: the offer up, taken down, or the window closing (as its

@@ -218,6 +218,11 @@ mod imp {
         list(LIST_ALL)
     }
 
+    /// The windows on screen, front to back, those of the desktop left out.
+    pub fn on_screen() -> Vec<MacWindow> {
+        list(ON_SCREEN_ONLY | EXCLUDE_DESKTOP)
+    }
+
     /// The ordinary window in front of all others now.
     pub fn front_window() -> Option<u32> {
         list(ON_SCREEN_ONLY | EXCLUDE_DESKTOP).into_iter().find(|w| w.layer == 0 && w.width > 1.0 && w.height > 1.0).map(|w| w.id)

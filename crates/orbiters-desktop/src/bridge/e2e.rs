@@ -539,6 +539,9 @@ fn keyboard_and_mouse_go_only_into_the_foreground_game_window() {
     client.fails("mouse", json!({ "action": "click", "x": 10, "y": 10 }), "not_foreground");
     client.fails("mouse", json!({ "action": "look", "dx": 10 }), "not_foreground");
     assert!(game.injected().is_empty(), "nothing went out");
+    // A point outside the window is said to be, before the window's focus is asked for at all.
+    client.fails("mouse", json!({ "action": "click", "x": 640, "y": 10 }), "outside_window");
+    client.fails("mouse", json!({ "action": "move", "x": 10, "y": 360 }), "outside_window");
     // OSC needs no focus.
     client.tool("press", json!({ "input": "jump" })).expect("OSC goes without the focus");
     assert_eq!(game.last_value("/input/Jump"), Some(0.0));
@@ -888,6 +891,10 @@ fn a_window_someone_resized_is_put_back_before_anything_is_clicked() {
     // The owner made profile 1's window 1777 by 1117 on 2026-11-15: the guide's (640, 620) was not the camera icon there.
     game.resize_by_hand(900, 500);
     assert_eq!(client.state()["vrchat"]["window"]["width"], 900);
+    // A point outside the size the window is put back to changes nothing: neither its size nor the focus.
+    client.fails("mouse", json!({ "action": "click", "x": 640, "y": 10 }), "outside_window");
+    client.fails("mouse", json!({ "action": "move", "x": 899, "y": 10 }), "outside_window");
+    assert_eq!(client.state()["vrchat"]["window"]["width"], 900, "not put back for it");
     // A click on a page the agent has not seen at that size: put back, and nothing clicked.
     let failure = client.fails("mouse", json!({ "action": "click", "x": CAMERA_ICON.0, "y": CAMERA_ICON.1 }), "window_resized");
     assert!(failure["next"].as_str().unwrap().contains("screenshot"), "{failure}");

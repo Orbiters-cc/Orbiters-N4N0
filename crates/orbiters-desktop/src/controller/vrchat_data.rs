@@ -38,6 +38,11 @@ impl Scope {
     pub fn vrchat_user(&self) -> Option<&str> {
         self.user.as_deref()
     }
+
+    /// Whether a VRChat account is signed in and may be used: what is asked with it can be answered.
+    pub fn signed_in(&self) -> bool {
+        self.allowed && self.user.is_some()
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {

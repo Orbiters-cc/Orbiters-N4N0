@@ -4,6 +4,9 @@
 //! loss. Only the engine's graphics server dropping this very session's game (`destroying Neptune context`,
 //! `VTEST_CLIENT_ERROR_CONTEXT_LOST`), not during a quit, and no frame *seen to be missing* for [`CONFIRM_AFTER`] since, is
 //! a confirmed loss: the graphics of that run will not come back. A frame after it ends the loss.
+//! Both need evidence of their own: a confirmation one dated after the drop, and late enough after it to show that no frame
+//! came; an end of the loss a counter that grew, in the swapchain it counts. A count repeated, one taken before the drop, one
+//! with no date and one that could not be read say neither.
 //!
 //! The tracker ([`Tracker`]) is pure and tested on every computer. One follower (`incident::follow`) feeds it what the
 //! engine's log says in the order it says it ([`LogEvent`]) and the frames the session's record counts, each reading with
@@ -68,7 +71,7 @@ pub(crate) struct Look {
 struct Loss {
     at: f64,
     wall: f64,
-    /// The presents lines said after it. One may have been on its way to the log as it came.
+    /// The presents lines that said more frames, after it. One may have been on its way to the log as it came.
     said: u32,
     /// The shown frames as counted after it: only more than these are frames after it.
     shown: Option<u64>,
@@ -77,7 +80,8 @@ struct Loss {
 /// One session's picture, look by look.
 #[derive(Debug, Default)]
 pub(crate) struct Tracker {
-    presents: Option<u64>,
+    /// The last count said of each swapchain: the lines name none, and each counts from its own 0.
+    presents: Vec<u64>,
     shown: Option<u64>,
     grew_at: Option<f64>,
     /// When the presents were last said, and how far apart they were.
@@ -87,11 +91,32 @@ pub(crate) struct Tracker {
     lost: bool,
 }
 
+/// How many swapchains' counts are told apart.
+const SWAPCHAINS: usize = 8;
+
 impl Tracker {
+    /// Takes a count of presents: whether it says frames since the last one of its own swapchain. It is the swapchain's whose
+    /// last count it comes closest after; one that repeats a count says nothing, and one under every count is a new
+    /// swapchain's, which counted from its own 0. The very first one has nothing to have grown from.
+    fn count(&mut self, count: u64) -> bool {
+        if self.presents.contains(&count) {
+            return false;
+        }
+        if let Some(last) = self.presents.iter_mut().filter(|last| **last < count).max() {
+            *last = count;
+            return true;
+        }
+        let first = self.presents.is_empty();
+        if self.presents.len() == SWAPCHAINS {
+            self.presents.remove(0);
+        }
+        self.presents.push(count);
+        !first && count > 0
+    }
+
     /// The picture at this look.
     pub(crate) fn look(&mut self, look: &Look) -> Picture {
         let at = look.at;
-        let mut observed = false;
         for event in look.log.iter().flatten() {
             match *event {
                 // Said again and again (a renderer that retries) it is one loss, from its first word; after frames, anew.
@@ -100,27 +125,27 @@ impl Tracker {
                     None => self.dropped = Some(Loss { at, wall: look.wall, said: 0, shown: None }),
                 },
                 LogEvent::Presents(count) => {
-                    let fresh = self.presents.is_some_and(|before| count < before);
-                    let grew = self.presents.is_some_and(|before| count > before);
-                    self.presents = Some(count);
-                    if grew {
-                        self.grew_at = Some(at);
+                    let new = self.presents.iter().all(|last| count < *last) && !self.presents.is_empty();
+                    if !self.count(count) {
+                        continue;
                     }
-                    if let Some(drop) = &mut self.dropped {
-                        drop.said += 1;
-                        // A line may have been on its way to the log as the drop came; a second one, a swapchain made
-                        // since (it counts from its own 0), or one of a later look cannot have.
-                        if drop.said >= 2 || fresh || at > drop.at {
-                            self.grew_at = Some(at);
-                            self.dropped = None;
-                            self.lost = false;
+                    match &mut self.dropped {
+                        None => self.grew_at = Some(at),
+                        Some(drop) => {
+                            drop.said += 1;
+                            // A line may have been on its way to the log as the drop came; a second one, a swapchain made
+                            // since (it counts from its own 0), or one of a later look cannot have.
+                            if drop.said >= 2 || new || at > drop.at {
+                                self.grew_at = Some(at);
+                                self.dropped = None;
+                                self.lost = false;
+                            }
                         }
                     }
                 }
             }
         }
         if let Some(events) = &look.log {
-            observed = true;
             if events.iter().any(|e| matches!(e, LogEvent::Presents(_))) {
                 if let Some(before) = self.said_at {
                     let lines = events.iter().filter(|e| matches!(e, LogEvent::Presents(_))).count() as f64;
@@ -132,13 +157,12 @@ impl Tracker {
         if let Some(shown) = look.shown {
             let grew = self.shown.is_some_and(|before| shown.frames > before);
             self.shown = Some(shown.frames);
-            observed = true;
             match &mut self.dropped {
                 None if grew => self.grew_at = Some(at),
                 None => {}
                 // Frames counted before the drop may be told after it: only a count taken after it is compared with.
                 Some(drop) => {
-                    if shown.at.is_some_and(|counted| counted >= drop.wall + SHOWN_LAG) || (shown.at.is_none() && at > drop.at) {
+                    if shown.at.is_some_and(|counted| counted >= drop.wall + SHOWN_LAG) {
                         match drop.shown {
                             Some(base) if shown.frames > base => {
                                 self.grew_at = Some(at);
@@ -157,9 +181,12 @@ impl Tracker {
             self.lost = false;
             return Picture::Unobservable;
         }
-        // Confirmed only by a reading that shows no frame since the drop, never by one that could not be made.
+        // Confirmed only by a reading that shows no frame since the drop: the log read now, or a count taken that long after
+        // the drop; never by one that could not be made, nor one of before.
         if let Some(drop) = &self.dropped {
-            if observed && at - drop.at >= CONFIRM_AFTER.max(2.0 * self.pace) {
+            let long = CONFIRM_AFTER.max(2.0 * self.pace);
+            let counted = look.shown.and_then(|shown| shown.at).is_some_and(|counted| counted >= drop.wall + long);
+            if (look.log.is_some() || counted) && at - drop.at >= long {
                 self.lost = true;
             }
         }
@@ -210,7 +237,7 @@ mod tests {
         /// the drop after them.
         fn at(&mut self, at: f64, running: bool, presents: Option<u64>, shown: Option<u64>, dropped: bool, quitting: bool) -> Picture {
             let log = presents.map(|count| {
-                let said = (self.presents != Some(count)).then_some(LogEvent::Presents(count));
+                let said = (!self.presents.contains(&count)).then_some(LogEvent::Presents(count));
                 said.into_iter().chain(dropped.then_some(LogEvent::Dropped)).collect()
             });
             let log = log.or(dropped.then(|| vec![LogEvent::Dropped]));
@@ -400,5 +427,48 @@ mod tests {
         assert_eq!(fresh(&seen, now), Some(("a", Picture::Lost)));
         assert_eq!(fresh(&seen, now + STALE_AFTER * 2), None, "a follower that stopped decides nothing");
         assert_eq!(of("never followed"), Picture::Unobservable);
+    }
+
+    /// Sixth verification (the verifier's fixture): a count taken before the drop confirms nothing after it, however late it
+    /// is read; one taken after it, and late enough to show that no frame came, does.
+    #[test]
+    fn evidence_of_before_the_drop_confirms_nothing() {
+        let counted = |at: f64, frames: u64, when: Option<f64>| Look { at, wall: 99.0 + at, running: true, shown: Some(Shown { frames, at: when }), ..Default::default() };
+        let mut t = Tracker::default();
+        t.look(&Look { wall: 100.0, ..log(1.0, &[Dropped]) });
+        assert_ne!(t.look(&counted(12.0, 42, Some(90.0))), Picture::Lost, "counted 10 s before the drop");
+        assert_ne!(t.look(&counted(60.0, 42, Some(99.0))), Picture::Lost);
+        assert_ne!(t.look(&counted(65.0, 42, None)), Picture::Lost, "no date");
+        assert_ne!(t.look(&counted(70.0, 42, Some(104.0))), Picture::Lost, "after it, too soon to show that no frame came");
+        assert_ne!(t.look(&unread(75.0)), Picture::Lost);
+        assert_eq!(t.look(&counted(80.0, 42, Some(178.0))), Picture::Lost);
+        assert_eq!(t.look(&counted(85.0, 43, Some(183.0))), Picture::Presenting, "a frame counted after it");
+    }
+
+    /// Sixth verification (the verifier's fixture): a count repeated is no frame, and cancels no loss; what grew, in its own
+    /// swapchain, does.
+    #[test]
+    fn a_count_repeated_cancels_no_loss() {
+        let mut t = Tracker::default();
+        t.look(&log(0.0, &[Presents(60)]));
+        t.look(&log(1.0, &[Dropped]));
+        assert_eq!(t.look(&log(2.0, &[Presents(60)])), Picture::Unobservable);
+        assert_eq!(t.look(&log(30.0, &[])), Picture::Lost);
+        assert_eq!(t.look(&log(31.0, &[Presents(60), Presents(60)])), Picture::Lost);
+        assert_eq!(t.look(&log(32.0, &[Presents(120)])), Picture::Presenting);
+        // Two swapchains: the other one's count, said again, is no new swapchain's.
+        let mut t = Tracker::default();
+        t.look(&log(0.0, &[Presents(6000), Presents(60)]));
+        t.look(&log(5.0, &[Dropped]));
+        t.look(&log(6.0, &[Presents(60)]));
+        t.look(&log(7.0, &[Presents(6000)]));
+        assert_eq!(t.look(&log(16.0, &[])), Picture::Lost);
+        assert_eq!(t.look(&log(17.0, &[Presents(120)])), Picture::Presenting, "it draws on");
+        // The first count ever seen has nothing to have grown from.
+        let mut t = Tracker::default();
+        t.look(&log(0.0, &[Dropped]));
+        t.look(&log(1.0, &[Presents(600)]));
+        assert_eq!(t.look(&log(12.0, &[])), Picture::Lost);
+        assert_eq!(t.look(&log(13.0, &[Presents(660)])), Picture::Presenting);
     }
 }

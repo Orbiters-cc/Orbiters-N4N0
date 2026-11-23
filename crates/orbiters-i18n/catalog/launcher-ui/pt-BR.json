@@ -115,6 +115,7 @@
   "Asks VRChat to quit, as its own Quit does, then starts it again as Home started it.": "Pede ao VRChat para fechar, como o próprio Sair dele, e depois o inicia de novo como o Início o iniciou.",
   "Restart VRChat": "Reiniciar o VRChat",
   "VRChat's picture stopped on this Mac and will not come back: restart it.": "A imagem do VRChat parou neste Mac e não vai voltar: reinicie-o.",
+  "The disk of {path} cannot be repaired in place: it is not an APFS disk. Nothing was changed.": "O disco de {path} não pode ser reparado no lugar: não é um disco APFS. Nada foi alterado.",
   "What runs VRChat on this Mac is not whole: press Repair on Home.": "O que executa o VRChat neste Mac não está completo: pressione Reparar no Início.",
   "An update of what runs VRChat was cut short while a game runs on it: quit that game, then press Play.": "Uma atualização do que executa o VRChat foi interrompida enquanto um jogo o usa: feche esse jogo e pressione Jogar.",
   "What runs VRChat on this Mac cannot be locked while it plays: check that its folder can be written and that its disk is not full.": "O que executa o VRChat neste Mac não pode ser bloqueado durante o jogo: verifique se a pasta permite gravação e se o disco não está cheio.",

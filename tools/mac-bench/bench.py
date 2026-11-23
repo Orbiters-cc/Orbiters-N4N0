@@ -9,9 +9,10 @@ session (never forced) and writes one results file, whatever happened (the outco
 the game, changes a setting or injects anything: it reads the engine's log and session records, VRChat's log, `ps`, `ioreg`,
 `pmset` and `lsappinfo`.
 
-The session is known from its admission (the engine's record made for this launch), not only once the program said it runs:
-whatever happens after, that session is asked to quit, and its own record says how it ended. A run whose session did not end
-exits with 5, and session.sh stops there.
+The session is the one the program started here names (its `starting` event, obelisk-cli 0.1.10, before the game runs), and
+the only one ever asked to quit: what the library's records say is current may be somebody else's. Its own record says how it
+ended. A run whose session did not end, or that may have started one it was not told the name of, exits with 5, and session.sh
+stops there.
 
 exit status: 0 measured, 2 did not start, 3 did not arrive, 4 did not settle or ended before a window, 5 its session did not
 end (whatever else happened).
@@ -27,7 +28,8 @@ whole window's length. The HUD's lines carry their own times and process: only t
 
 A window is scored only when all of it was seen: from its start to its end, with no gap longer than GAP between two looks,
 the session lived, the screen was unlocked, VRChat's own window server was the frontmost app and the local player stayed in
-the destination; its submissions were counted over at least COVERED of it, and its shown frames fill as much of it.
+the destination; its submissions were read over at least COVERED of it, inside it, with no two readings further apart than GAP,
+and its shown frames fill as much of it. Everything that decides it is kept with its times (`observed`), to score it again.
 Otherwise it is kept with `valid: false` and why. `--allow-locked` scores production alone behind a locked screen (and says so in every window).
 
 usage: bench.py --link 'vrchat://launch?...' [--percent N] [--arg A]... [--warm 90] [--window 60] [--windows 3]
@@ -85,15 +87,6 @@ def front_pid(out):
     return int(m.group(1)) if m else None
 
 
-def pointer():
-    """The id of the library's current session, or None."""
-    try:
-        with open(f"{RECORDS}/session.v2.json") as f:
-            return json.load(f).get("id")
-    except (OSError, ValueError):
-        return None
-
-
 def record(session):
     """The record of a session, or None when it cannot be read."""
     try:
@@ -102,18 +95,6 @@ def record(session):
         return value if value.get("id") == session else None
     except (OSError, ValueError):
         return None
-
-
-def admitted(before, since):
-    """The session admitted for the launch made at `since` (Unix seconds) after the library's current one was `before`: its
-    id, from the engine's own record (its supervisor born since), whether or not the program lived to say it runs."""
-    now_id = pointer()
-    if not now_id or now_id == before:
-        return None
-    value = record(now_id) or {}
-    born = (value.get("supervisor") or {}).get("birth_seconds")
-    app = (value.get("store") or {}).get("app_id")
-    return now_id if app == 438100 and isinstance(born, int) and born + 2 >= since else None
 
 
 def ended(session):
@@ -147,6 +128,7 @@ def same_place(wanted, said):
 JOINING = re.compile(r"\[Behaviour\] Joining (wrld_\S+)")
 LOCAL = re.compile(r"\[Behaviour\] Initialized PlayerAPI \".*\" is local")
 LEFT = re.compile(r"\[Behaviour\] OnLeftRoom")
+ARGUMENT = re.compile(r"^.*?\bArg: ")
 
 
 def whereabouts(vlines, wanted):
@@ -196,20 +178,21 @@ def settled(lines, at):
 
 
 class Follow(threading.Thread):
-    """Follows a growing file, each line stamped with the monotonic time it was read (the engine's lines carry none)."""
+    """Follows a growing file, opened once it is found to be this launch's, each line stamped with the monotonic time it was
+    read (the engine's lines carry none)."""
 
-    def __init__(self, path_fn, sink):
+    def __init__(self, open_fn, sink):
         super().__init__(daemon=True)
-        self.path_fn, self.sink, self.stop = path_fn, sink, False
+        self.open_fn, self.sink, self.stop = open_fn, sink, False
 
     def run(self):
-        path = None
-        while not self.stop and not path:
-            path = self.path_fn()
+        file = None
+        while not self.stop and not file:
+            file = self.open_fn()
             time.sleep(0.5)
-        if not path:
+        if not file:
             return
-        with open(path, "r", errors="replace") as f:
+        with file as f:
             buf = ""
             while not self.stop:
                 chunk = f.read()
@@ -224,16 +207,30 @@ class Follow(threading.Thread):
 
 
 def own_vrchat_log(since, link):
-    """This start's VRChat log: begun since the start, its head (the command line) holding the link."""
-    for p in sorted(glob.glob(f"{VRC_LOGS}/output_log_*.txt"), key=os.path.getmtime, reverse=True):
-        if os.path.getmtime(p) < since - 2:
-            continue
+    """This start's VRChat log, open at its beginning: made since the start, one of the arguments its head lists being the link."""
+    for p in glob.glob(f"{VRC_LOGS}/output_log_*.txt"):
         try:
-            with open(p, "r", errors="replace") as f:
-                if link in f.read(256 * 1024):
-                    return p
+            f = open(p, "r", errors="replace")
         except OSError:
-            pass
+            continue
+        made = getattr(os.fstat(f.fileno()), "st_birthtime", 0)
+        if made >= since and any(ARGUMENT.sub("", line).strip() == link for line in f.read(256 * 1024).split("\n") if ARGUMENT.search(line)):
+            f.seek(0)
+            return f
+        f.close()
+    return None
+
+
+def opened_engine_log(old, since):
+    """The engine's log of this start, open: another file than the one there was before it (`old`), made since."""
+    try:
+        f = open(ENGINE_LOG, "r", errors="replace")
+    except OSError:
+        return None
+    st = os.fstat(f.fileno())
+    if (st.st_ino, st.st_dev) != old and getattr(st, "st_birthtime", since) >= since:
+        return f
+    f.close()
     return None
 
 
@@ -307,6 +304,16 @@ def counted_rate(points, t0, t1, index):
     return (round(total / seconds, 2) if seconds > 0 else None), round(seconds, 1)
 
 
+def coverage(points, t0, t1):
+    """How much of [t0, t1] lies between two readings of one generation no further apart than GAP, in seconds; what is
+    outside the window counts for nothing of it."""
+    total = 0.0
+    for gen in sorted({p[1] for p in points}):
+        times = sorted({p[0] for p in points if p[1] == gen})
+        total += sum(max(0.0, min(b, t1) - max(a, t0)) for a, b in zip(times, times[1:]) if b - a <= GAP)
+    return round(total, 1)
+
+
 def shown_lines(lines, state, t0, t1):
     """The owned window server's HUD lines written from t0 to t1: (time, [positive intervals]). Their own times are told on
     this run's clock by the looks, which note both."""
@@ -358,10 +365,13 @@ def summarize(lines, t0, t1, state, allow_locked, moves=()):
     if any(x["front"] is None or x["front"] not in x["wsd"] for x in looks):
         why.append("VRChat was not frontmost all along")
     gens = sorted({p[1] for p in inside})
+    covered = coverage(points, t0, t1)
     if not inside:
         why.append("no guest Present line in the window")
-    elif sub_s < COVERED * length:
-        why.append(f"its submissions were counted over {sub_s} s of {length:.1f}")
+    elif covered < COVERED * length:
+        why.append(f"its submissions were counted over {covered} s of {length:.1f}")
+    elif (gap := longest_gap([p[0] for p in inside], t0, t1)) > GAP:
+        why.append(f"its submissions were not read for {gap:.1f} s of the window")
     if not hud:
         why.append("no frame was shown (no positive presentation time)")
     elif sum(hud) / 1000 < COVERED * length or longest_gap([t for t, vals in shown if vals], t0, t1) > GAP:
@@ -389,6 +399,7 @@ def summarize(lines, t0, t1, state, allow_locked, moves=()):
             "fence_wait_ms_median": pct([p[5] for p in inside], 0.5),
             "submitted_per_second_counted": submitted,
             "counted_over_seconds": sub_s,
+            "read_over_seconds_of_the_window": covered,
         },
         "worker_shown_events_per_second_counted": shown_events,
         "wsd_shown": {
@@ -406,16 +417,24 @@ def summarize(lines, t0, t1, state, allow_locked, moves=()):
 
 
 def told(session, event, at):
-    """What the program's event says of the session: it runs, and which it is (the program's word over the record seen at
-    its admission). Known from its admission already, it still runs only once this says so."""
+    """What the program's event says of the session: which it is, from its admission on (the first name said is the launch's
+    own), and that it runs."""
+    if event.get("event") in ("starting", "running"):
+        session["id"] = session["id"] or event.get("session_id")
     if event.get("event") == "running" and session["running_at"] is None:
-        session["id"] = event.get("session_id") or session["id"]
         session["running_at"] = at
 
 
-def close(cli, session, proc, res):
+def refused(events):
+    """Whether the program said that it started nothing: an error, and never that its launch was admitted."""
+    said = [e.get("event") for e in events]
+    return "error" in said and not {"starting", "running", "exited"} & set(said)
+
+
+def close(cli, session, proc, res, started_nothing=False):
     """Ends the launch: the session `session` asked to quit until its record is terminal, the program waited for. Whether
-    everything this run started is known to have ended; what is not is said in `res`."""
+    everything this run started is known to have ended; what is not is said in `res`. Without a session's name nothing is
+    ever asked to quit, and only the program's word that it started nothing (`started_nothing`) resolves the launch."""
     if session and ended(session) is None:
         res["quit"] = run([cli, "steam", "quit", "438100", "--session", session, "--wait", "60"], 90)
     until = now() + CLOSE_DEADLINE
@@ -429,6 +448,9 @@ def close(cli, session, proc, res):
         else:
             res["outcome"] += f"; the program had not ended {CLOSE_DEADLINE} s after the quit"
             return False
+    if not session and not started_nothing:
+        res["outcome"] += "; what the program may have started was never named: nothing was asked to quit, and it may run"
+        return False
     if session and res["terminal"] is None:
         res["outcome"] += f"; the session {session} had not ended {CLOSE_DEADLINE} s after the quit: it may still run"
         return False
@@ -478,7 +500,6 @@ def measure(ending):
     wanted = destination(a.link)
     if wanted is None:
         ap.error("--link names no world and instance")
-    before = pointer()
     proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     session = {"id": None, "running_at": None}
     state = {"gpu": [], "cpu": [], "look": []}
@@ -494,13 +515,13 @@ def measure(ending):
                 continue
             events.append((now(), e))
             told(session, e, now())
-    threading.Thread(target=read_events, daemon=True).start()
+    reader = threading.Thread(target=read_events, daemon=True)
+    reader.start()
     t_start = now()
     try:
-        # The game's own session: admitted (its record), then running (with its id), an error or an exit, within a deadline,
-        # the program alive.
+        # The game's own session: admitted (with its id), then running, an error or an exit, within a deadline, the program
+        # alive.
         while session["running_at"] is None and now() - t_start < START_DEADLINE:
-            session["id"] = session["id"] or admitted(before, started_wall)
             if any(e.get("event") in ("error", "exited") for _, e in events) or proc.poll() is not None:
                 break
             time.sleep(0.5)
@@ -509,13 +530,7 @@ def measure(ending):
             status = 2
             return status
 
-        def engine_log():
-            try:
-                st = os.stat(ENGINE_LOG)
-            except FileNotFoundError:
-                return None
-            return ENGINE_LOG if (st.st_ino, st.st_dev) != old_log else None
-        eng = Follow(engine_log, lambda t, l: lines.append((t, l)))
+        eng = Follow(lambda: opened_engine_log(old_log, started_wall), lambda t, l: lines.append((t, l)))
         vrc = Follow(lambda: own_vrchat_log(started_wall, a.link), lambda t, l: vlines.append((t, l)))
         eng.start(); vrc.start()
         threading.Thread(target=sampler, args=(state, stop, session), daemon=True).start()
@@ -549,7 +564,7 @@ def measure(ending):
         # The last second's lines are read.
         time.sleep(2)
         moves = whereabouts(list(vlines), wanted)
-        res["windows"] = [summarize(list(lines), t0, t1, state, a.allow_locked, moves) | {"from_s": round(t0 - t_start, 1)} for t0, t1 in windows]
+        res["windows"] = [summarize(list(lines), t0, t1, state, a.allow_locked, moves) | {"from_s": round(t0 - t_start, 1), "from": t0, "to": t1} for t0, t1 in windows]
         res["outcome"] = "measured" if windows else "the game ended before any window"
         status = 0 if windows else 4
         # Unscored, after the windows: 3 s stack samples of the render server and the game.
@@ -567,9 +582,11 @@ def measure(ending):
     finally:
         # Always: this launch's own session, whether or not the program that started it lives, is asked to quit (never
         # forced) until its own record says how it ended, and what happened is written.
-        session["id"] = session["id"] or admitted(before, started_wall)
+        if proc.poll() is not None:
+            # Its last words are read.
+            reader.join(5)
         res["session"] = session["id"]
-        resolved = close(cli, session["id"], proc, res)
+        resolved = close(cli, session["id"], proc, res, refused([e for _, e in events]))
         stop.set()
         for f in (eng, vrc):
             if f:
@@ -580,6 +597,12 @@ def measure(ending):
         res["render"] = [m.groups() for _, l in snapshot for m in [RENDER.search(l)] if m][:1]
         res["engine_trace"] = [l for _, l in snapshot if STOP.search(l)][:40]
         res["events"] = [e for _, e in events]
+        res["observed"] = {
+            "started_at": t_start,
+            "look": list(state["look"]),
+            "moves": whereabouts(list(vlines), wanted),
+            "lines": [[t, l] for t, l in snapshot if NPT.search(l) or SWAP.search(l) or HUD.search(l) or HELD.search(l)],
+        }
         with open(a.out, "w") as f:
             json.dump(res, f, indent=1)
         for w in res["windows"]:

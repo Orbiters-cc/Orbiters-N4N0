@@ -276,8 +276,8 @@ impl MacMachine {
     }
 
     /// Home's start with `args`, kept as one of its own.
-    fn start_home(&self, args: &[String], account: Option<&str>) -> Result<(), super::obelisk_cli::Refused> {
-        let id = self.start_launch(args)?;
+    fn start_home(&self, args: &[String], account: Option<&str>, steam: Option<u64>) -> Result<(), super::obelisk_cli::Refused> {
+        let id = self.start_launch(args, steam)?;
         let mut mine = self.home_launch.lock().unwrap();
         mine.push(HomeLaunch { id, args: args.to_vec(), account: account.map(str::to_owned) });
         let drop_old = mine.len().saturating_sub(HOME_LAUNCHES);
@@ -358,7 +358,8 @@ impl MacMachine {
             // Minutes may have passed: nothing is started for an account that is no longer the one signed in, nor over a
             // start made meanwhile (which the one start refuses).
             self.same_accounts(&launch, steam, &program, live)?;
-            match self.start_home(&launch.args, launch.account.as_deref()) {
+            // Said to the program too, which checks it against the session it starts with: no other account between the two.
+            match self.start_home(&launch.args, launch.account.as_deref(), steam) {
                 Ok(()) => return Ok(()),
                 Err(super::obelisk_cli::Refused::Wait(wait)) if wait <= Duration::from_secs(100) => std::thread::sleep(wait + Duration::from_secs(1)),
                 Err(refused) => return Err(refused.words()),
@@ -385,7 +386,8 @@ impl MacMachine {
     /// Home's start of VRChat with `args` through the shared start, at the render scale chosen in Settings (`render`,
     /// 25 to 100 % of the display's drawing resolution, the panel's pixels at most): its launch id, or why not. The
     /// bridge's starts (`start_launch_reserved`) keep the engine's own size, which its coordinates are measured in.
-    pub fn start_launch(&self, args: &[String]) -> Result<u64, super::obelisk_cli::Refused> {
+    /// For the Steam account `steam` or not at all, when one is named.
+    fn start_launch(&self, args: &[String], steam: Option<u64>) -> Result<u64, super::obelisk_cli::Refused> {
         let program = self.program_to_start()?;
         let render = self.render.load(Ordering::Relaxed);
         #[cfg(target_os = "macos")]
@@ -393,7 +395,7 @@ impl MacMachine {
         #[cfg(not(target_os = "macos"))]
         let sizes: Option<((u32, u32), (u32, u32))> = None;
         let percent = sizes.map(|(backing, panel)| orbiters_core::obelisk::render_percent(render, backing.0, panel.0));
-        self.play.start_rendered(&program, &self.library, args, percent)
+        self.play.start_rendered(&program, &self.library, args, percent, steam)
     }
 
     /// The same, with the reservation `token` the bridge took before it created the instance (`Play::reserve`).
@@ -449,7 +451,7 @@ impl Machine for MacMachine {
     }
 
     fn start_for(&self, args: &[String], account: Option<&str>) -> Result<(), String> {
-        self.start_home(args, account).map_err(|refused| refused.words())
+        self.start_home(args, account, None).map_err(|refused| refused.words())
     }
 
     fn engine_problem(&self) -> Option<orbiters_core::obelisk::EngineProblem> {
@@ -2054,7 +2056,7 @@ impl Controller {
         if !self.view().launcher.possible.play {
             return Notice::Error(tr("VRChat runs on another device: Play works on the computer that runs it.").into());
         }
-        if profile > orbiters_core::vrchat_launch::PROFILE_MAX {
+        if orbiters_core::vrchat_launch::main_profile(u64::from(profile)).is_none() {
             return Notice::Error(tr("VRChat does not know this profile.").into());
         }
         // Only VRChat's own grammar goes on, as Play's (a destination comes from the network or over IPC).

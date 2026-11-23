@@ -29,24 +29,29 @@ the frontmost app (`lsappinfo`), GPU utilisation (`ioreg`, device-wide) and the 
 process tree (`ps -M`). It starts `obelisk-cli steam play 438100 [--render-percent N]
 -- -screen-fullscreen 1 -window-mode borderless <link>`, waits (with deadlines) for the engine to say the game runs and for
 the local player to be in **the destination of the link** (world, instance and every tag it names: a fallback is no
-arrival) as **this start's own** VRChat log says it (the one whose command line holds the link), waits `--warm`
+arrival) as **this start's own** VRChat log says it (made since the start, one of the arguments its head lists being the link; held open
+from then on), waits `--warm`
 seconds and then until 20 s pass without a frame held over 250 ms (within 180 s, else nothing is scored), records `--windows` windows of `--window` seconds
 with nobody touching the game, takes 3 s stack samples only after them, and in every case (an arrival that never came, a
 failed start, an interruption) quits by session (`steam quit --session --wait 60`, never forced) and writes its results
-file with its `outcome`. The session is known from its **admission** (the record the engine makes for this launch), so that
-it is asked to quit whether or not the program that started it still lives; its own record says how it ended (`terminal`).
-A run whose session is not known to have ended exits with 5, and `session.sh` stops the series there, as it does after any
+file with its `outcome`. The session is the one **the program started here names** (its `starting` event, obelisk-cli 0.1.10),
+the only one ever asked to quit, whether or not that program still lives; its own record says how it ended (`terminal`). A run
+whose session is not known to have ended, or that may have started one it was never told the name of, exits with 5, and `session.sh` stops the series there, as it does after any
 run that failed.
 
 A window is **valid** only when all of it was seen: from its start to its end, never more than 5 s between two looks, the
 session lived, the screen was unlocked, this session's own window server was the frontmost app and the local player stayed
-in the destination; its submissions were counted over at least 90 % of it, and the shown frames of that window server (by
+in the destination; its submissions were read over at least 90 % of it, inside it, never more than 5 s apart (the line before
+the window is the rate's base and no coverage), and the shown frames of that window server (by
 the process and the time its `metal-HUD:` lines carry) fill as much of it, never more than 5 s apart; otherwise it is kept
 with `valid: false` and why, and never scored. `--allow-locked` scores production alone behind a locked screen, and says `production_only` in each window. Rates
 are counted, never reciprocal intervals: the presents (or shown events) between two lines of one swapchain generation
 divided by the time between those two lines (lines read together are one reading, the last of them: two batches read at
 once used to count one), the last line before the window included as its base, a count that went
 back (a new swapchain) never subtracted across, a measured zero kept as 0.
+
+Everything that decides a window is kept with its times in the results file (`observed`: the looks, the moves, the log's lines;
+each window's `from` and `to`), so that it can be scored again.
 
 `tools/mac-bench/test_bench.py` checks the scoring (boundary interval, generations, zero, coverage, validity), the arrival
 and the cleanup, without a game. **Results made by an earlier `bench.py`** (every file up to 2026-11-23) were scored by
@@ -76,6 +81,118 @@ end times (powermetrics and Metal's counters need root or the game's own process
 wake-up intervals. Without them the host wait cannot be split into GPU execution, queueing and wake-up; an overlap test
 (more work in flight) needs a change that demonstrably changes the in-flight work, and one matched pair of the same
 condition with the screen unlocked and locked is still to make.
+
+## The host timeline, and what owned workloads say (2026-11-23, 12:56 to 14:45; no VRChat start)
+
+What splits the fence wait, measured rather than guessed: the branches `perf-timeline` of Orbiters-cc/voile-lkd (from
+`3a299f2`, the shipped `orbiters-cli-0.1.8` line), Orbiters-cc/neptune, Orbiters-cc/dxmt (a public fork of Zagrios/dxmt; its
+branch `orbiters` is `b7d97ee`, what Voile ships) and Orbiters-cc/Obelisk (from 0.1.9). **Nothing of it is released**; no
+engine file, manifest or CLI of a player changed.
+
+- **On**: `OBELISK_TIMELINE=<an existing folder>` for obelisk-cli of that branch, with the instrumented engine files; each start
+  gets a folder in it, `<date>-<time>-<pid>/otl-{npt,dxmt,vtest,wsd}-<pid>.bin`. `OBELISK_TIMELINE_PASSES=1` adds GPU times per
+  encoder. `launch.sh` takes the variable away before the game: the guest never has it.
+- **Read**: `python3 tools/timeline/otl.py <that folder> --passes --cadence` (voile-lkd; `tools/timeline/README.md`).
+- **Off**: one `getenv` per host process and a branch per site; no thread, file, descriptor or memory
+  (`tests/timeline/run-otl-test.sh`).
+- **Joined end to end: 157,517 of 157,517 frames** of the owned workloads, through the real guest driver, ring, DXMT and `wsd`.
+- **Its price** (ms a frame, 2940 x 1912, quiet runs of one five-minute stretch; `tests/graphics/results/2026-11-23/overhead.txt`):
+
+| Frame | shipped files | instrumented, off | on | on, with GPU times per encoder |
+|---|---|---|---|---|
+| trivial | 0.509 | 0.505 | 0.508, 0.531 | 0.503, 0.507 |
+| 2x scene and resolve | 0.831 | 0.830, 0.832 | 0.832, 0.847 | 0.834, 0.841 |
+| 2,000 draws, 18,000 commands | 1.680 | 1.692, 1.709 | 1.716, 1.757 | 1.717, 1.734 |
+| GPU-bound | 9.387 | 9.393, 9.685 | 9.391, 9.555 | 9.387, 9.448 |
+
+  Off: within run-to-run noise (at most 0.03 ms on the heaviest decode). On: 0.02 to 0.06 ms on 2,000 draws. The runs beside
+  another program's compile are in the file and count for nothing.
+
+### Experiment 1, display cadence: Low Power Mode **off** only
+
+`wsd` (the timeline's build) as a full-screen app of the games category, numbered moving frames from the owned client, AC, screen
+unlocked, window in front. Two sessions; the second:
+
+| Sent per second, size | Shown per second | Replaced | Display-link ticks per second | `nextDrawable` p50 / p99 | Shown intervals, in refreshes |
+|---|---|---|---|---|---|
+| 20, 2940 x 1912 | 20.0 | 0 | 60.0 | 0.07 / 0.53 ms | 3: 294, 2: 2, 1: 1, 5: 2 |
+| 32, 2940 x 1912 | 32.0 | 0 | 60.0 | 0.01 / 0.08 | 2: 415, 1: 62, 3: 2 |
+| 60, 2940 x 1912 | 60.0 | 0 | 60.0 | 0.01 / 0.01 | 1: 898 |
+| 20, 1705 x 1109 | 20.0 | 0 | 60.0 | 0.01 / 0.03 | 3: 288 |
+| 32, 1705 x 1109 | 32.0 | 0 | 60.1 | 0.01 / 0.06 | 2: 418, 1: 60 |
+| 60, 1705 x 1109 | 59.0 | 15 (phase) | 60.0 | 0.04 / 0.07 | 1: 868, 2: 15 |
+
+**With it off, `wsd` loses nothing**: 60 ticks a second, no drawable wait, every ready frame shown at the next tick. 32 a second
+shown as two refreshes (and one now and then) is what 32 in 60 is; the "three refreshes" of VRChat at 100 % are late arrivals,
+not `wsd`. All five of macOS's display links give 60 (`tests/graphics/display_link_probe.m`). **The 30 a second under Low Power
+Mode is not answered**: it was off, and stays the owner's to turn on. `wsd` is therefore unchanged. To be run, once, unlocked,
+hands off for three minutes:
+
+```sh
+sudo pmset -a lowpowermode 1; ~/.orbiters-forks/src/voile-lkd-perf/tests/graphics/run-low-power-session.sh ~/Library/Logs/Obelisk/low-power-on; sudo pmset -a lowpowermode 0
+```
+
+30 ticks a second with ready frames on the default link and 60 on one that asks for the rate: `wsd` can fix it. 30 on all five:
+macOS's policy. 60 ticks and slow drawables: the drawable path.
+Also seen: 32.8 ms (two refreshes) from tick to shown at any rate, 49 ms when three drawables queue: latency, not frame rate.
+
+### Experiment 2, pass costs (Low Power Mode off)
+
+`pass_costs.exe` through the engine's own Wine in a temporary prefix and runtime. Milliseconds a frame (time between frames, GPU
+at 95 to 100 %); 2940 x 1912 cool (13:16 to 13:22), 1705 x 1109 the best of three rounds, with the encoders Metal got:
+
+| Frame | 2940 x 1912 | 1705 x 1109 | Encoders, nominal tile and copy traffic at 2940 x 1912 |
+|---|---|---|---|
+| trivial (clear, one triangle, present) | 0.507 | 0.250 | 2, 68 MB: `RGBA8 clear/store` 0.11 ms, the export copy (blit) 0.30 ms |
+| and four full-size copies | 1.172 | 0.431 | 0.166 and 0.045 ms a copy |
+| scene 1x with depth, then to the back buffer | 0.629 | 0.292 | 3, 140 MB |
+| 2x scene, resolve | 0.836 | 0.318 | 3, 214 MB: resolve folded: 2x colour `clear/store+resolve`, depth and stencil `clear/store` |
+| the same and `DiscardView` after, or before | 0.837, 0.839 | 0.316, 0.320 | the same three: **the hint does nothing** |
+| a `Flush` between scene and resolve | 1.102 | 0.447 | 4: the resolve its own pass, `load/store+resolve` |
+| a grab in the middle of the 2x scene | 1.334 | 0.612 | 4, 438 MB: the second part `load/store+resolve`, depth `load/store` |
+| eight small targets between parts, nothing read / read | 0.743 / 0.743 | 0.647 / 0.644 | 11: the parts **merged** into one full-size pass |
+| eight full-size parts, merged / split by reads (1x) | 1.474 / 3.087 | 0.732 / 1.359 | 11 / 19, 145 / 954 MB: **0.20 / 0.08 ms a split** |
+| the same, 2x, split by a resolve each | 1.871 / 4.971 | 1.119 / 2.407 | 11 / 19, 218 / 2,017 MB: **0.39 / 0.16 ms a split** |
+| eight uploads into a texture the pass reads | 0.928 | 0.816 | 18: each upload splits the pass (order requires it) |
+
+The same passes in plain Metal (`pass_bench.m`, per pass, flat / noise content): storing the 2x colour beside the resolve costs
+0.17 ms (cool) / 0.5 ms (noise, warm) at 2940 x 1912, 0.02 to 0.17 at 1705 x 1109; a split 0.10 / 0.4 ms at 1x, 0.22 / 0.9 ms at 2x;
+storing depth of one value nothing. Noise bounds it above, a picture lies between.
+
+What it decides:
+
+- **The chain's own fixed cost is small**: a trivial frame's fence wait is 0.50 ms at 2940 x 1912 (GPU 0.40, GPU end to
+  notification 0.08, notification to the guest's wake 0.02). It cannot be the 45 ms; a busy game's queues are not in it.
+- **The export copy is about 0.17 ms** (0.30 alone) and `wsd`'s full-screen triangle 0.5 to 1.0 ms of GPU a shown frame.
+- **DXMT's optimiser does what it should here**: matching resolves fold, independent parts merge. Left: real data
+  dependencies, and stores nobody reads again. **Discard hints would give VRChat nothing**: DXMT logs "err: Not implemented" at the
+  first call, the owned client made it do so, and neither kept VRChat log has that line.
+- **Needless stores and splits are several times cheaper than their nominal traffic**: five avoidable milliseconds of VRChat's
+  36 would need some thirteen to twenty-five needless full-size 2x splits a frame, six if nothing of them compresses. No longer the presumed main cost; VRChat's own
+  encoder list, which the timeline now prints, says.
+- **An attachment stored though the next frame clears it** (the exact case: `checkEncoderRelation` always makes a folded resolve
+  `StoreAndMultisampleResolve`): DXMT cannot know inside the command buffer that the next one clears. Within one command buffer a
+  later `Clear` of the same view could turn it into `MultisampleResolve`; across two it needs the next chunk in hand or a
+  guess that corrupts when wrong. Not changed; worth 0.2 to 0.5 ms a 2x scene.
+
+### The GPU's speed is not a constant of this Mac
+
+The same GPU-bound work, offscreen, nothing else running (`pass_bench --sustain`, thermal state "fair" throughout, which
+`pmset -g therm` does not say): 8.2 ms a frame at first, **11 to 12 ms after 75 to 120 s**. And: 10.3 to 10.6 ms warm, **13 to 14.8 ms
+within 10 s of three busy CPU threads, 10.6 to 10.9 ms within 15 s of their end**. The GPU-bound Direct3D frame took 9.4 ms at
+13:31 and 15 to 17 ms an hour later on a warm Mac with nothing else busy. One power and heat budget on a fanless Mac: **CPU
+work costs frame rate even where the GPU is the limit**. N4N0 itself used 22 to 28 % of a core all along (`orbiters-desktop`, its
+window open). Every row above and every earlier VRChat row is at whatever clock the Mac then had; a comparison of two builds or
+settings has to be interleaved and at one thermal state, and the bench should record `NSProcessInfo.thermalState` and the
+CPU of everything else beside each window (it records neither yet).
+
+### Next (not done)
+
+1. One VRChat start per condition (58, 100, 45) with the timeline and the encoder times: the split of the fence wait, the GPU's
+   idle gap, the encoder list. It needs the instrumented host files as an engine patch of their own (the CLI starts on released
+   digests only) and the soak `AGENTS.md` asks for, though no file of the game's process changes.
+2. The CPU power spent while the game plays (the ring's and the engine's spinning waits, N4N0's own window), since it is GPU clock.
+3. The Low Power Mode session above, before any change to `wsd`.
 
 ## Results: 2026-11-23, 11:28 to 12:12, the first with the screen unlocked (obelisk-cli 0.1.8)
 

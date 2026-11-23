@@ -135,6 +135,33 @@ pub fn behind(painter: &Painter, id: Id, textures: &Textures, source: LayerId, f
     true
 }
 
+/// Gives back the GPU objects of the backdrop `id` (its pyramid, its renderer, and its hold on the window's textures the
+/// page was drawn with), through the window's renderer. Call it once the backdrop is no longer painted (the panel over
+/// it closed): nothing else would, as only a painted backdrop's next frame looks after them. True when it held any.
+pub fn release(textures: &Textures, id: Id) -> bool {
+    let mut renderer = textures.write();
+    let Some(res) = renderer.callback_resources.get_mut::<BackdropResources>() else { return false };
+    match res.backdrops.remove(&id) {
+        Some(mut backdrop) => {
+            backdrop.release();
+            true
+        }
+        None => false,
+    }
+}
+
+/// What the backdrop `id` holds now: the window's textures it keeps a hold on, and its pyramid's size (`None`: nothing).
+pub fn held(textures: &Textures, id: Id) -> Option<(usize, [u32; 2])> {
+    let renderer = textures.read();
+    let res = renderer.callback_resources.get::<BackdropResources>()?;
+    res.backdrops.get(&id).map(|b| (b.mirrored.len(), b.size))
+}
+
+/// How many backdrops hold GPU objects now.
+pub fn count(textures: &Textures) -> usize {
+    textures.read().callback_resources.get::<BackdropResources>().map_or(0, |r| r.backdrops.len())
+}
+
 /// The composite's uniforms (see the shader's `C`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -650,6 +677,65 @@ mod tests {
         let module = naga::front::wgsl::parse_str(&shader()).expect("the backdrop's shader parses");
         let mut validator = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty());
         validator.validate(&module).expect("the backdrop's shader is valid");
+    }
+
+    /// Verify-r21 major 9: a backdrop holds its pyramid and the window's textures the page was drawn with (a picture of
+    /// the page here) only while it is painted: released, nothing is held; after a resize while open, one set at the new
+    /// size; over repeated open/close cycles, nothing accumulates. On the offscreen GPU (skipped without one).
+    #[test]
+    fn a_backdrop_holds_nothing_once_released_after_a_resize_and_over_cycles() {
+        let Ok(mut gpu) = crate::offscreen::Offscreen::new() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let ctx = egui::Context::default();
+        crate::install(&ctx);
+        let textures = gpu.textures().clone();
+        let id = Id::unique("backdrop-release-test");
+        let picture = ctx.load_texture("page-picture", egui::ColorImage::filled([8, 8], egui::Color32::RED), Default::default());
+        let mut frame = |size: egui::Vec2, open: bool| {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)), ..Default::default() };
+            gpu.frame_timed(&ctx, input, |ui| {
+                let page = Rect::from_min_size(pos2(10.0, 10.0), egui::vec2(120.0, 80.0));
+                ui.painter().image(picture.id(), page, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
+                ui.painter().text(pos2(20.0, 120.0), egui::Align2::LEFT_TOP, "page text", egui::FontId::proportional(14.0), egui::Color32::WHITE);
+                if open {
+                    let area = ui.max_rect();
+                    let look = Look { strength: 1.0, blur: 12.0, dim: 0.3, focus: area.shrink(40.0), radius: 20.0, reach: 200.0, far: 0.5, base: egui::Color32::BLACK };
+                    behind(ui.painter(), id, &textures, ui.layer_id(), ShapeIdx(0), area, look);
+                }
+            })
+            .expect("a frame");
+        };
+        let small = egui::vec2(320.0, 240.0);
+        for _ in 0..3 {
+            frame(small, true);
+        }
+        let (mirrored, size) = held(&textures, id).expect("held while painted");
+        assert!(mirrored >= 2, "the font atlas and the page's picture: {mirrored}");
+        assert!(size[0] > 0 && size[1] > 0);
+        // Closed: nothing paints it any more, and nothing else would give its objects back.
+        frame(small, false);
+        assert!(held(&textures, id).is_some(), "still held after the last painted frame (the leak this release fixes)");
+        assert!(release(&textures, id));
+        assert_eq!((held(&textures, id), count(&textures)), (None, 0));
+        assert!(!release(&textures, id), "nothing left to give back");
+        // A resize while open: one pyramid, at the new size.
+        frame(small, true);
+        frame(egui::vec2(480.0, 300.0), true);
+        let (_, resized) = held(&textures, id).expect("held");
+        assert!(resized[0] > size[0], "{resized:?} after {size:?}");
+        assert_eq!(count(&textures), 1);
+        assert!(release(&textures, id));
+        // Repeated cycles.
+        for _ in 0..5 {
+            frame(small, true);
+            frame(small, true);
+            assert_eq!(count(&textures), 1);
+            frame(small, false);
+            assert!(release(&textures, id));
+            assert_eq!(count(&textures), 0);
+        }
     }
 
     #[test]

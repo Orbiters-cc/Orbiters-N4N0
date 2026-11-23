@@ -193,6 +193,24 @@ fn questions(pending: &[Pending]) -> (String, String) {
     (ask(), latin(ask))
 }
 
+/// Which question N4N0 asked a yes or no answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Seen {
+    /// The one waiting now (N4N0's own paths: a sentence heard before any newer question was asked).
+    Current,
+    /// The one a surface showed, by its number (0: none was shown).
+    Question(u64),
+}
+
+impl Seen {
+    fn is(self, waiting: u64) -> bool {
+        match self {
+            Seen::Current => true,
+            Seen::Question(n) => n != 0 && n == waiting,
+        }
+    }
+}
+
 /// The confirmation the windows show for question number `n`.
 fn local_confirmation(n: u64, question: &str) -> N4n0Confirmation {
     N4n0Confirmation {
@@ -283,6 +301,8 @@ pub(crate) struct N4n0Runtime {
     pub(crate) pending: Vec<Pending>,
     pending_at: Option<Instant>,
     pending_id: u64,
+    /// Bumped when another Orbiters account (or nobody) is signed in ([`Command::ForgetAccount`]).
+    account_epoch: u64,
     /// What Orbiters - N4N0 tells the assistant at its next turn (the owner's yes, a turn that failed after its
     /// tools ran).
     pub(crate) notes: Vec<String>,
@@ -676,6 +696,7 @@ impl N4n0Runtime {
             // As the overlay's menu sees it: there, the camera's picture never shows.
             mirror: self.mirror.view(Instant::now(), crate::mirror::reach(false, &self.params)),
             assistant: self.assistant.view.clone(),
+            account_epoch: self.account_epoch,
         }
     }
 
@@ -1965,7 +1986,7 @@ impl N4n0 {
         }
         if !rt.voice_hint_shown {
             rt.voice_hint_shown = true;
-            rt.line(N4n0Who::Note, tr("N4N0 cannot hear yet: install its speech models in Orbiters - N4N0 › N4N0."));
+            rt.line(N4n0Who::Note, tr("N4N0 cannot hear yet: install its speech models in Orbiters - N4N0 › Settings › Voice & assistant."));
             rt.show(tr_latin("I can't hear you yet: install my ears in Orbiters - N4N0 > N4N0."));
         }
         false
@@ -2003,8 +2024,9 @@ impl N4n0 {
             }
             self.publish();
             // The answer to what N4N0 asked to do comes first; a menu's search page takes the rest as what to search for.
-            if !text.is_empty() && !self.answer(&text) && !self.menu_heard(&text) {
-                self.ask(text, "voice");
+            let seen = self.heard_question(began);
+            if !text.is_empty() && !self.answer(&text, seen) && !self.menu_heard(&text) {
+                self.ask_seen(text, "voice", seen);
             }
             return;
         }
@@ -2025,8 +2047,13 @@ impl N4n0 {
                     self.voice_listen(Source::WakeWord);
                     self.publish();
                 }
-                Some(command) if !self.answer(&command) && !self.menu_heard(&command) => self.ask(command, "voice"),
-                Some(_) | None => {}
+                Some(command) => {
+                    let seen = self.heard_question(began);
+                    if !self.answer(&command, seen) && !self.menu_heard(&command) {
+                        self.ask_seen(command, "voice", seen);
+                    }
+                }
+                None => {}
             }
         }
     }
@@ -2087,17 +2114,36 @@ impl N4n0 {
 
     /// The owner's sentence after N4N0 asked to do something (`true`: it was the answer): a yes does it, a no drops it.
     /// Anything else is a new request: what waited is dropped (the assistant hears so) and the sentence goes its way.
-    fn answer(self: &Shared, text: &str) -> bool {
-        self.answer_with(policy::reply(text))
+    /// `seen`: the question the sentence answers (see [`Seen`]).
+    fn answer(self: &Shared, text: &str, seen: Seen) -> bool {
+        self.answer_with(policy::reply(text), seen)
+    }
+
+    /// The question a sentence heard from `began` on answers: the one waiting, unless it was asked after the person began
+    /// to speak (they cannot have meant it).
+    fn heard_question(&self, began: Option<Instant>) -> Seen {
+        let rt = self.n4n0.lock().unwrap();
+        match (began, rt.pending_at) {
+            (Some(began), Some(asked)) if !rt.pending.is_empty() && asked > began => Seen::Question(0),
+            _ => Seen::Current,
+        }
     }
 
     /// The owner's answer to what N4N0 asked to do: yes (`Some(true)`), no, or something else (`None`), said or pressed
-    /// (the Ask page's Yes and No). `true`: it was an answer.
-    pub(crate) fn answer_with(self: &Shared, reply: Option<bool>) -> bool {
+    /// (the Ask page's Yes and No), for the question `seen`. `true`: it was an answer. A yes or no for a question that is
+    /// not the one waiting now (answered elsewhere since, and another asked: verify-r21 1) answers nothing: checked
+    /// here, under the lock the question is taken under.
+    pub(crate) fn answer_with(self: &Shared, reply: Option<bool>, seen: Seen) -> bool {
         let pending = {
             let mut rt = self.n4n0.lock().unwrap();
             if rt.pending.is_empty() {
                 return false;
+            }
+            if reply.is_some() && !seen.is(rt.pending_id) {
+                rt.line(N4n0Who::Note, tr("That answer was for a question N4N0 no longer asks: nothing was done. Answer the one shown now."));
+                drop(rt);
+                self.publish();
+                return true;
             }
             rt.pending_at = None;
             rt.confirmations.retain(|c| !c.approve_url.starts_with(LOCAL_APPROVAL));
@@ -2155,17 +2201,45 @@ impl N4n0 {
         self.publish();
     }
 
+    /// Another Orbiters account (or nobody) is signed in: nothing of the conversation, its lines, what N4N0 asked, its
+    /// action log or a turn under way belongs to the next one (verify-r21 3). A turn under way stops and nothing of it
+    /// comes back; the next turn starts from an empty conversation.
+    fn forget_account(self: &Shared) {
+        {
+            let mut rt = self.n4n0.lock().unwrap();
+            rt.conversation.clear();
+            rt.lines.clear();
+            rt.confirmations.clear();
+            rt.handed_off.clear();
+            rt.notes.clear();
+            rt.pending.clear();
+            rt.pending_at = None;
+            rt.quota = None;
+            rt.assistant.forget();
+            rt.generation += 1;
+            rt.account_epoch += 1;
+            if let Some(sender) = rt.sender.as_mut().filter(|s| s.streaming()) {
+                sender.hide();
+            }
+            if let Some(turn) = rt.turn.take() {
+                turn.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        self.publish();
+    }
+
     /// What the interfaces ask.
     pub fn command(self: &Shared, command: Command) {
         let _lifecycle = self.voice_lifecycle.lock();
         match command {
-            Command::Ask { text } => self.ask(text, "typed"),
+            Command::Ask { text, question } => self.ask_seen(text, "typed", Seen::Question(question.unwrap_or(0))),
             Command::Talk { down } => self.talk(down, Source::Window),
             Command::AskPage { open } => self.ask_page(open),
             Command::AskRetry => self.ask_retry(),
-            Command::AskAnswer { yes } => {
-                self.answer_with(Some(yes));
+            Command::AskAnswer { yes, question } => {
+                self.answer_with(Some(yes), Seen::Question(question));
             }
+            Command::ForgetAccount => self.forget_account(),
             Command::Assistant { on } => self.assistant_switch(on),
             Command::AskTalk { down } => self.ask_talk(down),
             Command::WakeOffer { accept, id } => self.wake_offer_answer(accept, id),
@@ -2363,13 +2437,18 @@ impl N4n0 {
 
     /// Puts a sentence to N4N0's assistant on a thread of its own (an answer to what N4N0 asked to do is taken here).
     pub(crate) fn ask(self: &Shared, text: String, via: &'static str) {
+        self.ask_seen(text, via, Seen::Current);
+    }
+
+    /// [`N4n0::ask`] from a surface that showed the question `seen` (a typed yes answers that one only).
+    pub(crate) fn ask_seen(self: &Shared, text: String, via: &'static str, seen: Seen) {
         let _lifecycle = self.voice_lifecycle.lock();
         let text = text.trim().to_string();
-        if text.is_empty() || self.answer(&text) {
+        if text.is_empty() || self.answer(&text, seen) {
             return;
         }
         if !self.with_settings(|s| s.n4n0.enabled && s.n4n0.assistant) {
-            self.add_line(N4n0Who::Note, tr("N4N0's assistant is off: turn it on in Orbiters - N4N0 › N4N0."));
+            self.add_line(N4n0Who::Note, tr("N4N0's assistant is off: turn it on in Orbiters - N4N0 › Settings › Voice & assistant."));
             return;
         }
         // The common short commands, from the person's own sentence alone: at once, with no network (REQUEST20 6).
@@ -2455,7 +2534,7 @@ impl N4n0 {
                     rt.handed_off.remove(&c.id);
                     rt.confirmations.push(N4n0Confirmation { id: c.id, title: c.title, summary: c.summary, approve_url: c.approve_url });
                     drop(rt);
-                    self.notify(NoticeKind::Info, tr("N4N0 prepared something that needs your approval: see Orbiters - N4N0 › N4N0."));
+                    self.notify(NoticeKind::Info, tr("N4N0 prepared something that needs your approval: see N4N0's chat at the top of Orbiters - N4N0."));
                 }
             });
             match done {

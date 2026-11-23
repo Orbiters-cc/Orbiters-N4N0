@@ -149,6 +149,12 @@ impl State {
         self.launcher.holds() || self.shown() == Some(Page::Music)
     }
 
+    /// A sheet or dialog of Home's is up over it (a profile, Previous instances, an edit of one's own card): it owns the
+    /// keyboard and the pointer (N4N0's chat stands aside, verify-r21 major 7).
+    pub fn modal_up(&self) -> bool {
+        self.launcher.holds()
+    }
+
     /// Back to Home itself (the sidebar's Home pressed on a feature's page, or on All tools).
     pub fn back_home(&mut self) {
         self.all_tools = false;

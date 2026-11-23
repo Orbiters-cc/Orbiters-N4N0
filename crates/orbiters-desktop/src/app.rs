@@ -319,7 +319,8 @@ impl App {
         let body = Rect::from_min_max(pos2(full.left(), full.top() + TITLE_H), full.max);
         // The shortcut to N4N0's bar, Esc, and the keys of the page while the bar or the chat has the keyboard.
         if content_ready {
-            self.chat.before_page(&ctx, &snap);
+            let modal = self.modal_up(&ctx, &snap);
+            self.chat.before_page(&ctx, &snap, modal);
         }
         if content_ready {
             let since = *self.sidebar_since.get_or_insert(now);
@@ -985,7 +986,7 @@ impl App {
     /// the few other threads that write: `pages::Working`), so a job added later blocks it without anyone listing it
     /// (SWEEP-18: a project copy, a Library move, a package update, a Toolkit install were cut by a list of busy
     /// things that did not name them).
-    fn idle_facts(&self, ctx: &egui::Context, snap: &Snapshot) -> [(&'static str, bool); 13] {
+    pub(crate) fn idle_facts(&self, ctx: &egui::Context, snap: &Snapshot) -> [(&'static str, bool); 14] {
         use crate::state::UploadState;
         [
             ("no work of the window runs (a job, a copy, a move, an install, a save, a scan)", pages::working_now() == 0), // i18n: not shown (a reason in code, never displayed)
@@ -1001,7 +1002,28 @@ impl App {
             ("no world's page or Share window is open", !self.worlds.holds()), // i18n: not shown (a reason in code, never displayed)
             ("no event's or picture's window is open", !self.events.holds()), // i18n: not shown (a reason in code, never displayed)
             ("no dialog is open on Unity projects", !self.projects.holds()), // i18n: not shown (a reason in code, never displayed)
+            // N4N0's chat up, something typed in it, Talk held: closing would lose them (verify-r21 8).
+            ("N4N0's chat is closed, nothing is typed in it, Talk is not held", !self.chat.holds()), // i18n: not shown (a reason in code, never displayed)
         ]
+    }
+
+    /// Whether the window may rest to the tray as far as its own work goes (every fact of [`App::idle_facts`]).
+    pub(crate) fn may_rest(&self, ctx: &egui::Context, snap: &Snapshot) -> bool {
+        self.idle_facts(ctx, snap).iter().all(|(_, idle)| *idle)
+    }
+
+    /// A sheet, dialog, window or menu of the page shown is up (or the first-use notice): the frontmost thing owns the
+    /// keyboard and the pointer, and N4N0's chat stands aside while it is (verify-r21 major 7).
+    pub(crate) fn modal_up(&self, ctx: &egui::Context, snap: &Snapshot) -> bool {
+        let page = match self.page {
+            Page::Home => self.home.modal_up(),
+            Page::Sessions => self.sessions.holds(),
+            Page::Worlds => self.worlds.holds(),
+            Page::Events => self.events.holds(),
+            Page::Projects => self.projects.holds(),
+            _ => false,
+        };
+        page || orbiters_ui::popup::any_open(ctx) || !(self.usage_told || snap.settings.usage.told_all())
     }
 
     /// One look at the countdown to closing to the tray: the offer up, taken down, or the window closing (as its

@@ -147,6 +147,15 @@ fn the_upload_warning_follows_the_content_ids() {
 /// Open, Duplicate, the Library's move.
 #[test]
 fn every_entry_point_of_the_library_asks() {
+    // The tests' own app data (a temporary folder of this process): what this test leaves in it goes with it.
+    struct Tidy;
+    impl Drop for Tidy {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(crate::data_dir());
+        }
+    }
+    assert!(crate::data_dir().starts_with(std::env::temp_dir()));
+    let _tidy = Tidy;
     let mut e = env();
     e.app = crate::data_dir();
     let job = run(&e).unwrap();
@@ -185,7 +194,4 @@ fn every_entry_point_of_the_library_asks() {
     let before = std::fs::read_dir(e.root.join("Projects")).unwrap().count();
     assert!(rt.block_on(crate::templates::duplicate(&e.vcc, &f, &e.root.join("Projects"), "F2", Default::default(), &cancel, &Default::default())).is_err());
     assert_eq!(std::fs::read_dir(e.root.join("Projects")).unwrap().count(), before);
-    for j in crate::unity6::journal::jobs(&e.app).into_iter().filter(|j| j.trial.path.starts_with(&e.root)) {
-        let _ = abandon(&e.app, &e.vcc, &j.id);
-    }
 }

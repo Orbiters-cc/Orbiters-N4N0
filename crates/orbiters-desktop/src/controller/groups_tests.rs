@@ -328,10 +328,14 @@ fn a_deletion_whose_subject_changed_is_refused() {
 fn a_post_edit_never_widens_an_audience_changed_meanwhile() {
     let seen_by_a = the_post(post_json("Meet-up", "public", &[]));
     let now = post_json("Meet-up", "group", &["grol_artist"]);
-    let (c, sent) = ctl(vec![ok(group(&["*"])), ok(posts_page(vec![now])), ok(group(&["*"]))]);
+    // Another post: its picture removed by B since A saw it, its words and audience as they were.
+    let with_picture = Post { image_id: Some("file_00000000-0000-4000-8000-0000000000f3".into()), ..seen_by_a.clone() };
+    let (c, sent) = ctl(vec![ok(group(&["*"])), ok(posts_page(vec![now])), ok(group(&["*"])), ok(posts_page(vec![post_json("Meet-up", "public", &[])])), ok(group(&["*"]))]);
     let s = scope(&c);
     let edit = PostDraft { title: "Meet-up!".into(), text: "Saturday".into(), visibility: g::Visibility::Public, ..Default::default() };
     assert_eq!(c.groups(LINK, s.clone(), Request::Prepare { write: Write::EditPost { group: G.into(), baseline: seen_by_a, edit } }), Reply::Failed(Failure::Changed));
+    let kept = PostDraft { title: "Meet-up!".into(), text: "Saturday".into(), visibility: g::Visibility::Public, image_id: with_picture.image_id.clone(), ..Default::default() };
+    assert_eq!(c.groups(LINK, s.clone(), Request::Prepare { write: Write::EditPost { group: G.into(), baseline: with_picture, edit: kept } }), Reply::Failed(Failure::Changed), "a removed picture is not put back");
     let odd = PostDraft { role_ids: vec!["grol_artist".into(), "not a role".into()], ..draft() };
     assert_eq!(c.groups(LINK, s, Request::Prepare { write: Write::CreatePost { group: G.into(), draft: odd } }), Reply::Failed(Failure::Api(GroupFailure::Invalid)), "an id that is not a role is refused, not dropped");
     assert!(writes(&sent).is_empty());

@@ -1092,7 +1092,9 @@ fn role_chooser(ui: &mut Ui, o: &Open, m: &Member, roles: &[Role], busy: bool, a
         let has = m.role_ids.contains(&r.id);
         let verdict = o.can(Action::AssignRole { role: &r.id, user: &m.user_id, add: !has });
         let cr = Rect::from_min_size(rect.min + vec2(16.0, 32.0) + at, vec2(*cw, 30.0));
-        let resp = ui.interact(cr, Id::unique(("assign", o.id.as_str(), m.user_id.as_str(), r.id.as_str())), if verdict.allowed() && !busy { Sense::click() } else { Sense::hover() });
+        // Group, member, role and direction are the press's: a list read again under a press that would turn "give"
+        // into "take back" makes it another control, which that press is not on (Major 3).
+        let resp = ui.interact(cr, Id::unique(("assign", o.id.as_str(), m.user_id.as_str(), r.id.as_str(), has)), if verdict.allowed() && !busy { Sense::click() } else { Sense::hover() });
         let fill = if has { theme::alpha(theme::ACCENT, 0.2) } else { theme::INK_700 };
         p.rect_filled(cr, theme::radius(15.0), if resp.hovered() && verdict.allowed() { theme::mix(fill, theme::FG, 0.08) } else { fill });
         let color = if verdict.allowed() { if has { theme::ACCENT } else { theme::FG } } else { theme::FG_4 };
@@ -1600,6 +1602,37 @@ mod tests {
         assert_eq!(run(vec![press(away, false)], 0.3, &mut chip), 0, "released elsewhere: no choice");
         assert_eq!(run(vec![egui::Event::PointerMoved(at), press(at, true)], 1.0, &mut chip), 0);
         assert_eq!(run(vec![press(at, false)], 1.1, &mut chip), 1, "released on the chip: one choice");
+    }
+
+    /// Major 3: a role read as held while the press is down turns "give" into "take back": that press does neither.
+    #[test]
+    fn a_role_chip_never_turns_round_under_a_press() {
+        let o = open_as(&["*"], &["grol_owner"]);
+        let without = Member { user_id: "usr_00000000-0000-4000-8000-000000000001".into(), display_name: Some("Sam".into()), roles_known: true, ..Default::default() };
+        let first = o.roles().iter().find(|r| o.can(Action::AssignRole { role: &r.id, user: &without.user_id, add: true }).allowed()).unwrap().id.clone();
+        let with = Member { role_ids: vec![first], ..without.clone() };
+        let roles = o.roles().to_vec();
+        let run = |ctx: &egui::Context, m: &Member, events: Vec<egui::Event>, t: f64, at: &mut egui::Pos2| {
+            let mut acts = Vec::new();
+            let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 600.0))), time: Some(t), ..Default::default() };
+            input.events = events;
+            let mut out = ctx.run_ui(input, |ui| {
+                role_chooser(ui, &o, m, &roles, false, &mut acts);
+                *at = ui.min_rect().min + vec2(36.0, 47.0);
+            });
+            out.textures_delta.clear();
+            acts.into_iter().filter_map(|a| if let Act::Write(Write::MemberRole { add, .. }, _) = a { Some(add) } else { None }).collect::<Vec<_>>()
+        };
+        let press = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        // (what the member has at the press, at the release) -> what is asked
+        for (down, up, asked) in [(&without, &without, vec![true]), (&with, &with, vec![false]), (&without, &with, vec![]), (&with, &without, vec![])] {
+            let (ctx, mut at) = (egui::Context::default(), egui::Pos2::ZERO);
+            run(&ctx, down, vec![], 0.0, &mut at);
+            run(&ctx, down, vec![egui::Event::PointerMoved(at)], 0.1, &mut at);
+            assert!(run(&ctx, down, vec![press(at, true)], 0.2, &mut at).is_empty());
+            assert!(run(&ctx, up, vec![], 0.3, &mut at).is_empty());
+            assert_eq!(run(&ctx, up, vec![press(at, false)], 0.4, &mut at), asked);
+        }
     }
 
     /// Minor 1: a right's key with no display name, or one holding controls, is shown through the text policy.

@@ -17,6 +17,7 @@ pub mod standing;
 pub mod trial;
 pub mod vcc;
 #[cfg(test)]
+#[path = "hostile/tests.rs"]
 mod hostile_tests;
 
 use orbiters_i18n::tr;

@@ -269,7 +269,7 @@ pub fn checklist(project: &Path, content: Content, cancel: &AtomicBool) -> Check
             for e in entries {
                 // A package folder that cannot be listed or looked into may hold what is asked.
                 let Ok(e) = e else {
-                    skip("Packages".to_string());
+                    skip("Packages".to_string()); // i18n: not shown (a folder name)
                     continue;
                 };
                 let n = e.file_name().to_string_lossy().into_owned();
@@ -283,7 +283,7 @@ pub fn checklist(project: &Path, content: Content, cancel: &AtomicBool) -> Check
                 }
             }
         }
-        Err(_) => skip("Packages".to_string()),
+        Err(_) => skip("Packages".to_string()), // i18n: not shown (a folder name)
     }
     let walker = roots.into_iter().flat_map(|root| {
         walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {

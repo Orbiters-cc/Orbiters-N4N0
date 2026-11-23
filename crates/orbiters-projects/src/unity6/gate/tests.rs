@@ -181,7 +181,7 @@ fn no_other_module_writes() {
     if folder.is_dir() {
         for f in std::fs::read_dir(folder).unwrap().flatten() {
             let name = f.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".rs") && !name.ends_with("_tests.rs") {
+            if name.ends_with(".rs") {
                 assert!(here.iter().any(|(n, _)| *n == name), "{name} is not looked at");
             }
         }

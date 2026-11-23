@@ -812,5 +812,4 @@ pub fn attempt_outcome(attempt: &Attempt, running: bool) -> Outcome {
 }
 
 #[cfg(test)]
-#[path = "trial_tests.rs"]
 pub(crate) mod tests;

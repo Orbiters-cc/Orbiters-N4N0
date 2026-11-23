@@ -39,7 +39,7 @@ impl Owner {
         use sha2::{Digest, Sha256};
         let Identity::Member { development, user } = identity else { return None };
         let env = if *development { "development" } else { "production" };
-        let digest = Sha256::digest(format!("{env}\nmember\n{user}").as_bytes());
+        let digest = Sha256::digest(format!("{env}\nmember\n{user}").as_bytes()); // i18n: not shown
         Some(Self { member: digest.iter().take(16).map(|b| format!("{b:02x}")).collect() })
     }
 }

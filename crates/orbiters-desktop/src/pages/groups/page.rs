@@ -378,8 +378,10 @@ fn line(ui: &mut Ui, label: &str, value: &str) {
     let w = ui.available_width();
     let p = ui.painter().clone();
     let galley = p.layout_job(Txt::new(value, 13.5).color(theme::FG).line_height(19.0).job(w - 150.0));
-    let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y.max(19.0) + 10.0), Sense::hover());
-    widgets::text(&p, pos2(rect.left(), rect.top() + 9.5), Align2::LEFT_CENTER, &Txt::new(label, 12.5).color(theme::FG_3));
+    // A long label (a flag's, in some languages) goes on as many lines as it takes: never over its value.
+    let label = p.layout_job(Txt::new(label, 12.5).color(theme::FG_3).line_height(19.0).job(140.0));
+    let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y.max(label.size().y).max(19.0) + 10.0), Sense::hover());
+    p.galley(rect.min, label, theme::FG_3);
     p.galley(pos2(rect.left() + 150.0, rect.top()), galley, theme::FG);
 }
 
@@ -1750,6 +1752,19 @@ mod tests {
         roles.push(Role { id: "grol_all".into(), name: "Everyone".into(), order: Some(9), default_role: true, known: true, whole: true, permissions: vec!["group-instance-moderate".into()], ..Default::default() });
         let change = RoleChange { name: Some("x".into()), ..Default::default() };
         assert!(!o.can(Action::EditRole { role: "grol_all", change: &change }).allowed());
+    }
+
+    /// A confirmation's labels are never drawn over their values, in any language.
+    #[test]
+    fn a_long_label_is_not_drawn_over_its_value() {
+        for label in [tr("Needs two-factor authentication"), "Précisément une très longue étiquette de droit", "短い", "Yes"] {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(520.0, 400.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| line(ui, label, "Yes"));
+            out.textures_delta.clear();
+            let at: Vec<Rect> = out.shapes.iter().filter_map(|s| match &s.shape { egui::Shape::Text(t) => Some(t.visual_bounding_rect()), _ => None }).collect();
+            assert!(at.len() == 2 && !at[0].intersects(at[1]), "{label}: {at:?}");
+        }
     }
 
     /// What VRChat left out is explained, with a way to read it again; what the rules refuse is said as such.

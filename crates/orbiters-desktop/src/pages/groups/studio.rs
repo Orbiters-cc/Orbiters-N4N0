@@ -660,6 +660,20 @@ fn legend(ui: &mut Ui, target: Target) {
     });
 }
 
+/// Each target made and written on its own: one that fails says so, and the others' files are kept and reported
+/// (verify-r22 Minor 3; `art::save_new` leaves no partial file of its own).
+fn export_each(targets: Vec<(Target, Crop)>, full: &image::RgbaImage, write: impl Fn(Target, &[u8]) -> std::io::Result<PathBuf>) -> Exported {
+    targets
+        .into_iter()
+        .map(|(t, c)| {
+            let one = art::encode_png(&art::render(full, t, c))
+                .map_err(|_| tr("The picture could not be made.").to_string())
+                .and_then(|png| write(t, &png).map(|path| (path, png.len() as u64)).map_err(|_| tr("The file could not be written.").to_string()));
+            (t, one)
+        })
+        .collect()
+}
+
 /// The account's gallery or its Photos & captures, as rows of the page (no scrolling of their own).
 fn choosers(ui: &mut Ui, studio: &mut Studio, thumbs: &HashMap<String, egui::TextureHandle>, acts: &mut Vec<Act>) {
     let mut visible_out: Vec<String> = Vec::new();
@@ -935,15 +949,7 @@ fn act_on(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act) {
             std::thread::spawn(move || {
                 let _working = working;
                 let dir = art::export_dir();
-                let r: Exported = targets
-                    .into_iter()
-                    .map(|(t, c)| {
-                        let one = art::encode_png(&art::render(&full, t, c)).map_err(|_| tr("The picture could not be made.").to_string()).and_then(|png| {
-                            art::save_new(&dir, &art::file_stem(&name, t), &png).map(|path| (path, png.len() as u64)).map_err(|_| tr("The file could not be written.").to_string())
-                        });
-                        (t, one)
-                    })
-                    .collect();
+                let r = export_each(targets, &full, |t, png| art::save_new(&dir, &art::file_stem(&name, t), png));
                 let _ = tx.send(r);
                 ctx2.request_repaint();
             });
@@ -998,5 +1004,125 @@ fn act_on(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act) {
                 cx.run(ctx, r);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn studio() -> Studio {
+        let card = GroupCard { id: "grp_00000000-0000-4000-8000-0000000000aa".into(), name: "Made-up".into(), ..Default::default() };
+        let mut s = Studio::new(card, "usr_00000000-0000-4000-8000-0000000000e1", Some(image::RgbaImage::new(64, 36)), &art::Drafts::default());
+        s.saved.source = Some(Source::File("C:/made-up/a.png".into()));
+        s
+    }
+
+    /// Minor 3: three targets exported, the second's write failing: the first and third are reported done with their
+    /// files, the second as failed; nothing of the second is left.
+    #[test]
+    fn an_export_reports_each_target_on_its_own() {
+        let dir = std::env::temp_dir().join(format!("orbiters-export-each-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let full = image::RgbaImage::from_pixel(64, 36, image::Rgba([10, 20, 30, 255]));
+        let targets: Vec<(Target, Crop)> = Target::ALL.iter().map(|t| (*t, Crop::default())).collect();
+        assert!(targets.len() >= 3);
+        let failing = targets[1].0;
+        let r = export_each(targets.clone(), &full, |t, png| if t == failing { art::save_new(&dir, "bad\u{0}name", png) } else { art::save_new(&dir, &art::file_stem("Made-up", t), png) });
+        assert_eq!(r.len(), targets.len());
+        for (t, one) in &r {
+            if *t == failing {
+                assert!(one.is_err(), "the failed one says so");
+            } else {
+                let (path, size) = one.as_ref().expect("the others are done and reported");
+                assert_eq!(std::fs::metadata(path).unwrap().len(), *size);
+            }
+        }
+        let files = std::fs::read_dir(&dir).unwrap().flatten().count();
+        assert_eq!(files, targets.len() - 1, "only the whole files");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Minor 5: a page of the gallery with an unusable entry still advances by what VRChat gave and offers more.
+    #[test]
+    fn the_gallery_pages_by_what_vrchat_gave() {
+        let mut s = studio();
+        s.gallery = Some((Vec::new(), 0, true, true));
+        let page = |n: usize, raw: usize| orbiters_core::vrchat_api::GroupInventory {
+            items: (0..n).map(|i| InventoryFile { id: format!("file_{i}"), url: format!("https://api.vrchat.cloud/api/1/file/file_{i}/1/file") }).collect(),
+            raw,
+        };
+        let full = orbiters_core::vrchat_api::GROUP_PAGE;
+        s.answer(Kind::Inventory { tag: FileTag::Gallery, offset: 0 }, Reply::Inventory(page(full - 1, full)));
+        let (list, at, more, _) = s.gallery.as_ref().unwrap();
+        assert_eq!(list.len(), full - 1);
+        assert_eq!(*at, full, "the next page starts after every entry VRChat gave");
+        assert!(*more, "a full page from VRChat: there may be more");
+    }
+
+    /// Blocker 5: an upload is bound to the art it was made from; moving the crop, turning it or choosing another
+    /// picture makes it no longer the one applied from here.
+    #[test]
+    fn an_upload_is_bound_to_its_art() {
+        let mut s = studio();
+        let file = InventoryFile { id: "file_a".into(), url: String::new() };
+        s.upload_revision = Some(s.revision());
+        let prepared = Prepared { op: "op".into(), write: Write::Upload { tag: FileTag::Gallery, group: s.card.id.clone(), staged: crate::controller::groups::Staged { name: "x.png".into(), size: 1, sha256: String::new() } }, confirm: true, role: None, post: None, member: None };
+        s.ended(Some(&prepared), &Outcome::Done(crate::controller::groups::Done::Uploaded(file.clone())));
+        assert!(s.upload_matches(), "the art it was made from");
+        s.set_crop(Target::GroupBanner, Crop { zoom: 2.0, ..Crop::default() });
+        assert!(!s.upload_matches(), "a new crop: not this upload");
+        s.set_crop(Target::GroupBanner, Crop::default());
+        assert!(s.upload_matches());
+        s.take_source(image::RgbaImage::new(64, 36));
+        assert!(!s.upload_matches(), "another picture: not this upload");
+        // An upload done for another group is not this studio's.
+        let other = Prepared { write: Write::Upload { tag: FileTag::Gallery, group: "grp_00000000-0000-4000-8000-0000000000ff".into(), staged: crate::controller::groups::Staged { name: "x.png".into(), size: 1, sha256: String::new() } }, ..prepared };
+        let before = s.uploaded.clone();
+        s.ended(Some(&other), &Outcome::Done(crate::controller::groups::Done::Uploaded(InventoryFile { id: "file_b".into(), url: String::new() })));
+        assert_eq!(s.uploaded, before);
+    }
+
+    /// Blocker 5: a picture chosen earlier and arriving late never replaces the one chosen after it.
+    #[test]
+    fn a_late_older_choice_is_dropped() {
+        let ctx = egui::Context::default();
+        let mut s = studio();
+        s.pending = None;
+        let (tx_old, rx_old) = mpsc::channel();
+        let (tx_new, rx_new) = mpsc::channel();
+        s.choice = 2;
+        s.loading = vec![Loading::Source(1, rx_old), Loading::Source(2, rx_new)];
+        tx_new.send(Ok((image::RgbaImage::new(10, 10), Source::File("C:/made-up/new.png".into())))).unwrap();
+        tx_old.send(Ok((image::RgbaImage::new(20, 20), Source::File("C:/made-up/old.png".into())))).unwrap();
+        take_loading(&ctx, &mut s);
+        assert_eq!(s.saved.source, Some(Source::File("C:/made-up/new.png".into())));
+        assert_eq!(s.pending.as_ref().map(|p| p.width()), Some(10));
+        // A gallery picture asked before a newer choice: dropped too.
+        s.wanted_source = Some("https://api.vrchat.cloud/api/1/file/file_new/1/file".into());
+        s.source_arrived("https://api.vrchat.cloud/api/1/file/file_old/1/file", Some(image::RgbaImage::new(30, 30)));
+        assert_eq!(s.pending.as_ref().map(|p| p.width()), Some(10));
+    }
+
+    /// Major 6: only the gallery tiles in view are asked for; a gallery larger than the picture cache, idle, asks for
+    /// no more than what shows.
+    #[test]
+    fn only_the_gallery_tiles_in_view_are_asked() {
+        let ctx = egui::Context::default();
+        let mut s = studio();
+        s.gallery = Some(((0..150).map(|i| InventoryFile { id: format!("file_{i}"), url: format!("https://api.vrchat.cloud/api/1/file/file_{i}/1/file") }).collect(), 150, false, false));
+        let thumbs = HashMap::new();
+        for t in 0..3 {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 500.0))), time: Some(t as f64), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                egui::ScrollArea::vertical().max_height(500.0).show(ui, |ui| {
+                    let mut acts = Vec::new();
+                    choosers(ui, &mut s, &thumbs, &mut acts);
+                });
+            });
+            out.textures_delta.clear();
+        }
+        assert!(!s.visible_urls.is_empty());
+        assert!(s.visible_urls.len() <= 40, "{} asked of 150", s.visible_urls.len());
     }
 }

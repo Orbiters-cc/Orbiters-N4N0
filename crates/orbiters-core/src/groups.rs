@@ -833,6 +833,13 @@ mod tests {
         assert_eq!(can(Action::DeleteRole { role: "grol_artist" }, &owner, &cat), Verdict::Withheld(Why::MissingData));
     }
 
+    /// Minor 2: the nameplate's apply is a seam with only "unavailable" in this version.
+    #[test]
+    fn the_nameplate_apply_is_unavailable_in_this_version() {
+        assert_eq!(NameplateApply::current(), NameplateApply::Unavailable);
+        assert!(!NameplateApply::current().can_apply());
+    }
+
     /// Missing order or role data never turns into a right to edit everything.
     #[test]
     fn missing_role_data_withholds() {
@@ -849,8 +856,12 @@ mod tests {
         assert_eq!(can(Action::EditRole { role: "grol_mod", change: &rename }, &admin, &cat), Verdict::Withheld(Why::MissingData));
         let roles = self::roles();
         let cat = Catalogue { roles: Some(&roles), permissions: None };
-        let rights = RoleChange { permissions: Some(s(&["group-instance-join"])), ..Default::default() };
+        // A right the admin holds: only the missing catalogue stands in the way.
+        let rights = RoleChange { permissions: Some(s(&[MEMBERS_MANAGE])), ..Default::default() };
         assert_eq!(can(Action::EditRole { role: "grol_mod", change: &rights }, &admin, &cat), Verdict::Withheld(Why::MissingData), "no catalogue, no right changes");
+        // A right the admin lacks is refused for that, whatever the catalogue says.
+        let unheld = RoleChange { permissions: Some(s(&["group-instance-join"])), ..Default::default() };
+        assert_eq!(can(Action::EditRole { role: "grol_mod", change: &unheld }, &admin, &cat), Verdict::Withheld(Why::Escalation));
         let nobody: Vec<String> = vec![];
         let roleless = Actor { role_ids: &nobody, ..admin };
         assert_eq!(can(Action::DeleteRole { role: "grol_artist" }, &roleless, &cat), Verdict::Withheld(Why::MissingData));

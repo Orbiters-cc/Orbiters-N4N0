@@ -1415,7 +1415,7 @@ impl Controller {
         rt.ask = Arc::new(ask);
     }
     /// [`Self::test_vrchat`] over a [`orbiters_core::vrchat_api::scripted_client`]: bodies recorded, drops possible.
-    pub(super) fn test_vrchat_scripted(&self, replies: Vec<orbiters_core::vrchat_api::Scripted>) -> Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>> {
+    pub(crate) fn test_vrchat_scripted(&self, replies: Vec<orbiters_core::vrchat_api::Scripted>) -> Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>> {
         self.test_account();
         let identity = self.vrchat_identity().unwrap();
         let mut rt = self.vrchat_login.lock().unwrap();

@@ -254,6 +254,8 @@ pub struct State {
     pub(crate) confirm_art: Option<egui::TextureHandle>,
     /// What the last refused write said, for the page that shows it.
     pub(crate) said: Option<String>,
+    /// The section comes into view at the next frame (N4N0's assistant opened "my groups").
+    pub(crate) reveal: bool,
 }
 
 impl Default for State {
@@ -273,6 +275,7 @@ impl Default for State {
             drafts_written: String::new(),
             confirm_art: None,
             said: None,
+            reveal: false,
         }
     }
 }
@@ -294,11 +297,19 @@ impl State {
     }
     /// Back to Home (the sidebar's Home). What the operator was writing is kept on disk first.
     pub fn close(&mut self) {
+        // A write being sent goes on at the service: its answer would be dropped with the jobs, so it is listed as
+        // uncertain, to check (Blocker 1).
+        if let Some(Flow::Sending { prepared }) = self.flow.take() {
+            self.add_uncertain(prepared.op.clone(), prepared.write.clone());
+        }
         self.keep_drafts();
         self.open = None;
         self.studio = None;
-        self.flow = None;
         self.jobs.reset();
+    }
+    /// Home's Groups section, in view at the next frame: N4N0's assistant's "open my groups" (it opens, nothing more).
+    pub fn reveal(&mut self) {
+        self.reveal = true;
     }
     pub(crate) fn account(&self) -> Option<&str> {
         self.scope.as_ref().and_then(|s| s.vrchat_user())
@@ -314,6 +325,10 @@ impl State {
         }
         let now = Self::signed(cx);
         if now != self.scope {
+            // A write being sent stays the previous account's to check, with its drafts (Blocker 1).
+            if let Some(Flow::Sending { prepared }) = self.flow.take() {
+                self.add_uncertain(prepared.op.clone(), prepared.write.clone());
+            }
             self.keep_drafts();
             self.scope = now;
             self.jobs.reset();
@@ -699,6 +714,9 @@ fn uncertain_words(u: &Uncertain) -> (String, String) {
 /// the account runs no group; "could not load" when reading failed (never "no groups", M1).
 pub fn home_section(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
+    if std::mem::take(&mut state.reveal) {
+        ui.scroll_to_cursor(Some(egui::Align::TOP));
+    }
     state.sync(cx);
     state.take(&ctx, cx);
     let Some(scope) = state.scope.clone() else { return };
@@ -1066,5 +1084,21 @@ mod tests {
         }
         assert_eq!(p.map.len(), PICTURES_MAX);
         assert!(!p.map.contains_key("https://api.vrchat.cloud/api/1/file/file_0/1/file"));
+    }
+
+    /// Major 6: a picture that failed or is on its way is not asked again by itself.
+    #[test]
+    fn a_failed_picture_is_not_asked_again() {
+        let ctx = egui::Context::default();
+        let ctl: Ctl = std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let scope = Scope::of(&ctl.view());
+        let mut jobs = Jobs::default();
+        let mut p = Pictures::default();
+        let url = "https://api.vrchat.cloud/api/1/file/file_1/1/file";
+        p.arrived(&ctx, url.to_string(), None);
+        for _ in 0..5 {
+            assert!(p.get(&ctx, &mut jobs, &ctl, &scope, url).is_none());
+        }
+        assert_eq!(p.asked, 0, "never asked again");
     }
 }

@@ -305,6 +305,9 @@ pub(crate) struct Runtime {
     running: usize,
     #[cfg(test)]
     pub(crate) sent_ops: u64,
+    /// Requests that reached the controller (the service's admission is tested by it).
+    #[cfg(test)]
+    pub(crate) entered: u64,
 }
 
 impl Runtime {
@@ -384,6 +387,12 @@ fn same_role(then: &Role, now: &Role) -> bool {
 }
 
 impl Controller {
+    /// Groups requests that reached the controller so far (tests of the service's admission).
+    #[cfg(test)]
+    pub(crate) fn groups_entered(&self) -> u64 {
+        self.groups.lock().unwrap().entered
+    }
+
     /// The service takes a groups request in only while fewer than [`ADMIT_MAX`] run: checked before its thread starts.
     pub fn groups_admit(&self) -> Option<Admitted> {
         let n = self.groups_admitted.clone();
@@ -401,6 +410,10 @@ impl Controller {
 
     /// A request of the window's (link `link`) under `scope`. Blocking: call on a thread of its own.
     pub fn groups(&self, link: u64, scope: Scope, request: Request) -> Reply {
+        #[cfg(test)]
+        {
+            self.groups.lock().unwrap().entered += 1;
+        }
         if scope != Scope::of(&self.view()) {
             return Reply::Failed(Failure::AccountChanged);
         }

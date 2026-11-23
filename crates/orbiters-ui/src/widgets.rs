@@ -1349,27 +1349,34 @@ mod tests {
     use super::*;
 
     /// A held Enter or Space (key repeats) never activates a focused consequential button; a fresh press or a click does.
+    /// egui decides what a repeat is from the keys it saw go down: the key is pressed before the button shows (as when
+    /// Enter, held on the press that opened a confirmation, keeps repeating on its Send).
     #[test]
     fn a_repeated_key_is_not_a_deliberate_activation() {
         let ctx = egui::Context::default();
-        let id = egui::Id::new("deliberate-test");
-        let frame = |events: Vec<egui::Event>| {
+        let id = "deliberate-test";
+        let frame = |events: Vec<egui::Event>, shown: bool| {
             let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), ..Default::default() };
             input.events = events;
             let mut hit = false;
-            let _ = ctx.run_ui(input, |ui| {
-                let resp = ui.push_id(id, |ui| ui.button("Send")).inner;
-                resp.request_focus();
-                hit = deliberate(&resp);
+            let mut out = ctx.run_ui(input, |ui| {
+                if shown {
+                    let resp = ui.push_id(id, |ui| ui.button("Send")).inner;
+                    resp.request_focus();
+                    hit = deliberate(&resp);
+                }
             });
+            out.textures_delta.clear();
             hit
         };
-        let key = |repeat: bool| egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat, modifiers: egui::Modifiers::NONE };
-        frame(vec![]);
-        frame(vec![]);
-        assert!(!frame(vec![key(true)]), "a repeat of a held key");
-        assert!(!frame(vec![key(true), key(true)]));
-        assert!(frame(vec![key(false)]), "a fresh press");
+        let enter = |pressed: bool| egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+        frame(vec![enter(true)], false);
+        frame(vec![], true);
+        frame(vec![], true);
+        assert!(!frame(vec![enter(true)], true), "a repeat of a held key");
+        assert!(!frame(vec![enter(true), enter(true)], true));
+        assert!(!frame(vec![enter(false)], true), "the release");
+        assert!(frame(vec![enter(true)], true), "a fresh press");
     }
 
     #[test]

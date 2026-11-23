@@ -79,6 +79,11 @@ pub struct Service {
 }
 
 impl Service {
+    /// Where a test's second link connects.
+    #[cfg(test)]
+    pub(crate) fn endpoint_for_tests(&self) -> Endpoint {
+        self.endpoint.clone()
+    }
     /// A service around `ctl`, which clients find at `endpoint` and which starts its processes from `exe`: as [`run`]
     /// makes it. `--link-smoke` and the tests make one around a controller that is never started.
     pub(crate) fn around(ctl: controller::Shared, endpoint: Endpoint, exe: PathBuf) -> Arc<Self> {

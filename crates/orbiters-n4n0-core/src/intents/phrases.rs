@@ -250,6 +250,7 @@ pub(super) fn page_names(page: super::Page) -> [&'static [&'static str]; 5] {
         P::AppCaptures => [&["photos and captures", "captures"], &["photos et captures", "captures"], &["fotos y capturas", "capturas"], &["fotos e capturas", "capturas"], &["写真とキャプチャー", "キャプチャー一覧"]],
         P::AppWorlds => [&["worlds page", "map explorer"], &["page mondes"], &["pagina mundos"], &["pagina mundos"], &["ワールドページ"]],
         P::AppEvents => [&["events"], &["evenements"], &["eventos"], &["eventos"], &["イベント"]],
+        P::AppGroups => [&["groups", "vrchat groups", "my groups"], &["groupes", "groupes vrchat"], &["grupos", "grupos vrchat"], &["grupos", "grupos vrchat"], &["グループ", "vrchatグループ"]],
         P::AppVideos => [&["videos", "saved videos"], &["videos", "videos enregistrees"], &["videos", "videos guardados"], &["videos", "videos salvos"], &["動画"]],
         P::AppSettings => [&["app settings", "orbiters settings"], &["parametres appli", "parametres orbiters"], &["configuracion app", "configuracion orbiters"], &["configuracoes app", "configuracoes orbiters"], &["アプリの設定"]],
     }

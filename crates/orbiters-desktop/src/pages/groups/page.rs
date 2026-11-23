@@ -1556,4 +1556,54 @@ mod tests {
         assert_eq!(o.members.offset, 2, "advanced by what VRChat gave");
         assert!(!o.members.more, "the total is reached");
     }
+
+    /// Major 3: a role is given only by a click released on its chip; a press dragged off the chip and released
+    /// elsewhere gives nothing.
+    #[test]
+    fn a_role_chip_acts_only_on_a_release_on_it() {
+        let o = open_as(&["*"], &["grol_owner"]);
+        let m = Member { user_id: "usr_00000000-0000-4000-8000-000000000001".into(), display_name: Some("Sam".into()), roles_known: true, ..Default::default() };
+        let roles = o.roles().to_vec();
+        let ctx = egui::Context::default();
+        let mut chip = Rect::NOTHING;
+        let mut run = |events: Vec<egui::Event>, t: f64, chip_out: &mut Rect| {
+            let mut acts = Vec::new();
+            let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 600.0))), time: Some(t), ..Default::default() };
+            input.events = events;
+            let mut out = ctx.run_ui(input, |ui| {
+                role_chooser(ui, &o, &m, &roles, false, &mut acts);
+                // The first chip ("Moderators"): where it was drawn.
+                *chip_out = Rect::from_min_size(ui.min_rect().min + vec2(16.0, 32.0), vec2(40.0, 30.0));
+            });
+            out.textures_delta.clear();
+            acts.len()
+        };
+        run(vec![], 0.0, &mut chip);
+        let at = chip.center();
+        let away = at + vec2(0.0, 300.0);
+        let press = |p: egui::Pos2, down: bool| egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: down, modifiers: egui::Modifiers::NONE };
+        assert_eq!(run(vec![egui::Event::PointerMoved(at), press(at, true)], 0.1, &mut chip), 0, "nothing on the press");
+        assert_eq!(run(vec![egui::Event::PointerMoved(away)], 0.2, &mut chip), 0);
+        assert_eq!(run(vec![press(away, false)], 0.3, &mut chip), 0, "released elsewhere: no choice");
+        assert_eq!(run(vec![egui::Event::PointerMoved(at), press(at, true)], 1.0, &mut chip), 0);
+        assert_eq!(run(vec![press(at, false)], 1.1, &mut chip), 1, "released on the chip: one choice");
+    }
+
+    /// Minor 1: a right's key with no display name, or one holding controls, is shown through the text policy.
+    #[test]
+    fn fallback_names_go_through_the_text_policy() {
+        let names = Names { permissions: [("group-x".to_string(), "Bad\u{202E}name".to_string())].into_iter().collect(), ..Default::default() };
+        assert_eq!(names.permission("group-x"), "Badname");
+        assert_eq!(names.permission("group-unknown\u{202E}x"), "group-unknownx");
+    }
+
+    /// Minor 6: an edit can remove the post's picture on purpose, and the confirmation says so.
+    #[test]
+    fn a_post_picture_can_be_removed_on_purpose() {
+        let baseline = Post { id: "gpos_1".into(), image_id: Some("file_x".into()), complete: true, ..Default::default() };
+        let c = Composer { baseline: Some(baseline.clone()), draft: PostDraft { image_id: None, ..Default::default() } };
+        assert!(c.removes_picture());
+        let kept = Composer { baseline: Some(baseline), draft: PostDraft { image_id: Some("file_x".into()), ..Default::default() } };
+        assert!(!kept.removes_picture());
+    }
 }

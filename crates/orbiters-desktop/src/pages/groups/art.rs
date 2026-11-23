@@ -606,4 +606,79 @@ mod tests {
         assert!(saved_file("usr_x/../y", g).is_none());
         let _ = std::fs::remove_file(file);
     }
+
+    /// Major 5: a picture whose header announces more pixels than allowed is refused from its header, before any
+    /// pixel is decoded; a picture file over the byte limit is refused before it is read.
+    #[test]
+    fn decoding_is_bounded_before_it_starts() {
+        // A tiny PNG that says it is 30000 × 30000.
+        let mut png = encode_png(&image::RgbaImage::new(1, 1)).unwrap();
+        png[16..20].copy_from_slice(&30000u32.to_be_bytes());
+        png[20..24].copy_from_slice(&30000u32.to_be_bytes());
+        let started = std::time::Instant::now();
+        assert!(decode_bounded(&png, SOURCE_PIXELS).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "refused from its header");
+        let ok = encode_png(&image::RgbaImage::new(64, 64)).unwrap();
+        assert!(decode_bounded(&ok, 64 * 64).is_ok());
+        assert!(decode_bounded(&ok, 64 * 63).is_err(), "one pixel over the bound");
+    }
+
+    /// Major 10: an ICC-tagged picture is turned into sRGB (a Display P3 colour changes; an sRGB-tagged one does not),
+    /// transparency is kept, and a transparent pixel lends no colour to an opaque neighbour when resampled.
+    #[test]
+    fn colours_are_managed_and_edges_are_clean() {
+        use image::ImageEncoder;
+        let tagged = |profile: moxcms::ColorProfile| {
+            let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 100, 50, 180]));
+            let mut out = Vec::new();
+            let mut enc = image::codecs::png::PngEncoder::new(&mut out);
+            enc.set_icc_profile(profile.encode().unwrap()).unwrap();
+            enc.write_image(img.as_raw(), 4, 4, image::ExtendedColorType::Rgba8).unwrap();
+            decode_source(&out).unwrap()
+        };
+        let p3 = tagged(moxcms::ColorProfile::new_display_p3());
+        let px = p3.get_pixel(0, 0).0;
+        assert_ne!(&px[..3], &[200, 100, 50], "a P3 colour is not the same numbers in sRGB");
+        assert_eq!(px[3], 180, "alpha kept");
+        let srgb = tagged(moxcms::ColorProfile::new_srgb());
+        let px = srgb.get_pixel(0, 0).0;
+        assert!(px[0].abs_diff(200) <= 2 && px[1].abs_diff(100) <= 2 && px[2].abs_diff(50) <= 2, "{px:?}");
+        // Opaque red beside transparent blue: halfway, red at half alpha (not purple).
+        let edge = image::RgbaImage::from_fn(2, 1, |x, _| if x == 0 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 255, 0]) });
+        let mid = sample(&edge, 0.5, 0.0, 2.0, 1.0).0;
+        assert_eq!((mid[0], mid[2]), (255, 0), "no colour from the transparent pixel: {mid:?}");
+        assert!(mid[3].abs_diff(128) <= 1);
+    }
+
+    /// Major 10: an EXIF orientation in a real file is applied (a picture turned a quarter on its side comes upright).
+    #[test]
+    fn exif_orientation_is_applied() {
+        use image::ImageEncoder;
+        // 4 × 2, left half red, right half blue; orientation 6 (turn 90° clockwise to view).
+        let img = image::RgbaImage::from_fn(4, 2, |x, _| if x < 2 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 255, 255]) });
+        let exif: Vec<u8> = vec![b'M', b'M', 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0];
+        let mut out = Vec::new();
+        let mut enc = image::codecs::png::PngEncoder::new(&mut out);
+        enc.set_exif_metadata(exif).unwrap();
+        enc.write_image(img.as_raw(), 4, 2, image::ExtendedColorType::Rgba8).unwrap();
+        let seen = decode_source(&out).unwrap();
+        assert_eq!((seen.width(), seen.height()), (2, 4), "turned upright");
+        assert_eq!(seen.get_pixel(0, 0).0[0], 255, "red on top after a clockwise turn");
+        assert_eq!(seen.get_pixel(0, 3).0[2], 255, "blue below");
+    }
+
+    /// Minor 3: a write that fails leaves no file behind, and a written file is whole (no `.part` left).
+    #[test]
+    fn an_export_is_whole_or_absent() {
+        let dir = std::env::temp_dir().join(format!("orbiters-banner-partial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(save_new(&dir, "bad\u{0}name", b"bytes").is_err(), "a name the disk refuses");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert!(left.is_empty(), "nothing left behind: {left:?}");
+        let path = save_new(&dir, "good", b"whole").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"whole");
+        let parts = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".part")).count();
+        assert_eq!(parts, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

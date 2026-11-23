@@ -268,6 +268,9 @@ fn the_offline_path_knows_the_common_commands_in_five_languages() {
         ("en", "take a 3d picture of the world in 5 s", vec![app(Intent::Picture3d { of: Some(PhotoMode::World), seconds: 5 })]),
         ("en", "open the worlds", vec![app(Intent::OpenPage { page: Page::Worlds })]),
         ("en", "show me my previous instances", vec![app(Intent::OpenPage { page: Page::Instances })]),
+        // Home's Groups section: it opens, nothing more (REQUEST22 1).
+        ("en", "open my groups", vec![app(Intent::OpenPage { page: Page::AppGroups })]),
+        ("fr", "ouvre mes groupes", vec![app(Intent::OpenPage { page: Page::AppGroups })]),
         ("en", "undo that", vec![app(Intent::Undo)]),
         ("en", "hide N4N0", vec![app(Intent::ShowN4n0 { on: false })]),
         ("en", "turn on fast walk and translation", vec![app(Intent::FastWalk { on: true }), app(Intent::Translation { on: true })]),

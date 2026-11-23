@@ -160,6 +160,12 @@ impl State {
         }
     }
 
+    /// Home itself, its Groups section in view (N4N0's assistant: "open my groups"; REQUEST22 1).
+    pub fn open_groups(&mut self) {
+        self.back_home();
+        self.groups.reveal();
+    }
+
     /// All tools shows, every feature of N4N0's menu (screenshots, tests).
     pub fn open_all_tools(&mut self) {
         self.all_tools = true;
